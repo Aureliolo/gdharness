@@ -389,8 +389,18 @@ async function main() {
   assert.match(INDEX_SOURCE, /@file:/, 'index.ts should pass operation params via @file: temp payloads');
   assert.match(
     INDEX_SOURCE,
-    /private async handleRunProject[\s\S]*?const cmdArgs = \[[^\]]*'--headless'[^\]]*'-d'[^\]]*'--path'[^\]]*args\.projectPath[^\]]*\]/,
-    'run_project should launch Godot with --headless in handleRunProject cmdArgs',
+    /private async handleRunProject[\s\S]*?const cmdArgs = this\.resolveHeadless\(args\.headless\)\s*\n\s*\? \['--headless', '-d', '--path', args\.projectPath\]/,
+    'run_project should still launch Godot with --headless whenever headless is resolved',
+  );
+  assert.match(
+    INDEX_SOURCE,
+    /private resolveHeadless[\s\S]*?if \(typeof requested === 'boolean'\) \{\s*\n\s*return requested;/,
+    'an explicit headless argument should win over the environment',
+  );
+  assert.match(
+    INDEX_SOURCE,
+    /private resolveHeadless[\s\S]*?return !\(process\.env\.DISPLAY \|\| process\.env\.WAYLAND_DISPLAY\);/,
+    'with no explicit argument a display-less environment such as CI should stay headless',
   );
   assert.match(OPERATIONS_SOURCE, /params_json\.begins_with\("@file:"\)/, 'godot_operations.gd should load params from @file: payloads');
   assert.match(
@@ -454,6 +464,12 @@ async function main() {
     INDEX_SOURCE,
     /maxDepth:[\s\S]*?includeBuiltIn:/,
     'get_dependencies must send the names the operation script reads, max_depth and include_built_in',
+  );
+
+  assert.match(
+    INDEX_SOURCE,
+    /if \(args\.headless === false\) \{\s*cmdArgs\.shift\(\);/,
+    'run_project must let a caller opt out of headless, since capture_screenshot cannot work against a game that renders nothing',
   );
 
   await testEditorStatusPortConflict();
