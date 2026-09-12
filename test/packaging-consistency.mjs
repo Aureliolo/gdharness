@@ -69,7 +69,6 @@ for (const requiredFile of [
   'package/package.json',
   'package/build/cli.js',
   'package/build/index.js',
-  'package/build/visualizer.html',
   'package/build/godot/operations/godot_operations.gd',
   'package/build/godot/addons/auto_reload/plugin.cfg',
   'package/build/godot/addons/godot_mcp_editor/plugin.cfg',

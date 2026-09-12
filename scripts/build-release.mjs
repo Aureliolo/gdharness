@@ -77,32 +77,6 @@ for (const sourcePath of await collectTypeScriptEntries(sourceRoot)) {
   }
 }
 
-const visualizerBuild = await Bun.build({
-  entrypoints: [path.join(sourceRoot, 'visualizer', 'main.js')],
-  target: 'browser',
-  format: 'iife',
-  bundle: true,
-  minify: false,
-  write: false,
-});
-if (!visualizerBuild.success) {
-  for (const log of visualizerBuild.logs) {
-    console.error(log);
-  }
-  throw new Error('Visualizer build failed');
-}
-
-const [template, css, bundledJavaScript] = await Promise.all([
-  readFile(path.join(sourceRoot, 'visualizer', 'template.html'), 'utf8'),
-  readFile(path.join(sourceRoot, 'visualizer', 'visualizer.css'), 'utf8'),
-  visualizerBuild.outputs[0].text(),
-]);
-await writeFile(
-  path.join(buildRoot, 'visualizer.html'),
-  template.replace('%%CSS%%', css).replace('%%SCRIPT%%', bundledJavaScript),
-  'utf8',
-);
-
 await cp(path.join(sourceRoot, 'godot'), path.join(buildRoot, 'godot'), { recursive: true });
 
 for (const executable of ['cli.js', 'index.js']) {

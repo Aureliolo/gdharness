@@ -246,11 +246,6 @@ export const CORE_TOOL_GROUPS: Record<string, ToolGroupDefinition> = {
     tools: ['get_runtime_status'],
     keywords: ['runtime status', 'game status', 'runtime connection'],
   },
-  core_visualizer: {
-    description: 'Interactive project code map visualization',
-    tools: ['map_project'],
-    keywords: ['visualize', 'code map', 'project map', 'visualizer'],
-  },
   core_diagnostics: {
     description: 'GDScript diagnostics and DAP debug output',
     tools: ['lsp_get_diagnostics', 'dap_get_output'],

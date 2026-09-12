@@ -10,7 +10,7 @@ const GODOT_PATH = process.env.GODOT_PATH || '/home/doyun/Apps/godot-4.6-rc2/God
 
 // A guard against the default surface growing by accident. Moving it is fine; moving it
 // without meaning to is what this catches.
-const COMPACT_TOOL_COUNT = 34;
+const COMPACT_TOOL_COUNT = 33;
 
 let passCount = 0;
 let failCount = 0;

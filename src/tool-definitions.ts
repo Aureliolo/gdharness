@@ -2,7 +2,7 @@ import { createDAPTools } from './dap_client.js';
 import { createLSPTools } from './lsp_client.js';
 import type { MCPToolDefinition } from './server-types.js';
 
-export function buildToolDefinitions(godotBridgePort: number): MCPToolDefinition[] {
+export function buildToolDefinitions(): MCPToolDefinition[] {
   return [
     {
       name: 'launch_editor',
@@ -2338,23 +2338,6 @@ export function buildToolDefinitions(godotBridgePort: number): MCPToolDefinition
       inputSchema: {
         type: 'object',
         properties: {},
-      },
-    },
-    // Project Visualizer Tool
-    {
-      name: 'map_project',
-      description: `Crawl the entire Godot project and build an interactive visual map of all scripts showing their structure (variables, functions, signals), connections (extends, preloads, signal connections), and descriptions. Opens an interactive browser-based visualization at localhost:${godotBridgePort}.`,
-      inputSchema: {
-        type: 'object',
-        properties: {
-          projectPath: { type: 'string', description: 'Absolute path to the Godot project directory' },
-          root: { type: 'string', description: 'Root path to start crawling from (default: res://)' },
-          include_addons: {
-            type: 'boolean',
-            description: 'Whether to include scripts in addons/ folder (default: false)',
-          },
-        },
-        required: ['projectPath'],
       },
     },
     // Godot LSP Tools (GDScript diagnostics via Godot editor LSP on port 6005)

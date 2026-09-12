@@ -40,8 +40,6 @@ import {
 import { setupResourceHandlers } from './resources.js';
 import { GodotLSPClient, handleLSPTool } from './lsp_client.js';
 import { GodotDAPClient, handleDAPTool } from './dap_client.js';
-import { mapProject } from './gdscript_parser.js';
-import { serveVisualization, setProjectPath, stopVisualizationServer } from './visualizer-server.js';
 import { GodotBridge, getDefaultBridge } from './godot-bridge.js';
 import { getPrompt, listPrompts } from './prompts.js';
 import { buildToolDefinitions as buildToolDefinitionsForServer } from './tool-definitions.js';
@@ -160,7 +158,6 @@ class GodotServer {
     'export.presets': 'list_export_presets',
     'export.run': 'export_project',
     'runtime.status': 'get_runtime_status',
-    'visualizer.map': 'map_project',
     'lsp.diagnostics': 'lsp_get_diagnostics',
     'dap.output': 'dap_get_output',
     'tool.groups': 'manage_tool_groups',
@@ -585,7 +582,6 @@ class GodotServer {
       } catch {}
       this.dapClient = null;
     }
-    stopVisualizationServer();
     if (this.godotBridge) {
       try {
         await this.godotBridge.stop();
@@ -1639,8 +1635,7 @@ class GodotServer {
     });
 
     // Define available tools
-    const buildToolDefinitions = (): MCPToolDefinition[] =>
-      buildToolDefinitionsForServer(this.godotBridge.getStatus().port);
+    const buildToolDefinitions = (): MCPToolDefinition[] => buildToolDefinitionsForServer();
 
     this.toolDefinitionFactory = buildToolDefinitions;
     this.cachedToolDefinitions = buildToolDefinitions();
@@ -1850,9 +1845,6 @@ class GodotServer {
           return {
             content: [{ type: 'text', text: JSON.stringify(this.getEditorStatusPayload(), null, 2) }],
           };
-        // Project Visualizer Tool
-        case 'map_project':
-          return await this.handleMapProject(request.params.arguments);
         case 'capture_screenshot':
           return await this.handleRuntimeCommand('capture_screenshot', request.params.arguments);
         case 'capture_viewport':
@@ -6823,65 +6815,6 @@ uniform float dissolve_amount : hint_range(0.0, 1.0) = 0.0;
       params.properties = typeof args.properties === 'string' ? JSON.parse(args.properties) : args.properties;
     }
     return await this.executeOperation('modify_resource', params, projectPath);
-  }
-
-  private async handleMapProject(args: any) {
-    const projectPath = args?.projectPath || args?.project_path;
-    if (!projectPath) {
-      throw new McpError(ErrorCode.InvalidParams, 'projectPath is required');
-    }
-    const root = (args?.root as string) || 'res://';
-    const includeAddons = (args?.include_addons as boolean) || false;
-
-    const result = mapProject(projectPath, root, includeAddons);
-    if (!result.ok || !result.project_map) {
-      return {
-        content: [
-          {
-            type: 'text',
-            text: JSON.stringify({ ok: false, error: result.error || 'Failed to map project' }),
-          },
-        ],
-        isError: true,
-      };
-    }
-
-    setProjectPath(projectPath);
-    try {
-      const url = await serveVisualization(result.project_map, this.godotBridge);
-      return {
-        content: [
-          {
-            type: 'text',
-            text: JSON.stringify(
-              {
-                ok: true,
-                url,
-                total_scripts: result.project_map.total_scripts,
-                total_connections: result.project_map.total_connections,
-                message: `Interactive project map opened at ${url} — ${result.project_map.total_scripts} scripts, ${result.project_map.total_connections} connections`,
-              },
-              null,
-              2,
-            ),
-          },
-        ],
-      };
-    } catch (error) {
-      const errMsg = error instanceof Error ? error.message : 'Unknown error';
-      return {
-        content: [
-          {
-            type: 'text',
-            text: JSON.stringify({
-              ok: false,
-              error: `Failed to start visualizer: ${errMsg}`,
-              project_map: result.project_map,
-            }),
-          },
-        ],
-      };
-    }
   }
 }
 

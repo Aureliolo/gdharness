@@ -38,7 +38,7 @@ try {
   await mkdir(path.join(stagingRoot, 'build'), { recursive: true });
 
   await Promise.all([
-    ...['cli.js', 'index.js', 'visualizer.html'].map((name) =>
+    ...['cli.js', 'index.js'].map((name) =>
       cp(path.join(root, 'build', name), path.join(stagingRoot, 'build', name)),
     ),
     cp(path.join(root, 'build', 'godot'), path.join(stagingRoot, 'build', 'godot'), { recursive: true }),
