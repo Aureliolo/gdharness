@@ -54,8 +54,8 @@ async function connectWebSocket(url) {
 }
 
 async function main() {
-  const host = process.env.GOPEAK_BRIDGE_HOST || '127.0.0.1';
-  const configuredPort = Number.parseInt(process.env.GOPEAK_BRIDGE_PORT || '', 10);
+  const host = process.env.GDHARNESS_BRIDGE_HOST || '127.0.0.1';
+  const configuredPort = Number.parseInt(process.env.GDHARNESS_BRIDGE_PORT || '', 10);
   const port = Number.isInteger(configuredPort) && configuredPort > 0
     ? configuredPort
     : await reservePort();
@@ -65,9 +65,9 @@ async function main() {
     env: {
       ...process.env,
       GODOT_PATH: process.env.GODOT_PATH || process.execPath,
-      GOPEAK_BRIDGE_PORT: String(port),
-      GOPEAK_BRIDGE_HOST: host,
-      GOPEAK_TOOL_PROFILE: 'compact',
+      GDHARNESS_BRIDGE_PORT: String(port),
+      GDHARNESS_BRIDGE_HOST: host,
+      GDHARNESS_TOOL_PROFILE: 'compact',
     },
   });
 

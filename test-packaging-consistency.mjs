@@ -8,9 +8,14 @@ import path from 'node:path';
 
 const root = import.meta.dirname;
 const pkg = await Bun.file(path.join(root, 'package.json')).json();
-const archiveName = `gopeak-${pkg.version}.tgz`;
+const archiveName = `${pkg.name}-${pkg.version}.tgz`;
 const archivePath = path.join(root, 'dist', archiveName);
 const checksumPath = `${archivePath}.sha256`;
+
+// GNU tar reads an absolute Windows path as a remote host spec, since "C:\..." looks like
+// "host:path" to it, and then fails trying to reach a machine called C. Hand it a relative
+// posix path instead, which every tar on every platform reads the same way.
+const archiveArg = `dist/${archiveName}`;
 
 assert.equal(await Bun.file(archivePath).exists(), true, `${archiveName} should exist; run bun run release:pack first`);
 assert.equal(await Bun.file(checksumPath).exists(), true, `${archiveName}.sha256 should exist`);
@@ -25,9 +30,25 @@ const actualChecksum = createHash('sha256').update(archiveBytes).digest('hex');
 const checksumFile = (await readFile(checksumPath, 'utf8')).trim();
 assert.equal(checksumFile, `${actualChecksum}  ${archiveName}`, 'SHA-256 sidecar should match the release archive');
 
-const tarList = Bun.spawnSync(['tar', '-tzf', archivePath], { cwd: root, stdout: 'pipe', stderr: 'pipe' });
+const tarList = Bun.spawnSync(['tar', '-tzf', archiveArg], { cwd: root, stdout: 'pipe', stderr: 'pipe' });
 assert.equal(tarList.exitCode, 0, tarList.stderr.toString());
 const archiveEntries = tarList.stdout.toString().trim().split('\n');
+
+// The exec bit has to be asserted against what the archive records, not against an
+// extracted file: a Windows filesystem cannot represent it and reports 0o666 whatever the
+// archive said.
+const tarVerbose = Bun.spawnSync(['tar', '-tvzf', archiveArg], { cwd: root, stdout: 'pipe', stderr: 'pipe' });
+assert.equal(tarVerbose.exitCode, 0, tarVerbose.stderr.toString());
+const cliListing = tarVerbose.stdout
+  .toString()
+  .split('\n')
+  .find((line) => line.trimEnd().endsWith('package/build/cli.js'));
+assert.ok(cliListing, 'release archive should list package/build/cli.js');
+assert.match(
+  cliListing,
+  /^-rwxr-xr-x/,
+  `packed CLI should be executable without being world-writable, got: ${cliListing}`,
+);
 const packedFiles = new Set(archiveEntries);
 assert.equal(
   packedFiles.size,
@@ -43,7 +64,6 @@ assert.equal(
 for (const requiredFile of [
   'package/package.json',
   'package/build/cli.js',
-  'package/build/godot-mcp.js',
   'package/build/index.js',
   'package/build/visualizer.html',
   'package/build/scripts/godot_operations.gd',
@@ -65,9 +85,9 @@ for (const forbiddenFile of [
   assert.equal(packedFiles.has(forbiddenFile), false, `release archive should exclude ${forbiddenFile}`);
 }
 
-const extractionRoot = await mkdtemp(path.join(os.tmpdir(), 'gopeak-packaging-'));
+const extractionRoot = await mkdtemp(path.join(os.tmpdir(), 'gdharness-packaging-'));
 try {
-  const extract = Bun.spawnSync(['tar', '-xzf', archivePath, '-C', extractionRoot], {
+  const extract = Bun.spawnSync(['tar', '-xzf', archiveArg, '-C', extractionRoot], {
     cwd: root,
     stdout: 'pipe',
     stderr: 'pipe',
@@ -87,13 +107,6 @@ try {
   assert.doesNotMatch(scriptCommands, /\b(?:npm|npx)\b/, 'packed scripts should use Bun, not npm or npx commands');
 
   const cliPath = path.join(packedRoot, 'build', 'cli.js');
-  const cliMode = (await stat(cliPath)).mode & 0o777;
-  assert.equal(cliMode, 0o755, 'packed CLI should be executable without world-writable permissions');
-  assert.equal(
-    (await stat(path.join(packedRoot, 'build', 'godot-mcp.js'))).mode & 0o777,
-    0o755,
-    'packed compatibility bin should be executable without world-writable permissions',
-  );
   assert.ok(
     (await readFile(cliPath, 'utf8')).startsWith('#!/usr/bin/env bun\n'),
     'packed CLI should execute with Bun when linked as a global bin',
@@ -118,7 +131,7 @@ try {
     stderr: 'pipe',
   });
   assert.equal(cli.exitCode, 0, cli.stderr.toString());
-  assert.equal(cli.stdout.toString().trim(), `gopeak v${pkg.version}`, 'packed bin should report the archive version');
+  assert.equal(cli.stdout.toString().trim(), `${pkg.name} v${pkg.version}`, 'packed bin should report the archive version');
 } finally {
   await rm(extractionRoot, { recursive: true, force: true });
 }

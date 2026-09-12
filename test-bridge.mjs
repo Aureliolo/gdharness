@@ -15,16 +15,16 @@ import { sanitizeToolName } from './test-support/tool-name.mjs';
 import { parseJsonLines, parseTextContent } from './test-support/json-rpc.mjs';
 
 const MCP_SERVER = './build/index.js';
-const bridgePortRaw = process.env.GODOT_BRIDGE_PORT || process.env.MCP_BRIDGE_PORT || process.env.GOPEAK_BRIDGE_PORT;
+const bridgePortRaw = process.env.GODOT_BRIDGE_PORT || process.env.MCP_BRIDGE_PORT || process.env.GDHARNESS_BRIDGE_PORT;
 const parsedBridgePort = Number.parseInt(bridgePortRaw || '', 10);
 const BRIDGE_PORT = Number.isInteger(parsedBridgePort) && parsedBridgePort >= 1 && parsedBridgePort <= 65535
   ? parsedBridgePort
   : null;
-const BRIDGE_HOST = process.env.GODOT_BRIDGE_HOST || process.env.MCP_BRIDGE_HOST || process.env.GOPEAK_BRIDGE_HOST || '127.0.0.1';
+const BRIDGE_HOST = process.env.GODOT_BRIDGE_HOST || process.env.MCP_BRIDGE_HOST || process.env.GDHARNESS_BRIDGE_HOST || '127.0.0.1';
 const GODOT_PATH = resolveGodotPath(process.env.GODOT_PATH);
-const TEST_PROJECT_FROM_ENV = process.env.GOPEAK_TEST_PROJECT || '';
+const TEST_PROJECT_FROM_ENV = process.env.GDHARNESS_TEST_PROJECT || '';
 const HAS_USABLE_GODOT = Boolean(GODOT_PATH && isExecutableFile(GODOT_PATH));
-const TOOL_PROFILE = resolveToolProfile(process.env.GOPEAK_TOOL_PROFILE || process.env.MCP_TOOL_PROFILE);
+const TOOL_PROFILE = resolveToolProfile(process.env.GDHARNESS_TOOL_PROFILE || process.env.MCP_TOOL_PROFILE);
 const RUNTIME_PORT = 7777;
 const OPENAI_COMPATIBLE_TOOL_NAME_PATTERN = /^[a-zA-Z0-9-]{1,128}$/;
 const ONE_PIXEL_PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO7Z0r0AAAAASUVORK5CYII=';
@@ -165,8 +165,8 @@ async function main() {
   const serverEnv = {
     ...process.env,
     DEBUG: 'true',
-    GOPEAK_TOOL_PROFILE: TOOL_PROFILE,
-    GOPEAK_BRIDGE_PORT: String(bridgePort),
+    GDHARNESS_TOOL_PROFILE: TOOL_PROFILE,
+    GDHARNESS_BRIDGE_PORT: String(bridgePort),
     GODOT_BRIDGE_HOST: BRIDGE_HOST,
   };
   if (GODOT_PATH) {

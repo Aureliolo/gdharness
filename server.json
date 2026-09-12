@@ -1,11 +1,11 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.HaD0Yun/gopeak",
-  "description": "GoPeak — Bun-native MCP server for trusted Godot 4 workflows, automation, debugging, and editing.",
+  "name": "io.github.Aureliolo/gdharness",
+  "description": "A harness for driving a Godot 4 project from an agent: editor addons, runtime bridge, MCP server.",
   "repository": {
-    "url": "https://github.com/HaD0Yun/Doyunha-Gopeak",
+    "url": "https://github.com/Aureliolo/gdharness",
     "source": "github"
   },
-  "websiteUrl": "https://github.com/HaD0Yun/Doyunha-Gopeak#readme",
-  "version": "2.3.9"
+  "websiteUrl": "https://github.com/Aureliolo/gdharness#readme",
+  "version": "0.1.0"
 }

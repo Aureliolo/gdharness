@@ -6,15 +6,7 @@ import process from 'node:process';
 const ROOT = process.cwd();
 const PACKAGE_JSON_PATH = path.join(ROOT, 'package.json');
 const SERVER_JSON_PATH = path.join(ROOT, 'server.json');
-const VERSION_REFERENCE_PATHS = [
-  'README.md',
-  'README-de.md',
-  'README-ja.md',
-  'README-ko.md',
-  'README-pt_BR.md',
-  'README-zh.md',
-  'index.html',
-];
+const VERSION_REFERENCE_PATHS = ['README.md', 'index.html'];
 const SEMVER_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z-.]+)?(?:\+[0-9A-Za-z-.]+)?$/;
 const SEMVER_SOURCE = String.raw`\d+\.\d+\.\d+(?:-[0-9A-Za-z-.]+)?(?:\+[0-9A-Za-z-.]+)?`;
 
@@ -38,13 +30,16 @@ function bumpVersion(currentVersion, bumpType) {
   return `${major}.${minor}.${patch + 1}`;
 }
 
-function replaceReleaseVersionReferences(content, nextVersion) {
+function replaceReleaseVersionReferences(content, nextVersion, packageName) {
   return content
     .replace(
-      new RegExp(`(releases/download/v)${SEMVER_SOURCE}(/gopeak-)${SEMVER_SOURCE}(\\.tgz)`, 'g'),
+      new RegExp(`(releases/download/v)${SEMVER_SOURCE}(/${packageName}-)${SEMVER_SOURCE}(\\.tgz)`, 'g'),
       `$1${nextVersion}$2${nextVersion}$3`,
     )
-    .replace(new RegExp(`(gopeak-)${SEMVER_SOURCE}(\\.tgz(?:\\.sha256)?)`, 'g'), `$1${nextVersion}$2`);
+    .replace(
+      new RegExp(`(${packageName}-)${SEMVER_SOURCE}(\\.tgz(?:\\.sha256)?)`, 'g'),
+      `$1${nextVersion}$2`,
+    );
 }
 
 async function readJson(filePath) {
@@ -99,7 +94,7 @@ async function main() {
   for (const relativePath of VERSION_REFERENCE_PATHS) {
     const filePath = path.join(ROOT, relativePath);
     const original = await fs.readFile(filePath, 'utf8');
-    const updated = replaceReleaseVersionReferences(original, nextVersion);
+    const updated = replaceReleaseVersionReferences(original, nextVersion, pkg.name);
     if (updated !== original) {
       await writeText(filePath, updated, dryRun);
       changed.push(relativePath);

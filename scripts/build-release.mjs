@@ -103,13 +103,8 @@ await cp(
   path.join(buildRoot, 'scripts', 'godot_operations.gd'),
 );
 await cp(path.join(sourceRoot, 'addon'), path.join(buildRoot, 'addon'), { recursive: true });
-await writeFile(
-  path.join(buildRoot, 'godot-mcp.js'),
-  '#!/usr/bin/env bun\nimport \'./cli.js\';\n',
-  'utf8',
-);
 
-for (const executable of ['cli.js', 'godot-mcp.js', 'index.js']) {
+for (const executable of ['cli.js', 'index.js']) {
   const executablePath = path.join(buildRoot, executable);
   const contents = await readFile(executablePath, 'utf8');
   if (!contents.startsWith('#!/usr/bin/env bun\n')) {
@@ -118,4 +113,4 @@ for (const executable of ['cli.js', 'godot-mcp.js', 'index.js']) {
   await chmod(executablePath, 0o755);
 }
 
-console.log(`Built dependency-free GoPeak runtime bundles with Bun ${Bun.version}`);
+console.log(`Built dependency-free gdharness bundles with Bun ${Bun.version}`);

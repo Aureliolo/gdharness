@@ -71,7 +71,7 @@ func _resolve_server_url(explicit_url: String) -> String:
 	if explicit_url != "":
 		return explicit_url
 
-	var env_keys := ["GODOT_BRIDGE_PORT", "MCP_BRIDGE_PORT", "GOPEAK_BRIDGE_PORT"]
+	var env_keys := ["GODOT_BRIDGE_PORT", "MCP_BRIDGE_PORT", "GDHARNESS_BRIDGE_PORT"]
 	for key in env_keys:
 		var raw := OS.get_environment(key)
 		if raw == "":

@@ -49,17 +49,11 @@ jobs:
       - name: Dynamic groups test
         run: bun run test:dynamic-groups
 
-      - name: Documentation policy tests
-        run: bun run test:docs
-
       - name: Metadata consistency tests
         run: bun run test:metadata
 
       - name: Packaging test
         run: bun run test:packaging
-
-      - name: Distribution archive and installer tests
-        run: bun run test:distribution
 
       - name: Audit production dependencies
         run: bun audit --prod

@@ -1,95 +1,59 @@
-# Contributing to GoPeak
+# Contributing
 
-Thanks for contributing to GoPeak. This guide focuses on the current repository layout and the checks we expect before review.
+## The rules that decide whether a change lands
 
-## Before you start
-
-- Search existing GitHub issues and pull requests before starting overlapping work.
-- Prefer small, reviewable changes over broad rewrites.
-- Keep user-visible behavior stable unless the change is explicitly intended to modify it.
-- When touching packaging or installation flows, preserve the current opt-in shell-hook behavior (`gopeak setup`) and avoid silent shell rc mutations during release installation.
+- **No fixture, no ship.** A tool is driven against a pinned Godot in CI before it exists in
+  a release. A change that adds or alters a tool comes with the fixture that proves it.
+- **A tool fails rather than answers.** No success payload for an empty or partial result
+  that could be a silent failure. An unknown argument or enum value is an error naming the
+  valid set, never a silent default.
+- **Every mutation reads back.** A tool that writes returns the engine's actual state
+  afterwards, read from the engine, not an echo of the request.
+- **Answers are sized.** Anything that can return a lot takes a detail level and defaults to
+  the smallest useful one. Anything unbounded paginates.
 
 ## Development setup
 
 ```bash
-git clone https://github.com/HaD0Yun/Doyunha-Gopeak.git
-cd Doyunha-Gopeak
-bun ci
+git clone https://github.com/Aureliolo/gdharness.git
+cd gdharness
+bun install
 bun run build
 ```
 
-Helpful commands:
+Checks, all of which CI runs:
 
 ```bash
+bun run ci                 # build, typecheck, regression and detection tests
+bun run test:dynamic-groups
+bun run test:metadata
 bun run watch              # TypeScript watch mode
-bun run test:setup         # Shell-hook regression checks
 ```
+
+`bun run test:packaging` and `bun run release:pack` only work on Linux or macOS. Windows
+cannot record a POSIX file mode, so the packer refuses there rather than shipping an archive
+whose executables are world-writable. Releases are cut by CI.
 
 ## Repository map
 
 ```text
 .
 ├── src/
-│   ├── index.ts           # MCP server entrypoint / current main orchestration surface
-│   ├── cli*.ts            # CLI entrypoint and setup/check/star helpers
+│   ├── index.ts           # MCP server entry point
+│   ├── cli.ts             # CLI entry point
+│   ├── tool-definitions.ts# Tool schemas
 │   ├── resources.ts       # MCP resources
 │   ├── prompts.ts         # MCP prompts
-│   ├── godot-bridge.ts    # Bridge transport and runtime integration
-│   ├── providers/         # Asset provider integrations
-│   └── visualizer/        # Browser visualizer assets
-├── docs/                  # Architecture, roadmap, release docs
-├── test-*.mjs             # Integration and regression coverage
-├── server.json            # MCP registry metadata
-└── package.json           # Bun package metadata and scripts
+│   ├── godot-bridge.ts    # Bridge transport to the editor addon
+│   ├── lsp_client.ts      # Godot language server client
+│   ├── dap_client.ts      # Godot debug adapter client
+│   ├── addon/             # The two Godot addons, editor and runtime
+│   └── scripts/           # Headless engine operations, GDScript
+├── docs/
+└── scripts/               # Build, pack and release tooling
 ```
 
-## Expected workflow
+## Style
 
-1. Make the smallest change that solves the problem.
-2. Reuse existing helpers and naming patterns before introducing new abstractions.
-3. Update docs when behavior, install flow, or capability claims change.
-4. Keep `package.json`, `server.json`, README claims, GitHub Release assets, checksum/attestation guidance, and release notes aligned when metadata changes.
-
-## Verification before PR
-
-Run the repository checks that cover your area. For most feature or packaging changes, run all of these:
-
-```bash
-bun run ci
-bun run test:dynamic-groups
-bun run test:integration
-bun run test:setup
-```
-
-If a command is not relevant or fails for an existing unrelated reason, call that out in the PR description with exact output.
-
-For bridge transport, compact-profile, or tool-discovery changes, also include the targeted checks that cover those paths (typically `bun run test:dynamic-groups`, `bun run test:integration`, or the closest focused regression script).
-
-## Capability changes
-
-When adding or changing tools, resources, prompts, or CLI behavior:
-
-- update the implementation and any related schema/metadata
-- document the user-facing behavior in `README.md` and/or `docs/`
-- keep compact/full profile behavior and aliases backward-compatible when possible
-- add or update regression coverage near the affected area
-
-## Documentation changes
-
-Prefer repository-grounded documentation over aspirational notes.
-
-- Use `docs/platform-roadmap.md` for active roadmap/planning material.
-- Use `docs/architecture.md` for structural decisions and boundaries.
-- Keep root-level summary docs (`README.md`, `ROADMAP.md`, `CONTRIBUTING.md`) aligned with the codebase instead of maintaining speculative feature backlogs.
-
-## Pull requests
-
-A good PR description includes:
-
-- what changed
-- why it changed
-- verification commands and results
-- any follow-up risks or compatibility notes
-- any client refresh/reconnect caveats when the change affects dynamic tool exposure or bridge connectivity
-
-Thanks again for helping improve GoPeak.
+- British English in prose. No em-dashes.
+- Comments explain why, never what.
