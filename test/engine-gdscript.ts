@@ -192,15 +192,19 @@ function testDependencyWalk(godotPath: string, projectDir: string): void {
   // else; what the walk leaves out by default is the engine's own res://. space.
   mkdirSync(join(projectDir, 'addons', 'fixture'), { recursive: true });
   writeFileSync(join(projectDir, 'addons', 'fixture', 'helper.gd'), 'extends Node\n');
+  // The engine-internal path is loaded at run time rather than preloaded: the walk reads source
+  // text, while a preload of a file that does not exist is a parse error every later fixture
+  // that loads the project's scripts would trip over.
   writeFileSync(
     join(projectDir, 'chain', 'shipping.gd'),
-    'extends Node\n\nconst Helper = preload("res://addons/fixture/helper.gd")\nconst Cache = preload("res://.godot/fixture_cache.gd")\n',
+    'extends Node\n\nconst Helper = preload("res://addons/fixture/helper.gd")\n\n\nfunc _cache() -> Variant:\n\treturn load("res://.godot/fixture_cache.gd")\n',
   );
   writeFileSync(paramsPath, JSON.stringify({ resource_path: 'res://chain/shipping.gd', max_depth: 3 }));
   const shipping = runScript(godotPath, projectDir, join(projectDir, 'operations', 'godot_operations.gd'), [
     'get_dependencies',
     `@file:${paramsPath}`,
   ]);
+  rmSync(join(projectDir, 'chain', 'shipping.gd'));
   if (shipping.status !== 0) {
     throw new Error(
       `get_dependencies through addons failed:\n${`${shipping.stdout}\n${shipping.stderr}`.trim()}`,

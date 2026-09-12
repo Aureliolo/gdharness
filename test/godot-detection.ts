@@ -100,25 +100,61 @@ function testIgnoresDirectoriesMatchingPattern() {
   }
 }
 
-/** A download in the home directory is tried, after every conventional path and never before. */
+/**
+ * A download in the home directory is tried, after every conventional path and never before.
+ *
+ * The scan reads the host's filesystem with the host's separators, so it is exercised for the
+ * platform this runs on; the other platforms' lists are shape-checked without a scan.
+ */
 function testDownloadsAreTriedAfterTheConventionalPaths() {
   const home = mkdtempSync(join(tmpdir(), 'gdharness-detect-home-'));
   try {
-    mkdirSync(join(home, 'Downloads'));
-    writeFileSync(join(home, 'Downloads', 'Godot_v4.4.1-stable_win64.exe'), '');
-    mkdirSync(join(home, 'Desktop'));
-    writeFileSync(join(home, 'Desktop', 'godot_v4.3-stable_linux.x86_64'), '');
+    // Where a release download lands on each platform, and what it is called there.
+    const hosts = {
+      win32: {
+        directory: 'Downloads',
+        binary: 'Godot_v4.4.1-stable_win64.exe',
+        named: `${home}\\Godot\\Godot.exe`,
+      },
+      linux: {
+        directory: 'Desktop',
+        binary: 'godot_v4.3-stable_linux.x86_64',
+        named: `${home}/.local/bin/godot`,
+      },
+      darwin: {
+        directory: 'Applications',
+        binary: 'Godot_v4.4.1-stable_macos.universal',
+        named: `${home}/Applications/Godot.app/Contents/MacOS/Godot`,
+      },
+    } as const;
+    const platform =
+      process.platform === 'win32' || process.platform === 'darwin' ? process.platform : 'linux';
+    const host = hosts[platform];
 
-    const windows = godotCandidates('win32', home);
-    const downloaded = windows.indexOf(join(home, 'Downloads', 'Godot_v4.4.1-stable_win64.exe'));
-    assert.ok(downloaded !== -1, `the download should be a candidate: ${windows.join(', ')}`);
-    assert.equal(windows[0], 'godot', 'PATH is asked first');
-    assert.ok(windows.indexOf(`${home}\\Godot\\Godot.exe`) < downloaded, 'named paths come before the scan');
-    assert.ok(!windows.some((p) => p.endsWith('linux.x86_64')), 'a Linux build is not a Windows candidate');
+    mkdirSync(join(home, host.directory));
+    writeFileSync(join(home, host.directory, host.binary), '');
+    writeFileSync(join(home, host.directory, `${host.binary}.zip`), '');
+    writeFileSync(
+      join(home, host.directory, platform === 'win32' ? 'godot_linux.x86_64' : 'Godot_win64.exe'),
+      '',
+    );
 
-    const linux = godotCandidates('linux', home);
-    assert.ok(linux.includes(join(home, 'Desktop', 'godot_v4.3-stable_linux.x86_64')));
-    assert.ok(!linux.some((p) => p.endsWith('.exe')), 'a Windows build is not a Linux candidate');
+    const candidates = godotCandidates(platform, home);
+    const downloaded = candidates.indexOf(join(home, host.directory, host.binary));
+    assert.ok(downloaded !== -1, `the download should be a candidate: ${candidates.join(', ')}`);
+    assert.equal(candidates[0], 'godot', 'PATH is asked first');
+    assert.ok(candidates.indexOf(host.named) < downloaded, 'named paths come before the scan');
+    assert.ok(!candidates.some((p) => p.endsWith('.zip')), 'the archive is not a candidate');
+    assert.ok(
+      !candidates.some((p) => p.endsWith(platform === 'win32' ? 'linux.x86_64' : 'win64.exe')),
+      "the other platform's build is not a candidate",
+    );
+
+    for (const other of ['win32', 'linux', 'darwin'] as const) {
+      const shaped = godotCandidates(other, home);
+      assert.equal(shaped[0], 'godot', `${other} asks PATH first`);
+      assert.ok(shaped.includes(hosts[other].named), `${other} lists its home install: ${shaped.join(', ')}`);
+    }
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
