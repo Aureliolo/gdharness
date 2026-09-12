@@ -104,6 +104,9 @@ jobs:
       - name: Dynamic groups test
         run: bun run test:dynamic-groups
 
+      - name: Bridge integration test
+        run: bun run test:integration
+
       - name: Metadata consistency tests
         run: bun run test:metadata
 

@@ -109,6 +109,13 @@ jobs:
           # and wrong here: without this a broken install would read as a pass.
           GDHARNESS_REQUIRE_GODOT: '1'
 
+      # Here rather than in build-and-test because its last phase makes real tool calls, and
+      # those need an engine: without one the tools answer with empty content and the phase
+      # passes on nothing.
+      - name: Tool group end to end
+        if: '!cancelled()'
+        run: bun run build && bun run test:e2e-groups
+
   # Biome owns formatting and the fast syntactic rules; oxlint owns the ones that need the type
   # checker, which it runs through typescript-go rather than a second copy of the compiler.
   # Separate from build-and-test so a lint failure and a broken build are two different red
@@ -177,6 +184,11 @@ jobs:
 
       - name: Dynamic groups test
         run: bun run test:dynamic-groups
+
+      # 41 assertions about the bridge, driven against a mock Godot over a real WebSocket, that
+      # nothing ran until now.
+      - name: Bridge integration test
+        run: bun run test:integration
 
       - name: Metadata consistency tests
         run: bun run test:metadata

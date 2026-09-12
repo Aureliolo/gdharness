@@ -12,14 +12,31 @@
  */
 
 import { spawn } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
+import { CORE_TOOL_GROUPS, TOOL_GROUPS } from '../build/tool-groups.js';
 import { sanitizeToolName } from './support/tool-name.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SERVER_PATH = join(__dirname, '..', 'build', 'index.js');
-const TEST_PROJECT = '/home/doyun/godot-new-project';
+
+const EXPECTED_CORE_GROUPS = Object.keys(CORE_TOOL_GROUPS).length;
+const EXPECTED_DYNAMIC_GROUPS = Object.keys(TOOL_GROUPS).length;
+const EXPECTED_TOTAL_GROUPS = EXPECTED_CORE_GROUPS + EXPECTED_DYNAMIC_GROUPS;
+
+/**
+ * A project of its own, because the tool calls below are real ones and a path on the machine of
+ * whoever wrote this is not a fixture. A project.godot is all the operations reached from here
+ * need; the engine reads the rest from defaults.
+ */
+const TEST_PROJECT = mkdtempSync(join(tmpdir(), 'gdharness-groups-'));
+writeFileSync(
+  join(TEST_PROJECT, 'project.godot'),
+  '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="GdharnessGroupsFixture"\n',
+);
 
 let passed = 0;
 let failed = 0;
@@ -37,6 +54,15 @@ function assert(condition, label) {
 
 function makeRequest(method, params, id) {
   return `${JSON.stringify({ jsonrpc: '2.0', method, params, id })}\n`;
+}
+
+/** The payload, or null when the tool answered with prose or with nothing at all. */
+function parseJsonOrNull(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
 }
 
 function makeNotification(method, params) {
@@ -285,7 +311,13 @@ async function run() {
     9,
   );
   const listGroupsData = JSON.parse(listGroupsRes.result.content[0].text);
-  assert(listGroupsData.totalGroups === 34, `Total groups = ${listGroupsData.totalGroups} (expected 34)`);
+  // Counted off the tables the server is built from rather than written out here. The three
+  // numbers that used to be literals were 34, 12 and 22 against tables holding 31, 11 and 20,
+  // so the test had been reporting on a shape the code left behind.
+  assert(
+    listGroupsData.totalGroups === EXPECTED_TOTAL_GROUPS,
+    `Total groups = ${listGroupsData.totalGroups} (expected ${EXPECTED_TOTAL_GROUPS})`,
+  );
   const animGroup = listGroupsData.groups.find((g) => g.name === 'animation');
   assert(animGroup?.active === true, 'animation group shows as active in list');
   const navGroup = listGroupsData.groups.find((g) => g.name === 'navigation');
@@ -293,10 +325,13 @@ async function run() {
   const coreSceneGroup = listGroupsData.groups.find((g) => g.name === 'core_scene');
   assert(coreSceneGroup?.alwaysVisible === true, 'core_scene group is alwaysVisible');
   assert(coreSceneGroup?.type === 'core', 'core_scene has type core');
-  assert(listGroupsData.coreGroups === 12, `Core groups = ${listGroupsData.coreGroups} (expected 12)`);
   assert(
-    listGroupsData.dynamicGroups === 22,
-    `Dynamic groups = ${listGroupsData.dynamicGroups} (expected 22)`,
+    listGroupsData.coreGroups === EXPECTED_CORE_GROUPS,
+    `Core groups = ${listGroupsData.coreGroups} (expected ${EXPECTED_CORE_GROUPS})`,
+  );
+  assert(
+    listGroupsData.dynamicGroups === EXPECTED_DYNAMIC_GROUPS,
+    `Dynamic groups = ${listGroupsData.dynamicGroups} (expected ${EXPECTED_DYNAMIC_GROUPS})`,
   );
 
   // ── Phase 6: Deactivation ──────────────────────────────────
@@ -397,8 +432,14 @@ async function run() {
     15,
     15000,
   );
-  const autoloadOk = !autoloadRes.error;
-  assert(autoloadOk, `list_autoloads executed successfully (real tool call)`);
+  // The absence of a JSON-RPC error says nothing, and neither does the absence of the word
+  // "error": with no engine to reach, this tool answers with empty content and no complaint.
+  // So the assertion is on the shape the tool promises, which only a real run produces.
+  const autoloadText = autoloadRes.result?.content?.[0]?.text ?? '';
+  assert(
+    !autoloadRes.error && Array.isArray(parseJsonOrNull(autoloadText)?.autoloads),
+    `list_autoloads returned its autoloads (real tool call): ${autoloadText.slice(0, 120) || '<empty>'}`,
+  );
   if (autoloadRes.result?.content?.[0]?.text) {
     const autoloadData = JSON.parse(autoloadRes.result.content[0].text);
     assert(typeof autoloadData === 'object', `list_autoloads returned valid data`);
@@ -434,7 +475,11 @@ async function run() {
     17,
     15000,
   );
-  assert(!healthRes.error, `get_project_health executed successfully (real tool call)`);
+  const healthText = healthRes.result?.content?.[0]?.text ?? '';
+  assert(
+    !healthRes.error && typeof parseJsonOrNull(healthText)?.checks === 'object',
+    `get_project_health returned its checks (real tool call): ${healthText.slice(0, 120) || '<empty>'}`,
+  );
 
   // ── Phase 9: Error handling ──────────────────────────────────
   console.log('\n[Phase 9] Error handling');
@@ -557,6 +602,7 @@ async function run() {
 // Error handling
 process.on('exit', () => {
   if (serverProcess && !serverProcess.killed) serverProcess.kill('SIGTERM');
+  rmSync(TEST_PROJECT, { recursive: true, force: true });
 });
 process.on('SIGINT', () => {
   if (serverProcess) serverProcess.kill('SIGTERM');
