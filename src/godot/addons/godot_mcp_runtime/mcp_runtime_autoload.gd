@@ -128,51 +128,35 @@ func _handle_message(client: StreamPeerTCP, data: String) -> void:
 
 
 func _execute_command(command: String, params: Dictionary) -> Dictionary:
-	match command:
-		"ping":
-			return {"type": "pong", "timestamp": Time.get_unix_time_from_system()}
+	var handler: Callable = _command_handlers().get(command, Callable())
+	if not handler.is_valid():
+		return {"type": "error", "message": "Unknown command: " + command}
+	return handler.call(params)
 
-		"get_tree":
-			return _cmd_get_tree(params)
 
-		"get_node":
-			return _cmd_get_node(params)
+## The command table. A dictionary rather than a match arm per command, so the set of commands
+## is one list that can be read, counted and answered with, instead of a branch each.
+func _command_handlers() -> Dictionary:
+	return {
+		"ping": _cmd_ping,
+		"get_tree": _cmd_get_tree,
+		"get_node": _cmd_get_node,
+		"set_property": _cmd_set_property,
+		"call_method": _cmd_call_method,
+		"get_metrics": _cmd_get_metrics,
+		"capture_screenshot": _cmd_capture_screenshot,
+		"capture_viewport": _cmd_capture_viewport,
+		"inject_action": _cmd_inject_action,
+		"inject_key": _cmd_inject_key,
+		"inject_mouse_click": _cmd_inject_mouse_click,
+		"inject_mouse_motion": _cmd_inject_mouse_motion,
+		"watch_signal": _cmd_watch_signal,
+		"unwatch_signal": _cmd_unwatch_signal,
+	}
 
-		"set_property":
-			return _cmd_set_property(params)
 
-		"call_method":
-			return _cmd_call_method(params)
-
-		"get_metrics":
-			return _cmd_get_metrics(params)
-
-		"capture_screenshot":
-			return _cmd_capture_screenshot(params)
-
-		"capture_viewport":
-			return _cmd_capture_viewport(params)
-
-		"inject_action":
-			return _cmd_inject_action(params)
-
-		"inject_key":
-			return _cmd_inject_key(params)
-
-		"inject_mouse_click":
-			return _cmd_inject_mouse_click(params)
-
-		"inject_mouse_motion":
-			return _cmd_inject_mouse_motion(params)
-
-		"watch_signal":
-			return _cmd_watch_signal(params)
-
-		"unwatch_signal":
-			return _cmd_unwatch_signal(params)
-
-		_:
-			return {"type": "error", "message": "Unknown command: " + command}
+func _cmd_ping(_params: Dictionary) -> Dictionary:
+	return {"type": "pong", "timestamp": Time.get_unix_time_from_system()}
 
 
 func _cmd_get_tree(params: Dictionary) -> Dictionary:
@@ -569,49 +553,52 @@ func _serialize_node(node: Node, include_properties: bool) -> Dictionary:
 	return result
 
 
-func _serialize_value(value) -> Variant:
-	if value == null:
-		return null
-	if value is Vector2:
-		return {"_type": "Vector2", "x": value.x, "y": value.y}
-	if value is Vector3:
-		return {"_type": "Vector3", "x": value.x, "y": value.y, "z": value.z}
-	if value is Vector2i:
-		return {"_type": "Vector2i", "x": value.x, "y": value.y}
-	if value is Vector3i:
-		return {"_type": "Vector3i", "x": value.x, "y": value.y, "z": value.z}
-	if value is Color:
-		return {"_type": "Color", "r": value.r, "g": value.g, "b": value.b, "a": value.a}
-	if value is Rect2:
-		return {
-			"_type": "Rect2",
-			"position": _serialize_value(value.position),
-			"size": _serialize_value(value.size)
-		}
-	if value is Transform2D:
-		return {
-			"_type": "Transform2D",
-			"origin": _serialize_value(value.origin),
-			"x": _serialize_value(value.x),
-			"y": _serialize_value(value.y)
-		}
-	if value is NodePath:
-		return {"_type": "NodePath", "path": str(value)}
-	# Resource before Object: every Resource is an Object, and the resource path is the useful half.
-	if value is Resource:
-		return {"_type": "Resource", "path": value.resource_path, "class": value.get_class()}
-	if value is Array:
-		var arr = []
-		for item in value:
-			arr.append(_serialize_value(item))
-		return arr
-	if value is Dictionary:
-		var dict = {}
-		for key in value:
-			dict[str(key)] = _serialize_value(value[key])
-		return dict
-	if value is Object:
-		return {"_type": "Object", "class": value.get_class()}
+## Converts a Godot value into something JSON can carry.
+##
+## Keyed on typeof() rather than written as a chain of `is` tests, so the set of types that
+## survive the wire is one table you can read rather than an order you have to trust. The order
+## mattered: Resource had to be checked before Object or every resource came back as a bare
+## class name with its path dropped, and nothing but a comment said so.
+func _serialize_value(value: Variant) -> Variant:
+	match typeof(value):
+		TYPE_NIL:
+			return null
+		TYPE_VECTOR2:
+			return {"_type": "Vector2", "x": value.x, "y": value.y}
+		TYPE_VECTOR3:
+			return {"_type": "Vector3", "x": value.x, "y": value.y, "z": value.z}
+		TYPE_VECTOR2I:
+			return {"_type": "Vector2i", "x": value.x, "y": value.y}
+		TYPE_VECTOR3I:
+			return {"_type": "Vector3i", "x": value.x, "y": value.y, "z": value.z}
+		TYPE_COLOR:
+			return {"_type": "Color", "r": value.r, "g": value.g, "b": value.b, "a": value.a}
+		TYPE_RECT2:
+			return {
+				"_type": "Rect2",
+				"position": _serialize_value(value.position),
+				"size": _serialize_value(value.size)
+			}
+		TYPE_TRANSFORM2D:
+			return {
+				"_type": "Transform2D",
+				"origin": _serialize_value(value.origin),
+				"x": _serialize_value(value.x),
+				"y": _serialize_value(value.y)
+			}
+		TYPE_NODE_PATH:
+			return {"_type": "NodePath", "path": str(value)}
+		TYPE_ARRAY:
+			return value.map(_serialize_value)
+		TYPE_DICTIONARY:
+			var serialised := {}
+			for key in value:
+				serialised[str(key)] = _serialize_value(value[key])
+			return serialised
+		TYPE_OBJECT:
+			if value is Resource:
+				return {"_type": "Resource", "path": value.resource_path, "class": value.get_class()}
+			return {"_type": "Object", "class": value.get_class()}
 	return value
 
 

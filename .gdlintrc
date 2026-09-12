@@ -14,5 +14,12 @@ max-file-lines: 600
 # gdlint's default is 10, which is enough arguments to hide a missing struct.
 function-arguments-number: 6
 
+# gdlint's default is 6, which fights the shape this project mandates: a tool fails rather than
+# answers, so every argument gets a guard clause with its own return, and no-else-return then
+# demands those be flat. Measured across the addons, a genuine validator tops out at 9 returns
+# and everything above 12 was a type dispatcher pretending to be a function. 12 admits the
+# validators and still catches the thing the rule is for.
+max-returns: 12
+
 # Matches Biome's lineWidth for TypeScript, so both languages wrap at the same column.
 max-line-length: 110
