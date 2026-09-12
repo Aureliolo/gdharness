@@ -6,7 +6,7 @@ import process from 'node:process';
 const ROOT = process.cwd();
 const PACKAGE_JSON_PATH = path.join(ROOT, 'package.json');
 const SERVER_JSON_PATH = path.join(ROOT, 'server.json');
-const VERSION_REFERENCE_PATHS = ['README.md', 'index.html'];
+const VERSION_REFERENCE_PATHS = ['README.md'];
 const SEMVER_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z-.]+)?(?:\+[0-9A-Za-z-.]+)?$/;
 const SEMVER_SOURCE = String.raw`\d+\.\d+\.\d+(?:-[0-9A-Za-z-.]+)?(?:\+[0-9A-Za-z-.]+)?`;
 
