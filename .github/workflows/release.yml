@@ -19,7 +19,7 @@ jobs:
 
     steps:
       - name: Checkout tag
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -141,8 +141,10 @@ jobs:
 
           (cd dist && sha256sum --check "$(basename "${checksum}")")
 
-          echo "archive=${archive}" >> "${GITHUB_OUTPUT}"
-          echo "checksum=${checksum}" >> "${GITHUB_OUTPUT}"
+          {
+            echo "archive=${archive}"
+            echo "checksum=${checksum}"
+          } >> "${GITHUB_OUTPUT}"
         id: assets
 
       - name: Upload release assets
@@ -191,9 +193,11 @@ jobs:
           fi
 
           (cd dist && sha256sum --check "$(basename "${checksum}")")
-          echo "archive=${archive}" >> "${GITHUB_OUTPUT}"
-          echo "checksum=${checksum}" >> "${GITHUB_OUTPUT}"
-          echo "sbom=dist/gdharness-${VERSION}.spdx.json" >> "${GITHUB_OUTPUT}"
+          {
+            echo "archive=${archive}"
+            echo "checksum=${checksum}"
+            echo "sbom=dist/gdharness-${VERSION}.spdx.json"
+          } >> "${GITHUB_OUTPUT}"
 
       - name: Generate SBOM
         uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
