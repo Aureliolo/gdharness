@@ -1,6 +1,6 @@
 @tool
-extends Node
 class_name MCPToolExecutor
+extends Node
 
 var _editor_plugin: EditorPlugin = null
 

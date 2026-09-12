@@ -5,6 +5,22 @@ extends SceneTree
 var debug_mode = false
 
 
+# Everything one dependency walk carries: the settings it was started with, and the state it
+# accumulates as it recurses. Kept together so the recursion passes one object rather than
+# six positional arguments that have to stay in the same order at every call site.
+class DependencyWalk:
+	var max_depth: int
+	var include_built_in: bool
+	var visited: Dictionary = {}
+	var path_stack: Array = []
+	var result: Dictionary
+
+	func _init(p_max_depth: int, p_include_built_in: bool, p_result: Dictionary) -> void:
+		max_depth = p_max_depth
+		include_built_in = p_include_built_in
+		result = p_result
+
+
 func _init():
 	var args = OS.get_cmdline_args()
 
@@ -278,8 +294,7 @@ func get_script_by_name(name_of_class):
 			if debug_mode:
 				print("Successfully loaded script from path")
 			return script
-		else:
-			printerr("Failed to load script from path: " + name_of_class)
+		printerr("Failed to load script from path: " + name_of_class)
 	elif debug_mode:
 		print("Resource not found, checking global class registry")
 
@@ -300,9 +315,8 @@ func get_script_by_name(name_of_class):
 				if debug_mode:
 					print("Successfully loaded script from registry")
 				return script
-			else:
-				printerr("Failed to load script from registry path: " + found_path)
-				break
+			printerr("Failed to load script from registry path: " + found_path)
+			break
 
 	printerr("Could not find script for class: " + name_of_class)
 	return null
@@ -811,7 +825,7 @@ func create_gdscript(params):
 
 	# Add template content or custom content
 	if not template.is_empty():
-		script_content += get_script_template(template, extends_class)
+		script_content += get_script_template(template)
 	elif not content.is_empty():
 		script_content += content
 	else:
@@ -846,7 +860,7 @@ func create_gdscript(params):
 
 
 # Get script template content based on template name
-func get_script_template(template_name: String, extends_class: String) -> String:
+func get_script_template(template_name: String) -> String:
 	match template_name:
 		"singleton":
 			return """## Singleton (Autoload) script
@@ -1704,12 +1718,8 @@ func get_dependencies(params):
 			log_error("Resource file does not exist: " + full_path)
 			quit(1)
 
-		var visited = {}
-		var path_stack = []
-		var deps = analyze_resource_dependencies(
-			full_path, max_depth, 0, visited, path_stack, include_built_in, result
-		)
-		result["dependencies"][full_path] = deps
+		var walk = DependencyWalk.new(max_depth, include_built_in, result)
+		result["dependencies"][full_path] = analyze_resource_dependencies(full_path, 0, walk)
 		result["summary"]["total_resources"] = 1
 	else:
 		# Analyze all project resources
@@ -1719,11 +1729,8 @@ func get_dependencies(params):
 			all_resources.append_array(find_files("res://", "." + ext))
 
 		for res_path in all_resources:
-			var visited = {}
-			var path_stack = []
-			var deps = analyze_resource_dependencies(
-				res_path, max_depth, 0, visited, path_stack, include_built_in, result
-			)
+			var walk = DependencyWalk.new(max_depth, include_built_in, result)
+			var deps = analyze_resource_dependencies(res_path, 0, walk)
 			if deps.size() > 0:
 				result["dependencies"][res_path] = deps
 
@@ -1749,33 +1756,25 @@ func count_dependencies_recursive(deps: Array) -> int:
 
 
 # Helper to analyze dependencies of a single resource
-func analyze_resource_dependencies(
-	path: String,
-	max_depth: int,
-	current_depth: int,
-	visited: Dictionary,
-	path_stack: Array,
-	include_built_in: bool,
-	result: Dictionary
-) -> Array:
+func analyze_resource_dependencies(path: String, current_depth: int, walk: DependencyWalk) -> Array:
 	var deps = []
 
-	if current_depth >= max_depth:
+	if current_depth >= walk.max_depth:
 		return deps
 
 	# Check for circular reference
-	if path in path_stack:
-		var cycle = path_stack.slice(path_stack.find(path))
+	if path in walk.path_stack:
+		var cycle = walk.path_stack.slice(walk.path_stack.find(path))
 		cycle.append(path)
-		if not cycle in result["circular_references"]:
-			result["circular_references"].append(cycle)
+		if not cycle in walk.result["circular_references"]:
+			walk.result["circular_references"].append(cycle)
 		return [{"path": path, "circular": true}]
 
 	# Skip if already fully visited
-	if visited.has(path):
-		return visited[path]
+	if walk.visited.has(path):
+		return walk.visited[path]
 
-	path_stack.append(path)
+	walk.path_stack.append(path)
 
 	# Parse the file to find dependencies
 	var file = FileAccess.open(path, FileAccess.READ)
@@ -1819,7 +1818,7 @@ func analyze_resource_dependencies(
 				# Skip engine-internal resources unless requested. `addons/` is not one of
 				# them: it is ordinary project content, and often shipping content, so
 				# treating it as built-in dropped every dependency of anything living there.
-				if not include_built_in and dep_path.begins_with("res://."):
+				if not walk.include_built_in and dep_path.begins_with("res://."):
 					continue
 
 				# Skip if same as source
@@ -1829,10 +1828,8 @@ func analyze_resource_dependencies(
 				var dep_info = {"path": dep_path, "exists": FileAccess.file_exists(dep_path)}
 
 				# Recursively analyze if exists and not yet added
-				if dep_info["exists"] and current_depth + 1 < max_depth:
-					var sub_deps = analyze_resource_dependencies(
-						dep_path, max_depth, current_depth + 1, visited, path_stack, include_built_in, result
-					)
+				if dep_info["exists"] and current_depth + 1 < walk.max_depth:
+					var sub_deps = analyze_resource_dependencies(dep_path, current_depth + 1, walk)
 					if sub_deps.size() > 0:
 						dep_info["dependencies"] = sub_deps
 
@@ -1845,8 +1842,8 @@ func analyze_resource_dependencies(
 				if not already_added:
 					deps.append(dep_info)
 
-	path_stack.pop_back()
-	visited[path] = deps
+	walk.path_stack.pop_back()
+	walk.visited[path] = deps
 	return deps
 
 
@@ -2922,28 +2919,28 @@ func get_non_default_properties(node: Node) -> Dictionary:
 func serialize_value(value) -> Variant:
 	if value == null:
 		return null
-	elif value is Vector2:
+	if value is Vector2:
 		return {"x": value.x, "y": value.y, "_type": "Vector2"}
-	elif value is Vector3:
+	if value is Vector3:
 		return {"x": value.x, "y": value.y, "z": value.z, "_type": "Vector3"}
-	elif value is Vector2i:
+	if value is Vector2i:
 		return {"x": value.x, "y": value.y, "_type": "Vector2i"}
-	elif value is Vector3i:
+	if value is Vector3i:
 		return {"x": value.x, "y": value.y, "z": value.z, "_type": "Vector3i"}
-	elif value is Color:
+	if value is Color:
 		return {"r": value.r, "g": value.g, "b": value.b, "a": value.a, "_type": "Color"}
-	elif value is Rect2:
+	if value is Rect2:
 		return {
 			"position": serialize_value(value.position), "size": serialize_value(value.size), "_type": "Rect2"
 		}
-	elif value is Transform2D:
+	if value is Transform2D:
 		return {
 			"origin": serialize_value(value.origin),
 			"x": serialize_value(value.x),
 			"y": serialize_value(value.y),
 			"_type": "Transform2D"
 		}
-	elif value is Transform3D:
+	if value is Transform3D:
 		return {
 			"origin": serialize_value(value.origin),
 			"basis":
@@ -2954,66 +2951,64 @@ func serialize_value(value) -> Variant:
 			},
 			"_type": "Transform3D"
 		}
-	elif value is NodePath:
+	if value is NodePath:
 		return {"path": str(value), "_type": "NodePath"}
-	elif value is Resource:
+	# Resource before Object: every Resource is an Object, and the resource path is the useful half.
+	if value is Resource:
 		if value.resource_path.is_empty():
 			return {"_type": "Resource", "class": value.get_class()}
 		return {"path": value.resource_path, "_type": "Resource", "class": value.get_class()}
-	elif value is Array:
+	if value is Array:
 		var arr = []
 		for item in value:
 			arr.append(serialize_value(item))
 		return arr
-	elif value is Dictionary:
+	if value is Dictionary:
 		var dict = {}
 		for key in value:
 			dict[str(key)] = serialize_value(value[key])
 		return dict
-	elif value is Object:
+	if value is Object:
 		return {"_type": "Object", "class": value.get_class()}
-	else:
-		return value
+	return value
 
 
 # Helper function to deserialize JSON values back to Godot types
 func deserialize_value(value) -> Variant:
 	if value == null:
 		return null
-	elif value is Dictionary:
-		if value.has("_type"):
-			var type_name = value["_type"]
-			match type_name:
-				"Vector2":
-					return Vector2(value.get("x", 0), value.get("y", 0))
-				"Vector3":
-					return Vector3(value.get("x", 0), value.get("y", 0), value.get("z", 0))
-				"Vector2i":
-					return Vector2i(value.get("x", 0), value.get("y", 0))
-				"Vector3i":
-					return Vector3i(value.get("x", 0), value.get("y", 0), value.get("z", 0))
-				"Color":
-					return Color(value.get("r", 0), value.get("g", 0), value.get("b", 0), value.get("a", 1))
-				"Rect2":
-					var pos = deserialize_value(value.get("position", {}))
-					var size = deserialize_value(value.get("size", {}))
-					return Rect2(pos, size)
-				"NodePath":
-					return NodePath(value.get("path", ""))
-				_:
-					return value
-		else:
-			var dict = {}
-			for key in value:
-				dict[key] = deserialize_value(value[key])
-			return dict
-	elif value is Array:
+	if value is Array:
 		var arr = []
 		for item in value:
 			arr.append(deserialize_value(item))
 		return arr
-	else:
+	if not value is Dictionary:
 		return value
+
+	if not value.has("_type"):
+		var dict = {}
+		for key in value:
+			dict[key] = deserialize_value(value[key])
+		return dict
+
+	match value["_type"]:
+		"Vector2":
+			return Vector2(value.get("x", 0), value.get("y", 0))
+		"Vector3":
+			return Vector3(value.get("x", 0), value.get("y", 0), value.get("z", 0))
+		"Vector2i":
+			return Vector2i(value.get("x", 0), value.get("y", 0))
+		"Vector3i":
+			return Vector3i(value.get("x", 0), value.get("y", 0), value.get("z", 0))
+		"Color":
+			return Color(value.get("r", 0), value.get("g", 0), value.get("b", 0), value.get("a", 1))
+		"Rect2":
+			var pos = deserialize_value(value.get("position", {}))
+			var size = deserialize_value(value.get("size", {}))
+			return Rect2(pos, size)
+		"NodePath":
+			return NodePath(value.get("path", ""))
+	return value
 
 
 # List all nodes in a scene with their hierarchy
@@ -4716,14 +4711,14 @@ uniform float outline_width : hint_range(0.0, 10.0) = 1.0;
 void fragment() {
     vec4 tex_color = texture(TEXTURE, UV);
     float alpha = tex_color.a;
-    
+
     vec2 size = TEXTURE_PIXEL_SIZE * outline_width;
     float outline_alpha = texture(TEXTURE, UV + vec2(-size.x, 0)).a;
     outline_alpha += texture(TEXTURE, UV + vec2(size.x, 0)).a;
     outline_alpha += texture(TEXTURE, UV + vec2(0, -size.y)).a;
     outline_alpha += texture(TEXTURE, UV + vec2(0, size.y)).a;
     outline_alpha = min(outline_alpha, 1.0);
-    
+
     COLOR = mix(outline_color * outline_alpha, tex_color, alpha);
 }
 """
@@ -5176,7 +5171,7 @@ func add_animation_track(params):
 
 
 # List all plugins in the project with their status
-func list_plugins(params):
+func list_plugins(_params):
 	log_info("Listing plugins")
 
 	var result = {"plugins": [], "addons_directory_exists": false, "enabled_count": 0, "disabled_count": 0}
@@ -5446,8 +5441,6 @@ func add_input_action(params):
 		log_error("No valid events provided")
 		quit(1)
 
-	# Format the action value for project.godot
-	# Format: {"deadzone": 0.5, "events": [Object(InputEventKey,"resource_local_to_scene":false,"resource_name":"","device":-1,"window_id":0,"alt_pressed":false,"shift_pressed":false,"ctrl_pressed":false,"meta_pressed":false,"pressed":false,"keycode":32,"physical_keycode":0,"key_label":0,"unicode":0,"echo":false,"script":null)]}
 	var action_value = build_input_action_string(deadzone, events_config)
 
 	# Set the input action
@@ -5573,7 +5566,7 @@ func get_keycode_value(key_name: String) -> int:
 	var upper_key = key_name.to_upper()
 	if key_map.has(upper_key):
 		return key_map[upper_key]
-	elif key_map.has(key_name):
+	if key_map.has(key_name):
 		return key_map[key_name]
 
 	# If not found, try to find by exact match or lowercase version
@@ -5600,21 +5593,36 @@ func build_input_action_string(deadzone: float, events: Array) -> String:
 				var alt = event.get("alt_pressed", false)
 				var shift = event.get("shift_pressed", false)
 				obj_str = (
-					'Object(InputEventKey,"resource_local_to_scene":false,"resource_name":"","device":-1,"window_id":0,"alt_pressed":%s,"shift_pressed":%s,"ctrl_pressed":%s,"meta_pressed":false,"pressed":false,"keycode":%d,"physical_keycode":0,"key_label":0,"unicode":0,"echo":false,"script":null)'
+					(
+						'Object(InputEventKey,"resource_local_to_scene":false,"resource_name":"",'
+						+ '"device":-1,"window_id":0,"alt_pressed":%s,"shift_pressed":%s,'
+						+ '"ctrl_pressed":%s,"meta_pressed":false,"pressed":false,"keycode":%d,'
+						+ '"physical_keycode":0,"key_label":0,"unicode":0,"echo":false,"script":null)'
+					)
 					% [str(alt).to_lower(), str(shift).to_lower(), str(ctrl).to_lower(), keycode]
 				)
 
 			"InputEventMouseButton":
 				var button_index = event.get("button_index", 1)
 				obj_str = (
-					'Object(InputEventMouseButton,"resource_local_to_scene":false,"resource_name":"","device":-1,"window_id":0,"alt_pressed":false,"shift_pressed":false,"ctrl_pressed":false,"meta_pressed":false,"button_mask":0,"position":Vector2(0, 0),"global_position":Vector2(0, 0),"factor":1.0,"button_index":%d,"canceled":false,"pressed":false,"double_click":false,"script":null)'
+					(
+						'Object(InputEventMouseButton,"resource_local_to_scene":false,"resource_name":"",'
+						+ '"device":-1,"window_id":0,"alt_pressed":false,"shift_pressed":false,'
+						+ '"ctrl_pressed":false,"meta_pressed":false,"button_mask":0,'
+						+ '"position":Vector2(0, 0),"global_position":Vector2(0, 0),"factor":1.0,'
+						+ '"button_index":%d,"canceled":false,"pressed":false,"double_click":false,'
+						+ '"script":null)'
+					)
 					% button_index
 				)
 
 			"InputEventJoypadButton":
 				var button_index = event.get("button_index", 0)
 				obj_str = (
-					'Object(InputEventJoypadButton,"resource_local_to_scene":false,"resource_name":"","device":-1,"button_index":%d,"pressure":0.0,"pressed":false,"script":null)'
+					(
+						'Object(InputEventJoypadButton,"resource_local_to_scene":false,"resource_name":"",'
+						+ '"device":-1,"button_index":%d,"pressure":0.0,"pressed":false,"script":null)'
+					)
 					% button_index
 				)
 
@@ -5622,7 +5630,10 @@ func build_input_action_string(deadzone: float, events: Array) -> String:
 				var axis = event.get("axis", 0)
 				var axis_value = event.get("axis_value", 1.0)
 				obj_str = (
-					'Object(InputEventJoypadMotion,"resource_local_to_scene":false,"resource_name":"","device":-1,"axis":%d,"axis_value":%f,"script":null)'
+					(
+						'Object(InputEventJoypadMotion,"resource_local_to_scene":false,"resource_name":"",'
+						+ '"device":-1,"axis":%d,"axis_value":%f,"script":null)'
+					)
 					% [axis, axis_value]
 				)
 
@@ -5960,7 +5971,7 @@ func create_audio_bus(params: Dictionary):
 	print(JSON.stringify(result))
 
 
-func get_audio_buses(params: Dictionary):
+func get_audio_buses(_params: Dictionary):
 	var buses = []
 	for i in range(AudioServer.bus_count):
 		var bus_info = {

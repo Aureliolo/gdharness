@@ -4,6 +4,10 @@ extends Node
 ## This singleton runs in the game and provides runtime inspection capabilities.
 ## It starts a TCP server that the MCP server can connect to.
 
+signal client_connected
+signal client_disconnected
+signal command_received(command: String, params: Dictionary)
+
 const DEFAULT_PORT = 7777
 const DEFAULT_BIND_ADDRESS = "127.0.0.1"
 const BIND_ADDRESS_SETTING = "godot_mcp/runtime/bind_address"
@@ -14,10 +18,6 @@ var _clients: Array[StreamPeerTCP] = []
 var _port: int = DEFAULT_PORT
 var _enabled: bool = true
 var _watched_signals: Dictionary = {}  # { "node_path:signal_name": callable }
-
-signal client_connected
-signal client_disconnected
-signal command_received(command: String, params: Dictionary)
 
 
 func _ready() -> void:
@@ -572,81 +572,80 @@ func _serialize_node(node: Node, include_properties: bool) -> Dictionary:
 func _serialize_value(value) -> Variant:
 	if value == null:
 		return null
-	elif value is Vector2:
+	if value is Vector2:
 		return {"_type": "Vector2", "x": value.x, "y": value.y}
-	elif value is Vector3:
+	if value is Vector3:
 		return {"_type": "Vector3", "x": value.x, "y": value.y, "z": value.z}
-	elif value is Vector2i:
+	if value is Vector2i:
 		return {"_type": "Vector2i", "x": value.x, "y": value.y}
-	elif value is Vector3i:
+	if value is Vector3i:
 		return {"_type": "Vector3i", "x": value.x, "y": value.y, "z": value.z}
-	elif value is Color:
+	if value is Color:
 		return {"_type": "Color", "r": value.r, "g": value.g, "b": value.b, "a": value.a}
-	elif value is Rect2:
+	if value is Rect2:
 		return {
 			"_type": "Rect2",
 			"position": _serialize_value(value.position),
 			"size": _serialize_value(value.size)
 		}
-	elif value is Transform2D:
+	if value is Transform2D:
 		return {
 			"_type": "Transform2D",
 			"origin": _serialize_value(value.origin),
 			"x": _serialize_value(value.x),
 			"y": _serialize_value(value.y)
 		}
-	elif value is NodePath:
+	if value is NodePath:
 		return {"_type": "NodePath", "path": str(value)}
-	elif value is Resource:
+	# Resource before Object: every Resource is an Object, and the resource path is the useful half.
+	if value is Resource:
 		return {"_type": "Resource", "path": value.resource_path, "class": value.get_class()}
-	elif value is Array:
+	if value is Array:
 		var arr = []
 		for item in value:
 			arr.append(_serialize_value(item))
 		return arr
-	elif value is Dictionary:
+	if value is Dictionary:
 		var dict = {}
 		for key in value:
 			dict[str(key)] = _serialize_value(value[key])
 		return dict
-	elif value is Object:
+	if value is Object:
 		return {"_type": "Object", "class": value.get_class()}
-	else:
-		return value
+	return value
 
 
 func _deserialize_value(value) -> Variant:
 	if value == null:
 		return null
-	elif value is Dictionary:
-		if value.has("_type"):
-			match value["_type"]:
-				"Vector2":
-					return Vector2(value.get("x", 0), value.get("y", 0))
-				"Vector3":
-					return Vector3(value.get("x", 0), value.get("y", 0), value.get("z", 0))
-				"Vector2i":
-					return Vector2i(value.get("x", 0), value.get("y", 0))
-				"Vector3i":
-					return Vector3i(value.get("x", 0), value.get("y", 0), value.get("z", 0))
-				"Color":
-					return Color(value.get("r", 0), value.get("g", 0), value.get("b", 0), value.get("a", 1))
-				"NodePath":
-					return NodePath(value.get("path", ""))
-				_:
-					return value
-		else:
-			var dict = {}
-			for key in value:
-				dict[key] = _deserialize_value(value[key])
-			return dict
-	elif value is Array:
+	if value is Array:
 		var arr = []
 		for item in value:
 			arr.append(_deserialize_value(item))
 		return arr
-	else:
+	if not value is Dictionary:
 		return value
+
+	if not value.has("_type"):
+		var dict = {}
+		for key in value:
+			dict[key] = _deserialize_value(value[key])
+		return dict
+
+	match value["_type"]:
+		"Vector2":
+			return Vector2(value.get("x", 0), value.get("y", 0))
+		"Vector3":
+			return Vector3(value.get("x", 0), value.get("y", 0), value.get("z", 0))
+		"Vector2i":
+			return Vector2i(value.get("x", 0), value.get("y", 0))
+		"Vector3i":
+			return Vector3i(value.get("x", 0), value.get("y", 0), value.get("z", 0))
+		"Color":
+			return Color(value.get("r", 0), value.get("g", 0), value.get("b", 0), value.get("a", 1))
+		"NodePath":
+			return NodePath(value.get("path", ""))
+	return value
 
 
 func _parameter_type(node: Object, method: String, index: int) -> int:

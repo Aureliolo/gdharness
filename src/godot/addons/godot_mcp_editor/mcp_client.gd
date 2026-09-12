@@ -1,6 +1,6 @@
 @tool
-extends Node
 class_name MCPEditorClient
+extends Node
 
 signal connected
 signal disconnected

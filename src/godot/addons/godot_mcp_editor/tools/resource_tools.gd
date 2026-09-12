@@ -1,6 +1,83 @@
 @tool
-extends Node
 class_name MCPResourceTools
+extends Node
+
+# Shader templates. Written as real multi-line source rather than escaped one-liners so that
+# what ends up in the .gdshader can be read here. The %s is the shader type.
+const SHADER_EMPTY: String = """shader_type %s;
+
+void fragment() {
+}
+"""
+
+const SHADER_BASIC: String = """shader_type %s;
+
+void fragment() {
+	COLOR = vec4(1.0);
+}
+"""
+
+const SHADER_COLOR_SHIFT: String = """shader_type %s;
+
+uniform vec4 color_shift : source_color = vec4(0.1, 0.0, 0.2, 0.0);
+
+void fragment() {
+	vec4 base = texture(TEXTURE, UV);
+	COLOR = vec4(clamp(base.rgb + color_shift.rgb, 0.0, 1.0), base.a);
+}
+"""
+
+const SHADER_OUTLINE: String = """shader_type %s;
+
+uniform vec4 outline_color : source_color = vec4(0.0, 0.0, 0.0, 1.0);
+uniform float outline_width : hint_range(0.0, 8.0) = 1.0;
+
+void fragment() {
+	vec2 px = TEXTURE_PIXEL_SIZE * outline_width;
+	float a = texture(TEXTURE, UV).a;
+	float edge = max(
+		max(texture(TEXTURE, UV + vec2(px.x, 0.0)).a, texture(TEXTURE, UV - vec2(px.x, 0.0)).a),
+		max(texture(TEXTURE, UV + vec2(0.0, px.y)).a, texture(TEXTURE, UV - vec2(0.0, px.y)).a)
+	);
+	vec4 base = texture(TEXTURE, UV);
+	COLOR = mix(outline_color * edge, base, a);
+}
+"""
+
+# The themed 3D shader is one body with the base colour and one effect block substituted in.
+const SHADER_THEME: String = """shader_type spatial;
+render_mode cull_back, depth_draw_opaque;
+
+void fragment() {
+	vec3 base_col = %s;
+%s
+}
+"""
+
+const EFFECT_PLAIN: String = """	ALBEDO = base_col;"""
+
+const EFFECT_GLOW: String = """	ALBEDO = base_col;
+	EMISSION = base_col * (0.5 + 0.5 * sin(TIME * 2.0));"""
+
+const EFFECT_HOLOGRAM: String = """	float scan = sin(UV.y * 120.0 + TIME * 6.0) * 0.5 + 0.5;
+	ALBEDO = base_col * 0.5;
+	EMISSION = base_col * (0.8 + scan);
+	ALPHA = 0.65;"""
+
+const EFFECT_WIND_SWAY: String = """	ALBEDO = base_col + vec3(0.05 * sin(TIME + UV.x * 10.0));"""
+
+const EFFECT_TORCH_FIRE: String = """	float flicker = 0.8 + 0.2 * sin(TIME * 17.0 + UV.y * 13.0);
+	ALBEDO = base_col * flicker;
+	EMISSION = vec3(1.0, 0.5, 0.1) * (flicker - 0.6);"""
+
+const EFFECT_DISSOLVE: String = """	float n = fract(sin(dot(UV * 123.4, vec2(12.9898, 78.233))) * 43758.5453);
+	float cut = 0.45 + 0.25 * sin(TIME);
+	ALBEDO = base_col;
+	ALPHA = step(cut, n);
+	EMISSION = vec3(1.0, 0.4, 0.1) * step(cut - 0.03, n) * (1.0 - step(cut + 0.03, n));"""
+
+const EFFECT_OUTLINE: String = """	float e = abs(sin(UV.x * 80.0)) * abs(sin(UV.y * 80.0));
+	ALBEDO = mix(base_col, vec3(0.0), step(0.85, e));"""
 
 var _editor_plugin: EditorPlugin = null
 
@@ -177,24 +254,15 @@ func create_shader(args: Dictionary) -> Dictionary:
 	var template := str(args.get("template", ""))
 
 	if code == "":
-		if template != "":
-			match template:
-				"basic":
-					code = "shader_type %s;\n\nvoid fragment() {\n\tCOLOR = vec4(1.0);\n}\n" % shader_type
-				"color_shift":
-					code = (
-						"shader_type %s;\n\nuniform vec4 color_shift : source_color = vec4(0.1, 0.0, 0.2, 0.0);\n\nvoid fragment() {\n\tvec4 base = texture(TEXTURE, UV);\n\tCOLOR = vec4(clamp(base.rgb + color_shift.rgb, 0.0, 1.0), base.a);\n}\n"
-						% shader_type
-					)
-				"outline":
-					code = (
-						"shader_type %s;\n\nuniform vec4 outline_color : source_color = vec4(0.0, 0.0, 0.0, 1.0);\nuniform float outline_width : hint_range(0.0, 8.0) = 1.0;\n\nvoid fragment() {\n\tvec2 px = TEXTURE_PIXEL_SIZE * outline_width;\n\tfloat a = texture(TEXTURE, UV).a;\n\tfloat edge = max(max(texture(TEXTURE, UV + vec2(px.x, 0.0)).a, texture(TEXTURE, UV - vec2(px.x, 0.0)).a), max(texture(TEXTURE, UV + vec2(0.0, px.y)).a, texture(TEXTURE, UV - vec2(0.0, px.y)).a));\n\tvec4 base = texture(TEXTURE, UV);\n\tCOLOR = mix(outline_color * edge, base, a);\n}\n"
-						% shader_type
-					)
-				_:
-					code = "shader_type %s;\n\nvoid fragment() {\n}\n" % shader_type
-		else:
-			code = "shader_type %s;\n\nvoid fragment() {\n}\n" % shader_type
+		match template:
+			"basic":
+				code = SHADER_BASIC % shader_type
+			"color_shift":
+				code = SHADER_COLOR_SHIFT % shader_type
+			"outline":
+				code = SHADER_OUTLINE % shader_type
+			_:
+				code = SHADER_EMPTY % shader_type
 
 	var file := FileAccess.open(shader_path, FileAccess.WRITE)
 	if file == null:
@@ -352,27 +420,22 @@ func _get_theme_shader_code(theme: String, effect: String) -> String:
 		"cartoon":
 			base_color = "vec3(0.95, 0.65, 0.20)"
 
-	var effect_block := "ALBEDO = base_col;"
+	var effect_block := EFFECT_PLAIN
 	match effect:
 		"glow":
-			effect_block = "ALBEDO = base_col; EMISSION = base_col * (0.5 + 0.5 * sin(TIME * 2.0));"
+			effect_block = EFFECT_GLOW
 		"hologram":
-			effect_block = "float scan = sin(UV.y * 120.0 + TIME * 6.0) * 0.5 + 0.5; ALBEDO = base_col * 0.5; EMISSION = base_col * (0.8 + scan); ALPHA = 0.65;"
+			effect_block = EFFECT_HOLOGRAM
 		"wind_sway":
-			effect_block = "ALBEDO = base_col + vec3(0.05 * sin(TIME + UV.x * 10.0));"
+			effect_block = EFFECT_WIND_SWAY
 		"torch_fire":
-			effect_block = "float flicker = 0.8 + 0.2 * sin(TIME * 17.0 + UV.y * 13.0); ALBEDO = base_col * flicker; EMISSION = vec3(1.0, 0.5, 0.1) * (flicker - 0.6);"
+			effect_block = EFFECT_TORCH_FIRE
 		"dissolve":
-			effect_block = "float n = fract(sin(dot(UV * 123.4, vec2(12.9898, 78.233))) * 43758.5453); float cut = 0.45 + 0.25 * sin(TIME); ALBEDO = base_col; ALPHA = step(cut, n); EMISSION = vec3(1.0, 0.4, 0.1) * step(cut - 0.03, n) * (1.0 - step(cut + 0.03, n));"
+			effect_block = EFFECT_DISSOLVE
 		"outline":
-			effect_block = "float e = abs(sin(UV.x * 80.0)) * abs(sin(UV.y * 80.0)); ALBEDO = mix(base_col, vec3(0.0), step(0.85, e));"
-		_:
-			effect_block = "ALBEDO = base_col;"
+			effect_block = EFFECT_OUTLINE
 
-	return (
-		"shader_type spatial;\nrender_mode cull_back, depth_draw_opaque;\n\nvoid fragment() {\n\tvec3 base_col = %s;\n\t%s\n}\n"
-		% [base_color, effect_block]
-	)
+	return SHADER_THEME % [base_color, effect_block]
 
 
 func apply_theme_shader(args: Dictionary) -> Dictionary:
