@@ -4,6 +4,7 @@ class_name MCPResourceTools
 
 var _editor_plugin: EditorPlugin = null
 
+
 func set_editor_plugin(plugin: EditorPlugin) -> void:
 	_editor_plugin = plugin
 
@@ -40,7 +41,9 @@ func _parse_value(value):
 				"Vector3i":
 					return Vector3i(value.get("x", 0), value.get("y", 0), value.get("z", 0))
 				"Rect2":
-					return Rect2(value.get("x", 0), value.get("y", 0), value.get("width", 0), value.get("height", 0))
+					return Rect2(
+						value.get("x", 0), value.get("y", 0), value.get("width", 0), value.get("height", 0)
+					)
 				"NodePath":
 					return NodePath(value.get("path", ""))
 	if typeof(value) == TYPE_ARRAY:
@@ -115,11 +118,7 @@ func create_resource(args: Dictionary) -> Dictionary:
 		return {"ok": false, "error": "Failed to save resource", "code": save_result}
 
 	_refresh_filesystem()
-	return {
-		"ok": true,
-		"resourcePath": res_path,
-		"resourceType": args.get("resourceType")
-	}
+	return {"ok": true, "resourcePath": res_path, "resourceType": args.get("resourceType")}
 
 
 func modify_resource(args: Dictionary) -> Dictionary:
@@ -165,11 +164,7 @@ func create_material(args: Dictionary) -> Dictionary:
 		return {"ok": false, "error": "Failed to save material", "code": save_result}
 
 	_refresh_filesystem()
-	return {
-		"ok": true,
-		"materialPath": mat_path,
-		"materialType": material_type
-	}
+	return {"ok": true, "materialPath": mat_path, "materialType": material_type}
 
 
 func create_shader(args: Dictionary) -> Dictionary:
@@ -187,9 +182,15 @@ func create_shader(args: Dictionary) -> Dictionary:
 				"basic":
 					code = "shader_type %s;\n\nvoid fragment() {\n\tCOLOR = vec4(1.0);\n}\n" % shader_type
 				"color_shift":
-					code = "shader_type %s;\n\nuniform vec4 color_shift : source_color = vec4(0.1, 0.0, 0.2, 0.0);\n\nvoid fragment() {\n\tvec4 base = texture(TEXTURE, UV);\n\tCOLOR = vec4(clamp(base.rgb + color_shift.rgb, 0.0, 1.0), base.a);\n}\n" % shader_type
+					code = (
+						"shader_type %s;\n\nuniform vec4 color_shift : source_color = vec4(0.1, 0.0, 0.2, 0.0);\n\nvoid fragment() {\n\tvec4 base = texture(TEXTURE, UV);\n\tCOLOR = vec4(clamp(base.rgb + color_shift.rgb, 0.0, 1.0), base.a);\n}\n"
+						% shader_type
+					)
 				"outline":
-					code = "shader_type %s;\n\nuniform vec4 outline_color : source_color = vec4(0.0, 0.0, 0.0, 1.0);\nuniform float outline_width : hint_range(0.0, 8.0) = 1.0;\n\nvoid fragment() {\n\tvec2 px = TEXTURE_PIXEL_SIZE * outline_width;\n\tfloat a = texture(TEXTURE, UV).a;\n\tfloat edge = max(max(texture(TEXTURE, UV + vec2(px.x, 0.0)).a, texture(TEXTURE, UV - vec2(px.x, 0.0)).a), max(texture(TEXTURE, UV + vec2(0.0, px.y)).a, texture(TEXTURE, UV - vec2(0.0, px.y)).a));\n\tvec4 base = texture(TEXTURE, UV);\n\tCOLOR = mix(outline_color * edge, base, a);\n}\n" % shader_type
+					code = (
+						"shader_type %s;\n\nuniform vec4 outline_color : source_color = vec4(0.0, 0.0, 0.0, 1.0);\nuniform float outline_width : hint_range(0.0, 8.0) = 1.0;\n\nvoid fragment() {\n\tvec2 px = TEXTURE_PIXEL_SIZE * outline_width;\n\tfloat a = texture(TEXTURE, UV).a;\n\tfloat edge = max(max(texture(TEXTURE, UV + vec2(px.x, 0.0)).a, texture(TEXTURE, UV - vec2(px.x, 0.0)).a), max(texture(TEXTURE, UV + vec2(0.0, px.y)).a, texture(TEXTURE, UV - vec2(0.0, px.y)).a));\n\tvec4 base = texture(TEXTURE, UV);\n\tCOLOR = mix(outline_color * edge, base, a);\n}\n"
+						% shader_type
+					)
 				_:
 					code = "shader_type %s;\n\nvoid fragment() {\n}\n" % shader_type
 		else:
@@ -304,7 +305,9 @@ func set_theme_color(args: Dictionary) -> Dictionary:
 
 	var theme := _load_theme(theme_path)
 	var c: Dictionary = args.get("color", {})
-	var color := Color(float(c.get("r", 1.0)), float(c.get("g", 1.0)), float(c.get("b", 1.0)), float(c.get("a", 1.0)))
+	var color := Color(
+		float(c.get("r", 1.0)), float(c.get("g", 1.0)), float(c.get("b", 1.0)), float(c.get("a", 1.0))
+	)
 	theme.set_color(str(args.get("colorName", "")), str(args.get("controlType", "")), color)
 
 	var save_result := ResourceSaver.save(theme, theme_path)
@@ -321,7 +324,9 @@ func set_theme_font_size(args: Dictionary) -> Dictionary:
 		return {"ok": false, "error": "themePath is required"}
 
 	var theme := _load_theme(theme_path)
-	theme.set_font_size(str(args.get("fontSizeName", "")), str(args.get("controlType", "")), int(args.get("size", 0)))
+	theme.set_font_size(
+		str(args.get("fontSizeName", "")), str(args.get("controlType", "")), int(args.get("size", 0))
+	)
 
 	var save_result := ResourceSaver.save(theme, theme_path)
 	if save_result != OK:
@@ -364,7 +369,10 @@ func _get_theme_shader_code(theme: String, effect: String) -> String:
 		_:
 			effect_block = "ALBEDO = base_col;"
 
-	return "shader_type spatial;\nrender_mode cull_back, depth_draw_opaque;\n\nvoid fragment() {\n\tvec3 base_col = %s;\n\t%s\n}\n" % [base_color, effect_block]
+	return (
+		"shader_type spatial;\nrender_mode cull_back, depth_draw_opaque;\n\nvoid fragment() {\n\tvec3 base_col = %s;\n\t%s\n}\n"
+		% [base_color, effect_block]
+	)
 
 
 func apply_theme_shader(args: Dictionary) -> Dictionary:

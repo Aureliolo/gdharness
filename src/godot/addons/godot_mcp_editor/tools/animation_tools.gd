@@ -4,6 +4,7 @@ class_name MCPAnimationTools
 
 var _editor_plugin: EditorPlugin = null
 
+
 func set_editor_plugin(plugin: EditorPlugin) -> void:
 	_editor_plugin = plugin
 
@@ -12,31 +13,40 @@ func set_editor_plugin(plugin: EditorPlugin) -> void:
 # Shared helpers
 # =============================================================================
 func _ensure_res_path(path: String) -> String:
-	if not path.begins_with("res://"): return "res://" + path
+	if not path.begins_with("res://"):
+		return "res://" + path
 	return path
+
 
 func _refresh_and_reload(scene_path: String) -> void:
 	_refresh_filesystem()
 	_reload_scene_in_editor(scene_path)
 
+
 func _refresh_filesystem() -> void:
 	if _editor_plugin:
 		EditorInterface.get_resource_filesystem().scan()
 
+
 func _reload_scene_in_editor(scene_path: String) -> void:
-	if not _editor_plugin: return
+	if not _editor_plugin:
+		return
 	var edited = EditorInterface.get_edited_scene_root()
 	if edited and edited.scene_file_path == scene_path:
 		EditorInterface.reload_scene_from_path(scene_path)
+
 
 func _load_scene(scene_path: String) -> Array:
 	if not FileAccess.file_exists(scene_path):
 		return [null, {"ok": false, "error": "Scene not found: " + scene_path}]
 	var packed = load(scene_path) as PackedScene
-	if not packed: return [null, {"ok": false, "error": "Failed to load: " + scene_path}]
+	if not packed:
+		return [null, {"ok": false, "error": "Failed to load: " + scene_path}]
 	var root = packed.instantiate()
-	if not root: return [null, {"ok": false, "error": "Failed to instantiate: " + scene_path}]
+	if not root:
+		return [null, {"ok": false, "error": "Failed to instantiate: " + scene_path}]
 	return [root, {}]
+
 
 func _save_scene(scene_root: Node, scene_path: String) -> Dictionary:
 	var packed = PackedScene.new()
@@ -50,24 +60,31 @@ func _save_scene(scene_root: Node, scene_path: String) -> Dictionary:
 	_refresh_and_reload(scene_path)
 	return {}
 
+
 func _find_node(root: Node, path: String) -> Node:
-	if path == "." or path.is_empty(): return root
+	if path == "." or path.is_empty():
+		return root
 	return root.get_node_or_null(path)
+
 
 func _parse_value(value):
 	if typeof(value) == TYPE_DICTIONARY:
 		if value.has("type") or value.has("_type"):
 			var t = value.get("type", value.get("_type", ""))
 			match t:
-				"Vector2": return Vector2(value.get("x",0), value.get("y",0))
-				"Vector3": return Vector3(value.get("x",0), value.get("y",0), value.get("z",0))
-				"Color": return Color(value.get("r",1), value.get("g",1), value.get("b",1), value.get("a",1))
+				"Vector2":
+					return Vector2(value.get("x", 0), value.get("y", 0))
+				"Vector3":
+					return Vector3(value.get("x", 0), value.get("y", 0), value.get("z", 0))
+				"Color":
+					return Color(value.get("r", 1), value.get("g", 1), value.get("b", 1), value.get("a", 1))
 	if typeof(value) == TYPE_ARRAY:
 		var result = []
 		for item in value:
 			result.append(_parse_value(item))
 		return result
 	return value
+
 
 func _parse_json_maybe(value):
 	if typeof(value) != TYPE_STRING:
@@ -77,12 +94,14 @@ func _parse_json_maybe(value):
 		return value
 	return parsed
 
+
 func _parse_method_args(raw_args: Array) -> Array:
 	var parsed_args: Array = []
 	for raw_arg in raw_args:
 		var parsed = _parse_json_maybe(raw_arg)
 		parsed_args.append(_parse_value(parsed))
 	return parsed_args
+
 
 func _get_default_animation_library(player: AnimationPlayer) -> AnimationLibrary:
 	var anim_lib: AnimationLibrary = player.get_animation_library("")
@@ -94,7 +113,10 @@ func _get_default_animation_library(player: AnimationPlayer) -> AnimationLibrary
 		return null
 	return anim_lib
 
-func _get_state_machine(anim_tree: AnimationTree, state_machine_path: String = "") -> AnimationNodeStateMachine:
+
+func _get_state_machine(
+	anim_tree: AnimationTree, state_machine_path: String = ""
+) -> AnimationNodeStateMachine:
 	if not anim_tree:
 		return null
 	if state_machine_path.is_empty() or state_machine_path == "root":
@@ -144,8 +166,10 @@ func create_animation(args: Dictionary) -> Dictionary:
 
 	var loop_mode := Animation.LOOP_NONE
 	match loop_mode_name:
-		"linear": loop_mode = Animation.LOOP_LINEAR
-		"pingpong": loop_mode = Animation.LOOP_PINGPONG
+		"linear":
+			loop_mode = Animation.LOOP_LINEAR
+		"pingpong":
+			loop_mode = Animation.LOOP_PINGPONG
 		_:
 			loop_mode_name = "none"
 			loop_mode = Animation.LOOP_NONE
@@ -225,7 +249,9 @@ func add_animation_track(args: Dictionary) -> Dictionary:
 				if typeof(keyframe) != TYPE_DICTIONARY:
 					continue
 				var raw_value = keyframe.get("value")
-				var parsed_value = _parse_json_maybe(raw_value) if typeof(raw_value) == TYPE_STRING else raw_value
+				var parsed_value = (
+					_parse_json_maybe(raw_value) if typeof(raw_value) == TYPE_STRING else raw_value
+				)
 				anim.track_insert_key(track_idx, float(keyframe.get("time", 0.0)), _parse_value(parsed_value))
 
 		"method":
@@ -239,13 +265,16 @@ func add_animation_track(args: Dictionary) -> Dictionary:
 			for keyframe in keyframes:
 				if typeof(keyframe) != TYPE_DICTIONARY:
 					continue
-				anim.track_insert_key(
-					track_idx,
-					float(keyframe.get("time", 0.0)),
-					{
-						"method": method_name,
-						"args": _parse_method_args(keyframe.get("args", [])),
-					}
+				(
+					anim
+					. track_insert_key(
+						track_idx,
+						float(keyframe.get("time", 0.0)),
+						{
+							"method": method_name,
+							"args": _parse_method_args(keyframe.get("args", [])),
+						}
+					)
 				)
 
 		_:
@@ -290,10 +319,14 @@ func create_animation_tree(args: Dictionary) -> Dictionary:
 
 	var root = null
 	match root_type:
-		"StateMachine": root = AnimationNodeStateMachine.new()
-		"BlendTree": root = AnimationNodeBlendTree.new()
-		"BlendSpace1D": root = AnimationNodeBlendSpace1D.new()
-		"BlendSpace2D": root = AnimationNodeBlendSpace2D.new()
+		"StateMachine":
+			root = AnimationNodeStateMachine.new()
+		"BlendTree":
+			root = AnimationNodeBlendTree.new()
+		"BlendSpace1D":
+			root = AnimationNodeBlendSpace1D.new()
+		"BlendSpace2D":
+			root = AnimationNodeBlendSpace2D.new()
 		_:
 			scene_root.queue_free()
 			return {"ok": false, "error": "Unsupported rootType: " + root_type}
@@ -390,9 +423,12 @@ func connect_animation_states(args: Dictionary) -> Dictionary:
 
 	var transition := AnimationNodeStateMachineTransition.new()
 	match transition_type:
-		"sync": transition.switch_mode = AnimationNodeStateMachineTransition.SWITCH_MODE_SYNC
-		"at_end": transition.switch_mode = AnimationNodeStateMachineTransition.SWITCH_MODE_AT_END
-		"immediate": transition.switch_mode = AnimationNodeStateMachineTransition.SWITCH_MODE_IMMEDIATE
+		"sync":
+			transition.switch_mode = AnimationNodeStateMachineTransition.SWITCH_MODE_SYNC
+		"at_end":
+			transition.switch_mode = AnimationNodeStateMachineTransition.SWITCH_MODE_AT_END
+		"immediate":
+			transition.switch_mode = AnimationNodeStateMachineTransition.SWITCH_MODE_IMMEDIATE
 		_:
 			scene_root.queue_free()
 			return {"ok": false, "error": "Unsupported transitionType: " + transition_type}

@@ -4,6 +4,7 @@ class_name MCPSceneTools
 
 var _editor_plugin: EditorPlugin = null
 
+
 func set_editor_plugin(plugin: EditorPlugin) -> void:
 	_editor_plugin = plugin
 
@@ -102,7 +103,9 @@ func _parse_value(value, expected_type: int = TYPE_NIL):
 				"Vector3i":
 					return Vector3i(value.get("x", 0), value.get("y", 0), value.get("z", 0))
 				"Rect2":
-					return Rect2(value.get("x", 0), value.get("y", 0), value.get("width", 0), value.get("height", 0))
+					return Rect2(
+						value.get("x", 0), value.get("y", 0), value.get("width", 0), value.get("height", 0)
+					)
 				"Transform2D":
 					if value.has("x") and value.has("y") and value.has("origin"):
 						var xx: Dictionary = value["x"]
@@ -118,9 +121,21 @@ func _parse_value(value, expected_type: int = TYPE_NIL):
 						var b: Dictionary = value["basis"]
 						var o: Dictionary = value["origin"]
 						var basis := Basis(
-							Vector3(b.get("x", {}).get("x", 1), b.get("x", {}).get("y", 0), b.get("x", {}).get("z", 0)),
-							Vector3(b.get("y", {}).get("x", 0), b.get("y", {}).get("y", 1), b.get("y", {}).get("z", 0)),
-							Vector3(b.get("z", {}).get("x", 0), b.get("z", {}).get("y", 0), b.get("z", {}).get("z", 1))
+							Vector3(
+								b.get("x", {}).get("x", 1),
+								b.get("x", {}).get("y", 0),
+								b.get("x", {}).get("z", 0)
+							),
+							Vector3(
+								b.get("y", {}).get("x", 0),
+								b.get("y", {}).get("y", 1),
+								b.get("y", {}).get("z", 0)
+							),
+							Vector3(
+								b.get("z", {}).get("x", 0),
+								b.get("z", {}).get("y", 0),
+								b.get("z", {}).get("z", 1)
+							)
 						)
 						return Transform3D(basis, Vector3(o.get("x", 0), o.get("y", 0), o.get("z", 0)))
 				"NodePath":
@@ -149,7 +164,9 @@ func _parse_value(value, expected_type: int = TYPE_NIL):
 					return Color(value.get("r", 1), value.get("g", 1), value.get("b", 1), value.get("a", 1))
 			TYPE_RECT2:
 				if value.has("x") and value.has("y") and value.has("width") and value.has("height"):
-					return Rect2(value.get("x", 0), value.get("y", 0), value.get("width", 0), value.get("height", 0))
+					return Rect2(
+						value.get("x", 0), value.get("y", 0), value.get("width", 0), value.get("height", 0)
+					)
 			TYPE_NODE_PATH:
 				if value.has("path"):
 					return NodePath(value.get("path", ""))
@@ -194,7 +211,13 @@ func _serialize_value(value) -> Variant:
 		TYPE_VECTOR3I:
 			return {"type": "Vector3i", "x": value.x, "y": value.y, "z": value.z}
 		TYPE_RECT2:
-			return {"type": "Rect2", "x": value.position.x, "y": value.position.y, "width": value.size.x, "height": value.size.y}
+			return {
+				"type": "Rect2",
+				"x": value.position.x,
+				"y": value.position.y,
+				"width": value.size.x,
+				"height": value.size.y
+			}
 		TYPE_NODE_PATH:
 			return {"type": "NodePath", "path": str(value)}
 		TYPE_TRANSFORM2D:
@@ -207,7 +230,8 @@ func _serialize_value(value) -> Variant:
 		TYPE_TRANSFORM3D:
 			return {
 				"type": "Transform3D",
-				"basis": {
+				"basis":
+				{
 					"x": {"x": value.basis.x.x, "y": value.basis.x.y, "z": value.basis.x.z},
 					"y": {"x": value.basis.y.x, "y": value.basis.y.y, "z": value.basis.y.z},
 					"z": {"x": value.basis.z.x, "y": value.basis.z.y, "z": value.basis.z.z}
@@ -255,13 +279,10 @@ func _set_owner_recursive(node: Node, scene_owner: Node) -> void:
 			_set_owner_recursive(child as Node, scene_owner)
 
 
-func _build_node_tree(node: Node, include_properties: bool, depth: int, current_depth: int, node_path: String) -> Dictionary:
-	var data := {
-		"name": str(node.name),
-		"type": node.get_class(),
-		"path": node_path,
-		"children": []
-	}
+func _build_node_tree(
+	node: Node, include_properties: bool, depth: int, current_depth: int, node_path: String
+) -> Dictionary:
+	var data := {"name": str(node.name), "type": node.get_class(), "path": node_path, "children": []}
 
 	if include_properties:
 		var props := {}
@@ -280,8 +301,12 @@ func _build_node_tree(node: Node, include_properties: bool, depth: int, current_
 	for child in node.get_children():
 		if child is Node:
 			var child_node := child as Node
-			var child_path := str(child_node.name) if node_path == "." else node_path + "/" + str(child_node.name)
-			data["children"].append(_build_node_tree(child_node, include_properties, depth, current_depth + 1, child_path))
+			var child_path := (
+				str(child_node.name) if node_path == "." else node_path + "/" + str(child_node.name)
+			)
+			data["children"].append(
+				_build_node_tree(child_node, include_properties, depth, current_depth + 1, child_path)
+			)
 
 	return data
 
@@ -637,7 +662,12 @@ func connect_signal(args: Dictionary) -> Dictionary:
 	var method_name := str(args.get("methodName", ""))
 	var flags := int(args.get("flags", 0))
 
-	if source_node_path.is_empty() or signal_name.is_empty() or target_node_path.is_empty() or method_name.is_empty():
+	if (
+		source_node_path.is_empty()
+		or signal_name.is_empty()
+		or target_node_path.is_empty()
+		or method_name.is_empty()
+	):
 		return {"ok": false, "error": "Missing required signal connection arguments"}
 
 	var result := _load_scene(scene_path)
@@ -686,7 +716,12 @@ func disconnect_signal(args: Dictionary) -> Dictionary:
 	var target_node_path := str(args.get("targetNodePath", ""))
 	var method_name := str(args.get("methodName", ""))
 
-	if source_node_path.is_empty() or signal_name.is_empty() or target_node_path.is_empty() or method_name.is_empty():
+	if (
+		source_node_path.is_empty()
+		or signal_name.is_empty()
+		or target_node_path.is_empty()
+		or method_name.is_empty()
+	):
 		return {"ok": false, "error": "Missing required signal disconnection arguments"}
 
 	var result := _load_scene(scene_path)
@@ -749,13 +784,15 @@ func list_connections(args: Dictionary) -> Dictionary:
 				var target_path := ""
 				if target_obj and target_obj is Node:
 					target_path = str(root.get_path_to(target_obj as Node))
-				connections.append({
-					"sourceNodePath": path,
-					"signalName": signal_name,
-					"targetNodePath": target_path,
-					"methodName": str(callable.get_method()),
-					"flags": int(conn.get("flags", 0))
-				})
+				connections.append(
+					{
+						"sourceNodePath": path,
+						"signalName": signal_name,
+						"targetNodePath": target_path,
+						"methodName": str(callable.get_method()),
+						"flags": int(conn.get("flags", 0))
+					}
+				)
 
 	root.queue_free()
 	return {"ok": true, "connections": connections}
@@ -781,8 +818,4 @@ func rescan_filesystem(args: Dictionary) -> Dictionary:
 
 	# Importing is reported separately from scanning, and a class is not registered until
 	# both are done, so a caller watching only one of them can look too early.
-	return {
-		"ok": true,
-		"scanning": filesystem.is_scanning(),
-		"importing": filesystem.is_importing()
-	}
+	return {"ok": true, "scanning": filesystem.is_scanning(), "importing": filesystem.is_importing()}

@@ -107,10 +107,7 @@ func _handle_connect() -> void:
 	_is_connected = true
 	_current_reconnect_delay = RECONNECT_DELAY
 
-	_send_message({
-		"type": "godot_ready",
-		"project_path": _project_path
-	})
+	_send_message({"type": "godot_ready", "project_path": _project_path})
 
 	connected.emit()
 
@@ -155,11 +152,7 @@ func _handle_message(json_string: String) -> void:
 
 
 func send_tool_result(request_id: String, success: bool, result = null, error: String = "") -> void:
-	var response := {
-		"type": "tool_result",
-		"id": request_id,
-		"success": success
-	}
+	var response := {"type": "tool_result", "id": request_id, "success": success}
 
 	if success:
 		response["result"] = result
