@@ -9,18 +9,25 @@
 
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 /**
- * GODOT_PATH first, then whatever `godot` resolves to on PATH, which is where setup-godot
- * leaves it. Both are checked by asking the binary its version rather than by looking at the
- * filesystem: on Windows the name on PATH is a shim, so existsSync says no about a Godot that
- * runs perfectly well.
+ * GODOT_PATH first, then the GODOT that setup-godot exports, then plain `godot` on PATH.
+ *
+ * Each is tried by running it rather than by looking for it on disk, since on Windows what
+ * sits on PATH is a shim. That platform also needs the extensions spelled out: setup-godot
+ * exports GODOT without one, and spawn does not apply PATHEXT to a path it is handed whole.
  */
 function resolveGodotPath() {
-  for (const candidate of [process.env.GODOT_PATH, process.env.GODOT, 'godot'].filter(Boolean)) {
+  const named = [process.env.GODOT_PATH, process.env.GODOT, 'godot'].filter(Boolean);
+  const candidates =
+    process.platform === 'win32'
+      ? named.flatMap((name) => [name, `${name}.exe`, `${name}.cmd`, `${name}.bat`])
+      : named;
+
+  for (const candidate of candidates) {
     const probe = spawnSync(candidate, ['--version'], { encoding: 'utf8', timeout: 60000 });
     if (probe.status === 0) return candidate;
   }
@@ -55,11 +62,10 @@ function createProject() {
 }
 
 function runScript(godotPath, projectDir, scriptPath, extraArgs = []) {
-  return spawnSync(
-    godotPath,
-    ['--headless', '--path', projectDir, '--script', scriptPath, ...extraArgs],
-    { encoding: 'utf8', timeout: 180000 },
-  );
+  return spawnSync(godotPath, ['--headless', '--path', projectDir, '--script', scriptPath, ...extraArgs], {
+    encoding: 'utf8',
+    timeout: 180000,
+  });
 }
 
 /**
