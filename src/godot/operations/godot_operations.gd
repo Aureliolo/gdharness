@@ -2237,62 +2237,71 @@ func get_non_default_properties(node: Node) -> Dictionary:
 	return props
 
 
-# Helper function to serialize Godot values to JSON-compatible format
-func serialize_value(value) -> Variant:
-	if value == null:
-		return null
-	if value is Vector2:
-		return {"x": value.x, "y": value.y, "_type": "Vector2"}
-	if value is Vector3:
-		return {"x": value.x, "y": value.y, "z": value.z, "_type": "Vector3"}
-	if value is Vector2i:
-		return {"x": value.x, "y": value.y, "_type": "Vector2i"}
-	if value is Vector3i:
-		return {"x": value.x, "y": value.y, "z": value.z, "_type": "Vector3i"}
-	if value is Color:
-		return {"r": value.r, "g": value.g, "b": value.b, "a": value.a, "_type": "Color"}
-	if value is Rect2:
-		return {
-			"position": serialize_value(value.position), "size": serialize_value(value.size), "_type": "Rect2"
-		}
-	if value is Transform2D:
-		return {
-			"origin": serialize_value(value.origin),
-			"x": serialize_value(value.x),
-			"y": serialize_value(value.y),
-			"_type": "Transform2D"
-		}
-	if value is Transform3D:
-		return {
-			"origin": serialize_value(value.origin),
-			"basis":
-			{
-				"x": serialize_value(value.basis.x),
-				"y": serialize_value(value.basis.y),
-				"z": serialize_value(value.basis.z)
-			},
-			"_type": "Transform3D"
-		}
-	if value is NodePath:
-		return {"path": str(value), "_type": "NodePath"}
-	# Resource before Object: every Resource is an Object, and the resource path is the useful half.
-	if value is Resource:
-		if value.resource_path.is_empty():
-			return {"_type": "Resource", "class": value.get_class()}
-		return {"path": value.resource_path, "_type": "Resource", "class": value.get_class()}
-	if value is Array:
-		var arr = []
-		for item in value:
-			arr.append(serialize_value(item))
-		return arr
-	if value is Dictionary:
-		var dict = {}
-		for key in value:
-			dict[str(key)] = serialize_value(value[key])
-		return dict
-	if value is Object:
-		return {"_type": "Object", "class": value.get_class()}
+# Converts a Godot value into something JSON can carry.
+#
+# Keyed on typeof() rather than written as a chain of `is` tests, so the set of types that
+# survive the wire is one table you can read rather than an order you have to trust. The order
+# mattered: Resource had to be checked before Object or every resource came back as a bare class
+# name with its path dropped, and nothing but a comment said so.
+func serialize_value(value: Variant) -> Variant:
+	match typeof(value):
+		TYPE_NIL:
+			return null
+		TYPE_VECTOR2:
+			return {"x": value.x, "y": value.y, "_type": "Vector2"}
+		TYPE_VECTOR3:
+			return {"x": value.x, "y": value.y, "z": value.z, "_type": "Vector3"}
+		TYPE_VECTOR2I:
+			return {"x": value.x, "y": value.y, "_type": "Vector2i"}
+		TYPE_VECTOR3I:
+			return {"x": value.x, "y": value.y, "z": value.z, "_type": "Vector3i"}
+		TYPE_COLOR:
+			return {"r": value.r, "g": value.g, "b": value.b, "a": value.a, "_type": "Color"}
+		TYPE_RECT2:
+			return {
+				"position": serialize_value(value.position),
+				"size": serialize_value(value.size),
+				"_type": "Rect2"
+			}
+		TYPE_TRANSFORM2D:
+			return {
+				"origin": serialize_value(value.origin),
+				"x": serialize_value(value.x),
+				"y": serialize_value(value.y),
+				"_type": "Transform2D"
+			}
+		TYPE_TRANSFORM3D:
+			return {
+				"origin": serialize_value(value.origin),
+				"basis":
+				{
+					"x": serialize_value(value.basis.x),
+					"y": serialize_value(value.basis.y),
+					"z": serialize_value(value.basis.z)
+				},
+				"_type": "Transform3D"
+			}
+		TYPE_NODE_PATH:
+			return {"path": str(value), "_type": "NodePath"}
+		TYPE_ARRAY:
+			return value.map(serialize_value)
+		TYPE_DICTIONARY:
+			var serialised := {}
+			for key in value:
+				serialised[str(key)] = serialize_value(value[key])
+			return serialised
+		TYPE_OBJECT:
+			return serialize_object(value)
 	return value
+
+
+# A pathless Resource says so rather than inventing an empty path for the caller to load.
+func serialize_object(value: Object) -> Dictionary:
+	if not value is Resource:
+		return {"_type": "Object", "class": value.get_class()}
+	if value.resource_path.is_empty():
+		return {"_type": "Resource", "class": value.get_class()}
+	return {"path": value.resource_path, "_type": "Resource", "class": value.get_class()}
 
 
 # Helper function to deserialize JSON values back to Godot types
