@@ -58,13 +58,13 @@ jobs:
           fi
 
       - name: Setup Bun
-        # No version pinned here on purpose: setup-bun reads packageManager out of
+        # No bun-version input on purpose: setup-bun reads packageManager out of
         # package.json, which is the one place the Bun version is written. Caching is off
         # because a cache entry can be written by any job on any branch, including a pull
         # request from a fork, and a release build is the last place to accept bytes whose
         # provenance is a cache key. The saving is seconds; the exposure is the artifact
         # everybody downloads.
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           no-cache: true
 
@@ -158,7 +158,7 @@ jobs:
         id: assets
 
       - name: Upload release assets
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-assets
           path: |
@@ -179,7 +179,7 @@ jobs:
 
     steps:
       - name: Download release assets
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: release-assets
           path: dist
@@ -213,7 +213,7 @@ jobs:
           upload-release-assets: false
 
       - name: Upload the bundle
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-bundle
           path: |
@@ -257,7 +257,7 @@ jobs:
 
     steps:
       - name: Download the bundle
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: release-bundle
           path: dist
