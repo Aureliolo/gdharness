@@ -47,8 +47,8 @@ bun run ci
 
 ## Licence
 
-MIT. Copyright (c) 2025 Solomon Elias for the original work, and the gdharness contributors
-for changes since the fork. See [LICENSE](LICENSE).
+MIT. Copyright (c) 2025 Solomon Elias for the original work, and Aurelio Amoroso for changes
+since the fork. See [LICENSE](LICENSE).
 
 This project is not affiliated with or endorsed by the GoPeak project or the Godot
 Foundation.
