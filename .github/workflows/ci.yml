@@ -109,9 +109,10 @@ jobs:
           # and wrong here: without this a broken install would read as a pass.
           GDHARNESS_REQUIRE_GODOT: '1'
 
-  # Biome owns formatting and the fast syntactic rules; ESLint is here for the checks that
-  # need the real TypeScript checker. Separate from build-and-test so a lint failure and a
-  # broken build are two different red lights rather than one.
+  # Biome owns formatting and the fast syntactic rules; oxlint owns the ones that need the type
+  # checker, which it runs through typescript-go rather than a second copy of the compiler.
+  # Separate from build-and-test so a lint failure and a broken build are two different red
+  # lights rather than one.
   lint:
     name: lint
     runs-on: ubuntu-latest
@@ -134,9 +135,9 @@ jobs:
       - name: Biome
         run: bun run lint:biome
 
-      - name: ESLint, type-aware
+      - name: oxlint, type-aware
         if: '!cancelled()'
-        run: bun run lint:eslint
+        run: bun run lint:types
 
   build-and-test:
     name: build-and-test

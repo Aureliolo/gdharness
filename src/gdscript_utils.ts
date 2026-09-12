@@ -155,7 +155,17 @@ export function modifyGDScript(params: ModifyScriptParams): { success: boolean; 
       case 'add_signal':
         content = addSignal(content, mod);
         break;
-      // Implement other mods as needed
+      // Declared by the parameter type and written by nothing. Falling past them wrote the file
+      // back unchanged and answered success, so a caller asking for one got a green result and
+      // an untouched script. Named one by one rather than caught by a default, so that adding a
+      // fourth modification type to the union fails to compile until something handles it.
+      case 'replace_function':
+      case 'remove_function':
+      case 'add_export':
+        throw new Error(
+          `Script modification "${mod.type}" is declared but not implemented. ` +
+            'Supported: add_variable, add_function, add_signal.',
+        );
     }
   }
 

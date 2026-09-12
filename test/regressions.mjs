@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { GodotDAPClient } from '../build/dap_client.js';
 import { dictionary, emptyRecord } from '../build/dictionary.js';
+import { modifyGDScript } from '../build/gdscript_utils.js';
 import { createBridge } from '../build/godot-bridge.js';
 import { GodotLSPClient } from '../build/lsp_client.js';
 import { parseProjectGodot } from '../build/resources.js';
@@ -816,6 +817,52 @@ async function testToolGroupLookupsCannotReachThePrototype() {
   });
 }
 
+/**
+ * A modification the type accepts and nothing implements has to fail rather than report success.
+ *
+ * `replace_function`, `remove_function` and `add_export` are all declared by ScriptModification
+ * and none of them is written. The switch fell past them, the file was written back byte for
+ * byte, and the caller got `{ success: true }` over a script nothing had touched.
+ */
+function testUnimplementedScriptModificationsFail() {
+  const projectDir = mkdtempSync(join(tmpdir(), 'gdharness-modify-'));
+  try {
+    const scriptPath = 'player.gd';
+    writeFileSync(join(projectDir, scriptPath), 'extends Node\n\nfunc _ready() -> void:\n\tpass\n');
+    const before = readFileSync(join(projectDir, scriptPath), 'utf8');
+
+    for (const type of ['replace_function', 'remove_function', 'add_export']) {
+      assert.throws(
+        () =>
+          modifyGDScript({
+            projectPath: projectDir,
+            scriptPath,
+            modifications: [{ type, name: 'whatever', newBody: '', varType: 'int' }],
+          }),
+        /declared but not implemented/,
+        `${type} should be refused rather than silently ignored`,
+      );
+    }
+
+    assert.equal(
+      readFileSync(join(projectDir, scriptPath), 'utf8'),
+      before,
+      'a refused modification must not have written the script',
+    );
+
+    // The implemented half still has to work, or the guard above is just breaking the tool.
+    const done = modifyGDScript({
+      projectPath: projectDir,
+      scriptPath,
+      modifications: [{ type: 'add_signal', name: 'died' }],
+    });
+    assert.equal(done.success, true, 'add_signal is implemented and should still succeed');
+    assert.match(readFileSync(join(projectDir, scriptPath), 'utf8'), /signal died/);
+  } finally {
+    rmSync(projectDir, { recursive: true, force: true });
+  }
+}
+
 function testProjectGodotMultilineValues() {
   const parsed = parseProjectGodot(
     [
@@ -986,6 +1033,7 @@ async function main() {
   await testDapFramesBodiesByBytes();
   await testFramingCeilingFailsLoudly();
   testDictionariesHaveNothingBehindThem();
+  testUnimplementedScriptModificationsFail();
   await testToolGroupLookupsCannotReachThePrototype();
   console.log('regression tests passed');
 }
