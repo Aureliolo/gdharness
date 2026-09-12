@@ -257,7 +257,7 @@ class GodotServer {
     this.godotDebugMode = godotDebugMode;
 
     // Set the path to the operations script
-    this.operationsScriptPath = join(__dirname, 'scripts', 'godot_operations.gd');
+    this.operationsScriptPath = join(__dirname, 'godot', 'operations', 'godot_operations.gd');
 
     // Initialize the Godot Editor Bridge (WebSocket server for editor plugin)
     this.godotBridge = getDefaultBridge();

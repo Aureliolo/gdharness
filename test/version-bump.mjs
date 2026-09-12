@@ -5,7 +5,7 @@ import { cp, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-const root = import.meta.dirname;
+const root = path.join(import.meta.dirname, '..');
 const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'gdharness-version-bump-'));
 const maintainedFiles = ['README.md'];
 

@@ -11,8 +11,8 @@ import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import process from 'node:process';
-import { sanitizeToolName } from './test-support/tool-name.mjs';
-import { parseJsonLines, parseTextContent } from './test-support/json-rpc.mjs';
+import { sanitizeToolName } from './support/tool-name.mjs';
+import { parseJsonLines, parseTextContent } from './support/json-rpc.mjs';
 
 const MCP_SERVER = './build/index.js';
 const bridgePortRaw = process.env.GODOT_BRIDGE_PORT || process.env.MCP_BRIDGE_PORT || process.env.GDHARNESS_BRIDGE_PORT;

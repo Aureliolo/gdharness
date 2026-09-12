@@ -26,7 +26,7 @@ flowchart LR
     Server --> Resources[Resource handlers\nsrc/resources.ts]
     Server --> Bridge[Godot Bridge\nsrc/godot-bridge.ts\nHTTP+WS :6505]
 
-    Bridge --> Addon[Godot Editor/Runtime Addons\nsrc/addon/...]
+    Bridge --> Addon[Godot Editor/Runtime Addons\nsrc/godot/addons/...]
     Server --> Godot[Godot process\nrun/editor/lsp/dap sockets]
 
     note1[Prompts capability is not yet exposed\nin MCP capabilities]:::note
@@ -113,7 +113,7 @@ These boundaries map to existing files and planned additions; they are design bo
 
 ### 4) Integration layer
 
-- **Bridge**: `src/godot-bridge.ts` + addons in `src/addon/...`
+- **Bridge**: `src/godot-bridge.ts` + addons in `src/godot/addons/...`
 - **Engine protocols**: LSP/DAP clients and Godot process interactions
 - **Rule**: integration errors map to stable MCP error surfaces.
 

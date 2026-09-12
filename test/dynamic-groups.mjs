@@ -3,7 +3,7 @@
 import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import process from 'node:process';
-import { sanitizeToolName } from './test-support/tool-name.mjs';
+import { sanitizeToolName } from './support/tool-name.mjs';
 
 const SERVER_ENTRY = './build/index.js';
 const GODOT_PATH = process.env.GODOT_PATH || '/home/doyun/Apps/godot-4.6-rc2/Godot_v4.6-rc2_linux.x86_64';

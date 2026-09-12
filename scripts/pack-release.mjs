@@ -40,8 +40,7 @@ try {
   await Promise.all([
     ...['cli.js', 'index.js', 'visualizer.html'].map((name) =>
       cp(path.join(root, 'build', name), path.join(stagingRoot, 'build', name))),
-    cp(path.join(root, 'build', 'addon'), path.join(stagingRoot, 'build', 'addon'), { recursive: true }),
-    cp(path.join(root, 'build', 'scripts'), path.join(stagingRoot, 'build', 'scripts'), { recursive: true }),
+    cp(path.join(root, 'build', 'godot'), path.join(stagingRoot, 'build', 'godot'), { recursive: true }),
     cp(path.join(root, 'README.md'), path.join(stagingRoot, 'README.md')),
     cp(path.join(root, 'LICENSE'), path.join(stagingRoot, 'LICENSE')),
     writeFile(

@@ -1,42 +1,28 @@
 ---
-name: Bug Report
-about: Report a bug in GoPeak
-title: '[Bug] '
+name: Bug report
+about: Something did not do what it said it would
+title: ''
 labels: bug
 assignees: ''
 ---
 
-**GoPeak version**: (e.g., 2.0.0)
-**Godot version**: (e.g., 4.6)
-**Node.js version**: (e.g., 22.x)
-**OS**: (e.g., Linux, macOS, Windows)
+**gdharness version**:
+**Godot version**:
+**Bun version**:
+**OS**:
+**MCP client**:
 
-**MCP Client**: (e.g., Claude Desktop, Cursor, Cline, OpenCode)
+## What you did
 
-## Description
+The tool call or command, with its arguments.
 
-A clear description of the bug.
+## What happened
 
-## Steps to Reproduce
+Paste the response or the error. If a tool reported success but did nothing, say so: that is
+the defect this project cares most about.
 
-1. ...
-2. ...
-3. ...
+## What you expected
 
-## Expected Behavior
+## Anything that makes it reproducible
 
-What you expected to happen.
-
-## Actual Behavior
-
-What actually happened. Include error messages if any.
-
-## Logs
-
-<details>
-<summary>Debug output (run with DEBUG=true)</summary>
-
-```
-Paste logs here
-```
-</details>
+A minimal project, a scene, a sequence of calls.

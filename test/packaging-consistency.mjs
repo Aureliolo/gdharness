@@ -6,7 +6,7 @@ import { chmod, mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-const root = import.meta.dirname;
+const root = path.join(import.meta.dirname, '..');
 const pkg = await Bun.file(path.join(root, 'package.json')).json();
 const archiveName = `${pkg.name}-${pkg.version}.tgz`;
 const archivePath = path.join(root, 'dist', archiveName);
@@ -66,10 +66,10 @@ for (const requiredFile of [
   'package/build/cli.js',
   'package/build/index.js',
   'package/build/visualizer.html',
-  'package/build/scripts/godot_operations.gd',
-  'package/build/addon/auto_reload/plugin.cfg',
-  'package/build/addon/godot_mcp_editor/plugin.cfg',
-  'package/build/addon/godot_mcp_runtime/plugin.cfg',
+  'package/build/godot/operations/godot_operations.gd',
+  'package/build/godot/addons/auto_reload/plugin.cfg',
+  'package/build/godot/addons/godot_mcp_editor/plugin.cfg',
+  'package/build/godot/addons/godot_mcp_runtime/plugin.cfg',
   'package/README.md',
   'package/LICENSE',
 ]) {

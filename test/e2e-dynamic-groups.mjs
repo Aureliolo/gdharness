@@ -15,10 +15,10 @@ import process from 'node:process';
 import { spawn } from 'child_process';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { sanitizeToolName } from './test-support/tool-name.mjs';
+import { sanitizeToolName } from './support/tool-name.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const SERVER_PATH = join(__dirname, 'build', 'index.js');
+const SERVER_PATH = join(__dirname, '..', 'build', 'index.js');
 const TEST_PROJECT = '/home/doyun/godot-new-project';
 
 let passed = 0;
