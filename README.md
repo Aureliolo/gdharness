@@ -2,9 +2,13 @@
 
 [![CI](https://github.com/Aureliolo/gdharness/actions/workflows/ci.yml/badge.svg)](https://github.com/Aureliolo/gdharness/actions/workflows/ci.yml)
 [![Scorecard](https://api.scorecard.dev/projects/github.com/Aureliolo/gdharness/badge)](https://scorecard.dev/viewer/?uri=github.com/Aureliolo/gdharness)
+[![SLSA Build 3](https://img.shields.io/badge/SLSA-Build%20L3-2f6f4e?style=flat)](docs/release-process.md#slsa)
+[![SBOM](https://img.shields.io/badge/SBOM-SPDX-2f6f4e?style=flat)](docs/release-process.md#what-a-release-carries)
+[![Signed releases](https://img.shields.io/badge/releases-Sigstore%20signed-2f6f4e?style=flat)](docs/release-process.md#verifying-a-release)
 [![Release](https://img.shields.io/github/v/release/Aureliolo/gdharness?display_name=tag&sort=semver)](https://github.com/Aureliolo/gdharness/releases)
 [![](https://badge.mcpx.dev?type=server 'MCP Server')](https://modelcontextprotocol.io/introduction)
 [![Made for Godot](https://img.shields.io/badge/Made%20for-Godot-478CBF?style=flat&logo=godot%20engine&logoColor=white)](https://godotengine.org)
+[![Godot](https://img.shields.io/badge/godot-4.7%2B-478CBF?style=flat&logo=godot%20engine&logoColor=white)](https://godotengine.org)
 [![Bun](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2FAureliolo%2Fgdharness%2Fmain%2Fpackage.json&query=%24.engines.bun&label=bun&color=f9f1e1&logo=bun&logoColor=black)](https://bun.sh/)
 [![Licence](https://img.shields.io/github/license/Aureliolo/gdharness)](LICENSE)
 
@@ -35,13 +39,47 @@ complete, hardened and actually working.
 
 Two things, and nothing else:
 
-- **Godot 4.6 or newer.** 4.6 is the floor because the runtime bridge uses `UDSServer`, which
-  the engine gained in 4.6. Tested against the versions listed under Support below.
+- **Godot 4.7 or newer.** That is the version CI drives every fixture against, on Linux,
+  Windows and macOS. Older engines are not supported and will not be: the work in front of this
+  wants `UDSServer` for the runtime bridge and the 4.7 input device ids, and carrying shims for
+  engines nobody here tests against is how a harness starts lying about what it verified.
 - **Bun 1.4.0 or newer.** 1.4 is the floor because the lockfile is `lockfileVersion: 2`,
   which older Bun cannot read.
 
 Then point any MCP client at it. gdharness installs the Godot addons into your project
 itself; there is nothing to copy by hand, no Python, and no Node.
+
+## Security
+
+An MCP server is a program you hand an agent, and it usually arrives as an unsigned tarball of
+unpinned dependencies. Every claim below is one you can check rather than take on trust.
+
+**What it does on your machine.** The runtime bridge binds `127.0.0.1` and refuses to listen at
+all outside a debug build, because its command set includes calling arbitrary methods, setting
+arbitrary properties and injecting input, none of it authenticated. No exported game serves it.
+Every subprocess is spawned with `execFile` and an argument array, never a shell: there is no
+string for a path full of quotes or backslashes to escape out of.
+
+**What the release is.** Each one carries an SPDX SBOM and a Sigstore build-provenance
+attestation over the archive, its checksum and the SBOM. The signing is keyless, so there is no
+signing key anywhere, including in CI, and it runs in a reusable workflow isolated from the
+build, which is [SLSA Build Level 3](docs/release-process.md#slsa). Published releases are
+immutable. Verify one before you install it:
+
+```bash
+gh attestation verify gdharness-X.Y.Z.tgz --repo Aureliolo/gdharness
+```
+
+**What goes into it.** Every dependency is an exact version and every GitHub action is pinned by
+commit digest. No carets, no ranges, no floating tags; the only version ranges in the repository
+are the two support floors above. Dependabot proposes the bumps and a human takes them.
+
+**What guards the branch.** `main` takes pull requests only, with signed commits, linear
+history and a required status check, and nobody can bypass it. CodeQL, OpenSSF Scorecard,
+actionlint, zizmor and secret scanning run against every change; the GDScript that ships in the
+bundle is driven against a real Godot on Linux, Windows and macOS.
+
+Found something? [SECURITY.md](.github/SECURITY.md) says how to report it.
 
 ## Building
 
