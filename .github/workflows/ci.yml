@@ -90,12 +90,10 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
 
-      - name: Setup Godot
-        uses: chickensoft-games/setup-godot@c233594225991af5aec714e52457cc76d6df8fa2 # v2.4.2
-        with:
-          version: 4.7.2
-          use-dotnet: false
-          include-templates: false
+      # Ours rather than a setup action's, because the engine is a 180 MB binary and this is the
+      # only way to know it is the one the repository pins. It exports GODOT_PATH.
+      - name: Install Godot
+        run: bun scripts/install-godot.mjs
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
