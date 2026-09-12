@@ -42,7 +42,13 @@ runs:
         archive="${RUNNER_TEMP}/bun-${build}.zip"
         curl -fsSL --proto '=https' --tlsv1.2 --retry 2 -o "${archive}" \
           "https://github.com/oven-sh/bun/releases/download/${tag}/bun-${build}.zip"
-        echo "${sha256}  ${archive}" | sha256sum --check --strict
+        # Compared here rather than through `sha256sum --check`: the macOS one is BSD's and does
+        # not take the GNU options, while the digest line format is the same on all three.
+        actual="$(sha256sum "${archive}" | cut -d ' ' -f 1)"
+        if [[ "${actual}" != "${sha256}" ]]; then
+          echo "bun-${build}.zip is not the file this action pins: expected ${sha256}, received ${actual}." >&2
+          exit 1
+        fi
         unzip -q -o "${archive}" -d "${RUNNER_TEMP}"
 
         bin="${RUNNER_TEMP}/bun-${build}"
