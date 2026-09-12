@@ -275,7 +275,7 @@ export class GodotDAPClient {
     const eventName = event.event;
     if (eventName === 'output') {
       const body = event.body;
-      const outputText = typeof body?.output === 'string' ? body.output : '';
+      const outputText = typeof body?.['output'] === 'string' ? body['output'] : '';
 
       if (outputText.length > 0) {
         const lines = outputText.split(/\r?\n/).filter((line: string) => line.length > 0);
@@ -290,7 +290,7 @@ export class GodotDAPClient {
 
     if (eventName === 'stopped') {
       const body = event.body;
-      const threadId = body?.threadId;
+      const threadId = body?.['threadId'];
       if (typeof threadId === 'number') {
         this.lastThreadId = threadId;
       }
@@ -409,8 +409,8 @@ export class GodotDAPClient {
       levels: 100,
     });
 
-    if (Array.isArray(response?.stackFrames)) {
-      return response.stackFrames;
+    if (Array.isArray(response?.['stackFrames'])) {
+      return response['stackFrames'];
     }
 
     return [];
@@ -419,8 +419,8 @@ export class GodotDAPClient {
   async getVariables(variablesReference: number): Promise<DAPArrayItem[]> {
     await this.attach();
     const response = await this.sendRequest('variables', { variablesReference });
-    if (Array.isArray(response?.variables)) {
-      return response.variables;
+    if (Array.isArray(response?.['variables'])) {
+      return response['variables'];
     }
 
     return [];
@@ -442,7 +442,7 @@ export class GodotDAPClient {
 
     try {
       const response = await this.sendRequest('threads');
-      const threads = response?.threads;
+      const threads = response?.['threads'];
       if (Array.isArray(threads) && threads.length > 0) {
         const firstThread = threads[0];
         const id = firstThread?.id;

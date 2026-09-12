@@ -158,21 +158,22 @@ export function parseProjectGodot(
   content: string,
 ): Record<string, Record<string, string | number | boolean | null>> {
   const result: Record<string, Record<string, string | number | boolean | null>> = {};
-  let currentSection = 'root';
-  result[currentSection] = {};
+  // Held rather than looked up again per key, so the section a value lands in is the one the
+  // header created and not whatever indexing the record a second time happens to return.
+  let section: Record<string, string | number | boolean | null> = {};
+  result['root'] = section;
 
   const lines = content.split(/\r?\n/);
   for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index].trim();
+    const line = (lines[index] ?? '').trim();
     if (!line || line.startsWith(';') || line.startsWith('#')) {
       continue;
     }
 
     if (line.startsWith('[') && line.endsWith(']')) {
-      currentSection = line.slice(1, -1).trim();
-      if (!result[currentSection]) {
-        result[currentSection] = {};
-      }
+      const name = line.slice(1, -1).trim();
+      section = result[name] ?? {};
+      result[name] = section;
       continue;
     }
 
@@ -186,10 +187,10 @@ export function parseProjectGodot(
 
     while (index + 1 < lines.length && !isValueComplete(rawValue)) {
       index += 1;
-      rawValue += `\n${lines[index].trim()}`;
+      rawValue += `\n${(lines[index] ?? '').trim()}`;
     }
 
-    result[currentSection][key] = parseIniLikeValue(rawValue);
+    section[key] = parseIniLikeValue(rawValue);
   }
 
   return result;
