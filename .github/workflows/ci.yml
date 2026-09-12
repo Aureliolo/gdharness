@@ -21,12 +21,13 @@ concurrency:
 jobs:
   # Formatting is mechanical and always enforceable, so it gates from day one.
   format:
+    name: format
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -43,6 +44,7 @@ jobs:
 
   # The GDScript is what runs inside a user's engine, and until now nothing checked it.
   gdscript:
+    name: gdscript
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -73,6 +75,7 @@ jobs:
   # things it covers, project.godot writing and path handling, are exactly where the platforms
   # differ.
   engine:
+    name: engine
     strategy:
       fail-fast: false
       matrix:
@@ -109,12 +112,13 @@ jobs:
   # to be red until the tool boundary is typed. They are separate jobs and not required
   # checks, so the failure is visible rather than hidden, and it blocks nothing yet.
   lint:
+    name: lint
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -134,12 +138,13 @@ jobs:
         run: bun run lint:eslint
 
   build-and-test:
+    name: build-and-test
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 

@@ -19,10 +19,11 @@ concurrency:
 
 jobs:
   tag:
+    name: tag
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      contents: write
+      contents: write # Creates the tag, which is the whole job.
 
     steps:
       - name: Checkout
