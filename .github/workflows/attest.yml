@@ -1,0 +1,55 @@
+name: Attest
+
+# Attestation lives in its own reusable workflow rather than inline in the release job, and
+# that separation is the whole difference between SLSA Build Level 2 and Level 3: the signing
+# runs somewhere the build cannot reach, so the identity in the certificate names this workflow
+# rather than whatever the release job happened to be doing. A verifier can then insist the
+# provenance came from here, which is a claim that means something; "some job in this repo
+# signed it" is not.
+on:
+  workflow_call:
+    inputs:
+      artifact:
+        description: Name of the uploaded artifact holding the files to attest
+        required: true
+        type: string
+      subjects:
+        description: Newline-separated paths inside that artifact to attest
+        required: true
+        type: string
+      sbom:
+        description: Path inside the artifact of the SBOM describing the archive
+        required: true
+        type: string
+      archive:
+        description: Path inside the artifact of the archive the SBOM describes
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  attest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      id-token: write
+      attestations: write
+
+    steps:
+      - name: Download the artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ${{ inputs.artifact }}
+          path: dist
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be
+        with:
+          subject-path: ${{ inputs.subjects }}
+
+      - name: Attest SBOM
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-path: ${{ inputs.archive }}
+          sbom-path: ${{ inputs.sbom }}

@@ -1,0 +1,58 @@
+name: Tag release
+
+# The second half of the button. A merged release pull request leaves main carrying a version
+# that has no tag; this creates it, which is what the release workflow waits for. Keyed on the
+# version in package.json rather than on the pull request, so a version that arrives some other
+# way still gets tagged exactly once.
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - package.json
+
+permissions: {}
+
+concurrency:
+  group: release-tag
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+
+      - name: Tag the version if it has no tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          version="$(bun -e "console.log((await Bun.file('package.json').json()).version)")"
+          server_version="$(bun -e "console.log((await Bun.file('server.json').json()).version)")"
+
+          if [[ "${server_version}" != "${version}" ]]; then
+            echo "server.json says ${server_version} and package.json says ${version}." >&2
+            exit 1
+          fi
+
+          if gh api "repos/${GH_REPO}/git/ref/tags/v${version}" >/dev/null 2>&1; then
+            echo "v${version} is already tagged; nothing to do."
+            exit 0
+          fi
+
+          gh api "repos/${GH_REPO}/git/refs" \
+            -f "ref=refs/tags/v${version}" \
+            -f "sha=${GITHUB_SHA}"
+          echo "Tagged v${version} at ${GITHUB_SHA}."
