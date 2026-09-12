@@ -180,8 +180,8 @@ function addVariable(content: string, mod: AddVariableMod): string {
   // Find where to insert (after extends/class_name)
   const lines = content.split('\n');
   let insertIdx = 0;
-  for (let i = 0; i < lines.length; i++) {
-    if (lines[i].startsWith('extends') || lines[i].startsWith('class_name')) {
+  for (const [i, line] of lines.entries()) {
+    if (line.startsWith('extends') || line.startsWith('class_name')) {
       insertIdx = i + 1;
     }
   }
@@ -197,12 +197,12 @@ function addSignal(content: string, mod: AddSignalMod): string {
   const lines = content.split('\n');
   let insertIdx = 0;
   // Insert after variables
-  for (let i = 0; i < lines.length; i++) {
+  for (const [i, line] of lines.entries()) {
     if (
-      lines[i].startsWith('extends') ||
-      lines[i].startsWith('class_name') ||
-      lines[i].startsWith('var ') ||
-      lines[i].startsWith('@')
+      line.startsWith('extends') ||
+      line.startsWith('class_name') ||
+      line.startsWith('var ') ||
+      line.startsWith('@')
     ) {
       insertIdx = i + 1;
     }
