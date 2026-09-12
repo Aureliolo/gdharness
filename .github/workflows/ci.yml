@@ -42,6 +42,13 @@ jobs:
       - name: Check formatting
         run: bun run format:check
 
+      # Offline on purpose: this asks whether every pinned version is one something watches, not
+      # whether it is the newest. The second question needs the network and would turn an
+      # unrelated change red the morning somebody upstream publishes.
+      - name: Every pin is watched
+        if: '!cancelled()'
+        run: bun run check:pins
+
   # The GDScript is what runs inside a user's engine, so it gets the same treatment as the
   # TypeScript in front of it.
   gdscript:
