@@ -12,6 +12,36 @@
 - **Answers are sized.** Anything that can return a lot takes a detail level and defaults to
   the smallest useful one. Anything unbounded paginates.
 
+## What every language in here is held to
+
+Four things, for each language present. A language that arrives without all four arrives with
+them in the same change.
+
+| | TypeScript | JavaScript (`.mjs`) | GDScript | Workflows |
+| --- | --- | --- | --- | --- |
+| Formatter | Biome | Biome | gdformat | - |
+| Linter | Biome, oxlint | Biome, oxlint | gdlint, nothing disabled | actionlint, zizmor at `pedantic` |
+| Type checker | `tsc`, `@tsconfig/strictest` | `checkJs` | the engine, warnings as errors | - |
+| Fuzzing | property tests on every parser of untrusted input | same | - | - |
+
+Rules are **written out rather than inherited from a preset**, so the file says what it enforces:
+see `.oxlintrc.json` and `.gdlintrc`. Nothing is turned off quietly. A rule that fires on good
+code is an argument about the rule, and the argument goes next to the suppression along with what
+it would cost to adopt.
+
+**Every job CI runs is a required status check.** A job that can be red while something merges is
+not a gate, and we have been bitten by exactly that.
+
+**Every pinned version is watched by something.** Dependabot covers the package ecosystems it
+understands, which is `package.json` and the workflow `uses:` digests. It does not see a version
+passed as an action input, an inline `pip install x==y`, a version inside a URL, or a pin held in
+a script: the engine, gdtoolkit, Python, actionlint and zizmor are all in that second group.
+`bun run check:pins` covers them, and it fails when it finds a pin that nothing watches, so a new
+pin cannot arrive unwatched.
+
+Pick the newest stable version of a tool rather than the familiar one, and read what the release
+actually changed before taking it.
+
 ## Development setup
 
 ```bash

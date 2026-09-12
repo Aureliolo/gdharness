@@ -1,0 +1,42 @@
+name: Pins
+
+# Dependabot watches package.json and the workflow `uses:` digests. It cannot see a version
+# passed as an action input, an inline `pip install x==y`, a version inside a URL, or a pin held
+# in a script, which is where the engine, gdtoolkit, Python, actionlint and zizmor all live. This
+# asks upstream about those once a week.
+#
+# Separate from CI because the answer depends on what somebody else published this morning, and a
+# check that can change its mind without the code changing does not belong on a pull request.
+on:
+  schedule:
+    - cron: '23 5 * * 1'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: pins
+  cancel-in-progress: false
+
+jobs:
+  outdated:
+    name: outdated
+    if: github.repository == 'Aureliolo/gdharness'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read # Reads the files the pins live in.
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun
+        # No bun-version input on purpose: setup-bun reads packageManager out of
+        # package.json, which is the one place the Bun version is written.
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - name: Ask upstream about every pin
+        run: bun run check:outdated
