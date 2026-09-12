@@ -24,7 +24,7 @@ import { tmpdir } from 'os';
 import { spawn } from 'child_process';
 import { createConnection as createTcpConnection } from 'node:net';
 import { promisify } from 'util';
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -47,7 +47,10 @@ import { CORE_TOOL_GROUPS, TOOL_GROUPS } from './tool-groups.js';
 import { DEBUG_MODE, GODOT_DEBUG_MODE_DEFAULT, SERVER_VERSION } from './server-version.js';
 import type { GodotProcess, GodotServerConfig, MCPToolDefinition, OperationParams } from './server-types.js';
 
-const execAsync = promisify(exec);
+// execFile, not exec: no shell means no quoting, and no quoting means no way to escape out
+// of it. Every argument below is an array element, so a path full of backslashes, spaces or
+// quotes is just a path.
+const run = promisify(execFile);
 
 /**
  * Scan a directory for Godot executable binaries.
@@ -386,9 +389,7 @@ class GodotServer {
         return false;
       }
 
-      // Try to execute Godot with --version flag
-      const command = path === 'godot' ? 'godot --version' : `"${path}" --version`;
-      await execAsync(command);
+      await run(path, ['--version']);
 
       this.logDebug(`Valid Godot path: ${path}`);
       this.validatedPaths.set(path, true);
@@ -1436,45 +1437,33 @@ class GodotServer {
     }
 
     try {
-      // Serialize parameters into a temp file to avoid shell/cmd JSON escaping issues
-      // (notably Windows command-line parsing of sequences such as \t, \r, and \").
-      const paramsJson = JSON.stringify(snakeCaseParams);
+      // Parameters go via a temp file rather than the command line: a JSON blob on argv
+      // runs into Windows command-line parsing of \t, \r and \" whatever the quoting.
       const paramsDir = mkdtempSync(join(tmpdir(), 'gdharness-params-'));
       const paramsFilePath = join(paramsDir, `${operation}.json`);
-      writeFileSync(paramsFilePath, paramsJson, 'utf8');
+      writeFileSync(paramsFilePath, JSON.stringify(snakeCaseParams), 'utf8');
 
-      // Escape the params file reference for the current shell.
-      const paramsFileArg = `@file:${paramsFilePath}`;
-      const escapedParams = paramsFileArg.replace(/'/g, "'\\''");
-      const isWindows = process.platform === 'win32';
-      const quotedParams = isWindows ? `\"${paramsFileArg.replace(/\"/g, '\\"')}\"` : `'${escapedParams}'`;
-
-      // Add debug arguments if debug mode is enabled
-      const debugArgs = this.godotDebugMode ? ['--debug-godot'] : [];
-
-      // Construct the command with the operation and JSON parameters
-      const cmd = [
-        `"${this.godotPath}"`,
+      const args = [
         '--headless',
         '--path',
-        `"${projectPath}"`,
+        projectPath,
         '--script',
-        `"${this.operationsScriptPath}"`,
+        this.operationsScriptPath,
         operation,
-        quotedParams, // Pass the JSON string as a single argument
-        ...debugArgs,
-      ].join(' ');
+        `@file:${paramsFilePath}`,
+        ...(this.godotDebugMode ? ['--debug-godot'] : []),
+      ];
 
-      this.logDebug(`Command: ${cmd}`);
+      this.logDebug(`Running: ${this.godotPath} ${args.join(' ')}`);
 
       try {
-        const { stdout, stderr } = await execAsync(cmd);
+        const { stdout, stderr } = await run(this.godotPath, args);
         return { stdout, stderr: this.sanitizeGodotStderr(stderr) };
       } finally {
         rmSync(paramsDir, { recursive: true, force: true });
       }
     } catch (error: unknown) {
-      // If execAsync throws, it still contains stdout/stderr
+      // A non-zero exit still carries stdout and stderr on the thrown error
       if (error instanceof Error && 'stdout' in error && 'stderr' in error) {
         const execError = error as Error & { stdout: string; stderr: string };
         return {
@@ -2269,7 +2258,7 @@ class GodotServer {
       }
 
       this.logDebug('Getting Godot version');
-      const { stdout } = await execAsync(`"${this.godotPath}" --version`);
+      const { stdout } = await run(this.godotPath, ['--version']);
       return {
         content: [
           {
@@ -2441,7 +2430,7 @@ class GodotServer {
 
       // Get Godot version
       const execOptions = { timeout: 10000 }; // 10 second timeout
-      const { stdout } = await execAsync(`"${this.godotPath}" --version`, execOptions);
+      const { stdout } = await run(this.godotPath, ['--version'], execOptions);
 
       // Get project structure using the recursive method
       const projectStructure = await this.getProjectStructureAsync(args.projectPath);
@@ -3045,7 +3034,7 @@ class GodotServer {
       }
 
       // Get Godot version to check if UIDs are supported
-      const { stdout: versionOutput } = await execAsync(`"${this.godotPath}" --version`);
+      const { stdout: versionOutput } = await run(this.godotPath, ['--version']);
       const version = versionOutput.trim();
 
       if (!this.isGodot44OrLater(version)) {
@@ -3131,7 +3120,7 @@ class GodotServer {
       }
 
       // Get Godot version to check if UIDs are supported
-      const { stdout: versionOutput } = await execAsync(`"${this.godotPath}" --version`);
+      const { stdout: versionOutput } = await run(this.godotPath, ['--version']);
       const version = versionOutput.trim();
 
       if (!this.isGodot44OrLater(version)) {
@@ -3859,12 +3848,19 @@ class GodotServer {
         }
       }
 
-      const exportFlag = args.debug ? '--export-debug' : '--export-release';
-      const cmd = `"${this.godotPath}" --headless --path "${args.projectPath}" ${exportFlag} "${args.preset}" "${args.outputPath}"`;
+      const exportArgs = [
+        '--headless',
+        '--path',
+        args.projectPath,
+        args.debug ? '--export-debug' : '--export-release',
+        args.preset,
+        args.outputPath,
+      ];
 
-      this.logDebug(`Export command: ${cmd}`);
+      this.logDebug(`Exporting: ${this.godotPath} ${exportArgs.join(' ')}`);
 
-      const { stdout, stderr } = await execAsync(cmd, { timeout: 300000 }); // 5 minute timeout for exports
+      // An export of a real project is slow, so it gets five minutes rather than the default.
+      const { stdout, stderr } = await run(this.godotPath, exportArgs, { timeout: 300000 });
 
       if (stderr && (stderr.includes('ERROR') || stderr.includes('Invalid preset'))) {
         return this.createErrorResponse(`Failed to export project: ${stderr}`, [
