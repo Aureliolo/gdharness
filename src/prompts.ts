@@ -1,17 +1,17 @@
 import {
   ErrorCode,
-  McpError,
   type GetPromptResult,
   type ListPromptsResult,
+  McpError,
   type Prompt,
 } from '@modelcontextprotocol/sdk/types.js';
 
 type PromptArgs = Record<string, string> | undefined;
 
-type PromptTemplate = {
+interface PromptTemplate {
   prompt: Prompt;
   render: (args: PromptArgs) => GetPromptResult;
-};
+}
 
 const PROMPTS_PAGE_SIZE = 20;
 
@@ -65,9 +65,9 @@ const promptTemplates: PromptTemplate[] = [
     render: (args: PromptArgs): GetPromptResult => {
       const projectPath = requireArg(args, 'project_path', 'godot.scene_bootstrap');
       const scenePath = requireArg(args, 'scene_path', 'godot.scene_bootstrap');
-      const rootNodeType = getTrimmedArg(args, 'root_node_type') || 'Node2D';
+      const rootNodeType = getTrimmedArg(args, 'root_node_type') ?? 'Node2D';
       const featureGoal =
-        getTrimmedArg(args, 'feature_goal') ||
+        getTrimmedArg(args, 'feature_goal') ??
         'Create a playable prototype with clear input and movement behavior.';
 
       return {
@@ -123,7 +123,7 @@ const promptTemplates: PromptTemplate[] = [
     render: (args: PromptArgs): GetPromptResult => {
       const projectPath = requireArg(args, 'project_path', 'godot.debug_triage');
       const errorExcerpt = requireArg(args, 'error_excerpt', 'godot.debug_triage');
-      const reproSteps = getTrimmedArg(args, 'repro_steps') || 'No reproduction steps provided.';
+      const reproSteps = getTrimmedArg(args, 'repro_steps') ?? 'No reproduction steps provided.';
 
       return {
         description: 'Deterministic debug triage workflow for Godot runtime/editor errors.',

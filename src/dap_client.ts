@@ -22,35 +22,37 @@ type DAPBody = Record<string, unknown>;
 
 type DAPArrayItem = Record<string, unknown>;
 
-type ToolDefinition = {
+interface ToolDefinition {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
-};
+}
 
-type ToolResponse = { content: Array<{ type: string; text: string }> };
+interface ToolResponse {
+  content: { type: string; text: string }[];
+}
 
-type ToolArgs = {
+interface ToolArgs {
   scriptPath?: unknown;
   line?: unknown;
-};
+}
 
 export class GodotDAPClient {
   private socket: Socket | null = null;
-  private connected: boolean = false;
+  private connected = false;
   private port: number;
   private host: string;
-  private seq: number = 1;
+  private seq = 1;
   private pendingRequests: Map<number, PendingRequest>;
-  private buffer: string = '';
+  private buffer = '';
   private outputBuffer: string[] = [];
-  private maxOutputLines: number = 1000;
-  private initialized: boolean = false;
-  private attached: boolean = false;
-  private lastThreadId: number = 1;
-  private breakpoints: Map<string, Set<number>> = new Map();
+  private maxOutputLines = 1000;
+  private initialized = false;
+  private attached = false;
+  private lastThreadId = 1;
+  private breakpoints = new Map<string, Set<number>>();
 
-  constructor(port: number = 6006, host: string = '127.0.0.1') {
+  constructor(port = 6006, host = '127.0.0.1') {
     this.port = port;
     this.host = host;
     this.pendingRequests = new Map();
@@ -126,7 +128,9 @@ export class GodotDAPClient {
     if (this.connected) {
       try {
         await this.sendRequest('disconnect', { restart: false });
-      } catch {}
+      } catch {
+        // The adapter may already be gone; the socket close below is what matters.
+      }
     }
 
     await new Promise<void>((resolve) => {
@@ -136,7 +140,9 @@ export class GodotDAPClient {
         return;
       }
 
-      socket.once('close', () => resolve());
+      socket.once('close', () => {
+        resolve();
+      });
       socket.end();
       setTimeout(() => {
         if (!socket.destroyed) {
@@ -198,7 +204,7 @@ export class GodotDAPClient {
   }
 
   private parseMessages(): void {
-    while (true) {
+    for (;;) {
       const headerEndIndex = this.buffer.indexOf('\r\n\r\n');
       if (headerEndIndex === -1) {
         return;
@@ -341,7 +347,7 @@ export class GodotDAPClient {
     this.attached = true;
   }
 
-  getOutput(clear: boolean = false): string[] {
+  getOutput(clear = false): string[] {
     const lines = [...this.outputBuffer];
     if (clear) {
       this.outputBuffer = [];
@@ -409,8 +415,9 @@ export class GodotDAPClient {
       levels: 100,
     });
 
-    if (Array.isArray(response?.['stackFrames'])) {
-      return response['stackFrames'];
+    const stackFrames = response['stackFrames'];
+    if (Array.isArray(stackFrames)) {
+      return stackFrames as DAPArrayItem[];
     }
 
     return [];
@@ -419,8 +426,9 @@ export class GodotDAPClient {
   async getVariables(variablesReference: number): Promise<DAPArrayItem[]> {
     await this.attach();
     const response = await this.sendRequest('variables', { variablesReference });
-    if (Array.isArray(response?.['variables'])) {
-      return response['variables'];
+    const variables = response['variables'];
+    if (Array.isArray(variables)) {
+      return variables as DAPArrayItem[];
     }
 
     return [];
@@ -442,16 +450,17 @@ export class GodotDAPClient {
 
     try {
       const response = await this.sendRequest('threads');
-      const threads = response?.['threads'];
+      const threads = response['threads'];
       if (Array.isArray(threads) && threads.length > 0) {
-        const firstThread = threads[0];
-        const id = firstThread?.id;
+        const id = (threads[0] as DAPArrayItem | undefined)?.['id'];
         if (typeof id === 'number' && id > 0) {
           this.lastThreadId = id;
           return id;
         }
       }
-    } catch {}
+    } catch {
+      // No thread list: fall through to the default thread id rather than failing the call.
+    }
 
     return 1;
   }
@@ -546,7 +555,7 @@ export async function handleDAPTool(
   toolName: string,
   args: unknown,
 ): Promise<ToolResponse> {
-  const safeArgs: ToolArgs = args && typeof args === 'object' ? (args as ToolArgs) : {};
+  const safeArgs: ToolArgs = args && typeof args === 'object' ? args : {};
 
   try {
     switch (toolName) {

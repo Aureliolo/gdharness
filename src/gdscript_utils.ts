@@ -1,5 +1,5 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
-import { join, dirname } from 'path';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 
 /**
  * Interface for GDScript file creation parameters
@@ -99,7 +99,7 @@ export function createGDScript(params: CreateScriptParams): CreateScriptResult {
     mkdirSync(dir, { recursive: true });
   }
 
-  let content = params.content || '';
+  let content = params.content ?? '';
 
   if (!content) {
     if (params.extends) {
@@ -213,7 +213,7 @@ function addSignal(content: string, mod: AddSignalMod): string {
 }
 
 function addFunction(content: string, mod: AddFunctionMod): string {
-  let funcDecl = `\nfunc ${mod.name}(${mod.params || ''})`;
+  let funcDecl = `\nfunc ${mod.name}(${mod.params ?? ''})`;
   if (mod.returnType) funcDecl += ` -> ${mod.returnType}`;
   funcDecl += `:\n`;
 

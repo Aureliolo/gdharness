@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { extname, isAbsolute, relative, resolve } from 'node:path';
-import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import {
   ListResourcesRequestSchema,
   ListResourceTemplatesRequestSchema,
@@ -252,16 +252,21 @@ function readResourceText(
   };
 }
 
-export function setupResourceHandlers(server: Server, getProjectPath: () => string | null): void {
-  server.setRequestHandler(ListResourcesRequestSchema, async () => ({
+export function setupResourceHandlers(mcp: McpServer, getProjectPath: () => string | null): void {
+  // Registered on the low-level protocol object rather than through registerResource: the
+  // godot:// space is a handful of hand-rolled URI templates, not the static list the
+  // high-level helper builds.
+  const server = mcp.server;
+
+  server.setRequestHandler(ListResourcesRequestSchema, () => ({
     resources: STATIC_RESOURCES,
   }));
 
-  server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({
+  server.setRequestHandler(ListResourceTemplatesRequestSchema, () => ({
     resourceTemplates: RESOURCE_TEMPLATES,
   }));
 
-  server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+  server.setRequestHandler(ReadResourceRequestSchema, (request) => {
     const uri = request.params.uri;
 
     try {
@@ -277,11 +282,13 @@ export function setupResourceHandlers(server: Server, getProjectPath: () => stri
         ],
       };
     } catch (error) {
+      // The cause carries the errno and the stack: ENOENT, EACCES and a symlink loop are
+      // otherwise the same sentence by the time they reach the client.
       if (error instanceof Error) {
-        throw new Error(`Failed to read resource '${uri}': ${error.message}`);
+        throw new Error(`Failed to read resource '${uri}': ${error.message}`, { cause: error });
       }
 
-      throw new Error(`Failed to read resource '${uri}'.`);
+      throw new Error(`Failed to read resource '${uri}'.`, { cause: error });
     }
   });
 }

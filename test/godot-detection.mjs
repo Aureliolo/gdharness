@@ -12,7 +12,7 @@
  * glob/sort logic is exercised without requiring an actual Godot install.
  */
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, statSync, utimesSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -84,7 +84,7 @@ function testNewestFirstOrdering() {
     assert.equal(result.length, 2, 'both binaries found');
     assert.ok(
       result[0].includes('Godot_v4.4.1-stable_win64.exe'),
-      'newest binary should be returned first, got: ' + result[0],
+      `newest binary should be returned first, got: ${result[0]}`,
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });

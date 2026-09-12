@@ -2,7 +2,7 @@
 
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { chmod, mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
+import { chmod, mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -137,7 +137,7 @@ try {
   for (const bundleName of ['cli.js', 'index.js']) {
     const bundle = await readFile(path.join(packedRoot, 'build', bundleName), 'utf8');
     const externalPackageImport =
-      bundle.match(/(?:from\s+|import\()["'](?:@modelcontextprotocol|fs-extra)(?:[\/"'])/)?.[0] ?? null;
+      bundle.match(/(?:from\s+|import\()["'](?:@modelcontextprotocol|fs-extra)(?:[/"'])/)?.[0] ?? null;
     assert.equal(
       externalPackageImport,
       null,

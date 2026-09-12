@@ -1,7 +1,7 @@
-import { exec } from 'child_process';
-import { promisify } from 'util';
-import { existsSync, readFileSync } from 'fs';
-import { join } from 'path';
+import { exec } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { promisify } from 'node:util';
 
 const execAsync = promisify(exec);
 
@@ -57,12 +57,15 @@ export async function exportProject(params: ExportProjectParams, godotPath: stri
       output: stdout,
       errors: stderr ? [stderr] : [],
     };
-  } catch (error: any) {
+  } catch (error) {
+    // execAsync rejects with an Error carrying the child's captured streams, so both are
+    // worth reporting: the stderr is usually the only thing that says why the export failed.
+    const failure = error as Error & { stdout?: string; stderr?: string };
     return {
       success: false,
       outputPath: absoluteOutputPath,
-      output: error.stdout || '',
-      errors: [error.message, error.stderr],
+      output: failure.stdout ?? '',
+      errors: [failure.message, failure.stderr ?? ''],
     };
   }
 }
@@ -97,7 +100,7 @@ export function listExportPresets(projectPath: string): ExportPreset[] {
 
   for (const line of lines) {
     if (line.startsWith('[preset.')) {
-      if (currentPreset && currentPreset.name) {
+      if (currentPreset?.name) {
         presets.push(currentPreset as ExportPreset);
       }
       currentPreset = { custom_features: [] };
@@ -112,7 +115,7 @@ export function listExportPresets(projectPath: string): ExportPreset[] {
     }
   }
 
-  if (currentPreset && currentPreset.name) {
+  if (currentPreset?.name) {
     presets.push(currentPreset as ExportPreset);
   }
 

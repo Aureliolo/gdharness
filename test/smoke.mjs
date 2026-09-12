@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
-import { setTimeout as delay } from 'node:timers/promises';
 import process from 'node:process';
+import { setTimeout as delay } from 'node:timers/promises';
 import { WebSocket } from 'ws';
 import { findJsonRpcResponse } from './support/json-rpc.mjs';
 

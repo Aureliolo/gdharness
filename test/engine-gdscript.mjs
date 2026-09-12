@@ -247,6 +247,7 @@ function main() {
 
   const projectDir = createProject();
   try {
+    runFixture(godotPath, projectDir, 'scene_parse');
     runFixture(godotPath, projectDir, 'operations_serialize');
     runFixture(godotPath, projectDir, 'runtime_serialize');
     runFixture(godotPath, projectDir, 'input_action');

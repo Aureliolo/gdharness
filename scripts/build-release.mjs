@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 
-import { chmod, cp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, cp, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 const root = path.resolve(import.meta.dirname, '..');

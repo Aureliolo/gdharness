@@ -3,17 +3,17 @@ import { createConnection, type Socket } from 'node:net';
 import { dirname, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-type PendingRequest = {
+interface PendingRequest {
   resolve: (value: unknown) => void;
   reject: (reason?: unknown) => void;
   timer: NodeJS.Timeout;
-};
+}
 
-type DiagnosticsWaiter = {
+interface DiagnosticsWaiter {
   resolve: (diagnostics: unknown[]) => void;
   reject: (reason?: unknown) => void;
   timer: NodeJS.Timeout;
-};
+}
 
 type JsonRecord = Record<string, unknown>;
 
@@ -43,20 +43,20 @@ function diagnosticsKey(uri: string): string {
 
 export class GodotLSPClient {
   private socket: Socket | null = null;
-  private connected: boolean = false;
+  private connected = false;
   private port: number;
   private host: string;
-  private requestId: number = 0;
+  private requestId = 0;
   private pendingRequests: Map<number, PendingRequest>;
-  private buffer: string = '';
+  private buffer = '';
 
   private connectPromise: Promise<void> | null = null;
-  private initialized: boolean = false;
+  private initialized = false;
   private rootPath: string | null = null;
-  private diagnosticsWaiters: Map<string, DiagnosticsWaiter> = new Map();
-  private documentVersions: Map<string, number> = new Map();
+  private diagnosticsWaiters = new Map<string, DiagnosticsWaiter>();
+  private documentVersions = new Map<string, number>();
 
-  constructor(port: number = 6005, host: string = '127.0.0.1') {
+  constructor(port = 6005, host = '127.0.0.1') {
     this.port = port;
     this.host = host;
     this.pendingRequests = new Map<number, PendingRequest>();
@@ -127,7 +127,9 @@ export class GodotLSPClient {
     this.initialized = false;
 
     await new Promise<void>((resolveClose) => {
-      socketToClose.once('close', () => resolveClose());
+      socketToClose.once('close', () => {
+        resolveClose();
+      });
       socketToClose.end();
       setTimeout(() => {
         if (!socketToClose.destroyed) {
@@ -230,7 +232,7 @@ export class GodotLSPClient {
   }
 
   private parseMessages(): void {
-    while (true) {
+    for (;;) {
       const headerEnd = this.buffer.indexOf('\r\n\r\n');
       if (headerEnd === -1) {
         return;
@@ -482,13 +484,13 @@ export class GodotLSPClient {
     });
 
     if (Array.isArray(result)) {
-      return result;
+      return result as unknown[];
     }
 
     if (result && typeof result === 'object') {
-      const resultObject = result as JsonRecord;
-      if (Array.isArray(resultObject['items'])) {
-        return resultObject['items'];
+      const items = (result as JsonRecord)['items'];
+      if (Array.isArray(items)) {
+        return items as unknown[];
       }
     }
 
@@ -515,7 +517,7 @@ export class GodotLSPClient {
       textDocument: { uri },
     });
 
-    return Array.isArray(result) ? result : [];
+    return Array.isArray(result) ? (result as unknown[]) : [];
   }
 
   isConnected(): boolean {
@@ -523,11 +525,11 @@ export class GodotLSPClient {
   }
 }
 
-export function createLSPTools(): Array<{
+export function createLSPTools(): {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
-}> {
+}[] {
   return [
     {
       name: 'lsp_get_diagnostics',
@@ -584,7 +586,7 @@ export function createLSPTools(): Array<{
   ];
 }
 
-function asToolResponse(payload: unknown): { content: Array<{ type: string; text: string }> } {
+function asToolResponse(payload: unknown): { content: { type: string; text: string }[] } {
   return {
     content: [
       {
@@ -654,7 +656,7 @@ export async function handleLSPTool(
   client: GodotLSPClient,
   toolName: string,
   args: unknown,
-): Promise<{ content: Array<{ type: string; text: string }> }> {
+): Promise<{ content: { type: string; text: string }[] }> {
   try {
     if (!args || typeof args !== 'object') {
       throw new Error('Tool arguments must be an object.');

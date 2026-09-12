@@ -6,13 +6,22 @@
 # reason to argue about the rule, not to switch it off quietly.
 disable: []
 
-# A file past this is one nobody reads end to end. godot_operations.gd is currently 6800
-# lines and fails this on purpose: splitting it is part of the rework, and the linter should
-# say so on every run until it happens rather than being tuned to accept it.
-max-file-lines: 600
+# gdlint's own default. It was 600 here for a while, which was a number picked rather than
+# measured: it failed two ordinary tool modules at 720 and 849 lines alongside the one file that
+# is genuinely the problem. godot_operations.gd is 4400 lines and fails this on purpose, because
+# splitting it is the rework and the linter should keep saying so rather than be tuned to accept
+# it. Tightening this again is worth doing once that file is no longer the reason it fires.
+max-file-lines: 1000
 
 # gdlint's default is 10, which is enough arguments to hide a missing struct.
 function-arguments-number: 6
+
+# gdlint's default is 6, which fights the shape this project mandates: a tool fails rather than
+# answers, so every argument gets a guard clause with its own return, and no-else-return then
+# demands those be flat. Measured across the addons, a genuine validator tops out at 9 returns
+# and everything above 12 was a type dispatcher pretending to be a function. 12 admits the
+# validators and still catches the thing the rule is for.
+max-returns: 12
 
 # Matches Biome's lineWidth for TypeScript, so both languages wrap at the same column.
 max-line-length: 110

@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import process from 'node:process';
 /**
  * E2E Test: Dynamic Tool Group Activation
  *
@@ -12,9 +11,10 @@ import process from 'node:process';
  * 6. Error handling (invalid group names)
  */
 
-import { spawn } from 'child_process';
-import { join, dirname } from 'path';
-import { fileURLToPath } from 'url';
+import { spawn } from 'node:child_process';
+import { dirname, join } from 'node:path';
+import process from 'node:process';
+import { fileURLToPath } from 'node:url';
 import { sanitizeToolName } from './support/tool-name.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -36,11 +36,11 @@ function assert(condition, label) {
 }
 
 function makeRequest(method, params, id) {
-  return JSON.stringify({ jsonrpc: '2.0', method, params, id }) + '\n';
+  return `${JSON.stringify({ jsonrpc: '2.0', method, params, id })}\n`;
 }
 
 function makeNotification(method, params) {
-  return JSON.stringify({ jsonrpc: '2.0', method, params }) + '\n';
+  return `${JSON.stringify({ jsonrpc: '2.0', method, params })}\n`;
 }
 
 function startServer() {
@@ -55,36 +55,6 @@ function startServer() {
     });
     serverProcess.on('error', reject);
     setTimeout(() => resolve(serverProcess), 500);
-  });
-}
-
-function sendAndReceive(proc, request, timeoutMs = 10000) {
-  return new Promise((resolve, reject) => {
-    let buffer = '';
-    const timer = setTimeout(() => reject(new Error(`Timeout waiting for response`)), timeoutMs);
-
-    const handler = (data) => {
-      buffer += data.toString();
-      const lines = buffer.split('\n');
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        try {
-          const parsed = JSON.parse(trimmed);
-          if (parsed.id !== undefined || parsed.method === 'notifications/tools/list_changed') {
-            clearTimeout(timer);
-            proc.stdout.removeListener('data', handler);
-            resolve(parsed);
-            return;
-          }
-        } catch {
-          /* partial JSON, keep buffering */
-        }
-      }
-    };
-
-    proc.stdout.on('data', handler);
-    proc.stdin.write(request);
   });
 }
 
@@ -131,7 +101,9 @@ async function drainNotifications(proc, ms = 300) {
       for (const line of lines) {
         try {
           notes.push(JSON.parse(line.trim()));
-        } catch {}
+        } catch {
+          // Partial line at the end of a chunk; the next chunk completes it.
+        }
       }
     };
     proc.stdout.on('data', handler);

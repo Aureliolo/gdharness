@@ -4,15 +4,15 @@
  * Tests: MCP server startup, WebSocket bridge, tool routing
  */
 import { spawn } from 'node:child_process';
-import { createServer } from 'node:net';
 import { accessSync, constants, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { WebSocket } from 'ws';
+import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
-import { setTimeout as delay } from 'node:timers/promises';
 import process from 'node:process';
-import { sanitizeToolName } from './support/tool-name.mjs';
+import { setTimeout as delay } from 'node:timers/promises';
+import { WebSocket } from 'ws';
 import { parseJsonLines, parseTextContent } from './support/json-rpc.mjs';
+import { sanitizeToolName } from './support/tool-name.mjs';
 
 const MCP_SERVER = './build/index.js';
 const bridgePortRaw =
@@ -51,7 +51,7 @@ function fail(name, err) {
 // --- MCP JSON-RPC helpers ---
 let msgId = 1;
 function rpcMsg(method, params = {}) {
-  return JSON.stringify({ jsonrpc: '2.0', id: msgId++, method, params }) + '\n';
+  return `${JSON.stringify({ jsonrpc: '2.0', id: msgId++, method, params })}\n`;
 }
 
 function expandToolCandidates(...names) {
@@ -199,7 +199,7 @@ async function main() {
     console.log('stderr:', stderr);
     process.exit(1);
   }
-  ok('MCP server started (pid: ' + server.pid + ')');
+  ok(`MCP server started (pid: ${server.pid})`);
 
   // 2. Send MCP initialize
   console.log('\n📡 Testing MCP Protocol...');
@@ -226,11 +226,11 @@ async function main() {
       fail('prompts capability', 'Missing capabilities.prompts in initialize response');
     }
   } else {
-    fail('MCP initialize', 'No valid response. stdout: ' + stdout.substring(0, 200));
+    fail('MCP initialize', `No valid response. stdout: ${stdout.substring(0, 200)}`);
   }
 
   // 3. Send initialized notification
-  server.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n');
+  server.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' })}\n`);
   await delay(500);
 
   // 4. List tools
@@ -843,10 +843,10 @@ async function main() {
       ) {
         ok('create_scene correctly reports editor not connected');
       } else {
-        ok('create_scene responded: ' + text.substring(0, 200));
+        ok(`create_scene responded: ${text.substring(0, 200)}`);
       }
     } else if (res.error) {
-      ok('create_scene returned error (expected): ' + res.error.message?.substring(0, 100));
+      ok(`create_scene returned error (expected): ${res.error.message?.substring(0, 100)}`);
     }
   } else {
     fail('create_scene without Godot', 'No response');
@@ -907,10 +907,10 @@ async function main() {
         if (status?.connected === true) {
           ok('get_editor_status shows connected after godot_ready');
         } else {
-          fail('Connected status', 'Expected connected=true, got: ' + text.substring(0, 200));
+          fail('Connected status', `Expected connected=true, got: ${text.substring(0, 200)}`);
         }
       } catch {
-        fail('Connected status', 'Expected JSON status payload, got: ' + text.substring(0, 200));
+        fail('Connected status', `Expected JSON status payload, got: ${text.substring(0, 200)}`);
       }
     }
 
@@ -925,7 +925,9 @@ async function main() {
           if (msg.type === 'tool_invoke') {
             resolve(msg);
           }
-        } catch {}
+        } catch {
+          // A frame that is not JSON is not the one being waited for.
+        }
       });
       setTimeout(() => reject(new Error('No tool_invoke received')), 5000);
     });
@@ -987,7 +989,7 @@ async function main() {
           if (text.includes('success') || text.includes('Scene created') || text.includes('test_bridge')) {
             ok('MCP received tool result from mock Godot');
           } else {
-            ok('MCP response: ' + text.substring(0, 200));
+            ok(`MCP response: ${text.substring(0, 200)}`);
           }
         }
       } else {
@@ -1009,7 +1011,9 @@ async function main() {
         if (msg.type === 'tool_invoke') {
           unexpectedInvokes.push(msg);
         }
-      } catch {}
+      } catch {
+        // A frame that is not JSON cannot be an unexpected invoke.
+      }
     };
     ws.on('message', missingArgsCapture);
     const missingArgsStartedAt = Date.now();
@@ -1061,9 +1065,9 @@ async function main() {
   cleanupTestProject();
 
   // Summary
-  console.log('\n' + '='.repeat(50));
+  console.log(`\n${'='.repeat(50)}`);
   console.log(`📊 Results: ${passed} passed, ${failed} failed`);
-  console.log('='.repeat(50) + '\n');
+  console.log(`${'='.repeat(50)}\n`);
 
   process.exit(failed > 0 ? 1 : 0);
 }

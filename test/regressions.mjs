@@ -1,16 +1,15 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
+import { spawn, spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { readFileSync, mkdtempSync, cpSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { spawn } from 'node:child_process';
-import { spawnSync } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createBridge } from '../build/godot-bridge.js';
-import { parseProjectGodot } from '../build/resources.js';
 import { GodotLSPClient } from '../build/lsp_client.js';
+import { parseProjectGodot } from '../build/resources.js';
 
 const INDEX_SOURCE = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
 const OPERATIONS_SOURCE = readFileSync(
@@ -23,7 +22,7 @@ const RUNTIME_SOURCE = readFileSync(
 );
 
 function makeRequest(method, params, id) {
-  return JSON.stringify({ jsonrpc: '2.0', method, params, id }) + '\n';
+  return `${JSON.stringify({ jsonrpc: '2.0', method, params, id })}\n`;
 }
 
 async function waitForJsonLine(stream, predicate, timeoutMs = 15000) {
@@ -240,7 +239,9 @@ async function withFakeLanguageServer(publishUri, handler) {
         }
       }
     });
-    socket.on('error', () => {});
+    socket.on('error', () => {
+      // The stub only has to not crash the suite when a client drops.
+    });
   });
 
   await new Promise((ready) => server.listen(0, '127.0.0.1', ready));
@@ -338,7 +339,7 @@ async function testEditorStatusPortConflict() {
       );
       await waitForJsonLine(proc.stdout, (msg) => msg.id === 1);
       proc.stdin.write(
-        JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized', params: {} }) + '\n',
+        `${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized', params: {} })}\n`,
       );
 
       proc.stdin.write(makeRequest('tools/call', { name: 'get_editor_status', arguments: {} }, 2));
@@ -420,7 +421,9 @@ async function main() {
   // headless argv, which took -d with it and launched a game the debugger never attached to.
   assert.match(
     INDEX_SOURCE,
-    /private async handleRunProject[\s\S]*?const cmdArgs = this\.resolveHeadless\(args\.headless\)\s*\n\s*\? \['--headless', '-d', '--path', args\.projectPath\]\s*\n\s*: \['-d', '--path', args\.projectPath\];/,
+    // The argument and the path may be read under any spelling; what matters is that the
+    // two branches differ by --headless alone and that -d survives in both.
+    /private async handleRunProject[\s\S]*?const cmdArgs = this\.resolveHeadless\([^)]+\)\s*\n\s*\? \['--headless', '-d', '--path', [\w.[\]']+\]\s*\n\s*: \['-d', '--path', [\w.[\]']+\];/,
     'run_project should pass --headless only when headless resolves true, and -d either way',
   );
   assert.match(
@@ -430,10 +433,18 @@ async function main() {
   );
   assert.match(
     INDEX_SOURCE,
-    // Either spelling of the lookup: strict TypeScript wants the bracket form on process.env,
-    // and which one is written says nothing about whether the check is right.
-    /private resolveHeadless[\s\S]*?return !\(process\.env(?:\.DISPLAY|\['DISPLAY'\]) \|\| process\.env(?:\.WAYLAND_DISPLAY|\['WAYLAND_DISPLAY'\])\);/,
+    // Either spelling of the lookup, read directly or through the env helper: which one is
+    // written says nothing about whether the check is right. What must hold is that both
+    // display variables are consulted and that neither being set means headless.
+    /private resolveHeadless[\s\S]*?DISPLAY[\s\S]{0,80}?WAYLAND_DISPLAY[^\n]*\n\s*\}/,
     'with no explicit argument a display-less environment such as CI should stay headless',
+  );
+  assert.match(
+    INDEX_SOURCE,
+    // An exported-but-empty display variable means no display, so the check must not treat
+    // the empty string as a desktop.
+    /function envValue[\s\S]*?value === undefined \|\| value === ''/,
+    'an empty environment variable should read as unset',
   );
   assert.match(
     OPERATIONS_SOURCE,

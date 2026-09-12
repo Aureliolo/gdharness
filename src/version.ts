@@ -29,7 +29,7 @@ export function getLocalVersion(): string {
         return value.version;
       }
     } catch {
-      continue;
+      // Not a readable package.json at this candidate, so try the next one up.
     }
   }
 
