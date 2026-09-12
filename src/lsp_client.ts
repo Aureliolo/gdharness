@@ -1,7 +1,8 @@
 import { readFile, realpath } from 'node:fs/promises';
 import { createConnection, type Socket } from 'node:net';
-import { dirname, resolve, sep } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { isWithinRoot } from './paths.js';
 
 interface PendingRequest {
   resolve: (value: unknown) => void;
@@ -667,19 +668,6 @@ function normalizeLSPError(error: unknown): string {
   return String(error);
 }
 
-function normalizePathForComparison(pathValue: string): string {
-  const resolved = resolve(pathValue);
-  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
-}
-
-function isPathWithinRoot(rootPath: string, candidatePath: string): boolean {
-  const normalizedRoot = normalizePathForComparison(rootPath);
-  const normalizedCandidate = normalizePathForComparison(candidatePath);
-  const rootPrefix = normalizedRoot.endsWith(sep) ? normalizedRoot : `${normalizedRoot}${sep}`;
-
-  return normalizedCandidate === normalizedRoot || normalizedCandidate.startsWith(rootPrefix);
-}
-
 async function resolveLSPPaths(
   projectPathValue: string,
   scriptPathValue: string,
@@ -700,7 +688,7 @@ async function resolveLSPPaths(
     throw new Error(`Script file does not exist: ${requestedScriptPath}`);
   }
 
-  if (!isPathWithinRoot(projectPath, scriptPath)) {
+  if (!isWithinRoot(projectPath, scriptPath)) {
     throw new Error('scriptPath resolves outside the project root boundary.');
   }
 

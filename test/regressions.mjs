@@ -12,6 +12,7 @@ import { dictionary, emptyRecord } from '../build/dictionary.js';
 import { modifyGDScript } from '../build/gdscript_utils.js';
 import { createBridge } from '../build/godot-bridge.js';
 import { GodotLSPClient } from '../build/lsp_client.js';
+import { isWithinRoot, resolveWithinProject } from '../build/paths.js';
 import { parseProjectGodot } from '../build/resources.js';
 
 const INDEX_SOURCE = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
@@ -711,25 +712,30 @@ async function testEditorStatusPortConflict() {
 }
 
 /**
- * Runs the built server over stdio, initialised and ready for tools/call, and hands `call` to
- * the body. The transport is the point: these fixtures are about what a peer can put on the
- * wire, and reaching into the class directly would not carry a `__proto__` through JSON.parse.
+ * Runs the built server over stdio, initialised and ready for tools/call, and hands `call` and
+ * `request` to the body. The transport is the point: these fixtures are about what a peer can
+ * put on the wire, and reaching into the class directly would not carry a `__proto__` through
+ * JSON.parse.
  */
-async function withStdioServer(body) {
+async function withStdioServer(body, env = {}) {
   const proc = spawn(process.execPath, ['./build/index.js'], {
     cwd: process.cwd(),
-    env: { ...process.env, GDHARNESS_TOOL_PROFILE: 'compact' },
+    env: { ...process.env, GDHARNESS_TOOL_PROFILE: 'compact', ...env },
     stdio: ['pipe', 'pipe', 'pipe'],
   });
 
   let nextId = 1;
+  const request = async (method, params) => {
+    nextId += 1;
+    const id = nextId;
+    proc.stdin.write(makeRequest(method, params, id));
+    return await waitForJsonLine(proc.stdout, (msg) => msg.id === id);
+  };
+
   // The text rather than a parsed payload: a refusal comes back as a sentence, and a fixture
   // about refusals must not fall over on the thing it is there to see.
   const call = async (name, args) => {
-    nextId += 1;
-    const id = nextId;
-    proc.stdin.write(makeRequest('tools/call', { name, arguments: args }, id));
-    const response = await waitForJsonLine(proc.stdout, (msg) => msg.id === id);
+    const response = await request('tools/call', { name, arguments: args });
     return response.result.content[0].text;
   };
 
@@ -750,7 +756,7 @@ async function withStdioServer(body) {
       `${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized', params: {} })}\n`,
     );
 
-    await body(call);
+    await body(call, request);
   } finally {
     proc.kill('SIGTERM');
     await Promise.race([new Promise((resolve) => proc.once('exit', resolve)), delay(2000)]);
@@ -913,6 +919,183 @@ function testProjectGodotMultilineValues() {
   assert.equal(typeof unterminated.s?.broken, 'string', 'an unterminated value should not hang');
 }
 
+/**
+ * A path read as a location inside the project has to land inside it.
+ *
+ * The guard this replaces was `path.includes('..')`, which is neither necessary nor sufficient:
+ * it refused ordinary names such as `archive..old.gd`, and it had nothing to say about the
+ * spellings that carry no dots at all. Those are platform-shaped, so the hostile set is too: a
+ * drive letter and a UNC share are absolute on Windows and ordinary filenames on Linux.
+ */
+function testProjectPathsAreContained() {
+  const onWindows = process.platform === 'win32';
+  const root = onWindows ? 'C:\\game' : '/srv/game';
+
+  const refused = [
+    '../../../../etc/passwd',
+    'scenes/../../outside.tscn',
+    'res://../../outside.gd',
+    'user://savegame.dat',
+    '',
+    '.',
+    ...(onWindows
+      ? ['C:\\Windows\\win.ini', 'C:/Windows/win.ini', 'D:\\other\\payload.gd', '\\\\server\\share\\x.gd']
+      : ['/etc/shadow/../passwd', '/../etc/passwd']),
+  ];
+
+  for (const candidate of refused) {
+    const answer = resolveWithinProject(root, candidate);
+    assert.equal(answer.ok, false, `${JSON.stringify(candidate)} should not resolve inside ${root}`);
+    assert.match(
+      answer.reason,
+      /empty|null byte|scheme|outside the project|project directory itself/,
+      `${JSON.stringify(candidate)} should be refused with a reason that says why`,
+    );
+  }
+
+  // The other half, or the fixture above passes against a function that refuses everything.
+  const accepted = [
+    ['scenes/main.tscn', 'scenes/main.tscn'],
+    ['res://scenes/main.tscn', 'scenes/main.tscn'],
+    ['/scenes/main.tscn', 'scenes/main.tscn'],
+    ['scenes/./main.tscn', 'scenes/main.tscn'],
+    ['scenes/sub/../main.tscn', 'scenes/main.tscn'],
+    ['archive..old.gd', 'archive..old.gd'],
+    ['..config/player.gd', '..config/player.gd'],
+    ...(onWindows ? [['scenes\\main.tscn', 'scenes/main.tscn']] : []),
+  ];
+
+  for (const [candidate, expected] of accepted) {
+    const answer = resolveWithinProject(root, candidate);
+    assert.equal(answer.ok, true, `${JSON.stringify(candidate)} names a file inside the project`);
+    assert.equal(
+      answer.relativePath,
+      expected,
+      `${JSON.stringify(candidate)} should reach the engine as a project-relative path`,
+    );
+    assert.equal(
+      answer.absolutePath,
+      join(root, ...expected.split('/')),
+      `${JSON.stringify(candidate)} should resolve to the file under the project root`,
+    );
+  }
+
+  // A sibling directory whose path merely begins with the project's text is not inside it,
+  // which is what a prefix comparison gets wrong and `relative` does not.
+  assert.equal(
+    isWithinRoot(root, `${root}-old${onWindows ? '\\' : '/'}player.gd`),
+    false,
+    'a sibling directory sharing the project name prefix is outside the project',
+  );
+  assert.equal(
+    isWithinRoot(root, join(root, 'scenes', 'main.tscn')),
+    true,
+    'a file under the project root is inside it',
+  );
+}
+
+/**
+ * The same, through the tools, because the check is only worth anything where it is called.
+ *
+ * Every argument below is documented as a path inside the project and is read as one: the
+ * operations script prefixes `res://` and opens it, the export path is a destination the engine
+ * writes. Several of these were not checked at all, and the rest were checked by a substring
+ * test that an absolute path walks straight past.
+ */
+async function testToolsRefusePathsOutsideTheProject() {
+  const sandbox = mkdtempSync(join(tmpdir(), 'gdharness-containment-'));
+  const projectPath = join(sandbox, 'project');
+  mkdirSync(projectPath, { recursive: true });
+  writeFileSync(join(projectPath, 'project.godot'), 'config_version=5\n');
+  writeFileSync(join(projectPath, 'inside.gd'), 'extends Node\n');
+  writeFileSync(join(sandbox, 'outside.gd'), 'extends Node\n');
+  writeFileSync(join(sandbox, 'outside.png'), 'not a png');
+
+  const outsideScript = '../outside.gd';
+  const hostile = [
+    ['create_script', { scriptPath: '../escaped.gd' }],
+    ['modify_script', { scriptPath: outsideScript, modifications: [{ type: 'add_signal', name: 'died' }] }],
+    ['get_script_info', { scriptPath: outsideScript }],
+    ['get_uid', { filePath: '../outside.png' }],
+    ['get_import_status', { resourcePath: '../outside.png' }],
+    ['get_import_options', { resourcePath: '../outside.png' }],
+    ['set_import_options', { resourcePath: '../outside.png', options: { flag: true } }],
+    ['reimport_resource', { resourcePath: '../outside.png' }],
+    ['get_dependencies', { resourcePath: outsideScript }],
+    ['find_resource_usages', { resourcePath: '../outside.png' }],
+    ['add_autoload', { name: 'Escaped', path: outsideScript }],
+    ['set_main_scene', { scenePath: '../outside.tscn' }],
+    ['run_project', { scene: '../outside.tscn' }],
+    ['export_project', { preset: 'Linux', outputPath: '../escaped.bin' }],
+    ['enable_plugin', { pluginName: '../../outsideplugin' }],
+    ['disable_plugin', { pluginName: '../../outsideplugin' }],
+  ];
+
+  // An absolute destination is the one that matters most for the export: the engine writes it,
+  // and no amount of looking for `..` in it finds anything.
+  const absoluteOutput = process.platform === 'win32' ? 'C:\\Windows\\Temp\\pwn.exe' : '/tmp/pwn.bin';
+
+  try {
+    await withStdioServer(
+      async (call, request) => {
+        for (const [tool, args] of hostile) {
+          const answer = await call(tool, { projectPath, ...args });
+          assert.match(
+            answer,
+            /resolves outside the project directory/,
+            `${tool} should refuse ${JSON.stringify(args)}`,
+          );
+        }
+
+        assert.match(
+          await call('export_project', { projectPath, preset: 'Linux', outputPath: absoluteOutput }),
+          /resolves outside the project directory/,
+          'export_project should refuse an absolute destination outside the project',
+        );
+
+        // The accepting half. These reach the engine, which is not Godot here, so the answer is
+        // whatever that failure says; what matters is that containment was not the thing that
+        // stopped them.
+        for (const [tool, args] of [
+          ['create_script', { scriptPath: 'scripts/player.gd' }],
+          ['get_uid', { filePath: 'inside.gd' }],
+          ['get_script_info', { scriptPath: 'inside.gd' }],
+          ['export_project', { preset: 'Linux', outputPath: 'builds/game.bin' }],
+        ]) {
+          assert.doesNotMatch(
+            await call(tool, { projectPath, ...args }),
+            /resolves outside the project directory/,
+            `${tool} should accept ${JSON.stringify(args)}`,
+          );
+        }
+
+        // The LSP tools ask the same question of the same helper, before they open a socket, so
+        // the refusal is observable with no language server anywhere. Only the refusal: the
+        // accepting side would connect to whatever editor is serving 6005 on this machine.
+        assert.match(
+          await call('lsp_get_diagnostics', { projectPath, scriptPath: '../outside.gd' }),
+          /outside the project root boundary/,
+          'lsp_get_diagnostics should refuse a script outside the project',
+        );
+
+        // The resource handler reads the same kind of path out of a URI. The URL parser folds
+        // away a plain `..`, so the traversal that reaches it is the encoded one.
+        const escaped = await request('resources/read', {
+          uri: 'godot://script/..%2f..%2foutside.gd',
+        });
+        assert.match(
+          escaped.error?.message ?? escaped.result?.contents?.[0]?.text ?? '',
+          /resolves outside the project directory/,
+          'a godot:// URI with an encoded traversal should be refused',
+        );
+      },
+      { GODOT_PATH: process.execPath },
+    );
+  } finally {
+    rmSync(sandbox, { recursive: true, force: true });
+  }
+}
+
 async function main() {
   testStaleDisconnectRegression();
   testSceneToolsVectorRegression();
@@ -935,6 +1118,13 @@ async function main() {
     INDEX_SOURCE,
     /private resolveHeadless[\s\S]*?if \(typeof requested === 'boolean'\) \{\s*\n\s*return requested;/,
     'an explicit headless argument should win over the environment',
+  );
+  // The engine reads the scene argument positionally, so a value that begins with a dash is
+  // another option to it. Asserted here because the argv is not visible from the response.
+  assert.match(
+    INDEX_SOURCE,
+    /private async handleRunProject[\s\S]*?res:\/\/\$\{[\w.]+\}[\s\S]*?cmdArgs\.push\(/,
+    'run_project should push a res:// scene path rather than the text that arrived',
   );
   assert.match(
     INDEX_SOURCE,
@@ -1034,7 +1224,9 @@ async function main() {
   await testFramingCeilingFailsLoudly();
   testDictionariesHaveNothingBehindThem();
   testUnimplementedScriptModificationsFail();
+  testProjectPathsAreContained();
   await testToolGroupLookupsCannotReachThePrototype();
+  await testToolsRefusePathsOutsideTheProject();
   console.log('regression tests passed');
 }
 
