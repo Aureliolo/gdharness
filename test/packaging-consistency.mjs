@@ -65,11 +65,35 @@ assert.equal(
   'release archive should contain bundles instead of a node_modules tree',
 );
 
+// The operations entry point dispatches to sibling modules it preloads by relative path, so
+// one missing from the archive is a tool that fails only once somebody asks for it.
+const operationsModules = [
+  'godot_operations.gd',
+  'audio_buses.gd',
+  'classdb_queries.gd',
+  'dependencies.gd',
+  'file_walk.gd',
+  'gdscript_analysis.gd',
+  'gdscript_authoring.gd',
+  'import_pipeline.gd',
+  'input_actions.gd',
+  'logger.gd',
+  'plugins.gd',
+  'project_config.gd',
+  'project_diagnostics.gd',
+  'resource_builders.gd',
+  'resource_files.gd',
+  'scene_builders.gd',
+  'scene_nodes.gd',
+  'serialisation.gd',
+  'shader_templates.gd',
+];
+
 for (const requiredFile of [
   'package/package.json',
   'package/build/cli.js',
   'package/build/index.js',
-  'package/build/godot/operations/godot_operations.gd',
+  ...operationsModules.map((module) => `package/build/godot/operations/${module}`),
   'package/build/godot/addons/auto_reload/plugin.cfg',
   'package/build/godot/addons/godot_mcp_editor/plugin.cfg',
   'package/build/godot/addons/godot_mcp_runtime/plugin.cfg',
@@ -78,6 +102,18 @@ for (const requiredFile of [
 ]) {
   assert.ok(packedFiles.has(requiredFile), `release archive should include ${requiredFile}`);
 }
+
+// A module added to the source directory and left out of the list above would otherwise be
+// packed and never checked, which is the half of this that a list alone cannot hold.
+const packedOperations = archiveEntries
+  .filter((entry) => entry.startsWith('package/build/godot/operations/') && entry.endsWith('.gd'))
+  .map((entry) => entry.slice('package/build/godot/operations/'.length))
+  .sort();
+assert.deepEqual(
+  packedOperations,
+  [...operationsModules].sort(),
+  'the packed operations directory should be exactly the modules listed here',
+);
 
 for (const forbiddenFile of [
   'package/src/cli.ts',
