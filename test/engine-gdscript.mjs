@@ -13,24 +13,48 @@ import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+const tried = [];
+
+/** True when the binary at this path answers --version, which is the only test that counts. */
+function godotRuns(candidate) {
+  const probe = spawnSync(candidate, ['--version'], { encoding: 'utf8', timeout: 60000 });
+  tried.push(`${candidate} -> ${probe.status ?? probe.error?.code ?? 'no status'}`);
+  return probe.status === 0;
+}
+
 /**
  * GODOT_PATH first, then the GODOT that setup-godot exports, then plain `godot` on PATH.
  *
- * Each is tried by running it rather than by looking for it on disk, since on Windows what
- * sits on PATH is a shim. That platform also needs the extensions spelled out: setup-godot
- * exports GODOT without one, and spawn does not apply PATHEXT to a path it is handed whole.
+ * Every candidate is tried by running it rather than by looking for it on disk, because on
+ * Windows what sits on PATH is a shim. Windows also needs the extensions spelled out and,
+ * failing that, `where` asked: setup-godot exports GODOT without an extension, and a bare name
+ * handed to spawn does not go through PATHEXT the way it would in a shell. Their own
+ * documented check is `godot --version` from pwsh, which is why it works there and not here.
  */
 function resolveGodotPath() {
   const named = [process.env.GODOT_PATH, process.env.GODOT, 'godot'].filter(Boolean);
-  const candidates =
-    process.platform === 'win32'
-      ? named.flatMap((name) => [name, `${name}.exe`, `${name}.cmd`, `${name}.bat`])
-      : named;
 
-  for (const candidate of candidates) {
-    const probe = spawnSync(candidate, ['--version'], { encoding: 'utf8', timeout: 60000 });
-    if (probe.status === 0) return candidate;
+  if (process.platform !== 'win32') {
+    return named.find(godotRuns) ?? null;
   }
+
+  for (const name of named) {
+    const spelling = [name, `${name}.exe`, `${name}.cmd`, `${name}.bat`].find(godotRuns);
+    if (spelling) return spelling;
+
+    // Last resort, and the one that copes with a layout we have not guessed: let Windows
+    // resolve the name itself and try whatever it hands back.
+    const where = spawnSync('where.exe', [name], { encoding: 'utf8', timeout: 30000 });
+    if (where.status !== 0) continue;
+
+    const resolved = where.stdout
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .find(godotRuns);
+    if (resolved) return resolved;
+  }
+
   return null;
 }
 
@@ -181,8 +205,14 @@ function main() {
     // A skip is fine on a machine with no engine and never fine where the job exists to run
     // this. Without the flag, CI installing Godot wrong would read as a pass.
     if (process.env.GDHARNESS_REQUIRE_GODOT) {
+      // The list of what was tried and how each one failed, because the next person to hit
+      // this is looking at a CI log for a platform they cannot reproduce.
       throw new Error(
-        'GDHARNESS_REQUIRE_GODOT is set and no Godot could be run. Tried GODOT_PATH, GODOT and godot on PATH.',
+        [
+          'GDHARNESS_REQUIRE_GODOT is set and no Godot could be run.',
+          `GODOT_PATH=${process.env.GODOT_PATH ?? '<unset>'} GODOT=${process.env.GODOT ?? '<unset>'}`,
+          ...tried.map((line) => `  tried ${line}`),
+        ].join('\n'),
       );
     }
     console.log('engine gdscript tests skipped (no Godot found)');
