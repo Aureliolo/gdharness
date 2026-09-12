@@ -32,6 +32,7 @@
     "test:dynamic-groups": "bun test/dynamic-groups.mjs",
     "test:regressions": "bun test/regressions.mjs",
     "test:detection": "bun test/godot-detection.mjs",
+    "test:engine": "bun test/engine-gdscript.mjs",
     "test:ci": "bun test/smoke.mjs && bun test/regressions.mjs && bun test/godot-detection.mjs",
     "test:metadata": "bun run build && bun test/metadata-consistency.mjs && bun test/version-bump.mjs",
     "test:version-bump": "bun test/version-bump.mjs",

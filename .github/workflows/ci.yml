@@ -67,6 +67,46 @@ jobs:
         if: '!cancelled()'
         run: gdlint src/godot
 
+  # The GDScript that ships in the bundle, driven against a real engine on every platform we
+  # claim to support. It is a separate job from build-and-test because it is the only one that
+  # needs Godot, and running it on one platform would say nothing about the other two: the
+  # things it covers, project.godot writing and path handling, are exactly where the platforms
+  # differ.
+  engine:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+
+      - name: Setup Godot
+        uses: chickensoft-games/setup-godot@c233594225991af5aec714e52457cc76d6df8fa2 # v2.4.2
+        with:
+          version: 4.7.2
+          use-dotnet: false
+          include-templates: false
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Engine fixtures
+        run: bun run test:engine
+        env:
+          # The suite skips when it cannot run Godot, which is right on a contributor's machine
+          # and wrong here: without this a broken install would read as a pass.
+          GDHARNESS_REQUIRE_GODOT: '1'
+
   # Both linters run against a codebase that has never been linted, so these are expected
   # to be red until the tool boundary is typed. They are separate jobs and not required
   # checks, so the failure is visible rather than hidden, and it blocks nothing yet.

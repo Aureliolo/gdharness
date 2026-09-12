@@ -5441,10 +5441,7 @@ func add_input_action(params):
 		log_error("No valid events provided")
 		quit(1)
 
-	var action_value = build_input_action_string(deadzone, events_config)
-
-	# Set the input action
-	config.set_value("input", action_name, action_value)
+	config.set_value("input", action_name, build_input_action(deadzone, events_config))
 
 	# Save project.godot
 	err = config.save("res://project.godot")
@@ -5578,69 +5575,48 @@ func get_keycode_value(key_name: String) -> int:
 	return 0
 
 
-# Helper: Build input action string for project.godot
-func build_input_action_string(deadzone: float, events: Array) -> String:
-	var events_str = []
+# The value project.godot stores for one input action.
+#
+# It has to be a Dictionary holding real InputEvent objects. ConfigFile writes those as the
+# unquoted expression Godot parses back into an action; hand it the same thing as assembled
+# text and it writes a quoted, escaped string, which loads as a String and leaves InputMap
+# with no action at all while add_input_action still reports the events it was given.
+func build_input_action(deadzone: float, events: Array) -> Dictionary:
+	var built: Array = []
 
 	for event in events:
 		var evt_class = event.get("class_name", "")
-		var obj_str = ""
 
 		match evt_class:
 			"InputEventKey":
-				var keycode = event.get("keycode", 0)
-				var ctrl = event.get("ctrl_pressed", false)
-				var alt = event.get("alt_pressed", false)
-				var shift = event.get("shift_pressed", false)
-				obj_str = (
-					(
-						'Object(InputEventKey,"resource_local_to_scene":false,"resource_name":"",'
-						+ '"device":-1,"window_id":0,"alt_pressed":%s,"shift_pressed":%s,'
-						+ '"ctrl_pressed":%s,"meta_pressed":false,"pressed":false,"keycode":%d,'
-						+ '"physical_keycode":0,"key_label":0,"unicode":0,"echo":false,"script":null)'
-					)
-					% [str(alt).to_lower(), str(shift).to_lower(), str(ctrl).to_lower(), keycode]
-				)
+				var key := InputEventKey.new()
+				key.keycode = int(event.get("keycode", 0))
+				key.ctrl_pressed = bool(event.get("ctrl_pressed", false))
+				key.alt_pressed = bool(event.get("alt_pressed", false))
+				key.shift_pressed = bool(event.get("shift_pressed", false))
+				built.append(key)
 
 			"InputEventMouseButton":
-				var button_index = event.get("button_index", 1)
-				obj_str = (
-					(
-						'Object(InputEventMouseButton,"resource_local_to_scene":false,"resource_name":"",'
-						+ '"device":-1,"window_id":0,"alt_pressed":false,"shift_pressed":false,'
-						+ '"ctrl_pressed":false,"meta_pressed":false,"button_mask":0,'
-						+ '"position":Vector2(0, 0),"global_position":Vector2(0, 0),"factor":1.0,'
-						+ '"button_index":%d,"canceled":false,"pressed":false,"double_click":false,'
-						+ '"script":null)'
-					)
-					% button_index
-				)
+				var mouse := InputEventMouseButton.new()
+				mouse.button_index = int(event.get("button_index", MOUSE_BUTTON_LEFT))
+				built.append(mouse)
 
 			"InputEventJoypadButton":
-				var button_index = event.get("button_index", 0)
-				obj_str = (
-					(
-						'Object(InputEventJoypadButton,"resource_local_to_scene":false,"resource_name":"",'
-						+ '"device":-1,"button_index":%d,"pressure":0.0,"pressed":false,"script":null)'
-					)
-					% button_index
-				)
+				var pad := InputEventJoypadButton.new()
+				pad.button_index = int(event.get("button_index", 0))
+				built.append(pad)
 
 			"InputEventJoypadMotion":
-				var axis = event.get("axis", 0)
-				var axis_value = event.get("axis_value", 1.0)
-				obj_str = (
-					(
-						'Object(InputEventJoypadMotion,"resource_local_to_scene":false,"resource_name":"",'
-						+ '"device":-1,"axis":%d,"axis_value":%f,"script":null)'
-					)
-					% [axis, axis_value]
-				)
+				var motion := InputEventJoypadMotion.new()
+				motion.axis = int(event.get("axis", 0))
+				motion.axis_value = float(event.get("axis_value", 1.0))
+				built.append(motion)
 
-		if not obj_str.is_empty():
-			events_str.append(obj_str)
+			_:
+				log_error("Unknown input event class: " + str(evt_class))
+				quit(1)
 
-	return '{"deadzone": %f, "events": [%s]}' % [deadzone, ", ".join(events_str)]
+	return {"deadzone": deadzone, "events": built}
 
 
 # ============================================
