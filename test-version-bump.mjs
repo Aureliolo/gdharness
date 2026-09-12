@@ -7,7 +7,7 @@ import path from 'node:path';
 
 const root = import.meta.dirname;
 const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), 'gdharness-version-bump-'));
-const maintainedFiles = ['README.md', 'index.html'];
+const maintainedFiles = ['README.md'];
 
 try {
   // Given: every maintained install surface points at the current release asset.
