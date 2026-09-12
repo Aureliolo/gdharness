@@ -29,7 +29,14 @@ import { inflateRawSync } from 'node:zlib';
  * dies if it is ever renamed, while the plain build writes to a redirected pipe, which is what
  * every caller here gives it.
  */
-const BUILDS = {
+interface Build {
+  tag: string;
+  digest: string;
+  asset: (tag: string) => string;
+  executable: (tag: string) => string;
+}
+
+const BUILDS: Partial<Record<NodeJS.Platform, Build>> = {
   linux: {
     // renovate: datasource=github-release-attachments depName=godotengine/godot versioning=regex:^(?<major>\d+)\.(?<minor>\d+)(?:\.(?<patch>\d+))?-(?<compatibility>stable)$
     tag: '4.7.2-stable',
@@ -57,12 +64,13 @@ const BUILDS = {
 };
 
 /** The one tag every platform pins, or a throw naming the disagreement. */
-function pinnedTag() {
+function pinnedTag(): string {
   const tags = new Set(Object.values(BUILDS).map((build) => build.tag));
-  if (tags.size !== 1) {
+  const [tag] = tags;
+  if (tags.size !== 1 || tag === undefined) {
     throw new Error(`The platforms pin different Godot releases: ${[...tags].join(', ')}.`);
   }
-  return BUILDS.linux.tag;
+  return tag;
 }
 
 const END_OF_CENTRAL_DIRECTORY = 0x06054b50;
@@ -76,8 +84,8 @@ const NEEDS_ZIP64 = 0xffffffff;
 
 /** The release asset, or a throw naming what came back instead. Two attempts, because a
  * transient network failure here is a red build that says nothing about the code. */
-async function download(url) {
-  let lastFailure = null;
+async function download(url: string): Promise<Buffer> {
+  let lastFailure: unknown = null;
 
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     try {
@@ -91,14 +99,15 @@ async function download(url) {
     }
   }
 
-  throw new Error(`Could not download ${url}: ${lastFailure?.message ?? String(lastFailure)}`);
+  const reason = lastFailure instanceof Error ? lastFailure.message : String(lastFailure);
+  throw new Error(`Could not download ${url}: ${reason}`);
 }
 
 /**
  * Where the end-of-central-directory record starts. It is the last thing in the file, 22 bytes
  * plus a comment of up to 65535, so the search starts at the end and walks back that far.
  */
-function endOfCentralDirectory(zip) {
+function endOfCentralDirectory(zip: Buffer): number {
   const earliest = Math.max(0, zip.length - 22 - 0xffff);
 
   for (let at = zip.length - 22; at >= earliest; at -= 1) {
@@ -115,7 +124,15 @@ function endOfCentralDirectory(zip) {
  * the real ones in a trailing data descriptor, which cannot be found without already knowing
  * where the entry ends.
  */
-function* entriesOf(zip) {
+interface Entry {
+  name: string;
+  method: number;
+  compressedSize: number;
+  uncompressedSize: number;
+  localHeader: number;
+}
+
+function* entriesOf(zip: Buffer): Generator<Entry> {
   const eocd = endOfCentralDirectory(zip);
   const count = zip.readUInt16LE(eocd + 10);
   let at = zip.readUInt32LE(eocd + 16);
@@ -126,7 +143,7 @@ function* entriesOf(zip) {
     }
 
     const nameLength = zip.readUInt16LE(at + 28);
-    const entry = {
+    const entry: Entry = {
       name: zip.subarray(at + 46, at + 46 + nameLength).toString('utf8'),
       method: zip.readUInt16LE(at + 10),
       compressedSize: zip.readUInt32LE(at + 20),
@@ -146,7 +163,7 @@ function* entriesOf(zip) {
 }
 
 /** One entry's bytes, decompressed and checked against the size the directory promised. */
-function contentsOf(zip, entry) {
+function contentsOf(zip: Buffer, entry: Entry): Buffer {
   if (zip.readUInt32LE(entry.localHeader) !== LOCAL_FILE_HEADER) {
     throw new Error(`${entry.name} has no local header where the directory says it is.`);
   }
@@ -160,7 +177,7 @@ function contentsOf(zip, entry) {
     zip.readUInt16LE(entry.localHeader + 28);
   const compressed = zip.subarray(start, start + entry.compressedSize);
 
-  let contents;
+  let contents: Buffer;
   if (entry.method === STORED) {
     contents = compressed;
   } else if (entry.method === DEFLATED) {
@@ -185,7 +202,7 @@ function contentsOf(zip, entry) {
  * two halves have to be right on a runner nobody here can reproduce. Reading the format is
  * about sixty lines and behaves the same everywhere.
  */
-export function extract(zip, into) {
+export function extract(zip: Buffer, into: string): void {
   const root = resolve(into);
 
   for (const entry of entriesOf(zip)) {
@@ -208,14 +225,14 @@ export function extract(zip, into) {
   }
 }
 
-async function main() {
+async function main(): Promise<void> {
   const tag = pinnedTag();
   const build = BUILDS[process.platform];
   if (!build) {
     throw new Error(`No pinned Godot for platform ${process.platform}.`);
   }
 
-  const root = join(process.env.RUNNER_TEMP ?? tmpdir(), `godot-${tag}`);
+  const root = join(process.env['RUNNER_TEMP'] ?? tmpdir(), `godot-${tag}`);
   rmSync(root, { recursive: true, force: true });
   mkdirSync(root, { recursive: true });
 
@@ -244,14 +261,15 @@ async function main() {
     throw new Error(`${executable} reports ${reported}, which is not ${tag}.`);
   }
 
-  if (process.env.GITHUB_ENV) {
-    appendFileSync(process.env.GITHUB_ENV, `GODOT_PATH=${executable}\n`);
+  const githubEnv = process.env['GITHUB_ENV'];
+  if (githubEnv) {
+    appendFileSync(githubEnv, `GODOT_PATH=${executable}\n`);
   }
 
   console.log(`${reported} installed at ${executable}`);
 }
 
-// Imported by test/zip-extract.mjs for the reader alone, which must not install an engine.
+// Imported by test/zip-extract.ts for the reader alone, which must not install an engine.
 if (import.meta.main) {
   await main();
 }

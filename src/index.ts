@@ -1516,20 +1516,31 @@ class GodotServer {
 
       this.logDebug(`Running: ${this.godotPath} ${args.join(' ')}`);
 
+      let stdout: string;
+      let stderr: string;
       try {
-        const { stdout, stderr } = await run(this.godotPath, args);
-        return { stdout, stderr: this.sanitizeGodotStderr(stderr) };
+        ({ stdout, stderr } = await run(this.godotPath, args));
       } finally {
         rmSync(paramsDir, { recursive: true, force: true });
       }
+
+      // Every operation prints its result as one JSON object. Whatever else came back is not an
+      // answer, and handing it on as one is how an engine that never ran reads as a tool that
+      // succeeded with nothing to say.
+      if (!/\{[\s\S]*\}/.test(stdout)) {
+        const detail = this.sanitizeGodotStderr(stderr).trim() || stdout.trim() || 'no output at all';
+        throw new Error(`${operation} produced no result from ${this.godotPath}: ${detail}`);
+      }
+      return { stdout, stderr: this.sanitizeGodotStderr(stderr) };
     } catch (error) {
-      // A non-zero exit still carries stdout and stderr on the thrown error
+      // A non-zero exit carries stdout and stderr on the thrown error, and the reason the
+      // engine gave is the message worth passing on.
       if (error instanceof Error && 'stdout' in error && 'stderr' in error) {
-        const execError = error as Error & { stdout: string; stderr: string };
-        return {
-          stdout: execError.stdout,
-          stderr: this.sanitizeGodotStderr(execError.stderr),
-        };
+        const execError = error as Error & { stdout: string; stderr: string; code?: number | string };
+        const detail = this.sanitizeGodotStderr(execError.stderr).trim() || execError.stdout.trim();
+        throw new Error(
+          `${operation} failed (exit ${execError.code ?? 'unknown'}): ${detail || execError.message}`,
+        );
       }
 
       throw error;
