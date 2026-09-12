@@ -1,6 +1,0 @@
-# Commits that only moved whitespace. Skip them when reading blame:
-#   git config blame.ignoreRevsFile .git-blame-ignore-revs
-# GitHub reads this file automatically.
-
-# Format the repository and wire up the linters
-4dd11b556bd3e954c5a88523e9c8467f370dec8c
