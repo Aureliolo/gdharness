@@ -1,22 +1,19 @@
 name: Workflows
 
-# The workflows themselves are code with credentials attached, and nothing was checking
-# them. actionlint covers syntax, expressions and the shell inside run: blocks; zizmor
-# covers the security side, template injection and over-broad permissions. They are
-# complementary and the guidance is to run both.
+# The workflows themselves are code with credentials attached. actionlint covers syntax,
+# expressions and the shell inside run: blocks; zizmor covers the security side, template
+# injection and over-broad permissions. They are complementary and the guidance is to run both.
+#
+# No paths filter. Both are required checks, and a required check that a paths filter stopped
+# from running never reports, which leaves the pull request waiting on it forever. Between them
+# they take under half a minute.
 on:
   push:
     branches:
       - main
-    paths:
-      - '.github/workflows/**'
-      - '.github/dependabot.yml'
   pull_request:
     branches:
       - main
-    paths:
-      - '.github/workflows/**'
-      - '.github/dependabot.yml'
 
 permissions: {}
 
