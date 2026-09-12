@@ -9,22 +9,57 @@ const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.ur
 const serverManifest = JSON.parse(fs.readFileSync(new URL('../server.json', import.meta.url), 'utf8'));
 
 assert.equal(serverManifest.version, pkg.version, 'server.json version should match package.json');
-assert.equal(serverManifest.packages, undefined, 'server.json should not advertise a registry package for a GitHub Release tarball');
-assert.equal(serverManifest.websiteUrl, pkg.homepage, 'server.json website should match the package homepage');
-assert.equal(serverManifest.repository?.url, 'https://github.com/Aureliolo/gdharness', 'server.json should link to the canonical GitHub repository');
-assert.equal(serverManifest.websiteUrl, 'https://github.com/Aureliolo/gdharness#readme', 'server.json should link to the canonical project page');
-assert.equal(pkg.repository?.url, 'git+https://github.com/Aureliolo/gdharness.git', 'package.json should link to the canonical GitHub repository');
-assert.equal(serverManifest.repository?.source, 'github', 'server.json should identify GitHub as its repository source');
+assert.equal(
+  serverManifest.packages,
+  undefined,
+  'server.json should not advertise a registry package for a GitHub Release tarball',
+);
+assert.equal(
+  serverManifest.websiteUrl,
+  pkg.homepage,
+  'server.json website should match the package homepage',
+);
+assert.equal(
+  serverManifest.repository?.url,
+  'https://github.com/Aureliolo/gdharness',
+  'server.json should link to the canonical GitHub repository',
+);
+assert.equal(
+  serverManifest.websiteUrl,
+  'https://github.com/Aureliolo/gdharness#readme',
+  'server.json should link to the canonical project page',
+);
+assert.equal(
+  pkg.repository?.url,
+  'git+https://github.com/Aureliolo/gdharness.git',
+  'package.json should link to the canonical GitHub repository',
+);
+assert.equal(
+  serverManifest.repository?.source,
+  'github',
+  'server.json should identify GitHub as its repository source',
+);
 
 assert.match(pkg.description, /godot/i, 'package description should say what the harness is for');
-assert.match(serverManifest.description, /godot/i, 'server manifest description should say what the harness is for');
-assert.ok(serverManifest.description.length <= 100, 'server.json description must satisfy the MCP schema 100-character limit');
+assert.match(
+  serverManifest.description,
+  /godot/i,
+  'server manifest description should say what the harness is for',
+);
+assert.ok(
+  serverManifest.description.length <= 100,
+  'server.json description must satisfy the MCP schema 100-character limit',
+);
 
 const versionOutput = execFileSync(process.execPath, ['./build/cli.js', 'version'], {
   cwd: process.cwd(),
   encoding: 'utf8',
 }).trim();
-assert.equal(versionOutput, `${pkg.name} v${pkg.version}`, 'CLI version output should stay in sync with package.json');
+assert.equal(
+  versionOutput,
+  `${pkg.name} v${pkg.version}`,
+  'CLI version output should stay in sync with package.json',
+);
 
 const child = spawn(process.execPath, ['./build/cli.js'], {
   cwd: process.cwd(),
@@ -50,16 +85,18 @@ try {
   await delay(500);
   assert.equal(child.exitCode, null, `build/cli.js exited during startup: ${stderr}`);
 
-  child.stdin.write(`${JSON.stringify({
-    jsonrpc: '2.0',
-    id: 1,
-    method: 'initialize',
-    params: {
-      protocolVersion: '2024-11-05',
-      capabilities: {},
-      clientInfo: { name: 'metadata-test', version: '1.0.0' },
-    },
-  })}\n`);
+  child.stdin.write(
+    `${JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {
+        protocolVersion: '2024-11-05',
+        capabilities: {},
+        clientInfo: { name: 'metadata-test', version: '1.0.0' },
+      },
+    })}\n`,
+  );
 
   const deadline = Date.now() + 10000;
   let initResponse;
@@ -72,22 +109,28 @@ try {
 
   assert.ok(initResponse, `initialize response missing. stderr: ${stderr}`);
   assert.equal(initResponse.error, undefined, `initialize failed: ${JSON.stringify(initResponse.error)}`);
-  assert.equal(initResponse.result?.serverInfo?.name, pkg.name, 'initialize should report package-aligned server name');
-  assert.equal(initResponse.result?.serverInfo?.version, pkg.version, 'initialize should report package-aligned server version');
-  assert.equal(initResponse.result?.capabilities?.tools?.listChanged, true, 'initialize should advertise listChanged tool capability');
+  assert.equal(
+    initResponse.result?.serverInfo?.name,
+    pkg.name,
+    'initialize should report package-aligned server name',
+  );
+  assert.equal(
+    initResponse.result?.serverInfo?.version,
+    pkg.version,
+    'initialize should report package-aligned server version',
+  );
+  assert.equal(
+    initResponse.result?.capabilities?.tools?.listChanged,
+    true,
+    'initialize should advertise listChanged tool capability',
+  );
 } finally {
   if (child.exitCode === null) {
     child.kill('SIGTERM');
-    await Promise.race([
-      new Promise((resolve) => child.once('exit', resolve)),
-      delay(2000),
-    ]);
+    await Promise.race([new Promise((resolve) => child.once('exit', resolve)), delay(2000)]);
     if (child.exitCode === null) {
       child.kill('SIGKILL');
-      await Promise.race([
-        new Promise((resolve) => child.once('exit', resolve)),
-        delay(2000),
-      ]);
+      await Promise.race([new Promise((resolve) => child.once('exit', resolve)), delay(2000)]);
     }
   }
 }

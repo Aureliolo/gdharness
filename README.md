@@ -33,9 +33,15 @@ complete, hardened and actually working.
 
 ## Requirements
 
-- Godot 4.7
-- Bun 1.3.3+
-- An MCP client
+Two things, and nothing else:
+
+- **Godot 4.6 or newer.** 4.6 is the floor because the runtime bridge uses `UDSServer`, which
+  the engine gained in 4.6. Tested against the versions listed under Support below.
+- **Bun 1.4.0 or newer.** 1.4 is the floor because the lockfile is `lockfileVersion: 2`,
+  which older Bun cannot read.
+
+Then point any MCP client at it. gdharness installs the Godot addons into your project
+itself; there is nothing to copy by hand, no Python, and no Node.
 
 ## Building
 

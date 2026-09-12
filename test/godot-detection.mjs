@@ -37,15 +37,15 @@ function testDetectsVersionedWindowsBinaries() {
 
     const result = scanDirectoryForGodotBinaries(dir, 'win32');
     assert.equal(result.length, 2, 'should find both Godot exe files');
-    assert.ok(result.every((p) => /\.exe$/i.test(p)), 'all win32 candidates must be .exe');
+    assert.ok(
+      result.every((p) => /\.exe$/i.test(p)),
+      'all win32 candidates must be .exe',
+    );
     assert.ok(
       result.some((p) => p.includes('Godot_v4.4.1-stable_win64.exe')),
       'should include the versioned 4.4.1 binary',
     );
-    assert.ok(
-      !result.some((p) => p.includes('notepad.exe')),
-      'should not include non-Godot executables',
-    );
+    assert.ok(!result.some((p) => p.includes('notepad.exe')), 'should not include non-Godot executables');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -65,10 +65,7 @@ function testDetectsVersionedLinuxBinaries() {
       result.some((p) => p.includes('godot_v4.4.1-stable_linux.x86_64')),
       'should include the versioned linux binary',
     );
-    assert.ok(
-      !result.some((p) => p.includes('unrelated_tool')),
-      'should not include non-godot files',
-    );
+    assert.ok(!result.some((p) => p.includes('unrelated_tool')), 'should not include non-godot files');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

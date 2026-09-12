@@ -1,0 +1,10 @@
+# One line ending in the repository, whatever the checkout platform does locally. Without
+# this a Windows contributor commits CRLF and the next diff is the whole tree.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.tgz binary

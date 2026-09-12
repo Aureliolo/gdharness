@@ -35,7 +35,7 @@ export interface ModifyScriptParams {
 /**
  * Types of modifications supported
  */
-export type ScriptModification = 
+export type ScriptModification =
   | AddFunctionMod
   | AddVariableMod
   | AddSignalMod
@@ -44,17 +44,17 @@ export type ScriptModification =
   | AddExportMod;
 
 export interface AddFunctionMod {
-  type: "add_function";
+  type: 'add_function';
   name: string;
   params?: string;
   returnType?: string;
   body: string;
   isAsync?: boolean;
-  position?: "end" | "after_ready" | "after_init";
+  position?: 'end' | 'after_ready' | 'after_init';
 }
 
 export interface AddVariableMod {
-  type: "add_variable";
+  type: 'add_variable';
   name: string;
   varType?: string;
   defaultValue?: string;
@@ -64,24 +64,24 @@ export interface AddVariableMod {
 }
 
 export interface AddSignalMod {
-  type: "add_signal";
+  type: 'add_signal';
   name: string;
   params?: string;
 }
 
 export interface ReplaceFunctionMod {
-  type: "replace_function";
+  type: 'replace_function';
   name: string;
   newBody: string;
 }
 
 export interface RemoveFunctionMod {
-  type: "remove_function";
+  type: 'remove_function';
   name: string;
 }
 
 export interface AddExportMod {
-  type: "add_export";
+  type: 'add_export';
   name: string;
   varType: string;
   defaultValue?: string;
@@ -94,12 +94,12 @@ export interface AddExportMod {
 export function createGDScript(params: CreateScriptParams): CreateScriptResult {
   const absolutePath = join(params.projectPath, params.scriptPath);
   const dir = dirname(absolutePath);
-  
+
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true });
   }
 
-  let content = params.content || "";
+  let content = params.content || '';
 
   if (!content) {
     if (params.extends) {
@@ -128,16 +128,16 @@ export function createGDScript(params: CreateScriptParams): CreateScriptResult {
     success: true,
     scriptPath: params.scriptPath,
     absolutePath,
-    registered: !!params.className
+    registered: !!params.className,
   };
 }
 
 /**
  * Modifies an existing GDScript file
  */
-export function modifyGDScript(params: ModifyScriptParams): { success: boolean, message?: string } {
+export function modifyGDScript(params: ModifyScriptParams): { success: boolean; message?: string } {
   const absolutePath = join(params.projectPath, params.scriptPath);
-  
+
   if (!existsSync(absolutePath)) {
     throw new Error(`Script file not found: ${absolutePath}`);
   }
@@ -165,7 +165,7 @@ export function modifyGDScript(params: ModifyScriptParams): { success: boolean, 
 }
 
 function addVariable(content: string, mod: AddVariableMod): string {
-  let varDecl = "";
+  let varDecl = '';
   if (mod.isExport) {
     varDecl += `@export `;
     if (mod.exportHint) varDecl += `${mod.exportHint} `;
@@ -173,11 +173,11 @@ function addVariable(content: string, mod: AddVariableMod): string {
   if (mod.isOnready) {
     varDecl += `@onready `;
   }
-  
+
   varDecl += `var ${mod.name}`;
   if (mod.varType) varDecl += `: ${mod.varType}`;
   if (mod.defaultValue) varDecl += ` = ${mod.defaultValue}`;
-  
+
   // Find where to insert (after extends/class_name)
   const lines = content.split('\n');
   let insertIdx = 0;
@@ -186,7 +186,7 @@ function addVariable(content: string, mod: AddVariableMod): string {
       insertIdx = i + 1;
     }
   }
-  
+
   lines.splice(insertIdx, 0, varDecl);
   return lines.join('\n');
 }
@@ -194,16 +194,21 @@ function addVariable(content: string, mod: AddVariableMod): string {
 function addSignal(content: string, mod: AddSignalMod): string {
   let signalDecl = `signal ${mod.name}`;
   if (mod.params) signalDecl += `(${mod.params})`;
-  
+
   const lines = content.split('\n');
   let insertIdx = 0;
   // Insert after variables
   for (let i = 0; i < lines.length; i++) {
-    if (lines[i].startsWith('extends') || lines[i].startsWith('class_name') || lines[i].startsWith('var ') || lines[i].startsWith('@')) {
+    if (
+      lines[i].startsWith('extends') ||
+      lines[i].startsWith('class_name') ||
+      lines[i].startsWith('var ') ||
+      lines[i].startsWith('@')
+    ) {
       insertIdx = i + 1;
     }
   }
-  
+
   lines.splice(insertIdx, 0, signalDecl);
   return lines.join('\n');
 }
@@ -212,12 +217,12 @@ function addFunction(content: string, mod: AddFunctionMod): string {
   let funcDecl = `\nfunc ${mod.name}(${mod.params || ''})`;
   if (mod.returnType) funcDecl += ` -> ${mod.returnType}`;
   funcDecl += `:\n`;
-  
+
   // Indent body
   const bodyLines = mod.body.split('\n');
   for (const line of bodyLines) {
     funcDecl += `\t${line}\n`;
   }
-  
+
   return content + funcDecl;
 }

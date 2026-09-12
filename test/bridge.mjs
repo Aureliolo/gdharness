@@ -15,19 +15,26 @@ import { sanitizeToolName } from './support/tool-name.mjs';
 import { parseJsonLines, parseTextContent } from './support/json-rpc.mjs';
 
 const MCP_SERVER = './build/index.js';
-const bridgePortRaw = process.env.GODOT_BRIDGE_PORT || process.env.MCP_BRIDGE_PORT || process.env.GDHARNESS_BRIDGE_PORT;
+const bridgePortRaw =
+  process.env.GODOT_BRIDGE_PORT || process.env.MCP_BRIDGE_PORT || process.env.GDHARNESS_BRIDGE_PORT;
 const parsedBridgePort = Number.parseInt(bridgePortRaw || '', 10);
-const BRIDGE_PORT = Number.isInteger(parsedBridgePort) && parsedBridgePort >= 1 && parsedBridgePort <= 65535
-  ? parsedBridgePort
-  : null;
-const BRIDGE_HOST = process.env.GODOT_BRIDGE_HOST || process.env.MCP_BRIDGE_HOST || process.env.GDHARNESS_BRIDGE_HOST || '127.0.0.1';
+const BRIDGE_PORT =
+  Number.isInteger(parsedBridgePort) && parsedBridgePort >= 1 && parsedBridgePort <= 65535
+    ? parsedBridgePort
+    : null;
+const BRIDGE_HOST =
+  process.env.GODOT_BRIDGE_HOST ||
+  process.env.MCP_BRIDGE_HOST ||
+  process.env.GDHARNESS_BRIDGE_HOST ||
+  '127.0.0.1';
 const GODOT_PATH = resolveGodotPath(process.env.GODOT_PATH);
 const TEST_PROJECT_FROM_ENV = process.env.GDHARNESS_TEST_PROJECT || '';
 const HAS_USABLE_GODOT = Boolean(GODOT_PATH && isExecutableFile(GODOT_PATH));
 const TOOL_PROFILE = resolveToolProfile(process.env.GDHARNESS_TOOL_PROFILE || process.env.MCP_TOOL_PROFILE);
 const RUNTIME_PORT = 7777;
 const OPENAI_COMPATIBLE_TOOL_NAME_PATTERN = /^[a-zA-Z0-9-]{1,128}$/;
-const ONE_PIXEL_PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO7Z0r0AAAAASUVORK5CYII=';
+const ONE_PIXEL_PNG_BASE64 =
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO7Z0r0AAAAASUVORK5CYII=';
 
 let passed = 0;
 let failed = 0;
@@ -99,20 +106,14 @@ function findExecutableInPath(names) {
 
 function createTestProjectFixture() {
   const projectPath = mkdtempSync(join(tmpdir(), 'gopeak-test-project-'));
-  writeFileSync(join(projectPath, 'project.godot'), [
-    '; Engine configuration file.',
-    '',
-    '[application]',
-    'config/name="Gopeak Bridge Test"',
-    '',
-  ].join('\n'));
-  writeFileSync(join(projectPath, 'player.gd'), [
-    'extends CharacterBody2D',
-    '',
-    'func _ready():',
-    '    pass',
-    '',
-  ].join('\n'));
+  writeFileSync(
+    join(projectPath, 'project.godot'),
+    ['; Engine configuration file.', '', '[application]', 'config/name="Gopeak Bridge Test"', ''].join('\n'),
+  );
+  writeFileSync(
+    join(projectPath, 'player.gd'),
+    ['extends CharacterBody2D', '', 'func _ready():', '    pass', ''].join('\n'),
+  );
   return projectPath;
 }
 
@@ -173,7 +174,6 @@ async function main() {
     serverEnv.GODOT_PATH = GODOT_PATH;
   }
 
-
   // 1. Start MCP server
   console.log('📦 Starting MCP server...');
   const server = spawn(process.execPath, [MCP_SERVER], {
@@ -182,10 +182,14 @@ async function main() {
   });
 
   let stderr = '';
-  server.stderr.on('data', d => { stderr += d.toString(); });
+  server.stderr.on('data', (d) => {
+    stderr += d.toString();
+  });
 
   let stdout = '';
-  server.stdout.on('data', d => { stdout += d.toString(); });
+  server.stdout.on('data', (d) => {
+    stdout += d.toString();
+  });
 
   // Wait for server startup
   await delay(2000);
@@ -200,11 +204,13 @@ async function main() {
   // 2. Send MCP initialize
   console.log('\n📡 Testing MCP Protocol...');
   stdout = ''; // reset
-  server.stdin.write(rpcMsg('initialize', {
-    protocolVersion: '2024-11-05',
-    capabilities: {},
-    clientInfo: { name: 'test-client', version: '1.0.0' }
-  }));
+  server.stdin.write(
+    rpcMsg('initialize', {
+      protocolVersion: '2024-11-05',
+      capabilities: {},
+      clientInfo: { name: 'test-client', version: '1.0.0' },
+    }),
+  );
   await delay(1000);
 
   const initResponses = parseJsonLines(stdout);
@@ -234,33 +240,38 @@ async function main() {
   await delay(1000);
 
   const promptListResponses = parseJsonLines(stdout);
-  const promptListResult = promptListResponses.find(response => response.result?.prompts)?.result;
+  const promptListResult = promptListResponses.find((response) => response.result?.prompts)?.result;
   if (promptListResult?.prompts?.length >= 2) {
     ok(`prompts/list returned ${promptListResult.prompts.length} prompt(s)`);
-    const promptNames = new Set(promptListResult.prompts.map(prompt => prompt.name));
+    const promptNames = new Set(promptListResult.prompts.map((prompt) => prompt.name));
     if (promptNames.has('godot.scene_bootstrap') && promptNames.has('godot.debug_triage')) {
       ok('Expected Godot prompts are listed');
     } else {
-      fail('prompt listing', `Expected godot.scene_bootstrap and godot.debug_triage, got: ${Array.from(promptNames).join(', ')}`);
+      fail(
+        'prompt listing',
+        `Expected godot.scene_bootstrap and godot.debug_triage, got: ${Array.from(promptNames).join(', ')}`,
+      );
     }
   } else {
     fail('prompts/list', 'No valid prompt list response');
   }
 
   stdout = '';
-  server.stdin.write(rpcMsg('prompts/get', {
-    name: 'godot.scene_bootstrap',
-    arguments: {
-      project_path: '/tmp/demo-project',
-      scene_path: 'res://scenes/Player.tscn',
-    },
-  }));
+  server.stdin.write(
+    rpcMsg('prompts/get', {
+      name: 'godot.scene_bootstrap',
+      arguments: {
+        project_path: '/tmp/demo-project',
+        scene_path: 'res://scenes/Player.tscn',
+      },
+    }),
+  );
   await delay(1000);
 
   const promptGetResponses = parseJsonLines(stdout);
-  const promptGetResult = promptGetResponses.find(response => response.result?.messages)?.result;
+  const promptGetResult = promptGetResponses.find((response) => response.result?.messages)?.result;
   if (promptGetResult?.messages?.length > 0) {
-    const promptText = promptGetResult.messages.map(message => message?.content?.text || '').join('\n');
+    const promptText = promptGetResult.messages.map((message) => message?.content?.text || '').join('\n');
     if (promptText.includes('/tmp/demo-project') && promptText.includes('res://scenes/Player.tscn')) {
       ok('prompts/get returns templated prompt content');
     } else {
@@ -274,7 +285,7 @@ async function main() {
   server.stdin.write(rpcMsg('prompts/get', { name: 'godot.unknown_prompt', arguments: {} }));
   await delay(1000);
   const unknownPromptResponses = parseJsonLines(stdout);
-  const unknownPromptError = unknownPromptResponses.find(response => response.error)?.error;
+  const unknownPromptError = unknownPromptResponses.find((response) => response.error)?.error;
   if (unknownPromptError?.message?.includes('Unknown prompt')) {
     ok('prompts/get returns clear error for unknown prompt');
   } else {
@@ -290,7 +301,7 @@ async function main() {
     server.stdin.write(rpcMsg('tools/call', { name: candidate, arguments: { limit: 20 } }));
     await delay(1000);
     const catalogResponses = parseJsonLines(stdout);
-    const catalogResult = catalogResponses.find(response => response.result?.content);
+    const catalogResult = catalogResponses.find((response) => response.result?.content);
     const parsedCatalog = parseTextContent(catalogResult);
     if (parsedCatalog && typeof parsedCatalog.totalTools === 'number') {
       catalogToolName = candidate;
@@ -307,14 +318,22 @@ async function main() {
     }
 
     stdout = '';
-    server.stdin.write(rpcMsg('tools/call', { name: catalogToolName, arguments: { query: 'scene', limit: 20 } }));
+    server.stdin.write(
+      rpcMsg('tools/call', { name: catalogToolName, arguments: { query: 'scene', limit: 20 } }),
+    );
     await delay(1000);
     const knownToolResponses = parseJsonLines(stdout);
-    const knownToolPayload = parseTextContent(knownToolResponses.find(response => response.result?.content));
-    const catalogIncludesKnownTool = Array.isArray(knownToolPayload?.tools) && knownToolPayload.tools.some((entry) => {
-      return expandToolCandidates('create_scene', 'scene.create').includes(entry?.tool)
-        || expandToolCandidates('create_scene', 'scene.create').includes(entry?.compactAlias);
-    });
+    const knownToolPayload = parseTextContent(
+      knownToolResponses.find((response) => response.result?.content),
+    );
+    const catalogIncludesKnownTool =
+      Array.isArray(knownToolPayload?.tools) &&
+      knownToolPayload.tools.some((entry) => {
+        return (
+          expandToolCandidates('create_scene', 'scene.create').includes(entry?.tool) ||
+          expandToolCandidates('create_scene', 'scene.create').includes(entry?.compactAlias)
+        );
+      });
     if (catalogIncludesKnownTool) {
       ok(`${catalogToolName} query includes known tool entry`);
     } else {
@@ -335,7 +354,7 @@ async function main() {
       await delay(1500);
 
       const responses = parseJsonLines(stdout);
-      const result = responses.find(response => response.result?.tools)?.result;
+      const result = responses.find((response) => response.result?.tools)?.result;
       if (!result?.tools) {
         throw new Error(`No valid tools/list response for page ${page}. stdout: ${stdout.substring(0, 500)}`);
       }
@@ -361,12 +380,12 @@ async function main() {
   let captureViewportToolName = 'capture_viewport';
   try {
     const tools = await listAllTools();
-    const toolNames = new Set(tools.map(tool => tool.name));
+    const toolNames = new Set(tools.map((tool) => tool.name));
     const invalidToolNames = tools
       .map((tool) => tool?.name)
       .filter((name) => typeof name !== 'string' || !OPENAI_COMPATIBLE_TOOL_NAME_PATTERN.test(name));
     const isCompactProfile = TOOL_PROFILE === 'compact';
-    const hasTool = (...names) => names.filter(Boolean).some(name => toolNames.has(name));
+    const hasTool = (...names) => names.filter(Boolean).some((name) => toolNames.has(name));
 
     ok(`tools/list returned ${tools.length} tools across all pages`);
     if (invalidToolNames.length === 0) {
@@ -381,7 +400,10 @@ async function main() {
       fail('get_editor_status/editor.status', 'Not found in tool list');
     }
     statusToolName = chooseTool(toolNames, expandToolCandidates('editor.status', 'get_editor_status'));
-    runtimeStatusToolName = chooseTool(toolNames, expandToolCandidates('runtime.status', 'get_runtime_status'));
+    runtimeStatusToolName = chooseTool(
+      toolNames,
+      expandToolCandidates('runtime.status', 'get_runtime_status'),
+    );
     inspectRuntimeTreeToolName = chooseTool(toolNames, expandToolCandidates('inspect_runtime_tree'));
     setRuntimePropertyToolName = chooseTool(toolNames, expandToolCandidates('set_runtime_property'));
     callRuntimeMethodToolName = chooseTool(toolNames, expandToolCandidates('call_runtime_method'));
@@ -415,19 +437,23 @@ async function main() {
   console.log('\n🏛️ Testing ClassDB introspection tools...');
   if (HAS_USABLE_GODOT) {
     stdout = '';
-    server.stdin.write(rpcMsg('tools/call', {
-      name: 'query_classes',
-      arguments: {
-        projectPath: TEST_PROJECT,
-        category: 'node2d',
-        filter: 'sprite',
-        instantiableOnly: true,
-      }
-    }));
+    server.stdin.write(
+      rpcMsg('tools/call', {
+        name: 'query_classes',
+        arguments: {
+          projectPath: TEST_PROJECT,
+          category: 'node2d',
+          filter: 'sprite',
+          instantiableOnly: true,
+        },
+      }),
+    );
     await delay(1500);
 
     const queryClassesResponses = parseJsonLines(stdout);
-    const queryClassesPayload = parseTextContent(queryClassesResponses.find(response => response.result?.content));
+    const queryClassesPayload = parseTextContent(
+      queryClassesResponses.find((response) => response.result?.content),
+    );
     if (queryClassesPayload && Array.isArray(queryClassesPayload.classes)) {
       ok(`query_classes returned structured JSON (${queryClassesPayload.classes.length} classes)`);
     } else {
@@ -435,18 +461,26 @@ async function main() {
     }
 
     stdout = '';
-    server.stdin.write(rpcMsg('tools/call', {
-      name: 'query_class_info',
-      arguments: {
-        projectPath: TEST_PROJECT,
-        className: 'Node2D',
-      }
-    }));
+    server.stdin.write(
+      rpcMsg('tools/call', {
+        name: 'query_class_info',
+        arguments: {
+          projectPath: TEST_PROJECT,
+          className: 'Node2D',
+        },
+      }),
+    );
     await delay(1500);
 
     const queryClassInfoResponses = parseJsonLines(stdout);
-    const queryClassInfoPayload = parseTextContent(queryClassInfoResponses.find(response => response.result?.content));
-    if (queryClassInfoPayload && queryClassInfoPayload.class_name === 'Node2D' && Array.isArray(queryClassInfoPayload.methods)) {
+    const queryClassInfoPayload = parseTextContent(
+      queryClassInfoResponses.find((response) => response.result?.content),
+    );
+    if (
+      queryClassInfoPayload &&
+      queryClassInfoPayload.class_name === 'Node2D' &&
+      Array.isArray(queryClassInfoPayload.methods)
+    ) {
       ok(`query_class_info returned structured JSON (${queryClassInfoPayload.methods.length} methods)`);
     } else {
       fail('query_class_info structured response', JSON.stringify(queryClassInfoResponses[0] || null));
@@ -456,15 +490,17 @@ async function main() {
   }
 
   stdout = '';
-  server.stdin.write(rpcMsg('tools/call', {
-    name: 'search_project',
-    arguments: {
-      projectPath: TEST_PROJECT,
-      query: 'extends CharacterBody2D',
-      fileTypes: ['gd'],
-      maxResults: 10,
-    }
-  }));
+  server.stdin.write(
+    rpcMsg('tools/call', {
+      name: 'search_project',
+      arguments: {
+        projectPath: TEST_PROJECT,
+        query: 'extends CharacterBody2D',
+        fileTypes: ['gd'],
+        maxResults: 10,
+      },
+    }),
+  );
   await delay(1500);
 
   const searchProjectResponses = parseJsonLines(stdout);
@@ -475,20 +511,27 @@ async function main() {
   if (searchProjectText.includes('player.gd') || searchProjectText.includes('CharacterBody2D')) {
     ok('search_project runs without script parse errors');
   } else {
-    fail('search_project regression', searchProjectText.substring(0, 400) || JSON.stringify(searchProjectResponses[0] || null));
+    fail(
+      'search_project regression',
+      searchProjectText.substring(0, 400) || JSON.stringify(searchProjectResponses[0] || null),
+    );
   }
 
   // 5.6 Runtime status should reflect addon ping, not only process state
   console.log('\n🧭 Testing runtime status...');
   stdout = '';
-  server.stdin.write(rpcMsg('tools/call', {
-    name: runtimeStatusToolName,
-    arguments: { projectPath: TEST_PROJECT }
-  }));
+  server.stdin.write(
+    rpcMsg('tools/call', {
+      name: runtimeStatusToolName,
+      arguments: { projectPath: TEST_PROJECT },
+    }),
+  );
   await delay(1500);
 
   const runtimeStatusResponses = parseJsonLines(stdout);
-  const runtimeStatusPayload = parseTextContent(runtimeStatusResponses.find(response => response.result?.content));
+  const runtimeStatusPayload = parseTextContent(
+    runtimeStatusResponses.find((response) => response.result?.content),
+  );
   if (runtimeStatusPayload?.connected === false && runtimeStatusPayload?.status === 'not_running') {
     ok('get_runtime_status reports not_running without runtime addon');
   } else {
@@ -512,74 +555,88 @@ async function main() {
 
       try {
         const request = JSON.parse(line);
-        socket.write(`${JSON.stringify({ type: 'welcome', protocol: 'godot_mcp_runtime', version: '1.0.0' })}\n`);
+        socket.write(
+          `${JSON.stringify({ type: 'welcome', protocol: 'godot_mcp_runtime', version: '1.0.0' })}\n`,
+        );
         if (request.command === 'ping') {
           socket.write(`${JSON.stringify({ type: 'pong', id: request.id, timestamp: Date.now() })}\n`);
         } else if (request.command === 'get_tree') {
-          socket.write(`${JSON.stringify({
-            type: 'tree',
-            id: request.id,
-            root: {
-              name: 'root',
-              type: 'Node',
-              path: request.params?.root || '/root',
-              children: [
-                {
-                  name: 'Player',
-                  type: 'CharacterBody2D',
-                  path: `${request.params?.root || '/root'}/Player`,
-                },
-              ],
-            },
-          })}\n`);
+          socket.write(
+            `${JSON.stringify({
+              type: 'tree',
+              id: request.id,
+              root: {
+                name: 'root',
+                type: 'Node',
+                path: request.params?.root || '/root',
+                children: [
+                  {
+                    name: 'Player',
+                    type: 'CharacterBody2D',
+                    path: `${request.params?.root || '/root'}/Player`,
+                  },
+                ],
+              },
+            })}\n`,
+          );
         } else if (request.command === 'set_property') {
-          socket.write(`${JSON.stringify({
-            type: 'property_set',
-            id: request.id,
-            path: request.params?.path,
-            property: request.params?.property,
-            old_value: false,
-            new_value: request.params?.value,
-          })}\n`);
+          socket.write(
+            `${JSON.stringify({
+              type: 'property_set',
+              id: request.id,
+              path: request.params?.path,
+              property: request.params?.property,
+              old_value: false,
+              new_value: request.params?.value,
+            })}\n`,
+          );
         } else if (request.command === 'call_method') {
-          socket.write(`${JSON.stringify({
-            type: 'method_result',
-            id: request.id,
-            path: request.params?.path,
-            method: request.params?.method,
-            result: {
-              echoed_args: request.params?.args || [],
-            },
-          })}\n`);
+          socket.write(
+            `${JSON.stringify({
+              type: 'method_result',
+              id: request.id,
+              path: request.params?.path,
+              method: request.params?.method,
+              result: {
+                echoed_args: request.params?.args || [],
+              },
+            })}\n`,
+          );
         } else if (request.command === 'get_metrics') {
-          socket.write(`${JSON.stringify({
-            type: 'metrics',
-            id: request.id,
-            data: {
-              fps: 60,
-              object_node_count: 42,
-            },
-          })}\n`);
+          socket.write(
+            `${JSON.stringify({
+              type: 'metrics',
+              id: request.id,
+              data: {
+                fps: 60,
+                object_node_count: 42,
+              },
+            })}\n`,
+          );
         } else if (request.command === 'capture_screenshot') {
-          socket.write(`${JSON.stringify({
-            type: 'screenshot',
-            id: request.id,
-            data: ONE_PIXEL_PNG_BASE64,
-            width: 1,
-            height: 1,
-            format: 'png',
-          })}\n`);
+          socket.write(
+            `${JSON.stringify({
+              type: 'screenshot',
+              id: request.id,
+              data: ONE_PIXEL_PNG_BASE64,
+              width: 1,
+              height: 1,
+              format: 'png',
+            })}\n`,
+          );
         } else if (request.command === 'capture_viewport') {
           const screenshotPath = request.params?.output_path || request.params?.outputPath;
           writeFileSync(screenshotPath, Buffer.from(ONE_PIXEL_PNG_BASE64, 'base64'));
-          socket.write(`${JSON.stringify({
-            type: 'screenshot_file',
-            id: request.id,
-            path: screenshotPath,
-            width: 1,
-            height: 1,
-            format: 'png',
-          })}\n`);
+          socket.write(
+            `${JSON.stringify({
+              type: 'screenshot_file',
+              id: request.id,
+              path: screenshotPath,
+              width: 1,
+              height: 1,
+              format: 'png',
+            })}\n`,
+          );
         }
       } catch {
         socket.write(`${JSON.stringify({ error: 'invalid_json' })}\n`);
@@ -594,14 +651,18 @@ async function main() {
   });
 
   stdout = '';
-  server.stdin.write(rpcMsg('tools/call', {
-    name: runtimeStatusToolName,
-    arguments: { projectPath: TEST_PROJECT }
-  }));
+  server.stdin.write(
+    rpcMsg('tools/call', {
+      name: runtimeStatusToolName,
+      arguments: { projectPath: TEST_PROJECT },
+    }),
+  );
   await delay(1500);
 
   const runtimeConnectedResponses = parseJsonLines(stdout);
-  const runtimeConnectedPayload = parseTextContent(runtimeConnectedResponses.find(response => response.result?.content));
+  const runtimeConnectedPayload = parseTextContent(
+    runtimeConnectedResponses.find((response) => response.result?.content),
+  );
   if (runtimeConnectedPayload?.connected === true && runtimeConnectedPayload?.runtimeAddon === 'connected') {
     ok('get_runtime_status reports connected when runtime addon responds to ping');
   } else {
@@ -609,14 +670,18 @@ async function main() {
   }
 
   stdout = '';
-  server.stdin.write(rpcMsg('tools/call', {
-    name: inspectRuntimeTreeToolName,
-    arguments: { projectPath: TEST_PROJECT, nodePath: '/root', depth: 2 }
-  }));
+  server.stdin.write(
+    rpcMsg('tools/call', {
+      name: inspectRuntimeTreeToolName,
+      arguments: { projectPath: TEST_PROJECT, nodePath: '/root', depth: 2 },
+    }),
+  );
   await delay(1500);
 
   const inspectRuntimeResponses = parseJsonLines(stdout);
-  const inspectRuntimePayload = parseTextContent(inspectRuntimeResponses.find(response => response.result?.content));
+  const inspectRuntimePayload = parseTextContent(
+    inspectRuntimeResponses.find((response) => response.result?.content),
+  );
   if (inspectRuntimePayload?.type === 'tree' && inspectRuntimePayload?.root?.path === '/root') {
     ok('inspect_runtime_tree relays runtime tree data from addon');
   } else {
@@ -624,14 +689,18 @@ async function main() {
   }
 
   stdout = '';
-  server.stdin.write(rpcMsg('tools/call', {
-    name: setRuntimePropertyToolName,
-    arguments: { projectPath: TEST_PROJECT, nodePath: '/root/Player', property: 'visible', value: true }
-  }));
+  server.stdin.write(
+    rpcMsg('tools/call', {
+      name: setRuntimePropertyToolName,
+      arguments: { projectPath: TEST_PROJECT, nodePath: '/root/Player', property: 'visible', value: true },
+    }),
+  );
   await delay(1500);
 
   const setRuntimePropertyResponses = parseJsonLines(stdout);
-  const setRuntimePropertyPayload = parseTextContent(setRuntimePropertyResponses.find(response => response.result?.content));
+  const setRuntimePropertyPayload = parseTextContent(
+    setRuntimePropertyResponses.find((response) => response.result?.content),
+  );
   if (setRuntimePropertyPayload?.type === 'property_set' && setRuntimePropertyPayload?.new_value === true) {
     ok('set_runtime_property relays addon property updates');
   } else {
@@ -639,29 +708,40 @@ async function main() {
   }
 
   stdout = '';
-  server.stdin.write(rpcMsg('tools/call', {
-    name: callRuntimeMethodToolName,
-    arguments: { projectPath: TEST_PROJECT, nodePath: '/root/Player', method: 'jump', args: [1, 2] }
-  }));
+  server.stdin.write(
+    rpcMsg('tools/call', {
+      name: callRuntimeMethodToolName,
+      arguments: { projectPath: TEST_PROJECT, nodePath: '/root/Player', method: 'jump', args: [1, 2] },
+    }),
+  );
   await delay(1500);
 
   const callRuntimeMethodResponses = parseJsonLines(stdout);
-  const callRuntimeMethodPayload = parseTextContent(callRuntimeMethodResponses.find(response => response.result?.content));
-  if (callRuntimeMethodPayload?.type === 'method_result' && Array.isArray(callRuntimeMethodPayload?.result?.echoed_args)) {
+  const callRuntimeMethodPayload = parseTextContent(
+    callRuntimeMethodResponses.find((response) => response.result?.content),
+  );
+  if (
+    callRuntimeMethodPayload?.type === 'method_result' &&
+    Array.isArray(callRuntimeMethodPayload?.result?.echoed_args)
+  ) {
     ok('call_runtime_method relays addon method results');
   } else {
     fail('call_runtime_method relay', JSON.stringify(callRuntimeMethodResponses[0] || null));
   }
 
   stdout = '';
-  server.stdin.write(rpcMsg('tools/call', {
-    name: getRuntimeMetricsToolName,
-    arguments: { projectPath: TEST_PROJECT, metrics: ['fps'] }
-  }));
+  server.stdin.write(
+    rpcMsg('tools/call', {
+      name: getRuntimeMetricsToolName,
+      arguments: { projectPath: TEST_PROJECT, metrics: ['fps'] },
+    }),
+  );
   await delay(1500);
 
   const runtimeMetricsResponses = parseJsonLines(stdout);
-  const runtimeMetricsPayload = parseTextContent(runtimeMetricsResponses.find(response => response.result?.content));
+  const runtimeMetricsPayload = parseTextContent(
+    runtimeMetricsResponses.find((response) => response.result?.content),
+  );
   if (runtimeMetricsPayload?.type === 'metrics' && runtimeMetricsPayload?.data?.fps === 60) {
     ok('get_runtime_metrics relays addon metrics');
   } else {
@@ -669,16 +749,20 @@ async function main() {
   }
 
   stdout = '';
-  server.stdin.write(rpcMsg('tools/call', {
-    name: captureScreenshotToolName,
-    arguments: {}
-  }));
+  server.stdin.write(
+    rpcMsg('tools/call', {
+      name: captureScreenshotToolName,
+      arguments: {},
+    }),
+  );
   await delay(1500);
 
   const captureScreenshotResponses = parseJsonLines(stdout);
-  const captureScreenshotResult = captureScreenshotResponses.find(response => response.result?.content)?.result;
+  const captureScreenshotResult = captureScreenshotResponses.find(
+    (response) => response.result?.content,
+  )?.result;
   const captureScreenshotContent = captureScreenshotResult?.content || [];
-  const screenshotImage = captureScreenshotContent.find(chunk => chunk?.type === 'image');
+  const screenshotImage = captureScreenshotContent.find((chunk) => chunk?.type === 'image');
   if (screenshotImage?.data && screenshotImage?.mimeType === 'image/png' && !('text' in screenshotImage)) {
     ok('capture_screenshot returns MCP-valid image content');
   } else {
@@ -686,38 +770,42 @@ async function main() {
   }
 
   stdout = '';
-  server.stdin.write(rpcMsg('tools/call', {
-    name: captureViewportToolName,
-    arguments: { viewportPath: '/root' }
-  }));
+  server.stdin.write(
+    rpcMsg('tools/call', {
+      name: captureViewportToolName,
+      arguments: { viewportPath: '/root' },
+    }),
+  );
   await delay(1500);
 
   const captureViewportResponses = parseJsonLines(stdout);
-  const captureViewportResult = captureViewportResponses.find(response => response.result?.content)?.result;
+  const captureViewportResult = captureViewportResponses.find((response) => response.result?.content)?.result;
   const captureViewportContent = captureViewportResult?.content || [];
-  const viewportImage = captureViewportContent.find(chunk => chunk?.type === 'image');
+  const viewportImage = captureViewportContent.find((chunk) => chunk?.type === 'image');
   if (viewportImage?.data && viewportImage?.mimeType === 'image/png' && !('text' in viewportImage)) {
     ok('capture_viewport returns MCP-valid image content');
   } else {
     fail('capture_viewport image content', JSON.stringify(captureViewportResponses[0] || null));
   }
 
-  await new Promise((resolve, reject) => runtimeServer.close((error) => error ? reject(error) : resolve()));
+  await new Promise((resolve, reject) => runtimeServer.close((error) => (error ? reject(error) : resolve())));
 
   // 6. Call get_editor_status (should show disconnected)
   console.log('\n🔌 Testing get_editor_status (no Godot connected)...');
   stdout = '';
-  server.stdin.write(rpcMsg('tools/call', {
-    name: statusToolName,
-    arguments: {}
-  }));
+  server.stdin.write(
+    rpcMsg('tools/call', {
+      name: statusToolName,
+      arguments: {},
+    }),
+  );
   await delay(1500);
 
   const statusResponses = parseJsonLines(stdout);
   if (statusResponses.length > 0) {
     const res = statusResponses[0];
     if (res.result?.content) {
-      const text = res.result.content.map(c => c.text).join('');
+      const text = res.result.content.map((c) => c.text).join('');
       ok('get_editor_status responded');
       if (text.includes('false') || text.includes('disconnected') || text.includes('not connected')) {
         ok('Status shows disconnected (correct - no Godot)');
@@ -734,18 +822,25 @@ async function main() {
   // 7. Test a migrated tool (should fail gracefully when no Godot)
   console.log('\n🎮 Testing migrated tool without Godot connected...');
   stdout = '';
-  server.stdin.write(rpcMsg('tools/call', {
-    name: sceneCreateToolName,
-    arguments: { scene_path: 'res://test.tscn', root_type: 'Node2D' }
-  }));
+  server.stdin.write(
+    rpcMsg('tools/call', {
+      name: sceneCreateToolName,
+      arguments: { scene_path: 'res://test.tscn', root_type: 'Node2D' },
+    }),
+  );
   await delay(2000);
 
   const sceneResponses = parseJsonLines(stdout);
   if (sceneResponses.length > 0) {
     const res = sceneResponses[0];
     if (res.result?.content) {
-      const text = res.result.content.map(c => c.text).join('');
-      if (text.includes('not connected') || text.includes('editor') || text.includes('Error') || text.includes('error')) {
+      const text = res.result.content.map((c) => c.text).join('');
+      if (
+        text.includes('not connected') ||
+        text.includes('editor') ||
+        text.includes('Error') ||
+        text.includes('error')
+      ) {
         ok('create_scene correctly reports editor not connected');
       } else {
         ok('create_scene responded: ' + text.substring(0, 200));
@@ -785,24 +880,28 @@ async function main() {
     ok('Godot WebSocket connected to /godot');
 
     // Send godot_ready
-    ws.send(JSON.stringify({
-      type: 'godot_ready',
-      project_path: TEST_PROJECT
-    }));
+    ws.send(
+      JSON.stringify({
+        type: 'godot_ready',
+        project_path: TEST_PROJECT,
+      }),
+    );
     await delay(500);
     ok('Sent godot_ready message');
 
     // Check editor status again (should be connected now)
     stdout = '';
-    server.stdin.write(rpcMsg('tools/call', {
-      name: statusToolName,
-      arguments: {}
-    }));
+    server.stdin.write(
+      rpcMsg('tools/call', {
+        name: statusToolName,
+        arguments: {},
+      }),
+    );
     await delay(1500);
 
     const connStatusResponses = parseJsonLines(stdout);
     if (connStatusResponses.length > 0) {
-      const text = connStatusResponses[0].result?.content?.map(c => c.text).join('') || '';
+      const text = connStatusResponses[0].result?.content?.map((c) => c.text).join('') || '';
       try {
         const status = JSON.parse(text);
         if (status?.connected === true) {
@@ -833,19 +932,21 @@ async function main() {
 
     // Send create_scene via MCP
     stdout = '';
-    server.stdin.write(rpcMsg('tools/call', {
-      name: sceneCreateToolName,
-      arguments: {
-        project_path: TEST_PROJECT,
-        scene_path: 'res://test_bridge.tscn',
-        root_type: 'Node2D',
-      }
-    }));
+    server.stdin.write(
+      rpcMsg('tools/call', {
+        name: sceneCreateToolName,
+        arguments: {
+          project_path: TEST_PROJECT,
+          scene_path: 'res://test_bridge.tscn',
+          root_type: 'Node2D',
+        },
+      }),
+    );
 
     try {
       const invokeMsg = await toolInvokePromise;
       ok(`Received tool_invoke: tool="${invokeMsg.tool}", id="${invokeMsg.id}"`);
-      
+
       if (invokeMsg.tool === 'create_scene') {
         ok('Correct tool invocation routed to legacy bridge command');
       } else {
@@ -853,9 +954,9 @@ async function main() {
       }
 
       if (
-        invokeMsg.args?.projectPath === TEST_PROJECT
-        && invokeMsg.args?.scenePath === 'res://test_bridge.tscn'
-        && invokeMsg.args?.rootNodeType === 'Node2D'
+        invokeMsg.args?.projectPath === TEST_PROJECT &&
+        invokeMsg.args?.scenePath === 'res://test_bridge.tscn' &&
+        invokeMsg.args?.rootNodeType === 'Node2D'
       ) {
         ok('Bridge tool arguments normalized to camelCase before dispatch');
       } else {
@@ -863,16 +964,18 @@ async function main() {
       }
 
       // Send back a mock result
-      ws.send(JSON.stringify({
-        type: 'tool_result',
-        id: invokeMsg.id,
-        success: true,
-        result: {
-          message: 'Scene created successfully',
-          scene_path: 'res://test_bridge.tscn',
-          root_type: 'Node2D'
-        }
-      }));
+      ws.send(
+        JSON.stringify({
+          type: 'tool_result',
+          id: invokeMsg.id,
+          success: true,
+          result: {
+            message: 'Scene created successfully',
+            scene_path: 'res://test_bridge.tscn',
+            root_type: 'Node2D',
+          },
+        }),
+      );
       await delay(1500);
 
       // Check MCP got the result
@@ -880,7 +983,7 @@ async function main() {
       if (toolResponses.length > 0) {
         const res = toolResponses[0];
         if (res.result?.content) {
-          const text = res.result.content.map(c => c.text).join('');
+          const text = res.result.content.map((c) => c.text).join('');
           if (text.includes('success') || text.includes('Scene created') || text.includes('test_bridge')) {
             ok('MCP received tool result from mock Godot');
           } else {
@@ -890,7 +993,6 @@ async function main() {
       } else {
         fail('Tool result relay', 'No MCP response after tool_result');
       }
-
     } catch (e) {
       console.log(`  ⚠️ Tool invoke via WebSocket check skipped: ${e.message}`);
     }
@@ -912,28 +1014,30 @@ async function main() {
     ws.on('message', missingArgsCapture);
     const missingArgsStartedAt = Date.now();
     stdout = '';
-    server.stdin.write(rpcMsg('tools/call', {
-      name: missingArgsToolName,
-      arguments: {},
-    }));
+    server.stdin.write(
+      rpcMsg('tools/call', {
+        name: missingArgsToolName,
+        arguments: {},
+      }),
+    );
     await delay(1200);
     ws.off('message', missingArgsCapture);
 
     const missingArgsResponses = parseJsonLines(stdout);
-    const missingArgsError = missingArgsResponses.find(response => response.error)?.error;
+    const missingArgsError = missingArgsResponses.find((response) => response.error)?.error;
     const missingArgsResultText = missingArgsResponses
       .flatMap((response) => response?.result?.content || [])
       .map((chunk) => chunk?.text || '')
       .join('\n');
-    const missingArgsRejected = Boolean(missingArgsError)
-      || /missing required arguments/i.test(missingArgsResultText);
+    const missingArgsRejected =
+      Boolean(missingArgsError) || /missing required arguments/i.test(missingArgsResultText);
     if (missingArgsRejected) {
       const elapsed = Date.now() - missingArgsStartedAt;
       ok(`${missingArgsToolName} missing args rejected immediately (${elapsed}ms)`);
     } else {
       fail(
         `${missingArgsToolName} missing args`,
-        `Expected immediate missing-args rejection. Responses: ${JSON.stringify(missingArgsResponses[0] || null)}`
+        `Expected immediate missing-args rejection. Responses: ${JSON.stringify(missingArgsResponses[0] || null)}`,
       );
     }
 
@@ -945,7 +1049,6 @@ async function main() {
 
     ws.close();
     await delay(500);
-
   } catch (e) {
     fail('WebSocket connection', e.message);
   }
@@ -965,7 +1068,7 @@ async function main() {
   process.exit(failed > 0 ? 1 : 0);
 }
 
-main().catch(e => {
+main().catch((e) => {
   console.error('Test runner error:', e);
   process.exit(1);
 });

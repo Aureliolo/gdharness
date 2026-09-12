@@ -73,8 +73,8 @@ export class GodotDAPClient {
         reject(
           new Error(
             `Could not connect to Godot DAP server at ${this.host}:${this.port}. ` +
-              'Make sure Godot is running with debug/DAP enabled.'
-          )
+              'Make sure Godot is running with debug/DAP enabled.',
+          ),
         );
       }, 3000);
 
@@ -106,9 +106,7 @@ export class GodotDAPClient {
         clearTimeout(connectTimeout);
         this.socket = null;
         reject(
-          new Error(
-            `Could not connect to Godot DAP server at ${this.host}:${this.port}: ${error.message}`
-          )
+          new Error(`Could not connect to Godot DAP server at ${this.host}:${this.port}: ${error.message}`),
         );
       };
 
@@ -546,7 +544,7 @@ export function createDAPTools(): ToolDefinition[] {
 export async function handleDAPTool(
   client: GodotDAPClient,
   toolName: string,
-  args: unknown
+  args: unknown,
 ): Promise<ToolResponse> {
   const safeArgs: ToolArgs = args && typeof args === 'object' ? (args as ToolArgs) : {};
 

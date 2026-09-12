@@ -95,7 +95,9 @@ export class GodotLSPClient {
       socket.on('error', (error: Error) => {
         if (!settled && !this.connected) {
           settled = true;
-          rejectConnect(new Error(`Failed to connect to Godot LSP at ${this.host}:${this.port}: ${error.message}`));
+          rejectConnect(
+            new Error(`Failed to connect to Godot LSP at ${this.host}:${this.port}: ${error.message}`),
+          );
         }
         this.handleSocketFailure(error);
       });
@@ -275,7 +277,8 @@ export class GodotLSPClient {
           if (errorPayload && typeof errorPayload === 'object') {
             const errorObject = errorPayload as JsonRecord;
             const code = typeof errorObject.code === 'number' ? errorObject.code : 'unknown';
-            const messageText = typeof errorObject.message === 'string' ? errorObject.message : 'Unknown LSP error';
+            const messageText =
+              typeof errorObject.message === 'string' ? errorObject.message : 'Unknown LSP error';
             pending.reject(new Error(`LSP error (${code}): ${messageText}`));
           } else {
             pending.resolve(message.result);
@@ -287,9 +290,10 @@ export class GodotLSPClient {
         const params = message.params;
         const paramsObject = params && typeof params === 'object' ? (params as JsonRecord) : null;
         const uri = paramsObject && typeof paramsObject.uri === 'string' ? paramsObject.uri : null;
-        const diagnostics = paramsObject && Array.isArray(paramsObject.diagnostics)
-          ? (paramsObject.diagnostics as unknown[])
-          : [];
+        const diagnostics =
+          paramsObject && Array.isArray(paramsObject.diagnostics)
+            ? (paramsObject.diagnostics as unknown[])
+            : [];
         if (typeof uri === 'string') {
           const key = diagnosticsKey(uri);
           const waiter = this.diagnosticsWaiters.get(key);
@@ -462,7 +466,12 @@ export class GodotLSPClient {
     }
   }
 
-  async getCompletions(filePath: string, content: string, line: number, character: number): Promise<unknown[]> {
+  async getCompletions(
+    filePath: string,
+    content: string,
+    line: number,
+    character: number,
+  ): Promise<unknown[]> {
     await this.ensureConnected();
     await this.ensureInitializedForFile(filePath);
 
@@ -514,7 +523,11 @@ export class GodotLSPClient {
   }
 }
 
-export function createLSPTools(): Array<{ name: string, description: string, inputSchema: Record<string, unknown> }> {
+export function createLSPTools(): Array<{
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+}> {
   return [
     {
       name: 'lsp_get_diagnostics',
@@ -571,7 +584,7 @@ export function createLSPTools(): Array<{ name: string, description: string, inp
   ];
 }
 
-function asToolResponse(payload: unknown): { content: Array<{ type: string, text: string }> } {
+function asToolResponse(payload: unknown): { content: Array<{ type: string; text: string }> } {
   return {
     content: [
       {
@@ -612,7 +625,7 @@ function isPathWithinRoot(rootPath: string, candidatePath: string): boolean {
 
 async function resolveLSPPaths(
   projectPathValue: string,
-  scriptPathValue: string
+  scriptPathValue: string,
 ): Promise<{ projectPath: string; scriptPath: string }> {
   const requestedProjectPath = resolve(projectPathValue);
   let projectPath: string;
@@ -640,8 +653,8 @@ async function resolveLSPPaths(
 export async function handleLSPTool(
   client: GodotLSPClient,
   toolName: string,
-  args: unknown
-): Promise<{ content: Array<{ type: string, text: string }> }> {
+  args: unknown,
+): Promise<{ content: Array<{ type: string; text: string }> }> {
   try {
     if (!args || typeof args !== 'object') {
       throw new Error('Tool arguments must be an object.');

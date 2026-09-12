@@ -8,19 +8,23 @@ import { exportProject, listExportPresets, ExportProjectParams } from './project
 export const PRIORITY_1_TOOLS = [
   {
     name: 'create_script',
-    description: 'Creates a new GDScript file with proper structure, class_name, and inheritance. Use this to create new scripts.',
+    description:
+      'Creates a new GDScript file with proper structure, class_name, and inheritance. Use this to create new scripts.',
     inputSchema: {
       type: 'object',
       properties: {
         projectPath: { type: 'string', description: 'Absolute path to Godot project' },
-        scriptPath: { type: 'string', description: 'Relative path for the new script (e.g., "scripts/player.gd")' },
+        scriptPath: {
+          type: 'string',
+          description: 'Relative path for the new script (e.g., "scripts/player.gd")',
+        },
         className: { type: 'string', description: 'Optional: class_name for global registration' },
         extends: { type: 'string', description: 'Base class to extend (default: "Node")' },
         content: { type: 'string', description: 'Optional: Initial content' },
-        template: { type: 'string', description: 'Optional: Template name' }
+        template: { type: 'string', description: 'Optional: Template name' },
       },
-      required: ['projectPath', 'scriptPath']
-    }
+      required: ['projectPath', 'scriptPath'],
+    },
   },
   {
     name: 'modify_script',
@@ -39,12 +43,12 @@ export const PRIORITY_1_TOOLS = [
               name: { type: 'string' },
               // Other properties depend on type, simplified for schema
             },
-            required: ['type', 'name']
-          }
-        }
+            required: ['type', 'name'],
+          },
+        },
       },
-      required: ['projectPath', 'scriptPath', 'modifications']
-    }
+      required: ['projectPath', 'scriptPath', 'modifications'],
+    },
   },
   {
     name: 'export_project',
@@ -55,10 +59,10 @@ export const PRIORITY_1_TOOLS = [
         projectPath: { type: 'string' },
         preset: { type: 'string', description: 'Name of the export preset (e.g., "Windows Desktop")' },
         outputPath: { type: 'string', description: 'Relative path for output file' },
-        debug: { type: 'boolean' }
+        debug: { type: 'boolean' },
       },
-      required: ['projectPath', 'preset', 'outputPath']
-    }
+      required: ['projectPath', 'preset', 'outputPath'],
+    },
   },
   {
     name: 'list_export_presets',
@@ -66,11 +70,11 @@ export const PRIORITY_1_TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        projectPath: { type: 'string' }
+        projectPath: { type: 'string' },
       },
-      required: ['projectPath']
-    }
-  }
+      required: ['projectPath'],
+    },
+  },
 ];
 
 /**
@@ -80,16 +84,16 @@ export async function handlePriority1Tools(name: string, args: any, godotPath: s
   switch (name) {
     case 'create_script':
       return createGDScript(args as CreateScriptParams);
-      
+
     case 'modify_script':
       return modifyGDScript(args as ModifyScriptParams);
-      
+
     case 'export_project':
       return await exportProject(args as ExportProjectParams, godotPath);
-      
+
     case 'list_export_presets':
       return { presets: listExportPresets(args.projectPath) };
-      
+
     default:
       throw new Error(`Unknown tool: ${name}`);
   }

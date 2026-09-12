@@ -154,7 +154,9 @@ function isValueComplete(value: string): boolean {
   return depth <= 0 && !inString;
 }
 
-export function parseProjectGodot(content: string): Record<string, Record<string, string | number | boolean | null>> {
+export function parseProjectGodot(
+  content: string,
+): Record<string, Record<string, string | number | boolean | null>> {
   const result: Record<string, Record<string, string | number | boolean | null>> = {};
   let currentSection = 'root';
   result[currentSection] = {};
@@ -221,7 +223,10 @@ function parseIniLikeValue(value: string): string | number | boolean | null {
   return value;
 }
 
-function readResourceText(uri: string, getProjectPath: () => string | null): { mimeType: string; text: string } {
+function readResourceText(
+  uri: string,
+  getProjectPath: () => string | null,
+): { mimeType: string; text: string } {
   const projectPath = ensureProjectPath(getProjectPath);
   const parsedUri = parseGodotUri(uri);
 

@@ -17,7 +17,11 @@ const checksumPath = `${archivePath}.sha256`;
 // posix path instead, which every tar on every platform reads the same way.
 const archiveArg = `dist/${archiveName}`;
 
-assert.equal(await Bun.file(archivePath).exists(), true, `${archiveName} should exist; run bun run release:pack first`);
+assert.equal(
+  await Bun.file(archivePath).exists(),
+  true,
+  `${archiveName} should exist; run bun run release:pack first`,
+);
 assert.equal(await Bun.file(checksumPath).exists(), true, `${archiveName}.sha256 should exist`);
 assert.deepEqual(
   (await readdir(path.join(root, 'dist'))).sort(),
@@ -28,7 +32,11 @@ assert.deepEqual(
 const archiveBytes = new Uint8Array(await Bun.file(archivePath).arrayBuffer());
 const actualChecksum = createHash('sha256').update(archiveBytes).digest('hex');
 const checksumFile = (await readFile(checksumPath, 'utf8')).trim();
-assert.equal(checksumFile, `${actualChecksum}  ${archiveName}`, 'SHA-256 sidecar should match the release archive');
+assert.equal(
+  checksumFile,
+  `${actualChecksum}  ${archiveName}`,
+  'SHA-256 sidecar should match the release archive',
+);
 
 const tarList = Bun.spawnSync(['tar', '-tzf', archiveArg], { cwd: root, stdout: 'pipe', stderr: 'pipe' });
 assert.equal(tarList.exitCode, 0, tarList.stderr.toString());
@@ -50,11 +58,7 @@ assert.match(
   `packed CLI should be executable without being world-writable, got: ${cliListing}`,
 );
 const packedFiles = new Set(archiveEntries);
-assert.equal(
-  packedFiles.size,
-  archiveEntries.length,
-  'release archive should not contain duplicate paths',
-);
+assert.equal(packedFiles.size, archiveEntries.length, 'release archive should not contain duplicate paths');
 assert.equal(
   archiveEntries.some((entry) => entry.startsWith('package/node_modules/')),
   false,
@@ -65,7 +69,6 @@ for (const requiredFile of [
   'package/package.json',
   'package/build/cli.js',
   'package/build/index.js',
-  'package/build/visualizer.html',
   'package/build/godot/operations/godot_operations.gd',
   'package/build/godot/addons/auto_reload/plugin.cfg',
   'package/build/godot/addons/godot_mcp_editor/plugin.cfg',
@@ -97,14 +100,34 @@ try {
   const packedRoot = path.join(extractionRoot, 'package');
   const packedPackage = JSON.parse(await readFile(path.join(packedRoot, 'package.json'), 'utf8'));
   assert.deepEqual(packedPackage.dependencies ?? {}, {}, 'packed runtime should not fetch dependencies');
-  assert.deepEqual(packedPackage.peerDependencies ?? {}, {}, 'packed runtime should not fetch peer dependencies');
-  assert.deepEqual(packedPackage.optionalDependencies ?? {}, {}, 'packed runtime should not fetch optional dependencies');
-  assert.equal(packedPackage.devDependencies, undefined, 'packed runtime should not include development dependencies');
+  assert.deepEqual(
+    packedPackage.peerDependencies ?? {},
+    {},
+    'packed runtime should not fetch peer dependencies',
+  );
+  assert.deepEqual(
+    packedPackage.optionalDependencies ?? {},
+    {},
+    'packed runtime should not fetch optional dependencies',
+  );
+  assert.equal(
+    packedPackage.devDependencies,
+    undefined,
+    'packed runtime should not include development dependencies',
+  );
   assert.equal(packedPackage.scripts?.prepare, undefined, 'packed package should not require prepare');
-  assert.equal(packedPackage.scripts?.postinstall, undefined, 'packed package should not require postinstall');
+  assert.equal(
+    packedPackage.scripts?.postinstall,
+    undefined,
+    'packed package should not require postinstall',
+  );
 
   const scriptCommands = Object.values(packedPackage.scripts ?? {}).join('\n');
-  assert.doesNotMatch(scriptCommands, /\b(?:npm|npx)\b/, 'packed scripts should use Bun, not npm or npx commands');
+  assert.doesNotMatch(
+    scriptCommands,
+    /\b(?:npm|npx)\b/,
+    'packed scripts should use Bun, not npm or npx commands',
+  );
 
   const cliPath = path.join(packedRoot, 'build', 'cli.js');
   assert.ok(
@@ -113,9 +136,8 @@ try {
   );
   for (const bundleName of ['cli.js', 'index.js']) {
     const bundle = await readFile(path.join(packedRoot, 'build', bundleName), 'utf8');
-    const externalPackageImport = bundle.match(
-      /(?:from\s+|import\()["'](?:@modelcontextprotocol|fs-extra)(?:[\/"'])/,
-    )?.[0] ?? null;
+    const externalPackageImport =
+      bundle.match(/(?:from\s+|import\()["'](?:@modelcontextprotocol|fs-extra)(?:[\/"'])/)?.[0] ?? null;
     assert.equal(
       externalPackageImport,
       null,
@@ -131,7 +153,11 @@ try {
     stderr: 'pipe',
   });
   assert.equal(cli.exitCode, 0, cli.stderr.toString());
-  assert.equal(cli.stdout.toString().trim(), `${pkg.name} v${pkg.version}`, 'packed bin should report the archive version');
+  assert.equal(
+    cli.stdout.toString().trim(),
+    `${pkg.name} v${pkg.version}`,
+    'packed bin should report the archive version',
+  );
 } finally {
   await rm(extractionRoot, { recursive: true, force: true });
 }
