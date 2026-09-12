@@ -1,4 +1,4 @@
-import { readFileSync } from 'fs';
+import { readFileSync } from 'node:fs';
 
 export const DEBUG_MODE: boolean = process.env['DEBUG'] === 'true';
 export const GODOT_DEBUG_MODE_DEFAULT: boolean = process.env['GODOT_DEBUG'] === 'true' || DEBUG_MODE;

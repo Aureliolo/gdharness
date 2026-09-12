@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import http from 'node:http';
 import type { RawData } from 'ws';
 import { WebSocket, WebSocketServer } from 'ws';
+import { errorMessage, toError } from './errors.js';
 
 const DEFAULT_PORT = 6505;
 const DEFAULT_HOST = '127.0.0.1';
@@ -88,12 +89,12 @@ export interface GodotReadyMessage {
 type IncomingMessage = ToolResultMessage | PongMessage | GodotReadyMessage;
 type OutgoingMessage = ToolInvokeMessage | PingMessage;
 
-type BridgeEventMap = {
+interface BridgeEventMap {
   tool_start: { tool: string; id: string; args: Record<string, unknown> };
   tool_end: { tool: string; id: string; success: boolean; duration: number };
   godot_connected: { projectPath?: string | undefined };
   godot_disconnected: Record<string, never>;
-};
+}
 
 interface PendingRequest {
   toolName: string;
@@ -203,12 +204,16 @@ export class GodotBridge extends EventEmitter {
     this.stopKeepalive();
     this.rejectAllPending(new Error('GodotBridge stopped'));
     this.resourceQueues.clear();
-    const closeTasks: Array<Promise<void>> = [];
+    const closeTasks: Promise<void>[] = [];
 
+    // A close that half-fails must not look like one that worked: a bridge still holding its
+    // port is the failure that costs a whole session to find, and silence is what hides it.
     if (this.socket) {
       try {
         this.socket.close();
-      } catch {}
+      } catch (error) {
+        this.log('debug', `Godot socket did not close cleanly: ${errorMessage(error)}`);
+      }
       this.socket = null;
     }
 
@@ -217,7 +222,9 @@ export class GodotBridge extends EventEmitter {
       for (const client of godotWss.clients) {
         try {
           client.close();
-        } catch {}
+        } catch (error) {
+          this.log('debug', `Godot client did not close cleanly: ${errorMessage(error)}`);
+        }
       }
       closeTasks.push(this.closeWebSocketServer(godotWss));
       this.godotWss = null;
@@ -228,7 +235,9 @@ export class GodotBridge extends EventEmitter {
       for (const client of vizWss.clients) {
         try {
           client.close();
-        } catch {}
+        } catch (error) {
+          this.log('debug', `Visualizer client did not close cleanly: ${errorMessage(error)}`);
+        }
       }
       closeTasks.push(this.closeWebSocketServer(vizWss));
       this.vizWss = null;
@@ -468,13 +477,26 @@ export class GodotBridge extends EventEmitter {
     });
   }
 
+  /**
+   * `ws` hands a frame over as one of three shapes, and only one of them survives a bare
+   * `toString()`: an array of chunks comma-joins into nonsense and an ArrayBuffer renders as
+   * "[object ArrayBuffer]". Both then fail to parse, so a payload large enough to be
+   * fragmented (a deep scene tree, a base64 screenshot) is dropped and its caller waits for
+   * the timeout. Which shape arrives depends on size, so the failure is intermittent.
+   */
+  private static rawDataToString(data: RawData): string {
+    if (Array.isArray(data)) return Buffer.concat(data).toString('utf8');
+    if (Buffer.isBuffer(data)) return data.toString('utf8');
+    return Buffer.from(data).toString('utf8');
+  }
+
   private handleRawMessage(data: RawData): void {
     let parsed: unknown;
 
     try {
-      parsed = JSON.parse(data.toString());
+      parsed = JSON.parse(GodotBridge.rawDataToString(data));
     } catch (error) {
-      this.log('error', `Invalid JSON from Godot: ${error instanceof Error ? error.message : String(error)}`);
+      this.log('error', `Invalid JSON from Godot: ${errorMessage(error)}`);
       return;
     }
 
@@ -573,13 +595,13 @@ export class GodotBridge extends EventEmitter {
       } catch (error) {
         clearTimeout(timeout);
         this.pendingRequests.delete(requestId);
-        reject(error);
+        reject(toError(error));
       }
     });
   }
 
   private sendMessage(message: OutgoingMessage): void {
-    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+    if (this.socket?.readyState !== WebSocket.OPEN) {
       throw new Error('Godot is not connected');
     }
 
@@ -598,7 +620,7 @@ export class GodotBridge extends EventEmitter {
         const ping: PingMessage = { type: 'ping' };
         this.sendMessage(ping);
       } catch (error) {
-        this.log('warn', `Failed to send ping: ${error instanceof Error ? error.message : String(error)}`);
+        this.log('warn', `Failed to send ping: ${errorMessage(error)}`);
       }
     }, KEEPALIVE_INTERVAL_MS);
   }
@@ -727,10 +749,7 @@ export class GodotBridge extends EventEmitter {
 let defaultBridge: GodotBridge | null = null;
 
 export function getDefaultBridge(): GodotBridge {
-  if (!defaultBridge) {
-    defaultBridge = new GodotBridge(resolveDefaultBridgePort(), resolveDefaultBridgeHost());
-  }
-
+  defaultBridge ??= new GodotBridge(resolveDefaultBridgePort(), resolveDefaultBridgeHost());
   return defaultBridge;
 }
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
 import { spawn } from 'node:child_process';
-import { setTimeout as delay } from 'node:timers/promises';
 import process from 'node:process';
+import { setTimeout as delay } from 'node:timers/promises';
 import { sanitizeToolName } from './support/tool-name.mjs';
 
 const SERVER_ENTRY = './build/index.js';

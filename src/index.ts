@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+
 /**
  * Godot MCP Server
  *
@@ -7,16 +8,14 @@
  * capture debug output, and control project execution.
  */
 
-import { fileURLToPath } from 'url';
-import { join, dirname, basename, normalize } from 'path';
-import { existsSync, readdirSync, readFileSync, writeFileSync, mkdtempSync, rmSync, statSync } from 'fs';
-import { tmpdir } from 'os';
-import { spawn } from 'child_process';
+import { execFile, spawn } from 'node:child_process';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createConnection as createTcpConnection } from 'node:net';
-import { promisify } from 'util';
-import { execFile } from 'child_process';
-
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { homedir, tmpdir } from 'node:os';
+import { basename, dirname, join, normalize } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import {
   CallToolRequestSchema,
@@ -26,16 +25,39 @@ import {
   ListToolsRequestSchema,
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
-
-import { setupResourceHandlers } from './resources.js';
-import { GodotLSPClient, handleLSPTool } from './lsp_client.js';
 import { GodotDAPClient, handleDAPTool } from './dap_client.js';
-import { GodotBridge, getDefaultBridge } from './godot-bridge.js';
+import { errorMessage } from './errors.js';
+import { type GodotBridge, getDefaultBridge } from './godot-bridge.js';
+import { GodotLSPClient, handleLSPTool } from './lsp_client.js';
 import { getPrompt, listPrompts } from './prompts.js';
+import { setupResourceHandlers } from './resources.js';
+import type {
+  GodotProcess,
+  GodotServerConfig,
+  MCPToolDefinition,
+  OperationParams,
+  ProjectStructure,
+  ToolResponse,
+} from './server-types.js';
+import { DEBUG_MODE, GODOT_DEBUG_MODE_DEFAULT, SERVER_VERSION } from './server-version.js';
+import {
+  asParams,
+  readArray,
+  readBoolean,
+  readBooleanEither,
+  readNonEmptyString,
+  readNonEmptyStringEither,
+  readNumber,
+  readNumberLike,
+  readParams,
+  readPositiveNumber,
+  readString,
+  readStringArray,
+  readStringEither,
+} from './tool-args.js';
 import { buildToolDefinitions as buildToolDefinitionsForServer } from './tool-definitions.js';
 import { CORE_TOOL_GROUPS, TOOL_GROUPS } from './tool-groups.js';
-import { DEBUG_MODE, GODOT_DEBUG_MODE_DEFAULT, SERVER_VERSION } from './server-version.js';
-import type { GodotProcess, GodotServerConfig, MCPToolDefinition, OperationParams } from './server-types.js';
+import { sanitizeExportedToolName } from './tool-names.js';
 
 // execFile, not exec: no shell means no quoting, and no quoting means no way to escape out
 // of it. Every argument below is an array element, so a path full of backslashes, spaces or
@@ -74,7 +96,7 @@ export function scanDirectoryForGodotBinaries(
 
   const pattern = platform === 'win32' ? /^godot.*\.exe$/i : /^godot/i;
 
-  const matches: Array<{ name: string; mtime: number }> = [];
+  const matches: { name: string; mtime: number }[] = [];
   for (const name of entries) {
     if (!pattern.test(name)) {
       continue;
@@ -94,6 +116,32 @@ export function scanDirectoryForGodotBinaries(
   return matches.map((m) => join(directory, m.name));
 }
 
+/**
+ * An environment variable's value, treating the empty string as unset.
+ *
+ * A variable exported with nothing in it is how a shell says "not configured", and reading it
+ * as a configured empty value picks a tool profile of "" or a page size that will not parse.
+ */
+function envValue(name: string): string | undefined {
+  const value = process.env[name];
+  return value === undefined || value === '' ? undefined : value;
+}
+
+/**
+ * The user's home directory, or an empty string when there is not one.
+ *
+ * `homedir()` reads HOME or USERPROFILE and falls back to the OS user database, so it answers
+ * in cases a bare environment read does not. It can still come back empty, and every caller
+ * has to treat that as "skip the home-relative candidates" rather than build a path from it.
+ */
+function resolveHomeDirectory(): string {
+  try {
+    return homedir();
+  } catch {
+    return '';
+  }
+}
+
 // Derive __filename and __dirname in ESM
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -102,12 +150,15 @@ const __dirname = dirname(__filename);
  * Main server class for the Godot MCP server
  */
 class GodotServer {
-  private server: Server;
+  // The tool surface here is built by hand: names are sanitised and aliased, the list changes
+  // as groups activate, and pagination is ours. That is the "advanced use case" McpServer's
+  // own docs point at its `.server` for, so registration goes through the protocol object.
+  private mcp: McpServer;
   private activeProcess: GodotProcess | null = null;
   private godotPath: string | null = null;
   private operationsScriptPath: string;
-  private validatedPaths: Map<string, boolean> = new Map();
-  private strictPathValidation: boolean = false;
+  private validatedPaths = new Map<string, boolean>();
+  private strictPathValidation = false;
   private godotDebugMode: boolean = GODOT_DEBUG_MODE_DEFAULT;
   private lspClient: GodotLSPClient | null = null;
   private dapClient: GodotDAPClient | null = null;
@@ -119,7 +170,7 @@ class GodotServer {
   private toolDefinitionFactory: (() => MCPToolDefinition[]) | null = null;
   private readonly toolExposureProfile: 'compact' | 'full' | 'legacy';
   private readonly toolsListPageSize: number;
-  private activeGroups: Set<string> = new Set();
+  private activeGroups = new Set<string>();
   private readonly compactAliasToLegacy: Record<string, string> = {
     'tool.catalog': 'tool_catalog',
     'project.list': 'list_projects',
@@ -207,8 +258,8 @@ class GodotServer {
 
   constructor(config?: GodotServerConfig) {
     const rawProfile = (
-      process.env['GDHARNESS_TOOL_PROFILE'] ||
-      process.env['MCP_TOOL_PROFILE'] ||
+      envValue('GDHARNESS_TOOL_PROFILE') ??
+      envValue('MCP_TOOL_PROFILE') ??
       'compact'
     ).toLowerCase();
     if (rawProfile === 'full' || rawProfile === 'legacy' || rawProfile === 'compact') {
@@ -217,7 +268,7 @@ class GodotServer {
       this.toolExposureProfile = 'compact';
     }
 
-    const rawToolsPageSize = parseInt(process.env['GDHARNESS_TOOLS_PAGE_SIZE'] || '33', 10);
+    const rawToolsPageSize = parseInt(envValue('GDHARNESS_TOOLS_PAGE_SIZE') ?? '33', 10);
     this.toolsListPageSize =
       Number.isFinite(rawToolsPageSize) && rawToolsPageSize > 0 ? rawToolsPageSize : 33;
 
@@ -264,7 +315,7 @@ class GodotServer {
     if (debugMode) console.error(`[DEBUG] Operations script path: ${this.operationsScriptPath}`);
 
     // Initialize the MCP server
-    this.server = new Server(
+    this.mcp = new McpServer(
       {
         name: 'gdharness',
         version: SERVER_VERSION,
@@ -282,10 +333,12 @@ class GodotServer {
     this.setupToolHandlers();
 
     // Set up resource handlers for godot:// URIs
-    setupResourceHandlers(this.server, () => this.lastProjectPath);
+    setupResourceHandlers(this.mcp, () => this.lastProjectPath);
 
     // Error handling
-    this.server.onerror = (error) => console.error('[MCP Error]', error);
+    this.mcp.server.onerror = (error) => {
+      console.error('[MCP Error]', error);
+    };
 
     this.setupShutdownHandlers();
   }
@@ -303,14 +356,14 @@ class GodotServer {
   /**
    * Create a standardized error response with possible solutions
    */
-  private createErrorResponse(message: string, possibleSolutions: string[] = []): any {
+  private createErrorResponse(message: string, possibleSolutions: string[] = []): ToolResponse {
     // Log the error
     console.error(`[SERVER] Error response: ${message}`);
     if (possibleSolutions.length > 0) {
       console.error(`[SERVER] Possible solutions: ${possibleSolutions.join(', ')}`);
     }
 
-    const response: any = {
+    const response: ToolResponse = {
       content: [
         {
           type: 'text',
@@ -323,7 +376,7 @@ class GodotServer {
     if (possibleSolutions.length > 0) {
       response.content.push({
         type: 'text',
-        text: 'Possible solutions:\n- ' + possibleSolutions.join('\n- '),
+        text: `Possible solutions:\n- ${possibleSolutions.join('\n- ')}`,
       });
     }
 
@@ -355,7 +408,7 @@ class GodotServer {
       this.logDebug(`Quick-validating Godot path: ${path}`);
       return path === 'godot' || existsSync(path);
     } catch (error) {
-      this.logDebug(`Invalid Godot path: ${path}, error: ${error}`);
+      this.logDebug(`Invalid Godot path: ${path}, error: ${errorMessage(error)}`);
       return false;
     }
   }
@@ -364,9 +417,9 @@ class GodotServer {
    * Validate if a Godot path is valid and executable
    */
   private async isValidGodotPath(path: string): Promise<boolean> {
-    // Check cache first
-    if (this.validatedPaths.has(path)) {
-      return this.validatedPaths.get(path)!;
+    const cached = this.validatedPaths.get(path);
+    if (cached !== undefined) {
+      return cached;
     }
 
     try {
@@ -385,7 +438,7 @@ class GodotServer {
       this.validatedPaths.set(path, true);
       return true;
     } catch (error) {
-      this.logDebug(`Invalid Godot path: ${path}, error: ${error}`);
+      this.logDebug(`Invalid Godot path: ${path}, error: ${errorMessage(error)}`);
       this.validatedPaths.set(path, false);
       return false;
     }
@@ -418,6 +471,12 @@ class GodotServer {
     const osPlatform = process.platform;
     this.logDebug(`Auto-detecting Godot path for platform: ${osPlatform}`);
 
+    // A home directory is not guaranteed: a service account, a container or a Windows session
+    // started without a profile has none. Interpolating the miss produced candidates beginning
+    // with the literal text "undefined", which the detector then stat'd and scanned, and the
+    // only symptom was detection failing for no stated reason.
+    const home = resolveHomeDirectory();
+
     const possiblePaths: string[] = [
       'godot', // Check if 'godot' is in PATH first
     ];
@@ -427,25 +486,29 @@ class GodotServer {
       possiblePaths.push(
         '/Applications/Godot.app/Contents/MacOS/Godot',
         '/Applications/Godot_4.app/Contents/MacOS/Godot',
-        `${process.env['HOME']}/Applications/Godot.app/Contents/MacOS/Godot`,
-        `${process.env['HOME']}/Applications/Godot_4.app/Contents/MacOS/Godot`,
-        `${process.env['HOME']}/Library/Application Support/Steam/steamapps/common/Godot Engine/Godot.app/Contents/MacOS/Godot`,
       );
+      if (home) {
+        possiblePaths.push(
+          `${home}/Applications/Godot.app/Contents/MacOS/Godot`,
+          `${home}/Applications/Godot_4.app/Contents/MacOS/Godot`,
+          `${home}/Library/Application Support/Steam/steamapps/common/Godot Engine/Godot.app/Contents/MacOS/Godot`,
+        );
+      }
     } else if (osPlatform === 'win32') {
       possiblePaths.push(
         'C:\\Program Files\\Godot\\Godot.exe',
         'C:\\Program Files (x86)\\Godot\\Godot.exe',
         'C:\\Program Files\\Godot_4\\Godot.exe',
         'C:\\Program Files (x86)\\Godot_4\\Godot.exe',
-        `${process.env['USERPROFILE']}\\Godot\\Godot.exe`,
       );
+      if (home) {
+        possiblePaths.push(`${home}\\Godot\\Godot.exe`);
+      }
     } else if (osPlatform === 'linux') {
-      possiblePaths.push(
-        '/usr/bin/godot',
-        '/usr/local/bin/godot',
-        '/snap/bin/godot',
-        `${process.env['HOME']}/.local/bin/godot`,
-      );
+      possiblePaths.push('/usr/bin/godot', '/usr/local/bin/godot', '/snap/bin/godot');
+      if (home) {
+        possiblePaths.push(`${home}/.local/bin/godot`);
+      }
     }
 
     // Try each possible path
@@ -468,21 +531,20 @@ class GodotServer {
         'C:\\Program Files (x86)\\Godot',
         'C:\\Program Files\\Godot_4',
         'C:\\Program Files (x86)\\Godot_4',
-        `${process.env['USERPROFILE']}\\Godot`,
-        `${process.env['USERPROFILE']}\\Downloads`,
-        `${process.env['USERPROFILE']}\\Desktop`,
       );
+      if (home) {
+        scanDirectories.push(`${home}\\Godot`, `${home}\\Downloads`, `${home}\\Desktop`);
+      }
     } else if (osPlatform === 'darwin') {
-      scanDirectories.push('/Applications', `${process.env['HOME']}/Applications`);
+      scanDirectories.push('/Applications');
+      if (home) {
+        scanDirectories.push(`${home}/Applications`);
+      }
     } else if (osPlatform === 'linux') {
-      scanDirectories.push(
-        '/usr/bin',
-        '/usr/local/bin',
-        '/snap/bin',
-        `${process.env['HOME']}/.local/bin`,
-        `${process.env['HOME']}/Downloads`,
-        `${process.env['HOME']}/Desktop`,
-      );
+      scanDirectories.push('/usr/bin', '/usr/local/bin', '/snap/bin');
+      if (home) {
+        scanDirectories.push(`${home}/.local/bin`, `${home}/Downloads`, `${home}/Desktop`);
+      }
     }
 
     for (const dir of scanDirectories) {
@@ -561,24 +623,31 @@ class GodotServer {
       this.activeProcess.process.kill();
       this.activeProcess = null;
     }
+    // Each of these is allowed to fail without stopping the rest of the shutdown, but a
+    // failure has to leave a trace: a stop that did not release the language server port is
+    // indistinguishable from one that did until the next run cannot bind.
     if (this.lspClient) {
       try {
         await this.lspClient.disconnect();
-      } catch {}
+      } catch (error) {
+        this.logDebug(`LSP client did not disconnect cleanly: ${errorMessage(error)}`);
+      }
       this.lspClient = null;
     }
     if (this.dapClient) {
       try {
         await this.dapClient.disconnect();
-      } catch {}
+      } catch (error) {
+        this.logDebug(`DAP client did not disconnect cleanly: ${errorMessage(error)}`);
+      }
       this.dapClient = null;
     }
-    if (this.godotBridge) {
-      try {
-        await this.godotBridge.stop();
-      } catch {}
+    try {
+      await this.godotBridge.stop();
+    } catch (error) {
+      this.logDebug(`Godot bridge did not stop cleanly: ${errorMessage(error)}`);
     }
-    await this.server.close();
+    await this.mcp.server.close();
   }
 
   private setupShutdownHandlers(): void {
@@ -586,11 +655,21 @@ class GodotServer {
       void this.handleShutdown(source, exitCode);
     };
 
-    process.once('SIGINT', () => requestShutdown('SIGINT', 0));
-    process.once('SIGTERM', () => requestShutdown('SIGTERM', 0));
-    process.once('SIGHUP', () => requestShutdown('SIGHUP', 0));
-    process.once('beforeExit', (code: number) => requestShutdown(`beforeExit:${code}`));
-    process.once('exit', () => this.forceCleanupOnExit());
+    process.once('SIGINT', () => {
+      requestShutdown('SIGINT', 0);
+    });
+    process.once('SIGTERM', () => {
+      requestShutdown('SIGTERM', 0);
+    });
+    process.once('SIGHUP', () => {
+      requestShutdown('SIGHUP', 0);
+    });
+    process.once('beforeExit', (code: number) => {
+      requestShutdown(`beforeExit:${code}`);
+    });
+    process.once('exit', () => {
+      this.forceCleanupOnExit();
+    });
   }
 
   private async handleShutdown(source: string, exitCode?: number): Promise<void> {
@@ -618,26 +697,28 @@ class GodotServer {
     }
     this.shutdownInitiated = true;
 
+    // 'exit' runs synchronously and the process is gone the moment this returns, so the child
+    // kill is the only thing that can still happen here. The bridge's close is a promise that
+    // would never settle, and the sockets go with the process anyway; the paths that can
+    // await it are SIGINT, SIGTERM, SIGHUP and beforeExit, which all go through cleanup().
     if (this.activeProcess) {
       try {
         this.activeProcess.process.kill();
-      } catch {}
+      } catch (error) {
+        console.error('[SERVER] Failed to kill the Godot process on exit:', errorMessage(error));
+      }
       this.activeProcess = null;
-    }
-
-    if (this.godotBridge) {
-      void this.godotBridge.stop().catch(() => {});
     }
   }
 
   private async handleRuntimeCommand(
     command: string,
     args: unknown,
-  ): Promise<{ content: Array<{ type: string; text?: string; data?: string; mimeType?: string }> }> {
+  ): Promise<{ content: { type: string; text?: string; data?: string; mimeType?: string }[] }> {
     const params = args && typeof args === 'object' ? (args as Record<string, unknown>) : {};
     const RUNTIME_PORT = 7777;
     const RUNTIME_HOST = '127.0.0.1';
-    const timeoutOverride = Number.parseInt(process.env['GDHARNESS_RUNTIME_TIMEOUT_MS'] || '', 10);
+    const timeoutOverride = Number.parseInt(envValue('GDHARNESS_RUNTIME_TIMEOUT_MS') ?? '', 10);
     const TIMEOUT_MS = Number.isInteger(timeoutOverride) && timeoutOverride > 0 ? timeoutOverride : 10000;
     const expectsScreenshot = command === 'capture_screenshot' || command === 'capture_viewport';
     const screenshotDir = expectsScreenshot
@@ -654,7 +735,7 @@ class GodotServer {
     return new Promise((resolve) => {
       const socket = createTcpConnection({ port: RUNTIME_PORT, host: RUNTIME_HOST }, () => {
         const payload = JSON.stringify({ command, params: runtimeParams, id: Date.now() });
-        socket.write(payload + '\n');
+        socket.write(`${payload}\n`);
       });
 
       let responseBuffer = Buffer.alloc(0);
@@ -676,7 +757,7 @@ class GodotServer {
         });
       }, TIMEOUT_MS);
 
-      const resolveRuntimePayload = (parsed: any) => {
+      const resolveRuntimePayload = (parsed: OperationParams) => {
         if (resolved) {
           return;
         }
@@ -684,8 +765,13 @@ class GodotServer {
         clearTimeout(timer);
         socket.destroy();
 
-        if (parsed.type === 'screenshot_file' && parsed.path) {
-          const returnedPath = String(parsed.path);
+        const payloadType = readString(parsed, 'type');
+        const returnedPath = readString(parsed, 'path');
+        const dimensions = `${readNumber(parsed, 'width') ?? 0}x${readNumber(parsed, 'height') ?? 0} ${
+          readString(parsed, 'format') ?? 'unknown'
+        }`;
+
+        if (payloadType === 'screenshot_file' && returnedPath) {
           if (!screenshotPath || normalize(returnedPath) !== normalize(screenshotPath)) {
             cleanupScreenshotDir();
             resolve({
@@ -705,14 +791,14 @@ class GodotServer {
               content: [
                 {
                   type: 'text',
-                  text: `Screenshot captured: ${parsed.width}x${parsed.height} ${parsed.format}`,
+                  text: `Screenshot captured: ${dimensions}`,
                 },
                 { type: 'image', data: imageData, mimeType: 'image/png' },
               ],
             });
           } catch (error) {
             cleanupScreenshotDir();
-            const message = error instanceof Error ? error.message : String(error);
+            const message = errorMessage(error);
             resolve({
               content: [
                 { type: 'text', text: `Failed to read screenshot file '${screenshotPath}': ${message}` },
@@ -722,15 +808,16 @@ class GodotServer {
           return;
         }
 
-        if (parsed.type === 'screenshot' && parsed.data) {
+        const inlineData = readString(parsed, 'data');
+        if (payloadType === 'screenshot' && inlineData) {
           cleanupScreenshotDir();
           resolve({
             content: [
               {
                 type: 'text',
-                text: `Screenshot captured: ${parsed.width}x${parsed.height} ${parsed.format}`,
+                text: `Screenshot captured: ${dimensions}`,
               },
-              { type: 'image', data: parsed.data, mimeType: 'image/png' },
+              { type: 'image', data: inlineData, mimeType: 'image/png' },
             ],
           });
           return;
@@ -744,7 +831,7 @@ class GodotServer {
 
       socket.on('data', (chunk: Buffer) => {
         responseBuffer = Buffer.concat([responseBuffer, Buffer.from(chunk)]);
-        const parsedMessages: any[] = [];
+        const parsedMessages: OperationParams[] = [];
 
         const parseCandidate = (candidate: string) => {
           const trimmed = candidate.trim();
@@ -752,7 +839,7 @@ class GodotServer {
             return;
           }
           try {
-            parsedMessages.push(JSON.parse(trimmed));
+            parsedMessages.push(asParams(JSON.parse(trimmed)));
           } catch {
             // Ignore malformed frame/line and keep scanning.
           }
@@ -784,12 +871,15 @@ class GodotServer {
         }
 
         if (parsedMessages.length > 0) {
+          const typeOf = (message: OperationParams) => readString(message, 'type');
           const candidate =
-            parsedMessages.find((message) => message?.type === 'screenshot_file' && message?.path) ??
-            parsedMessages.find((message) => message?.type === 'screenshot' && message?.data) ??
-            parsedMessages.find((message) => message?.type === 'pong') ??
-            parsedMessages.find((message) => message?.type && message.type !== 'welcome') ??
-            null;
+            parsedMessages.find((m) => typeOf(m) === 'screenshot_file' && m['path']) ??
+            parsedMessages.find((m) => typeOf(m) === 'screenshot' && m['data']) ??
+            parsedMessages.find((m) => typeOf(m) === 'pong') ??
+            parsedMessages.find((m) => {
+              const type = typeOf(m);
+              return type !== undefined && type !== 'welcome';
+            });
 
           if (candidate) {
             resolveRuntimePayload(candidate);
@@ -807,7 +897,7 @@ class GodotServer {
         resolved = true;
         cleanupScreenshotDir();
         try {
-          const parsed = JSON.parse(responseData);
+          const parsed: unknown = JSON.parse(responseData);
           resolve({
             content: [{ type: 'text', text: JSON.stringify(parsed, null, 2) }],
           });
@@ -842,33 +932,17 @@ class GodotServer {
   private async handleLSP(
     toolName: string,
     args: unknown,
-  ): Promise<{ content: Array<{ type: string; text: string }> }> {
-    if (!this.lspClient) {
-      this.lspClient = new GodotLSPClient();
-    }
+  ): Promise<{ content: { type: string; text: string }[] }> {
+    this.lspClient ??= new GodotLSPClient();
     return handleLSPTool(this.lspClient, toolName, args);
   }
 
   private async handleDAP(
     toolName: string,
     args: unknown,
-  ): Promise<{ content: Array<{ type: string; text: string }> }> {
-    if (!this.dapClient) {
-      this.dapClient = new GodotDAPClient();
-    }
+  ): Promise<{ content: { type: string; text: string }[] }> {
+    this.dapClient ??= new GodotDAPClient();
     return handleDAPTool(this.dapClient, toolName, args);
-  }
-
-  private sanitizeExportedToolName(toolName: string): string {
-    const sanitized = toolName
-      .normalize('NFKD')
-      .replace(/[^\x00-\x7F]/g, '')
-      .replace(/[^a-zA-Z0-9-]+/g, '-')
-      .replace(/-+/g, '-')
-      .replace(/^-+|-+$/g, '')
-      .slice(0, 128);
-
-    return sanitized.length > 0 ? sanitized : 'tool';
   }
 
   private buildToolNameResolutionMap(allTools: MCPToolDefinition[]): Map<string, string> {
@@ -886,12 +960,12 @@ class GodotServer {
 
     for (const tool of allTools) {
       register(tool.name, tool.name);
-      register(this.sanitizeExportedToolName(tool.name), tool.name);
+      register(sanitizeExportedToolName(tool.name), tool.name);
     }
 
     for (const [compactName, legacyName] of Object.entries(this.compactAliasToLegacy)) {
       register(compactName, legacyName);
-      register(this.sanitizeExportedToolName(compactName), legacyName);
+      register(sanitizeExportedToolName(compactName), legacyName);
     }
 
     return resolutionMap;
@@ -901,8 +975,8 @@ class GodotServer {
     const allTools = this.getAllToolDefinitions();
     const resolutionMap = this.buildToolNameResolutionMap(allTools);
     return (
-      resolutionMap.get(requestedToolName) ||
-      resolutionMap.get(this.sanitizeExportedToolName(requestedToolName)) ||
+      resolutionMap.get(requestedToolName) ??
+      resolutionMap.get(sanitizeExportedToolName(requestedToolName)) ??
       requestedToolName
     );
   }
@@ -926,7 +1000,7 @@ class GodotServer {
     return compactTools;
   }
 
-  private jsonTextResponse(payload: unknown): { content: Array<{ type: string; text: string }> } {
+  private jsonTextResponse(payload: unknown): { content: { type: string; text: string }[] } {
     return {
       content: [
         {
@@ -986,7 +1060,11 @@ class GodotServer {
 
   private notifyToolListChanged(): void {
     this.cachedToolDefinitions = [];
-    this.server.sendToolListChanged().catch(() => {});
+    this.mcp.server.sendToolListChanged().catch((error: unknown) => {
+      // A client that has gone away cannot be told the list changed, and that is not a
+      // failure of the call that changed it; it is still worth having in the log.
+      this.logDebug(`Could not send the tool list change notification: ${errorMessage(error)}`);
+    });
   }
 
   private autoActivateMatchingGroups(query: string): string[] {
@@ -1035,7 +1113,7 @@ class GodotServer {
     const seenNames = new Map<string, string>();
 
     return tools.map((tool) => {
-      const sanitizedName = this.sanitizeExportedToolName(tool.name);
+      const sanitizedName = sanitizeExportedToolName(tool.name);
       const existing = seenNames.get(sanitizedName);
       if (existing && existing !== tool.name) {
         throw new Error(
@@ -1142,12 +1220,10 @@ class GodotServer {
       });
   }
 
-  private async handleToolCatalog(args: any): Promise<{ content: Array<{ type: string; text: string }> }> {
-    const normalizedArgs = this.normalizeParameters(args || {});
-    const query =
-      typeof normalizedArgs['query'] === 'string' ? normalizedArgs['query'].trim().toLowerCase() : '';
-    const rawLimit = typeof normalizedArgs['limit'] === 'number' ? normalizedArgs['limit'] : 30;
-    const limit = Math.max(1, Math.min(100, rawLimit));
+  private handleToolCatalog(args: unknown): { content: { type: string; text: string }[] } {
+    const normalizedArgs = this.normalizeParameters(args);
+    const query = (readString(normalizedArgs, 'query') ?? '').trim().toLowerCase();
+    const limit = Math.max(1, Math.min(100, readNumber(normalizedArgs, 'limit') ?? 30));
 
     const tools = this.getAllToolDefinitions();
     const reverseAlias = this.buildLegacyToCompactAliasMap();
@@ -1169,8 +1245,8 @@ class GodotServer {
       .sort((left, right) => right.score - left.score);
 
     const items = scored.slice(0, limit).map(({ tool }) => {
-      const groupInfo = toolToGroup.get(tool.name) || null;
-      const compactAlias = reverseAlias.get(tool.name) || null;
+      const groupInfo = toolToGroup.get(tool.name) ?? null;
+      const compactAlias = reverseAlias.get(tool.name) ?? null;
       return {
         tool: tool.name,
         compactAlias,
@@ -1178,12 +1254,11 @@ class GodotServer {
         // uncallable: once its group is active it is exposed under its sanitized name,
         // where underscores are hyphens. Reporting only a null alias reads as "this tool
         // cannot be called", which is how it was read in #74.
-        callAs: compactAlias || this.sanitizeExportedToolName(tool.name),
-        requiresGroupActivation: Boolean(
+        callAs: compactAlias ?? sanitizeExportedToolName(tool.name),
+        requiresGroupActivation:
           !compactAlias && groupInfo?.type === 'dynamic' && !this.activeGroups.has(groupInfo.group),
-        ),
-        group: groupInfo?.group || null,
-        groupType: groupInfo?.type || null,
+        group: groupInfo?.group ?? null,
+        groupType: groupInfo?.type ?? null,
         description: tool.description,
       };
     });
@@ -1204,13 +1279,10 @@ class GodotServer {
     });
   }
 
-  private async handleManageToolGroups(
-    args: any,
-  ): Promise<{ content: Array<{ type: string; text: string }> }> {
-    const normalizedArgs = this.normalizeParameters(args || {});
-    const action =
-      typeof normalizedArgs['action'] === 'string' ? normalizedArgs['action'].toLowerCase() : 'status';
-    const groupName = typeof normalizedArgs['group'] === 'string' ? normalizedArgs['group'] : '';
+  private handleManageToolGroups(args: unknown): { content: { type: string; text: string }[] } {
+    const normalizedArgs = this.normalizeParameters(args);
+    const action = (readString(normalizedArgs, 'action') ?? 'status').toLowerCase();
+    const groupName = readString(normalizedArgs, 'group') ?? '';
 
     switch (action) {
       case 'list': {
@@ -1291,7 +1363,7 @@ class GodotServer {
         });
       }
 
-      case 'status':
+      // 'status' lands here too: an unrecognised action reports the state rather than failing.
       default: {
         const coreGroupDetails = Object.entries(CORE_TOOL_GROUPS).map(([name, group]) => ({
           name,
@@ -1307,7 +1379,7 @@ class GodotServer {
           tools: TOOL_GROUPS[name]?.tools,
         }));
         const totalCoreTools = coreGroupDetails.reduce((sum, g) => sum + g.tools.length, 0);
-        const totalDynamicTools = activeGroupDetails.reduce((sum, g) => sum + (g.tools?.length || 0), 0);
+        const totalDynamicTools = activeGroupDetails.reduce((sum, g) => sum + (g.tools?.length ?? 0), 0);
         return this.jsonTextResponse({
           coreGroups: { count: coreGroupDetails.length, tools: totalCoreTools, groups: coreGroupDetails },
           dynamicGroups: {
@@ -1322,19 +1394,26 @@ class GodotServer {
   }
 
   /**
-   * Normalize parameters to camelCase format
-   * @param params Object with either snake_case or camelCase keys
+   * Normalize parameters to camelCase format.
+   *
+   * Takes `unknown` because that is what arrives: a `tools/call` with no `arguments` member
+   * is legal MCP, and the SDK passes the absence straight through. Declaring the parameter
+   * non-nullable meant a handler's first read threw a TypeError instead of returning the
+   * "required argument" response written a few lines below it.
+   *
+   * @param params Object with either snake_case or camelCase keys, or nothing at all
    * @returns Object with all keys in camelCase format
    */
-  private normalizeParameters(params: OperationParams): OperationParams {
-    if (!params || typeof params !== 'object') {
-      return params;
+  private normalizeParameters(params: unknown): OperationParams {
+    if (typeof params !== 'object' || params === null || Array.isArray(params)) {
+      return {};
     }
 
+    const source = params as OperationParams;
     const result: OperationParams = {};
 
-    for (const key in params) {
-      if (Object.prototype.hasOwnProperty.call(params, key)) {
+    for (const key in source) {
+      if (Object.hasOwn(source, key)) {
         let normalizedKey = key;
 
         // Preserve sentinel keys like _type, but normalize regular snake_case keys.
@@ -1342,15 +1421,17 @@ class GodotServer {
           normalizedKey = key;
         } else if (key.includes('_')) {
           normalizedKey =
-            this.parameterMappings[key] ||
+            this.parameterMappings[key] ??
             key.replace(/_([a-zA-Z0-9])/g, (_, letter: string) => letter.toUpperCase());
         }
 
+        const value = source[key];
+
         // Handle nested objects recursively
-        if (typeof params[key] === 'object' && params[key] !== null && !Array.isArray(params[key])) {
-          result[normalizedKey] = this.normalizeParameters(params[key] as OperationParams);
+        if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+          result[normalizedKey] = this.normalizeParameters(value);
         } else {
-          result[normalizedKey] = params[key];
+          result[normalizedKey] = value;
         }
       }
     }
@@ -1367,18 +1448,20 @@ class GodotServer {
     const result: OperationParams = {};
 
     for (const key in params) {
-      if (Object.prototype.hasOwnProperty.call(params, key)) {
+      if (Object.hasOwn(params, key)) {
         // Convert camelCase to snake_case while preserving sentinel keys like _type.
         const snakeKey = key.startsWith('_')
           ? key
-          : this.reverseParameterMappings[key] ||
-            key.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
+          : (this.reverseParameterMappings[key] ??
+            key.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`));
+
+        const value = params[key];
 
         // Handle nested objects recursively
-        if (typeof params[key] === 'object' && params[key] !== null && !Array.isArray(params[key])) {
-          result[snakeKey] = this.convertCamelToSnakeCase(params[key] as OperationParams);
+        if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+          result[snakeKey] = this.convertCamelToSnakeCase(value as OperationParams);
         } else {
-          result[snakeKey] = params[key];
+          result[snakeKey] = value;
         }
       }
     }
@@ -1439,7 +1522,7 @@ class GodotServer {
       } finally {
         rmSync(paramsDir, { recursive: true, force: true });
       }
-    } catch (error: unknown) {
+    } catch (error) {
       // A non-zero exit still carries stdout and stderr on the thrown error
       if (error instanceof Error && 'stdout' in error && 'stderr' in error) {
         const execError = error as Error & { stdout: string; stderr: string };
@@ -1476,8 +1559,8 @@ class GodotServer {
    * @param recursive Whether to search recursively
    * @returns Array of Godot projects
    */
-  private findGodotProjects(directory: string, recursive: boolean): Array<{ path: string; name: string }> {
-    const projects: Array<{ path: string; name: string }> = [];
+  private findGodotProjects(directory: string, recursive: boolean): { path: string; name: string }[] {
+    const projects: { path: string; name: string }[] = [];
 
     try {
       // Check if the directory itself is a Godot project
@@ -1530,7 +1613,7 @@ class GodotServer {
         }
       }
     } catch (error) {
-      this.logDebug(`Error searching directory ${directory}: ${error}`);
+      this.logDebug(`Error searching directory ${directory}: ${errorMessage(error)}`);
     }
 
     return projects;
@@ -1540,11 +1623,11 @@ class GodotServer {
    * Set up the tool handlers for the MCP server
    */
   private setupToolHandlers() {
-    this.server.setRequestHandler(ListPromptsRequestSchema, async (request) => {
+    this.mcp.server.setRequestHandler(ListPromptsRequestSchema, (request) => {
       return listPrompts(request.params?.cursor);
     });
 
-    this.server.setRequestHandler(GetPromptRequestSchema, async (request) => {
+    this.mcp.server.setRequestHandler(GetPromptRequestSchema, (request) => {
       return getPrompt(request.params.name, request.params.arguments);
     });
 
@@ -1554,7 +1637,7 @@ class GodotServer {
     this.toolDefinitionFactory = buildToolDefinitions;
     this.cachedToolDefinitions = buildToolDefinitions();
 
-    this.server.setRequestHandler(ListToolsRequestSchema, async (request) => {
+    this.mcp.server.setRequestHandler(ListToolsRequestSchema, (request) => {
       const allTools = buildToolDefinitions();
       this.cachedToolDefinitions = allTools;
 
@@ -1563,11 +1646,11 @@ class GodotServer {
     });
 
     // Handle tool calls
-    this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    this.mcp.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       this.logDebug(`Handling tool request: ${request.params.name}`);
-      const rawArgs = request.params.arguments as Record<string, unknown> | undefined;
-      const normalizedArgs = this.normalizeParameters((rawArgs || {}) as OperationParams);
-      if (typeof normalizedArgs?.['projectPath'] === 'string') {
+      const rawArgs = request.params.arguments;
+      const normalizedArgs = this.normalizeParameters(rawArgs);
+      if (typeof normalizedArgs['projectPath'] === 'string') {
         this.lastProjectPath = normalizedArgs['projectPath'];
       }
       const resolvedToolName = this.resolveToolAlias(request.params.name);
@@ -1577,13 +1660,13 @@ class GodotServer {
         case 'run_project':
           return await this.handleRunProject(request.params.arguments);
         case 'get_debug_output':
-          return await this.handleGetDebugOutput();
+          return this.handleGetDebugOutput();
         case 'stop_project':
-          return await this.handleStopProject();
+          return this.handleStopProject();
         case 'get_godot_version':
           return await this.handleGetGodotVersion();
         case 'list_projects':
-          return await this.handleListProjects(request.params.arguments);
+          return this.handleListProjects(request.params.arguments);
         case 'get_project_info':
           return await this.handleGetProjectInfo(request.params.arguments);
         case 'validate_patch_with_lsp':
@@ -1591,9 +1674,9 @@ class GodotServer {
         case 'enforce_version_gate':
           return await this.handleEnforceVersionGate(request.params.arguments);
         case 'tool_catalog':
-          return await this.handleToolCatalog(request.params.arguments);
+          return this.handleToolCatalog(request.params.arguments);
         case 'manage_tool_groups':
-          return await this.handleManageToolGroups(request.params.arguments);
+          return this.handleManageToolGroups(request.params.arguments);
         case 'create_scene':
           return await this.handleViaBridge('create_scene', normalizedArgs);
         case 'add_node':
@@ -1707,7 +1790,7 @@ class GodotServer {
           return await this.handleAddInputAction(request.params.arguments);
         // Project Search handlers
         case 'search_project':
-          return await this.handleSearchProject(request.params.arguments);
+          return this.handleSearchProject(request.params.arguments);
         // 2D Tile Tools handlers
         case 'create_tileset':
           return await this.handleViaBridge('create_tileset', normalizedArgs);
@@ -1794,17 +1877,18 @@ class GodotServer {
    * Handle the launch_editor tool
    * @param args Tool arguments
    */
-  private async handleLaunchEditor(args: any) {
+  private async handleLaunchEditor(rawArgs: unknown) {
     // Normalize parameters to camelCase
-    args = this.normalizeParameters(args);
+    const args = this.normalizeParameters(rawArgs);
+    const projectPath = readString(args, 'projectPath');
 
-    if (!args.projectPath) {
+    if (!projectPath) {
       return this.createErrorResponse('Project path is required', [
         'Provide a valid path to a Godot project directory',
       ]);
     }
 
-    if (!this.validatePath(args.projectPath)) {
+    if (!this.validatePath(projectPath)) {
       return this.createErrorResponse('Invalid project path', [
         'Provide a valid path without ".." or other potentially unsafe characters',
       ]);
@@ -1823,16 +1907,16 @@ class GodotServer {
       }
 
       // Check if the project directory exists and contains a project.godot file
-      const projectFile = join(args.projectPath, 'project.godot');
+      const projectFile = join(projectPath, 'project.godot');
       if (!existsSync(projectFile)) {
-        return this.createErrorResponse(`Not a valid Godot project: ${args.projectPath}`, [
+        return this.createErrorResponse(`Not a valid Godot project: ${projectPath}`, [
           'Ensure the path points to a directory containing a project.godot file',
           'Use list_projects to find valid Godot projects',
         ]);
       }
 
-      this.logDebug(`Launching Godot editor for project: ${args.projectPath}`);
-      const process = spawn(this.godotPath, ['-e', '--path', args.projectPath], {
+      this.logDebug(`Launching Godot editor for project: ${projectPath}`);
+      const process = spawn(this.godotPath, ['-e', '--path', projectPath], {
         stdio: 'pipe',
       });
 
@@ -1844,13 +1928,12 @@ class GodotServer {
         content: [
           {
             type: 'text',
-            text: `Godot editor launched successfully for project at ${args.projectPath}.`,
+            text: `Godot editor launched successfully for project at ${projectPath}.`,
           },
         ],
       };
-    } catch (error: unknown) {
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      return this.createErrorResponse(`Failed to launch Godot editor: ${errorMessage}`, [
+    } catch (error) {
+      return this.createErrorResponse(`Failed to launch Godot editor: ${errorMessage(error)}`, [
         'Ensure Godot is installed correctly',
         'Check if the GODOT_PATH environment variable is set correctly',
         'Verify the project path is accessible',
@@ -1877,20 +1960,24 @@ class GodotServer {
     if (process.platform === 'win32' || process.platform === 'darwin') {
       return false;
     }
-    return !(process.env['DISPLAY'] || process.env['WAYLAND_DISPLAY']);
+    // Through envValue because a display variable exported empty means no display, the same as
+    // one that was never exported: a bare `??` here would read `DISPLAY=""` as a desktop.
+    return envValue('DISPLAY') === undefined && envValue('WAYLAND_DISPLAY') === undefined;
   }
 
-  private async handleRunProject(args: any) {
+  private async handleRunProject(rawArgs: unknown) {
     // Normalize parameters to camelCase
-    args = this.normalizeParameters(args);
+    const args = this.normalizeParameters(rawArgs);
+    const projectPath = readString(args, 'projectPath');
+    const scene = readString(args, 'scene');
 
-    if (!args.projectPath) {
+    if (!projectPath) {
       return this.createErrorResponse('Project path is required', [
         'Provide a valid path to a Godot project directory',
       ]);
     }
 
-    if (!this.validatePath(args.projectPath)) {
+    if (!this.validatePath(projectPath)) {
       return this.createErrorResponse('Invalid project path', [
         'Provide a valid path without ".." or other potentially unsafe characters',
       ]);
@@ -1909,9 +1996,9 @@ class GodotServer {
       }
 
       // Check if the project directory exists and contains a project.godot file
-      const projectFile = join(args.projectPath, 'project.godot');
+      const projectFile = join(projectPath, 'project.godot');
       if (!existsSync(projectFile)) {
-        return this.createErrorResponse(`Not a valid Godot project: ${args.projectPath}`, [
+        return this.createErrorResponse(`Not a valid Godot project: ${projectPath}`, [
           'Ensure the path points to a directory containing a project.godot file',
           'Use list_projects to find valid Godot projects',
         ]);
@@ -1923,20 +2010,20 @@ class GodotServer {
         this.activeProcess.process.kill();
       }
 
-      const cmdArgs = this.resolveHeadless(args.headless)
-        ? ['--headless', '-d', '--path', args.projectPath]
-        : ['-d', '--path', args.projectPath];
-      if (args.scene && this.validatePath(args.scene)) {
-        this.logDebug(`Adding scene parameter: ${args.scene}`);
-        cmdArgs.push(args.scene);
+      const cmdArgs = this.resolveHeadless(args['headless'])
+        ? ['--headless', '-d', '--path', projectPath]
+        : ['-d', '--path', projectPath];
+      if (scene && this.validatePath(scene)) {
+        this.logDebug(`Adding scene parameter: ${scene}`);
+        cmdArgs.push(scene);
       }
 
-      this.logDebug(`Running Godot project: ${args.projectPath}`);
-      const process = spawn(this.godotPath!, cmdArgs, { stdio: 'pipe' });
+      this.logDebug(`Running Godot project: ${projectPath}`);
+      const process = spawn(this.godotPath, cmdArgs, { stdio: 'pipe' });
       const output: string[] = [];
       const errors: string[] = [];
 
-      process.stdout?.on('data', (data: Buffer) => {
+      process.stdout.on('data', (data: Buffer) => {
         const lines = data.toString().split('\n');
         output.push(...lines);
         lines.forEach((line: string) => {
@@ -1944,7 +2031,7 @@ class GodotServer {
         });
       });
 
-      process.stderr?.on('data', (data: Buffer) => {
+      process.stderr.on('data', (data: Buffer) => {
         const lines = data.toString().split('\n');
         errors.push(...lines);
         lines.forEach((line: string) => {
@@ -1953,15 +2040,15 @@ class GodotServer {
       });
 
       process.on('exit', (code: number | null) => {
-        this.logDebug(`Godot process exited with code ${code}`);
-        if (this.activeProcess && this.activeProcess.process === process) {
+        this.logDebug(`Godot process exited with code ${code ?? 'none'}`);
+        if (this.activeProcess?.process === process) {
           this.activeProcess = null;
         }
       });
 
       process.on('error', (err: Error) => {
         console.error('Failed to start Godot process:', err);
-        if (this.activeProcess && this.activeProcess.process === process) {
+        if (this.activeProcess?.process === process) {
           this.activeProcess = null;
         }
       });
@@ -1976,9 +2063,8 @@ class GodotServer {
           },
         ],
       };
-    } catch (error: unknown) {
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      return this.createErrorResponse(`Failed to run Godot project: ${errorMessage}`, [
+    } catch (error) {
+      return this.createErrorResponse(`Failed to run Godot project: ${errorMessage(error)}`, [
         'Ensure Godot is installed correctly',
         'Check if the GODOT_PATH environment variable is set correctly',
         'Verify the project path is accessible',
@@ -1998,12 +2084,13 @@ class GodotServer {
    * report whether one is running. A caller that has just written a script needs the scan
    * to have landed before the new class_name is resolvable, so this polls until it has.
    */
-  private async handleRescanFilesystem(args: any): Promise<any> {
-    const timeoutMs = Number.isFinite(Number(args?.timeoutMs)) ? Number(args.timeoutMs) : 10000;
+  private async handleRescanFilesystem(rawArgs: unknown): Promise<ToolResponse> {
+    const args = this.normalizeParameters(rawArgs);
+    const timeoutMs = readNumberLike(args, 'timeoutMs') ?? 10000;
     const started = Date.now();
 
     const first = await this.handleViaBridge('rescan_filesystem', args);
-    if (first?.isError) {
+    if (first.isError) {
       return first;
     }
 
@@ -2011,10 +2098,10 @@ class GodotServer {
     while (busy && Date.now() - started < timeoutMs) {
       await new Promise((settle) => setTimeout(settle, 100));
       const status = (await this.godotBridge.invokeTool('rescan_filesystem', {
-        ...(args || {}),
+        ...args,
         statusOnly: true,
       })) as Record<string, unknown>;
-      busy = Boolean(status?.['scanning']) || Boolean(status?.['importing']);
+      busy = Boolean(status['scanning']) || Boolean(status['importing']);
     }
 
     return {
@@ -2038,7 +2125,7 @@ class GodotServer {
     };
   }
 
-  private async handleViaBridge(toolName: string, args: any): Promise<any> {
+  private async handleViaBridge(toolName: string, args: unknown): Promise<ToolResponse> {
     if (!this.godotBridge.isConnected()) {
       return {
         content: [
@@ -2060,18 +2147,15 @@ class GodotServer {
       };
     }
     try {
-      const normalizedArgs = this.normalizeParameters((args || {}) as OperationParams);
-      const missingRequiredArgs = this.getMissingRequiredArguments(
-        toolName,
-        normalizedArgs as Record<string, unknown>,
-      );
+      const normalizedArgs = this.normalizeParameters(args);
+      const missingRequiredArgs = this.getMissingRequiredArguments(toolName, normalizedArgs);
       if (missingRequiredArgs.length > 0) {
         return this.createErrorResponse(
           `Missing required arguments for ${toolName}: ${missingRequiredArgs.join(', ')}`,
           [`Provide required argument(s): ${missingRequiredArgs.join(', ')}`],
         );
       }
-      const result = await this.godotBridge.invokeTool(toolName, normalizedArgs as Record<string, unknown>);
+      const result = await this.godotBridge.invokeTool(toolName, normalizedArgs);
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     } catch (error) {
       return {
@@ -2080,7 +2164,7 @@ class GodotServer {
             type: 'text',
             text: JSON.stringify(
               {
-                error: error instanceof Error ? error.message : String(error),
+                error: errorMessage(error),
               },
               null,
               2,
@@ -2095,7 +2179,7 @@ class GodotServer {
   /**
    * Handle the get_debug_output tool
    */
-  private async handleGetDebugOutput() {
+  private handleGetDebugOutput(): ToolResponse {
     if (!this.activeProcess) {
       return this.createErrorResponse('No active Godot process.', [
         'Use run_project to start a Godot project first',
@@ -2123,7 +2207,7 @@ class GodotServer {
   /**
    * Handle the stop_project tool
    */
-  private async handleStopProject() {
+  private handleStopProject(): ToolResponse {
     if (!this.activeProcess) {
       return this.createErrorResponse('No active Godot process to stop.', [
         'Use run_project to start a Godot project first',
@@ -2181,9 +2265,8 @@ class GodotServer {
           },
         ],
       };
-    } catch (error: unknown) {
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      return this.createErrorResponse(`Failed to get Godot version: ${errorMessage}`, [
+    } catch (error) {
+      return this.createErrorResponse(`Failed to get Godot version: ${errorMessage(error)}`, [
         'Ensure Godot is installed correctly',
         'Check if the GODOT_PATH environment variable is set correctly',
       ]);
@@ -2193,32 +2276,33 @@ class GodotServer {
   /**
    * Handle the list_projects tool
    */
-  private async handleListProjects(args: any) {
+  private handleListProjects(rawArgs: unknown): ToolResponse {
     // Normalize parameters to camelCase
-    args = this.normalizeParameters(args);
+    const args = this.normalizeParameters(rawArgs);
+    const directory = readString(args, 'directory');
 
-    if (!args.directory) {
+    if (!directory) {
       return this.createErrorResponse('Directory is required', [
         'Provide a valid directory path to search for Godot projects',
       ]);
     }
 
-    if (!this.validatePath(args.directory)) {
+    if (!this.validatePath(directory)) {
       return this.createErrorResponse('Invalid directory path', [
         'Provide a valid path without ".." or other potentially unsafe characters',
       ]);
     }
 
     try {
-      this.logDebug(`Listing Godot projects in directory: ${args.directory}`);
-      if (!existsSync(args.directory)) {
-        return this.createErrorResponse(`Directory does not exist: ${args.directory}`, [
+      this.logDebug(`Listing Godot projects in directory: ${directory}`);
+      if (!existsSync(directory)) {
+        return this.createErrorResponse(`Directory does not exist: ${directory}`, [
           'Provide a valid directory path that exists on the system',
         ]);
       }
 
-      const recursive = args.recursive === true;
-      const projects = this.findGodotProjects(args.directory, recursive);
+      const recursive = readBoolean(args, 'recursive') ?? false;
+      const projects = this.findGodotProjects(directory, recursive);
 
       return {
         content: [
@@ -2228,8 +2312,8 @@ class GodotServer {
           },
         ],
       };
-    } catch (error: any) {
-      return this.createErrorResponse(`Failed to list projects: ${error?.message || 'Unknown error'}`, [
+    } catch (error) {
+      return this.createErrorResponse(`Failed to list projects: ${errorMessage(error)}`, [
         'Ensure the directory exists and is accessible',
         'Check if you have permission to read the directory',
       ]);
@@ -2241,10 +2325,10 @@ class GodotServer {
    * @param projectPath Path to the Godot project
    * @returns Promise resolving to an object with counts of scenes, scripts, assets, and other files
    */
-  private getProjectStructureAsync(projectPath: string): Promise<any> {
+  private getProjectStructureAsync(projectPath: string): Promise<ProjectStructure> {
     return new Promise((resolve) => {
       try {
-        const structure = {
+        const structure: ProjectStructure = {
           scenes: 0,
           scripts: 0,
           assets: 0,
@@ -2274,7 +2358,7 @@ class GodotServer {
               } else if (ext === 'gd' || ext === 'gdscript' || ext === 'cs') {
                 structure.scripts++;
               } else if (
-                ['png', 'jpg', 'jpeg', 'webp', 'svg', 'ttf', 'wav', 'mp3', 'ogg'].includes(ext || '')
+                ['png', 'jpg', 'jpeg', 'webp', 'svg', 'ttf', 'wav', 'mp3', 'ogg'].includes(ext ?? '')
               ) {
                 structure.assets++;
               } else {
@@ -2288,7 +2372,7 @@ class GodotServer {
         scanDirectory(projectPath);
         resolve(structure);
       } catch (error) {
-        this.logDebug(`Error getting project structure asynchronously: ${error}`);
+        this.logDebug(`Error getting project structure asynchronously: ${errorMessage(error)}`);
         resolve({
           error: 'Failed to get project structure',
           scenes: 0,
@@ -2303,17 +2387,18 @@ class GodotServer {
   /**
    * Handle the get_project_info tool
    */
-  private async handleGetProjectInfo(args: any) {
+  private async handleGetProjectInfo(rawArgs: unknown) {
     // Normalize parameters to camelCase
-    args = this.normalizeParameters(args);
+    const args = this.normalizeParameters(rawArgs);
+    const projectPath = readString(args, 'projectPath');
 
-    if (!args.projectPath) {
+    if (!projectPath) {
       return this.createErrorResponse('Project path is required', [
         'Provide a valid path to a Godot project directory',
       ]);
     }
 
-    if (!this.validatePath(args.projectPath)) {
+    if (!this.validatePath(projectPath)) {
       return this.createErrorResponse('Invalid project path', [
         'Provide a valid path without ".." or other potentially unsafe characters',
       ]);
@@ -2332,34 +2417,34 @@ class GodotServer {
       }
 
       // Check if the project directory exists and contains a project.godot file
-      const projectFile = join(args.projectPath, 'project.godot');
+      const projectFile = join(projectPath, 'project.godot');
       if (!existsSync(projectFile)) {
-        return this.createErrorResponse(`Not a valid Godot project: ${args.projectPath}`, [
+        return this.createErrorResponse(`Not a valid Godot project: ${projectPath}`, [
           'Ensure the path points to a directory containing a project.godot file',
           'Use list_projects to find valid Godot projects',
         ]);
       }
 
-      this.logDebug(`Getting project info for: ${args.projectPath}`);
+      this.logDebug(`Getting project info for: ${projectPath}`);
 
       // Get Godot version
       const execOptions = { timeout: 10000 }; // 10 second timeout
       const { stdout } = await run(this.godotPath, ['--version'], execOptions);
 
       // Get project structure using the recursive method
-      const projectStructure = await this.getProjectStructureAsync(args.projectPath);
+      const projectStructure = await this.getProjectStructureAsync(projectPath);
 
       // Extract project name from project.godot file
-      let projectName = basename(args.projectPath);
+      let projectName = basename(projectPath);
       try {
         const projectFileContent = readFileSync(projectFile, 'utf8');
-        const configNameMatch = projectFileContent.match(/config\/name="([^"]+)"/);
-        if (configNameMatch && configNameMatch[1]) {
+        const configNameMatch = /config\/name="([^"]+)"/.exec(projectFileContent);
+        if (configNameMatch?.[1]) {
           projectName = configNameMatch[1];
           this.logDebug(`Found project name in config: ${projectName}`);
         }
       } catch (error) {
-        this.logDebug(`Error reading project file: ${error}`);
+        this.logDebug(`Error reading project file: ${errorMessage(error)}`);
         // Continue with default project name if extraction fails
       }
 
@@ -2370,7 +2455,7 @@ class GodotServer {
             text: JSON.stringify(
               {
                 name: projectName,
-                path: args.projectPath,
+                path: projectPath,
                 godotVersion: stdout.trim(),
                 structure: projectStructure,
               },
@@ -2380,8 +2465,8 @@ class GodotServer {
           },
         ],
       };
-    } catch (error: any) {
-      return this.createErrorResponse(`Failed to get project info: ${error?.message || 'Unknown error'}`, [
+    } catch (error) {
+      return this.createErrorResponse(`Failed to get project info: ${errorMessage(error)}`, [
         'Ensure Godot is installed correctly',
         'Check if the GODOT_PATH environment variable is set correctly',
         'Verify the project path is accessible',
@@ -2407,30 +2492,32 @@ class GodotServer {
   /**
    * Pre-apply LSP validation gate
    */
-  private async handleValidatePatchWithLsp(args: any) {
-    args = this.normalizeParameters(args);
+  private async handleValidatePatchWithLsp(rawArgs: unknown) {
+    const args = this.normalizeParameters(rawArgs);
+    const projectPath = readString(args, 'projectPath');
+    const scriptPath = readString(args, 'scriptPath');
 
-    if (!args.projectPath || !args.scriptPath) {
+    if (!projectPath || !scriptPath) {
       return this.createErrorResponse('Missing required parameters', ['Provide projectPath and scriptPath']);
     }
 
     try {
       const lspResult = await this.handleLSP('lsp_get_diagnostics', {
-        projectPath: args.projectPath,
-        scriptPath: args.scriptPath,
+        projectPath,
+        scriptPath,
       });
 
-      const textPayload = lspResult?.content?.[0]?.text || '{}';
-      let diagnostics: any[] = [];
+      const textPayload = lspResult.content[0]?.text ?? '{}';
+      let diagnostics: unknown[] = [];
       try {
-        const parsed = JSON.parse(textPayload);
-        diagnostics = Array.isArray(parsed?.diagnostics) ? parsed.diagnostics : [];
+        const parsed = asParams(JSON.parse(textPayload));
+        diagnostics = readArray(parsed, 'diagnostics') ?? [];
       } catch {
         diagnostics = [];
       }
 
-      const hasBlocking = diagnostics.some((d: any) => {
-        const severity = d?.severity;
+      const hasBlocking = diagnostics.some((entry) => {
+        const severity = asParams(entry)['severity'];
         return severity === 1 || severity === 'error' || severity === 'ERROR';
       });
 
@@ -2440,7 +2527,7 @@ class GodotServer {
             type: 'text',
             text: JSON.stringify(
               {
-                scriptPath: args.scriptPath,
+                scriptPath,
                 diagnosticsCount: diagnostics.length,
                 blockOnError: hasBlocking,
                 canApply: !hasBlocking,
@@ -2452,8 +2539,8 @@ class GodotServer {
           },
         ],
       };
-    } catch (error: any) {
-      return this.createErrorResponse(`Failed LSP validation: ${error?.message || 'Unknown error'}`, [
+    } catch (error) {
+      return this.createErrorResponse(`Failed LSP validation: ${errorMessage(error)}`, [
         'Ensure Godot editor is running with LSP enabled (port 6005)',
       ]);
     }
@@ -2462,35 +2549,36 @@ class GodotServer {
   /**
    * Version and protocol gate
    */
-  private async handleEnforceVersionGate(args: any) {
-    args = this.normalizeParameters(args);
+  private async handleEnforceVersionGate(rawArgs: unknown) {
+    const args = this.normalizeParameters(rawArgs);
+    const projectPath = readString(args, 'projectPath');
 
-    if (!args.projectPath) {
+    if (!projectPath) {
       return this.createErrorResponse('Project path is required', ['Provide projectPath']);
     }
 
-    const minGodotVersion = args.minGodotVersion || '4.2';
-    const minProtocolVersion = args.minProtocolVersion || '1.0';
+    const minGodotVersion = readNonEmptyString(args, 'minGodotVersion') ?? '4.2';
+    const minProtocolVersion = readNonEmptyString(args, 'minProtocolVersion') ?? '1.0';
 
     try {
       const versionResult = await this.handleGetGodotVersion();
-      const godotVersion = (versionResult?.content?.[0]?.text || '').trim();
+      const godotVersion = (versionResult.content[0]?.text ?? '').trim();
       const godotOk = this.compareMajorMinorVersions(godotVersion, minGodotVersion);
 
       let runtimeProtocol = 'unknown';
       let runtimeConnected = false;
       let protocolOk = false;
-      let capabilityInfo: any = {};
+      let capabilityInfo: OperationParams = {};
 
       const runtime = await this.handleRuntimeCommand('ping', {});
-      const runtimeText = runtime?.content?.[0]?.text || '{}';
+      const runtimeText = runtime.content[0]?.text ?? '{}';
       try {
-        const parsed = JSON.parse(runtimeText);
-        runtimeConnected = !parsed?.error;
-        runtimeProtocol = parsed?.protocol_version || parsed?.protocolVersion || '1.0';
+        const parsed = asParams(JSON.parse(runtimeText));
+        runtimeConnected = !parsed['error'];
+        runtimeProtocol = readNonEmptyStringEither(parsed, 'protocol_version', 'protocolVersion') ?? '1.0';
         capabilityInfo = {
           hasRuntime: runtimeConnected,
-          responseType: parsed?.type || null,
+          responseType: readString(parsed, 'type') ?? null,
         };
       } catch {
         runtimeConnected = false;
@@ -2533,11 +2621,10 @@ class GodotServer {
           },
         ],
       };
-    } catch (error: any) {
-      return this.createErrorResponse(
-        `Failed to enforce version gate: ${error?.message || 'Unknown error'}`,
-        ['Ensure Godot is installed and runtime addon is available'],
-      );
+    } catch (error) {
+      return this.createErrorResponse(`Failed to enforce version gate: ${errorMessage(error)}`, [
+        'Ensure Godot is installed and runtime addon is available',
+      ]);
     }
   }
 
@@ -2556,7 +2643,7 @@ class GodotServer {
         JSON.parse(line);
         return line;
       } catch {
-        continue;
+        // Not the JSON payload: Godot writes warnings on the same stream, so keep scanning.
       }
     }
 
@@ -2589,15 +2676,17 @@ class GodotServer {
   /**
    * Handle the get_uid tool
    */
-  private async handleGetUid(args: any) {
+  private async handleGetUid(rawArgs: unknown) {
     // Normalize parameters to camelCase
-    args = this.normalizeParameters(args);
+    const args = this.normalizeParameters(rawArgs);
+    const projectPath = readString(args, 'projectPath');
+    const filePath = readString(args, 'filePath');
 
-    if (!args.projectPath || !args.filePath) {
+    if (!projectPath || !filePath) {
       return this.createErrorResponse('Missing required parameters', ['Provide projectPath and filePath']);
     }
 
-    if (!this.validatePath(args.projectPath) || !this.validatePath(args.filePath)) {
+    if (!this.validatePath(projectPath) || !this.validatePath(filePath)) {
       return this.createErrorResponse('Invalid path', [
         'Provide valid paths without ".." or other potentially unsafe characters',
       ]);
@@ -2616,31 +2705,31 @@ class GodotServer {
       }
 
       // Check if the project directory exists and contains a project.godot file
-      const projectFile = join(args.projectPath, 'project.godot');
+      const projectFile = join(projectPath, 'project.godot');
       if (!existsSync(projectFile)) {
-        return this.createErrorResponse(`Not a valid Godot project: ${args.projectPath}`, [
+        return this.createErrorResponse(`Not a valid Godot project: ${projectPath}`, [
           'Ensure the path points to a directory containing a project.godot file',
           'Use list_projects to find valid Godot projects',
         ]);
       }
 
       // Check if the file exists
-      const filePath = join(args.projectPath, args.filePath);
-      if (!existsSync(filePath)) {
-        return this.createErrorResponse(`File does not exist: ${args.filePath}`, [
+      const resolvedFilePath = join(projectPath, filePath);
+      if (!existsSync(resolvedFilePath)) {
+        return this.createErrorResponse(`File does not exist: ${filePath}`, [
           'Ensure the file path is correct',
         ]);
       }
 
       // Prepare parameters for the operation (already in camelCase)
       const params = {
-        filePath: args.filePath,
+        filePath,
       };
 
       // Execute the operation
-      const { stdout, stderr } = await this.executeOperation('get_uid', params, args.projectPath);
+      const { stdout, stderr } = await this.executeOperation('get_uid', params, projectPath);
 
-      if (stderr && stderr.includes('Failed to')) {
+      if (stderr.includes('Failed to')) {
         return this.createErrorResponse(`Failed to get UID: ${stderr}`, [
           'Check if the file is a valid Godot resource',
           'Ensure the file path is correct',
@@ -2651,12 +2740,12 @@ class GodotServer {
         content: [
           {
             type: 'text',
-            text: `UID for ${args.filePath}: ${stdout.trim()}`,
+            text: `UID for ${filePath}: ${stdout.trim()}`,
           },
         ],
       };
-    } catch (error: any) {
-      return this.createErrorResponse(`Failed to get UID: ${error?.message || 'Unknown error'}`, [
+    } catch (error) {
+      return this.createErrorResponse(`Failed to get UID: ${errorMessage(error)}`, [
         'Ensure Godot is installed correctly',
         'Check if the GODOT_PATH environment variable is set correctly',
         'Verify the project path is accessible',
@@ -2667,17 +2756,18 @@ class GodotServer {
   /**
    * Handle the update_project_uids tool
    */
-  private async handleUpdateProjectUids(args: any) {
+  private async handleUpdateProjectUids(rawArgs: unknown) {
     // Normalize parameters to camelCase
-    args = this.normalizeParameters(args);
+    const args = this.normalizeParameters(rawArgs);
+    const projectPath = readString(args, 'projectPath');
 
-    if (!args.projectPath) {
+    if (!projectPath) {
       return this.createErrorResponse('Project path is required', [
         'Provide a valid path to a Godot project directory',
       ]);
     }
 
-    if (!this.validatePath(args.projectPath)) {
+    if (!this.validatePath(projectPath)) {
       return this.createErrorResponse('Invalid project path', [
         'Provide a valid path without ".." or other potentially unsafe characters',
       ]);
@@ -2696,9 +2786,9 @@ class GodotServer {
       }
 
       // Check if the project directory exists and contains a project.godot file
-      const projectFile = join(args.projectPath, 'project.godot');
+      const projectFile = join(projectPath, 'project.godot');
       if (!existsSync(projectFile)) {
-        return this.createErrorResponse(`Not a valid Godot project: ${args.projectPath}`, [
+        return this.createErrorResponse(`Not a valid Godot project: ${projectPath}`, [
           'Ensure the path points to a directory containing a project.godot file',
           'Use list_projects to find valid Godot projects',
         ]);
@@ -2706,13 +2796,13 @@ class GodotServer {
 
       // Prepare parameters for the operation (already in camelCase)
       const params = {
-        projectPath: args.projectPath,
+        projectPath: projectPath,
       };
 
       // Execute the operation
-      const { stdout, stderr } = await this.executeOperation('resave_resources', params, args.projectPath);
+      const { stdout, stderr } = await this.executeOperation('resave_resources', params, projectPath);
 
-      if (stderr && stderr.includes('Failed to')) {
+      if (stderr.includes('Failed to')) {
         return this.createErrorResponse(`Failed to update project UIDs: ${stderr}`, [
           'Check if the project is valid',
           'Ensure you have write permissions to the project directory',
@@ -2727,8 +2817,8 @@ class GodotServer {
           },
         ],
       };
-    } catch (error: any) {
-      return this.createErrorResponse(`Failed to update project UIDs: ${error?.message || 'Unknown error'}`, [
+    } catch (error) {
+      return this.createErrorResponse(`Failed to update project UIDs: ${errorMessage(error)}`, [
         'Ensure Godot is installed correctly',
         'Check if the GODOT_PATH environment variable is set correctly',
         'Verify the project path is accessible',
@@ -2747,47 +2837,50 @@ class GodotServer {
   /**
    * Handle the get_import_status tool
    */
-  private async handleGetImportStatus(args: any) {
-    args = this.normalizeParameters(args);
+  private async handleGetImportStatus(rawArgs: unknown) {
+    const args = this.normalizeParameters(rawArgs);
+    const projectPath = readString(args, 'projectPath');
+    const resourcePath = readString(args, 'resourcePath');
+    const includeUpToDate = readBoolean(args, 'includeUpToDate') ?? false;
 
-    if (!args.projectPath) {
+    if (!projectPath) {
       return this.createErrorResponse('Project path is required', [
         'Provide a valid path to a Godot project directory',
       ]);
     }
 
-    if (!this.validatePath(args.projectPath)) {
+    if (!this.validatePath(projectPath)) {
       return this.createErrorResponse('Invalid project path', [
         'Provide a valid path without ".." or other potentially unsafe characters',
       ]);
     }
 
     try {
-      const projectFile = join(args.projectPath, 'project.godot');
+      const projectFile = join(projectPath, 'project.godot');
       if (!existsSync(projectFile)) {
-        return this.createErrorResponse(`Not a valid Godot project: ${args.projectPath}`, [
+        return this.createErrorResponse(`Not a valid Godot project: ${projectPath}`, [
           'Ensure the path points to a directory containing a project.godot file',
         ]);
       }
 
-      const params: any = {
-        resourcePath: args.resourcePath || '',
-        includeUpToDate: args.includeUpToDate || false,
+      const params: OperationParams = {
+        resourcePath: resourcePath ?? '',
+        includeUpToDate,
       };
 
-      const { stdout, stderr } = await this.executeOperation('get_import_status', params, args.projectPath);
+      const { stdout, stderr } = await this.executeOperation('get_import_status', params, projectPath);
 
-      if (stderr && stderr.includes('ERROR')) {
+      if (stderr.includes('ERROR')) {
         return this.createErrorResponse(`Failed to get import status: ${stderr}`, [
           'Verify the resource path if specified',
         ]);
       }
 
       return {
-        content: [{ type: 'text', text: this.extractLastJsonLine(stdout) || stdout.trim() }],
+        content: [{ type: 'text', text: this.extractLastJsonLine(stdout) ?? stdout.trim() }],
       };
-    } catch (error: any) {
-      return this.createErrorResponse(`Failed to get import status: ${error?.message || 'Unknown error'}`, [
+    } catch (error) {
+      return this.createErrorResponse(`Failed to get import status: ${errorMessage(error)}`, [
         'Ensure Godot is installed correctly',
         'Verify the project path is accessible',
       ]);
@@ -2797,53 +2890,55 @@ class GodotServer {
   /**
    * Handle the get_import_options tool
    */
-  private async handleGetImportOptions(args: any) {
-    args = this.normalizeParameters(args);
+  private async handleGetImportOptions(rawArgs: unknown) {
+    const args = this.normalizeParameters(rawArgs);
+    const projectPath = readString(args, 'projectPath');
+    const resourcePath = readString(args, 'resourcePath');
 
-    if (!args.projectPath || !args.resourcePath) {
+    if (!projectPath || !resourcePath) {
       return this.createErrorResponse('Missing required parameters', [
         'Provide projectPath and resourcePath',
       ]);
     }
 
-    if (!this.validatePath(args.projectPath) || !this.validatePath(args.resourcePath)) {
+    if (!this.validatePath(projectPath) || !this.validatePath(resourcePath)) {
       return this.createErrorResponse('Invalid path', [
         'Provide valid paths without ".." or other potentially unsafe characters',
       ]);
     }
 
     try {
-      const projectFile = join(args.projectPath, 'project.godot');
+      const projectFile = join(projectPath, 'project.godot');
       if (!existsSync(projectFile)) {
-        return this.createErrorResponse(`Not a valid Godot project: ${args.projectPath}`, [
+        return this.createErrorResponse(`Not a valid Godot project: ${projectPath}`, [
           'Ensure the path points to a directory containing a project.godot file',
         ]);
       }
 
-      const resourceFile = join(args.projectPath, args.resourcePath);
+      const resourceFile = join(projectPath, resourcePath);
       if (!existsSync(resourceFile)) {
-        return this.createErrorResponse(`Resource file does not exist: ${args.resourcePath}`, [
+        return this.createErrorResponse(`Resource file does not exist: ${resourcePath}`, [
           'Ensure the resource path is correct',
         ]);
       }
 
-      const params: any = {
-        resourcePath: args.resourcePath,
+      const params: OperationParams = {
+        resourcePath: resourcePath,
       };
 
-      const { stdout, stderr } = await this.executeOperation('get_import_options', params, args.projectPath);
+      const { stdout, stderr } = await this.executeOperation('get_import_options', params, projectPath);
 
-      if (stderr && stderr.includes('ERROR')) {
+      if (stderr.includes('ERROR')) {
         return this.createErrorResponse(`Failed to get import options: ${stderr}`, [
           'Verify the resource is an importable file type',
         ]);
       }
 
       return {
-        content: [{ type: 'text', text: this.extractLastJsonLine(stdout) || stdout.trim() }],
+        content: [{ type: 'text', text: this.extractLastJsonLine(stdout) ?? stdout.trim() }],
       };
-    } catch (error: any) {
-      return this.createErrorResponse(`Failed to get import options: ${error?.message || 'Unknown error'}`, [
+    } catch (error) {
+      return this.createErrorResponse(`Failed to get import options: ${errorMessage(error)}`, [
         'Ensure Godot is installed correctly',
         'Verify the project path is accessible',
       ]);
@@ -2853,45 +2948,49 @@ class GodotServer {
   /**
    * Handle the set_import_options tool
    */
-  private async handleSetImportOptions(args: any) {
-    args = this.normalizeParameters(args);
+  private async handleSetImportOptions(rawArgs: unknown) {
+    const args = this.normalizeParameters(rawArgs);
+    const projectPath = readString(args, 'projectPath');
+    const resourcePath = readString(args, 'resourcePath');
+    const options = readParams(args, 'options');
+    const reimport = readBoolean(args, 'reimport') !== false;
 
-    if (!args.projectPath || !args.resourcePath || !args.options) {
+    if (!projectPath || !resourcePath || !options) {
       return this.createErrorResponse('Missing required parameters', [
         'Provide projectPath, resourcePath, and options',
       ]);
     }
 
-    if (!this.validatePath(args.projectPath) || !this.validatePath(args.resourcePath)) {
+    if (!this.validatePath(projectPath) || !this.validatePath(resourcePath)) {
       return this.createErrorResponse('Invalid path', [
         'Provide valid paths without ".." or other potentially unsafe characters',
       ]);
     }
 
     try {
-      const projectFile = join(args.projectPath, 'project.godot');
+      const projectFile = join(projectPath, 'project.godot');
       if (!existsSync(projectFile)) {
-        return this.createErrorResponse(`Not a valid Godot project: ${args.projectPath}`, [
+        return this.createErrorResponse(`Not a valid Godot project: ${projectPath}`, [
           'Ensure the path points to a directory containing a project.godot file',
         ]);
       }
 
-      const resourceFile = join(args.projectPath, args.resourcePath);
+      const resourceFile = join(projectPath, resourcePath);
       if (!existsSync(resourceFile)) {
-        return this.createErrorResponse(`Resource file does not exist: ${args.resourcePath}`, [
+        return this.createErrorResponse(`Resource file does not exist: ${resourcePath}`, [
           'Ensure the resource path is correct',
         ]);
       }
 
-      const params: any = {
-        resourcePath: args.resourcePath,
-        options: args.options,
-        reimport: args.reimport !== false,
+      const params: OperationParams = {
+        resourcePath: resourcePath,
+        options: options,
+        reimport,
       };
 
-      const { stdout, stderr } = await this.executeOperation('set_import_options', params, args.projectPath);
+      const { stdout, stderr } = await this.executeOperation('set_import_options', params, projectPath);
 
-      if (stderr && stderr.includes('ERROR')) {
+      if (stderr.includes('ERROR')) {
         return this.createErrorResponse(`Failed to set import options: ${stderr}`, [
           'Verify the options are valid for this resource type',
         ]);
@@ -2900,8 +2999,8 @@ class GodotServer {
       return {
         content: [{ type: 'text', text: `Import options updated successfully.\n\n${stdout.trim()}` }],
       };
-    } catch (error: any) {
-      return this.createErrorResponse(`Failed to set import options: ${error?.message || 'Unknown error'}`, [
+    } catch (error) {
+      return this.createErrorResponse(`Failed to set import options: ${errorMessage(error)}`, [
         'Ensure Godot is installed correctly',
         'Verify the project path is accessible',
       ]);
@@ -2911,46 +3010,49 @@ class GodotServer {
   /**
    * Handle the reimport_resource tool
    */
-  private async handleReimportResource(args: any) {
-    args = this.normalizeParameters(args);
+  private async handleReimportResource(rawArgs: unknown) {
+    const args = this.normalizeParameters(rawArgs);
+    const projectPath = readString(args, 'projectPath');
+    const resourcePath = readString(args, 'resourcePath');
+    const force = readBoolean(args, 'force') ?? false;
 
-    if (!args.projectPath) {
+    if (!projectPath) {
       return this.createErrorResponse('Project path is required', [
         'Provide a valid path to a Godot project directory',
       ]);
     }
 
-    if (!this.validatePath(args.projectPath)) {
+    if (!this.validatePath(projectPath)) {
       return this.createErrorResponse('Invalid project path', [
         'Provide a valid path without ".." or other potentially unsafe characters',
       ]);
     }
 
     try {
-      const projectFile = join(args.projectPath, 'project.godot');
+      const projectFile = join(projectPath, 'project.godot');
       if (!existsSync(projectFile)) {
-        return this.createErrorResponse(`Not a valid Godot project: ${args.projectPath}`, [
+        return this.createErrorResponse(`Not a valid Godot project: ${projectPath}`, [
           'Ensure the path points to a directory containing a project.godot file',
         ]);
       }
 
-      if (args.resourcePath) {
-        const resourceFile = join(args.projectPath, args.resourcePath);
+      if (resourcePath) {
+        const resourceFile = join(projectPath, resourcePath);
         if (!existsSync(resourceFile)) {
-          return this.createErrorResponse(`Resource file does not exist: ${args.resourcePath}`, [
+          return this.createErrorResponse(`Resource file does not exist: ${resourcePath}`, [
             'Ensure the resource path is correct',
           ]);
         }
       }
 
-      const params: any = {
-        resourcePath: args.resourcePath || '',
-        force: args.force || false,
+      const params: OperationParams = {
+        resourcePath: resourcePath ?? '',
+        force,
       };
 
-      const { stdout, stderr } = await this.executeOperation('reimport_resource', params, args.projectPath);
+      const { stdout, stderr } = await this.executeOperation('reimport_resource', params, projectPath);
 
-      if (stderr && stderr.includes('ERROR')) {
+      if (stderr.includes('ERROR')) {
         return this.createErrorResponse(`Failed to reimport resource: ${stderr}`, [
           'Verify the resource path if specified',
         ]);
@@ -2959,8 +3061,8 @@ class GodotServer {
       return {
         content: [{ type: 'text', text: `Reimport completed.\n\n${stdout.trim()}` }],
       };
-    } catch (error: any) {
-      return this.createErrorResponse(`Failed to reimport resource: ${error?.message || 'Unknown error'}`, [
+    } catch (error) {
+      return this.createErrorResponse(`Failed to reimport resource: ${errorMessage(error)}`, [
         'Ensure Godot is installed correctly',
         'Verify the project path is accessible',
       ]);
@@ -2970,46 +3072,48 @@ class GodotServer {
   /**
    * Handle the list_export_presets tool
    */
-  private async handleListExportPresets(args: any) {
-    args = this.normalizeParameters(args);
+  private async handleListExportPresets(rawArgs: unknown) {
+    const args = this.normalizeParameters(rawArgs);
+    const projectPath = readString(args, 'projectPath');
+    const includeTemplateStatus = readBoolean(args, 'includeTemplateStatus') !== false;
 
-    if (!args.projectPath) {
+    if (!projectPath) {
       return this.createErrorResponse('Project path is required', [
         'Provide a valid path to a Godot project directory',
       ]);
     }
 
-    if (!this.validatePath(args.projectPath)) {
+    if (!this.validatePath(projectPath)) {
       return this.createErrorResponse('Invalid project path', [
         'Provide a valid path without ".." or other potentially unsafe characters',
       ]);
     }
 
     try {
-      const projectFile = join(args.projectPath, 'project.godot');
+      const projectFile = join(projectPath, 'project.godot');
       if (!existsSync(projectFile)) {
-        return this.createErrorResponse(`Not a valid Godot project: ${args.projectPath}`, [
+        return this.createErrorResponse(`Not a valid Godot project: ${projectPath}`, [
           'Ensure the path points to a directory containing a project.godot file',
         ]);
       }
 
-      const params: any = {
-        includeTemplateStatus: args.includeTemplateStatus !== false,
+      const params: OperationParams = {
+        includeTemplateStatus,
       };
 
-      const { stdout, stderr } = await this.executeOperation('list_export_presets', params, args.projectPath);
+      const { stdout, stderr } = await this.executeOperation('list_export_presets', params, projectPath);
 
-      if (stderr && stderr.includes('ERROR')) {
+      if (stderr.includes('ERROR')) {
         return this.createErrorResponse(`Failed to list export presets: ${stderr}`, [
           'Check if export_presets.cfg exists in the project',
         ]);
       }
 
       return {
-        content: [{ type: 'text', text: this.extractLastJsonLine(stdout) || stdout.trim() }],
+        content: [{ type: 'text', text: this.extractLastJsonLine(stdout) ?? stdout.trim() }],
       };
-    } catch (error: any) {
-      return this.createErrorResponse(`Failed to list export presets: ${error?.message || 'Unknown error'}`, [
+    } catch (error) {
+      return this.createErrorResponse(`Failed to list export presets: ${errorMessage(error)}`, [
         'Ensure Godot is installed correctly',
         'Verify the project path is accessible',
       ]);
@@ -3019,25 +3123,29 @@ class GodotServer {
   /**
    * Handle the export_project tool
    */
-  private async handleExportProject(args: any) {
-    args = this.normalizeParameters(args);
+  private async handleExportProject(rawArgs: unknown) {
+    const args = this.normalizeParameters(rawArgs);
+    const projectPath = readString(args, 'projectPath');
+    const preset = readNonEmptyString(args, 'preset');
+    const outputPath = readString(args, 'outputPath');
+    const debug = readBoolean(args, 'debug') ?? false;
 
-    if (!args.projectPath || !args.preset || !args.outputPath) {
+    if (!projectPath || !preset || !outputPath) {
       return this.createErrorResponse('Missing required parameters', [
         'Provide projectPath, preset, and outputPath',
       ]);
     }
 
-    if (!this.validatePath(args.projectPath) || !this.validatePath(args.outputPath)) {
+    if (!this.validatePath(projectPath) || !this.validatePath(outputPath)) {
       return this.createErrorResponse('Invalid path', [
         'Provide valid paths without ".." or other potentially unsafe characters',
       ]);
     }
 
     try {
-      const projectFile = join(args.projectPath, 'project.godot');
+      const projectFile = join(projectPath, 'project.godot');
       if (!existsSync(projectFile)) {
-        return this.createErrorResponse(`Not a valid Godot project: ${args.projectPath}`, [
+        return this.createErrorResponse(`Not a valid Godot project: ${projectPath}`, [
           'Ensure the path points to a directory containing a project.godot file',
         ]);
       }
@@ -3056,10 +3164,10 @@ class GodotServer {
       const exportArgs = [
         '--headless',
         '--path',
-        args.projectPath,
-        args.debug ? '--export-debug' : '--export-release',
-        args.preset,
-        args.outputPath,
+        projectPath,
+        debug ? '--export-debug' : '--export-release',
+        preset,
+        outputPath,
       ];
 
       this.logDebug(`Exporting: ${this.godotPath} ${exportArgs.join(' ')}`);
@@ -3078,12 +3186,12 @@ class GodotServer {
         content: [
           {
             type: 'text',
-            text: `Project exported successfully to: ${args.outputPath}\n\n${stdout}${stderr}`,
+            text: `Project exported successfully to: ${outputPath}\n\n${stdout}${stderr}`,
           },
         ],
       };
-    } catch (error: any) {
-      return this.createErrorResponse(`Failed to export project: ${error?.message || 'Unknown error'}`, [
+    } catch (error) {
+      return this.createErrorResponse(`Failed to export project: ${errorMessage(error)}`, [
         'Ensure Godot is installed correctly',
         'Verify export templates are installed',
         'Check the preset name is valid',
@@ -3094,47 +3202,50 @@ class GodotServer {
   /**
    * Handle the validate_project tool
    */
-  private async handleValidateProject(args: any) {
-    args = this.normalizeParameters(args);
+  private async handleValidateProject(rawArgs: unknown) {
+    const args = this.normalizeParameters(rawArgs);
+    const projectPath = readString(args, 'projectPath');
+    const preset = readNonEmptyString(args, 'preset');
+    const includeSuggestions = readBoolean(args, 'includeSuggestions') !== false;
 
-    if (!args.projectPath) {
+    if (!projectPath) {
       return this.createErrorResponse('Project path is required', [
         'Provide a valid path to a Godot project directory',
       ]);
     }
 
-    if (!this.validatePath(args.projectPath)) {
+    if (!this.validatePath(projectPath)) {
       return this.createErrorResponse('Invalid project path', [
         'Provide a valid path without ".." or other potentially unsafe characters',
       ]);
     }
 
     try {
-      const projectFile = join(args.projectPath, 'project.godot');
+      const projectFile = join(projectPath, 'project.godot');
       if (!existsSync(projectFile)) {
-        return this.createErrorResponse(`Not a valid Godot project: ${args.projectPath}`, [
+        return this.createErrorResponse(`Not a valid Godot project: ${projectPath}`, [
           'Ensure the path points to a directory containing a project.godot file',
         ]);
       }
 
-      const params: any = {
-        preset: args.preset || '',
-        includeSuggestions: args.includeSuggestions !== false,
+      const params: OperationParams = {
+        preset: preset ?? '',
+        includeSuggestions,
       };
 
-      const { stdout, stderr } = await this.executeOperation('validate_project', params, args.projectPath);
+      const { stdout, stderr } = await this.executeOperation('validate_project', params, projectPath);
 
-      if (stderr && stderr.includes('ERROR')) {
+      if (stderr.includes('ERROR')) {
         return this.createErrorResponse(`Failed to validate project: ${stderr}`, [
           'Verify the project structure is valid',
         ]);
       }
 
       return {
-        content: [{ type: 'text', text: this.extractLastJsonLine(stdout) || stdout.trim() }],
+        content: [{ type: 'text', text: this.extractLastJsonLine(stdout) ?? stdout.trim() }],
       };
-    } catch (error: any) {
-      return this.createErrorResponse(`Failed to validate project: ${error?.message || 'Unknown error'}`, [
+    } catch (error) {
+      return this.createErrorResponse(`Failed to validate project: ${errorMessage(error)}`, [
         'Ensure Godot is installed correctly',
         'Verify the project path is accessible',
       ]);
@@ -3148,25 +3259,29 @@ class GodotServer {
   /**
    * Handle the get_dependencies tool
    */
-  private async handleGetDependencies(args: any) {
-    args = this.normalizeParameters(args);
+  private async handleGetDependencies(rawArgs: unknown) {
+    const args = this.normalizeParameters(rawArgs);
+    const projectPath = readString(args, 'projectPath');
+    const resourcePath = readString(args, 'resourcePath');
+    const depth = readNumberLike(args, 'depth');
+    const includeBuiltin = readBoolean(args, 'includeBuiltin') ?? false;
 
-    if (!args.projectPath || !args.resourcePath) {
+    if (!projectPath || !resourcePath) {
       return this.createErrorResponse('Missing required parameters', [
         'Provide projectPath and resourcePath',
       ]);
     }
 
-    if (!this.validatePath(args.projectPath) || !this.validatePath(args.resourcePath)) {
+    if (!this.validatePath(projectPath) || !this.validatePath(resourcePath)) {
       return this.createErrorResponse('Invalid path', [
         'Provide valid paths without ".." or other potentially unsafe characters',
       ]);
     }
 
     try {
-      const projectFile = join(args.projectPath, 'project.godot');
+      const projectFile = join(projectPath, 'project.godot');
       if (!existsSync(projectFile)) {
-        return this.createErrorResponse(`Not a valid Godot project: ${args.projectPath}`, [
+        return this.createErrorResponse(`Not a valid Godot project: ${projectPath}`, [
           'Ensure the path points to a directory containing a project.godot file',
         ]);
       }
@@ -3179,26 +3294,26 @@ class GodotServer {
       // A negative depth means unlimited in this tool's schema. The script has no notion of
       // that and compares `current_depth >= max_depth`, so passing -1 straight through
       // would return nothing at all.
-      const requested = args.depth !== undefined ? Number(args.depth) : -1;
-      const params: any = {
-        resourcePath: args.resourcePath,
-        maxDepth: Number.isFinite(requested) && requested >= 0 ? requested : 100,
-        includeBuiltIn: args.includeBuiltin || false,
+      const requested = depth ?? -1;
+      const params: OperationParams = {
+        resourcePath,
+        maxDepth: requested >= 0 ? requested : 100,
+        includeBuiltIn: includeBuiltin,
       };
 
-      const { stdout, stderr } = await this.executeOperation('get_dependencies', params, args.projectPath);
+      const { stdout, stderr } = await this.executeOperation('get_dependencies', params, projectPath);
 
-      if (stderr && stderr.includes('ERROR')) {
+      if (stderr.includes('ERROR')) {
         return this.createErrorResponse(`Failed to get dependencies: ${stderr}`, [
           'Verify the resource path is correct',
         ]);
       }
 
       return {
-        content: [{ type: 'text', text: this.extractLastJsonLine(stdout) || stdout.trim() }],
+        content: [{ type: 'text', text: this.extractLastJsonLine(stdout) ?? stdout.trim() }],
       };
-    } catch (error: any) {
-      return this.createErrorResponse(`Failed to get dependencies: ${error?.message || 'Unknown error'}`, [
+    } catch (error) {
+      return this.createErrorResponse(`Failed to get dependencies: ${errorMessage(error)}`, [
         'Ensure Godot is installed correctly',
         'Verify the project path is accessible',
       ]);
@@ -3208,101 +3323,103 @@ class GodotServer {
   /**
    * Handle the find_resource_usages tool
    */
-  private async handleFindResourceUsages(args: any) {
-    args = this.normalizeParameters(args);
+  private async handleFindResourceUsages(rawArgs: unknown) {
+    const args = this.normalizeParameters(rawArgs);
+    const projectPath = readString(args, 'projectPath');
+    const resourcePath = readString(args, 'resourcePath');
+    const fileTypes = readStringArray(args, 'fileTypes');
 
-    if (!args.projectPath || !args.resourcePath) {
+    if (!projectPath || !resourcePath) {
       return this.createErrorResponse('Missing required parameters', [
         'Provide projectPath and resourcePath',
       ]);
     }
 
-    if (!this.validatePath(args.projectPath) || !this.validatePath(args.resourcePath)) {
+    if (!this.validatePath(projectPath) || !this.validatePath(resourcePath)) {
       return this.createErrorResponse('Invalid path', [
         'Provide valid paths without ".." or other potentially unsafe characters',
       ]);
     }
 
     try {
-      const projectFile = join(args.projectPath, 'project.godot');
+      const projectFile = join(projectPath, 'project.godot');
       if (!existsSync(projectFile)) {
-        return this.createErrorResponse(`Not a valid Godot project: ${args.projectPath}`, [
+        return this.createErrorResponse(`Not a valid Godot project: ${projectPath}`, [
           'Ensure the path points to a directory containing a project.godot file',
         ]);
       }
 
-      const params: any = {
-        resourcePath: args.resourcePath,
-        fileTypes: args.fileTypes || ['tscn', 'tres', 'gd'],
+      const params: OperationParams = {
+        resourcePath: resourcePath,
+        fileTypes: fileTypes ?? ['tscn', 'tres', 'gd'],
       };
 
-      const { stdout, stderr } = await this.executeOperation(
-        'find_resource_usages',
-        params,
-        args.projectPath,
-      );
+      const { stdout, stderr } = await this.executeOperation('find_resource_usages', params, projectPath);
 
-      if (stderr && stderr.includes('ERROR')) {
+      if (stderr.includes('ERROR')) {
         return this.createErrorResponse(`Failed to find resource usages: ${stderr}`, [
           'Verify the resource path is correct',
         ]);
       }
 
       return {
-        content: [{ type: 'text', text: this.extractLastJsonLine(stdout) || stdout.trim() }],
+        content: [{ type: 'text', text: this.extractLastJsonLine(stdout) ?? stdout.trim() }],
       };
-    } catch (error: any) {
-      return this.createErrorResponse(
-        `Failed to find resource usages: ${error?.message || 'Unknown error'}`,
-        ['Ensure Godot is installed correctly', 'Verify the project path is accessible'],
-      );
+    } catch (error) {
+      return this.createErrorResponse(`Failed to find resource usages: ${errorMessage(error)}`, [
+        'Ensure Godot is installed correctly',
+        'Verify the project path is accessible',
+      ]);
     }
   }
 
   /**
    * Handle the parse_error_log tool
    */
-  private async handleParseErrorLog(args: any) {
-    args = this.normalizeParameters(args);
+  private async handleParseErrorLog(rawArgs: unknown) {
+    const args = this.normalizeParameters(rawArgs);
+    const projectPath = readString(args, 'projectPath');
+    const logContent = readString(args, 'logContent');
+    const maxErrors = readPositiveNumber(args, 'maxErrors');
 
-    if (!args.projectPath) {
+    if (!projectPath) {
       return this.createErrorResponse('Project path is required', [
         'Provide a valid path to a Godot project directory',
       ]);
     }
 
-    if (!this.validatePath(args.projectPath)) {
+    if (!this.validatePath(projectPath)) {
       return this.createErrorResponse('Invalid project path', [
         'Provide a valid path without ".." or other potentially unsafe characters',
       ]);
     }
 
     try {
-      const projectFile = join(args.projectPath, 'project.godot');
+      const projectFile = join(projectPath, 'project.godot');
       if (!existsSync(projectFile)) {
-        return this.createErrorResponse(`Not a valid Godot project: ${args.projectPath}`, [
+        return this.createErrorResponse(`Not a valid Godot project: ${projectPath}`, [
           'Ensure the path points to a directory containing a project.godot file',
         ]);
       }
 
-      const params: any = {
-        logContent: args.logContent || '',
-        maxErrors: args.maxErrors || 50,
+      const params: OperationParams = {
+        logContent: logContent ?? '',
+        maxErrors: maxErrors ?? 50,
       };
 
-      const { stdout, stderr } = await this.executeOperation('parse_error_log', params, args.projectPath);
+      const { stdout, stderr } = await this.executeOperation('parse_error_log', params, projectPath);
 
-      if (stderr && stderr.includes('ERROR')) {
+      if (stderr.includes('ERROR')) {
         return this.createErrorResponse(`Failed to parse error log: ${stderr}`, [
           'Verify the log content or ensure godot.log exists',
         ]);
       }
 
       return {
-        content: [{ type: 'text', text: this.extractLastJsonLine(stdout) || stdout.trim() }],
+        content: [{ type: 'text', text: this.extractLastJsonLine(stdout) ?? stdout.trim() }],
       };
-    } catch (error: any) {
-      return this.createErrorResponse(`Failed to parse error log: ${error?.message || 'Unknown error'}`, [
+    } catch (error) {
+      return this.createErrorResponse(`Failed to parse error log: ${errorMessage(error)}`, [
         'Ensure Godot is installed correctly',
         'Verify the project path is accessible',
       ]);
@@ -3312,46 +3429,48 @@ class GodotServer {
   /**
    * Handle the get_project_health tool
    */
-  private async handleGetProjectHealth(args: any) {
-    args = this.normalizeParameters(args);
+  private async handleGetProjectHealth(rawArgs: unknown) {
+    const args = this.normalizeParameters(rawArgs);
+    const projectPath = readString(args, 'projectPath');
+    const includeDetails = readBoolean(args, 'includeDetails') !== false;
 
-    if (!args.projectPath) {
+    if (!projectPath) {
       return this.createErrorResponse('Project path is required', [
         'Provide a valid path to a Godot project directory',
       ]);
     }
 
-    if (!this.validatePath(args.projectPath)) {
+    if (!this.validatePath(projectPath)) {
       return this.createErrorResponse('Invalid project path', [
         'Provide a valid path without ".." or other potentially unsafe characters',
       ]);
     }
 
     try {
-      const projectFile = join(args.projectPath, 'project.godot');
+      const projectFile = join(projectPath, 'project.godot');
       if (!existsSync(projectFile)) {
-        return this.createErrorResponse(`Not a valid Godot project: ${args.projectPath}`, [
+        return this.createErrorResponse(`Not a valid Godot project: ${projectPath}`, [
           'Ensure the path points to a directory containing a project.godot file',
         ]);
       }
 
-      const params: any = {
-        includeDetails: args.includeDetails !== false,
+      const params: OperationParams = {
+        includeDetails,
       };
 
-      const { stdout, stderr } = await this.executeOperation('get_project_health', params, args.projectPath);
+      const { stdout, stderr } = await this.executeOperation('get_project_health', params, projectPath);
 
-      if (stderr && stderr.includes('ERROR')) {
+      if (stderr.includes('ERROR')) {
         return this.createErrorResponse(`Failed to get project health: ${stderr}`, [
           'Verify the project structure',
         ]);
       }
 
       return {
-        content: [{ type: 'text', text: this.extractLastJsonLine(stdout) || stdout.trim() }],
+        content: [{ type: 'text', text: this.extractLastJsonLine(stdout) ?? stdout.trim() }],
       };
-    } catch (error: any) {
-      return this.createErrorResponse(`Failed to get project health: ${error?.message || 'Unknown error'}`, [
+    } catch (error) {
+      return this.createErrorResponse(`Failed to get project health: ${errorMessage(error)}`, [
         'Ensure Godot is installed correctly',
         'Verify the project path is accessible',
       ]);
@@ -3365,44 +3484,46 @@ class GodotServer {
   /**
    * Handle the get_project_setting tool
    */
-  private async handleGetProjectSetting(args: any) {
-    args = this.normalizeParameters(args);
+  private async handleGetProjectSetting(rawArgs: unknown) {
+    const args = this.normalizeParameters(rawArgs);
+    const projectPath = readString(args, 'projectPath');
+    const setting = readString(args, 'setting');
 
-    if (!args.projectPath || !args.setting) {
+    if (!projectPath || !setting) {
       return this.createErrorResponse('Missing required parameters', ['Provide projectPath and setting']);
     }
 
-    if (!this.validatePath(args.projectPath)) {
+    if (!this.validatePath(projectPath)) {
       return this.createErrorResponse('Invalid project path', [
         'Provide a valid path without ".." or other potentially unsafe characters',
       ]);
     }
 
     try {
-      const projectFile = join(args.projectPath, 'project.godot');
+      const projectFile = join(projectPath, 'project.godot');
       if (!existsSync(projectFile)) {
-        return this.createErrorResponse(`Not a valid Godot project: ${args.projectPath}`, [
+        return this.createErrorResponse(`Not a valid Godot project: ${projectPath}`, [
           'Ensure the path points to a directory containing a project.godot file',
         ]);
       }
 
-      const params: any = {
-        setting: args.setting,
+      const params: OperationParams = {
+        setting: setting,
       };
 
-      const { stdout, stderr } = await this.executeOperation('get_project_setting', params, args.projectPath);
+      const { stdout, stderr } = await this.executeOperation('get_project_setting', params, projectPath);
 
-      if (stderr && stderr.includes('ERROR')) {
+      if (stderr.includes('ERROR')) {
         return this.createErrorResponse(`Failed to get project setting: ${stderr}`, [
           'Verify the setting path is correct',
         ]);
       }
 
       return {
-        content: [{ type: 'text', text: this.extractLastJsonLine(stdout) || stdout.trim() }],
+        content: [{ type: 'text', text: this.extractLastJsonLine(stdout) ?? stdout.trim() }],
       };
-    } catch (error: any) {
-      return this.createErrorResponse(`Failed to get project setting: ${error?.message || 'Unknown error'}`, [
+    } catch (error) {
+      return this.createErrorResponse(`Failed to get project setting: ${errorMessage(error)}`, [
         'Ensure Godot is installed correctly',
         'Verify the project path is accessible',
       ]);
@@ -3412,37 +3533,39 @@ class GodotServer {
   /**
    * Handle the set_project_setting tool
    */
-  private async handleSetProjectSetting(args: any) {
-    args = this.normalizeParameters(args);
+  private async handleSetProjectSetting(rawArgs: unknown) {
+    const args = this.normalizeParameters(rawArgs);
+    const projectPath = readString(args, 'projectPath');
+    const setting = readString(args, 'setting');
 
-    if (!args.projectPath || !args.setting || args.value === undefined) {
+    if (!projectPath || !setting || args['value'] === undefined) {
       return this.createErrorResponse('Missing required parameters', [
         'Provide projectPath, setting, and value',
       ]);
     }
 
-    if (!this.validatePath(args.projectPath)) {
+    if (!this.validatePath(projectPath)) {
       return this.createErrorResponse('Invalid project path', [
         'Provide a valid path without ".." or other potentially unsafe characters',
       ]);
     }
 
     try {
-      const projectFile = join(args.projectPath, 'project.godot');
+      const projectFile = join(projectPath, 'project.godot');
       if (!existsSync(projectFile)) {
-        return this.createErrorResponse(`Not a valid Godot project: ${args.projectPath}`, [
+        return this.createErrorResponse(`Not a valid Godot project: ${projectPath}`, [
           'Ensure the path points to a directory containing a project.godot file',
         ]);
       }
 
-      const params: any = {
-        setting: args.setting,
-        value: args.value,
+      const params: OperationParams = {
+        setting: setting,
+        value: args['value'],
       };
 
-      const { stdout, stderr } = await this.executeOperation('set_project_setting', params, args.projectPath);
+      const { stdout, stderr } = await this.executeOperation('set_project_setting', params, projectPath);
 
-      if (stderr && stderr.includes('ERROR')) {
+      if (stderr.includes('ERROR')) {
         return this.createErrorResponse(`Failed to set project setting: ${stderr}`, [
           'Verify the setting path and value',
         ]);
@@ -3451,8 +3574,8 @@ class GodotServer {
       return {
         content: [{ type: 'text', text: `Setting updated successfully.\n\n${stdout.trim()}` }],
       };
-    } catch (error: any) {
-      return this.createErrorResponse(`Failed to set project setting: ${error?.message || 'Unknown error'}`, [
+    } catch (error) {
+      return this.createErrorResponse(`Failed to set project setting: ${errorMessage(error)}`, [
         'Ensure Godot is installed correctly',
         'Verify the project path is accessible',
       ]);
@@ -3462,46 +3585,50 @@ class GodotServer {
   /**
    * Handle the add_autoload tool
    */
-  private async handleAddAutoload(args: any) {
-    args = this.normalizeParameters(args);
+  private async handleAddAutoload(rawArgs: unknown) {
+    const args = this.normalizeParameters(rawArgs);
+    const projectPath = readString(args, 'projectPath');
+    const name = readString(args, 'name');
+    const path = readString(args, 'path');
+    const enabled = readBoolean(args, 'enabled') !== false;
 
-    if (!args.projectPath || !args.name || !args.path) {
+    if (!projectPath || !name || !path) {
       return this.createErrorResponse('Missing required parameters', ['Provide projectPath, name, and path']);
     }
 
-    if (!this.validatePath(args.projectPath) || !this.validatePath(args.path)) {
+    if (!this.validatePath(projectPath) || !this.validatePath(path)) {
       return this.createErrorResponse('Invalid path', [
         'Provide valid paths without ".." or other potentially unsafe characters',
       ]);
     }
 
     try {
-      const projectFile = join(args.projectPath, 'project.godot');
+      const projectFile = join(projectPath, 'project.godot');
       if (!existsSync(projectFile)) {
-        return this.createErrorResponse(`Not a valid Godot project: ${args.projectPath}`, [
+        return this.createErrorResponse(`Not a valid Godot project: ${projectPath}`, [
           'Ensure the path points to a directory containing a project.godot file',
         ]);
       }
 
-      const params: any = {
-        name: args.name,
-        path: args.path,
-        enabled: args.enabled !== false,
+      const params: OperationParams = {
+        name: name,
+        path: path,
+        enabled,
       };
 
-      const { stdout, stderr } = await this.executeOperation('add_autoload', params, args.projectPath);
+      const { stdout, stderr } = await this.executeOperation('add_autoload', params, projectPath);
 
-      if (stderr && stderr.includes('ERROR')) {
+      if (stderr.includes('ERROR')) {
         return this.createErrorResponse(`Failed to add autoload: ${stderr}`, [
           'Verify the script/scene path exists',
         ]);
       }
 
       return {
-        content: [{ type: 'text', text: `Autoload '${args.name}' added successfully.\n\n${stdout.trim()}` }],
+        content: [{ type: 'text', text: `Autoload '${name}' added successfully.\n\n${stdout.trim()}` }],
       };
-    } catch (error: any) {
-      return this.createErrorResponse(`Failed to add autoload: ${error?.message || 'Unknown error'}`, [
+    } catch (error) {
+      return this.createErrorResponse(`Failed to add autoload: ${errorMessage(error)}`, [
         'Ensure Godot is installed correctly',
         'Verify the project path is accessible',
       ]);
@@ -3511,46 +3638,46 @@ class GodotServer {
   /**
    * Handle the remove_autoload tool
    */
-  private async handleRemoveAutoload(args: any) {
-    args = this.normalizeParameters(args);
+  private async handleRemoveAutoload(rawArgs: unknown) {
+    const args = this.normalizeParameters(rawArgs);
+    const projectPath = readString(args, 'projectPath');
+    const name = readString(args, 'name');
 
-    if (!args.projectPath || !args.name) {
+    if (!projectPath || !name) {
       return this.createErrorResponse('Missing required parameters', ['Provide projectPath and name']);
     }
 
-    if (!this.validatePath(args.projectPath)) {
+    if (!this.validatePath(projectPath)) {
       return this.createErrorResponse('Invalid project path', [
         'Provide a valid path without ".." or other potentially unsafe characters',
       ]);
     }
 
     try {
-      const projectFile = join(args.projectPath, 'project.godot');
+      const projectFile = join(projectPath, 'project.godot');
       if (!existsSync(projectFile)) {
-        return this.createErrorResponse(`Not a valid Godot project: ${args.projectPath}`, [
+        return this.createErrorResponse(`Not a valid Godot project: ${projectPath}`, [
           'Ensure the path points to a directory containing a project.godot file',
         ]);
       }
 
-      const params: any = {
-        name: args.name,
+      const params: OperationParams = {
+        name: name,
       };
 
-      const { stdout, stderr } = await this.executeOperation('remove_autoload', params, args.projectPath);
+      const { stdout, stderr } = await this.executeOperation('remove_autoload', params, projectPath);
 
-      if (stderr && stderr.includes('ERROR')) {
+      if (stderr.includes('ERROR')) {
         return this.createErrorResponse(`Failed to remove autoload: ${stderr}`, [
           'Verify the autoload name exists',
         ]);
       }
 
       return {
-        content: [
-          { type: 'text', text: `Autoload '${args.name}' removed successfully.\n\n${stdout.trim()}` },
-        ],
+        content: [{ type: 'text', text: `Autoload '${name}' removed successfully.\n\n${stdout.trim()}` }],
       };
-    } catch (error: any) {
-      return this.createErrorResponse(`Failed to remove autoload: ${error?.message || 'Unknown error'}`, [
+    } catch (error) {
+      return this.createErrorResponse(`Failed to remove autoload: ${errorMessage(error)}`, [
         'Ensure Godot is installed correctly',
         'Verify the project path is accessible',
       ]);
@@ -3560,42 +3687,43 @@ class GodotServer {
   /**
    * Handle the list_autoloads tool
    */
-  private async handleListAutoloads(args: any) {
-    args = this.normalizeParameters(args);
+  private async handleListAutoloads(rawArgs: unknown) {
+    const args = this.normalizeParameters(rawArgs);
+    const projectPath = readString(args, 'projectPath');
 
-    if (!args.projectPath) {
+    if (!projectPath) {
       return this.createErrorResponse('Project path is required', [
         'Provide a valid path to a Godot project directory',
       ]);
     }
 
-    if (!this.validatePath(args.projectPath)) {
+    if (!this.validatePath(projectPath)) {
       return this.createErrorResponse('Invalid project path', [
         'Provide a valid path without ".." or other potentially unsafe characters',
       ]);
     }
 
     try {
-      const projectFile = join(args.projectPath, 'project.godot');
+      const projectFile = join(projectPath, 'project.godot');
       if (!existsSync(projectFile)) {
-        return this.createErrorResponse(`Not a valid Godot project: ${args.projectPath}`, [
+        return this.createErrorResponse(`Not a valid Godot project: ${projectPath}`, [
           'Ensure the path points to a directory containing a project.godot file',
         ]);
       }
 
-      const { stdout, stderr } = await this.executeOperation('list_autoloads', {}, args.projectPath);
+      const { stdout, stderr } = await this.executeOperation('list_autoloads', {}, projectPath);
 
-      if (stderr && stderr.includes('ERROR')) {
+      if (stderr.includes('ERROR')) {
         return this.createErrorResponse(`Failed to list autoloads: ${stderr}`, [
           'Verify the project structure',
         ]);
       }
 
       return {
-        content: [{ type: 'text', text: this.extractLastJsonLine(stdout) || stdout.trim() }],
+        content: [{ type: 'text', text: this.extractLastJsonLine(stdout) ?? stdout.trim() }],
       };
-    } catch (error: any) {
-      return this.createErrorResponse(`Failed to list autoloads: ${error?.message || 'Unknown error'}`, [
+    } catch (error) {
+      return this.createErrorResponse(`Failed to list autoloads: ${errorMessage(error)}`, [
         'Ensure Godot is installed correctly',
         'Verify the project path is accessible',
       ]);
@@ -3605,51 +3733,53 @@ class GodotServer {
   /**
    * Handle the set_main_scene tool
    */
-  private async handleSetMainScene(args: any) {
-    args = this.normalizeParameters(args);
+  private async handleSetMainScene(rawArgs: unknown) {
+    const args = this.normalizeParameters(rawArgs);
+    const projectPath = readString(args, 'projectPath');
+    const scenePath = readString(args, 'scenePath');
 
-    if (!args.projectPath || !args.scenePath) {
+    if (!projectPath || !scenePath) {
       return this.createErrorResponse('Missing required parameters', ['Provide projectPath and scenePath']);
     }
 
-    if (!this.validatePath(args.projectPath) || !this.validatePath(args.scenePath)) {
+    if (!this.validatePath(projectPath) || !this.validatePath(scenePath)) {
       return this.createErrorResponse('Invalid path', [
         'Provide valid paths without ".." or other potentially unsafe characters',
       ]);
     }
 
     try {
-      const projectFile = join(args.projectPath, 'project.godot');
+      const projectFile = join(projectPath, 'project.godot');
       if (!existsSync(projectFile)) {
-        return this.createErrorResponse(`Not a valid Godot project: ${args.projectPath}`, [
+        return this.createErrorResponse(`Not a valid Godot project: ${projectPath}`, [
           'Ensure the path points to a directory containing a project.godot file',
         ]);
       }
 
-      const sceneFile = join(args.projectPath, args.scenePath);
+      const sceneFile = join(projectPath, scenePath);
       if (!existsSync(sceneFile)) {
-        return this.createErrorResponse(`Scene file does not exist: ${args.scenePath}`, [
+        return this.createErrorResponse(`Scene file does not exist: ${scenePath}`, [
           'Ensure the scene path is correct',
         ]);
       }
 
-      const params: any = {
-        scenePath: args.scenePath,
+      const params: OperationParams = {
+        scenePath: scenePath,
       };
 
-      const { stdout, stderr } = await this.executeOperation('set_main_scene', params, args.projectPath);
+      const { stdout, stderr } = await this.executeOperation('set_main_scene', params, projectPath);
 
-      if (stderr && stderr.includes('ERROR')) {
+      if (stderr.includes('ERROR')) {
         return this.createErrorResponse(`Failed to set main scene: ${stderr}`, [
           'Verify the scene path is correct',
         ]);
       }
 
       return {
-        content: [{ type: 'text', text: `Main scene set to '${args.scenePath}'.\n\n${stdout.trim()}` }],
+        content: [{ type: 'text', text: `Main scene set to '${scenePath}'.\n\n${stdout.trim()}` }],
       };
-    } catch (error: any) {
-      return this.createErrorResponse(`Failed to set main scene: ${error?.message || 'Unknown error'}`, [
+    } catch (error) {
+      return this.createErrorResponse(`Failed to set main scene: ${errorMessage(error)}`, [
         'Ensure Godot is installed correctly',
         'Verify the project path is accessible',
       ]);
@@ -3667,10 +3797,11 @@ class GodotServer {
   /**
    * Handle the get_runtime_status tool
    */
-  private async handleGetRuntimeStatus(args: any) {
-    args = this.normalizeParameters(args);
+  private async handleGetRuntimeStatus(rawArgs: unknown) {
+    const args = this.normalizeParameters(rawArgs);
+    const projectPath = readString(args, 'projectPath');
 
-    if (!args.projectPath) {
+    if (!projectPath) {
       return this.createErrorResponse('Project path is required', [
         'Provide a valid path to a Godot project directory',
       ]);
@@ -3678,16 +3809,16 @@ class GodotServer {
 
     try {
       const runtime = await this.handleRuntimeCommand('ping', {});
-      const runtimeText = runtime?.content?.[0]?.text || '';
+      const runtimeText = runtime.content[0]?.text ?? '';
 
-      let runtimePayload: any = null;
+      let runtimePayload: OperationParams | null = null;
       try {
-        runtimePayload = JSON.parse(runtimeText);
+        runtimePayload = asParams(JSON.parse(runtimeText));
       } catch {
         runtimePayload = null;
       }
 
-      const runtimeConnected = runtimePayload?.type === 'pong';
+      const runtimeConnected = runtimePayload !== null && readString(runtimePayload, 'type') === 'pong';
 
       if (runtimeConnected) {
         return {
@@ -3752,8 +3883,8 @@ class GodotServer {
           },
         ],
       };
-    } catch (error: any) {
-      return this.createErrorResponse(`Failed to get runtime status: ${error?.message || 'Unknown error'}`, [
+    } catch (error) {
+      return this.createErrorResponse(`Failed to get runtime status: ${errorMessage(error)}`, [
         'Ensure Godot is installed correctly',
       ]);
     }
@@ -3762,10 +3893,14 @@ class GodotServer {
   /**
    * Handle the inspect_runtime_tree tool
    */
-  private async handleInspectRuntimeTree(args: any) {
-    args = this.normalizeParameters(args);
+  private async handleInspectRuntimeTree(rawArgs: unknown) {
+    const args = this.normalizeParameters(rawArgs);
+    const projectPath = readString(args, 'projectPath');
+    const nodePath = readNonEmptyString(args, 'nodePath');
+    const depth = readPositiveNumber(args, 'depth');
+    const includeProperties = readBoolean(args, 'includeProperties') ?? false;
 
-    if (!args.projectPath) {
+    if (!projectPath) {
       return this.createErrorResponse('Project path is required', [
         'Provide a valid path to a Godot project directory',
       ]);
@@ -3773,25 +3908,27 @@ class GodotServer {
 
     try {
       return await this.handleRuntimeCommand('get_tree', {
-        root: args.nodePath || '/root',
-        depth: args.depth || 3,
-        include_properties: Boolean(args.includeProperties),
+        root: nodePath ?? '/root',
+        depth: depth ?? 3,
+        include_properties: includeProperties,
       });
-    } catch (error: any) {
-      return this.createErrorResponse(
-        `Failed to inspect runtime tree: ${error?.message || 'Unknown error'}`,
-        ['Ensure a Godot process is running with the runtime addon enabled'],
-      );
+    } catch (error) {
+      return this.createErrorResponse(`Failed to inspect runtime tree: ${errorMessage(error)}`, [
+        'Ensure a Godot process is running with the runtime addon enabled',
+      ]);
     }
   }
 
   /**
    * Handle the set_runtime_property tool
    */
-  private async handleSetRuntimeProperty(args: any) {
-    args = this.normalizeParameters(args);
+  private async handleSetRuntimeProperty(rawArgs: unknown) {
+    const args = this.normalizeParameters(rawArgs);
+    const projectPath = readString(args, 'projectPath');
+    const nodePath = readNonEmptyString(args, 'nodePath');
+    const property = readString(args, 'property');
 
-    if (!args.projectPath || !args.nodePath || !args.property || args.value === undefined) {
+    if (!projectPath || !nodePath || !property || args['value'] === undefined) {
       return this.createErrorResponse('Missing required parameters', [
         'Provide projectPath, nodePath, property, and value',
       ]);
@@ -3799,25 +3936,27 @@ class GodotServer {
 
     try {
       return await this.handleRuntimeCommand('set_property', {
-        path: args.nodePath,
-        property: args.property,
-        value: args.value,
+        path: nodePath,
+        property: property,
+        value: args['value'],
       });
-    } catch (error: any) {
-      return this.createErrorResponse(
-        `Failed to set runtime property: ${error?.message || 'Unknown error'}`,
-        ['Ensure a Godot process is running with the runtime addon'],
-      );
+    } catch (error) {
+      return this.createErrorResponse(`Failed to set runtime property: ${errorMessage(error)}`, [
+        'Ensure a Godot process is running with the runtime addon',
+      ]);
     }
   }
 
   /**
    * Handle the call_runtime_method tool
    */
-  private async handleCallRuntimeMethod(args: any) {
-    args = this.normalizeParameters(args);
+  private async handleCallRuntimeMethod(rawArgs: unknown) {
+    const args = this.normalizeParameters(rawArgs);
+    const projectPath = readString(args, 'projectPath');
+    const nodePath = readNonEmptyString(args, 'nodePath');
+    const method = readString(args, 'method');
 
-    if (!args.projectPath || !args.nodePath || !args.method) {
+    if (!projectPath || !nodePath || !method) {
       return this.createErrorResponse('Missing required parameters', [
         'Provide projectPath, nodePath, and method',
       ]);
@@ -3825,12 +3964,12 @@ class GodotServer {
 
     try {
       return await this.handleRuntimeCommand('call_method', {
-        path: args.nodePath,
-        method: args.method,
-        args: Array.isArray(args.args) ? args.args : [],
+        path: nodePath,
+        method,
+        args: readArray(args, 'args') ?? [],
       });
-    } catch (error: any) {
-      return this.createErrorResponse(`Failed to call runtime method: ${error?.message || 'Unknown error'}`, [
+    } catch (error) {
+      return this.createErrorResponse(`Failed to call runtime method: ${errorMessage(error)}`, [
         'Ensure a Godot process is running with the runtime addon',
       ]);
     }
@@ -3839,10 +3978,12 @@ class GodotServer {
   /**
    * Handle the get_runtime_metrics tool
    */
-  private async handleGetRuntimeMetrics(args: any) {
-    args = this.normalizeParameters(args);
+  private async handleGetRuntimeMetrics(rawArgs: unknown) {
+    const args = this.normalizeParameters(rawArgs);
+    const projectPath = readString(args, 'projectPath');
+    const metrics = readArray(args, 'metrics');
 
-    if (!args.projectPath) {
+    if (!projectPath) {
       return this.createErrorResponse('Project path is required', [
         'Provide a valid path to a Godot project directory',
       ]);
@@ -3850,10 +3991,10 @@ class GodotServer {
 
     try {
       return await this.handleRuntimeCommand('get_metrics', {
-        metrics: Array.isArray(args.metrics) ? args.metrics : [],
+        metrics: Array.isArray(metrics) ? metrics : [],
       });
-    } catch (error: any) {
-      return this.createErrorResponse(`Failed to get runtime metrics: ${error?.message || 'Unknown error'}`, [
+    } catch (error) {
+      return this.createErrorResponse(`Failed to get runtime metrics: ${errorMessage(error)}`, [
         'Ensure a Godot process is running',
       ]);
     }
@@ -3867,52 +4008,58 @@ class GodotServer {
    * Handle the create_script tool
    * Creates a new GDScript file with proper structure and optional templates
    */
-  private async handleCreateScript(args: any) {
-    args = this.normalizeParameters(args);
+  private async handleCreateScript(rawArgs: unknown) {
+    const args = this.normalizeParameters(rawArgs);
+    const projectPath = readString(args, 'projectPath');
+    const scriptPath = readString(args, 'scriptPath');
+    const className = readString(args, 'className');
+    const extendsClass = readNonEmptyString(args, 'extends');
+    const content = readString(args, 'content');
+    const template = readString(args, 'template');
 
-    if (!args.projectPath) {
+    if (!projectPath) {
       return this.createErrorResponse('Project path is required', [
         'Provide a valid path to a Godot project directory',
       ]);
     }
 
-    if (!args.scriptPath) {
+    if (!scriptPath) {
       return this.createErrorResponse('Script path is required', [
         'Provide a path for the new script file (e.g., "scripts/player.gd")',
       ]);
     }
 
-    if (!args.scriptPath.endsWith('.gd')) {
+    if (!scriptPath.endsWith('.gd')) {
       return this.createErrorResponse('Script path must end with .gd extension', [
         'Provide a valid GDScript path (e.g., "scripts/player.gd")',
       ]);
     }
 
-    if (!this.validatePath(args.projectPath)) {
+    if (!this.validatePath(projectPath)) {
       return this.createErrorResponse('Invalid project path', [
         'Provide a valid path without ".." or other potentially unsafe characters',
       ]);
     }
 
-    const projectFile = join(args.projectPath, 'project.godot');
+    const projectFile = join(projectPath, 'project.godot');
     if (!existsSync(projectFile)) {
-      return this.createErrorResponse(`Not a valid Godot project: ${args.projectPath}`, [
+      return this.createErrorResponse(`Not a valid Godot project: ${projectPath}`, [
         'Ensure the path points to a directory containing a project.godot file',
       ]);
     }
 
     try {
       const params = {
-        script_path: args.scriptPath,
-        class_name: args.className || '',
-        extends_class: args.extends || 'Node',
-        content: args.content || '',
-        template: args.template || '',
+        script_path: scriptPath,
+        class_name: className ?? '',
+        extends_class: extendsClass ?? 'Node',
+        content: content ?? '',
+        template: template ?? '',
       };
 
-      const { stdout, stderr } = await this.executeOperation('create_script', params, args.projectPath);
+      const { stdout, stderr } = await this.executeOperation('create_script', params, projectPath);
 
-      if (stderr && stderr.includes('ERROR')) {
+      if (stderr.includes('ERROR')) {
         return this.createErrorResponse(`Failed to create script: ${stderr}`, [
           'Check the script path and ensure parent directories exist',
         ]);
@@ -3920,9 +4067,9 @@ class GodotServer {
 
       // Try to parse JSON result
       try {
-        const jsonMatch = stdout.match(/\{[\s\S]*\}/);
+        const jsonMatch = /\{[\s\S]*\}/.exec(stdout);
         if (jsonMatch) {
-          const result = JSON.parse(jsonMatch[0]);
+          const result: unknown = JSON.parse(jsonMatch[0]);
           return {
             content: [
               {
@@ -3944,8 +4091,8 @@ class GodotServer {
           },
         ],
       };
-    } catch (error: any) {
-      return this.createErrorResponse(`Failed to create script: ${error?.message || 'Unknown error'}`, [
+    } catch (error) {
+      return this.createErrorResponse(`Failed to create script: ${errorMessage(error)}`, [
         'Check that Godot is properly installed and accessible',
       ]);
     }
@@ -3955,49 +4102,52 @@ class GodotServer {
    * Handle the modify_script tool
    * Modifies an existing GDScript file by adding functions, variables, or signals
    */
-  private async handleModifyScript(args: any) {
-    args = this.normalizeParameters(args);
+  private async handleModifyScript(rawArgs: unknown) {
+    const args = this.normalizeParameters(rawArgs);
+    const projectPath = readString(args, 'projectPath');
+    const scriptPath = readString(args, 'scriptPath');
+    const modifications = readArray(args, 'modifications');
 
-    if (!args.projectPath) {
+    if (!projectPath) {
       return this.createErrorResponse('Project path is required', [
         'Provide a valid path to a Godot project directory',
       ]);
     }
 
-    if (!args.scriptPath) {
+    if (!scriptPath) {
       return this.createErrorResponse('Script path is required', [
         'Provide the path to an existing script file',
       ]);
     }
 
-    if (!args.modifications || !Array.isArray(args.modifications) || args.modifications.length === 0) {
+    if (!modifications || !Array.isArray(modifications) || modifications.length === 0) {
       return this.createErrorResponse('Modifications array is required', [
         'Provide an array of modifications with type and name properties',
       ]);
     }
 
-    if (!this.validatePath(args.projectPath)) {
+    if (!this.validatePath(projectPath)) {
       return this.createErrorResponse('Invalid project path', [
         'Provide a valid path without ".." or other potentially unsafe characters',
       ]);
     }
 
-    const projectFile = join(args.projectPath, 'project.godot');
+    const projectFile = join(projectPath, 'project.godot');
     if (!existsSync(projectFile)) {
-      return this.createErrorResponse(`Not a valid Godot project: ${args.projectPath}`, [
+      return this.createErrorResponse(`Not a valid Godot project: ${projectPath}`, [
         'Ensure the path points to a directory containing a project.godot file',
       ]);
     }
 
     try {
       const params = {
-        script_path: args.scriptPath,
-        modifications: args.modifications,
+        script_path: scriptPath,
+        modifications: modifications,
       };
 
-      const { stdout, stderr } = await this.executeOperation('modify_script', params, args.projectPath);
+      const { stdout, stderr } = await this.executeOperation('modify_script', params, projectPath);
 
-      if (stderr && stderr.includes('ERROR')) {
+      if (stderr.includes('ERROR')) {
         return this.createErrorResponse(`Failed to modify script: ${stderr}`, [
           'Check that the script file exists and is a valid GDScript',
         ]);
@@ -4005,9 +4155,9 @@ class GodotServer {
 
       // Try to parse JSON result
       try {
-        const jsonMatch = stdout.match(/\{[\s\S]*\}/);
+        const jsonMatch = /\{[\s\S]*\}/.exec(stdout);
         if (jsonMatch) {
-          const result = JSON.parse(jsonMatch[0]);
+          const result: unknown = JSON.parse(jsonMatch[0]);
           return {
             content: [
               {
@@ -4029,8 +4179,8 @@ class GodotServer {
           },
         ],
       };
-    } catch (error: any) {
-      return this.createErrorResponse(`Failed to modify script: ${error?.message || 'Unknown error'}`, [
+    } catch (error) {
+      return this.createErrorResponse(`Failed to modify script: ${errorMessage(error)}`, [
         'Check that Godot is properly installed and accessible',
       ]);
     }
@@ -4040,43 +4190,46 @@ class GodotServer {
    * Handle the get_script_info tool
    * Analyzes a GDScript file and returns its structure
    */
-  private async handleGetScriptInfo(args: any) {
-    args = this.normalizeParameters(args);
+  private async handleGetScriptInfo(rawArgs: unknown) {
+    const args = this.normalizeParameters(rawArgs);
+    const projectPath = readString(args, 'projectPath');
+    const scriptPath = readString(args, 'scriptPath');
+    const includeInherited = readBoolean(args, 'includeInherited') ?? false;
 
-    if (!args.projectPath) {
+    if (!projectPath) {
       return this.createErrorResponse('Project path is required', [
         'Provide a valid path to a Godot project directory',
       ]);
     }
 
-    if (!args.scriptPath) {
+    if (!scriptPath) {
       return this.createErrorResponse('Script path is required', [
         'Provide the path to a script file to analyze',
       ]);
     }
 
-    if (!this.validatePath(args.projectPath)) {
+    if (!this.validatePath(projectPath)) {
       return this.createErrorResponse('Invalid project path', [
         'Provide a valid path without ".." or other potentially unsafe characters',
       ]);
     }
 
-    const projectFile = join(args.projectPath, 'project.godot');
+    const projectFile = join(projectPath, 'project.godot');
     if (!existsSync(projectFile)) {
-      return this.createErrorResponse(`Not a valid Godot project: ${args.projectPath}`, [
+      return this.createErrorResponse(`Not a valid Godot project: ${projectPath}`, [
         'Ensure the path points to a directory containing a project.godot file',
       ]);
     }
 
     try {
       const params = {
-        script_path: args.scriptPath,
-        include_inherited: args.includeInherited || false,
+        script_path: scriptPath,
+        include_inherited: includeInherited || false,
       };
 
-      const { stdout, stderr } = await this.executeOperation('get_script_info', params, args.projectPath);
+      const { stdout, stderr } = await this.executeOperation('get_script_info', params, projectPath);
 
-      if (stderr && stderr.includes('ERROR')) {
+      if (stderr.includes('ERROR')) {
         return this.createErrorResponse(`Failed to analyze script: ${stderr}`, [
           'Check that the script file exists and is a valid GDScript',
         ]);
@@ -4084,9 +4237,9 @@ class GodotServer {
 
       // Try to parse JSON result
       try {
-        const jsonMatch = stdout.match(/\{[\s\S]*\}/);
+        const jsonMatch = /\{[\s\S]*\}/.exec(stdout);
         if (jsonMatch) {
-          const result = JSON.parse(jsonMatch[0]);
+          const result: unknown = JSON.parse(jsonMatch[0]);
           return {
             content: [
               {
@@ -4108,8 +4261,8 @@ class GodotServer {
           },
         ],
       };
-    } catch (error: any) {
-      return this.createErrorResponse(`Failed to analyze script: ${error?.message || 'Unknown error'}`, [
+    } catch (error) {
+      return this.createErrorResponse(`Failed to analyze script: ${errorMessage(error)}`, [
         'Check that Godot is properly installed and accessible',
       ]);
     }
@@ -4130,42 +4283,43 @@ class GodotServer {
   /**
    * Handle the list_plugins tool
    */
-  private async handleListPlugins(args: any) {
-    args = this.normalizeParameters(args);
+  private async handleListPlugins(rawArgs: unknown) {
+    const args = this.normalizeParameters(rawArgs);
+    const projectPath = readString(args, 'projectPath');
 
-    if (!args.projectPath) {
+    if (!projectPath) {
       return this.createErrorResponse('Project path is required', [
         'Provide a valid path to a Godot project directory',
       ]);
     }
 
-    if (!this.validatePath(args.projectPath)) {
+    if (!this.validatePath(projectPath)) {
       return this.createErrorResponse('Invalid project path', [
         'Provide a valid path without ".." or other potentially unsafe characters',
       ]);
     }
 
     try {
-      const projectFile = join(args.projectPath, 'project.godot');
+      const projectFile = join(projectPath, 'project.godot');
       if (!existsSync(projectFile)) {
-        return this.createErrorResponse(`Not a valid Godot project: ${args.projectPath}`, [
+        return this.createErrorResponse(`Not a valid Godot project: ${projectPath}`, [
           'Ensure the path points to a directory containing a project.godot file',
         ]);
       }
 
-      const { stdout, stderr } = await this.executeOperation('list_plugins', {}, args.projectPath);
+      const { stdout, stderr } = await this.executeOperation('list_plugins', {}, projectPath);
 
-      if (stderr && stderr.includes('ERROR')) {
+      if (stderr.includes('ERROR')) {
         return this.createErrorResponse(`Failed to list plugins: ${stderr}`, [
           'Verify the project structure',
         ]);
       }
 
       return {
-        content: [{ type: 'text', text: this.extractLastJsonLine(stdout) || stdout.trim() }],
+        content: [{ type: 'text', text: this.extractLastJsonLine(stdout) ?? stdout.trim() }],
       };
-    } catch (error: any) {
-      return this.createErrorResponse(`Failed to list plugins: ${error?.message || 'Unknown error'}`, [
+    } catch (error) {
+      return this.createErrorResponse(`Failed to list plugins: ${errorMessage(error)}`, [
         'Ensure Godot is installed correctly',
         'Verify the project path is accessible',
       ]);
@@ -4175,34 +4329,36 @@ class GodotServer {
   /**
    * Handle the enable_plugin tool
    */
-  private async handleEnablePlugin(args: any) {
-    args = this.normalizeParameters(args);
+  private async handleEnablePlugin(rawArgs: unknown) {
+    const args = this.normalizeParameters(rawArgs);
+    const projectPath = readString(args, 'projectPath');
+    const pluginName = readString(args, 'pluginName');
 
-    if (!args.projectPath || !args.pluginName) {
+    if (!projectPath || !pluginName) {
       return this.createErrorResponse('Missing required parameters', ['Provide projectPath and pluginName']);
     }
 
-    if (!this.validatePath(args.projectPath)) {
+    if (!this.validatePath(projectPath)) {
       return this.createErrorResponse('Invalid project path', [
         'Provide a valid path without ".." or other potentially unsafe characters',
       ]);
     }
 
     try {
-      const projectFile = join(args.projectPath, 'project.godot');
+      const projectFile = join(projectPath, 'project.godot');
       if (!existsSync(projectFile)) {
-        return this.createErrorResponse(`Not a valid Godot project: ${args.projectPath}`, [
+        return this.createErrorResponse(`Not a valid Godot project: ${projectPath}`, [
           'Ensure the path points to a directory containing a project.godot file',
         ]);
       }
 
-      const params: any = {
-        pluginName: args.pluginName,
+      const params: OperationParams = {
+        pluginName: pluginName,
       };
 
-      const { stdout, stderr } = await this.executeOperation('enable_plugin', params, args.projectPath);
+      const { stdout, stderr } = await this.executeOperation('enable_plugin', params, projectPath);
 
-      if (stderr && stderr.includes('ERROR')) {
+      if (stderr.includes('ERROR')) {
         return this.createErrorResponse(`Failed to enable plugin: ${stderr}`, [
           'Verify the plugin exists in the addons directory',
           'Check the plugin name is correct',
@@ -4210,12 +4366,10 @@ class GodotServer {
       }
 
       return {
-        content: [
-          { type: 'text', text: `Plugin '${args.pluginName}' enabled successfully.\n\n${stdout.trim()}` },
-        ],
+        content: [{ type: 'text', text: `Plugin '${pluginName}' enabled successfully.\n\n${stdout.trim()}` }],
       };
-    } catch (error: any) {
-      return this.createErrorResponse(`Failed to enable plugin: ${error?.message || 'Unknown error'}`, [
+    } catch (error) {
+      return this.createErrorResponse(`Failed to enable plugin: ${errorMessage(error)}`, [
         'Ensure Godot is installed correctly',
         'Verify the project path is accessible',
       ]);
@@ -4225,34 +4379,36 @@ class GodotServer {
   /**
    * Handle the disable_plugin tool
    */
-  private async handleDisablePlugin(args: any) {
-    args = this.normalizeParameters(args);
+  private async handleDisablePlugin(rawArgs: unknown) {
+    const args = this.normalizeParameters(rawArgs);
+    const projectPath = readString(args, 'projectPath');
+    const pluginName = readString(args, 'pluginName');
 
-    if (!args.projectPath || !args.pluginName) {
+    if (!projectPath || !pluginName) {
       return this.createErrorResponse('Missing required parameters', ['Provide projectPath and pluginName']);
     }
 
-    if (!this.validatePath(args.projectPath)) {
+    if (!this.validatePath(projectPath)) {
       return this.createErrorResponse('Invalid project path', [
         'Provide a valid path without ".." or other potentially unsafe characters',
       ]);
     }
 
     try {
-      const projectFile = join(args.projectPath, 'project.godot');
+      const projectFile = join(projectPath, 'project.godot');
       if (!existsSync(projectFile)) {
-        return this.createErrorResponse(`Not a valid Godot project: ${args.projectPath}`, [
+        return this.createErrorResponse(`Not a valid Godot project: ${projectPath}`, [
           'Ensure the path points to a directory containing a project.godot file',
         ]);
       }
 
-      const params: any = {
-        pluginName: args.pluginName,
+      const params: OperationParams = {
+        pluginName: pluginName,
       };
 
-      const { stdout, stderr } = await this.executeOperation('disable_plugin', params, args.projectPath);
+      const { stdout, stderr } = await this.executeOperation('disable_plugin', params, projectPath);
 
-      if (stderr && stderr.includes('ERROR')) {
+      if (stderr.includes('ERROR')) {
         return this.createErrorResponse(`Failed to disable plugin: ${stderr}`, [
           'Verify the plugin is currently enabled',
           'Check the plugin name is correct',
@@ -4261,11 +4417,11 @@ class GodotServer {
 
       return {
         content: [
-          { type: 'text', text: `Plugin '${args.pluginName}' disabled successfully.\n\n${stdout.trim()}` },
+          { type: 'text', text: `Plugin '${pluginName}' disabled successfully.\n\n${stdout.trim()}` },
         ],
       };
-    } catch (error: any) {
-      return this.createErrorResponse(`Failed to disable plugin: ${error?.message || 'Unknown error'}`, [
+    } catch (error) {
+      return this.createErrorResponse(`Failed to disable plugin: ${errorMessage(error)}`, [
         'Ensure Godot is installed correctly',
         'Verify the project path is accessible',
       ]);
@@ -4279,44 +4435,48 @@ class GodotServer {
   /**
    * Handle the add_input_action tool
    */
-  private async handleAddInputAction(args: any) {
-    args = this.normalizeParameters(args);
+  private async handleAddInputAction(rawArgs: unknown) {
+    const args = this.normalizeParameters(rawArgs);
+    const projectPath = readString(args, 'projectPath');
+    const actionName = readString(args, 'actionName');
+    const events = readArray(args, 'events');
+    const deadzone = readNumberLike(args, 'deadzone');
 
-    if (!args.projectPath || !args.actionName || !args.events) {
+    if (!projectPath || !actionName || !events) {
       return this.createErrorResponse('Missing required parameters', [
         'Provide projectPath, actionName, and events',
       ]);
     }
 
-    if (!this.validatePath(args.projectPath)) {
+    if (!this.validatePath(projectPath)) {
       return this.createErrorResponse('Invalid project path', [
         'Provide a valid path without ".." or other potentially unsafe characters',
       ]);
     }
 
-    if (!Array.isArray(args.events) || args.events.length === 0) {
+    if (!Array.isArray(events) || events.length === 0) {
       return this.createErrorResponse('Events must be a non-empty array', [
         'Provide at least one input event',
       ]);
     }
 
     try {
-      const projectFile = join(args.projectPath, 'project.godot');
+      const projectFile = join(projectPath, 'project.godot');
       if (!existsSync(projectFile)) {
-        return this.createErrorResponse(`Not a valid Godot project: ${args.projectPath}`, [
+        return this.createErrorResponse(`Not a valid Godot project: ${projectPath}`, [
           'Ensure the path points to a directory containing a project.godot file',
         ]);
       }
 
-      const params: any = {
-        actionName: args.actionName,
-        events: args.events,
-        deadzone: args.deadzone !== undefined ? args.deadzone : 0.5,
+      const params: OperationParams = {
+        actionName: actionName,
+        events: events,
+        deadzone: deadzone ?? 0.5,
       };
 
-      const { stdout, stderr } = await this.executeOperation('add_input_action', params, args.projectPath);
+      const { stdout, stderr } = await this.executeOperation('add_input_action', params, projectPath);
 
-      if (stderr && stderr.includes('ERROR')) {
+      if (stderr.includes('ERROR')) {
         return this.createErrorResponse(`Failed to add input action: ${stderr}`, [
           'Verify the event types and parameters are valid',
         ]);
@@ -4324,11 +4484,11 @@ class GodotServer {
 
       return {
         content: [
-          { type: 'text', text: `Input action '${args.actionName}' added successfully.\n\n${stdout.trim()}` },
+          { type: 'text', text: `Input action '${actionName}' added successfully.\n\n${stdout.trim()}` },
         ],
       };
-    } catch (error: any) {
-      return this.createErrorResponse(`Failed to add input action: ${error?.message || 'Unknown error'}`, [
+    } catch (error) {
+      return this.createErrorResponse(`Failed to add input action: ${errorMessage(error)}`, [
         'Ensure Godot is installed correctly',
         'Verify the project path is accessible',
       ]);
@@ -4352,10 +4512,10 @@ class GodotServer {
     );
     const result = {
       query,
-      results: [] as Array<{
+      results: [] as {
         file: string;
-        matches: Array<{ line: number; content: string; match: string }>;
-      }>,
+        matches: { line: number; content: string; match: string }[];
+      }[],
       summary: {
         files_searched: 0,
         files_with_matches: 0,
@@ -4393,7 +4553,7 @@ class GodotServer {
           continue;
         }
 
-        const extension = entry.name.includes('.') ? entry.name.split('.').pop()?.toLowerCase() || '' : '';
+        const extension = entry.name.includes('.') ? (entry.name.split('.').pop()?.toLowerCase() ?? '') : '';
         if (!normalizedExtensions.has(extension)) {
           continue;
         }
@@ -4401,7 +4561,7 @@ class GodotServer {
         result.summary.files_searched += 1;
         const content = readFileSync(entryPath, 'utf8');
         const lines = content.split('\n');
-        const matches: Array<{ line: number; content: string; match: string }> = [];
+        const matches: { line: number; content: string; match: string }[] = [];
 
         for (const [index, line] of lines.entries()) {
           if (result.summary.total_matches >= maxResults) {
@@ -4443,48 +4603,47 @@ class GodotServer {
   /**
    * Handle the search_project tool
    */
-  private async handleSearchProject(args: any) {
-    args = this.normalizeParameters(args);
+  private handleSearchProject(rawArgs: unknown): ToolResponse {
+    const args = this.normalizeParameters(rawArgs);
+    const projectPath = readString(args, 'projectPath');
+    const query = readString(args, 'query');
+    const fileTypes = readStringArray(args, 'fileTypes') ?? ['gd', 'tscn', 'tres'];
+    const regex = readBoolean(args, 'regex') ?? false;
+    const caseSensitive = readBoolean(args, 'caseSensitive') ?? false;
+    const maxResults = readPositiveNumber(args, 'maxResults') ?? 100;
 
-    if (!args.projectPath || !args.query) {
+    if (!projectPath || !query) {
       return this.createErrorResponse('Missing required parameters', ['Provide projectPath and query']);
     }
 
-    if (!this.validatePath(args.projectPath)) {
+    if (!this.validatePath(projectPath)) {
       return this.createErrorResponse('Invalid project path', [
         'Provide a valid path without ".." or other potentially unsafe characters',
       ]);
     }
 
     try {
-      const projectFile = join(args.projectPath, 'project.godot');
+      const projectFile = join(projectPath, 'project.godot');
       if (!existsSync(projectFile)) {
-        return this.createErrorResponse(`Not a valid Godot project: ${args.projectPath}`, [
+        return this.createErrorResponse(`Not a valid Godot project: ${projectPath}`, [
           'Ensure the path points to a directory containing a project.godot file',
         ]);
       }
 
-      const params: any = {
-        query: args.query,
-        fileTypes: args.fileTypes || ['gd', 'tscn', 'tres'],
-        regex: args.regex || false,
-        caseSensitive: args.caseSensitive || false,
-        maxResults: args.maxResults || 100,
-      };
       const result = this.searchProjectNatively(
-        args.projectPath,
-        params.query,
-        params.fileTypes,
-        params.regex,
-        params.caseSensitive,
-        params.maxResults,
+        projectPath,
+        query,
+        fileTypes,
+        regex,
+        caseSensitive,
+        maxResults,
       );
 
       return {
         content: [{ type: 'text', text: JSON.stringify(result) }],
       };
-    } catch (error: any) {
-      return this.createErrorResponse(`Failed to search project: ${error?.message || 'Unknown error'}`, [
+    } catch (error) {
+      return this.createErrorResponse(`Failed to search project: ${errorMessage(error)}`, [
         'Ensure Godot is installed correctly',
         'Verify the project path is accessible',
       ]);
@@ -4529,7 +4688,7 @@ class GodotServer {
       console.error(`[SERVER] Using Godot at: ${this.godotPath}`);
 
       const transport = new StdioServerTransport();
-      await this.server.connect(transport);
+      await this.mcp.server.connect(transport);
       process.stdin.once('end', () => {
         void this.handleShutdown('stdin:end', 0);
       });
@@ -4547,16 +4706,15 @@ class GodotServer {
           bridgeError instanceof Error && 'code' in bridgeError && typeof bridgeError.code === 'string'
             ? bridgeError.code
             : null;
-        const errorMessage = bridgeError instanceof Error ? bridgeError.message : String(bridgeError);
+        const bridgeReason = errorMessage(bridgeError);
         const bridgeMessage =
-          bridgeCode && !errorMessage.includes(bridgeCode) ? `${bridgeCode}: ${errorMessage}` : errorMessage;
+          bridgeCode && !bridgeReason.includes(bridgeCode) ? `${bridgeCode}: ${bridgeReason}` : bridgeReason;
         this.bridgeStartupError = bridgeMessage;
         console.error(`[SERVER] Warning: Godot Editor Bridge failed to start: ${bridgeMessage}`);
         console.error('[SERVER] Continuing without bridge-backed editor tools.');
       }
-    } catch (error: unknown) {
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      console.error('[SERVER] Failed to start:', errorMessage);
+    } catch (error) {
+      console.error('[SERVER] Failed to start:', errorMessage(error));
       process.exit(1);
     }
   }
@@ -4569,101 +4727,98 @@ class GodotServer {
   // Audio System Handlers
   // ============================================
 
-  private async handleCreateAudioBus(args: any) {
-    args = this.normalizeParameters(args);
-    if (!args.projectPath || !args.busName) {
+  private async handleCreateAudioBus(rawArgs: unknown) {
+    const args = this.normalizeParameters(rawArgs);
+    const projectPath = readString(args, 'projectPath');
+    const busName = readString(args, 'busName');
+    const parentBusIndex = readNumberLike(args, 'parentBusIndex');
+    if (!projectPath || !busName) {
       return this.createErrorResponse('Missing required parameters', ['Provide projectPath and busName']);
     }
     try {
       const params = {
-        busName: args.busName,
-        parentBusIndex: args.parentBusIndex || 0,
+        busName: busName,
+        parentBusIndex: parentBusIndex ?? 0,
       };
-      const { stdout, stderr } = await this.executeOperation('create_audio_bus', params, args.projectPath);
-      if (stderr && stderr.includes('ERROR')) {
+      const { stdout, stderr } = await this.executeOperation('create_audio_bus', params, projectPath);
+      if (stderr.includes('ERROR')) {
         return this.createErrorResponse(`Failed to create audio bus: ${stderr}`, []);
       }
       return {
-        content: [
-          { type: 'text', text: `Audio bus '${args.busName}' created successfully.\n\n${stdout.trim()}` },
-        ],
+        content: [{ type: 'text', text: `Audio bus '${busName}' created successfully.\n\n${stdout.trim()}` }],
       };
-    } catch (error: any) {
-      return this.createErrorResponse(`Failed to create audio bus: ${error?.message}`, []);
+    } catch (error) {
+      return this.createErrorResponse(`Failed to create audio bus: ${errorMessage(error)}`, []);
     }
   }
 
-  private async handleGetAudioBuses(args: any) {
-    args = this.normalizeParameters(args);
-    if (!args.projectPath) {
+  private async handleGetAudioBuses(rawArgs: unknown) {
+    const args = this.normalizeParameters(rawArgs);
+    const projectPath = readString(args, 'projectPath');
+    if (!projectPath) {
       return this.createErrorResponse('Project path is required', []);
     }
     try {
-      const { stdout, stderr } = await this.executeOperation('get_audio_buses', {}, args.projectPath);
-      if (stderr && stderr.includes('ERROR')) {
+      const { stdout, stderr } = await this.executeOperation('get_audio_buses', {}, projectPath);
+      if (stderr.includes('ERROR')) {
         return this.createErrorResponse(`Failed to get audio buses: ${stderr}`, []);
       }
       return { content: [{ type: 'text', text: stdout.trim() }] };
-    } catch (error: any) {
-      return this.createErrorResponse(`Failed to get audio buses: ${error?.message}`, []);
+    } catch (error) {
+      return this.createErrorResponse(`Failed to get audio buses: ${errorMessage(error)}`, []);
     }
   }
 
-  private async handleSetAudioBusEffect(args: any) {
-    args = this.normalizeParameters(args);
-    if (
-      !args.projectPath ||
-      args.busIndex === undefined ||
-      args.effectIndex === undefined ||
-      !args.effectType
-    ) {
+  private async handleSetAudioBusEffect(rawArgs: unknown) {
+    const args = this.normalizeParameters(rawArgs);
+    const projectPath = readString(args, 'projectPath');
+    const busIndex = readNumberLike(args, 'busIndex');
+    const effectIndex = readNumberLike(args, 'effectIndex');
+    const effectType = readString(args, 'effectType');
+    const enabled = readBoolean(args, 'enabled') !== false;
+    if (!projectPath || busIndex === undefined || effectIndex === undefined || !effectType) {
       return this.createErrorResponse('Missing required parameters', [
         'Provide projectPath, busIndex, effectIndex, and effectType',
       ]);
     }
     try {
       const params = {
-        busIndex: args.busIndex,
-        effectIndex: args.effectIndex,
-        effectType: args.effectType,
-        enabled: args.enabled !== false,
+        busIndex: busIndex,
+        effectIndex: effectIndex,
+        effectType: effectType,
+        enabled,
       };
-      const { stdout, stderr } = await this.executeOperation(
-        'set_audio_bus_effect',
-        params,
-        args.projectPath,
-      );
-      if (stderr && stderr.includes('ERROR')) {
+      const { stdout, stderr } = await this.executeOperation('set_audio_bus_effect', params, projectPath);
+      if (stderr.includes('ERROR')) {
         return this.createErrorResponse(`Failed to set audio bus effect: ${stderr}`, []);
       }
       return { content: [{ type: 'text', text: `Audio bus effect set successfully.\n\n${stdout.trim()}` }] };
-    } catch (error: any) {
-      return this.createErrorResponse(`Failed to set audio bus effect: ${error?.message}`, []);
+    } catch (error) {
+      return this.createErrorResponse(`Failed to set audio bus effect: ${errorMessage(error)}`, []);
     }
   }
 
-  private async handleSetAudioBusVolume(args: any) {
-    args = this.normalizeParameters(args);
-    if (!args.projectPath || args.busIndex === undefined || args.volumeDb === undefined) {
+  private async handleSetAudioBusVolume(rawArgs: unknown) {
+    const args = this.normalizeParameters(rawArgs);
+    const projectPath = readString(args, 'projectPath');
+    const busIndex = readNumberLike(args, 'busIndex');
+    const volumeDb = readNumberLike(args, 'volumeDb');
+    if (!projectPath || busIndex === undefined || volumeDb === undefined) {
       return this.createErrorResponse('Missing required parameters', [
         'Provide projectPath, busIndex, and volumeDb',
       ]);
     }
     try {
-      const params = { busIndex: args.busIndex, volumeDb: args.volumeDb };
-      const { stdout, stderr } = await this.executeOperation(
-        'set_audio_bus_volume',
-        params,
-        args.projectPath,
-      );
-      if (stderr && stderr.includes('ERROR')) {
+      const params = { busIndex: busIndex, volumeDb: volumeDb };
+      const { stdout, stderr } = await this.executeOperation('set_audio_bus_volume', params, projectPath);
+      if (stderr.includes('ERROR')) {
         return this.createErrorResponse(`Failed to set audio bus volume: ${stderr}`, []);
       }
       return {
-        content: [{ type: 'text', text: `Audio bus volume set to ${args.volumeDb}dB.\n\n${stdout.trim()}` }],
+        content: [{ type: 'text', text: `Audio bus volume set to ${volumeDb}dB.\n\n${stdout.trim()}` }],
       };
-    } catch (error: any) {
-      return this.createErrorResponse(`Failed to set audio bus volume: ${error?.message}`, []);
+    } catch (error) {
+      return this.createErrorResponse(`Failed to set audio bus volume: ${errorMessage(error)}`, []);
     }
   }
 
@@ -4694,19 +4849,24 @@ class GodotServer {
   /**
    * Handle the query_classes tool: ClassDB introspection
    */
-  private async handleQueryClasses(args: any) {
-    const projectPath = args?.projectPath || args?.project_path;
+  private async handleQueryClasses(rawArgs: unknown) {
+    // These three take the caller's spelling as it arrives rather than normalising first, so
+    // both snake_case and camelCase reach the operation script under the name it expects.
+    const args = asParams(rawArgs);
+    const projectPath = readStringEither(args, 'projectPath', 'project_path');
     if (!projectPath) {
       throw new McpError(ErrorCode.InvalidParams, 'projectPath is required');
     }
-    const params: Record<string, any> = {};
-    if (args?.filter) params['filter'] = args.filter;
-    if (args?.category) params['category'] = args.category;
-    if (args?.instantiableOnly !== undefined) params['instantiable_only'] = args.instantiableOnly;
-    if (args?.instantiable_only !== undefined) params['instantiable_only'] = args.instantiable_only;
+    const params: OperationParams = {};
+    const filter = readString(args, 'filter');
+    const category = readString(args, 'category');
+    const instantiableOnly = readBooleanEither(args, 'instantiableOnly', 'instantiable_only');
+    if (filter) params['filter'] = filter;
+    if (category) params['category'] = category;
+    if (instantiableOnly !== undefined) params['instantiable_only'] = instantiableOnly;
 
     const { stdout, stderr } = await this.executeOperation('query_classes', params, projectPath);
-    if (stderr && stderr.trim()) {
+    if (stderr.trim()) {
       return this.createErrorResponse(`Failed to query classes: ${stderr.trim()}`, [
         'Check the project path and ensure project.godot exists',
         'Verify the category/filter arguments are valid',
@@ -4714,30 +4874,31 @@ class GodotServer {
     }
 
     return {
-      content: [{ type: 'text', text: this.extractLastJsonLine(stdout) || stdout.trim() }],
+      content: [{ type: 'text', text: this.extractLastJsonLine(stdout) ?? stdout.trim() }],
     };
   }
 
   /**
    * Handle the query_class_info tool — ClassDB introspection
    */
-  private async handleQueryClassInfo(args: any) {
-    const projectPath = args?.projectPath || args?.project_path;
-    const className = args?.className || args?.class_name;
+  private async handleQueryClassInfo(rawArgs: unknown) {
+    const args = asParams(rawArgs);
+    const projectPath = readStringEither(args, 'projectPath', 'project_path');
+    const className = readStringEither(args, 'className', 'class_name');
     if (!projectPath) {
       throw new McpError(ErrorCode.InvalidParams, 'projectPath is required');
     }
     if (!className) {
       throw new McpError(ErrorCode.InvalidParams, 'className is required');
     }
-    const params: Record<string, any> = {
+    const params: OperationParams = {
       class_name: className,
     };
-    if (args?.includeInherited !== undefined) params['include_inherited'] = args.includeInherited;
-    if (args?.include_inherited !== undefined) params['include_inherited'] = args.include_inherited;
+    const includeInherited = readBooleanEither(args, 'includeInherited', 'include_inherited');
+    if (includeInherited !== undefined) params['include_inherited'] = includeInherited;
 
     const { stdout, stderr } = await this.executeOperation('query_class_info', params, projectPath);
-    if (stderr && stderr.trim()) {
+    if (stderr.trim()) {
       return this.createErrorResponse(`Failed to query class info: ${stderr.trim()}`, [
         'Check that the class name exists in the current Godot version',
         'Verify the project path and ClassDB availability',
@@ -4745,16 +4906,17 @@ class GodotServer {
     }
 
     return {
-      content: [{ type: 'text', text: this.extractLastJsonLine(stdout) || stdout.trim() }],
+      content: [{ type: 'text', text: this.extractLastJsonLine(stdout) ?? stdout.trim() }],
     };
   }
 
   /**
    * Handle the inspect_inheritance tool — ClassDB introspection
    */
-  private async handleInspectInheritance(args: any) {
-    const projectPath = args?.projectPath || args?.project_path;
-    const className = args?.className || args?.class_name;
+  private async handleInspectInheritance(rawArgs: unknown) {
+    const args = asParams(rawArgs);
+    const projectPath = readStringEither(args, 'projectPath', 'project_path');
+    const className = readStringEither(args, 'className', 'class_name');
     if (!projectPath) {
       throw new McpError(ErrorCode.InvalidParams, 'projectPath is required');
     }
@@ -4768,13 +4930,13 @@ class GodotServer {
       },
       projectPath,
     );
-    if (stderr && stderr.trim()) {
+    if (stderr.trim()) {
       return this.createErrorResponse(`Failed to inspect inheritance: ${stderr.trim()}`, [
         'Check that the class name exists in the current Godot version',
       ]);
     }
     return {
-      content: [{ type: 'text', text: this.extractLastJsonLine(stdout) || stdout.trim() }],
+      content: [{ type: 'text', text: this.extractLastJsonLine(stdout) ?? stdout.trim() }],
     };
   }
 }
