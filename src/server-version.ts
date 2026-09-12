@@ -1,7 +1,7 @@
 import { readFileSync } from 'fs';
 
-export const DEBUG_MODE: boolean = process.env.DEBUG === 'true';
-export const GODOT_DEBUG_MODE_DEFAULT: boolean = process.env.GODOT_DEBUG === 'true' || DEBUG_MODE;
+export const DEBUG_MODE: boolean = process.env['DEBUG'] === 'true';
+export const GODOT_DEBUG_MODE_DEFAULT: boolean = process.env['GODOT_DEBUG'] === 'true' || DEBUG_MODE;
 
 export const SERVER_VERSION = (() => {
   try {
