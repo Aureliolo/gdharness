@@ -29,11 +29,12 @@ concurrency:
 
 jobs:
   prepare:
+    name: prepare
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
-      contents: write
-      pull-requests: write
+      contents: write # Creates the release branch and the signed version-bump commit on it.
+      pull-requests: write # Opens the pull request whose merge cuts the release.
 
     steps:
       - name: Checkout main

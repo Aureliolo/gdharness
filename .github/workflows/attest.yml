@@ -30,11 +30,14 @@ permissions: {}
 
 jobs:
   attest:
+    name: attest
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # The identity in the OIDC token is this workflow rather than the one that built the
+    # archive, which is what makes the provenance worth reading and why this job lives apart.
     permissions:
-      id-token: write
-      attestations: write
+      id-token: write # Sigstore signs against this token.
+      attestations: write # Writes the provenance onto the repository.
 
     steps:
       - name: Download the artifact

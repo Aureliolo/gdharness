@@ -7,19 +7,26 @@ on:
 
 permissions: {}
 
+# Keyed on the tag rather than the workflow, and never cancelled: two tags are two releases
+# and must both run, while the same tag twice is a re-run that should not race itself.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build_test:
+    name: build_test
     if: github.repository == 'Aureliolo/gdharness'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
-      contents: read
+      contents: read # Reads the tagged source it builds.
     outputs:
       version: ${{ steps.version.outputs.version }}
 
     steps:
       - name: Checkout tag
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -52,16 +59,14 @@ jobs:
 
       - name: Setup Bun
         # No version pinned here on purpose: setup-bun reads packageManager out of
-        # package.json, which is the one place the Bun version is written.
+        # package.json, which is the one place the Bun version is written. Caching is off
+        # because a cache entry can be written by any job on any branch, including a pull
+        # request from a fork, and a release build is the last place to accept bytes whose
+        # provenance is a cache key. The saving is seconds; the exposure is the artifact
+        # everybody downloads.
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
-
-      - name: Restore Bun package cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
-          path: ~/.bun/install/cache
-          key: ${{ runner.os }}-bun-${{ hashFiles('package.json', 'bun.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-bun-
+          no-cache: true
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -110,6 +115,11 @@ jobs:
 
       - name: Verify clean source and build release assets
         shell: bash
+        # The version arrives through the environment rather than through ${{ }} inside the
+        # script: an expansion is pasted in before bash ever sees the line, so anything that
+        # reaches that output becomes shell rather than a string.
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
 
@@ -122,7 +132,7 @@ jobs:
           rm -rf dist
           bun run release:pack
 
-          version="${{ steps.version.outputs.version }}"
+          version="${VERSION}"
           archive="dist/gdharness-${version}.tgz"
           checksum="${archive}.sha256"
 
@@ -141,8 +151,10 @@ jobs:
 
           (cd dist && sha256sum --check "$(basename "${checksum}")")
 
-          echo "archive=${archive}" >> "${GITHUB_OUTPUT}"
-          echo "checksum=${checksum}" >> "${GITHUB_OUTPUT}"
+          {
+            echo "archive=${archive}"
+            echo "checksum=${checksum}"
+          } >> "${GITHUB_OUTPUT}"
         id: assets
 
       - name: Upload release assets
@@ -158,6 +170,7 @@ jobs:
   # The SBOM is built from the archive rather than from the source tree, so what it lists is
   # what ships rather than what the build happened to have lying around.
   sbom:
+    name: sbom
     if: github.repository == 'Aureliolo/gdharness'
     needs: build_test
     runs-on: ubuntu-latest
@@ -211,12 +224,19 @@ jobs:
           retention-days: 1
 
   attest:
+    name: attest
     if: github.repository == 'Aureliolo/gdharness'
     needs: [build_test, sbom]
+    # Handed to a workflow of its own so the identity Sigstore signs is not the build's.
+    # That separation is what SLSA Build L3 asks for.
     permissions:
-      id-token: write
-      attestations: write
-    uses: ./.github/workflows/attest.yml
+      id-token: write # Sigstore signs against this token.
+      attestations: write # Writes the provenance onto the repository.
+    # zizmor wants `$/...` here. actionlint 1.7.12 rejects that spelling as neither of the two
+    # forms GitHub documents, and this path only runs on a tag, where a syntax error is a failed
+    # release rather than a failed check. The two linters disagree; the one that can be verified
+    # against a real parser wins. Worth revisiting when actionlint knows the shorthand.
+    uses: ./.github/workflows/attest.yml # zizmor: ignore[self-repository]
     with:
       artifact: release-bundle
       archive: dist/gdharness-${{ needs.build_test.outputs.version }}.tgz
@@ -227,12 +247,13 @@ jobs:
         dist/gdharness-${{ needs.build_test.outputs.version }}.spdx.json
 
   publish:
+    name: publish
     if: github.repository == 'Aureliolo/gdharness'
     needs: [build_test, attest]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
-      contents: write
+      contents: write # Creates the release and uploads the assets onto it.
 
     steps:
       - name: Download the bundle

@@ -10,21 +10,24 @@ on:
 
 permissions: {}
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   analysis:
+    name: analysis
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
-      # Upload the result to code scanning, and let Scorecard read workflow runs.
-      security-events: write
-      actions: read
-      contents: read
-      # Publishing to the OpenSSF API is what makes the badge resolve.
-      id-token: write
+      security-events: write # Uploads the result to code scanning.
+      actions: read # Scorecard scores the CI checks from the workflow run history.
+      contents: read # Reads the repository it is scoring.
+      id-token: write # Publishing to the OpenSSF API is what makes the badge resolve.
 
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
