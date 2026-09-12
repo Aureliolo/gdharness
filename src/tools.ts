@@ -1,5 +1,11 @@
-import { createGDScript, modifyGDScript, CreateScriptParams, ModifyScriptParams } from './gdscript_utils.js';
-import { exportProject, listExportPresets, ExportProjectParams } from './project_utils.js';
+import {
+  type CreateScriptParams,
+  createGDScript,
+  type ModifyScriptParams,
+  modifyGDScript,
+} from './gdscript_utils.js';
+import { type ExportProjectParams, exportProject, listExportPresets } from './project_utils.js';
+import { asParams, readString } from './tool-args.js';
 
 /**
  * Defines the new tool schemas for Priority 1 features
@@ -79,19 +85,21 @@ export const PRIORITY_1_TOOLS = [
 /**
  * Handles the execution of Priority 1 tools
  */
-export async function handlePriority1Tools(name: string, args: any, godotPath: string): Promise<any> {
+export async function handlePriority1Tools(name: string, args: unknown, godotPath: string): Promise<unknown> {
+  const params = asParams(args);
+
   switch (name) {
     case 'create_script':
-      return createGDScript(args as CreateScriptParams);
+      return createGDScript(params as unknown as CreateScriptParams);
 
     case 'modify_script':
-      return modifyGDScript(args as ModifyScriptParams);
+      return modifyGDScript(params as unknown as ModifyScriptParams);
 
     case 'export_project':
-      return await exportProject(args as ExportProjectParams, godotPath);
+      return await exportProject(params as unknown as ExportProjectParams, godotPath);
 
     case 'list_export_presets':
-      return { presets: listExportPresets(args.projectPath) };
+      return { presets: listExportPresets(readString(params, 'projectPath') ?? '') };
 
     default:
       throw new Error(`Unknown tool: ${name}`);

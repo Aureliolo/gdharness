@@ -1,11 +1,3 @@
-export function sanitizeToolName(name) {
-  return (
-    name
-      .normalize('NFKD')
-      .replace(/[^\x00-\x7F]/g, '')
-      .replace(/[^a-zA-Z0-9-]+/g, '-')
-      .replace(/-+/g, '-')
-      .replace(/^-+|-+$/g, '')
-      .slice(0, 128) || 'tool'
-  );
-}
+// The shipped sanitiser, not a copy of it: a second implementation of the same rules is a
+// test that stops testing the server the first time either side is edited.
+export { sanitizeExportedToolName as sanitizeToolName } from '../../build/tool-names.js';

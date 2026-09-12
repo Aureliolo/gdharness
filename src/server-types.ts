@@ -1,5 +1,7 @@
+import type { ChildProcess } from 'node:child_process';
+
 export interface GodotProcess {
-  process: any;
+  process: ChildProcess;
   output: string[];
   errors: string[];
 }
@@ -11,8 +13,37 @@ export interface GodotServerConfig {
   strictPathValidation?: boolean;
 }
 
-export interface OperationParams {
-  [key: string]: any;
+/**
+ * Tool arguments as they arrive over MCP: keys chosen by the caller, values not yet checked.
+ * `unknown` rather than `any` so that every read has to say what it expects the value to be;
+ * the readers in `tool-args.ts` are where that happens.
+ */
+export type OperationParams = Record<string, unknown>;
+
+/** File counts for a project, by kind. `error` is set when the walk could not finish. */
+export interface ProjectStructure {
+  scenes: number;
+  scripts: number;
+  assets: number;
+  other: number;
+  error?: string;
+}
+
+/**
+ * One block of a tool result. `text` carries JSON or prose; `data` plus `mimeType` carry a
+ * base64 payload, which is how a screenshot comes back.
+ */
+export interface ToolResponseContent {
+  type: string;
+  text?: string;
+  data?: string;
+  mimeType?: string;
+}
+
+/** What every tool handler returns. `isError` marks a handled failure, not a thrown one. */
+export interface ToolResponse {
+  content: ToolResponseContent[];
+  isError?: boolean;
 }
 
 export interface MCPToolDefinition {
