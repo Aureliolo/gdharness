@@ -71,25 +71,15 @@ export const TOOL_GROUPS: Record<string, ToolGroupDefinition> = {
     tools: ['set_theme_color', 'set_theme_font_size', 'apply_theme_shader'],
     keywords: ['theme', 'ui style', 'font size', 'color override', 'theme color', 'theme shader'],
   },
-  asset_store: {
-    description: 'Asset library search and download',
-    tools: ['search_assets', 'fetch_asset', 'list_asset_providers'],
-    keywords: ['asset store', 'asset library', 'download asset', 'search assets', 'fetch asset'],
-  },
   testing: {
     description: 'Screenshot capture and input injection for testing',
     tools: ['capture_screenshot', 'capture_viewport', 'inject_action', 'inject_key', 'inject_mouse_click', 'inject_mouse_motion'],
     keywords: ['screenshot', 'capture', 'inject input', 'simulate', 'test input', 'inject key', 'inject mouse', 'viewport capture'],
   },
   dx_tools: {
-    description: 'Developer experience tools (error log, health, usages, scaffold)',
-    tools: ['parse_error_log', 'get_project_health', 'find_resource_usages', 'scaffold_gameplay_prototype'],
-    keywords: ['error log', 'project health', 'find usages', 'scaffold', 'prototype', 'resource usages'],
-  },
-  intent_tracking: {
-    description: 'Intent capture, decision logging, and handoff',
-    tools: ['capture_intent_snapshot', 'record_decision_log', 'generate_handoff_brief', 'summarize_intent_context', 'record_work_step', 'record_execution_trace', 'export_handoff_pack', 'set_recording_mode', 'get_recording_mode'],
-    keywords: ['intent', 'handoff', 'decision log', 'work step', 'recording', 'execution trace', 'handoff brief'],
+    description: 'Developer experience tools (error log, health, usages)',
+    tools: ['parse_error_log', 'get_project_health', 'find_resource_usages'],
+    keywords: ['error log', 'project health', 'find usages', 'resource usages'],
   },
   class_advanced: {
     description: 'Advanced class introspection',
