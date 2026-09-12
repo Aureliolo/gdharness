@@ -71,10 +71,11 @@ gh attestation verify gdharness-X.Y.Z.tgz --repo Aureliolo/gdharness
 
 **What goes into it.** Every dependency is an exact version and every GitHub action is pinned by
 commit digest. No carets, no ranges, no floating tags; the only version ranges in the repository
-are the two support floors above. The Godot that CI drives the fixtures against is pinned the same
-way: it is fetched from the engine's own release and refused unless it matches the SHA-512
-published alongside it, so the largest binary in the pipeline is not the one thing nobody checked.
-Dependabot proposes the bumps and a human takes them.
+are the two support floors above. Nothing fetched from outside the repository runs unchecked:
+the engine CI drives the fixtures against, the Bun that runs every job, uv, the interpreter and
+gdtoolkit under it, and actionlint are each refused unless they match a digest written here, and
+the npm packages carry theirs in the lockfile. Renovate proposes the bumps, digests included, in
+one pull request a week, and a human takes them.
 
 **What guards the branch.** `main` takes pull requests only, with linear history and nine
 required status checks: the build and its tests, both formatters, both linters, the GDScript

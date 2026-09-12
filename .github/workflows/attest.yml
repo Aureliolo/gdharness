@@ -31,7 +31,7 @@ permissions: {}
 jobs:
   attest:
     name: attest
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     # The identity in the OIDC token is this workflow rather than the one that built the
     # archive, which is what makes the provenance worth reading and why this job lives apart.

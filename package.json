@@ -23,8 +23,6 @@
     "lint:fix": "bun x biome check --write . && oxlint --type-aware --fix src test scripts",
     "lint:biome": "bun x biome check .",
     "lint:types": "oxlint --type-aware --deny-warnings src test scripts",
-    "check:pins": "bun scripts/check-pins.mjs --offline",
-    "check:outdated": "bun scripts/check-pins.mjs",
     "lint:gd": "gdlint src/godot",
     "format:gd": "gdformat --line-length=110 src/godot",
     "format:gd:check": "gdformat --check --line-length=110 src/godot",

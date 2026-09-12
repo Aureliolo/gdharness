@@ -8,8 +8,11 @@
  * This fetches the published asset, refuses anything but the digest written below, and hands
  * back an absolute path to a binary that has already answered --version.
  *
- * Raising the version means raising the digests too. They come from the SHA512-SUMS.txt
- * attached to the same release, and a mismatch is a hard failure rather than a warning.
+ * The digests are the ones Godot publishes in the SHA512-SUMS.txt attached to the release, and
+ * a mismatch is a hard failure rather than a warning. Renovate raises the tag and the digest of
+ * each platform together, which is why the tag is written three times: a digest can only be
+ * looked up beside the version it belongs to, and the three are checked against each other
+ * below so that a partial update cannot install anything.
  */
 
 import { execFileSync } from 'node:child_process';
@@ -19,10 +22,8 @@ import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { inflateRawSync } from 'node:zlib';
 
-const VERSION = '4.7.2-stable';
-
 /**
- * Per platform: the asset on the release, its SHA-512 as published, and where the executable
+ * Per platform: the release tag, the SHA-512 of the asset as published, and where the executable
  * sits once the archive is open. The Windows archive holds two binaries and this is the plain
  * one on purpose: the console build derives the real executable's filename from its own and
  * dies if it is ever renamed, while the plain build writes to a redirected pipe, which is what
@@ -30,26 +31,39 @@ const VERSION = '4.7.2-stable';
  */
 const BUILDS = {
   linux: {
-    asset: `Godot_v${VERSION}_linux.x86_64.zip`,
+    // renovate: datasource=github-release-attachments depName=godotengine/godot versioning=regex:^(?<major>\d+)\.(?<minor>\d+)(?:\.(?<patch>\d+))?-(?<compatibility>stable)$
+    tag: '4.7.2-stable',
     digest:
       '9aa00f7a605200940bce3027a567b782f49bd8e940dd06ae9e987bd65aee1b1467edd56ed84fcdcbdd44354bf613bdbb4e5d2913e925850368e150c59ed54c65',
-    executable: `Godot_v${VERSION}_linux.x86_64`,
+    asset: (tag) => `Godot_v${tag}_linux.x86_64.zip`,
+    executable: (tag) => `Godot_v${tag}_linux.x86_64`,
   },
   darwin: {
-    asset: `Godot_v${VERSION}_macos.universal.zip`,
+    // renovate: datasource=github-release-attachments depName=godotengine/godot versioning=regex:^(?<major>\d+)\.(?<minor>\d+)(?:\.(?<patch>\d+))?-(?<compatibility>stable)$
+    tag: '4.7.2-stable',
     digest:
       '38aa16e5bba2083941fc5b3e54be0089bd4cc35e32415f5b9fd9a8a6a7b9818255d44532ea8ef94b5aef56c4b407c2d634fa4f657e4ebe681ebbf59b7bac69ca',
-    executable: join('Godot.app', 'Contents', 'MacOS', 'Godot'),
+    asset: (tag) => `Godot_v${tag}_macos.universal.zip`,
+    executable: () => join('Godot.app', 'Contents', 'MacOS', 'Godot'),
   },
   win32: {
-    asset: `Godot_v${VERSION}_win64.exe.zip`,
+    // renovate: datasource=github-release-attachments depName=godotengine/godot versioning=regex:^(?<major>\d+)\.(?<minor>\d+)(?:\.(?<patch>\d+))?-(?<compatibility>stable)$
+    tag: '4.7.2-stable',
     digest:
       '83decd58fdf67b9d657958a1ae6bf1929c20785315a81effe245874cdc57acb709bf868e00778a96984338c1b29dafdb453c6847747694621c6ecf5da2259993',
-    executable: `Godot_v${VERSION}_win64.exe`,
+    asset: (tag) => `Godot_v${tag}_win64.exe.zip`,
+    executable: (tag) => `Godot_v${tag}_win64.exe`,
   },
 };
 
-const RELEASE_URL = `https://github.com/godotengine/godot/releases/download/${VERSION}`;
+/** The one tag every platform pins, or a throw naming the disagreement. */
+function pinnedTag() {
+  const tags = new Set(Object.values(BUILDS).map((build) => build.tag));
+  if (tags.size !== 1) {
+    throw new Error(`The platforms pin different Godot releases: ${[...tags].join(', ')}.`);
+  }
+  return BUILDS.linux.tag;
+}
 
 const END_OF_CENTRAL_DIRECTORY = 0x06054b50;
 const CENTRAL_FILE_HEADER = 0x02014b50;
@@ -195,21 +209,23 @@ export function extract(zip, into) {
 }
 
 async function main() {
+  const tag = pinnedTag();
   const build = BUILDS[process.platform];
   if (!build) {
     throw new Error(`No pinned Godot for platform ${process.platform}.`);
   }
 
-  const root = join(process.env.RUNNER_TEMP ?? tmpdir(), `godot-${VERSION}`);
+  const root = join(process.env.RUNNER_TEMP ?? tmpdir(), `godot-${tag}`);
   rmSync(root, { recursive: true, force: true });
   mkdirSync(root, { recursive: true });
 
-  const archive = await download(`${RELEASE_URL}/${build.asset}`);
+  const asset = build.asset(tag);
+  const archive = await download(`https://github.com/godotengine/godot/releases/download/${tag}/${asset}`);
   const digest = createHash('sha512').update(archive).digest('hex');
   if (digest !== build.digest) {
     throw new Error(
       [
-        `${build.asset} is not the file this repository pins.`,
+        `${asset} is not the file this repository pins.`,
         `  expected ${build.digest}`,
         `  received ${digest}`,
       ].join('\n'),
@@ -218,14 +234,14 @@ async function main() {
 
   extract(archive, root);
 
-  const executable = join(root, build.executable);
+  const executable = join(root, build.executable(tag));
   chmodSync(executable, 0o755);
 
   // A path that exists is not an engine. Ask it what it is, and fail here rather than leave a
   // broken install for the suite to report as "no Godot found".
   const reported = execFileSync(executable, ['--version'], { encoding: 'utf8', timeout: 120000 }).trim();
-  if (!reported.startsWith(VERSION.replace('-', '.'))) {
-    throw new Error(`${executable} reports ${reported}, which is not ${VERSION}.`);
+  if (!reported.startsWith(tag.replace('-', '.'))) {
+    throw new Error(`${executable} reports ${reported}, which is not ${tag}.`);
   }
 
   if (process.env.GITHUB_ENV) {
