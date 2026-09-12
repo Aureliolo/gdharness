@@ -37,7 +37,8 @@ async function main(): Promise<void> {
 }
 
 function printHelp(): void {
-  console.log(`
+  console.log(
+    `
 gdharness v${getLocalVersion()}, a harness for driving a Godot 4 project from an agent
 
 Usage:
@@ -46,7 +47,8 @@ Usage:
   gdharness help       Show this help
 
 More info: https://github.com/Aureliolo/gdharness
-`.trim());
+`.trim(),
+  );
 }
 
 await main().catch((error: unknown) => {

@@ -13,11 +13,11 @@ export function initLayout() {
 
   // Build adjacency map for connected nodes
   const adjacency = new Map();
-  nodes.forEach(n => {
+  nodes.forEach((n) => {
     adjacency.set(n.path, []);
   });
 
-  edges.forEach(e => {
+  edges.forEach((e) => {
     if (adjacency.has(e.from) && adjacency.has(e.to)) {
       adjacency.get(e.from).push(e.to);
       adjacency.get(e.to).push(e.from);
@@ -26,15 +26,13 @@ export function initLayout() {
 
   // Find root nodes (most connections or extends nothing)
   const connectionCount = new Map();
-  nodes.forEach(n => {
+  nodes.forEach((n) => {
     const count = (adjacency.get(n.path) || []).length;
     connectionCount.set(n.path, count);
   });
 
   // Sort nodes by connection count (most connected first)
-  const sortedNodes = [...nodes].sort((a, b) =>
-    connectionCount.get(b.path) - connectionCount.get(a.path)
-  );
+  const sortedNodes = [...nodes].sort((a, b) => connectionCount.get(b.path) - connectionCount.get(a.path));
 
   // Initial placement: spread nodes in a grid with good spacing
   const cols = Math.ceil(Math.sqrt(nodes.length));
@@ -69,7 +67,7 @@ export function initGroupedLayout() {
   if (nodes.length === 0) return;
 
   const groups = {};
-  nodes.forEach(n => {
+  nodes.forEach((n) => {
     const cat = n.category || 'other';
     if (!groups[cat]) groups[cat] = [];
     groups[cat].push(n);
@@ -102,14 +100,14 @@ export function initGroupedLayout() {
       totalW: innerW + GROUP_PADDING * 2,
       totalH: innerH + GROUP_PADDING * 2 + 30,
       gCol,
-      gRow
+      gRow,
     };
   });
 
   const maxColWidths = [];
   const maxRowHeights = [];
 
-  Object.values(groupLayouts).forEach(g => {
+  Object.values(groupLayouts).forEach((g) => {
     while (maxColWidths.length <= g.gCol) maxColWidths.push(0);
     while (maxRowHeights.length <= g.gRow) maxRowHeights.push(0);
     maxColWidths[g.gCol] = Math.max(maxColWidths[g.gCol], g.totalW);
@@ -135,7 +133,7 @@ export function initGroupedLayout() {
       y: groupY - GROUP_PADDING - 30,
       w: g.totalW,
       h: g.totalH,
-      category: cat
+      category: cat,
     };
 
     g.nodes.forEach((n, ni) => {
@@ -150,7 +148,7 @@ export function initGroupedLayout() {
   for (let iter = 0; iter < iterations; iter++) {
     const alpha = Math.pow(1 - iter / iterations, 2) * 0.5;
 
-    Object.values(groupLayouts).forEach(g => {
+    Object.values(groupLayouts).forEach((g) => {
       for (let i = 0; i < g.nodes.length; i++) {
         for (let j = i + 1; j < g.nodes.length; j++) {
           const a = g.nodes[i];
@@ -173,9 +171,9 @@ export function initGroupedLayout() {
       }
     });
 
-    edges.forEach(e => {
-      const from = nodes.find(n => n.path === e.from);
-      const to = nodes.find(n => n.path === e.to);
+    edges.forEach((e) => {
+      const from = nodes.find((n) => n.path === e.from);
+      const to = nodes.find((n) => n.path === e.to);
       if (!from || !to || from.category !== to.category) return;
       const dx = to.x - from.x;
       const dy = to.y - from.y;
@@ -192,13 +190,13 @@ export function initGroupedLayout() {
     });
   }
 
-  window.__categoryGroupBoxes = Object.values(groupLayouts).map(g => g.groupBox);
+  window.__categoryGroupBoxes = Object.values(groupLayouts).map((g) => g.groupBox);
   centerGroupedLayout();
 }
 
 function applyForces(alpha, adjacency) {
-  const repulsion = 50000;  // Strong repulsion
-  const attraction = 0.08;  // Moderate attraction
+  const repulsion = 50000; // Strong repulsion
+  const attraction = 0.08; // Moderate attraction
   const idealEdgeLength = MIN_SPACING_X * 1.2;
 
   // Repulsion between all nodes
@@ -234,9 +232,9 @@ function applyForces(alpha, adjacency) {
   }
 
   // Attraction along edges - pull connected nodes together
-  edges.forEach(e => {
-    const from = nodes.find(n => n.path === e.from);
-    const to = nodes.find(n => n.path === e.to);
+  edges.forEach((e) => {
+    const from = nodes.find((n) => n.path === e.from);
+    const to = nodes.find((n) => n.path === e.to);
     if (!from || !to) return;
 
     const dx = to.x - from.x;
@@ -299,10 +297,12 @@ function centerLayout() {
   if (nodes.length === 0) return;
 
   // Find bounding box
-  let minX = Infinity, maxX = -Infinity;
-  let minY = Infinity, maxY = -Infinity;
+  let minX = Infinity,
+    maxX = -Infinity;
+  let minY = Infinity,
+    maxY = -Infinity;
 
-  nodes.forEach(n => {
+  nodes.forEach((n) => {
     minX = Math.min(minX, n.x);
     maxX = Math.max(maxX, n.x);
     minY = Math.min(minY, n.y);
@@ -313,7 +313,7 @@ function centerLayout() {
   const centerX = (minX + maxX) / 2;
   const centerY = (minY + maxY) / 2;
 
-  nodes.forEach(n => {
+  nodes.forEach((n) => {
     n.x -= centerX;
     n.y -= centerY;
   });
@@ -326,7 +326,7 @@ function centerGroupedLayout() {
   let minY = Infinity;
   let maxY = -Infinity;
 
-  nodes.forEach(n => {
+  nodes.forEach((n) => {
     minX = Math.min(minX, n.x);
     maxX = Math.max(maxX, n.x);
     minY = Math.min(minY, n.y);
@@ -335,13 +335,13 @@ function centerGroupedLayout() {
 
   const cx = (minX + maxX) / 2;
   const cy = (minY + maxY) / 2;
-  nodes.forEach(n => {
+  nodes.forEach((n) => {
     n.x -= cx;
     n.y -= cy;
   });
 
   if (window.__categoryGroupBoxes) {
-    window.__categoryGroupBoxes.forEach(b => {
+    window.__categoryGroupBoxes.forEach((b) => {
       b.x -= cx;
       b.y -= cy;
     });

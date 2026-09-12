@@ -45,10 +45,10 @@ export interface ScriptConnection {
 }
 
 export interface ScriptNode {
-  path: string;        // res:// path
+  path: string; // res:// path
   filename: string;
   folder: string;
-  category: string;    // e.g., "player", "audio", "network", "dungeon", "ui", "system", "utility"
+  category: string; // e.g., "player", "audio", "network", "dungeon", "ui", "system", "utility"
   class_name: string;
   extends: string;
   description: string;
@@ -69,10 +69,10 @@ export interface ProjectEdge {
 }
 
 export interface CategoryInfo {
-  id: string;       // e.g., "player"
-  label: string;    // e.g., "Player"
-  color: string;    // e.g., "#f38ba8"
-  count: number;    // Number of scripts in this category
+  id: string; // e.g., "player"
+  label: string; // e.g., "Player"
+  color: string; // e.g., "#f38ba8"
+  count: number; // Number of scripts in this category
 }
 
 export interface ProjectMap {
@@ -85,18 +85,32 @@ export interface ProjectMap {
 
 // Dynamic color palette — assigned to categories as they are discovered.
 const CATEGORY_PALETTE = [
-  '#f38ba8', '#fab387', '#89dceb', '#a6e3a1', '#cba6f7',
-  '#f9e2af', '#94e2d5', '#7aa2f7', '#89b4fa', '#eba0ac',
-  '#b4befe', '#74c7ec', '#f5c2e7', '#a6adc8', '#f2cdcd',
-  '#cdd6f4', '#bac2de', '#94e2d5', '#fab387', '#89dceb',
+  '#f38ba8',
+  '#fab387',
+  '#89dceb',
+  '#a6e3a1',
+  '#cba6f7',
+  '#f9e2af',
+  '#94e2d5',
+  '#7aa2f7',
+  '#89b4fa',
+  '#eba0ac',
+  '#b4befe',
+  '#74c7ec',
+  '#f5c2e7',
+  '#a6adc8',
+  '#f2cdcd',
+  '#cdd6f4',
+  '#bac2de',
+  '#94e2d5',
+  '#fab387',
+  '#89dceb',
 ];
 const FALLBACK_COLOR = '#6c7086';
 
 // Folder names that are generic containers, not meaningful categories.
 // When a script sits under one of these, skip to the next subfolder.
-const CONTAINER_FOLDERS = new Set([
-  'scripts', 'src', 'code', 'source', 'gdscript', 'gd', 'lib', 'core',
-]);
+const CONTAINER_FOLDERS = new Set(['scripts', 'src', 'code', 'source', 'gdscript', 'gd', 'lib', 'core']);
 
 export interface MapProjectResult {
   ok: boolean;
@@ -115,7 +129,7 @@ export interface MapProjectResult {
 export function mapProject(
   projectPath: string,
   rootRes: string = 'res://',
-  includeAddons: boolean = false
+  includeAddons: boolean = false,
 ): MapProjectResult {
   // Normalise rootRes
   if (!rootRes.startsWith('res://')) {
@@ -253,7 +267,7 @@ function collectScripts(
   dirPath: string,
   projectRoot: string,
   results: string[],
-  includeAddons: boolean
+  includeAddons: boolean,
 ): void {
   let entries: string[];
   try {
@@ -330,21 +344,33 @@ function parseScript(absolutePath: string, resPath: string): ScriptNode {
     // Description tag (first 15 lines)
     if (i < 15 && !description) {
       const m = stripped.match(reDesc);
-      if (m) { description = m[1]; continue; }
+      if (m) {
+        description = m[1];
+        continue;
+      }
     }
 
     // extends (class name or file path)
     if (!extendsClass) {
       const mPath = stripped.match(reExtendsPath);
-      if (mPath) { extendsClass = mPath[1]; continue; }
+      if (mPath) {
+        extendsClass = mPath[1];
+        continue;
+      }
       const m = stripped.match(reExtends);
-      if (m) { extendsClass = m[1]; continue; }
+      if (m) {
+        extendsClass = m[1];
+        continue;
+      }
     }
 
     // class_name
     if (!classNameStr) {
       const m = stripped.match(reClassName);
-      if (m) { classNameStr = m[1]; continue; }
+      if (m) {
+        classNameStr = m[1];
+        continue;
+      }
     }
 
     // Variables — only top-level (not indented)
@@ -432,9 +458,7 @@ function parseScript(absolutePath: string, resPath: string): ScriptNode {
   // ── Second pass: extract function bodies ──
   for (let fi = 0; fi < funcStarts.length; fi++) {
     const startIdx = funcStarts[fi].lineIdx;
-    let endIdx = fi + 1 < funcStarts.length
-      ? funcStarts[fi + 1].lineIdx
-      : lineCount;
+    let endIdx = fi + 1 < funcStarts.length ? funcStarts[fi + 1].lineIdx : lineCount;
 
     // Trim trailing blank lines
     while (endIdx > startIdx + 1 && lines[endIdx - 1].trim() === '') {
@@ -530,9 +554,7 @@ function categorizeScript(node: ScriptNode): string {
 
 /** Turn a folder slug into a readable label: my_cool_scripts → My Cool Scripts */
 function prettifyLabel(slug: string): string {
-  return slug
-    .replace(/[_-]/g, ' ')
-    .replace(/\b\w/g, c => c.toUpperCase());
+  return slug.replace(/[_-]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
 // ─── Path Helpers ────────────────────────────────────────────────────
@@ -594,7 +616,7 @@ export function refreshMap(projectPath: string, args: Record<string, unknown>): 
  */
 export function createScriptFile(
   projectPath: string,
-  args: Record<string, unknown>
+  args: Record<string, unknown>,
 ): { ok: boolean; path?: string; error?: string } {
   let scriptPath = (args.path as string) || '';
   const extendsType = (args.extends as string) || 'Node';
@@ -635,7 +657,7 @@ export function createScriptFile(
  */
 export function modifyVariable(
   projectPath: string,
-  args: Record<string, unknown>
+  args: Record<string, unknown>,
 ): { ok: boolean; action?: string; variable?: string; error?: string } {
   const scriptPath = args.path as string;
   const action = args.action as string; // "add" | "update" | "delete"
@@ -661,7 +683,7 @@ export function modifyVariable(
 
   if (action === 'delete') {
     const pattern = new RegExp(
-      `^(@export(?:\\([^)]*\\))?\\s+)?(?:@onready\\s+)?var\\s+${oldName}\\s*(?::|=|$)`
+      `^(@export(?:\\([^)]*\\))?\\s+)?(?:@onready\\s+)?var\\s+${oldName}\\s*(?::|=|$)`,
     );
     for (let i = lines.length - 1; i >= 0; i--) {
       if (pattern.test(lines[i].trim())) {
@@ -672,7 +694,7 @@ export function modifyVariable(
     }
   } else if (action === 'update') {
     const pattern = new RegExp(
-      `^(@export(?:\\([^)]*\\))?\\s+)?(@onready\\s+)?var\\s+${oldName}\\s*(?::\\s*\\w+)?(?:\\s*=\\s*.+)?$`
+      `^(@export(?:\\([^)]*\\))?\\s+)?(@onready\\s+)?var\\s+${oldName}\\s*(?::\\s*\\w+)?(?:\\s*=\\s*.+)?$`,
     );
     for (let i = 0; i < lines.length; i++) {
       if (pattern.test(lines[i].trim())) {
@@ -699,7 +721,7 @@ export function modifyVariable(
  */
 export function modifySignal(
   projectPath: string,
-  args: Record<string, unknown>
+  args: Record<string, unknown>,
 ): { ok: boolean; action?: string; signal?: string; error?: string } {
   const scriptPath = args.path as string;
   const action = args.action as string;
@@ -760,7 +782,7 @@ export function modifySignal(
  */
 export function modifyFunction(
   projectPath: string,
-  args: Record<string, unknown>
+  args: Record<string, unknown>,
 ): { ok: boolean; function?: string; error?: string } {
   const scriptPath = args.path as string;
   const funcName = args.name as string;
@@ -826,7 +848,7 @@ export function modifyFunction(
  */
 export function deleteFunction(
   projectPath: string,
-  args: Record<string, unknown>
+  args: Record<string, unknown>,
 ): { ok: boolean; deleted?: string; error?: string } {
   const scriptPath = args.path as string;
   const funcName = args.name as string;
@@ -887,8 +909,13 @@ export function deleteFunction(
  */
 export function findUsages(
   projectPath: string,
-  args: Record<string, unknown>
-): { ok: boolean; usages?: Array<{ file: string; line: number; code: string }>; count?: number; error?: string } {
+  args: Record<string, unknown>,
+): {
+  ok: boolean;
+  usages?: Array<{ file: string; line: number; code: string }>;
+  count?: number;
+  error?: string;
+} {
   const name = args.name as string;
   const itemType = (args.type as string) || ''; // "variable", "signal", "function"
   const rootRes = (args.root as string) || 'res://';
@@ -940,7 +967,7 @@ function buildVarLine(
   type: string,
   defaultVal: string,
   exported: boolean,
-  onready: boolean
+  onready: boolean,
 ): string {
   let line = '';
   if (exported) line += '@export ';

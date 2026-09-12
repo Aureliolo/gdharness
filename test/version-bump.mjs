@@ -12,9 +12,15 @@ const maintainedFiles = ['README.md'];
 try {
   // Given: every maintained install surface points at the current release asset.
   await mkdir(path.join(fixtureRoot, 'scripts'), { recursive: true });
-  await cp(path.join(root, 'scripts', 'bump-version.mjs'), path.join(fixtureRoot, 'scripts', 'bump-version.mjs'));
+  await cp(
+    path.join(root, 'scripts', 'bump-version.mjs'),
+    path.join(fixtureRoot, 'scripts', 'bump-version.mjs'),
+  );
   await writeFile(path.join(fixtureRoot, 'package.json'), '{"name":"gdharness","version":"0.1.0"}\n');
-  await writeFile(path.join(fixtureRoot, 'server.json'), '{"name":"io.github.Aureliolo/gdharness","version":"0.1.0"}\n');
+  await writeFile(
+    path.join(fixtureRoot, 'server.json'),
+    '{"name":"io.github.Aureliolo/gdharness","version":"0.1.0"}\n',
+  );
   for (const fileName of maintainedFiles) {
     await writeFile(
       path.join(fixtureRoot, fileName),

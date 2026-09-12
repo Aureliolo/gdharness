@@ -36,7 +36,7 @@ async function collectTypeScriptEntries(directory) {
   for (const item of await readdir(directory, { withFileTypes: true })) {
     const itemPath = path.join(directory, item.name);
     if (item.isDirectory()) {
-      entries.push(...await collectTypeScriptEntries(itemPath));
+      entries.push(...(await collectTypeScriptEntries(itemPath)));
     } else if (item.isFile() && item.name.endsWith('.ts')) {
       entries.push(itemPath);
     }
@@ -52,22 +52,28 @@ await buildBundledEntrypoint('server-entry.ts', 'index.js');
 
 for (const sourcePath of await collectTypeScriptEntries(sourceRoot)) {
   const relativePath = path.relative(sourceRoot, sourcePath);
-  if (relativePath === 'cli.ts' || relativePath === 'index.ts' || relativePath === 'server-entry.ts') continue;
+  if (relativePath === 'cli.ts' || relativePath === 'index.ts' || relativePath === 'server-entry.ts')
+    continue;
 
   const outputPath = path.join(buildRoot, relativePath.replace(/\.ts$/, '.js'));
   await mkdir(path.dirname(outputPath), { recursive: true });
-  const result = Bun.spawnSync([
-    process.execPath,
-    'build',
-    sourcePath,
-    `--outfile=${outputPath}`,
-    '--target=bun',
-    '--format=esm',
-    '--sourcemap=none',
-    '--no-bundle',
-  ], { cwd: root, stdout: 'pipe', stderr: 'pipe' });
+  const result = Bun.spawnSync(
+    [
+      process.execPath,
+      'build',
+      sourcePath,
+      `--outfile=${outputPath}`,
+      '--target=bun',
+      '--format=esm',
+      '--sourcemap=none',
+      '--no-bundle',
+    ],
+    { cwd: root, stdout: 'pipe', stderr: 'pipe' },
+  );
   if (result.exitCode !== 0) {
-    throw new Error(`Development module build failed for ${relativePath}:\n${result.stderr.toString().trim()}`);
+    throw new Error(
+      `Development module build failed for ${relativePath}:\n${result.stderr.toString().trim()}`,
+    );
   }
 }
 
@@ -97,11 +103,7 @@ await writeFile(
   'utf8',
 );
 
-await cp(
-  path.join(sourceRoot, 'godot'),
-  path.join(buildRoot, 'godot'),
-  { recursive: true },
-);
+await cp(path.join(sourceRoot, 'godot'), path.join(buildRoot, 'godot'), { recursive: true });
 
 for (const executable of ['cli.js', 'index.js']) {
   const executablePath = path.join(buildRoot, executable);

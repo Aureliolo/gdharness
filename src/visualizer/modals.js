@@ -3,10 +3,18 @@
  */
 
 import {
-  nodes, edges, setCurrentView, setSceneData, getFolderColor,
-  setExpandedScene, setExpandedSceneHierarchy, setSelectedSceneNode,
-  setHoveredSceneNode, expandedScene,
-  gitChangeSummary, categoryColorMap
+  nodes,
+  edges,
+  setCurrentView,
+  setSceneData,
+  getFolderColor,
+  setExpandedScene,
+  setExpandedSceneHierarchy,
+  setSelectedSceneNode,
+  setHoveredSceneNode,
+  expandedScene,
+  gitChangeSummary,
+  categoryColorMap,
 } from './state.js';
 import { sendCommand } from './websocket.js';
 import { draw, getCanvas, roundRect, getContext, clearPositions, fitToView } from './canvas.js';
@@ -84,7 +92,7 @@ window.submitNewScript = async function () {
     const result = await sendCommand('create_script_file', {
       path: path,
       extends: extendsType,
-      class_name: className || ''
+      class_name: className || '',
     });
 
     if (result.ok) {
@@ -116,7 +124,9 @@ window.refreshProject = async function () {
     if (result.ok && result.project_map) {
       // Build old-position lookup by path for stable repositioning
       const oldPositions = {};
-      nodes.forEach(n => { oldPositions[n.path] = { x: n.x, y: n.y }; });
+      nodes.forEach((n) => {
+        oldPositions[n.path] = { x: n.x, y: n.y };
+      });
 
       // Map new nodes, preserving positions for existing paths
       const newNodes = result.project_map.nodes.map((n) => {
@@ -128,7 +138,7 @@ window.refreshProject = async function () {
           color: categoryColorMap[n.category] || getFolderColor(n.folder),
           highlighted: true,
           visible: true,
-          categoryVisible: true
+          categoryVisible: true,
         };
       });
 
@@ -141,7 +151,7 @@ window.refreshProject = async function () {
       gitChangeSummary.modified = 0;
       gitChangeSummary.added = 0;
       gitChangeSummary.untracked = 0;
-      nodes.forEach(n => {
+      nodes.forEach((n) => {
         if (n.gitStatus === 'modified') gitChangeSummary.modified++;
         else if (n.gitStatus === 'added') gitChangeSummary.added++;
         else if (n.gitStatus === 'untracked') gitChangeSummary.untracked++;
@@ -158,7 +168,7 @@ window.refreshProject = async function () {
       }
 
       // Only run full layout for brand-new nodes (no prior position)
-      const hasNewNodes = newNodes.some(n => n.x === 0 && n.y === 0 && !oldPositions[n.path]);
+      const hasNewNodes = newNodes.some((n) => n.x === 0 && n.y === 0 && !oldPositions[n.path]);
       if (hasNewNodes) {
         initLayout();
       }
@@ -228,7 +238,7 @@ window.switchView = function (view) {
   setCurrentView(view);
 
   // Update tab buttons
-  document.querySelectorAll('#view-tabs button').forEach(btn => {
+  document.querySelectorAll('#view-tabs button').forEach((btn) => {
     btn.classList.toggle('active', btn.textContent.toLowerCase() === view);
   });
 

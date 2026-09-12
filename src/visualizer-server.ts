@@ -122,10 +122,12 @@ function handleVisualizerConnection(ws: WebSocket): void {
   console.error('[visualizer] Browser connected via WebSocket');
 
   if (currentBridge) {
-    ws.send(JSON.stringify({
-      type: 'godot_status',
-      status: currentBridge.getStatus(),
-    }));
+    ws.send(
+      JSON.stringify({
+        type: 'godot_status',
+        status: currentBridge.getStatus(),
+      }),
+    );
   }
 
   ws.on('message', async (data) => {
@@ -144,8 +146,10 @@ function handleVisualizerConnection(ws: WebSocket): void {
   });
 }
 
-type CommandHandler = (projectPath: string, args: Record<string, unknown>) =>
-  { ok: boolean; [key: string]: unknown };
+type CommandHandler = (
+  projectPath: string,
+  args: Record<string, unknown>,
+) => { ok: boolean; [key: string]: unknown };
 
 function parseDiffHunks(diffText: string): {
   hunks: Array<{ startLine: number; endLine: number; header: string; lines: string[] }>;
@@ -348,10 +352,7 @@ const COMMAND_MAP: Record<string, CommandHandler> = {
       if (diffText.trim() === '' && fs.existsSync(absolutePath)) {
         const relPath = path.relative(pp, absolutePath);
         const quotedRelPath = quoteForShell(relPath);
-        const untracked = runDiffCommand(
-          `git ls-files --others --exclude-standard -- ${quotedRelPath}`,
-          pp
-        );
+        const untracked = runDiffCommand(`git ls-files --others --exclude-standard -- ${quotedRelPath}`, pp);
         if (untracked.trim() !== '') {
           diffText = runDiffCommand(`git diff --no-index /dev/null ${quotedAbsolutePath}`, pp);
         }
@@ -449,9 +450,7 @@ function broadcastToVisualizer(message: Record<string, unknown>): void {
 }
 
 function openBrowser(url: string): void {
-  const cmd = process.platform === 'darwin' ? 'open'
-            : process.platform === 'win32' ? 'start'
-            : 'xdg-open';
+  const cmd = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open';
   exec(`${cmd} ${url}`, (err) => {
     if (err) {
       console.error(`[visualizer] Could not open browser: ${err.message}`);

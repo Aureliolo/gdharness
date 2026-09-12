@@ -3,23 +3,56 @@
  */
 
 import {
-  nodes, edges, camera, W, H, defaultZoom,
-  dragging, setDragging,
-  hoveredNode, setHoveredNode,
-  searchTerm, setSearchTerm,
-  currentView, expandedScene, expandedSceneHierarchy, sceneData,
-  setExpandedScene, setExpandedSceneHierarchy,
-  setSelectedSceneNode, setHoveredSceneNode,
-  selectedSceneNode, scenePositions, setScenePosition,
-  categories, activeCategories, toggleCategory, setAllCategories,
-  categoryGroupMode, setCategoryGroupMode,
-  changesVisible, setChangesVisible, gitChangeSummary, changesFilter, setChangesFilter
+  nodes,
+  edges,
+  camera,
+  W,
+  H,
+  defaultZoom,
+  dragging,
+  setDragging,
+  hoveredNode,
+  setHoveredNode,
+  searchTerm,
+  setSearchTerm,
+  currentView,
+  expandedScene,
+  expandedSceneHierarchy,
+  sceneData,
+  setExpandedScene,
+  setExpandedSceneHierarchy,
+  setSelectedSceneNode,
+  setHoveredSceneNode,
+  selectedSceneNode,
+  scenePositions,
+  setScenePosition,
+  categories,
+  activeCategories,
+  toggleCategory,
+  setAllCategories,
+  categoryGroupMode,
+  setCategoryGroupMode,
+  changesVisible,
+  setChangesVisible,
+  gitChangeSummary,
+  changesFilter,
+  setChangesFilter,
 } from './state.js';
 import {
-  getCanvas, screenToWorld, hitTest, groupBoxHitTest, draw, resize,
-  updateZoomIndicator, centerOnNodes, savePositions,
-  sceneHitTest, SCENE_CARD_W, SCENE_CARD_H,
-  clearPositions, fitToView
+  getCanvas,
+  screenToWorld,
+  hitTest,
+  groupBoxHitTest,
+  draw,
+  resize,
+  updateZoomIndicator,
+  centerOnNodes,
+  savePositions,
+  sceneHitTest,
+  SCENE_CARD_W,
+  SCENE_CARD_H,
+  clearPositions,
+  fitToView,
 } from './canvas.js';
 import { initLayout, initGroupedLayout } from './layout.js';
 import { openPanel, closePanel, openSceneNodePanel, closeSceneNodePanel } from './panel.js';
@@ -35,7 +68,7 @@ export function initEvents() {
   // Mouse events
   canvas.addEventListener('mousedown', (e) => {
     const w = screenToWorld(e.clientX, e.clientY);
-    
+
     if (currentView === 'scenes') {
       handleSceneMouseDown(e, w);
     } else {
@@ -64,26 +97,30 @@ export function initEvents() {
     // Only handle clicks on empty space (not nodes) - nodes are handled by mouseup
   });
 
-  canvas.addEventListener('wheel', (e) => {
-    e.preventDefault();
-    // Smaller zoom increments for finer control
-    const zoomFactor = e.deltaY > 0 ? 0.95 : 1.05;
-    const newZoom = Math.max(0.1, Math.min(5, camera.zoom * zoomFactor));
-    const wx = (e.clientX - W / 2) / camera.zoom + camera.x;
-    const wy = (e.clientY - H / 2) / camera.zoom + camera.y;
-    camera.zoom = newZoom;
-    camera.x = wx - (e.clientX - W / 2) / camera.zoom;
-    camera.y = wy - (e.clientY - H / 2) / camera.zoom;
-    updateZoomIndicator();
-    draw();
-  }, { passive: false });
+  canvas.addEventListener(
+    'wheel',
+    (e) => {
+      e.preventDefault();
+      // Smaller zoom increments for finer control
+      const zoomFactor = e.deltaY > 0 ? 0.95 : 1.05;
+      const newZoom = Math.max(0.1, Math.min(5, camera.zoom * zoomFactor));
+      const wx = (e.clientX - W / 2) / camera.zoom + camera.x;
+      const wy = (e.clientY - H / 2) / camera.zoom + camera.y;
+      camera.zoom = newZoom;
+      camera.x = wx - (e.clientX - W / 2) / camera.zoom;
+      camera.y = wy - (e.clientY - H / 2) / camera.zoom;
+      updateZoomIndicator();
+      draw();
+    },
+    { passive: false },
+  );
 
   // Double-click to rename
   canvas.addEventListener('dblclick', (e) => {
     if (currentView === 'scenes' && expandedScene) {
       const w = screenToWorld(e.clientX, e.clientY);
       const hit = sceneHitTest(w.x, w.y);
-      
+
       if (hit && hit.type === 'sceneNode') {
         e.preventDefault();
         startInlineRename(e.clientX, e.clientY, hit.node, hit.scenePath);
@@ -94,17 +131,17 @@ export function initEvents() {
   // Right-click context menu
   canvas.addEventListener('contextmenu', (e) => {
     e.preventDefault();
-    
+
     if (currentView === 'scenes' && expandedScene) {
       const w = screenToWorld(e.clientX, e.clientY);
       const hit = sceneHitTest(w.x, w.y);
-      
+
       if (hit && hit.type === 'sceneNode') {
         showSceneContextMenu(e.clientX, e.clientY, hit.node, hit.scenePath);
         return;
       }
     }
-    
+
     // Hide scene context menu if clicking elsewhere
     hideSceneContextMenu();
   });
@@ -122,13 +159,14 @@ export function initEvents() {
     setSearchTerm(term);
 
     if (currentView === 'scripts') {
-      nodes.forEach(n => {
+      nodes.forEach((n) => {
         if (!term) {
           n.highlighted = true;
           n.visible = true;
           return;
         }
-        const matches = n.filename.toLowerCase().includes(term) ||
+        const matches =
+          n.filename.toLowerCase().includes(term) ||
           (n.class_name && n.class_name.toLowerCase().includes(term)) ||
           (n.description && n.description.toLowerCase().includes(term)) ||
           (n.path && n.path.toLowerCase().includes(term));
@@ -136,7 +174,7 @@ export function initEvents() {
         n.visible = matches;
       });
 
-      const matchingNodes = nodes.filter(n => n.highlighted);
+      const matchingNodes = nodes.filter((n) => n.highlighted);
       const count = matchingNodes.length;
       statsEl.textContent = term
         ? `${count}/${nodes.length}`
@@ -158,39 +196,39 @@ export function initEvents() {
       if (expandedScene && expandedSceneHierarchy) {
         // Search within expanded scene - highlight matching nodes
         const matchingPaths = [];
-        
+
         function searchNode(node) {
-          const matches = !term || 
+          const matches =
+            !term ||
             node.name.toLowerCase().includes(term) ||
             (node.type && node.type.toLowerCase().includes(term));
-          
+
           node.highlighted = matches;
           if (matches && term) matchingPaths.push(node.path);
-          
+
           if (node.children) {
             for (const child of node.children) {
               searchNode(child);
             }
           }
         }
-        
+
         searchNode(expandedSceneHierarchy);
-        
+
         const totalNodes = countNodes(expandedSceneHierarchy);
-        statsEl.textContent = term
-          ? `${matchingPaths.length}/${totalNodes} nodes`
-          : `${totalNodes} nodes`;
+        statsEl.textContent = term ? `${matchingPaths.length}/${totalNodes} nodes` : `${totalNodes} nodes`;
       } else if (sceneData && sceneData.scenes) {
         // Search in scene overview
         let matchCount = 0;
         for (const scene of sceneData.scenes) {
           const sceneName = scene.name || scene.path.split('/').pop().replace('.tscn', '');
-          scene.highlighted = !term || 
+          scene.highlighted =
+            !term ||
             sceneName.toLowerCase().includes(term) ||
             (scene.root_type && scene.root_type.toLowerCase().includes(term));
           if (scene.highlighted) matchCount++;
         }
-        
+
         statsEl.textContent = term
           ? `${matchCount}/${sceneData.scenes.length} scenes`
           : `${sceneData.scenes.length} scenes`;
@@ -199,7 +237,7 @@ export function initEvents() {
 
     draw();
   });
-  
+
   function countNodes(node) {
     let count = 1;
     if (node.children) {
@@ -215,7 +253,7 @@ export function initEvents() {
     if (e.key === 'Escape') {
       // Also close context menus
       hideSceneContextMenu();
-      
+
       if (currentView === 'scenes') {
         if (selectedSceneNode) {
           setSelectedSceneNode(null);
@@ -228,21 +266,31 @@ export function initEvents() {
         closePanel();
       }
     }
-    
+
     // Focus search with /
     if (e.key === '/' && document.activeElement !== searchInput) {
       e.preventDefault();
       searchInput.focus();
     }
-    
+
     // Delete key to delete selected scene node
-    if ((e.key === 'Delete' || e.key === 'Backspace') && currentView === 'scenes' && selectedSceneNode && !e.target.matches('input, textarea')) {
+    if (
+      (e.key === 'Delete' || e.key === 'Backspace') &&
+      currentView === 'scenes' &&
+      selectedSceneNode &&
+      !e.target.matches('input, textarea')
+    ) {
       e.preventDefault();
       sceneNodeAction('delete');
     }
-    
+
     // Enter to open properties panel for selected node
-    if (e.key === 'Enter' && currentView === 'scenes' && expandedScene && !e.target.matches('input, textarea')) {
+    if (
+      e.key === 'Enter' &&
+      currentView === 'scenes' &&
+      expandedScene &&
+      !e.target.matches('input, textarea')
+    ) {
       // If no node selected, select root
       // If node selected, this could toggle the panel (already handled by re-click)
     }
@@ -268,14 +316,14 @@ function handleScriptsMouseDown(e, w) {
       offY: hit.y - w.y,
       startScreenX: e.clientX,
       startScreenY: e.clientY,
-      moved: false
+      moved: false,
     });
     canvas.classList.add('dragging');
   } else if (categoryGroupMode === 'grouped' && e.button === 0) {
     const box = groupBoxHitTest(w.x, w.y);
     if (box) {
       // Collect all nodes belonging to this category
-      const groupNodes = nodes.filter(n => n.category === box.category);
+      const groupNodes = nodes.filter((n) => n.category === box.category);
       setDragging({
         type: 'group',
         box: box,
@@ -284,7 +332,7 @@ function handleScriptsMouseDown(e, w) {
         offY: box.y - w.y,
         startScreenX: e.clientX,
         startScreenY: e.clientY,
-        moved: false
+        moved: false,
       });
       canvas.classList.add('dragging');
     } else {
@@ -388,7 +436,7 @@ function handleSceneMouseDown(e, w) {
         offY: pos.y - w.y,
         startScreenX: e.clientX,
         startScreenY: e.clientY,
-        moved: false
+        moved: false,
       });
       canvas.classList.add('dragging');
     } else if (hit.type === 'sceneNode') {
@@ -399,7 +447,7 @@ function handleSceneMouseDown(e, w) {
         scenePath: hit.scenePath,
         startScreenX: e.clientX,
         startScreenY: e.clientY,
-        moved: false
+        moved: false,
       });
     }
   } else {
@@ -434,7 +482,7 @@ function handleSceneMouseMove(e) {
   } else {
     const w = screenToWorld(e.clientX, e.clientY);
     const hit = sceneHitTest(w.x, w.y);
-    
+
     if (hit) {
       if (hit.type === 'sceneCard') {
         setHoveredSceneNode({ scenePath: hit.scenePath, nodePath: null });
@@ -452,7 +500,7 @@ function handleSceneMouseMove(e) {
 
 function handleSceneMouseUp(e) {
   const canvas = getCanvas();
-  
+
   if (dragging) {
     if (dragging.type === 'sceneCard' && !dragging.moved) {
       // Scene card was clicked - expand the scene
@@ -462,7 +510,7 @@ function handleSceneMouseUp(e) {
       selectSceneNode(dragging.node, dragging.scenePath);
     }
   }
-  
+
   canvas.classList.remove('dragging');
   setDragging(null);
 }
@@ -470,20 +518,20 @@ function handleSceneMouseUp(e) {
 // ---- Scene expansion and navigation ----
 async function expandScene(scenePath) {
   console.log('Expanding scene:', scenePath);
-  
+
   try {
     // Fetch the scene hierarchy
     const result = await sendCommand('get_scene_hierarchy', { scene_path: scenePath });
-    
+
     if (result.ok) {
       setExpandedScene(scenePath);
       setExpandedSceneHierarchy(result.hierarchy);
-      
+
       // Reset camera position but keep user's zoom level
       camera.x = 0;
       camera.y = 100;
       // Don't change zoom - keep user's preference
-      
+
       // Update UI
       updateSceneBackButton(true, scenePath);
       draw();
@@ -499,7 +547,7 @@ async function expandScene(scenePath) {
 
 async function selectSceneNode(node, scenePath) {
   console.log('Selected scene node:', node.name, 'in', scenePath);
-  
+
   // If clicking the same node that's already selected, close the panel
   if (selectedSceneNode && selectedSceneNode.path === node.path) {
     setSelectedSceneNode(null);
@@ -507,9 +555,9 @@ async function selectSceneNode(node, scenePath) {
     draw();
     return;
   }
-  
+
   setSelectedSceneNode(node);
-  
+
   // Open the properties panel for this node
   await openSceneNodePanel(scenePath, node);
   draw();
@@ -528,7 +576,7 @@ export function goBackToSceneOverview() {
 function updateSceneBackButton(show, scenePath = '') {
   const backBtn = document.getElementById('scene-back-btn');
   const legend = document.getElementById('legend');
-  
+
   if (backBtn) {
     backBtn.style.display = show ? 'flex' : 'none';
     if (show) {
@@ -536,7 +584,7 @@ function updateSceneBackButton(show, scenePath = '') {
       backBtn.querySelector('.scene-name').textContent = sceneName;
     }
   }
-  
+
   // Hide legend when in expanded scene view (it's not relevant there)
   if (legend) {
     legend.classList.toggle('hidden', show);
@@ -579,7 +627,7 @@ export function buildCategoryList() {
   if (!catList || !categories.length) return;
 
   catList.innerHTML = '';
-  categories.forEach(cat => {
+  categories.forEach((cat) => {
     const item = document.createElement('div');
     item.className = 'cat-item' + (activeCategories.has(cat.id) ? '' : ' inactive');
     item.dataset.catId = cat.id;
@@ -597,7 +645,7 @@ export function buildCategoryList() {
   });
 }
 
-window.toggleGroupMode = function() {
+window.toggleGroupMode = function () {
   const btn = document.getElementById('cat-mode-btn');
   if (categoryGroupMode === 'free') {
     setCategoryGroupMode('grouped');
@@ -616,21 +664,21 @@ window.toggleGroupMode = function() {
   draw();
 };
 
-window.toggleAllCategories = function() {
+window.toggleAllCategories = function () {
   const allActive = activeCategories.size === categories.length;
   setAllCategories(!allActive);
   buildCategoryList();
   draw();
 };
 
-window.toggleChangesVisible = function() {
+window.toggleChangesVisible = function () {
   const toggleInput = document.getElementById('changes-toggle-input');
   const checked = !!(toggleInput && toggleInput.checked);
   setChangesVisible(checked);
   draw();
 };
 
-window.filterByChangeType = function(type) {
+window.filterByChangeType = function (type) {
   const nextFilter = changesFilter === type ? null : type;
   setChangesFilter(nextFilter);
 
@@ -673,7 +721,7 @@ function showSceneContextMenu(x, y, node, scenePath) {
   const menu = document.getElementById('scene-context-menu');
   contextMenuNode = node;
   contextMenuScenePath = scenePath;
-  
+
   menu.style.left = x + 'px';
   menu.style.top = y + 'px';
   menu.classList.add('visible');
@@ -690,11 +738,11 @@ async function sceneNodeAction(action) {
   // Save node info BEFORE hiding menu (which clears these variables)
   const node = contextMenuNode;
   const scenePath = contextMenuScenePath;
-  
+
   hideSceneContextMenu();
-  
+
   if (!node || !scenePath) return;
-  
+
   try {
     switch (action) {
       case 'add_child': {
@@ -702,14 +750,14 @@ async function sceneNodeAction(action) {
         if (!nodeType) return;
         const nodeName = prompt('Enter node name:', 'NewNode');
         if (!nodeName) return;
-        
+
         const result = await sendCommand('add_node', {
           scene_path: scenePath,
           parent_path: node.path,
           node_type: nodeType,
-          node_name: nodeName
+          node_name: nodeName,
         });
-        
+
         if (result.ok) {
           await refreshExpandedScene(scenePath);
         } else {
@@ -717,17 +765,17 @@ async function sceneNodeAction(action) {
         }
         break;
       }
-      
+
       case 'rename': {
         const newName = prompt('Enter new name:', node.name);
         if (!newName || newName === node.name) return;
-        
+
         const result = await sendCommand('rename_node', {
           scene_path: scenePath,
           node_path: node.path,
-          new_name: newName
+          new_name: newName,
         });
-        
+
         if (result.ok) {
           await refreshExpandedScene(scenePath);
         } else {
@@ -735,13 +783,13 @@ async function sceneNodeAction(action) {
         }
         break;
       }
-      
+
       case 'duplicate': {
         const result = await sendCommand('duplicate_node', {
           scene_path: scenePath,
-          node_path: node.path
+          node_path: node.path,
         });
-        
+
         if (result.ok) {
           await refreshExpandedScene(scenePath);
         } else {
@@ -749,7 +797,7 @@ async function sceneNodeAction(action) {
         }
         break;
       }
-      
+
       case 'move_up': {
         if (node.index === undefined || node.index <= 0) {
           alert('Cannot move node up - already at top');
@@ -758,9 +806,9 @@ async function sceneNodeAction(action) {
         const result = await sendCommand('reorder_node', {
           scene_path: scenePath,
           node_path: node.path,
-          new_index: node.index - 1
+          new_index: node.index - 1,
         });
-        
+
         if (result.ok) {
           await refreshExpandedScene(scenePath);
         } else {
@@ -768,14 +816,14 @@ async function sceneNodeAction(action) {
         }
         break;
       }
-      
+
       case 'move_down': {
         const result = await sendCommand('reorder_node', {
           scene_path: scenePath,
           node_path: node.path,
-          new_index: (node.index || 0) + 1
+          new_index: (node.index || 0) + 1,
         });
-        
+
         if (result.ok) {
           await refreshExpandedScene(scenePath);
         } else {
@@ -783,19 +831,19 @@ async function sceneNodeAction(action) {
         }
         break;
       }
-      
+
       case 'delete': {
         if (node.path === '.') {
           alert('Cannot delete root node');
           return;
         }
         if (!confirm(`Delete node "${node.name}" and all its children?`)) return;
-        
+
         const result = await sendCommand('remove_node', {
           scene_path: scenePath,
-          node_path: node.path
+          node_path: node.path,
         });
-        
+
         if (result.ok) {
           closeSceneNodePanel();
           setSelectedSceneNode(null);
@@ -826,7 +874,7 @@ function startInlineRename(screenX, screenY, node, scenePath) {
   // Create an input overlay at the node position
   const existingInput = document.getElementById('inline-rename-input');
   if (existingInput) existingInput.remove();
-  
+
   const input = document.createElement('input');
   input.id = 'inline-rename-input';
   input.type = 'text';
@@ -847,23 +895,23 @@ function startInlineRename(screenX, screenY, node, scenePath) {
     z-index: 1000;
     outline: none;
   `;
-  
+
   document.body.appendChild(input);
   input.focus();
   input.select();
-  
+
   async function finishRename() {
     const newName = input.value.trim();
     input.remove();
-    
+
     if (newName && newName !== node.name) {
       try {
         const result = await sendCommand('rename_node', {
           scene_path: scenePath,
           node_path: node.path,
-          new_name: newName
+          new_name: newName,
         });
-        
+
         if (result.ok) {
           await refreshExpandedScene(scenePath);
         } else {
@@ -874,7 +922,7 @@ function startInlineRename(screenX, screenY, node, scenePath) {
       }
     }
   }
-  
+
   input.addEventListener('blur', finishRename);
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {

@@ -3,7 +3,7 @@
  */
 
 // Project data injected at build time
-export const PROJECT_DATA = "%%PROJECT_DATA%%";
+export const PROJECT_DATA = '%%PROJECT_DATA%%';
 
 // Node dimensions
 export const NODE_W = 200;
@@ -50,8 +50,16 @@ export function setSearchTerm(value) {
 
 // Folder color mapping
 const FOLDER_COLORS = [
-  '#d4a27f', '#7aa2f7', '#a6e3a1', '#f38ba8', '#89dceb',
-  '#fab387', '#cba6f7', '#f9e2af', '#94e2d5', '#eba0ac'
+  '#d4a27f',
+  '#7aa2f7',
+  '#a6e3a1',
+  '#f38ba8',
+  '#89dceb',
+  '#fab387',
+  '#cba6f7',
+  '#f9e2af',
+  '#94e2d5',
+  '#eba0ac',
 ];
 
 const folderColorMap = {};
@@ -69,7 +77,7 @@ export function getFolderColor(folder) {
 export const categories = PROJECT_DATA.categories || [];
 
 export const categoryColorMap = {};
-categories.forEach(c => {
+categories.forEach((c) => {
   categoryColorMap[c.id] = c.color;
 });
 
@@ -81,7 +89,7 @@ export const nodes = PROJECT_DATA.nodes.map((n, i) => ({
   color: categoryColorMap[n.category] || getFolderColor(n.folder),
   highlighted: true,
   visible: true,
-  categoryVisible: true
+  categoryVisible: true,
 }));
 
 export const edges = PROJECT_DATA.edges;
@@ -91,7 +99,7 @@ export function setCategoryGroupMode(mode) {
   categoryGroupMode = mode;
 }
 
-export const activeCategories = new Set(categories.map(c => c.id));
+export const activeCategories = new Set(categories.map((c) => c.id));
 
 export function toggleCategory(categoryId) {
   if (activeCategories.has(categoryId)) {
@@ -105,7 +113,7 @@ export function toggleCategory(categoryId) {
 export function setAllCategories(active) {
   activeCategories.clear();
   if (active) {
-    categories.forEach(c => {
+    categories.forEach((c) => {
       activeCategories.add(c.id);
     });
   }
@@ -113,7 +121,7 @@ export function setAllCategories(active) {
 }
 
 function updateNodeVisibility() {
-  nodes.forEach(n => {
+  nodes.forEach((n) => {
     n.categoryVisible = activeCategories.has(n.category || 'other');
   });
 }
@@ -135,7 +143,7 @@ export function addActionEntry(entry) {
 
 export const gitChangeSummary = { modified: 0, added: 0, untracked: 0, new: 0 };
 // Compute summary from project data
-nodes.forEach(n => {
+nodes.forEach((n) => {
   if (n.gitStatus === 'modified') gitChangeSummary.modified++;
   else if (n.gitStatus === 'added') gitChangeSummary.added++;
   else if (n.gitStatus === 'untracked') gitChangeSummary.untracked++;
@@ -151,11 +159,11 @@ export let currentView = 'scripts';
 export let sceneData = null;
 
 // Scene view state
-export let expandedScene = null;        // The scene currently expanded (path)
+export let expandedScene = null; // The scene currently expanded (path)
 export let expandedSceneHierarchy = null; // Full hierarchy of expanded scene
-export let selectedSceneNode = null;    // Currently selected node in scene tree
-export let hoveredSceneNode = null;     // Node being hovered over
-export let sceneNodeProperties = null;  // Properties of selected scene node
+export let selectedSceneNode = null; // Currently selected node in scene tree
+export let hoveredSceneNode = null; // Node being hovered over
+export let sceneNodeProperties = null; // Properties of selected scene node
 
 // Scene positions (for scene cards in overview)
 export const scenePositions = {};
@@ -177,12 +185,12 @@ export const scriptToScenes = {};
 
 export function setSceneData(data) {
   sceneData = data;
-  
+
   // Build script-to-scenes mapping
   for (const key in scriptToScenes) {
     delete scriptToScenes[key];
   }
-  
+
   if (data && data.scenes) {
     for (const scene of data.scenes) {
       const sceneName = scene.name || scene.path.split('/').pop().replace('.tscn', '');
@@ -193,7 +201,7 @@ export function setSceneData(data) {
           }
           scriptToScenes[scriptPath].push({
             path: scene.path,
-            name: sceneName
+            name: sceneName,
           });
         }
       }
@@ -246,5 +254,8 @@ export function setCurrentUsages(value) {
 
 // Utility function
 export function esc(s) {
-  return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return String(s || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 }

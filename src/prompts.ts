@@ -39,7 +39,8 @@ const promptTemplates: PromptTemplate[] = [
     prompt: {
       name: 'godot.scene_bootstrap',
       title: 'Godot Scene Bootstrap',
-      description: 'Generate a deterministic scene bootstrap plan and starter GDScript wiring for a new gameplay scene.',
+      description:
+        'Generate a deterministic scene bootstrap plan and starter GDScript wiring for a new gameplay scene.',
       arguments: [
         {
           name: 'project_path',
@@ -65,7 +66,9 @@ const promptTemplates: PromptTemplate[] = [
       const projectPath = requireArg(args, 'project_path', 'godot.scene_bootstrap');
       const scenePath = requireArg(args, 'scene_path', 'godot.scene_bootstrap');
       const rootNodeType = getTrimmedArg(args, 'root_node_type') || 'Node2D';
-      const featureGoal = getTrimmedArg(args, 'feature_goal') || 'Create a playable prototype with clear input and movement behavior.';
+      const featureGoal =
+        getTrimmedArg(args, 'feature_goal') ||
+        'Create a playable prototype with clear input and movement behavior.';
 
       return {
         description: 'Deterministic checklist for creating and wiring a new Godot scene.',

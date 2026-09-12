@@ -182,17 +182,11 @@ async function main() {
   const cleanup = async () => {
     if (server.exitCode === null) {
       server.kill('SIGTERM');
-      await Promise.race([
-        new Promise((resolve) => server.once('exit', resolve)),
-        delay(2000),
-      ]);
+      await Promise.race([new Promise((resolve) => server.once('exit', resolve)), delay(2000)]);
 
       if (server.exitCode === null) {
         server.kill('SIGKILL');
-        await Promise.race([
-          new Promise((resolve) => server.once('exit', resolve)),
-          delay(2000),
-        ]);
+        await Promise.race([new Promise((resolve) => server.once('exit', resolve)), delay(2000)]);
       }
     }
   };
@@ -209,7 +203,11 @@ async function main() {
       clientInfo: { name: 'dynamic-group-test', version: '1.0.0' },
     });
 
-    assert(!init.error, 'initialize succeeded', `initialize failed: ${init.error?.message || 'unknown error'}`);
+    assert(
+      !init.error,
+      'initialize succeeded',
+      `initialize failed: ${init.error?.message || 'unknown error'}`,
+    );
     client.notify('notifications/initialized');
 
     const initialTools = await listAllTools(client);
@@ -292,7 +290,9 @@ async function main() {
       arguments: { action: 'status' },
     });
     const statusPayload = parseToolCallJson(statusResponse);
-    const statusActiveNames = new Set((statusPayload.dynamicGroups?.groups || []).map((group) => group?.name));
+    const statusActiveNames = new Set(
+      (statusPayload.dynamicGroups?.groups || []).map((group) => group?.name),
+    );
 
     assert(
       statusActiveNames.has('animation'),

@@ -8,13 +8,7 @@ import { buildCategoryList, buildChangesPanel, initEvents, updateStats } from '.
 import { initLayout } from './layout.js';
 import { initModals } from './modals.js';
 import { initPanel } from './panel.js';
-import {
-  addActionEntry,
-  actionLog,
-  gitChangeSummary,
-  nodes,
-  PROJECT_DATA
-} from './state.js';
+import { addActionEntry, actionLog, gitChangeSummary, nodes, PROJECT_DATA } from './state.js';
 import { connectWebSocket, onActionEvent, sendCommand } from './websocket.js';
 
 const COMMAND_DISPLAY = {
@@ -37,7 +31,7 @@ const COMMAND_DISPLAY = {
     return `${icon} external ${status}`;
   },
   modify_script: () => '✏️ Script modified',
-  create_script: () => '🆕 Script created'
+  create_script: () => '🆕 Script created',
 };
 
 function shortPath(p) {
@@ -68,7 +62,7 @@ function normalizeEntry(raw) {
     args: raw.details || raw.args || {},
     timestamp: raw.ts || raw.timestamp || Date.now(),
     reason: raw.reason || null,
-    filePath: raw.filePath || raw.details?.path || raw.args?.path || null
+    filePath: raw.filePath || raw.details?.path || raw.args?.path || null,
   };
 }
 
@@ -76,20 +70,22 @@ function initTimeline() {
   renderTimeline();
 
   const fetchActionLog = (attempt = 0) => {
-    sendCommand('get_action_log').then((result) => {
-      if (result?.entries) {
-        for (const entry of result.entries) {
-          addActionEntry(normalizeEntry(entry));
+    sendCommand('get_action_log')
+      .then((result) => {
+        if (result?.entries) {
+          for (const entry of result.entries) {
+            addActionEntry(normalizeEntry(entry));
+          }
         }
-      }
-      renderTimeline();
-    }).catch((err) => {
-      if (err.message === 'WebSocket not connected' && attempt < 10) {
-        setTimeout(() => fetchActionLog(attempt + 1), 300);
-        return;
-      }
-      console.log('[timeline] Could not fetch action log:', err.message);
-    });
+        renderTimeline();
+      })
+      .catch((err) => {
+        if (err.message === 'WebSocket not connected' && attempt < 10) {
+          setTimeout(() => fetchActionLog(attempt + 1), 300);
+          return;
+        }
+        console.log('[timeline] Could not fetch action log:', err.message);
+      });
   };
 
   fetchActionLog();
@@ -224,7 +220,7 @@ function init() {
 }
 
 window.timelineCardClick = function timelineCardClick(filePath) {
-  const node = nodes.find(n => n.path === filePath);
+  const node = nodes.find((n) => n.path === filePath);
   if (node) {
     centerOnNodes([node]);
     draw();
@@ -244,7 +240,9 @@ function initTimelineDrag() {
   const header = panel?.querySelector('.tl-header');
   if (!panel || !header) return;
 
-  let dragging = false, offsetX = 0, offsetY = 0;
+  let dragging = false,
+    offsetX = 0,
+    offsetY = 0;
 
   header.addEventListener('mousedown', (e) => {
     dragging = true;

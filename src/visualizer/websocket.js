@@ -76,12 +76,14 @@ export function sendCommand(command, args) {
     const id = ++requestId;
     pendingRequests.set(id, { resolve, reject });
 
-    ws.send(JSON.stringify({
-      type: 'visualizer_command',
-      id,
-      command,
-      args
-    }));
+    ws.send(
+      JSON.stringify({
+        type: 'visualizer_command',
+        id,
+        command,
+        args,
+      }),
+    );
 
     // Timeout after 30 seconds
     setTimeout(() => {

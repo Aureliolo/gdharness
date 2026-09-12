@@ -3,14 +3,35 @@
  */
 
 import {
-  nodes, edges, NODE_W, NODE_H, camera, defaultZoom,
-  W, H, setDimensions, searchTerm, hoveredNode, selectedNode,
-  currentView, sceneData, expandedScene, expandedSceneHierarchy,
-  selectedSceneNode, hoveredSceneNode, scenePositions,
-  setExpandedScene, setSelectedSceneNode, setHoveredSceneNode,
-  setScenePosition, scriptToScenes,
-  categoryGroupMode, categories, activeCategories, categoryColorMap,
-  changesVisible
+  nodes,
+  edges,
+  NODE_W,
+  NODE_H,
+  camera,
+  defaultZoom,
+  W,
+  H,
+  setDimensions,
+  searchTerm,
+  hoveredNode,
+  selectedNode,
+  currentView,
+  sceneData,
+  expandedScene,
+  expandedSceneHierarchy,
+  selectedSceneNode,
+  hoveredSceneNode,
+  scenePositions,
+  setExpandedScene,
+  setSelectedSceneNode,
+  setHoveredSceneNode,
+  setScenePosition,
+  scriptToScenes,
+  categoryGroupMode,
+  categories,
+  activeCategories,
+  categoryColorMap,
+  changesVisible,
 } from './state.js';
 
 let canvas, ctx;
@@ -69,7 +90,7 @@ export function resize() {
 export function screenToWorld(sx, sy) {
   return {
     x: (sx - W / 2) / camera.zoom + camera.x,
-    y: (sy - H / 2) / camera.zoom + camera.y
+    y: (sy - H / 2) / camera.zoom + camera.y,
   };
 }
 
@@ -89,12 +110,12 @@ export function setCustomZoom(value) {
   // Parse percentage string like "150%" or just "150" or "1.5"
   let parsed = parseFloat(value.replace('%', '').trim());
   if (isNaN(parsed)) return;
-  
+
   // If user entered a small number like 1.5, treat as multiplier
   if (parsed > 0 && parsed < 10) {
     parsed = parsed * 100;
   }
-  
+
   // Clamp to valid range (10% - 500%)
   const newZoom = Math.max(0.1, Math.min(5, parsed / 100));
   camera.zoom = newZoom;
@@ -110,13 +131,16 @@ window.setCustomZoom = setCustomZoom;
 export function savePositions() {
   try {
     const positions = {};
-    nodes.forEach(n => {
+    nodes.forEach((n) => {
       positions[n.path] = { x: n.x, y: n.y };
     });
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({
-      positions,
-      camera: { x: camera.x, y: camera.y, zoom: camera.zoom }
-    }));
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        positions,
+        camera: { x: camera.x, y: camera.y, zoom: camera.zoom },
+      }),
+    );
   } catch (e) {
     console.warn('Failed to save positions:', e);
   }
@@ -131,7 +155,7 @@ export function loadPositions() {
     let restored = 0;
 
     if (data.positions) {
-      nodes.forEach(n => {
+      nodes.forEach((n) => {
         if (data.positions[n.path]) {
           n.x = data.positions[n.path].x;
           n.y = data.positions[n.path].y;
@@ -176,11 +200,11 @@ export function draw() {
 
   // Ensure DPR transform is set for crisp rendering on high-DPI displays
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  
+
   // Use crisp line rendering
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
-  
+
   ctx.clearRect(0, 0, W, H);
   ctx.save();
   ctx.translate(Math.round(W / 2), Math.round(H / 2));
@@ -196,7 +220,8 @@ export function draw() {
   // Group edges by node pair, type, and direction for bundled drawing
   const edgeGroups = {};
   for (const e of edges) {
-    const si = pathIdx[e.from], ti = pathIdx[e.to];
+    const si = pathIdx[e.from],
+      ti = pathIdx[e.to];
     if (si === undefined || ti === undefined) continue;
 
     // Keep direction (A->B is different from B->A)
@@ -210,7 +235,8 @@ export function draw() {
   // Draw bundled edges
   for (const key of Object.keys(edgeGroups)) {
     const group = edgeGroups[key];
-    const s = nodes[group.si], t = nodes[group.ti];
+    const s = nodes[group.si],
+      t = nodes[group.ti];
     const count = group.edges.length;
 
     if (s.categoryVisible === false || t.categoryVisible === false) continue;
@@ -219,7 +245,7 @@ export function draw() {
 
     // Dim edges when one node is hidden, or when neither is highlighted
     const bothVisible = s.visible !== false && t.visible !== false;
-    ctx.globalAlpha = (!bothVisible || (!s.highlighted && !t.highlighted)) ? 0.08 : 0.5;
+    ctx.globalAlpha = !bothVisible || (!s.highlighted && !t.highlighted) ? 0.08 : 0.5;
 
     // Calculate perpendicular offset for multiple edge types between same nodes
     const angle = Math.atan2(t.y - s.y, t.x - s.x);
@@ -253,7 +279,8 @@ export function draw() {
 
     // Arrow at midpoint - fixed world-space size
     const al = 10;
-    const mx = (s.x + t.x) / 2 + offsetX, my = (s.y + t.y) / 2 + offsetY;
+    const mx = (s.x + t.x) / 2 + offsetX,
+      my = (s.y + t.y) / 2 + offsetY;
     ctx.beginPath();
     ctx.moveTo(mx + Math.cos(angle) * al, my + Math.sin(angle) * al);
     ctx.lineTo(mx + Math.cos(angle + 2.5) * al * 0.6, my + Math.sin(angle + 2.5) * al * 0.6);
@@ -287,7 +314,7 @@ export function draw() {
 
   if (categoryGroupMode === 'grouped' && window.__categoryGroupBoxes) {
     for (const box of window.__categoryGroupBoxes) {
-      const catInfo = categories.find(c => c.id === box.category);
+      const catInfo = categories.find((c) => c.id === box.category);
       if (!catInfo) continue;
       if (!activeCategories.has(box.category)) continue;
 
@@ -324,7 +351,8 @@ export function draw() {
     // Round coordinates for crisper rendering
     const x = Math.round(n.x - NODE_W / 2);
     const y = Math.round(n.y - NODE_H / 2);
-    const isHovered = n === hoveredNode, isSelected = n === selectedNode;
+    const isHovered = n === hoveredNode,
+      isSelected = n === selectedNode;
 
     ctx.globalAlpha = n.highlighted ? 1 : 0.12;
 
@@ -334,7 +362,7 @@ export function draw() {
       const glowColors = {
         modified: 'rgba(249, 226, 175, 0.4)',
         added: 'rgba(166, 227, 161, 0.4)',
-        untracked: 'rgba(137, 180, 250, 0.3)'
+        untracked: 'rgba(137, 180, 250, 0.3)',
       };
       ctx.shadowColor = glowColors[n.gitStatus] || 'rgba(0,0,0,0.4)';
       ctx.shadowBlur = isHovered ? 20 : 12;
@@ -433,18 +461,18 @@ export function draw() {
     // Lines (yellow/amber)
     ctx.fillStyle = '#f9e2af';
     ctx.fillText(n.line_count + 'L', subX, subY);
-    
+
     // Scene usage badge (top-right corner)
     const usedInScenes = scriptToScenes[n.path];
     if (usedInScenes && usedInScenes.length > 0) {
       const badgeX = x + NODE_W - 8;
       const badgeY = y + 8;
-      
+
       ctx.fillStyle = 'rgba(166, 227, 161, 0.2)';
       ctx.beginPath();
       ctx.roundRect(badgeX - 20, badgeY - 4, 24, 14, 3);
       ctx.fill();
-      
+
       ctx.fillStyle = '#a6e3a1';
       ctx.font = `600 9px -apple-system, system-ui, sans-serif`;
       ctx.textAlign = 'right';
@@ -455,8 +483,8 @@ export function draw() {
     if (changesVisible && n.gitStatus) {
       const badgeConfigs = {
         modified: { bg: 'rgba(249, 226, 175, 0.25)', fg: '#f9e2af', label: 'M' },
-        added:    { bg: 'rgba(166, 227, 161, 0.25)', fg: '#a6e3a1', label: '+' },
-        untracked:{ bg: 'rgba(137, 180, 250, 0.25)', fg: '#89b4fa', label: '?' }
+        added: { bg: 'rgba(166, 227, 161, 0.25)', fg: '#a6e3a1', label: '+' },
+        untracked: { bg: 'rgba(137, 180, 250, 0.25)', fg: '#89b4fa', label: '?' },
       };
       const badge = badgeConfigs[n.gitStatus];
       if (badge) {
@@ -479,12 +507,12 @@ export function draw() {
 }
 
 // Scene view constants
-const SCENE_CARD_W = 200;  // Match NODE_W
-const SCENE_CARD_H = 54;   // Match NODE_H
-const SCENE_NODE_MIN_W = 80;   // Minimum node width
-const SCENE_NODE_MAX_W = 200;  // Maximum node width
+const SCENE_CARD_W = 200; // Match NODE_W
+const SCENE_CARD_H = 54; // Match NODE_H
+const SCENE_NODE_MIN_W = 80; // Minimum node width
+const SCENE_NODE_MAX_W = 200; // Maximum node width
 const SCENE_NODE_H = 36;
-const SCENE_NODE_GAP_X = 15;  // Reduced for tighter layout
+const SCENE_NODE_GAP_X = 15; // Reduced for tighter layout
 const SCENE_NODE_GAP_Y = 40;
 
 // Calculate dynamic node width based on name
@@ -498,10 +526,10 @@ function calculateNodeWidth(name) {
 function drawSceneView() {
   // Ensure DPR transform is set for crisp rendering on high-DPI displays
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  
+
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
-  
+
   ctx.clearRect(0, 0, W, H);
   ctx.save();
   ctx.translate(Math.round(W / 2), Math.round(H / 2));
@@ -526,7 +554,7 @@ function drawSceneView() {
 
 function drawSceneOverview() {
   const scenes = sceneData.scenes;
-  
+
   // Calculate positions if not set
   scenes.forEach((scene, i) => {
     if (!scenePositions[scene.path]) {
@@ -534,7 +562,7 @@ function drawSceneOverview() {
       setScenePosition(
         scene.path,
         (i % cols) * (SCENE_CARD_W + 40) - ((cols - 1) * (SCENE_CARD_W + 40)) / 2,
-        Math.floor(i / cols) * (SCENE_CARD_H + 30) - 100
+        Math.floor(i / cols) * (SCENE_CARD_H + 30) - 100,
       );
     }
   });
@@ -543,8 +571,8 @@ function drawSceneOverview() {
   if (sceneData.edges) {
     ctx.globalAlpha = 0.4;
     for (const edge of sceneData.edges) {
-      const fromScene = scenes.find(s => s.path === edge.from);
-      const toScene = scenes.find(s => s.path === edge.to);
+      const fromScene = scenes.find((s) => s.path === edge.from);
+      const toScene = scenes.find((s) => s.path === edge.to);
       if (!fromScene || !toScene) continue;
 
       const fromPos = scenePositions[edge.from];
@@ -573,8 +601,9 @@ function drawSceneOverview() {
     const pos = scenePositions[scene.path];
     const x = pos.x;
     const y = pos.y;
-    
-    const isHovered = hoveredSceneNode && hoveredSceneNode.scenePath === scene.path && !hoveredSceneNode.nodePath;
+
+    const isHovered =
+      hoveredSceneNode && hoveredSceneNode.scenePath === scene.path && !hoveredSceneNode.nodePath;
     const isExpanded = expandedScene === scene.path;
     const sceneColor = getSceneColor(scene.path);
 
@@ -623,13 +652,13 @@ function drawExpandedSceneView() {
   if (!hierarchy) return;
 
   // Draw back button area (handled by HTML overlay)
-  
+
   // Draw the node tree
   const treeLayout = calculateTreeLayout(hierarchy);
-  
+
   // Draw connection lines first
   drawTreeConnections(treeLayout.nodes);
-  
+
   // Draw nodes
   for (const node of treeLayout.nodes) {
     drawSceneNode(node);
@@ -639,21 +668,21 @@ function drawExpandedSceneView() {
 function calculateTreeLayout(hierarchy) {
   const nodes = [];
   const LEVEL_HEIGHT = SCENE_NODE_H + SCENE_NODE_GAP_Y;
-  
+
   // Simple layout: each node positions its children directly below,
   // centered on itself, without considering grandchildren widths
   function processNode(node, depth, centerX) {
     const nodeWidth = calculateNodeWidth(node.name);
     const x = centerX - nodeWidth / 2;
     const y = depth * LEVEL_HEIGHT;
-    
+
     const nodeLayout = {
       ...node,
       x,
       y,
       width: nodeWidth,
       height: SCENE_NODE_H,
-      childPositions: []
+      childPositions: [],
     };
     nodes.push(nodeLayout);
 
@@ -665,19 +694,19 @@ function calculateTreeLayout(hierarchy) {
         totalChildrenWidth += calculateNodeWidth(child.name) + SCENE_NODE_GAP_X;
       }
       totalChildrenWidth -= SCENE_NODE_GAP_X; // Remove last gap
-      
+
       // Start children centered under parent
       let childX = centerX - totalChildrenWidth / 2;
-      
+
       for (const child of node.children) {
         const childWidth = calculateNodeWidth(child.name);
         const childCenterX = childX + childWidth / 2;
-        
+
         nodeLayout.childPositions.push({
           x: childCenterX,
-          y: (depth + 1) * LEVEL_HEIGHT
+          y: (depth + 1) * LEVEL_HEIGHT,
         });
-        
+
         processNode(child, depth + 1, childCenterX);
         childX += childWidth + SCENE_NODE_GAP_X;
       }
@@ -704,13 +733,13 @@ function drawTreeConnections(nodes) {
       for (const childPos of node.childPositions) {
         ctx.beginPath();
         ctx.moveTo(parentX, parentY);
-        
+
         // Draw an elbow connector
         const midY = parentY + (childPos.y - parentY) / 2;
         ctx.lineTo(parentX, midY);
         ctx.lineTo(childPos.x, midY);
         ctx.lineTo(childPos.x, childPos.y);
-        
+
         ctx.stroke();
       }
     }
@@ -727,7 +756,7 @@ function drawSceneNode(node) {
 
   // Node type color
   const nodeColor = getNodeTypeColor(node.type);
-  
+
   // Dim non-highlighted nodes when searching
   ctx.globalAlpha = isHighlighted ? 1 : 0.25;
 
@@ -746,10 +775,15 @@ function drawSceneNode(node) {
   ctx.shadowOffsetY = 0;
 
   // Border - use accent color for highlighted search results
-  const borderColor = isSelected ? nodeColor : isHovered ? nodeColor : 
-                      (isHighlighted && searchTerm ? '#f9e2af' : 'rgba(255,255,255,0.06)');
+  const borderColor = isSelected
+    ? nodeColor
+    : isHovered
+      ? nodeColor
+      : isHighlighted && searchTerm
+        ? '#f9e2af'
+        : 'rgba(255,255,255,0.06)';
   ctx.strokeStyle = borderColor;
-  ctx.lineWidth = (isSelected || (isHighlighted && searchTerm)) ? 2 : 1;
+  ctx.lineWidth = isSelected || (isHighlighted && searchTerm) ? 2 : 1;
   ctx.stroke();
 
   // Left accent
@@ -763,7 +797,7 @@ function drawSceneNode(node) {
   ctx.font = `600 11px -apple-system, system-ui, sans-serif`;
   ctx.textAlign = 'left';
   ctx.textBaseline = 'middle';
-  
+
   const displayName = node.name || 'Node';
   ctx.fillText(displayName, x + 10, y + SCENE_NODE_H / 2 - 4);
 
@@ -789,7 +823,7 @@ function drawSceneNode(node) {
     ctx.fillText(`#${node.index}`, x + w - 6, y + 10);
     ctx.textAlign = 'left';
   }
-  
+
   // Reset alpha
   ctx.globalAlpha = 1;
 }
@@ -806,41 +840,106 @@ function getSceneColor(scenePath) {
 
 function getNodeTypeColor(nodeType) {
   // Godot's actual node type colors
-  const GODOT_GREEN = '#8eef97';   // Control/UI nodes
-  const GODOT_BLUE = '#8da5f3';    // Node2D nodes
-  const GODOT_RED = '#fc7f7f';     // Node3D nodes
-  const GODOT_GRAY = '#b2b2b2';    // Base Node
-  
+  const GODOT_GREEN = '#8eef97'; // Control/UI nodes
+  const GODOT_BLUE = '#8da5f3'; // Node2D nodes
+  const GODOT_RED = '#fc7f7f'; // Node3D nodes
+  const GODOT_GRAY = '#b2b2b2'; // Base Node
+
   // Control/UI nodes (green)
   const controlTypes = [
-    'Control', 'Label', 'Button', 'LineEdit', 'TextEdit', 'RichTextLabel',
-    'Panel', 'PanelContainer', 'Container', 'BoxContainer', 'VBoxContainer', 
-    'HBoxContainer', 'GridContainer', 'MarginContainer', 'ScrollContainer',
-    'TabContainer', 'ProgressBar', 'TextureRect', 'ColorRect', 'NinePatchRect',
-    'CheckBox', 'CheckButton', 'OptionButton', 'SpinBox', 'Slider', 'HSlider',
-    'VSlider', 'Tree', 'ItemList', 'MenuButton', 'LinkButton', 'CanvasLayer'
+    'Control',
+    'Label',
+    'Button',
+    'LineEdit',
+    'TextEdit',
+    'RichTextLabel',
+    'Panel',
+    'PanelContainer',
+    'Container',
+    'BoxContainer',
+    'VBoxContainer',
+    'HBoxContainer',
+    'GridContainer',
+    'MarginContainer',
+    'ScrollContainer',
+    'TabContainer',
+    'ProgressBar',
+    'TextureRect',
+    'ColorRect',
+    'NinePatchRect',
+    'CheckBox',
+    'CheckButton',
+    'OptionButton',
+    'SpinBox',
+    'Slider',
+    'HSlider',
+    'VSlider',
+    'Tree',
+    'ItemList',
+    'MenuButton',
+    'LinkButton',
+    'CanvasLayer',
   ];
-  
+
   // Node2D nodes (blue)
   const node2DTypes = [
-    'Node2D', 'Sprite2D', 'AnimatedSprite2D', 'CharacterBody2D', 'RigidBody2D',
-    'StaticBody2D', 'Area2D', 'CollisionShape2D', 'CollisionPolygon2D',
-    'Camera2D', 'Path2D', 'PathFollow2D', 'Line2D', 'Polygon2D', 'TileMap',
-    'TileMapLayer', 'Marker2D', 'RemoteTransform2D', 'VisibleOnScreenNotifier2D',
-    'GPUParticles2D', 'CPUParticles2D', 'LightOccluder2D', 'PointLight2D',
-    'DirectionalLight2D', 'AudioStreamPlayer2D', 'NavigationRegion2D'
+    'Node2D',
+    'Sprite2D',
+    'AnimatedSprite2D',
+    'CharacterBody2D',
+    'RigidBody2D',
+    'StaticBody2D',
+    'Area2D',
+    'CollisionShape2D',
+    'CollisionPolygon2D',
+    'Camera2D',
+    'Path2D',
+    'PathFollow2D',
+    'Line2D',
+    'Polygon2D',
+    'TileMap',
+    'TileMapLayer',
+    'Marker2D',
+    'RemoteTransform2D',
+    'VisibleOnScreenNotifier2D',
+    'GPUParticles2D',
+    'CPUParticles2D',
+    'LightOccluder2D',
+    'PointLight2D',
+    'DirectionalLight2D',
+    'AudioStreamPlayer2D',
+    'NavigationRegion2D',
   ];
-  
+
   // Node3D nodes (red)
   const node3DTypes = [
-    'Node3D', 'Sprite3D', 'AnimatedSprite3D', 'CharacterBody3D', 'RigidBody3D',
-    'StaticBody3D', 'Area3D', 'CollisionShape3D', 'CollisionPolygon3D',
-    'Camera3D', 'MeshInstance3D', 'MultiMeshInstance3D', 'CSGBox3D',
-    'CSGCylinder3D', 'CSGSphere3D', 'CSGMesh3D', 'Path3D', 'PathFollow3D',
-    'GPUParticles3D', 'CPUParticles3D', 'OmniLight3D', 'SpotLight3D',
-    'DirectionalLight3D', 'AudioStreamPlayer3D', 'NavigationRegion3D'
+    'Node3D',
+    'Sprite3D',
+    'AnimatedSprite3D',
+    'CharacterBody3D',
+    'RigidBody3D',
+    'StaticBody3D',
+    'Area3D',
+    'CollisionShape3D',
+    'CollisionPolygon3D',
+    'Camera3D',
+    'MeshInstance3D',
+    'MultiMeshInstance3D',
+    'CSGBox3D',
+    'CSGCylinder3D',
+    'CSGSphere3D',
+    'CSGMesh3D',
+    'Path3D',
+    'PathFollow3D',
+    'GPUParticles3D',
+    'CPUParticles3D',
+    'OmniLight3D',
+    'SpotLight3D',
+    'DirectionalLight3D',
+    'AudioStreamPlayer3D',
+    'NavigationRegion3D',
   ];
-  
+
   // Check exact matches first, then partial
   for (const type of controlTypes) {
     if (nodeType === type || nodeType.includes(type)) return GODOT_GREEN;
@@ -851,11 +950,11 @@ function getNodeTypeColor(nodeType) {
   for (const type of node3DTypes) {
     if (nodeType === type || nodeType.includes(type)) return GODOT_RED;
   }
-  
+
   // Fallback: check for 2D/3D suffix
   if (nodeType.endsWith('2D')) return GODOT_BLUE;
   if (nodeType.endsWith('3D')) return GODOT_RED;
-  
+
   return GODOT_GRAY; // Default gray for base Node
 }
 
@@ -877,8 +976,7 @@ export function sceneHitTest(wx, wy) {
     const treeLayout = calculateTreeLayout(expandedSceneHierarchy);
     for (let i = treeLayout.nodes.length - 1; i >= 0; i--) {
       const node = treeLayout.nodes[i];
-      if (wx >= node.x && wx <= node.x + node.width &&
-          wy >= node.y && wy <= node.y + SCENE_NODE_H) {
+      if (wx >= node.x && wx <= node.x + node.width && wy >= node.y && wy <= node.y + SCENE_NODE_H) {
         return { type: 'sceneNode', node, scenePath: expandedScene };
       }
     }
@@ -888,9 +986,8 @@ export function sceneHitTest(wx, wy) {
     for (const scene of sceneData.scenes) {
       const pos = scenePositions[scene.path];
       if (!pos) continue;
-      
-      if (wx >= pos.x && wx <= pos.x + SCENE_CARD_W &&
-          wy >= pos.y && wy <= pos.y + SCENE_CARD_H) {
+
+      if (wx >= pos.x && wx <= pos.x + SCENE_CARD_W && wy >= pos.y && wy <= pos.y + SCENE_CARD_H) {
         return { type: 'sceneCard', scene, scenePath: scene.path };
       }
     }
@@ -914,8 +1011,8 @@ export function hitTest(wx, wy) {
     if (n.categoryVisible === false) continue;
     // Skip hidden nodes during search
     if (searchTerm && n.visible === false) continue;
-    if (wx >= n.x - NODE_W / 2 && wx <= n.x + NODE_W / 2 &&
-        wy >= n.y - NODE_H / 2 && wy <= n.y + NODE_H / 2) return n;
+    if (wx >= n.x - NODE_W / 2 && wx <= n.x + NODE_W / 2 && wy >= n.y - NODE_H / 2 && wy <= n.y + NODE_H / 2)
+      return n;
   }
   return null;
 }
@@ -923,8 +1020,7 @@ export function hitTest(wx, wy) {
 export function groupBoxHitTest(wx, wy) {
   if (!window.__categoryGroupBoxes) return null;
   for (const box of window.__categoryGroupBoxes) {
-    if (wx >= box.x && wx <= box.x + box.w &&
-        wy >= box.y && wy <= box.y + box.h) {
+    if (wx >= box.x && wx <= box.x + box.w && wy >= box.y && wy <= box.y + box.h) {
       return box;
     }
   }
@@ -934,8 +1030,11 @@ export function groupBoxHitTest(wx, wy) {
 export function centerOnNodes(nodeList) {
   if (!nodeList || nodeList.length === 0) return;
 
-  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-  nodeList.forEach(n => {
+  let minX = Infinity,
+    maxX = -Infinity,
+    minY = Infinity,
+    maxY = -Infinity;
+  nodeList.forEach((n) => {
     minX = Math.min(minX, n.x);
     maxX = Math.max(maxX, n.x);
     minY = Math.min(minY, n.y);
@@ -950,8 +1049,11 @@ export function centerOnNodes(nodeList) {
 export function fitToView(nodeList) {
   if (!nodeList || nodeList.length === 0) return;
 
-  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-  nodeList.forEach(n => {
+  let minX = Infinity,
+    maxX = -Infinity,
+    minY = Infinity,
+    maxY = -Infinity;
+  nodeList.forEach((n) => {
     minX = Math.min(minX, n.x);
     maxX = Math.max(maxX, n.x);
     minY = Math.min(minY, n.y);
@@ -961,8 +1063,8 @@ export function fitToView(nodeList) {
   camera.x = (minX + maxX) / 2;
   camera.y = (minY + maxY) / 2;
 
-  const spanX = (maxX - minX) + NODE_W * 2;
-  const spanY = (maxY - minY) + NODE_H * 2;
+  const spanX = maxX - minX + NODE_W * 2;
+  const spanY = maxY - minY + NODE_H * 2;
   // Calculate zoom to fit all nodes, but cap at 100% (1.0) to avoid zooming in too much
   camera.zoom = Math.min(1.0, W / spanX, H / spanY) * 0.9;
   // Don't change defaultZoom - keep it at 1 (100%) so reset always goes to 100%

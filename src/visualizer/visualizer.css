@@ -2,7 +2,11 @@
    GODOT PROJECT MAP VISUALIZER — "VOID" BIG TYPOGRAPHY DARK DASHBOARD
    ============================================================================ */
 
-* { margin: 0; padding: 0; box-sizing: border-box; }
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
 
 :root {
   /* Void palette */
@@ -11,8 +15,8 @@
   --bg-tertiary: #202734;
   --bg-hover: #293243;
   --bg-surface: #1b212c;
-  --border: rgba(255,255,255,0.06);
-  --border-light: rgba(255,255,255,0.1);
+  --border: rgba(255, 255, 255, 0.06);
+  --border-light: rgba(255, 255, 255, 0.1);
   --text-primary: #f0f0f5;
   --text-secondary: #7d8590;
   --text-muted: #484f58;
@@ -44,8 +48,8 @@
   --font-body: 12px;
   --font-small: 10px;
   --font-micro: 9px;
-  --font-mono: 'SF Mono', 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
-  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --font-mono: "SF Mono", "JetBrains Mono", "Fira Code", "Consolas", monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
 
   /* Spacing scale */
   --space-xs: 6px;
@@ -56,10 +60,10 @@
   --space-2xl: 44px;
 
   /* Shadows */
-  --shadow-panel: 0 2px 20px rgba(0,0,0,0.5);
-  --shadow-elevated: 0 4px 30px rgba(0,0,0,0.4);
-  --shadow-menu: 0 8px 40px rgba(0,0,0,0.6);
-  --shadow-modal: 0 16px 64px rgba(0,0,0,0.6);
+  --shadow-panel: 0 2px 20px rgba(0, 0, 0, 0.5);
+  --shadow-elevated: 0 4px 30px rgba(0, 0, 0, 0.4);
+  --shadow-menu: 0 8px 40px rgba(0, 0, 0, 0.6);
+  --shadow-modal: 0 16px 64px rgba(0, 0, 0, 0.6);
 
   /* Radii */
   --radius-sm: 8px;
@@ -79,9 +83,13 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
-canvas { display: block; cursor: grab; }
-canvas.dragging { cursor: grabbing; }
-
+canvas {
+  display: block;
+  cursor: grab;
+}
+canvas.dragging {
+  cursor: grabbing;
+}
 
 /* ============================================================================
    SEARCH BAR
@@ -168,19 +176,22 @@ canvas.dragging { cursor: grabbing; }
 
 #refresh-btn.refresh-done {
   color: #a6e3a1;
-  background: rgba(166,227,161,0.1);
+  background: rgba(166, 227, 161, 0.1);
 }
 
 #refresh-btn.refresh-error {
   color: #f38ba8;
-  background: rgba(243,139,168,0.1);
+  background: rgba(243, 139, 168, 0.1);
 }
 
 @keyframes spin {
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
 }
-
 
 /* ============================================================================
    VIEW TABS — floating transparent row, top-left
@@ -225,7 +236,6 @@ canvas.dragging { cursor: grabbing; }
   font-weight: 700;
 }
 
-
 /* ============================================================================
    CATEGORY PANEL
    ============================================================================ */
@@ -250,9 +260,16 @@ canvas.dragging { cursor: grabbing; }
   font-size: var(--font-small);
 }
 
-#category-panel::-webkit-scrollbar { width: 3px; }
-#category-panel::-webkit-scrollbar-track { background: transparent; }
-#category-panel::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 2px; }
+#category-panel::-webkit-scrollbar {
+  width: 3px;
+}
+#category-panel::-webkit-scrollbar-track {
+  background: transparent;
+}
+#category-panel::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 2px;
+}
 
 .cat-header {
   display: flex;
@@ -357,7 +374,6 @@ canvas.dragging { cursor: grabbing; }
   font-weight: 600;
   flex-shrink: 0;
 }
-
 
 /* ============================================================================
    CHANGES PANEL
@@ -501,7 +517,6 @@ canvas.dragging { cursor: grabbing; }
   letter-spacing: 0.08em;
 }
 
-
 /* ============================================================================
    LEGEND — minimal horizontal row, bottom-left
    ============================================================================ */
@@ -511,7 +526,7 @@ canvas.dragging { cursor: grabbing; }
   bottom: 20px;
   left: 20px;
   z-index: 100;
-  background: rgba(8,9,10,0.7);
+  background: rgba(8, 9, 10, 0.7);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
   border: none;
@@ -531,7 +546,9 @@ canvas.dragging { cursor: grabbing; }
   margin-bottom: 0;
 }
 
-#legend .item:last-child { margin-bottom: 0; }
+#legend .item:last-child {
+  margin-bottom: 0;
+}
 
 #legend .line {
   width: 28px;
@@ -539,8 +556,9 @@ canvas.dragging { cursor: grabbing; }
   border-radius: 1px;
 }
 
-#legend.hidden { display: none; }
-
+#legend.hidden {
+  display: none;
+}
 
 /* ============================================================================
    ZOOM INDICATOR — minimal, after legend
@@ -567,8 +585,12 @@ canvas.dragging { cursor: grabbing; }
   background: var(--bg-hover);
 }
 
-#zoom-indicator.faded { opacity: 0.4; }
-#zoom-indicator.faded:hover { opacity: 1; }
+#zoom-indicator.faded {
+  opacity: 0.4;
+}
+#zoom-indicator.faded:hover {
+  opacity: 1;
+}
 
 #zoom-indicator svg {
   flex-shrink: 0;
@@ -601,7 +623,6 @@ canvas.dragging { cursor: grabbing; }
   color: var(--text-primary);
 }
 
-
 /* ============================================================================
    DETAIL PANEL
    ============================================================================ */
@@ -619,11 +640,15 @@ canvas.dragging { cursor: grabbing; }
   z-index: 200;
   overflow-y: auto;
   transition: right 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-  box-shadow: -8px 0 40px rgba(0,0,0,0.5);
+  box-shadow: -8px 0 40px rgba(0, 0, 0, 0.5);
 }
 
-#detail-panel.open { right: 0; }
-#detail-panel.resizing { transition: none; }
+#detail-panel.open {
+  right: 0;
+}
+#detail-panel.resizing {
+  transition: none;
+}
 
 /* Horizontal resize handle */
 #panel-resize-handle {
@@ -637,7 +662,7 @@ canvas.dragging { cursor: grabbing; }
 }
 
 #panel-resize-handle::after {
-  content: '';
+  content: "";
   position: absolute;
   left: 3px;
   top: 50%;
@@ -656,9 +681,16 @@ canvas.dragging { cursor: grabbing; }
   background: var(--accent);
 }
 
-#detail-panel::-webkit-scrollbar { width: 4px; }
-#detail-panel::-webkit-scrollbar-track { background: transparent; }
-#detail-panel::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.06); border-radius: 2px; }
+#detail-panel::-webkit-scrollbar {
+  width: 4px;
+}
+#detail-panel::-webkit-scrollbar-track {
+  background: transparent;
+}
+#detail-panel::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 2px;
+}
 
 .panel-header {
   position: sticky;
@@ -757,7 +789,6 @@ canvas.dragging { cursor: grabbing; }
   background: var(--bg-tertiary);
 }
 
-
 /* ============================================================================
    SECTIONS (detail panel content)
    ============================================================================ */
@@ -782,7 +813,7 @@ canvas.dragging { cursor: grabbing; }
 }
 
 .section-resize-handle::after {
-  content: '';
+  content: "";
   width: 40px;
   height: 3px;
   background: var(--border-light);
@@ -821,7 +852,9 @@ canvas.dragging { cursor: grabbing; }
   font-weight: 700;
 }
 
-.item-list { list-style: none; }
+.item-list {
+  list-style: none;
+}
 
 .item-list li {
   padding: 6px 8px;
@@ -857,16 +890,24 @@ canvas.dragging { cursor: grabbing; }
 #vars-list li::-webkit-scrollbar-thumb,
 #signals-list li::-webkit-scrollbar-thumb,
 .section .item-list li.clickable::-webkit-scrollbar-thumb {
-  background: rgba(255,255,255,0.12);
+  background: rgba(255, 255, 255, 0.12);
   border-radius: 2px;
 }
 
-.item-list li:hover { background: var(--bg-secondary); }
-.item-list li.clickable { cursor: pointer; }
-.item-list li.clickable:hover { background: var(--bg-tertiary); }
+.item-list li:hover {
+  background: var(--bg-secondary);
+}
+.item-list li.clickable {
+  cursor: pointer;
+}
+.item-list li.clickable:hover {
+  background: var(--bg-tertiary);
+}
 
 /* Scene usage list */
-.scene-usage-section { margin-bottom: var(--space-lg); }
+.scene-usage-section {
+  margin-bottom: var(--space-lg);
+}
 
 .scene-list li.scene-link {
   cursor: pointer;
@@ -896,8 +937,12 @@ canvas.dragging { cursor: grabbing; }
   flex-shrink: 0;
 }
 
-.item-list li:hover .item-actions { opacity: 1; }
-.item-list li:hover .delete { opacity: 1 !important; }
+.item-list li:hover .item-actions {
+  opacity: 1;
+}
+.item-list li:hover .delete {
+  opacity: 1 !important;
+}
 
 .item-actions button {
   background: var(--bg-tertiary);
@@ -919,7 +964,7 @@ canvas.dragging { cursor: grabbing; }
 }
 
 .item-actions button.delete:hover {
-  background: rgba(243,139,168,0.15);
+  background: rgba(243, 139, 168, 0.15);
   color: #f38ba8;
 }
 
@@ -934,11 +979,13 @@ canvas.dragging { cursor: grabbing; }
   display: inline-block;
 }
 
-.editable:hover { background: rgba(255,255,255,0.06); }
+.editable:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
 
 .editable:focus {
   outline: none;
-  background: rgba(255,255,255,0.1);
+  background: rgba(255, 255, 255, 0.1);
   box-shadow: 0 0 0 1px var(--accent);
 }
 
@@ -964,14 +1011,15 @@ canvas.dragging { cursor: grabbing; }
   letter-spacing: 1px;
 }
 
-.onready-badge:hover { background: rgba(137, 180, 250, 0.25); }
+.onready-badge:hover {
+  background: rgba(137, 180, 250, 0.25);
+}
 
 .onready-badge.inactive {
-  background: rgba(255,255,255,0.04);
+  background: rgba(255, 255, 255, 0.04);
   color: var(--text-muted);
   opacity: 0.5;
 }
-
 
 /* ============================================================================
    CONTEXT MENUS
@@ -989,7 +1037,9 @@ canvas.dragging { cursor: grabbing; }
   display: none;
 }
 
-#context-menu.visible { display: block; }
+#context-menu.visible {
+  display: block;
+}
 
 #context-menu .menu-item {
   display: flex;
@@ -1007,7 +1057,10 @@ canvas.dragging { cursor: grabbing; }
   color: var(--text-primary);
 }
 
-#context-menu .menu-item svg { flex-shrink: 0; opacity: 0.6; }
+#context-menu .menu-item svg {
+  flex-shrink: 0;
+  opacity: 0.6;
+}
 
 #context-menu .menu-divider {
   height: 1px;
@@ -1028,7 +1081,9 @@ canvas.dragging { cursor: grabbing; }
   display: none;
 }
 
-#scene-context-menu.visible { display: block; }
+#scene-context-menu.visible {
+  display: block;
+}
 
 #scene-context-menu .menu-item {
   display: flex;
@@ -1046,17 +1101,23 @@ canvas.dragging { cursor: grabbing; }
   color: var(--text-primary);
 }
 
-#scene-context-menu .menu-item.danger { color: #f38ba8; }
-#scene-context-menu .menu-item.danger:hover { background: rgba(243, 139, 168, 0.1); }
+#scene-context-menu .menu-item.danger {
+  color: #f38ba8;
+}
+#scene-context-menu .menu-item.danger:hover {
+  background: rgba(243, 139, 168, 0.1);
+}
 
-#scene-context-menu .menu-item svg { flex-shrink: 0; opacity: 0.6; }
+#scene-context-menu .menu-item svg {
+  flex-shrink: 0;
+  opacity: 0.6;
+}
 
 #scene-context-menu .menu-divider {
   height: 1px;
   background: var(--border);
   margin: 6px 12px;
 }
-
 
 /* ============================================================================
    MODALS
@@ -1068,7 +1129,7 @@ canvas.dragging { cursor: grabbing; }
   left: 0;
   right: 0;
   bottom: 0;
-  background: rgba(0,0,0,0.7);
+  background: rgba(0, 0, 0, 0.7);
   z-index: 600;
   display: flex;
   align-items: center;
@@ -1108,7 +1169,9 @@ canvas.dragging { cursor: grabbing; }
   margin-bottom: var(--space-lg);
 }
 
-.modal-body .form-group:last-child { margin-bottom: 0; }
+.modal-body .form-group:last-child {
+  margin-bottom: 0;
+}
 
 .modal-body label {
   display: block;
@@ -1172,7 +1235,6 @@ canvas.dragging { cursor: grabbing; }
 .modal-footer .confirm:hover {
   background: var(--accent-light);
 }
-
 
 /* ============================================================================
    TIMELINE / ACTIVITY PANEL
@@ -1253,9 +1315,16 @@ canvas.dragging { cursor: grabbing; }
   max-height: calc(100vh - 170px);
 }
 
-.tl-body::-webkit-scrollbar { width: 3px; }
-.tl-body::-webkit-scrollbar-track { background: transparent; }
-.tl-body::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.06); border-radius: 2px; }
+.tl-body::-webkit-scrollbar {
+  width: 3px;
+}
+.tl-body::-webkit-scrollbar-track {
+  background: transparent;
+}
+.tl-body::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 2px;
+}
 
 .tl-empty {
   padding: var(--space-xl) var(--space-lg);
@@ -1276,7 +1345,7 @@ canvas.dragging { cursor: grabbing; }
   border: none;
   border-radius: var(--radius-sm);
   overflow: hidden;
-  box-shadow: 0 1px 4px rgba(0,0,0,0.2);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
 }
 
 .tl-card-header {
@@ -1365,7 +1434,6 @@ canvas.dragging { cursor: grabbing; }
   margin-top: 2px;
 }
 
-
 /* ============================================================================
    FLOATING USAGE PANEL
    ============================================================================ */
@@ -1388,8 +1456,12 @@ canvas.dragging { cursor: grabbing; }
   overflow: hidden;
 }
 
-#usage-float-panel.visible { display: flex; }
-#usage-float-panel.dragging { user-select: none; }
+#usage-float-panel.visible {
+  display: flex;
+}
+#usage-float-panel.dragging {
+  user-select: none;
+}
 
 /* Resize handle */
 #usage-float-panel .ufp-resize {
@@ -1403,7 +1475,7 @@ canvas.dragging { cursor: grabbing; }
 }
 
 #usage-float-panel .ufp-resize::after {
-  content: '';
+  content: "";
   position: absolute;
   right: 5px;
   bottom: 5px;
@@ -1414,7 +1486,9 @@ canvas.dragging { cursor: grabbing; }
   opacity: 0.4;
 }
 
-#usage-float-panel .ufp-resize:hover::after { opacity: 0.8; }
+#usage-float-panel .ufp-resize:hover::after {
+  opacity: 0.8;
+}
 
 #usage-float-panel .ufp-header {
   display: flex;
@@ -1426,7 +1500,9 @@ canvas.dragging { cursor: grabbing; }
   cursor: grab;
 }
 
-#usage-float-panel .ufp-header:active { cursor: grabbing; }
+#usage-float-panel .ufp-header:active {
+  cursor: grabbing;
+}
 
 #usage-float-panel .ufp-header .ufp-info {
   flex: 1;
@@ -1505,8 +1581,12 @@ canvas.dragging { cursor: grabbing; }
   transition: background 0.1s;
 }
 
-#usage-float-panel .ufp-item:last-child { border-bottom: none; }
-#usage-float-panel .ufp-item:hover { background: var(--bg-hover); }
+#usage-float-panel .ufp-item:last-child {
+  border-bottom: none;
+}
+#usage-float-panel .ufp-item:hover {
+  background: var(--bg-hover);
+}
 
 #usage-float-panel .ufp-item.active {
   background: var(--accent-dim);
@@ -1533,7 +1613,7 @@ canvas.dragging { cursor: grabbing; }
 }
 
 #usage-float-panel .ufp-item .ufp-func::before {
-  content: 'func ';
+  content: "func ";
   color: var(--gd-keyword);
   font-weight: normal;
 }
@@ -1601,7 +1681,6 @@ canvas.dragging { cursor: grabbing; }
   background: rgba(243, 139, 168, 0.25);
 }
 
-
 /* ============================================================================
    CODE LINE HIGHLIGHT
    ============================================================================ */
@@ -1612,7 +1691,6 @@ canvas.dragging { cursor: grabbing; }
   margin-left: -14px !important;
   padding-left: 11px !important;
 }
-
 
 /* ============================================================================
    ADD ITEM FORM
@@ -1636,7 +1714,9 @@ canvas.dragging { cursor: grabbing; }
   color: var(--text-secondary);
 }
 
-.add-item-btn svg { opacity: 0.5; }
+.add-item-btn svg {
+  opacity: 0.5;
+}
 
 .add-item-form {
   background: var(--bg-secondary);
@@ -1653,7 +1733,9 @@ canvas.dragging { cursor: grabbing; }
   margin-bottom: var(--space-sm);
 }
 
-.add-item-form .form-row:last-child { margin-bottom: 0; }
+.add-item-form .form-row:last-child {
+  margin-bottom: 0;
+}
 
 .add-item-form input,
 .add-item-form select {
@@ -1705,22 +1787,42 @@ canvas.dragging { cursor: grabbing; }
   background: var(--accent-light);
 }
 
-
 /* ============================================================================
    SYNTAX TOKENS — UNCHANGED colors
    ============================================================================ */
 
-.kw { color: var(--gd-keyword); font-weight: 600; }
-.fn { color: var(--gd-func-name); }
-.tp { color: var(--gd-type); }
-.str { color: var(--gd-string); }
-.num { color: var(--gd-number); }
-.cmt { color: var(--gd-comment); font-style: italic; }
-.sig { color: var(--gd-signal); }
-.exp { color: var(--gd-export); }
-.param { color: var(--text-secondary); }
-.ret { color: var(--text-muted); }
-
+.kw {
+  color: var(--gd-keyword);
+  font-weight: 600;
+}
+.fn {
+  color: var(--gd-func-name);
+}
+.tp {
+  color: var(--gd-type);
+}
+.str {
+  color: var(--gd-string);
+}
+.num {
+  color: var(--gd-number);
+}
+.cmt {
+  color: var(--gd-comment);
+  font-style: italic;
+}
+.sig {
+  color: var(--gd-signal);
+}
+.exp {
+  color: var(--gd-export);
+}
+.param {
+  color: var(--text-secondary);
+}
+.ret {
+  color: var(--text-muted);
+}
 
 /* ============================================================================
    TAGS
@@ -1736,11 +1838,23 @@ canvas.dragging { cursor: grabbing; }
   letter-spacing: 0.5px;
 }
 
-.tag-export { background: rgba(187, 181, 41, 0.12); color: var(--gd-export); }
-.tag-signal { background: rgba(166, 227, 161, 0.12); color: var(--gd-signal); }
-.tag-lines { background: var(--bg-tertiary); color: var(--text-muted); font-weight: normal; }
-.tag-return { background: rgba(104, 151, 187, 0.12); color: var(--gd-type); }
-
+.tag-export {
+  background: rgba(187, 181, 41, 0.12);
+  color: var(--gd-export);
+}
+.tag-signal {
+  background: rgba(166, 227, 161, 0.12);
+  color: var(--gd-signal);
+}
+.tag-lines {
+  background: var(--bg-tertiary);
+  color: var(--text-muted);
+  font-weight: normal;
+}
+.tag-return {
+  background: rgba(104, 151, 187, 0.12);
+  color: var(--gd-type);
+}
 
 /* ============================================================================
    FUNCTION VIEWER
@@ -1849,8 +1963,13 @@ canvas.dragging { cursor: grabbing; }
   color: var(--text-muted);
 }
 
-.func-viewer-footer .status { opacity: 0; transition: opacity 0.2s; }
-.func-viewer-footer .status.visible { opacity: 1; }
+.func-viewer-footer .status {
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+.func-viewer-footer .status.visible {
+  opacity: 1;
+}
 
 .func-viewer-footer .save-btn {
   background: var(--accent);
@@ -1865,8 +1984,12 @@ canvas.dragging { cursor: grabbing; }
   transition: all 0.2s;
 }
 
-.func-viewer-footer .save-btn.active { opacity: 1; }
-.func-viewer-footer .save-btn.active:hover { background: var(--accent-light); }
+.func-viewer-footer .save-btn.active {
+  opacity: 1;
+}
+.func-viewer-footer .save-btn.active:hover {
+  background: var(--accent-light);
+}
 
 .code-line {
   display: block;
@@ -1875,7 +1998,9 @@ canvas.dragging { cursor: grabbing; }
   white-space: pre;
 }
 
-.code-line:hover { background: rgba(255,255,255,0.02); }
+.code-line:hover {
+  background: rgba(255, 255, 255, 0.02);
+}
 
 .line-num {
   color: var(--text-muted);
@@ -1891,7 +2016,6 @@ canvas.dragging { cursor: grabbing; }
   white-space: pre;
   flex: 1;
 }
-
 
 /* ============================================================================
    SCENE VIEW STYLES
@@ -1936,7 +2060,6 @@ canvas.dragging { cursor: grabbing; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-
 
 /* ============================================================================
    SCENE NODE PROPERTIES PANEL STYLES
@@ -1997,11 +2120,11 @@ canvas.dragging { cursor: grabbing; }
 }
 
 .property-section.collapsed .section-header span:first-child::before {
-  content: '▶ ';
+  content: "▶ ";
 }
 
 .property-section:not(.collapsed) .section-header span:first-child::before {
-  content: '▼ ';
+  content: "▼ ";
 }
 
 .property-section .section-header span:first-child {
@@ -2257,12 +2380,13 @@ canvas.dragging { cursor: grabbing; }
   border-radius: 6px;
 }
 
-
 /* ============================================================================
    DIFF STYLES
    ============================================================================ */
 
-.diff-container { padding: 0; }
+.diff-container {
+  padding: 0;
+}
 
 .diff-loading {
   padding: var(--space-md);
@@ -2283,14 +2407,16 @@ canvas.dragging { cursor: grabbing; }
   font-style: italic;
 }
 
-.diff-group { margin-bottom: var(--space-sm); }
+.diff-group {
+  margin-bottom: var(--space-sm);
+}
 
 .diff-group-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
   padding: 8px var(--space-sm);
-  background: rgba(255,255,255,0.02);
+  background: rgba(255, 255, 255, 0.02);
   font-size: var(--font-small);
   font-weight: 600;
   color: var(--text-primary);
@@ -2306,8 +2432,12 @@ canvas.dragging { cursor: grabbing; }
   font-family: var(--font-mono);
 }
 
-.diff-stat-add { color: #a6e3a1; }
-.diff-stat-del { color: #f38ba8; }
+.diff-stat-add {
+  color: #a6e3a1;
+}
+.diff-stat-del {
+  color: #f38ba8;
+}
 
 .diff-hunk {
   font-family: var(--font-mono);
@@ -2321,6 +2451,14 @@ canvas.dragging { cursor: grabbing; }
   word-break: break-all;
 }
 
-.diff-add { background: rgba(166, 227, 161, 0.08); color: #a6e3a1; }
-.diff-del { background: rgba(243, 139, 168, 0.08); color: #f38ba8; }
-.diff-ctx { color: var(--text-muted); }
+.diff-add {
+  background: rgba(166, 227, 161, 0.08);
+  color: #a6e3a1;
+}
+.diff-del {
+  background: rgba(243, 139, 168, 0.08);
+  color: #f38ba8;
+}
+.diff-ctx {
+  color: var(--text-muted);
+}
