@@ -1,0 +1,26 @@
+version: 2
+updates:
+  # Digests, not tags: the repository requires SHA-pinned actions, and Dependabot keeps the
+  # version comment beside the digest when it bumps one.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+    groups:
+      actions:
+        patterns:
+          - "*"
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: deps
+    groups:
+      development:
+        dependency-type: development
+      production:
+        dependency-type: production
