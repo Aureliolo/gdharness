@@ -60,7 +60,7 @@
       "managerFilePatterns": ["/^\\.github/.+\\.ya?ml$/"],
       "matchStrings": [
         "# renovate: datasource=(?<datasource>python-version) depName=(?<depName>\\S+)(?: versioning=(?<versioning>\\S+))?\\n\\s*[A-Z0-9_]+: '?(?<currentValue>[^'\\s]+)'?",
-        "# renovate: datasource=(?<datasource>github-runners) depName=(?<depName>ubuntu|windows|macos)\\n\\s*- (?:ubuntu|windows|macos)-(?<currentValue>[0-9.]+(?:-[a-z0-9]+)?)"
+        "# renovate: datasource=(?<datasource>github-runners) depName=(?<depName>ubuntu|windows|macos)\\n\\s*runner: (?:ubuntu|windows|macos)-(?<currentValue>[0-9.]+(?:-[a-z0-9]+)?)"
       ]
     }
   ]

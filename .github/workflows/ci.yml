@@ -98,21 +98,26 @@ jobs:
   # things it covers, project.godot writing and path handling, are exactly where the platforms
   # differ.
   engine:
-    name: engine
+    # Named by platform rather than by runner image, because the name is what the branch ruleset
+    # requires, and an image bump must not rename a required check out from under it.
+    name: engine (${{ matrix.platform }})
     strategy:
       fail-fast: false
       matrix:
         # Renovate reads a runner out of `runs-on:` but not out of a matrix, so each of these
         # carries its own line for it.
-        os:
-          # renovate: datasource=github-runners depName=ubuntu
-          - ubuntu-24.04
-          # renovate: datasource=github-runners depName=windows
-          - windows-2025
-          # renovate: datasource=github-runners depName=macos
-          - macos-26
+        include:
+          - platform: linux
+            # renovate: datasource=github-runners depName=ubuntu
+            runner: ubuntu-24.04
+          - platform: windows
+            # renovate: datasource=github-runners depName=windows
+            runner: windows-2025
+          - platform: macos
+            # renovate: datasource=github-runners depName=macos
+            runner: macos-26
 
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 25
 
     steps:
