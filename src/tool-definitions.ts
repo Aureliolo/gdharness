@@ -1169,8 +1169,8 @@ export function buildToolDefinitions(godotBridgePort: number): MCPToolDefinition
                 description: 'Property name to set',
               },
               value: {
-                type: 'string',
-                description: 'Value to set (Godot handles type conversion)',
+                description:
+                  'Value to set. Numbers and booleans pass as themselves; a value is fitted to the type the property already holds. Typed values take the tagged form {"_type":"Vector2","x":0,"y":0}.',
               },
             },
             required: ['projectPath', 'nodePath', 'property', 'value'],
@@ -1196,8 +1196,9 @@ export function buildToolDefinitions(godotBridgePort: number): MCPToolDefinition
               },
               args: {
                 type: 'array',
-                items: { type: 'string' },
-                description: 'Arguments to pass to the method (as JSON strings)',
+                items: {},
+                description:
+                  'Arguments to pass to the method. Numbers and booleans pass as themselves; each argument is fitted to the type the method declares. Typed values take the tagged form {"_type":"Vector2","x":0,"y":0}.',
               },
             },
             required: ['projectPath', 'nodePath', 'method'],

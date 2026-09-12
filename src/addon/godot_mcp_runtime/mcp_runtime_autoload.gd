@@ -218,7 +218,7 @@ func _cmd_set_property(params: Dictionary) -> Dictionary:
 		return {"type": "error", "message": "Node not found: " + node_path}
 	
 	var old_value = node.get(property)
-	node.set(property, _deserialize_value(value))
+	node.set(property, _as_type(value, typeof(old_value)))
 	
 	return {
 		"type": "property_set",
@@ -245,9 +245,9 @@ func _cmd_call_method(params: Dictionary) -> Dictionary:
 		return {"type": "error", "message": "Method not found: " + method}
 	
 	var deserialized_args = []
-	for arg in args:
-		deserialized_args.append(_deserialize_value(arg))
-	
+	for index in args.size():
+		deserialized_args.append(_as_type(args[index], _parameter_type(node, method, index)))
+
 	var result = node.callv(method, deserialized_args)
 	
 	return {
@@ -669,6 +669,34 @@ func _deserialize_value(value) -> Variant:
 		return arr
 	else:
 		return value
+
+
+func _parameter_type(node: Object, method: String, index: int) -> int:
+	for entry in node.get_method_list():
+		if entry.get("name", "") != method:
+			continue
+		var params = entry.get("args", [])
+		if index < 0 or index >= params.size():
+			return TYPE_NIL
+		return int(params[index].get("type", TYPE_NIL))
+	return TYPE_NIL
+
+
+func _as_type(value, type: int) -> Variant:
+	var fitted = _deserialize_value(value)
+	if type == TYPE_NIL or typeof(fitted) == type:
+		return fitted
+
+	var simple = [TYPE_BOOL, TYPE_INT, TYPE_FLOAT, TYPE_STRING]
+	if not simple.has(type) or not simple.has(typeof(fitted)):
+		return fitted
+
+	if fitted is String and type != TYPE_STRING:
+		var parsed = JSON.parse_string(fitted)
+		if typeof(parsed) != TYPE_NIL and typeof(parsed) != TYPE_STRING:
+			fitted = parsed
+
+	return type_convert(fitted, type)
 
 
 func _resolve_mouse_button(raw: Variant) -> int:
