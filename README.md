@@ -76,10 +76,13 @@ way: it is fetched from the engine's own release and refused unless it matches t
 published alongside it, so the largest binary in the pipeline is not the one thing nobody checked.
 Dependabot proposes the bumps and a human takes them.
 
-**What guards the branch.** `main` takes pull requests only, with signed commits, linear
-history and a required status check, and nobody can bypass it. CodeQL, OpenSSF Scorecard,
-actionlint, zizmor and secret scanning run against every change; the GDScript that ships in the
-bundle is driven against a real Godot on Linux, Windows and macOS.
+**What guards the branch.** `main` takes pull requests only, with linear history and nine
+required status checks: the build and its tests, both formatters, both linters, the GDScript
+lint, and the engine fixtures on Linux, Windows and macOS. Every job CI runs is one of them, so
+there is no check that can be red at the moment something merges. Nobody can bypass it, and every
+commit on every branch has to be signed. CodeQL, OpenSSF Scorecard, actionlint, zizmor and secret
+scanning run against every change, and zizmor's findings fail the build rather than filing a
+ticket somebody has to notice.
 
 Found something? [SECURITY.md](.github/SECURITY.md) says how to report it.
 
