@@ -9,9 +9,9 @@
  */
 
 import { execFile, spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createConnection as createTcpConnection } from 'node:net';
-import { homedir, tmpdir } from 'node:os';
+import { tmpdir } from 'node:os';
 import { basename, dirname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -26,9 +26,11 @@ import {
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
 import { GodotDAPClient, handleDAPTool } from './dap_client.js';
+import { godotCandidates, resolveHomeDirectory } from './detection.js';
 import { dictionary, emptyRecord } from './dictionary.js';
 import { errorMessage } from './errors.js';
 import { type GodotBridge, getDefaultBridge } from './godot-bridge.js';
+import { envValue, resolveHeadless, runArguments } from './launch.js';
 import { GodotLSPClient, handleLSPTool } from './lsp_client.js';
 import { resolveWithinProject } from './paths.js';
 import { getPrompt, listPrompts } from './prompts.js';
@@ -65,84 +67,6 @@ import { sanitizeExportedToolName } from './tool-names.js';
 // of it. Every argument below is an array element, so a path full of backslashes, spaces or
 // quotes is just a path.
 const run = promisify(execFile);
-
-/**
- * Scan a directory for Godot executable binaries.
- *
- * Godot release downloads use versioned filenames such as
- * `Godot_v4.4.1-stable_win64.exe` or `Godot_v4.3-stable_linux.x86_64`,
- * which the hard-coded candidate list cannot match. This helper globs a
- * single install directory for any `Godot*.exe` / `godot*` binary and
- * returns candidates sorted newest-first by modification time so the
- * auto-detection picks the most recently installed build.
- *
- * Exported for unit testing.
- * @param directory Directory to scan
- * @param platform Current OS platform (controls the executable pattern)
- * @returns Array of absolute candidate paths, newest first
- */
-export function scanDirectoryForGodotBinaries(
-  directory: string,
-  platform: NodeJS.Platform = process.platform,
-): string[] {
-  if (!directory || !existsSync(directory)) {
-    return [];
-  }
-
-  let entries: string[];
-  try {
-    entries = readdirSync(directory);
-  } catch {
-    return [];
-  }
-
-  const pattern = platform === 'win32' ? /^godot.*\.exe$/i : /^godot/i;
-
-  const matches: { name: string; mtime: number }[] = [];
-  for (const name of entries) {
-    if (!pattern.test(name)) {
-      continue;
-    }
-    const fullPath = join(directory, name);
-    try {
-      const stat = statSync(fullPath);
-      if (stat.isFile()) {
-        matches.push({ name, mtime: stat.mtimeMs });
-      }
-    } catch {
-      // ignore unreadable entries
-    }
-  }
-
-  matches.sort((a, b) => b.mtime - a.mtime);
-  return matches.map((m) => join(directory, m.name));
-}
-
-/**
- * An environment variable's value, treating the empty string as unset.
- *
- * A variable exported with nothing in it is how a shell says "not configured", and reading it
- * as a configured empty value picks a tool profile of "" or a page size that will not parse.
- */
-function envValue(name: string): string | undefined {
-  const value = process.env[name];
-  return value === undefined || value === '' ? undefined : value;
-}
-
-/**
- * The user's home directory, or an empty string when there is not one.
- *
- * `homedir()` reads HOME or USERPROFILE and falls back to the OS user database, so it answers
- * in cases a bare environment read does not. It can still come back empty, and every caller
- * has to treat that as "skip the home-relative candidates" rather than build a path from it.
- */
-function resolveHomeDirectory(): string {
-  try {
-    return homedir();
-  } catch {
-    return '';
-  }
-}
 
 // Derive __filename and __dirname in ESM
 const __filename = fileURLToPath(import.meta.url);
@@ -462,53 +386,11 @@ class GodotServer {
       }
     }
 
-    // Auto-detect based on platform
     const osPlatform = process.platform;
     this.logDebug(`Auto-detecting Godot path for platform: ${osPlatform}`);
 
-    // A home directory is not guaranteed: a service account, a container or a Windows session
-    // started without a profile has none. Interpolating the miss produced candidates beginning
-    // with the literal text "undefined", which the detector then stat'd and scanned, and the
-    // only symptom was detection failing for no stated reason.
-    const home = resolveHomeDirectory();
-
-    const possiblePaths: string[] = [
-      'godot', // Check if 'godot' is in PATH first
-    ];
-
-    // Add platform-specific paths
-    if (osPlatform === 'darwin') {
-      possiblePaths.push(
-        '/Applications/Godot.app/Contents/MacOS/Godot',
-        '/Applications/Godot_4.app/Contents/MacOS/Godot',
-      );
-      if (home) {
-        possiblePaths.push(
-          `${home}/Applications/Godot.app/Contents/MacOS/Godot`,
-          `${home}/Applications/Godot_4.app/Contents/MacOS/Godot`,
-          `${home}/Library/Application Support/Steam/steamapps/common/Godot Engine/Godot.app/Contents/MacOS/Godot`,
-        );
-      }
-    } else if (osPlatform === 'win32') {
-      possiblePaths.push(
-        'C:\\Program Files\\Godot\\Godot.exe',
-        'C:\\Program Files (x86)\\Godot\\Godot.exe',
-        'C:\\Program Files\\Godot_4\\Godot.exe',
-        'C:\\Program Files (x86)\\Godot_4\\Godot.exe',
-      );
-      if (home) {
-        possiblePaths.push(`${home}\\Godot\\Godot.exe`);
-      }
-    } else if (osPlatform === 'linux') {
-      possiblePaths.push('/usr/bin/godot', '/usr/local/bin/godot', '/snap/bin/godot');
-      if (home) {
-        possiblePaths.push(`${home}/.local/bin/godot`);
-      }
-    }
-
-    // Try each possible path
-    for (const path of possiblePaths) {
-      const normalizedPath = normalize(path);
+    for (const candidate of godotCandidates(osPlatform, resolveHomeDirectory())) {
+      const normalizedPath = normalize(candidate);
       if (await this.isValidGodotPath(normalizedPath)) {
         this.godotPath = normalizedPath;
         this.logDebug(`Found Godot at: ${normalizedPath}`);
@@ -516,45 +398,6 @@ class GodotServer {
       }
     }
 
-    // Scan known Godot install directories for versioned binaries
-    // (e.g. Godot_v4.4.1-stable_win64.exe) that the hard-coded candidate
-    // list above cannot match. Candidates are sorted newest-first by mtime.
-    const scanDirectories: string[] = [];
-    if (osPlatform === 'win32') {
-      scanDirectories.push(
-        'C:\\Program Files\\Godot',
-        'C:\\Program Files (x86)\\Godot',
-        'C:\\Program Files\\Godot_4',
-        'C:\\Program Files (x86)\\Godot_4',
-      );
-      if (home) {
-        scanDirectories.push(`${home}\\Godot`, `${home}\\Downloads`, `${home}\\Desktop`);
-      }
-    } else if (osPlatform === 'darwin') {
-      scanDirectories.push('/Applications');
-      if (home) {
-        scanDirectories.push(`${home}/Applications`);
-      }
-    } else if (osPlatform === 'linux') {
-      scanDirectories.push('/usr/bin', '/usr/local/bin', '/snap/bin');
-      if (home) {
-        scanDirectories.push(`${home}/.local/bin`, `${home}/Downloads`, `${home}/Desktop`);
-      }
-    }
-
-    for (const dir of scanDirectories) {
-      const candidates = scanDirectoryForGodotBinaries(dir, osPlatform);
-      for (const candidate of candidates) {
-        const normalizedCandidate = normalize(candidate);
-        if (await this.isValidGodotPath(normalizedCandidate)) {
-          this.godotPath = normalizedCandidate;
-          this.logDebug(`Found versioned Godot binary at: ${normalizedCandidate}`);
-          return;
-        }
-      }
-    }
-
-    // If we get here, we couldn't find Godot
     this.logDebug(`Warning: Could not find Godot in common locations for ${osPlatform}`);
     console.error(`[SERVER] Could not find Godot in common locations for ${osPlatform}`);
     console.error(
@@ -1946,30 +1789,6 @@ class GodotServer {
     }
   }
 
-  /**
-   * Whether to launch the game without a window.
-   *
-   * A headless Godot renders nothing, so capture_screenshot, capture_viewport and the input
-   * injection tools cannot work against a game started that way: they fail in the dummy
-   * texture storage, and run_project is the only way to start a game over MCP.
-   *
-   * Left to itself this follows the environment. CI is both the place that needs headless
-   * and the place with no display, so deciding on the display keeps every existing headless
-   * run headless while letting the visual tools work on a desktop with no configuration.
-   * An explicit true or false overrides it.
-   */
-  private resolveHeadless(requested: unknown): boolean {
-    if (typeof requested === 'boolean') {
-      return requested;
-    }
-    if (process.platform === 'win32' || process.platform === 'darwin') {
-      return false;
-    }
-    // Through envValue because a display variable exported empty means no display, the same as
-    // one that was never exported: a bare `??` here would read `DISPLAY=""` as a desktop.
-    return envValue('DISPLAY') === undefined && envValue('WAYLAND_DISPLAY') === undefined;
-  }
-
   private async handleRunProject(rawArgs: unknown) {
     // Normalize parameters to camelCase
     const args = this.normalizeParameters(rawArgs);
@@ -2016,23 +1835,18 @@ class GodotServer {
         this.activeProcess.process.kill();
       }
 
-      const cmdArgs = this.resolveHeadless(args['headless'])
-        ? ['--headless', '-d', '--path', projectPath]
-        : ['-d', '--path', projectPath];
-      if (sceneToRun?.ok) {
-        // As a res:// path rather than the text that arrived: the engine reads this argument
-        // positionally, so a value beginning with a dash would otherwise be another option.
-        const sceneArgument = `res://${sceneToRun.relativePath}`;
-        this.logDebug(`Adding scene parameter: ${sceneArgument}`);
-        cmdArgs.push(sceneArgument);
-      }
+      const cmdArgs = runArguments({
+        projectPath,
+        headless: resolveHeadless(args['headless'], { platform: process.platform, variables: process.env }),
+        scene: sceneToRun?.ok ? sceneToRun.relativePath : null,
+      });
 
-      this.logDebug(`Running Godot project: ${projectPath}`);
-      const process = spawn(this.godotPath, cmdArgs, { stdio: 'pipe' });
+      this.logDebug(`Running Godot project: ${this.godotPath} ${cmdArgs.join(' ')}`);
+      const child = spawn(this.godotPath, cmdArgs, { stdio: 'pipe' });
       const output: string[] = [];
       const errors: string[] = [];
 
-      process.stdout.on('data', (data: Buffer) => {
+      child.stdout.on('data', (data: Buffer) => {
         const lines = data.toString().split('\n');
         output.push(...lines);
         lines.forEach((line: string) => {
@@ -2040,7 +1854,7 @@ class GodotServer {
         });
       });
 
-      process.stderr.on('data', (data: Buffer) => {
+      child.stderr.on('data', (data: Buffer) => {
         const lines = data.toString().split('\n');
         errors.push(...lines);
         lines.forEach((line: string) => {
@@ -2048,21 +1862,21 @@ class GodotServer {
         });
       });
 
-      process.on('exit', (code: number | null) => {
+      child.on('exit', (code: number | null) => {
         this.logDebug(`Godot process exited with code ${code ?? 'none'}`);
-        if (this.activeProcess?.process === process) {
+        if (this.activeProcess?.process === child) {
           this.activeProcess = null;
         }
       });
 
-      process.on('error', (err: Error) => {
+      child.on('error', (err: Error) => {
         console.error('Failed to start Godot process:', err);
-        if (this.activeProcess?.process === process) {
+        if (this.activeProcess?.process === child) {
           this.activeProcess = null;
         }
       });
 
-      this.activeProcess = { process, output, errors };
+      this.activeProcess = { process: child, output, errors };
 
       return {
         content: [

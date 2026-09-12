@@ -1,34 +1,29 @@
-#!/usr/bin/env node
 /**
- * Unit tests for Godot versioned-binary auto-detection (Issue #67).
+ * Where the server looks for an engine when nothing names one.
  *
- * Godot release downloads use versioned filenames such as
- * `Godot_v4.4.1-stable_win64.exe` that the hard-coded candidate list in
- * detectGodotPath() cannot match. scanDirectoryForGodotBinaries() globs an
- * install directory for any Godot executable and returns candidates sorted
- * newest-first by mtime.
- *
- * These tests run against a real temp directory with synthetic files so the
- * glob/sort logic is exercised without requiring an actual Godot install.
+ * A release download is a file called `Godot_v4.4.1-stable_win64.exe`, which no fixed list of
+ * install paths can name, so the directories a download lands in are read as well. The list is
+ * asserted against a temp directory laid out like a home, so the order in which candidates are
+ * tried is a fact about the function rather than about this machine.
  */
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const { scanDirectoryForGodotBinaries } = await import('../src/index.js');
+import { godotCandidates, scanDirectoryForGodotBinaries } from '../src/detection.js';
 
 function testIgnoresEmptyAndMissingDirectories() {
-  assert.deepEqual(scanDirectoryForGodotBinaries(''), [], 'empty directory returns no candidates');
+  assert.deepEqual(scanDirectoryForGodotBinaries('', 'linux'), [], 'empty directory returns no candidates');
   assert.deepEqual(
-    scanDirectoryForGodotBinaries('/nonexistent/path/xyz'),
+    scanDirectoryForGodotBinaries('/nonexistent/path/xyz', 'linux'),
     [],
     'missing directory returns no candidates',
   );
 }
 
 function testDetectsVersionedWindowsBinaries() {
-  const dir = mkdtempSync(join(tmpdir(), 'gopeak-detect-win-'));
+  const dir = mkdtempSync(join(tmpdir(), 'gdharness-detect-win-'));
   try {
     writeFileSync(join(dir, 'Godot_v4.4.1-stable_win64.exe'), '');
     writeFileSync(join(dir, 'Godot_v4.3-stable_win64.exe'), '');
@@ -52,7 +47,7 @@ function testDetectsVersionedWindowsBinaries() {
 }
 
 function testDetectsVersionedLinuxBinaries() {
-  const dir = mkdtempSync(join(tmpdir(), 'gopeak-detect-linux-'));
+  const dir = mkdtempSync(join(tmpdir(), 'gdharness-detect-linux-'));
   try {
     writeFileSync(join(dir, 'godot_v4.4.1-stable_linux.x86_64'), '');
     writeFileSync(join(dir, 'godot4'), '');
@@ -72,7 +67,7 @@ function testDetectsVersionedLinuxBinaries() {
 }
 
 function testNewestFirstOrdering() {
-  const dir = mkdtempSync(join(tmpdir(), 'gopeak-detect-order-'));
+  const dir = mkdtempSync(join(tmpdir(), 'gdharness-detect-order-'));
   try {
     writeFileSync(join(dir, 'Godot_v4.0-stable_win64.exe'), 'old');
     const past = new Date(Date.now() - 120_000);
@@ -92,7 +87,7 @@ function testNewestFirstOrdering() {
 }
 
 function testIgnoresDirectoriesMatchingPattern() {
-  const dir = mkdtempSync(join(tmpdir(), 'gopeak-detect-dir-'));
+  const dir = mkdtempSync(join(tmpdir(), 'gdharness-detect-dir-'));
   try {
     mkdirSync(join(dir, 'Godot_temp'));
     writeFileSync(join(dir, 'Godot_v4.4.1-stable_win64.exe'), '');
@@ -105,12 +100,50 @@ function testIgnoresDirectoriesMatchingPattern() {
   }
 }
 
+/** A download in the home directory is tried, after every conventional path and never before. */
+function testDownloadsAreTriedAfterTheConventionalPaths() {
+  const home = mkdtempSync(join(tmpdir(), 'gdharness-detect-home-'));
+  try {
+    mkdirSync(join(home, 'Downloads'));
+    writeFileSync(join(home, 'Downloads', 'Godot_v4.4.1-stable_win64.exe'), '');
+    mkdirSync(join(home, 'Desktop'));
+    writeFileSync(join(home, 'Desktop', 'godot_v4.3-stable_linux.x86_64'), '');
+
+    const windows = godotCandidates('win32', home);
+    const downloaded = windows.indexOf(join(home, 'Downloads', 'Godot_v4.4.1-stable_win64.exe'));
+    assert.ok(downloaded !== -1, `the download should be a candidate: ${windows.join(', ')}`);
+    assert.equal(windows[0], 'godot', 'PATH is asked first');
+    assert.ok(windows.indexOf(`${home}\\Godot\\Godot.exe`) < downloaded, 'named paths come before the scan');
+    assert.ok(!windows.some((p) => p.endsWith('linux.x86_64')), 'a Linux build is not a Windows candidate');
+
+    const linux = godotCandidates('linux', home);
+    assert.ok(linux.includes(join(home, 'Desktop', 'godot_v4.3-stable_linux.x86_64')));
+    assert.ok(!linux.some((p) => p.endsWith('.exe')), 'a Windows build is not a Linux candidate');
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
+/** Without a home directory the list is the fixed paths alone, with nothing spelled "undefined". */
+function testNoHomeMeansNoHomeCandidates() {
+  for (const platform of ['win32', 'linux', 'darwin'] as const) {
+    const candidates = godotCandidates(platform, '');
+    assert.ok(candidates.length > 1, `${platform} still has the conventional paths`);
+    assert.ok(
+      candidates.every((p) => !p.includes('undefined') && !p.startsWith('/Downloads') && !p.startsWith('\\')),
+      `${platform} candidates should not be built from a missing home: ${candidates.join(', ')}`,
+    );
+  }
+}
+
 function main() {
   testIgnoresEmptyAndMissingDirectories();
   testDetectsVersionedWindowsBinaries();
   testDetectsVersionedLinuxBinaries();
   testNewestFirstOrdering();
   testIgnoresDirectoriesMatchingPattern();
+  testDownloadsAreTriedAfterTheConventionalPaths();
+  testNoHomeMeansNoHomeCandidates();
   console.log('godot detection tests passed');
 }
 

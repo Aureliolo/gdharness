@@ -187,6 +187,40 @@ function testDependencyWalk(godotPath: string, projectDir: string): void {
     asArray(get(cyclicPayload, 'circular_references')).length > 0,
     'the walk should report the cycle it found rather than silently stopping',
   );
+
+  // addons/ is project content and often shipping content, so it is walked like anything
+  // else; what the walk leaves out by default is the engine's own res://. space.
+  mkdirSync(join(projectDir, 'addons', 'fixture'), { recursive: true });
+  writeFileSync(join(projectDir, 'addons', 'fixture', 'helper.gd'), 'extends Node\n');
+  writeFileSync(
+    join(projectDir, 'chain', 'shipping.gd'),
+    'extends Node\n\nconst Helper = preload("res://addons/fixture/helper.gd")\nconst Cache = preload("res://.godot/fixture_cache.gd")\n',
+  );
+  writeFileSync(paramsPath, JSON.stringify({ resource_path: 'res://chain/shipping.gd', max_depth: 3 }));
+  const shipping = runScript(godotPath, projectDir, join(projectDir, 'operations', 'godot_operations.gd'), [
+    'get_dependencies',
+    `@file:${paramsPath}`,
+  ]);
+  if (shipping.status !== 0) {
+    throw new Error(
+      `get_dependencies through addons failed:\n${`${shipping.stdout}\n${shipping.stderr}`.trim()}`,
+    );
+  }
+  const shippingDeps = asArray(
+    get(
+      lastJsonLine(shipping.stdout, 'get_dependencies through addons'),
+      'dependencies',
+      'res://chain/shipping.gd',
+    ),
+  ).map((dep) => get(dep, 'path'));
+  assert.ok(
+    shippingDeps.includes('res://addons/fixture/helper.gd'),
+    `addons are walked: ${shippingDeps.join(', ')}`,
+  );
+  assert.ok(
+    !shippingDeps.includes('res://.godot/fixture_cache.gd'),
+    `res://. is skipped: ${shippingDeps.join(', ')}`,
+  );
 }
 
 /**
@@ -667,6 +701,8 @@ function main(): void {
     runFixture(godotPath, projectDir, 'operations_modules');
     runFixture(godotPath, projectDir, 'operations_serialize');
     runFixture(godotPath, projectDir, 'runtime_serialize');
+    runFixture(godotPath, projectDir, 'runtime_input');
+    runFixture(godotPath, projectDir, 'runtime_clients');
     runFixture(godotPath, projectDir, 'input_action');
     testDependencyWalk(godotPath, projectDir);
     testOperations(godotPath, projectDir);
