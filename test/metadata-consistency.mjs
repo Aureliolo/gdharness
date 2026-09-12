@@ -3,10 +3,10 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
-import { findJsonRpcResponse } from './test-support/json-rpc.mjs';
+import { findJsonRpcResponse } from './support/json-rpc.mjs';
 
-const pkg = JSON.parse(fs.readFileSync(new URL('./package.json', import.meta.url), 'utf8'));
-const serverManifest = JSON.parse(fs.readFileSync(new URL('./server.json', import.meta.url), 'utf8'));
+const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+const serverManifest = JSON.parse(fs.readFileSync(new URL('../server.json', import.meta.url), 'utf8'));
 
 assert.equal(serverManifest.version, pkg.version, 'server.json version should match package.json');
 assert.equal(serverManifest.packages, undefined, 'server.json should not advertise a registry package for a GitHub Release tarball');

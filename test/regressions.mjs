@@ -8,13 +8,13 @@ import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { spawnSync } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
-import { createBridge } from './build/godot-bridge.js';
-import { parseProjectGodot } from './build/resources.js';
-import { GodotLSPClient } from './build/lsp_client.js';
+import { createBridge } from '../build/godot-bridge.js';
+import { parseProjectGodot } from '../build/resources.js';
+import { GodotLSPClient } from '../build/lsp_client.js';
 
-const INDEX_SOURCE = readFileSync(new URL('./src/index.ts', import.meta.url), 'utf8');
-const OPERATIONS_SOURCE = readFileSync(new URL('./src/scripts/godot_operations.gd', import.meta.url), 'utf8');
-const RUNTIME_SOURCE = readFileSync(new URL('./src/addon/godot_mcp_runtime/mcp_runtime_autoload.gd', import.meta.url), 'utf8');
+const INDEX_SOURCE = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
+const OPERATIONS_SOURCE = readFileSync(new URL('../src/godot/operations/godot_operations.gd', import.meta.url), 'utf8');
+const RUNTIME_SOURCE = readFileSync(new URL('../src/godot/addons/godot_mcp_runtime/mcp_runtime_autoload.gd', import.meta.url), 'utf8');
 
 function makeRequest(method, params, id) {
   return JSON.stringify({ jsonrpc: '2.0', method, params, id }) + '\n';
@@ -144,7 +144,7 @@ function testSceneToolsVectorRegression() {
   try {
     mkdirSync(join(projectDir, 'addons', 'godot_mcp_editor', 'tools'), { recursive: true });
     mkdirSync(join(projectDir, 'scenes'), { recursive: true });
-    cpSync('src/addon/godot_mcp_editor/tools/scene_tools.gd', join(projectDir, 'addons', 'godot_mcp_editor', 'tools', 'scene_tools.gd'));
+    cpSync('src/godot/addons/godot_mcp_editor/tools/scene_tools.gd', join(projectDir, 'addons', 'godot_mcp_editor', 'tools', 'scene_tools.gd'));
 
     writeFileSync(join(projectDir, 'project.godot'), `; Engine configuration file.\n; It's best edited using the editor.\nconfig_version=5\n\n[application]\nconfig/name="GopeakRegression"\n`);
 

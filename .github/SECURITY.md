@@ -1,24 +1,42 @@
-# Security Policy
+# Security
 
-## Supported Versions
+## Reporting
 
-| Version | Supported |
-|---------|-----------|
-| 2.x     | Yes       |
-| < 2.0   | No        |
+Report a vulnerability privately through
+[GitHub's advisory form](https://github.com/Aureliolo/gdharness/security/advisories/new).
+Please do not open a public issue for anything exploitable.
 
-## Reporting a Vulnerability
+Include what you did, what happened, and what you expected. A minimal reproduction is worth
+more than a description.
 
-If you discover a security vulnerability in GoPeak, please report it responsibly:
+## What is in scope
 
-1. **Do NOT** open a public GitHub issue
-2. Email the maintainer or use [GitHub Security Advisories](https://github.com/HaD0Yun/godot-mcp/security/advisories/new)
-3. Include steps to reproduce and potential impact
+gdharness runs on a developer's machine and drives a Godot editor and a running game. The
+things worth reporting:
 
-We will acknowledge receipt within 48 hours and provide a fix timeline.
+- The runtime bridge or the editor bridge reachable from outside the machine, or from a
+  release build rather than a debug one.
+- A tool executing something the caller did not ask for: path traversal out of the project
+  directory, argument injection into the Godot command line, a file written outside the
+  project.
+- Anything that makes the release archive differ from what was built and attested.
+- Secrets or tokens read, logged or transmitted by the server.
 
-## Security Considerations
+## What is not
 
-- **Path Traversal**: MCP Resources (`godot://` URIs) include path traversal protection
-- **Localhost Only**: Runtime addon TCP (port 7777), LSP (port 6005), and DAP (port 6006) connections are localhost-only
-- **No Remote Execution**: All file operations are restricted to the Godot project directory
+- The bridge being reachable from the same machine. It binds loopback and refuses to serve a
+  release build; a local process is inside the trust boundary by design.
+- An MCP client sending hostile arguments. The client is the operator here.
+
+## Releases
+
+Every release is built in CI on Linux from a signed commit on `main`, with a frozen
+lockfile. Each one ships the archive, a SHA-256 sidecar and an SPDX SBOM, and carries two
+Sigstore attestations: build provenance, and the SBOM bound to the archive. Releases are
+immutable and the `v*` tags cannot be moved.
+
+```bash
+gh attestation verify gdharness-<version>.tgz --repo Aureliolo/gdharness
+gh attestation verify gdharness-<version>.tgz --repo Aureliolo/gdharness --predicate-type https://spdx.dev/Document
+sha256sum --check gdharness-<version>.tgz.sha256
+```

@@ -1,27 +1,8 @@
-## Summary
+## What this changes
 
-Brief description of the changes.
+## How it was proved
 
-## Type
-
-- [ ] Bug fix
-- [ ] New feature / tool
-- [ ] Refactoring
-- [ ] Documentation
-- [ ] Other
-
-## Changes
-
-- ...
-
-## Testing
-
-- [ ] `bun run build` passes
-- [ ] Tested with MCP client (which one?)
-- [ ] New tools documented in README
-
-## Checklist
-
-- [ ] Code follows existing patterns in the codebase
-- [ ] No `as any` or `@ts-ignore` added
-- [ ] CHANGELOG.md updated (if applicable)
+- [ ] `bun run ci` passes
+- [ ] A tool that was added or altered has a fixture driving it against a real Godot
+- [ ] A mutating tool reads its result back from the engine rather than echoing the request
+- [ ] Failure modes error and name the valid input, rather than defaulting silently
