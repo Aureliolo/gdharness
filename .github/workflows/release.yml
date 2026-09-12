@@ -17,7 +17,7 @@ jobs:
   build_test:
     name: build_test
     if: github.repository == 'Aureliolo/gdharness'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
       contents: read # Reads the tagged source it builds.
@@ -57,16 +57,12 @@ jobs:
             exit 1
           fi
 
-      - name: Setup Bun
-        # No bun-version input on purpose: setup-bun reads packageManager out of
-        # package.json, which is the one place the Bun version is written. Caching is off
-        # because a cache entry can be written by any job on any branch, including a pull
-        # request from a fork, and a release build is the last place to accept bytes whose
-        # provenance is a cache key. The saving is seconds; the exposure is the artifact
-        # everybody downloads.
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          no-cache: true
+      # No package cache here on purpose: a cache entry can be written by any job on any branch,
+      # including a pull request from a fork, and a release build is the last place to accept
+      # bytes whose provenance is a cache key. The saving is seconds; the exposure is the artifact
+      # everybody downloads.
+      - name: Install Bun
+        uses: ./.github/actions/install-bun # zizmor: ignore[self-repository]
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -176,7 +172,7 @@ jobs:
     name: sbom
     if: github.repository == 'Aureliolo/gdharness'
     needs: build_test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions: {}
 
@@ -253,7 +249,7 @@ jobs:
     name: publish
     if: github.repository == 'Aureliolo/gdharness'
     needs: [build_test, attest]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
       contents: write # Creates the release and uploads the assets onto it.

@@ -30,7 +30,7 @@ concurrency:
 jobs:
   prepare:
     name: prepare
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: write # Creates the release branch and the signed version-bump commit on it.
@@ -43,8 +43,8 @@ jobs:
           ref: main
           persist-credentials: false
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - name: Install Bun
+        uses: ./.github/actions/install-bun # zizmor: ignore[self-repository]
 
       - name: Raise the version
         id: bump

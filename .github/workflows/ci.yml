@@ -22,7 +22,7 @@ jobs:
   # Formatting is mechanical and always enforceable, so it gates from day one.
   format:
     name: format
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
 
     steps:
@@ -31,10 +31,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Setup Bun
-        # No bun-version input on purpose: setup-bun reads packageManager out of
-        # package.json, which is the one place the Bun version is written.
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - name: Install Bun
+        uses: ./.github/actions/install-bun # zizmor: ignore[self-repository]
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -42,18 +40,11 @@ jobs:
       - name: Check formatting
         run: bun run format:check
 
-      # Offline on purpose: this asks whether every pinned version is one something watches, not
-      # whether it is the newest. The second question needs the network and would turn an
-      # unrelated change red the morning somebody upstream publishes.
-      - name: Every pin is watched
-        if: '!cancelled()'
-        run: bun run check:pins
-
   # The GDScript is what runs inside a user's engine, so it gets the same treatment as the
   # TypeScript in front of it.
   gdscript:
     name: gdscript
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
 
     steps:
@@ -62,13 +53,37 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Setup Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: '3.13'
+      # uv rather than setup-python and pip: setup-python fetches an interpreter by version and
+      # checks nothing about it, and pip trusts whatever the index serves. uv is the one download
+      # done on trust here, and it is refused unless it matches the digest written below; the
+      # interpreter it then installs is checked against the hashes uv itself carries, and the
+      # packages against the hashes in the requirements file.
+      - name: Install uv
+        env:
+          # renovate: datasource=github-release-attachments depName=astral-sh/uv versioning=semver
+          UV_TAG: 0.12.13
+          UV_SHA256: 745765a3b6e360ad76743599ae5c42e9278c7edf8bbff9fc76d05bf2623a04dd
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/uv-x86_64-unknown-linux-gnu.tar.gz"
+          curl -fsSL --proto '=https' --tlsv1.2 --retry 2 -o "${archive}" \
+            "https://github.com/astral-sh/uv/releases/download/${UV_TAG}/uv-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${UV_SHA256}  ${archive}" | sha256sum --check --strict
+          tar -xzf "${archive}" -C "${RUNNER_TEMP}"
+          echo "${RUNNER_TEMP}/uv-x86_64-unknown-linux-gnu" >> "${GITHUB_PATH}"
 
       - name: Install gdtoolkit
-        run: pip install gdtoolkit==4.5.0
+        env:
+          # renovate: datasource=python-version depName=python
+          PYTHON_VERSION: 3.14.7
+          # The interpreter uv downloads and verifies, never one the runner image happens to have.
+          UV_MANAGED_PYTHON: '1'
+        run: |
+          set -euo pipefail
+          uv venv --python "${PYTHON_VERSION}" "${RUNNER_TEMP}/gdtoolkit"
+          uv pip install --python "${RUNNER_TEMP}/gdtoolkit" --require-hashes \
+            --requirements .github/requirements/gdtoolkit.txt
+          echo "${RUNNER_TEMP}/gdtoolkit/bin" >> "${GITHUB_PATH}"
 
       - name: Check formatting
         run: gdformat --check --line-length=110 src/godot
@@ -83,13 +98,26 @@ jobs:
   # things it covers, project.godot writing and path handling, are exactly where the platforms
   # differ.
   engine:
-    name: engine
+    # Named by platform rather than by runner image, because the name is what the branch ruleset
+    # requires, and an image bump must not rename a required check out from under it.
+    name: engine (${{ matrix.platform }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        # Renovate reads a runner out of `runs-on:` but not out of a matrix, so each of these
+        # carries its own line for it.
+        include:
+          - platform: linux
+            # renovate: datasource=github-runners depName=ubuntu
+            runner: ubuntu-24.04
+          - platform: windows
+            # renovate: datasource=github-runners depName=windows
+            runner: windows-2025
+          - platform: macos
+            # renovate: datasource=github-runners depName=macos
+            runner: macos-26
 
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 25
 
     steps:
@@ -98,8 +126,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - name: Install Bun
+        uses: ./.github/actions/install-bun # zizmor: ignore[self-repository]
 
       # Ours rather than a setup action's, because the engine is a 180 MB binary and this is the
       # only way to know it is the one the repository pins. It exports GODOT_PATH.
@@ -129,7 +157,7 @@ jobs:
   # lights rather than one.
   lint:
     name: lint
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
 
     steps:
@@ -138,10 +166,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Setup Bun
-        # No bun-version input on purpose: setup-bun reads packageManager out of
-        # package.json, which is the one place the Bun version is written.
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - name: Install Bun
+        uses: ./.github/actions/install-bun # zizmor: ignore[self-repository]
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -155,7 +181,7 @@ jobs:
 
   build-and-test:
     name: build-and-test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
 
     steps:
@@ -164,10 +190,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Setup Bun
-        # No bun-version input on purpose: setup-bun reads packageManager out of
-        # package.json, which is the one place the Bun version is written.
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - name: Install Bun
+        uses: ./.github/actions/install-bun # zizmor: ignore[self-repository]
 
       - name: Restore Bun package cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

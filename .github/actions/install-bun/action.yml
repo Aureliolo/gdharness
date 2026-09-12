@@ -1,0 +1,67 @@
+name: Install Bun
+description: >-
+  The Bun this repository pins, fetched from its release and refused unless its SHA-256 is the one
+  written here. setup-bun downloads whatever the release serves for a version and checks nothing
+  about what arrived, and Bun is the process that runs every other check.
+
+runs:
+  using: composite
+  steps:
+    - name: Download, verify, install
+      shell: bash
+      env:
+        # Three copies of the tag on purpose: each platform's digest has to sit beside a version
+        # for Renovate to move the two together, and the script refuses to run if they disagree.
+        # renovate: datasource=github-release-attachments depName=oven-sh/bun versioning=regex:^bun-v(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)$
+        LINUX_X64_TAG: bun-v1.4.2
+        LINUX_X64_SHA256: 36368faef7527875d5ffa52e53cd48021741f2a83eb6208a8dd64068d422a913
+        # renovate: datasource=github-release-attachments depName=oven-sh/bun versioning=regex:^bun-v(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)$
+        MACOS_ARM64_TAG: bun-v1.4.2
+        MACOS_ARM64_SHA256: 90987a3a16d7db556d886ac3d551e7b6d3edf0a1cf43acaed622e8676be1d12f
+        # renovate: datasource=github-release-attachments depName=oven-sh/bun versioning=regex:^bun-v(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)$
+        WINDOWS_X64_TAG: bun-v1.4.2
+        WINDOWS_X64_SHA256: ce4c17497b2f29712a99d3d53f028de28cd42e3bacb8589599e7f000e49b6405
+      # The one write to GITHUB_PATH is a directory under RUNNER_TEMP named by this file; no
+      # input reaches it.
+      run: | # zizmor: ignore[github-env]
+        set -euo pipefail
+
+        if [[ "${LINUX_X64_TAG}" != "${MACOS_ARM64_TAG}" || "${LINUX_X64_TAG}" != "${WINDOWS_X64_TAG}" ]]; then
+          echo "The three Bun tags disagree: ${LINUX_X64_TAG} ${MACOS_ARM64_TAG} ${WINDOWS_X64_TAG}" >&2
+          exit 1
+        fi
+        tag="${LINUX_X64_TAG}"
+
+        case "${RUNNER_OS}-${RUNNER_ARCH}" in
+          Linux-X64) build=linux-x64; sha256="${LINUX_X64_SHA256}" ;;
+          macOS-ARM64) build=darwin-aarch64; sha256="${MACOS_ARM64_SHA256}" ;;
+          Windows-X64) build=windows-x64; sha256="${WINDOWS_X64_SHA256}" ;;
+          *) echo "No pinned Bun for ${RUNNER_OS} ${RUNNER_ARCH}." >&2; exit 1 ;;
+        esac
+
+        archive="${RUNNER_TEMP}/bun-${build}.zip"
+        curl -fsSL --proto '=https' --tlsv1.2 --retry 2 -o "${archive}" \
+          "https://github.com/oven-sh/bun/releases/download/${tag}/bun-${build}.zip"
+        # Compared here rather than through `sha256sum --check`: the macOS one is BSD's and does
+        # not take the GNU options. Hashed from stdin because the GNU one prefixes its output
+        # with a backslash when the file name holds one, which every Windows path does.
+        actual="$(sha256sum < "${archive}" | cut -d ' ' -f 1)"
+        if [[ "${actual}" != "${sha256}" ]]; then
+          echo "bun-${build}.zip is not the file this action pins: expected ${sha256}, received ${actual}." >&2
+          exit 1
+        fi
+        unzip -q -o "${archive}" -d "${RUNNER_TEMP}"
+
+        bin="${RUNNER_TEMP}/bun-${build}"
+        reported="$("${bin}/bun" --version)"
+        wanted="$("${bin}/bun" -e "console.log((await Bun.file('package.json').json()).packageManager)")"
+        if [[ "bun-v${reported}" != "${tag}" || "${wanted}" != "bun@${reported}" ]]; then
+          echo "Installed Bun ${reported}; this action pins ${tag} and package.json says ${wanted}." >&2
+          exit 1
+        fi
+
+        if [[ "${RUNNER_OS}" == Windows ]]; then
+          bin="$(cygpath --windows "${bin}")"
+        fi
+        echo "${bin}" >> "${GITHUB_PATH}"
+        echo "Bun ${reported} at ${bin}"
