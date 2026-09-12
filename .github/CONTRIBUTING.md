@@ -24,7 +24,7 @@ all TypeScript, so one type checker covers everything Bun runs.
 | Linter | Biome, oxlint type-aware | gdlint, nothing disabled | actionlint, zizmor at `pedantic` |
 | Type checker | `tsc`, `@tsconfig/strictest`, over `src`, `test` and `scripts` alike | the engine, warnings as errors | - |
 | Dead code | knip: every file, export and dependency is reached from an entry point | - | - |
-| Fuzzing | property tests on every parser of untrusted input | - | - |
+| Fuzzing | fast-check properties in `test/fuzz.ts` over every reader of bytes nobody here wrote: the Content-Length framing, `project.godot`, paths inside a project, the engine archive | - | - |
 
 Rules are **written out rather than inherited from a preset**, so the file says what it enforces:
 see `.oxlintrc.json` and `.gdlintrc`. Nothing is turned off quietly. A rule that fires on good
@@ -65,7 +65,7 @@ bun run build
 Checks, all of which CI runs:
 
 ```bash
-bun run ci                 # build, typecheck over src, test and scripts, regression and detection tests
+bun run ci                 # build, typecheck over src, test and scripts, regression, detection, archive and property tests
 bun run test:dynamic-groups
 bun run test:metadata
 bun run format             # Biome, writes

@@ -2,6 +2,7 @@ import { readFile, realpath } from 'node:fs/promises';
 import { createConnection, type Socket } from 'node:net';
 import { dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { FrameReader, frame, OversizedStreamError } from './framing.js';
 import { isWithinRoot } from './paths.js';
 
 interface PendingRequest {
@@ -19,19 +20,6 @@ interface DiagnosticsWaiter {
 type JsonRecord = Record<string, unknown>;
 
 const DIAGNOSTICS_TIMEOUT_MS = 5000;
-
-const HEADER_TERMINATOR = '\r\n\r\n';
-
-/**
- * A ceiling on the bytes held while waiting for a message to complete.
- *
- * Without one, a peer that announces a Content-Length and then stops sending grows this
- * process until it dies, and says nothing on the way. The largest real traffic on this
- * socket is a completion list over the whole global scope or the diagnostics for a very
- * long script, both of which Godot answers in hundreds of kilobytes; 32 MiB is two orders
- * of magnitude above that, so reaching it means the stream is broken rather than busy.
- */
-const MAX_MESSAGE_BYTES = 32 * 1024 * 1024;
 
 /**
  * Normalise a file URI so the same file always produces the same key.
@@ -62,10 +50,7 @@ export class GodotLSPClient {
   private host: string;
   private requestId = 0;
   private pendingRequests: Map<number, PendingRequest>;
-  // Bytes, not a string. Content-Length counts bytes, while every string index in
-  // JavaScript counts UTF-16 code units, and the two stop agreeing at the first character
-  // outside ASCII: an accented project name desynchronises the stream for good.
-  private buffer: Buffer = Buffer.alloc(0);
+  private reader = new FrameReader();
 
   private connectPromise: Promise<void> | null = null;
   private initialized = false;
@@ -94,7 +79,7 @@ export class GodotLSPClient {
       const socket = createConnection({ port: this.port, host: this.host }, () => {
         this.socket = socket;
         this.connected = true;
-        this.buffer = Buffer.alloc(0);
+        this.reader = new FrameReader();
 
         if (!settled) {
           settled = true;
@@ -103,11 +88,24 @@ export class GodotLSPClient {
       });
 
       socket.on('data', (chunk: Buffer) => {
-        this.buffer = Buffer.concat([this.buffer, chunk]);
-        this.parseMessages();
-
-        if (this.buffer.length > MAX_MESSAGE_BYTES) {
-          this.failOversizedStream(`${this.buffer.length} bytes buffered with no complete message`);
+        let frames: ReturnType<FrameReader['push']>;
+        try {
+          frames = this.reader.push(chunk);
+        } catch (error) {
+          if (error instanceof OversizedStreamError) {
+            this.failOversizedStream(error.message);
+            return;
+          }
+          throw error;
+        }
+        for (const received of frames) {
+          if (received.kind === 'malformed') {
+            console.error(
+              `[GodotLSP] Discarding a ${received.byteLength} byte message that is not JSON: ${received.reason}`,
+            );
+            continue;
+          }
+          this.handleMessage(received.value);
         }
       });
 
@@ -195,8 +193,7 @@ export class GodotLSPClient {
       params,
     };
 
-    const content = JSON.stringify(payload);
-    const framed = this.frameMessage(content);
+    const framed = frame(payload);
 
     return new Promise<unknown>((resolveRequest, rejectRequest) => {
       const timer = setTimeout(() => {
@@ -239,106 +236,50 @@ export class GodotLSPClient {
       params,
     };
 
-    const content = JSON.stringify(payload);
-    const framed = this.frameMessage(content);
-
-    this.socket.write(framed);
+    this.socket.write(frame(payload));
   }
 
-  private frameMessage(content: string): Buffer {
-    const body = Buffer.from(content, 'utf8');
-    // Header and body come from the same encode, so the announced length is always the
-    // number of bytes that follow it.
-    return Buffer.concat([Buffer.from(`Content-Length: ${body.length}${HEADER_TERMINATOR}`, 'ascii'), body]);
-  }
+  private handleMessage(parsed: unknown): void {
+    if (!parsed || typeof parsed !== 'object') {
+      return;
+    }
 
-  private parseMessages(): void {
-    for (;;) {
-      const headerEnd = this.buffer.indexOf(HEADER_TERMINATOR);
-      if (headerEnd === -1) {
-        return;
-      }
+    const message: JsonRecord = parsed as JsonRecord;
 
-      // Headers are ASCII by specification, so latin1 decodes them one byte to one
-      // character and the offsets below stay byte offsets.
-      const header = this.buffer.toString('latin1', 0, headerEnd);
-      const contentLengthMatch = /Content-Length:\s*(\d+)/i.exec(header);
-      if (!contentLengthMatch?.[1]) {
-        this.buffer = this.buffer.subarray(headerEnd + HEADER_TERMINATOR.length);
-        continue;
-      }
+    if (typeof message['id'] === 'number') {
+      const pending = this.pendingRequests.get(message['id']);
+      if (pending) {
+        clearTimeout(pending.timer);
+        this.pendingRequests.delete(message['id']);
 
-      const contentLength = Number.parseInt(contentLengthMatch[1], 10);
-      if (contentLength > MAX_MESSAGE_BYTES) {
-        this.failOversizedStream(`a peer announced a ${contentLength} byte message`);
-        return;
-      }
-
-      const bodyStart = headerEnd + HEADER_TERMINATOR.length;
-      const bodyEnd = bodyStart + contentLength;
-
-      if (this.buffer.length < bodyEnd) {
-        return;
-      }
-
-      const body = this.buffer.toString('utf8', bodyStart, bodyEnd);
-      this.buffer = this.buffer.subarray(bodyEnd);
-
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(body);
-      } catch (error) {
-        // A body that will not parse is the only symptom a framing fault has, and skipping
-        // it in silence leaves the stream desynchronised with nothing on any log to say so.
-        console.error(
-          `[GodotLSP] Discarding a ${contentLength} byte message that is not JSON: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-        continue;
-      }
-
-      if (!parsed || typeof parsed !== 'object') {
-        continue;
-      }
-
-      const message: JsonRecord = parsed as JsonRecord;
-
-      if (typeof message['id'] === 'number') {
-        const pending = this.pendingRequests.get(message['id']);
-        if (pending) {
-          clearTimeout(pending.timer);
-          this.pendingRequests.delete(message['id']);
-
-          const errorPayload = message['error'];
-          if (errorPayload && typeof errorPayload === 'object') {
-            const errorObject = errorPayload as JsonRecord;
-            const code = typeof errorObject['code'] === 'number' ? errorObject['code'] : 'unknown';
-            const messageText =
-              typeof errorObject['message'] === 'string' ? errorObject['message'] : 'Unknown LSP error';
-            pending.reject(new Error(`LSP error (${code}): ${messageText}`));
-          } else {
-            pending.resolve(message['result']);
-          }
+        const errorPayload = message['error'];
+        if (errorPayload && typeof errorPayload === 'object') {
+          const errorObject = errorPayload as JsonRecord;
+          const code = typeof errorObject['code'] === 'number' ? errorObject['code'] : 'unknown';
+          const messageText =
+            typeof errorObject['message'] === 'string' ? errorObject['message'] : 'Unknown LSP error';
+          pending.reject(new Error(`LSP error (${code}): ${messageText}`));
+        } else {
+          pending.resolve(message['result']);
         }
       }
+    }
 
-      if (message['method'] === 'textDocument/publishDiagnostics') {
-        const params = message['params'];
-        const paramsObject = params && typeof params === 'object' ? (params as JsonRecord) : null;
-        const uri = paramsObject && typeof paramsObject['uri'] === 'string' ? paramsObject['uri'] : null;
-        const diagnostics =
-          paramsObject && Array.isArray(paramsObject['diagnostics'])
-            ? (paramsObject['diagnostics'] as unknown[])
-            : [];
-        if (typeof uri === 'string') {
-          const key = diagnosticsKey(uri);
-          const waiter = this.diagnosticsWaiters.get(key);
-          if (waiter) {
-            clearTimeout(waiter.timer);
-            this.diagnosticsWaiters.delete(key);
-            waiter.resolve(diagnostics);
-          }
+    if (message['method'] === 'textDocument/publishDiagnostics') {
+      const params = message['params'];
+      const paramsObject = params && typeof params === 'object' ? (params as JsonRecord) : null;
+      const uri = paramsObject && typeof paramsObject['uri'] === 'string' ? paramsObject['uri'] : null;
+      const diagnostics =
+        paramsObject && Array.isArray(paramsObject['diagnostics'])
+          ? (paramsObject['diagnostics'] as unknown[])
+          : [];
+      if (typeof uri === 'string') {
+        const key = diagnosticsKey(uri);
+        const waiter = this.diagnosticsWaiters.get(key);
+        if (waiter) {
+          clearTimeout(waiter.timer);
+          this.diagnosticsWaiters.delete(key);
+          waiter.resolve(diagnostics);
         }
       }
     }
@@ -355,12 +296,10 @@ export class GodotLSPClient {
     this.socket = null;
     this.connected = false;
     this.initialized = false;
-    this.buffer = Buffer.alloc(0);
+    this.reader = new FrameReader();
     socket?.destroy();
 
-    const overflow = new Error(
-      `Godot LSP stream exceeded the ${MAX_MESSAGE_BYTES} byte ceiling: ${detail}. The connection was dropped.`,
-    );
+    const overflow = new Error(`Godot LSP ${detail}. The connection was dropped.`);
     this.rejectAllPending(overflow);
     this.rejectAllDiagnosticsWaiters(overflow);
   }

@@ -211,15 +211,22 @@ function parseIniLikeValue(value: string): IniValue {
     return false;
   }
 
+  // Past 2^53, or past what a double holds at all, the number no longer says what was written
+  // and the text is the only faithful copy.
   if (/^-?\d+$/.test(value)) {
-    return Number.parseInt(value, 10);
+    const parsed = Number.parseInt(value, 10);
+    return Number.isSafeInteger(parsed) ? parsed : value;
   }
 
   if (/^-?\d*\.\d+$/.test(value)) {
-    return Number.parseFloat(value);
+    const parsed = Number.parseFloat(value);
+    return Number.isFinite(parsed) ? parsed : value;
   }
 
-  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+  if (
+    value.length >= 2 &&
+    ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'")))
+  ) {
     return value.slice(1, -1);
   }
 

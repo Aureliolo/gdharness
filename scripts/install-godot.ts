@@ -19,8 +19,10 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { appendFileSync, chmodSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, relative, resolve, sep } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { inflateRawSync } from 'node:zlib';
+
+import { isWithinRoot } from '../src/paths.js';
 
 /**
  * Per platform: the release tag, the SHA-512 of the asset as published, and where the executable
@@ -181,7 +183,10 @@ function contentsOf(zip: Buffer, entry: Entry): Buffer {
   if (entry.method === STORED) {
     contents = compressed;
   } else if (entry.method === DEFLATED) {
-    contents = inflateRawSync(compressed);
+    // Deflate expands up to a thousandfold, so a body that unpacks past the size the directory
+    // promised is stopped there rather than allowed to fill memory first and fail the size
+    // check afterwards. zlib insists the limit be at least one byte.
+    contents = inflateRawSync(compressed, { maxOutputLength: Math.max(1, entry.uncompressedSize) });
   } else {
     throw new Error(`${entry.name} uses compression method ${entry.method}, which is not stored or deflate.`);
   }
@@ -205,23 +210,35 @@ function contentsOf(zip: Buffer, entry: Entry): Buffer {
 export function extract(zip: Buffer, into: string): void {
   const root = resolve(into);
 
+  // Every entry is judged and unpacked before the first one is written, so an archive that
+  // turns out to be bad halfway through has put nothing on disk. It was fetched over the network
+  // before anything looked at it, and a name such as `../x`, `/etc/x`, `D:/x` or `//host/share/x`
+  // otherwise writes wherever it likes; the containment check is the same arithmetic the
+  // filesystem will do, shared with the server's own path handling. Holding the unpacked engine
+  // in memory for a moment costs a few hundred megabytes on a runner that has gigabytes.
+  const planned: { target: string; contents: Buffer | null }[] = [];
   for (const entry of entriesOf(zip)) {
+    if (entry.name.includes('\0')) {
+      throw new Error('An entry name contains a null byte.');
+    }
     const target = resolve(root, entry.name);
-
-    // An archive naming ../ or an absolute path writes wherever it likes otherwise, and this
-    // one is fetched over the network before anything has looked at it.
-    const inside = relative(root, target);
-    if (inside.startsWith('..') || inside.includes(`..${sep}`)) {
+    if (target === root) {
+      throw new Error(`${entry.name} names the install directory itself.`);
+    }
+    if (!isWithinRoot(root, target)) {
       throw new Error(`${entry.name} would be written outside the install directory.`);
     }
+    planned.push({ target, contents: entry.name.endsWith('/') ? null : contentsOf(zip, entry) });
+  }
 
-    if (entry.name.endsWith('/')) {
+  for (const { target, contents } of planned) {
+    if (contents === null) {
       mkdirSync(target, { recursive: true });
       continue;
     }
 
     mkdirSync(dirname(target), { recursive: true });
-    writeFileSync(target, contentsOf(zip, entry));
+    writeFileSync(target, contents);
   }
 }
 

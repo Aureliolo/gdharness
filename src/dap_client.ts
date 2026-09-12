@@ -1,4 +1,5 @@
 import { createConnection, type Socket } from 'node:net';
+import { FrameReader, frame, OversizedStreamError } from './framing.js';
 
 interface PendingRequest {
   resolve: (value: DAPBody | PromiseLike<DAPBody>) => void;
@@ -37,19 +38,6 @@ interface ToolArgs {
   line?: unknown;
 }
 
-const HEADER_TERMINATOR = '\r\n\r\n';
-
-/**
- * A ceiling on the bytes held while waiting for a message to complete.
- *
- * Without one, an adapter that announces a Content-Length and then stops sending grows this
- * process until it dies, and says nothing on the way. The largest real traffic on this
- * socket is a variable tree or a burst of output events, neither of which reaches a
- * megabyte; 32 MiB is far enough above that for reaching it to mean the stream is broken
- * rather than busy.
- */
-const MAX_MESSAGE_BYTES = 32 * 1024 * 1024;
-
 export class GodotDAPClient {
   private socket: Socket | null = null;
   private connected = false;
@@ -57,10 +45,7 @@ export class GodotDAPClient {
   private host: string;
   private seq = 1;
   private pendingRequests: Map<number, PendingRequest>;
-  // Bytes, not a string. Content-Length counts bytes, while every string index in
-  // JavaScript counts UTF-16 code units, and the two stop agreeing at the first character
-  // outside ASCII: one printed emoji desynchronises the stream for good.
-  private buffer: Buffer = Buffer.alloc(0);
+  private reader = new FrameReader();
   private outputBuffer: string[] = [];
   private maxOutputLines = 1000;
   private initialized = false;
@@ -97,14 +82,27 @@ export class GodotDAPClient {
       const handleConnect = (): void => {
         clearTimeout(connectTimeout);
         this.connected = true;
-        this.buffer = Buffer.alloc(0);
+        this.reader = new FrameReader();
 
         socket.on('data', (chunk: Buffer) => {
-          this.buffer = Buffer.concat([this.buffer, chunk]);
-          this.parseMessages();
-
-          if (this.buffer.length > MAX_MESSAGE_BYTES) {
-            this.failOversizedStream(`${this.buffer.length} bytes buffered with no complete message`);
+          let frames: ReturnType<FrameReader['push']>;
+          try {
+            frames = this.reader.push(chunk);
+          } catch (error) {
+            if (error instanceof OversizedStreamError) {
+              this.failOversizedStream(error.message);
+              return;
+            }
+            throw error;
+          }
+          for (const received of frames) {
+            if (received.kind === 'malformed') {
+              console.error(
+                `[GodotDAP] Discarding a ${received.byteLength} byte message that is not JSON: ${received.reason}`,
+              );
+              continue;
+            }
+            this.handleMessage(received.value as DAPMessage);
           }
         });
 
@@ -198,7 +196,7 @@ export class GodotDAPClient {
       arguments: args,
     };
 
-    const payload = this.frameMessage(JSON.stringify(request));
+    const payload = frame(request);
 
     return await new Promise<DAPBody>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -218,99 +216,32 @@ export class GodotDAPClient {
     });
   }
 
-  private frameMessage(content: string): Buffer {
-    const body = Buffer.from(content, 'utf8');
-    // Header and body come from the same encode, so the announced length is always the
-    // number of bytes that follow it.
-    return Buffer.concat([Buffer.from(`Content-Length: ${body.length}${HEADER_TERMINATOR}`, 'ascii'), body]);
-  }
-
-  private parseMessages(): void {
-    for (;;) {
-      const headerEndIndex = this.buffer.indexOf(HEADER_TERMINATOR);
-      if (headerEndIndex === -1) {
+  private handleMessage(message: DAPMessage): void {
+    if (message.type === 'response') {
+      const requestSeq = message.request_seq;
+      if (typeof requestSeq !== 'number') {
         return;
       }
 
-      // Headers are ASCII by specification, so latin1 decodes them one byte to one
-      // character and the offsets below stay byte offsets.
-      const headerText = this.buffer.toString('latin1', 0, headerEndIndex);
-      const headerLines = headerText.split('\r\n');
-
-      let contentLength = -1;
-      for (const line of headerLines) {
-        const [rawKey, rawValue] = line.split(':');
-        if (!rawKey || !rawValue) {
-          continue;
-        }
-
-        if (rawKey.trim().toLowerCase() === 'content-length') {
-          const parsedLength = Number.parseInt(rawValue.trim(), 10);
-          if (!Number.isNaN(parsedLength) && parsedLength >= 0) {
-            contentLength = parsedLength;
-          }
-        }
-      }
-
-      if (contentLength < 0) {
-        this.buffer = this.buffer.subarray(headerEndIndex + HEADER_TERMINATOR.length);
-        continue;
-      }
-
-      if (contentLength > MAX_MESSAGE_BYTES) {
-        this.failOversizedStream(`the adapter announced a ${contentLength} byte message`);
+      const pending = this.pendingRequests.get(requestSeq);
+      if (!pending) {
         return;
       }
 
-      const bodyStart = headerEndIndex + HEADER_TERMINATOR.length;
-      const totalMessageLength = bodyStart + contentLength;
-      if (this.buffer.length < totalMessageLength) {
-        return;
+      clearTimeout(pending.timer);
+      this.pendingRequests.delete(requestSeq);
+
+      if (message.success) {
+        pending.resolve(message.body ?? {});
+      } else {
+        const errorText =
+          typeof message.message === 'string'
+            ? message.message
+            : `DAP request failed: ${message.command ?? 'unknown command'}`;
+        pending.reject(new Error(errorText));
       }
-
-      const bodyText = this.buffer.toString('utf8', bodyStart, totalMessageLength);
-      this.buffer = this.buffer.subarray(totalMessageLength);
-
-      let message: DAPMessage;
-      try {
-        message = JSON.parse(bodyText) as DAPMessage;
-      } catch (error) {
-        // A body that will not parse is the only symptom a framing fault has, and skipping
-        // it in silence leaves the stream desynchronised with nothing on any log to say so.
-        console.error(
-          `[GodotDAP] Discarding a ${contentLength} byte message that is not JSON: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-        continue;
-      }
-
-      if (message.type === 'response') {
-        const requestSeq = message.request_seq;
-        if (typeof requestSeq !== 'number') {
-          continue;
-        }
-
-        const pending = this.pendingRequests.get(requestSeq);
-        if (!pending) {
-          continue;
-        }
-
-        clearTimeout(pending.timer);
-        this.pendingRequests.delete(requestSeq);
-
-        if (message.success) {
-          pending.resolve(message.body ?? {});
-        } else {
-          const errorText =
-            typeof message.message === 'string'
-              ? message.message
-              : `DAP request failed: ${message.command ?? 'unknown command'}`;
-          pending.reject(new Error(errorText));
-        }
-      } else if (message.type === 'event') {
-        this.handleEvent(message);
-      }
+    } else if (message.type === 'event') {
+      this.handleEvent(message);
     }
   }
 
@@ -514,14 +445,10 @@ export class GodotDAPClient {
     this.connected = false;
     this.initialized = false;
     this.attached = false;
-    this.buffer = Buffer.alloc(0);
+    this.reader = new FrameReader();
     socket?.destroy();
 
-    this.failPendingRequests(
-      new Error(
-        `Godot DAP stream exceeded the ${MAX_MESSAGE_BYTES} byte ceiling: ${detail}. The connection was dropped.`,
-      ),
-    );
+    this.failPendingRequests(new Error(`Godot DAP ${detail}. The connection was dropped.`));
   }
 
   private failPendingRequests(error: Error): void {

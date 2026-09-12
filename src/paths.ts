@@ -102,6 +102,17 @@ export function resolveWithinProject(projectPath: string, candidatePath: string)
     };
   }
 
+  // Windows reads a colon as a drive (`C:name` is relative to that drive's current directory,
+  // which node:path resolves against the project instead) or as an alternate data stream
+  // (`script.gd:hidden` writes beside the file where nothing lists it), and Godot refuses one in
+  // any resource path, so nothing inside a project is ever spelled with it on any platform.
+  if (withoutScheme.includes(':')) {
+    return {
+      ok: false,
+      reason: `Path '${trimmed}' contains ':', which no file inside a project is named with.`,
+    };
+  }
+
   const root = resolve(projectPath);
   const absolutePath = resolve(root, withoutScheme);
 
