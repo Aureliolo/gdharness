@@ -26,6 +26,7 @@ import {
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
 import { GodotDAPClient, handleDAPTool } from './dap_client.js';
+import { dictionary, emptyRecord } from './dictionary.js';
 import { errorMessage } from './errors.js';
 import { type GodotBridge, getDefaultBridge } from './godot-bridge.js';
 import { GodotLSPClient, handleLSPTool } from './lsp_client.js';
@@ -211,7 +212,7 @@ class GodotServer {
    * Parameter name mappings between snake_case and camelCase
    * This allows the server to accept both formats
    */
-  private parameterMappings: Record<string, string> = {
+  private parameterMappings: Record<string, string> = dictionary({
     project_path: 'projectPath',
     scene_path: 'scenePath',
     root_node_type: 'rootNodeType',
@@ -248,13 +249,13 @@ class GodotServer {
     source_id: 'sourceId',
     atlas_coords: 'atlasCoords',
     alternative_tile: 'alternativeTile',
-  };
+  });
 
   /**
    * Reverse mapping from camelCase to snake_case
    * Generated from parameterMappings for quick lookups
    */
-  private reverseParameterMappings: Record<string, string> = {};
+  private reverseParameterMappings: Record<string, string> = emptyRecord();
 
   constructor(config?: GodotServerConfig) {
     const rawProfile = (
@@ -1215,7 +1216,9 @@ class GodotServer {
     return required
       .filter((field): field is string => typeof field === 'string')
       .filter((field) => {
-        const value = args[field];
+        // Own properties only: a required argument satisfied by something inherited from
+        // Object.prototype, or by a value a `__proto__` member put there, is not supplied.
+        const value = Object.hasOwn(args, field) ? args[field] : undefined;
         return value === undefined || value === null || (typeof value === 'string' && value.trim() === '');
       });
   }
@@ -1410,7 +1413,10 @@ class GodotServer {
     }
 
     const source = params as OperationParams;
-    const result: OperationParams = {};
+    // The keys are the `arguments` member of a tools/call, straight off the wire. JSON.parse
+    // makes `__proto__` an own enumerable property, so it survives the hasOwn guard below and
+    // the write would re-parent this object onto caller-supplied data rather than store a key.
+    const result: OperationParams = emptyRecord();
 
     for (const key in source) {
       if (Object.hasOwn(source, key)) {
@@ -1445,7 +1451,7 @@ class GodotServer {
    * @returns Object with snake_case keys
    */
   private convertCamelToSnakeCase(params: OperationParams): OperationParams {
-    const result: OperationParams = {};
+    const result: OperationParams = emptyRecord();
 
     for (const key in params) {
       if (Object.hasOwn(params, key)) {

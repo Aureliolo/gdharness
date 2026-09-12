@@ -1,6 +1,10 @@
+import { dictionary } from './dictionary.js';
 import type { ToolGroupDefinition } from './server-types.js';
 
-export const TOOL_GROUPS: Record<string, ToolGroupDefinition> = {
+// Both tables are indexed by the `group` argument of a tools/call, so they have no prototype:
+// otherwise `group: "constructor"` passes an existence check and the handler answers about a
+// group that does not exist, or dereferences a function looking for `.tools`.
+export const TOOL_GROUPS: Record<string, ToolGroupDefinition> = dictionary({
   scene_advanced: {
     description: 'Advanced scene tree manipulation (duplicate, reparent, sprite)',
     tools: ['duplicate_node', 'reparent_node', 'load_sprite'],
@@ -160,9 +164,9 @@ export const TOOL_GROUPS: Record<string, ToolGroupDefinition> = {
     tools: ['validate_patch_with_lsp', 'enforce_version_gate'],
     keywords: ['version gate', 'validate patch', 'version constraint', 'version check'],
   },
-};
+});
 
-export const CORE_TOOL_GROUPS: Record<string, ToolGroupDefinition> = {
+export const CORE_TOOL_GROUPS: Record<string, ToolGroupDefinition> = dictionary({
   core_meta: {
     description: 'Tool discovery and group management',
     tools: ['tool_catalog', 'manage_tool_groups'],
@@ -251,4 +255,4 @@ export const CORE_TOOL_GROUPS: Record<string, ToolGroupDefinition> = {
     tools: ['lsp_get_diagnostics', 'dap_get_output'],
     keywords: ['diagnostics', 'errors', 'warnings', 'linting', 'debug output'],
   },
-};
+});
