@@ -30,6 +30,7 @@
     "test:smoke": "bun test/smoke.mjs",
     "test:integration": "bun test/bridge.mjs",
     "test:dynamic-groups": "bun test/dynamic-groups.mjs",
+    "test:e2e-groups": "bun test/e2e-dynamic-groups.mjs",
     "test:regressions": "bun test/regressions.mjs",
     "test:detection": "bun test/godot-detection.mjs",
     "test:engine": "bun test/engine-gdscript.mjs",
