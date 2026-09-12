@@ -1,6 +1,6 @@
 import { deflateRawSync } from 'node:zlib';
 
-const STORED = 0;
+export const STORED = 0;
 export const DEFLATED = 8;
 
 export interface ZipEntrySpec {
