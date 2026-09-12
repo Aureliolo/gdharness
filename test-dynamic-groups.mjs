@@ -8,6 +8,10 @@ import { sanitizeToolName } from './test-support/tool-name.mjs';
 const SERVER_ENTRY = './build/index.js';
 const GODOT_PATH = process.env.GODOT_PATH || '/home/doyun/Apps/godot-4.6-rc2/Godot_v4.6-rc2_linux.x86_64';
 
+// A guard against the default surface growing by accident. Moving it is fine; moving it
+// without meaning to is what this catches.
+const COMPACT_TOOL_COUNT = 34;
+
 let passCount = 0;
 let failCount = 0;
 let nextId = 1;
@@ -215,9 +219,9 @@ async function main() {
       .filter((name) => !OPENAI_COMPATIBLE_TOOL_NAME_PATTERN.test(name));
 
     assert(
-      initialTools.length === 33,
-      'Default compact profile exposes exactly 33 tools',
-      `Expected 33 initial tools, got ${initialTools.length}`,
+      initialTools.length === COMPACT_TOOL_COUNT,
+      `Default compact profile exposes exactly ${COMPACT_TOOL_COUNT} tools`,
+      `Expected ${COMPACT_TOOL_COUNT} initial tools, got ${initialTools.length}`,
     );
     assert(
       invalidInitialToolNames.length === 0,
@@ -312,9 +316,9 @@ async function main() {
     const afterResetNames = new Set(afterResetTools.map((tool) => tool.name));
 
     assert(
-      afterResetTools.length === 33,
-      'After reset, compact profile exposes exactly 33 tools again',
-      `Expected 33 tools after reset, got ${afterResetTools.length}`,
+      afterResetTools.length === COMPACT_TOOL_COUNT,
+      `After reset, compact profile exposes exactly ${COMPACT_TOOL_COUNT} tools again`,
+      `Expected ${COMPACT_TOOL_COUNT} tools after reset, got ${afterResetTools.length}`,
     );
     assert(
       animationGroupTools.every((name) => !afterResetNames.has(sanitizeToolName(name))),
