@@ -30,9 +30,13 @@ things worth reporting:
 
 ## Releases
 
-Every release archive is built in CI on Linux, published with a SHA-256 sidecar, and carries
-a build provenance attestation. Verify one with:
+Every release is built in CI on Linux from a signed commit on `main`, with a frozen
+lockfile. Each one ships the archive, a SHA-256 sidecar and an SPDX SBOM, and carries two
+Sigstore attestations: build provenance, and the SBOM bound to the archive. Releases are
+immutable and the `v*` tags cannot be moved.
 
 ```bash
 gh attestation verify gdharness-<version>.tgz --repo Aureliolo/gdharness
+gh attestation verify gdharness-<version>.tgz --repo Aureliolo/gdharness --predicate-type https://spdx.dev/Document
+sha256sum --check gdharness-<version>.tgz.sha256
 ```

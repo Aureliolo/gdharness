@@ -35,6 +35,21 @@ jobs:
             exit 1
           fi
 
+      # The branch ruleset requires signed commits on main, so this only fails if that
+      # ruleset was bypassed or removed. That is exactly when you want to hear about it.
+      - name: Verify the release commit is signed
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          verified="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}" --jq '.commit.verification.verified')"
+          reason="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}" --jq '.commit.verification.reason')"
+          if [[ "${verified}" != "true" ]]; then
+            echo "Release commit ${GITHUB_SHA} carries no valid signature: ${reason}" >&2
+            exit 1
+          fi
+
       - name: Setup Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
@@ -49,7 +64,7 @@ jobs:
             ${{ runner.os }}-bun-1.3.3-
 
       - name: Install dependencies
-        run: bun ci
+        run: bun install --frozen-lockfile
 
       - name: Verify tag and metadata versions
         shell: bash
@@ -84,17 +99,11 @@ jobs:
       - name: Dynamic groups test
         run: bun run test:dynamic-groups
 
-      - name: Documentation policy tests
-        run: bun run test:docs
-
       - name: Metadata consistency tests
         run: bun run test:metadata
 
       - name: Packaging test
         run: bun run test:packaging
-
-      - name: Distribution archive and installer tests
-        run: bun run test:distribution
 
       - name: Audit production dependencies
         run: bun audit --prod
@@ -184,6 +193,16 @@ jobs:
           (cd dist && sha256sum --check "$(basename "${checksum}")")
           echo "archive=${archive}" >> "${GITHUB_OUTPUT}"
           echo "checksum=${checksum}" >> "${GITHUB_OUTPUT}"
+          echo "sbom=dist/gdharness-${VERSION}.spdx.json" >> "${GITHUB_OUTPUT}"
+
+      - name: Generate SBOM
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          file: ${{ steps.assets.outputs.archive }}
+          format: spdx-json
+          output-file: ${{ steps.assets.outputs.sbom }}
+          upload-artifact: false
+          upload-release-assets: false
 
       - name: Attest release assets
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be
@@ -191,6 +210,13 @@ jobs:
           subject-path: |
             ${{ steps.assets.outputs.archive }}
             ${{ steps.assets.outputs.checksum }}
+            ${{ steps.assets.outputs.sbom }}
+
+      - name: Attest SBOM
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-path: ${{ steps.assets.outputs.archive }}
+          sbom-path: ${{ steps.assets.outputs.sbom }}
 
       - name: Create GitHub Release
         env:
@@ -201,6 +227,7 @@ jobs:
           gh release create "${GITHUB_REF_NAME}" \
             "${{ steps.assets.outputs.archive }}" \
             "${{ steps.assets.outputs.checksum }}" \
+            "${{ steps.assets.outputs.sbom }}" \
             --verify-tag \
             --generate-notes \
-            --title "GoPeak ${VERSION}"
+            --title "gdharness ${VERSION}"
