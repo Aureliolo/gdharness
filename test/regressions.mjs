@@ -416,10 +416,12 @@ async function main() {
     'index.ts should preserve sentinel keys like _type during parameter normalization',
   );
   assert.match(INDEX_SOURCE, /@file:/, 'index.ts should pass operation params via @file: temp payloads');
+  // Both branches, because the opt-out was once written as a shift() off the front of the
+  // headless argv, which took -d with it and launched a game the debugger never attached to.
   assert.match(
     INDEX_SOURCE,
-    /private async handleRunProject[\s\S]*?const cmdArgs = this\.resolveHeadless\(args\.headless\)\s*\n\s*\? \['--headless', '-d', '--path', args\.projectPath\]/,
-    'run_project should still launch Godot with --headless whenever headless is resolved',
+    /private async handleRunProject[\s\S]*?const cmdArgs = this\.resolveHeadless\(args\.headless\)\s*\n\s*\? \['--headless', '-d', '--path', args\.projectPath\]\s*\n\s*: \['-d', '--path', args\.projectPath\];/,
+    'run_project should pass --headless only when headless resolves true, and -d either way',
   );
   assert.match(
     INDEX_SOURCE,
@@ -497,12 +499,6 @@ async function main() {
     INDEX_SOURCE,
     /maxDepth:[\s\S]*?includeBuiltIn:/,
     'get_dependencies must send the names the operation script reads, max_depth and include_built_in',
-  );
-
-  assert.match(
-    INDEX_SOURCE,
-    /if \(args\.headless === false\) \{\s*cmdArgs\.shift\(\);/,
-    'run_project must let a caller opt out of headless, since capture_screenshot cannot work against a game that renders nothing',
   );
 
   await testEditorStatusPortConflict();
