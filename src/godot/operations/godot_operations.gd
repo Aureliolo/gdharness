@@ -3,6 +3,8 @@ extends SceneTree
 
 # Debug mode flag
 var debug_mode = false
+# Built on first use rather than at load, because the table holds Callables bound to this object.
+var _serialisers: Dictionary = {}
 
 
 # Everything one dependency walk carries: the settings it was started with, and the state it
@@ -2244,55 +2246,63 @@ func get_non_default_properties(node: Node) -> Dictionary:
 # mattered: Resource had to be checked before Object or every resource came back as a bare class
 # name with its path dropped, and nothing but a comment said so.
 func serialize_value(value: Variant) -> Variant:
-	match typeof(value):
-		TYPE_NIL:
-			return null
-		TYPE_VECTOR2:
-			return {"x": value.x, "y": value.y, "_type": "Vector2"}
-		TYPE_VECTOR3:
-			return {"x": value.x, "y": value.y, "z": value.z, "_type": "Vector3"}
-		TYPE_VECTOR2I:
-			return {"x": value.x, "y": value.y, "_type": "Vector2i"}
-		TYPE_VECTOR3I:
-			return {"x": value.x, "y": value.y, "z": value.z, "_type": "Vector3i"}
-		TYPE_COLOR:
-			return {"r": value.r, "g": value.g, "b": value.b, "a": value.a, "_type": "Color"}
-		TYPE_RECT2:
-			return {
-				"position": serialize_value(value.position),
-				"size": serialize_value(value.size),
-				"_type": "Rect2"
-			}
-		TYPE_TRANSFORM2D:
-			return {
-				"origin": serialize_value(value.origin),
-				"x": serialize_value(value.x),
-				"y": serialize_value(value.y),
-				"_type": "Transform2D"
-			}
-		TYPE_TRANSFORM3D:
-			return {
-				"origin": serialize_value(value.origin),
-				"basis":
-				{
-					"x": serialize_value(value.basis.x),
-					"y": serialize_value(value.basis.y),
-					"z": serialize_value(value.basis.z)
-				},
-				"_type": "Transform3D"
-			}
-		TYPE_NODE_PATH:
-			return {"path": str(value), "_type": "NodePath"}
-		TYPE_ARRAY:
-			return value.map(serialize_value)
-		TYPE_DICTIONARY:
-			var serialised := {}
-			for key in value:
-				serialised[str(key)] = serialize_value(value[key])
-			return serialised
-		TYPE_OBJECT:
-			return serialize_object(value)
-	return value
+	if _serialisers.is_empty():
+		_serialisers = _build_serialisers()
+	var converter: Callable = _serialisers.get(typeof(value), Callable())
+	return converter.call(value) if converter.is_valid() else value
+
+
+func _build_serialisers() -> Dictionary:
+	return {
+		TYPE_NIL: func(_value): return null,
+		TYPE_VECTOR2: func(v): return {"x": v.x, "y": v.y, "_type": "Vector2"},
+		TYPE_VECTOR3: func(v): return {"x": v.x, "y": v.y, "z": v.z, "_type": "Vector3"},
+		TYPE_VECTOR2I: func(v): return {"x": v.x, "y": v.y, "_type": "Vector2i"},
+		TYPE_VECTOR3I: func(v): return {"x": v.x, "y": v.y, "z": v.z, "_type": "Vector3i"},
+		TYPE_COLOR: func(v): return {"r": v.r, "g": v.g, "b": v.b, "a": v.a, "_type": "Color"},
+		TYPE_NODE_PATH: func(v): return {"path": str(v), "_type": "NodePath"},
+		TYPE_ARRAY: func(v): return v.map(serialize_value),
+		TYPE_RECT2: _serialize_rect2,
+		TYPE_TRANSFORM2D: _serialize_transform2d,
+		TYPE_TRANSFORM3D: _serialize_transform3d,
+		TYPE_DICTIONARY: _serialize_dictionary,
+		TYPE_OBJECT: serialize_object,
+	}
+
+
+func _serialize_rect2(value: Rect2) -> Dictionary:
+	return {
+		"position": serialize_value(value.position), "size": serialize_value(value.size), "_type": "Rect2"
+	}
+
+
+func _serialize_transform2d(value: Transform2D) -> Dictionary:
+	return {
+		"origin": serialize_value(value.origin),
+		"x": serialize_value(value.x),
+		"y": serialize_value(value.y),
+		"_type": "Transform2D"
+	}
+
+
+func _serialize_transform3d(value: Transform3D) -> Dictionary:
+	return {
+		"origin": serialize_value(value.origin),
+		"basis":
+		{
+			"x": serialize_value(value.basis.x),
+			"y": serialize_value(value.basis.y),
+			"z": serialize_value(value.basis.z)
+		},
+		"_type": "Transform3D"
+	}
+
+
+func _serialize_dictionary(value: Dictionary) -> Dictionary:
+	var serialised := {}
+	for key in value:
+		serialised[str(key)] = serialize_value(value[key])
+	return serialised
 
 
 # A pathless Resource says so rather than inventing an empty path for the caller to load.
