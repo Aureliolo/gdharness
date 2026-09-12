@@ -135,12 +135,19 @@ export class GodotBridge extends EventEmitter {
   private resourceQueues = new Map<string, Promise<void>>();
   private visualizerHtml = this.getDefaultVisualizerHtml();
 
+  private readonly port: number;
+  private readonly host: string;
+  private readonly timeoutMs: number;
+
   public constructor(
-    private readonly port: number = DEFAULT_PORT,
-    private readonly host: string = DEFAULT_HOST,
-    private readonly timeoutMs: number = DEFAULT_TIMEOUT_MS,
+    port: number = DEFAULT_PORT,
+    host: string = DEFAULT_HOST,
+    timeoutMs: number = DEFAULT_TIMEOUT_MS,
   ) {
     super();
+    this.port = port;
+    this.host = host;
+    this.timeoutMs = timeoutMs;
   }
 
   public start(): Promise<void> {

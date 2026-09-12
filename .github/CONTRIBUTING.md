@@ -28,7 +28,7 @@ bun run ci                 # build, typecheck, regression and detection tests
 bun run test:dynamic-groups
 bun run test:metadata
 bun run format             # Biome, writes
-bun run lint               # Biome and ESLint
+bun run lint               # Biome, then oxlint with its type-aware rules
 bun run lint:gd            # gdlint, needs gdtoolkit==4.5.0 from pip
 bun run format:gd          # gdformat, writes
 bun run watch              # TypeScript watch mode

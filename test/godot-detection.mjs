@@ -114,4 +114,4 @@ function main() {
   console.log('godot detection tests passed');
 }
 
-await main();
+main();
