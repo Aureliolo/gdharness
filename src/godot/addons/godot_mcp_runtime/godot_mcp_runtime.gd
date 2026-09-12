@@ -3,7 +3,7 @@ extends EditorPlugin
 
 ## Godot MCP Runtime Plugin
 ## Enables real-time communication between a running Godot game and the MCP server.
-## 
+##
 ## This plugin provides:
 ## - WebSocket server for bidirectional communication
 ## - Scene tree inspection

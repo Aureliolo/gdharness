@@ -1,0 +1,18 @@
+# gdlint's defaults with the size limits stated rather than inherited. Only changed keys are
+# listed; everything else stays at gdlint's own default, which is already strict about
+# naming and definition order.
+#
+# Nothing is disabled. `disable: []` is deliberate: a rule that fires on good code is a
+# reason to argue about the rule, not to switch it off quietly.
+disable: []
+
+# A file past this is one nobody reads end to end. godot_operations.gd is currently 6800
+# lines and fails this on purpose: splitting it is part of the rework, and the linter should
+# say so on every run until it happens rather than being tuned to accept it.
+max-file-lines: 600
+
+# gdlint's default is 10, which is enough arguments to hide a missing struct.
+function-arguments-number: 6
+
+# Matches Biome's lineWidth for TypeScript, so both languages wrap at the same column.
+max-line-length: 110

@@ -1,6 +1,6 @@
 @tool
-extends Node
 class_name MCPToolExecutor
+extends Node
 
 var _editor_plugin: EditorPlugin = null
 
@@ -71,7 +71,6 @@ func _init_tools() -> void:
 		"disconnect_signal": [_scene_tools, "disconnect_signal"],
 		"list_connections": [_scene_tools, "list_connections"],
 		"rescan_filesystem": [_scene_tools, "rescan_filesystem"],
-
 		# Resource tools
 		"create_resource": [_resource_tools, "create_resource"],
 		"modify_resource": [_resource_tools, "modify_resource"],
@@ -82,7 +81,6 @@ func _init_tools() -> void:
 		"set_theme_color": [_resource_tools, "set_theme_color"],
 		"set_theme_font_size": [_resource_tools, "set_theme_font_size"],
 		"apply_theme_shader": [_resource_tools, "apply_theme_shader"],
-
 		# Animation tools
 		"create_animation": [_animation_tools, "create_animation"],
 		"add_animation_track": [_animation_tools, "add_animation_track"],
