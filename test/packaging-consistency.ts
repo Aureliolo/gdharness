@@ -5,9 +5,10 @@ import { createHash } from 'node:crypto';
 import { chmod, mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import pkg from '../package.json' with { type: 'json' };
+import { asObject, get } from './support/json.js';
 
 const root = path.join(import.meta.dirname, '..');
-const pkg = await Bun.file(path.join(root, 'package.json')).json();
 const archiveName = `${pkg.name}-${pkg.version}.tgz`;
 const archivePath = path.join(root, 'dist', archiveName);
 const checksumPath = `${archivePath}.sha256`;
@@ -117,8 +118,8 @@ assert.deepEqual(
 for (const forbiddenFile of [
   'package/src/cli.ts',
   'package/build/godot-bridge.js',
-  'package/scripts/postinstall.mjs',
-  'package/scripts/build-release.mjs',
+  'package/scripts/build-release.ts',
+  'package/test/smoke.ts',
 ]) {
   assert.equal(packedFiles.has(forbiddenFile), false, `release archive should exclude ${forbiddenFile}`);
 }
@@ -133,31 +134,41 @@ try {
   assert.equal(extract.exitCode, 0, extract.stderr.toString());
 
   const packedRoot = path.join(extractionRoot, 'package');
-  const packedPackage = JSON.parse(await readFile(path.join(packedRoot, 'package.json'), 'utf8'));
-  assert.deepEqual(packedPackage.dependencies ?? {}, {}, 'packed runtime should not fetch dependencies');
+  const packedPackage: unknown = JSON.parse(await readFile(path.join(packedRoot, 'package.json'), 'utf8'));
   assert.deepEqual(
-    packedPackage.peerDependencies ?? {},
+    get(packedPackage, 'dependencies') ?? {},
+    {},
+    'packed runtime should not fetch dependencies',
+  );
+  assert.deepEqual(
+    get(packedPackage, 'peerDependencies') ?? {},
     {},
     'packed runtime should not fetch peer dependencies',
   );
   assert.deepEqual(
-    packedPackage.optionalDependencies ?? {},
+    get(packedPackage, 'optionalDependencies') ?? {},
     {},
     'packed runtime should not fetch optional dependencies',
   );
   assert.equal(
-    packedPackage.devDependencies,
+    get(packedPackage, 'devDependencies'),
     undefined,
     'packed runtime should not include development dependencies',
   );
-  assert.equal(packedPackage.scripts?.prepare, undefined, 'packed package should not require prepare');
   assert.equal(
-    packedPackage.scripts?.postinstall,
+    get(packedPackage, 'scripts', 'prepare'),
+    undefined,
+    'packed package should not require prepare',
+  );
+  assert.equal(
+    get(packedPackage, 'scripts', 'postinstall'),
     undefined,
     'packed package should not require postinstall',
   );
 
-  const scriptCommands = Object.values(packedPackage.scripts ?? {}).join('\n');
+  const scriptCommands = Object.values(asObject(get(packedPackage, 'scripts') ?? {}, 'packed scripts')).join(
+    '\n',
+  );
   assert.doesNotMatch(
     scriptCommands,
     /\b(?:npm|npx)\b/,
@@ -172,7 +183,7 @@ try {
   for (const bundleName of ['cli.js', 'index.js']) {
     const bundle = await readFile(path.join(packedRoot, 'build', bundleName), 'utf8');
     const externalPackageImport =
-      bundle.match(/(?:from\s+|import\()["'](?:@modelcontextprotocol|fs-extra)(?:[/"'])/)?.[0] ?? null;
+      /(?:from\s+|import\()["'](?:@modelcontextprotocol|fs-extra)(?:[/"'])/.exec(bundle)?.[0] ?? null;
     assert.equal(
       externalPackageImport,
       null,

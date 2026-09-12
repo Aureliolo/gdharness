@@ -16,7 +16,7 @@ import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const { scanDirectoryForGodotBinaries } = await import('../src/index.ts');
+const { scanDirectoryForGodotBinaries } = await import('../src/index.js');
 
 function testIgnoresEmptyAndMissingDirectories() {
   assert.deepEqual(scanDirectoryForGodotBinaries(''), [], 'empty directory returns no candidates');
@@ -83,7 +83,7 @@ function testNewestFirstOrdering() {
     const result = scanDirectoryForGodotBinaries(dir, 'win32');
     assert.equal(result.length, 2, 'both binaries found');
     assert.ok(
-      result[0].includes('Godot_v4.4.1-stable_win64.exe'),
+      result[0]?.includes('Godot_v4.4.1-stable_win64.exe'),
       `newest binary should be returned first, got: ${result[0]}`,
     );
   } finally {
@@ -99,7 +99,7 @@ function testIgnoresDirectoriesMatchingPattern() {
 
     const result = scanDirectoryForGodotBinaries(dir, 'win32');
     assert.equal(result.length, 1, 'should only return files, not directories');
-    assert.ok(result[0].includes('Godot_v4.4.1-stable_win64.exe'));
+    assert.ok(result[0]?.includes('Godot_v4.4.1-stable_win64.exe'));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

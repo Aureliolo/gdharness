@@ -58,14 +58,14 @@ function resolveDefaultBridgeHost(): string {
   return DEFAULT_HOST;
 }
 
-export interface ToolInvokeMessage {
+interface ToolInvokeMessage {
   type: 'tool_invoke';
   id: string;
   tool: string;
   args: Record<string, unknown>;
 }
 
-export interface ToolResultMessage {
+interface ToolResultMessage {
   type: 'tool_result';
   id: string;
   success: boolean;
@@ -73,15 +73,15 @@ export interface ToolResultMessage {
   error?: string;
 }
 
-export interface PingMessage {
+interface PingMessage {
   type: 'ping';
 }
 
-export interface PongMessage {
+interface PongMessage {
   type: 'pong';
 }
 
-export interface GodotReadyMessage {
+interface GodotReadyMessage {
   type: 'godot_ready';
   project_path: string;
 }
