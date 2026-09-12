@@ -1,5 +1,5 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
-import { join, dirname, basename } from 'path';
+import { join, dirname } from 'path';
 
 /**
  * Interface for GDScript file creation parameters
@@ -143,7 +143,6 @@ export function modifyGDScript(params: ModifyScriptParams): { success: boolean; 
   }
 
   let content = readFileSync(absolutePath, 'utf-8');
-  const lines = content.split('\n');
 
   for (const mod of params.modifications) {
     switch (mod.type) {

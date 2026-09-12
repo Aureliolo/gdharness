@@ -1,4 +1,3 @@
-import { CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { createGDScript, modifyGDScript, CreateScriptParams, ModifyScriptParams } from './gdscript_utils.js';
 import { exportProject, listExportPresets, ExportProjectParams } from './project_utils.js';
 
