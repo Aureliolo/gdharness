@@ -9,7 +9,7 @@
 
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -23,65 +23,21 @@ function godotRuns(candidate) {
 }
 
 /**
- * The executable a Windows batch shim runs, or null when the file is absent or says something
- * this does not recognise. The shim is one line of the form `@"C:\...\godot.exe" %*`, so the
- * first quoted path ending in .exe is the engine. What it actually contained goes into the
- * diagnostic either way, since the next person to read this is looking at a CI log.
- */
-function shimTarget(path) {
-  let contents;
-  try {
-    contents = readFileSync(path, 'utf8');
-  } catch {
-    return null;
-  }
-
-  const quoted = /"([^"]+\.exe)"/i.exec(contents) ?? /([A-Za-z]:\\[^\s"]+\.exe)/i.exec(contents);
-  tried.push(`${path} is a shim reading: ${contents.trim().split('\n')[0] ?? ''}`);
-  return quoted?.[1] ?? null;
-}
-
-/**
- * GODOT_PATH first, then the GODOT that setup-godot exports, then plain `godot` on PATH.
+ * GODOT_PATH first, then GODOT, then plain `godot` on PATH.
  *
- * Every candidate is tried by running it rather than by looking for it on disk, because on
- * Windows what sits on PATH is a shim. Windows also needs the extensions spelled out and,
- * failing that, `where` asked: setup-godot exports GODOT without an extension, and a bare name
- * handed to spawn does not go through PATHEXT the way it would in a shell. Their own
- * documented check is `godot --version` from pwsh, which is why it works there and not here.
+ * Every candidate is tried by running it rather than by looking for it on disk, because a path
+ * that exists is not an engine. Windows gets the .exe spelling tried as well, since a bare name
+ * handed to spawn does not go through PATHEXT the way it would in a shell. Nothing beyond that
+ * is guessed at: CI installs the engine itself through scripts/install-godot.mjs and exports an
+ * absolute GODOT_PATH, so a miss here is a real miss rather than a layout nobody predicted.
  */
 function resolveGodotPath() {
-  const named = [process.env.GODOT_PATH, process.env.GODOT, 'godot'].filter(Boolean);
+  const spellings = (name) => (process.platform === 'win32' ? [name, `${name}.exe`] : [name]);
 
-  if (process.platform !== 'win32') {
-    return named.find(godotRuns) ?? null;
-  }
-
-  for (const name of named) {
-    const spelling = [name, `${name}.exe`, `${name}.cmd`, `${name}.bat`].find(godotRuns);
-    if (spelling) return spelling;
-
-    // setup-godot leaves a .cmd shim rather than the engine, and spawn refuses to run a batch
-    // file without a shell, which is the CVE-2024-27980 mitigation and not something to work
-    // around by turning the shell back on: every later call passes project paths. Read the
-    // shim instead and take the executable it points at.
-    const target = shimTarget(`${name}.cmd`) ?? shimTarget(`${name}.bat`);
-    if (target && godotRuns(target)) return target;
-
-    // Last resort, and the one that copes with a layout we have not guessed: let Windows
-    // resolve the name itself and try whatever it hands back.
-    const where = spawnSync('where.exe', [name], { encoding: 'utf8', timeout: 30000 });
-    if (where.status !== 0) continue;
-
-    const resolved = where.stdout
-      .split('\n')
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .find(godotRuns);
-    if (resolved) return resolved;
-  }
-
-  return null;
+  return (
+    [process.env.GODOT_PATH, process.env.GODOT, 'godot'].filter(Boolean).flatMap(spellings).find(godotRuns) ??
+    null
+  );
 }
 
 /**
