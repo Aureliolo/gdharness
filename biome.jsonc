@@ -3,6 +3,13 @@
   "files": {
     "includes": ["**", "!build", "!dist", "!node_modules", "!**/*.html"]
   },
+  "json": {
+    "parser": {
+      // oxlint reads its config as JSONC, and a rule list of this size is unreadable without
+      // somewhere to say why each block is there.
+      "allowComments": true
+    }
+  },
   "formatter": {
     "enabled": true,
     "indentStyle": "space",

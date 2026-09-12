@@ -9,11 +9,11 @@ export function sanitizeExportedToolName(toolName: string): string {
   const sanitized = toolName
     .normalize('NFKD')
     // \x00 is the lower bound of an ASCII range, not a control character matched for its own
-    // sake. Neither linter has a spelling of "strip everything outside ASCII" that it accepts,
-    // and dropping the guard would put arbitrary bytes in a wire-visible tool name. Each
-    // suppression has to sit on the line the rule points at, hence the two spellings.
+    // sake. Biome has no spelling of "strip everything outside ASCII" that it accepts, and
+    // dropping the guard would put arbitrary bytes in a wire-visible tool name.
+    // Each suppression has to sit where its own linter looks for it, hence two spellings.
     // biome-ignore lint/suspicious/noControlCharactersInRegex: range bound, not a match target
-    .replace(/[^\x00-\x7F]/g, '') // eslint-disable-line no-control-regex
+    .replace(/[^\x00-\x7F]/g, '') // oxlint-disable-line no-control-regex
     .replace(/[^a-zA-Z0-9-]+/g, '-')
     .replace(/-+/g, '-')
     .replace(/^-+|-+$/g, '')
