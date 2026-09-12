@@ -27,6 +27,10 @@ Checks, all of which CI runs:
 bun run ci                 # build, typecheck, regression and detection tests
 bun run test:dynamic-groups
 bun run test:metadata
+bun run format             # Biome, writes
+bun run lint               # Biome and ESLint
+bun run lint:gd            # gdlint, needs gdtoolkit==4.5.0 from pip
+bun run format:gd          # gdformat, writes
 bun run watch              # TypeScript watch mode
 ```
 
