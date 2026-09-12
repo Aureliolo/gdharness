@@ -9,7 +9,7 @@
 
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -20,6 +20,25 @@ function godotRuns(candidate) {
   const probe = spawnSync(candidate, ['--version'], { encoding: 'utf8', timeout: 60000 });
   tried.push(`${candidate} -> ${probe.status ?? probe.error?.code ?? 'no status'}`);
   return probe.status === 0;
+}
+
+/**
+ * The executable a Windows batch shim runs, or null when the file is absent or says something
+ * this does not recognise. The shim is one line of the form `@"C:\...\godot.exe" %*`, so the
+ * first quoted path ending in .exe is the engine. What it actually contained goes into the
+ * diagnostic either way, since the next person to read this is looking at a CI log.
+ */
+function shimTarget(path) {
+  let contents;
+  try {
+    contents = readFileSync(path, 'utf8');
+  } catch {
+    return null;
+  }
+
+  const quoted = /"([^"]+\.exe)"/i.exec(contents) ?? /([A-Za-z]:\\[^\s"]+\.exe)/i.exec(contents);
+  tried.push(`${path} is a shim reading: ${contents.trim().split('\n')[0] ?? ''}`);
+  return quoted?.[1] ?? null;
 }
 
 /**
@@ -41,6 +60,13 @@ function resolveGodotPath() {
   for (const name of named) {
     const spelling = [name, `${name}.exe`, `${name}.cmd`, `${name}.bat`].find(godotRuns);
     if (spelling) return spelling;
+
+    // setup-godot leaves a .cmd shim rather than the engine, and spawn refuses to run a batch
+    // file without a shell, which is the CVE-2024-27980 mitigation and not something to work
+    // around by turning the shell back on: every later call passes project paths. Read the
+    // shim instead and take the executable it points at.
+    const target = shimTarget(`${name}.cmd`) ?? shimTarget(`${name}.bat`);
+    if (target && godotRuns(target)) return target;
 
     // Last resort, and the one that copes with a layout we have not guessed: let Windows
     // resolve the name itself and try whatever it hands back.
