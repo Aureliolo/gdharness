@@ -1,0 +1,9 @@
+{
+  "$schema": "https://unpkg.com/knip@6.35.1/schema.json",
+  // `lint:dead` runs this with KNIP_DISABLE_RAW_TRANSFER=1. knip parses through oxc-parser, whose
+  // raw transfer reserves a 6 GiB buffer per CPU core it parses on; Linux never commits those
+  // pages, Windows does, and on a 32-core machine the reservation fails outright.
+  "entry": ["src/cli.ts", "src/server-entry.ts", "scripts/*.ts", "test/*.ts"],
+  "project": ["src/**/*.ts", "scripts/**/*.ts", "test/**/*.ts"],
+  "ignoreBinaries": ["gdlint", "gdformat"]
+}

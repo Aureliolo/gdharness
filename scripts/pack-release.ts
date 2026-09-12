@@ -4,9 +4,9 @@ import { createHash } from 'node:crypto';
 import { chmod, cp, mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import sourcePackage from '../package.json' with { type: 'json' };
 
 const root = path.resolve(import.meta.dirname, '..');
-const sourcePackage = await Bun.file(path.join(root, 'package.json')).json();
 const outputDirectory = path.join(root, 'dist');
 const archiveName = `${sourcePackage.name}-${sourcePackage.version}.tgz`;
 const archivePath = path.join(outputDirectory, archiveName);

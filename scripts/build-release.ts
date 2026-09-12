@@ -7,7 +7,7 @@ const root = path.resolve(import.meta.dirname, '..');
 const sourceRoot = path.join(root, 'src');
 const buildRoot = path.join(root, 'build');
 
-async function buildBundledEntrypoint(sourceName, outputName) {
+async function buildBundledEntrypoint(sourceName: string, outputName: string): Promise<void> {
   const result = await Bun.build({
     entrypoints: [path.join(sourceRoot, sourceName)],
     outdir: buildRoot,
@@ -17,7 +17,6 @@ async function buildBundledEntrypoint(sourceName, outputName) {
     // embedding the npm `ws` package with `target: node` stalls WS upgrades.
     target: 'bun',
     format: 'esm',
-    bundle: true,
     packages: 'bundle',
     minify: false,
     sourcemap: 'none',
@@ -31,8 +30,8 @@ async function buildBundledEntrypoint(sourceName, outputName) {
   throw new Error(`Bundling ${sourceName} failed`);
 }
 
-async function collectTypeScriptEntries(directory) {
-  const entries = [];
+async function collectTypeScriptEntries(directory: string): Promise<string[]> {
+  const entries: string[] = [];
   for (const item of await readdir(directory, { withFileTypes: true })) {
     const itemPath = path.join(directory, item.name);
     if (item.isDirectory()) {

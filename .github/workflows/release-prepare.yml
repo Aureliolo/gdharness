@@ -53,7 +53,7 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          bun scripts/bump-version.mjs "${VERSION:-$BUMP}"
+          bun scripts/bump-version.ts "${VERSION:-$BUMP}"
           next="$(bun -e "console.log((await Bun.file('package.json').json()).version)")"
           echo "version=${next}" >> "${GITHUB_OUTPUT}"
           echo "branch=release/v${next}" >> "${GITHUB_OUTPUT}"
@@ -90,7 +90,7 @@ jobs:
           VERSION: ${{ steps.bump.outputs.version }}
         run: |
           set -euo pipefail
-          bun scripts/commit-signed.mjs "${BRANCH}" "Release v${VERSION}" \
+          bun scripts/commit-signed.ts "${BRANCH}" "Release v${VERSION}" \
             package.json server.json README.md
 
       - name: Open the pull request

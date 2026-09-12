@@ -14,15 +14,17 @@
 
 ## What every language in here is held to
 
-Four things, for each language present. A language that arrives without all four arrives with
-them in the same change.
+Five things, for each language present. A language that arrives without all five arrives with
+them in the same change. There is no JavaScript here: the server, the scripts and the tests are
+all TypeScript, so one type checker covers everything Bun runs.
 
-| | TypeScript | JavaScript (`.mjs`) | GDScript | Workflows |
-| --- | --- | --- | --- | --- |
-| Formatter | Biome | Biome | gdformat | - |
-| Linter | Biome, oxlint | Biome, oxlint | gdlint, nothing disabled | actionlint, zizmor at `pedantic` |
-| Type checker | `tsc`, `@tsconfig/strictest` | `checkJs` | the engine, warnings as errors | - |
-| Fuzzing | property tests on every parser of untrusted input | same | - | - |
+| | TypeScript | GDScript | Workflows |
+| --- | --- | --- | --- |
+| Formatter | Biome | gdformat | - |
+| Linter | Biome, oxlint type-aware | gdlint, nothing disabled | actionlint, zizmor at `pedantic` |
+| Type checker | `tsc`, `@tsconfig/strictest`, over `src`, `test` and `scripts` alike | the engine, warnings as errors | - |
+| Dead code | knip: every file, export and dependency is reached from an entry point | - | - |
+| Fuzzing | property tests on every parser of untrusted input | - | - |
 
 Rules are **written out rather than inherited from a preset**, so the file says what it enforces:
 see `.oxlintrc.json` and `.gdlintrc`. Nothing is turned off quietly. A rule that fires on good
@@ -36,7 +38,7 @@ not a gate, and we have been bitten by exactly that.
 unless it matches a digest written in this repository: the Bun that runs every job
 (`.github/actions/install-bun`), uv and the interpreter and gdtoolkit under it (`ci.yml`,
 `.github/requirements/`), actionlint (`workflows.yml`), and the engine
-(`scripts/install-godot.mjs`). npm packages carry theirs in `bun.lock`, actions are pinned by
+(`scripts/install-godot.ts`). npm packages carry theirs in `bun.lock`, actions are pinned by
 commit, and zizmor runs from a container image whose digest is fixed by the action's commit. A
 tool that arrives without a digest arrives with one in the same change.
 
@@ -63,12 +65,12 @@ bun run build
 Checks, all of which CI runs:
 
 ```bash
-bun run ci                 # build, typecheck, regression and detection tests
+bun run ci                 # build, typecheck over src, test and scripts, regression and detection tests
 bun run test:dynamic-groups
 bun run test:metadata
 bun run format             # Biome, writes
-bun run lint               # Biome, then oxlint with its type-aware rules
-bun run lint:gd            # gdlint, needs gdtoolkit==4.5.0 from pip
+bun run lint               # Biome, then oxlint with its type-aware rules, then knip
+bun run lint:gd            # gdlint, needs gdtoolkit from .github/requirements/gdtoolkit.txt
 bun run format:gd          # gdformat, writes
 bun run watch              # TypeScript watch mode
 ```

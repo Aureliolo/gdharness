@@ -132,7 +132,7 @@ jobs:
       # Ours rather than a setup action's, because the engine is a 180 MB binary and this is the
       # only way to know it is the one the repository pins. It exports GODOT_PATH.
       - name: Install Godot
-        run: bun scripts/install-godot.mjs
+        run: bun scripts/install-godot.ts
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -144,12 +144,20 @@ jobs:
           # and wrong here: without this a broken install would read as a pass.
           GDHARNESS_REQUIRE_GODOT: '1'
 
+      # The regressions that drive the scene tools through the engine skip without one, so they
+      # are run again here, where a skip is a failure.
+      - name: Regressions that need the engine
+        if: '!cancelled()'
+        run: bun run build && bun run test:regressions
+        env:
+          GDHARNESS_REQUIRE_GODOT: '1'
+
       # Here rather than in build-and-test because its last phase makes real tool calls, and
       # those need an engine: without one the tools answer with empty content and the phase
       # passes on nothing.
       - name: Tool group end to end
         if: '!cancelled()'
-        run: bun run build && bun run test:e2e-groups
+        run: bun run test:e2e-groups
 
   # Biome owns formatting and the fast syntactic rules; oxlint owns the ones that need the type
   # checker, which it runs through typescript-go rather than a second copy of the compiler.
@@ -178,6 +186,12 @@ jobs:
       - name: oxlint, type-aware
         if: '!cancelled()'
         run: bun run lint:types
+
+      # A file, export or dependency nothing reaches. Dead code is where the next silent
+      # failure hides: it looks maintained and nothing runs it.
+      - name: knip
+        if: '!cancelled()'
+        run: bun run lint:dead
 
   build-and-test:
     name: build-and-test

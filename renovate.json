@@ -11,12 +11,13 @@
   "minimumReleaseAge": "7 days",
   "osvVulnerabilityAlerts": true,
   "rangeStrategy": "pin",
+  "separateMajorMinor": false,
   "commitMessageAction": "Raise",
   "commitMessageTopic": "{{depName}}",
   "commitMessageExtra": "to {{newVersion}}",
   "packageRules": [
     {
-      "description": "One pull request for everything. Every version here is pinned exactly and every check has to be green before anything merges, so a week's updates arriving as separate pull requests is that many rounds of CI to land one week's work. A vulnerability fix is the exception and arrives on its own the day it exists; the weekly lock file refresh is the other, because it changes nothing this file names.",
+      "description": "One pull request for everything, majors included (separateMajorMinor is off for that). Every version here is pinned exactly and every check has to be green before anything merges, so a week's updates arriving as separate pull requests is that many rounds of CI to land one week's work. A vulnerability fix is the exception and arrives on its own the day it exists; the weekly lock file refreshes are the other, because they change nothing this file names.",
       "matchPackageNames": ["*"],
       "groupName": "all dependencies",
       "groupSlug": "all"
@@ -48,7 +49,7 @@
     {
       "description": "A version with the SHA-256 or SHA-512 of the file it names on the next line: Bun, uv, actionlint and the engine. The tag and the digest move together, and the datasource finds the new digest in the checksum file the release publishes.",
       "customType": "regex",
-      "managerFilePatterns": ["/^\\.github/.+\\.ya?ml$/", "/^scripts/.+\\.mjs$/"],
+      "managerFilePatterns": ["/^\\.github/.+\\.ya?ml$/", "/^scripts/.+\\.ts$/"],
       "matchStrings": [
         "# renovate: datasource=(?<datasource>github-release-attachments) depName=(?<depName>\\S+) versioning=(?<versioning>\\S+)\\n\\s*[A-Z0-9_]+_TAG: (?<currentValue>\\S+)\\n\\s*[A-Z0-9_]+_SHA256: (?<currentDigest>[0-9a-f]{64})",
         "// renovate: datasource=(?<datasource>github-release-attachments) depName=(?<depName>\\S+) versioning=(?<versioning>\\S+)\\n\\s*tag: '(?<currentValue>[^']+)',\\n\\s*digest:\\s*'(?<currentDigest>[0-9a-f]{128})'"

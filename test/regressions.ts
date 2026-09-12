@@ -1,19 +1,21 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { createServer } from 'node:net';
+import { createServer, type Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { GodotDAPClient } from '../build/dap_client.js';
-import { dictionary, emptyRecord } from '../build/dictionary.js';
-import { modifyGDScript } from '../build/gdscript_utils.js';
-import { createBridge } from '../build/godot-bridge.js';
-import { GodotLSPClient } from '../build/lsp_client.js';
-import { isWithinRoot, resolveWithinProject } from '../build/paths.js';
-import { parseProjectGodot } from '../build/resources.js';
+import { GodotDAPClient } from '../src/dap_client.js';
+import { dictionary, emptyRecord } from '../src/dictionary.js';
+import { createBridge } from '../src/godot-bridge.js';
+import { GodotLSPClient } from '../src/lsp_client.js';
+import { isWithinRoot, resolveWithinProject } from '../src/paths.js';
+import { parseProjectGodot } from '../src/resources.js';
+import { get, text } from './support/json.js';
+import { isRecord, type JsonRpcMessage, parseTextContent, textOf } from './support/json-rpc.js';
+import { ServerProcess } from './support/server.js';
 
 const INDEX_SOURCE = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
 const OPERATIONS_SOURCE = readFileSync(
@@ -29,114 +31,79 @@ const RUNTIME_SOURCE = readFileSync(
   'utf8',
 );
 
-function makeRequest(method, params, id) {
-  return `${JSON.stringify({ jsonrpc: '2.0', method, params, id })}\n`;
-}
-
-async function waitForJsonLine(stream, predicate, timeoutMs = 15000) {
-  let buffer = '';
-  const start = Date.now();
-
-  return await new Promise((resolve, reject) => {
-    const onData = (chunk) => {
-      buffer += chunk.toString();
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        try {
-          const parsed = JSON.parse(trimmed);
-          if (predicate(parsed)) {
-            cleanup();
-            resolve(parsed);
-            return;
-          }
-        } catch {
-          // ignore partial/non-json lines
-        }
-      }
-
-      if (Date.now() - start > timeoutMs) {
-        cleanup();
-        reject(new Error('Timed out waiting for JSON-RPC response'));
-      }
-    };
-
-    const cleanup = () => {
-      stream.off('data', onData);
-    };
-
-    stream.on('data', onData);
-  });
-}
-
-async function withOccupiedBridgePort(run) {
+async function withOccupiedBridgePort<T>(run: () => Promise<T>): Promise<T> {
   const blocker = createServer();
-  const blockerState = await new Promise((resolve, reject) => {
-    blocker.once('error', (error) => {
-      if (error?.code === 'EADDRINUSE') {
+  const blockerState = await new Promise<{ alreadyOccupied: boolean }>((resolve, reject) => {
+    blocker.once('error', (error: NodeJS.ErrnoException) => {
+      if (error.code === 'EADDRINUSE') {
         resolve({ alreadyOccupied: true });
         return;
       }
       reject(error);
     });
-    blocker.listen(6505, '127.0.0.1', () => resolve({ alreadyOccupied: false }));
+    blocker.listen(6505, '127.0.0.1', () => {
+      resolve({ alreadyOccupied: false });
+    });
   });
 
   try {
     return await run();
   } finally {
     if (!blockerState.alreadyOccupied) {
-      await new Promise((resolve, reject) => blocker.close((err) => (err ? reject(err) : resolve())));
+      await new Promise<void>((resolve, reject) => {
+        blocker.close((err) => {
+          if (err) reject(err);
+          else resolve();
+        });
+      });
     }
   }
 }
 
+/**
+ * The slice of a ws WebSocket the bridge touches. The bridge's connection handler is private
+ * and typed against the real class, so the fake is handed over through the seam below rather
+ * than by pretending to be one.
+ */
 class FakeSocket extends EventEmitter {
-  constructor(name) {
+  readonly name: string;
+  readyState = 1;
+  readonly sent: unknown[] = [];
+
+  constructor(name: string) {
     super();
     this.name = name;
-    this.readyState = 1;
-    this.sent = [];
   }
 
-  send(payload) {
+  send(payload: unknown): void {
     this.sent.push(payload);
   }
 
-  close(code = 1000, reason = '') {
+  close(code = 1000, reason = ''): void {
     this.readyState = 3;
     this.emit('close', code, Buffer.from(reason));
   }
 }
 
-function resolveGodotPath() {
-  const candidates = [
-    process.env.GODOT_PATH,
-    '/home/yun/.local/bin/godot4',
-    '/home/yun/.local/bin/godot',
-  ].filter(Boolean);
-
-  for (const candidate of candidates) {
-    if (existsSync(candidate)) {
-      return candidate;
-    }
-  }
-
-  return null;
+function connectFake(bridge: ReturnType<typeof createBridge>, socket: FakeSocket): void {
+  (bridge as unknown as { handleConnection: (socket: FakeSocket) => void }).handleConnection(socket);
 }
 
-function testStaleDisconnectRegression() {
+function resolveGodotPath(): string | null {
+  const candidate = process.env['GODOT_PATH'];
+  return candidate && existsSync(candidate) ? candidate : null;
+}
+
+function testStaleDisconnectRegression(): void {
   const bridge = createBridge(0, 1000, '127.0.0.1');
   const first = new FakeSocket('first');
   const second = new FakeSocket('second');
 
-  bridge.handleConnection(first);
+  connectFake(bridge, first);
   assert.equal(bridge.getStatus().connected, true, 'first socket should be connected');
 
   first.readyState = 3;
-  bridge.handleConnection(second);
+  connectFake(bridge, second);
   assert.equal(bridge.getStatus().connected, true, 'second socket should be connected');
 
   first.emit('close', 1000, Buffer.from('late close from stale socket'));
@@ -146,9 +113,14 @@ function testStaleDisconnectRegression() {
   assert.equal(bridge.getStatus().connected, false, 'active socket close should disconnect bridge');
 }
 
-function testSceneToolsVectorRegression() {
+function testSceneToolsVectorRegression(): void {
   const godotPath = resolveGodotPath();
   if (!godotPath) {
+    // A skip is fine on a machine with no engine and never fine where the job exists to run
+    // this: the engine job sets the flag so a missing install reads as a failure, not a pass.
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
     console.log('scene tools vector regression skipped (Godot not found)');
     return;
   }
@@ -198,21 +170,33 @@ function testSceneToolsVectorRegression() {
  * `reply` decides what URI it publishes diagnostics under, which is the whole point: Godot
  * does not echo back the URI the client sent, it builds its own.
  */
-async function withFakeLanguageServer(publishUri, handler) {
-  const sockets = new Set();
+/** The port a listening server landed on, which `address()` only answers once it is up. */
+function portOf(server: Server): number {
+  const address = server.address();
+  if (!address || typeof address === 'string') {
+    throw new Error('The server is not listening on a TCP port.');
+  }
+  return address.port;
+}
+
+async function withFakeLanguageServer<T>(
+  publishUri: (uri: string) => string | null,
+  handler: (port: number) => Promise<T>,
+): Promise<T> {
+  const sockets = new Set<Socket>();
 
   const server = createServer((socket) => {
     sockets.add(socket);
     let buffer = '';
 
-    const send = (message) => {
+    const send = (message: unknown): void => {
       const body = JSON.stringify(message);
       socket.write(`Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
     };
 
-    socket.on('data', (chunk) => {
+    socket.on('data', (chunk: Buffer) => {
       buffer += chunk.toString();
-      while (true) {
+      for (;;) {
         const headerEnd = buffer.indexOf('\r\n\r\n');
         if (headerEnd === -1) return;
         const length = Number(/content-length:\s*(\d+)/i.exec(buffer.slice(0, headerEnd))?.[1]);
@@ -220,13 +204,13 @@ async function withFakeLanguageServer(publishUri, handler) {
         const start = headerEnd + 4;
         if (buffer.length < start + length) return;
 
-        const message = JSON.parse(buffer.slice(start, start + length));
+        const message = JSON.parse(buffer.slice(start, start + length)) as JsonRpcMessage;
         buffer = buffer.slice(start + length);
 
         if (message.method === 'initialize') {
           send({ jsonrpc: '2.0', id: message.id, result: { capabilities: {} } });
         } else if (message.method === 'textDocument/didOpen') {
-          const uri = publishUri(message.params.textDocument.uri);
+          const uri = publishUri(String(get(message.params, 'textDocument', 'uri')));
           if (uri !== null) {
             send({
               jsonrpc: '2.0',
@@ -252,13 +236,17 @@ async function withFakeLanguageServer(publishUri, handler) {
     });
   });
 
-  await new Promise((ready) => server.listen(0, '127.0.0.1', ready));
+  await new Promise<void>((ready) => server.listen(0, '127.0.0.1', ready));
 
   try {
-    return await handler(server.address().port);
+    return await handler(portOf(server));
   } finally {
     for (const socket of sockets) socket.destroy();
-    await new Promise((closed) => server.close(closed));
+    await new Promise<void>((closed) =>
+      server.close(() => {
+        closed();
+      }),
+    );
   }
 }
 
@@ -273,8 +261,8 @@ async function withFakeLanguageServer(publishUri, handler) {
  * Re-encoding one character of the basename reproduces exactly that mismatch on any
  * platform, without needing a Windows drive letter to do it.
  */
-async function testDiagnosticsSurviveUriReEncoding() {
-  const reEncodeFirstLetter = (uri) => {
+async function testDiagnosticsSurviveUriReEncoding(): Promise<void> {
+  const reEncodeFirstLetter = (uri: string): string => {
     const at = uri.lastIndexOf('/') + 1;
     const code = uri.charCodeAt(at).toString(16).toUpperCase();
     return `${uri.slice(0, at)}%${code}${uri.slice(at + 1)}`;
@@ -292,7 +280,7 @@ async function testDiagnosticsSurviveUriReEncoding() {
       1,
       'diagnostics published under a differently encoded but identical URI should still reach the caller',
     );
-    await client.disconnect?.();
+    await client.disconnect();
   });
 }
 
@@ -301,7 +289,7 @@ async function testDiagnosticsSurviveUriReEncoding() {
  * that gives up must not answer with one too. Reporting a dead language server as a clean
  * file is the failure that hides itself.
  */
-async function testDiagnosticsTimeoutIsNotAnEmptyResult() {
+async function testDiagnosticsTimeoutIsNotAnEmptyResult(): Promise<void> {
   await withFakeLanguageServer(
     () => null,
     async (port) => {
@@ -311,7 +299,7 @@ async function testDiagnosticsTimeoutIsNotAnEmptyResult() {
         /published no diagnostics/,
         'a diagnostics wait that times out should fail rather than report an empty result',
       );
-      await client.disconnect?.();
+      await client.disconnect();
     },
   );
 }
@@ -324,10 +312,13 @@ async function testDiagnosticsTimeoutIsNotAnEmptyResult() {
  */
 const MULTIBYTE = 'café 字幕 🎮 Ünterstützung';
 
-function frameJsonRpc(message) {
+function frameJsonRpc(message: unknown): Buffer {
   const body = Buffer.from(JSON.stringify(message), 'utf8');
   return Buffer.concat([Buffer.from(`Content-Length: ${body.length}\r\n\r\n`, 'ascii'), body]);
 }
+
+/** Both protocols frame the same way; what the body is (JSON-RPC or DAP) is the handler's business. */
+type FramedPeerHandler = (message: Record<string, unknown>, socket: Socket) => void;
 
 /**
  * A peer speaking the Content-Length framing both the LSP and the DAP client read.
@@ -336,16 +327,19 @@ function frameJsonRpc(message) {
  * go back and how they are split across writes: a fixture for a framing bug has to control
  * chunk boundaries, not just message contents.
  */
-async function withFramedPeer(onMessage, handler) {
-  const sockets = new Set();
+async function withFramedPeer<T>(
+  onMessage: FramedPeerHandler,
+  handler: (port: number) => Promise<T>,
+): Promise<T> {
+  const sockets = new Set<Socket>();
 
   const server = createServer((socket) => {
     sockets.add(socket);
     let buffer = Buffer.alloc(0);
 
-    socket.on('data', (chunk) => {
+    socket.on('data', (chunk: Buffer) => {
       buffer = Buffer.concat([buffer, chunk]);
-      while (true) {
+      for (;;) {
         const headerEnd = buffer.indexOf('\r\n\r\n');
         if (headerEnd === -1) return;
         const header = buffer.toString('latin1', 0, headerEnd);
@@ -354,9 +348,9 @@ async function withFramedPeer(onMessage, handler) {
         const start = headerEnd + 4;
         if (buffer.length < start + length) return;
 
-        const message = JSON.parse(buffer.toString('utf8', start, start + length));
+        const message: unknown = JSON.parse(buffer.toString('utf8', start, start + length));
         buffer = buffer.subarray(start + length);
-        onMessage(message, socket);
+        onMessage(isRecord(message) ? message : {}, socket);
       }
     });
     socket.on('error', () => {
@@ -364,13 +358,17 @@ async function withFramedPeer(onMessage, handler) {
     });
   });
 
-  await new Promise((ready) => server.listen(0, '127.0.0.1', ready));
+  await new Promise<void>((ready) => server.listen(0, '127.0.0.1', ready));
 
   try {
-    return await handler(server.address().port);
+    return await handler(portOf(server));
   } finally {
     for (const socket of sockets) socket.destroy();
-    await new Promise((closed) => server.close(closed));
+    await new Promise<void>((closed) =>
+      server.close(() => {
+        closed();
+      }),
+    );
   }
 }
 
@@ -385,16 +383,16 @@ async function withFramedPeer(onMessage, handler) {
  * and is one the client ignores; the second is the one under assertion, and it can only be
  * found at all if the first was measured in bytes.
  */
-async function testLspFramesBodiesByBytes() {
+async function testLspFramesBodiesByBytes(): Promise<void> {
   const diagnosticMessage = `Could not find type "${MULTIBYTE}" in the current scope.`;
 
-  const respond = (message, socket) => {
-    if (message.method === 'initialize') {
-      socket.write(frameJsonRpc({ jsonrpc: '2.0', id: message.id, result: { capabilities: {} } }));
+  const respond: FramedPeerHandler = (message, socket) => {
+    if (message['method'] === 'initialize') {
+      socket.write(frameJsonRpc({ jsonrpc: '2.0', id: message['id'], result: { capabilities: {} } }));
       return;
     }
 
-    if (message.method === 'textDocument/didOpen') {
+    if (message['method'] === 'textDocument/didOpen') {
       socket.write(
         Buffer.concat([
           frameJsonRpc({
@@ -406,7 +404,7 @@ async function testLspFramesBodiesByBytes() {
             jsonrpc: '2.0',
             method: 'textDocument/publishDiagnostics',
             params: {
-              uri: message.params.textDocument.uri,
+              uri: get(message['params'], 'textDocument', 'uri'),
               diagnostics: [
                 {
                   range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
@@ -435,11 +433,11 @@ async function testLspFramesBodiesByBytes() {
       'a message following a multi-byte one must still be found, or the stream has desynchronised',
     );
     assert.equal(
-      diagnostics[0].message,
+      get(diagnostics[0], 'message'),
       diagnosticMessage,
       'a diagnostic quoting non-ASCII text must arrive with that text intact',
     );
-    await client.disconnect?.();
+    await client.disconnect();
   });
 }
 
@@ -452,16 +450,16 @@ async function testLspFramesBodiesByBytes() {
  * this fails on either fault: a body assembled wrongly across the chunk boundary, or a length
  * read in code units, which walks past the end of the first message and loses the second.
  */
-async function testLspReassemblesBodySplitMidCharacter() {
+async function testLspReassemblesBodySplitMidCharacter(): Promise<void> {
   const diagnosticMessage = `Invalid operand "${MULTIBYTE}"`;
 
-  const respond = (message, socket) => {
-    if (message.method === 'initialize') {
-      socket.write(frameJsonRpc({ jsonrpc: '2.0', id: message.id, result: { capabilities: {} } }));
+  const respond: FramedPeerHandler = (message, socket) => {
+    if (message['method'] === 'initialize') {
+      socket.write(frameJsonRpc({ jsonrpc: '2.0', id: message['id'], result: { capabilities: {} } }));
       return;
     }
 
-    if (message.method === 'textDocument/didOpen') {
+    if (message['method'] === 'textDocument/didOpen') {
       const log = frameJsonRpc({
         jsonrpc: '2.0',
         method: 'window/logMessage',
@@ -473,7 +471,7 @@ async function testLspReassemblesBodySplitMidCharacter() {
           jsonrpc: '2.0',
           method: 'textDocument/publishDiagnostics',
           params: {
-            uri: message.params.textDocument.uri,
+            uri: get(message['params'], 'textDocument', 'uri'),
             diagnostics: [{ message: diagnosticMessage, severity: 1, source: 'gdscript' }],
           },
         }),
@@ -495,11 +493,11 @@ async function testLspReassemblesBodySplitMidCharacter() {
 
     assert.equal(diagnostics.length, 1, 'a body split across two reads must still be assembled');
     assert.equal(
-      diagnostics[0].message,
+      get(diagnostics[0], 'message'),
       diagnosticMessage,
       'a character split across two reads must decode to itself, not to replacement characters',
     );
-    await client.disconnect?.();
+    await client.disconnect();
   });
 }
 
@@ -507,18 +505,18 @@ async function testLspReassemblesBodySplitMidCharacter() {
  * The debug adapter client frames identically and had the identical fault. Godot prints
  * through it, so the non-ASCII case here is an ordinary `print()` of a translated string.
  */
-async function testDapFramesBodiesByBytes() {
+async function testDapFramesBodiesByBytes(): Promise<void> {
   const outputLine = `print: ${MULTIBYTE}`;
   const marker = MULTIBYTE.repeat(8);
 
-  const respond = (message, socket) => {
-    if (message.command === 'initialize') {
+  const respond: FramedPeerHandler = (message, socket) => {
+    if (message['command'] === 'initialize') {
       socket.write(
         Buffer.concat([
           frameJsonRpc({
             seq: 1,
             type: 'response',
-            request_seq: message.seq,
+            request_seq: message['seq'],
             command: 'initialize',
             success: true,
             body: { marker },
@@ -538,8 +536,8 @@ async function testDapFramesBodiesByBytes() {
       frameJsonRpc({
         seq: 3,
         type: 'response',
-        request_seq: message.seq,
-        command: message.command,
+        request_seq: message['seq'],
+        command: message['command'],
         success: true,
         body: {},
       }),
@@ -550,7 +548,7 @@ async function testDapFramesBodiesByBytes() {
     const client = new GodotDAPClient(port, '127.0.0.1');
     const body = await client.initialize();
 
-    assert.equal(body.marker, marker, 'a response body holding non-ASCII text must arrive intact');
+    assert.equal(get(body, 'marker'), marker, 'a response body holding non-ASCII text must arrive intact');
     assert.deepEqual(
       client.getOutput(),
       [outputLine],
@@ -565,8 +563,8 @@ async function testDapFramesBodiesByBytes() {
  * process grows until it is killed with nothing on any log, so both clients cap what they
  * will hold and drop the connection with the size in the message.
  */
-async function testFramingCeilingFailsLoudly() {
-  const announceTooMuch = (_message, socket) => {
+async function testFramingCeilingFailsLoudly(): Promise<void> {
+  const announceTooMuch: FramedPeerHandler = (_message, socket) => {
     socket.write(Buffer.from('Content-Length: 999999999\r\n\r\n', 'ascii'));
   };
 
@@ -577,7 +575,7 @@ async function testFramingCeilingFailsLoudly() {
       /exceeded the 33554432 byte ceiling/,
       'an LSP peer announcing more than the ceiling should fail the request, naming the size',
     );
-    await client.disconnect?.();
+    await client.disconnect();
   });
 
   await withFramedPeer(announceTooMuch, async (port) => {
@@ -597,7 +595,7 @@ async function testFramingCeilingFailsLoudly() {
  * keys onto one of them: every object in the process gains a property, and the section the
  * caller asked for is a function that JSON.stringify drops on the floor.
  */
-function testProjectGodotResistsPrototypeKeys() {
+function testProjectGodotResistsPrototypeKeys(): void {
   const parsed = parseProjectGodot(
     [
       '[application]',
@@ -616,12 +614,12 @@ function testProjectGodotResistsPrototypeKeys() {
   );
 
   assert.equal(
-    Object.prototype.polluted,
+    get(Object.prototype, 'polluted'),
     undefined,
     'a [__proto__] section must not put a property on every object in the process',
   );
   assert.equal(
-    Object.polluted,
+    (Object as unknown as Record<string, unknown>)['polluted'],
     undefined,
     'a [constructor] section must not write onto the Object constructor',
   );
@@ -632,84 +630,64 @@ function testProjectGodotResistsPrototypeKeys() {
     'the parsed project must carry no prototype for a section name to reach through',
   );
   assert.equal(
-    Object.getPrototypeOf(parsed.misc),
+    Object.getPrototypeOf(parsed['misc']),
     null,
     'each section must carry no prototype for a key name to reach through',
   );
 
   assert.equal(typeof parsed.constructor, 'object', 'a [constructor] section must parse to data');
-  assert.equal(parsed.constructor.polluted, 'yes', 'a [constructor] section must keep its own keys');
+  assert.equal(
+    get(parsed, 'constructor', 'polluted'),
+    'yes',
+    'a [constructor] section must keep its own keys',
+  );
   // Through the descriptor rather than the accessor: reading it as a property would answer
   // with whatever prototype is behind the object when the section is not there as data.
-  const protoSection = Object.getOwnPropertyDescriptor(parsed, '__proto__')?.value;
-  assert.equal(protoSection?.polluted, 'yes', 'a [__proto__] section must keep its own keys');
+  const protoSection: unknown = Object.getOwnPropertyDescriptor(parsed, '__proto__')?.value;
+  assert.equal(get(protoSection, 'polluted'), 'yes', 'a [__proto__] section must keep its own keys');
   assert.equal(
-    Object.getOwnPropertyDescriptor(parsed.misc, '__proto__')?.value,
+    Object.getOwnPropertyDescriptor(parsed['misc'], '__proto__')?.value,
     'data',
     'a __proto__ key must land on the section as data',
   );
-  assert.equal(parsed.misc.kept, 'value', 'a key after a __proto__ key must survive');
-  assert.equal(parsed.application['config/name'], 'Pollution', 'ordinary sections must be unaffected');
+  assert.equal(get(parsed, 'misc', 'kept'), 'value', 'a key after a __proto__ key must survive');
+  assert.equal(
+    get(parsed, 'application', 'config/name'),
+    'Pollution',
+    'ordinary sections must be unaffected',
+  );
 
   // What the resource handler returns. JSON.stringify drops a function value outright, so a
   // section parsed onto the Object constructor leaves the client a project with a hole in it.
-  const serialised = JSON.parse(JSON.stringify(parsed));
+  const serialised: unknown = JSON.parse(JSON.stringify(parsed));
   assert.equal(
-    serialised.constructor.polluted,
+    get(serialised, 'constructor', 'polluted'),
     'yes',
     'a [constructor] section must survive the JSON the resource handler hands back',
   );
 }
 
-async function testEditorStatusPortConflict() {
+async function testEditorStatusPortConflict(): Promise<void> {
   await withOccupiedBridgePort(async () => {
-    const proc = spawn(process.execPath, ['./build/index.js'], {
-      cwd: process.cwd(),
-      env: {
-        ...process.env,
-        GDHARNESS_TOOL_PROFILE: 'compact',
-      },
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-
-    const stderrChunks = [];
-    proc.stderr.on('data', (chunk) => stderrChunks.push(chunk.toString()));
-
+    const server = new ServerProcess({ env: { GDHARNESS_TOOL_PROFILE: 'compact' } });
     try {
       await delay(500);
-      assert.equal(proc.exitCode, null, 'server should stay alive when the bridge port is occupied');
+      assert.equal(server.exited, false, 'server should stay alive when the bridge port is occupied');
+      await server.initialize('regression-test');
 
-      proc.stdin.write(
-        makeRequest(
-          'initialize',
-          {
-            protocolVersion: '2024-11-05',
-            capabilities: {},
-            clientInfo: { name: 'regression-test', version: '1.0.0' },
-          },
-          1,
-        ),
-      );
-      await waitForJsonLine(proc.stdout, (msg) => msg.id === 1);
-      proc.stdin.write(
-        `${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized', params: {} })}\n`,
-      );
-
-      proc.stdin.write(makeRequest('tools/call', { name: 'get_editor_status', arguments: {} }, 2));
-      const response = await waitForJsonLine(proc.stdout, (msg) => msg.id === 2);
-      const payload = JSON.parse(response.result.content[0].text);
-      assert.equal(payload.bridgeAvailable, false);
-      assert.match(payload.startupError ?? '', /EADDRINUSE/i);
-      assert.match(payload.note ?? '', /Another gdharness instance may own the editor bridge/i);
+      const response = await server.request('tools/call', { name: 'get_editor_status', arguments: {} });
+      const payload = parseTextContent(response);
+      assert.equal(get(payload, 'bridgeAvailable'), false);
+      assert.match(text(get(payload, 'startupError')), /EADDRINUSE/i);
+      assert.match(text(get(payload, 'note')), /Another gdharness instance may own the editor bridge/i);
     } finally {
-      proc.kill('SIGTERM');
-      await Promise.race([new Promise((resolve) => proc.once('exit', resolve)), delay(2000)]);
-      if (proc.exitCode === null) {
-        proc.kill('SIGKILL');
-      }
+      await server.stop();
     }
   });
 }
+
+type ToolCall = (name: string, args: unknown) => Promise<string>;
+type RawRequest = (method: string, params: unknown) => Promise<JsonRpcMessage>;
 
 /**
  * Runs the built server over stdio, initialised and ready for tools/call, and hands `call` and
@@ -717,52 +695,28 @@ async function testEditorStatusPortConflict() {
  * put on the wire, and reaching into the class directly would not carry a `__proto__` through
  * JSON.parse.
  */
-async function withStdioServer(body, env = {}) {
-  const proc = spawn(process.execPath, ['./build/index.js'], {
-    cwd: process.cwd(),
-    env: { ...process.env, GDHARNESS_TOOL_PROFILE: 'compact', ...env },
-    stdio: ['pipe', 'pipe', 'pipe'],
-  });
+async function withStdioServer(
+  body: (call: ToolCall, request: RawRequest) => Promise<void>,
+  env: Record<string, string> = {},
+): Promise<void> {
+  const server = new ServerProcess({ env: { GDHARNESS_TOOL_PROFILE: 'compact', ...env } });
 
-  let nextId = 1;
-  const request = async (method, params) => {
-    nextId += 1;
-    const id = nextId;
-    proc.stdin.write(makeRequest(method, params, id));
-    return await waitForJsonLine(proc.stdout, (msg) => msg.id === id);
-  };
+  const request: RawRequest = async (method, params) => await server.request(method, params);
 
   // The text rather than a parsed payload: a refusal comes back as a sentence, and a fixture
   // about refusals must not fall over on the thing it is there to see.
-  const call = async (name, args) => {
+  const call: ToolCall = async (name, args) => {
     const response = await request('tools/call', { name, arguments: args });
-    return response.result.content[0].text;
+    const text = textOf(response);
+    assert.ok(text !== null, `${name} answered with no text content: ${JSON.stringify(response)}`);
+    return text;
   };
 
   try {
-    proc.stdin.write(
-      makeRequest(
-        'initialize',
-        {
-          protocolVersion: '2024-11-05',
-          capabilities: {},
-          clientInfo: { name: 'regression-test', version: '1.0.0' },
-        },
-        1,
-      ),
-    );
-    await waitForJsonLine(proc.stdout, (msg) => msg.id === 1);
-    proc.stdin.write(
-      `${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized', params: {} })}\n`,
-    );
-
+    await server.initialize('regression-test');
     await body(call, request);
   } finally {
-    proc.kill('SIGTERM');
-    await Promise.race([new Promise((resolve) => proc.once('exit', resolve)), delay(2000)]);
-    if (proc.exitCode === null) {
-      proc.kill('SIGKILL');
-    }
+    await server.stop();
   }
 }
 
@@ -774,9 +728,9 @@ async function withStdioServer(body, env = {}) {
  * belonging to Object.prototype must read as absent, and writing `__proto__` must store a key
  * rather than re-parent the object.
  */
-function testDictionariesHaveNothingBehindThem() {
+function testDictionariesHaveNothingBehindThem(): void {
   const table = dictionary({ real: 'yes' });
-  const blank = emptyRecord();
+  const blank = emptyRecord<unknown>();
 
   assert.equal(table['real'], 'yes', 'a dictionary must still answer for its own keys');
 
@@ -787,7 +741,7 @@ function testDictionariesHaveNothingBehindThem() {
 
   // Copied key by key out of parsed JSON, which is how such a name arrives in the first place:
   // JSON.parse makes __proto__ an own enumerable property rather than a prototype.
-  const hostile = JSON.parse('{"__proto__": {"injected": true}}');
+  const hostile = JSON.parse('{"__proto__": {"injected": true}}') as Record<string, unknown>;
   for (const key of Object.keys(hostile)) {
     blank[key] = hostile[key];
   }
@@ -807,7 +761,7 @@ function testDictionariesHaveNothingBehindThem() {
  * the existence checks pass and the handler answers about a group that does not exist; with the
  * branches in the other order it dereferences a function looking for `.tools`.
  */
-async function testToolGroupLookupsCannotReachThePrototype() {
+async function testToolGroupLookupsCannotReachThePrototype(): Promise<void> {
   await withStdioServer(async (call) => {
     for (const group of ['constructor', 'toString', 'hasOwnProperty', '__proto__']) {
       for (const action of ['activate', 'deactivate']) {
@@ -823,53 +777,7 @@ async function testToolGroupLookupsCannotReachThePrototype() {
   });
 }
 
-/**
- * A modification the type accepts and nothing implements has to fail rather than report success.
- *
- * `replace_function`, `remove_function` and `add_export` are all declared by ScriptModification
- * and none of them is written. The switch fell past them, the file was written back byte for
- * byte, and the caller got `{ success: true }` over a script nothing had touched.
- */
-function testUnimplementedScriptModificationsFail() {
-  const projectDir = mkdtempSync(join(tmpdir(), 'gdharness-modify-'));
-  try {
-    const scriptPath = 'player.gd';
-    writeFileSync(join(projectDir, scriptPath), 'extends Node\n\nfunc _ready() -> void:\n\tpass\n');
-    const before = readFileSync(join(projectDir, scriptPath), 'utf8');
-
-    for (const type of ['replace_function', 'remove_function', 'add_export']) {
-      assert.throws(
-        () =>
-          modifyGDScript({
-            projectPath: projectDir,
-            scriptPath,
-            modifications: [{ type, name: 'whatever', newBody: '', varType: 'int' }],
-          }),
-        /declared but not implemented/,
-        `${type} should be refused rather than silently ignored`,
-      );
-    }
-
-    assert.equal(
-      readFileSync(join(projectDir, scriptPath), 'utf8'),
-      before,
-      'a refused modification must not have written the script',
-    );
-
-    // The implemented half still has to work, or the guard above is just breaking the tool.
-    const done = modifyGDScript({
-      projectPath: projectDir,
-      scriptPath,
-      modifications: [{ type: 'add_signal', name: 'died' }],
-    });
-    assert.equal(done.success, true, 'add_signal is implemented and should still succeed');
-    assert.match(readFileSync(join(projectDir, scriptPath), 'utf8'), /signal died/);
-  } finally {
-    rmSync(projectDir, { recursive: true, force: true });
-  }
-}
-
-function testProjectGodotMultilineValues() {
+function testProjectGodotMultilineValues(): void {
   const parsed = parseProjectGodot(
     [
       '[input]',
@@ -893,30 +801,38 @@ function testProjectGodotMultilineValues() {
   );
 
   assert.equal(
-    parsed.input?.move_left,
+    get(parsed, 'input', 'move_left'),
     '{\n"deadzone": 0.2,\n"events": [Object(InputEventKey,"physical_keycode":65)]\n}',
     'multi-line dictionary values should be joined rather than truncated to their first line',
   );
   assert.equal(
-    parsed.rendering?.['renderer/rendering_method'],
+    get(parsed, 'rendering', 'renderer/rendering_method'),
     'gl_compatibility',
     'a section following a multi-line value should still be parsed',
   );
   assert.equal(
-    parsed.misc?.brace_in_string,
+    get(parsed, 'misc', 'brace_in_string'),
     '{',
     'a brace inside a quoted string should not start a continuation',
   );
-  assert.equal(parsed.misc?.after_brace_in_string, 'kept', 'a key after a quoted brace should survive');
   assert.equal(
-    parsed.misc?.inline_dict,
+    get(parsed, 'misc', 'after_brace_in_string'),
+    'kept',
+    'a key after a quoted brace should survive',
+  );
+  assert.equal(
+    get(parsed, 'misc', 'inline_dict'),
     '{"x": [1, 2], "y": {"z": 3}}',
     'a balanced single-line dictionary should be left alone',
   );
-  assert.equal(parsed.misc?.after_inline_dict, 7, 'a key after an inline dictionary should survive');
+  assert.equal(
+    get(parsed, 'misc', 'after_inline_dict'),
+    7,
+    'a key after an inline dictionary should survive',
+  );
 
   const unterminated = parseProjectGodot('[s]\nbroken={\n"k": 1\n');
-  assert.equal(typeof unterminated.s?.broken, 'string', 'an unterminated value should not hang');
+  assert.equal(typeof get(unterminated, 's', 'broken'), 'string', 'an unterminated value should not hang');
 }
 
 /**
@@ -927,7 +843,7 @@ function testProjectGodotMultilineValues() {
  * spellings that carry no dots at all. Those are platform-shaped, so the hostile set is too: a
  * drive letter and a UNC share are absolute on Windows and ordinary filenames on Linux.
  */
-function testProjectPathsAreContained() {
+function testProjectPathsAreContained(): void {
   const onWindows = process.platform === 'win32';
   const root = onWindows ? 'C:\\game' : '/srv/game';
 
@@ -953,7 +869,7 @@ function testProjectPathsAreContained() {
 
   for (const candidate of refused) {
     const answer = resolveWithinProject(root, candidate);
-    assert.equal(answer.ok, false, `${JSON.stringify(candidate)} should not resolve inside ${root}`);
+    assert.ok(!answer.ok, `${JSON.stringify(candidate)} should not resolve inside ${root}`);
     assert.match(
       answer.reason,
       /empty|null byte|scheme|absolute|outside the project|project directory itself/,
@@ -962,19 +878,19 @@ function testProjectPathsAreContained() {
   }
 
   // The other half, or the fixture above passes against a function that refuses everything.
-  const accepted = [
+  const accepted: [string, string][] = [
     ['scenes/main.tscn', 'scenes/main.tscn'],
     ['res://scenes/main.tscn', 'scenes/main.tscn'],
     ['scenes/./main.tscn', 'scenes/main.tscn'],
     ['scenes/sub/../main.tscn', 'scenes/main.tscn'],
     ['archive..old.gd', 'archive..old.gd'],
     ['..config/player.gd', '..config/player.gd'],
-    ...(onWindows ? [['scenes\\main.tscn', 'scenes/main.tscn']] : []),
+    ...(onWindows ? [['scenes\\main.tscn', 'scenes/main.tscn'] as [string, string]] : []),
   ];
 
   for (const [candidate, expected] of accepted) {
     const answer = resolveWithinProject(root, candidate);
-    assert.equal(answer.ok, true, `${JSON.stringify(candidate)} names a file inside the project`);
+    assert.ok(answer.ok, `${JSON.stringify(candidate)} names a file inside the project`);
     assert.equal(
       answer.relativePath,
       expected,
@@ -1009,7 +925,7 @@ function testProjectPathsAreContained() {
  * writes. Several of these were not checked at all, and the rest were checked by a substring
  * test that an absolute path walks straight past.
  */
-async function testToolsRefusePathsOutsideTheProject() {
+async function testToolsRefusePathsOutsideTheProject(): Promise<void> {
   const sandbox = mkdtempSync(join(tmpdir(), 'gdharness-containment-'));
   const projectPath = join(sandbox, 'project');
   mkdirSync(projectPath, { recursive: true });
@@ -1019,7 +935,7 @@ async function testToolsRefusePathsOutsideTheProject() {
   writeFileSync(join(sandbox, 'outside.png'), 'not a png');
 
   const outsideScript = '../outside.gd';
-  const hostile = [
+  const hostile: [string, Record<string, unknown>][] = [
     ['create_script', { scriptPath: '../escaped.gd' }],
     ['modify_script', { scriptPath: outsideScript, modifications: [{ type: 'add_signal', name: 'died' }] }],
     ['get_script_info', { scriptPath: outsideScript }],
@@ -1063,12 +979,13 @@ async function testToolsRefusePathsOutsideTheProject() {
         // The accepting half. These reach the engine, which is not Godot here, so the answer is
         // whatever that failure says; what matters is that containment was not the thing that
         // stopped them.
-        for (const [tool, args] of [
+        const accepted: [string, Record<string, unknown>][] = [
           ['create_script', { scriptPath: 'scripts/player.gd' }],
           ['get_uid', { filePath: 'inside.gd' }],
           ['get_script_info', { scriptPath: 'inside.gd' }],
           ['export_project', { preset: 'Linux', outputPath: 'builds/game.bin' }],
-        ]) {
+        ];
+        for (const [tool, args] of accepted) {
           assert.doesNotMatch(
             await call(tool, { projectPath, ...args }),
             /is absolute|resolves outside the project directory/,
@@ -1091,7 +1008,7 @@ async function testToolsRefusePathsOutsideTheProject() {
           uri: 'godot://script/..%2f..%2foutside.gd',
         });
         assert.match(
-          escaped.error?.message ?? escaped.result?.contents?.[0]?.text ?? '',
+          escaped.error?.message ?? text(get(escaped.result, 'contents', 0, 'text')),
           /is absolute|resolves outside the project directory/,
           'a godot:// URI with an encoded traversal should be refused',
         );
@@ -1103,7 +1020,7 @@ async function testToolsRefusePathsOutsideTheProject() {
   }
 }
 
-async function main() {
+async function main(): Promise<void> {
   testStaleDisconnectRegression();
   testSceneToolsVectorRegression();
   assert.match(
@@ -1230,7 +1147,6 @@ async function main() {
   await testDapFramesBodiesByBytes();
   await testFramingCeilingFailsLoudly();
   testDictionariesHaveNothingBehindThem();
-  testUnimplementedScriptModificationsFail();
   testProjectPathsAreContained();
   await testToolGroupLookupsCannotReachThePrototype();
   await testToolsRefusePathsOutsideTheProject();

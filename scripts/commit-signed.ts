@@ -7,7 +7,7 @@
  * createCommitOnBranch is the way out, because GitHub signs what it commits on your behalf, so
  * the ruleset stays strict and nothing has to be excepted from it.
  *
- * Usage: bun scripts/commit-signed.mjs <branch> <message> <file>...
+ * Usage: bun scripts/commit-signed.ts <branch> <message> <file>...
  */
 
 import { readFileSync } from 'node:fs';
@@ -16,7 +16,7 @@ import process from 'node:process';
 const [branch, message, ...files] = process.argv.slice(2);
 
 if (!branch || !message || files.length === 0) {
-  console.error('Usage: bun scripts/commit-signed.mjs <branch> <message> <file>...');
+  console.error('Usage: bun scripts/commit-signed.ts <branch> <message> <file>...');
   process.exit(1);
 }
 
@@ -61,12 +61,21 @@ const response = await fetch('https://api.github.com/graphql', {
   body: JSON.stringify({ query, variables: { input } }),
 });
 
-const payload = await response.json();
+interface CreateCommitResponse {
+  errors?: unknown;
+  data?: { createCommitOnBranch?: { commit?: { oid: string; url: string } } };
+}
+
+const payload = (await response.json()) as CreateCommitResponse;
 
 if (!response.ok || payload.errors) {
   console.error(JSON.stringify(payload.errors ?? payload, null, 2));
   process.exit(1);
 }
 
-const commit = payload.data.createCommitOnBranch.commit;
+const commit = payload.data?.createCommitOnBranch?.commit;
+if (!commit) {
+  console.error(`GitHub answered without a commit: ${JSON.stringify(payload)}`);
+  process.exit(1);
+}
 console.log(`${commit.oid} ${commit.url}`);

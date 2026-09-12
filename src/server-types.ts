@@ -33,7 +33,7 @@ export interface ProjectStructure {
  * One block of a tool result. `text` carries JSON or prose; `data` plus `mimeType` carry a
  * base64 payload, which is how a screenshot comes back.
  */
-export interface ToolResponseContent {
+interface ToolResponseContent {
   type: string;
   text?: string;
   data?: string;
