@@ -60,7 +60,7 @@ assert.equal(
   'CLI version output should stay in sync with package.json',
 );
 
-const server = new ServerProcess({ entry: './build/cli.js', env: { GDHARNESS_TOOL_PROFILE: 'compact' } });
+const server = new ServerProcess({ entry: './build/cli.js' });
 try {
   const init = await server.initialize('metadata-test');
   assert.equal(init.error, undefined, `initialize failed: ${JSON.stringify(init.error)}`);
@@ -70,7 +70,8 @@ try {
   assert.equal(serverInfo['version'], pkg.version, 'initialize should report package-aligned server version');
   const capabilities = isRecord(result['capabilities']) ? result['capabilities'] : {};
   const tools = isRecord(capabilities['tools']) ? capabilities['tools'] : {};
-  assert.equal(tools['listChanged'], true, 'initialize should advertise listChanged tool capability');
+  // The list never changes, so a client is not told to expect it to.
+  assert.equal(tools['listChanged'], undefined, 'initialize should not advertise a changing tool list');
 } finally {
   await server.stop();
 }

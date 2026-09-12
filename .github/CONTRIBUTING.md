@@ -66,7 +66,7 @@ Checks, all of which CI runs:
 
 ```bash
 bun run ci                 # build, typecheck over src, test and scripts, regression, detection, archive and property tests
-bun run test:dynamic-groups
+bun run test:integration   # the bridge against a mock editor and a mock runtime
 bun run test:metadata
 bun run format             # Biome, writes
 bun run lint               # Biome, then oxlint with its type-aware rules, then knip

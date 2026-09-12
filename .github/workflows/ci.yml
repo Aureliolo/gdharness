@@ -152,12 +152,13 @@ jobs:
         env:
           GDHARNESS_REQUIRE_GODOT: '1'
 
-      # Here rather than in build-and-test because its last phase makes real tool calls, and
-      # those need an engine: without one the tools answer with empty content and the phase
-      # passes on nothing.
-      - name: Tool group end to end
+      # The bridge test's ClassDB phase reaches the engine and skips without one, so it is run
+      # again here, where a skip is a failure.
+      - name: Bridge integration test with the engine
         if: '!cancelled()'
-        run: bun run test:e2e-groups
+        run: bun run test:integration
+        env:
+          GDHARNESS_REQUIRE_GODOT: '1'
 
   # Biome owns formatting and the fast syntactic rules; oxlint owns the ones that need the type
   # checker, which it runs through typescript-go rather than a second copy of the compiler.
@@ -227,11 +228,7 @@ jobs:
       - name: Runtime regression tests
         run: bun run test:ci
 
-      - name: Dynamic groups test
-        run: bun run test:dynamic-groups
-
-      # 41 assertions about the bridge, driven against a mock Godot over a real WebSocket, that
-      # nothing ran until now.
+      # The bridge, driven against a mock Godot over a real WebSocket.
       - name: Bridge integration test
         run: bun run test:integration
 

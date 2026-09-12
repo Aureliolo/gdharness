@@ -137,7 +137,29 @@ func _parse_tagged_dictionary(value: Dictionary) -> Array:
 		"Resource":
 			var resource_path: String = str(value.get("path", ""))
 			return [true, null if resource_path.is_empty() else load(resource_path)]
-	return [false, null]
+		_:
+			return _parse_new_resource(type_tag, value)
+
+
+## A tag naming a Resource class builds a fresh one, its other keys set as properties, so a
+## NavigationRegion2D can arrive with its NavigationPolygon and an AnimationTree with its root
+## state machine in the same add as any other property.
+func _parse_new_resource(type_tag: String, value: Dictionary) -> Array:
+	if (
+		type_tag.is_empty()
+		or not ClassDB.class_exists(type_tag)
+		or not ClassDB.is_parent_class(type_tag, "Resource")
+		or not ClassDB.can_instantiate(type_tag)
+	):
+		return [false, null]
+
+	var built: Resource = ClassDB.instantiate(type_tag)
+	for key: Variant in value:
+		var name := str(key)
+		if name == "_type" or name == "type":
+			continue
+		built.set(name, _parse_value(value[key], typeof(built.get(name))))
+	return [true, built]
 
 
 func _parse_transform2d(value: Dictionary) -> Array:
