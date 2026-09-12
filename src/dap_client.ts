@@ -37,6 +37,19 @@ interface ToolArgs {
   line?: unknown;
 }
 
+const HEADER_TERMINATOR = '\r\n\r\n';
+
+/**
+ * A ceiling on the bytes held while waiting for a message to complete.
+ *
+ * Without one, an adapter that announces a Content-Length and then stops sending grows this
+ * process until it dies, and says nothing on the way. The largest real traffic on this
+ * socket is a variable tree or a burst of output events, neither of which reaches a
+ * megabyte; 32 MiB is far enough above that for reaching it to mean the stream is broken
+ * rather than busy.
+ */
+const MAX_MESSAGE_BYTES = 32 * 1024 * 1024;
+
 export class GodotDAPClient {
   private socket: Socket | null = null;
   private connected = false;
@@ -44,7 +57,10 @@ export class GodotDAPClient {
   private host: string;
   private seq = 1;
   private pendingRequests: Map<number, PendingRequest>;
-  private buffer = '';
+  // Bytes, not a string. Content-Length counts bytes, while every string index in
+  // JavaScript counts UTF-16 code units, and the two stop agreeing at the first character
+  // outside ASCII: one printed emoji desynchronises the stream for good.
+  private buffer: Buffer = Buffer.alloc(0);
   private outputBuffer: string[] = [];
   private maxOutputLines = 1000;
   private initialized = false;
@@ -67,8 +83,6 @@ export class GodotDAPClient {
       const socket = createConnection({ host: this.host, port: this.port });
       this.socket = socket;
 
-      socket.setEncoding('utf8');
-
       const connectTimeout = setTimeout(() => {
         socket.destroy();
         this.socket = null;
@@ -83,10 +97,15 @@ export class GodotDAPClient {
       const handleConnect = (): void => {
         clearTimeout(connectTimeout);
         this.connected = true;
+        this.buffer = Buffer.alloc(0);
 
-        socket.on('data', (chunk: string) => {
-          this.buffer += chunk;
+        socket.on('data', (chunk: Buffer) => {
+          this.buffer = Buffer.concat([this.buffer, chunk]);
           this.parseMessages();
+
+          if (this.buffer.length > MAX_MESSAGE_BYTES) {
+            this.failOversizedStream(`${this.buffer.length} bytes buffered with no complete message`);
+          }
         });
 
         socket.on('error', (error: Error) => {
@@ -199,18 +218,23 @@ export class GodotDAPClient {
     });
   }
 
-  private frameMessage(content: string): string {
-    return `Content-Length: ${Buffer.byteLength(content, 'utf8')}\r\n\r\n${content}`;
+  private frameMessage(content: string): Buffer {
+    const body = Buffer.from(content, 'utf8');
+    // Header and body come from the same encode, so the announced length is always the
+    // number of bytes that follow it.
+    return Buffer.concat([Buffer.from(`Content-Length: ${body.length}${HEADER_TERMINATOR}`, 'ascii'), body]);
   }
 
   private parseMessages(): void {
     for (;;) {
-      const headerEndIndex = this.buffer.indexOf('\r\n\r\n');
+      const headerEndIndex = this.buffer.indexOf(HEADER_TERMINATOR);
       if (headerEndIndex === -1) {
         return;
       }
 
-      const headerText = this.buffer.slice(0, headerEndIndex);
+      // Headers are ASCII by specification, so latin1 decodes them one byte to one
+      // character and the offsets below stay byte offsets.
+      const headerText = this.buffer.toString('latin1', 0, headerEndIndex);
       const headerLines = headerText.split('\r\n');
 
       let contentLength = -1;
@@ -229,22 +253,35 @@ export class GodotDAPClient {
       }
 
       if (contentLength < 0) {
-        this.buffer = this.buffer.slice(headerEndIndex + 4);
+        this.buffer = this.buffer.subarray(headerEndIndex + HEADER_TERMINATOR.length);
         continue;
       }
 
-      const totalMessageLength = headerEndIndex + 4 + contentLength;
+      if (contentLength > MAX_MESSAGE_BYTES) {
+        this.failOversizedStream(`the adapter announced a ${contentLength} byte message`);
+        return;
+      }
+
+      const bodyStart = headerEndIndex + HEADER_TERMINATOR.length;
+      const totalMessageLength = bodyStart + contentLength;
       if (this.buffer.length < totalMessageLength) {
         return;
       }
 
-      const bodyText = this.buffer.slice(headerEndIndex + 4, totalMessageLength);
-      this.buffer = this.buffer.slice(totalMessageLength);
+      const bodyText = this.buffer.toString('utf8', bodyStart, totalMessageLength);
+      this.buffer = this.buffer.subarray(totalMessageLength);
 
       let message: DAPMessage;
       try {
         message = JSON.parse(bodyText) as DAPMessage;
-      } catch {
+      } catch (error) {
+        // A body that will not parse is the only symptom a framing fault has, and skipping
+        // it in silence leaves the stream desynchronised with nothing on any log to say so.
+        console.error(
+          `[GodotDAP] Discarding a ${contentLength} byte message that is not JSON: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
         continue;
       }
 
@@ -463,6 +500,28 @@ export class GodotDAPClient {
     }
 
     return 1;
+  }
+
+  /**
+   * Drop a connection whose framing has run away, naming the size that did it.
+   *
+   * Nothing downstream can recover from a stream this far out of step, and waiting quietly
+   * for the rest of a body that is never coming is indistinguishable from an idle adapter.
+   */
+  private failOversizedStream(detail: string): void {
+    const socket = this.socket;
+    this.socket = null;
+    this.connected = false;
+    this.initialized = false;
+    this.attached = false;
+    this.buffer = Buffer.alloc(0);
+    socket?.destroy();
+
+    this.failPendingRequests(
+      new Error(
+        `Godot DAP stream exceeded the ${MAX_MESSAGE_BYTES} byte ceiling: ${detail}. The connection was dropped.`,
+      ),
+    );
   }
 
   private failPendingRequests(error: Error): void {
