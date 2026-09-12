@@ -1,4 +1,8 @@
 version: 2
+
+# A compromised release is usually caught within days of publication, and a bot that takes a
+# version the hour it appears is the fastest possible way to install one. Waiting a week on a
+# major and a few days on anything else costs nothing here and closes that window.
 updates:
   # Digests, not tags: the repository requires SHA-pinned actions, and Dependabot keeps the
   # version comment beside the digest when it bumps one.
@@ -6,6 +10,8 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     commit-message:
       prefix: ci
     groups:
@@ -17,6 +23,9 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
+      semver-major-days: 14
     commit-message:
       prefix: deps
     groups:
