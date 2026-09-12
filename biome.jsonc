@@ -19,7 +19,15 @@
   "linter": {
     "enabled": true,
     "rules": {
-      "recommended": true
+      "recommended": true,
+      "complexity": {
+        // Off because it contradicts the type checker, which is the stronger of the two here.
+        // noPropertyAccessFromIndexSignature requires obj['key'] wherever key comes from an
+        // index signature, so that a typo is a visible lookup rather than a silent undefined;
+        // useLiteralKeys asks for obj.key back. One of them has to yield and correctness wins.
+        // Neither fires once the tool arguments are real types instead of index signatures.
+        "useLiteralKeys": "off"
+      }
     }
   },
   "assist": {

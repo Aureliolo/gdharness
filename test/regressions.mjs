@@ -430,7 +430,9 @@ async function main() {
   );
   assert.match(
     INDEX_SOURCE,
-    /private resolveHeadless[\s\S]*?return !\(process\.env\.DISPLAY \|\| process\.env\.WAYLAND_DISPLAY\);/,
+    // Either spelling of the lookup: strict TypeScript wants the bracket form on process.env,
+    // and which one is written says nothing about whether the check is right.
+    /private resolveHeadless[\s\S]*?return !\(process\.env(?:\.DISPLAY|\['DISPLAY'\]) \|\| process\.env(?:\.WAYLAND_DISPLAY|\['WAYLAND_DISPLAY'\])\);/,
     'with no explicit argument a display-less environment such as CI should stay headless',
   );
   assert.match(

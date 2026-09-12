@@ -237,8 +237,8 @@ export class GodotLSPClient {
       }
 
       const header = this.buffer.slice(0, headerEnd);
-      const contentLengthMatch = header.match(/Content-Length:\s*(\d+)/i);
-      if (!contentLengthMatch) {
+      const contentLengthMatch = /Content-Length:\s*(\d+)/i.exec(header);
+      if (!contentLengthMatch?.[1]) {
         this.buffer = this.buffer.slice(headerEnd + 4);
         continue;
       }
@@ -267,32 +267,32 @@ export class GodotLSPClient {
 
       const message: JsonRecord = parsed as JsonRecord;
 
-      if (typeof message.id === 'number') {
-        const pending = this.pendingRequests.get(message.id);
+      if (typeof message['id'] === 'number') {
+        const pending = this.pendingRequests.get(message['id']);
         if (pending) {
           clearTimeout(pending.timer);
-          this.pendingRequests.delete(message.id);
+          this.pendingRequests.delete(message['id']);
 
-          const errorPayload = message.error;
+          const errorPayload = message['error'];
           if (errorPayload && typeof errorPayload === 'object') {
             const errorObject = errorPayload as JsonRecord;
-            const code = typeof errorObject.code === 'number' ? errorObject.code : 'unknown';
+            const code = typeof errorObject['code'] === 'number' ? errorObject['code'] : 'unknown';
             const messageText =
-              typeof errorObject.message === 'string' ? errorObject.message : 'Unknown LSP error';
+              typeof errorObject['message'] === 'string' ? errorObject['message'] : 'Unknown LSP error';
             pending.reject(new Error(`LSP error (${code}): ${messageText}`));
           } else {
-            pending.resolve(message.result);
+            pending.resolve(message['result']);
           }
         }
       }
 
-      if (message.method === 'textDocument/publishDiagnostics') {
-        const params = message.params;
+      if (message['method'] === 'textDocument/publishDiagnostics') {
+        const params = message['params'];
         const paramsObject = params && typeof params === 'object' ? (params as JsonRecord) : null;
-        const uri = paramsObject && typeof paramsObject.uri === 'string' ? paramsObject.uri : null;
+        const uri = paramsObject && typeof paramsObject['uri'] === 'string' ? paramsObject['uri'] : null;
         const diagnostics =
-          paramsObject && Array.isArray(paramsObject.diagnostics)
-            ? (paramsObject.diagnostics as unknown[])
+          paramsObject && Array.isArray(paramsObject['diagnostics'])
+            ? (paramsObject['diagnostics'] as unknown[])
             : [];
         if (typeof uri === 'string') {
           const key = diagnosticsKey(uri);
@@ -487,8 +487,8 @@ export class GodotLSPClient {
 
     if (result && typeof result === 'object') {
       const resultObject = result as JsonRecord;
-      if (Array.isArray(resultObject.items)) {
-        return resultObject.items;
+      if (Array.isArray(resultObject['items'])) {
+        return resultObject['items'];
       }
     }
 
@@ -661,8 +661,8 @@ export async function handleLSPTool(
     }
 
     const parsedArgs = args as JsonRecord;
-    const projectPathValue = parsedArgs.projectPath;
-    const scriptPathValue = parsedArgs.scriptPath;
+    const projectPathValue = parsedArgs['projectPath'];
+    const scriptPathValue = parsedArgs['scriptPath'];
 
     if (typeof projectPathValue !== 'string' || projectPathValue.length === 0) {
       throw new Error('Missing required argument: projectPath');
@@ -684,8 +684,8 @@ export async function handleLSPTool(
       }
 
       case 'lsp_get_completions': {
-        const line = Number(parsedArgs.line);
-        const character = Number(parsedArgs.character);
+        const line = Number(parsedArgs['line']);
+        const character = Number(parsedArgs['character']);
 
         if (!Number.isFinite(line) || !Number.isFinite(character)) {
           throw new Error('Arguments line and character must be numbers.');
@@ -696,8 +696,8 @@ export async function handleLSPTool(
       }
 
       case 'lsp_get_hover': {
-        const line = Number(parsedArgs.line);
-        const character = Number(parsedArgs.character);
+        const line = Number(parsedArgs['line']);
+        const character = Number(parsedArgs['character']);
 
         if (!Number.isFinite(line) || !Number.isFinite(character)) {
           throw new Error('Arguments line and character must be numbers.');

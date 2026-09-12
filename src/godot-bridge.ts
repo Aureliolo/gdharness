@@ -91,7 +91,7 @@ type OutgoingMessage = ToolInvokeMessage | PingMessage;
 type BridgeEventMap = {
   tool_start: { tool: string; id: string; args: Record<string, unknown> };
   tool_end: { tool: string; id: string; success: boolean; duration: number };
-  godot_connected: { projectPath?: string };
+  godot_connected: { projectPath?: string | undefined };
   godot_disconnected: Record<string, never>;
 };
 
@@ -101,7 +101,9 @@ interface PendingRequest {
   resolve: (value: unknown) => void;
   reject: (reason?: unknown) => void;
   startedAt: number;
-  resourceKey?: string;
+  // Explicitly `| undefined`: under exactOptionalPropertyTypes the bare `?` means the key may
+  // be missing, not that it may be present and unset, and these are built from optional chains.
+  resourceKey?: string | undefined;
 }
 
 interface GodotConnectionInfo {
@@ -114,9 +116,9 @@ interface BridgeStatus {
   host: string;
   port: number;
   connected: boolean;
-  projectPath?: string;
-  connectedAt?: Date;
-  lastPongAt?: Date;
+  projectPath?: string | undefined;
+  connectedAt?: Date | undefined;
+  lastPongAt?: Date | undefined;
   pendingRequests: number;
   queuedResources: number;
 }
@@ -697,7 +699,7 @@ export class GodotBridge extends EventEmitter {
     }
 
     const message = value as Record<string, unknown>;
-    const type = message.type;
+    const type = message['type'];
     if (type !== 'tool_result' && type !== 'pong' && type !== 'godot_ready') {
       return false;
     }
@@ -707,13 +709,13 @@ export class GodotBridge extends EventEmitter {
     }
 
     if (type === 'godot_ready') {
-      return typeof message.project_path === 'string';
+      return typeof message['project_path'] === 'string';
     }
 
     return (
-      typeof message.id === 'string' &&
-      typeof message.success === 'boolean' &&
-      (message.error === undefined || typeof message.error === 'string')
+      typeof message['id'] === 'string' &&
+      typeof message['success'] === 'boolean' &&
+      (message['error'] === undefined || typeof message['error'] === 'string')
     );
   }
 

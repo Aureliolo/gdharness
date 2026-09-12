@@ -9,16 +9,7 @@
 
 import { fileURLToPath } from 'url';
 import { join, dirname, basename, normalize } from 'path';
-import {
-  existsSync,
-  readdirSync,
-  mkdirSync,
-  readFileSync,
-  writeFileSync,
-  mkdtempSync,
-  rmSync,
-  statSync,
-} from 'fs';
+import { existsSync, readdirSync, readFileSync, writeFileSync, mkdtempSync, rmSync, statSync } from 'fs';
 import { tmpdir } from 'os';
 import { spawn } from 'child_process';
 import { createConnection as createTcpConnection } from 'node:net';
@@ -216,8 +207,8 @@ class GodotServer {
 
   constructor(config?: GodotServerConfig) {
     const rawProfile = (
-      process.env.GDHARNESS_TOOL_PROFILE ||
-      process.env.MCP_TOOL_PROFILE ||
+      process.env['GDHARNESS_TOOL_PROFILE'] ||
+      process.env['MCP_TOOL_PROFILE'] ||
       'compact'
     ).toLowerCase();
     if (rawProfile === 'full' || rawProfile === 'legacy' || rawProfile === 'compact') {
@@ -226,7 +217,7 @@ class GodotServer {
       this.toolExposureProfile = 'compact';
     }
 
-    const rawToolsPageSize = parseInt(process.env.GDHARNESS_TOOLS_PAGE_SIZE || '33', 10);
+    const rawToolsPageSize = parseInt(process.env['GDHARNESS_TOOLS_PAGE_SIZE'] || '33', 10);
     this.toolsListPageSize =
       Number.isFinite(rawToolsPageSize) && rawToolsPageSize > 0 ? rawToolsPageSize : 33;
 
@@ -411,8 +402,8 @@ class GodotServer {
     }
 
     // Check environment variable next
-    if (process.env.GODOT_PATH) {
-      const normalizedPath = normalize(process.env.GODOT_PATH);
+    if (process.env['GODOT_PATH']) {
+      const normalizedPath = normalize(process.env['GODOT_PATH']);
       this.logDebug(`Checking GODOT_PATH environment variable: ${normalizedPath}`);
       if (await this.isValidGodotPath(normalizedPath)) {
         this.godotPath = normalizedPath;
@@ -436,9 +427,9 @@ class GodotServer {
       possiblePaths.push(
         '/Applications/Godot.app/Contents/MacOS/Godot',
         '/Applications/Godot_4.app/Contents/MacOS/Godot',
-        `${process.env.HOME}/Applications/Godot.app/Contents/MacOS/Godot`,
-        `${process.env.HOME}/Applications/Godot_4.app/Contents/MacOS/Godot`,
-        `${process.env.HOME}/Library/Application Support/Steam/steamapps/common/Godot Engine/Godot.app/Contents/MacOS/Godot`,
+        `${process.env['HOME']}/Applications/Godot.app/Contents/MacOS/Godot`,
+        `${process.env['HOME']}/Applications/Godot_4.app/Contents/MacOS/Godot`,
+        `${process.env['HOME']}/Library/Application Support/Steam/steamapps/common/Godot Engine/Godot.app/Contents/MacOS/Godot`,
       );
     } else if (osPlatform === 'win32') {
       possiblePaths.push(
@@ -446,14 +437,14 @@ class GodotServer {
         'C:\\Program Files (x86)\\Godot\\Godot.exe',
         'C:\\Program Files\\Godot_4\\Godot.exe',
         'C:\\Program Files (x86)\\Godot_4\\Godot.exe',
-        `${process.env.USERPROFILE}\\Godot\\Godot.exe`,
+        `${process.env['USERPROFILE']}\\Godot\\Godot.exe`,
       );
     } else if (osPlatform === 'linux') {
       possiblePaths.push(
         '/usr/bin/godot',
         '/usr/local/bin/godot',
         '/snap/bin/godot',
-        `${process.env.HOME}/.local/bin/godot`,
+        `${process.env['HOME']}/.local/bin/godot`,
       );
     }
 
@@ -477,20 +468,20 @@ class GodotServer {
         'C:\\Program Files (x86)\\Godot',
         'C:\\Program Files\\Godot_4',
         'C:\\Program Files (x86)\\Godot_4',
-        `${process.env.USERPROFILE}\\Godot`,
-        `${process.env.USERPROFILE}\\Downloads`,
-        `${process.env.USERPROFILE}\\Desktop`,
+        `${process.env['USERPROFILE']}\\Godot`,
+        `${process.env['USERPROFILE']}\\Downloads`,
+        `${process.env['USERPROFILE']}\\Desktop`,
       );
     } else if (osPlatform === 'darwin') {
-      scanDirectories.push('/Applications', `${process.env.HOME}/Applications`);
+      scanDirectories.push('/Applications', `${process.env['HOME']}/Applications`);
     } else if (osPlatform === 'linux') {
       scanDirectories.push(
         '/usr/bin',
         '/usr/local/bin',
         '/snap/bin',
-        `${process.env.HOME}/.local/bin`,
-        `${process.env.HOME}/Downloads`,
-        `${process.env.HOME}/Desktop`,
+        `${process.env['HOME']}/.local/bin`,
+        `${process.env['HOME']}/Downloads`,
+        `${process.env['HOME']}/Desktop`,
       );
     }
 
@@ -646,7 +637,7 @@ class GodotServer {
     const params = args && typeof args === 'object' ? (args as Record<string, unknown>) : {};
     const RUNTIME_PORT = 7777;
     const RUNTIME_HOST = '127.0.0.1';
-    const timeoutOverride = Number.parseInt(process.env.GDHARNESS_RUNTIME_TIMEOUT_MS || '', 10);
+    const timeoutOverride = Number.parseInt(process.env['GDHARNESS_RUNTIME_TIMEOUT_MS'] || '', 10);
     const TIMEOUT_MS = Number.isInteger(timeoutOverride) && timeoutOverride > 0 ? timeoutOverride : 10000;
     const expectsScreenshot = command === 'capture_screenshot' || command === 'capture_viewport';
     const screenshotDir = expectsScreenshot
@@ -1153,8 +1144,9 @@ class GodotServer {
 
   private async handleToolCatalog(args: any): Promise<{ content: Array<{ type: string; text: string }> }> {
     const normalizedArgs = this.normalizeParameters(args || {});
-    const query = typeof normalizedArgs.query === 'string' ? normalizedArgs.query.trim().toLowerCase() : '';
-    const rawLimit = typeof normalizedArgs.limit === 'number' ? normalizedArgs.limit : 30;
+    const query =
+      typeof normalizedArgs['query'] === 'string' ? normalizedArgs['query'].trim().toLowerCase() : '';
+    const rawLimit = typeof normalizedArgs['limit'] === 'number' ? normalizedArgs['limit'] : 30;
     const limit = Math.max(1, Math.min(100, rawLimit));
 
     const tools = this.getAllToolDefinitions();
@@ -1216,8 +1208,9 @@ class GodotServer {
     args: any,
   ): Promise<{ content: Array<{ type: string; text: string }> }> {
     const normalizedArgs = this.normalizeParameters(args || {});
-    const action = typeof normalizedArgs.action === 'string' ? normalizedArgs.action.toLowerCase() : 'status';
-    const groupName = typeof normalizedArgs.group === 'string' ? normalizedArgs.group : '';
+    const action =
+      typeof normalizedArgs['action'] === 'string' ? normalizedArgs['action'].toLowerCase() : 'status';
+    const groupName = typeof normalizedArgs['group'] === 'string' ? normalizedArgs['group'] : '';
 
     switch (action) {
       case 'list': {
@@ -1326,21 +1319,6 @@ class GodotServer {
         });
       }
     }
-  }
-
-  /**
-   * Check if the Godot version is 4.4 or later
-   * @param version The Godot version string
-   * @returns True if the version is 4.4 or later
-   */
-  private isGodot44OrLater(version: string): boolean {
-    const match = version.match(/^(\d+)\.(\d+)/);
-    if (match) {
-      const major = parseInt(match[1], 10);
-      const minor = parseInt(match[2], 10);
-      return major > 4 || (major === 4 && minor >= 4);
-    }
-    return false;
   }
 
   /**
@@ -1589,8 +1567,8 @@ class GodotServer {
       this.logDebug(`Handling tool request: ${request.params.name}`);
       const rawArgs = request.params.arguments as Record<string, unknown> | undefined;
       const normalizedArgs = this.normalizeParameters((rawArgs || {}) as OperationParams);
-      if (typeof normalizedArgs?.projectPath === 'string') {
-        this.lastProjectPath = normalizedArgs.projectPath;
+      if (typeof normalizedArgs?.['projectPath'] === 'string') {
+        this.lastProjectPath = normalizedArgs['projectPath'];
       }
       const resolvedToolName = this.resolveToolAlias(request.params.name);
       switch (resolvedToolName) {
@@ -1899,7 +1877,7 @@ class GodotServer {
     if (process.platform === 'win32' || process.platform === 'darwin') {
       return false;
     }
-    return !(process.env.DISPLAY || process.env.WAYLAND_DISPLAY);
+    return !(process.env['DISPLAY'] || process.env['WAYLAND_DISPLAY']);
   }
 
   private async handleRunProject(args: any) {
@@ -2036,7 +2014,7 @@ class GodotServer {
         ...(args || {}),
         statusOnly: true,
       })) as Record<string, unknown>;
-      busy = Boolean(status?.scanning) || Boolean(status?.importing);
+      busy = Boolean(status?.['scanning']) || Boolean(status?.['importing']);
     }
 
     return {
@@ -2413,8 +2391,8 @@ class GodotServer {
 
   private compareMajorMinorVersions(actual: string, minimum: string): boolean {
     const parse = (value: string): [number, number] => {
-      const m = value.match(/(\d+)\.(\d+)/);
-      if (!m) return [0, 0];
+      const m = /(\d+)\.(\d+)/.exec(value);
+      if (!m?.[1] || !m[2]) return [0, 0];
       return [parseInt(m[1], 10), parseInt(m[2], 10)];
     };
 
@@ -2569,8 +2547,7 @@ class GodotServer {
       .map((line) => line.trim())
       .filter((line) => line.length > 0);
 
-    for (let i = lines.length - 1; i >= 0; i -= 1) {
-      const line = lines[i];
+    for (const line of lines.reverse()) {
       if (!(line.startsWith('{') || line.startsWith('['))) {
         continue;
       }
@@ -2655,20 +2632,6 @@ class GodotServer {
         ]);
       }
 
-      // Get Godot version to check if UIDs are supported
-      const { stdout: versionOutput } = await run(this.godotPath, ['--version']);
-      const version = versionOutput.trim();
-
-      if (!this.isGodot44OrLater(version)) {
-        return this.createErrorResponse(
-          `UIDs are only supported in Godot 4.4 or later. Current version: ${version}`,
-          [
-            'Upgrade to Godot 4.4 or later to use UIDs',
-            'Use resource paths instead of UIDs for this version of Godot',
-          ],
-        );
-      }
-
       // Prepare parameters for the operation (already in camelCase)
       const params = {
         filePath: args.filePath,
@@ -2739,20 +2702,6 @@ class GodotServer {
           'Ensure the path points to a directory containing a project.godot file',
           'Use list_projects to find valid Godot projects',
         ]);
-      }
-
-      // Get Godot version to check if UIDs are supported
-      const { stdout: versionOutput } = await run(this.godotPath, ['--version']);
-      const version = versionOutput.trim();
-
-      if (!this.isGodot44OrLater(version)) {
-        return this.createErrorResponse(
-          `UIDs are only supported in Godot 4.4 or later. Current version: ${version}`,
-          [
-            'Upgrade to Godot 4.4 or later to use UIDs',
-            'Use resource paths instead of UIDs for this version of Godot',
-          ],
-        );
       }
 
       // Prepare parameters for the operation (already in camelCase)
@@ -4454,13 +4403,12 @@ class GodotServer {
         const lines = content.split('\n');
         const matches: Array<{ line: number; content: string; match: string }> = [];
 
-        for (let index = 0; index < lines.length; index += 1) {
+        for (const [index, line] of lines.entries()) {
           if (result.summary.total_matches >= maxResults) {
             result.summary.truncated = true;
             break;
           }
 
-          const line = lines[index];
           const match = regex
             ? regex.exec(line)?.[0]
             : (caseSensitive ? line : line.toLowerCase()).includes(queryToCheck)
@@ -4752,10 +4700,10 @@ class GodotServer {
       throw new McpError(ErrorCode.InvalidParams, 'projectPath is required');
     }
     const params: Record<string, any> = {};
-    if (args?.filter) params.filter = args.filter;
-    if (args?.category) params.category = args.category;
-    if (args?.instantiableOnly !== undefined) params.instantiable_only = args.instantiableOnly;
-    if (args?.instantiable_only !== undefined) params.instantiable_only = args.instantiable_only;
+    if (args?.filter) params['filter'] = args.filter;
+    if (args?.category) params['category'] = args.category;
+    if (args?.instantiableOnly !== undefined) params['instantiable_only'] = args.instantiableOnly;
+    if (args?.instantiable_only !== undefined) params['instantiable_only'] = args.instantiable_only;
 
     const { stdout, stderr } = await this.executeOperation('query_classes', params, projectPath);
     if (stderr && stderr.trim()) {
@@ -4785,8 +4733,8 @@ class GodotServer {
     const params: Record<string, any> = {
       class_name: className,
     };
-    if (args?.includeInherited !== undefined) params.include_inherited = args.includeInherited;
-    if (args?.include_inherited !== undefined) params.include_inherited = args.include_inherited;
+    if (args?.includeInherited !== undefined) params['include_inherited'] = args.includeInherited;
+    if (args?.include_inherited !== undefined) params['include_inherited'] = args.include_inherited;
 
     const { stdout, stderr } = await this.executeOperation('query_class_info', params, projectPath);
     if (stderr && stderr.trim()) {

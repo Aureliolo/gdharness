@@ -68,6 +68,19 @@ export async function exportProject(params: ExportProjectParams, godotPath: stri
 }
 
 /**
+ * Everything after the first `=` on a config line. Splitting on every `=` and taking the
+ * second field truncates any value that contains one, which an export path readily does.
+ */
+function configValue(line: string): string {
+  const separator = line.indexOf('=');
+  return separator === -1 ? '' : line.slice(separator + 1);
+}
+
+function unquoted(line: string): string {
+  return configValue(line).replace(/"/g, '');
+}
+
+/**
  * Parses export_presets.cfg to list available presets
  */
 export function listExportPresets(projectPath: string): ExportPreset[] {
@@ -89,13 +102,13 @@ export function listExportPresets(projectPath: string): ExportPreset[] {
       }
       currentPreset = { custom_features: [] };
     } else if (line.startsWith('name=')) {
-      if (currentPreset) currentPreset.name = line.split('=')[1].replace(/"/g, '');
+      if (currentPreset) currentPreset.name = unquoted(line);
     } else if (line.startsWith('platform=')) {
-      if (currentPreset) currentPreset.platform = line.split('=')[1].replace(/"/g, '');
+      if (currentPreset) currentPreset.platform = unquoted(line);
     } else if (line.startsWith('runnable=')) {
-      if (currentPreset) currentPreset.runnable = line.split('=')[1] === 'true';
+      if (currentPreset) currentPreset.runnable = configValue(line) === 'true';
     } else if (line.startsWith('export_path=')) {
-      if (currentPreset) currentPreset.export_path = line.split('=')[1].replace(/"/g, '');
+      if (currentPreset) currentPreset.export_path = unquoted(line);
     }
   }
 
