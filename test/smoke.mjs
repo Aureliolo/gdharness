@@ -4,7 +4,7 @@ import { createServer } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
 import process from 'node:process';
 import { WebSocket } from 'ws';
-import { findJsonRpcResponse } from '../test-support/json-rpc.mjs';
+import { findJsonRpcResponse } from './support/json-rpc.mjs';
 
 const OPENAI_COMPATIBLE_TOOL_NAME_PATTERN = /^[a-zA-Z0-9-]{1,128}$/;
 

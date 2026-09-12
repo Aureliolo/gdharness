@@ -1,23 +1,20 @@
 ---
-name: Feature Request
-about: Suggest a new tool or improvement for GoPeak
-title: '[Feature] '
+name: Feature request
+about: Something the harness cannot do yet
+title: ''
 labels: enhancement
 assignees: ''
 ---
 
-## Problem
+## What you are trying to do
 
-What problem does this feature solve?
+The task, not the tool. What are you trying to get the engine to tell you or do?
 
-## Proposed Solution
+## Why the current tools cannot
 
-Describe the feature or tool you'd like to see.
+Which ones you tried and where they stopped.
 
-## Alternatives Considered
+## What it would take to fixture it
 
-Any alternative solutions you've considered.
-
-## Additional Context
-
-Any other context, screenshots, or examples.
+Every tool here is driven against a real Godot in CI before it ships. A sketch of how this
+one could be proved working counts for a lot.

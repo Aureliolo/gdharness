@@ -97,12 +97,11 @@ await writeFile(
   'utf8',
 );
 
-await mkdir(path.join(buildRoot, 'scripts'), { recursive: true });
 await cp(
-  path.join(sourceRoot, 'scripts', 'godot_operations.gd'),
-  path.join(buildRoot, 'scripts', 'godot_operations.gd'),
+  path.join(sourceRoot, 'godot'),
+  path.join(buildRoot, 'godot'),
+  { recursive: true },
 );
-await cp(path.join(sourceRoot, 'addon'), path.join(buildRoot, 'addon'), { recursive: true });
 
 for (const executable of ['cli.js', 'index.js']) {
   const executablePath = path.join(buildRoot, executable);
