@@ -11,12 +11,13 @@
   "minimumReleaseAge": "7 days",
   "osvVulnerabilityAlerts": true,
   "rangeStrategy": "pin",
+  "separateMajorMinor": false,
   "commitMessageAction": "Raise",
   "commitMessageTopic": "{{depName}}",
   "commitMessageExtra": "to {{newVersion}}",
   "packageRules": [
     {
-      "description": "One pull request for everything. Every version here is pinned exactly and every check has to be green before anything merges, so a week's updates arriving as separate pull requests is that many rounds of CI to land one week's work. A vulnerability fix is the exception and arrives on its own the day it exists; the weekly lock file refresh is the other, because it changes nothing this file names.",
+      "description": "One pull request for everything, majors included (separateMajorMinor is off for that). Every version here is pinned exactly and every check has to be green before anything merges, so a week's updates arriving as separate pull requests is that many rounds of CI to land one week's work. A vulnerability fix is the exception and arrives on its own the day it exists; the weekly lock file refreshes are the other, because they change nothing this file names.",
       "matchPackageNames": ["*"],
       "groupName": "all dependencies",
       "groupSlug": "all"
