@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { extname, isAbsolute, relative, resolve } from 'node:path';
+import { extname, resolve } from 'node:path';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import {
   ListResourcesRequestSchema,
@@ -7,6 +7,7 @@ import {
   ReadResourceRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { emptyRecord } from './dictionary.js';
+import { resolveWithinProject } from './paths.js';
 
 const STATIC_RESOURCES = [
   {
@@ -51,33 +52,33 @@ function ensureProjectPath(getProjectPath: () => string | null): string {
   return resolve(projectPath);
 }
 
-function validateRelativePath(inputPath: string): string {
-  const normalized = inputPath.replace(/\\/g, '/').trim().replace(/^\/+/, '');
-  if (!normalized) {
+/**
+ * A URI pathname as a path inside the project.
+ *
+ * Only the shape of the thing is settled here, because where it lands is `resolveWithinProject`'s
+ * question: a Windows client writes separators the other way round, and the pathname of
+ * `godot://scene/scenes/main.tscn` arrives with the leading slash `URL` puts there.
+ *
+ * That slash is stripped here and nowhere else. This is the only place that knows the string came
+ * out of a URL rather than off a caller's keyboard, and `resolveWithinProject` refuses anything
+ * absolute so that it gives the same answer on every platform.
+ */
+function uriPathToProjectPath(inputPath: string): string {
+  const normalized = inputPath.replace(/\\/g, '/').trim();
+  if (normalized.replace(/\//g, '') === '') {
     throw new Error('Resource path is empty.');
   }
 
-  if (normalized.includes('..')) {
-    throw new Error('Invalid resource path: directory traversal is not allowed.');
-  }
-
-  const segments = normalized.split('/');
-  if (segments.some((segment) => segment === '' || segment === '.' || segment === '..')) {
-    throw new Error('Invalid resource path.');
-  }
-
-  return normalized;
+  return normalized.replace(/^\/+/, '');
 }
 
 function resolveProjectFile(projectPath: string, resourcePath: string): string {
-  const fullPath = resolve(projectPath, resourcePath);
-  const relativePath = relative(projectPath, fullPath);
-
-  if (relativePath.startsWith('..') || isAbsolute(relativePath)) {
-    throw new Error('Resolved file path escapes project directory.');
+  const contained = resolveWithinProject(projectPath, resourcePath);
+  if (!contained.ok) {
+    throw new Error(contained.reason);
   }
 
-  return fullPath;
+  return contained.absolutePath;
 }
 
 function parseGodotUri(uri: string): ParsedGodotUri {
@@ -101,7 +102,7 @@ function parseGodotUri(uri: string): ParsedGodotUri {
     throw new Error(`Unsupported Godot resource type: ${host}`);
   }
 
-  const resourcePath = validateRelativePath(decodeURIComponent(parsed.pathname));
+  const resourcePath = uriPathToProjectPath(decodeURIComponent(parsed.pathname));
 
   return { kind: host, resourcePath };
 }

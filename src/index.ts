@@ -30,6 +30,7 @@ import { dictionary, emptyRecord } from './dictionary.js';
 import { errorMessage } from './errors.js';
 import { type GodotBridge, getDefaultBridge } from './godot-bridge.js';
 import { GodotLSPClient, handleLSPTool } from './lsp_client.js';
+import { resolveWithinProject } from './paths.js';
 import { getPrompt, listPrompts } from './prompts.js';
 import { setupResourceHandlers } from './resources.js';
 import type {
@@ -146,6 +147,12 @@ function resolveHomeDirectory(): string {
 // Derive __filename and __dirname in ESM
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+
+/** What to tell a caller whose file, scene, script or resource path landed outside the project. */
+const PATH_SOLUTIONS = [
+  'Give the path relative to the project, such as "scenes/main.tscn" or "res://scenes/main.tscn"',
+  'Point projectPath at the project the file belongs to',
+];
 
 /**
  * Main server class for the Godot MCP server
@@ -382,19 +389,6 @@ class GodotServer {
     }
 
     return response;
-  }
-
-  /**
-   * Validate a path to prevent path traversal attacks
-   */
-  private validatePath(path: string): boolean {
-    // Basic validation to prevent path traversal
-    if (!path || path.includes('..')) {
-      return false;
-    }
-
-    // Add more validation as needed
-    return true;
   }
 
   /**
@@ -1894,12 +1888,6 @@ class GodotServer {
       ]);
     }
 
-    if (!this.validatePath(projectPath)) {
-      return this.createErrorResponse('Invalid project path', [
-        'Provide a valid path without ".." or other potentially unsafe characters',
-      ]);
-    }
-
     try {
       // Ensure godotPath is set
       if (!this.godotPath) {
@@ -1983,10 +1971,11 @@ class GodotServer {
       ]);
     }
 
-    if (!this.validatePath(projectPath)) {
-      return this.createErrorResponse('Invalid project path', [
-        'Provide a valid path without ".." or other potentially unsafe characters',
-      ]);
+    // Before the engine is looked for, so that a scene the server will not run is refused as
+    // such rather than as a missing Godot.
+    const sceneToRun = scene ? resolveWithinProject(projectPath, scene) : null;
+    if (sceneToRun && !sceneToRun.ok) {
+      return this.createErrorResponse(sceneToRun.reason, PATH_SOLUTIONS);
     }
 
     try {
@@ -2019,9 +2008,12 @@ class GodotServer {
       const cmdArgs = this.resolveHeadless(args['headless'])
         ? ['--headless', '-d', '--path', projectPath]
         : ['-d', '--path', projectPath];
-      if (scene && this.validatePath(scene)) {
-        this.logDebug(`Adding scene parameter: ${scene}`);
-        cmdArgs.push(scene);
+      if (sceneToRun?.ok) {
+        // As a res:// path rather than the text that arrived: the engine reads this argument
+        // positionally, so a value beginning with a dash would otherwise be another option.
+        const sceneArgument = `res://${sceneToRun.relativePath}`;
+        this.logDebug(`Adding scene parameter: ${sceneArgument}`);
+        cmdArgs.push(sceneArgument);
       }
 
       this.logDebug(`Running Godot project: ${projectPath}`);
@@ -2293,12 +2285,6 @@ class GodotServer {
       ]);
     }
 
-    if (!this.validatePath(directory)) {
-      return this.createErrorResponse('Invalid directory path', [
-        'Provide a valid path without ".." or other potentially unsafe characters',
-      ]);
-    }
-
     try {
       this.logDebug(`Listing Godot projects in directory: ${directory}`);
       if (!existsSync(directory)) {
@@ -2401,12 +2387,6 @@ class GodotServer {
     if (!projectPath) {
       return this.createErrorResponse('Project path is required', [
         'Provide a valid path to a Godot project directory',
-      ]);
-    }
-
-    if (!this.validatePath(projectPath)) {
-      return this.createErrorResponse('Invalid project path', [
-        'Provide a valid path without ".." or other potentially unsafe characters',
       ]);
     }
 
@@ -2692,10 +2672,9 @@ class GodotServer {
       return this.createErrorResponse('Missing required parameters', ['Provide projectPath and filePath']);
     }
 
-    if (!this.validatePath(projectPath) || !this.validatePath(filePath)) {
-      return this.createErrorResponse('Invalid path', [
-        'Provide valid paths without ".." or other potentially unsafe characters',
-      ]);
+    const file = resolveWithinProject(projectPath, filePath);
+    if (!file.ok) {
+      return this.createErrorResponse(file.reason, PATH_SOLUTIONS);
     }
 
     try {
@@ -2720,16 +2699,16 @@ class GodotServer {
       }
 
       // Check if the file exists
-      const resolvedFilePath = join(projectPath, filePath);
-      if (!existsSync(resolvedFilePath)) {
+      if (!existsSync(file.absolutePath)) {
         return this.createErrorResponse(`File does not exist: ${filePath}`, [
           'Ensure the file path is correct',
         ]);
       }
 
-      // Prepare parameters for the operation (already in camelCase)
+      // The contained path rather than the text that arrived, so that the file the engine
+      // opens is the one this handler checked.
       const params = {
-        filePath,
+        filePath: file.relativePath,
       };
 
       // Execute the operation
@@ -2770,12 +2749,6 @@ class GodotServer {
     if (!projectPath) {
       return this.createErrorResponse('Project path is required', [
         'Provide a valid path to a Godot project directory',
-      ]);
-    }
-
-    if (!this.validatePath(projectPath)) {
-      return this.createErrorResponse('Invalid project path', [
-        'Provide a valid path without ".." or other potentially unsafe characters',
       ]);
     }
 
@@ -2855,10 +2828,9 @@ class GodotServer {
       ]);
     }
 
-    if (!this.validatePath(projectPath)) {
-      return this.createErrorResponse('Invalid project path', [
-        'Provide a valid path without ".." or other potentially unsafe characters',
-      ]);
+    const resource = resourcePath ? resolveWithinProject(projectPath, resourcePath) : null;
+    if (resource && !resource.ok) {
+      return this.createErrorResponse(resource.reason, PATH_SOLUTIONS);
     }
 
     try {
@@ -2870,7 +2842,7 @@ class GodotServer {
       }
 
       const params: OperationParams = {
-        resourcePath: resourcePath ?? '',
+        resourcePath: resource?.ok ? resource.relativePath : '',
         includeUpToDate,
       };
 
@@ -2907,10 +2879,9 @@ class GodotServer {
       ]);
     }
 
-    if (!this.validatePath(projectPath) || !this.validatePath(resourcePath)) {
-      return this.createErrorResponse('Invalid path', [
-        'Provide valid paths without ".." or other potentially unsafe characters',
-      ]);
+    const resource = resolveWithinProject(projectPath, resourcePath);
+    if (!resource.ok) {
+      return this.createErrorResponse(resource.reason, PATH_SOLUTIONS);
     }
 
     try {
@@ -2921,15 +2892,14 @@ class GodotServer {
         ]);
       }
 
-      const resourceFile = join(projectPath, resourcePath);
-      if (!existsSync(resourceFile)) {
+      if (!existsSync(resource.absolutePath)) {
         return this.createErrorResponse(`Resource file does not exist: ${resourcePath}`, [
           'Ensure the resource path is correct',
         ]);
       }
 
       const params: OperationParams = {
-        resourcePath: resourcePath,
+        resourcePath: resource.relativePath,
       };
 
       const { stdout, stderr } = await this.executeOperation('get_import_options', params, projectPath);
@@ -2967,10 +2937,9 @@ class GodotServer {
       ]);
     }
 
-    if (!this.validatePath(projectPath) || !this.validatePath(resourcePath)) {
-      return this.createErrorResponse('Invalid path', [
-        'Provide valid paths without ".." or other potentially unsafe characters',
-      ]);
+    const resource = resolveWithinProject(projectPath, resourcePath);
+    if (!resource.ok) {
+      return this.createErrorResponse(resource.reason, PATH_SOLUTIONS);
     }
 
     try {
@@ -2981,15 +2950,14 @@ class GodotServer {
         ]);
       }
 
-      const resourceFile = join(projectPath, resourcePath);
-      if (!existsSync(resourceFile)) {
+      if (!existsSync(resource.absolutePath)) {
         return this.createErrorResponse(`Resource file does not exist: ${resourcePath}`, [
           'Ensure the resource path is correct',
         ]);
       }
 
       const params: OperationParams = {
-        resourcePath: resourcePath,
+        resourcePath: resource.relativePath,
         options: options,
         reimport,
       };
@@ -3028,10 +2996,9 @@ class GodotServer {
       ]);
     }
 
-    if (!this.validatePath(projectPath)) {
-      return this.createErrorResponse('Invalid project path', [
-        'Provide a valid path without ".." or other potentially unsafe characters',
-      ]);
+    const resource = resourcePath ? resolveWithinProject(projectPath, resourcePath) : null;
+    if (resource && !resource.ok) {
+      return this.createErrorResponse(resource.reason, PATH_SOLUTIONS);
     }
 
     try {
@@ -3042,17 +3009,14 @@ class GodotServer {
         ]);
       }
 
-      if (resourcePath) {
-        const resourceFile = join(projectPath, resourcePath);
-        if (!existsSync(resourceFile)) {
-          return this.createErrorResponse(`Resource file does not exist: ${resourcePath}`, [
-            'Ensure the resource path is correct',
-          ]);
-        }
+      if (resource?.ok && !existsSync(resource.absolutePath)) {
+        return this.createErrorResponse(`Resource file does not exist: ${resourcePath}`, [
+          'Ensure the resource path is correct',
+        ]);
       }
 
       const params: OperationParams = {
-        resourcePath: resourcePath ?? '',
+        resourcePath: resource?.ok ? resource.relativePath : '',
         force,
       };
 
@@ -3086,12 +3050,6 @@ class GodotServer {
     if (!projectPath) {
       return this.createErrorResponse('Project path is required', [
         'Provide a valid path to a Godot project directory',
-      ]);
-    }
-
-    if (!this.validatePath(projectPath)) {
-      return this.createErrorResponse('Invalid project path', [
-        'Provide a valid path without ".." or other potentially unsafe characters',
       ]);
     }
 
@@ -3142,10 +3100,11 @@ class GodotServer {
       ]);
     }
 
-    if (!this.validatePath(projectPath) || !this.validatePath(outputPath)) {
-      return this.createErrorResponse('Invalid path', [
-        'Provide valid paths without ".." or other potentially unsafe characters',
-      ]);
+    // The engine writes whatever this names, and it is documented as a destination inside the
+    // project, so it is contained like every other project-relative argument.
+    const output = resolveWithinProject(projectPath, outputPath);
+    if (!output.ok) {
+      return this.createErrorResponse(output.reason, PATH_SOLUTIONS);
     }
 
     try {
@@ -3173,7 +3132,7 @@ class GodotServer {
         projectPath,
         debug ? '--export-debug' : '--export-release',
         preset,
-        outputPath,
+        output.absolutePath,
       ];
 
       this.logDebug(`Exporting: ${this.godotPath} ${exportArgs.join(' ')}`);
@@ -3217,12 +3176,6 @@ class GodotServer {
     if (!projectPath) {
       return this.createErrorResponse('Project path is required', [
         'Provide a valid path to a Godot project directory',
-      ]);
-    }
-
-    if (!this.validatePath(projectPath)) {
-      return this.createErrorResponse('Invalid project path', [
-        'Provide a valid path without ".." or other potentially unsafe characters',
       ]);
     }
 
@@ -3278,10 +3231,9 @@ class GodotServer {
       ]);
     }
 
-    if (!this.validatePath(projectPath) || !this.validatePath(resourcePath)) {
-      return this.createErrorResponse('Invalid path', [
-        'Provide valid paths without ".." or other potentially unsafe characters',
-      ]);
+    const resource = resolveWithinProject(projectPath, resourcePath);
+    if (!resource.ok) {
+      return this.createErrorResponse(resource.reason, PATH_SOLUTIONS);
     }
 
     try {
@@ -3302,7 +3254,7 @@ class GodotServer {
       // would return nothing at all.
       const requested = depth ?? -1;
       const params: OperationParams = {
-        resourcePath,
+        resourcePath: resource.relativePath,
         maxDepth: requested >= 0 ? requested : 100,
         includeBuiltIn: includeBuiltin,
       };
@@ -3341,10 +3293,9 @@ class GodotServer {
       ]);
     }
 
-    if (!this.validatePath(projectPath) || !this.validatePath(resourcePath)) {
-      return this.createErrorResponse('Invalid path', [
-        'Provide valid paths without ".." or other potentially unsafe characters',
-      ]);
+    const resource = resolveWithinProject(projectPath, resourcePath);
+    if (!resource.ok) {
+      return this.createErrorResponse(resource.reason, PATH_SOLUTIONS);
     }
 
     try {
@@ -3356,7 +3307,7 @@ class GodotServer {
       }
 
       const params: OperationParams = {
-        resourcePath: resourcePath,
+        resourcePath: resource.relativePath,
         fileTypes: fileTypes ?? ['tscn', 'tres', 'gd'],
       };
 
@@ -3391,12 +3342,6 @@ class GodotServer {
     if (!projectPath) {
       return this.createErrorResponse('Project path is required', [
         'Provide a valid path to a Godot project directory',
-      ]);
-    }
-
-    if (!this.validatePath(projectPath)) {
-      return this.createErrorResponse('Invalid project path', [
-        'Provide a valid path without ".." or other potentially unsafe characters',
       ]);
     }
 
@@ -3443,12 +3388,6 @@ class GodotServer {
     if (!projectPath) {
       return this.createErrorResponse('Project path is required', [
         'Provide a valid path to a Godot project directory',
-      ]);
-    }
-
-    if (!this.validatePath(projectPath)) {
-      return this.createErrorResponse('Invalid project path', [
-        'Provide a valid path without ".." or other potentially unsafe characters',
       ]);
     }
 
@@ -3499,12 +3438,6 @@ class GodotServer {
       return this.createErrorResponse('Missing required parameters', ['Provide projectPath and setting']);
     }
 
-    if (!this.validatePath(projectPath)) {
-      return this.createErrorResponse('Invalid project path', [
-        'Provide a valid path without ".." or other potentially unsafe characters',
-      ]);
-    }
-
     try {
       const projectFile = join(projectPath, 'project.godot');
       if (!existsSync(projectFile)) {
@@ -3547,12 +3480,6 @@ class GodotServer {
     if (!projectPath || !setting || args['value'] === undefined) {
       return this.createErrorResponse('Missing required parameters', [
         'Provide projectPath, setting, and value',
-      ]);
-    }
-
-    if (!this.validatePath(projectPath)) {
-      return this.createErrorResponse('Invalid project path', [
-        'Provide a valid path without ".." or other potentially unsafe characters',
       ]);
     }
 
@@ -3602,10 +3529,9 @@ class GodotServer {
       return this.createErrorResponse('Missing required parameters', ['Provide projectPath, name, and path']);
     }
 
-    if (!this.validatePath(projectPath) || !this.validatePath(path)) {
-      return this.createErrorResponse('Invalid path', [
-        'Provide valid paths without ".." or other potentially unsafe characters',
-      ]);
+    const autoload = resolveWithinProject(projectPath, path);
+    if (!autoload.ok) {
+      return this.createErrorResponse(autoload.reason, PATH_SOLUTIONS);
     }
 
     try {
@@ -3618,7 +3544,7 @@ class GodotServer {
 
       const params: OperationParams = {
         name: name,
-        path: path,
+        path: autoload.relativePath,
         enabled,
       };
 
@@ -3651,12 +3577,6 @@ class GodotServer {
 
     if (!projectPath || !name) {
       return this.createErrorResponse('Missing required parameters', ['Provide projectPath and name']);
-    }
-
-    if (!this.validatePath(projectPath)) {
-      return this.createErrorResponse('Invalid project path', [
-        'Provide a valid path without ".." or other potentially unsafe characters',
-      ]);
     }
 
     try {
@@ -3703,12 +3623,6 @@ class GodotServer {
       ]);
     }
 
-    if (!this.validatePath(projectPath)) {
-      return this.createErrorResponse('Invalid project path', [
-        'Provide a valid path without ".." or other potentially unsafe characters',
-      ]);
-    }
-
     try {
       const projectFile = join(projectPath, 'project.godot');
       if (!existsSync(projectFile)) {
@@ -3748,10 +3662,9 @@ class GodotServer {
       return this.createErrorResponse('Missing required parameters', ['Provide projectPath and scenePath']);
     }
 
-    if (!this.validatePath(projectPath) || !this.validatePath(scenePath)) {
-      return this.createErrorResponse('Invalid path', [
-        'Provide valid paths without ".." or other potentially unsafe characters',
-      ]);
+    const scene = resolveWithinProject(projectPath, scenePath);
+    if (!scene.ok) {
+      return this.createErrorResponse(scene.reason, PATH_SOLUTIONS);
     }
 
     try {
@@ -3762,15 +3675,14 @@ class GodotServer {
         ]);
       }
 
-      const sceneFile = join(projectPath, scenePath);
-      if (!existsSync(sceneFile)) {
+      if (!existsSync(scene.absolutePath)) {
         return this.createErrorResponse(`Scene file does not exist: ${scenePath}`, [
           'Ensure the scene path is correct',
         ]);
       }
 
       const params: OperationParams = {
-        scenePath: scenePath,
+        scenePath: scene.relativePath,
       };
 
       const { stdout, stderr } = await this.executeOperation('set_main_scene', params, projectPath);
@@ -4041,10 +3953,9 @@ class GodotServer {
       ]);
     }
 
-    if (!this.validatePath(projectPath)) {
-      return this.createErrorResponse('Invalid project path', [
-        'Provide a valid path without ".." or other potentially unsafe characters',
-      ]);
+    const script = resolveWithinProject(projectPath, scriptPath);
+    if (!script.ok) {
+      return this.createErrorResponse(script.reason, PATH_SOLUTIONS);
     }
 
     const projectFile = join(projectPath, 'project.godot');
@@ -4056,7 +3967,7 @@ class GodotServer {
 
     try {
       const params = {
-        script_path: scriptPath,
+        script_path: script.relativePath,
         class_name: className ?? '',
         extends_class: extendsClass ?? 'Node',
         content: content ?? '',
@@ -4132,10 +4043,9 @@ class GodotServer {
       ]);
     }
 
-    if (!this.validatePath(projectPath)) {
-      return this.createErrorResponse('Invalid project path', [
-        'Provide a valid path without ".." or other potentially unsafe characters',
-      ]);
+    const script = resolveWithinProject(projectPath, scriptPath);
+    if (!script.ok) {
+      return this.createErrorResponse(script.reason, PATH_SOLUTIONS);
     }
 
     const projectFile = join(projectPath, 'project.godot');
@@ -4147,7 +4057,7 @@ class GodotServer {
 
     try {
       const params = {
-        script_path: scriptPath,
+        script_path: script.relativePath,
         modifications: modifications,
       };
 
@@ -4214,10 +4124,9 @@ class GodotServer {
       ]);
     }
 
-    if (!this.validatePath(projectPath)) {
-      return this.createErrorResponse('Invalid project path', [
-        'Provide a valid path without ".." or other potentially unsafe characters',
-      ]);
+    const script = resolveWithinProject(projectPath, scriptPath);
+    if (!script.ok) {
+      return this.createErrorResponse(script.reason, PATH_SOLUTIONS);
     }
 
     const projectFile = join(projectPath, 'project.godot');
@@ -4229,7 +4138,7 @@ class GodotServer {
 
     try {
       const params = {
-        script_path: scriptPath,
+        script_path: script.relativePath,
         include_inherited: includeInherited || false,
       };
 
@@ -4299,12 +4208,6 @@ class GodotServer {
       ]);
     }
 
-    if (!this.validatePath(projectPath)) {
-      return this.createErrorResponse('Invalid project path', [
-        'Provide a valid path without ".." or other potentially unsafe characters',
-      ]);
-    }
-
     try {
       const projectFile = join(projectPath, 'project.godot');
       if (!existsSync(projectFile)) {
@@ -4344,9 +4247,12 @@ class GodotServer {
       return this.createErrorResponse('Missing required parameters', ['Provide projectPath and pluginName']);
     }
 
-    if (!this.validatePath(projectPath)) {
-      return this.createErrorResponse('Invalid project path', [
-        'Provide a valid path without ".." or other potentially unsafe characters',
+    // The operation script reads the name as res://addons/<name>/plugin.cfg, so the name is a
+    // directory in the project and is contained as one.
+    const plugin = resolveWithinProject(projectPath, `addons/${pluginName}/plugin.cfg`);
+    if (!plugin.ok) {
+      return this.createErrorResponse(plugin.reason, [
+        'Give the plugin directory name as it appears under addons/, such as "my_plugin"',
       ]);
     }
 
@@ -4394,9 +4300,10 @@ class GodotServer {
       return this.createErrorResponse('Missing required parameters', ['Provide projectPath and pluginName']);
     }
 
-    if (!this.validatePath(projectPath)) {
-      return this.createErrorResponse('Invalid project path', [
-        'Provide a valid path without ".." or other potentially unsafe characters',
+    const plugin = resolveWithinProject(projectPath, `addons/${pluginName}/plugin.cfg`);
+    if (!plugin.ok) {
+      return this.createErrorResponse(plugin.reason, [
+        'Give the plugin directory name as it appears under addons/, such as "my_plugin"',
       ]);
     }
 
@@ -4451,12 +4358,6 @@ class GodotServer {
     if (!projectPath || !actionName || !events) {
       return this.createErrorResponse('Missing required parameters', [
         'Provide projectPath, actionName, and events',
-      ]);
-    }
-
-    if (!this.validatePath(projectPath)) {
-      return this.createErrorResponse('Invalid project path', [
-        'Provide a valid path without ".." or other potentially unsafe characters',
       ]);
     }
 
@@ -4620,12 +4521,6 @@ class GodotServer {
 
     if (!projectPath || !query) {
       return this.createErrorResponse('Missing required parameters', ['Provide projectPath and query']);
-    }
-
-    if (!this.validatePath(projectPath)) {
-      return this.createErrorResponse('Invalid project path', [
-        'Provide a valid path without ".." or other potentially unsafe characters',
-      ]);
     }
 
     try {
