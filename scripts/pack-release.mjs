@@ -1,17 +1,17 @@
 #!/usr/bin/env bun
 
 import { createHash } from 'node:crypto';
-import { cp, mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { chmod, cp, mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
 const root = path.resolve(import.meta.dirname, '..');
 const sourcePackage = await Bun.file(path.join(root, 'package.json')).json();
 const outputDirectory = path.join(root, 'dist');
-const archiveName = `gopeak-${sourcePackage.version}.tgz`;
+const archiveName = `${sourcePackage.name}-${sourcePackage.version}.tgz`;
 const archivePath = path.join(outputDirectory, archiveName);
 const checksumPath = `${archivePath}.sha256`;
-const stagingRoot = await mkdtemp(path.join(os.tmpdir(), 'gopeak-release-pack-'));
+const stagingRoot = await mkdtemp(path.join(os.tmpdir(), `${sourcePackage.name}-release-pack-`));
 
 const releasePackage = {
   name: sourcePackage.name,
@@ -21,8 +21,7 @@ const releasePackage = {
   type: sourcePackage.type,
   main: sourcePackage.main,
   bin: {
-    gopeak: 'build/cli.js',
-    'godot-mcp': 'build/godot-mcp.js',
+    gdharness: 'build/cli.js',
   },
   engines: sourcePackage.engines,
   license: sourcePackage.license,
@@ -30,7 +29,6 @@ const releasePackage = {
   homepage: sourcePackage.homepage,
   bugs: sourcePackage.bugs,
   author: sourcePackage.author,
-  funding: sourcePackage.funding,
   keywords: sourcePackage.keywords,
 };
 
@@ -40,7 +38,7 @@ try {
   await mkdir(path.join(stagingRoot, 'build'), { recursive: true });
 
   await Promise.all([
-    ...['cli.js', 'godot-mcp.js', 'index.js', 'visualizer.html'].map((name) =>
+    ...['cli.js', 'index.js', 'visualizer.html'].map((name) =>
       cp(path.join(root, 'build', name), path.join(stagingRoot, 'build', name))),
     cp(path.join(root, 'build', 'addon'), path.join(stagingRoot, 'build', 'addon'), { recursive: true }),
     cp(path.join(root, 'build', 'scripts'), path.join(stagingRoot, 'build', 'scripts'), { recursive: true }),
@@ -52,6 +50,23 @@ try {
       'utf8',
     ),
   ]);
+
+  // bun pm pack records whatever mode the staged file carries, so the bins are chmodded
+  // here rather than left to whatever cp produced. Windows cannot express a POSIX mode at
+  // all and would ship a world-writable executable without saying so, so the release is
+  // refused there instead: cut it where the modes are real.
+  for (const executable of ['cli.js', 'index.js']) {
+    const staged = path.join(stagingRoot, 'build', executable);
+    await chmod(staged, 0o755);
+    const mode = (await stat(staged)).mode & 0o777;
+    if (mode !== 0o755) {
+      throw new Error(
+        `build/${executable} staged as ${mode.toString(8)} rather than 755. This platform `
+        + 'cannot record POSIX modes, so the archive would ship a wrong one. Cut the release '
+        + 'on Linux or macOS.',
+      );
+    }
+  }
 
   const stagedArchive = path.join(stagingRoot, archiveName);
   const pack = Bun.spawnSync([

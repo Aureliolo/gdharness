@@ -9,7 +9,7 @@ permissions: {}
 
 jobs:
   build_test:
-    if: github.repository == 'HaD0Yun/Doyunha-Gopeak'
+    if: github.repository == 'Aureliolo/gdharness'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -113,7 +113,7 @@ jobs:
           bun run release:pack
 
           version="${{ steps.version.outputs.version }}"
-          archive="dist/gopeak-${version}.tgz"
+          archive="dist/gdharness-${version}.tgz"
           checksum="${archive}.sha256"
 
           if [[ ! -s "${archive}" || ! -s "${checksum}" ]]; then
@@ -146,7 +146,7 @@ jobs:
           retention-days: 1
 
   attest_release:
-    if: github.repository == 'HaD0Yun/Doyunha-Gopeak'
+    if: github.repository == 'Aureliolo/gdharness'
     needs: build_test
     runs-on: ubuntu-latest
     permissions:
@@ -168,7 +168,7 @@ jobs:
           VERSION: ${{ needs.build_test.outputs.version }}
         run: |
           set -euo pipefail
-          archive="dist/gopeak-${VERSION}.tgz"
+          archive="dist/gdharness-${VERSION}.tgz"
           checksum="${archive}.sha256"
 
           expected_assets="$(printf '%s\n' "${archive}" "${checksum}")"

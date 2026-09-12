@@ -208,14 +208,14 @@ class GodotServer {
   private reverseParameterMappings: Record<string, string> = {};
 
   constructor(config?: GodotServerConfig) {
-    const rawProfile = (process.env.GOPEAK_TOOL_PROFILE || process.env.MCP_TOOL_PROFILE || 'compact').toLowerCase();
+    const rawProfile = (process.env.GDHARNESS_TOOL_PROFILE || process.env.MCP_TOOL_PROFILE || 'compact').toLowerCase();
     if (rawProfile === 'full' || rawProfile === 'legacy' || rawProfile === 'compact') {
       this.toolExposureProfile = rawProfile;
     } else {
       this.toolExposureProfile = 'compact';
     }
 
-    const rawToolsPageSize = parseInt(process.env.GOPEAK_TOOLS_PAGE_SIZE || '33', 10);
+    const rawToolsPageSize = parseInt(process.env.GDHARNESS_TOOLS_PAGE_SIZE || '33', 10);
     this.toolsListPageSize = Number.isFinite(rawToolsPageSize) && rawToolsPageSize > 0
       ? rawToolsPageSize
       : 33;
@@ -265,7 +265,7 @@ class GodotServer {
     // Initialize the MCP server
     this.server = new Server(
       {
-        name: 'gopeak',
+        name: 'gdharness',
         version: SERVER_VERSION,
       },
       {
@@ -632,10 +632,10 @@ class GodotServer {
     const params = (args && typeof args === 'object') ? args as Record<string, unknown> : {};
     const RUNTIME_PORT = 7777;
     const RUNTIME_HOST = '127.0.0.1';
-    const timeoutOverride = Number.parseInt(process.env.GOPEAK_RUNTIME_TIMEOUT_MS || '', 10);
+    const timeoutOverride = Number.parseInt(process.env.GDHARNESS_RUNTIME_TIMEOUT_MS || '', 10);
     const TIMEOUT_MS = Number.isInteger(timeoutOverride) && timeoutOverride > 0 ? timeoutOverride : 10000;
     const expectsScreenshot = command === 'capture_screenshot' || command === 'capture_viewport';
-    const screenshotDir = expectsScreenshot ? mkdtempSync(join(tmpdir(), 'gopeak-runtime-screenshot-')) : null;
+    const screenshotDir = expectsScreenshot ? mkdtempSync(join(tmpdir(), 'gdharness-runtime-screenshot-')) : null;
     const screenshotPath = screenshotDir ? join(screenshotDir, 'capture.png') : null;
     const runtimeParams = screenshotPath ? { ...params, output_path: screenshotPath } : params;
     const cleanupScreenshotDir = () => {
@@ -677,7 +677,7 @@ class GodotServer {
           if (!screenshotPath || normalize(returnedPath) !== normalize(screenshotPath)) {
             cleanupScreenshotDir();
             resolve({
-              content: [{ type: 'text', text: `Rejected screenshot file path outside the GoPeak-managed capture path: '${returnedPath}'` }],
+              content: [{ type: 'text', text: `Rejected screenshot file path outside the managed capture path: '${returnedPath}'` }],
             });
             return;
           }
@@ -1350,7 +1350,7 @@ class GodotServer {
       // Serialize parameters into a temp file to avoid shell/cmd JSON escaping issues
       // (notably Windows command-line parsing of sequences such as \t, \r, and \").
       const paramsJson = JSON.stringify(snakeCaseParams);
-      const paramsDir = mkdtempSync(join(tmpdir(), 'gopeak-params-'));
+      const paramsDir = mkdtempSync(join(tmpdir(), 'gdharness-params-'));
       const paramsFilePath = join(paramsDir, `${operation}.json`);
       writeFileSync(paramsFilePath, paramsJson, 'utf8');
 
@@ -1410,10 +1410,10 @@ class GodotServer {
       bridgeAvailable: this.bridgeStartupError === null,
       startupError: this.bridgeStartupError,
       note: isPortConflict
-        ? 'Bridge port is already in use. Another gopeak instance may own the editor bridge, so this server cannot report that editor connection.'
+        ? 'Bridge port is already in use. Another gdharness instance may own the editor bridge, so this server cannot report that editor connection.'
         : undefined,
       suggestion: isPortConflict
-        ? 'Stop duplicate gopeak/MCP server instances or re-run the command from the same server process that owns the bridge port.'
+        ? 'Stop duplicate gdharness/MCP server instances or re-run the command from the same server process that owns the bridge port.'
         : undefined,
     };
   }

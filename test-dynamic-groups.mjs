@@ -164,7 +164,7 @@ async function main() {
     env: {
       ...process.env,
       GODOT_PATH,
-      GOPEAK_TOOL_PROFILE: 'compact',
+      GDHARNESS_TOOL_PROFILE: 'compact',
     },
     stdio: ['pipe', 'pipe', 'pipe'],
   });

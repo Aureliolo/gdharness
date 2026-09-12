@@ -49,8 +49,8 @@ function startServer() {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: {
         ...process.env,
-        GOPEAK_TOOL_PROFILE: 'compact',
-        GOPEAK_TOOLS_PAGE_SIZE: '200', // large page to get all tools at once
+        GDHARNESS_TOOL_PROFILE: 'compact',
+        GDHARNESS_TOOLS_PAGE_SIZE: '200', // large page to get all tools at once
       },
     });
     serverProcess.on('error', reject);

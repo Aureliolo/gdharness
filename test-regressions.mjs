@@ -11,7 +11,6 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { createBridge } from './build/godot-bridge.js';
 
 const INDEX_SOURCE = readFileSync(new URL('./src/index.ts', import.meta.url), 'utf8');
-const CLI_NOTIFY_SOURCE = readFileSync(new URL('./src/cli/notify.ts', import.meta.url), 'utf8');
 const OPERATIONS_SOURCE = readFileSync(new URL('./src/scripts/godot_operations.gd', import.meta.url), 'utf8');
 const RUNTIME_SOURCE = readFileSync(new URL('./src/addon/godot_mcp_runtime/mcp_runtime_autoload.gd', import.meta.url), 'utf8');
 
@@ -171,7 +170,7 @@ async function testEditorStatusPortConflict() {
       cwd: process.cwd(),
       env: {
         ...process.env,
-        GOPEAK_TOOL_PROFILE: 'compact',
+        GDHARNESS_TOOL_PROFILE: 'compact',
       },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -196,7 +195,7 @@ async function testEditorStatusPortConflict() {
       const payload = JSON.parse(response.result.content[0].text);
       assert.equal(payload.bridgeAvailable, false);
       assert.match(payload.startupError ?? '', /EADDRINUSE/i);
-      assert.match(payload.note ?? '', /Another gopeak instance may own the editor bridge/i);
+      assert.match(payload.note ?? '', /Another gdharness instance may own the editor bridge/i);
     } finally {
       proc.kill('SIGTERM');
       await Promise.race([
@@ -219,11 +218,6 @@ async function main() {
     INDEX_SOURCE,
     /private async handleRunProject[\s\S]*?const cmdArgs = \[[^\]]*'--headless'[^\]]*'-d'[^\]]*'--path'[^\]]*args\.projectPath[^\]]*\]/,
     'run_project should launch Godot with --headless in handleRunProject cmdArgs',
-  );
-  assert.match(
-    CLI_NOTIFY_SOURCE,
-    /const wantsStar = await askYesNo\('[^']*Star GoPeak on GitHub\? \(y\/n\): '\);\s*\n\s*if \(wantsStar\) \{\s*\n\s*await handleStar\(\);/m,
-    'star prompt should call handleStar only when the user accepts',
   );
   assert.match(OPERATIONS_SOURCE, /params_json\.begins_with\("@file:"\)/, 'godot_operations.gd should load params from @file: payloads');
   assert.match(

@@ -10,8 +10,8 @@ const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_TIMEOUT_MS = 30_000;
 const KEEPALIVE_INTERVAL_MS = 10_000;
 const SECOND_CONNECTION_CLOSE_CODE = 4000;
-const BRIDGE_PORT_ENV_KEYS = ['GODOT_BRIDGE_PORT', 'MCP_BRIDGE_PORT', 'GOPEAK_BRIDGE_PORT'] as const;
-const BRIDGE_HOST_ENV_KEYS = ['GODOT_BRIDGE_HOST', 'MCP_BRIDGE_HOST', 'GOPEAK_BRIDGE_HOST'] as const;
+const BRIDGE_PORT_ENV_KEYS = ['GODOT_BRIDGE_PORT', 'MCP_BRIDGE_PORT', 'GDHARNESS_BRIDGE_PORT'] as const;
+const BRIDGE_HOST_ENV_KEYS = ['GODOT_BRIDGE_HOST', 'MCP_BRIDGE_HOST', 'GDHARNESS_BRIDGE_HOST'] as const;
 const BRIDGE_VERSION = (() => {
   try {
     const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version?: string };

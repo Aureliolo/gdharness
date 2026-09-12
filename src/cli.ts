@@ -1,69 +1,30 @@
 #!/usr/bin/env bun
 /**
- * GoPeak CLI Entrypoint
+ * gdharness CLI entry point.
  *
  * Routes subcommands or falls through to the MCP server.
- *
- *   gopeak              → Start MCP server (default, backward-compatible)
- *   gopeak setup        → Install shell hooks
- *   gopeak check        → Check for updates
- *   gopeak star         → Star on GitHub
- *   gopeak uninstall    → Remove shell hooks
- *   gopeak version      → Print version
- *   gopeak help         → Show help
  */
 
-import { getLocalVersion } from './cli/utils.js';
+import { getLocalVersion } from './version.js';
 
 const args = process.argv.slice(2);
 const command = args[0];
 
-const CLI_COMMANDS = ['setup', 'check', 'update', 'star', 'notify', 'uninstall', 'version', 'help', '--version', '-v', '--help', '-h'];
+const CLI_COMMANDS = ['version', 'help', '--version', '-v', '--help', '-h'];
 
 async function main(): Promise<void> {
-  // If no args or not a CLI command → start MCP server (original behavior)
   if (!command || !CLI_COMMANDS.includes(command)) {
-    // Dynamic import to avoid loading MCP SDK for CLI-only commands
+    // Dynamic import so a CLI-only command never loads the MCP SDK.
     const { runGodotServer } = await import('./index.js');
     await runGodotServer();
     return;
   }
 
   switch (command) {
-    case 'setup': {
-      const { setupShellHooks } = await import('./cli/setup.js');
-      await setupShellHooks(args.slice(1));
-      break;
-    }
-    case 'check': {
-      const { checkForUpdates } = await import('./cli/check.js');
-      await checkForUpdates(args.slice(1));
-      break;
-    }
-    case 'update': {
-      const { updateGoPeak } = await import('./cli/update.js');
-      await updateGoPeak();
-      break;
-    }
-    case 'star': {
-      const { starGoPeak } = await import('./cli/star.js');
-      await starGoPeak();
-      break;
-    }
-    case 'notify': {
-      const { showNotification } = await import('./cli/notify.js');
-      await showNotification();
-      break;
-    }
-    case 'uninstall': {
-      const { uninstallHooks } = await import('./cli/uninstall.js');
-      await uninstallHooks();
-      break;
-    }
     case 'version':
     case '--version':
     case '-v': {
-      console.log(`gopeak v${getLocalVersion()}`);
+      console.log(`gdharness v${getLocalVersion()}`);
       break;
     }
     case 'help':
@@ -76,30 +37,19 @@ async function main(): Promise<void> {
 }
 
 function printHelp(): void {
-  const version = getLocalVersion();
   console.log(`
-GoPeak v${version} — AI-Powered Godot Development via MCP
+gdharness v${getLocalVersion()}, a harness for driving a Godot 4 project from an agent
 
 Usage:
-  gopeak                Start MCP server (default)
-  gopeak setup          Install shell hooks for update notifications
-  gopeak check          Check for GoPeak updates
-  gopeak check --bg     Background check (used by shell hooks)
-  gopeak check --quiet  Print only if update available
-  gopeak update         Download, verify, and install the latest GitHub Release
-  gopeak star           Star GoPeak on GitHub
-  gopeak uninstall      Remove shell hooks
-  gopeak version        Show current version
-  gopeak help           Show this help
+  gdharness            Start the MCP server (default)
+  gdharness version    Show the installed version
+  gdharness help       Show this help
 
-Shell hooks wrap these commands with update notifications:
-  claude, codex, gemini, opencode, omc, omx
-
-More info: https://github.com/HaD0Yun/Doyunha-Gopeak
+More info: https://github.com/Aureliolo/gdharness
 `.trim());
 }
 
 await main().catch((error: unknown) => {
-  console.error('gopeak:', error instanceof Error ? error.message : String(error));
+  console.error('gdharness:', error instanceof Error ? error.message : String(error));
   process.exit(1);
 });

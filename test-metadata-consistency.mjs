@@ -11,40 +11,26 @@ const serverManifest = JSON.parse(fs.readFileSync(new URL('./server.json', impor
 assert.equal(serverManifest.version, pkg.version, 'server.json version should match package.json');
 assert.equal(serverManifest.packages, undefined, 'server.json should not advertise a registry package for a GitHub Release tarball');
 assert.equal(serverManifest.websiteUrl, pkg.homepage, 'server.json website should match the package homepage');
-assert.equal(serverManifest.repository?.url, 'https://github.com/HaD0Yun/Doyunha-Gopeak', 'server.json should link to the canonical GitHub repository');
-assert.equal(serverManifest.websiteUrl, 'https://github.com/HaD0Yun/Doyunha-Gopeak#readme', 'server.json should link to the canonical project page');
-assert.equal(pkg.repository?.url, 'git+https://github.com/HaD0Yun/Doyunha-Gopeak.git', 'package.json should link to the canonical GitHub repository');
+assert.equal(serverManifest.repository?.url, 'https://github.com/Aureliolo/gdharness', 'server.json should link to the canonical GitHub repository');
+assert.equal(serverManifest.websiteUrl, 'https://github.com/Aureliolo/gdharness#readme', 'server.json should link to the canonical project page');
+assert.equal(pkg.repository?.url, 'git+https://github.com/Aureliolo/gdharness.git', 'package.json should link to the canonical GitHub repository');
 assert.equal(serverManifest.repository?.source, 'github', 'server.json should identify GitHub as its repository source');
 
-// Given current runtime and installer surfaces
-// When repository links or GitHub API coordinates are embedded
-// Then none may point users or automation to the retired repository name.
-for (const path of [
-  'src/cli/check.ts',
-  'src/cli/notify.ts',
-  'src/cli/setup.ts',
-  'src/cli/star.ts',
-  'install-addon.sh',
-  'install-addon.ps1',
-]) {
-  const contents = fs.readFileSync(new URL(`./${path}`, import.meta.url), 'utf8');
-  assert.doesNotMatch(contents, /HaD0Yun\/Gopeak-godot-mcp/i, `${path} should use the canonical repository name`);
-}
-assert.match(pkg.description, /GoPeak/i, 'package description should use GoPeak branding');
-assert.match(serverManifest.description, /GoPeak/i, 'server manifest description should use GoPeak branding');
+assert.match(pkg.description, /godot/i, 'package description should say what the harness is for');
+assert.match(serverManifest.description, /godot/i, 'server manifest description should say what the harness is for');
 assert.ok(serverManifest.description.length <= 100, 'server.json description must satisfy the MCP schema 100-character limit');
 
 const versionOutput = execFileSync(process.execPath, ['./build/cli.js', 'version'], {
   cwd: process.cwd(),
   encoding: 'utf8',
 }).trim();
-assert.equal(versionOutput, `gopeak v${pkg.version}`, 'CLI version output should stay in sync with package.json');
+assert.equal(versionOutput, `${pkg.name} v${pkg.version}`, 'CLI version output should stay in sync with package.json');
 
 const child = spawn(process.execPath, ['./build/cli.js'], {
   cwd: process.cwd(),
   env: {
     ...process.env,
-    GOPEAK_TOOL_PROFILE: 'compact',
+    GDHARNESS_TOOL_PROFILE: 'compact',
   },
   stdio: ['pipe', 'pipe', 'pipe'],
 });
