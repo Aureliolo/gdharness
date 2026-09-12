@@ -1,0 +1,67 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:best-practices",
+    "customManagers:biomeVersions",
+    "security:openssf-scorecard",
+    ":semanticCommitsDisabled"
+  ],
+  "timezone": "Europe/Zurich",
+  "schedule": ["before 6am on monday"],
+  "minimumReleaseAge": "7 days",
+  "osvVulnerabilityAlerts": true,
+  "rangeStrategy": "pin",
+  "commitMessageAction": "Raise",
+  "commitMessageTopic": "{{depName}}",
+  "commitMessageExtra": "to {{newVersion}}",
+  "packageRules": [
+    {
+      "description": "One pull request for everything. Every version here is pinned exactly and every check has to be green before anything merges, so a week's updates arriving as separate pull requests is that many rounds of CI to land one week's work. A vulnerability fix is the exception and arrives on its own the day it exists; the weekly lock file refresh is the other, because it changes nothing this file names.",
+      "matchPackageNames": ["*"],
+      "groupName": "all dependencies",
+      "groupSlug": "all"
+    },
+    {
+      "description": "A major gets a fortnight rather than a week. A compromised release is usually caught within days of publication, and a major is where the surprises live.",
+      "matchUpdateTypes": ["major"],
+      "minimumReleaseAge": "14 days"
+    },
+    {
+      "description": "A new interpreter reaches uv's download list a few days after python.org publishes it, and CI installs the interpreter through uv. Waiting a fortnight keeps the two from crossing.",
+      "matchDatasources": ["python-version"],
+      "minimumReleaseAge": "14 days"
+    },
+    {
+      "description": "engines.bun is the floor a contributor's machine has to clear, not a pin, and it moves only when the code starts needing something newer.",
+      "matchDepTypes": ["engines"],
+      "enabled": false
+    }
+  ],
+  "pip_requirements": {
+    "enabled": false
+  },
+  "pip-compile": {
+    "description": "gdtoolkit is installed with --require-hashes from a lock uv compiles, so a bump rewrites the lock with the new hashes rather than the bare version.",
+    "managerFilePatterns": ["/^\\.github/requirements/.+\\.txt$/"]
+  },
+  "customManagers": [
+    {
+      "description": "A version with the SHA-256 or SHA-512 of the file it names on the next line: Bun, uv, actionlint and the engine. The tag and the digest move together, and the datasource finds the new digest in the checksum file the release publishes.",
+      "customType": "regex",
+      "managerFilePatterns": ["/^\\.github/.+\\.ya?ml$/", "/^scripts/.+\\.mjs$/"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>github-release-attachments) depName=(?<depName>\\S+) versioning=(?<versioning>\\S+)\\n\\s*[A-Z0-9_]+_TAG: (?<currentValue>\\S+)\\n\\s*[A-Z0-9_]+_SHA256: (?<currentDigest>[0-9a-f]{64})",
+        "// renovate: datasource=(?<datasource>github-release-attachments) depName=(?<depName>\\S+) versioning=(?<versioning>\\S+)\\n\\s*tag: '(?<currentValue>[^']+)',\\n\\s*digest:\\s*'(?<currentDigest>[0-9a-f]{128})'"
+      ]
+    },
+    {
+      "description": "A version on its own, for what nothing downloads directly: the interpreter uv installs and verifies against the hashes it carries, and the runner images inside a job matrix, which the github-actions manager reads from runs-on: but not from a matrix.",
+      "customType": "regex",
+      "managerFilePatterns": ["/^\\.github/.+\\.ya?ml$/"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>python-version) depName=(?<depName>\\S+)(?: versioning=(?<versioning>\\S+))?\\n\\s*[A-Z0-9_]+: '?(?<currentValue>[^'\\s]+)'?",
+        "# renovate: datasource=(?<datasource>github-runners) depName=(?<depName>ubuntu|windows|macos)\\n\\s*- (?:ubuntu|windows|macos)-(?<currentValue>[0-9.]+(?:-[a-z0-9]+)?)"
+      ]
+    }
+  ]
+}

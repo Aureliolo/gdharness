@@ -32,12 +32,21 @@ it would cost to adopt.
 **Every job CI runs is a required status check.** A job that can be red while something merges is
 not a gate, and we have been bitten by exactly that.
 
-**Every pinned version is watched by something.** Dependabot covers the package ecosystems it
-understands, which is `package.json` and the workflow `uses:` digests. It does not see a version
-passed as an action input, an inline `pip install x==y`, a version inside a URL, or a pin held in
-a script: the engine, gdtoolkit, Python, actionlint and zizmor are all in that second group.
-`bun run check:pins` covers them, and it fails when it finds a pin that nothing watches, so a new
-pin cannot arrive unwatched.
+**Nothing from outside the repository runs unverified.** Every file CI downloads is refused
+unless it matches a digest written in this repository: the Bun that runs every job
+(`.github/actions/install-bun`), uv and the interpreter and gdtoolkit under it (`ci.yml`,
+`.github/requirements/`), actionlint (`workflows.yml`), and the engine
+(`scripts/install-godot.mjs`). npm packages carry theirs in `bun.lock`, actions are pinned by
+commit, and zizmor runs from a container image whose digest is fixed by the action's commit. A
+tool that arrives without a digest arrives with one in the same change.
+
+**Every pin is watched by Renovate, digest included.** `renovate.json` is the whole of it: the
+`bun` and `github-actions` managers cover `package.json`, the lockfile and every `uses:`; the
+`pip-compile` manager recompiles the gdtoolkit lock with new hashes; and two regex managers read
+the `# renovate:` line above any other pin, so a new one is watched the moment it is annotated.
+One pull request a week carries everything, a vulnerability fix arrives on its own the day it
+exists, and the lock file refresh is its own weekly pull request because it changes nothing this
+file names. A pin without an annotation is a pin nothing watches, and the review refuses it.
 
 Pick the newest stable version of a tool rather than the familiar one, and read what the release
 actually changed before taking it.
