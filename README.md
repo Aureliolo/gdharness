@@ -71,7 +71,10 @@ gh attestation verify gdharness-X.Y.Z.tgz --repo Aureliolo/gdharness
 
 **What goes into it.** Every dependency is an exact version and every GitHub action is pinned by
 commit digest. No carets, no ranges, no floating tags; the only version ranges in the repository
-are the two support floors above. Dependabot proposes the bumps and a human takes them.
+are the two support floors above. The Godot that CI drives the fixtures against is pinned the same
+way: it is fetched from the engine's own release and refused unless it matches the SHA-512
+published alongside it, so the largest binary in the pipeline is not the one thing nobody checked.
+Dependabot proposes the bumps and a human takes them.
 
 **What guards the branch.** `main` takes pull requests only, with signed commits, linear
 history and a required status check, and nobody can bypass it. CodeQL, OpenSSF Scorecard,
