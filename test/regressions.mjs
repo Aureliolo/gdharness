@@ -938,9 +938,17 @@ function testProjectPathsAreContained() {
     'user://savegame.dat',
     '',
     '.',
+    // Refused on both platforms, not on whichever one node:path happens to call absolute. A
+    // leading `/` is absolute to node:path on POSIX and a leading `\` is on Windows, so a rule
+    // leaning on isAbsolute alone would judge the same argument by which machine read it.
+    '/etc/shadow/../passwd',
+    '/../etc/passwd',
+    '/etc/passwd',
+    '\\Windows\\win.ini',
+    'res:///etc/passwd',
     ...(onWindows
       ? ['C:\\Windows\\win.ini', 'C:/Windows/win.ini', 'D:\\other\\payload.gd', '\\\\server\\share\\x.gd']
-      : ['/etc/shadow/../passwd', '/../etc/passwd']),
+      : []),
   ];
 
   for (const candidate of refused) {
@@ -948,7 +956,7 @@ function testProjectPathsAreContained() {
     assert.equal(answer.ok, false, `${JSON.stringify(candidate)} should not resolve inside ${root}`);
     assert.match(
       answer.reason,
-      /empty|null byte|scheme|outside the project|project directory itself/,
+      /empty|null byte|scheme|absolute|outside the project|project directory itself/,
       `${JSON.stringify(candidate)} should be refused with a reason that says why`,
     );
   }
@@ -957,7 +965,6 @@ function testProjectPathsAreContained() {
   const accepted = [
     ['scenes/main.tscn', 'scenes/main.tscn'],
     ['res://scenes/main.tscn', 'scenes/main.tscn'],
-    ['/scenes/main.tscn', 'scenes/main.tscn'],
     ['scenes/./main.tscn', 'scenes/main.tscn'],
     ['scenes/sub/../main.tscn', 'scenes/main.tscn'],
     ['archive..old.gd', 'archive..old.gd'],
@@ -1042,14 +1049,14 @@ async function testToolsRefusePathsOutsideTheProject() {
           const answer = await call(tool, { projectPath, ...args });
           assert.match(
             answer,
-            /resolves outside the project directory/,
+            /is absolute|resolves outside the project directory/,
             `${tool} should refuse ${JSON.stringify(args)}`,
           );
         }
 
         assert.match(
           await call('export_project', { projectPath, preset: 'Linux', outputPath: absoluteOutput }),
-          /resolves outside the project directory/,
+          /is absolute|resolves outside the project directory/,
           'export_project should refuse an absolute destination outside the project',
         );
 
@@ -1064,7 +1071,7 @@ async function testToolsRefusePathsOutsideTheProject() {
         ]) {
           assert.doesNotMatch(
             await call(tool, { projectPath, ...args }),
-            /resolves outside the project directory/,
+            /is absolute|resolves outside the project directory/,
             `${tool} should accept ${JSON.stringify(args)}`,
           );
         }
@@ -1085,7 +1092,7 @@ async function testToolsRefusePathsOutsideTheProject() {
         });
         assert.match(
           escaped.error?.message ?? escaped.result?.contents?.[0]?.text ?? '',
-          /resolves outside the project directory/,
+          /is absolute|resolves outside the project directory/,
           'a godot:// URI with an encoded traversal should be refused',
         );
       },

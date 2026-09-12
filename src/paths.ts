@@ -59,10 +59,17 @@ export function isWithinRoot(rootPath: string, candidatePath: string): boolean {
  * A caller-supplied path read as a location inside the project.
  *
  * Both spellings of the same file are accepted, `res://scenes/main.tscn` and
- * `scenes/main.tscn`, and a leading `/` is read as the project root, which is what a URI
- * pathname and most agents mean by it. A leading `\` is not: on Windows that is the root of a
- * drive, so it is left to resolve as the absolute path it is and refused with everything else
- * that lands outside.
+ * `scenes/main.tscn`. Anything absolute is refused, a leading `/` or `\` included.
+ *
+ * Reading a leading `/` as the project root was tried and is worse on both counts. It makes
+ * `/etc/passwd` quietly succeed as `<project>/etc/passwd`, when a caller who wrote that meant
+ * something this must not do, and it answers differently per platform: `/x` is absolute to
+ * node:path on POSIX and `\x` is absolute on Windows, so the same argument would be judged by
+ * which machine read it. A boundary check has to give one answer everywhere.
+ *
+ * The one caller that legitimately holds a leading slash is the `godot://` URI reader, where
+ * `URL` put it there. It strips it itself, being the only place that knows the string is a URL
+ * pathname rather than something a caller typed.
  */
 export function resolveWithinProject(projectPath: string, candidatePath: string): Containment {
   const trimmed = candidatePath.trim();
@@ -86,8 +93,17 @@ export function resolveWithinProject(projectPath: string, candidatePath: string)
     };
   }
 
+  // Refused here rather than left to the containment check below, which would accept a leading
+  // separator on the platform where node:path does not read it as absolute.
+  if (withoutScheme.startsWith('/') || withoutScheme.startsWith('\\') || isAbsolute(withoutScheme)) {
+    return {
+      ok: false,
+      reason: `Path '${trimmed}' is absolute; give a path inside the project, such as 'scenes/main.tscn'.`,
+    };
+  }
+
   const root = resolve(projectPath);
-  const absolutePath = resolve(root, withoutScheme.replace(/^\/+/, ''));
+  const absolutePath = resolve(root, withoutScheme);
 
   if (!isWithinRoot(root, absolutePath)) {
     return { ok: false, reason: `Path '${trimmed}' resolves outside the project directory.` };

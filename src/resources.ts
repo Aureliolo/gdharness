@@ -58,6 +58,10 @@ function ensureProjectPath(getProjectPath: () => string | null): string {
  * Only the shape of the thing is settled here, because where it lands is `resolveWithinProject`'s
  * question: a Windows client writes separators the other way round, and the pathname of
  * `godot://scene/scenes/main.tscn` arrives with the leading slash `URL` puts there.
+ *
+ * That slash is stripped here and nowhere else. This is the only place that knows the string came
+ * out of a URL rather than off a caller's keyboard, and `resolveWithinProject` refuses anything
+ * absolute so that it gives the same answer on every platform.
  */
 function uriPathToProjectPath(inputPath: string): string {
   const normalized = inputPath.replace(/\\/g, '/').trim();
@@ -65,7 +69,7 @@ function uriPathToProjectPath(inputPath: string): string {
     throw new Error('Resource path is empty.');
   }
 
-  return normalized;
+  return normalized.replace(/^\/+/, '');
 }
 
 function resolveProjectFile(projectPath: string, resourcePath: string): string {
