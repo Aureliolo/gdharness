@@ -1,0 +1,109 @@
+name: Prepare release
+
+# Cutting a tag by hand is the one release step nobody can check afterwards, and it is the step
+# most often done at the wrong time, from the wrong branch, against the wrong version. This puts
+# it behind a button: pick the bump, get a pull request, merge it. Tagging and publishing follow
+# from the merge without anyone typing a version again.
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Which part of the version to raise
+        required: true
+        type: choice
+        default: patch
+        options:
+          - patch
+          - minor
+          - major
+      version:
+        description: An exact version instead, such as 1.0.0. Overrides the bump above.
+        required: false
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: release-prepare
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+
+      - name: Raise the version
+        id: bump
+        env:
+          BUMP: ${{ inputs.bump }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          bun scripts/bump-version.mjs "${VERSION:-$BUMP}"
+          next="$(bun -e "console.log((await Bun.file('package.json').json()).version)")"
+          echo "version=${next}" >> "${GITHUB_OUTPUT}"
+          echo "branch=release/v${next}" >> "${GITHUB_OUTPUT}"
+
+      - name: Refuse a version that is already released
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ steps.bump.outputs.version }}
+        run: |
+          set -euo pipefail
+          if gh release view "v${VERSION}" >/dev/null 2>&1; then
+            echo "v${VERSION} is already released. Pick a higher version." >&2
+            exit 1
+          fi
+
+      - name: Open the branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BRANCH: ${{ steps.bump.outputs.branch }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${GH_REPO}/git/refs" \
+            -f "ref=refs/heads/${BRANCH}" \
+            -f "sha=${GITHUB_SHA}"
+
+      - name: Commit the bump
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          EXPECTED_HEAD_OID: ${{ github.sha }}
+          BRANCH: ${{ steps.bump.outputs.branch }}
+          VERSION: ${{ steps.bump.outputs.version }}
+        run: |
+          set -euo pipefail
+          bun scripts/commit-signed.mjs "${BRANCH}" "Release v${VERSION}" \
+            package.json server.json README.md
+
+      - name: Open the pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BRANCH: ${{ steps.bump.outputs.branch }}
+          VERSION: ${{ steps.bump.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh pr create \
+            --base main \
+            --head "${BRANCH}" \
+            --title "Release v${VERSION}" \
+            --body "Raises the version to ${VERSION} in package.json, server.json and the README.
+
+          Merging this tags v${VERSION}, which builds, signs and publishes the release."
