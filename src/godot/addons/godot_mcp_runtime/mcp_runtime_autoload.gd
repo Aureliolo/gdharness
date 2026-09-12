@@ -18,6 +18,8 @@ var _clients: Array[StreamPeerTCP] = []
 var _port: int = DEFAULT_PORT
 var _enabled: bool = true
 var _watched_signals: Dictionary = {}  # { "node_path:signal_name": callable }
+# Built on first use rather than at load, because the table holds Callables bound to this node.
+var _serialisers: Dictionary = {}
 
 
 func _ready() -> void:
@@ -555,51 +557,62 @@ func _serialize_node(node: Node, include_properties: bool) -> Dictionary:
 
 ## Converts a Godot value into something JSON can carry.
 ##
-## Keyed on typeof() rather than written as a chain of `is` tests, so the set of types that
-## survive the wire is one table you can read rather than an order you have to trust. The order
-## mattered: Resource had to be checked before Object or every resource came back as a bare
-## class name with its path dropped, and nothing but a comment said so.
+## The set of types that survive the wire is a table keyed on typeof(), rather than an order of
+## `is` tests you have to trust. That order used to be load bearing and documented only by a
+## comment: Resource had to be checked before Object, or every resource came back as a bare
+## class name with its path dropped. Nothing else here depends on being asked in order.
 func _serialize_value(value: Variant) -> Variant:
-	match typeof(value):
-		TYPE_NIL:
-			return null
-		TYPE_VECTOR2:
-			return {"_type": "Vector2", "x": value.x, "y": value.y}
-		TYPE_VECTOR3:
-			return {"_type": "Vector3", "x": value.x, "y": value.y, "z": value.z}
-		TYPE_VECTOR2I:
-			return {"_type": "Vector2i", "x": value.x, "y": value.y}
-		TYPE_VECTOR3I:
-			return {"_type": "Vector3i", "x": value.x, "y": value.y, "z": value.z}
-		TYPE_COLOR:
-			return {"_type": "Color", "r": value.r, "g": value.g, "b": value.b, "a": value.a}
-		TYPE_RECT2:
-			return {
-				"_type": "Rect2",
-				"position": _serialize_value(value.position),
-				"size": _serialize_value(value.size)
-			}
-		TYPE_TRANSFORM2D:
-			return {
-				"_type": "Transform2D",
-				"origin": _serialize_value(value.origin),
-				"x": _serialize_value(value.x),
-				"y": _serialize_value(value.y)
-			}
-		TYPE_NODE_PATH:
-			return {"_type": "NodePath", "path": str(value)}
-		TYPE_ARRAY:
-			return value.map(_serialize_value)
-		TYPE_DICTIONARY:
-			var serialised := {}
-			for key in value:
-				serialised[str(key)] = _serialize_value(value[key])
-			return serialised
-		TYPE_OBJECT:
-			if value is Resource:
-				return {"_type": "Resource", "path": value.resource_path, "class": value.get_class()}
-			return {"_type": "Object", "class": value.get_class()}
-	return value
+	if _serialisers.is_empty():
+		_serialisers = _build_serialisers()
+	var converter: Callable = _serialisers.get(typeof(value), Callable())
+	return converter.call(value) if converter.is_valid() else value
+
+
+func _build_serialisers() -> Dictionary:
+	return {
+		TYPE_NIL: func(_value): return null,
+		TYPE_VECTOR2: func(v): return {"_type": "Vector2", "x": v.x, "y": v.y},
+		TYPE_VECTOR3: func(v): return {"_type": "Vector3", "x": v.x, "y": v.y, "z": v.z},
+		TYPE_VECTOR2I: func(v): return {"_type": "Vector2i", "x": v.x, "y": v.y},
+		TYPE_VECTOR3I: func(v): return {"_type": "Vector3i", "x": v.x, "y": v.y, "z": v.z},
+		TYPE_COLOR: func(v): return {"_type": "Color", "r": v.r, "g": v.g, "b": v.b, "a": v.a},
+		TYPE_NODE_PATH: func(v): return {"_type": "NodePath", "path": str(v)},
+		TYPE_ARRAY: func(v): return v.map(_serialize_value),
+		TYPE_RECT2: _serialize_rect2,
+		TYPE_TRANSFORM2D: _serialize_transform2d,
+		TYPE_DICTIONARY: _serialize_dictionary,
+		TYPE_OBJECT: _serialize_object,
+	}
+
+
+func _serialize_rect2(value: Rect2) -> Dictionary:
+	return {
+		"_type": "Rect2", "position": _serialize_value(value.position), "size": _serialize_value(value.size)
+	}
+
+
+func _serialize_transform2d(value: Transform2D) -> Dictionary:
+	return {
+		"_type": "Transform2D",
+		"origin": _serialize_value(value.origin),
+		"x": _serialize_value(value.x),
+		"y": _serialize_value(value.y)
+	}
+
+
+func _serialize_dictionary(value: Dictionary) -> Dictionary:
+	var serialised := {}
+	for key in value:
+		serialised[str(key)] = _serialize_value(value[key])
+	return serialised
+
+
+## The one case that genuinely needs the class hierarchy, since a Resource is also an Object and
+## its path is the half worth having.
+func _serialize_object(value: Object) -> Dictionary:
+	if value is Resource:
+		return {"_type": "Resource", "path": value.resource_path, "class": value.get_class()}
+	return {"_type": "Object", "class": value.get_class()}
 
 
 func _deserialize_value(value) -> Variant:
