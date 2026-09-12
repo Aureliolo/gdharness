@@ -1,0 +1,69 @@
+name: Workflows
+
+# The workflows themselves are code with credentials attached, and nothing was checking
+# them. actionlint covers syntax, expressions and the shell inside run: blocks; zizmor
+# covers the security side, template injection and over-broad permissions. They are
+# complementary and the guidance is to run both.
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/**'
+      - '.github/dependabot.yml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/**'
+      - '.github/dependabot.yml'
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  actionlint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+
+      - name: Run actionlint
+        # Pinned by digest like everything else. shellcheck and pyflakes come with the
+        # runner image, so the shell inside run: blocks is checked too.
+        run: |
+          set -euo pipefail
+          curl -fsSL --proto '=https' --tlsv1.2 \
+            https://raw.githubusercontent.com/rhysd/actionlint/914e7df21a07ef503a81201c76d2b11c789d3fca/scripts/download-actionlint.bash \
+            -o download-actionlint.bash
+          echo "Downloaded actionlint installer"
+          bash download-actionlint.bash 1.7.12
+          ./actionlint -color
+
+  zizmor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+
+      - name: Run zizmor
+        uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
+        with:
+          version: 1.30.1
+          persona: pedantic
