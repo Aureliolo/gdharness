@@ -10,7 +10,7 @@ const GODOT_PATH = process.env.GODOT_PATH || '/home/doyun/Apps/godot-4.6-rc2/God
 
 // A guard against the default surface growing by accident. Moving it is fine; moving it
 // without meaning to is what this catches.
-const COMPACT_TOOL_COUNT = 34;
+const COMPACT_TOOL_COUNT = 33;
 
 let passCount = 0;
 let failCount = 0;
@@ -182,17 +182,11 @@ async function main() {
   const cleanup = async () => {
     if (server.exitCode === null) {
       server.kill('SIGTERM');
-      await Promise.race([
-        new Promise((resolve) => server.once('exit', resolve)),
-        delay(2000),
-      ]);
+      await Promise.race([new Promise((resolve) => server.once('exit', resolve)), delay(2000)]);
 
       if (server.exitCode === null) {
         server.kill('SIGKILL');
-        await Promise.race([
-          new Promise((resolve) => server.once('exit', resolve)),
-          delay(2000),
-        ]);
+        await Promise.race([new Promise((resolve) => server.once('exit', resolve)), delay(2000)]);
       }
     }
   };
@@ -209,7 +203,11 @@ async function main() {
       clientInfo: { name: 'dynamic-group-test', version: '1.0.0' },
     });
 
-    assert(!init.error, 'initialize succeeded', `initialize failed: ${init.error?.message || 'unknown error'}`);
+    assert(
+      !init.error,
+      'initialize succeeded',
+      `initialize failed: ${init.error?.message || 'unknown error'}`,
+    );
     client.notify('notifications/initialized');
 
     const initialTools = await listAllTools(client);
@@ -292,7 +290,9 @@ async function main() {
       arguments: { action: 'status' },
     });
     const statusPayload = parseToolCallJson(statusResponse);
-    const statusActiveNames = new Set((statusPayload.dynamicGroups?.groups || []).map((group) => group?.name));
+    const statusActiveNames = new Set(
+      (statusPayload.dynamicGroups?.groups || []).map((group) => group?.name),
+    );
 
     assert(
       statusActiveNames.has('animation'),

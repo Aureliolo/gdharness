@@ -14,7 +14,9 @@ const BRIDGE_PORT_ENV_KEYS = ['GODOT_BRIDGE_PORT', 'MCP_BRIDGE_PORT', 'GDHARNESS
 const BRIDGE_HOST_ENV_KEYS = ['GODOT_BRIDGE_HOST', 'MCP_BRIDGE_HOST', 'GDHARNESS_BRIDGE_HOST'] as const;
 const BRIDGE_VERSION = (() => {
   try {
-    const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version?: string };
+    const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
+      version?: string;
+    };
     return typeof pkg.version === 'string' ? pkg.version : '0.0.0';
   } catch {
     return '0.0.0';
@@ -204,8 +206,7 @@ export class GodotBridge extends EventEmitter {
     if (this.socket) {
       try {
         this.socket.close();
-      } catch {
-      }
+      } catch {}
       this.socket = null;
     }
 
@@ -214,8 +215,7 @@ export class GodotBridge extends EventEmitter {
       for (const client of godotWss.clients) {
         try {
           client.close();
-        } catch {
-        }
+        } catch {}
       }
       closeTasks.push(this.closeWebSocketServer(godotWss));
       this.godotWss = null;
@@ -226,8 +226,7 @@ export class GodotBridge extends EventEmitter {
       for (const client of vizWss.clients) {
         try {
           client.close();
-        } catch {
-        }
+        } catch {}
       }
       closeTasks.push(this.closeWebSocketServer(vizWss));
       this.vizWss = null;
@@ -304,25 +303,37 @@ export class GodotBridge extends EventEmitter {
       return;
     }
 
-    if (req.method === 'POST' && (this.getRequestPathname(req.url) === '/' || this.getRequestPathname(req.url) === '/mcp')) {
+    if (
+      req.method === 'POST' &&
+      (this.getRequestPathname(req.url) === '/' || this.getRequestPathname(req.url) === '/mcp')
+    ) {
       let body = '';
       req.on('data', (chunk: Buffer) => {
         body += chunk.toString();
       });
       req.on('end', () => {
         try {
-          const parsed = JSON.parse(body) as { method?: unknown; id?: unknown; params?: { protocolVersion?: unknown } };
+          const parsed = JSON.parse(body) as {
+            method?: unknown;
+            id?: unknown;
+            params?: { protocolVersion?: unknown };
+          };
           if (parsed.method === 'initialize') {
             res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-            res.end(JSON.stringify({
-              jsonrpc: '2.0',
-              id: typeof parsed.id === 'number' || typeof parsed.id === 'string' ? parsed.id : 1,
-              result: {
-                protocolVersion: typeof parsed.params?.protocolVersion === 'string' ? parsed.params.protocolVersion : '2025-06-18',
-                capabilities: {},
-                serverInfo: { name: 'gopeak', version: BRIDGE_VERSION },
-              },
-            }));
+            res.end(
+              JSON.stringify({
+                jsonrpc: '2.0',
+                id: typeof parsed.id === 'number' || typeof parsed.id === 'string' ? parsed.id : 1,
+                result: {
+                  protocolVersion:
+                    typeof parsed.params?.protocolVersion === 'string'
+                      ? parsed.params.protocolVersion
+                      : '2025-06-18',
+                  capabilities: {},
+                  serverInfo: { name: 'gopeak', version: BRIDGE_VERSION },
+                },
+              }),
+            );
             return;
           }
 
@@ -648,7 +659,10 @@ export class GodotBridge extends EventEmitter {
 
     const taskPromise = previous.catch(() => undefined).then(task);
 
-    const tail = taskPromise.then(() => undefined, () => undefined);
+    const tail = taskPromise.then(
+      () => undefined,
+      () => undefined,
+    );
     this.resourceQueues.set(resourceKey, tail);
 
     return taskPromise.finally(() => {

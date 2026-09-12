@@ -38,16 +38,13 @@ try {
   await mkdir(path.join(stagingRoot, 'build'), { recursive: true });
 
   await Promise.all([
-    ...['cli.js', 'index.js', 'visualizer.html'].map((name) =>
-      cp(path.join(root, 'build', name), path.join(stagingRoot, 'build', name))),
+    ...['cli.js', 'index.js'].map((name) =>
+      cp(path.join(root, 'build', name), path.join(stagingRoot, 'build', name)),
+    ),
     cp(path.join(root, 'build', 'godot'), path.join(stagingRoot, 'build', 'godot'), { recursive: true }),
     cp(path.join(root, 'README.md'), path.join(stagingRoot, 'README.md')),
     cp(path.join(root, 'LICENSE'), path.join(stagingRoot, 'LICENSE')),
-    writeFile(
-      path.join(stagingRoot, 'package.json'),
-      `${JSON.stringify(releasePackage, null, 2)}\n`,
-      'utf8',
-    ),
+    writeFile(path.join(stagingRoot, 'package.json'), `${JSON.stringify(releasePackage, null, 2)}\n`, 'utf8'),
   ]);
 
   // bun pm pack records whatever mode the staged file carries, so the bins are chmodded
@@ -60,27 +57,22 @@ try {
     const mode = (await stat(staged)).mode & 0o777;
     if (mode !== 0o755) {
       throw new Error(
-        `build/${executable} staged as ${mode.toString(8)} rather than 755. This platform `
-        + 'cannot record POSIX modes, so the archive would ship a wrong one. Cut the release '
-        + 'on Linux or macOS.',
+        `build/${executable} staged as ${mode.toString(8)} rather than 755. This platform ` +
+          'cannot record POSIX modes, so the archive would ship a wrong one. Cut the release ' +
+          'on Linux or macOS.',
       );
     }
   }
 
   const stagedArchive = path.join(stagingRoot, archiveName);
-  const pack = Bun.spawnSync([
-    process.execPath,
-    'pm',
-    'pack',
-    '--ignore-scripts',
-    '--filename',
-    stagedArchive,
-    '--quiet',
-  ], {
-    cwd: stagingRoot,
-    stdout: 'pipe',
-    stderr: 'pipe',
-  });
+  const pack = Bun.spawnSync(
+    [process.execPath, 'pm', 'pack', '--ignore-scripts', '--filename', stagedArchive, '--quiet'],
+    {
+      cwd: stagingRoot,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    },
+  );
   if (pack.exitCode !== 0) {
     throw new Error(`bun pm pack failed:\n${pack.stderr.toString().trim()}`);
   }

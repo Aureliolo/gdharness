@@ -56,9 +56,7 @@ async function connectWebSocket(url) {
 async function main() {
   const host = process.env.GDHARNESS_BRIDGE_HOST || '127.0.0.1';
   const configuredPort = Number.parseInt(process.env.GDHARNESS_BRIDGE_PORT || '', 10);
-  const port = Number.isInteger(configuredPort) && configuredPort > 0
-    ? configuredPort
-    : await reservePort();
+  const port = Number.isInteger(configuredPort) && configuredPort > 0 ? configuredPort : await reservePort();
 
   const server = spawn(process.execPath, ['build/index.js'], {
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -143,7 +141,9 @@ async function main() {
       .map((tool) => tool?.name)
       .filter((name) => typeof name !== 'string' || !OPENAI_COMPATIBLE_TOOL_NAME_PATTERN.test(name));
     if (invalidToolNames.length > 0) {
-      throw new Error(`tools/list exposed invalid OpenAI-compatible tool names: ${invalidToolNames.join(', ')}`);
+      throw new Error(
+        `tools/list exposed invalid OpenAI-compatible tool names: ${invalidToolNames.join(', ')}`,
+      );
     }
 
     await connectWebSocket(`ws://${host}:${port}/visualizer`);

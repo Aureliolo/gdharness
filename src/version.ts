@@ -19,12 +19,12 @@ export function getLocalVersion(): string {
     try {
       const value: unknown = JSON.parse(readFileSync(packagePath, 'utf-8'));
       if (
-        typeof value === 'object'
-        && value !== null
-        && 'name' in value
-        && value.name === 'gdharness'
-        && 'version' in value
-        && typeof value.version === 'string'
+        typeof value === 'object' &&
+        value !== null &&
+        'name' in value &&
+        value.name === 'gdharness' &&
+        'version' in value &&
+        typeof value.version === 'string'
       ) {
         return value.version;
       }
