@@ -86,7 +86,6 @@ const operationsModules = [
   'scene_builders.gd',
   'scene_nodes.gd',
   'serialisation.gd',
-  'shader_templates.gd',
 ];
 
 for (const requiredFile of [

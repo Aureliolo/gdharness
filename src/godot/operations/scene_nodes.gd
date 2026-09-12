@@ -135,12 +135,6 @@ func node_at_path(scene_root: Node, node_path: String) -> Node:
 	return scene_root.get_node_or_null(clean_path)
 
 
-func set_owner_recursive(node: Node, owner: Node) -> void:
-	for child in node.get_children():
-		child.owner = owner
-		set_owner_recursive(child, owner)
-
-
 func _build_node_tree(node: Node, current_depth: int, max_depth: int, include_properties: bool) -> Dictionary:
 	var result = {
 		"name": node.name,

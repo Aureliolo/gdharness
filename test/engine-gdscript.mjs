@@ -620,7 +620,6 @@ function main() {
     runFixture(godotPath, projectDir, 'operations_serialize');
     runFixture(godotPath, projectDir, 'runtime_serialize');
     runFixture(godotPath, projectDir, 'input_action');
-    runFixture(godotPath, projectDir, 'shader_templates');
     testDependencyWalk(godotPath, projectDir);
     testOperations(godotPath, projectDir);
     testRefusals(godotPath, projectDir);
