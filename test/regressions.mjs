@@ -18,6 +18,10 @@ const OPERATIONS_SOURCE = readFileSync(
   new URL('../src/godot/operations/godot_operations.gd', import.meta.url),
   'utf8',
 );
+const DEPENDENCIES_SOURCE = readFileSync(
+  new URL('../src/godot/operations/dependencies.gd', import.meta.url),
+  'utf8',
+);
 const RUNTIME_SOURCE = readFileSync(
   new URL('../src/godot/addons/godot_mcp_runtime/mcp_runtime_autoload.gd', import.meta.url),
   'utf8',
@@ -959,9 +963,14 @@ async function main() {
   testProjectGodotMultilineValues();
   testProjectGodotResistsPrototypeKeys();
   assert.doesNotMatch(
-    OPERATIONS_SOURCE,
+    DEPENDENCIES_SOURCE,
     /include_built_in and \(dep_path\.contains\("addons\/"\)/,
     'addons/ is project content and often ships, so dependency analysis must not skip it as built-in',
+  );
+  assert.match(
+    DEPENDENCIES_SOURCE,
+    /dep_path\.begins_with\("res:\/\/\."\)/,
+    'the dependency walk should still skip the engine-internal res://. paths it was written to skip',
   );
   assert.match(
     INDEX_SOURCE,

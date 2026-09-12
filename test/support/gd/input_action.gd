@@ -1,15 +1,16 @@
-extends "res://operations/godot_operations.gd"
+extends SceneTree
 
 ## project.godot stores an input action as an engine expression, not as JSON, and what goes in
 ## has to be a Dictionary of real InputEvent objects: ConfigFile writes a String quoted and
 ## escaped, which loads back as a String and leaves InputMap with no action while the tool still
 ## reports the events it was handed. So every action is written through the real code, saved,
 ## loaded back the way the engine loads it, and asserted on the events that came out.
-##
-## Extending the operations script inherits its functions without running its constructor, which
-## is the only way to reach them: the script is a SceneTree that does its whole job from _init.
+
+const InputActions = preload("res://operations/input_actions.gd")
+const Log = preload("res://operations/logger.gd")
 
 var failures: Array[String] = []
+var actions := InputActions.new(Log.new())
 
 
 func _init() -> void:
@@ -64,7 +65,7 @@ func _events_of(label: String, action: Dictionary, expected_count: int) -> Array
 
 
 func _check_key() -> void:
-	var action := build_input_action(
+	var action := actions.build_input_action(
 		0.5,
 		[
 			{
@@ -99,7 +100,7 @@ func _check_key() -> void:
 
 
 func _check_mouse_button() -> void:
-	var action := build_input_action(
+	var action := actions.build_input_action(
 		0.2, [{"class_name": "InputEventMouseButton", "button_index": MOUSE_BUTTON_RIGHT}]
 	)
 
@@ -116,7 +117,7 @@ func _check_mouse_button() -> void:
 
 
 func _check_joypad() -> void:
-	var action := build_input_action(
+	var action := actions.build_input_action(
 		0.3,
 		[
 			{"class_name": "InputEventJoypadButton", "button_index": JOY_BUTTON_A},
@@ -150,7 +151,7 @@ func _check_joypad() -> void:
 func _check_written_form() -> void:
 	var path := "user://input_action_written.cfg"
 	var config := ConfigFile.new()
-	config.set_value("input", "fixture", build_input_action(0.5, [{"class_name": "InputEventKey"}]))
+	config.set_value("input", "fixture", actions.build_input_action(0.5, [{"class_name": "InputEventKey"}]))
 	if config.save(path) != OK:
 		_fail("could not save the written-form config")
 		return
