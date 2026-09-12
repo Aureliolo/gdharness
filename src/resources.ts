@@ -154,13 +154,26 @@ function isValueComplete(value: string): boolean {
   return depth <= 0 && !inString;
 }
 
-export function parseProjectGodot(
-  content: string,
-): Record<string, Record<string, string | number | boolean | null>> {
-  const result: Record<string, Record<string, string | number | boolean | null>> = {};
+type IniValue = string | number | boolean | null;
+
+/**
+ * A dictionary safe to index with a name out of a file.
+ *
+ * Both the section names and the keys in project.godot are attacker-controlled text used
+ * directly as object keys. On an ordinary object literal `[constructor]` resolves to the
+ * Object function and `[__proto__]` to Object.prototype, so the parser would then write the
+ * file's keys onto one of those instead of into its own result. Without a prototype there is
+ * nothing behind the object for a name to reach.
+ */
+function emptyRecord<T>(): Record<string, T> {
+  return Object.create(null) as Record<string, T>;
+}
+
+export function parseProjectGodot(content: string): Record<string, Record<string, IniValue>> {
+  const result: Record<string, Record<string, IniValue>> = emptyRecord();
   // Held rather than looked up again per key, so the section a value lands in is the one the
   // header created and not whatever indexing the record a second time happens to return.
-  let section: Record<string, string | number | boolean | null> = {};
+  let section: Record<string, IniValue> = emptyRecord();
   result['root'] = section;
 
   const lines = content.split(/\r?\n/);
@@ -172,7 +185,7 @@ export function parseProjectGodot(
 
     if (line.startsWith('[') && line.endsWith(']')) {
       const name = line.slice(1, -1).trim();
-      section = result[name] ?? {};
+      section = result[name] ?? emptyRecord();
       result[name] = section;
       continue;
     }
@@ -196,7 +209,7 @@ export function parseProjectGodot(
   return result;
 }
 
-function parseIniLikeValue(value: string): string | number | boolean | null {
+function parseIniLikeValue(value: string): IniValue {
   if (value === 'null') {
     return null;
   }

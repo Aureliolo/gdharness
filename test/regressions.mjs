@@ -7,6 +7,7 @@ import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { GodotDAPClient } from '../build/dap_client.js';
 import { createBridge } from '../build/godot-bridge.js';
 import { GodotLSPClient } from '../build/lsp_client.js';
 import { parseProjectGodot } from '../build/resources.js';
@@ -308,6 +309,351 @@ async function testDiagnosticsTimeoutIsNotAnEmptyResult() {
   );
 }
 
+/**
+ * Every shape of character that separates a byte count from a code-unit count: 'é' and 'ü'
+ * are two bytes and one UTF-16 unit, '字' and '幕' are three and one, and '🎮' is four bytes
+ * and a surrogate pair. A body carrying these is longer in bytes than in units, which is the
+ * gap that walks a stream framed by Content-Length off its own message boundaries.
+ */
+const MULTIBYTE = 'café 字幕 🎮 Ünterstützung';
+
+function frameJsonRpc(message) {
+  const body = Buffer.from(JSON.stringify(message), 'utf8');
+  return Buffer.concat([Buffer.from(`Content-Length: ${body.length}\r\n\r\n`, 'ascii'), body]);
+}
+
+/**
+ * A peer speaking the Content-Length framing both the LSP and the DAP client read.
+ *
+ * The writing side is left to `onMessage`, which is handed the socket and decides what bytes
+ * go back and how they are split across writes: a fixture for a framing bug has to control
+ * chunk boundaries, not just message contents.
+ */
+async function withFramedPeer(onMessage, handler) {
+  const sockets = new Set();
+
+  const server = createServer((socket) => {
+    sockets.add(socket);
+    let buffer = Buffer.alloc(0);
+
+    socket.on('data', (chunk) => {
+      buffer = Buffer.concat([buffer, chunk]);
+      while (true) {
+        const headerEnd = buffer.indexOf('\r\n\r\n');
+        if (headerEnd === -1) return;
+        const header = buffer.toString('latin1', 0, headerEnd);
+        const length = Number(/content-length:\s*(\d+)/i.exec(header)?.[1]);
+        if (!Number.isFinite(length)) return;
+        const start = headerEnd + 4;
+        if (buffer.length < start + length) return;
+
+        const message = JSON.parse(buffer.toString('utf8', start, start + length));
+        buffer = buffer.subarray(start + length);
+        onMessage(message, socket);
+      }
+    });
+    socket.on('error', () => {
+      // The stub only has to not crash the suite when a client drops.
+    });
+  });
+
+  await new Promise((ready) => server.listen(0, '127.0.0.1', ready));
+
+  try {
+    return await handler(server.address().port);
+  } finally {
+    for (const socket of sockets) socket.destroy();
+    await new Promise((closed) => server.close(closed));
+  }
+}
+
+/**
+ * Content-Length is a count of bytes and every string index in JavaScript is a count of
+ * UTF-16 code units, so a client that buffers decoded text reads the end of a message that
+ * holds one accent in the wrong place. The body it hands to JSON.parse is short, the parse
+ * fails, and the bytes it did not consume are read as the next message's header: the stream
+ * is desynchronised from then on and never recovers.
+ *
+ * Two messages arrive in one write for that reason. The first carries the multi-byte text
+ * and is one the client ignores; the second is the one under assertion, and it can only be
+ * found at all if the first was measured in bytes.
+ */
+async function testLspFramesBodiesByBytes() {
+  const diagnosticMessage = `Could not find type "${MULTIBYTE}" in the current scope.`;
+
+  const respond = (message, socket) => {
+    if (message.method === 'initialize') {
+      socket.write(frameJsonRpc({ jsonrpc: '2.0', id: message.id, result: { capabilities: {} } }));
+      return;
+    }
+
+    if (message.method === 'textDocument/didOpen') {
+      socket.write(
+        Buffer.concat([
+          frameJsonRpc({
+            jsonrpc: '2.0',
+            method: 'window/logMessage',
+            params: { type: 3, message: MULTIBYTE.repeat(8) },
+          }),
+          frameJsonRpc({
+            jsonrpc: '2.0',
+            method: 'textDocument/publishDiagnostics',
+            params: {
+              uri: message.params.textDocument.uri,
+              diagnostics: [
+                {
+                  range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
+                  message: diagnosticMessage,
+                  severity: 1,
+                  source: 'gdscript',
+                },
+              ],
+            },
+          }),
+        ]),
+      );
+    }
+  };
+
+  await withFramedPeer(respond, async (port) => {
+    const client = new GodotLSPClient(port, '127.0.0.1');
+    const diagnostics = await client.getDiagnostics(
+      join(tmpdir(), 'gopeak-lsp-framing', 'player.gd'),
+      'extends Node\n',
+    );
+
+    assert.equal(
+      diagnostics.length,
+      1,
+      'a message following a multi-byte one must still be found, or the stream has desynchronised',
+    );
+    assert.equal(
+      diagnostics[0].message,
+      diagnosticMessage,
+      'a diagnostic quoting non-ASCII text must arrive with that text intact',
+    );
+    await client.disconnect?.();
+  });
+}
+
+/**
+ * The same pair, cut in two between the bytes of one character. TCP splits where it likes,
+ * so a client has to hold bytes until the announced count is complete rather than decode
+ * whatever a single read happened to deliver.
+ *
+ * The cut falls inside the body under assertion and the message before it is multi-byte, so
+ * this fails on either fault: a body assembled wrongly across the chunk boundary, or a length
+ * read in code units, which walks past the end of the first message and loses the second.
+ */
+async function testLspReassemblesBodySplitMidCharacter() {
+  const diagnosticMessage = `Invalid operand "${MULTIBYTE}"`;
+
+  const respond = (message, socket) => {
+    if (message.method === 'initialize') {
+      socket.write(frameJsonRpc({ jsonrpc: '2.0', id: message.id, result: { capabilities: {} } }));
+      return;
+    }
+
+    if (message.method === 'textDocument/didOpen') {
+      const log = frameJsonRpc({
+        jsonrpc: '2.0',
+        method: 'window/logMessage',
+        params: { type: 3, message: MULTIBYTE.repeat(8) },
+      });
+      const framed = Buffer.concat([
+        log,
+        frameJsonRpc({
+          jsonrpc: '2.0',
+          method: 'textDocument/publishDiagnostics',
+          params: {
+            uri: message.params.textDocument.uri,
+            diagnostics: [{ message: diagnosticMessage, severity: 1, source: 'gdscript' }],
+          },
+        }),
+      ]);
+
+      // Two bytes into the four the emoji is spelled with, so neither half is valid UTF-8.
+      const split = framed.indexOf(Buffer.from('🎮', 'utf8'), log.length) + 2;
+      socket.write(framed.subarray(0, split));
+      setTimeout(() => socket.write(framed.subarray(split)), 20);
+    }
+  };
+
+  await withFramedPeer(respond, async (port) => {
+    const client = new GodotLSPClient(port, '127.0.0.1');
+    const diagnostics = await client.getDiagnostics(
+      join(tmpdir(), 'gopeak-lsp-framing', 'split.gd'),
+      'extends Node\n',
+    );
+
+    assert.equal(diagnostics.length, 1, 'a body split across two reads must still be assembled');
+    assert.equal(
+      diagnostics[0].message,
+      diagnosticMessage,
+      'a character split across two reads must decode to itself, not to replacement characters',
+    );
+    await client.disconnect?.();
+  });
+}
+
+/**
+ * The debug adapter client frames identically and had the identical fault. Godot prints
+ * through it, so the non-ASCII case here is an ordinary `print()` of a translated string.
+ */
+async function testDapFramesBodiesByBytes() {
+  const outputLine = `print: ${MULTIBYTE}`;
+  const marker = MULTIBYTE.repeat(8);
+
+  const respond = (message, socket) => {
+    if (message.command === 'initialize') {
+      socket.write(
+        Buffer.concat([
+          frameJsonRpc({
+            seq: 1,
+            type: 'response',
+            request_seq: message.seq,
+            command: 'initialize',
+            success: true,
+            body: { marker },
+          }),
+          frameJsonRpc({
+            seq: 2,
+            type: 'event',
+            event: 'output',
+            body: { category: 'console', output: `${outputLine}\n` },
+          }),
+        ]),
+      );
+      return;
+    }
+
+    socket.write(
+      frameJsonRpc({
+        seq: 3,
+        type: 'response',
+        request_seq: message.seq,
+        command: message.command,
+        success: true,
+        body: {},
+      }),
+    );
+  };
+
+  await withFramedPeer(respond, async (port) => {
+    const client = new GodotDAPClient(port, '127.0.0.1');
+    const body = await client.initialize();
+
+    assert.equal(body.marker, marker, 'a response body holding non-ASCII text must arrive intact');
+    assert.deepEqual(
+      client.getOutput(),
+      [outputLine],
+      'an event following a multi-byte response must still be found, or the stream has desynchronised',
+    );
+    await client.disconnect();
+  });
+}
+
+/**
+ * A peer that announces a body and never sends it. Buffering it away quietly is how a
+ * process grows until it is killed with nothing on any log, so both clients cap what they
+ * will hold and drop the connection with the size in the message.
+ */
+async function testFramingCeilingFailsLoudly() {
+  const announceTooMuch = (_message, socket) => {
+    socket.write(Buffer.from('Content-Length: 999999999\r\n\r\n', 'ascii'));
+  };
+
+  await withFramedPeer(announceTooMuch, async (port) => {
+    const client = new GodotLSPClient(port, '127.0.0.1');
+    await assert.rejects(
+      () => client.initialize(tmpdir()),
+      /exceeded the 33554432 byte ceiling/,
+      'an LSP peer announcing more than the ceiling should fail the request, naming the size',
+    );
+    await client.disconnect?.();
+  });
+
+  await withFramedPeer(announceTooMuch, async (port) => {
+    const client = new GodotDAPClient(port, '127.0.0.1');
+    await assert.rejects(
+      () => client.initialize(),
+      /exceeded the 33554432 byte ceiling/,
+      'a DAP adapter announcing more than the ceiling should fail the request, naming the size',
+    );
+  });
+}
+
+/**
+ * Section names and keys come out of project.godot, which is a file the project supplies. On
+ * an ordinary object `result['constructor']` is the Object function and `result['__proto__']`
+ * is Object.prototype, so a parser that indexes its result with those names writes the file's
+ * keys onto one of them: every object in the process gains a property, and the section the
+ * caller asked for is a function that JSON.stringify drops on the floor.
+ */
+function testProjectGodotResistsPrototypeKeys() {
+  const parsed = parseProjectGodot(
+    [
+      '[application]',
+      'config/name="Pollution"',
+      '',
+      '[constructor]',
+      'polluted="yes"',
+      '',
+      '[__proto__]',
+      'polluted="yes"',
+      '',
+      '[misc]',
+      '__proto__="data"',
+      'kept="value"',
+    ].join('\n'),
+  );
+
+  assert.equal(
+    Object.prototype.polluted,
+    undefined,
+    'a [__proto__] section must not put a property on every object in the process',
+  );
+  assert.equal(
+    Object.polluted,
+    undefined,
+    'a [constructor] section must not write onto the Object constructor',
+  );
+
+  assert.equal(
+    Object.getPrototypeOf(parsed),
+    null,
+    'the parsed project must carry no prototype for a section name to reach through',
+  );
+  assert.equal(
+    Object.getPrototypeOf(parsed.misc),
+    null,
+    'each section must carry no prototype for a key name to reach through',
+  );
+
+  assert.equal(typeof parsed.constructor, 'object', 'a [constructor] section must parse to data');
+  assert.equal(parsed.constructor.polluted, 'yes', 'a [constructor] section must keep its own keys');
+  // Through the descriptor rather than the accessor: reading it as a property would answer
+  // with whatever prototype is behind the object when the section is not there as data.
+  const protoSection = Object.getOwnPropertyDescriptor(parsed, '__proto__')?.value;
+  assert.equal(protoSection?.polluted, 'yes', 'a [__proto__] section must keep its own keys');
+  assert.equal(
+    Object.getOwnPropertyDescriptor(parsed.misc, '__proto__')?.value,
+    'data',
+    'a __proto__ key must land on the section as data',
+  );
+  assert.equal(parsed.misc.kept, 'value', 'a key after a __proto__ key must survive');
+  assert.equal(parsed.application['config/name'], 'Pollution', 'ordinary sections must be unaffected');
+
+  // What the resource handler returns. JSON.stringify drops a function value outright, so a
+  // section parsed onto the Object constructor leaves the client a project with a hole in it.
+  const serialised = JSON.parse(JSON.stringify(parsed));
+  assert.equal(
+    serialised.constructor.polluted,
+    'yes',
+    'a [constructor] section must survive the JSON the resource handler hands back',
+  );
+}
+
 async function testEditorStatusPortConflict() {
   await withOccupiedBridgePort(async () => {
     const proc = spawn(process.execPath, ['./build/index.js'], {
@@ -503,6 +849,7 @@ async function main() {
   );
 
   testProjectGodotMultilineValues();
+  testProjectGodotResistsPrototypeKeys();
   assert.doesNotMatch(
     OPERATIONS_SOURCE,
     /include_built_in and \(dep_path\.contains\("addons\/"\)/,
@@ -517,6 +864,10 @@ async function main() {
   await testEditorStatusPortConflict();
   await testDiagnosticsSurviveUriReEncoding();
   await testDiagnosticsTimeoutIsNotAnEmptyResult();
+  await testLspFramesBodiesByBytes();
+  await testLspReassemblesBodySplitMidCharacter();
+  await testDapFramesBodiesByBytes();
+  await testFramingCeilingFailsLoudly();
   console.log('regression tests passed');
 }
 
