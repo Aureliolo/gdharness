@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { GodotDAPClient } from '../build/dap_client.js';
+import { dictionary, emptyRecord } from '../build/dictionary.js';
 import { createBridge } from '../build/godot-bridge.js';
 import { GodotLSPClient } from '../build/lsp_client.js';
 import { parseProjectGodot } from '../build/resources.js';
@@ -704,6 +705,113 @@ async function testEditorStatusPortConflict() {
   });
 }
 
+/**
+ * Runs the built server over stdio, initialised and ready for tools/call, and hands `call` to
+ * the body. The transport is the point: these fixtures are about what a peer can put on the
+ * wire, and reaching into the class directly would not carry a `__proto__` through JSON.parse.
+ */
+async function withStdioServer(body) {
+  const proc = spawn(process.execPath, ['./build/index.js'], {
+    cwd: process.cwd(),
+    env: { ...process.env, GDHARNESS_TOOL_PROFILE: 'compact' },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+
+  let nextId = 1;
+  // The text rather than a parsed payload: a refusal comes back as a sentence, and a fixture
+  // about refusals must not fall over on the thing it is there to see.
+  const call = async (name, args) => {
+    nextId += 1;
+    const id = nextId;
+    proc.stdin.write(makeRequest('tools/call', { name, arguments: args }, id));
+    const response = await waitForJsonLine(proc.stdout, (msg) => msg.id === id);
+    return response.result.content[0].text;
+  };
+
+  try {
+    proc.stdin.write(
+      makeRequest(
+        'initialize',
+        {
+          protocolVersion: '2024-11-05',
+          capabilities: {},
+          clientInfo: { name: 'regression-test', version: '1.0.0' },
+        },
+        1,
+      ),
+    );
+    await waitForJsonLine(proc.stdout, (msg) => msg.id === 1);
+    proc.stdin.write(
+      `${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized', params: {} })}\n`,
+    );
+
+    await body(call);
+  } finally {
+    proc.kill('SIGTERM');
+    await Promise.race([new Promise((resolve) => proc.once('exit', resolve)), delay(2000)]);
+    if (proc.exitCode === null) {
+      proc.kill('SIGKILL');
+    }
+  }
+}
+
+/**
+ * The dictionaries every untrusted name is looked up in have nothing behind them.
+ *
+ * This is the one mechanism the sites in index.ts and tool-groups.ts all rely on, so it is
+ * asserted directly rather than only through whichever of them a fixture can reach. A name
+ * belonging to Object.prototype must read as absent, and writing `__proto__` must store a key
+ * rather than re-parent the object.
+ */
+function testDictionariesHaveNothingBehindThem() {
+  const table = dictionary({ real: 'yes' });
+  const blank = emptyRecord();
+
+  assert.equal(table['real'], 'yes', 'a dictionary must still answer for its own keys');
+
+  for (const inherited of ['constructor', 'toString', 'valueOf', 'hasOwnProperty', 'isPrototypeOf']) {
+    assert.equal(table[inherited], undefined, `${inherited} must not resolve in a filled dictionary`);
+    assert.equal(blank[inherited], undefined, `${inherited} must not resolve in an empty one`);
+  }
+
+  // Copied key by key out of parsed JSON, which is how such a name arrives in the first place:
+  // JSON.parse makes __proto__ an own enumerable property rather than a prototype.
+  const hostile = JSON.parse('{"__proto__": {"injected": true}}');
+  for (const key of Object.keys(hostile)) {
+    blank[key] = hostile[key];
+  }
+
+  assert.deepEqual(
+    Object.getOwnPropertyDescriptor(blank, '__proto__')?.value,
+    { injected: true },
+    '__proto__ must land as an ordinary key',
+  );
+  assert.equal(blank['injected'], undefined, 'writing __proto__ must not re-parent the dictionary');
+  assert.equal(Object.getPrototypeOf(blank), null, 'the dictionary must still have no prototype');
+}
+
+/**
+ * The tool-group tables are indexed by an argument off the wire, so a name belonging to
+ * Object.prototype must not resolve to a group. `constructor` is truthy on a plain literal, so
+ * the existence checks pass and the handler answers about a group that does not exist; with the
+ * branches in the other order it dereferences a function looking for `.tools`.
+ */
+async function testToolGroupLookupsCannotReachThePrototype() {
+  await withStdioServer(async (call) => {
+    for (const group of ['constructor', 'toString', 'hasOwnProperty', '__proto__']) {
+      for (const action of ['activate', 'deactivate']) {
+        const answer = await call('manage_tool_groups', { action, group });
+        assert.match(
+          answer,
+          /unknown/i,
+          `${action} ${group} should be refused as unknown, not treated as a group`,
+        );
+        assert.doesNotMatch(answer, /core group/i, `${group} must not be reported as a core group`);
+      }
+    }
+  });
+}
+
 function testProjectGodotMultilineValues() {
   const parsed = parseProjectGodot(
     [
@@ -868,6 +976,8 @@ async function main() {
   await testLspReassemblesBodySplitMidCharacter();
   await testDapFramesBodiesByBytes();
   await testFramingCeilingFailsLoudly();
+  testDictionariesHaveNothingBehindThem();
+  await testToolGroupLookupsCannotReachThePrototype();
   console.log('regression tests passed');
 }
 

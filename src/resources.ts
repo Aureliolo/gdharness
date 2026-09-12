@@ -6,6 +6,7 @@ import {
   ListResourceTemplatesRequestSchema,
   ReadResourceRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
+import { emptyRecord } from './dictionary.js';
 
 const STATIC_RESOURCES = [
   {
@@ -155,19 +156,6 @@ function isValueComplete(value: string): boolean {
 }
 
 type IniValue = string | number | boolean | null;
-
-/**
- * A dictionary safe to index with a name out of a file.
- *
- * Both the section names and the keys in project.godot are attacker-controlled text used
- * directly as object keys. On an ordinary object literal `[constructor]` resolves to the
- * Object function and `[__proto__]` to Object.prototype, so the parser would then write the
- * file's keys onto one of those instead of into its own result. Without a prototype there is
- * nothing behind the object for a name to reach.
- */
-function emptyRecord<T>(): Record<string, T> {
-  return Object.create(null) as Record<string, T>;
-}
 
 export function parseProjectGodot(content: string): Record<string, Record<string, IniValue>> {
   const result: Record<string, Record<string, IniValue>> = emptyRecord();
