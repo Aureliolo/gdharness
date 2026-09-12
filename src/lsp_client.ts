@@ -19,6 +19,19 @@ type JsonRecord = Record<string, unknown>;
 
 const DIAGNOSTICS_TIMEOUT_MS = 5000;
 
+const HEADER_TERMINATOR = '\r\n\r\n';
+
+/**
+ * A ceiling on the bytes held while waiting for a message to complete.
+ *
+ * Without one, a peer that announces a Content-Length and then stops sending grows this
+ * process until it dies, and says nothing on the way. The largest real traffic on this
+ * socket is a completion list over the whole global scope or the diagnostics for a very
+ * long script, both of which Godot answers in hundreds of kilobytes; 32 MiB is two orders
+ * of magnitude above that, so reaching it means the stream is broken rather than busy.
+ */
+const MAX_MESSAGE_BYTES = 32 * 1024 * 1024;
+
 /**
  * Normalise a file URI so the same file always produces the same key.
  *
@@ -48,7 +61,10 @@ export class GodotLSPClient {
   private host: string;
   private requestId = 0;
   private pendingRequests: Map<number, PendingRequest>;
-  private buffer = '';
+  // Bytes, not a string. Content-Length counts bytes, while every string index in
+  // JavaScript counts UTF-16 code units, and the two stop agreeing at the first character
+  // outside ASCII: an accented project name desynchronises the stream for good.
+  private buffer: Buffer = Buffer.alloc(0);
 
   private connectPromise: Promise<void> | null = null;
   private initialized = false;
@@ -77,7 +93,7 @@ export class GodotLSPClient {
       const socket = createConnection({ port: this.port, host: this.host }, () => {
         this.socket = socket;
         this.connected = true;
-        this.buffer = '';
+        this.buffer = Buffer.alloc(0);
 
         if (!settled) {
           settled = true;
@@ -85,11 +101,13 @@ export class GodotLSPClient {
         }
       });
 
-      socket.setEncoding('utf8');
-
-      socket.on('data', (chunk: string) => {
-        this.buffer += chunk;
+      socket.on('data', (chunk: Buffer) => {
+        this.buffer = Buffer.concat([this.buffer, chunk]);
         this.parseMessages();
+
+        if (this.buffer.length > MAX_MESSAGE_BYTES) {
+          this.failOversizedStream(`${this.buffer.length} bytes buffered with no complete message`);
+        }
       });
 
       socket.on('error', (error: Error) => {
@@ -199,7 +217,7 @@ export class GodotLSPClient {
         return;
       }
 
-      socket.write(framed, 'utf8', (error?: Error | null) => {
+      socket.write(framed, (error?: Error | null) => {
         if (error) {
           clearTimeout(timer);
           this.pendingRequests.delete(id);
@@ -223,43 +241,59 @@ export class GodotLSPClient {
     const content = JSON.stringify(payload);
     const framed = this.frameMessage(content);
 
-    this.socket.write(framed, 'utf8');
+    this.socket.write(framed);
   }
 
-  private frameMessage(content: string): string {
-    const contentLength = Buffer.byteLength(content, 'utf8');
-    return `Content-Length: ${contentLength}\r\n\r\n${content}`;
+  private frameMessage(content: string): Buffer {
+    const body = Buffer.from(content, 'utf8');
+    // Header and body come from the same encode, so the announced length is always the
+    // number of bytes that follow it.
+    return Buffer.concat([Buffer.from(`Content-Length: ${body.length}${HEADER_TERMINATOR}`, 'ascii'), body]);
   }
 
   private parseMessages(): void {
     for (;;) {
-      const headerEnd = this.buffer.indexOf('\r\n\r\n');
+      const headerEnd = this.buffer.indexOf(HEADER_TERMINATOR);
       if (headerEnd === -1) {
         return;
       }
 
-      const header = this.buffer.slice(0, headerEnd);
+      // Headers are ASCII by specification, so latin1 decodes them one byte to one
+      // character and the offsets below stay byte offsets.
+      const header = this.buffer.toString('latin1', 0, headerEnd);
       const contentLengthMatch = /Content-Length:\s*(\d+)/i.exec(header);
       if (!contentLengthMatch?.[1]) {
-        this.buffer = this.buffer.slice(headerEnd + 4);
+        this.buffer = this.buffer.subarray(headerEnd + HEADER_TERMINATOR.length);
         continue;
       }
 
       const contentLength = Number.parseInt(contentLengthMatch[1], 10);
-      const bodyStart = headerEnd + 4;
+      if (contentLength > MAX_MESSAGE_BYTES) {
+        this.failOversizedStream(`a peer announced a ${contentLength} byte message`);
+        return;
+      }
+
+      const bodyStart = headerEnd + HEADER_TERMINATOR.length;
       const bodyEnd = bodyStart + contentLength;
 
       if (this.buffer.length < bodyEnd) {
         return;
       }
 
-      const body = this.buffer.slice(bodyStart, bodyEnd);
-      this.buffer = this.buffer.slice(bodyEnd);
+      const body = this.buffer.toString('utf8', bodyStart, bodyEnd);
+      this.buffer = this.buffer.subarray(bodyEnd);
 
       let parsed: unknown;
       try {
         parsed = JSON.parse(body);
-      } catch {
+      } catch (error) {
+        // A body that will not parse is the only symptom a framing fault has, and skipping
+        // it in silence leaves the stream desynchronised with nothing on any log to say so.
+        console.error(
+          `[GodotLSP] Discarding a ${contentLength} byte message that is not JSON: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
         continue;
       }
 
@@ -307,6 +341,27 @@ export class GodotLSPClient {
         }
       }
     }
+  }
+
+  /**
+   * Drop a connection whose framing has run away, naming the size that did it.
+   *
+   * Nothing downstream can recover from a stream this far out of step, and waiting quietly
+   * for the rest of a body that is never coming is indistinguishable from an idle server.
+   */
+  private failOversizedStream(detail: string): void {
+    const socket = this.socket;
+    this.socket = null;
+    this.connected = false;
+    this.initialized = false;
+    this.buffer = Buffer.alloc(0);
+    socket?.destroy();
+
+    const overflow = new Error(
+      `Godot LSP stream exceeded the ${MAX_MESSAGE_BYTES} byte ceiling: ${detail}. The connection was dropped.`,
+    );
+    this.rejectAllPending(overflow);
+    this.rejectAllDiagnosticsWaiters(overflow);
   }
 
   private handleSocketFailure(error: Error): void {
