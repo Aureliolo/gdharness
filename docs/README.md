@@ -1,13 +1,22 @@
 # Documentation
 
-These files are the source of <https://aureliolo.github.io/gdharness>. `bun run docs` renders them
-into `site/`, which is gitignored; `scripts/build-docs.ts` is the whole of the generator and
-`theme/` is the whole of the theme.
+Source of <https://aureliolo.github.io/gdharness>. `bun run docs` renders it into `site/`, which is
+gitignored. The generator is `scripts/build-docs.ts`; the theme is `theme/`.
 
-- [index.md](./index.md): what gdharness is and the rules it is built to.
-- [install.md](./install.md): how to install it, written for the agent doing it.
-- [traps.md](./traps.md): what Godot does that costs an afternoon.
-- [release-process.md](./release-process.md): how a release is cut, signed and verified.
+| File              | Page                                                                   |
+| ----------------- | ---------------------------------------------------------------------- |
+| `index.md`        | Front page                                                             |
+| `install.md`      | Install, verify, configure, update                                     |
+| `architecture.md` | What connects to what, and the ports                                   |
+| `usage.md`        | What has to be running for which tools                                 |
+| `traps.md`        | Godot behaviours that affect use                                       |
+| `tested.md`       | What CI covers and what it does not                                    |
+| `agent.md`        | The install written for an agent. Markdown only, not in the navigation |
 
-The tool reference has no file here: it is rendered from `src/tool-definitions.ts` at build time,
-so it cannot drift from what the server answers.
+The tool reference has no file here. It is rendered from `src/tool-definitions.ts` at build time.
+
+Every page is published as HTML and as its markdown. `llms.txt` indexes the markdown;
+`llms-full.txt` is all of it in one file. A page in `docs/` that the generator does not list fails
+the build.
+
+Cutting a release is in [.github/release-process.md](../.github/release-process.md).

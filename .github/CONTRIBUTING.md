@@ -103,7 +103,6 @@ whose executables are world-writable. Releases are cut by CI.
 │   ├── runtime-client.ts  # Talking to a running game
 │   ├── project-scan.ts    # Reading a project directory without the engine
 │   ├── resources.ts       # MCP resources
-│   ├── prompts.ts         # MCP prompts
 │   ├── godot-bridge.ts    # Bridge transport to the editor addon
 │   ├── lsp_client.ts      # Godot language server client
 │   ├── dap_client.ts      # Godot debug adapter client
@@ -116,6 +115,9 @@ whose executables are world-writable. Releases are cut by CI.
 │   └── theme/             # Its template and stylesheet, both hand-written
 └── scripts/               # Build, pack, release and site tooling
 ```
+
+[release-process.md](./release-process.md) is how a release is cut, signed and verified, which is a
+maintainer's job rather than a reader's, so it lives here rather than on the site.
 
 The site at <https://aureliolo.github.io/gdharness> is built from `docs/` by
 `scripts/build-docs.ts` and published by `.github/workflows/docs.yml`. The tool reference is

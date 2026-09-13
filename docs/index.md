@@ -1,72 +1,73 @@
-# A harness for driving Godot from an agent
+# gdharness
 
-gdharness is an MCP server that hands an agent the three things it otherwise has to guess at: the
-editor that is open, the game that is running, and the project on disk. Thirty-two tools, each
-shaped like a task rather than an engine call, and every answer read back from the engine rather
-than echoed from the request.
+MCP server and Godot addons for driving a Godot 4 project from an agent: the editor that is open,
+the game that is running, and the project on disk.
 
-- **The editor.** Scenes, nodes, signals, resources and animations, changed inside the editor you
-  already have open, and read back out of the file it wrote.
-- **The running game.** The live tree, a node's rectangle, a method called, a signal waited for, a
-  button clicked. Headless included, where there is no window to click in.
-- **The project.** Settings, autoloads, imports, exports, dependencies, the class cache, the test
-  tier and ClassDB, off a short-lived engine that opens nothing.
+Requires Godot 4.7.0 or newer and [Bun](https://bun.sh) 1.4.0 or newer.
 
-## What it is for
+```jsonc a call and its answer
+runtime_inspect { "op": "rect", "nodePath": "/root/Hall/Ledger/BuyButton" }
 
-An agent editing a Godot project without this is working from the source text alone. It can read a
-`.tscn` file, but it cannot ask what the scene actually contains; it can write a script, but it
-cannot ask the engine whether that script parses; it can change a screen, but it cannot look at the
-screen. Every one of those gaps gets filled by guessing, and the guesses are what cost the
-afternoon.
+{
+  "type": "rect",
+  "path": "/root/Hall/Ledger/BuyButton",
+  "visible": true,
+  "canvas": { "position": { "x": 812, "y": 418 }, "size": { "x": 180, "y": 34 } },
+  "window": { "position": { "x": 812, "y": 418 }, "size": { "x": 180, "y": 34 } }
+}
+```
 
-gdharness closes them by asking the engine. The editor answers about scenes, its language server
-answers about scripts, its debugger holds the game it plays, and the game itself answers about what
-is on screen right now.
+## Install
 
-## The rules it is built to
+1. Download a release and verify its attestation.
+2. Point your MCP client at `build/index.js`, with `GODOT_PATH` set.
+3. `gdharness setup /path/to/project`
+4. `gdharness doctor /path/to/project`
 
-- **No fixture, no ship.** Every tool is driven against a pinned Godot in CI before it exists in a
-  release. Anything nobody will write a fixture for is cut instead of shipped.
-- **A tool fails rather than answers.** No success payload for an empty or partial result that
-  could be a silent failure. An unknown argument or an unknown enum value is an error naming the
-  valid set, never a silent default.
-- **Every mutation reads back.** A tool that writes returns the engine's actual state afterwards,
-  read from the engine, never an echo of the request.
-- **Strict projects are the baseline.** Every shipped script, and every script the tools write,
-  parses with all of GDScript's warnings raised to errors.
-- **Few tools, shaped like tasks.** Around thirty, not a hundred. A server whose tool list does not
-  fit in a context window has too many tools, not a missing pagination feature.
-- **Answers are sized.** Anything that can return a lot takes a detail level and defaults to the
-  smallest useful one; anything unbounded paginates.
+[Install](install.html) has the commands.
 
-## What it needs
-
-Godot 4.7 or newer, and [Bun](https://bun.sh) to run the server. The editor addons are installed
-into your project by `gdharness setup`, and nothing else is required: no global install, no
-`PATH` entry, no ambient project. Every tool call names the project it is about.
-
-## Getting it
-
-The whole of it is on the [Install](install.html) page, written for the agent that will do it.
-If you would rather hand the job over, paste this into any agent that speaks MCP:
+To have an agent do it, paste:
 
 ```text
 Install gdharness into this project by following
-https://aureliolo.github.io/gdharness/install.html, then tell me what it asked you to
+https://aureliolo.github.io/gdharness/agent.md, then tell me what it asked you to
 recommend back to me.
 ```
 
-There are no one-click install links here, deliberately. A link that configures an editor for you
-is the exact shape of a known attack, and a line of text the agent reads is just as convenient
-without teaching anybody that clicking one is safe.
+## Three parts
 
-## Where the rest is
+**Inside Godot.** Addons installed into your project. They make the open editor and the running
+game answerable, and reload the editor's view when files change on disk.
 
-[Tools](tools.html) is the reference, generated from the server itself, so it says what the server
-says. [Traps](traps.html) is what Godot does that costs an afternoon and what to do instead.
-[Release process](releases.html) is how a release is built, signed and verified by whoever installs
-it.
+**The MCP server.** What your agent calls: {{tools}} tools and four `godot://` resources.
 
-gdharness is a fork of [GoPeak](https://github.com/HaD0Yun/Doyunha-Gopeak), rebuilt to be complete,
-hardened and actually tested.
+**The CLI.** Installs the addons, checks them, rebuilds the class cache.
+
+[How it works](architecture.html) is what talks to what.
+
+## Tools
+
+{{tools}} tools, named `domain_verb`. A tool that does several related things takes an `op`. An
+unknown op or argument is refused with the valid set listed. Answers are read from the engine after
+the change, not echoed from the request. Engine stderr comes back under `engine_messages`.
+
+[Tools](tools.html) is the full reference, generated from the server.
+
+## Pages
+
+- [Install](install.html): install, verify, configure, update.
+- [How it works](architecture.html): the parts, the connections, the ports.
+- [Using it](usage.html): which tools need the editor, running and reading the game.
+- [Tools](tools.html): every tool, op and argument.
+- [Traps](traps.html): five Godot behaviours you still have to know, and the ones handled for you.
+- [What is proven](tested.html): what CI drives against a real engine, and what it does not.
+
+For agents: every page also exists as markdown at the same name, [llms.txt](llms.txt) indexes them,
+and `llms-full.txt` is all of them in one file.
+
+## Project
+
+Fork of [GoPeak](https://github.com/HaD0Yun/Doyunha-Gopeak) v2.3.9, September 2026, MIT, by Solomon
+Elias originally and completely reworked since to be hardened, condensed and more streamlined.
+
+Not affiliated with GoPeak or the Godot Foundation.
