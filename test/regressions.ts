@@ -9,6 +9,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -1237,9 +1238,11 @@ function testProjectDefaultsToTheWorkingDirectory(): void {
       { encoding: 'utf8', cwd: project, timeout: 60000 },
     );
     const report: unknown = JSON.parse(flagged.stdout);
+    // The real path, because the CLI resolves the directory it was run in and on macOS every
+    // /var/folders temporary directory is really /private/var/folders.
     assert.equal(
       get(report, 'projectPath'),
-      project,
+      realpathSync.native(project),
       `a flag is not a path: ${flagged.stdout}${flagged.stderr}`,
     );
 
