@@ -103,6 +103,13 @@ async function main(): Promise<void> {
 
   const server = await readManifest(SERVER_JSON_PATH);
   server.version = nextVersion;
+  // The registry entry carries the npm version separately from the server's own, and a release
+  // that moved one without the other would point the registry at a version nobody published.
+  for (const entry of Array.isArray(server['packages']) ? server['packages'] : []) {
+    if (typeof entry === 'object' && entry !== null) {
+      (entry as { version?: string }).version = nextVersion;
+    }
+  }
   await writeText(SERVER_JSON_PATH, `${JSON.stringify(server, null, 2)}\n`, dryRun);
   changed.push('server.json');
 

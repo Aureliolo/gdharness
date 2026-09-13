@@ -4,99 +4,47 @@ For an agent. Version `{{version}}`. MCP server plus three Godot addons.
 
 ## Refuse
 
-- Installing without verifying the release. A failed check stops the install.
-- Node instead of Bun.
 - Starting a second Godot editor while one is open. 6005 and 6006 hold one client each.
 - Spawning an engine for anything a tool already does.
+- Reporting provenance as verified when no check ran.
 
 ## 1. Requirements
 
 ```bash
 godot --version   # >= 4.7.0, keep the absolute path
-bun --version     # >= 1.4.0
+node --version    # >= 22, for npx
 ```
 
-## 2. Download and verify
-
-Two checks: the checksum for the bytes, the attestation for who built them.
+## 2. Install
 
 ```bash
-gh --version
+cd /absolute/path/to/project
+npx -y gdharness@{{version}} setup . --runtime
 ```
 
-With `gh`, authenticated:
+It installs the addons, enables the editor plugins, registers the runtime autoload, rebuilds the
+class list, and writes the server into every harness it finds here. It prints what it wrote and
+where. Anything it hands back as a command or a block to paste is yours to apply.
 
-```bash
-VERSION={{version}}
-gh release download "v${VERSION}" --repo Aureliolo/gdharness
-sha256sum -c "gdharness-${VERSION}.tgz.sha256"
-gh attestation verify "gdharness-${VERSION}.tgz" --repo Aureliolo/gdharness \
-  --bundle "gdharness-${VERSION}.intoto.jsonl" \
-  --signer-workflow Aureliolo/gdharness/.github/workflows/release-build.yml \
-  --source-ref "refs/tags/v${VERSION}" \
-  --deny-self-hosted-runners
-```
+Name harnesses instead of detecting them with `--claude-code`, `--cursor`, `--vscode`,
+`--opencode`, `--codex`, `--gemini`, `--copilot-cli`, `--windsurf`, `--junie`, `--kiro`,
+`--hermes`. `--no-connect` installs the addons and writes no config.
 
-Without it:
-
-```bash
-VERSION={{version}}
-BASE="https://github.com/Aureliolo/gdharness/releases/download/v${VERSION}"
-curl -fsSLO "${BASE}/gdharness-${VERSION}.tgz"
-curl -fsSLO "${BASE}/gdharness-${VERSION}.tgz.sha256"
-sha256sum -c "gdharness-${VERSION}.tgz.sha256"   # macOS: shasum -a 256 -c
-```
-
-Then verify the `.intoto.jsonl` bundle with Sigstore tooling against identity
-`https://github.com/Aureliolo/gdharness/.github/workflows/release-build.yml@refs/tags/v${VERSION}`
-and issuer `https://token.actions.githubusercontent.com`. If that is not possible, report that the
-provenance was not verified. Do not present it as verified.
-
-```bash
-mkdir -p .tools/gdharness
-tar -xzf "gdharness-${VERSION}.tgz" -C .tools/gdharness --strip-components=1
-bun .tools/gdharness/build/cli.js version   # must print ${VERSION}
-```
-
-## 3. Configure the MCP client
-
-Absolute paths for all three values. Clients do not expand `${...}` and do not reliably inherit
-`PATH`.
-
-```json
-{
-  "mcpServers": {
-    "gdharness": {
-      "command": "/absolute/path/to/bun",
-      "args": ["/absolute/path/to/.tools/gdharness/build/index.js"],
-      "env": { "GODOT_PATH": "/absolute/path/to/godot" }
-    }
-  }
-}
-```
+If this project generates its MCP config from a template, pass `--no-connect` and edit the
+template instead.
 
 `GODOT_PATH` is the only environment variable read. Every tool call carries its own `projectPath`.
-If the project generates this file, edit the template and regenerate. Reconnect the client, then
-confirm the tools are listed.
+Reconnect the harness, then confirm the tools are listed.
 
-## 4. Install the addons
-
-```bash
-bun .tools/gdharness/build/cli.js setup  /absolute/path/to/project
-bun .tools/gdharness/build/cli.js doctor /absolute/path/to/project   # must exit 0
-```
-
-The runtime addon is an autoload and reaches an export, so it is off by default. Turn it on while
-working, off before committing:
+The runtime addon is an autoload and reaches an export. Turn it off before committing:
 
 ```bash
-bun .tools/gdharness/build/cli.js runtime on  /absolute/path/to/project
-bun .tools/gdharness/build/cli.js runtime off /absolute/path/to/project
+npx -y gdharness@{{version}} runtime off /absolute/path/to/project
 ```
 
 Without it, `runtime_*` has nothing to talk to.
 
-## 5. Verify
+## 3. Verify
 
 1. `editor_status` with nothing open: reports no editor, does not fail.
 2. Open the project in the editor. `editor_status`: `connected` true, `addonVersion` equal to
@@ -107,16 +55,34 @@ Without it, `runtime_*` has nothing to talk to.
 ## Updating
 
 ```bash
-# verify the new archive as in step 2, then
-rm -rf .tools/gdharness && mkdir -p .tools/gdharness
-tar -xzf "gdharness-${VERSION}.tgz" -C .tools/gdharness --strip-components=1
-bun .tools/gdharness/build/cli.js setup  /absolute/path/to/project
-bun .tools/gdharness/build/cli.js doctor /absolute/path/to/project
+npx -y gdharness@<new> setup /absolute/path/to/project
 ```
 
-Then reconnect the MCP server, and restart an open editor with `editor_launch restart`. Confirm
-with `editor_status`: `addonVersion` equal to `serverVersion`, `addonIsStale` false. Skipping
-either leaves the old version answering.
+The addons and the harness entries move to the new version together. Then reconnect the MCP
+server, and restart an open editor with `editor_launch restart`. Confirm with `editor_status`:
+`addonVersion` equal to `serverVersion`, `addonIsStale` false. Skipping either leaves the old
+version answering.
+
+## Installing from the signed archive instead
+
+For a pinned or offline install. The archive is the same bytes npm serves.
+
+```bash
+VERSION={{version}}
+gh release download "v${VERSION}" --repo Aureliolo/gdharness
+sha256sum -c "gdharness-${VERSION}.tgz.sha256"
+gh attestation verify "gdharness-${VERSION}.tgz" --repo Aureliolo/gdharness \
+  --bundle "gdharness-${VERSION}.intoto.jsonl" \
+  --signer-workflow Aureliolo/gdharness/.github/workflows/release-build.yml \
+  --source-ref "refs/tags/v${VERSION}" \
+  --deny-self-hosted-runners
+mkdir -p .tools/gdharness
+tar -xzf "gdharness-${VERSION}.tgz" -C .tools/gdharness --strip-components=1
+node .tools/gdharness/build/cli.js setup /absolute/path/to/project
+```
+
+A failed check stops the install. Without `gh`, `install.md` has the `cosign` command and the
+browser lookup. If no check ran, say so rather than calling it verified.
 
 ## Rules
 

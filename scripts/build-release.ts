@@ -12,10 +12,11 @@ async function buildBundledEntrypoint(sourceName: string, outputName: string): P
     entrypoints: [path.join(sourceRoot, sourceName)],
     outdir: buildRoot,
     naming: outputName,
-    // Bun supplies `ws` as a runtime compatibility module. Keeping Bun as the
-    // target preserves its working WebSocket server implementation on 1.3.3;
-    // embedding the npm `ws` package with `target: node` stalls WS upgrades.
-    target: 'bun',
+    // Node, because `npx gdharness` is how every harness spawns a server and npx is Node. The
+    // bundle runs under both: the embedded `ws` serves the editor socket on Node and on Bun,
+    // which test/node-runtime.ts holds to, since an earlier Bun could not and the workaround for
+    // that was targeting Bun and shipping something npx could not start.
+    target: 'node',
     format: 'esm',
     packages: 'bundle',
     minify: false,

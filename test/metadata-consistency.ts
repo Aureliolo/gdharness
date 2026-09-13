@@ -8,11 +8,20 @@ import { isRecord } from './support/json-rpc.js';
 import { ServerProcess } from './support/server.js';
 
 assert.equal(serverManifest.version, pkg.version, 'server.json version should match package.json');
-assert.equal(
-  (serverManifest as { packages?: unknown }).packages,
-  undefined,
-  'server.json should not advertise a registry package for a GitHub Release tarball',
+// The registry entry is installable only if it names a package, and correct only if that package
+// is the npm one at this exact version. A manifest pointing at a version nobody published is
+// worse than no manifest: a client believes it and fails at install.
+const registryPackages: unknown = (serverManifest as { packages?: unknown }).packages;
+assert.ok(
+  Array.isArray(registryPackages) && registryPackages.length === 1,
+  'server.json should name exactly one installable package',
 );
+const registryPackage: unknown = registryPackages[0];
+assert.ok(isRecord(registryPackage), 'the package entry should be an object');
+assert.equal(registryPackage['registryType'], 'npm', 'the package should be the npm one');
+assert.equal(registryPackage['identifier'], pkg.name, 'the package should be named as package.json names it');
+assert.equal(registryPackage['version'], pkg.version, 'the package version should match package.json');
+assert.deepEqual(registryPackage['transport'], { type: 'stdio' }, 'the package should be a stdio server');
 assert.equal(
   serverManifest.websiteUrl,
   pkg.homepage,

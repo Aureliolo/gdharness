@@ -14,6 +14,7 @@ import { cpSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } f
 import { join } from 'node:path';
 import process from 'node:process';
 import { marked, type Tokens } from 'marked';
+import { HARNESSES, launchFor } from '../src/harnesses.js';
 import { SERVER_VERSION } from '../src/server-version.js';
 import { TOOL_SPECS } from '../src/tool-definitions.js';
 
@@ -24,9 +25,35 @@ const OUT = 'site';
 /** Counted rather than written down, so a tool added or dropped cannot leave the prose stale. */
 const TOOL_COUNT = String(TOOL_SPECS.length);
 
+/**
+ * Every harness gdharness can write itself into, as a markdown table.
+ *
+ * From the same table `gdharness setup` reads, so the page cannot list a harness the command
+ * does not know or miss one it does.
+ */
+function renderHarnesses(): string {
+  const rows = HARNESSES.map((harness) => {
+    const file = `\`${harness.scope === 'home' ? '~/' : ''}${harness.file.replaceAll('\\', '/')}\``;
+    const how =
+      harness.addCommand !== undefined
+        ? `runs \`${harness.addCommand(EXAMPLE_LAUNCH).join(' ')}\``
+        : harness.snippet !== undefined
+          ? 'prints the block to paste'
+          : 'written for you';
+    return `| ${harness.name} | \`--${harness.id}\` | ${file} | ${how} |`;
+  });
+  return ['| Harness | Flag | Config | How |', '| --- | --- | --- | --- |', ...rows].join('\n');
+}
+
+/** A launch line for the documentation: this version, and a path a reader will recognise. */
+const EXAMPLE_LAUNCH = launchFor(SERVER_VERSION, '/path/to/godot');
+
 /** The placeholders every page carries, so a command on the page is one the reader can run. */
 function filled(text: string): string {
-  return text.replaceAll('{{version}}', SERVER_VERSION).replaceAll('{{tools}}', TOOL_COUNT);
+  return text
+    .replaceAll('{{version}}', SERVER_VERSION)
+    .replaceAll('{{tools}}', TOOL_COUNT)
+    .replaceAll('{{harnesses}}', renderHarnesses());
 }
 
 /** Where the site lives, for the canonical links and llms.txt. */
@@ -386,30 +413,27 @@ function build(): void {
     );
 
   for (const page of PAGES) {
+    // Substituted before parsing, not after, so that a generated table arrives as markdown and
+    // is rendered as a table rather than dropped into the page as its own source.
     const rendered =
       page.render !== undefined
         ? page.render()
-        : marked.parse(readFileSync(join(DOCS, page.source ?? ''), 'utf8'), { async: false });
+        : marked.parse(filled(readFileSync(join(DOCS, page.source ?? ''), 'utf8')), { async: false });
     // A table is the one thing here that cannot be made to fit a phone, so it gets to scroll
     // inside its own box rather than taking the page sideways with it. The opening paragraph
     // is the lede, which is a presentation decision and so belongs here rather than as markup
     // inside the markdown.
-    const content = filled(
-      rendered
-        .replaceAll('<table>', '<div class="scroll"><table>')
-        .replaceAll('</table>', '</table></div>')
-        .replace(/(<\/h1>\s*)<p>/, '$1<p class="lede">'),
-    );
-    const html = filled(
-      template
-        .replaceAll(
-          '{{title}}',
-          escaped(page.path === 'index.html' ? page.title : `${page.title} · gdharness`),
-        )
-        .replaceAll('{{description}}', escaped(page.summary))
-        .replaceAll('{{canonical}}', `${SITE_URL}/${page.path}`)
-        .replaceAll('{{nav}}', renderNav(page.path)),
-    ).replaceAll('{{content}}', content);
+    const content = rendered
+      .replaceAll('<table>', '<div class="scroll"><table>')
+      .replaceAll('</table>', '</table></div>')
+      .replace(/(<\/h1>\s*)<p>/, '$1<p class="lede">');
+    const html = template
+      .replaceAll('{{title}}', escaped(page.path === 'index.html' ? page.title : `${page.title} · gdharness`))
+      .replaceAll('{{description}}', escaped(page.summary))
+      .replaceAll('{{canonical}}', `${SITE_URL}/${page.path}`)
+      .replaceAll('{{nav}}', renderNav(page.path))
+      .replaceAll('{{version}}', escaped(SERVER_VERSION))
+      .replaceAll('{{content}}', content);
     writeFileSync(join(OUT, page.path), html, 'utf8');
     writeFileSync(join(OUT, page.text), textOf(page), 'utf8');
   }
