@@ -31,7 +31,8 @@ import { join } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { SERVER_VERSION } from '../src/server-version.js';
-import { asArray, asNumber, asString, get, text } from './support/json.js';
+import { RUNTIME_AUTOLOAD } from '../src/setup.js';
+import { asArray, asNumber, asObject, asString, get, text } from './support/json.js';
 import { parseTextContent, textOf } from './support/json-rpc.js';
 import { reservePort, ServerProcess } from './support/server.js';
 
@@ -45,6 +46,130 @@ const LSP_READY_TIMEOUT_MS = 90_000;
 const GAME_STOP_TIMEOUT_MS = 90_000;
 
 const SCENE = 'res://fixture.tscn';
+
+/** An action bound to nothing, for the input tool to name. */
+const FIXTURE_ACTION = 'fixture_action';
+/** Godot's KEY_SPACE, which is what the engine reports for the key the input case sends. */
+const SPACE_KEYCODE = 32;
+
+/**
+ * The game the editor plays: something to break in, something to ask, something to wait for,
+ * and something to click.
+ *
+ * It runs until it is stopped rather than quitting after the print, because a game that ends
+ * that instant can take its debugger connection down before the console it wrote comes over it,
+ * and because the runtime cases need it there to answer.
+ */
+const MAIN_GD = [
+  'extends Node',
+  '',
+  'signal ticked(at: int)',
+  '',
+  '## Changed only by the game, so waiting on it is waiting on something real.',
+  'var ticks: int = 0',
+  '## Changed only from outside, so a case can set it and read it back without racing.',
+  'var stash: int = 0',
+  '## Set to 42 a second in, which is what there is to wait for.',
+  'var answer: int = 0',
+  '## Raised by the button, so a click is judged by what the game did rather than by the answer',
+  '## the tool gave about itself.',
+  'var clicks: int = 0',
+  '## The last action and key the tree was handed, which says whether an injected one arrived.',
+  'var acted: String = ""',
+  'var keyed: int = 0',
+  '',
+  '',
+  'func _ready() -> void:',
+  '\tvar total: int = 2 + 2',
+  '\tprint("the game said ", total)',
+  '',
+  '\tvar ticker: Timer = Timer.new()',
+  '\tticker.name = "Ticker"',
+  '\tticker.wait_time = 0.2',
+  '\tticker.autostart = true',
+  '\tadd_child(ticker)',
+  '\tticker.timeout.connect(_tick)',
+  '',
+  '\tvar late: Timer = Timer.new()',
+  '\tlate.name = "Late"',
+  '\tlate.wait_time = 1.0',
+  '\tlate.one_shot = true',
+  '\tlate.autostart = true',
+  '\tadd_child(late)',
+  '\tlate.timeout.connect(_answer)',
+  '',
+  '\tvar panel: Control = Control.new()',
+  '\tpanel.name = "Panel"',
+  '\tpanel.position = Vector2(10, 20)',
+  '\tpanel.size = Vector2(320, 240)',
+  '\tadd_child(panel)',
+  '',
+  '\tvar press: Button = Button.new()',
+  '\tpress.name = "Press"',
+  '\tpress.text = "Go"',
+  // A headless engine's window is 64 by 64 whatever the project asks for, and the GUI only
+  // delivers to what is inside it, so the button has to be small and near the corner.
+  '\tpress.position = Vector2(2, 2)',
+  '\tpress.size = Vector2(40, 20)',
+  '\tadd_child(press)',
+  '\tpress.pressed.connect(_pressed)',
+  '',
+  '',
+  'func _input(event: InputEvent) -> void:',
+  '\tif event is InputEventAction:',
+  '\t\tvar action: InputEventAction = event',
+  '\t\tacted = action.action',
+  '\telif event is InputEventKey:',
+  '\t\tvar key: InputEventKey = event',
+  '\t\tkeyed = key.keycode',
+  '',
+  '',
+  'func _tick() -> void:',
+  '\tticks += 1',
+  '\tticked.emit(ticks)',
+  '',
+  '',
+  'func _answer() -> void:',
+  '\tanswer = 42',
+  '',
+  '',
+  'func _pressed() -> void:',
+  '\tclicks += 1',
+  '',
+  '',
+  'func stow(value: int) -> int:',
+  '\tstash = value',
+  '\treturn stash',
+  '',
+  '',
+  'func peek() -> int:',
+  '\treturn stash',
+  '',
+  '',
+  'func peek_clicks() -> int:',
+  '\treturn clicks',
+  '',
+  '',
+  'func last_action() -> String:',
+  '\treturn acted',
+  '',
+  '',
+  'func last_key() -> int:',
+  '\treturn keyed',
+  '',
+  '',
+  `func holding() -> bool:`,
+  `\treturn Input.is_action_pressed("${FIXTURE_ACTION}")`,
+  '',
+];
+
+/**
+ * Where the breakpoint goes, found in the script rather than written down twice.
+ *
+ * A line number in two places is a line number that drifts: this one did, the moment the game
+ * gained anything above it.
+ */
+const BREAK_LINE = MAIN_GD.findIndex((line) => line.includes('print(')) + 1;
 
 interface Editor {
   /** Calls a tool and answers with its payload, failing on a refusal. */
@@ -123,6 +248,22 @@ function createProject(): string {
       '[editor_plugins]',
       'enabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")',
       '',
+      // The runtime addon, registered the way an install registers it. A game the editor plays
+      // then serves the runtime tools, which is the only way to drive them against a real one:
+      // its own guard is the debug build, not the display, so a headless game answers.
+      '[autoload]',
+      '',
+      `${RUNTIME_AUTOLOAD.name}="*res://${RUNTIME_AUTOLOAD.path}"`,
+      '',
+      // An action with nothing bound to it: runtime_input action names one, and an injected
+      // InputEventAction carries the name rather than a key, so the binding is what is not needed.
+      '[input]',
+      '',
+      `${FIXTURE_ACTION}={`,
+      '"deadzone": 0.2,',
+      '"events": []',
+      '}',
+      '',
     ].join('\n'),
   );
 
@@ -151,21 +292,7 @@ function createProject(): string {
     ['extends Node', '', '', 'func ring( -> int:', '\tpass', ''].join('\n'),
   );
 
-  // A main scene for the debug cases, which need a game the editor is actually playing. It runs
-  // until it is stopped rather than quitting on the line after the print: a game that ends that
-  // instant can take its debugger connection down before the console it wrote comes over it.
-  writeFileSync(
-    join(dir, 'main.gd'),
-    [
-      'extends Node',
-      '',
-      '',
-      'func _ready() -> void:',
-      '\tvar total: int = 2 + 2',
-      '\tprint("the game said ", total)',
-      '',
-    ].join('\n'),
-  );
+  writeFileSync(join(dir, 'main.gd'), MAIN_GD.join('\n'));
   writeFileSync(
     join(dir, 'main.tscn'),
     [
@@ -314,6 +441,10 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
     XDG_CONFIG_HOME: home,
     XDG_DATA_HOME: home,
     XDG_CACHE_HOME: home,
+    // Where a played game announces the port it is listening on, and where the server looks for
+    // it. Named here so the two agree by construction rather than by both deriving a temporary
+    // directory that Windows spells two ways.
+    GDHARNESS_RUNTIME_DIR: join(home, 'runtime'),
   };
 
   const server = new ServerProcess({
@@ -800,8 +931,8 @@ async function testLanguageServer({ call, attempt, project }: Editor): Promise<v
 async function testDebugging({ call, attempt, project }: Editor): Promise<void> {
   const main = { projectPath: project, scriptPath: 'res://main.gd' };
 
-  // Line 6 is the print, so the frame the game stops in is _ready with the sum already worked out.
-  await call('debug_breakpoint', { ...main, op: 'set', line: 6 });
+  // The print, so the frame the game stops in is _ready with the sum already worked out.
+  await call('debug_breakpoint', { ...main, op: 'set', line: BREAK_LINE });
 
   const run = await call('editor_run', { projectPath: project });
   assert.equal(get(run, 'through'), 'editor', 'the editor should be the one playing it');
@@ -817,7 +948,7 @@ async function testDebugging({ call, attempt, project }: Editor): Promise<void> 
   }
   assert.ok(frames.length > 0, `the game should stop at the breakpoint; the adapter said: ${said}`);
   assert.equal(get(frames[0], 'name'), '_ready', 'in the function the breakpoint is in');
-  assert.equal(get(frames[0], 'line'), 6, 'on the line it was set on');
+  assert.equal(get(frames[0], 'line'), BREAK_LINE, 'on the line it was set on');
 
   await call('debug_control', { op: 'continue' });
 
@@ -837,7 +968,202 @@ async function testDebugging({ call, attempt, project }: Editor): Promise<void> 
   assert.equal(through, 'editor', 'the console should come from the editor session');
   assert.match(console_, /the game said 4/, `and carry what the game printed; it carried:\n${console_}`);
 
-  await call('debug_breakpoint', { ...main, op: 'remove', line: 6 });
+  await call('debug_breakpoint', { ...main, op: 'remove', line: BREAK_LINE });
+  // The game is left running: it is past the breakpoint and answering, which is what the runtime
+  // cases need, and a game stopped at a breakpoint answers nothing at all.
+}
+
+/**
+ * The runtime tools, against a game that is actually running.
+ *
+ * Both halves of these were covered and the join was not: the addon's GDScript is driven inside
+ * a headless engine, and the relay is driven against a mock Godot, so a server and an addon that
+ * had stopped agreeing would have passed both. The game here is the one the editor plays, which
+ * is what gives it a debugger and a runtime socket at the same time.
+ *
+ * Input included, both ways in: a click by path, which the addon pushes into the viewport, and
+ * the raw events, which go through Input. Each is judged by what the game did about it rather
+ * than by the answer the tool gave about itself.
+ *
+ * A capture is the one tool that cannot answer here, and its refusal is asserted instead: a
+ * headless engine draws nothing and its texture holds whatever was drawn last, so a capture that
+ * succeeded would be the same frame for ever.
+ */
+async function testRuntime({ call, refusal, attempt, project }: Editor): Promise<void> {
+  const game = { projectPath: project };
+
+  // The game announces itself in a file, which it writes once it is listening, so the first
+  // answer is waited for rather than assumed.
+  const deadline = Date.now() + GAME_STOP_TIMEOUT_MS;
+  let reached = await attempt('runtime_inspect', { ...game, op: 'tree', nodePath: '/root' });
+  while (!reached.ok && Date.now() < deadline) {
+    await delay(500);
+    reached = await attempt('runtime_inspect', { ...game, op: 'tree', nodePath: '/root' });
+  }
+  assert.ok(reached.ok, `the game should be reachable over the runtime socket: ${reached.text}`);
+
+  const tree = await call('runtime_inspect', { ...game, op: 'tree', nodePath: '/root', depth: 3 });
+  const paths = JSON.stringify(tree);
+  assert.match(paths, /Main/, 'the tree should carry the running scene');
+  assert.match(paths, /Ticker/, 'and the nodes it made at runtime, which no .tscn has');
+
+  const found = asArray(
+    get(await call('runtime_inspect', { ...game, op: 'find', className: 'Timer' }), 'nodes'),
+    'nodes',
+  );
+  assert.equal(found.length, 2, `find should answer with both timers: ${JSON.stringify(found)}`);
+
+  const rect = await call('runtime_inspect', { ...game, op: 'rect', nodePath: '/root/Main/Panel' });
+  assert.equal(get(rect, 'canvas', 'size', 'x'), 320, 'rect should measure the control it was given');
+  assert.equal(get(rect, 'canvas', 'position', 'y'), 20, 'and place it where the game put it');
+
+  const metrics = await call('runtime_inspect', { ...game, op: 'metrics', metrics: ['object_node_count'] });
+  assert.deepEqual(
+    Object.keys(asObject(get(metrics, 'data'))),
+    ['object_node_count'],
+    'metrics should answer with the ones named and no others',
+  );
+  assert.match(
+    await refusal('runtime_inspect', { ...game, op: 'metrics', metrics: ['frames_per_second'] }),
+    /Unknown metrics: frames_per_second/,
+    'and refuse a name that is not one, rather than answering with everything',
+  );
+
+  // A method call and a property set, each read back through the other, so neither is taken on
+  // its own word: the call answers, and the property it wrote is read by a second call.
+  assert.equal(
+    get(
+      await call('runtime_invoke', {
+        ...game,
+        op: 'call',
+        nodePath: '/root/Main',
+        method: 'stow',
+        args: [7],
+      }),
+      'result',
+    ),
+    7,
+    'a method should run in the game and answer with what it returned',
+  );
+  await call('runtime_invoke', { ...game, op: 'set', nodePath: '/root/Main', property: 'stash', value: 9 });
+  assert.equal(
+    get(
+      await call('runtime_invoke', { ...game, op: 'call', nodePath: '/root/Main', method: 'peek' }),
+      'result',
+    ),
+    9,
+    'and the property set on it should be what the game reads back',
+  );
+
+  const frames = await call('runtime_wait', { ...game, op: 'frames', frames: 5 });
+  assert.equal(get(frames, 'frames'), 5, 'waiting for frames should let that many pass');
+
+  const signalled = await call('runtime_wait', {
+    ...game,
+    op: 'signal',
+    nodePath: '/root/Main',
+    signal: 'ticked',
+    timeoutMs: 10_000,
+  });
+  assert.equal(get(signalled, 'fired'), true, 'waiting for a signal should catch it');
+  assert.equal(typeof get(signalled, 'args', 0), 'number', 'and carry what it was emitted with');
+
+  // Something the game does on its own a second in, so this waits rather than answering about
+  // a value that was already there.
+  const until = await call('runtime_wait', {
+    ...game,
+    op: 'until',
+    nodePath: '/root/Main',
+    property: 'answer',
+    value: 42,
+    timeoutMs: 10_000,
+  });
+  assert.equal(get(until, 'met'), true, 'waiting for a property should answer when it reads that');
+  assert.equal(get(until, 'value'), 42, 'and with what it read');
+
+  // A whole click, judged by what the game did about it: the button raises a counter, and the
+  // counter is read back through a second tool. The tool's own answer is asserted too, because
+  // "what was under the pointer" is the part that says the click landed where it was aimed.
+  const clicked = await call('runtime_input', { ...game, op: 'click', nodePath: '/root/Main/Press' });
+  assert.equal(get(clicked, 'landed'), true, 'the click should reach the control it named');
+  assert.equal(get(clicked, 'control_afterwards'), 'in_tree', 'which is still there afterwards');
+  assert.equal(
+    get(
+      await call('runtime_invoke', { ...game, op: 'call', nodePath: '/root/Main', method: 'peek_clicks' }),
+      'result',
+    ),
+    1,
+    'and the game should have acted on it',
+  );
+
+  // The same button, pressed by position rather than by path: the events go through Input, which
+  // is the other of the two ways in, and the counter says whether they arrived.
+  const where = await call('runtime_inspect', { ...game, op: 'rect', nodePath: '/root/Main/Press' });
+  const centre = {
+    x: asNumber(get(where, 'window', 'position', 'x')) + asNumber(get(where, 'window', 'size', 'x')) / 2,
+    y: asNumber(get(where, 'window', 'position', 'y')) + asNumber(get(where, 'window', 'size', 'y')) / 2,
+  };
+  await call('runtime_input', { ...game, op: 'mouse_motion', ...centre });
+  await call('runtime_input', { ...game, op: 'mouse_click', ...centre, pressed: true });
+  await call('runtime_wait', { ...game, op: 'frames', frames: 1 });
+  await call('runtime_input', { ...game, op: 'mouse_click', ...centre, pressed: false });
+  await call('runtime_wait', { ...game, op: 'frames', frames: 2 });
+  assert.equal(
+    get(
+      await call('runtime_invoke', { ...game, op: 'call', nodePath: '/root/Main', method: 'peek_clicks' }),
+      'result',
+    ),
+    2,
+    'a mouse button sent by position should press what is under it',
+  );
+
+  const injected = await call('runtime_input', { ...game, op: 'action', action: FIXTURE_ACTION });
+  assert.equal(get(injected, 'action'), FIXTURE_ACTION, 'an action should be injected by name');
+  assert.equal(
+    get(
+      await call('runtime_invoke', { ...game, op: 'call', nodePath: '/root/Main', method: 'holding' }),
+      'result',
+    ),
+    true,
+    'and the game should read it as held',
+  );
+  await call('runtime_wait', { ...game, op: 'frames', frames: 2 });
+  assert.equal(
+    get(
+      await call('runtime_invoke', { ...game, op: 'call', nodePath: '/root/Main', method: 'last_action' }),
+      'result',
+    ),
+    FIXTURE_ACTION,
+    'and the tree should have been handed the event',
+  );
+  await call('runtime_input', { ...game, op: 'key', keycode: 'Space' });
+  await call('runtime_wait', { ...game, op: 'frames', frames: 2 });
+  assert.equal(
+    get(
+      await call('runtime_invoke', { ...game, op: 'call', nodePath: '/root/Main', method: 'last_key' }),
+      'result',
+    ),
+    SPACE_KEYCODE,
+    'a key should arrive as the key it names',
+  );
+
+  assert.match(
+    await refusal('runtime_input', { ...game, op: 'action', action: 'no_such_action' }),
+    /Action not found/,
+    'an action nothing declares should be refused rather than injected into nowhere',
+  );
+  assert.match(
+    await refusal('runtime_input', { ...game, op: 'key', keycode: 'Ctrl-Alt-Nonsense' }),
+    /Invalid key_label/,
+    'and so should a key name that is not one',
+  );
+
+  assert.match(
+    await refusal('runtime_capture', game),
+    /no window/,
+    'a capture with nothing drawing should be refused, not answered with the last frame',
+  );
+
   await call('editor_stop', {});
 }
 
@@ -898,6 +1224,7 @@ async function main(): Promise<void> {
     await testEditorRescan(editor);
     await testLanguageServer(editor);
     await testDebugging(editor);
+    await testRuntime(editor);
     await testEditorRestart(editor);
   });
 

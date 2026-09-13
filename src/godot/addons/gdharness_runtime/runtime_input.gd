@@ -175,9 +175,9 @@ func click(params: Dictionary) -> Dictionary:
 	var button: int = _resolve_mouse_button(params.get("button", MOUSE_BUTTON_LEFT))
 	var double: bool = bool(params.get("double", false))
 
-	# Pushed into the viewport rather than through Input: Input hands an event to the window
-	# it names, and a headless engine has no window to hand it to, so a click sent that way
-	# reaches nothing. The viewport delivers it to the GUI the same way a real one arrives.
+	# Pushed into the viewport rather than through Input: Input accumulates events and flushes
+	# them at the next frame, so the hovered control read below would be the one from before
+	# the pointer moved. The viewport delivers it to the GUI the same way a real one arrives.
 	viewport.push_input(_motion(position, Vector2.ZERO))
 	# What the engine itself thinks is under the pointer, which is the answer to "did it land",
 	# read before the press so the caller learns about a control on top rather than a click
