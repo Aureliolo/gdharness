@@ -714,8 +714,8 @@ async function withStdioServer(
 /**
  * The dictionaries every untrusted name is looked up in have nothing behind them.
  *
- * This is the one mechanism the sites in index.ts and tool-groups.ts all rely on, so it is
- * asserted directly rather than only through whichever of them a fixture can reach. A name
+ * This is the one mechanism every lookup site in index.ts relies on, so it is asserted
+ * directly rather than only through whichever of them a fixture can reach. A name
  * belonging to Object.prototype must read as absent, and writing `__proto__` must store a key
  * rather than re-parent the object.
  */
