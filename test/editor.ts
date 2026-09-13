@@ -355,8 +355,15 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
     // answer does not carry: a fixture that reports only its own assertion sends whoever reads
     // the run back to guessing about an editor that is no longer there to ask.
     const said = engineOutput.join('').trim();
+    // Whether the editor this started is still alive, which separates a restart that never
+    // happened from one that happened and never came back: the editor a restart brings up is a
+    // process Godot spawns, and nothing here can read its output.
+    const state =
+      editor.exitCode === null && editor.signalCode === null
+        ? 'still running'
+        : `gone (exit ${editor.exitCode ?? 'none'}, signal ${editor.signalCode ?? 'none'})`;
     throw new Error(
-      `${failure instanceof Error ? failure.stack : String(failure)}\n\nThe editor said:\n${said}`,
+      `${failure instanceof Error ? failure.stack : String(failure)}\n\nThe editor this started is ${state}. It said:\n${said}`,
     );
   } finally {
     // The game first: it is the editor's child and outlives it, so a run that failed part way
