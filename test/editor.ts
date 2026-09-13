@@ -676,6 +676,26 @@ async function testSceneAnimation({ call, project }: Editor): Promise<void> {
   assert.match(saved, /tracks\/0\/path = NodePath\("Press:modulate:a"\)/);
   assert.match(saved, /"times": PackedFloat32Array\(0, 2\)/);
   assert.match(saved, /&"fade": SubResource/, 'and be in the player library under its name');
+
+  // A method track, which is the other kind and keeps none of the same fields: a call with its
+  // arguments rather than a value to interpolate.
+  const method = await call('scene_animation', {
+    ...scene,
+    op: 'add_track',
+    playerNodePath: 'Anim',
+    animationName: 'fade',
+    track: {
+      type: 'method',
+      nodePath: '.',
+      method: 'queue_redraw',
+      keyframes: [{ time: 1, args: [] }],
+    },
+  });
+  assert.equal(get(method, 'trackIndex'), 1, 'the second track should be index 1');
+
+  const withMethod = fileText(project, 'fixture.tscn');
+  assert.match(withMethod, /tracks\/1\/type = "method"/, 'the track type should be in the scene');
+  assert.match(withMethod, /"method": &"queue_redraw"/, 'with the method it calls');
 }
 
 /** Resources written to disk: a .tres, a shader, and a theme edited in place. */
