@@ -20,8 +20,8 @@ concurrency:
 jobs:
   # On a pull request this is the whole job: the site has to build, and the build refuses a page
   # nothing links to, so a new document cannot land unreachable.
-  build:
-    name: build
+  site:
+    name: site
     runs-on: ubuntu-24.04
     timeout-minutes: 10
 
@@ -49,7 +49,7 @@ jobs:
   deploy:
     name: deploy
     if: github.event_name == 'push'
-    needs: build
+    needs: site
     runs-on: ubuntu-24.04
     timeout-minutes: 10
 
