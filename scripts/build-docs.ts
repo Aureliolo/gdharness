@@ -233,7 +233,7 @@ function renderHome(): string {
     renderPicker(),
     '<p class="note">With no harness named it asks about each one it finds, here or on this machine, and writes nothing outside the project directory without a flag or a typed yes. <a href="architecture.html">How it works</a> has every harness it knows.</p>',
     '</section>',
-    '<p class="smallprint">Fork of <a href="https://github.com/HaD0Yun/Doyunha-Gopeak">GoPeak</a> v2.3.9, September 2026, MIT, by Solomon Elias originally and completely reworked since to be hardened, condensed and more streamlined. Not affiliated with GoPeak or the Godot Foundation.</p>',
+    '<p class="smallprint">Fork of <a href="https://github.com/HaD0Yun/Doyunha-Gopeak">GoPeak</a> v2.3.9, September 2026, MIT: the original MCP server <a href="https://github.com/Coding-Solo/godot-mcp">godot-mcp</a> by <a href="https://github.com/Coding-Solo">Solomon Elias</a>, GoPeak by <a href="https://github.com/HaD0Yun">HaD0Yun</a>, and completely reworked since to be hardened, condensed and more streamlined. Not affiliated with GoPeak or the Godot Foundation.</p>',
   ].join('\n');
 }
 
@@ -283,9 +283,11 @@ function renderHomeText(): string {
     '',
     '## Project',
     '',
-    'Fork of GoPeak v2.3.9, September 2026, MIT, by Solomon Elias originally and completely reworked',
-    'since to be hardened, condensed and more streamlined. Not affiliated with GoPeak or the Godot',
-    'Foundation.',
+    'Fork of [GoPeak](https://github.com/HaD0Yun/Doyunha-Gopeak) v2.3.9, September 2026, MIT: the',
+    'original MCP server [godot-mcp](https://github.com/Coding-Solo/godot-mcp) by',
+    '[Solomon Elias](https://github.com/Coding-Solo), GoPeak by [HaD0Yun](https://github.com/HaD0Yun),',
+    'and completely reworked since to be hardened, condensed and more streamlined. Not affiliated with',
+    'GoPeak or the Godot Foundation.',
     '',
   ].join('\n');
 }

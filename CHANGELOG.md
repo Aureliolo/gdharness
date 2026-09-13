@@ -5,6 +5,8 @@ Every release and what it carries is on the
 from the pull requests the release contains, at the moment it is cut, so they cannot fall behind
 the code the way a file kept by hand does; this file is here so nobody looks for one.
 
-Forked from [GoPeak](https://github.com/HaD0Yun/Doyunha-Gopeak) v2.3.9. The fork's history
-starts there, so the releases page records gdharness only; for anything before the fork, read
-GoPeak's own changelog.
+Forked from [GoPeak](https://github.com/HaD0Yun/Doyunha-Gopeak) v2.3.9, by
+[HaD0Yun](https://github.com/HaD0Yun), itself a fork of
+[godot-mcp](https://github.com/Coding-Solo/godot-mcp) by
+[Solomon Elias](https://github.com/Coding-Solo). The history starts at GoPeak, so the
+releases page records gdharness only; for anything before that, read GoPeak's own changelog.
