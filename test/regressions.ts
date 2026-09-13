@@ -11,7 +11,7 @@ import { pathToFileURL } from 'node:url';
 import { GodotDAPClient } from '../src/dap_client.js';
 import { dictionary, emptyRecord } from '../src/dictionary.js';
 import { createBridge } from '../src/godot-bridge.js';
-import { envValue, resolveHeadless, runArguments } from '../src/launch.js';
+import { editorArguments, envValue, resolveHeadless, runArguments } from '../src/launch.js';
 import { GodotLSPClient } from '../src/lsp_client.js';
 import { isWithinRoot, resolveWithinProject } from '../src/paths.js';
 import { parseProjectGodot } from '../src/resources.js';
@@ -1109,6 +1109,10 @@ function testRunArgumentsLeaveTheLocalDebuggerOff(): void {
     '/p',
   ]);
   assert.deepEqual(runArguments({ projectPath: '/p', headless: false, scene: null }), ['--path', '/p']);
+
+  // editor_launch spawns detached with its output dropped, so the only thing that can be
+  // asserted about it is the argv, and the only thing that can go wrong quietly is the argv.
+  assert.deepEqual(editorArguments('/p'), ['-e', '--path', '/p']);
   // The scene as a res:// path and last: the engine reads it positionally, so text beginning
   // with a dash would otherwise be another option to it.
   assert.deepEqual(runArguments({ projectPath: '/p', headless: false, scene: 'scenes/-odd.tscn' }), [
