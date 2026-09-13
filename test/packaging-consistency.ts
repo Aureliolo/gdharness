@@ -133,6 +133,15 @@ try {
 
   const packedRoot = path.join(extractionRoot, 'package');
   const packedPackage: unknown = JSON.parse(await readFile(path.join(packedRoot, 'package.json'), 'utf8'));
+  // The marker the MCP registry reads out of the published package to decide this repository owns
+  // the name it publishes under. pack-release.ts rebuilds package.json field by field, so one
+  // dropped there is dropped from npm, and the only thing that would notice is a release job
+  // failing after the release is already out.
+  assert.equal(
+    get(packedPackage, 'mcpName'),
+    pkg.mcpName,
+    'packed package should carry the mcpName the registry verifies ownership with',
+  );
   assert.deepEqual(
     get(packedPackage, 'dependencies') ?? {},
     {},

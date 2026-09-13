@@ -36,6 +36,17 @@ nothing. `release.yml` calls `release-build.yml`, which runs the first three job
 4. **publish**, in `release.yml`, rechecks the checksum, verifies that file against every
    subject the way a user would (from the file, naming `release-build.yml` at the tag as the
    builder), and creates the GitHub Release with all four files.
+5. **npm**, in `release.yml`, publishes that same signed archive to npm, which is how every
+   harness actually installs the server. Tokenless: npm's trusted publisher for the package
+   names this workflow and the job's OIDC token is the whole credential, so npm adds its own
+   provenance on top. It then downloads what npm serves and fails unless those bytes hash to
+   the archive that was signed.
+6. **registry**, in `release.yml`, publishes `server.json` to the official MCP registry, the
+   entry that clients and every marketplace downstream of it read. Tokenless again: the
+   registry has no accounts, and grants the `io.github.Aureliolo/*` namespace to whatever this
+   workflow's OIDC token proves it is. It runs last because the registry checks that the npm
+   package exists at this version and carries a matching `mcpName`, and it reads the published
+   entry back before the job passes.
 
 ## What a release carries
 
@@ -108,3 +119,15 @@ such a version, naming it, before it writes a branch.
   read something other than the unpacked archive and the lockfile, or a syft upgrade changed
   what its catalogers see. The SBOM is wrong, not the archive; fix the sbom job and rerun the
   workflow on the tag.
+- **Registry validation failed for package**: the registry could not find `mcpName` in the
+  package npm serves, or it does not match the name in `server.json`. `test:metadata` and
+  `test:packaging` both check that pair, so this means one of them was skipped or the packing
+  dropped the field.
+- **You do not have permission to publish this server**: `server.json` names something outside
+  `io.github.Aureliolo/*`, which is the only namespace a token from this repository is given.
+- **The registry never served X**, or **The registry serves ...**: the publish was accepted and
+  what came back a minute later is missing or not this version. The release and npm are
+  unaffected. Do not rerun the job: a registry version is published once and cannot be
+  republished or edited, so a rerun fails at the publish step instead. Read the entry yourself
+  at `registry.modelcontextprotocol.io/v0.1/servers/io.github.Aureliolo%2Fgdharness/versions/latest`,
+  and if it really is wrong, that version is spent there and the next release replaces it.
