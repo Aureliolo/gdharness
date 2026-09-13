@@ -18,5 +18,6 @@ rules:
 
 ignore:
   - node_modules/
+  - .venv/
   - build/
   - dist/

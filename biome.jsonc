@@ -3,7 +3,7 @@
   "files": {
     // .claude holds tool-managed git worktrees, each a full copy of the repository with its own
     // configuration, and Biome refuses to run when it finds a second root.
-    "includes": ["**", "!build", "!dist", "!node_modules", "!.claude", "!**/*.html"]
+    "includes": ["**", "!build", "!dist", "!node_modules", "!.venv", "!.claude", "!**/*.html"]
   },
   "json": {
     "parser": {
