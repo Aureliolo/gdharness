@@ -97,7 +97,7 @@ function renderPicker(): string {
     const skill = harness.skills === undefined ? '.agents/skills' : harness.skills.dir.replaceAll('\\', '/');
     return [
       `<div class="panel panel-${harness.id}">`,
-      `<pre><code>${escaped(command)}</code></pre>`,
+      `<pre><code>${codeText(command)}</code></pre>`,
       `<p>${where}${how} The skill goes to <code>${escaped(skill)}</code>.${left}</p>`,
       '</div>',
     ].join('');
@@ -110,7 +110,7 @@ function renderPicker(): string {
   panels.push(
     [
       '<div class="panel panel-other">',
-      `<pre><code>${escaped(bothRunners('setup .'))}</code></pre>`,
+      `<pre><code>${codeText(bothRunners('setup .'))}</code></pre>`,
       '<p>Any MCP client that can spawn a local stdio server will do. With no harness named it asks about the ones it finds, and the entry it writes is the same everywhere. <a href="architecture.html">How it works</a> has every file and key, and says which ones it cannot write for you.</p>',
       '</div>',
     ].join(''),
@@ -227,7 +227,7 @@ function renderHome(): string {
     `<div class="cards">${cards.join('')}</div>`,
     '<section class="install">',
     '<h2 class="step">Hand it to your agent</h2>',
-    `<figure class="code"><figcaption>paste this</figcaption><pre><code>${escaped(paste)}</code></pre></figure>`,
+    `<figure class="code"><figcaption>paste this</figcaption><pre><code>${codeText(paste)}</code></pre></figure>`,
     '<p class="note">It reads the guide, installs the addons, writes the config for the harness it is running in, and reports the two things it cannot do for itself.</p>',
     '<h2 class="step">Or do it yourself</h2>',
     renderPicker(),
@@ -383,6 +383,7 @@ marked.use({
       const [language = '', ...rest] = (token.lang ?? '').split(' ');
       const label = rest.join(' ');
       const bar = label === '' ? '' : `<figcaption>${escaped(label)}</figcaption>`;
+      codeBlocks.push(token.text);
       return `<figure class="code">${bar}<pre><code>${coloured(token.text, language)}</code></pre></figure>\n`;
     },
   },
@@ -421,6 +422,23 @@ function escaped(text: string): string {
     .replaceAll('"', '&quot;');
 }
 
+/** One call and the answer it comes back with, which is what the whole reference is a list of. */
+const EXAMPLE_CALL = `project_settings {
+  "projectPath": "/home/you/game",
+  "op": "set",
+  "setting": "display/window/size/viewport_width",
+  "value": 1280
+}
+
+{
+  "setting_path": "display/window/size/viewport_width",
+  "old_value": 1152,
+  "new_value": 1280,
+  "was_new": false,
+  "saved": true
+}
+`;
+
 /** The tool reference, from the definitions the server answers with. */
 function renderTools(): string {
   const parts: string[] = [
@@ -431,19 +449,7 @@ function renderTools(): string {
     'related things takes an <code>op</code>. An unknown op or argument is refused with the valid set ',
     'listed. Generated from the server.</p>\n',
     '<h2 id="a-call-and-its-answer">A call and its answer</h2>\n',
-    '<figure class="code"><pre><code>project_settings {\n',
-    '  "projectPath": "/home/you/game",\n',
-    '  "op": "set",\n',
-    '  "setting": "display/window/size/viewport_width",\n',
-    '  "value": 1280\n',
-    '}\n\n',
-    '{\n',
-    '  "setting_path": "display/window/size/viewport_width",\n',
-    '  "old_value": 1152,\n',
-    '  "new_value": 1280,\n',
-    '  "was_new": false,\n',
-    '  "saved": true\n',
-    '}\n</code></pre></figure>\n',
+    `<figure class="code"><pre><code>${codeText(EXAMPLE_CALL)}</code></pre></figure>\n`,
     '<p><code>new_value</code> is read from the engine after the write. Engine stderr comes back ',
     'under <code>engine_messages</code>. Every call takes <code>projectPath</code>, except the ',
     '<code>runtime_*</code> and <code>debug_*</code> tools, where it picks between running games.</p>\n',
@@ -641,18 +647,25 @@ function build(): void {
  */
 const CODE_COLUMNS = 84;
 
-/** The text of every code block on a page, one line per entry, with the markup taken back out. */
-function codeLinesIn(html: string): string[] {
-  return [...html.matchAll(/<pre><code[^>]*>([\s\S]*?)<\/code><\/pre>/g)].flatMap((match) =>
-    (match[1] ?? '')
-      .replaceAll(/<[^>]+>/g, '')
-      .replaceAll('&lt;', '<')
-      .replaceAll('&gt;', '>')
-      .replaceAll('&quot;', '"')
-      .replaceAll('&#39;', "'")
-      .replaceAll('&amp;', '&')
-      .split('\n'),
-  );
+/**
+ * Every code block, as the text it was written as, collected while the pages render.
+ *
+ * Kept here rather than read back out of the HTML: by then the highlighter has wrapped each token
+ * in markup and escaped the text, and measuring that means stripping tags and decoding entities,
+ * which is indistinguishable from a sanitiser that does not work. The source is the thing being
+ * measured anyway.
+ */
+const codeBlocks: string[] = [];
+
+/**
+ * A block of code, escaped for the page and measured on the way through.
+ *
+ * Every code block goes through this or through the markdown renderer, so one built by hand in
+ * this file is as answerable for fitting the column as one written in a document.
+ */
+function codeText(text: string): string {
+  codeBlocks.push(text);
+  return escaped(text);
 }
 
 /** Every id a page offers, which is what a `#fragment` pointed at it has to find. */
@@ -705,11 +718,9 @@ function checkOutput(): void {
   }
 
   const wrong: string[] = [];
-  for (const name of names.filter((file) => file.endsWith('.html'))) {
-    for (const line of codeLinesIn(readFileSync(join(OUT, name), 'utf8'))) {
-      if (line.length > CODE_COLUMNS) {
-        wrong.push(`${name} has a code line of ${line.length} characters: ${line.slice(0, 60)}...`);
-      }
+  for (const line of codeBlocks.flatMap((block) => block.split('\n'))) {
+    if (line.length > CODE_COLUMNS) {
+      wrong.push(`a code line is ${line.length} characters, ${CODE_COLUMNS} fit: ${line.slice(0, 56)}...`);
     }
   }
 
