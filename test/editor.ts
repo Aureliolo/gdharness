@@ -146,6 +146,10 @@ const MAIN_GD = [
   '\treturn stash',
   '',
   '',
+  'func peek_ticks() -> int:',
+  '\treturn ticks',
+  '',
+  '',
   'func peek_clicks() -> int:',
   '\treturn clicks',
   '',
@@ -590,6 +594,18 @@ async function testSceneNodes({ call, project }: Editor): Promise<void> {
   await call('scene_node', { ...scene, op: 'delete', nodePath: 'Panel/Copy' });
   assert.deepEqual(nodePaths(get(await call('scene_tree', scene), 'tree')), ['.', 'Panel', 'Press']);
   assert.doesNotMatch(fileText(project, 'fixture.tscn'), /name="Copy"/, 'and be gone from the file');
+
+  // Saving it again, and saving it somewhere else. The copy is read back through the tool that
+  // reads scenes rather than as text, so it is a scene rather than a file of the right size.
+  const saved = await call('scene_create', { ...scene, op: 'save' });
+  assert.equal(get(saved, 'savedPath'), SCENE, 'a save should answer with where it went');
+  const copy = 'res://made/copy.tscn';
+  await call('scene_create', { ...scene, op: 'save_as', newPath: copy });
+  assert.deepEqual(
+    nodePaths(get(await call('scene_tree', { projectPath: project, scenePath: copy }), 'tree')),
+    ['.', 'Panel', 'Press'],
+    'and a copy should hold the same nodes, in a directory the save made',
+  );
 }
 
 /**
@@ -920,6 +936,30 @@ async function testLanguageServer({ call, attempt, project }: Editor): Promise<v
 }
 
 /**
+ * The stack the adapter answers with, once it says what the case is waiting for.
+ *
+ * Polled rather than slept on: how long a second engine takes to reach a line, or to stop on
+ * being asked, is not a number anything here can know.
+ */
+async function stackWithin(
+  attempt: Editor['attempt'],
+  what: string,
+  reached: (frames: unknown[]) => boolean,
+): Promise<unknown[]> {
+  const deadline = Date.now() + GAME_STOP_TIMEOUT_MS;
+  let frames: unknown[] = [];
+  let said = '';
+  while (!reached(frames) && Date.now() < deadline) {
+    const stack = await attempt('debug_state', { op: 'stack' });
+    said = stack.text;
+    frames = stack.ok ? asArray(JSON.parse(stack.text), 'stackFrames') : [];
+    if (!reached(frames)) await delay(500);
+  }
+  assert.ok(reached(frames), `${what}, and the adapter answered with: ${said}`);
+  return frames;
+}
+
+/**
  * The debug tools, against a game the editor is playing.
  *
  * They only answer for a game the editor's own debugger is holding, which is why editor_run asks
@@ -928,7 +968,7 @@ async function testLanguageServer({ call, attempt, project }: Editor): Promise<v
  * always empty. Everything here is asserted off the session: the stop, the frame it stopped in,
  * and the line the game printed after being let go.
  */
-async function testDebugging({ call, attempt, project }: Editor): Promise<void> {
+async function testDebugging({ call, refusal, attempt, project }: Editor): Promise<void> {
   const main = { projectPath: project, scriptPath: 'res://main.gd' };
 
   // The print, so the frame the game stops in is _ready with the sum already worked out.
@@ -937,36 +977,68 @@ async function testDebugging({ call, attempt, project }: Editor): Promise<void> 
   const run = await call('editor_run', { projectPath: project });
   assert.equal(get(run, 'through'), 'editor', 'the editor should be the one playing it');
 
-  const deadline = Date.now() + GAME_STOP_TIMEOUT_MS;
-  let frames: unknown[] = [];
-  let said = '';
-  while (frames.length === 0 && Date.now() < deadline) {
-    const stack = await attempt('debug_state', { op: 'stack' });
-    said = stack.text;
-    frames = stack.ok ? asArray(JSON.parse(stack.text), 'stackFrames') : [];
-    if (frames.length === 0) await delay(500);
-  }
-  assert.ok(frames.length > 0, `the game should stop at the breakpoint; the adapter said: ${said}`);
+  const frames = await stackWithin(
+    attempt,
+    'the game should stop at the breakpoint',
+    (stack) => stack.length > 0,
+  );
   assert.equal(get(frames[0], 'name'), '_ready', 'in the function the breakpoint is in');
   assert.equal(get(frames[0], 'line'), BREAK_LINE, 'on the line it was set on');
 
+  // One line, run. The game is held either way, so what says the step happened is where it is
+  // held now: a step that did nothing leaves it on the line it was already on.
+  await call('debug_control', { op: 'step_over' });
+  await stackWithin(
+    attempt,
+    `stepping should leave the game held past line ${BREAK_LINE}`,
+    (stack) => stack.length > 0 && asNumber(get(stack[0], 'line')) > BREAK_LINE,
+  );
+
   await call('debug_control', { op: 'continue' });
 
-  // Waited for rather than slept on: the line arrives as a debug adapter event, and how long
-  // that takes is how long a second engine takes to get past the line it was held on.
+  // The adapter's own console, read before anything drains it: editor_output takes the lines
+  // out of the adapter as it reads them, so this is the one that has to ask first.
   const printed = Date.now() + GAME_STOP_TIMEOUT_MS;
-  let console_ = '';
-  let through = '';
-  while (!console_.includes('the game said 4') && Date.now() < printed) {
-    const output = await call('editor_output', {});
-    through = text(get(output, 'through'));
-    console_ = asArray(get(output, 'entries'), 'entries')
-      .map((entry) => text(get(entry, 'text')))
+  let adapter = '';
+  while (!adapter.includes('the game said 4') && Date.now() < printed) {
+    adapter = asArray(get(await call('debug_state', { op: 'output' }), 'output'), 'output')
+      .map(text)
       .join('\n');
-    if (!console_.includes('the game said 4')) await delay(500);
+    if (!adapter.includes('the game said 4')) await delay(500);
   }
-  assert.equal(through, 'editor', 'the console should come from the editor session');
-  assert.match(console_, /the game said 4/, `and carry what the game printed; it carried:\n${console_}`);
+  assert.match(adapter, /the game said 4/, `the adapter should have the game's console: ${adapter}`);
+
+  const output = await call('editor_output', {});
+  assert.equal(get(output, 'through'), 'editor', 'the console should come from the editor session');
+  const console_ = asArray(get(output, 'entries'), 'entries')
+    .map((entry) => text(get(entry, 'text')))
+    .join('\n');
+  assert.match(console_, /the game said 4/, `and reach editor_output; it carried:\n${console_}`);
+
+  // Pausing is the editor's own toolbar button, and an editor started headless has no toolbar:
+  // measured here, the request is taken and answered while the game runs on, its tree never
+  // paused. So the refusal is what a headless editor owes the caller, and the game going on
+  // with its counter is the evidence behind it.
+  const ticks = async (): Promise<number> =>
+    asNumber(
+      get(
+        await call('runtime_invoke', {
+          projectPath: project,
+          op: 'call',
+          nodePath: '/root/Main',
+          method: 'peek_ticks',
+        }),
+        'result',
+      ),
+    );
+
+  const before = await ticks();
+  assert.match(
+    await refusal('debug_control', { op: 'pause' }),
+    /still running, with no stack to read/,
+    'a pause that did not stop the game should say so rather than report a pause',
+  );
+  assert.ok((await ticks()) > before, 'and the game should indeed still be getting on with it');
 
   await call('debug_breakpoint', { ...main, op: 'remove', line: BREAK_LINE });
   // The game is left running: it is past the breakpoint and answering, which is what the runtime
@@ -1162,6 +1234,25 @@ async function testRuntime({ call, refusal, attempt, project }: Editor): Promise
     await refusal('runtime_capture', game),
     /no window/,
     'a capture with nothing drawing should be refused, not answered with the last frame',
+  );
+  assert.match(
+    await refusal('runtime_capture', { ...game, op: 'viewport', viewportPath: '/root/Main/Panel' }),
+    /not a Viewport/,
+    'and a viewport capture of something that is not one should say which mistake was made',
+  );
+
+  // What the editor is playing, which is the half the server cannot see for itself: this game
+  // was started through it, so the editor is the one that knows.
+  const status = await call('editor_status', {});
+  assert.equal(
+    get(status, 'game', 'playingInEditor', 'playing'),
+    true,
+    'the editor should say it is playing',
+  );
+  assert.match(
+    text(get(status, 'game', 'playingInEditor', 'scene')),
+    /main\.tscn/,
+    'and which scene it has running',
   );
 
   await call('editor_stop', {});

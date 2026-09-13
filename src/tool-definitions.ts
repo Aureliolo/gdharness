@@ -721,7 +721,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'editor_status',
     description:
-      'Whether the editor addon is connected, which Godot answers, and whether a game with the runtime addon is reachable.',
+      'Whether the editor addon is connected, which Godot answers, whether the editor is playing something, and whether a game with the runtime addon is reachable.',
     parameters: {},
     requires: [],
   },
@@ -952,7 +952,11 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     requires: [],
     operations: {
       continue: { summary: 'resume after a breakpoint or pause', requires: [] },
-      pause: { summary: 'pause the game', requires: [] },
+      pause: {
+        summary:
+          'pause the game, which needs an editor with a window: Godot pauses from its toolbar, and a pause that did not stop the game is refused rather than reported',
+        requires: [],
+      },
       step_over: { summary: 'run the current line', requires: [] },
     },
   },
