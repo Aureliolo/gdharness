@@ -98,7 +98,7 @@ const PROJECT_FILE_ARGUMENTS = [
 ];
 
 /** The headless operation behind each tool and op that needs neither the editor nor a game. */
-const HEADLESS_OPERATIONS: Readonly<Record<string, Readonly<Record<string, string>>>> = dictionary({
+export const HEADLESS_OPERATIONS: Readonly<Record<string, Readonly<Record<string, string>>>> = dictionary({
   project_settings: dictionary({
     get: 'get_project_setting',
     set: 'set_project_setting',
@@ -1218,6 +1218,32 @@ class GodotServer {
     };
   }
 
+  /**
+   * What the editor is playing, which is the half this server cannot see for itself.
+   *
+   * A game started from the editor's own play button belongs to no process here, so without
+   * asking, editor_status reports nothing running while a game is on screen. Answered only by
+   * an editor holding this version's addon: an older one has no such command, and the staleness
+   * in the same payload is what says why the answer is missing.
+   */
+  private async editorPlayingState(): Promise<{ playing: boolean; scene: string } | null> {
+    const status = this.godotBridge.getStatus();
+    if (!status.connected || status.addonVersion !== SERVER_VERSION) {
+      return null;
+    }
+    try {
+      const answer = await this.godotBridge.invokeTool('playing_status', {});
+      return {
+        playing: readBoolean(asParams(answer), 'playing') ?? false,
+        scene: readString(asParams(answer), 'scenePath') ?? '',
+      };
+    } catch {
+      // The editor is there but did not answer this one, which the connection fields already
+      // describe; a status call is not the place to fail over its own extra question.
+      return null;
+    }
+  }
+
   /** editor_status: the three things an agent asks before doing anything else, in one answer. */
   private async handleEditorStatus(): Promise<ToolResponse> {
     const godotPath = await this.locator.find();
@@ -1245,6 +1271,7 @@ class GodotServer {
       },
       game: {
         processActive: this.activeProcess !== null,
+        playingInEditor: await this.editorPlayingState(),
         runtimeConnected: games.some((game) => game.reachable),
         runtimes: games,
       },

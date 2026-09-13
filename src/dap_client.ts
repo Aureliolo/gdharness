@@ -370,12 +370,6 @@ export class GodotDAPClient {
     await this.sendRequest('continue', { threadId: resolvedThreadId });
   }
 
-  async pause(threadId?: number): Promise<void> {
-    await this.attach();
-    const resolvedThreadId = await this.resolveThreadId(threadId);
-    await this.sendRequest('pause', { threadId: resolvedThreadId });
-  }
-
   async stepOver(threadId?: number): Promise<void> {
     await this.attach();
     const resolvedThreadId = await this.resolveThreadId(threadId);
@@ -477,15 +471,12 @@ export async function handleDAPTool(
 
   try {
     switch (toolName) {
+      // JSON like every other answer: a caller that reads one tool with a parser should not
+      // have to read this one with a regex.
       case 'dap_get_output': {
         const output = client.getOutput(false);
         return {
-          content: [
-            {
-              type: 'text',
-              text: output.length > 0 ? output.join('\n') : 'No DAP output captured yet.',
-            },
-          ],
+          content: [{ type: 'text', text: JSON.stringify({ lines: output.length, output }, null, 2) }],
         };
       }
 
@@ -517,18 +508,6 @@ export async function handleDAPTool(
       case 'dap_continue': {
         await client.continue();
         return { content: [{ type: 'text', text: JSON.stringify({ continued: true }, null, 2) }] };
-      }
-
-      case 'dap_pause': {
-        await client.pause();
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify({ paused: true, stack: await client.getStackTrace() }, null, 2),
-            },
-          ],
-        };
       }
 
       case 'dap_step_over': {
