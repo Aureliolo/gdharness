@@ -1,27 +1,30 @@
 @tool
-class_name MCPToolExecutor
 extends Node
+
+## Routes each command the server sends to the tool module that answers it. The modules are
+## preloaded rather than looked up on disk at runtime, so a missing one fails to parse here
+## instead of leaving a command silently unanswered.
+
+const SceneTools = preload("tools/scene_tools.gd")
+const ResourceTools = preload("tools/resource_tools.gd")
+const AnimationTools = preload("tools/animation_tools.gd")
 
 var _editor_plugin: EditorPlugin = null
 
-var _scene_tools: Node = null
-var _resource_tools: Node = null
-var _animation_tools: Node = null
+var _scene_tools: SceneTools = null
+var _resource_tools: ResourceTools = null
+var _animation_tools: AnimationTools = null
 
 var _tool_map: Dictionary = {}
-var _initialized := false
+var _initialized: bool = false
 
 
 func set_editor_plugin(plugin: EditorPlugin) -> void:
 	_editor_plugin = plugin
 	_init_tools()
-
-	if _scene_tools and _scene_tools.has_method("set_editor_plugin"):
-		_scene_tools.set_editor_plugin(plugin)
-	if _resource_tools and _resource_tools.has_method("set_editor_plugin"):
-		_resource_tools.set_editor_plugin(plugin)
-	if _animation_tools and _animation_tools.has_method("set_editor_plugin"):
-		_animation_tools.set_editor_plugin(plugin)
+	_scene_tools.set_editor_plugin(plugin)
+	_resource_tools.set_editor_plugin(plugin)
+	_animation_tools.set_editor_plugin(plugin)
 
 
 func _init_tools() -> void:
@@ -29,31 +32,17 @@ func _init_tools() -> void:
 		return
 	_initialized = true
 
-	var base_path: String = get_script().resource_path.get_base_dir()
-	var scene_tools_path := "%s/tools/scene_tools.gd" % base_path
-	var resource_tools_path := "%s/tools/resource_tools.gd" % base_path
-	var animation_tools_path := "%s/tools/animation_tools.gd" % base_path
+	_scene_tools = SceneTools.new()
+	_scene_tools.name = "SceneTools"
+	add_child(_scene_tools)
 
-	if ResourceLoader.exists(scene_tools_path):
-		var scene_script: Script = load(scene_tools_path)
-		if scene_script:
-			_scene_tools = scene_script.new()
-			_scene_tools.name = "SceneTools"
-			add_child(_scene_tools)
+	_resource_tools = ResourceTools.new()
+	_resource_tools.name = "ResourceTools"
+	add_child(_resource_tools)
 
-	if ResourceLoader.exists(resource_tools_path):
-		var resource_script: Script = load(resource_tools_path)
-		if resource_script:
-			_resource_tools = resource_script.new()
-			_resource_tools.name = "ResourceTools"
-			add_child(_resource_tools)
-
-	if ResourceLoader.exists(animation_tools_path):
-		var animation_script: Script = load(animation_tools_path)
-		if animation_script:
-			_animation_tools = animation_script.new()
-			_animation_tools.name = "AnimationTools"
-			add_child(_animation_tools)
+	_animation_tools = AnimationTools.new()
+	_animation_tools.name = "AnimationTools"
+	add_child(_animation_tools)
 
 	_tool_map = {
 		# Scene tools
@@ -94,9 +83,6 @@ func execute_tool(tool_name: String, args: Dictionary) -> Dictionary:
 	var handler: Array = _tool_map[tool_name]
 	var node: Node = handler[0]
 	var method: String = handler[1]
-
-	if node == null:
-		return {"ok": false, "error": "Tool handler unavailable: " + tool_name}
 
 	if not node.has_method(method):
 		return {"ok": false, "error": "Tool method not found: %s.%s" % [node.name, method]}

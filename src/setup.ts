@@ -1,0 +1,225 @@
+/**
+ * What the CLI does to a project: puts the shipped addons in it, turns the editor ones on,
+ * turns the runtime autoload on or off, and reads back whether all of that holds.
+ *
+ * Every write that lands in project.godot goes through the engine's own operations, so the
+ * file is written the way the editor writes it; the addon copy is a plain copy, whole and
+ * fresh each time, so an upgrade never leaves a file of the old version behind.
+ */
+
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { type HeadlessEngine, type HeadlessOutcome, runOperation } from './headless.js';
+import { parseProjectGodot } from './resources.js';
+import { SERVER_VERSION } from './server-version.js';
+import { readString } from './tool-args.js';
+
+/** The addons the package ships, by directory name under addons/. */
+const ADDONS = ['gdharness_editor', 'gdharness_runtime', 'auto_reload'] as const;
+
+/** The addons that are editor plugins and are enabled by setup. */
+export const EDITOR_PLUGINS = ['gdharness_editor', 'auto_reload'] as const;
+
+/** The runtime addon is an autoload and nothing else: registered by name, never by plugin.cfg. */
+export const RUNTIME_AUTOLOAD = {
+  name: 'GdharnessRuntime',
+  path: 'addons/gdharness_runtime/runtime_autoload.gd',
+} as const;
+
+/** Written into each installed addon, so doctor can tell an old copy from the shipped one. */
+const VERSION_MARKER = '.gdharness-version';
+
+/** Where the shipped addons are, beside this module in the build and in the source tree alike. */
+function shippedAddonsDirectory(): string {
+  return join(dirname(fileURLToPath(import.meta.url)), 'godot', 'addons');
+}
+
+/** The operations script, laid out the same way. */
+export function shippedOperationsScript(): string {
+  return join(dirname(fileURLToPath(import.meta.url)), 'godot', 'operations', 'godot_operations.gd');
+}
+
+export interface InstalledAddon {
+  readonly name: string;
+  readonly path: string;
+  readonly replaced: boolean;
+}
+
+/** Each addon copied whole into the project's addons/, over whatever was there. */
+export function installAddons(
+  projectPath: string,
+  from: string = shippedAddonsDirectory(),
+): InstalledAddon[] {
+  const installed: InstalledAddon[] = [];
+  for (const name of ADDONS) {
+    const source = join(from, name);
+    if (!existsSync(join(source, name === 'gdharness_runtime' ? 'runtime_autoload.gd' : 'plugin.cfg'))) {
+      throw new Error(`The package holds no ${name} addon at ${source}.`);
+    }
+    const target = join(projectPath, 'addons', name);
+    const replaced = existsSync(target);
+    rmSync(target, { recursive: true, force: true });
+    mkdirSync(dirname(target), { recursive: true });
+    cpSync(source, target, { recursive: true });
+    writeFileSync(join(target, VERSION_MARKER), `${SERVER_VERSION}\n`);
+    installed.push({ name, path: target, replaced });
+  }
+  return installed;
+}
+
+/** The plugins turned on in project.godot, through the engine. */
+export async function enablePlugins(
+  engine: HeadlessEngine,
+  projectPath: string,
+  names: readonly string[],
+): Promise<HeadlessOutcome[]> {
+  const outcomes: HeadlessOutcome[] = [];
+  for (const name of names) {
+    outcomes.push(await runOperation(engine, 'enable_plugin', { pluginName: name }, projectPath));
+  }
+  return outcomes;
+}
+
+/** The runtime autoload registered or removed, through the engine. */
+export async function setRuntime(
+  engine: HeadlessEngine,
+  projectPath: string,
+  on: boolean,
+): Promise<HeadlessOutcome> {
+  return on
+    ? await runOperation(
+        engine,
+        'add_autoload',
+        { name: RUNTIME_AUTOLOAD.name, path: `res://${RUNTIME_AUTOLOAD.path}`, enabled: true },
+        projectPath,
+      )
+    : await runOperation(engine, 'remove_autoload', { name: RUNTIME_AUTOLOAD.name }, projectPath);
+}
+
+interface AddonState {
+  readonly name: string;
+  readonly installed: boolean;
+  /** The version the copy came from, or null when no marker was written with it. */
+  readonly version: string | null;
+  readonly current: boolean;
+}
+
+export interface ProjectReport {
+  readonly projectPath: string;
+  readonly addons: readonly AddonState[];
+  readonly pluginsEnabled: readonly string[];
+  readonly runtimeAutoload: boolean;
+  /** class_name declarations on disk that the class cache does not list, or lists elsewhere. */
+  readonly staleClasses: readonly string[];
+  readonly classCacheExists: boolean;
+  readonly problems: readonly string[];
+}
+
+/** The enabled editor plugins, read out of project.godot's PackedStringArray of plugin.cfg paths. */
+function enabledPlugins(settings: Record<string, Record<string, unknown>>): string[] {
+  const raw = settings['editor_plugins']?.['enabled'];
+  if (typeof raw !== 'string') {
+    return [];
+  }
+  return [...raw.matchAll(/res:\/\/addons\/([^/"]+)\/plugin\.cfg/g)]
+    .map((match) => match[1] ?? '')
+    .filter(Boolean);
+}
+
+/** Every `class_name` declared under the project, with the script that declares it. */
+function declaredClasses(projectPath: string): Map<string, string> {
+  const declared = new Map<string, string>();
+  const visit = (directory: string, prefix: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      if (entry.name.startsWith('.')) {
+        continue;
+      }
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        visit(path, `${prefix}${entry.name}/`);
+      } else if (entry.isFile() && entry.name.endsWith('.gd')) {
+        const found = /^class_name\s+([A-Za-z_][A-Za-z0-9_]*)/m.exec(readFileSync(path, 'utf8'));
+        if (found?.[1]) {
+          declared.set(found[1], `res://${prefix}${entry.name}`);
+        }
+      }
+    }
+  };
+  visit(projectPath, '');
+  return declared;
+}
+
+/** The classes the cache lists, with the path each is recorded at. */
+function cachedClasses(projectPath: string): Map<string, string> | null {
+  const cache = join(projectPath, '.godot', 'global_script_class_cache.cfg');
+  if (!existsSync(cache)) {
+    return null;
+  }
+  const listed = new Map<string, string>();
+  const text = readFileSync(cache, 'utf8');
+  for (const entry of text.matchAll(/"class":\s*&"([^"]+)"[\s\S]*?"path":\s*"([^"]+)"/g)) {
+    listed.set(entry[1] ?? '', entry[2] ?? '');
+  }
+  return listed;
+}
+
+/** What holds and what does not, read from the project directory alone. */
+export function inspectProject(projectPath: string): ProjectReport {
+  const problems: string[] = [];
+  const addons = ADDONS.map((name): AddonState => {
+    const directory = join(projectPath, 'addons', name);
+    const marker = join(directory, VERSION_MARKER);
+    const installed = existsSync(directory);
+    const version = existsSync(marker) ? readFileSync(marker, 'utf8').trim() : null;
+    const current = version === SERVER_VERSION;
+    if (!installed) {
+      problems.push(`addons/${name} is not installed; run gdharness setup`);
+    } else if (!current) {
+      problems.push(
+        `addons/${name} is ${version ?? 'of an unknown version'}, this gdharness is ${SERVER_VERSION}; run gdharness setup`,
+      );
+    }
+    return { name, installed, version, current };
+  });
+
+  const settings = parseProjectGodot(readFileSync(join(projectPath, 'project.godot'), 'utf8'));
+  const pluginsEnabled = enabledPlugins(settings);
+  for (const name of EDITOR_PLUGINS) {
+    if (!pluginsEnabled.includes(name)) {
+      problems.push(`the ${name} plugin is not enabled in project.godot; run gdharness setup`);
+    }
+  }
+  const autoload = settings['autoload'];
+  const runtimeAutoload =
+    autoload !== undefined && typeof readString(autoload, RUNTIME_AUTOLOAD.name) === 'string';
+
+  const cached = cachedClasses(projectPath);
+  const staleClasses: string[] = [];
+  if (cached === null) {
+    problems.push(
+      'no .godot/global_script_class_cache.cfg: the engine knows no class_name; run project_import refresh_classes or open the editor',
+    );
+  } else {
+    for (const [name, path] of declaredClasses(projectPath)) {
+      if (cached.get(name) !== path) {
+        staleClasses.push(name);
+      }
+    }
+    if (staleClasses.length > 0) {
+      problems.push(
+        `the class cache does not list ${staleClasses.join(', ')}; run project_import refresh_classes or gdharness classes`,
+      );
+    }
+  }
+
+  return {
+    projectPath,
+    addons,
+    pluginsEnabled,
+    runtimeAutoload,
+    staleClasses,
+    classCacheExists: cached !== null,
+    problems,
+  };
+}

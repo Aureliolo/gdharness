@@ -114,11 +114,11 @@ function testSceneToolsVectorRegression(): void {
 
   const projectDir = mkdtempSync(join(tmpdir(), 'gopeak-regression-'));
   try {
-    mkdirSync(join(projectDir, 'addons', 'godot_mcp_editor', 'tools'), { recursive: true });
+    mkdirSync(join(projectDir, 'addons', 'gdharness_editor', 'tools'), { recursive: true });
     mkdirSync(join(projectDir, 'scenes'), { recursive: true });
     cpSync(
-      'src/godot/addons/godot_mcp_editor/tools/scene_tools.gd',
-      join(projectDir, 'addons', 'godot_mcp_editor', 'tools', 'scene_tools.gd'),
+      'src/godot/addons/gdharness_editor/tools/scene_tools.gd',
+      join(projectDir, 'addons', 'gdharness_editor', 'tools', 'scene_tools.gd'),
     );
 
     writeFileSync(
@@ -128,7 +128,7 @@ function testSceneToolsVectorRegression(): void {
 
     writeFileSync(
       join(projectDir, 'runner.gd'),
-      `extends SceneTree\n\nfunc _fail(message: String) -> void:\n\tprinterr(message)\n\tquit(1)\n\nfunc _init() -> void:\n\tvar root := Node2D.new()\n\troot.name = "Root"\n\tvar packed := PackedScene.new()\n\tif packed.pack(root) != OK:\n\t\t_fail("failed to pack root scene")\n\t\treturn\n\tif ResourceSaver.save(packed, "res://scenes/Test.tscn") != OK:\n\t\t_fail("failed to save root scene")\n\t\treturn\n\troot.queue_free()\n\n\tvar scene_tools = load("res://addons/godot_mcp_editor/tools/scene_tools.gd").new()\n\tvar project_path := ProjectSettings.globalize_path("res://")\n\n\tvar add_result: Dictionary = scene_tools.add_node({\n\t\t"projectPath": project_path,\n\t\t"scenePath": "res://scenes/Test.tscn",\n\t\t"nodeType": "Node2D",\n\t\t"nodeName": "TestNode",\n\t\t"parentNodePath": ".",\n\t\t"properties": {\n\t\t\t"position": {"x": 100, "y": 200},\n\t\t\t"scale": {"_type": "Vector2", "x": 2, "y": 2}\n\t\t}\n\t})\n\tif not add_result.get("ok", false):\n\t\t_fail("add_node failed: %s" % JSON.stringify(add_result))\n\t\treturn\n\n\tvar set_result: Dictionary = scene_tools.set_node_properties({\n\t\t"projectPath": project_path,\n\t\t"scenePath": "res://scenes/Test.tscn",\n\t\t"nodePath": "TestNode",\n\t\t"properties": {\n\t\t\t"position": [300, 400]\n\t\t}\n\t})\n\tif not set_result.get("ok", false):\n\t\t_fail("set_node_properties failed: %s" % JSON.stringify(set_result))\n\t\treturn\n\n\t# A tagged Resource class is built on the spot, which is how a region gets its polygon and a\n\t# tree its root without a wrapper tool per node class.\n\tvar nav_result: Dictionary = scene_tools.add_node({\n\t\t"projectPath": project_path,\n\t\t"scenePath": "res://scenes/Test.tscn",\n\t\t"nodeType": "NavigationRegion2D",\n\t\t"nodeName": "Walkable",\n\t\t"parentNodePath": ".",\n\t\t"properties": {"navigation_polygon": {"_type": "NavigationPolygon"}}\n\t})\n\tif not nav_result.get("ok", false):\n\t\t_fail("add_node NavigationRegion2D failed: %s" % JSON.stringify(nav_result))\n\t\treturn\n\tvar tree_result: Dictionary = scene_tools.add_node({\n\t\t"projectPath": project_path,\n\t\t"scenePath": "res://scenes/Test.tscn",\n\t\t"nodeType": "AnimationTree",\n\t\t"nodeName": "Tree",\n\t\t"parentNodePath": ".",\n\t\t"properties": {\n\t\t\t"anim_player": {"_type": "NodePath", "path": "../TestNode"},\n\t\t\t"tree_root": {"_type": "AnimationNodeStateMachine"}\n\t\t}\n\t})\n\tif not tree_result.get("ok", false):\n\t\t_fail("add_node AnimationTree failed: %s" % JSON.stringify(tree_result))\n\t\treturn\n\n\tvar loaded := load("res://scenes/Test.tscn") as PackedScene\n\tif loaded == null:\n\t\t_fail("failed to reload saved scene")\n\t\treturn\n\n\tvar instance := loaded.instantiate()\n\tvar node := instance.get_node_or_null("TestNode") as Node2D\n\tif node == null:\n\t\t_fail("saved node missing")\n\t\treturn\n\n\tif node.position != Vector2(300, 400):\n\t\t_fail("position mismatch: %s" % node.position)\n\t\treturn\n\tif node.scale != Vector2(2, 2):\n\t\t_fail("scale mismatch: %s" % node.scale)\n\t\treturn\n\tvar walkable := instance.get_node_or_null("Walkable") as NavigationRegion2D\n\tif walkable == null or walkable.navigation_polygon == null:\n\t\t_fail("the tagged NavigationPolygon should be built and saved")\n\t\treturn\n\tvar tree := instance.get_node_or_null("Tree") as AnimationTree\n\tif tree == null or not (tree.tree_root is AnimationNodeStateMachine) or tree.anim_player != NodePath("../TestNode"):\n\t\t_fail("the tagged AnimationNodeStateMachine and NodePath should be built and saved")\n\t\treturn\n\n\tprint(JSON.stringify({"ok": true, "position": [node.position.x, node.position.y], "scale": [node.scale.x, node.scale.y]}))\n\tinstance.queue_free()\n\tquit(0)\n`,
+      `extends SceneTree\n\nfunc _fail(message: String) -> void:\n\tprinterr(message)\n\tquit(1)\n\nfunc _init() -> void:\n\tvar root := Node2D.new()\n\troot.name = "Root"\n\tvar packed := PackedScene.new()\n\tif packed.pack(root) != OK:\n\t\t_fail("failed to pack root scene")\n\t\treturn\n\tif ResourceSaver.save(packed, "res://scenes/Test.tscn") != OK:\n\t\t_fail("failed to save root scene")\n\t\treturn\n\troot.queue_free()\n\n\tvar scene_tools = load("res://addons/gdharness_editor/tools/scene_tools.gd").new()\n\tvar project_path := ProjectSettings.globalize_path("res://")\n\n\tvar add_result: Dictionary = scene_tools.add_node({\n\t\t"projectPath": project_path,\n\t\t"scenePath": "res://scenes/Test.tscn",\n\t\t"nodeType": "Node2D",\n\t\t"nodeName": "TestNode",\n\t\t"parentNodePath": ".",\n\t\t"properties": {\n\t\t\t"position": {"x": 100, "y": 200},\n\t\t\t"scale": {"_type": "Vector2", "x": 2, "y": 2}\n\t\t}\n\t})\n\tif not add_result.get("ok", false):\n\t\t_fail("add_node failed: %s" % JSON.stringify(add_result))\n\t\treturn\n\n\tvar set_result: Dictionary = scene_tools.set_node_properties({\n\t\t"projectPath": project_path,\n\t\t"scenePath": "res://scenes/Test.tscn",\n\t\t"nodePath": "TestNode",\n\t\t"properties": {\n\t\t\t"position": [300, 400]\n\t\t}\n\t})\n\tif not set_result.get("ok", false):\n\t\t_fail("set_node_properties failed: %s" % JSON.stringify(set_result))\n\t\treturn\n\n\t# A tagged Resource class is built on the spot, which is how a region gets its polygon and a\n\t# tree its root without a wrapper tool per node class.\n\tvar nav_result: Dictionary = scene_tools.add_node({\n\t\t"projectPath": project_path,\n\t\t"scenePath": "res://scenes/Test.tscn",\n\t\t"nodeType": "NavigationRegion2D",\n\t\t"nodeName": "Walkable",\n\t\t"parentNodePath": ".",\n\t\t"properties": {"navigation_polygon": {"_type": "NavigationPolygon"}}\n\t})\n\tif not nav_result.get("ok", false):\n\t\t_fail("add_node NavigationRegion2D failed: %s" % JSON.stringify(nav_result))\n\t\treturn\n\tvar tree_result: Dictionary = scene_tools.add_node({\n\t\t"projectPath": project_path,\n\t\t"scenePath": "res://scenes/Test.tscn",\n\t\t"nodeType": "AnimationTree",\n\t\t"nodeName": "Tree",\n\t\t"parentNodePath": ".",\n\t\t"properties": {\n\t\t\t"anim_player": {"_type": "NodePath", "path": "../TestNode"},\n\t\t\t"tree_root": {"_type": "AnimationNodeStateMachine"}\n\t\t}\n\t})\n\tif not tree_result.get("ok", false):\n\t\t_fail("add_node AnimationTree failed: %s" % JSON.stringify(tree_result))\n\t\treturn\n\n\tvar loaded := load("res://scenes/Test.tscn") as PackedScene\n\tif loaded == null:\n\t\t_fail("failed to reload saved scene")\n\t\treturn\n\n\tvar instance := loaded.instantiate()\n\tvar node := instance.get_node_or_null("TestNode") as Node2D\n\tif node == null:\n\t\t_fail("saved node missing")\n\t\treturn\n\n\tif node.position != Vector2(300, 400):\n\t\t_fail("position mismatch: %s" % node.position)\n\t\treturn\n\tif node.scale != Vector2(2, 2):\n\t\t_fail("scale mismatch: %s" % node.scale)\n\t\treturn\n\tvar walkable := instance.get_node_or_null("Walkable") as NavigationRegion2D\n\tif walkable == null or walkable.navigation_polygon == null:\n\t\t_fail("the tagged NavigationPolygon should be built and saved")\n\t\treturn\n\tvar tree := instance.get_node_or_null("Tree") as AnimationTree\n\tif tree == null or not (tree.tree_root is AnimationNodeStateMachine) or tree.anim_player != NodePath("../TestNode"):\n\t\t_fail("the tagged AnimationNodeStateMachine and NodePath should be built and saved")\n\t\treturn\n\n\tprint(JSON.stringify({"ok": true, "position": [node.position.x, node.position.y], "scale": [node.scale.x, node.scale.y]}))\n\tinstance.queue_free()\n\tquit(0)\n`,
     );
 
     const run = spawnSync(
@@ -1359,6 +1359,77 @@ async function testGdUnitRunner(): Promise<void> {
   }
 }
 
+/**
+ * The CLI against a real engine: setup puts the addons in and turns the editor ones on,
+ * runtime on and off registers and removes the autoload, and doctor says so, then says what
+ * is wrong once something is.
+ */
+function testCommandLineSetup(): void {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('command line setup regression skipped (Godot not found)');
+    return;
+  }
+
+  const projectDir = mkdtempSync(join(tmpdir(), 'gdharness-cli-'));
+  const cli = (...cliArgs: string[]): { status: number | null; stdout: string; stderr: string } => {
+    const run = spawnSync(process.execPath, ['build/cli.js', ...cliArgs], {
+      encoding: 'utf8',
+      timeout: 180000,
+      env: { ...process.env, GODOT_PATH: godotPath },
+    });
+    return { status: run.status, stdout: run.stdout, stderr: run.stderr };
+  };
+  try {
+    writeFileSync(
+      join(projectDir, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="CliRegression"\n',
+    );
+
+    const before = cli('doctor', projectDir);
+    assert.equal(before.status, 1, `doctor fails a bare project:\n${before.stdout}${before.stderr}`);
+    assert.match(before.stdout, /addons\/gdharness_editor is not installed/);
+
+    const setup = cli('setup', projectDir);
+    assert.equal(setup.status, 0, `setup:\n${setup.stdout}${setup.stderr}`);
+    for (const addon of ['gdharness_editor', 'gdharness_runtime', 'auto_reload']) {
+      assert.ok(existsSync(join(projectDir, 'addons', addon, '.gdharness-version')), `${addon} is installed`);
+    }
+    const written = readFileSync(join(projectDir, 'project.godot'), 'utf8');
+    assert.match(written, /res:\/\/addons\/gdharness_editor\/plugin\.cfg/, 'the editor plugin is enabled');
+    assert.match(written, /res:\/\/addons\/auto_reload\/plugin\.cfg/, 'and auto reload');
+    assert.doesNotMatch(written, /GdharnessRuntime/, 'the runtime autoload is off unless asked for');
+
+    const healthy = cli('doctor', projectDir, '--json');
+    assert.equal(healthy.status, 0, `doctor after setup:\n${healthy.stdout}${healthy.stderr}`);
+    const report: unknown = JSON.parse(healthy.stdout);
+    assert.deepEqual(get(report, 'problems'), []);
+    assert.equal(get(report, 'runtimeAutoload'), false);
+
+    assert.equal(cli('runtime', 'on', projectDir).status, 0);
+    assert.match(
+      readFileSync(join(projectDir, 'project.godot'), 'utf8'),
+      /GdharnessRuntime="\*res:\/\/addons\/gdharness_runtime\/runtime_autoload\.gd"/,
+    );
+    assert.equal(get(JSON.parse(cli('doctor', projectDir, '--json').stdout), 'runtimeAutoload'), true);
+    assert.equal(cli('runtime', 'off', projectDir).status, 0);
+    assert.doesNotMatch(readFileSync(join(projectDir, 'project.godot'), 'utf8'), /GdharnessRuntime/);
+
+    // A class written after the cache was built is what doctor is for.
+    writeFileSync(join(projectDir, 'late.gd'), 'class_name LateArrival\nextends Node\n');
+    const stale = cli('doctor', projectDir);
+    assert.equal(stale.status, 1, 'a stale class cache is a problem');
+    assert.match(stale.stdout, /class cache: stale for LateArrival/);
+    assert.equal(cli('classes', projectDir).status, 0);
+    assert.equal(cli('doctor', projectDir).status, 0, 'and rebuilding it is the cure');
+  } finally {
+    rmSync(projectDir, { recursive: true, force: true });
+  }
+}
+
 async function main(): Promise<void> {
   testStaleDisconnectRegression();
   testSceneToolsVectorRegression();
@@ -1366,6 +1437,7 @@ async function main(): Promise<void> {
   testHeadlessFollowsTheDisplay();
   await testParametersReachTheEngine();
   await testGdUnitRunner();
+  testCommandLineSetup();
 
   testProjectGodotMultilineValues();
   testProjectGodotResistsPrototypeKeys();

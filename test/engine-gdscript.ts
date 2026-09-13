@@ -604,24 +604,24 @@ function testOperations(godotPath: string, projectDir: string): void {
   // written is read back through the same file rather than trusted from the answer.
   const plugins = operation('list_plugins', {});
   assert.equal(get(plugins, 'addons_directory_exists'), true);
-  assert.equal(get(named(get(plugins, 'plugins'), 'godot_mcp_editor'), 'enabled'), false);
+  assert.equal(get(named(get(plugins, 'plugins'), 'gdharness_editor'), 'enabled'), false);
   assert.equal(get(plugins, 'enabled_count'), 0);
 
-  assert.equal(get(operation('enable_plugin', { plugin_name: 'godot_mcp_editor' }), 'action'), 'enabled');
+  assert.equal(get(operation('enable_plugin', { plugin_name: 'gdharness_editor' }), 'action'), 'enabled');
   assert.match(
     readFileSync(join(projectDir, 'project.godot'), 'utf8'),
-    /^enabled=PackedStringArray\("res:\/\/addons\/godot_mcp_editor\/plugin\.cfg"\)$/m,
+    /^enabled=PackedStringArray\("res:\/\/addons\/gdharness_editor\/plugin\.cfg"\)$/m,
     'the enabled list should be written as the expression the editor reads, not a quoted string',
   );
   const enabled = operation('list_plugins', {});
-  assert.equal(get(named(get(enabled, 'plugins'), 'godot_mcp_editor'), 'enabled'), true);
+  assert.equal(get(named(get(enabled, 'plugins'), 'gdharness_editor'), 'enabled'), true);
   assert.equal(get(enabled, 'enabled_count'), 1);
   assert.equal(
-    get(operation('enable_plugin', { plugin_name: 'godot_mcp_editor' }), 'action'),
+    get(operation('enable_plugin', { plugin_name: 'gdharness_editor' }), 'action'),
     'already_enabled',
   );
 
-  assert.equal(get(operation('disable_plugin', { plugin_name: 'godot_mcp_editor' }), 'action'), 'disabled');
+  assert.equal(get(operation('disable_plugin', { plugin_name: 'gdharness_editor' }), 'action'), 'disabled');
   assert.equal(get(operation('list_plugins', {}), 'enabled_count'), 0);
 
   // Input actions, which are stored as an engine expression rather than as JSON.

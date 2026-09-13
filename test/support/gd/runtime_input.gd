@@ -4,8 +4,8 @@ extends SceneTree
 ## engine does with the event rather than on what the command echoes back. The input module
 ## needs no tree for any of this, so it is built on a bare node and never joins one.
 
-const InputCommands = preload("res://addons/godot_mcp_runtime/runtime_input.gd")
-const Values = preload("res://addons/godot_mcp_runtime/runtime_values.gd")
+const InputCommands = preload("res://addons/gdharness_runtime/runtime_input.gd")
+const Values = preload("res://addons/gdharness_runtime/runtime_values.gd")
 
 var failures: Array[String] = []
 

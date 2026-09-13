@@ -5,7 +5,7 @@ extends SceneTree
 ## bytes arrive, refuses what it cannot read, drops a client that hangs up without the engine
 ## printing an error about it, and takes its announcement down with it.
 
-const Runtime = preload("res://addons/godot_mcp_runtime/mcp_runtime_autoload.gd")
+const Runtime = preload("res://addons/gdharness_runtime/runtime_autoload.gd")
 const DEADLINE_MSEC: int = 5000
 
 var failures: Array[String] = []

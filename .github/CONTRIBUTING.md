@@ -87,7 +87,8 @@ whose executables are world-writable. Releases are cut by CI.
 ├── src/
 │   ├── server.ts          # The MCP server: validation and dispatch of every tool
 │   ├── server-entry.ts    # Its entry point, bundled as build/index.js
-│   ├── cli.ts             # CLI entry point
+│   ├── cli.ts             # CLI entry point: the server by default, setup, doctor, runtime, classes
+│   ├── setup.ts           # What the CLI does to a project
 │   ├── tool-definitions.ts# Tool schemas
 │   ├── headless.ts        # Running one operation of the engine script
 │   ├── godot-path.ts      # Finding the engine
@@ -101,7 +102,6 @@ whose executables are world-writable. Releases are cut by CI.
 │   ├── godot-bridge.ts    # Bridge transport to the editor addon
 │   ├── lsp_client.ts      # Godot language server client
 │   ├── dap_client.ts      # Godot debug adapter client
-│   ├── visualizer/        # Browser visualiser, bundled into the release
 │   └── godot/             # GDScript, copied verbatim into the bundle
 │       ├── addons/        # The Godot addons: editor, runtime, auto reload
 │       └── operations/    # Headless engine operations
