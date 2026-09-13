@@ -675,7 +675,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'editor_run',
     description:
-      'Runs the project. start keeps it running and collecting output until editor_stop, windowed where there is a display and headless where there is not, unless headless says otherwise; the runtime tools need a window. check boots it headless for a few frames, waits for it to quit, and answers with the verdict: whether it came up, and every error and warning it printed on the way.',
+      'Runs the project. start keeps it running and collecting output until editor_stop, windowed where there is a display and headless where there is not, unless headless says otherwise; only runtime_capture needs the window. check boots it headless for a few frames, waits for it to quit, and answers with the verdict: whether it came up, and every error and warning it printed on the way.',
     parameters: {
       projectPath: PROJECT_PATH,
       scene: { type: 'string', description: 'A scene to run instead of the main scene.' },
@@ -862,7 +862,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'runtime_input',
     description:
-      'Input to the running game: a whole click on a Control named by path, or a raw action, key, mouse button or mouse motion. click works headless too; the rest need a window.',
+      'Input to the running game: a whole click on a Control named by path, or a raw action, key, mouse button or mouse motion. All of it works headless, where the window is 64 by 64 and the GUI only takes what is inside it.',
     parameters: {
       projectPath: RUNNING_PROJECT_PATH,
       nodePath: { type: 'string', description: 'click: the Control to click, at its centre.' },
