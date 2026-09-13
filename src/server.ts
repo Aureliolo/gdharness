@@ -26,11 +26,12 @@ import {
 import { staleClassNames } from './class-cache.js';
 import { GodotDAPClient, handleDAPTool } from './dap_client.js';
 import { dictionary, emptyRecord } from './dictionary.js';
-import { errorMessage } from './errors.js';
+import { errorMessage, Refusal } from './errors.js';
 import { GameLog } from './game-log.js';
 import { type GodotBridge, getDefaultBridge } from './godot-bridge.js';
 import { GodotLocator } from './godot-path.js';
 import { type HeadlessOutcome, runOperation } from './headless.js';
+import { defectReport, feedbackNotice } from './issues.js';
 import { parseJUnit, type TestReport } from './junit.js';
 import { editorArguments, envValue, resolveHeadless, runArguments } from './launch.js';
 import { GodotLSPClient, handleLSPTool } from './lsp_client.js';
@@ -66,6 +67,15 @@ import { UpdateCheck } from './update-check.js';
  * scrolled well out of anybody's reading, and a session shorter than it gets exactly one.
  */
 const UPDATE_NOTICE_EVERY = 500;
+
+/**
+ * How many answers pass between one invitation to report a gap and the next.
+ *
+ * Only whoever is driving the harness can notice that a tool which should exist does not, and
+ * they will not think to say so unasked. Often enough that a long session is asked more than
+ * once, rare enough that it is never the reason an answer got longer.
+ */
+const FEEDBACK_NOTICE_EVERY = 250;
 
 // execFile, not exec: no shell means no quoting, and no quoting means no way to escape out
 // of it. Every argument below is an array element, so a path full of backslashes, spaces or
@@ -237,6 +247,7 @@ class GodotServer {
   private readonly updates = new UpdateCheck(SERVER_VERSION);
   private noticedUpdate = false;
   private callsSinceNotice = 0;
+  private callsSinceFeedback = 0;
   private lspClient: GodotLSPClient | null = null;
   private dapClient: GodotDAPClient | null = null;
   private bridgeStartupError: string | null = null;
@@ -439,9 +450,32 @@ class GodotServer {
       // Started here and not waited for: whatever it learns lands on a later call, and a
       // registry that never answers costs this one nothing.
       this.updates.refresh();
-      const answer = await this.dispatch(spec.name, checked.op ?? '', args);
-      return this.withUpdateNotice(answer);
+      const answer = await this.answered(spec.name, checked.op ?? '', args);
+      return this.withFeedbackNotice(this.withUpdateNotice(answer));
     });
+  }
+
+  /**
+   * The dispatch, and what a throw out of it answers with.
+   *
+   * Nearly every failure a tool anticipates is returned rather than thrown, and the few that are
+   * thrown say so by their type, so anything else arriving here is a state the code does not
+   * model. That is worth saying plainly: an exception message handed straight to an agent reads
+   * as something it did wrong, and it will spend three turns rephrasing a call that was right the
+   * first time. A {@link Refusal} passes through as the caller's answer, and an `McpError` as
+   * itself, since the protocol has its own place for "no such tool".
+   */
+  private async answered(tool: string, op: string, args: OperationParams): Promise<ToolResponse> {
+    try {
+      return await this.dispatch(tool, op, args);
+    } catch (error) {
+      if (error instanceof McpError || error instanceof Refusal) {
+        throw error;
+      }
+      const where = op === '' ? tool : `${tool} op=${op}`;
+      console.error(`[SERVER] Unmodelled failure in ${where}:`, error);
+      return { content: [{ type: 'text', text: defectReport(where, error) }], isError: true };
+    }
   }
 
   /**
@@ -484,6 +518,27 @@ class GodotServer {
           ),
         },
       ],
+    };
+  }
+
+  /**
+   * Asks, now and then, for the thing that is missing.
+   *
+   * A gap in the tool surface is invisible from in here: the server answers what it was asked and
+   * never hears about the call somebody wanted to make and could not. The one party that does
+   * know is whatever just worked around it, and it will not volunteer that unprompted. So it is
+   * asked, rarely enough to never be the reason an answer got longer, and told to put it to the
+   * user rather than file anything itself.
+   */
+  private withFeedbackNotice(answer: ToolResponse): ToolResponse {
+    this.callsSinceFeedback += 1;
+    if (this.callsSinceFeedback < FEEDBACK_NOTICE_EVERY) {
+      return answer;
+    }
+    this.callsSinceFeedback = 0;
+    return {
+      ...answer,
+      content: [...answer.content, { type: 'text', text: feedbackNotice() }],
     };
   }
 

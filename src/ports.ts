@@ -7,6 +7,8 @@
  * only ever talk to the default is one that stops working the moment somebody does.
  */
 
+import { Refusal } from './errors.js';
+
 /**
  * The port in this variable, or the fallback when it is unset.
  *
@@ -22,7 +24,7 @@ export function portFromEnv(variable: string, fallback: number): number {
 
   const parsed = Number.parseInt(raw, 10);
   if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535 || String(parsed) !== raw) {
-    throw new Error(`${variable} is "${raw}", not a port between 1 and 65535.`);
+    throw new Refusal(`${variable} is "${raw}", not a port between 1 and 65535.`);
   }
   return parsed;
 }
