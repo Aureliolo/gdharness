@@ -74,6 +74,18 @@ export interface Harness {
   readonly container: string;
   readonly shape: Shape;
   /**
+   * A directory under home that says this harness is on the machine, for a project-scoped one
+   * that this project has not used yet. Read only: nothing is ever written here. Set only where
+   * the harness documents the path, because a wrong marker offers somebody a harness they do not
+   * have.
+   */
+  readonly home?: string;
+  /**
+   * The harness's own directory beside its config, for one whose config file sits at the root of
+   * the project or of the home directory and therefore has no parent of its own to look for.
+   */
+  readonly marker?: string;
+  /**
    * Its own command for adding a server, for a harness whose config this cannot safely write.
    * Present means the file is TOML or YAML, or its exact shape is not documented.
    */
@@ -126,6 +138,8 @@ export const HARNESSES: readonly Harness[] = [
     file: '.mcp.json',
     container: 'mcpServers',
     shape: 'plain',
+    home: '.claude',
+    marker: '.claude',
   },
   {
     id: 'copilot-cli',
@@ -134,6 +148,7 @@ export const HARNESSES: readonly Harness[] = [
     file: '.mcp.json',
     container: 'mcpServers',
     shape: 'plain',
+    home: '.copilot',
   },
   {
     id: 'qoder',
@@ -142,6 +157,8 @@ export const HARNESSES: readonly Harness[] = [
     file: '.mcp.json',
     container: 'mcpServers',
     shape: 'plain',
+    home: '.qoder',
+    marker: '.qoder',
   },
   {
     id: 'command-code',
@@ -150,6 +167,7 @@ export const HARNESSES: readonly Harness[] = [
     file: '.mcp.json',
     container: 'mcpServers',
     shape: 'plain',
+    home: '.commandcode',
   },
   {
     id: 'cursor',
@@ -158,6 +176,7 @@ export const HARNESSES: readonly Harness[] = [
     file: join('.cursor', 'mcp.json'),
     container: 'mcpServers',
     shape: 'plain',
+    home: '.cursor',
   },
   {
     id: 'vscode',
@@ -166,6 +185,7 @@ export const HARNESSES: readonly Harness[] = [
     file: join('.vscode', 'mcp.json'),
     container: 'servers',
     shape: 'typed',
+    home: '.vscode',
   },
   {
     id: 'opencode',
@@ -174,6 +194,8 @@ export const HARNESSES: readonly Harness[] = [
     file: 'opencode.json',
     container: 'mcp',
     shape: 'opencode',
+    home: join('.config', 'opencode'),
+    marker: '.opencode',
   },
   {
     id: 'junie',
@@ -182,6 +204,7 @@ export const HARNESSES: readonly Harness[] = [
     file: join('.junie', 'mcp', 'mcp.json'),
     container: 'mcpServers',
     shape: 'plain',
+    home: '.junie',
   },
   {
     id: 'kiro',
@@ -190,6 +213,7 @@ export const HARNESSES: readonly Harness[] = [
     file: join('.kiro', 'settings', 'mcp.json'),
     container: 'mcpServers',
     shape: 'plain',
+    home: '.kiro',
   },
   {
     id: 'gemini',
@@ -198,6 +222,7 @@ export const HARNESSES: readonly Harness[] = [
     file: join('.gemini', 'settings.json'),
     container: 'mcpServers',
     shape: 'plain',
+    home: '.gemini',
   },
   {
     id: 'roo',
@@ -222,6 +247,7 @@ export const HARNESSES: readonly Harness[] = [
     file: join('.amazonq', 'mcp.json'),
     container: 'mcpServers',
     shape: 'plain',
+    home: join('.aws', 'amazonq'),
   },
   {
     id: 'zed',
@@ -239,6 +265,7 @@ export const HARNESSES: readonly Harness[] = [
     file: join('.amp', 'settings.json'),
     container: 'amp.mcpServers',
     shape: 'plain',
+    home: join('.config', 'amp'),
   },
   {
     id: 'warp',
@@ -247,6 +274,7 @@ export const HARNESSES: readonly Harness[] = [
     file: join('.warp', '.mcp.json'),
     container: 'mcpServers',
     shape: 'plain',
+    home: '.warp',
   },
   {
     id: 'trae',
@@ -255,6 +283,7 @@ export const HARNESSES: readonly Harness[] = [
     file: join('.trae', 'mcp.json'),
     container: 'mcpServers',
     shape: 'plain',
+    home: '.trae',
   },
   {
     id: 'factory',
@@ -263,6 +292,7 @@ export const HARNESSES: readonly Harness[] = [
     file: join('.factory', 'mcp.json'),
     container: 'mcpServers',
     shape: 'typed',
+    home: '.factory',
   },
   {
     id: 'tabnine',
@@ -271,6 +301,7 @@ export const HARNESSES: readonly Harness[] = [
     file: join('.tabnine', 'mcp_servers.json'),
     container: 'mcpServers',
     shape: 'plain',
+    home: '.tabnine',
   },
   {
     id: 'firebender',
@@ -287,6 +318,7 @@ export const HARNESSES: readonly Harness[] = [
     file: join('.pi', 'mcp.json'),
     container: 'mcpServers',
     shape: 'plain',
+    home: '.pi',
   },
 
   // Project-scoped, but the file is TOML or YAML, so it is printed rather than written.
@@ -306,6 +338,7 @@ export const HARNESSES: readonly Harness[] = [
     file: 'vtcode.toml',
     container: 'mcp.servers',
     shape: 'plain',
+    marker: '.vtcode',
     snippet: (launch) => tomlServer(launch, 'mcp.servers'),
   },
   {
@@ -346,6 +379,7 @@ export const HARNESSES: readonly Harness[] = [
     file: join('.cline', 'data', 'settings', 'cline_mcp_settings.json'),
     container: 'mcpServers',
     shape: 'plain',
+    marker: '.cline',
   },
   {
     id: 'goose',
@@ -555,9 +589,64 @@ export function detectGlobal(projectPath: string): readonly Harness[] {
   return HARNESSES.filter((harness) => harness.scope === 'home' && present(harness, projectPath));
 }
 
+/**
+ * Whether this harness is set up where its config would go.
+ *
+ * The config file counts, and so does the harness's own directory, because one that has been
+ * opened has a directory before anything writes a server into it. The directory only counts when
+ * it belongs to the harness: for a config that sits at the project root, the parent is the project
+ * itself, and taking that as evidence would find every harness in every project.
+ */
 function present(harness: Harness, projectPath: string): boolean {
   const path = configPath(harness, projectPath);
-  return existsSync(path) || existsSync(dirname(path));
+  if (existsSync(path)) {
+    return true;
+  }
+  const root = harness.scope === 'project' ? projectPath : homedir();
+  const own = dirname(path);
+  if (own !== root && existsSync(own)) {
+    return true;
+  }
+  return harness.marker !== undefined && existsSync(join(root, harness.marker));
+}
+
+/** Why a harness is worth asking about. */
+type Reason =
+  /** Already configured in this project, so writing it is finishing what is there. */
+  | 'configured'
+  /** On this machine, but this project has not used it yet. */
+  | 'installed'
+  /** On this machine, and has nowhere but the machine to be configured. */
+  | 'machine-wide';
+
+export interface Candidate {
+  readonly harness: Harness;
+  readonly reason: Reason;
+}
+
+/**
+ * Every harness worth offering, and why.
+ *
+ * Detection by project config alone misses the case somebody actually has: the harness is
+ * installed, this project is new, and there is nothing to find yet. Its home directory answers
+ * that, and is only ever read.
+ */
+export function candidates(projectPath: string): readonly Candidate[] {
+  const found: Candidate[] = [];
+  for (const harness of HARNESSES) {
+    if (harness.scope === 'home') {
+      if (present(harness, projectPath)) {
+        found.push({ harness, reason: 'machine-wide' });
+      }
+      continue;
+    }
+    if (present(harness, projectPath)) {
+      found.push({ harness, reason: 'configured' });
+    } else if (harness.home !== undefined && existsSync(join(homedir(), harness.home))) {
+      found.push({ harness, reason: 'installed' });
+    }
+  }
+  return found;
 }
 
 /** One file, and every harness that reads it. */
