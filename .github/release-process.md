@@ -4,12 +4,13 @@
 
 Run **Prepare release** from the Actions tab and pick `patch`, `minor` or `major`, or type an
 exact version. It raises the version in `package.json`, `server.json` and the README on a
-`release/vX.Y.Z` branch, with a signed commit, and prints the `gh pr create` line to open the
-pull request with.
+`release/vX.Y.Z` branch, with a signed commit, opens the pull request, and links it in the run
+summary.
 
-Open that pull request and merge it. Everything after it is automatic. The pull request is
-yours to open rather than the workflow's because one opened with the job token starts no
-workflow: nothing would check it and the merge would stay blocked.
+That pull request's checks are held at the start. GitHub creates the runs for anything a
+workflow opens with the job token but does not start them, so the merge box carries a banner
+offering **Approve workflows to run**. Click it, then merge once the checks are green.
+Everything after the merge is automatic.
 
 Nobody types a version twice and nobody creates a tag by hand, which is the release step that
 cannot be checked afterwards and the one most likely to be done from the wrong branch.
