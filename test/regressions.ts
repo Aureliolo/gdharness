@@ -14,7 +14,7 @@ import {
 } from 'node:fs';
 import { createServer, type Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 import { staleClassNames } from '../src/class-cache.js';
@@ -25,6 +25,7 @@ import { editorArguments, envValue, resolveHeadless, runArguments } from '../src
 import { GodotLSPClient } from '../src/lsp_client.js';
 import { isWithinRoot, resolveWithinProject } from '../src/paths.js';
 import { parseProjectGodot } from '../src/resources.js';
+import { discoverRuntimes, runtimeDirectories } from '../src/runtime-client.js';
 import { HEADLESS_OPERATIONS } from '../src/server.js';
 import { addonMismatch } from '../src/server-version.js';
 import { TOOL_SPECS } from '../src/tool-definitions.js';
@@ -1321,6 +1322,56 @@ function testVersionOrdering(): void {
 }
 
 /**
+ * A game is found wherever it announced itself, not only where this server would have.
+ *
+ * The two sides derive the path the same way and do not share an environment, which is the whole
+ * bug: a game is started by the editor and inherits its variables, not the server's. Measured on
+ * Windows, where an editor opened without TMP or TEMP set put its games in the Windows directory
+ * while the server watched the user's and answered that no game was running.
+ */
+function testAGameIsFoundWhereverItAnnounced(): void {
+  const withOverride = runtimeDirectories({ GDHARNESS_RUNTIME_DIR: join(tmpdir(), 'chosen') });
+  assert.equal(withOverride[0], resolve(join(tmpdir(), 'chosen')), 'an explicit directory leads');
+
+  const directories = runtimeDirectories({});
+  assert.ok(directories.length > 1, 'and the places a differently started editor would put one follow');
+  assert.equal(new Set(directories).size, directories.length, 'each listed once');
+  for (const directory of directories) {
+    assert.equal(basename(directory), 'gdharness', `${directory} is a gdharness directory`);
+  }
+
+  const root = mkdtempSync(join(tmpdir(), 'gdharness-announce-'));
+  try {
+    const elsewhere = join(root, 'elsewhere', 'gdharness');
+    mkdirSync(elsewhere, { recursive: true });
+    writeFileSync(
+      join(elsewhere, `runtime-${process.pid}.json`),
+      JSON.stringify({
+        protocol: 2,
+        pid: process.pid,
+        port: 51_234,
+        address: '127.0.0.1',
+        project: { name: 'Fixture', path: root },
+      }),
+      'utf8',
+    );
+
+    const empty = join(root, 'empty', 'gdharness');
+    assert.deepEqual(discoverRuntimes([empty]), [], 'the directory this server watches holds nothing');
+    const found = discoverRuntimes([empty, elsewhere]);
+    assert.equal(found.length, 1, 'and the one the editor actually used is read as well');
+    assert.equal(found[0]?.port, 51_234);
+    assert.equal(
+      discoverRuntimes([elsewhere, elsewhere]).length,
+      1,
+      'a game announced once is one game however many directories are searched',
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+/**
  * A version mismatch sends the reader at whichever half is actually behind.
  *
  * Both directions happen, and the second is the one that got told to do the wrong thing: upgrading
@@ -2199,6 +2250,7 @@ async function main(): Promise<void> {
   testProjectDefaultsToTheWorkingDirectory();
   testVersionOrdering();
   testTheStaleHalfIsNamedCorrectly();
+  testAGameIsFoundWhereverItAnnounced();
   await testParametersReachTheEngine();
   await testGdUnitRunner();
   testCommandLineSetup();
