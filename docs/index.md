@@ -21,7 +21,7 @@ runtime_inspect { "op": "rect", "nodePath": "/root/Hall/Ledger/BuyButton" }
 ## Install
 
 ```bash from the project directory
-npx -y gdharness@{{version}} setup . --runtime
+npx -y gdharness@{{version}} setup .
 ```
 
 Addons in, editor plugins on, class list rebuilt, and the server registered with the harnesses

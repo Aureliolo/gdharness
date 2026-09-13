@@ -1518,22 +1518,41 @@ function testCommandLineSetup(): void {
     const written = readFileSync(join(projectDir, 'project.godot'), 'utf8');
     assert.match(written, /res:\/\/addons\/gdharness_editor\/plugin\.cfg/, 'the editor plugin is enabled');
     assert.match(written, /res:\/\/addons\/auto_reload\/plugin\.cfg/, 'and auto reload');
-    assert.doesNotMatch(written, /GdharnessRuntime/, 'the runtime autoload is off unless asked for');
+    assert.match(
+      written,
+      /GdharnessRuntime="\*res:\/\/addons\/gdharness_runtime\/runtime_autoload\.gd"/,
+      'the runtime autoload is registered, in this project and nowhere else',
+    );
+    assert.match(setup.stdout, /gdharness runtime off/, 'and setup says how to take it out of an export');
 
     const healthy = cli('doctor', projectDir, '--json');
     assert.equal(healthy.status, 0, `doctor after setup:\n${healthy.stdout}${healthy.stderr}`);
     const report: unknown = JSON.parse(healthy.stdout);
     assert.deepEqual(get(report, 'problems'), []);
-    assert.equal(get(report, 'runtimeAutoload'), false);
+    assert.equal(get(report, 'runtimeAutoload'), true);
 
+    assert.equal(cli('runtime', 'off', projectDir).status, 0);
+    assert.doesNotMatch(readFileSync(join(projectDir, 'project.godot'), 'utf8'), /GdharnessRuntime/);
+    assert.equal(get(JSON.parse(cli('doctor', projectDir, '--json').stdout), 'runtimeAutoload'), false);
     assert.equal(cli('runtime', 'on', projectDir).status, 0);
     assert.match(
       readFileSync(join(projectDir, 'project.godot'), 'utf8'),
       /GdharnessRuntime="\*res:\/\/addons\/gdharness_runtime\/runtime_autoload\.gd"/,
     );
-    assert.equal(get(JSON.parse(cli('doctor', projectDir, '--json').stdout), 'runtimeAutoload'), true);
-    assert.equal(cli('runtime', 'off', projectDir).status, 0);
-    assert.doesNotMatch(readFileSync(join(projectDir, 'project.godot'), 'utf8'), /GdharnessRuntime/);
+
+    // The opt-out, in its own project, because the flag only means anything on a fresh install.
+    const bare = mkdtempSync(join(tmpdir(), 'gdharness-cli-bare-'));
+    try {
+      writeFileSync(
+        join(bare, 'project.godot'),
+        '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="NoRuntime"\n',
+      );
+      const withoutRuntime = cli('setup', bare, '--no-runtime');
+      assert.equal(withoutRuntime.status, 0, `setup --no-runtime:\n${withoutRuntime.stdout}`);
+      assert.doesNotMatch(readFileSync(join(bare, 'project.godot'), 'utf8'), /GdharnessRuntime/);
+    } finally {
+      rmSync(bare, { recursive: true, force: true });
+    }
 
     // A class written after the cache was built is what doctor is for.
     writeFileSync(join(projectDir, 'late.gd'), 'class_name LateArrival\nextends Node\n');
