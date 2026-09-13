@@ -78,3 +78,14 @@ export function runArguments(options: RunOptions): string[] {
   }
   return args;
 }
+
+/**
+ * The engine's argument list for opening the editor on a project.
+ *
+ * Never `--headless`: this one exists to put an editor in front of a person, and one nobody can
+ * see is not that. Pure for the same reason as the rest of this file, since the editor is
+ * spawned detached and its argv appears in no tool's answer.
+ */
+export function editorArguments(projectPath: string): string[] {
+  return ['-e', '--path', projectPath];
+}
