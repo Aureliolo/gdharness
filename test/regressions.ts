@@ -9,13 +9,12 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
-  realpathSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
 import { createServer, type Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 import { staleClassNames } from '../src/class-cache.js';
@@ -1237,13 +1236,19 @@ function testProjectDefaultsToTheWorkingDirectory(): void {
       [join(process.cwd(), 'build', 'cli.js'), 'doctor', '--json'],
       { encoding: 'utf8', cwd: project, timeout: 60000 },
     );
+    // Parsing at all is half the assertion: a flag taken as the path refuses with a sentence.
+    // The directory it settled on is compared by name rather than in full, because the spelling
+    // of a temporary directory is the platform's business: macOS resolves /var/folders to
+    // /private/var/folders, and a Windows runner reports Temp under an 8.3 short name.
     const report: unknown = JSON.parse(flagged.stdout);
-    // The real path, because the CLI resolves the directory it was run in and on macOS every
-    // /var/folders temporary directory is really /private/var/folders.
     assert.equal(
-      get(report, 'projectPath'),
-      realpathSync.native(project),
+      basename(text(get(report, 'projectPath'))),
+      'game',
       `a flag is not a path: ${flagged.stdout}${flagged.stderr}`,
+    );
+    assert.ok(
+      asArray(get(report, 'problems')).length > 0,
+      'and the report is about that project, not an empty answer',
     );
 
     const nowhere = cli(elsewhere);
