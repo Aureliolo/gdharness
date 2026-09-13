@@ -3,6 +3,7 @@ import { readFile, realpath } from 'node:fs/promises';
 import { createConnection, type Socket } from 'node:net';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { Refusal } from './errors.js';
 import { FrameReader, frame, OversizedStreamError } from './framing.js';
 import { isWithinRoot, resolveWithinProject } from './paths.js';
 import { portFromEnv } from './ports.js';
@@ -197,7 +198,7 @@ export class GodotLSPClient {
     await this.ensureConnected();
 
     if (!this.socket) {
-      throw new Error('Not connected to Godot LSP');
+      throw new Refusal('Not connected to Godot LSP');
     }
 
     this.requestId += 1;
@@ -244,7 +245,7 @@ export class GodotLSPClient {
 
   private sendNotification(method: string, params?: unknown): void {
     if (!this.connected || !this.socket) {
-      throw new Error('Not connected to Godot LSP');
+      throw new Refusal('Not connected to Godot LSP');
     }
 
     const payload = {
@@ -572,7 +573,7 @@ async function resolveLSPPaths(
   try {
     projectPath = await realpath(requestedProjectPath);
   } catch {
-    throw new Error(`Project path does not exist: ${requestedProjectPath}`);
+    throw new Refusal(`Project path does not exist: ${requestedProjectPath}`);
   }
 
   // The project's own reader rather than a plain resolve, so `res://scripts/a.gd` names the same
@@ -580,18 +581,18 @@ async function resolveLSPPaths(
   // resolving it literally made a path with `res:` in the middle and reported the file missing.
   const contained = resolveWithinProject(projectPath, scriptPathValue);
   if (!contained.ok) {
-    throw new Error(contained.reason);
+    throw new Refusal(contained.reason);
   }
 
   let scriptPath: string;
   try {
     scriptPath = await realpath(contained.absolutePath);
   } catch {
-    throw new Error(`Script file does not exist: ${contained.absolutePath}`);
+    throw new Refusal(`Script file does not exist: ${contained.absolutePath}`);
   }
 
   if (!isWithinRoot(projectPath, scriptPath)) {
-    throw new Error('scriptPath resolves outside the project root boundary.');
+    throw new Refusal('scriptPath resolves outside the project root boundary.');
   }
 
   return { projectPath, scriptPath };
@@ -604,7 +605,7 @@ export async function handleLSPTool(
 ): Promise<{ content: { type: string; text: string }[] }> {
   try {
     if (!args || typeof args !== 'object') {
-      throw new Error('Tool arguments must be an object.');
+      throw new Refusal('Tool arguments must be an object.');
     }
 
     const parsedArgs = args as JsonRecord;
@@ -612,11 +613,11 @@ export async function handleLSPTool(
     const scriptPathValue = parsedArgs['scriptPath'];
 
     if (typeof projectPathValue !== 'string' || projectPathValue.length === 0) {
-      throw new Error('Missing required argument: projectPath');
+      throw new Refusal('Missing required argument: projectPath');
     }
 
     if (typeof scriptPathValue !== 'string' || scriptPathValue.length === 0) {
-      throw new Error('Missing required argument: scriptPath');
+      throw new Refusal('Missing required argument: scriptPath');
     }
 
     const { projectPath, scriptPath } = await resolveLSPPaths(projectPathValue, scriptPathValue);
@@ -635,7 +636,7 @@ export async function handleLSPTool(
         const character = Number(parsedArgs['character']);
 
         if (!Number.isFinite(line) || !Number.isFinite(character)) {
-          throw new Error('Arguments line and character must be numbers.');
+          throw new Refusal('Arguments line and character must be numbers.');
         }
 
         const completions = await client.getCompletions(scriptPath, content, line, character);
@@ -647,7 +648,7 @@ export async function handleLSPTool(
         const character = Number(parsedArgs['character']);
 
         if (!Number.isFinite(line) || !Number.isFinite(character)) {
-          throw new Error('Arguments line and character must be numbers.');
+          throw new Refusal('Arguments line and character must be numbers.');
         }
 
         const hover = await client.getHover(scriptPath, content, line, character);

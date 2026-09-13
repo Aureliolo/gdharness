@@ -3,7 +3,7 @@ import { EventEmitter } from 'node:events';
 import http from 'node:http';
 import type { RawData } from 'ws';
 import { WebSocket, WebSocketServer } from 'ws';
-import { errorMessage, toError } from './errors.js';
+import { errorMessage, Refusal, toError } from './errors.js';
 import { portFromEnv } from './ports.js';
 
 const DEFAULT_PORT = 6505;
@@ -458,7 +458,7 @@ export class GodotBridge extends EventEmitter {
 
   private sendMessage(message: OutgoingMessage): void {
     if (this.socket?.readyState !== WebSocket.OPEN) {
-      throw new Error('Godot is not connected');
+      throw new Refusal('Godot is not connected');
     }
 
     this.socket.send(JSON.stringify(message));
