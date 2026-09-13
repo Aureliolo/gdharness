@@ -16,7 +16,7 @@ your-project/
 |-- .mcp.json                  Claude Code, Copilot CLI, Qoder, Command Code
 |-- .cursor/mcp.json           Cursor, and one file per other harness
 |-- .agents/skills/gdharness/  the skill, read by nine of the harnesses
-`-- .claude/skills/gdharness/  a copy for each of the three that do not
+`-- .claude/skills/gdharness/  a copy for each of the three that do not read it
 
 ~/                             touched only when you say so
 `-- .codex/config.toml         Codex, and the others with no project config
@@ -29,24 +29,18 @@ The entry written into each config is the same everywhere: `npx -y gdharness@{{v
 
 ## How setup decides what to write
 
-```text
-                       gdharness setup .
-                              |
-              +---------------+---------------+
-      harnesses named                    none named
-      by flag                                 |
-              |                     +---------+---------+
-      write exactly those,     a terminal            a pipe, CI,
-      no questions             to ask                or an agent
-              |                     |                     |
-              |            ask about each one    write the ones this
-              |            found here or on      project already uses,
-              |            this machine          name the rest with the
-              |                     |            flag that writes them
-              +---------------------+---------------------+
-                              |
-                    write the skill, unless --no-skill
-```
+Three cases, decided in this order. The `.` in each is the project: `setup` takes the directory to
+install into, and `.` is the one you are standing in.
+
+| What you ran                  | What it writes                                                                                |
+| ----------------------------- | --------------------------------------------------------------------------------------------- |
+| `setup . --cursor --vscode`   | Exactly the harnesses named, and no questions                                                 |
+| `setup .` at a terminal       | Asks about each harness found here or on this machine, one at a time                          |
+| `setup .` with nothing to ask | The harnesses this project already uses, and it names the rest with the flag that writes each |
+
+The third case is a pipe, a CI job or an agent: there is nobody to answer, so it writes what the
+project already committed to and can never hang waiting. Every case ends by writing the skill,
+unless `--no-skill`.
 
 **Nothing outside the project is written without a flag or a typed yes.** A harness with no
 project-level config at all is then written where it lives, because that is its limitation rather
@@ -57,8 +51,6 @@ and whether it is on this machine at all. The second reads the harness's own dir
 and never writes there.
 
 ## Every harness
-
-{{harnesses}}
 
 All but two are written for you, whatever the format, because a block to paste is a step that gets
 skipped or pasted into the wrong file.
@@ -74,6 +66,8 @@ servers under is not, and an invented key writes a file that parses, loads and d
 print the block instead.
 
 Four harnesses read the same `.mcp.json`, so it is written once and all four are named.
+
+{{harnesses}}
 
 ## Where the skill goes
 

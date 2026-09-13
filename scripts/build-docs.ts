@@ -33,18 +33,28 @@ const TOOL_COUNT = String(TOOL_SPECS.length);
  * does not know or miss one it does.
  */
 function renderHarnesses(): string {
-  const rows = HARNESSES.map((harness) => {
-    const file = `\`${displayPath(harness, 'linux')}\``;
-    const how = harness.snippet === undefined ? 'written for you' : 'prints the block to paste';
-    const scope = harness.scope === 'project' ? 'project' : 'machine-wide';
-    const skills =
-      harness.skills === undefined ? '`.agents/skills`' : `\`${harness.skills.dir.replaceAll('\\', '/')}\``;
-    return `| ${harness.name} | \`--${harness.id}\` | ${file} | ${scope} | ${how} | ${skills} |`;
-  });
+  // Three columns, and scope is the heading above each table rather than a fourth. A column whose
+  // every cell reads the same is a column that costs width and says nothing, and with six of them
+  // the flags and the paths were breaking across lines in the middle of a word.
+  const table = (scope: Harness['scope']): string[] => [
+    '| Harness | Flag | Config |',
+    '| --- | --- | --- |',
+    ...HARNESSES.filter((harness) => harness.scope === scope).map(
+      (harness) => `| ${harness.name} | \`--${harness.id}\` | \`${displayPath(harness, 'linux')}\` |`,
+    ),
+  ];
+  const project = HARNESSES.filter((harness) => harness.scope === 'project').length;
   return [
-    '| Harness | Flag | Config | Scope | How | Skill |',
-    '| --- | --- | --- | --- | --- | --- |',
-    ...rows,
+    `### Inside the project (${project})`,
+    '',
+    ...table('project'),
+    '',
+    `### No project-level config (${HARNESSES.length - project})`,
+    '',
+    'Setting one of these up writes in your home directory and affects every project you open with',
+    'it, so it happens only when you name it by flag or answer yes at a terminal.',
+    '',
+    ...table('home'),
   ].join('\n');
 }
 

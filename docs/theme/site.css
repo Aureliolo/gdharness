@@ -301,7 +301,12 @@ code {
   border: 1px solid var(--rule-soft);
   border-radius: 3px;
   padding: 0.08em 0.34em;
-  word-break: break-word;
+  /*
+   * Never broken across lines. A flag or a path split in the middle of a word reads as two
+   * different things, and in a narrow table cell every one of them was being split. A cell too
+   * narrow for its content is the table's problem to solve, not the word's.
+   */
+  white-space: nowrap;
 }
 
 /*
@@ -350,7 +355,12 @@ figure > pre {
 
 pre code {
   font-size: 13px;
-  line-height: 1.62;
+  /*
+   * Tight, because a diagram drawn out of characters only reads as one when the lines are close
+   * enough for its verticals to join up. At the 1.62 prose uses, a tree came apart into a column
+   * of loose pipes with daylight between them.
+   */
+  line-height: 1.4;
   background: none;
   border: 0;
   padding: 0;
