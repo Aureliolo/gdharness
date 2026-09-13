@@ -31,15 +31,18 @@ things worth reporting:
 ## Releases
 
 Every release is built in CI on Linux from a signed commit on `main`, with a frozen
-lockfile. Each one ships the archive, a SHA-256 sidecar and an SPDX SBOM, and carries two
-Sigstore attestations: build provenance, and the SBOM bound to the archive. From 0.2.4 the
-attestations are also attached to the release as `gdharness-<version>.intoto.jsonl`, so they
-verify without GitHub's API. Releases are immutable and the `v*` tags cannot be moved.
+lockfile, by `release-build.yml`. Each one ships the archive, a SHA-256 sidecar and an SPDX
+SBOM, and carries two Sigstore attestations: build provenance, and the SBOM bound to the
+archive. From 0.2.4 the build and the signing both run in that one reusable workflow, which is
+SLSA Build Level 3, and the attestations are also attached to the release as
+`gdharness-<version>.intoto.jsonl`, so they verify without GitHub's API. Releases are immutable
+and the `v*` tags cannot be moved.
 
 ```bash
-gh attestation verify gdharness-<version>.tgz --repo Aureliolo/gdharness
-gh attestation verify gdharness-<version>.tgz --repo Aureliolo/gdharness --predicate-type https://spdx.dev/Document
-gh attestation verify gdharness-<version>.tgz --repo Aureliolo/gdharness --bundle gdharness-<version>.intoto.jsonl
+signer=Aureliolo/gdharness/.github/workflows/release-build.yml
+gh attestation verify gdharness-<version>.tgz --repo Aureliolo/gdharness --signer-workflow "$signer"
+gh attestation verify gdharness-<version>.tgz --repo Aureliolo/gdharness --signer-workflow "$signer" --predicate-type https://spdx.dev/Document
+gh attestation verify gdharness-<version>.tgz --repo Aureliolo/gdharness --signer-workflow "$signer" --bundle gdharness-<version>.intoto.jsonl
 sha256sum --check gdharness-<version>.tgz.sha256
 ```
 

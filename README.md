@@ -146,12 +146,13 @@ string for a path full of quotes or backslashes to escape out of.
 
 **What the release is.** Each one carries an SPDX SBOM and a Sigstore build-provenance
 attestation over the archive, its checksum and the SBOM. The signing is keyless, so there is no
-signing key anywhere, including in CI, and it runs in a reusable workflow isolated from the
-build, which is [SLSA Build Level 3](docs/release-process.md#slsa). Published releases are
-immutable. Verify one before you install it:
+signing key anywhere, including in CI, and the whole build runs in one reusable workflow whose
+identity the certificate carries, which is [SLSA Build Level 3](docs/release-process.md#slsa)
+from 0.2.4. Published releases are immutable. Verify one before you install it:
 
 ```bash
-gh attestation verify gdharness-X.Y.Z.tgz --repo Aureliolo/gdharness
+gh attestation verify gdharness-X.Y.Z.tgz --repo Aureliolo/gdharness \
+  --signer-workflow Aureliolo/gdharness/.github/workflows/release-build.yml
 ```
 
 **What goes into it.** Every dependency is an exact version and every GitHub action is pinned by

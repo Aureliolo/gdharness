@@ -18,298 +18,25 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build_test:
-    name: build_test
+  # Building, testing, the SBOM and the signing all happen in release-build.yml, so the
+  # identity Sigstore certifies is those build steps rather than this file's; see there.
+  build:
+    name: build
     if: github.repository == 'Aureliolo/gdharness'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
     permissions:
-      contents: read # Reads the tagged source it builds.
-    outputs:
-      version: ${{ steps.version.outputs.version }}
-
-    steps:
-      - name: Checkout tag
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Verify release commit is on main
-        shell: bash
-        run: |
-          set -euo pipefail
-          git fetch --no-tags "https://github.com/${GITHUB_REPOSITORY}.git" main:refs/remotes/origin/main
-          release_commit="$(git rev-parse "${GITHUB_SHA}^{commit}")"
-          if ! git merge-base --is-ancestor "${release_commit}" origin/main; then
-            echo "Release commit ${release_commit} is not reachable from origin/main." >&2
-            exit 1
-          fi
-
-      # The branch ruleset requires signed commits on main, so this only fails if that
-      # ruleset was bypassed or removed. That is exactly when you want to hear about it.
-      - name: Verify the release commit is signed
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          verified="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}" --jq '.commit.verification.verified')"
-          reason="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}" --jq '.commit.verification.reason')"
-          if [[ "${verified}" != "true" ]]; then
-            echo "Release commit ${GITHUB_SHA} carries no valid signature: ${reason}" >&2
-            exit 1
-          fi
-
-      # No package cache here on purpose: a cache entry can be written by any job on any branch,
-      # including a pull request from a fork, and a release build is the last place to accept
-      # bytes whose provenance is a cache key. The saving is seconds; the exposure is the artifact
-      # everybody downloads.
-      - name: Install Bun
-        uses: ./.github/actions/install-bun # zizmor: ignore[self-repository]
-
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-
-      - name: Verify tag and metadata versions
-        shell: bash
-        run: |
-          set -euo pipefail
-          package_version="$(bun -e "console.log((await Bun.file('package.json').json()).version)")"
-          server_version="$(bun -e "console.log((await Bun.file('server.json').json()).version)")"
-          expected_tag="v${package_version}"
-
-          if [[ "${GITHUB_REF_NAME}" != "${expected_tag}" ]]; then
-            echo "Tag ${GITHUB_REF_NAME} does not match package version ${package_version}." >&2
-            exit 1
-          fi
-
-          if [[ "${server_version}" != "${package_version}" ]]; then
-            echo "server.json version ${server_version} does not match package version ${package_version}." >&2
-            exit 1
-          fi
-
-          echo "version=${package_version}" >> "${GITHUB_OUTPUT}"
-        id: version
-
-      - name: Build
-        run: bun run build
-
-      - name: Typecheck
-        run: bun run typecheck
-
-      - name: Runtime regression tests
-        run: bun run test:ci
-
-      - name: Bridge integration test
-        run: bun run test:integration
-
-      - name: Metadata consistency tests
-        run: bun run test:metadata
-
-      - name: Packaging test
-        run: bun run test:packaging
-
-      - name: Audit production dependencies
-        run: bun audit --prod
-
-      - name: Verify clean source and build release assets
-        shell: bash
-        # The version arrives through the environment rather than through ${{ }} inside the
-        # script: an expansion is pasted in before bash ever sees the line, so anything that
-        # reaches that output becomes shell rather than a string.
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          set -euo pipefail
-
-          if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
-            echo "Tests or build steps modified the checked-out release source." >&2
-            git status --short >&2
-            exit 1
-          fi
-
-          rm -rf dist
-          bun run release:pack
-
-          version="${VERSION}"
-          archive="dist/gdharness-${version}.tgz"
-          checksum="${archive}.sha256"
-
-          if [[ ! -s "${archive}" || ! -s "${checksum}" ]]; then
-            echo "Release archive or checksum is missing or empty." >&2
-            exit 1
-          fi
-
-          expected_assets="$(printf '%s\n' "${archive}" "${checksum}")"
-          actual_assets="$(find dist -maxdepth 1 -type f -print | sort)"
-          if [[ "${actual_assets}" != "${expected_assets}" ]]; then
-            echo "dist contains stale or unexpected release assets." >&2
-            printf '%s\n' "${actual_assets}" >&2
-            exit 1
-          fi
-
-          (cd dist && sha256sum --check "$(basename "${checksum}")")
-
-          {
-            echo "archive=${archive}"
-            echo "checksum=${checksum}"
-          } >> "${GITHUB_OUTPUT}"
-        id: assets
-
-      - name: Upload release assets
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: release-assets
-          path: |
-            ${{ steps.assets.outputs.archive }}
-            ${{ steps.assets.outputs.checksum }}
-          if-no-files-found: error
-          retention-days: 1
-
-  # The archive is a bundle, and nothing inside a bundle names what went into it, so scanning
-  # the archive alone lists nothing. What it was built from is in the lockfile at the tag; syft
-  # reads that beside the unpacked archive, and the SBOM carries every shipped file with its
-  # digest and every production package the bundler had. Then the job checks the SBOM says so,
-  # because an SBOM that lists nothing looks exactly like a passing step.
-  sbom:
-    name: sbom
-    if: github.repository == 'Aureliolo/gdharness'
-    needs: build_test
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    permissions:
-      contents: read # Reads the lockfile at the tag.
-
-    steps:
-      - name: Checkout tag
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Download release assets
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: release-assets
-          path: dist
-
-      - name: Verify downloaded release assets
-        shell: bash
-        env:
-          VERSION: ${{ needs.build_test.outputs.version }}
-        run: |
-          set -euo pipefail
-          archive="dist/gdharness-${VERSION}.tgz"
-          checksum="${archive}.sha256"
-
-          expected_assets="$(printf '%s\n' "${archive}" "${checksum}")"
-          actual_assets="$(find dist -maxdepth 1 -type f -print | sort)"
-          if [[ "${actual_assets}" != "${expected_assets}" ]]; then
-            echo "Downloaded artifact contains unexpected release assets." >&2
-            printf '%s\n' "${actual_assets}" >&2
-            exit 1
-          fi
-
-          (cd dist && sha256sum --check "$(basename "${checksum}")")
-
-      - name: Lay out what syft reads
-        shell: bash
-        env:
-          VERSION: ${{ needs.build_test.outputs.version }}
-        run: |
-          set -euo pipefail
-          mkdir sbom-input
-          tar -xzf "dist/gdharness-${VERSION}.tgz" -C sbom-input
-          cp bun.lock sbom-input/bun.lock
-
-      - name: Generate SBOM
-        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
-        env:
-          SYFT_SOURCE_NAME: gdharness
-          SYFT_SOURCE_VERSION: ${{ needs.build_test.outputs.version }}
-        with:
-          path: sbom-input
-          config: .github/syft.yaml
-          format: spdx-json
-          output-file: dist/gdharness-${{ needs.build_test.outputs.version }}.spdx.json
-          upload-artifact: false
-          upload-release-assets: false
-
-      - name: Check the SBOM lists what ships
-        shell: bash
-        env:
-          VERSION: ${{ needs.build_test.outputs.version }}
-        run: |
-          set -euo pipefail
-          archive="dist/gdharness-${VERSION}.tgz"
-          sbom="dist/gdharness-${VERSION}.spdx.json"
-          failed=0
-
-          # Every member of the archive, with a SHA-256; and nothing with a SHA-256 that is not
-          # a member, bar the lockfile the dependencies were read from.
-          tar -tzf "${archive}" | sed '/\/$/d' | sort > members.txt
-          jq -r '(.files // [])[] | select(any(.checksums[]; .algorithm == "SHA256")) | .fileName' "${sbom}" \
-            | sed '/^bun\.lock$/d' | sort > listed.txt
-          if ! diff -u members.txt listed.txt; then
-            echo "The SBOM's files are not the archive's members." >&2
-            failed=1
-          fi
-
-          # The product itself and every production dependency the bundler was given, at the
-          # exact versions package.json pins.
-          {
-            echo "gdharness ${VERSION}"
-            jq -r '.dependencies | to_entries[] | "\(.key) \(.value)"' package.json
-          } | while read -r name version; do
-            if ! jq -e --arg n "${name}" --arg v "${version}" \
-                'any(.packages[]; .name == $n and .versionInfo == $v)' "${sbom}" >/dev/null; then
-              echo "The SBOM does not list ${name} ${version}." >&2
-              exit 1
-            fi
-          done || failed=1
-
-          rm -f members.txt listed.txt
-          exit "${failed}"
-
-      - name: Upload the bundle
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: release-bundle
-          path: |
-            dist/gdharness-${{ needs.build_test.outputs.version }}.tgz
-            dist/gdharness-${{ needs.build_test.outputs.version }}.tgz.sha256
-            dist/gdharness-${{ needs.build_test.outputs.version }}.spdx.json
-          if-no-files-found: error
-          retention-days: 1
-
-  attest:
-    name: attest
-    if: github.repository == 'Aureliolo/gdharness'
-    needs: [build_test, sbom]
-    # Handed to a workflow of its own so the identity Sigstore signs is not the build's.
-    # That separation is what SLSA Build L3 asks for.
-    permissions:
-      id-token: write # Sigstore signs against this token.
-      attestations: write # Writes the provenance onto the repository.
+      contents: read # The build reads the tagged source.
+      id-token: write # Only release-build.yml's attest job uses it, to sign.
+      attestations: write # Only release-build.yml's attest job uses it, to store the provenance.
     # zizmor wants `$/...` here. actionlint 1.7.12 rejects that spelling as neither of the two
     # forms GitHub documents, and this path only runs on a tag, where a syntax error is a failed
     # release rather than a failed check. The two linters disagree; the one that can be verified
     # against a real parser wins. Worth revisiting when actionlint knows the shorthand.
-    uses: ./.github/workflows/attest.yml # zizmor: ignore[self-repository]
-    with:
-      artifact: release-bundle
-      archive: dist/gdharness-${{ needs.build_test.outputs.version }}.tgz
-      sbom: dist/gdharness-${{ needs.build_test.outputs.version }}.spdx.json
-      bundle: gdharness-${{ needs.build_test.outputs.version }}.intoto.jsonl
-      subjects: |
-        dist/gdharness-${{ needs.build_test.outputs.version }}.tgz
-        dist/gdharness-${{ needs.build_test.outputs.version }}.tgz.sha256
-        dist/gdharness-${{ needs.build_test.outputs.version }}.spdx.json
+    uses: ./.github/workflows/release-build.yml # zizmor: ignore[self-repository]
 
   publish:
     name: publish
     if: github.repository == 'Aureliolo/gdharness'
-    needs: [build_test, attest]
+    needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
@@ -333,22 +60,23 @@ jobs:
       - name: Verify the checksum once more
         shell: bash
         env:
-          VERSION: ${{ needs.build_test.outputs.version }}
+          VERSION: ${{ needs.build.outputs.version }}
         run: |
           set -euo pipefail
           (cd dist && sha256sum --check "gdharness-${VERSION}.tgz.sha256")
 
       # The file that ships has to verify the way a user will run it, from the file alone, and
-      # has to name attest.yml at this tag; otherwise it only looks like proof.
+      # has to name release-build.yml at this tag as the builder; otherwise it only looks like
+      # proof.
       - name: Verify the attestations that will ship
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ needs.build_test.outputs.version }}
+          VERSION: ${{ needs.build.outputs.version }}
         run: |
           set -euo pipefail
           bundle="dist/gdharness-${VERSION}.intoto.jsonl"
-          signer="${GITHUB_REPOSITORY}/.github/workflows/attest.yml"
+          signer="${GITHUB_REPOSITORY}/.github/workflows/release-build.yml"
           for subject in "gdharness-${VERSION}.tgz" "gdharness-${VERSION}.tgz.sha256" "gdharness-${VERSION}.spdx.json"; do
             gh attestation verify "dist/${subject}" --bundle "${bundle}" \
               --repo "${GITHUB_REPOSITORY}" --signer-workflow "${signer}" \
@@ -363,7 +91,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          VERSION: ${{ needs.build_test.outputs.version }}
+          VERSION: ${{ needs.build.outputs.version }}
         run: |
           set -euo pipefail
           gh release create "${GITHUB_REF_NAME}" \

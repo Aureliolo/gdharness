@@ -18,7 +18,7 @@ cannot be checked afterwards and the one most likely to be done from the wrong b
 
 `release-tag.yml` sees a new version on `main` with no matching tag, creates `vX.Y.Z`, and
 dispatches `release.yml` on it, since a tag it makes with the job token would otherwise start
-nothing. `release.yml` runs four jobs in order:
+nothing. `release.yml` calls `release-build.yml`, which runs the first three jobs, then publishes:
 
 1. **build_test** refuses to go on unless the tag matches `package.json` and `server.json`, the
    release commit is reachable from `main`, and that commit carries a valid signature. Then it
@@ -30,11 +30,11 @@ nothing. `release.yml` runs four jobs in order:
    and `package.json`, because an SBOM that lists nothing looks exactly like a passing step
    (`.github/syft.yaml` says what syft reads).
 3. **attest** signs the archive, its checksum and the SBOM through Sigstore, attests the SBOM
-   against the archive, and gathers both signed attestations into one JSON Lines file. It is a
-   separate reusable workflow on purpose: see below.
-4. **publish** rechecks the checksum, verifies that file against every subject the way a user
-   would (from the file, naming `attest.yml` at the tag), and creates the GitHub Release with
-   all four files.
+   against the archive, and gathers both signed attestations into one JSON Lines file. It is the
+   only job with a token that can sign: see below.
+4. **publish**, in `release.yml`, rechecks the checksum, verifies that file against every
+   subject the way a user would (from the file, naming `release-build.yml` at the tag as the
+   builder), and creates the GitHub Release with all four files.
 
 ## What a release carries
 
@@ -56,22 +56,35 @@ gh release download "v${VERSION}" --repo Aureliolo/gdharness
 sha256sum -c "gdharness-${VERSION}.tgz.sha256"
 gh attestation verify "gdharness-${VERSION}.tgz" --repo Aureliolo/gdharness \
   --bundle "gdharness-${VERSION}.intoto.jsonl" \
-  --signer-workflow Aureliolo/gdharness/.github/workflows/attest.yml \
-  --source-ref "refs/tags/v${VERSION}"
+  --signer-workflow Aureliolo/gdharness/.github/workflows/release-build.yml \
+  --source-ref "refs/tags/v${VERSION}" \
+  --deny-self-hosted-runners
 ```
 
 The checksum proves the bytes match what the release lists. The attestation proves GitHub
-Actions built those bytes from this repository, in `attest.yml` at that tag, which the
-checksum alone cannot: a checksum generated alongside a tampered archive agrees with it
-perfectly. Drop `--bundle` to read the same attestations from GitHub's API instead.
+Actions built those bytes from this repository, by the steps in `release-build.yml` at that
+tag, on a GitHub-hosted runner, which the checksum alone cannot: a checksum generated
+alongside a tampered archive agrees with it perfectly. Drop `--bundle` to read the same
+attestations from GitHub's API instead. Releases up to 0.2.3 were signed by `attest.yml`, which
+only signed; give that name to `--signer-workflow` for them, and no `--bundle`.
 
 ## SLSA
 
-The attestation runs in `attest.yml`, a reusable workflow the release calls, rather than inline
-in the release job. That separation is the difference between SLSA Build Level 2 and Level 3:
-signing happens where the build cannot reach it, so the identity in the certificate names that
-workflow. A verifier can then require the provenance to have come from it, which is a claim
-worth something; "some job in this repository signed it" is not.
+SLSA Build Level 3 on GitHub Actions means the build runs inside a reusable workflow, so the
+identity in the Sigstore certificate names the build steps rather than whatever workflow
+called them. `release-build.yml` is that workflow: it checks out the tag, builds, tests, packs,
+writes the SBOM and signs, and `release.yml` only decides when that happens and publishes the
+result. A verifier that passes `--signer-workflow .../release-build.yml` is requiring those
+exact steps, at the tag the provenance names, and no caller can change them.
+
+Inside it, the build and the signing are separate jobs. `id-token: write` puts the signing
+token within reach of every step in the job that holds it, and the build runs `bun install`,
+so only the attest job, which downloads the finished bytes and signs them, is given that
+permission. Runners are GitHub-hosted and ephemeral, and signing is keyless: there is no key
+anywhere to take.
+
+Up to 0.2.3 the archive was built in `release.yml` and only the signing ran in a reusable
+workflow, which names the signer but not the build; those releases are SLSA Build Level 2.
 
 ## When a release job fails
 
