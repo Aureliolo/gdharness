@@ -26,6 +26,7 @@ import { GodotLSPClient } from '../src/lsp_client.js';
 import { isWithinRoot, resolveWithinProject } from '../src/paths.js';
 import { parseProjectGodot } from '../src/resources.js';
 import { HEADLESS_OPERATIONS } from '../src/server.js';
+import { addonMismatch } from '../src/server-version.js';
 import { TOOL_SPECS } from '../src/tool-definitions.js';
 import { cacheFile, isNewer } from '../src/update-check.js';
 import { asArray, asNumber, get, text } from './support/json.js';
@@ -1320,6 +1321,31 @@ function testVersionOrdering(): void {
 }
 
 /**
+ * A version mismatch sends the reader at whichever half is actually behind.
+ *
+ * Both directions happen, and the second is the one that got told to do the wrong thing: upgrading
+ * a project mid-session writes the new addon while the harness carries on spawning the server it
+ * already started, so the editor holds the newer half and restarting it widens the gap.
+ */
+function testTheStaleHalfIsNamedCorrectly(): void {
+  assert.equal(addonMismatch('0.5.0', '0.5.0'), undefined, 'agreeing versions say nothing');
+
+  const behind = addonMismatch('0.4.2', '0.5.0') ?? '';
+  assert.match(behind, /editor_launch restart/, 'an old editor is restarted');
+  assert.doesNotMatch(behind, /reconnect/, 'and reconnecting the server would not help it');
+
+  const ahead = addonMismatch('0.6.0', '0.5.0') ?? '';
+  assert.match(ahead, /reconnect/, 'an old server is reconnected');
+  assert.doesNotMatch(ahead, /editor_launch restart/, 'and restarting the editor would widen it');
+  assert.match(ahead, /0\.6\.0/, 'naming the version the harness should be spawning');
+
+  const unversioned = addonMismatch('', '0.5.0') ?? '';
+  assert.match(unversioned, /before versions were reported/, 'a pre-0.4.0 addon is named as one');
+  assert.match(unversioned, /editor_launch restart/, 'and it is the old half by definition');
+  assert.equal(addonMismatch(undefined, '0.5.0'), unversioned, 'so is a bridge reporting nothing');
+}
+
+/**
  * The update notice reaches the agent, once, and says what to do about it.
  *
  * Driven off a seeded cache rather than the registry: the point is the answer a tool carries, and
@@ -2172,6 +2198,7 @@ async function main(): Promise<void> {
   testStaleClassesAreReadFromDisk();
   testProjectDefaultsToTheWorkingDirectory();
   testVersionOrdering();
+  testTheStaleHalfIsNamedCorrectly();
   await testParametersReachTheEngine();
   await testGdUnitRunner();
   testCommandLineSetup();
