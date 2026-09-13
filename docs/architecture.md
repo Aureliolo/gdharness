@@ -72,10 +72,10 @@ Four harnesses read the same `.mcp.json`, so it is written once and all four are
 `.agents/skills/<name>/SKILL.md` is the cross-tool convention, and the reason there is one skill
 rather than an integration per harness.
 
-| | |
-| --- | --- |
+|                        |                                                                                                               |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------- |
 | Reads `.agents/skills` | Codex, which looks nowhere else, plus Cursor, VS Code, Copilot, Gemini CLI, opencode, Junie, Windsurf, Hermes |
-| Needs its own copy | Claude Code `.claude/skills`, Kiro `.kiro/skills`, Cline `.cline/skills` |
+| Needs its own copy     | Claude Code `.claude/skills`, Kiro `.kiro/skills`, Cline `.cline/skills`                                      |
 
 A harness that does read the shared directory still gets its own copy when this project already
 keeps skills there, because that is where its author will look.

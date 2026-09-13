@@ -49,7 +49,7 @@
     "test:metadata": "bun run build && bun test/metadata-consistency.ts && bun test/version-bump.ts",
     "test:version-bump": "bun test/version-bump.ts",
     "test:packaging": "bun run release:pack && bun test/packaging-consistency.ts",
-    "ci": "bun run build && bun run typecheck && bun run test:ci",
+    "ci": "bun run build && bun run typecheck && bun run format:check && bun run lint && bun run test:ci",
     "watch": "tsc --watch",
     "pack": "bun run release:pack",
     "release:pack": "bun run build && bun scripts/pack-release.ts",
