@@ -28,12 +28,13 @@ import { GodotDAPClient, handleDAPTool } from './dap_client.js';
 import { godotCandidates, resolveHomeDirectory } from './detection.js';
 import { dictionary, emptyRecord } from './dictionary.js';
 import { errorMessage } from './errors.js';
+import { GameLog } from './game-log.js';
 import { type GodotBridge, getDefaultBridge } from './godot-bridge.js';
 import { envValue, resolveHeadless, runArguments } from './launch.js';
 import { GodotLSPClient, handleLSPTool } from './lsp_client.js';
 import { resolveWithinProject } from './paths.js';
 import { getPrompt, listPrompts } from './prompts.js';
-import { setupResourceHandlers } from './resources.js';
+import { parseProjectGodot, setupResourceHandlers } from './resources.js';
 import { chooseRuntime, discoverRuntimes, runtimeRequest } from './runtime-client.js';
 import type {
   GodotProcess,
@@ -74,6 +75,12 @@ const PATH_SOLUTIONS = [
   'Give the path relative to the project, such as "scenes/main.tscn" or "res://scenes/main.tscn"',
   'Point projectPath at the project the file belongs to',
 ];
+
+/** Whether project.godot names a scene for the game to start in. */
+function hasMainScene(projectFile: string): boolean {
+  const scene = parseProjectGodot(readFileSync(projectFile, 'utf8'))['application']?.['run/main_scene'];
+  return typeof scene === 'string' && scene !== '';
+}
 
 /**
  * Main server class for the Godot MCP server
@@ -1079,11 +1086,11 @@ class GodotServer {
       case 'editor_launch':
         return await this.handleLaunchEditor(args);
       case 'editor_run':
-        return await this.handleRunProject(args);
+        return await this.handleRunProject(args, op);
       case 'editor_stop':
         return this.handleStopProject();
       case 'editor_output':
-        return this.handleGetDebugOutput();
+        return this.handleGetDebugOutput(args);
       case 'editor_status':
         return await this.handleEditorStatus();
       case 'editor_rescan':
@@ -1305,8 +1312,7 @@ class GodotServer {
     }
   }
 
-  private async handleRunProject(rawArgs: unknown) {
-    // Normalize parameters to camelCase
+  private async handleRunProject(rawArgs: unknown, op = 'start'): Promise<ToolResponse> {
     const args = this.normalizeParameters(rawArgs);
     const projectPath = readString(args, 'projectPath');
     const scene = readString(args, 'scene');
@@ -1345,6 +1351,25 @@ class GodotServer {
         ]);
       }
 
+      // Asked to run a project with no main scene, the engine puts up a modal box and waits for
+      // a click, even headless on Windows: a process on a pipe that never exits.
+      if (!sceneToRun && !hasMainScene(projectFile)) {
+        return this.createErrorResponse('The project sets no main scene, so there is nothing to run.', [
+          'Pass scene to run one scene',
+          'Choose the main scene with project_settings set_main_scene',
+        ]);
+      }
+
+      const godotPath = this.godotPath;
+      if (op === 'check') {
+        return await this.checkBoot(
+          godotPath,
+          projectPath,
+          sceneToRun?.ok ? sceneToRun.relativePath : null,
+          args,
+        );
+      }
+
       // Kill any existing process
       if (this.activeProcess) {
         this.logDebug('Killing existing Godot process before starting a new one');
@@ -1357,51 +1382,21 @@ class GodotServer {
         scene: sceneToRun?.ok ? sceneToRun.relativePath : null,
       });
 
-      this.logDebug(`Running Godot project: ${this.godotPath} ${cmdArgs.join(' ')}`);
-      const child = spawn(this.godotPath, cmdArgs, { stdio: 'pipe' });
-      const output: string[] = [];
-      const errors: string[] = [];
-
-      child.stdout.on('data', (data: Buffer) => {
-        const lines = data.toString().split('\n');
-        output.push(...lines);
-        lines.forEach((line: string) => {
-          if (line.trim()) this.logDebug(`[Godot stdout] ${line}`);
-        });
-      });
-
-      child.stderr.on('data', (data: Buffer) => {
-        const lines = data.toString().split('\n');
-        errors.push(...lines);
-        lines.forEach((line: string) => {
-          if (line.trim()) this.logDebug(`[Godot stderr] ${line}`);
-        });
-      });
-
-      child.on('exit', (code: number | null) => {
-        this.logDebug(`Godot process exited with code ${code ?? 'none'}`);
-        if (this.activeProcess?.process === child) {
+      this.logDebug(`Running Godot project: ${godotPath} ${cmdArgs.join(' ')}`);
+      const started = this.spawnGame(godotPath, cmdArgs);
+      this.activeProcess = started;
+      started.process.on('exit', () => {
+        if (this.activeProcess === started) {
           this.activeProcess = null;
         }
       });
 
-      child.on('error', (err: Error) => {
-        console.error('Failed to start Godot process:', err);
-        if (this.activeProcess?.process === child) {
-          this.activeProcess = null;
-        }
+      return this.jsonTextResponse({
+        started: true,
+        pid: started.process.pid ?? null,
+        arguments: cmdArgs,
+        message: 'Use editor_output for what it prints and editor_stop to end it.',
       });
-
-      this.activeProcess = { process: child, output, errors };
-
-      return {
-        content: [
-          {
-            type: 'text',
-            text: `Godot project started in debug mode. Use editor_output to see output.`,
-          },
-        ],
-      };
     } catch (error) {
       return this.createErrorResponse(`Failed to run Godot project: ${errorMessage(error)}`, [
         'Ensure Godot is installed correctly',
@@ -1545,67 +1540,120 @@ class GodotServer {
     }
   }
 
-  /**
-   * Handle the get_debug_output tool
-   */
-  private handleGetDebugOutput(): ToolResponse {
-    if (!this.activeProcess) {
-      return this.createErrorResponse('No active Godot process.', [
-        'Use editor_run to start a Godot project first',
-        'Check if the Godot process crashed unexpectedly',
-      ]);
-    }
+  /** The engine as a child process, with everything it prints read into a log as it comes. */
+  private spawnGame(godotPath: string, cmdArgs: string[]): GodotProcess {
+    const child = spawn(godotPath, cmdArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const log = new GameLog();
+    const started: GodotProcess = { process: child, log, startedAt: Date.now(), exitCode: null };
 
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(
-            {
-              output: this.activeProcess.output,
-              errors: this.activeProcess.errors,
-            },
-            null,
-            2,
-          ),
-        },
-      ],
-    };
+    child.stdout.on('data', (data: Buffer) => {
+      log.append('stdout', data);
+    });
+    child.stderr.on('data', (data: Buffer) => {
+      log.append('stderr', data);
+    });
+    child.on('exit', (code: number | null) => {
+      this.logDebug(`Godot process exited with code ${code ?? 'none'}`);
+      log.finish();
+      started.exitCode = code ?? -1;
+    });
+    child.on('error', (err: Error) => {
+      console.error('Failed to start Godot process:', err);
+      log.append('stderr', `${err.message}\n`);
+      started.exitCode = -1;
+    });
+    return started;
   }
 
   /**
-   * Handle the stop_project tool
+   * editor_run check: the project booted headless and left to quit after a few frames, which
+   * is what a commit gate does by hand. A project that will not quit is killed and reported as
+   * hung rather than waited on forever.
    */
+  private async checkBoot(
+    godotPath: string,
+    projectPath: string,
+    scene: string | null,
+    args: OperationParams,
+  ): Promise<ToolResponse> {
+    const frames = readPositiveNumber(args, 'frames') ?? 3;
+    const timeoutMs = readPositiveNumber(args, 'timeoutMs') ?? 60000;
+    const cmdArgs = runArguments({ projectPath, headless: true, scene, quitAfter: frames });
+    const run = this.spawnGame(godotPath, cmdArgs);
+
+    const hung = await new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => {
+        run.process.kill();
+        resolve(true);
+      }, timeoutMs);
+      run.process.once('exit', () => {
+        clearTimeout(timer);
+        resolve(false);
+      });
+      run.process.once('error', () => {
+        clearTimeout(timer);
+        resolve(false);
+      });
+    });
+
+    const errors = run.log.count('error');
+    const warnings = run.log.count('warning');
+    return this.jsonTextResponse({
+      booted: !hung && run.exitCode === 0 && errors === 0,
+      hung,
+      exitCode: run.exitCode,
+      durationMs: Date.now() - run.startedAt,
+      frames,
+      errors,
+      warnings,
+      entries: run.log.select({ severity: 'warning', sinceLastCall: false, limit: 200 }).entries,
+    });
+  }
+
+  /** editor_output: the log as entries, filtered the way the caller asked. */
+  private handleGetDebugOutput(args: OperationParams): ToolResponse {
+    if (!this.activeProcess) {
+      return this.createErrorResponse('No game is running. Start one with editor_run.');
+    }
+    const severity = readString(args, 'severity');
+    const selected = this.activeProcess.log.select({
+      severity: severity === 'error' || severity === 'warning' ? severity : 'info',
+      sinceLastCall: readBoolean(args, 'sinceLastCall') ?? false,
+      contains: readNonEmptyString(args, 'contains'),
+      limit: readPositiveNumber(args, 'limit') ?? 200,
+    });
+    return this.jsonTextResponse({
+      running: this.activeProcess.exitCode === null,
+      exitCode: this.activeProcess.exitCode,
+      pid: this.activeProcess.process.pid ?? null,
+      errors: this.activeProcess.log.count('error'),
+      warnings: this.activeProcess.log.count('warning'),
+      clean: this.activeProcess.log.count('error') === 0,
+      omitted: selected.omitted,
+      entries: selected.entries,
+    });
+  }
+
+  /** editor_stop: the game is ended and its verdict answered, the errors and warnings kept. */
   private handleStopProject(): ToolResponse {
     if (!this.activeProcess) {
-      return this.createErrorResponse('No active Godot process to stop.', [
-        'Use editor_run to start a Godot project first',
-        'The process may have already terminated',
-      ]);
+      return this.createErrorResponse('No game is running. Start one with editor_run.');
     }
 
-    this.logDebug('Stopping active Godot process');
-    this.activeProcess.process.kill();
-    const output = this.activeProcess.output;
-    const errors = this.activeProcess.errors;
+    const stopped = this.activeProcess;
     this.activeProcess = null;
+    this.logDebug('Stopping active Godot process');
+    stopped.process.kill();
 
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(
-            {
-              message: 'Godot project stopped',
-              finalOutput: output,
-              finalErrors: errors,
-            },
-            null,
-            2,
-          ),
-        },
-      ],
-    };
+    return this.jsonTextResponse({
+      stopped: true,
+      exitedBeforeStop: stopped.exitCode !== null,
+      exitCode: stopped.exitCode,
+      errors: stopped.log.count('error'),
+      warnings: stopped.log.count('warning'),
+      clean: stopped.log.count('error') === 0,
+      entries: stopped.log.select({ severity: 'warning', sinceLastCall: false, limit: 200 }).entries,
+    });
   }
 
   /**

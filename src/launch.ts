@@ -52,20 +52,27 @@ export interface RunOptions {
   readonly headless: boolean;
   /** The scene as the project names it, `scenes/main.tscn`, or null for the main scene. */
   readonly scene: string | null;
+  /** Frames to run before the engine quits on its own, or null to run until stopped. */
+  readonly quitAfter?: number | null;
 }
 
 /**
- * The engine's argument list for running a project under the debugger.
+ * The engine's argument list for running a project.
  *
- * `-d` is present either way: the opt-out was once written as a shift() off the front of the
- * headless argv, which took -d with it and launched a game the debugger never attached to. The
- * scene goes last as a res:// path rather than the text that arrived, because the engine reads
- * that argument positionally and a value beginning with a dash would be another option to it.
+ * Never `-d`: it turns on the engine's own stdin debugger, which breaks into a `debug>` prompt
+ * on the first script error and, on a process with no stdin, prints that prompt in a loop
+ * forever instead of the error. Without it the error is printed and the game carries on, which
+ * is what the log reads. The scene goes last as a res:// path rather than the text that arrived,
+ * because the engine reads that argument positionally and a value beginning with a dash would be
+ * another option to it.
  */
 export function runArguments(options: RunOptions): string[] {
   const args = options.headless
-    ? ['--headless', '-d', '--path', options.projectPath]
-    : ['-d', '--path', options.projectPath];
+    ? ['--headless', '--path', options.projectPath]
+    : ['--path', options.projectPath];
+  if (options.quitAfter !== undefined && options.quitAfter !== null) {
+    args.push('--quit-after', String(options.quitAfter));
+  }
   if (options.scene !== null) {
     args.push(`res://${options.scene}`);
   }

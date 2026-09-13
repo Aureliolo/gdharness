@@ -78,6 +78,15 @@ tools talk to the editor's language server and debug adapter; the `runtime_*` to
 a running game, whether `editor_run` started it or the editor's play button did. Everything
 else runs the engine headless and needs nothing open.
 
+What a game prints comes back as entries rather than lines: `editor_output` reads the engine's
+`ERROR:`, `SCRIPT ERROR:` and `WARNING:` headlines with the `at:` line and backtrace under each,
+answers with the counts and a `clean` verdict, and filters by severity, by text, or to what has
+arrived since the last call. `editor_run check` boots the project headless for a few frames,
+waits for it to quit and answers whether it came up clean, which is the boot gate a commit hook
+otherwise does by hand with a grep. The engine's own stdin debugger is never turned on: it
+breaks into a prompt on the first script error and, with no terminal to read from, never comes
+back.
+
 A game finds its own port: the runtime addon listens on whatever the operating system hands
 out and announces the port in a file named by its process id, under `$GDHARNESS_RUNTIME_DIR`,
 else `$XDG_RUNTIME_DIR/gdharness`, else the temporary directory. The server reads that, so two
