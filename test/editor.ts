@@ -1032,6 +1032,11 @@ async function testDebugging({ call, refusal, attempt, project }: Editor): Promi
   // worked out on the line above the breakpoint, so a frame that cannot show it as 4 is one
   // that is not really stopped where it says it is.
   const scopes = asArray(get(await call('debug_state', { op: 'variables' }), 'scopes'), 'scopes');
+  assert.deepEqual(
+    scopes.map((scope) => text(get(scope, 'name'))),
+    ['Locals', 'Members', 'Globals'],
+    'all three scopes should have arrived, not the empty list the first ask answers with',
+  );
   const named = scopes.flatMap((scope) => asArray(get(scope, 'variables'), 'variables'));
   const total = named.find((variable) => text(get(variable, 'name')) === 'total');
   assert.ok(total, `total should be in scope at the breakpoint; saw ${JSON.stringify(named)}`);
