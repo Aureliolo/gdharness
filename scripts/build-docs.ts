@@ -105,14 +105,6 @@ const PAGES: readonly Page[] = [
     group: 'Start',
   },
   {
-    source: 'usage.md',
-    path: 'usage.html',
-    text: 'usage.md',
-    title: 'Using it',
-    summary: 'Which tools need the editor, how the game is run and read, and the ports.',
-    group: 'Start',
-  },
-  {
     path: 'tools.html',
     text: 'tools.md',
     title: 'Tools',

@@ -29,15 +29,15 @@ exits when the call is answered.
 
 ## Which tools use which
 
-| Tools                                                                 | Route                                                               |
-| --------------------------------------------------------------------- | ------------------------------------------------------------------- |
-| `scene_*`, `resource_edit`, `editor_rescan`, `editor_launch restart`  | Editor bridge                                                       |
-| `script_diagnostics`, `script_info` except `structure`                | Language server                                                     |
-| `debug_*`, and the console `editor_output` returns                    | Debug adapter                                                       |
-| `runtime_*`                                                           | Runtime                                                             |
-| `project_*`, `editor_classes`, `script_info structure`, `script_edit` | Headless operations                                                 |
-| `editor_run`                                                          | Editor bridge when an editor is connected, otherwise a spawned game |
-| `editor_status`                                                       | All of them, reporting what answers                                 |
+| Tools                                                                 | Route                                                               | Needs running                                   |
+| --------------------------------------------------------------------- | ------------------------------------------------------------------- | ----------------------------------------------- |
+| `scene_*`, `resource_edit`, `editor_rescan`, `editor_launch restart`  | Editor bridge                                                       | The editor, addon enabled                       |
+| `script_diagnostics`, `script_info` except `structure`                | Language server                                                     | The editor                                      |
+| `debug_*`, and the console `editor_output` returns                    | Debug adapter                                                       | A game the editor is playing                    |
+| `runtime_*`                                                           | Runtime                                                             | A game with the runtime autoload                |
+| `project_*`, `editor_classes`, `script_info structure`, `script_edit` | Headless operations                                                 | Nothing                                         |
+| `editor_run`                                                          | Editor bridge when an editor is connected, otherwise a spawned game | Nothing, though the editor changes what it does |
+| `editor_status`                                                       | All of them, reporting what answers                                 | Nothing                                         |
 
 ## Running the game
 
@@ -50,6 +50,14 @@ will not answer for it, and its console is read from the process pipe instead.
 
 `editor_run check` always spawns: headless, a few frames, then quit, answering with the boot
 verdict and every error and warning printed.
+
+`editor_output` answers with entries rather than lines: each `ERROR:`, `SCRIPT ERROR:` and
+`WARNING:` headline with its `at:` line and backtrace, the counts, and a `clean` verdict. It
+filters by severity, by text, and to what has arrived since the last call. A screenshot cannot do
+this job: a non-empty PNG says nothing about whether the game came up clean.
+
+The engine's own stdin debugger is never enabled. It breaks into a prompt on the first script
+error and never returns without a terminal.
 
 ## Finding a running game
 

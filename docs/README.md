@@ -7,8 +7,7 @@ gitignored. The generator is `scripts/build-docs.ts`; the theme is `theme/`.
 | ----------------- | ---------------------------------------------------------------------- |
 | `index.md`        | Front page                                                             |
 | `install.md`      | Install, verify, configure, update                                     |
-| `architecture.md` | What connects to what, and the ports                                   |
-| `usage.md`        | What has to be running for which tools                                 |
+| `architecture.md` | What connects to what, the ports, and what each tool needs running     |
 | `traps.md`        | Godot behaviours that affect use                                       |
 | `tested.md`       | What CI covers and what it does not                                    |
 | `agent.md`        | The install written for an agent. Markdown only, not in the navigation |

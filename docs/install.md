@@ -84,6 +84,21 @@ are easy to miss, because the old version keeps answering until they are done:
 
 `editor_status` confirms: `addonVersion` equal to `serverVersion`, `addonIsStale` false.
 
+## The rest of the CLI
+
+```bash
+gdharness setup /path/to/project              # addons in, editor ones enabled, class list rebuilt
+gdharness setup /path/to/project --no-connect # and write no harness configuration
+gdharness doctor /path/to/project             # exits 1 on a problem and names it
+gdharness classes /path/to/project            # rebuild the class cache from disk
+```
+
+`setup` copies each addon whole and writes the version beside it, so `doctor` can tell an old copy
+from the shipped one. An editor that was already open keeps serving the addon it loaded at startup
+until it is restarted.
+
+Writes to `project.godot` go through the engine, so the file keeps its comments and formatting.
+
 ## The runtime autoload
 
 It is an autoload, so an export ships it unless it is removed. It refuses to serve outside a debug
@@ -138,15 +153,10 @@ tar -xzf "gdharness-${VERSION}.tgz" -C .tools/gdharness --strip-components=1
 node .tools/gdharness/build/cli.js setup /path/to/project
 ```
 
-## Conventions to recommend
+## Before the first change
 
-- After writing a `class_name`, call `project_import refresh_classes` before running the game.
-- Use `editor_run` rather than starting an engine. A game started as its own process has no
-  debugger session.
-- Set breakpoints before running. They register on the adapter, not on a session.
-- Read `editor_output` after a run: entries with backtraces and a `clean` verdict.
-- Measure the running game with `runtime_inspect` and `runtime_invoke` rather than reasoning from
-  the source.
-- One editor at a time. 6005 and 6006 hold one client each.
+Two things cost the most time if nobody tells your agent: call `project_import refresh_classes`
+after writing a `class_name` and before running the game, and use `editor_run` rather than starting
+an engine, because a game started as its own process has no debugger session.
 
-[Traps](traps.html) is the rest of what is worth knowing before the first change.
+[Traps](traps.html) is the rest, and `agent.md` is the same list written for an agent to follow.

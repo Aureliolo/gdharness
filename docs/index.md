@@ -59,8 +59,8 @@ the change, not echoed from the request. Engine stderr comes back under `engine_
 ## Pages
 
 - [Install](install.html): install, verify, configure, update.
-- [How it works](architecture.html): the parts, the connections, the ports.
-- [Using it](usage.html): which tools need the editor, running and reading the game.
+- [How it works](architecture.html): the parts, the connections, the ports, and what each tool
+  needs running.
 - [Tools](tools.html): every tool, op and argument.
 - [Traps](traps.html): five Godot behaviours you still have to know, and the ones handled for you.
 - [What is proven](tested.html): what CI drives against a real engine, and what it does not.
