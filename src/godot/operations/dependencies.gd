@@ -38,8 +38,10 @@ func _init(p_log: Log) -> void:
 # Get dependencies for a resource with circular reference detection
 func get_dependencies(params: Dictionary) -> Dictionary:
 	var resource_path: String = str(params.get("resource_path", ""))
-	var max_depth: int = int(params.get("max_depth", 10))
-	var include_built_in: bool = bool(params.get("include_built_in", false))
+	# No depth, or a depth of zero or less, means the whole chain; the walk stops at cycles.
+	var depth: int = int(params.get("depth", 0))
+	var max_depth: int = depth if depth > 0 else 1000
+	var include_built_in: bool = bool(params.get("include_builtin", false))
 
 	_log.info(
 		(

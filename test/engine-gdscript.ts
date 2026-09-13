@@ -122,8 +122,8 @@ function runScript(
 function assertNoEngineErrors(label: string, output: string): void {
   const errors = output
     .split('\n')
-    .filter((line) => /^(SCRIPT ERROR|USER SCRIPT ERROR|ERROR|USER ERROR):/.test(line.trim()));
-  assert.equal(errors.length, 0, `${label} hit engine errors:\n${errors.join('\n')}`);
+    .filter((line) => /^(USER )?(SCRIPT ERROR|ERROR|WARNING):/.test(line.trim()));
+  assert.equal(errors.length, 0, `${label} hit engine errors or warnings:\n${errors.join('\n')}`);
 }
 
 /** Runs one of the fixture scripts in test/support/gd and returns the JSON it reported. */
@@ -204,7 +204,7 @@ function testDependencyWalk(godotPath: string, projectDir: string): void {
   );
 
   const paramsPath = join(projectDir, 'deps.json');
-  writeFileSync(paramsPath, JSON.stringify({ resource_path: 'res://chain/top.gd', max_depth: 5 }));
+  writeFileSync(paramsPath, JSON.stringify({ resource_path: 'res://chain/top.gd', depth: 5 }));
 
   const run = runScript(godotPath, projectDir, join(projectDir, 'operations', 'godot_operations.gd'), [
     'get_dependencies',
@@ -235,7 +235,7 @@ function testDependencyWalk(godotPath: string, projectDir: string): void {
   );
 
   // A cycle has to be reported rather than walked forever.
-  writeFileSync(paramsPath, JSON.stringify({ resource_path: 'res://chain/ouro.gd', max_depth: 10 }));
+  writeFileSync(paramsPath, JSON.stringify({ resource_path: 'res://chain/ouro.gd' }));
   const cyclic = runScript(godotPath, projectDir, join(projectDir, 'operations', 'godot_operations.gd'), [
     'get_dependencies',
     `@file:${paramsPath}`,
@@ -261,7 +261,7 @@ function testDependencyWalk(godotPath: string, projectDir: string): void {
     join(projectDir, 'chain', 'shipping.gd'),
     'extends Node\n\nconst Helper = preload("res://addons/fixture/helper.gd")\n\n\nfunc _cache() -> Variant:\n\treturn load("res://.godot/fixture_cache.gd")\n',
   );
-  writeFileSync(paramsPath, JSON.stringify({ resource_path: 'res://chain/shipping.gd', max_depth: 3 }));
+  writeFileSync(paramsPath, JSON.stringify({ resource_path: 'res://chain/shipping.gd', depth: 3 }));
   const shipping = runScript(godotPath, projectDir, join(projectDir, 'operations', 'godot_operations.gd'), [
     'get_dependencies',
     `@file:${paramsPath}`,
@@ -312,7 +312,11 @@ function runOperation(
   if (run.status !== 0) {
     throw new Error(`${operation} failed (${run.status ?? run.signal}):\n${output.trim()}`);
   }
-  assertNoEngineErrors(operation, output);
+  // Anything on stderr from an operation that succeeded is the engine complaining about
+  // something the operation did, a leaked object or a resource still in use at exit included,
+  // and the server hands every such line on to the caller. So an operation that passes here is
+  // one that answers cleanly.
+  assert.equal(run.stderr.trim(), '', `${operation} succeeded but wrote to stderr:\n${run.stderr.trim()}`);
 
   return lastJsonLine(run.stdout, operation);
 }
@@ -399,7 +403,7 @@ function testOperations(godotPath: string, projectDir: string): void {
   const created = operation('create_script', {
     script_path: 'made/hero.gd',
     class_name: 'FixtureHero',
-    extends_class: 'Node2D',
+    extends: 'Node2D',
     template: 'state_machine',
   });
   assert.equal(get(created, 'registered'), true, 'a script given a class_name is registered');
@@ -533,7 +537,7 @@ function testOperations(godotPath: string, projectDir: string): void {
   );
 
   // The resave walks the project and writes every scene and script back.
-  assert.equal(get(operation('get_uid', { file_path: 'made/hero.gd' }), 'exists'), false);
+  assert.equal(get(operation('get_uid', { resource_path: 'made/hero.gd' }), 'exists'), false);
   const resaved = operation('resave_resources', {});
   assert.ok(asNumber(get(resaved, 'scenes_saved')) > 0, 'the fixture scene should be resaved');
   assert.equal(get(resaved, 'scenes_with_errors'), 0);
@@ -541,7 +545,7 @@ function testOperations(godotPath: string, projectDir: string): void {
   // Measured on 4.7.2: outside the editor ResourceSaver answers OK and writes no .uid
   // sidecar, so a script that had none still has none. The count above is resaves, not UIDs.
   assert.equal(
-    get(operation('get_uid', { file_path: 'made/hero.gd' }), 'exists'),
+    get(operation('get_uid', { resource_path: 'made/hero.gd' }), 'exists'),
     false,
     'a headless resave cannot mint a UID, and saying it did would be the lie to catch',
   );
@@ -581,10 +585,18 @@ function testOperations(godotPath: string, projectDir: string): void {
   assert.equal(get(action, 'events', 0, 'ctrl_pressed'), true);
 
   // Audio buses live in the AudioServer and only survive the run if the layout is saved.
-  assert.equal(get(operation('create_audio_bus', { busName: 'Fixture' }), 'success'), true);
+  const fixtureBus = operation('create_audio_bus', { bus_name: 'Fixture' });
+  assert.equal(get(fixtureBus, 'bus', 'name'), 'Fixture', 'the bus carries the name it was given');
+  assert.equal(get(fixtureBus, 'layout'), 'res://default_bus_layout.tres');
   const buses = operation('get_audio_buses', {});
-  assert.ok(asNumber(get(buses, 'bus_count')) >= 1);
   assert.ok(named(get(buses, 'buses'), 'Master'), 'every project has a Master bus');
+  assert.ok(named(get(buses, 'buses'), 'Fixture'), 'the layout was written, so a fresh process sees the bus');
+  const reverb = operation('set_audio_bus_effect', {
+    bus_index: asNumber(get(fixtureBus, 'bus', 'index')),
+    effect_index: 0,
+    effect_type: 'AudioEffectReverb',
+  });
+  assert.equal(get(reverb, 'bus', 'effects', 0, 'type'), 'AudioEffectReverb', JSON.stringify(reverb));
 
   // ClassDB, which is the one source of answers that does not touch the project at all.
   const classes = operation('query_classes', { filter: 'camera', category: 'node' });

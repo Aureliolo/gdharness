@@ -202,7 +202,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'project_info',
     description:
-      'What a project is: name, main scene, structure and settings from project.godot, with optional sections on top.',
+      'What a project is: its name and main scene from project.godot, the Godot that answers, and how many scenes, scripts and assets it holds, with optional sections on top.',
     parameters: {
       projectPath: PROJECT_PATH,
       include: {

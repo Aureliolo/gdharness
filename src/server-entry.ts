@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 
-import { runGodotServer } from './index.js';
+import { runGodotServer } from './server.js';
 
 await runGodotServer().catch((error: unknown) => {
   const errorMessage = error instanceof Error ? error.message : 'Unknown error';

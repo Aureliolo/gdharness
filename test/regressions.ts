@@ -1132,7 +1132,7 @@ async function testParametersReachTheEngine(): Promise<void> {
           },
           ENGINE_CALL_TIMEOUT_MS,
         );
-        assert.match(updated, /Setting updated/, updated);
+        assert.equal(get(JSON.parse(updated), 'saved'), true, updated);
         const written = readFileSync(join(projectDir, 'project.godot'), 'utf8');
         assert.match(
           written,
@@ -1188,7 +1188,7 @@ async function testParametersReachTheEngine(): Promise<void> {
           { projectPath: projectDir, op: 'set_main_scene', scenePath: 'main.tscn' },
           ENGINE_CALL_TIMEOUT_MS,
         );
-        assert.match(chosen, /Main scene set to 'main\.tscn'/, chosen);
+        assert.equal(get(JSON.parse(chosen), 'new_main_scene'), 'res://main.tscn', chosen);
         const clean: unknown = JSON.parse(
           await call('editor_run', { projectPath: projectDir, op: 'check' }, ENGINE_CALL_TIMEOUT_MS),
         );
@@ -1196,6 +1196,40 @@ async function testParametersReachTheEngine(): Promise<void> {
         assert.equal(get(clean, 'exitCode'), 0);
         assert.equal(get(clean, 'errors'), 0);
         assert.equal(get(clean, 'hung'), false);
+
+        // The audio bus layout lives in a file the engine loads at startup, and each of these
+        // is a separate engine process: the name and the volume have to survive between them.
+        // The name once did not, because the operation read a spelling the server never sent.
+        const bus: unknown = JSON.parse(
+          await call(
+            'project_settings',
+            { projectPath: projectDir, op: 'add_audio_bus', busName: 'Music' },
+            ENGINE_CALL_TIMEOUT_MS,
+          ),
+        );
+        assert.equal(get(bus, 'bus', 'name'), 'Music', JSON.stringify(bus));
+        const busIndex = asNumber(get(bus, 'bus', 'index'));
+        const quieter: unknown = JSON.parse(
+          await call(
+            'project_settings',
+            { projectPath: projectDir, op: 'set_audio_bus_volume', busIndex, volumeDb: -6 },
+            ENGINE_CALL_TIMEOUT_MS,
+          ),
+        );
+        assert.equal(get(quieter, 'bus', 'name'), 'Music', JSON.stringify(quieter));
+        const listed: unknown = JSON.parse(
+          await call(
+            'project_info',
+            { projectPath: projectDir, include: ['audio_buses'] },
+            ENGINE_CALL_TIMEOUT_MS,
+          ),
+        );
+        const music = asArray(get(listed, 'audio_buses', 'buses')).find(
+          (entry) => get(entry, 'name') === 'Music',
+        );
+        assert.ok(music, `the bus is still there in a fresh process:\n${JSON.stringify(listed, null, 2)}`);
+        assert.equal(asNumber(get(music, 'volume_db')), -6, 'and so is its volume');
+        assert.equal(get(listed, 'mainScene'), 'res://main.tscn');
 
         writeFileSync(
           join(projectDir, 'broken.gd'),

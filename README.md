@@ -53,7 +53,9 @@ itself; there is nothing to copy by hand, no Python, and no Node.
 Thirty-one, named `domain_verb`. A tool that does several related things takes an `op`, and
 its description says which arguments each op needs; a call with an argument the tool does not
 name, an op it does not have, or a required argument missing is refused with the valid set
-spelled out.
+spelled out. Every answer is JSON, read back from the engine after the change rather than
+echoed from the request, and anything the engine said on stderr on the way comes back with it
+under `engine_messages`.
 
 | Domain | Tools |
 | --- | --- |

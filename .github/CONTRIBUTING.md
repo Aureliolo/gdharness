@@ -84,9 +84,16 @@ whose executables are world-writable. Releases are cut by CI.
 ```text
 .
 ├── src/
-│   ├── index.ts           # MCP server entry point
+│   ├── server.ts          # The MCP server: validation and dispatch of every tool
+│   ├── server-entry.ts    # Its entry point, bundled as build/index.js
 │   ├── cli.ts             # CLI entry point
 │   ├── tool-definitions.ts# Tool schemas
+│   ├── headless.ts        # Running one operation of the engine script
+│   ├── godot-path.ts      # Finding the engine
+│   ├── game-log.ts        # What a game prints, read as problems
+│   ├── launch.ts          # How a game is started
+│   ├── runtime-client.ts  # Talking to a running game
+│   ├── project-scan.ts    # Reading a project directory without the engine
 │   ├── resources.ts       # MCP resources
 │   ├── prompts.ts         # MCP prompts
 │   ├── godot-bridge.ts    # Bridge transport to the editor addon
