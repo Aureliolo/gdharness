@@ -105,6 +105,50 @@ func _check_click() -> void:
 		_fail("a control outside the window cannot be clicked, and the answer says so: %s" % str(off_screen))
 	far.free()
 
+	if clicked.get("control_afterwards") != "in_tree":
+		_fail("a button that stays put should be reported in the tree: %s" % str(clicked))
+
+	# A button that acts on its own release the way a menu button does: the whole panel goes,
+	# and the button with it. The click has to answer rather than trip over the node it aimed
+	# at, and say what became of it.
+	var freed: Dictionary = await _click_a_button_that(
+		func(going: Button) -> void: going.get_parent().queue_free()
+	)
+	if freed.get("type") != "clicked" or freed.get("landed") != true:
+		_fail("a click on a button that frees its panel should still land: %s" % str(freed))
+	if freed.get("control_afterwards") != "freed":
+		_fail("a button freed by its own click should be reported freed: %s" % str(freed))
+
+	var removed: Dictionary = await _click_a_button_that(
+		func(going: Button) -> void: going.get_parent().remove_child(going)
+	)
+	if removed.get("control_afterwards") != "removed":
+		_fail("a button taken out of the tree by its own click should be reported removed: %s" % str(removed))
+
+
+## A fresh panel with one button whose press does `to_it`, clicked; the panel is cleared away
+## afterwards whatever the press did to it.
+func _click_a_button_that(to_it: Callable) -> Dictionary:
+	var panel: Panel = Panel.new()
+	panel.name = "Doomed"
+	panel.position = Vector2(10, 250)
+	panel.size = Vector2(300, 100)
+	root.add_child(panel)
+	var going: Button = Button.new()
+	going.name = "Go"
+	going.position = Vector2(30, 20)
+	going.size = Vector2(80, 30)
+	going.pressed.connect(func() -> void: to_it.call(going))
+	panel.add_child(going)
+	await process_frame
+
+	var answer: Dictionary = await node._execute_command("click", {"path": "/root/Doomed/Go"})
+	if is_instance_valid(going) and not going.is_inside_tree():
+		going.free()
+	if is_instance_valid(panel):
+		panel.free()
+	return answer
+
 
 func _check_frames() -> void:
 	var before: int = frames_seen

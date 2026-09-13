@@ -181,16 +181,30 @@ func click(params: Dictionary) -> Dictionary:
 	viewport.push_input(_motion(position, Vector2.ZERO))
 	# What the engine itself thinks is under the pointer, which is the answer to "did it land",
 	# read before the press so the caller learns about a control on top rather than a click
-	# that went to it.
+	# that went to it. Read in full here, path included, because nothing about that control
+	# is guaranteed to survive the release: a button that opens the next screen takes the
+	# whole menu out of the tree, and a node that has left the tree has no path to give.
 	var hovered: Control = viewport.gui_get_hovered_control()
+	var hovered_path: Variant = null
+	if hovered != null:
+		hovered_path = str(hovered.get_path())
+	var landed: bool = hovered == control or (hovered != null and control.is_ancestor_of(hovered))
 
 	viewport.push_input(_button(position, button, true, double))
 	await _host.get_tree().process_frame
 	viewport.push_input(_button(position, button, false, false))
+	# The release is what a button acts on, and a queue_free it causes lands at the end of
+	# this frame; the frame passes so the answer describes the control as the click left it.
+	await _host.get_tree().process_frame
 
-	var hovered_path: Variant = null
-	if hovered != null:
-		hovered_path = str(hovered.get_path())
+	# What became of the control: still in the tree, taken out of it, or freed. A button that
+	# opened another screen is the second or the third, and the caller wants to hear that
+	# rather than guess it from a tree that has changed shape. A freed reference cannot be
+	# handed to anything typed, so the question is asked here.
+	var afterwards: String = "freed"
+	if is_instance_valid(control):
+		afterwards = "in_tree" if control.is_inside_tree() else "removed"
+
 	return {
 		"type": "clicked",
 		"path": node_path,
@@ -198,7 +212,8 @@ func click(params: Dictionary) -> Dictionary:
 		"button": button,
 		"double": double,
 		"hovered": hovered_path,
-		"landed": hovered == control or (hovered != null and control.is_ancestor_of(hovered)),
+		"landed": landed,
+		"control_afterwards": afterwards,
 	}
 
 
