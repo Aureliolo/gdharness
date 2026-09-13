@@ -28,6 +28,8 @@ import { reservePort, ServerProcess } from './support/server.js';
 /** Long enough for a cold editor to finish its first filesystem scan on a slow runner. */
 const CONNECT_TIMEOUT_MS = 120_000;
 const TOOL_TIMEOUT_MS = 60_000;
+/** The editor serves its language server after the addon has connected, and takes its time. */
+const LSP_READY_TIMEOUT_MS = 90_000;
 
 const SCENE = 'res://fixture.tscn';
 
@@ -36,6 +38,8 @@ interface Editor {
   call: (name: string, args: Record<string, unknown>) => Promise<unknown>;
   /** Calls a tool that must be refused and answers with the sentence it was refused with. */
   refusal: (name: string, args: Record<string, unknown>) => Promise<string>;
+  /** Calls a tool and answers with how it went, for waiting on something to come up. */
+  attempt: (name: string, args: Record<string, unknown>) => Promise<{ ok: boolean; text: string }>;
   project: string;
 }
 
@@ -187,6 +191,11 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
     return textOf(response) ?? '';
   };
 
+  const attempt = async (name: string, args: Record<string, unknown>) => {
+    const response = await invoke(name, args);
+    return { ok: get(response, 'result', 'isError') !== true, text: textOf(response) ?? '' };
+  };
+
   const editor: ChildProcess = spawn(
     godotPath,
     [
@@ -233,7 +242,7 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
     }
     assert.ok(connected, `the editor never reached the bridge:\n${engineOutput.join('')}`);
 
-    await body({ call, refusal, project });
+    await body({ call, refusal, attempt, project });
   } finally {
     editor.kill();
     await server.stop();
@@ -423,8 +432,19 @@ async function testEditorRescan({ call, project }: Editor): Promise<void> {
  * that has quietly stopped answering returns nothing for every file, which reads exactly like a
  * clean project, so the case that matters is the one where something is wrong.
  */
-async function testLanguageServer({ call, project }: Editor): Promise<void> {
+async function testLanguageServer({ call, attempt, project }: Editor): Promise<void> {
   const sound = { projectPath: project, scriptPath: 'res://sound.gd' };
+
+  // The bridge is up as soon as the plugin loads, which is well before the editor is serving
+  // diagnostics on a cold runner, so the first answer is waited for rather than assumed. Only
+  // the first: everything after it asserts once, so a tool that stops working still fails.
+  const ready = Date.now() + LSP_READY_TIMEOUT_MS;
+  let attempted = await attempt('script_diagnostics', sound);
+  while (!attempted.ok && Date.now() < ready) {
+    await delay(500);
+    attempted = await attempt('script_diagnostics', sound);
+  }
+  assert.ok(attempted.ok, `the language server never answered: ${attempted.text}`);
 
   const clean = await call('script_diagnostics', sound);
   assert.equal(get(clean, 'clean'), true, 'a script that parses should come back clean');
