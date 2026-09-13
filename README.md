@@ -40,7 +40,7 @@ runtime_inspect { "op": "rect", "nodePath": "/root/Hall/Ledger/BuyButton" }
 From the project directory:
 
 ```bash
-npx -y gdharness@0.4.2 setup . --runtime
+npx -y gdharness@0.4.2 setup .
 ```
 
 Addons in, editor plugins on, class list rebuilt, and the server registered with the harnesses
