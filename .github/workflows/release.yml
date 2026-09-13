@@ -108,6 +108,11 @@ jobs:
   # the Sigstore attestation and the SBOM cover the bytes npm serves, and npm adds its own
   # provenance on top. Runs after the release so a published npm version always has a release
   # behind it to verify against.
+  #
+  # Publishing is tokenless through OIDC, except for the very first version of a package: npm
+  # will not hold a trusted publisher for a name nobody has published yet, so that one release
+  # goes out with a short-lived NPM_TOKEN secret which is then deleted. Either way it is this
+  # workflow that publishes, never a developer's machine.
   npm:
     name: npm
     if: github.repository == 'Aureliolo/gdharness'
@@ -149,6 +154,8 @@ jobs:
         shell: bash
         env:
           VERSION: ${{ needs.build.outputs.version }}
+          # Empty once trusted publishing is configured, and meant to be: see below.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
           # Checked rather than assumed: too old an npm publishes with no provenance and says
@@ -160,9 +167,20 @@ jobs:
             exit 1
           fi
 
-          # No NPM_TOKEN anywhere: the OIDC token this job asked for is the credential, and npm
-          # generates and publishes its own provenance attestation from it without being asked.
-          npm publish "dist/gdharness-${VERSION}.tgz" --access public
+          if [ -n "${NODE_AUTH_TOKEN:-}" ]; then
+            # The first publish only, and the reason it exists: npm has no pending publisher, so
+            # a package has to be on the registry before a trusted publisher can be attached to
+            # it (npm/cli#8544). A short-lived token gets the name published from here rather
+            # than from somebody's laptop. Provenance is asked for by name on this path, because
+            # only the trusted-publishing path generates it unasked. Delete the secret once the
+            # publisher is configured, and this branch goes with it.
+            echo "Publishing with NPM_TOKEN. Delete the secret once trusted publishing is set up."
+            npm publish "dist/gdharness-${VERSION}.tgz" --access public --provenance
+          else
+            # No token anywhere: the OIDC token this job asked for is the credential, and npm
+            # generates and publishes its own provenance attestation from it without being asked.
+            npm publish "dist/gdharness-${VERSION}.tgz" --access public
+          fi
 
       # The claim made in the documentation is that what npm serves is the archive this repository
       # signed, so somebody can install from npm and verify against the release bundle. That is
