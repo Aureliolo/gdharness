@@ -32,7 +32,7 @@ import { type GodotBridge, getDefaultBridge } from './godot-bridge.js';
 import { GodotLocator } from './godot-path.js';
 import { type HeadlessOutcome, runOperation } from './headless.js';
 import { parseJUnit, type TestReport } from './junit.js';
-import { envValue, resolveHeadless, runArguments } from './launch.js';
+import { editorArguments, envValue, resolveHeadless, runArguments } from './launch.js';
 import { GodotLSPClient, handleLSPTool } from './lsp_client.js';
 import { resolveWithinProject } from './paths.js';
 import { findGodotProjects, projectStructure, searchProject } from './project-scan.js';
@@ -1248,7 +1248,7 @@ class GodotServer {
       return engine.response;
     }
     this.logDebug(`Launching Godot editor for project: ${project.value.path}`);
-    const editor = spawn(engine.value, ['-e', '--path', project.value.path], {
+    const editor = spawn(engine.value, editorArguments(project.value.path), {
       stdio: 'ignore',
       detached: true,
     });
