@@ -190,6 +190,9 @@ export const HARNESSES: readonly Harness[] = [
     shape: 'plain',
     home: '.copilot',
     skills: { dir: join('.github', 'skills'), shared: true },
+    // It walks from the working directory up to the repository root loading each .mcp.json it
+    // passes, and the first launch in a folder asks whether to trust it before any of that.
+    manual: 'Trust the folder when Copilot CLI first asks, or it reads no config here.',
   },
   {
     id: 'qoder',
@@ -219,6 +222,7 @@ export const HARNESSES: readonly Harness[] = [
     shape: 'plain',
     home: '.cursor',
     skills: { dir: join('.cursor', 'skills'), shared: true },
+    manual: 'Cursor asks before each tool call by default, and the server can be toggled off.',
   },
   {
     id: 'vscode',
@@ -229,6 +233,7 @@ export const HARNESSES: readonly Harness[] = [
     shape: 'typed',
     home: '.vscode',
     skills: { dir: join('.github', 'skills'), shared: true },
+    manual: 'VS Code asks you to trust a server the first time it starts one.',
   },
   {
     id: 'opencode',
@@ -322,6 +327,7 @@ export const HARNESSES: readonly Harness[] = [
     container: 'mcpServers',
     shape: 'plain',
     home: '.warp',
+    manual: 'Warp starts a project server only once you toggle it on, on its MCP servers page.',
   },
   {
     id: 'trae',
