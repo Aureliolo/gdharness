@@ -111,8 +111,6 @@ browser lookup. If no check ran, say so rather than calling it verified.
 ## Reference
 
 - `tools.md`: every tool, op and argument.
-- `architecture.md`: what connects to what, the ports, and what each tool needs running.
-- `traps.md`: Godot behaviours that affect how you use this.
-- `tested.md`: what is covered by tests and what is not.
+- `architecture.md`: what an install writes, what connects to what, and every harness.
 
 All at <https://aureliolo.github.io/gdharness>.

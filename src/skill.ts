@@ -15,7 +15,6 @@ import { basename, dirname, join } from 'node:path';
 import type { Harness } from './harnesses.js';
 import { TOOL_SPECS } from './tool-definitions.js';
 import { renderToolsMarkdown } from './tool-reference.js';
-import { renderTraps } from './traps.js';
 
 /** The skill's name, which is also its directory. The format requires them to match. */
 export const SKILL_NAME = 'gdharness';
@@ -46,13 +45,11 @@ that is running, and the project on disk. ${TOOL_SPECS.length} tools, named \`do
 - \`editor_status\` says whether an editor is connected and whether its addon matches the server.
   \`addonIsStale\` means the editor is serving an older addon and needs restarting.
 
-## The five that cost the most time
-
-${renderTraps('###')}
-
-Read \`editor_output\` after every run as well. It returns the engine's errors and warnings as
-entries with their backtraces, and a \`clean\` verdict, so a run that printed an error is one call
-away from being known.
+- Read \`editor_output\` after every run. It returns the engine's errors and warnings as entries
+  with their backtraces, and a \`clean\` verdict, so a run that printed an error is one call away
+  from being known.
+- Start the game with \`editor_run start\`, never by spawning an engine. The editor plays it, so
+  its debugger holds it, which is what gives the \`debug_*\` tools something to talk to.
 
 ## Measuring a running game
 
@@ -95,7 +92,7 @@ said on stderr comes back under \`engine_messages\`.
 ## More
 
 - \`references/tools.md\`: every tool, generated from the server.
-- <https://aureliolo.github.io/gdharness>: how the parts connect, what CI proves, and the traps.
+- <https://aureliolo.github.io/gdharness>: what an install writes, and what talks to what.
 `;
 }
 

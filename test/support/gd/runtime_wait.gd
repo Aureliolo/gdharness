@@ -103,6 +103,10 @@ func _check_click() -> void:
 		or not str(off_screen.get("message", "")).contains("outside the viewport")
 	):
 		_fail("a control outside the window cannot be clicked, and the answer says so: %s" % str(off_screen))
+	# This engine is headless, which is why the viewport is 64 by 64 rather than whatever the
+	# project asked for. The rect on its own does not say that, so the refusal has to.
+	if not str(off_screen.get("message", "")).contains("run it with a window"):
+		_fail("and names the window as what it would take: %s" % str(off_screen))
 	far.free()
 
 	if clicked.get("control_afterwards") != "in_tree":

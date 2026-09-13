@@ -207,8 +207,5 @@ node .tools/gdharness/build/cli.js setup /path/to/project
 
 ## Before the first change
 
-Two things cost the most time if nobody tells your agent: call `project_import refresh_classes`
-after writing a `class_name` and before running the game, and use `editor_run` rather than starting
-an engine, because a game started as its own process has no debugger session.
-
-[Traps](traps.html) is the rest, and `agent.md` is the same list written for an agent to follow.
+Nothing. The skill the install writes is what your agent reads, and the rest is refusals: a tool
+that cannot answer says which state it is in and what changes it, rather than answering emptily.

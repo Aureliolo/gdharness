@@ -56,7 +56,7 @@ runtime_inspect { "op": "rect", "nodePath": "/root/Hall/Ledger/BuyButton" }
 ## Documentation
 
 [aureliolo.github.io/gdharness](https://aureliolo.github.io/gdharness): installing it, how the
-parts connect, every tool, the Godot traps worth knowing, and what CI proves against a real engine.
+parts connect, and every tool, op and argument.
 
 [SECURITY.md](.github/SECURITY.md) is how to report something.
 [CONTRIBUTING.md](.github/CONTRIBUTING.md) is what a change has to clear.

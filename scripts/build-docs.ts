@@ -18,7 +18,6 @@ import { displayPath, HARNESSES, type Harness, runLine } from '../src/harnesses.
 import { SERVER_VERSION } from '../src/server-version.js';
 import { TOOL_SPECS } from '../src/tool-definitions.js';
 import { renderToolsMarkdown } from '../src/tool-reference.js';
-import { renderTraps } from '../src/traps.js';
 
 const DOCS = 'docs';
 const THEME = join(DOCS, 'theme');
@@ -168,8 +167,7 @@ function filled(text: string, markup = true): string {
     .replaceAll('{{version}}', SERVER_VERSION)
     .replaceAll('{{tools}}', TOOL_COUNT)
     .replaceAll('{{harnesses}}', renderHarnesses())
-    .replaceAll('{{picker}}', markup ? renderPicker() : renderPickerText())
-    .replaceAll('{{traps}}', renderTraps('##'));
+    .replaceAll('{{picker}}', markup ? renderPicker() : renderPickerText());
 }
 
 /** The three things gdharness is made of, and where each one is documented. */
@@ -282,8 +280,6 @@ function renderHomeText(): string {
     '- [How it works](architecture.md): what an install writes, how it decides, and what talks to',
     '  what once it is running.',
     '- [Tools](tools.md): every tool, op and argument.',
-    '- [Traps](traps.md): five Godot behaviours you still have to know.',
-    '- [What is proven](tested.md): what CI drives against a real engine, and what it does not.',
     '',
     '## Project',
     '',
@@ -351,22 +347,6 @@ const PAGES: readonly Page[] = [
     group: 'Reference',
     render: renderTools,
     renderText: renderToolsMarkdown,
-  },
-  {
-    source: 'traps.md',
-    path: 'traps.html',
-    text: 'traps.md',
-    title: 'Traps',
-    summary: 'Five Godot behaviours that are still yours to know, and the ones already handled.',
-    group: 'Reference',
-  },
-  {
-    source: 'tested.md',
-    path: 'tested.html',
-    text: 'tested.md',
-    title: 'What is proven',
-    summary: 'Why the answers can be believed: what is driven against a real engine, and what is not.',
-    group: 'Reference',
   },
 ];
 

@@ -7,9 +7,10 @@
  * fresh each time, so an upgrade never leaves a file of the old version behind.
  */
 
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { cachedClasses, staleAgainst } from './class-cache.js';
 import { type HeadlessEngine, type HeadlessOutcome, runOperation } from './headless.js';
 import { parseProjectGodot } from './resources.js';
 import { SERVER_VERSION } from './server-version.js';
@@ -153,43 +154,6 @@ function enabledPlugins(settings: Record<string, Record<string, unknown>>): stri
     .filter(Boolean);
 }
 
-/** Every `class_name` declared under the project, with the script that declares it. */
-function declaredClasses(projectPath: string): Map<string, string> {
-  const declared = new Map<string, string>();
-  const visit = (directory: string, prefix: string): void => {
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
-      if (entry.name.startsWith('.')) {
-        continue;
-      }
-      const path = join(directory, entry.name);
-      if (entry.isDirectory()) {
-        visit(path, `${prefix}${entry.name}/`);
-      } else if (entry.isFile() && entry.name.endsWith('.gd')) {
-        const found = /^class_name\s+([A-Za-z_][A-Za-z0-9_]*)/m.exec(readFileSync(path, 'utf8'));
-        if (found?.[1]) {
-          declared.set(found[1], `res://${prefix}${entry.name}`);
-        }
-      }
-    }
-  };
-  visit(projectPath, '');
-  return declared;
-}
-
-/** The classes the cache lists, with the path each is recorded at. */
-function cachedClasses(projectPath: string): Map<string, string> | null {
-  const cache = join(projectPath, '.godot', 'global_script_class_cache.cfg');
-  if (!existsSync(cache)) {
-    return null;
-  }
-  const listed = new Map<string, string>();
-  const text = readFileSync(cache, 'utf8');
-  for (const entry of text.matchAll(/"class":\s*&"([^"]+)"[\s\S]*?"path":\s*"([^"]+)"/g)) {
-    listed.set(entry[1] ?? '', entry[2] ?? '');
-  }
-  return listed;
-}
-
 /** What holds and what does not, read from the project directory alone. */
 export function inspectProject(projectPath: string): ProjectReport {
   const problems: string[] = [];
@@ -221,22 +185,15 @@ export function inspectProject(projectPath: string): ProjectReport {
     autoload !== undefined && typeof readString(autoload, RUNTIME_AUTOLOAD.name) === 'string';
 
   const cached = cachedClasses(projectPath);
-  const staleClasses: string[] = [];
+  const staleClasses = cached === null ? [] : staleAgainst(cached, projectPath);
   if (cached === null) {
     problems.push(
       'no .godot/global_script_class_cache.cfg: the engine knows no class_name; run project_import refresh_classes or open the editor',
     );
-  } else {
-    for (const [name, path] of declaredClasses(projectPath)) {
-      if (cached.get(name) !== path) {
-        staleClasses.push(name);
-      }
-    }
-    if (staleClasses.length > 0) {
-      problems.push(
-        `the class cache does not list ${staleClasses.join(', ')}; run project_import refresh_classes or gdharness classes`,
-      );
-    }
+  } else if (staleClasses.length > 0) {
+    problems.push(
+      `the class cache does not list ${staleClasses.join(', ')}; run project_import refresh_classes or gdharness classes`,
+    );
   }
 
   return {
