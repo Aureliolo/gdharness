@@ -459,9 +459,39 @@ function testOperations(godotPath: string, projectDir: string): void {
   });
   assert.equal(get(created, 'registered'), true, 'a script given a class_name is registered');
   assert.equal(get(created, 'full_path'), 'res://made/hero.gd');
+  assert.equal(get(created, 'parses'), true, 'the answer says the engine accepted what was written');
   const heroSource = readFileSync(join(projectDir, 'made', 'hero.gd'), 'utf8');
   assert.match(heroSource, /^class_name FixtureHero/m, 'the class_name should be written first');
   assert.match(heroSource, /func change_state/, 'the state_machine template should be the one used');
+
+  // Every template has to parse in the strictest project there is, which this one is: a
+  // template that trips a warning there is a script the tool wrote that the engine refuses.
+  // The operation loads what it wrote and says so, and anything it printed on the way is
+  // stderr the run above refuses.
+  for (const [template, base] of [
+    ['singleton', 'Node'],
+    ['component', 'Node'],
+    ['resource', 'Resource'],
+    ['none', 'Node'],
+  ] as const) {
+    const made = operation('create_script', {
+      script_path: `made/${template}_template.gd`,
+      extends: base,
+      template: template === 'none' ? '' : template,
+    });
+    assert.equal(get(made, 'parses'), true, `the ${template} template should parse under every warning`);
+  }
+  const broken = runRefusedOperation(godotPath, projectDir, 'create_script', {
+    script_path: 'made/broken.gd',
+    content: 'func _ready() -> void:\n\tvar loose = 1\n',
+  });
+  assert.equal(broken.status, 0, 'a script that was written is a success, whatever it says');
+  assert.equal(
+    get(lastJsonLine(broken.stdout, 'create_script'), 'parses'),
+    false,
+    'a script the engine refuses is reported as not parsing',
+  );
+  assert.match(broken.stderr, /loose/, 'the reason is on stderr, where the server reads it from');
 
   // What gets written has to parse where an untyped declaration is an error, which the
   // autoload check further down proves by booting the project with this script as one.

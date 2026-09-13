@@ -61,6 +61,11 @@ func create_gdscript(params: Dictionary) -> Dictionary:
 	file.store_string(script_content)
 	file.close()
 
+	# Whether the engine accepts what was written, parsed under this project's own warning
+	# settings: a script that does not load is a script the caller wants to hear about now,
+	# and the reason is on stderr, which comes back with the answer.
+	var written: Script = ResourceLoader.load(full_script_path, "Script", ResourceLoader.CACHE_MODE_IGNORE)
+
 	return {
 		"success": true,
 		"script_path": script_path,
@@ -68,7 +73,8 @@ func create_gdscript(params: Dictionary) -> Dictionary:
 		"absolute_path": ProjectSettings.globalize_path(full_script_path),
 		"registered": not cls_name_param.is_empty(),
 		"extends": extends_class,
-		"template_used": template if not template.is_empty() else "none"
+		"template_used": template if not template.is_empty() else "none",
+		"parses": written != null and written.can_instantiate(),
 	}
 
 
@@ -323,12 +329,14 @@ func _ready() -> void:
 signal state_changed(old_state: String, new_state: String)
 
 var current_state: String = ""
+## State objects by name. A state may define enter(), exit(), process(delta) and
+## physics_process(delta); whichever it has are called.
 var states: Dictionary = {}
 
 func _ready() -> void:
 \t_setup_states()
 \tif states.size() > 0:
-\t\tchange_state(states.keys()[0])
+\t\tchange_state(str(states.keys()[0]))
 
 func _setup_states() -> void:
 \t# Override this to add states
@@ -336,34 +344,29 @@ func _setup_states() -> void:
 \tpass
 
 func _process(delta: float) -> void:
-\tif current_state.is_empty():
-\t\treturn
-\tif states.has(current_state) and states[current_state].has_method("process"):
-\t\tstates[current_state].process(delta)
+\t_call_state(current_state, "process", [delta])
 
 func _physics_process(delta: float) -> void:
-\tif current_state.is_empty():
-\t\treturn
-\tif states.has(current_state) and states[current_state].has_method("physics_process"):
-\t\tstates[current_state].physics_process(delta)
+\t_call_state(current_state, "physics_process", [delta])
 
 func change_state(new_state: String) -> void:
 \tif not states.has(new_state):
 \t\tpush_error("State not found: " + new_state)
 \t\treturn
-\t
+
 \tvar old_state: String = current_state
-\t
-\tif not old_state.is_empty() and states.has(old_state):
-\t\tif states[old_state].has_method("exit"):
-\t\t\tstates[old_state].exit()
-\t
+\t_call_state(old_state, "exit", [])
 \tcurrent_state = new_state
-\t
-\tif states[current_state].has_method("enter"):
-\t\tstates[current_state].enter()
-\t
+\t_call_state(current_state, "enter", [])
 \tstate_changed.emit(old_state, new_state)
+
+## Calls a method on the named state when it has one; a state without it is left alone.
+func _call_state(state_name: String, method: String, args: Array) -> void:
+\tif state_name.is_empty() or not states.has(state_name):
+\t\treturn
+\tvar state: Object = states[state_name]
+\tif state != null and state.has_method(method):
+\t\tstate.callv(method, args)
 """
 		"component":
 			return """## Component pattern - attach to nodes to add behavior
