@@ -15,25 +15,32 @@ Godot does not have to be on `PATH`.
 npx -y gdharness@{{version}} setup . --runtime
 ```
 
-That installs the addons, enables the editor plugins, registers the runtime autoload, rebuilds
-the class list, and writes the server into every agent harness it finds on this machine.
+That installs the addons, enables the editor plugins, registers the runtime autoload, rebuilds the
+class list, and registers the server with the harnesses already set up **in this project**.
 
 Then reconnect the harness so it spawns the server, and check `editor_status` answers.
 
 ## What it writes, and where
 
-Detected harnesses are written to. Name them instead to pick:
+**Only files inside the project directory, unless you name a harness yourself.** A harness whose
+configuration is machine-wide is reported and left alone:
+
+```text
+Cursor: written /home/you/game/.cursor/mcp.json
+Codex CLI: found, not touched. Its config is machine-wide; pass --codex to write it.
+```
+
+That is deliberate. Registering a project's Godot path in `~/.codex/config.toml` would put this
+project's server in front of every other project you open with Codex, and installing one project
+is not consent to that. Name it and it is written:
 
 ```bash
-npx -y gdharness@{{version}} setup . --cursor --vscode
-npx -y gdharness@{{version}} setup . --no-connect    # addons only
+npx -y gdharness@{{version}} setup . --codex          # yes, write the machine-wide one
+npx -y gdharness@{{version}} setup . --cursor --vscode # only these two, detected or not
+npx -y gdharness@{{version}} setup . --no-connect      # addons only, no configuration at all
 ```
 
 {{harnesses}}
-
-A `project` scope writes inside the project, which is right for gdharness: the entry carries this
-project's Godot path. A `home` scope harness has no per-project config, so its entry is global and
-the Godot path in it is the one from the machine that ran `setup`.
 
 The entry is the same everywhere:
 

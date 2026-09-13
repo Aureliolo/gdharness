@@ -23,12 +23,16 @@ npx -y gdharness@{{version}} setup . --runtime
 ```
 
 It installs the addons, enables the editor plugins, registers the runtime autoload, rebuilds the
-class list, and writes the server into every harness it finds here. It prints what it wrote and
-where. Anything it hands back as a command or a block to paste is yours to apply.
+class list, and registers the server with the harnesses already set up in this project. It prints
+what it wrote and where. Anything it hands back as a command or a block to paste is yours to apply.
 
-Name harnesses instead of detecting them with `--claude-code`, `--cursor`, `--vscode`,
-`--opencode`, `--codex`, `--gemini`, `--copilot-cli`, `--windsurf`, `--junie`, `--kiro`,
-`--hermes`. `--no-connect` installs the addons and writes no config.
+**It writes nothing outside the project directory unless a harness is named.** One whose config is
+machine-wide is reported instead, with the flag that would write it. Do not pass that flag on the
+reader's behalf: it changes every other project they open with that harness.
+
+Name harnesses with `--claude-code`, `--cursor`, `--vscode`, `--opencode`, `--junie`, `--kiro`,
+`--codex`, `--gemini`, `--copilot-cli`, `--windsurf`, `--hermes`. `--no-connect` installs the
+addons and writes no config at all.
 
 If this project generates its MCP config from a template, pass `--no-connect` and edit the
 template instead.

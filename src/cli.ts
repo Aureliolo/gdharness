@@ -11,6 +11,7 @@ import { GodotLocator } from './godot-path.js';
 import {
   connect,
   detect,
+  detectGlobal,
   HARNESSES,
   type Harness,
   harnessById,
@@ -75,10 +76,10 @@ const SETUP_FLAGS = new Set(['--runtime', '--no-connect', '--json']);
  * An unknown flag is refused rather than ignored, because a silently dropped `--curser` leaves
  * somebody believing a harness is configured when nothing was written.
  */
-function chosenHarnesses(projectPath: string): readonly Harness[] {
-  const named = args.filter((arg) => arg.startsWith('--') && !SETUP_FLAGS.has(arg));
+function chosenHarnesses(projectPath: string): { harnesses: readonly Harness[]; named: boolean } {
+  const flags = args.filter((arg) => arg.startsWith('--') && !SETUP_FLAGS.has(arg));
   const picked: Harness[] = [];
-  for (const flag of named) {
+  for (const flag of flags) {
     const harness = harnessById(flag.slice(2));
     if (harness === undefined) {
       throw new UsageError(
@@ -87,7 +88,9 @@ function chosenHarnesses(projectPath: string): readonly Harness[] {
     }
     picked.push(harness);
   }
-  return picked.length > 0 ? picked : detect(projectPath);
+  return picked.length > 0
+    ? { harnesses: picked, named: true }
+    : { harnesses: detect(projectPath), named: false };
 }
 
 function reportConnection(written: Written): void {
@@ -132,12 +135,22 @@ async function setup(): Promise<void> {
   if (!args.includes('--no-connect')) {
     // The version is the running one, so the config pins the server that installed these addons.
     const launch = launchFor(getLocalVersion(), godot.godotPath);
-    const harnesses = chosenHarnesses(projectPath);
+    const { harnesses, named } = chosenHarnesses(projectPath);
     if (harnesses.length === 0) {
-      console.log(`no harness detected; name one with --${HARNESSES.map((h) => h.id).join(' or --')}`);
+      console.log(`no harness set up in this project; name one with --${HARNESSES[0]?.id ?? 'claude-code'}`);
     }
     for (const harness of harnesses) {
       reportConnection(connect(harness, projectPath, launch));
+    }
+
+    // Named on the command line and nowhere else: a machine-wide config is the reader's to change,
+    // so the most this does unasked is say which one it found and what would write it.
+    if (!named) {
+      for (const harness of detectGlobal(projectPath)) {
+        console.log(
+          `${harness.name}: found, not touched. Its config is machine-wide; pass --${harness.id} to write it.`,
+        );
+      }
     }
   }
 
@@ -202,7 +215,9 @@ Usage:
                                      Install the addons into the project, enable the editor
                                      ones, register the runtime autoload with --runtime, and
                                      rebuild the class list. Then register the server with the
-                                     harnesses found here, or with the ones named:
+                                     harnesses already set up in this project, writing only files
+                                     inside it. A harness whose config is machine-wide is named
+                                     and left alone unless you ask for it by flag:
                                      ${HARNESSES.map((harness) => `--${harness.id}`).join(', ')}
   gdharness doctor <project> [--json]
                                      Say what holds and what does not; exit 1 on a problem
