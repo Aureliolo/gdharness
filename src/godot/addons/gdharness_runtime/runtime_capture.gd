@@ -33,6 +33,21 @@ func _capture(viewport: Viewport, params: Dictionary) -> Dictionary:
 	if requested_path.is_empty():
 		return {"type": "error", "message": "output_path required"}
 
+	# Godot draws nothing to a minimised window and nothing at all without one, and the
+	# texture keeps whatever was drawn last. A capture then comes back byte for byte the same
+	# every time, with a success payload, and a game running perfectly well reads as a game
+	# that has frozen. A frame nobody drew is not evidence of anything, so it is refused.
+	if not _host.get_tree().root.can_draw():
+		return {
+			"type": "error",
+			"message":
+			(
+				"Nothing is being drawn to the game's window: it is minimised, or this engine "
+				+ "has no window. The texture still holds the last frame that was drawn, so this "
+				+ "and every capture after it would be that frame. Restore the window and ask again."
+			),
+		}
+
 	var viewport_texture: ViewportTexture = viewport.get_texture()
 	if viewport_texture == null:
 		return {"type": "error", "message": "No viewport texture available"}
