@@ -30,13 +30,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
+import { SERVER_VERSION } from '../src/server-version.js';
 import { asArray, asNumber, asString, get, text } from './support/json.js';
 import { parseTextContent, textOf } from './support/json-rpc.js';
 import { reservePort, ServerProcess } from './support/server.js';
 
 /** Long enough for a cold editor to finish its first filesystem scan on a slow runner. */
 const CONNECT_TIMEOUT_MS = 120_000;
-const TOOL_TIMEOUT_MS = 60_000;
+/** Past the longest a tool waits on its own, so the tool's answer is what a case fails on. */
+const TOOL_TIMEOUT_MS = 120_000;
 /** The editor serves its language server after the addon has connected, and takes its time. */
 const LSP_READY_TIMEOUT_MS = 90_000;
 /** A game the editor plays is a second engine starting, on a runner that is already busy. */
@@ -88,6 +90,9 @@ function createProject(): string {
   const dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'gdharness-editor-')));
 
   cpSync('src/godot/addons', join(dir, 'addons'), { recursive: true });
+  // The marker an install writes beside the addon, which is how the editor knows which version
+  // it is running: a copy without one is a copy gdharness did not put there.
+  writeFileSync(join(dir, 'addons', 'gdharness_editor', '.gdharness-version'), `${SERVER_VERSION}\n`);
 
   writeFileSync(
     join(dir, 'project.godot'),
@@ -194,6 +199,41 @@ function createProject(): string {
   return dir;
 }
 
+/**
+ * Ends every engine whose command line names this project, whoever started it.
+ *
+ * Asked of the operating system rather than tracked, because the processes worth ending here are
+ * the ones nothing has a handle to: an editor a restart brought up, or a game the editor played.
+ * Nothing outside the fixture's own temporary directory can match.
+ */
+function endEnginesUnder(project: string): void {
+  const listing =
+    process.platform === 'win32'
+      ? spawnSync(
+          'powershell',
+          [
+            '-NoProfile',
+            '-Command',
+            'Get-CimInstance Win32_Process -Filter "Name=\'godot.exe\'" | ForEach-Object { "$($_.ProcessId) $($_.CommandLine)" }',
+          ],
+          { encoding: 'utf8', timeout: 30_000 },
+        )
+      : spawnSync('ps', ['-eo', 'pid=,args='], { encoding: 'utf8', timeout: 30_000 });
+
+  const wanted = project.replaceAll('\\', '/').toLowerCase();
+  for (const line of listing.stdout.split('\n')) {
+    const [, pid, rest] = /^\s*(\d+)\s+(.*)$/.exec(line.trim()) ?? [];
+    if (pid === undefined || rest === undefined) continue;
+    if (!rest.replaceAll('\\', '/').toLowerCase().includes(wanted)) continue;
+    try {
+      process.kill(Number(pid));
+      console.log(`ended engine ${pid}, which was still holding the fixture project`);
+    } catch {
+      // Gone between the listing and here, which is the outcome this is for.
+    }
+  }
+}
+
 /** Waits for a killed engine to actually be gone, which is not the same moment. */
 async function exited(child: ChildProcess): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) {
@@ -265,8 +305,20 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
   const lspPort = await reservePort();
   const dapPort = await reservePort();
 
+  // The same user directories the editor gets: a restart is the server starting the editor
+  // again, and a child of this server must not be the one run that writes into the editor
+  // settings of whoever is running the fixture.
+  const own = {
+    APPDATA: home,
+    LOCALAPPDATA: home,
+    XDG_CONFIG_HOME: home,
+    XDG_DATA_HOME: home,
+    XDG_CACHE_HOME: home,
+  };
+
   const server = new ServerProcess({
     env: {
+      ...own,
       GDHARNESS_BRIDGE_PORT: String(bridgePort),
       GDHARNESS_LSP_PORT: String(lspPort),
       GDHARNESS_DAP_PORT: String(dapPort),
@@ -316,11 +368,7 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
         GDHARNESS_BRIDGE_PORT: String(bridgePort),
         // Its own everything: a fixture must not rewrite the editor settings of the machine it
         // runs on, and on a developer's machine those belong to the editor they have open.
-        APPDATA: home,
-        LOCALAPPDATA: home,
-        XDG_CONFIG_HOME: home,
-        XDG_DATA_HOME: home,
-        XDG_CACHE_HOME: home,
+        ...own,
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     },
@@ -350,16 +398,30 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
     // answer does not carry: a fixture that reports only its own assertion sends whoever reads
     // the run back to guessing about an editor that is no longer there to ask.
     const said = engineOutput.join('').trim();
+    // Whether the editor this started is still alive, which separates a restart that never
+    // happened from one that happened and never came back: the editor a restart brings up is a
+    // process Godot spawns, and nothing here can read its output.
+    const state =
+      editor.exitCode === null && editor.signalCode === null
+        ? 'still running'
+        : `gone (exit ${editor.exitCode ?? 'none'}, signal ${editor.signalCode ?? 'none'})`;
     throw new Error(
-      `${failure instanceof Error ? failure.stack : String(failure)}\n\nThe editor said:\n${said}`,
+      `${failure instanceof Error ? failure.stack : String(failure)}\n\nThe editor this started is ${state}. It said:\n${said}`,
     );
   } finally {
     // The game first: it is the editor's child and outlives it, so a run that failed part way
     // through would otherwise leave an engine behind holding the fixture project.
     await invoke('editor_stop', {}).catch(() => undefined);
+
     editor.kill();
     await exited(editor);
     await server.stop();
+
+    // Every engine still holding this project, not just the one spawned here. A restart replaces
+    // that process with one nothing here has a handle to, and a restart that failed part way
+    // leaves an editor running on somebody's desktop: that happened, on a real machine, and the
+    // only reason it was noticed is that it put a window up.
+    endEnginesUnder(project);
     // Reported rather than thrown: a directory still held is worth saying, and an exception from
     // here would replace whatever the cases were failing on, which is the thing worth reading.
     const held = await removeWhenFree(project);
@@ -779,6 +841,43 @@ async function testDebugging({ call, attempt, project }: Editor): Promise<void> 
   await call('editor_stop', {});
 }
 
+/**
+ * Restarting the editor, and the staleness that makes it necessary.
+ *
+ * An install replaces the addon under a running editor, which goes on serving the code it read
+ * at startup: the only sign is a tool behaving like the old version, which is no sign at all.
+ * The editor reports the version it loaded, and this is the tool that changes it. Run last,
+ * because everything before it is talking to the editor this ends.
+ */
+async function testEditorRestart({ call, refusal, project }: Editor): Promise<void> {
+  const before = get(await call('editor_status', {}), 'editor');
+  assert.equal(
+    get(before, 'addonVersion'),
+    SERVER_VERSION,
+    'the editor should report the version of the addon it loaded',
+  );
+  assert.equal(get(before, 'addonIsStale'), false, 'which is the one this server ships');
+  assert.equal(typeof get(before, 'editorPid'), 'number', 'and say which process it is');
+
+  // The editor here is headless, and a headless editor must refuse: the engine hands back none
+  // of the arguments it consumed, so a restart brings up a project manager with no project
+  // instead of the editor that was there. That happened on a real desktop, which is why this
+  // case asserts the refusal rather than skipping.
+  assert.match(
+    await refusal('editor_launch', { projectPath: project, op: 'restart' }),
+    /headless/,
+    'a headless editor should refuse to restart, and say why',
+  );
+
+  const after = get(await call('editor_status', {}), 'editor');
+  assert.equal(get(after, 'connected'), true, 'and still be there afterwards');
+  assert.equal(
+    get(after, 'editorPid'),
+    get(before, 'editorPid'),
+    'as the same process, since a refused restart must not have restarted anything',
+  );
+}
+
 async function main(): Promise<void> {
   const godotPath = resolveGodotPath();
   if (!godotPath) {
@@ -799,6 +898,7 @@ async function main(): Promise<void> {
     await testEditorRescan(editor);
     await testLanguageServer(editor);
     await testDebugging(editor);
+    await testEditorRestart(editor);
   });
 
   console.log('editor tests passed');

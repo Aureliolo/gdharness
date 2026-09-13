@@ -12,6 +12,7 @@ import { execFile, spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, normalize } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -65,6 +66,14 @@ import { buildToolDefinitions, TOOL_SPECS, type ToolSpec, toolSpec } from './too
 const run = promisify(execFile);
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+/**
+ * Long enough for an editor to save, close, start again and rescan a large project.
+ *
+ * Not longer: an editor that has not come back by now is stuck on something a person has to
+ * look at, usually a dialog, and saying so beats holding the caller's call open in silence.
+ */
+const EDITOR_RESTART_TIMEOUT_MS = 90_000;
 
 /** What to tell a caller whose file, scene, script or resource path landed outside the project. */
 const PATH_SOLUTIONS = [
@@ -573,7 +582,7 @@ class GodotServer {
         }
 
       case 'editor_launch':
-        return await this.handleLaunchEditor(args);
+        return op === 'restart' ? await this.handleRestartEditor() : await this.handleLaunchEditor(args);
       case 'editor_run':
         return await this.handleRunProject(args, op);
       case 'editor_stop':
@@ -1187,10 +1196,19 @@ class GodotServer {
   private getEditorStatusPayload() {
     const status = this.godotBridge.getStatus();
     const isPortConflict = this.bridgeStartupError?.includes('EADDRINUSE') ?? false;
+    // The addon an editor loaded at startup, against the one this server ships. An install
+    // replaces the files under a running editor without changing what it is serving, and until
+    // now the only sign of that was a tool answering as the old version did.
+    const stale = status.connected && status.addonVersion !== SERVER_VERSION;
     return {
       ...status,
+      serverVersion: SERVER_VERSION,
+      addonIsStale: status.connected ? stale : undefined,
       bridgeAvailable: this.bridgeStartupError === null,
       startupError: this.bridgeStartupError,
+      staleNote: stale
+        ? `The editor is running the ${status.addonVersion === '' ? 'addon from before versions were reported' : status.addonVersion} addon while this server ships ${SERVER_VERSION}. Restart it with editor_launch restart to pick the new one up.`
+        : undefined,
       note: isPortConflict
         ? 'Bridge port is already in use. Another gdharness instance may own the editor bridge, so this server cannot report that editor connection.'
         : undefined,
@@ -1231,6 +1249,73 @@ class GodotServer {
         runtimes: games,
       },
     });
+  }
+
+  /**
+   * editor_launch restart: the editor restarts itself, and this waits to see it come back.
+   *
+   * Installing over a running editor leaves it serving the code it read at startup, so an
+   * upgrade is not in effect until somebody restarts it, and the only sign is a tool behaving
+   * like the old version. The answer is the version that reconnected rather than the one that
+   * was asked for: what matters is which addon the editor is holding now.
+   */
+  private async handleRestartEditor(): Promise<ToolResponse> {
+    const before = this.godotBridge.getStatus();
+    if (!before.connected) {
+      return this.createErrorResponse('No editor is connected, so there is nothing to restart.', [
+        'editor_launch opens one on a project',
+        'editor_status says whether the bridge is up and what has reached it',
+      ]);
+    }
+
+    const asked = await this.handleViaBridge('restart_editor', {});
+    if (asked.isError === true) {
+      return asked;
+    }
+
+    // A connection newer than the one that was there, rather than one that is merely up: the
+    // editor that answered is on its way out, and an editor that ignored the request looks
+    // exactly like one that came straight back.
+    const startedAt = before.connectedAt?.getTime() ?? 0;
+    const began = Date.now();
+    const back = await this.waitForBridge(() => {
+      const status = this.godotBridge.getStatus();
+      return status.connected && (status.connectedAt?.getTime() ?? 0) > startedAt;
+    }, began + EDITOR_RESTART_TIMEOUT_MS);
+
+    if (!back) {
+      return this.createErrorResponse(
+        `The editor was asked to restart and has not come back within ${EDITOR_RESTART_TIMEOUT_MS / 1000}s.`,
+        [
+          'It may be asking what to do about an unsaved scene: look at the editor window',
+          'An addon that no longer parses stops the editor reaching this server',
+          'editor_status says whether anything has reached the bridge since',
+        ],
+      );
+    }
+
+    const now = this.godotBridge.getStatus();
+    return this.jsonTextResponse({
+      restarted: true,
+      editorPid: now.editorPid,
+      addonVersion: now.addonVersion,
+      serverVersion: SERVER_VERSION,
+      addonIsStale: now.addonVersion !== SERVER_VERSION,
+      tookMs: Date.now() - began,
+    });
+  }
+
+  /** Polls until the bridge is in the state asked for, or until the deadline passes. */
+  private async waitForBridge(reached: () => boolean, deadline: number): Promise<boolean> {
+    for (;;) {
+      if (reached()) {
+        return true;
+      }
+      if (Date.now() >= deadline) {
+        return false;
+      }
+      await delay(250);
+    }
   }
 
   /**

@@ -43,6 +43,41 @@ func stop_playing(_args: Dictionary) -> Dictionary:
 	return {"ok": true, "wasPlaying": was_playing, "playing": EditorInterface.is_playing_scene()}
 
 
+## Restarts the editor, which is how a replaced addon is picked up.
+##
+## An install writes the new files under a running editor, which goes on serving the code it read
+## at startup: the version it reports and the tools it answers are the old ones until it comes
+## back. Scenes are saved on the way out, because the alternative is throwing away somebody's
+## unsaved work to pick up a version.
+func restart_editor(_args: Dictionary) -> Dictionary:
+	# Only an editor with a window, because only that one can come back as itself. The engine
+	# hands back none of the arguments it consumed: OS.get_cmdline_args() in an editor started
+	# with --headless --path <project> --lsp-port <n> answers with none of them, so a headless
+	# editor restarted by anybody comes up as a project manager with no project, holding the
+	# desktop of whoever was unlucky enough to be watching. A windowed editor was started with
+	# none of that, so Godot's own restart brings back the same editor on the same project.
+	if not DisplayServer.window_can_draw():
+		return {
+			"ok": false,
+			"error":
+			(
+				"This editor is headless, and the engine does not hand back the arguments it was "
+				+ "started with, so nothing can bring it back as the editor it is. Start it again "
+				+ "yourself."
+			)
+		}
+
+	if EditorInterface.is_playing_scene():
+		EditorInterface.stop_playing_scene()
+
+	EditorInterface.save_all_scenes()
+
+	# Deferred so this answer is on its way out before the editor goes.
+	EditorInterface.restart_editor.call_deferred(true)
+
+	return {"ok": true, "restarting": true, "saved": true}
+
+
 func playing_status(_args: Dictionary) -> Dictionary:
 	var playing: bool = EditorInterface.is_playing_scene()
 	return {

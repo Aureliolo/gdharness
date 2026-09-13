@@ -48,6 +48,8 @@ interface PongMessage {
 interface GodotReadyMessage {
   type: 'godot_ready';
   project_path: string;
+  addon_version?: string;
+  editor_pid?: number;
 }
 
 type IncomingMessage = ToolResultMessage | PongMessage | GodotReadyMessage;
@@ -75,6 +77,10 @@ interface GodotConnectionInfo {
   projectPath?: string;
   connectedAt: Date;
   lastPongAt?: Date;
+  /** The addon version this editor loaded, which an install under it does not change. */
+  addonVersion?: string;
+  /** Which process is on the other end, since a restarted editor is a new one. */
+  editorPid?: number | undefined;
 }
 
 interface BridgeStatus {
@@ -84,6 +90,8 @@ interface BridgeStatus {
   projectPath?: string | undefined;
   connectedAt?: Date | undefined;
   lastPongAt?: Date | undefined;
+  addonVersion?: string | undefined;
+  editorPid?: number | undefined;
   pendingRequests: number;
   queuedResources: number;
 }
@@ -223,6 +231,8 @@ export class GodotBridge extends EventEmitter {
       projectPath: this.connectionInfo?.projectPath,
       connectedAt: this.connectionInfo?.connectedAt,
       lastPongAt: this.connectionInfo?.lastPongAt,
+      addonVersion: this.connectionInfo?.addonVersion,
+      editorPid: this.connectionInfo?.editorPid,
       pendingRequests: this.pendingRequests.size,
       queuedResources: this.resourceQueues.size,
     };
@@ -381,6 +391,10 @@ export class GodotBridge extends EventEmitter {
       case 'godot_ready':
         if (this.connectionInfo) {
           this.connectionInfo.projectPath = message.project_path;
+          // An older addon sends no version at all, which is itself worth reporting: it is one
+          // installed before this was written, so it is certainly not the shipped one.
+          this.connectionInfo.addonVersion = message.addon_version ?? '';
+          this.connectionInfo.editorPid = message.editor_pid;
           this.log('info', `Godot ready: ${message.project_path}`);
           this.emitBridgeEvent('godot_connected', { projectPath: message.project_path });
         }

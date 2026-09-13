@@ -9,6 +9,8 @@ signal disconnected
 signal tool_requested(request_id: String, tool_name: String, args: Dictionary)
 
 const DEFAULT_URL: String = "ws://127.0.0.1:6505/godot"
+## Written beside the addon by the install, so it names the version this copy came from.
+const VERSION_MARKER: String = "res://addons/gdharness_editor/.gdharness-version"
 const RECONNECT_DELAY: float = 3.0
 const MAX_RECONNECT_DELAY: float = 30.0
 
@@ -106,9 +108,33 @@ func _handle_connect() -> void:
 	_is_connected = true
 	_current_reconnect_delay = RECONNECT_DELAY
 
-	_send_message({"type": "godot_ready", "project_path": _project_path})
+	# The version reported is the one this editor loaded at startup, not the one on disk: an
+	# upgrade replaces the files under a running editor, which goes on serving the old code until
+	# somebody restarts it, and nothing else can tell the two apart.
+	# The process id with it, because a restarted editor is a different process from the one
+	# whoever started it is holding, and nothing else says which one is now on the other end.
+	_send_message(
+		{
+			"type": "godot_ready",
+			"project_path": _project_path,
+			"addon_version": _loaded_version(),
+			"editor_pid": OS.get_process_id()
+		}
+	)
 
 	connected.emit()
+
+
+## The version marker beside this addon, or "" when the copy was not installed by gdharness.
+func _loaded_version() -> String:
+	if not FileAccess.file_exists(VERSION_MARKER):
+		return ""
+	var file: FileAccess = FileAccess.open(VERSION_MARKER, FileAccess.READ)
+	if file == null:
+		return ""
+	var text: String = file.get_as_text().strip_edges()
+	file.close()
+	return text
 
 
 func _handle_disconnect() -> void:

@@ -662,9 +662,15 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   // -------------------------------------------------------------------------------------------
   {
     name: 'editor_launch',
-    description: 'Opens the Godot editor on a project, in a window on this machine.',
+    description:
+      'Opens the Godot editor on a project, in a window on this machine, or restarts the one already connected. An editor goes on serving the addon it read at startup, so restart is what puts a gdharness upgrade into effect; it saves open scenes on the way out and answers with the version that came back. Only an editor with a window can be restarted, because the engine hands back none of the arguments it was started with. editor_status says which editor is connected and whether it is holding an old addon.',
     parameters: { projectPath: PROJECT_PATH },
-    requires: ['projectPath'],
+    requires: [],
+    operations: {
+      open: { summary: 'open the editor on a project', requires: ['projectPath'] },
+      restart: { summary: 'restart the connected editor and wait for it', requires: [] },
+    },
+    defaultOperation: 'open',
   },
   {
     name: 'editor_run',

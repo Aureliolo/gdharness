@@ -77,6 +77,7 @@ func _init_tools() -> void:
 		"set_theme_font_size": [_resource_tools, "set_theme_font_size"],
 		# Animation tools
 		"play_scene": [_play_tools, "play_scene"],
+		"restart_editor": [_play_tools, "restart_editor"],
 		"stop_playing": [_play_tools, "stop_playing"],
 		"playing_status": [_play_tools, "playing_status"],
 		"create_animation": [_animation_tools, "create_animation"],
