@@ -5,14 +5,25 @@ import { portFromEnv } from './ports.js';
 
 const DEFAULT_DAP_PORT = 6006;
 
+/** What any request waits before it is called unanswered. */
+const DAP_REQUEST_TIMEOUT_MS = 10_000;
+
 /**
- * How long to let a frame's scopes arrive before giving up on them.
+ * How long to let a frame's variables arrive before giving up on them.
  *
  * The dump comes from the stopped game over the editor's debugger, so it is a round trip through
  * two processes rather than a local read. Generous, because the alternative is answering "no
  * variables" about a frame that has them.
  */
-const SCOPES_TIMEOUT_MS = 10_000;
+const SCOPES_TIMEOUT_MS = 20_000;
+
+/**
+ * What one poll for a frame's variables waits.
+ *
+ * Short, because the adapter answers nothing at all while the dump is in flight, and a poll that
+ * waited the full request timeout would spend the whole budget learning that once.
+ */
+const VARIABLES_POLL_TIMEOUT_MS = 2_000;
 
 interface PendingRequest {
   resolve: (value: DAPBody | PromiseLike<DAPBody>) => void;
@@ -191,7 +202,11 @@ export class GodotDAPClient {
     }
   }
 
-  private async sendRequest(command: string, args?: Record<string, unknown>): Promise<DAPBody> {
+  private async sendRequest(
+    command: string,
+    args?: Record<string, unknown>,
+    timeoutMs = DAP_REQUEST_TIMEOUT_MS,
+  ): Promise<DAPBody> {
     await this.ensureConnected();
 
     if (!this.socket) {
@@ -212,7 +227,7 @@ export class GodotDAPClient {
       const timer = setTimeout(() => {
         this.pendingRequests.delete(requestSeq);
         reject(new Error(`DAP request timed out: ${command}`));
-      }, 10000);
+      }, timeoutMs);
 
       this.pendingRequests.set(requestSeq, { resolve, reject, timer });
 
@@ -415,29 +430,42 @@ export class GodotDAPClient {
     return [];
   }
 
-  async getVariables(variablesReference: number): Promise<DAPArrayItem[]> {
-    await this.attach();
-    const response = await this.sendRequest('variables', { variablesReference });
-    const variables = response['variables'];
-    if (Array.isArray(variables)) {
-      return variables as DAPArrayItem[];
+  /**
+   * One scope's values, asked for until the game has sent them.
+   *
+   * `req_variables` refuses a reference it has not been given the values for yet, with the same
+   * "unknown" any other failure gets, and answers nothing at all while the dump is in flight. Both
+   * mean "not yet" rather than "no such thing", and neither is distinguishable from the other, so
+   * both are waited out.
+   */
+  private async variablesWhenReady(variablesReference: number, deadline: number): Promise<DAPArrayItem[]> {
+    while (Date.now() < deadline) {
+      try {
+        const answered = (
+          await this.sendRequest('variables', { variablesReference }, VARIABLES_POLL_TIMEOUT_MS)
+        )['variables'];
+        if (Array.isArray(answered)) {
+          return answered as DAPArrayItem[];
+        }
+      } catch {
+        // Refused or unanswered: the dump is still coming.
+      }
+      await delay(200);
     }
-
     return [];
   }
 
   /**
    * What is in scope at a frame: locals, members and globals, each with its values.
    *
-   * Asking once is not enough, and the engine's own source says why. `req_scopes` both answers
-   * and asks: it calls `request_stack_dump` for the frame, so the first call sets the dump going
-   * and answers with an empty list, and while the dump is partway in it answers with the error
-   * "unknown". Only once the game has sent all three scopes does it answer with them. `req_variables`
-   * has the matching half, answering nothing at all while `_remaining_vars` is above zero.
+   * Asking once is not enough, and the engine's own source says why. `req_scopes` both answers and
+   * asks: it calls `request_stack_dump` for the frame, so the first call sets the dump going and
+   * answers with an empty list, and while the dump is partway in it answers "unknown". Only once
+   * the game has sent all three does it answer with them.
    *
-   * So the scopes are asked for until they are all there. A single pass happens to work whenever
-   * the dump has already arrived, which is most of the time and is why this surfaced as a flake on
-   * one platform rather than as a failure.
+   * Which means asking for the scopes a second time restarts the very dump the values are waiting
+   * on. So they are asked for until they arrive and then left alone, and it is the values that are
+   * polled after that, never the scopes again.
    */
   async getScopes(frameId?: number): Promise<{ name: string; variables: DAPArrayItem[] }[]> {
     await this.attach();
@@ -467,7 +495,7 @@ export class GodotDAPClient {
       const reference = scope['variablesReference'];
       named.push({
         name: typeof scope['name'] === 'string' ? scope['name'] : 'scope',
-        variables: typeof reference === 'number' ? await this.getVariables(reference) : [],
+        variables: typeof reference === 'number' ? await this.variablesWhenReady(reference, deadline) : [],
       });
     }
     return named;
