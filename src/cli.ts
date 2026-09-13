@@ -72,7 +72,7 @@ function said(outcome: HeadlessOutcome, what: string): void {
 }
 
 /** setup's own flags, so anything else beginning with -- is read as naming a harness. */
-const SETUP_FLAGS = new Set(['--runtime', '--no-connect', '--json', '--yes']);
+const SETUP_FLAGS = new Set(['--runtime', '--no-runtime', '--no-connect', '--json', '--yes']);
 
 /**
  * The harnesses named on the command line, which is how an agent drives this.
@@ -114,20 +114,21 @@ function offer(candidate: Candidate): { question: string; fallback: boolean } {
  * rest are named with the flag that would write them. Nothing outside the project is ever written
  * without a flag or a typed yes.
  */
-async function chosenHarnesses(projectPath: string, ask: Ask): Promise<readonly Harness[]> {
+async function chosenHarnesses(
+  projectPath: string,
+  ask: Ask,
+): Promise<{ harnesses: readonly Harness[]; skipped: readonly Candidate[] }> {
   const named = namedHarnesses();
   if (named.length > 0) {
-    return named;
+    return { harnesses: named, skipped: [] };
   }
 
   const offered = candidates(projectPath);
   if (!interactive() || args.includes('--yes')) {
-    for (const candidate of offered.filter((one) => one.reason !== 'configured')) {
-      console.log(
-        `${candidate.harness.name}: found, not touched. Pass --${candidate.harness.id} to set it up.`,
-      );
-    }
-    return offered.filter((one) => one.reason === 'configured').map((one) => one.harness);
+    return {
+      harnesses: offered.filter((one) => one.reason === 'configured').map((one) => one.harness),
+      skipped: offered.filter((one) => one.reason !== 'configured'),
+    };
   }
 
   const picked: Harness[] = [];
@@ -137,7 +138,17 @@ async function chosenHarnesses(projectPath: string, ask: Ask): Promise<readonly 
       picked.push(candidate.harness);
     }
   }
-  return picked;
+  return { harnesses: picked, skipped: [] };
+}
+
+/** What was found and left alone, and the flag that would take it further. */
+function reportSkipped(candidate: Candidate): void {
+  const { harness, reason } = candidate;
+  console.log(
+    reason === 'machine-wide'
+      ? `${harness.name}: found, not touched. Its config is machine-wide; pass --${harness.id} to write it.`
+      : `${harness.name}: installed, not touched. Pass --${harness.id} to set it up here.`,
+  );
 }
 
 function reportConnection(group: Group, launch: Launch, projectPath: string): void {
@@ -157,9 +168,28 @@ function reportConnection(group: Group, launch: Launch, projectPath: string): vo
   console.log(`${who}: ${written.action} ${written.path}`);
 }
 
+/**
+ * What setup cannot do for you, which is everything that happens in a process it does not own.
+ *
+ * Both of these are easy to miss, because the old version keeps answering until they are done:
+ * the harness holds the server it spawned, and the editor holds the addon it loaded at startup.
+ */
+function nextSteps(projectPath: string, runtime: boolean): void {
+  console.log('\nTwo things this cannot do for you:');
+  console.log('  1. Reconnect the MCP server in your harness, so it spawns this version.');
+  console.log('  2. Restart an open editor, or open the project. Then editor_status should answer.');
+  if (runtime) {
+    console.log(
+      `\nThe runtime autoload is registered, which is what the runtime_* tools talk to. It reaches an\nexport, so turn it off before you ship: gdharness runtime off ${projectPath}`,
+    );
+  }
+}
+
 async function setup(): Promise<void> {
   const projectPath = projectArgument(1);
-  const runtime = args.includes('--runtime');
+  // The runtime addon is per-project like everything else setup installs, so it is not something
+  // to opt into: without it a third of the tools have nothing to talk to.
+  const runtime = !args.includes('--no-runtime');
   const godot = await engine();
 
   for (const addon of installAddons(projectPath)) {
@@ -185,21 +215,27 @@ async function setup(): Promise<void> {
     // The version is the running one, so the config pins the server that installed these addons.
     const launch = launchFor(getLocalVersion(), godot.godotPath);
     const ask = new Ask();
-    let harnesses: readonly Harness[];
+    let chosen: { harnesses: readonly Harness[]; skipped: readonly Candidate[] };
     try {
-      harnesses = await chosenHarnesses(projectPath, ask);
+      chosen = await chosenHarnesses(projectPath, ask);
     } finally {
       ask.close();
     }
-    if (harnesses.length === 0) {
-      console.log('no harness configured; name one yourself, and gdharness harnesses lists them all');
-    }
-    for (const group of groupByFile(harnesses, projectPath)) {
+    for (const group of groupByFile(chosen.harnesses, projectPath)) {
       reportConnection(group, launch, projectPath);
+    }
+    for (const candidate of chosen.skipped) {
+      reportSkipped(candidate);
+    }
+    if (chosen.harnesses.length === 0) {
+      console.log('no harness configured; name one yourself, and gdharness harnesses lists them all');
     }
   }
 
   doctorReport(projectPath);
+  if (!args.includes('--json')) {
+    nextSteps(projectPath, runtime);
+  }
 }
 
 function doctorReport(projectPath: string): void {
@@ -271,10 +307,10 @@ gdharness v${getLocalVersion()}, a harness for driving a Godot 4 project from an
 
 Usage:
   gdharness                          Start the MCP server (default)
-  gdharness setup <project> [--runtime] [--no-connect] [--yes] [--<harness>]
+  gdharness setup <project> [--no-runtime] [--no-connect] [--yes] [--<harness>]
                                      Install the addons into the project, enable the editor
-                                     ones, register the runtime autoload with --runtime, and
-                                     rebuild the class list. Then register the server with your
+                                     ones, register the runtime autoload unless --no-runtime,
+                                     and rebuild the class list. Then register the server with your
                                      harnesses: the ones you name by flag, or, at a terminal,
                                      whichever are found here or on this machine, one question
                                      each. With no terminal and no flags it writes the ones this

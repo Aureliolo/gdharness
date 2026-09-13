@@ -12,7 +12,7 @@ Godot does not have to be on `PATH`.
 ## One command
 
 ```bash from the project directory
-npx -y gdharness@{{version}} setup . --runtime
+npx -y gdharness@{{version}} setup .
 ```
 
 That installs the addons, enables the editor plugins, registers the runtime autoload, rebuilds the
@@ -108,15 +108,18 @@ Writes to `project.godot` go through the engine, so the file keeps its comments 
 
 ## The runtime autoload
 
+`setup` registers it, because without it the `runtime_*` tools have nothing to talk to. Like
+everything else `setup` installs it belongs to that project alone: its own copy of the addon, its
+own entry in that project's `project.godot`. Twenty Godot projects means twenty independent
+installs, each pinned to its own version and its own engine. `--no-runtime` leaves it out.
+
 It is an autoload, so an export ships it unless it is removed. It refuses to serve outside a debug
-build, so it is not a server on a player's machine, but leave it off in anything you ship.
+build, so it is not a server on a player's machine, but turn it off before you ship.
 
 ```bash
 gdharness runtime on  /path/to/project
 gdharness runtime off /path/to/project
 ```
-
-Without it the `runtime_*` tools have nothing to talk to.
 
 ## Installing from the signed archive
 
