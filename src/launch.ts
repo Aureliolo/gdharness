@@ -105,6 +105,19 @@ export function editorArguments(projectPath: string): string[] {
  * off `HOME`, and moving that moves far more than saves, so a run there still writes where it
  * always did.
  */
-export function userDataIn(home: string): NodeJS.ProcessEnv {
-  return { ...process.env, APPDATA: home, XDG_DATA_HOME: home };
+export function userDataIn(home: string, variables: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const moved = ['APPDATA', 'XDG_DATA_HOME'];
+  const carried: NodeJS.ProcessEnv = {};
+  for (const [name, value] of Object.entries(variables)) {
+    // Windows compares variable names without case but a copied object does not, so a machine
+    // spelling it AppData would hand the child both that and the one set below, and which of
+    // them the engine reads is nobody's decision.
+    if (!moved.some((named) => named.toLowerCase() === name.toLowerCase())) {
+      carried[name] = value;
+    }
+  }
+  for (const named of moved) {
+    carried[named] = home;
+  }
+  return carried;
 }

@@ -1331,12 +1331,17 @@ function testVersionOrdering(): void {
  */
 function testATestRunKeepsOutOfThePlayersSaves(): void {
   const home = join(tmpdir(), 'gdharness-tests-fixture');
-  const environment = userDataIn(home);
+  const theirs = { AppData: join('C', 'Users', 'somebody', 'AppData', 'Roaming'), TERM: 'dumb' };
+  const environment = userDataIn(home, theirs);
 
   assert.equal(environment['APPDATA'], home, 'Windows reads the user directory out of APPDATA');
   assert.equal(environment['XDG_DATA_HOME'], home, 'and Linux out of XDG_DATA_HOME');
-  assert.equal(environment['PATH'], process.env['PATH'], 'everything else is the environment we have');
-  assert.notEqual(home, process.env['APPDATA'], 'which is not where the player keeps theirs');
+  assert.equal(environment['TERM'], 'dumb', 'everything else is the environment we were handed');
+  assert.deepEqual(
+    Object.keys(environment).filter((name) => name.toLowerCase() === 'appdata'),
+    ['APPDATA'],
+    'and a machine spelling it another way is left holding one of it rather than two',
+  );
 }
 
 /**
