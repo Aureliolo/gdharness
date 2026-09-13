@@ -1251,6 +1251,31 @@ function testProjectDefaultsToTheWorkingDirectory(): void {
       'and the report is about that project, not an empty answer',
     );
 
+    // A flag nobody recognises stops the command before it starts. `setup --curser` used to
+    // install the addons, enable the plugins, register the autoload and rebuild the class list,
+    // and refuse the option afterwards, leaving the project half configured.
+    for (const typo of [
+      ['setup', '--curser'],
+      ['doctor', '--jsonn'],
+      ['uninstall', '--claude'],
+    ]) {
+      const refused = spawnSync(process.execPath, [join(process.cwd(), 'build', 'cli.js'), ...typo], {
+        encoding: 'utf8',
+        cwd: project,
+        timeout: 60000,
+      });
+      assert.match(
+        `${refused.stdout}${refused.stderr}`,
+        /Unknown option/,
+        `${typo.join(' ')} should be refused`,
+      );
+      assert.equal(refused.status, 2, 'as a usage error');
+      assert.ok(
+        !existsSync(join(project, 'addons')),
+        `${typo.join(' ')} should have written nothing before refusing`,
+      );
+    }
+
     const nowhere = cli(elsewhere);
     assert.match(
       nowhere.output,
@@ -1850,6 +1875,15 @@ function testCommandLineSetup(): void {
     assert.equal(existsSync(join(projectDir, '.agents')), false, 'the directory the skill made is gone');
     const theirs = JSON.parse(readFileSync(shared, 'utf8')) as Record<string, Record<string, unknown>>;
     assert.deepEqual(theirs['mcpServers'], { other: { command: 'theirs' } }, 'their server survives ours');
+
+    // Twice. The engine refuses to remove an autoload that is not registered and to disable a
+    // plugin that is not enabled, so a second uninstall failed where the first had succeeded, and
+    // one on a project that never had gdharness failed outright while reporting removals it had
+    // not made.
+    const again = cli('uninstall', projectDir);
+    assert.equal(again.status, 0, `a second uninstall:\n${again.stdout}${again.stderr}`);
+    assert.match(again.stdout, /Nothing of gdharness was in this project/, 'and says so plainly');
+    assert.doesNotMatch(again.stdout, /autoload removed/, 'rather than reporting work it did not do');
   } finally {
     rmSync(projectDir, { recursive: true, force: true });
   }
