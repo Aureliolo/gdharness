@@ -1359,6 +1359,77 @@ async function testGdUnitRunner(): Promise<void> {
   }
 }
 
+/**
+ * The CLI against a real engine: setup puts the addons in and turns the editor ones on,
+ * runtime on and off registers and removes the autoload, and doctor says so, then says what
+ * is wrong once something is.
+ */
+function testCommandLineSetup(): void {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('command line setup regression skipped (Godot not found)');
+    return;
+  }
+
+  const projectDir = mkdtempSync(join(tmpdir(), 'gdharness-cli-'));
+  const cli = (...cliArgs: string[]): { status: number | null; stdout: string; stderr: string } => {
+    const run = spawnSync(process.execPath, ['build/cli.js', ...cliArgs], {
+      encoding: 'utf8',
+      timeout: 180000,
+      env: { ...process.env, GODOT_PATH: godotPath },
+    });
+    return { status: run.status, stdout: run.stdout, stderr: run.stderr };
+  };
+  try {
+    writeFileSync(
+      join(projectDir, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="CliRegression"\n',
+    );
+
+    const before = cli('doctor', projectDir);
+    assert.equal(before.status, 1, `doctor fails a bare project:\n${before.stdout}${before.stderr}`);
+    assert.match(before.stdout, /addons\/gdharness_editor is not installed/);
+
+    const setup = cli('setup', projectDir);
+    assert.equal(setup.status, 0, `setup:\n${setup.stdout}${setup.stderr}`);
+    for (const addon of ['gdharness_editor', 'gdharness_runtime', 'auto_reload']) {
+      assert.ok(existsSync(join(projectDir, 'addons', addon, '.gdharness-version')), `${addon} is installed`);
+    }
+    const written = readFileSync(join(projectDir, 'project.godot'), 'utf8');
+    assert.match(written, /res:\/\/addons\/gdharness_editor\/plugin\.cfg/, 'the editor plugin is enabled');
+    assert.match(written, /res:\/\/addons\/auto_reload\/plugin\.cfg/, 'and auto reload');
+    assert.doesNotMatch(written, /GdharnessRuntime/, 'the runtime autoload is off unless asked for');
+
+    const healthy = cli('doctor', projectDir, '--json');
+    assert.equal(healthy.status, 0, `doctor after setup:\n${healthy.stdout}${healthy.stderr}`);
+    const report: unknown = JSON.parse(healthy.stdout);
+    assert.deepEqual(get(report, 'problems'), []);
+    assert.equal(get(report, 'runtimeAutoload'), false);
+
+    assert.equal(cli('runtime', 'on', projectDir).status, 0);
+    assert.match(
+      readFileSync(join(projectDir, 'project.godot'), 'utf8'),
+      /GdharnessRuntime="\*res:\/\/addons\/gdharness_runtime\/runtime_autoload\.gd"/,
+    );
+    assert.equal(get(JSON.parse(cli('doctor', projectDir, '--json').stdout), 'runtimeAutoload'), true);
+    assert.equal(cli('runtime', 'off', projectDir).status, 0);
+    assert.doesNotMatch(readFileSync(join(projectDir, 'project.godot'), 'utf8'), /GdharnessRuntime/);
+
+    // A class written after the cache was built is what doctor is for.
+    writeFileSync(join(projectDir, 'late.gd'), 'class_name LateArrival\nextends Node\n');
+    const stale = cli('doctor', projectDir);
+    assert.equal(stale.status, 1, 'a stale class cache is a problem');
+    assert.match(stale.stdout, /class cache: stale for LateArrival/);
+    assert.equal(cli('classes', projectDir).status, 0);
+    assert.equal(cli('doctor', projectDir).status, 0, 'and rebuilding it is the cure');
+  } finally {
+    rmSync(projectDir, { recursive: true, force: true });
+  }
+}
+
 async function main(): Promise<void> {
   testStaleDisconnectRegression();
   testSceneToolsVectorRegression();
@@ -1366,6 +1437,7 @@ async function main(): Promise<void> {
   testHeadlessFollowsTheDisplay();
   await testParametersReachTheEngine();
   await testGdUnitRunner();
+  testCommandLineSetup();
 
   testProjectGodotMultilineValues();
   testProjectGodotResistsPrototypeKeys();

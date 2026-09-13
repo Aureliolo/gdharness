@@ -94,7 +94,7 @@ for (const requiredFile of [
   ...operationsModules.map((module) => `package/build/godot/operations/${module}`),
   'package/build/godot/addons/auto_reload/plugin.cfg',
   'package/build/godot/addons/gdharness_editor/plugin.cfg',
-  'package/build/godot/addons/gdharness_runtime/plugin.cfg',
+  'package/build/godot/addons/gdharness_runtime/runtime_autoload.gd',
   'package/README.md',
   'package/LICENSE',
 ]) {

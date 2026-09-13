@@ -87,7 +87,8 @@ whose executables are world-writable. Releases are cut by CI.
 ├── src/
 │   ├── server.ts          # The MCP server: validation and dispatch of every tool
 │   ├── server-entry.ts    # Its entry point, bundled as build/index.js
-│   ├── cli.ts             # CLI entry point
+│   ├── cli.ts             # CLI entry point: the server by default, setup, doctor, runtime, classes
+│   ├── setup.ts           # What the CLI does to a project
 │   ├── tool-definitions.ts# Tool schemas
 │   ├── headless.ts        # Running one operation of the engine script
 │   ├── godot-path.ts      # Finding the engine

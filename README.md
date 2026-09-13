@@ -48,6 +48,26 @@ Two things, and nothing else:
 Then point any MCP client at it. gdharness installs the Godot addons into your project
 itself; there is nothing to copy by hand, no Python, and no Node.
 
+## Setting up a project
+
+```sh
+gdharness setup /path/to/project             # the addons in, the editor ones enabled, the class list rebuilt
+gdharness setup /path/to/project --runtime   # and the runtime autoload registered
+gdharness doctor /path/to/project            # what holds and what does not; exit 1 on a problem
+gdharness runtime on|off /path/to/project    # the runtime autoload, which reaches an export if left on
+gdharness classes /path/to/project           # rebuild .godot/global_script_class_cache.cfg from disk
+```
+
+`setup` copies each addon whole, over whatever was there, and writes the version it came
+from beside it, so an upgrade never leaves a file of the old version behind and `doctor` can
+tell an old copy from the shipped one. `doctor` also compares every `class_name` on disk with
+the class cache, which is the check the editor cannot make for itself. Every write to
+`project.godot` goes through the engine, so the file is written the way the editor writes it.
+
+The runtime addon is an autoload and nothing else. An autoload reaches an export, and its
+command set includes calling methods and injecting input, so it is registered only when asked
+for and refuses to serve outside a debug build.
+
 ## Tools
 
 Thirty-two, named `domain_verb`. A tool that does several related things takes an `op`, and
