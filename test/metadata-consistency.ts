@@ -1,9 +1,13 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import process from 'node:process';
 import pkg from '../package.json' with { type: 'json' };
 import serverManifest from '../server.json' with { type: 'json' };
+import { HARNESSES } from '../src/harnesses.js';
+import { RESOURCE_COUNT } from '../src/resources.js';
+import { TOOL_SPECS } from '../src/tool-definitions.js';
 import { isRecord } from './support/json-rpc.js';
 import { ServerProcess } from './support/server.js';
 
@@ -57,6 +61,36 @@ assert.equal(
 );
 
 assert.match(pkg.description, /godot/i, 'package description should say what the harness is for');
+
+/**
+ * The numbers the README states about itself, against the tables they are about.
+ *
+ * Nothing generates the README, so a count in it is a number somebody typed once. The same prose
+ * in the docs said eight harnesses had no project-level config when it was eleven, and that nine
+ * read the shared skills directory when it was thirty-two of thirty-five. Both had been true, and
+ * both had been wrong for twenty-four harnesses.
+ */
+const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8');
+const claimed = (pattern: RegExp, what: string): number => {
+  const found = pattern.exec(readme);
+  assert.ok(found?.[1], `the README should still state ${what}`);
+  return Number(found[1]);
+};
+assert.equal(
+  claimed(/\|\s*(\d+) tools named/, 'how many tools there are'),
+  TOOL_SPECS.length,
+  'the README tool count should match the tools the server answers',
+);
+assert.equal(
+  claimed(/and (\d+) `godot:\/\/` resources/, 'how many resources there are'),
+  RESOURCE_COUNT,
+  'the README resource count should match the resources the server serves',
+);
+assert.equal(
+  claimed(/\|\s*Harnesses\s*\|\s*(\d+),/, 'how many harnesses it knows'),
+  HARNESSES.length,
+  'the README harness count should match the harness table',
+);
 assert.match(
   serverManifest.description,
   /godot/i,

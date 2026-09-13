@@ -40,6 +40,14 @@ const RESOURCE_TEMPLATES = [
   },
 ];
 
+/**
+ * How many `godot://` resources there are, counted rather than remembered.
+ *
+ * The README states this number about itself and nothing generates the README, so a resource
+ * added or dropped would leave it quietly wrong.
+ */
+export const RESOURCE_COUNT = STATIC_RESOURCES.length + RESOURCE_TEMPLATES.length;
+
 type ParsedGodotUri =
   | { kind: 'project-info' }
   | { kind: 'scene' | 'script' | 'resource'; resourcePath: string };

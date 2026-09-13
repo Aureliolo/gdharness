@@ -313,20 +313,37 @@ async function uninstall(): Promise<void> {
     console.log(`skill: removed ${directory}`);
   }
 
-  const disabled = await disablePlugins(godot, projectPath, EDITOR_PLUGINS);
+  // What was actually there, read before anything is taken out. Without it the engine's no-ops
+  // were reported as work: run in a project that never had gdharness, this said it had disabled
+  // the plugins, removed the autoload, and that a harness should stop spawning a server.
+  const before = inspectProject(projectPath);
+
+  // Only what is actually there is taken out. The engine refuses to remove an autoload that is
+  // not registered, which made a second uninstall fail where the first had succeeded, and made
+  // one on a project that never had gdharness fail outright.
+  const enabled = EDITOR_PLUGINS.filter((name) => before.pluginsEnabled.includes(name));
+  const disabled = await disablePlugins(godot, projectPath, enabled);
   for (const [index, outcome] of disabled.entries()) {
-    const name = EDITOR_PLUGINS[index] ?? '';
+    const name = enabled[index] ?? '';
     said(outcome, `disabling ${name}`);
     console.log(`${name}: ${outcome.ok ? String(outcome.payload['action']) : 'failed'}`);
   }
-  said(await setRuntime(godot, projectPath, false), 'removing the runtime autoload');
-  console.log(`${RUNTIME_AUTOLOAD.name} autoload removed`);
+  if (before.runtimeAutoload) {
+    said(await setRuntime(godot, projectPath, false), 'removing the runtime autoload');
+    console.log(`${RUNTIME_AUTOLOAD.name} autoload removed`);
+  }
 
-  for (const path of removeAddons(projectPath)) {
+  const addons = removeAddons(projectPath);
+  for (const path of addons) {
     console.log(`removed ${path}`);
   }
 
-  console.log('\nReconnect your harness so it stops spawning a server that is no longer installed.');
+  const anything = addons.length > 0 || before.runtimeAutoload || enabled.length > 0;
+  console.log(
+    anything
+      ? '\nReconnect your harness so it stops spawning a server that is no longer installed.'
+      : '\nNothing of gdharness was in this project.',
+  );
 }
 
 /**
@@ -348,8 +365,11 @@ async function upgrade(): Promise<void> {
   const before = inspectProject(projectPath);
   const installed = before.addons.find((addon) => addon.installed)?.version ?? null;
   if (installed === null) {
+    // The path only where it is not the directory you are in, so the command the message hands
+    // back is one that can be copied rather than a line carrying its own path twice.
+    const where = projectPath === process.cwd() ? '' : ` ${projectPath}`;
     throw new UsageError(
-      `gdharness is not installed in ${projectPath}. Run  gdharness setup ${projectPath}  instead.`,
+      `gdharness is not installed in ${projectPath}. Run  gdharness setup${where}  instead.`,
     );
   }
   console.log(installed === version ? `already ${version}; reinstalling` : `${installed} -> ${version}`);
@@ -502,7 +522,24 @@ More info: https://github.com/Aureliolo/gdharness
   );
 }
 
+/**
+ * Every flag is one this program knows, checked before any command starts.
+ *
+ * A mistyped flag used to be caught halfway through: `setup --curser` installed the addons,
+ * enabled the plugins, registered the autoload and rebuilt the class list, and only then refused
+ * the option, leaving a project half configured and the command exiting non-zero. A flag nobody
+ * recognises is a sentence nobody meant, so nothing happens until they all read.
+ */
+function checkFlags(): void {
+  for (const flag of args.slice(1).filter((arg) => arg.startsWith('--'))) {
+    if (!SETUP_FLAGS.has(flag) && harnessById(flag.slice(2)) === undefined) {
+      throw new UsageError(`Unknown option ${flag}. Run gdharness harnesses for every flag it takes.`);
+    }
+  }
+}
+
 async function main(): Promise<void> {
+  checkFlags();
   switch (command) {
     case undefined: {
       // Dynamic import so a CLI-only command never loads the MCP SDK.

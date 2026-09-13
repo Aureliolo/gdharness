@@ -44,12 +44,11 @@ that is running, and the project on disk. ${TOOL_SPECS.length} tools, named \`do
   running games. There is no ambient project.
 - \`editor_status\` says whether an editor is connected and whether its addon matches the server.
   \`addonIsStale\` means the editor is serving an older addon and needs restarting.
-
+- Start the game with \`editor_run start\`, never by spawning an engine. The editor plays it, so
+  its debugger holds it, which is what gives the \`debug_*\` tools something to talk to.
 - Read \`editor_output\` after every run. It returns the engine's errors and warnings as entries
   with their backtraces, and a \`clean\` verdict, so a run that printed an error is one call away
   from being known.
-- Start the game with \`editor_run start\`, never by spawning an engine. The editor plays it, so
-  its debugger holds it, which is what gives the \`debug_*\` tools something to talk to.
 
 ## Measuring a running game
 
@@ -64,7 +63,7 @@ that is running, and the project on disk. ${TOOL_SPECS.length} tools, named \`do
 These need the runtime autoload, which \`gdharness setup\` registers. \`runtime_capture\` needs a
 window and refuses headless rather than handing back the last frame anything drew.
 
-The autoload reaches an export. \`gdharness runtime off <project>\` before shipping.
+The autoload reaches an export. \`gdharness runtime off\` in the project before shipping.
 
 ## At a breakpoint
 
@@ -85,9 +84,14 @@ answer is printed.
 ## Refusals are useful
 
 An unknown op, an argument the tool does not name, or a missing required one is refused with the
-valid set spelled out, so a call that succeeded is a call that was understood. Every answer is read
-back from the engine after the change rather than echoed from the request, and whatever the engine
-said on stderr comes back under \`engine_messages\`.
+valid set spelled out, so a call that succeeded is a call that was understood.
+
+A tool that cannot answer says which state it is in and what changes it, rather than answering
+emptily: no game running, a game with no debugger behind it, a game running rather than stopped, a
+control outside a headless viewport. Read the refusal instead of retrying the call.
+
+Every answer is read back from the engine after the change rather than echoed from the request, and
+whatever the engine said on stderr comes back under \`engine_messages\`.
 
 ## More
 
