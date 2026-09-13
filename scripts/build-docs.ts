@@ -56,12 +56,109 @@ function renderHarnesses(): string {
 /** A launch line for the documentation: this version, and a path a reader will recognise. */
 const EXAMPLE_LAUNCH = launchFor(SERVER_VERSION, '/path/to/godot');
 
-/** The placeholders every page carries, so a command on the page is one the reader can run. */
-function filled(text: string): string {
+/** The harnesses the picker offers by name, before the reader falls back to the full table. */
+const PICKED = [
+  'claude-code',
+  'cursor',
+  'vscode',
+  'opencode',
+  'codex',
+  'gemini',
+  'cline',
+  'copilot-cli',
+  'zed',
+  'roo',
+  'windsurf',
+  'amazon-q',
+];
+
+/**
+ * The install picker: choose a harness, read the one command and the one file it writes.
+ *
+ * Radio inputs and sibling selectors, so it works with no JavaScript at all, and generated from
+ * the harness table so a panel cannot describe a harness `setup` does not know.
+ */
+function renderPicker(): string {
+  const chosen = PICKED.map((id) => HARNESSES.find((harness) => harness.id === id)).filter(
+    (harness) => harness !== undefined,
+  );
+  if (chosen.length !== PICKED.length) {
+    throw new Error('The picker names a harness the table does not have.');
+  }
+
+  const inputs = chosen.map(
+    (harness, index) =>
+      `<input type="radio" name="harness" id="pick-${harness.id}"${index === 0 ? ' checked' : ''} />`,
+  );
+  const chips = chosen.map((harness) => `<label for="pick-${harness.id}">${escaped(harness.name)}</label>`);
+  const panels = chosen.map((harness) => {
+    const command = `npx -y gdharness@${SERVER_VERSION} setup . --${harness.id}`;
+    const where =
+      harness.scope === 'project'
+        ? `Writes <code>${escaped(displayPath(harness, 'linux'))}</code> inside the project.`
+        : `${escaped(harness.name)} has no project-level config, so this writes <code>${escaped(displayPath(harness, 'linux'))}</code> and affects every project you open with it.`;
+    const how =
+      harness.addCommand !== undefined
+        ? ' It prints the command to run rather than editing the file itself.'
+        : harness.snippet !== undefined
+          ? ' The file is not JSON, so it prints the block to paste rather than rewriting it.'
+          : '';
+    const skill = harness.skills === undefined ? '.agents/skills' : harness.skills.dir.replaceAll('\\', '/');
+    return [
+      `<div class="panel panel-${harness.id}">`,
+      `<pre><code>${escaped(command)}</code></pre>`,
+      `<p>${where}${how} The skill goes to <code>${escaped(skill)}</code>.</p>`,
+      '</div>',
+    ].join('');
+  });
+
+  // The rules tying each input to its chip and its panel are generated with them, so a harness
+  // added to the list above cannot outrun a hand-maintained stylesheet.
+  const rules = chosen.flatMap((harness) => [
+    `#pick-${harness.id}:checked ~ .panels .panel-${harness.id}{display:block}`,
+    `#pick-${harness.id}:checked ~ .chips label[for="pick-${harness.id}"]{color:var(--signal-ink);background:var(--signal);border-color:var(--signal)}`,
+    `#pick-${harness.id}:focus-visible ~ .chips label[for="pick-${harness.id}"]{outline:2px solid var(--signal);outline-offset:2px}`,
+  ]);
+
+  return [
+    '<div class="picker">',
+    `<style>${rules.join('')}</style>`,
+    ...inputs,
+    `<div class="chips">${chips.join('')}</div>`,
+    `<div class="panels">${panels.join('')}</div>`,
+    '</div>',
+  ].join('\n');
+}
+
+/** The same choice as plain markdown, for the twin an agent reads. */
+function renderPickerText(): string {
+  const rows = PICKED.map((id) => HARNESSES.find((harness) => harness.id === id))
+    .filter((harness) => harness !== undefined)
+    .map(
+      (harness) =>
+        `| ${harness.name} | \`npx -y gdharness@${SERVER_VERSION} setup . --${harness.id}\` | \`${displayPath(harness, 'linux')}\` |`,
+    );
+  return [
+    '| Harness | Command | Writes |',
+    '| --- | --- | --- |',
+    ...rows,
+    '',
+    'Leave the flag off and it asks about every harness it finds.',
+  ].join('\n');
+}
+
+/**
+ * The placeholders every page carries, so a command on the page is one the reader can run.
+ *
+ * The markdown twin gets the same facts without the markup: a reader who asked for markdown is
+ * usually an agent, and a picker made of radio inputs is nothing to it.
+ */
+function filled(text: string, markup = true): string {
   return text
     .replaceAll('{{version}}', SERVER_VERSION)
     .replaceAll('{{tools}}', TOOL_COUNT)
-    .replaceAll('{{harnesses}}', renderHarnesses());
+    .replaceAll('{{harnesses}}', renderHarnesses())
+    .replaceAll('{{picker}}', markup ? renderPicker() : renderPickerText());
 }
 
 /** Where the site lives, for the canonical links and llms.txt. */
@@ -347,6 +444,9 @@ function renderLlmsTxt(): string {
 
 function build(): void {
   const template = readFileSync(join(THEME, 'page.html'), 'utf8');
+  // The front page is not a page of documentation and is not laid out like one: no side rail, and
+  // its own hero. Everything else shares the one template.
+  const homeTemplate = readFileSync(join(THEME, 'home.html'), 'utf8');
 
   // A markdown file nobody listed is a page with no way to reach it, which is worse than one
   // that does not exist: it publishes and nothing links to it.
@@ -367,6 +467,7 @@ function build(): void {
   const textOf = (page: { source?: string; renderText?: () => string }): string =>
     filled(
       page.renderText !== undefined ? page.renderText() : readFileSync(join(DOCS, page.source ?? ''), 'utf8'),
+      false,
     );
 
   for (const page of PAGES) {
@@ -384,7 +485,7 @@ function build(): void {
       .replaceAll('<table>', '<div class="scroll"><table>')
       .replaceAll('</table>', '</table></div>')
       .replace(/(<\/h1>\s*)<p>/, '$1<p class="lede">');
-    const html = template
+    const html = (page.home === true ? homeTemplate : template)
       .replaceAll('{{title}}', escaped(page.path === 'index.html' ? page.title : `${page.title} · gdharness`))
       .replaceAll('{{description}}', escaped(page.summary))
       .replaceAll('{{canonical}}', `${SITE_URL}/${page.path}`)

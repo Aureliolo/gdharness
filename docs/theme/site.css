@@ -490,3 +490,98 @@ summary:hover {
     margin-bottom: 10px;
   }
 }
+
+/*
+ * The front page. No side rail, a wider measure, and the first thing on it is the one line you
+ * paste rather than a paragraph about what pasting it would do.
+ */
+
+.home main {
+  max-width: 1000px;
+  margin: 0 auto;
+  padding-top: 56px;
+}
+
+.home main > * {
+  max-width: 74ch;
+}
+
+.home h1 {
+  font-size: clamp(38px, 6vw, 56px);
+  margin-bottom: 20px;
+}
+
+.home h1 + p {
+  font-size: 19px;
+  line-height: 1.55;
+  color: var(--body);
+}
+
+/*
+ * The install picker: radio inputs, sibling selectors, no script. The inputs sit before the chips
+ * and the panels so that `:checked ~` can reach both, and are taken out of the flow rather than
+ * hidden, because `display: none` takes them out of the keyboard order with it.
+ */
+
+.picker {
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  background: var(--raised);
+  margin: 18px 0 14px;
+  max-width: 74ch;
+}
+
+.picker > input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.picker .chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--rule);
+}
+
+.picker label {
+  font-size: 13px;
+  padding: 6px 12px;
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.picker label:hover {
+  color: var(--ink);
+  border-color: var(--faint);
+}
+
+.picker .panel {
+  display: none;
+  padding: 16px;
+}
+
+.picker .panel pre {
+  margin: 0 0 10px;
+  padding: 12px 14px;
+  background: var(--sunken);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  overflow-x: auto;
+  font-family: var(--mono);
+  font-size: 13.5px;
+  color: var(--signal);
+}
+
+.picker .panel p {
+  margin: 0;
+  font-size: 13.5px;
+  color: var(--muted);
+}
+
+.picker .panel code {
+  color: var(--body);
+}
