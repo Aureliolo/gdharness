@@ -8,6 +8,9 @@ extends Node
 ## editor to play means the debugger it owns is holding the game, which is what makes the debug
 ## tools answer at all.
 
+## Time for the answer to reach the server before the editor goes, in seconds.
+const QUIT_DELAY: float = 0.5
+
 var _editor_plugin: EditorPlugin = null
 
 
@@ -53,10 +56,23 @@ func restart_editor(_args: Dictionary) -> Dictionary:
 	if EditorInterface.is_playing_scene():
 		EditorInterface.stop_playing_scene()
 
-	# Deferred so this answer is sent before the editor goes: a reply written into a socket the
-	# restart has already closed is a call that looks like it failed.
-	EditorInterface.restart_editor.call_deferred(true)
-	return {"ok": true, "restarting": true, "saved": true}
+	EditorInterface.save_all_scenes()
+
+	# The same command line rather than EditorInterface.restart_editor, which builds its own and
+	# keeps only what it expects: an editor started headless, or on a language server port that
+	# is not the default, comes back without either and is a different editor on the same project.
+	var arguments: PackedStringArray = OS.get_cmdline_args()
+	OS.set_restart_on_exit(true, arguments)
+
+	# On a timer rather than deferred: this answer is still sitting in the socket until the next
+	# poll, and quitting in the same frame sends the caller nothing at all.
+	get_tree().create_timer(QUIT_DELAY).timeout.connect(_quit)
+
+	return {"ok": true, "restarting": true, "saved": true, "arguments": arguments}
+
+
+func _quit() -> void:
+	get_tree().quit()
 
 
 func playing_status(_args: Dictionary) -> Dictionary:
