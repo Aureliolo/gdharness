@@ -33,18 +33,82 @@ const TOOL_COUNT = String(TOOL_SPECS.length);
  * does not know or miss one it does.
  */
 function renderHarnesses(): string {
-  const rows = HARNESSES.map((harness) => {
-    const file = `\`${displayPath(harness, 'linux')}\``;
-    const how = harness.snippet === undefined ? 'written for you' : 'prints the block to paste';
-    const scope = harness.scope === 'project' ? 'project' : 'machine-wide';
-    const skills =
-      harness.skills === undefined ? '`.agents/skills`' : `\`${harness.skills.dir.replaceAll('\\', '/')}\``;
-    return `| ${harness.name} | \`--${harness.id}\` | ${file} | ${scope} | ${how} | ${skills} |`;
-  });
+  // Three columns, and scope is the heading above each table rather than a fourth. A column whose
+  // every cell reads the same is a column that costs width and says nothing, and with six of them
+  // the flags and the paths were breaking across lines in the middle of a word.
+  const table = (scope: Harness['scope']): string[] => [
+    '| Harness | Flag | Config |',
+    '| --- | --- | --- |',
+    ...HARNESSES.filter((harness) => harness.scope === scope).map(
+      (harness) => `| ${harness.name} | \`--${harness.id}\` | \`${displayPath(harness, 'linux')}\` |`,
+    ),
+  ];
+  const project = HARNESSES.filter((harness) => harness.scope === 'project').length;
   return [
-    '| Harness | Flag | Config | Scope | How | Skill |',
-    '| --- | --- | --- | --- | --- | --- |',
-    ...rows,
+    `### Inside the project (${project})`,
+    '',
+    ...table('project'),
+    '',
+    `### No project-level config (${HARNESSES.length - project})`,
+    '',
+    'Setting one of these up writes in your home directory and affects every project you open with',
+    'it, so it happens only when you name it by flag or answer yes at a terminal.',
+    '',
+    ...table('home'),
+  ].join('\n');
+}
+
+/** How setup decides what to write: one command in, three ways out, one thing at the end. */
+const FLOW = [
+  {
+    when: 'Harnesses named by flag',
+    writes: 'Exactly those, and nothing is asked.',
+  },
+  {
+    when: 'None named, a terminal to ask at',
+    writes: 'It asks about each harness it finds here or on this machine, one at a time.',
+  },
+  {
+    when: 'None named, nobody to ask',
+    writes: 'The harnesses this project already uses, and it names the rest with the flag for each.',
+  },
+] as const;
+
+/**
+ * The one diagram on the site, drawn in elements rather than in characters.
+ *
+ * It was ASCII art in a code block, which is how a flow chart is usually written down and is not
+ * how one should be published: the box-drawing glyphs are not in the mono face, so the browser
+ * fetched them from whatever font had them and the verticals landed off their columns, and even
+ * once that was ASCII the lines could not join up at any line height a browser reads code at.
+ * Boxes and rules are elements the stylesheet can place exactly, in the theme, at any width.
+ */
+function renderFlow(): string {
+  const lanes = FLOW.map((step) =>
+    [
+      '<div class="lane">',
+      `<p class="when">${escaped(step.when)}</p>`,
+      `<p class="then">${escaped(step.writes)}</p>`,
+      '</div>',
+    ].join(''),
+  );
+  return [
+    '<div class="flow">',
+    '<p class="start"><code class="cmd">gdharness setup</code></p>',
+    `<div class="fan">${lanes.join('')}</div>`,
+    '<p class="end">then the skill, unless <code>--no-skill</code></p>',
+    '</div>',
+  ].join('\n');
+}
+
+/** The same three ways out, for the twin an agent reads, where a diagram is nothing. */
+function renderFlowText(): string {
+  return [
+    '| When you run `gdharness setup` | What it writes |',
+    '| --- | --- |',
+    ...FLOW.map((step) => `| ${step.when} | ${step.writes} |`),
+    '',
+    'Every one of them ends by writing the skill, unless `--no-skill`.',
   ].join('\n');
 }
 
@@ -84,7 +148,7 @@ function renderPicker(): string {
   );
   const chips = chosen.map((harness) => `<label for="pick-${harness.id}">${escaped(harness.name)}</label>`);
   const panels = chosen.map((harness) => {
-    const command = bothRunners(`setup . --${harness.id}`);
+    const command = bothRunners(`setup --${harness.id}`);
     const where =
       harness.scope === 'project'
         ? `Writes <code>${escaped(displayPath(harness, 'linux'))}</code> inside the project.`
@@ -97,7 +161,7 @@ function renderPicker(): string {
     const skill = harness.skills === undefined ? '.agents/skills' : harness.skills.dir.replaceAll('\\', '/');
     return [
       `<div class="panel panel-${harness.id}">`,
-      `<pre><code>${escaped(command)}</code></pre>`,
+      `<pre><code>${codeText(command)}</code></pre>`,
       `<p>${where}${how} The skill goes to <code>${escaped(skill)}</code>.${left}</p>`,
       '</div>',
     ].join('');
@@ -110,7 +174,7 @@ function renderPicker(): string {
   panels.push(
     [
       '<div class="panel panel-other">',
-      `<pre><code>${escaped(bothRunners('setup .'))}</code></pre>`,
+      `<pre><code>${codeText(bothRunners('setup'))}</code></pre>`,
       '<p>Any MCP client that can spawn a local stdio server will do. With no harness named it asks about the ones it finds, and the entry it writes is the same everywhere. <a href="architecture.html">How it works</a> has every file and key, and says which ones it cannot write for you.</p>',
       '</div>',
     ].join(''),
@@ -143,7 +207,7 @@ function renderPickerText(): string {
     'Every harness takes the same command with its own flag, under either runner:',
     '',
     '```bash',
-    bothRunners('setup . --<harness>'),
+    bothRunners('setup --<harness>'),
     '```',
     '',
     'Leave the flag off and it asks about the ones it finds.',
@@ -167,7 +231,8 @@ function filled(text: string, markup = true): string {
     .replaceAll('{{version}}', SERVER_VERSION)
     .replaceAll('{{tools}}', TOOL_COUNT)
     .replaceAll('{{harnesses}}', renderHarnesses())
-    .replaceAll('{{picker}}', markup ? renderPicker() : renderPickerText());
+    .replaceAll('{{picker}}', markup ? renderPicker() : renderPickerText())
+    .replaceAll('{{flow}}', markup ? renderFlow() : renderFlowText());
 }
 
 /** The three things gdharness is made of, and where each one is documented. */
@@ -227,13 +292,13 @@ function renderHome(): string {
     `<div class="cards">${cards.join('')}</div>`,
     '<section class="install">',
     '<h2 class="step">Hand it to your agent</h2>',
-    `<figure class="code"><figcaption>paste this</figcaption><pre><code>${escaped(paste)}</code></pre></figure>`,
+    `<figure class="code"><figcaption>paste this</figcaption><pre><code>${codeText(paste)}</code></pre></figure>`,
     '<p class="note">It reads the guide, installs the addons, writes the config for the harness it is running in, and reports the two things it cannot do for itself.</p>',
     '<h2 class="step">Or do it yourself</h2>',
     renderPicker(),
     '<p class="note">With no harness named it asks about each one it finds, here or on this machine, and writes nothing outside the project directory without a flag or a typed yes. <a href="architecture.html">How it works</a> has every harness it knows.</p>',
     '</section>',
-    '<p class="smallprint">Fork of <a href="https://github.com/HaD0Yun/Doyunha-Gopeak">GoPeak</a> v2.3.9, September 2026, MIT, by Solomon Elias originally and completely reworked since to be hardened, condensed and more streamlined. Not affiliated with GoPeak or the Godot Foundation.</p>',
+    '<p class="smallprint">Fork of <a href="https://github.com/HaD0Yun/Doyunha-Gopeak">GoPeak</a> v2.3.9, September 2026, MIT: the original MCP server <a href="https://github.com/Coding-Solo/godot-mcp">godot-mcp</a> by <a href="https://github.com/Coding-Solo">Solomon Elias</a>, GoPeak by <a href="https://github.com/HaD0Yun">HaD0Yun</a>, and completely reworked since to be hardened, condensed and more streamlined. Not affiliated with GoPeak or the Godot Foundation.</p>',
   ].join('\n');
 }
 
@@ -283,9 +348,11 @@ function renderHomeText(): string {
     '',
     '## Project',
     '',
-    'Fork of GoPeak v2.3.9, September 2026, MIT, by Solomon Elias originally and completely reworked',
-    'since to be hardened, condensed and more streamlined. Not affiliated with GoPeak or the Godot',
-    'Foundation.',
+    'Fork of [GoPeak](https://github.com/HaD0Yun/Doyunha-Gopeak) v2.3.9, September 2026, MIT: the',
+    'original MCP server [godot-mcp](https://github.com/Coding-Solo/godot-mcp) by',
+    '[Solomon Elias](https://github.com/Coding-Solo), GoPeak by [HaD0Yun](https://github.com/HaD0Yun),',
+    'and completely reworked since to be hardened, condensed and more streamlined. Not affiliated with',
+    'GoPeak or the Godot Foundation.',
     '',
   ].join('\n');
 }
@@ -381,6 +448,7 @@ marked.use({
       const [language = '', ...rest] = (token.lang ?? '').split(' ');
       const label = rest.join(' ');
       const bar = label === '' ? '' : `<figcaption>${escaped(label)}</figcaption>`;
+      codeBlocks.push(token.text);
       return `<figure class="code">${bar}<pre><code>${coloured(token.text, language)}</code></pre></figure>\n`;
     },
   },
@@ -419,26 +487,34 @@ function escaped(text: string): string {
     .replaceAll('"', '&quot;');
 }
 
+/** One call and the answer it comes back with, which is what the whole reference is a list of. */
+const EXAMPLE_CALL = `project_settings {
+  "projectPath": "/home/you/game",
+  "op": "set",
+  "setting": "display/window/size/viewport_width",
+  "value": 1280
+}
+
+{
+  "setting_path": "display/window/size/viewport_width",
+  "old_value": 1152,
+  "new_value": 1280,
+  "was_new": false,
+  "saved": true
+}
+`;
+
 /** The tool reference, from the definitions the server answers with. */
 function renderTools(): string {
   const parts: string[] = [
+    // Every other page opens with its own name, because the markdown behind it starts with one.
+    // This page is built rather than parsed, so it has to say so itself.
+    '<h1>Tools</h1>\n',
     `<p class="lede">${TOOL_SPECS.length} tools, named <code>domain_verb</code>. A tool that does several `,
     'related things takes an <code>op</code>. An unknown op or argument is refused with the valid set ',
     'listed. Generated from the server.</p>\n',
     '<h2 id="a-call-and-its-answer">A call and its answer</h2>\n',
-    '<figure class="code"><pre><code>project_settings {\n',
-    '  "projectPath": "/home/you/game",\n',
-    '  "op": "set",\n',
-    '  "setting": "display/window/size/viewport_width",\n',
-    '  "value": 1280\n',
-    '}\n\n',
-    '{\n',
-    '  "setting_path": "display/window/size/viewport_width",\n',
-    '  "old_value": 1152,\n',
-    '  "new_value": 1280,\n',
-    '  "was_new": false,\n',
-    '  "saved": true\n',
-    '}\n</code></pre></figure>\n',
+    `<figure class="code"><pre><code>${codeText(EXAMPLE_CALL)}</code></pre></figure>\n`,
     '<p><code>new_value</code> is read from the engine after the write. Engine stderr comes back ',
     'under <code>engine_messages</code>. Every call takes <code>projectPath</code>, except the ',
     '<code>runtime_*</code> and <code>debug_*</code> tools, where it picks between running games.</p>\n',
@@ -626,6 +702,37 @@ function build(): void {
   console.log(`built ${PAGES.length} pages, ${PAGES.length + 1} text files, into ${OUT}/`);
 }
 
+/**
+ * How wide a line of code may be before it stops fitting the one column.
+ *
+ * A block that does not fit either slides sideways, hiding half of itself behind a gesture
+ * nobody makes, or wraps and loses the alignment it was drawn with. Both are the document's
+ * fault rather than the stylesheet's, so the build says which line is too long and the document
+ * is written to fit.
+ */
+const CODE_COLUMNS = 84;
+
+/**
+ * Every code block, as the text it was written as, collected while the pages render.
+ *
+ * Kept here rather than read back out of the HTML: by then the highlighter has wrapped each token
+ * in markup and escaped the text, and measuring that means stripping tags and decoding entities,
+ * which is indistinguishable from a sanitiser that does not work. The source is the thing being
+ * measured anyway.
+ */
+const codeBlocks: string[] = [];
+
+/**
+ * A block of code, escaped for the page and measured on the way through.
+ *
+ * Every code block goes through this or through the markdown renderer, so one built by hand in
+ * this file is as answerable for fitting the column as one written in a document.
+ */
+function codeText(text: string): string {
+  codeBlocks.push(text);
+  return escaped(text);
+}
+
 /** Every id a page offers, which is what a `#fragment` pointed at it has to find. */
 function anchorsIn(html: string): Set<string> {
   return new Set([...html.matchAll(/\sid="([^"]*)"/g)].map((match) => match[1] ?? ''));
@@ -648,6 +755,26 @@ function linksIn(text: string): string[] {
  * putting escapes in a regular expression, and an escape in this file is exactly what got
  * mangled into a raw control byte last time.
  */
+/**
+ * Box drawing and block elements, which look like the obvious way to draw a diagram and are not.
+ *
+ * IBM Plex Mono has no glyphs in these blocks, so the browser draws them from whatever other font
+ * it can find, at that font's advance width. The verticals then sit off the columns they were
+ * aligned to and the horizontals come apart, which is what every one of these diagrams did on the
+ * live site. ASCII draws the same picture out of characters the face actually has.
+ */
+function drawingCharactersIn(text: string): string[] {
+  const found = new Set<string>();
+  for (const character of text) {
+    const code = character.codePointAt(0) ?? 0;
+    // U+2190..U+21FF arrows, U+2500..U+257F box drawing, U+2580..U+259F block elements.
+    if ((code >= 0x2190 && code <= 0x21ff) || (code >= 0x2500 && code <= 0x259f)) {
+      found.add(character);
+    }
+  }
+  return [...found];
+}
+
 function controlCharactersIn(text: string): number[] {
   const found: number[] = [];
   for (let index = 0; index < text.length; index += 1) {
@@ -676,6 +803,18 @@ function checkOutput(): void {
   }
 
   const wrong: string[] = [];
+  for (const line of codeBlocks.flatMap((block) => block.split('\n'))) {
+    if (line.length > CODE_COLUMNS) {
+      wrong.push(`a code line is ${line.length} characters, ${CODE_COLUMNS} fit: ${line.slice(0, 56)}...`);
+    }
+    const drawn = drawingCharactersIn(line);
+    if (drawn.length > 0) {
+      wrong.push(
+        `a code line draws with ${drawn.join(' ')}, which the mono face has no glyphs for: ${line.slice(0, 40)}...`,
+      );
+    }
+  }
+
   for (const name of names.filter((file) => /\.(?:html|md|txt|css)$/.test(file))) {
     const text = readFileSync(join(OUT, name), 'utf8');
     for (const code of controlCharactersIn(text)) {

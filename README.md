@@ -63,7 +63,9 @@ parts connect, and every tool, op and argument.
 
 ## Project
 
-Fork of [GoPeak](https://github.com/HaD0Yun/Doyunha-Gopeak) v2.3.9, September 2026, MIT, by Solomon
-Elias originally and completely reworked since to be hardened, condensed and more streamlined.
+Fork of [GoPeak](https://github.com/HaD0Yun/Doyunha-Gopeak) v2.3.9, September 2026, MIT: the
+original MCP server [godot-mcp](https://github.com/Coding-Solo/godot-mcp) by
+[Solomon Elias](https://github.com/Coding-Solo), GoPeak by [HaD0Yun](https://github.com/HaD0Yun),
+and completely reworked since to be hardened, condensed and more streamlined.
 
 Not affiliated with GoPeak or the Godot Foundation.
