@@ -120,11 +120,19 @@ func _parse_properties_dict(raw: Variant) -> Dictionary:
 	return {}
 
 
+## The theme on disk at this path, or null when there is not one.
+##
+## Read past the cache, because the caller saves what it gets back and the cached copy is the
+## one an earlier call already edited. A miss answers null rather than a blank Theme: writing
+## one over a path holding something else, or holding nothing, is inventing a resource rather
+## than editing one, and it reads as a success either way.
 func _load_theme(theme_path: String) -> Theme:
-	var loaded: Resource = load(theme_path)
+	if not ResourceLoader.exists(theme_path, "Theme"):
+		return null
+	var loaded: Resource = ResourceLoader.load(theme_path, "Theme", ResourceLoader.CACHE_MODE_IGNORE)
 	if loaded is Theme:
 		return loaded
-	return Theme.new()
+	return null
 
 
 func _save_scene_root(root: Node, scene_path: String) -> Error:
@@ -311,19 +319,39 @@ func set_theme_color(args: Dictionary) -> Dictionary:
 	if theme_path == "res://":
 		return {"ok": false, "error": "themePath is required"}
 
+	var color_name: String = str(args.get("colorName", ""))
+	var control_type: String = str(args.get("controlType", ""))
+	if color_name.is_empty() or control_type.is_empty():
+		return {"ok": false, "error": "colorName and controlType are required"}
+
 	var theme: Theme = _load_theme(theme_path)
+	if theme == null:
+		return {"ok": false, "error": "No Theme at %s. Create one there first." % theme_path}
+
 	var c: Dictionary = args.get("color", {})
 	var color: Color = Color(
 		float(c.get("r", 1.0)), float(c.get("g", 1.0)), float(c.get("b", 1.0)), float(c.get("a", 1.0))
 	)
-	theme.set_color(str(args.get("colorName", "")), str(args.get("controlType", "")), color)
+	theme.set_color(color_name, control_type, color)
 
 	var save_result: Error = ResourceSaver.save(theme, theme_path)
 	if save_result != OK:
 		return {"ok": false, "error": "Failed to save theme", "code": save_result}
 
 	_refresh_filesystem()
-	return {"ok": true}
+
+	var saved: Theme = _load_theme(theme_path)
+	if saved == null or not saved.has_color(color_name, control_type):
+		return {"ok": false, "error": "The theme saved without %s/%s" % [control_type, color_name]}
+
+	var stored: Color = saved.get_color(color_name, control_type)
+	return {
+		"ok": true,
+		"themePath": theme_path,
+		"controlType": control_type,
+		"colorName": color_name,
+		"color": {"r": stored.r, "g": stored.g, "b": stored.b, "a": stored.a}
+	}
 
 
 func set_theme_font_size(args: Dictionary) -> Dictionary:
@@ -331,14 +359,31 @@ func set_theme_font_size(args: Dictionary) -> Dictionary:
 	if theme_path == "res://":
 		return {"ok": false, "error": "themePath is required"}
 
+	var font_size_name: String = str(args.get("fontSizeName", ""))
+	var control_type: String = str(args.get("controlType", ""))
+	if font_size_name.is_empty() or control_type.is_empty():
+		return {"ok": false, "error": "fontSizeName and controlType are required"}
+
 	var theme: Theme = _load_theme(theme_path)
-	theme.set_font_size(
-		str(args.get("fontSizeName", "")), str(args.get("controlType", "")), int(args.get("size", 0))
-	)
+	if theme == null:
+		return {"ok": false, "error": "No Theme at %s. Create one there first." % theme_path}
+
+	theme.set_font_size(font_size_name, control_type, int(args.get("size", 0)))
 
 	var save_result: Error = ResourceSaver.save(theme, theme_path)
 	if save_result != OK:
 		return {"ok": false, "error": "Failed to save theme", "code": save_result}
 
 	_refresh_filesystem()
-	return {"ok": true}
+
+	var saved: Theme = _load_theme(theme_path)
+	if saved == null or not saved.has_font_size(font_size_name, control_type):
+		return {"ok": false, "error": "The theme saved without %s/%s" % [control_type, font_size_name]}
+
+	return {
+		"ok": true,
+		"themePath": theme_path,
+		"controlType": control_type,
+		"fontSizeName": font_size_name,
+		"size": saved.get_font_size(font_size_name, control_type)
+	}

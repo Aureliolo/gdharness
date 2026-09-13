@@ -716,7 +716,9 @@ func connect_signal(args: Dictionary) -> Dictionary:
 	var signal_name: String = str(args.get("signalName", ""))
 	var target_node_path: String = str(args.get("targetNodePath", ""))
 	var method_name: String = str(args.get("methodName", ""))
-	var flags: int = int(args.get("flags", 0))
+	# A connection without CONNECT_PERSIST is a runtime one, and PackedScene.pack drops those on
+	# the way out: without this the scene saves unchanged and this answers success over nothing.
+	var flags: int = int(args.get("flags", 0)) | Object.CONNECT_PERSIST
 
 	if (
 		source_node_path.is_empty()

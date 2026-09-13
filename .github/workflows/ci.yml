@@ -207,6 +207,15 @@ jobs:
         env:
           GDHARNESS_REQUIRE_GODOT: '1'
 
+      # The editor tools, against an editor this starts itself. Nothing else in CI opens one, so
+      # without this every scene_* tool, resource_edit and editor_rescan is covered by argument
+      # checks alone, which a tool answering plausible nonsense passes as well as a working one.
+      - name: Editor fixtures
+        if: '!cancelled()'
+        run: bun run build && bun run test:editor
+        env:
+          GDHARNESS_REQUIRE_GODOT: '1'
+
   # Biome owns formatting and the fast syntactic rules; oxlint owns the ones that need the type
   # checker, which it runs through typescript-go rather than a second copy of the compiler.
   # Separate from build-and-test so a lint failure and a broken build are two different red
