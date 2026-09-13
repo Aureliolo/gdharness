@@ -405,6 +405,147 @@ th:last-child {
   padding-right: 0;
 }
 
+/* ------------------------------------------------------------------ the flow */
+
+/*
+ * One command in, three ways out, one thing at the end.
+ *
+ * Drawn in elements rather than in characters. As ASCII art in a code block it came apart twice:
+ * the box-drawing glyphs are not in the mono face, so the browser found them in some other font
+ * at some other width, and even once it was plain ASCII the verticals could not join across the
+ * line height code is set at. Here the rules are elements, placed exactly, in the theme, and the
+ * whole thing stacks into a column on a narrow screen instead of overflowing.
+ */
+.flow {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin: 0 0 20px;
+}
+
+.flow p {
+  margin: 0;
+  text-align: center;
+}
+
+code.cmd {
+  font-size: 14px;
+  padding: 8px 14px;
+  color: var(--signal);
+  border-color: color-mix(in srgb, var(--signal) 45%, transparent);
+}
+
+/* The stem out of the command, and the one into the line at the end. */
+.flow .start::after,
+.flow .end::before {
+  content: "";
+  display: block;
+  width: 1px;
+  height: 24px;
+  margin: 0 auto;
+  background: var(--rule);
+}
+
+.flow .fan {
+  position: relative;
+  width: 100%;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 14px;
+  /* The stem zone above and below, inside the box, so the bars have somewhere to sit. */
+  padding: 24px 0;
+}
+
+/* The two bars, drawn centre to centre of the outer lanes rather than edge to edge. */
+.flow .fan::before,
+.flow .fan::after {
+  content: "";
+  position: absolute;
+  left: calc(100% / 6);
+  right: calc(100% / 6);
+  height: 1px;
+  background: var(--rule);
+}
+
+.flow .fan::before {
+  top: 0;
+}
+
+.flow .fan::after {
+  bottom: 0;
+}
+
+.flow .lane {
+  position: relative;
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  background: var(--raised);
+  padding: 14px 16px;
+}
+
+/* Each lane's own stem, up to the first bar and down to the second. */
+.flow .lane::before,
+.flow .lane::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  width: 1px;
+  height: 24px;
+  background: var(--rule);
+}
+
+.flow .lane::before {
+  top: -24px;
+}
+
+.flow .lane::after {
+  bottom: -24px;
+}
+
+.flow .when {
+  margin-bottom: 8px;
+  text-align: left;
+  color: var(--ink);
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+.flow .then {
+  text-align: left;
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--muted);
+}
+
+.flow .end {
+  font-size: 13px;
+  color: var(--faint);
+}
+
+@media (max-width: 720px) {
+  .flow .fan {
+    grid-template-columns: 1fr;
+    gap: 24px;
+  }
+
+  /* Stacked, the bars have nothing to span and each lane hangs off the one above it. */
+  .flow .fan::before,
+  .flow .fan::after,
+  .flow .lane:first-child::before,
+  .flow .lane:last-child::after {
+    display: none;
+  }
+
+  .flow .lane::before {
+    top: -24px;
+    height: 24px;
+  }
+
+  .flow .lane::after {
+    display: none;
+  }
+}
+
 /* ------------------------------------------------------------------ the tool reference */
 
 .tool {

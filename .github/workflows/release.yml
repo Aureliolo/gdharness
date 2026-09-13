@@ -103,13 +103,13 @@ jobs:
             'Point your agent at <https://aureliolo.github.io/gdharness>, or do it yourself:' \
             '' \
             '```bash' \
-            "npx -y gdharness@${VERSION} setup ." \
+            "npx -y gdharness@${VERSION} setup" \
             '```' \
             '' \
             '## Upgrade from an earlier version' \
             '' \
             '```bash' \
-            "npx -y gdharness@${VERSION} upgrade ." \
+            "npx -y gdharness@${VERSION} upgrade" \
             '```' \
             '' \
             'Then restart the editor so it loads the new addons, and reconnect the MCP server so' \

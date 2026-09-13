@@ -16,7 +16,7 @@ yours is somewhere else, and it will write that path into the config it generate
 ## One command
 
 ```bash from the project directory
-npx -y gdharness@{{version}} setup .
+npx -y gdharness@{{version}} setup
 ```
 
 That installs the addons, enables the editor plugins, registers the runtime autoload, rebuilds the
@@ -42,16 +42,16 @@ can never hang waiting for an answer nobody can give.
 
 ```bash
 # exactly these two, no questions
-npx -y gdharness@{{version}} setup . --cursor --vscode
+npx -y gdharness@{{version}} setup --cursor --vscode
 
 # yes, write the machine-wide one
-npx -y gdharness@{{version}} setup . --codex
+npx -y gdharness@{{version}} setup --codex
 
 # no questions, and nothing outside the project
-npx -y gdharness@{{version}} setup . --yes
+npx -y gdharness@{{version}} setup --yes
 
 # the addons only, no configuration at all
-npx -y gdharness@{{version}} setup . --no-connect
+npx -y gdharness@{{version}} setup --no-connect
 ```
 
 ## What it writes, and where
@@ -103,7 +103,7 @@ parse is refused rather than replaced.
 | `project_info`                            | The project name and main scene.                           |
 | `editor_run` start, `editor_output`, stop | The game starts, its console comes back, it stops.         |
 
-`gdharness doctor .` exits 1 on any problem and names it.
+`gdharness doctor` exits 1 on any problem and names it.
 
 ## Updating
 
@@ -112,7 +112,7 @@ and tells your agent when there is a newer release. One request to one host, car
 you or the project. `GDHARNESS_NO_UPDATE_CHECK=1` in the server's environment stops it.
 
 ```bash
-npx -y gdharness@<new> upgrade .
+npx -y gdharness@<new> upgrade
 ```
 
 `upgrade` asks nothing: it reinstalls the addons at the new version and re-pins every config that
@@ -128,15 +128,19 @@ because the old version keeps answering until they are done:
 
 ## The rest of the CLI
 
-| Command                        | What it does                                            |
-| ------------------------------ | ------------------------------------------------------- |
-| `setup <project>`              | Addons in, editor plugins on, class list rebuilt        |
-| `setup <project> --no-connect` | The same, and no harness configuration written          |
-| `upgrade <project>`            | The same project, on this version                       |
-| `uninstall <project>`          | All of it back out again                                |
-| `doctor <project>`             | Says what holds and what does not; exits 1 on a problem |
-| `classes <project>`            | Rebuilds the class cache from disk                      |
-| `harnesses`                    | Every harness, its flag and the file it reads           |
+| Command              | What it does                                            |
+| -------------------- | ------------------------------------------------------- |
+| `setup`              | Addons in, editor plugins on, class list rebuilt        |
+| `setup --no-connect` | The same, and no harness configuration written          |
+| `upgrade`            | The same project, on this version                       |
+| `uninstall`          | All of it back out again                                |
+| `doctor`             | Says what holds and what does not; exits 1 on a problem |
+| `classes`            | Rebuilds the class cache from disk                      |
+| `harnesses`          | Every harness, its flag and the file it reads           |
+
+Each of these takes the project directory as its argument and defaults to the one you are in. It
+has to hold a `project.godot` either way, so the default cannot act on somewhere that is not a
+Godot project.
 
 `setup` copies each addon whole and writes the version beside it, so `doctor` can tell an old copy
 from the shipped one. An editor that was already open keeps serving the addon it loaded at startup
@@ -145,7 +149,7 @@ until it is restarted.
 ## Uninstalling
 
 ```bash
-gdharness uninstall /path/to/project
+gdharness uninstall
 ```
 
 The addons, the editor plugin entries, the runtime autoload, the skill, and gdharness's own entry
@@ -173,8 +177,8 @@ It is an autoload, so an export ships it unless it is removed. It refuses to ser
 build, so it is not a server on a player's machine, but turn it off before you ship.
 
 ```bash
-gdharness runtime on  /path/to/project
-gdharness runtime off /path/to/project
+gdharness runtime on
+gdharness runtime off
 ```
 
 ## Installing from the signed archive

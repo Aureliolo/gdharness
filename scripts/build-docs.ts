@@ -58,6 +58,60 @@ function renderHarnesses(): string {
   ].join('\n');
 }
 
+/** How setup decides what to write: one command in, three ways out, one thing at the end. */
+const FLOW = [
+  {
+    when: 'Harnesses named by flag',
+    writes: 'Exactly those, and nothing is asked.',
+  },
+  {
+    when: 'None named, a terminal to ask at',
+    writes: 'It asks about each harness it finds here or on this machine, one at a time.',
+  },
+  {
+    when: 'None named, nobody to ask',
+    writes: 'The harnesses this project already uses, and it names the rest with the flag for each.',
+  },
+] as const;
+
+/**
+ * The one diagram on the site, drawn in elements rather than in characters.
+ *
+ * It was ASCII art in a code block, which is how a flow chart is usually written down and is not
+ * how one should be published: the box-drawing glyphs are not in the mono face, so the browser
+ * fetched them from whatever font had them and the verticals landed off their columns, and even
+ * once that was ASCII the lines could not join up at any line height a browser reads code at.
+ * Boxes and rules are elements the stylesheet can place exactly, in the theme, at any width.
+ */
+function renderFlow(): string {
+  const lanes = FLOW.map((step) =>
+    [
+      '<div class="lane">',
+      `<p class="when">${escaped(step.when)}</p>`,
+      `<p class="then">${escaped(step.writes)}</p>`,
+      '</div>',
+    ].join(''),
+  );
+  return [
+    '<div class="flow">',
+    '<p class="start"><code class="cmd">gdharness setup</code></p>',
+    `<div class="fan">${lanes.join('')}</div>`,
+    '<p class="end">then the skill, unless <code>--no-skill</code></p>',
+    '</div>',
+  ].join('\n');
+}
+
+/** The same three ways out, for the twin an agent reads, where a diagram is nothing. */
+function renderFlowText(): string {
+  return [
+    '| When you run `gdharness setup` | What it writes |',
+    '| --- | --- |',
+    ...FLOW.map((step) => `| ${step.when} | ${step.writes} |`),
+    '',
+    'Every one of them ends by writing the skill, unless `--no-skill`.',
+  ].join('\n');
+}
+
 /**
  * The same command under both runners, one line each.
  *
@@ -94,7 +148,7 @@ function renderPicker(): string {
   );
   const chips = chosen.map((harness) => `<label for="pick-${harness.id}">${escaped(harness.name)}</label>`);
   const panels = chosen.map((harness) => {
-    const command = bothRunners(`setup . --${harness.id}`);
+    const command = bothRunners(`setup --${harness.id}`);
     const where =
       harness.scope === 'project'
         ? `Writes <code>${escaped(displayPath(harness, 'linux'))}</code> inside the project.`
@@ -120,7 +174,7 @@ function renderPicker(): string {
   panels.push(
     [
       '<div class="panel panel-other">',
-      `<pre><code>${codeText(bothRunners('setup .'))}</code></pre>`,
+      `<pre><code>${codeText(bothRunners('setup'))}</code></pre>`,
       '<p>Any MCP client that can spawn a local stdio server will do. With no harness named it asks about the ones it finds, and the entry it writes is the same everywhere. <a href="architecture.html">How it works</a> has every file and key, and says which ones it cannot write for you.</p>',
       '</div>',
     ].join(''),
@@ -153,7 +207,7 @@ function renderPickerText(): string {
     'Every harness takes the same command with its own flag, under either runner:',
     '',
     '```bash',
-    bothRunners('setup . --<harness>'),
+    bothRunners('setup --<harness>'),
     '```',
     '',
     'Leave the flag off and it asks about the ones it finds.',
@@ -177,7 +231,8 @@ function filled(text: string, markup = true): string {
     .replaceAll('{{version}}', SERVER_VERSION)
     .replaceAll('{{tools}}', TOOL_COUNT)
     .replaceAll('{{harnesses}}', renderHarnesses())
-    .replaceAll('{{picker}}', markup ? renderPicker() : renderPickerText());
+    .replaceAll('{{picker}}', markup ? renderPicker() : renderPickerText())
+    .replaceAll('{{flow}}', markup ? renderFlow() : renderFlowText());
 }
 
 /** The three things gdharness is made of, and where each one is documented. */

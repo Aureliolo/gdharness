@@ -1197,6 +1197,52 @@ function testStaleClassesAreReadFromDisk(): void {
 }
 
 /**
+ * No project named means the one you are standing in, and only if it is one.
+ *
+ * `doctor` is the command to prove it with: it reads the project directory and starts no engine,
+ * so this holds on a machine with no Godot on it. The refusal matters as much as the default,
+ * because a command that acts on the working directory has to be sure what the working directory
+ * is before it acts.
+ */
+function testProjectDefaultsToTheWorkingDirectory(): void {
+  const sandbox = mkdtempSync(join(tmpdir(), 'gdharness-cwd-'));
+  const project = join(sandbox, 'game');
+  const elsewhere = join(sandbox, 'not-a-project');
+  const cli = (cwd: string): { status: number | null; output: string } => {
+    const run = spawnSync(process.execPath, [join(process.cwd(), 'build', 'cli.js'), 'doctor'], {
+      encoding: 'utf8',
+      cwd,
+      timeout: 60000,
+    });
+    return { status: run.status, output: `${run.stdout}${run.stderr}` };
+  };
+  try {
+    mkdirSync(project, { recursive: true });
+    mkdirSync(elsewhere, { recursive: true });
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+
+    const here = cli(project);
+    assert.match(
+      here.output,
+      /addons\/gdharness_editor is not installed/,
+      `doctor with no argument should report on the directory it ran in: ${here.output}`,
+    );
+
+    const nowhere = cli(elsewhere);
+    assert.match(
+      nowhere.output,
+      /Not a Godot project/,
+      `and refuse where there is no project.godot: ${nowhere.output}`,
+    );
+    // 2 is what a usage error exits with, as against 1 for a project that has problems: telling
+    // the two apart is the point, because only one of them means "you are in the wrong place".
+    assert.equal(nowhere.status, 2, 'as a usage error rather than a project with problems');
+  } finally {
+    rmSync(sandbox, { recursive: true, force: true });
+  }
+}
+
+/**
  * The ordering an update notice is decided by.
  *
  * Getting this wrong in either direction is bad in its own way: too eager and every session is
@@ -2025,6 +2071,7 @@ async function main(): Promise<void> {
   testRunArgumentsLeaveTheLocalDebuggerOff();
   testHeadlessFollowsTheDisplay();
   testStaleClassesAreReadFromDisk();
+  testProjectDefaultsToTheWorkingDirectory();
   testVersionOrdering();
   await testParametersReachTheEngine();
   await testGdUnitRunner();

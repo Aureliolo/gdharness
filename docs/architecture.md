@@ -29,18 +29,11 @@ The entry written into each config is the same everywhere: `npx -y gdharness@{{v
 
 ## How setup decides what to write
 
-Three cases, decided in this order. The `.` in each is the project: `setup` takes the directory to
-install into, and `.` is the one you are standing in.
+{{flow}}
 
-| What you ran                  | What it writes                                                                                |
-| ----------------------------- | --------------------------------------------------------------------------------------------- |
-| `setup . --cursor --vscode`   | Exactly the harnesses named, and no questions                                                 |
-| `setup .` at a terminal       | Asks about each harness found here or on this machine, one at a time                          |
-| `setup .` with nothing to ask | The harnesses this project already uses, and it names the rest with the flag that writes each |
-
-The third case is a pipe, a CI job or an agent: there is nobody to answer, so it writes what the
-project already committed to and can never hang waiting. Every case ends by writing the skill,
-unless `--no-skill`.
+`setup` takes the directory to install into, and defaults to the one you are in. The third way out
+is a pipe, a CI job or an agent, where there is nobody to answer a question: it writes what the
+project has already committed to rather than hanging on an answer that is never coming.
 
 **Nothing outside the project is written without a flag or a typed yes.** A harness with no
 project-level config at all is then written where it lives, because that is its limitation rather
