@@ -26,6 +26,7 @@ import {
   writeYaml,
 } from './config-formats.js';
 import { Refusal } from './errors.js';
+import { currentRunner, type Runner } from './runner.js';
 
 /** What gdharness is called wherever it is registered. */
 export const SERVER_KEY = 'gdharness';
@@ -35,27 +36,6 @@ export interface Launch {
   readonly command: string;
   readonly args: readonly string[];
   readonly env: Readonly<Record<string, string>>;
-}
-
-/** The two runners that fetch and run a published package without installing it first. */
-export type Runner = 'npx' | 'bunx';
-
-/**
- * Whichever runner is running us.
- *
- * Somebody who installed with `bunx` may not have Node at all, so writing `npx` into their config
- * would leave them an entry nothing can spawn.
- */
-function currentRunner(): Runner {
-  // Bun's own types declare versions.bun as always present, which it is not under Node.
-  const versions: Readonly<Record<string, string | undefined>> = process.versions;
-  return versions['bun'] === undefined ? 'npx' : 'bunx';
-}
-
-/** What a runner is typed as, which is the same line the config holds. */
-export function runLine(runner: Runner, version: string, rest = ''): string {
-  const flag = runner === 'npx' ? '-y ' : '';
-  return `${runner} ${flag}gdharness@${version}${rest === '' ? '' : ` ${rest}`}`;
 }
 
 /**

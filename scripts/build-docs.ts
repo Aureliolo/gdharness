@@ -14,7 +14,8 @@ import { cpSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } f
 import { join } from 'node:path';
 import process from 'node:process';
 import { marked, type Tokens } from 'marked';
-import { displayPath, HARNESSES, type Harness, runLine } from '../src/harnesses.js';
+import { displayPath, HARNESSES, type Harness } from '../src/harnesses.js';
+import { runLine } from '../src/runner.js';
 import { SERVER_VERSION } from '../src/server-version.js';
 import { TOOL_SPECS } from '../src/tool-definitions.js';
 import { renderToolsMarkdown } from '../src/tool-reference.js';
