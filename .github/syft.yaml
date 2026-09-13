@@ -1,0 +1,15 @@
+# How the release SBOM is made. The archive is a bundle, so nothing inside it names what was
+# bundled; that comes from the lockfile the build read, which syft is given beside the unpacked
+# archive. The lockfile parser leaves out packages only development needs, which is exactly the
+# set the bundler never saw. The package cataloger is off for a directory by default and it is
+# what reads the shipped package.json.
+select-catalogers:
+  - "+javascript-package-cataloger"
+
+# Every file that ships, with its digest, so a consumer can check the archive against the SBOM
+# member by member rather than only as a whole.
+file:
+  metadata:
+    selection: all
+    digests:
+      - sha256
