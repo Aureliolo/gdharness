@@ -553,7 +553,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   // -------------------------------------------------------------------------------------------
   {
     name: 'script_edit',
-    description: 'Creates a GDScript file, or adds functions, variables and signals to one.',
+    description:
+      "Creates a GDScript file, or adds functions, variables and signals to one. Every declaration written carries a type. create loads what it wrote under the project's own warning settings and answers with parses; the engine's reasons for a refusal come back under engine_messages.",
     parameters: {
       projectPath: PROJECT_PATH,
       scriptPath: SCRIPT_PATH,
