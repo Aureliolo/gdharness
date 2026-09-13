@@ -261,6 +261,14 @@ func create_tileset(args: Dictionary) -> Dictionary:
 	return {"ok": true, "tilesetPath": tileset_path}
 
 
+## The source ids a tile set holds, for saying what a cell could have named instead.
+func _source_ids(tile_set: TileSet) -> PackedInt32Array:
+	var ids: PackedInt32Array = PackedInt32Array()
+	for index: int in tile_set.get_source_count():
+		ids.append(tile_set.get_source_id(index))
+	return ids
+
+
 func set_tilemap_cells(args: Dictionary) -> Dictionary:
 	var scene_path: String = _ensure_res_path(str(args.get("scenePath", "")))
 	var node_path: String = str(args.get("tilemapNodePath", ""))
@@ -287,23 +295,53 @@ func set_tilemap_cells(args: Dictionary) -> Dictionary:
 
 	var layer: int = int(args.get("layer", 0))
 	var cells: Variant = args.get("cells", [])
+	# Refused rather than skipped: placing nothing and answering success is indistinguishable
+	# from placing everything, and the caller only finds out by opening the scene.
 	if typeof(cells) != TYPE_ARRAY:
-		cells = []
-	var placed: Array = cells
+		root.queue_free()
+		return {"ok": false, "error": "cells must be an array of cells to place"}
 
+	var placed: Array = cells
+	if placed.is_empty():
+		root.queue_free()
+		return {"ok": false, "error": "cells is empty, so there is nothing to place"}
+
+	# set_cell stores a cell whatever source id it is given, and a tile set without that source
+	# simply draws nothing, so the source is checked here: the alternative is a call that reports
+	# placing tiles and a scene that shows none.
+	var tile_set: TileSet = tilemap.tile_set
+	if tile_set == null:
+		root.queue_free()
+		return {"ok": false, "error": "The TileMap has no TileSet, so no cell can name a source"}
+
+	var written: int = 0
 	for entry: Variant in placed:
 		if typeof(entry) != TYPE_DICTIONARY:
-			continue
+			root.queue_free()
+			return {
+				"ok": false, "error": "every cell must be an object with coords, sourceId and atlasCoords"
+			}
 		var cell: Dictionary = entry
+		var source_id: int = int(cell.get("sourceId", -1))
+		if not tile_set.has_source(source_id):
+			root.queue_free()
+			return {
+				"ok": false,
+				"error": "The TileSet has no source %d; it has %s" % [source_id, _source_ids(tile_set)]
+			}
+
 		var coords: Dictionary = cell.get("coords", {})
 		var atlas_coords: Dictionary = cell.get("atlasCoords", {})
+		var at: Vector2i = Vector2i(int(coords.get("x", 0)), int(coords.get("y", 0)))
 		tilemap.set_cell(
 			layer,
-			Vector2i(int(coords.get("x", 0)), int(coords.get("y", 0))),
-			int(cell.get("sourceId", -1)),
+			at,
+			source_id,
 			Vector2i(int(atlas_coords.get("x", 0)), int(atlas_coords.get("y", 0))),
 			int(cell.get("alternativeTile", 0))
 		)
+		if tilemap.get_cell_source_id(layer, at) != -1:
+			written += 1
 
 	var save_result: Error = _save_scene_root(root, scene_path)
 	root.queue_free()
@@ -311,7 +349,7 @@ func set_tilemap_cells(args: Dictionary) -> Dictionary:
 		return {"ok": false, "error": "Failed to save scene", "code": save_result}
 
 	_refresh_filesystem()
-	return {"ok": true, "cellCount": placed.size()}
+	return {"ok": true, "layer": layer, "placed": written, "requested": placed.size()}
 
 
 func set_theme_color(args: Dictionary) -> Dictionary:

@@ -299,11 +299,38 @@ func _serialize_value(value: Variant) -> Variant:
 			return value
 
 
-func _set_node_properties(node: Node, properties: Dictionary) -> void:
+## Set each property, answering with what went wrong or "" when nothing did.
+##
+## A property the node does not have, and a resource path nothing is at, are both refused: Object
+## .set ignores an unknown name and stores null for a resource that would not load, so either one
+## saves a scene that quietly did not change and reports it as a change that did.
+func _set_node_properties(node: Node, properties: Dictionary) -> String:
 	for prop_name: Variant in properties:
-		var expected_type: int = _get_property_type(node, str(prop_name))
-		var val: Variant = _parse_value(properties[prop_name], expected_type)
-		node.set(prop_name, val)
+		var property: String = str(prop_name)
+		if not _has_property(node, property):
+			return "%s has no property %s" % [node.get_class(), property]
+
+		var expected_type: int = _get_property_type(node, property)
+		var raw: Variant = properties[prop_name]
+
+		# A resource-valued property takes the path of one, which is how a caller names a
+		# TileSet, a material or a theme: there is no other way to hand a tool a Resource.
+		if expected_type == TYPE_OBJECT and typeof(raw) == TYPE_STRING:
+			var path: String = String(raw)
+			if not ResourceLoader.exists(path):
+				return "No resource at %s for %s" % [path, property]
+			node.set(property, load(path))
+			continue
+
+		node.set(property, _parse_value(raw, expected_type))
+	return ""
+
+
+func _has_property(node: Node, prop_name: String) -> bool:
+	for prop: Dictionary in node.get_property_list():
+		if str(prop.get("name", "")) == prop_name:
+			return true
+	return false
 
 
 func _parse_properties_arg(raw_properties: Variant) -> Dictionary:
@@ -449,7 +476,12 @@ func add_node(args: Dictionary) -> Dictionary:
 		return {"ok": false, "error": "Failed to instantiate nodeType: " + node_type}
 
 	new_node.name = node_name
-	_set_node_properties(new_node, properties)
+	var refused_property: String = _set_node_properties(new_node, properties)
+	if not refused_property.is_empty():
+		new_node.queue_free()
+		root.queue_free()
+		return {"ok": false, "error": refused_property}
+
 	parent.add_child(new_node)
 	_set_owner_recursive(new_node, root)
 
@@ -597,7 +629,10 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 		root.queue_free()
 		return {"ok": false, "error": "Node not found: " + node_path}
 
-	_set_node_properties(node, properties)
+	var refused_property: String = _set_node_properties(node, properties)
+	if not refused_property.is_empty():
+		root.queue_free()
+		return {"ok": false, "error": refused_property}
 
 	var err: Dictionary = _save_scene(root, scene_path)
 	if not err.is_empty():
