@@ -19,7 +19,7 @@
     "enabled": false
   },
   "lockFileMaintenance": {
-    "description": "The second pull request of the week, the day after the first: bun.lock and the hash-locked requirements regenerated, which is where the transitive dependencies move. Nothing this repository names changes in it, which is why it is not folded into the first.",
+    "description": "The second pull request of the week, the day after the first: bun.lock and uv.lock regenerated, which is where the transitive dependencies move. Nothing this repository names changes in it, which is why it is not folded into the first.",
     "enabled": true,
     "schedule": ["before 6am on tuesday"]
   },
@@ -36,7 +36,7 @@
       "minimumReleaseAge": "14 days"
     },
     {
-      "description": "A new interpreter reaches uv's download list a few days after python.org publishes it, and CI installs the interpreter through uv. Waiting a fortnight keeps the two from crossing.",
+      "description": "A new interpreter reaches uv's download list a few days after python.org publishes it, and uv installs the one requires-python pins in pyproject.toml. Waiting a fortnight keeps the two from crossing.",
       "matchDatasources": ["python-version"],
       "minimumReleaseAge": "14 days"
     },
@@ -46,13 +46,6 @@
       "enabled": false
     }
   ],
-  "pip_requirements": {
-    "enabled": false
-  },
-  "pip-compile": {
-    "description": "gdtoolkit and yamllint are installed with --require-hashes from locks uv compiles, so a bump rewrites the lock with the new hashes rather than the bare version.",
-    "managerFilePatterns": ["/^\\.github/requirements/.+\\.txt$/"]
-  },
   "customManagers": [
     {
       "description": "A version with the SHA-256 or SHA-512 of the file it names on the next line: Bun, uv, actionlint and the engine. The tag and the digest move together, and the datasource finds the new digest in the checksum file the release publishes.",
@@ -72,11 +65,10 @@
       ]
     },
     {
-      "description": "A version on its own, for what nothing downloads directly: the interpreter uv installs and verifies against the hashes it carries, and the runner images inside a job matrix, which the github-actions manager reads from runs-on: but not from a matrix.",
+      "description": "The runner images inside a job matrix, which the github-actions manager reads from runs-on: but not from a matrix.",
       "customType": "regex",
       "managerFilePatterns": ["/^\\.github/.+\\.ya?ml$/"],
       "matchStrings": [
-        "# renovate: datasource=(?<datasource>python-version) depName=(?<depName>\\S+)(?: versioning=(?<versioning>\\S+))?\\n\\s*[A-Z0-9_]+: '?(?<currentValue>[^'\\s]+)'?",
         "# renovate: datasource=(?<datasource>github-runners) depName=(?<depName>ubuntu|windows|macos)\\n\\s*runner: (?:ubuntu|windows|macos)-(?<currentValue>[0-9.]+(?:-[a-z0-9]+)?)"
       ]
     }
