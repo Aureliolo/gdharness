@@ -205,6 +205,7 @@ function startMockRuntime(directory: string, options: MockRuntimeOptions): Promi
             path: params['path'],
             hovered: params['path'],
             landed: true,
+            control_afterwards: 'in_tree',
             asked: params,
           });
           break;

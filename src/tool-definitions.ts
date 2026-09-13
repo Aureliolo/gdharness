@@ -880,7 +880,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     requires: [],
     operations: {
       click: {
-        summary: 'press and release on a Control, a frame apart, and answer with what was under the pointer',
+        summary:
+          'press and release on a Control, a frame apart, and answer with what was under the pointer and what became of the control: in_tree, removed or freed',
         requires: ['nodePath'],
       },
       action: { summary: 'press or release an action', requires: ['action'] },

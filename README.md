@@ -90,8 +90,9 @@ under `engine_messages`.
 The `runtime_*` tools ask the game rather than the tree dump: `runtime_inspect find` answers
 with the paths of the nodes matching a class, script, name pattern or group, `rect` with where
 one is on screen in window pixels, `runtime_input click` presses and releases a Control by
-path and says what was under the pointer, and `runtime_wait` lets frames pass or waits for a
-signal or a property before answering. A node-valued property comes back as its path, so an
+path and says what was under the pointer and what became of the control (a menu button that
+opens the next screen takes itself out of the tree, and the answer says so), and
+`runtime_wait` lets frames pass or waits for a signal or a property before answering. A node-valued property comes back as its path, so an
 answer can be fed straight into the next call.
 
 The `scene_*` and `resource_*` tools and `editor_rescan` go through the editor addon and need
