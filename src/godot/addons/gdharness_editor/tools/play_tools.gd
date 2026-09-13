@@ -8,9 +8,6 @@ extends Node
 ## editor to play means the debugger it owns is holding the game, which is what makes the debug
 ## tools answer at all.
 
-## Time for the answer to reach the server before the editor goes, in seconds.
-const QUIT_DELAY: float = 0.5
-
 var _editor_plugin: EditorPlugin = null
 
 
@@ -53,26 +50,32 @@ func stop_playing(_args: Dictionary) -> Dictionary:
 ## back. Scenes are saved on the way out, because the alternative is throwing away somebody's
 ## unsaved work to pick up a version.
 func restart_editor(_args: Dictionary) -> Dictionary:
+	# Only an editor with a window, because only that one can come back as itself. The engine
+	# hands back none of the arguments it consumed: OS.get_cmdline_args() in an editor started
+	# with --headless --path <project> --lsp-port <n> answers with none of them, so a headless
+	# editor restarted by anybody comes up as a project manager with no project, holding the
+	# desktop of whoever was unlucky enough to be watching. A windowed editor was started with
+	# none of that, so Godot's own restart brings back the same editor on the same project.
+	if not DisplayServer.window_can_draw():
+		return {
+			"ok": false,
+			"error":
+			(
+				"This editor is headless, and the engine does not hand back the arguments it was "
+				+ "started with, so nothing can bring it back as the editor it is. Start it again "
+				+ "yourself."
+			)
+		}
+
 	if EditorInterface.is_playing_scene():
 		EditorInterface.stop_playing_scene()
 
 	EditorInterface.save_all_scenes()
 
-	# The same command line rather than EditorInterface.restart_editor, which builds its own and
-	# keeps only what it expects: an editor started headless, or on a language server port that
-	# is not the default, comes back without either and is a different editor on the same project.
-	var arguments: PackedStringArray = OS.get_cmdline_args()
-	OS.set_restart_on_exit(true, arguments)
+	# Deferred so this answer is on its way out before the editor goes.
+	EditorInterface.restart_editor.call_deferred(true)
 
-	# On a timer rather than deferred: this answer is still sitting in the socket until the next
-	# poll, and quitting in the same frame sends the caller nothing at all.
-	get_tree().create_timer(QUIT_DELAY).timeout.connect(_quit)
-
-	return {"ok": true, "restarting": true, "saved": true, "arguments": arguments}
-
-
-func _quit() -> void:
-	get_tree().quit()
+	return {"ok": true, "restarting": true, "saved": true}
 
 
 func playing_status(_args: Dictionary) -> Dictionary:

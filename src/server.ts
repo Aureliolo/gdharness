@@ -1273,34 +1273,49 @@ class GodotServer {
       return asked;
     }
 
-    // The socket the answer came down is about to close, so the wait is for a connection that is
-    // new rather than for one that is up: a restart that never came back and one that never left
-    // both leave the bridge looking exactly as it did.
+    // A connection newer than the one that was there, rather than one that is merely up: the
+    // editor that answered is on its way out, and an editor that ignored the request looks
+    // exactly like one that came straight back.
     const startedAt = before.connectedAt?.getTime() ?? 0;
-    const deadline = Date.now() + EDITOR_RESTART_TIMEOUT_MS;
-    let now = this.godotBridge.getStatus();
-    while (Date.now() < deadline && !(now.connected && (now.connectedAt?.getTime() ?? 0) > startedAt)) {
-      await delay(250);
-      now = this.godotBridge.getStatus();
-    }
+    const began = Date.now();
+    const back = await this.waitForBridge(() => {
+      const status = this.godotBridge.getStatus();
+      return status.connected && (status.connectedAt?.getTime() ?? 0) > startedAt;
+    }, began + EDITOR_RESTART_TIMEOUT_MS);
 
-    if (!now.connected || (now.connectedAt?.getTime() ?? 0) <= startedAt) {
+    if (!back) {
       return this.createErrorResponse(
         `The editor was asked to restart and has not come back within ${EDITOR_RESTART_TIMEOUT_MS / 1000}s.`,
         [
-          'It may be asking what to do about an unsaved scene',
-          'An addon that no longer parses stops the editor reaching this server: check the editor window',
+          'It may be asking what to do about an unsaved scene: look at the editor window',
+          'An addon that no longer parses stops the editor reaching this server',
+          'editor_status says whether anything has reached the bridge since',
         ],
       );
     }
 
+    const now = this.godotBridge.getStatus();
     return this.jsonTextResponse({
       restarted: true,
+      editorPid: now.editorPid,
       addonVersion: now.addonVersion,
       serverVersion: SERVER_VERSION,
       addonIsStale: now.addonVersion !== SERVER_VERSION,
-      tookMs: Date.now() - (deadline - EDITOR_RESTART_TIMEOUT_MS),
+      tookMs: Date.now() - began,
     });
+  }
+
+  /** Polls until the bridge is in the state asked for, or until the deadline passes. */
+  private async waitForBridge(reached: () => boolean, deadline: number): Promise<boolean> {
+    for (;;) {
+      if (reached()) {
+        return true;
+      }
+      if (Date.now() >= deadline) {
+        return false;
+      }
+      await delay(250);
+    }
   }
 
   /**
