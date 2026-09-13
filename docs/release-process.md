@@ -29,9 +29,12 @@ nothing. `release.yml` runs four jobs in order:
    bundle names nothing on its own. The job then checks the SBOM against the archive's members
    and `package.json`, because an SBOM that lists nothing looks exactly like a passing step
    (`.github/syft.yaml` says what syft reads).
-3. **attest** signs the archive, its checksum and the SBOM through Sigstore, and attests the
-   SBOM against the archive. It is a separate reusable workflow on purpose: see below.
-4. **publish** rechecks the checksum and creates the GitHub Release with all three files.
+3. **attest** signs the archive, its checksum and the SBOM through Sigstore, attests the SBOM
+   against the archive, and gathers both signed attestations into one JSON Lines file. It is a
+   separate reusable workflow on purpose: see below.
+4. **publish** rechecks the checksum, verifies that file against every subject the way a user
+   would (from the file, naming `attest.yml` at the tag), and creates the GitHub Release with
+   all four files.
 
 ## What a release carries
 
@@ -40,6 +43,8 @@ nothing. `release.yml` runs four jobs in order:
 - An SPDX SBOM of the archive.
 - A Sigstore build-provenance attestation over all three, and an SBOM attestation tying the
   SBOM to the archive. Both are keyless: there is no signing key anywhere, including in CI.
+  They are stored on the repository and attached to the release as
+  `gdharness-X.Y.Z.intoto.jsonl`, which is also the file OpenSSF Scorecard looks for.
 
 Releases are immutable, so a published one cannot be edited or replaced.
 
@@ -49,12 +54,16 @@ Releases are immutable, so a published one cannot be edited or replaced.
 VERSION=X.Y.Z
 gh release download "v${VERSION}" --repo Aureliolo/gdharness
 sha256sum -c "gdharness-${VERSION}.tgz.sha256"
-gh attestation verify "gdharness-${VERSION}.tgz" --repo Aureliolo/gdharness
+gh attestation verify "gdharness-${VERSION}.tgz" --repo Aureliolo/gdharness \
+  --bundle "gdharness-${VERSION}.intoto.jsonl" \
+  --signer-workflow Aureliolo/gdharness/.github/workflows/attest.yml \
+  --source-ref "refs/tags/v${VERSION}"
 ```
 
 The checksum proves the bytes match what the release lists. The attestation proves GitHub
-Actions built those bytes from this repository, which the checksum alone cannot: a checksum
-generated alongside a tampered archive agrees with it perfectly.
+Actions built those bytes from this repository, in `attest.yml` at that tag, which the
+checksum alone cannot: a checksum generated alongside a tampered archive agrees with it
+perfectly. Drop `--bundle` to read the same attestations from GitHub's API instead.
 
 ## SLSA
 
