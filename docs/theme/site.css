@@ -30,6 +30,10 @@
 
   --measure: 68ch;
   --gutter: clamp(20px, 4vw, 40px);
+  /* One frame for the header, the content and the footer, so every page has the same left edge
+     and the wordmark sits directly above the first word of the page under it. Prose is held to
+     the measure inside it; only the front page's cards use the full width. */
+  --frame: 1060px;
 }
 
 @media (prefers-color-scheme: light) {
@@ -100,13 +104,18 @@ a:hover {
 /* ------------------------------------------------------------------ chrome */
 
 .top {
+  border-bottom: 1px solid var(--rule);
+}
+
+.top > .bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px 24px;
   flex-wrap: wrap;
+  max-width: var(--frame);
+  margin: 0 auto;
   padding: 16px var(--gutter);
-  border-bottom: 1px solid var(--rule);
 }
 
 .wordmark {
@@ -151,18 +160,23 @@ a:hover {
 }
 
 main {
-  max-width: calc(var(--measure) + 2 * var(--gutter));
+  max-width: var(--frame);
   margin: 0 auto;
   padding: 28px var(--gutter) 80px;
   min-width: 0;
 }
 
 .foot {
+  border-top: 1px solid var(--rule);
+}
+
+.foot > .bar {
   display: flex;
   flex-wrap: wrap;
   gap: 8px 22px;
+  max-width: var(--frame);
+  margin: 0 auto;
   padding: 18px var(--gutter);
-  border-top: 1px solid var(--rule);
   font-family: var(--mono);
   font-size: 12px;
   color: var(--faint);
@@ -442,8 +456,6 @@ summary:hover {
  */
 
 .home main {
-  max-width: 1060px;
-  margin: 0 auto;
   padding: 0 var(--gutter) 64px;
 }
 

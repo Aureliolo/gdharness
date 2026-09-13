@@ -115,7 +115,9 @@ jobs:
             'Then restart the editor so it loads the new addons, and reconnect the MCP server so' \
             'your harness spawns this version.' \
             '' \
-            "[Install guide](https://aureliolo.github.io/gdharness/install.html) · [What it writes](https://aureliolo.github.io/gdharness/architecture.html) · [Tools](https://aureliolo.github.io/gdharness/tools.html)" \
+            '[Install guide](https://aureliolo.github.io/gdharness/install.html)' \
+            '· [What it writes](https://aureliolo.github.io/gdharness/architecture.html)' \
+            '· [Tools](https://aureliolo.github.io/gdharness/tools.html)' \
             '' \
             > notes.md
           gh release create "${GITHUB_REF_NAME}" \

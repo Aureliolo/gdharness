@@ -22,22 +22,26 @@
       href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%231c1f26'/%3E%3Ccircle cx='8' cy='8' r='3' fill='%2357d98a'/%3E%3C/svg%3E"
     />
   </head>
-  <body>
+  <body{{bodyclass}}>
     <a class="skip" href="#content">Skip to the content</a>
     <header class="top">
-      <a class="wordmark" href="index.html">gdharness</a>
-      <nav class="links" aria-label="Pages">
-        {{toplinks}}
-        <a href="https://github.com/Aureliolo/gdharness/releases">Releases</a>
-        <a href="https://github.com/Aureliolo/gdharness">Source</a>
-      </nav>
+      <div class="bar">
+        <a class="wordmark" href="index.html">gdharness</a>
+        <nav class="links" aria-label="Pages">
+          {{toplinks}}
+          <a href="https://github.com/Aureliolo/gdharness/releases">Releases</a>
+          <a href="https://github.com/Aureliolo/gdharness">Source</a>
+        </nav>
+      </div>
     </header>
     <main id="content">{{content}}</main>
     <footer class="foot">
-      <span>gdharness {{version}}</span>
-      <span>Godot 4.7</span>
-      <span>Sigstore signed, SLSA Build L3</span>
-      <span>MIT</span>
+      <div class="bar">
+        <span>gdharness {{version}}</span>
+        <span>Godot 4.7</span>
+        <span>Sigstore signed, SLSA Build L3</span>
+        <span>MIT</span>
+      </div>
     </footer>
   </body>
 </html>

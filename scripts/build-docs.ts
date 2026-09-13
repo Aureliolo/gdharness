@@ -300,8 +300,10 @@ interface Page {
   readonly path: string;
   /** The same page as plain markdown, which is what an agent is pointed at. */
   readonly text: string;
-  /** In the browser tab, and the heading of its nav entry. */
+  /** In the browser tab, and in the navigation unless `nav` says otherwise. */
   readonly title: string;
+  /** What the navigation calls it, where the title would read oddly in a row of links. */
+  readonly nav?: string;
   /** One line for llms.txt, which is the index an agent reads first. */
   readonly summary: string;
   /** The front page is not a page of documentation and is not laid out like one. */
@@ -315,6 +317,9 @@ const PAGES: readonly Page[] = [
     path: 'index.html',
     text: 'index.md',
     title: 'gdharness',
+    // The wordmark beside it already says gdharness, and the same word twice in a row of links
+    // reads as a mistake rather than as a destination.
+    nav: 'Overview',
     summary: 'What gdharness is, what it is made of, and the rules it is built to.',
     home: true,
     render: renderHome,
@@ -495,19 +500,16 @@ function renderTools(): string {
  * to those.
  */
 /**
- * The one navigation, on every page including the front one.
+ * The one navigation, on every page and listing every page including the front one.
  *
  * It is the page list, so a page outside it is one nothing links to, and there is nowhere for a
- * second copy to drift out of step with the first. The front page is not in it: the wordmark
- * beside it already goes there.
+ * second copy to drift out of step with the first.
  */
 function renderTopLinks(current: string): string {
-  return PAGES.filter((page) => page.home !== true)
-    .map((page) => {
-      const here = page.path === current ? ' class="on" aria-current="page"' : '';
-      return `<a href="${page.path}"${here}>${escaped(page.title)}</a>`;
-    })
-    .join('\n        ');
+  return PAGES.map((page) => {
+    const here = page.path === current ? ' class="on" aria-current="page"' : '';
+    return `<a href="${page.path}"${here}>${escaped(page.nav ?? page.title)}</a>`;
+  }).join('\n          ');
 }
 
 /**
@@ -549,10 +551,11 @@ function renderLlmsTxt(): string {
 }
 
 function build(): void {
+  // One template for every page, the front one included. It had a second copy of its own for a
+  // while, and the copy went on linking to a page that had been deleted: the same chrome written
+  // twice is the same chrome wrong once. What the front page needs instead is a class on the
+  // body, which its own block in the stylesheet hangs off.
   const template = readFileSync(join(THEME, 'page.html'), 'utf8');
-  // The front page is not a page of documentation and is not laid out like one: no side rail, and
-  // its own hero. Everything else shares the one template.
-  const homeTemplate = readFileSync(join(THEME, 'home.html'), 'utf8');
 
   // A markdown file nobody listed is a page with no way to reach it, which is worse than one
   // that does not exist: it publishes and nothing links to it.
@@ -591,8 +594,9 @@ function build(): void {
       .replaceAll('<table>', '<div class="scroll"><table>')
       .replaceAll('</table>', '</table></div>')
       .replace(/(<\/h1>\s*)<p>/, '$1<p class="lede">');
-    const html = (page.home === true ? homeTemplate : template)
+    const html = template
       .replaceAll('{{title}}', escaped(page.path === 'index.html' ? page.title : `${page.title} · gdharness`))
+      .replaceAll('{{bodyclass}}', page.home === true ? ' class="home"' : '')
       .replaceAll('{{description}}', escaped(page.summary))
       .replaceAll('{{canonical}}', `${SITE_URL}/${page.path}`)
       .replaceAll('{{toplinks}}', renderTopLinks(page.path))
