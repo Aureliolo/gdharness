@@ -15,10 +15,11 @@ import process from 'node:process';
 import {
   configPath,
   connect,
-  containerKey,
   detect,
   detectGlobal,
+  displayPath,
   entryFor,
+  groupByFile,
   HARNESSES,
   harnessById,
   launchFor,
@@ -57,24 +58,20 @@ function testTheLaunchIsTheSameEverywhere(): void {
   assert.deepEqual(LAUNCH.env, { GODOT_PATH: '/opt/godot/godot' });
 }
 
-function testEachDialectIsShapedAsItsHarnessReadsIt(): void {
-  const plain = entryFor('mcpServers', LAUNCH);
+function testEachShapeIsWrittenAsItsHarnessReadsIt(): void {
+  const plain = entryFor('plain', LAUNCH);
   assert.equal(plain['command'], 'npx');
   assert.equal(plain['type'], undefined, 'the common shape carries no type');
 
-  const code = entryFor('servers', LAUNCH);
-  assert.equal(code['type'], 'stdio', 'VS Code is told the transport');
-  assert.equal(code['command'], 'npx');
+  const typed = entryFor('typed', LAUNCH);
+  assert.equal(typed['type'], 'stdio', 'VS Code and Factory are told the transport');
+  assert.equal(typed['command'], 'npx');
 
   const open = entryFor('opencode', LAUNCH);
   assert.equal(open['type'], 'local');
   assert.deepEqual(open['command'], ['npx', '-y', 'gdharness@9.9.9'], 'opencode takes one array');
   assert.deepEqual(open['environment'], { GODOT_PATH: '/opt/godot/godot' });
   assert.equal(open['enabled'], true);
-
-  assert.equal(containerKey('mcpServers'), 'mcpServers');
-  assert.equal(containerKey('servers'), 'servers');
-  assert.equal(containerKey('opencode'), 'mcp', 'opencode hangs its servers off mcp');
 }
 
 function testAConfigIsWrittenWhereTheHarnessLooks(): void {
@@ -83,13 +80,62 @@ function testAConfigIsWrittenWhereTheHarnessLooks(): void {
     try {
       const written = connect(harness, root, LAUNCH);
       assert.equal(written.action, 'written', `${harness.id} wrote a new file`);
-      assert.equal(written.path, join(root, harness.file), `${harness.id} wrote where it looks`);
+      assert.equal(written.path, join(root, harness.file as string), `${harness.id} wrote where it looks`);
 
       const config = read(written.path);
-      const servers = config[containerKey(harness.dialect)] as Record<string, unknown>;
-      assert.ok(servers[SERVER_KEY], `${harness.id} holds gdharness under ${containerKey(harness.dialect)}`);
+      const servers = config[harness.container] as Record<string, unknown>;
+      assert.ok(servers[SERVER_KEY], `${harness.id} holds gdharness under ${harness.container}`);
     } finally {
       rmSync(root, { recursive: true, force: true });
+    }
+  }
+}
+
+/**
+ * Four harnesses read `.mcp.json`. Writing it once and naming all four is the point of grouping,
+ * and a group that silently dropped a harness would leave somebody unconfigured.
+ */
+function testHarnessesSharingAFileAreWrittenOnce(): void {
+  const root = project();
+  try {
+    const groups = groupByFile(
+      HARNESSES.filter((known) => known.scope === 'project'),
+      root,
+    );
+    const paths = groups.map((group) => group.path);
+    assert.equal(new Set(paths).size, paths.length, 'no file is written by two groups');
+
+    const shared = groups.find((group) => group.path === join(root, '.mcp.json'));
+    assert.ok(shared, '.mcp.json is one group');
+    const names = shared.harnesses.map((harness) => harness.id);
+    for (const id of ['claude-code', 'copilot-cli', 'qoder', 'command-code']) {
+      assert.ok(names.includes(id), `${id} reads .mcp.json and is named on that group`);
+    }
+
+    const grouped = groups.flatMap((group) => group.harnesses).length;
+    assert.equal(
+      grouped,
+      HARNESSES.filter((known) => known.scope === 'project').length,
+      'every harness is in exactly one group',
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+/** A path we cannot show a reader is a path they cannot check, whatever platform they are on. */
+function testEveryHarnessHasAReadablePathOnEveryPlatform(): void {
+  for (const platform of ['win32', 'darwin', 'linux'] as const) {
+    for (const harness of HARNESSES) {
+      const shown = displayPath(harness, platform);
+      assert.ok(shown.length > 0, `${harness.id} has a path on ${platform}`);
+      assert.ok(!shown.includes('\\'), `${harness.id} shows forward slashes on ${platform}`);
+      if (harness.scope === 'home') {
+        assert.ok(
+          shown.startsWith('~/') || shown.startsWith('%APPDATA%/'),
+          `${harness.id} is shown as leaving the project on ${platform}`,
+        );
+      }
     }
   }
 }
@@ -99,7 +145,7 @@ function testNothingAlreadyInTheFileIsLost(): void {
   assert.ok(harness, 'claude-code is in the table');
   const root = project();
   try {
-    const path = join(root, harness.file);
+    const path = join(root, harness.file as string);
     writeFileSync(
       path,
       JSON.stringify({
@@ -143,7 +189,7 @@ function testAConfigThatDoesNotParseIsLeftAlone(): void {
   assert.ok(harness, 'claude-code is in the table');
   const root = project();
   try {
-    const path = join(root, harness.file);
+    const path = join(root, harness.file as string);
     const damaged = '{ this is not json';
     writeFileSync(path, damaged, 'utf8');
 
@@ -260,8 +306,10 @@ function testCodexCarriesTheGodotPath(): void {
 const TESTS = [
   testEveryIdIsUniqueAndFindable,
   testTheLaunchIsTheSameEverywhere,
-  testEachDialectIsShapedAsItsHarnessReadsIt,
+  testEachShapeIsWrittenAsItsHarnessReadsIt,
   testAConfigIsWrittenWhereTheHarnessLooks,
+  testHarnessesSharingAFileAreWrittenOnce,
+  testEveryHarnessHasAReadablePathOnEveryPlatform,
   testNothingAlreadyInTheFileIsLost,
   testWritingTwiceReplacesRatherThanDuplicates,
   testAConfigThatDoesNotParseIsLeftAlone,
