@@ -12,11 +12,14 @@ import {
   connect,
   detect,
   detectGlobal,
+  displayPath,
+  type Group,
+  groupByFile,
   HARNESSES,
   type Harness,
   harnessById,
+  type Launch,
   launchFor,
-  type Written,
 } from './harnesses.js';
 import { type HeadlessEngine, type HeadlessOutcome, runOperation } from './headless.js';
 import { GODOT_DEBUG_MODE_DEFAULT } from './server-version.js';
@@ -82,9 +85,7 @@ function chosenHarnesses(projectPath: string): { harnesses: readonly Harness[]; 
   for (const flag of flags) {
     const harness = harnessById(flag.slice(2));
     if (harness === undefined) {
-      throw new UsageError(
-        `Unknown option ${flag}. Harnesses: ${HARNESSES.map((known) => `--${known.id}`).join(', ')}.`,
-      );
+      throw new UsageError(`Unknown option ${flag}. Run gdharness harnesses for every flag it takes.`);
     }
     picked.push(harness);
   }
@@ -93,19 +94,21 @@ function chosenHarnesses(projectPath: string): { harnesses: readonly Harness[]; 
     : { harnesses: detect(projectPath), named: false };
 }
 
-function reportConnection(written: Written): void {
+function reportConnection(group: Group, launch: Launch, projectPath: string): void {
+  const who = group.harnesses.map((harness) => harness.name).join(', ');
+  const written = connect(group.writer, projectPath, launch);
   if (written.action === 'command') {
-    console.log(`${written.harness.name}: run  ${(written.command ?? []).join(' ')}`);
+    console.log(`${who}: run  ${(written.command ?? []).join(' ')}`);
     return;
   }
   if (written.action === 'snippet') {
-    console.log(`${written.harness.name}: put this in ${written.path}`);
+    console.log(`${who}: put this in ${written.path}`);
     for (const line of (written.snippet ?? '').split('\n')) {
       console.log(`  ${line}`);
     }
     return;
   }
-  console.log(`${written.harness.name}: ${written.action} ${written.path}`);
+  console.log(`${who}: ${written.action} ${written.path}`);
 }
 
 async function setup(): Promise<void> {
@@ -137,10 +140,12 @@ async function setup(): Promise<void> {
     const launch = launchFor(getLocalVersion(), godot.godotPath);
     const { harnesses, named } = chosenHarnesses(projectPath);
     if (harnesses.length === 0) {
-      console.log(`no harness set up in this project; name one with --${HARNESSES[0]?.id ?? 'claude-code'}`);
+      console.log(
+        'no harness set up in this project; name one with --claude-code, or see gdharness harnesses',
+      );
     }
-    for (const harness of harnesses) {
-      reportConnection(connect(harness, projectPath, launch));
+    for (const group of groupByFile(harnesses, projectPath)) {
+      reportConnection(group, launch, projectPath);
     }
 
     // Named on the command line and nowhere else: a machine-wide config is the reader's to change,
@@ -204,6 +209,21 @@ async function classes(): Promise<void> {
   }
 }
 
+/** Every harness, its flag and its file, because there are too many to list in the help. */
+function printHarnesses(): void {
+  const width = Math.max(...HARNESSES.map((harness) => harness.name.length));
+  for (const scope of ['project', 'home'] as const) {
+    console.log(
+      scope === 'project'
+        ? 'Configured inside the project. Written when set up here, or when named.'
+        : '\nNo project-level config exists for these, so they are written only when named.',
+    );
+    for (const harness of HARNESSES.filter((known) => known.scope === scope)) {
+      console.log(`  --${harness.id.padEnd(24)}${harness.name.padEnd(width + 2)}${displayPath(harness)}`);
+    }
+  }
+}
+
 function printHelp(): void {
   console.log(
     `
@@ -216,9 +236,9 @@ Usage:
                                      ones, register the runtime autoload with --runtime, and
                                      rebuild the class list. Then register the server with the
                                      harnesses already set up in this project, writing only files
-                                     inside it. A harness whose config is machine-wide is named
-                                     and left alone unless you ask for it by flag:
-                                     ${HARNESSES.map((harness) => `--${harness.id}`).join(', ')}
+                                     inside it. A harness with no project-level config is named
+                                     and left alone unless you ask for it by flag.
+  gdharness harnesses                Every harness, its flag and the file it reads
   gdharness doctor <project> [--json]
                                      Say what holds and what does not; exit 1 on a problem
   gdharness runtime on|off <project> Register or remove the runtime autoload, which reaches
@@ -252,6 +272,9 @@ async function main(): Promise<void> {
       return;
     case 'classes':
       await classes();
+      return;
+    case 'harnesses':
+      printHarnesses();
       return;
     case 'version':
     case '--version':
