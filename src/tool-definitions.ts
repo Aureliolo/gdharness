@@ -35,6 +35,11 @@ const PROJECT_PATH: JsonSchema = {
   type: 'string',
   description: 'Absolute path to the project directory, the one holding project.godot.',
 };
+const RUNNING_PROJECT_PATH: JsonSchema = {
+  type: 'string',
+  description:
+    'Which game, when more than one is running: the project directory it was started from. Not needed with one game.',
+};
 const SCENE_PATH: JsonSchema = {
   type: 'string',
   description: 'Scene file inside the project, such as "scenes/main.tscn" or "res://scenes/main.tscn".',
@@ -712,6 +717,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     description:
       'The scene tree or the performance metrics of the running game. Needs the game running with the runtime addon.',
     parameters: {
+      projectPath: RUNNING_PROJECT_PATH,
       nodePath: { type: 'string', description: 'tree: where to start. Default /root.' },
       depth: { type: 'number', description: 'tree: levels to descend. Default 3.' },
       includeProperties: {
@@ -736,6 +742,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     description:
       'Sets a property or calls a method on a node in the running game. Needs the game running with the runtime addon.',
     parameters: {
+      projectPath: RUNNING_PROJECT_PATH,
       nodePath: { type: 'string', description: 'Absolute node path, such as "/root/Main/Player".' },
       property: { type: 'string' },
       value: { description: "set: the value, fitted to the property's type." },
@@ -753,6 +760,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     description:
       'A picture of the running game: the whole screen or one viewport, as an image. Needs the game running with a window.',
     parameters: {
+      projectPath: RUNNING_PROJECT_PATH,
       viewportPath: {
         type: 'string',
         description: 'viewport: the Viewport node. Default the root viewport.',
@@ -773,6 +781,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     description:
       'Injects input into the running game: an action, a key, a mouse click or mouse motion. Needs the game running with a window.',
     parameters: {
+      projectPath: RUNNING_PROJECT_PATH,
       action: { type: 'string', description: 'action: the InputMap action name.' },
       pressed: { type: 'boolean', description: 'Press or release. Default true.' },
       strength: { type: 'number', description: 'action: 0 to 1. Default 1.' },

@@ -10,7 +10,6 @@
 
 import { execFile, spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { createConnection as createTcpConnection } from 'node:net';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -35,6 +34,7 @@ import { GodotLSPClient, handleLSPTool } from './lsp_client.js';
 import { resolveWithinProject } from './paths.js';
 import { getPrompt, listPrompts } from './prompts.js';
 import { setupResourceHandlers } from './resources.js';
+import { chooseRuntime, discoverRuntimes, runtimeRequest } from './runtime-client.js';
 import type {
   GodotProcess,
   GodotServerConfig,
@@ -492,222 +492,74 @@ class GodotServer {
     }
   }
 
-  private async handleRuntimeCommand(
-    command: string,
-    args: unknown,
-  ): Promise<{ content: { type: string; text?: string; data?: string; mimeType?: string }[] }> {
-    const params = args && typeof args === 'object' ? (args as Record<string, unknown>) : {};
-    const RUNTIME_PORT = 7777;
-    const RUNTIME_HOST = '127.0.0.1';
-    const timeoutOverride = Number.parseInt(envValue('GDHARNESS_RUNTIME_TIMEOUT_MS') ?? '', 10);
-    const TIMEOUT_MS = Number.isInteger(timeoutOverride) && timeoutOverride > 0 ? timeoutOverride : 10000;
+  /** How long one runtime request may take. Ten seconds, unless the environment says otherwise. */
+  private runtimeTimeoutMs(): number {
+    const override = Number.parseInt(envValue('GDHARNESS_RUNTIME_TIMEOUT_MS') ?? '', 10);
+    return Number.isInteger(override) && override > 0 ? override : 10000;
+  }
+
+  /**
+   * One command to the running game, and its answer as a tool result.
+   *
+   * `op` and `projectPath` are the server's business and stay here: the first chose the
+   * command, the second chooses the game when more than one is running. A capture is answered
+   * through a file the server names, so a game cannot point the reader at a path of its own
+   * choosing, and the file is gone again before the image is returned.
+   */
+  private async handleRuntimeCommand(command: string, args: unknown): Promise<ToolResponse> {
+    const { op: _op, projectPath, ...params } = asParams(args);
+    const choice = chooseRuntime(
+      discoverRuntimes(),
+      typeof projectPath === 'string' ? projectPath : undefined,
+    );
+    if ('problem' in choice) {
+      return this.createErrorResponse(choice.problem);
+    }
+
     const expectsScreenshot = command === 'capture_screenshot' || command === 'capture_viewport';
     const screenshotDir = expectsScreenshot
       ? mkdtempSync(join(tmpdir(), 'gdharness-runtime-screenshot-'))
       : null;
     const screenshotPath = screenshotDir ? join(screenshotDir, 'capture.png') : null;
-    const runtimeParams = screenshotPath ? { ...params, output_path: screenshotPath } : params;
-    const cleanupScreenshotDir = () => {
+    try {
+      const reply = await runtimeRequest(
+        choice.endpoint,
+        command,
+        screenshotPath ? { ...params, output_path: screenshotPath } : params,
+        this.runtimeTimeoutMs(),
+      );
+      if (!reply.ok) {
+        return this.createErrorResponse(reply.message);
+      }
+
+      const { id: _id, ...payload } = reply.payload;
+      if (!expectsScreenshot) {
+        return this.jsonTextResponse(payload);
+      }
+
+      const returnedPath = readString(payload, 'path');
+      if (readString(payload, 'type') !== 'screenshot_file' || !returnedPath || !screenshotPath) {
+        return this.createErrorResponse(`The game answered a capture with ${JSON.stringify(payload)}`);
+      }
+      if (normalize(returnedPath) !== normalize(screenshotPath)) {
+        return this.createErrorResponse(
+          `Rejected screenshot file path outside the managed capture path: '${returnedPath}'`,
+        );
+      }
+      const dimensions = `${readNumber(payload, 'width') ?? 0}x${readNumber(payload, 'height') ?? 0} ${
+        readString(payload, 'format') ?? 'unknown'
+      }`;
+      return {
+        content: [
+          { type: 'text', text: `Screenshot captured: ${dimensions}` },
+          { type: 'image', data: readFileSync(screenshotPath).toString('base64'), mimeType: 'image/png' },
+        ],
+      };
+    } finally {
       if (screenshotDir) {
         rmSync(screenshotDir, { recursive: true, force: true });
       }
-    };
-
-    return new Promise((resolve) => {
-      const socket = createTcpConnection({ port: RUNTIME_PORT, host: RUNTIME_HOST }, () => {
-        const payload = JSON.stringify({ command, params: runtimeParams, id: Date.now() });
-        socket.write(`${payload}\n`);
-      });
-
-      let responseBuffer = Buffer.alloc(0);
-      let resolved = false;
-      const timer = setTimeout(() => {
-        if (resolved) {
-          return;
-        }
-        resolved = true;
-        socket.destroy();
-        cleanupScreenshotDir();
-        resolve({
-          content: [
-            {
-              type: 'text',
-              text: `Runtime command '${command}' timed out after ${TIMEOUT_MS}ms. Ensure the Godot game is running with the MCP runtime addon enabled.`,
-            },
-          ],
-        });
-      }, TIMEOUT_MS);
-
-      const resolveRuntimePayload = (parsed: OperationParams) => {
-        if (resolved) {
-          return;
-        }
-        resolved = true;
-        clearTimeout(timer);
-        socket.destroy();
-
-        const payloadType = readString(parsed, 'type');
-        const returnedPath = readString(parsed, 'path');
-        const dimensions = `${readNumber(parsed, 'width') ?? 0}x${readNumber(parsed, 'height') ?? 0} ${
-          readString(parsed, 'format') ?? 'unknown'
-        }`;
-
-        if (payloadType === 'screenshot_file' && returnedPath) {
-          if (!screenshotPath || normalize(returnedPath) !== normalize(screenshotPath)) {
-            cleanupScreenshotDir();
-            resolve({
-              content: [
-                {
-                  type: 'text',
-                  text: `Rejected screenshot file path outside the managed capture path: '${returnedPath}'`,
-                },
-              ],
-            });
-            return;
-          }
-          try {
-            const imageData = readFileSync(screenshotPath).toString('base64');
-            cleanupScreenshotDir();
-            resolve({
-              content: [
-                {
-                  type: 'text',
-                  text: `Screenshot captured: ${dimensions}`,
-                },
-                { type: 'image', data: imageData, mimeType: 'image/png' },
-              ],
-            });
-          } catch (error) {
-            cleanupScreenshotDir();
-            const message = errorMessage(error);
-            resolve({
-              content: [
-                { type: 'text', text: `Failed to read screenshot file '${screenshotPath}': ${message}` },
-              ],
-            });
-          }
-          return;
-        }
-
-        const inlineData = readString(parsed, 'data');
-        if (payloadType === 'screenshot' && inlineData) {
-          cleanupScreenshotDir();
-          resolve({
-            content: [
-              {
-                type: 'text',
-                text: `Screenshot captured: ${dimensions}`,
-              },
-              { type: 'image', data: inlineData, mimeType: 'image/png' },
-            ],
-          });
-          return;
-        }
-
-        cleanupScreenshotDir();
-        resolve({
-          content: [{ type: 'text', text: JSON.stringify(parsed, null, 2) }],
-        });
-      };
-
-      socket.on('data', (chunk: Buffer) => {
-        responseBuffer = Buffer.concat([responseBuffer, Buffer.from(chunk)]);
-        const parsedMessages: OperationParams[] = [];
-
-        const parseCandidate = (candidate: string) => {
-          const trimmed = candidate.trim();
-          if (!trimmed) {
-            return;
-          }
-          try {
-            parsedMessages.push(asParams(JSON.parse(trimmed)));
-          } catch {
-            // Ignore malformed frame/line and keep scanning.
-          }
-        };
-
-        // First, parse the framed payload format emitted by Godot's StreamPeerTCP.put_utf8_string().
-        let offset = 0;
-        while (offset + 4 <= responseBuffer.length) {
-          const frameLength = responseBuffer.readUInt32LE(offset);
-          if (frameLength <= 0 || offset + 4 + frameLength > responseBuffer.length) {
-            break;
-          }
-
-          const frame = responseBuffer.subarray(offset + 4, offset + 4 + frameLength).toString('utf8');
-          parseCandidate(frame);
-          offset += 4 + frameLength;
-        }
-        if (offset > 0) {
-          responseBuffer = responseBuffer.subarray(offset);
-        }
-
-        // Fallback for plain newline-delimited JSON payloads.
-        let newlineIndex = responseBuffer.indexOf(0x0a);
-        while (newlineIndex !== -1) {
-          const line = responseBuffer.subarray(0, newlineIndex).toString('utf8');
-          responseBuffer = responseBuffer.subarray(newlineIndex + 1);
-          parseCandidate(line);
-          newlineIndex = responseBuffer.indexOf(0x0a);
-        }
-
-        if (parsedMessages.length > 0) {
-          const typeOf = (message: OperationParams) => readString(message, 'type');
-          const candidate =
-            parsedMessages.find((m) => typeOf(m) === 'screenshot_file' && m['path']) ??
-            parsedMessages.find((m) => typeOf(m) === 'screenshot' && m['data']) ??
-            parsedMessages.find((m) => typeOf(m) === 'pong') ??
-            parsedMessages.find((m) => {
-              const type = typeOf(m);
-              return type !== undefined && type !== 'welcome';
-            });
-
-          if (candidate) {
-            resolveRuntimePayload(candidate);
-          }
-        }
-      });
-
-      socket.on('end', () => {
-        if (resolved) {
-          return;
-        }
-
-        clearTimeout(timer);
-        const responseData = responseBuffer.toString('utf8').trim();
-        resolved = true;
-        cleanupScreenshotDir();
-        try {
-          const parsed: unknown = JSON.parse(responseData);
-          resolve({
-            content: [{ type: 'text', text: JSON.stringify(parsed, null, 2) }],
-          });
-        } catch {
-          resolve({
-            content: [
-              { type: 'text', text: responseData || 'Command sent successfully (no structured response).' },
-            ],
-          });
-        }
-      });
-
-      socket.on('error', (error: Error) => {
-        if (resolved) {
-          return;
-        }
-        resolved = true;
-        clearTimeout(timer);
-        cleanupScreenshotDir();
-        resolve({
-          content: [
-            {
-              type: 'text',
-              text: `Failed to connect to Godot runtime addon at ${RUNTIME_HOST}:${RUNTIME_PORT}: ${error.message}. Ensure the game is running with the MCP runtime autoload enabled.`,
-            },
-          ],
-        });
-      });
-    });
+    }
   }
 
   private async handleLSP(
@@ -1338,14 +1190,21 @@ class GodotServer {
   /** editor_status: the three things an agent asks before doing anything else, in one answer. */
   private async handleEditorStatus(): Promise<ToolResponse> {
     const version = await this.handleGetGodotVersion();
-    const runtime = await this.handleRuntimeCommand('ping', {});
-    let runtimePayload: OperationParams | null = null;
-    try {
-      runtimePayload = asParams(JSON.parse(runtime.content[0]?.text ?? ''));
-    } catch {
-      runtimePayload = null;
-    }
-    const runtimeConnected = runtimePayload !== null && readString(runtimePayload, 'type') === 'pong';
+
+    // Every announced game is pinged, so a game that announced and then hung is reported as
+    // such rather than counted as reachable on the strength of its announcement.
+    const games = await Promise.all(
+      discoverRuntimes().map(async (endpoint) => {
+        const reply = await runtimeRequest(endpoint, 'ping', {}, this.runtimeTimeoutMs());
+        return {
+          pid: endpoint.pid,
+          port: endpoint.port,
+          project: endpoint.project,
+          reachable: reply.ok,
+          problem: reply.ok ? null : reply.message,
+        };
+      }),
+    );
 
     return this.jsonTextResponse({
       editor: this.getEditorStatusPayload(),
@@ -1355,8 +1214,8 @@ class GodotServer {
       },
       game: {
         processActive: this.activeProcess !== null,
-        runtimeConnected,
-        runtime: runtimeConnected ? runtimePayload : null,
+        runtimeConnected: games.some((game) => game.reachable),
+        runtimes: games,
       },
     });
   }
@@ -3000,96 +2859,42 @@ class GodotServer {
   // Phase 4: Runtime Tools Handlers
   // ============================================
 
-  /**
-   * Handle the inspect_runtime_tree tool
-   */
-  private async handleInspectRuntimeTree(rawArgs: unknown) {
-    const args = this.normalizeParameters(rawArgs);
-    const nodePath = readNonEmptyString(args, 'nodePath');
-    const depth = readPositiveNumber(args, 'depth');
-    const includeProperties = readBoolean(args, 'includeProperties') ?? false;
-
-    try {
-      return await this.handleRuntimeCommand('get_tree', {
-        root: nodePath ?? '/root',
-        depth: depth ?? 3,
-        include_properties: includeProperties,
-      });
-    } catch (error) {
-      return this.createErrorResponse(`Failed to inspect runtime tree: ${errorMessage(error)}`, [
-        'Ensure a Godot process is running with the runtime addon enabled',
-      ]);
-    }
+  /** runtime_inspect tree, in the words the addon uses. */
+  private async handleInspectRuntimeTree(args: OperationParams): Promise<ToolResponse> {
+    return await this.handleRuntimeCommand('get_tree', {
+      projectPath: args['projectPath'],
+      root: readNonEmptyString(args, 'nodePath') ?? '/root',
+      depth: readPositiveNumber(args, 'depth') ?? 3,
+      include_properties: readBoolean(args, 'includeProperties') ?? false,
+    });
   }
 
-  /**
-   * Handle the set_runtime_property tool
-   */
-  private async handleSetRuntimeProperty(rawArgs: unknown) {
-    const args = this.normalizeParameters(rawArgs);
-    const nodePath = readNonEmptyString(args, 'nodePath');
-    const property = readString(args, 'property');
-
-    if (!nodePath || !property || args['value'] === undefined) {
-      return this.createErrorResponse('Missing required parameters', [
-        'Provide nodePath, property, and value',
-      ]);
-    }
-
-    try {
-      return await this.handleRuntimeCommand('set_property', {
-        path: nodePath,
-        property: property,
-        value: args['value'],
-      });
-    } catch (error) {
-      return this.createErrorResponse(`Failed to set runtime property: ${errorMessage(error)}`, [
-        'Ensure a Godot process is running with the runtime addon',
-      ]);
-    }
+  /** runtime_invoke set: the value is fitted to the property's own type on the game's side. */
+  private async handleSetRuntimeProperty(args: OperationParams): Promise<ToolResponse> {
+    return await this.handleRuntimeCommand('set_property', {
+      projectPath: args['projectPath'],
+      path: readNonEmptyString(args, 'nodePath') ?? '',
+      property: readString(args, 'property') ?? '',
+      value: args['value'],
+    });
   }
 
-  /**
-   * Handle the call_runtime_method tool
-   */
-  private async handleCallRuntimeMethod(rawArgs: unknown) {
-    const args = this.normalizeParameters(rawArgs);
-    const nodePath = readNonEmptyString(args, 'nodePath');
-    const method = readString(args, 'method');
-
-    if (!nodePath || !method) {
-      return this.createErrorResponse('Missing required parameters', ['Provide nodePath and method']);
-    }
-
-    try {
-      return await this.handleRuntimeCommand('call_method', {
-        path: nodePath,
-        method,
-        args: readArray(args, 'args') ?? [],
-      });
-    } catch (error) {
-      return this.createErrorResponse(`Failed to call runtime method: ${errorMessage(error)}`, [
-        'Ensure a Godot process is running with the runtime addon',
-      ]);
-    }
+  /** runtime_invoke call: the arguments are fitted to the method's parameter types likewise. */
+  private async handleCallRuntimeMethod(args: OperationParams): Promise<ToolResponse> {
+    return await this.handleRuntimeCommand('call_method', {
+      projectPath: args['projectPath'],
+      path: readNonEmptyString(args, 'nodePath') ?? '',
+      method: readString(args, 'method') ?? '',
+      args: readArray(args, 'args') ?? [],
+    });
   }
 
-  /**
-   * Handle the get_runtime_metrics tool
-   */
-  private async handleGetRuntimeMetrics(rawArgs: unknown) {
-    const args = this.normalizeParameters(rawArgs);
-    const metrics = readArray(args, 'metrics');
-
-    try {
-      return await this.handleRuntimeCommand('get_metrics', {
-        metrics: Array.isArray(metrics) ? metrics : [],
-      });
-    } catch (error) {
-      return this.createErrorResponse(`Failed to get runtime metrics: ${errorMessage(error)}`, [
-        'Ensure a Godot process is running',
-      ]);
-    }
+  /** runtime_inspect metrics: an empty list asks for all of them. */
+  private async handleGetRuntimeMetrics(args: OperationParams): Promise<ToolResponse> {
+    return await this.handleRuntimeCommand('get_metrics', {
+      projectPath: args['projectPath'],
+      metrics: readArray(args, 'metrics') ?? [],
+    });
   }
 
   // ============================================
