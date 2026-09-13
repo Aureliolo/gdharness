@@ -77,11 +77,14 @@ const MAIN_GD = [
   '## The last action and key the tree was handed, which says whether an injected one arrived.',
   'var acted: String = ""',
   'var keyed: int = 0',
+  '## Set from _ready through a call, so there is a frame to step into and back out of.',
+  'var doubled: int = 0',
   '',
   '',
   'func _ready() -> void:',
   '\tvar total: int = 2 + 2',
   '\tprint("the game said ", total)',
+  '\tdoubled = _twice(total)',
   '',
   '\tvar ticker: Timer = Timer.new()',
   '\tticker.name = "Ticker"',
@@ -160,6 +163,10 @@ const MAIN_GD = [
   '',
   `func holding() -> bool:`,
   `\treturn Input.is_action_pressed("${FIXTURE_ACTION}")`,
+  '',
+  '',
+  'func _twice(n: int) -> int:',
+  '\treturn n * 2',
   '',
 ];
 
@@ -542,7 +549,7 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
   } finally {
     // The game first: it is the editor's child and outlives it, so a run that failed part way
     // through would otherwise leave an engine behind holding the fixture project.
-    await invoke('editor_stop', {}).catch(() => undefined);
+    await invoke('editor_run', { op: 'stop' }).catch(() => undefined);
 
     editor.kill();
     await exited(editor);
@@ -775,9 +782,29 @@ async function testResourcesOnNodes({ call, refusal, project }: Editor): Promise
     properties: { size: { type: 'Vector2', x: 8, y: 8 } },
   });
 
+  // A texture is a resource-valued property like any other, so set is what assigns one: there is
+  // no op of its own for sprites.
   await call('scene_node', { ...scene, op: 'add', nodeType: 'Sprite2D', nodeName: 'Dot' });
-  await call('scene_node', { ...scene, op: 'load_sprite', nodePath: 'Dot', texturePath: 'res://dot.tres' });
+  await call('scene_node', {
+    ...scene,
+    op: 'set',
+    nodePath: 'Dot',
+    properties: { texture: 'res://dot.tres' },
+  });
   assert.match(fileText(project, 'fixture.tscn'), /dot\.tres/, 'the texture should be on the sprite');
+
+  // The boundary holds for a path inside `properties`, where no argument name announces that it
+  // is one: user:// loads perfectly well and is not a file this project owns.
+  assert.match(
+    await refusal('scene_node', {
+      ...scene,
+      op: 'set',
+      nodePath: 'Dot',
+      properties: { texture: 'user://elsewhere.tres' },
+    }),
+    /res:\/\/ or uid:\/\//,
+    'a resource outside the project is refused',
+  );
 
   const tiles = { projectPath: project, resourcePath: 'res://tiles.tres' };
   await call('resource_edit', {
@@ -1001,6 +1028,15 @@ async function testDebugging({ call, refusal, attempt, project }: Editor): Promi
   assert.equal(get(frames[0], 'name'), '_ready', 'in the function the breakpoint is in');
   assert.equal(get(frames[0], 'line'), BREAK_LINE, 'on the line it was set on');
 
+  // The whole point of stopping somewhere: reading what the program is holding. `total` is
+  // worked out on the line above the breakpoint, so a frame that cannot show it as 4 is one
+  // that is not really stopped where it says it is.
+  const scopes = asArray(get(await call('debug_state', { op: 'variables' }), 'scopes'), 'scopes');
+  const named = scopes.flatMap((scope) => asArray(get(scope, 'variables'), 'variables'));
+  const total = named.find((variable) => text(get(variable, 'name')) === 'total');
+  assert.ok(total, `total should be in scope at the breakpoint; saw ${JSON.stringify(named)}`);
+  assert.match(text(get(total, 'value')), /\b4\b/, 'and should read as the 4 the line above worked out');
+
   // One line, run. The game is held either way, so what says the step happened is where it is
   // held now: a step that did nothing leaves it on the line it was already on.
   await call('debug_control', { op: 'step_over' });
@@ -1009,6 +1045,20 @@ async function testDebugging({ call, refusal, attempt, project }: Editor): Promi
     `stepping should leave the game held past line ${BREAK_LINE}`,
     (stack) => stack.length > 0 && asNumber(get(stack[0], 'line')) > BREAK_LINE,
   );
+
+  // Into the call on that line. Judged by the function the top frame is in, which is the only
+  // thing that tells a step_into from a step_over that happened to move.
+  //
+  // There is no step_out to come back with: Godot's adapter parser implements req_next and
+  // req_stepIn and nothing for stepOut, so the request is never answered. Stepping over from
+  // inside the function runs it to its end and returns to the caller, which is the way back.
+  await call('debug_control', { op: 'step_into' });
+  const inside = await stackWithin(
+    attempt,
+    'step_into should leave the game inside the function that line calls',
+    (stack) => stack.length > 0 && text(get(stack[0], 'name')) === '_twice',
+  );
+  assert.ok(inside.length > 1, 'with the caller still under it on the stack');
 
   await call('debug_control', { op: 'continue' });
 
@@ -1037,8 +1087,16 @@ async function testDebugging({ call, refusal, attempt, project }: Editor): Promi
   // becoming one of the two that work.
   assert.match(
     await refusal('debug_control', { op: 'pause' }),
-    /continue, step_over/,
+    /continue, step_over, step_into/,
     'an op that does not exist should be refused with the ones that do',
+  );
+
+  // The other one Godot has not got. Asked for rather than assumed absent, so that an engine
+  // which grows a stepOut is noticed here instead of going unused.
+  assert.match(
+    await refusal('debug_control', { op: 'step_out' }),
+    /continue, step_over, step_into/,
+    'step_out should be refused: the adapter never answers a stepOut request',
   );
 
   await call('debug_breakpoint', { ...main, op: 'remove', line: BREAK_LINE });
@@ -1089,6 +1147,25 @@ async function testRuntime({ call, refusal, attempt, project }: Editor): Promise
   const rect = await call('runtime_inspect', { ...game, op: 'rect', nodePath: '/root/Main/Panel' });
   assert.equal(get(rect, 'canvas', 'size', 'x'), 320, 'rect should measure the control it was given');
   assert.equal(get(rect, 'canvas', 'position', 'y'), 20, 'and place it where the game put it');
+
+  // One property, read straight: the alternative is the whole tree with every property on it, or
+  // calling `get` through runtime_invoke, and neither is a question about one value.
+  const doubled = await call('runtime_inspect', {
+    ...game,
+    op: 'property',
+    nodePath: '/root/Main',
+    property: 'doubled',
+  });
+  assert.equal(get(doubled, 'value'), 8, 'property should read what _ready worked out');
+  assert.equal(get(doubled, 'property'), 'doubled', 'and say which property it answered for');
+
+  // A property the node has not got is refused rather than answered null, which is what a node
+  // with that property set to null would answer.
+  assert.match(
+    await refusal('runtime_inspect', { ...game, op: 'property', nodePath: '/root/Main', property: 'nope' }),
+    /has no property nope/,
+    'a property that does not exist is refused',
+  );
 
   const metrics = await call('runtime_inspect', { ...game, op: 'metrics', metrics: ['object_node_count'] });
   assert.deepEqual(
@@ -1256,7 +1333,7 @@ async function testRuntime({ call, refusal, attempt, project }: Editor): Promise
     'and which scene it has running',
   );
 
-  await call('editor_stop', {});
+  await call('editor_run', { projectPath: project, op: 'stop' });
 }
 
 /**

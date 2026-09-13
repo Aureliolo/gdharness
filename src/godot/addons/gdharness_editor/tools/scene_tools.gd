@@ -317,6 +317,13 @@ func _set_node_properties(node: Node, properties: Dictionary) -> String:
 		# TileSet, a material or a theme: there is no other way to hand a tool a Resource.
 		if expected_type == TYPE_OBJECT and typeof(raw) == TYPE_STRING:
 			var path: String = String(raw)
+			# The project boundary is enforced here as well as on the server, because only the
+			# engine knows that this property is one holding a path: an absolute path and a
+			# user:// one both load, and neither names a file this project owns.
+			if not (path.begins_with("res://") or path.begins_with("uid://")):
+				return "%s takes a res:// or uid:// path, not %s" % [property, path]
+			if path.split("/").has(".."):
+				return "%s leaves the project: %s" % [property, path]
 			if not ResourceLoader.exists(path):
 				return "No resource at %s for %s" % [path, property]
 			node.set(property, load(path))
@@ -681,45 +688,6 @@ func get_node_properties(args: Dictionary) -> Dictionary:
 		defaults.queue_free()
 	root.queue_free()
 	return {"ok": true, "nodePath": node_path, "properties": props}
-
-
-func load_sprite(args: Dictionary) -> Dictionary:
-	var project_path: String = str(args.get("projectPath", ""))
-	var scene_path: String = _to_scene_res_path(project_path, str(args.get("scenePath", "")))
-	var node_path: String = str(args.get("nodePath", "."))
-	var texture_path: String = _to_scene_res_path(project_path, str(args.get("texturePath", "")))
-
-	if texture_path == "res://":
-		return {"ok": false, "error": "Missing texturePath"}
-
-	var texture: Texture2D = load(texture_path) as Texture2D
-	if not texture:
-		return {"ok": false, "error": "Failed to load texture: " + texture_path}
-
-	var loaded: Array = _load_scene(scene_path)
-	var refused: Dictionary = loaded[1]
-	if not refused.is_empty():
-		return refused
-
-	var root: Node = loaded[0]
-	var node: Node = _find_node(root, node_path)
-	if not node:
-		root.queue_free()
-		return {"ok": false, "error": "Node not found: " + node_path}
-
-	if node is Sprite2D:
-		(node as Sprite2D).texture = texture
-	elif node is Sprite3D:
-		(node as Sprite3D).texture = texture
-	else:
-		root.queue_free()
-		return {"ok": false, "error": "Node is not Sprite2D or Sprite3D: " + node_path}
-
-	var err: Dictionary = _save_scene(root, scene_path)
-	if not err.is_empty():
-		return err
-
-	return {"ok": true, "nodePath": node_path, "texturePath": texture_path}
 
 
 func save_scene(args: Dictionary) -> Dictionary:

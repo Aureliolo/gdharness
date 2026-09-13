@@ -1,42 +1,13 @@
 /**
- * What can be learnt about a project by reading its directory, with no engine involved: which
- * directories are projects, what kinds of file one holds, and where a piece of text occurs.
+ * What can be learnt about a project by reading its directory, with no engine involved: what
+ * kinds of file it holds, and where a piece of text occurs.
  */
 
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { basename, join } from 'node:path';
-
-export interface ProjectLocation {
-  readonly path: string;
-  readonly name: string;
-}
+import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 /** Directories that are never part of a project's own files. */
 const SKIPPED = new Set(['.git', '.godot', '.import', 'node_modules']);
-
-/**
- * Every directory holding a project.godot: the directory itself, its children, and with
- * `recursive` every descendant until a project is found (a project's own subdirectories are
- * not looked in, since a nested project.godot is an addon's or a test fixture's).
- */
-export function findGodotProjects(directory: string, recursive: boolean): ProjectLocation[] {
-  const projects: ProjectLocation[] = [];
-  if (existsSync(join(directory, 'project.godot'))) {
-    projects.push({ path: directory, name: basename(directory) });
-  }
-  for (const entry of readdirSync(directory, { withFileTypes: true })) {
-    if (!entry.isDirectory() || entry.name.startsWith('.')) {
-      continue;
-    }
-    const child = join(directory, entry.name);
-    if (existsSync(join(child, 'project.godot'))) {
-      projects.push({ path: child, name: entry.name });
-    } else if (recursive) {
-      projects.push(...findGodotProjects(child, true));
-    }
-  }
-  return projects;
-}
 
 /** File counts for a project, by kind. */
 export interface ProjectStructure {
