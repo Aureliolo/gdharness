@@ -23,6 +23,9 @@ export interface LogEntry {
 
 const HEADLINE = /^(USER )?(SCRIPT ERROR|ERROR|WARNING):\s?(.*)$/;
 
+/** An ANSI colour sequence: the escape byte, a bracket, the parameters, the letter m. */
+const COLOUR_CODE = new RegExp(`${String.fromCharCode(0x1b)}\\[[0-9;]*m`, 'g');
+
 /** The severity a headline announces, or null for a line that announces nothing. */
 function announced(line: string): { severity: Severity; text: string } | null {
   const match = HEADLINE.exec(line);
@@ -67,7 +70,9 @@ export class GameLog {
     }
   }
 
-  private line(source: 'stdout' | 'stderr', line: string): void {
+  private line(source: 'stdout' | 'stderr', raw: string): void {
+    // Colour codes are for a terminal; a caller reading entries wants the words.
+    const line = raw.replace(COLOUR_CODE, '');
     if (line.trim() === '') {
       return;
     }

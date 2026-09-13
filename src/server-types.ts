@@ -10,28 +10,12 @@ export interface GodotProcess {
   exitCode: number | null;
 }
 
-export interface GodotServerConfig {
-  godotPath?: string;
-  debugMode?: boolean;
-  godotDebugMode?: boolean;
-  strictPathValidation?: boolean;
-}
-
 /**
  * Tool arguments as they arrive over MCP: keys chosen by the caller, values not yet checked.
  * `unknown` rather than `any` so that every read has to say what it expects the value to be;
  * the readers in `tool-args.ts` are where that happens.
  */
 export type OperationParams = Record<string, unknown>;
-
-/** File counts for a project, by kind. `error` is set when the walk could not finish. */
-export interface ProjectStructure {
-  scenes: number;
-  scripts: number;
-  assets: number;
-  other: number;
-  error?: string;
-}
 
 /**
  * One block of a tool result. `text` carries JSON or prose; `data` plus `mimeType` carry a

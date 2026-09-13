@@ -71,6 +71,7 @@ assert.equal(
 const operationsModules = [
   'godot_operations.gd',
   'audio_buses.gd',
+  'class_cache.gd',
   'classdb_queries.gd',
   'dependencies.gd',
   'file_walk.gd',

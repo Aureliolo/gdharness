@@ -117,12 +117,12 @@ func add_input_action(params: Dictionary) -> Dictionary:
 	if err != OK:
 		return _log.failure("Failed to load project.godot: " + str(err))
 
+	# One bad event fails the whole action: an action written with the events that happened to
+	# parse is a binding the caller did not ask for, reported as the one they did.
 	var events_config: Array[Dictionary] = []
-
 	for event: Variant in events:
 		if not event is Dictionary:
-			_log.error("Event must be an object")
-			continue
+			return _log.failure("Every event must be an object, not " + JSON.stringify(event))
 		var fields: Dictionary = event
 		var event_type: String = str(fields.get("type", ""))
 
@@ -130,20 +130,18 @@ func add_input_action(params: Dictionary) -> Dictionary:
 			"key":
 				var keycode: String = str(fields.get("keycode", ""))
 				if keycode.is_empty():
-					_log.error("Keycode is required for key events")
-					continue
+					return _log.failure("A key event needs keycode")
+				var key_value: int = _keycode_value(keycode)
+				if key_value == KEY_NONE:
+					return _log.failure("Unknown key: " + keycode)
 
-				var event_config: Dictionary = {
-					"class_name": "InputEventKey", "keycode": _keycode_value(keycode)
-				}
-
+				var event_config: Dictionary = {"class_name": "InputEventKey", "keycode": key_value}
 				if fields.get("ctrl", false):
 					event_config["ctrl_pressed"] = true
 				if fields.get("alt", false):
 					event_config["alt_pressed"] = true
 				if fields.get("shift", false):
 					event_config["shift_pressed"] = true
-
 				events_config.append(event_config)
 
 			"mouse_button":
@@ -157,19 +155,19 @@ func add_input_action(params: Dictionary) -> Dictionary:
 				)
 
 			"joypad_axis":
-				events_config.append(
-					{
-						"class_name": "InputEventJoypadMotion",
-						"axis": fields.get("axis", 0),
-						"axis_value": fields.get("axis_value", fields.get("axisValue", 1))
-					}
-				)
+				var motion: Dictionary = {
+					"class_name": "InputEventJoypadMotion",
+					"axis": fields.get("axis", 0),
+					"axis_value": fields.get("axisValue", 1),
+				}
+				events_config.append(motion)
 
 			_:
-				_log.error("Unknown event type: " + event_type)
+				var known: String = "key, mouse_button, joypad_button, joypad_axis"
+				return _log.failure("Unknown event type: " + event_type + ". One of " + known + ".")
 
-	if events_config.size() == 0:
-		return _log.failure("No valid events provided")
+	if events_config.is_empty():
+		return _log.failure("events must hold at least one event")
 
 	var action: Dictionary = build_input_action(deadzone, events_config)
 	if action.is_empty():
@@ -234,11 +232,10 @@ func build_input_action(deadzone: float, events: Array) -> Dictionary:
 	return {"deadzone": deadzone, "events": built}
 
 
+# The keycode for a key name as the tool spells it, or KEY_NONE for a name the table lacks.
 func _keycode_value(key_name: String) -> int:
 	var wanted: String = key_name.to_lower()
 	for name: String in KEY_NAMES:
 		if name.to_lower() == wanted:
 			return KEY_NAMES[name]
-
-	_log.error("Unknown key: " + key_name)
-	return 0
+	return KEY_NONE

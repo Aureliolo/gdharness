@@ -56,6 +56,14 @@
       ]
     },
     {
+      "description": "A tag with the commit it names on the next line, for a repository fetched as an archive of that commit: gdUnit4. The archive's own digest sits under it and is rewritten by hand when the raise fails, as the installer says.",
+      "customType": "regex",
+      "managerFilePatterns": ["/^scripts/.+\\.ts$/"],
+      "matchStrings": [
+        "// renovate: datasource=(?<datasource>github-tags) depName=(?<depName>\\S+)\\n\\s*const VERSION = '(?<currentValue>[^']+)';\\n\\s*const COMMIT = '(?<currentDigest>[0-9a-f]{40})';"
+      ]
+    },
+    {
       "description": "A version on its own, for what nothing downloads directly: the interpreter uv installs and verifies against the hashes it carries, and the runner images inside a job matrix, which the github-actions manager reads from runs-on: but not from a matrix.",
       "customType": "regex",
       "managerFilePatterns": ["/^\\.github/.+\\.ya?ml$/"],

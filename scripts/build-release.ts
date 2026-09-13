@@ -51,8 +51,7 @@ await buildBundledEntrypoint('server-entry.ts', 'index.js');
 
 for (const sourcePath of await collectTypeScriptEntries(sourceRoot)) {
   const relativePath = path.relative(sourceRoot, sourcePath);
-  if (relativePath === 'cli.ts' || relativePath === 'index.ts' || relativePath === 'server-entry.ts')
-    continue;
+  if (relativePath === 'cli.ts' || relativePath === 'server-entry.ts') continue;
 
   const outputPath = path.join(buildRoot, relativePath.replace(/\.ts$/, '.js'));
   await mkdir(path.dirname(outputPath), { recursive: true });

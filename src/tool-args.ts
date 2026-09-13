@@ -38,37 +38,21 @@ export function readNonEmptyString(params: OperationParams, key: string): string
 }
 
 /**
- * A number greater than zero. Zero is not a usable limit or depth anywhere it is read here,
- * so it means the same as not sending the argument at all.
+ * A number greater than zero, or a string that is wholly one. Zero is not a usable limit or
+ * depth anywhere it is read here, so it means the same as not sending the argument at all; and
+ * clients that build their arguments as text send `"3"` where the schema says 3, which is the
+ * same mismatch the runtime bridge fits arguments to their types for.
  */
 export function readPositiveNumber(params: OperationParams, key: string): number | undefined {
-  const value = readNumberLike(params, key);
-  return value !== undefined && value > 0 ? value : undefined;
-}
-
-/**
- * A number, or a string that is wholly one. Clients that build their arguments as text send
- * `"3"` where the schema says 3, and refusing those would turn a working call into a missing
- * argument; the same mismatch is why the runtime bridge had to fit arguments to their types.
- */
-export function readNumberLike(params: OperationParams, key: string): number | undefined {
   const value = params[key];
-  if (typeof value === 'number' && Number.isFinite(value)) {
-    return value;
-  }
-  if (typeof value === 'string' && value.trim() !== '') {
-    const parsed = Number(value);
-    if (Number.isFinite(parsed)) {
-      return parsed;
-    }
-  }
-  return undefined;
+  const number = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
+  return typeof number === 'number' && Number.isFinite(number) && number > 0 ? number : undefined;
 }
 
 /**
- * A boolean, or the strings "true" and "false". Same reason as readNumberLike: a client that
- * builds its arguments as text sends "true", and the old untyped reads forwarded that string
- * to Godot, where it was truthy. Anything else is not an answer and reads as absent.
+ * A boolean, or the strings "true" and "false". Same reason as readPositiveNumber: a client
+ * that builds its arguments as text sends "true", and an untyped read forwarded to Godot is
+ * truthy. Anything else is not an answer and reads as absent.
  */
 export function readBoolean(params: OperationParams, key: string): boolean | undefined {
   const value = params[key];
@@ -102,17 +86,4 @@ export function readParams(params: OperationParams, key: string): OperationParam
   return typeof value === 'object' && value !== null && !Array.isArray(value)
     ? (value as OperationParams)
     : undefined;
-}
-
-/** Present under either key, so a caller may spell an argument in snake_case or camelCase. */
-export function readStringEither(params: OperationParams, first: string, second: string): string | undefined {
-  return readString(params, first) ?? readString(params, second);
-}
-
-export function readBooleanEither(
-  params: OperationParams,
-  first: string,
-  second: string,
-): boolean | undefined {
-  return readBoolean(params, first) ?? readBoolean(params, second);
 }

@@ -15,7 +15,7 @@ const CLI_COMMANDS = ['version', 'help', '--version', '-v', '--help', '-h'];
 async function main(): Promise<void> {
   if (!command || !CLI_COMMANDS.includes(command)) {
     // Dynamic import so a CLI-only command never loads the MCP SDK.
-    const { runGodotServer } = await import('./index.js');
+    const { runGodotServer } = await import('./server.js');
     await runGodotServer();
     return;
   }

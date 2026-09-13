@@ -29,7 +29,7 @@ const GODOT_PATH = resolveGodotPath(process.env['GODOT_PATH']);
 const HAS_USABLE_GODOT = Boolean(GODOT_PATH && isExecutableFile(GODOT_PATH));
 /** domain_verb, which every client accepts: no dots, no case, nothing a strict client rejects. */
 const TOOL_NAME_PATTERN = /^[a-z][a-z0-9_]{1,63}$/;
-const TOOL_COUNT = 31;
+const TOOL_COUNT = 32;
 const ONE_PIXEL_PNG_BASE64 =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO7Z0r0AAAAASUVORK5CYII=';
 

@@ -50,14 +50,16 @@ itself; there is nothing to copy by hand, no Python, and no Node.
 
 ## Tools
 
-Thirty-one, named `domain_verb`. A tool that does several related things takes an `op`, and
+Thirty-two, named `domain_verb`. A tool that does several related things takes an `op`, and
 its description says which arguments each op needs; a call with an argument the tool does not
 name, an op it does not have, or a required argument missing is refused with the valid set
-spelled out.
+spelled out. Every answer is JSON, read back from the engine after the change rather than
+echoed from the request, and anything the engine said on stderr on the way comes back with it
+under `engine_messages`.
 
 | Domain | Tools |
 | --- | --- |
-| `project_*` | `list`, `info`, `settings`, `search`, `dependencies`, `import`, `export` |
+| `project_*` | `list`, `info`, `settings`, `search`, `dependencies`, `import`, `export`, `test` |
 | `scene_*` | `create`, `tree`, `node`, `signal`, `animation` |
 | `script_*` | `edit`, `info`, `diagnostics` |
 | `resource_*` | `edit` |
@@ -86,6 +88,18 @@ waits for it to quit and answers whether it came up clean, which is the boot gat
 otherwise does by hand with a grep. The engine's own stdin debugger is never turned on: it
 breaks into a prompt on the first script error and, with no terminal to read from, never comes
 back.
+
+`project_test` runs the project's gdUnit4 suites headless and answers with every case rather
+than a console to read: which failed, at what line, and what the assertion said, along with
+anything the engine printed on the way. The class list is rebuilt before the run, because the
+runner is itself a set of `class_name`s the engine has to resolve, and so is any suite written
+since the editor last scanned.
+
+`project_import refresh_classes` rewrites `.godot/global_script_class_cache.cfg` from the
+`class_name` declarations on disk. The editor fixes that list at startup and refreshes it only on
+a filesystem scan it does not always run (godotengine/godot#42786), and a game started from a
+stale editor cannot resolve any class written since; the rebuilt file is the one the engine reads
+at boot, and the answer says which classes were added, removed or changed.
 
 A game finds its own port: the runtime addon listens on whatever the operating system hands
 out and announces the port in a file named by its process id, under `$GDHARNESS_RUNTIME_DIR`,

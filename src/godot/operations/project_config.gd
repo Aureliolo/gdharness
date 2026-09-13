@@ -39,8 +39,9 @@ func get_project_setting(params: Dictionary) -> Dictionary:
 # Set a project setting value
 func set_project_setting(params: Dictionary) -> Dictionary:
 	var setting_path: String = str(params.get("setting", ""))
+	if setting_path.is_empty():
+		return _log.failure("setting is required")
 	var value: Variant = params.get("value")
-	var save_immediately: bool = bool(params.get("save", true))
 
 	_log.info("Setting project setting: " + setting_path)
 
@@ -50,23 +51,18 @@ func set_project_setting(params: Dictionary) -> Dictionary:
 		old_value = ProjectSettings.get_setting(setting_path)
 
 	var final_value: Variant = _values.deserialize_value(value)
-
 	ProjectSettings.set_setting(setting_path, final_value)
+	var err: Error = ProjectSettings.save()
+	if err != OK:
+		return _log.failure("Failed to save project.godot: " + error_string(err))
 
-	var result: Dictionary = {
+	return {
 		"setting_path": setting_path,
 		"old_value": _values.serialize_value(old_value) if had_value else null,
 		"new_value": _values.serialize_value(final_value),
-		"was_new": not had_value
+		"was_new": not had_value,
+		"saved": true,
 	}
-
-	if save_immediately:
-		var err: Error = ProjectSettings.save()
-		result["saved"] = err == OK
-		if err != OK:
-			result["save_error"] = str(err)
-
-	return result
 
 
 # Add an autoload singleton

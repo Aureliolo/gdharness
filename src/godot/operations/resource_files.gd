@@ -4,67 +4,49 @@ const FileWalk = preload("file_walk.gd")
 const Log = preload("logger.gd")
 
 var _log: Log
-var _files := FileWalk.new()
+var _files: FileWalk = FileWalk.new()
 
 
 func _init(p_log: Log) -> void:
 	_log = p_log
 
 
-# Get UID for a specific file
+# The UID the engine gave a file, from the .uid sidecar it writes beside scripts and shaders.
 func get_uid(params: Dictionary) -> Dictionary:
-	if not params.has("file_path"):
-		return _log.failure("File path is required")
-
-	# Ensure the file path starts with res:// for Godot's resource system
-	var file_path: String = str(params.file_path)
+	var file_path: String = str(params.get("resource_path", ""))
+	if file_path.is_empty():
+		return _log.failure("resource_path is required")
 	if not file_path.begins_with("res://"):
 		file_path = "res://" + file_path
 
 	_log.info("Getting UID for file: " + file_path)
 
 	var absolute_path: String = ProjectSettings.globalize_path(file_path)
-	_log.debug("Absolute file path: " + absolute_path)
-
 	if not FileAccess.file_exists(file_path):
-		_log.error("File does not exist at: " + file_path)
-		return _log.failure("Absolute file path that doesn't exist: " + absolute_path)
+		return _log.failure("File does not exist: " + file_path)
 
 	var uid_path: String = file_path + ".uid"
-	_log.debug("UID file path: " + uid_path)
-
 	var f: FileAccess = FileAccess.open(uid_path, FileAccess.READ)
 	if not f:
-		_log.debug("UID file does not exist or could not be opened")
 		return {
 			"file": file_path,
-			"absolutePath": absolute_path,
+			"absolute_path": absolute_path,
 			"exists": false,
-			"message": "UID file does not exist for this file. Use resave_resources to generate UIDs."
+			"message": "No .uid sidecar. refresh_uids writes one for every script and shader."
 		}
 
 	var uid_content: String = f.get_as_text()
 	f.close()
 
 	return {
-		"file": file_path, "absolutePath": absolute_path, "uid": uid_content.strip_edges(), "exists": true
+		"file": file_path, "absolute_path": absolute_path, "uid": uid_content.strip_edges(), "exists": true
 	}
 
 
-# Resave all resources to update UID references
-func resave_resources(params: Dictionary) -> Dictionary:
+# Resave every scene, script and shader so that UID references are current.
+func resave_resources(_params: Dictionary) -> Dictionary:
 	_log.info("Resaving all resources to update UID references...")
-
-	# Get project path if provided
 	var project_path: String = "res://"
-	if params.has("project_path"):
-		project_path = str(params.project_path)
-		if not project_path.begins_with("res://"):
-			project_path = "res://" + project_path
-		if not project_path.ends_with("/"):
-			project_path += "/"
-
-	_log.debug("Using project path: " + project_path)
 
 	var scenes: Array[String] = _files.find_files(project_path, ".tscn")
 	_log.debug("Found " + str(scenes.size()) + " scenes")

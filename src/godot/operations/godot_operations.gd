@@ -10,6 +10,7 @@ extends SceneTree
 # absolute path outside the project. A res:// path would only resolve in the test fixture.
 
 const AudioBuses = preload("audio_buses.gd")
+const ClassCache = preload("class_cache.gd")
 const ClassDbQueries = preload("classdb_queries.gd")
 const Dependencies = preload("dependencies.gd")
 const GdscriptAnalysis = preload("gdscript_analysis.gd")
@@ -104,6 +105,8 @@ func _run(operation: String, params: Dictionary) -> Dictionary:
 			payload = ResourceFiles.new(_log).get_uid(params)
 		"resave_resources":
 			payload = ResourceFiles.new(_log).resave_resources(params)
+		"refresh_class_cache":
+			payload = ClassCache.new(_log).refresh_class_cache(params)
 
 		# Import and export pipeline
 		"get_import_status":

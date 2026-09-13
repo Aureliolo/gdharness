@@ -13,7 +13,9 @@ func _init(p_log: Log) -> void:
 func create_gdscript(params: Dictionary) -> Dictionary:
 	var script_path: String = str(params.get("script_path", ""))
 	var cls_name_param: String = str(params.get("class_name", ""))
-	var extends_class: String = str(params.get("extends_class", "Node"))
+	var extends_class: String = str(params.get("extends", "Node"))
+	if extends_class.is_empty():
+		extends_class = "Node"
 	var content: String = str(params.get("content", ""))
 	var template: String = str(params.get("template", ""))
 
