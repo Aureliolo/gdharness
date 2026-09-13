@@ -37,15 +37,21 @@ function bumpVersion(currentVersion: string, bumpType: 'major' | 'minor' | 'patc
 }
 
 function replaceReleaseVersionReferences(content: string, nextVersion: string, packageName: string): string {
-  return content
-    .replace(
-      new RegExp(`(releases/download/v)${SEMVER_SOURCE}(/${packageName}-)${SEMVER_SOURCE}(\\.tgz)`, 'g'),
-      `$1${nextVersion}$2${nextVersion}$3`,
-    )
-    .replace(
-      new RegExp(`(${packageName}-)${SEMVER_SOURCE}(\\.tgz(?:\\.sha256)?)`, 'g'),
-      `$1${nextVersion}$2`,
-    );
+  return (
+    content
+      .replace(
+        new RegExp(`(releases/download/v)${SEMVER_SOURCE}(/${packageName}-)${SEMVER_SOURCE}(\\.tgz)`, 'g'),
+        `$1${nextVersion}$2${nextVersion}$3`,
+      )
+      .replace(
+        new RegExp(`(${packageName}-)${SEMVER_SOURCE}(\\.tgz(?:\\.sha256)?)`, 'g'),
+        `$1${nextVersion}$2`,
+      )
+      // The install line, which is the one a reader copies: `npx -y gdharness@0.3.1 setup .`.
+      // Left out of here it stays on the last release forever, pinning every new project to a
+      // version older than the one the page it sits on describes.
+      .replace(new RegExp(`(${packageName}@)${SEMVER_SOURCE}`, 'g'), `$1${nextVersion}`)
+  );
 }
 
 async function readManifest(filePath: string): Promise<VersionedManifest> {

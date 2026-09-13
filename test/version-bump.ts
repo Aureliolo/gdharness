@@ -26,7 +26,8 @@ try {
     await writeFile(
       path.join(fixtureRoot, fileName),
       'https://github.com/Aureliolo/gdharness/releases/download/v0.1.0/gdharness-0.1.0.tgz\n' +
-        'gdharness-0.1.0.tgz.sha256\nbun add -g "$PWD/gdharness-0.1.0.tgz"\n',
+        'gdharness-0.1.0.tgz.sha256\nbun add -g "$PWD/gdharness-0.1.0.tgz"\n' +
+        'npx -y gdharness@0.1.0 setup . --runtime\n',
     );
   }
 
@@ -49,6 +50,8 @@ try {
     assert.match(content, /releases\/download\/v0\.2\.0\/gdharness-0\.2\.0\.tgz/);
     assert.match(content, /gdharness-0\.2\.0\.tgz\.sha256/);
     assert.match(content, /\$PWD\/gdharness-0\.2\.0\.tgz/);
+    // The line a reader copies to install it, which is the one that matters most.
+    assert.match(content, /npx -y gdharness@0\.2\.0 setup \./);
   }
 } finally {
   await rm(fixtureRoot, { recursive: true, force: true });
