@@ -64,7 +64,9 @@ gdharness classes /path/to/project           # rebuild .godot/global_script_clas
 
 `setup` copies each addon whole, over whatever was there, and writes the version it came
 from beside it, so an upgrade never leaves a file of the old version behind and `doctor` can
-tell an old copy from the shipped one. `doctor` also compares every `class_name` on disk with
+tell an old copy from the shipped one. An editor that was already open goes on serving the
+addon it read at startup, so `editor_status` reports the version the connected editor is
+actually holding and `editor_launch restart` is what puts the new one in front of it. `doctor` also compares every `class_name` on disk with
 the class cache, which is the check the editor cannot make for itself. Every write to
 `project.godot` goes through the engine, so the file is written the way the editor writes it.
 

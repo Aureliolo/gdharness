@@ -30,13 +30,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
+import { SERVER_VERSION } from '../src/server-version.js';
 import { asArray, asNumber, asString, get, text } from './support/json.js';
 import { parseTextContent, textOf } from './support/json-rpc.js';
 import { reservePort, ServerProcess } from './support/server.js';
 
 /** Long enough for a cold editor to finish its first filesystem scan on a slow runner. */
 const CONNECT_TIMEOUT_MS = 120_000;
-const TOOL_TIMEOUT_MS = 60_000;
+/** Past the longest a tool waits on its own, so the tool's answer is what a case fails on. */
+const TOOL_TIMEOUT_MS = 120_000;
 /** The editor serves its language server after the addon has connected, and takes its time. */
 const LSP_READY_TIMEOUT_MS = 90_000;
 /** A game the editor plays is a second engine starting, on a runner that is already busy. */
@@ -88,6 +90,9 @@ function createProject(): string {
   const dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'gdharness-editor-')));
 
   cpSync('src/godot/addons', join(dir, 'addons'), { recursive: true });
+  // The marker an install writes beside the addon, which is how the editor knows which version
+  // it is running: a copy without one is a copy gdharness did not put there.
+  writeFileSync(join(dir, 'addons', 'gdharness_editor', '.gdharness-version'), `${SERVER_VERSION}\n`);
 
   writeFileSync(
     join(dir, 'project.godot'),
@@ -357,6 +362,19 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
     // The game first: it is the editor's child and outlives it, so a run that failed part way
     // through would otherwise leave an engine behind holding the fixture project.
     await invoke('editor_stop', {}).catch(() => undefined);
+
+    // The editor that is connected now, which after a restart is not the one spawned here: that
+    // process is long gone and killing its handle leaves the new one holding the project.
+    const connected = await invoke('editor_status', {}).catch(() => null);
+    const pid = connected === null ? undefined : get(parseTextContent(connected), 'editor', 'editorPid');
+    if (typeof pid === 'number' && pid !== editor.pid) {
+      try {
+        process.kill(pid);
+      } catch {
+        // Already gone, which is the outcome this is for.
+      }
+    }
+
     editor.kill();
     await exited(editor);
     await server.stop();
@@ -779,6 +797,43 @@ async function testDebugging({ call, attempt, project }: Editor): Promise<void> 
   await call('editor_stop', {});
 }
 
+/**
+ * Restarting the editor, and the staleness that makes it necessary.
+ *
+ * An install replaces the addon under a running editor, which goes on serving the code it read
+ * at startup: the only sign is a tool behaving like the old version, which is no sign at all.
+ * The editor reports the version it loaded, and this is the tool that changes it. Run last,
+ * because everything before it is talking to the editor this ends.
+ */
+async function testEditorRestart({ call, project }: Editor): Promise<void> {
+  const before = get(await call('editor_status', {}), 'editor');
+  assert.equal(
+    get(before, 'addonVersion'),
+    SERVER_VERSION,
+    'the editor should report the version of the addon it loaded',
+  );
+  assert.equal(get(before, 'addonIsStale'), false, 'which is the one this server ships');
+
+  const restarted = await call('editor_launch', { projectPath: project, op: 'restart' });
+  assert.equal(get(restarted, 'restarted'), true, 'the editor should come back');
+  assert.equal(get(restarted, 'addonVersion'), SERVER_VERSION, 'with the addon it had');
+
+  const after = get(await call('editor_status', {}), 'editor');
+  assert.equal(get(after, 'connected'), true, 'and be connected again afterwards');
+  assert.notEqual(
+    get(after, 'connectedAt'),
+    get(before, 'connectedAt'),
+    'as a new connection rather than the one that was already there',
+  );
+  // The process too: an editor that reconnected without restarting would have the same one, and
+  // is exactly the failure this tool exists to rule out.
+  assert.notEqual(
+    get(after, 'editorPid'),
+    get(before, 'editorPid'),
+    'and as a new process, which is what restarting means',
+  );
+}
+
 async function main(): Promise<void> {
   const godotPath = resolveGodotPath();
   if (!godotPath) {
@@ -799,6 +854,7 @@ async function main(): Promise<void> {
     await testEditorRescan(editor);
     await testLanguageServer(editor);
     await testDebugging(editor);
+    await testEditorRestart(editor);
   });
 
   console.log('editor tests passed');

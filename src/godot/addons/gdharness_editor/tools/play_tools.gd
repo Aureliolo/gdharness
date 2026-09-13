@@ -43,6 +43,22 @@ func stop_playing(_args: Dictionary) -> Dictionary:
 	return {"ok": true, "wasPlaying": was_playing, "playing": EditorInterface.is_playing_scene()}
 
 
+## Restarts the editor, which is how a replaced addon is picked up.
+##
+## An install writes the new files under a running editor, which goes on serving the code it read
+## at startup: the version it reports and the tools it answers are the old ones until it comes
+## back. Scenes are saved on the way out, because the alternative is throwing away somebody's
+## unsaved work to pick up a version.
+func restart_editor(_args: Dictionary) -> Dictionary:
+	if EditorInterface.is_playing_scene():
+		EditorInterface.stop_playing_scene()
+
+	# Deferred so this answer is sent before the editor goes: a reply written into a socket the
+	# restart has already closed is a call that looks like it failed.
+	EditorInterface.restart_editor.call_deferred(true)
+	return {"ok": true, "restarting": true, "saved": true}
+
+
 func playing_status(_args: Dictionary) -> Dictionary:
 	var playing: bool = EditorInterface.is_playing_scene()
 	return {
