@@ -300,12 +300,12 @@ interface Page {
   readonly path: string;
   /** The same page as plain markdown, which is what an agent is pointed at. */
   readonly text: string;
-  /** In the browser tab, and the heading of its nav entry. */
+  /** In the browser tab, and in the navigation unless `nav` says otherwise. */
   readonly title: string;
+  /** What the navigation calls it, where the title would read oddly in a row of links. */
+  readonly nav?: string;
   /** One line for llms.txt, which is the index an agent reads first. */
   readonly summary: string;
-  /** The nav group it sits under. */
-  readonly group: string;
   /** The front page is not a page of documentation and is not laid out like one. */
   readonly home?: boolean;
   readonly render?: () => string;
@@ -317,8 +317,10 @@ const PAGES: readonly Page[] = [
     path: 'index.html',
     text: 'index.md',
     title: 'gdharness',
+    // The wordmark beside it already says gdharness, and the same word twice in a row of links
+    // reads as a mistake rather than as a destination.
+    nav: 'Overview',
     summary: 'What gdharness is, what it is made of, and the rules it is built to.',
-    group: 'Start',
     home: true,
     render: renderHome,
     renderText: renderHomeText,
@@ -329,7 +331,6 @@ const PAGES: readonly Page[] = [
     text: 'install.md',
     title: 'Install',
     summary: 'Installing and configuring it, step by step, with what to check after each.',
-    group: 'Start',
   },
   {
     source: 'architecture.md',
@@ -337,14 +338,12 @@ const PAGES: readonly Page[] = [
     text: 'architecture.md',
     title: 'How it works',
     summary: 'The parts, what connects to what, the ports, and which tools use which.',
-    group: 'Start',
   },
   {
     path: 'tools.html',
     text: 'tools.md',
     title: 'Tools',
     summary: 'Every tool, every op and every argument, generated from the server itself.',
-    group: 'Reference',
     render: renderTools,
     renderText: renderToolsMarkdown,
   },
@@ -500,22 +499,17 @@ function renderTools(): string {
  * it reaches a sentence, so every page here has a plain twin and the links written for agents go
  * to those.
  */
-/** The navigation, which is the page list: a page outside it would be one nothing links to. */
-function renderNav(current: string): string {
-  const groups = new Map<string, Page[]>();
-  for (const page of PAGES) {
-    groups.set(page.group, [...(groups.get(page.group) ?? []), page]);
-  }
-
-  const parts: string[] = [];
-  for (const [group, pages] of groups) {
-    parts.push(`<span class="grp">${escaped(group)}</span>`);
-    for (const page of pages) {
-      const here = page.path === current ? ' class="on" aria-current="page"' : '';
-      parts.push(`<a href="${page.path}"${here}>${escaped(page.title)}</a>`);
-    }
-  }
-  return parts.join('\n');
+/**
+ * The one navigation, on every page and listing every page including the front one.
+ *
+ * It is the page list, so a page outside it is one nothing links to, and there is nowhere for a
+ * second copy to drift out of step with the first.
+ */
+function renderTopLinks(current: string): string {
+  return PAGES.map((page) => {
+    const here = page.path === current ? ' class="on" aria-current="page"' : '';
+    return `<a href="${page.path}"${here}>${escaped(page.nav ?? page.title)}</a>`;
+  }).join('\n          ');
 }
 
 /**
@@ -557,10 +551,11 @@ function renderLlmsTxt(): string {
 }
 
 function build(): void {
+  // One template for every page, the front one included. It had a second copy of its own for a
+  // while, and the copy went on linking to a page that had been deleted: the same chrome written
+  // twice is the same chrome wrong once. What the front page needs instead is a class on the
+  // body, which its own block in the stylesheet hangs off.
   const template = readFileSync(join(THEME, 'page.html'), 'utf8');
-  // The front page is not a page of documentation and is not laid out like one: no side rail, and
-  // its own hero. Everything else shares the one template.
-  const homeTemplate = readFileSync(join(THEME, 'home.html'), 'utf8');
 
   // A markdown file nobody listed is a page with no way to reach it, which is worse than one
   // that does not exist: it publishes and nothing links to it.
@@ -599,11 +594,12 @@ function build(): void {
       .replaceAll('<table>', '<div class="scroll"><table>')
       .replaceAll('</table>', '</table></div>')
       .replace(/(<\/h1>\s*)<p>/, '$1<p class="lede">');
-    const html = (page.home === true ? homeTemplate : template)
+    const html = template
       .replaceAll('{{title}}', escaped(page.path === 'index.html' ? page.title : `${page.title} · gdharness`))
+      .replaceAll('{{bodyclass}}', page.home === true ? ' class="home"' : '')
       .replaceAll('{{description}}', escaped(page.summary))
       .replaceAll('{{canonical}}', `${SITE_URL}/${page.path}`)
-      .replaceAll('{{nav}}', renderNav(page.path))
+      .replaceAll('{{toplinks}}', renderTopLinks(page.path))
       .replaceAll('{{version}}', escaped(SERVER_VERSION))
       .replaceAll('{{content}}', content);
     writeFileSync(join(OUT, page.path), html, 'utf8');
@@ -626,7 +622,89 @@ function build(): void {
   // file whose name begins with an underscore.
   writeFileSync(join(OUT, '.nojekyll'), '', 'utf8');
 
+  checkOutput();
   console.log(`built ${PAGES.length} pages, ${PAGES.length + 1} text files, into ${OUT}/`);
+}
+
+/** Every id a page offers, which is what a `#fragment` pointed at it has to find. */
+function anchorsIn(html: string): Set<string> {
+  return new Set([...html.matchAll(/\sid="([^"]*)"/g)].map((match) => match[1] ?? ''));
+}
+
+/** Every link a file makes, whether it is written as HTML, as markdown, or bare in angles. */
+function linksIn(text: string): string[] {
+  const patterns = [
+    /href="([^"]*)"/g,
+    /\[[^\]]*\]\(([^)\s]+)\)/g,
+    /<([\w.-]+\.(?:html|md|txt)(?:#[^>\s]*)?)>/g,
+  ];
+  return patterns.flatMap((pattern) => [...text.matchAll(pattern)].map((match) => match[1] ?? ''));
+}
+
+/**
+ * Text that is not tab, newline or carriage return but is still below a space.
+ *
+ * Compared by code point rather than matched by a character class: writing that class means
+ * putting escapes in a regular expression, and an escape in this file is exactly what got
+ * mangled into a raw control byte last time.
+ */
+function controlCharactersIn(text: string): number[] {
+  const found: number[] = [];
+  for (let index = 0; index < text.length; index += 1) {
+    const code = text.charCodeAt(index);
+    if (code < 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d) {
+      found.push(code);
+    }
+  }
+  return found;
+}
+
+/**
+ * What the build refuses to publish.
+ *
+ * Both of these shipped once. A page was deleted while the front page's hand-written link row
+ * went on pointing at it, and a CSS escape was mangled into a control byte that rendered as an
+ * empty box on every card. Neither is something a person notices by reading the source, and both
+ * are one pass over the output to catch.
+ */
+function checkOutput(): void {
+  const names = readdirSync(OUT);
+  const published = new Set(names);
+  const anchors = new Map<string, Set<string>>();
+  for (const name of names.filter((file) => file.endsWith('.html'))) {
+    anchors.set(name, anchorsIn(readFileSync(join(OUT, name), 'utf8')));
+  }
+
+  const wrong: string[] = [];
+  for (const name of names.filter((file) => /\.(?:html|md|txt|css)$/.test(file))) {
+    const text = readFileSync(join(OUT, name), 'utf8');
+    for (const code of controlCharactersIn(text)) {
+      wrong.push(`${name} holds the control character U+${code.toString(16).padStart(4, '0').toUpperCase()}`);
+    }
+
+    for (const link of linksIn(text)) {
+      // Anything with a scheme, and anything protocol-relative, is somebody else's to serve.
+      if (/^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(link)) {
+        continue;
+      }
+      const [target = '', fragment = ''] = link.split('#');
+      const file = target === '' ? name : target;
+      if (!published.has(file)) {
+        wrong.push(`${name} links to ${link}, and ${file} is not published`);
+        continue;
+      }
+      // Only a rendered page has ids to look for. A fragment into markdown is whatever anchor
+      // the reader's own renderer makes of a heading, which nothing here decides.
+      const known = anchors.get(file);
+      if (fragment !== '' && known !== undefined && !known.has(fragment)) {
+        wrong.push(`${name} links to ${link}, and ${file} has no id="${fragment}"`);
+      }
+    }
+  }
+
+  if (wrong.length > 0) {
+    throw new Error(`the site would publish broken:\n  ${wrong.join('\n  ')}`);
+  }
 }
 
 try {

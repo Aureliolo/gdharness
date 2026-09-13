@@ -57,6 +57,15 @@ import {
   readStringArray,
 } from './tool-args.js';
 import { buildToolDefinitions, TOOL_SPECS, type ToolSpec, toolSpec } from './tool-definitions.js';
+import { UpdateCheck } from './update-check.js';
+
+/**
+ * How many answers pass between one update notice and the next.
+ *
+ * A session long enough to run through this many tool calls is one where the first notice has
+ * scrolled well out of anybody's reading, and a session shorter than it gets exactly one.
+ */
+const UPDATE_NOTICE_EVERY = 500;
 
 // execFile, not exec: no shell means no quoting, and no quoting means no way to escape out
 // of it. Every argument below is an array element, so a path full of backslashes, spaces or
@@ -225,6 +234,9 @@ class GodotServer {
   private readonly godotBridge: GodotBridge;
   private readonly tools: MCPToolDefinition[] = buildToolDefinitions();
   private activeProcess: GodotProcess | null = null;
+  private readonly updates = new UpdateCheck(SERVER_VERSION);
+  private noticedUpdate = false;
+  private callsSinceNotice = 0;
   private lspClient: GodotLSPClient | null = null;
   private dapClient: GodotDAPClient | null = null;
   private bridgeStartupError: string | null = null;
@@ -424,8 +436,55 @@ class GodotServer {
       if (typeof args['projectPath'] === 'string') {
         this.lastProjectPath = args['projectPath'];
       }
-      return await this.dispatch(spec.name, checked.op ?? '', args);
+      // Started here and not waited for: whatever it learns lands on a later call, and a
+      // registry that never answers costs this one nothing.
+      this.updates.refresh();
+      const answer = await this.dispatch(spec.name, checked.op ?? '', args);
+      return this.withUpdateNotice(answer);
     });
+  }
+
+  /**
+   * Adds the "there is a newer one" block to an answer, at most once a session and then rarely.
+   *
+   * On every answer it would stop being read by the third call, and on one answer only it would
+   * be missed by a session that started before the check came back. So: the first answer after
+   * an update is known, and then one in every {@link UPDATE_NOTICE_EVERY} after that, for a
+   * session long enough to have forgotten.
+   */
+  private withUpdateNotice(answer: ToolResponse): ToolResponse {
+    this.callsSinceNotice += 1;
+    if (this.callsSinceNotice < UPDATE_NOTICE_EVERY && this.noticedUpdate) {
+      return answer;
+    }
+    const notice = this.updates.notice();
+    if (notice === null) {
+      return answer;
+    }
+    this.noticedUpdate = true;
+    this.callsSinceNotice = 0;
+    return {
+      ...answer,
+      content: [
+        ...answer.content,
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              update_available: {
+                ...notice,
+                what_to_do:
+                  'Tell the user a newer gdharness is out, with what changed, and offer to take it. ' +
+                  'Only run the upgrade command if they say yes: it restarts their editor and the ' +
+                  'MCP server has to be reconnected afterwards.',
+              },
+            },
+            null,
+            2,
+          ),
+        },
+      ],
+    };
   }
 
   /**
