@@ -2666,9 +2666,6 @@ class GodotServer {
   }
 
   /**
-   * Handle the parse_error_log tool
-   */
-  /**
    * Handle the get_project_health tool
    */
   private async handleGetProjectHealth(rawArgs: unknown) {

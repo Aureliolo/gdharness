@@ -10,56 +10,45 @@ func _init(p_log: Log) -> void:
 
 
 # Analyze a GDScript file and return its structure
-func get_gdscript_info(params) -> Dictionary:
-	var script_path = params.script_path
+func get_gdscript_info(params: Dictionary) -> Dictionary:
+	var script_path: String = str(params.get("script_path", ""))
 
 	_log.info("Analyzing GDScript: " + script_path)
 
-	# Ensure script path has res:// prefix
-	var full_script_path = script_path
+	var full_script_path: String = script_path
 	if not full_script_path.begins_with("res://"):
 		full_script_path = "res://" + full_script_path
 
-	# Check if file exists
 	if not FileAccess.file_exists(full_script_path):
 		return _log.failure("Script file does not exist: " + full_script_path)
 
-	# Read script content
-	var file = FileAccess.open(full_script_path, FileAccess.READ)
+	var file: FileAccess = FileAccess.open(full_script_path, FileAccess.READ)
 	if not file:
 		return _log.failure("Failed to open script file: " + full_script_path)
 
-	var content = file.get_as_text()
+	var content: String = file.get_as_text()
 	file.close()
 
-	var lines = content.split("\n")
+	var lines: PackedStringArray = content.split("\n")
 
-	var result = {
-		"path": script_path,
-		"full_path": full_script_path,
-		"class_name": null,
-		"extends": "RefCounted",
-		"signals": [],
-		"variables": [],
-		"functions": [],
-		"constants": [],
-		"enums": [],
-		"inner_classes": [],
-		"dependencies": [],
-		"line_count": lines.size()
-	}
+	var declared_class_name: Variant = null
+	var extends_name: String = "RefCounted"
+	var signals: Array[Dictionary] = []
+	var variables: Array[Dictionary] = []
+	var functions: Array[Dictionary] = []
+	var constants: Array[Dictionary] = []
+	var enums: Array[Dictionary] = []
+	var inner_classes: Array[String] = []
+	var dependencies: Array[String] = []
 
-	var in_multiline_string = false
+	var in_multiline_string: bool = false
 
-	for i in range(lines.size()):
-		var line = lines[i]
-		var stripped = line.strip_edges()
+	for i: int in range(lines.size()):
+		var stripped: String = lines[i].strip_edges()
 
-		# Skip empty lines and comments
 		if stripped.is_empty() or stripped.begins_with("#"):
 			continue
 
-		# Handle multiline strings
 		if '"""' in stripped or "'''" in stripped:
 			in_multiline_string = not in_multiline_string
 			continue
@@ -67,65 +56,60 @@ func get_gdscript_info(params) -> Dictionary:
 		if in_multiline_string:
 			continue
 
-		# Parse class_name
 		if stripped.begins_with("class_name "):
-			result["class_name"] = stripped.substr(11).strip_edges()
-
-		# Parse extends
+			declared_class_name = stripped.substr(11).strip_edges()
 		elif stripped.begins_with("extends "):
-			result["extends"] = stripped.substr(8).strip_edges()
-
-		# Parse signals
+			extends_name = stripped.substr(8).strip_edges()
 		elif stripped.begins_with("signal "):
-			result["signals"].append(_parse_signal(stripped, i + 1))
-
-		# Parse constants
+			signals.append(_parse_signal(stripped, i + 1))
 		elif stripped.begins_with("const "):
-			result["constants"].append(_parse_constant(stripped, i + 1))
-
-		# Parse enums
+			constants.append(_parse_constant(stripped, i + 1))
 		elif stripped.begins_with("enum "):
-			result["enums"].append(_parse_enum(stripped, i + 1))
-
-		# Parse variables
+			enums.append(_parse_enum(stripped, i + 1))
 		elif (
 			stripped.begins_with("var ")
 			or stripped.begins_with("@export")
 			or stripped.begins_with("@onready")
 		):
-			result["variables"].append(_parse_variable(stripped, i + 1))
-
-		# Parse functions
+			variables.append(_parse_variable(stripped, i + 1))
 		elif stripped.begins_with("func ") or stripped.begins_with("static func "):
-			result["functions"].append(_parse_function(stripped, i + 1))
-
-		# Parse inner classes
+			functions.append(_parse_function(stripped, i + 1))
 		elif stripped.begins_with("class "):
-			var cls_name = stripped.substr(6).split(":")[0].split(" ")[0].strip_edges()
-			result["inner_classes"].append(cls_name)
+			inner_classes.append(stripped.substr(6).split(":")[0].split(" ")[0].strip_edges())
 
-		# Parse dependencies (preload, load)
 		if "preload(" in stripped or "load(" in stripped:
-			for dep in _extract_dependencies(stripped):
-				if dep not in result["dependencies"]:
-					result["dependencies"].append(dep)
+			for dep: String in _extract_dependencies(stripped):
+				if dep not in dependencies:
+					dependencies.append(dep)
 
-	return result
+	return {
+		"path": script_path,
+		"full_path": full_script_path,
+		"class_name": declared_class_name,
+		"extends": extends_name,
+		"signals": signals,
+		"variables": variables,
+		"functions": functions,
+		"constants": constants,
+		"enums": enums,
+		"inner_classes": inner_classes,
+		"dependencies": dependencies,
+		"line_count": lines.size()
+	}
 
 
 func _parse_signal(line: String, line_num: int) -> Dictionary:
-	var signal_text = line.substr(7).strip_edges()
-	var signal_name = ""
-	var params = []
+	var signal_text: String = line.substr(7).strip_edges()
+	var signal_name: String = ""
+	var params: Array[Dictionary] = []
 
 	if "(" in signal_text:
-		var parts = signal_text.split("(")
+		var parts: PackedStringArray = signal_text.split("(")
 		signal_name = parts[0].strip_edges()
 		if parts.size() > 1:
-			var params_text = parts[1].replace(")", "").strip_edges()
+			var params_text: String = parts[1].replace(")", "").strip_edges()
 			if not params_text.is_empty():
-				var param_parts = params_text.split(",")
-				for p in param_parts:
+				for p: String in params_text.split(","):
 					params.append(_parse_param(p.strip_edges()))
 	else:
 		signal_name = signal_text
@@ -134,18 +118,18 @@ func _parse_signal(line: String, line_num: int) -> Dictionary:
 
 
 func _parse_constant(line: String, line_num: int) -> Dictionary:
-	var const_text = line.substr(6).strip_edges()
-	var name = ""
-	var value = ""
-	var type_hint = ""
+	var const_text: String = line.substr(6).strip_edges()
+	var name: String = ""
+	var value: String = ""
+	var type_hint: String = ""
 
 	if "=" in const_text:
-		var parts = const_text.split("=", true, 1)
-		var name_part = parts[0].strip_edges()
+		var parts: PackedStringArray = const_text.split("=", true, 1)
+		var name_part: String = parts[0].strip_edges()
 		value = parts[1].strip_edges() if parts.size() > 1 else ""
 
 		if ":" in name_part:
-			var type_parts = name_part.split(":")
+			var type_parts: PackedStringArray = name_part.split(":")
 			name = type_parts[0].strip_edges()
 			type_hint = type_parts[1].strip_edges()
 		else:
@@ -157,19 +141,18 @@ func _parse_constant(line: String, line_num: int) -> Dictionary:
 
 
 func _parse_enum(line: String, line_num: int) -> Dictionary:
-	var enum_text = line.substr(5).strip_edges()
-	var enum_name = ""
-	var values = []
+	var enum_text: String = line.substr(5).strip_edges()
+	var enum_name: String = ""
+	var values: Array[String] = []
 
 	if "{" in enum_text:
-		var parts = enum_text.split("{")
+		var parts: PackedStringArray = enum_text.split("{")
 		enum_name = parts[0].strip_edges()
 		if parts.size() > 1:
-			var values_text = parts[1].replace("}", "").strip_edges()
+			var values_text: String = parts[1].replace("}", "").strip_edges()
 			if not values_text.is_empty():
-				var value_parts = values_text.split(",")
-				for v in value_parts:
-					var val = v.strip_edges()
+				for v: String in values_text.split(","):
+					var val: String = v.strip_edges()
 					if not val.is_empty():
 						values.append(val)
 	else:
@@ -179,42 +162,40 @@ func _parse_enum(line: String, line_num: int) -> Dictionary:
 
 
 func _parse_variable(line: String, line_num: int) -> Dictionary:
-	var is_export = line.begins_with("@export")
-	var is_onready = "@onready" in line
-	var export_hint = ""
+	var is_export: bool = line.begins_with("@export")
+	var is_onready: bool = "@onready" in line
+	var export_hint: String = ""
 
-	# Extract export hint
 	if is_export:
-		var export_match = line.find("@export")
-		var hint_end = line.find("var ")
+		var export_match: int = line.find("@export")
+		var hint_end: int = line.find("var ")
 		if hint_end > export_match:
-			var hint_part = line.substr(export_match + 7, hint_end - export_match - 7).strip_edges()
+			var hint_part: String = line.substr(export_match + 7, hint_end - export_match - 7).strip_edges()
 			if hint_part.begins_with("_"):
 				export_hint = hint_part.substr(1).split(" ")[0]
 
-	# Find var declaration
-	var var_pos = line.find("var ")
+	var var_pos: int = line.find("var ")
 	if var_pos == -1:
 		return {"name": "", "line": line_num}
 
-	var var_text = line.substr(var_pos + 4).strip_edges()
-	var name = ""
-	var type_hint = ""
-	var default_value = ""
+	var var_text: String = line.substr(var_pos + 4).strip_edges()
+	var name: String = ""
+	var type_hint: String = ""
+	var default_value: String = ""
 
 	if "=" in var_text:
-		var parts = var_text.split("=", true, 1)
-		var name_part = parts[0].strip_edges()
+		var parts: PackedStringArray = var_text.split("=", true, 1)
+		var name_part: String = parts[0].strip_edges()
 		default_value = parts[1].strip_edges() if parts.size() > 1 else ""
 
 		if ":" in name_part:
-			var type_parts = name_part.split(":")
+			var type_parts: PackedStringArray = name_part.split(":")
 			name = type_parts[0].strip_edges()
 			type_hint = type_parts[1].strip_edges()
 		else:
 			name = name_part
 	elif ":" in var_text:
-		var type_parts = var_text.split(":")
+		var type_parts: PackedStringArray = var_text.split(":")
 		name = type_parts[0].strip_edges()
 		type_hint = type_parts[1].strip_edges()
 	else:
@@ -232,32 +213,30 @@ func _parse_variable(line: String, line_num: int) -> Dictionary:
 
 
 func _parse_function(line: String, line_num: int) -> Dictionary:
-	var is_static = line.begins_with("static ")
-	var func_text = line
+	var is_static: bool = line.begins_with("static ")
+	var func_text: String = line
 
 	if is_static:
 		func_text = line.substr(7).strip_edges()
 
-	func_text = func_text.substr(5).strip_edges()  # Remove "func "
+	func_text = func_text.substr(5).strip_edges()
 
-	var name = ""
-	var params = []
-	var return_type = ""
+	var name: String = ""
+	var params: Array[Dictionary] = []
+	var return_type: String = ""
 
 	if "(" in func_text:
-		var paren_start = func_text.find("(")
+		var paren_start: int = func_text.find("(")
 		name = func_text.substr(0, paren_start).strip_edges()
 
-		var paren_end = func_text.rfind(")")
+		var paren_end: int = func_text.rfind(")")
 		if paren_end > paren_start:
-			var params_text = func_text.substr(paren_start + 1, paren_end - paren_start - 1)
+			var params_text: String = func_text.substr(paren_start + 1, paren_end - paren_start - 1)
 			if not params_text.is_empty():
-				var param_parts = params_text.split(",")
-				for p in param_parts:
+				for p: String in params_text.split(","):
 					params.append(_parse_param(p.strip_edges()))
 
-		# Check for return type
-		var after_paren = func_text.substr(paren_end + 1).strip_edges()
+		var after_paren: String = func_text.substr(paren_end + 1).strip_edges()
 		if after_paren.begins_with("->"):
 			return_type = after_paren.substr(2).replace(":", "").strip_edges()
 
@@ -272,23 +251,23 @@ func _parse_function(line: String, line_num: int) -> Dictionary:
 
 
 func _parse_param(param_text: String) -> Dictionary:
-	var name = ""
-	var type_hint = ""
-	var default_value = ""
+	var name: String = ""
+	var type_hint: String = ""
+	var default_value: String = ""
 
 	if "=" in param_text:
-		var parts = param_text.split("=", true, 1)
-		var name_part = parts[0].strip_edges()
+		var parts: PackedStringArray = param_text.split("=", true, 1)
+		var name_part: String = parts[0].strip_edges()
 		default_value = parts[1].strip_edges() if parts.size() > 1 else ""
 
 		if ":" in name_part:
-			var type_parts = name_part.split(":")
+			var type_parts: PackedStringArray = name_part.split(":")
 			name = type_parts[0].strip_edges()
 			type_hint = type_parts[1].strip_edges()
 		else:
 			name = name_part
 	elif ":" in param_text:
-		var type_parts = param_text.split(":")
+		var type_parts: PackedStringArray = param_text.split(":")
 		name = type_parts[0].strip_edges()
 		type_hint = type_parts[1].strip_edges()
 	else:
@@ -297,14 +276,13 @@ func _parse_param(param_text: String) -> Dictionary:
 	return {"name": name, "type": type_hint, "default": default_value}
 
 
-func _extract_dependencies(line: String) -> Array:
-	var deps = []
-	var regex = RegEx.new()
+func _extract_dependencies(line: String) -> Array[String]:
+	var deps: Array[String] = []
+	var regex: RegEx = RegEx.new()
 
-	# Match preload("...") and load("...")
 	regex.compile("(?:preload|load)\\s*\\(\\s*[\"']([^\"']+)[\"']\\s*\\)")
 
-	for m in regex.search_all(line):
+	for m: RegExMatch in regex.search_all(line):
 		deps.append(m.get_string(1))
 
 	return deps

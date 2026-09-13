@@ -238,17 +238,17 @@ func _parse_array(value: Array, expected_type: int) -> Variant:
 		TYPE_VECTOR3I:
 			if value.size() >= 3:
 				return Vector3i(value[0], value[1], value[2])
-	return value.map(func(item): return _parse_value(item))
+	return value.map(func(item: Variant) -> Variant: return _parse_value(item))
 
 
 func _get_property_type(node: Node, prop_name: String) -> int:
-	for prop in node.get_property_list():
+	for prop: Dictionary in node.get_property_list():
 		if str(prop.get("name", "")) == prop_name:
 			return int(prop.get("type", TYPE_NIL))
 	return TYPE_NIL
 
 
-func _serialize_value(value) -> Variant:
+func _serialize_value(value: Variant) -> Variant:
 	match typeof(value):
 		TYPE_VECTOR2:
 			return {"type": "Vector2", "x": value.x, "y": value.y}
@@ -297,20 +297,20 @@ func _serialize_value(value) -> Variant:
 
 
 func _set_node_properties(node: Node, properties: Dictionary) -> void:
-	for prop_name in properties:
+	for prop_name: Variant in properties:
 		var expected_type := _get_property_type(node, str(prop_name))
-		var val = _parse_value(properties[prop_name], expected_type)
+		var val: Variant = _parse_value(properties[prop_name], expected_type)
 		node.set(prop_name, val)
 
 
-func _parse_properties_arg(raw_properties) -> Dictionary:
+func _parse_properties_arg(raw_properties: Variant) -> Dictionary:
 	if typeof(raw_properties) == TYPE_DICTIONARY:
 		return raw_properties
 	if typeof(raw_properties) == TYPE_STRING:
 		var text := String(raw_properties)
 		if text.strip_edges().is_empty():
 			return {}
-		var parsed = JSON.parse_string(text)
+		var parsed: Variant = JSON.parse_string(text)
 		if typeof(parsed) == TYPE_DICTIONARY:
 			return parsed
 	return {}
@@ -392,7 +392,7 @@ func create_scene(args: Dictionary) -> Dictionary:
 
 	if not script_path.is_empty():
 		var full_script_path := _to_scene_res_path(project_path, script_path)
-		var script = load(full_script_path)
+		var script: Resource = load(full_script_path)
 		if not script:
 			root.queue_free()
 			return {"ok": false, "error": "Failed to load script: " + full_script_path}
@@ -631,9 +631,9 @@ func get_node_properties(args: Dictionary) -> Dictionary:
 		var prop_name := str(p.get("name", ""))
 		if prop_name.is_empty():
 			continue
-		var current_val = node.get(prop_name)
+		var current_val: Variant = node.get(prop_name)
 		if not include_defaults and defaults:
-			var default_val = defaults.get(prop_name)
+			var default_val: Variant = defaults.get(prop_name)
 			if current_val == default_val:
 				continue
 		props[prop_name] = _serialize_value(current_val)
@@ -653,7 +653,7 @@ func load_sprite(args: Dictionary) -> Dictionary:
 	if texture_path == "res://":
 		return {"ok": false, "error": "Missing texturePath"}
 
-	var texture = load(texture_path)
+	var texture: Resource = load(texture_path)
 	if not texture or not (texture is Texture2D):
 		return {"ok": false, "error": "Failed to load texture: " + texture_path}
 
@@ -819,7 +819,7 @@ func list_connections(args: Dictionary) -> Dictionary:
 	_collect_nodes_recursive(root, ".", nodes)
 
 	var connections: Array = []
-	for entry in nodes:
+	for entry: Dictionary in nodes:
 		var path := str(entry["path"])
 		if not filter_path.is_empty() and filter_path != path:
 			continue

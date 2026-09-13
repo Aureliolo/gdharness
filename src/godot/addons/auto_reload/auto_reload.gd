@@ -44,9 +44,9 @@ func _exit_tree() -> void:
 
 func _update_watched_files() -> void:
 	# Get currently edited scene
-	var edited_scene = editor_interface.get_edited_scene_root()
+	var edited_scene: Node = editor_interface.get_edited_scene_root()
 	if edited_scene and edited_scene.scene_file_path:
-		var path = edited_scene.scene_file_path
+		var path: String = edited_scene.scene_file_path
 		if not watched_files.has(path):
 			watched_files[path] = _get_modified_time(path)
 
@@ -56,19 +56,19 @@ func _update_watched_files() -> void:
 
 func _watch_node_scripts(node: Node) -> void:
 	# Watch the script attached to this node
-	var script = node.get_script()
-	if script and script.resource_path:
-		var path = script.resource_path
+	var script: Variant = node.get_script()
+	if script is Script and (script as Script).resource_path:
+		var path: String = (script as Script).resource_path
 		if not watched_files.has(path):
 			watched_files[path] = _get_modified_time(path)
 
 	# Recursively watch children
-	for child in node.get_children():
+	for child: Node in node.get_children():
 		_watch_node_scripts(child)
 
 
 func _get_modified_time(path: String) -> int:
-	var global_path = ProjectSettings.globalize_path(path)
+	var global_path: String = ProjectSettings.globalize_path(path)
 	if FileAccess.file_exists(global_path):
 		return FileAccess.get_modified_time(global_path)
 	return 0
@@ -77,12 +77,12 @@ func _get_modified_time(path: String) -> int:
 func _check_for_changes() -> void:
 	_update_watched_files()
 
-	var files_to_reload: Array = []
-	var scripts_to_reload: Array = []
+	var files_to_reload: Array[String] = []
+	var scripts_to_reload: Array[String] = []
 
-	for path in watched_files.keys():
-		var current_time = _get_modified_time(path)
-		var last_time = watched_files[path]
+	for path: String in watched_files.keys():
+		var current_time: int = _get_modified_time(path)
+		var last_time: int = watched_files[path]
 
 		if current_time > last_time:
 			if path.ends_with(".gd"):
@@ -92,11 +92,11 @@ func _check_for_changes() -> void:
 			watched_files[path] = current_time
 
 	# Reload changed scripts first
-	for path in scripts_to_reload:
+	for path: String in scripts_to_reload:
 		_reload_script(path)
 
 	# Then reload changed scenes
-	for path in files_to_reload:
+	for path: String in files_to_reload:
 		_reload_scene(path)
 
 
@@ -104,7 +104,7 @@ func _reload_script(path: String) -> void:
 	print("[Godot MCP - AutoReload] Script changed: ", path)
 
 	# Reload the script resource
-	var script = load(path)
+	var script: Resource = load(path)
 	if script:
 		ResourceLoader.load(path, "", ResourceLoader.CACHE_MODE_REPLACE)
 		print("[Godot MCP - AutoReload] Script reloaded: ", path)
@@ -114,7 +114,7 @@ func _reload_scene(path: String) -> void:
 	print("[Godot MCP - AutoReload] Scene changed: ", path)
 
 	# Check if this is the currently edited scene
-	var edited_scene = editor_interface.get_edited_scene_root()
+	var edited_scene: Node = editor_interface.get_edited_scene_root()
 	if edited_scene and edited_scene.scene_file_path == path:
 		# Reload the current scene
 		editor_interface.reload_scene_from_path(path)

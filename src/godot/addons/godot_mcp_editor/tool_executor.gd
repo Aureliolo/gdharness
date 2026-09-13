@@ -101,7 +101,7 @@ func execute_tool(tool_name: String, args: Dictionary) -> Dictionary:
 	if not node.has_method(method):
 		return {"ok": false, "error": "Tool method not found: %s.%s" % [node.name, method]}
 
-	var result = node.call(method, args)
+	var result: Variant = node.call(method, args)
 	if result is Dictionary:
 		return result
 

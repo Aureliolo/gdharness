@@ -31,7 +31,7 @@ func _refresh_filesystem() -> void:
 func _reload_scene_in_editor(scene_path: String) -> void:
 	if not _editor_plugin:
 		return
-	var edited = EditorInterface.get_edited_scene_root()
+	var edited: Node = EditorInterface.get_edited_scene_root()
 	if edited and edited.scene_file_path == scene_path:
 		EditorInterface.reload_scene_from_path(scene_path)
 
@@ -39,17 +39,17 @@ func _reload_scene_in_editor(scene_path: String) -> void:
 func _load_scene(scene_path: String) -> Array:
 	if not FileAccess.file_exists(scene_path):
 		return [null, {"ok": false, "error": "Scene not found: " + scene_path}]
-	var packed = load(scene_path) as PackedScene
+	var packed: PackedScene = load(scene_path) as PackedScene
 	if not packed:
 		return [null, {"ok": false, "error": "Failed to load: " + scene_path}]
-	var root = packed.instantiate()
+	var root: Node = packed.instantiate()
 	if not root:
 		return [null, {"ok": false, "error": "Failed to instantiate: " + scene_path}]
 	return [root, {}]
 
 
 func _save_scene(scene_root: Node, scene_path: String) -> Dictionary:
-	var packed = PackedScene.new()
+	var packed := PackedScene.new()
 	if packed.pack(scene_root) != OK:
 		scene_root.queue_free()
 		return {"ok": false, "error": "Failed to pack scene"}
@@ -67,29 +67,32 @@ func _find_node(root: Node, path: String) -> Node:
 	return root.get_node_or_null(path)
 
 
-func _parse_value(value):
+func _parse_value(value: Variant) -> Variant:
 	if typeof(value) == TYPE_DICTIONARY:
-		if value.has("type") or value.has("_type"):
-			var t = value.get("type", value.get("_type", ""))
+		var fields: Dictionary = value
+		if fields.has("type") or fields.has("_type"):
+			var t: Variant = fields.get("type", fields.get("_type", ""))
 			match t:
 				"Vector2":
-					return Vector2(value.get("x", 0), value.get("y", 0))
+					return Vector2(fields.get("x", 0), fields.get("y", 0))
 				"Vector3":
-					return Vector3(value.get("x", 0), value.get("y", 0), value.get("z", 0))
+					return Vector3(fields.get("x", 0), fields.get("y", 0), fields.get("z", 0))
 				"Color":
-					return Color(value.get("r", 1), value.get("g", 1), value.get("b", 1), value.get("a", 1))
+					return Color(
+						fields.get("r", 1), fields.get("g", 1), fields.get("b", 1), fields.get("a", 1)
+					)
 	if typeof(value) == TYPE_ARRAY:
-		var result = []
-		for item in value:
+		var result: Array = []
+		for item: Variant in value:
 			result.append(_parse_value(item))
 		return result
 	return value
 
 
-func _parse_json_maybe(value):
+func _parse_json_maybe(value: Variant) -> Variant:
 	if typeof(value) != TYPE_STRING:
 		return value
-	var parsed = JSON.parse_string(value)
+	var parsed: Variant = JSON.parse_string(value)
 	if parsed == null and value != "null":
 		return value
 	return parsed
@@ -97,8 +100,8 @@ func _parse_json_maybe(value):
 
 func _parse_method_args(raw_args: Array) -> Array:
 	var parsed_args: Array = []
-	for raw_arg in raw_args:
-		var parsed = _parse_json_maybe(raw_arg)
+	for raw_arg: Variant in raw_args:
+		var parsed: Variant = _parse_json_maybe(raw_arg)
 		parsed_args.append(_parse_value(parsed))
 	return parsed_args
 
@@ -122,9 +125,9 @@ func _get_state_machine(
 	if state_machine_path.is_empty() or state_machine_path == "root":
 		return anim_tree.tree_root as AnimationNodeStateMachine
 
-	var current = anim_tree.tree_root
-	for segment in state_machine_path.split("/", false):
-		if String(segment).is_empty():
+	var current: Variant = anim_tree.tree_root
+	for segment: String in state_machine_path.split("/", false):
+		if segment.is_empty():
 			continue
 		if current == null or not current.has_method("get_node"):
 			return null
@@ -151,7 +154,7 @@ func create_animation(args: Dictionary) -> Dictionary:
 		return loaded[1]
 
 	var scene_root: Node = loaded[0]
-	var player = _find_node(scene_root, player_node_path) as AnimationPlayer
+	var player: AnimationPlayer = _find_node(scene_root, player_node_path) as AnimationPlayer
 	if not player:
 		scene_root.queue_free()
 		return {"ok": false, "error": "AnimationPlayer not found at: " + player_node_path}
@@ -174,7 +177,7 @@ func create_animation(args: Dictionary) -> Dictionary:
 			loop_mode_name = "none"
 			loop_mode = Animation.LOOP_NONE
 
-	var anim = Animation.new()
+	var anim := Animation.new()
 	anim.length = float(args.get("length", 1.0))
 	anim.loop_mode = loop_mode
 	anim.step = float(args.get("step", 0.1))
@@ -217,7 +220,7 @@ func add_animation_track(args: Dictionary) -> Dictionary:
 		return loaded[1]
 
 	var scene_root: Node = loaded[0]
-	var player = _find_node(scene_root, player_node_path) as AnimationPlayer
+	var player: AnimationPlayer = _find_node(scene_root, player_node_path) as AnimationPlayer
 	if not player:
 		scene_root.queue_free()
 		return {"ok": false, "error": "AnimationPlayer not found at: " + player_node_path}
@@ -245,11 +248,11 @@ func add_animation_track(args: Dictionary) -> Dictionary:
 				return {"ok": false, "error": "track.property is required for property track"}
 			track_idx = anim.add_track(Animation.TYPE_VALUE)
 			anim.track_set_path(track_idx, NodePath(node_path_str + ":" + prop_name))
-			for keyframe in keyframes:
+			for keyframe: Variant in keyframes:
 				if typeof(keyframe) != TYPE_DICTIONARY:
 					continue
-				var raw_value = keyframe.get("value")
-				var parsed_value = (
+				var raw_value: Variant = keyframe.get("value")
+				var parsed_value: Variant = (
 					_parse_json_maybe(raw_value) if typeof(raw_value) == TYPE_STRING else raw_value
 				)
 				anim.track_insert_key(track_idx, float(keyframe.get("time", 0.0)), _parse_value(parsed_value))
@@ -262,7 +265,7 @@ func add_animation_track(args: Dictionary) -> Dictionary:
 				return {"ok": false, "error": "track.method is required for method track"}
 			track_idx = anim.add_track(Animation.TYPE_METHOD)
 			anim.track_set_path(track_idx, NodePath(method_node_path))
-			for keyframe in keyframes:
+			for keyframe: Variant in keyframes:
 				if typeof(keyframe) != TYPE_DICTIONARY:
 					continue
 				(
@@ -312,7 +315,7 @@ func add_animation_state(args: Dictionary) -> Dictionary:
 		return loaded[1]
 
 	var scene_root: Node = loaded[0]
-	var anim_tree = _find_node(scene_root, anim_tree_path) as AnimationTree
+	var anim_tree: AnimationTree = _find_node(scene_root, anim_tree_path) as AnimationTree
 	if not anim_tree:
 		scene_root.queue_free()
 		return {"ok": false, "error": "AnimationTree not found at: " + anim_tree_path}
@@ -357,7 +360,7 @@ func connect_animation_states(args: Dictionary) -> Dictionary:
 		return loaded[1]
 
 	var scene_root: Node = loaded[0]
-	var anim_tree = _find_node(scene_root, anim_tree_path) as AnimationTree
+	var anim_tree: AnimationTree = _find_node(scene_root, anim_tree_path) as AnimationTree
 	if not anim_tree:
 		scene_root.queue_free()
 		return {"ok": false, "error": "AnimationTree not found at: " + anim_tree_path}

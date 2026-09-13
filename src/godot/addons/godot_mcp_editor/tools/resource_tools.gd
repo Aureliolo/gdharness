@@ -67,51 +67,49 @@ func _refresh_filesystem() -> void:
 		EditorInterface.get_resource_filesystem().scan()
 
 
-func _parse_value(value):
+func _parse_value(value: Variant) -> Variant:
 	if typeof(value) == TYPE_DICTIONARY:
-		if value.has("type") or value.has("_type"):
-			var t = value.get("type", value.get("_type", ""))
+		var fields: Dictionary = value
+		if fields.has("type") or fields.has("_type"):
+			var t: Variant = fields.get("type", fields.get("_type", ""))
 			match t:
 				"Vector2":
-					return Vector2(value.get("x", 0), value.get("y", 0))
+					return Vector2(fields.get("x", 0), fields.get("y", 0))
 				"Vector3":
-					return Vector3(value.get("x", 0), value.get("y", 0), value.get("z", 0))
+					return Vector3(fields.get("x", 0), fields.get("y", 0), fields.get("z", 0))
 				"Color":
-					return Color(value.get("r", 1), value.get("g", 1), value.get("b", 1), value.get("a", 1))
+					return Color(
+						fields.get("r", 1), fields.get("g", 1), fields.get("b", 1), fields.get("a", 1)
+					)
 				"Vector2i":
-					return Vector2i(value.get("x", 0), value.get("y", 0))
+					return Vector2i(fields.get("x", 0), fields.get("y", 0))
 				"Vector3i":
-					return Vector3i(value.get("x", 0), value.get("y", 0), value.get("z", 0))
+					return Vector3i(fields.get("x", 0), fields.get("y", 0), fields.get("z", 0))
 				"Rect2":
 					return Rect2(
-						value.get("x", 0), value.get("y", 0), value.get("width", 0), value.get("height", 0)
+						fields.get("x", 0),
+						fields.get("y", 0),
+						fields.get("width", 0),
+						fields.get("height", 0)
 					)
 				"NodePath":
-					return NodePath(value.get("path", ""))
+					return NodePath(fields.get("path", ""))
 	if typeof(value) == TYPE_ARRAY:
-		var result := []
-		for item in value:
+		var result: Array = []
+		for item: Variant in value:
 			result.append(_parse_value(item))
 		return result
 	return value
 
 
-func _set_resource_properties(resource: Resource, properties) -> void:
-	var props = properties
-	if typeof(properties) == TYPE_STRING:
-		var json := JSON.new()
-		if json.parse(properties) == OK:
-			props = json.data
-		else:
-			return
-	if typeof(props) != TYPE_DICTIONARY:
-		return
-	for key in props:
-		var val = _parse_value(props[key])
+func _set_resource_properties(resource: Resource, properties: Variant) -> void:
+	var props: Dictionary = _parse_properties_dict(properties)
+	for key: Variant in props:
+		var val: Variant = _parse_value(props[key])
 		resource.set(key, val)
 
 
-func _parse_properties_dict(raw) -> Dictionary:
+func _parse_properties_dict(raw: Variant) -> Dictionary:
 	if typeof(raw) == TYPE_DICTIONARY:
 		return raw
 	if typeof(raw) == TYPE_STRING and raw != "":
@@ -122,7 +120,7 @@ func _parse_properties_dict(raw) -> Dictionary:
 
 
 func _load_theme(theme_path: String) -> Theme:
-	var loaded = load(theme_path)
+	var loaded: Resource = load(theme_path)
 	if loaded is Theme:
 		return loaded
 	return Theme.new()
@@ -142,13 +140,14 @@ func create_resource(args: Dictionary) -> Dictionary:
 	if res_path == "res://":
 		return {"ok": false, "error": "resourcePath is required"}
 
-	var resource = ClassDB.instantiate(resource_type)
-	if resource == null or not (resource is Resource):
+	var instance: Variant = ClassDB.instantiate(resource_type)
+	if instance == null or not (instance is Resource):
 		return {"ok": false, "error": "Failed to instantiate resource type", "resourceType": resource_type}
+	var resource: Resource = instance
 
 	var script_path := str(args.get("script", ""))
 	if script_path != "":
-		var script_obj = load(_ensure_res_path(script_path))
+		var script_obj: Resource = load(_ensure_res_path(script_path))
 		if script_obj:
 			resource.set_script(script_obj)
 
@@ -168,8 +167,8 @@ func modify_resource(args: Dictionary) -> Dictionary:
 	if res_path == "res://":
 		return {"ok": false, "error": "resourcePath is required"}
 
-	var resource = load(res_path)
-	if resource == null or not (resource is Resource):
+	var resource: Resource = load(res_path)
+	if resource == null:
 		return {"ok": false, "error": "Resource not found", "resourcePath": res_path}
 
 	_set_resource_properties(resource, args.get("properties", ""))
@@ -217,17 +216,17 @@ func create_tileset(args: Dictionary) -> Dictionary:
 		return {"ok": false, "error": "tilesetPath is required"}
 
 	var tileset := TileSet.new()
-	var sources = args.get("sources", [])
+	var sources: Variant = args.get("sources", [])
 	if typeof(sources) != TYPE_ARRAY:
 		sources = []
 
-	for source in sources:
+	for source: Variant in sources:
 		if typeof(source) != TYPE_DICTIONARY:
 			continue
 		var atlas := TileSetAtlasSource.new()
 		var tex_path := _ensure_res_path(str(source.get("texture", "")))
-		var tex = load(tex_path)
-		if tex == null:
+		var tex: Resource = load(tex_path)
+		if not tex is Texture2D:
 			continue
 		atlas.texture = tex
 
@@ -258,11 +257,11 @@ func set_tilemap_cells(args: Dictionary) -> Dictionary:
 	if scene_path == "res://":
 		return {"ok": false, "error": "scenePath is required"}
 
-	var scene_res = load(scene_path)
-	if scene_res == null or not (scene_res is PackedScene):
+	var scene_res: Resource = load(scene_path)
+	if not scene_res is PackedScene:
 		return {"ok": false, "error": "Scene not found", "scenePath": scene_path}
 
-	var root := (scene_res as PackedScene).instantiate()
+	var root: Node = (scene_res as PackedScene).instantiate()
 	if root == null:
 		return {"ok": false, "error": "Failed to instantiate scene"}
 
@@ -277,11 +276,11 @@ func set_tilemap_cells(args: Dictionary) -> Dictionary:
 		return {"ok": false, "error": "TileMap node not found", "tilemapNodePath": node_path}
 
 	var layer := int(args.get("layer", 0))
-	var cells = args.get("cells", [])
+	var cells: Variant = args.get("cells", [])
 	if typeof(cells) != TYPE_ARRAY:
 		cells = []
 
-	for cell in cells:
+	for cell: Variant in cells:
 		if typeof(cell) != TYPE_DICTIONARY:
 			continue
 		var coords: Dictionary = cell.get("coords", {})

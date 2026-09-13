@@ -22,7 +22,7 @@ all TypeScript, so one type checker covers everything Bun runs.
 | --- | --- | --- | --- |
 | Formatter | Biome | gdformat | - |
 | Linter | Biome, oxlint type-aware | gdlint, nothing disabled | actionlint, zizmor at `pedantic` |
-| Type checker | `tsc`, `@tsconfig/strictest`, over `src`, `test` and `scripts` alike | the engine, warnings as errors | - |
+| Type checker | `tsc`, `@tsconfig/strictest`, over `src`, `test` and `scripts` alike | the engine: `test:engine` parses every shipped script with an untyped declaration as an error, addons included, and proves the gate bites by planting one | - |
 | Dead code | knip: every file, export and dependency is reached from an entry point | - | - |
 | Fuzzing | fast-check properties in `test/fuzz.ts` over every reader of bytes nobody here wrote: the Content-Length framing, `project.godot`, paths inside a project, the engine archive | - | - |
 
