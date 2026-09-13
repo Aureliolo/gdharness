@@ -9,7 +9,16 @@
 
 import assert from 'node:assert/strict';
 import { type SpawnSyncReturns, spawnSync } from 'node:child_process';
-import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  cpSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { asArray, asNumber, asString, get, lastJsonLine } from './support/json.js';
@@ -659,11 +668,13 @@ function main(): void {
     runFixture(godotPath, projectDir, 'runtime_serialize');
     runFixture(godotPath, projectDir, 'runtime_input');
     // The game announces itself under the engine's temporary directory and the server looks
-    // under Bun's; a platform where the two differ is one where no game is ever found.
+    // under Bun's; a platform where the two differ is one where no game is ever found. Both go
+    // through the filesystem's own spelling, because Windows hands one side the 8.3 short name
+    // and the other the long one for the same directory.
     const clients = runFixture(godotPath, projectDir, 'runtime_clients');
     assert.equal(
-      resolve(asString(get(clients, 'temp_dir'))),
-      resolve(tmpdir()),
+      realpathSync.native(asString(get(clients, 'temp_dir'))),
+      realpathSync.native(tmpdir()),
       'the engine and the server should agree on the temporary directory',
     );
     runFixture(godotPath, projectDir, 'input_action');
