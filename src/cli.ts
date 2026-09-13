@@ -9,9 +9,9 @@ import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { GodotLocator } from './godot-path.js';
 import {
+  type Candidate,
+  candidates,
   connect,
-  detect,
-  detectGlobal,
   displayPath,
   type Group,
   groupByFile,
@@ -22,6 +22,7 @@ import {
   launchFor,
 } from './harnesses.js';
 import { type HeadlessEngine, type HeadlessOutcome, runOperation } from './headless.js';
+import { Ask, interactive } from './prompt.js';
 import { GODOT_DEBUG_MODE_DEFAULT } from './server-version.js';
 import {
   EDITOR_PLUGINS,
@@ -71,27 +72,72 @@ function said(outcome: HeadlessOutcome, what: string): void {
 }
 
 /** setup's own flags, so anything else beginning with -- is read as naming a harness. */
-const SETUP_FLAGS = new Set(['--runtime', '--no-connect', '--json']);
+const SETUP_FLAGS = new Set(['--runtime', '--no-connect', '--json', '--yes']);
 
 /**
- * The harnesses to write into: the ones named, else the ones this machine appears to run.
+ * The harnesses named on the command line, which is how an agent drives this.
  *
  * An unknown flag is refused rather than ignored, because a silently dropped `--curser` leaves
  * somebody believing a harness is configured when nothing was written.
  */
-function chosenHarnesses(projectPath: string): { harnesses: readonly Harness[]; named: boolean } {
+function namedHarnesses(): readonly Harness[] {
   const flags = args.filter((arg) => arg.startsWith('--') && !SETUP_FLAGS.has(arg));
-  const picked: Harness[] = [];
-  for (const flag of flags) {
+  return flags.map((flag) => {
     const harness = harnessById(flag.slice(2));
     if (harness === undefined) {
       throw new UsageError(`Unknown option ${flag}. Run gdharness harnesses for every flag it takes.`);
     }
-    picked.push(harness);
+    return harness;
+  });
+}
+
+/** What a candidate's prompt says, and what happens when nobody answers. */
+function offer(candidate: Candidate): { question: string; fallback: boolean } {
+  const { harness, reason } = candidate;
+  if (reason === 'machine-wide') {
+    return {
+      question: `${harness.name} is on this machine and has no project-level config. Write ${displayPath(harness)}? That affects every project you open with it.`,
+      fallback: false,
+    };
   }
-  return picked.length > 0
-    ? { harnesses: picked, named: true }
-    : { harnesses: detect(projectPath), named: false };
+  if (reason === 'installed') {
+    return { question: `${harness.name} is installed. Set it up for this project?`, fallback: true };
+  }
+  return { question: `${harness.name} is set up here. Add gdharness to it?`, fallback: true };
+}
+
+/**
+ * The harnesses to write into.
+ *
+ * Flags win outright. Otherwise every harness worth offering is asked about one at a time, and
+ * when there is nobody to ask, the ones already configured in this project are written and the
+ * rest are named with the flag that would write them. Nothing outside the project is ever written
+ * without a flag or a typed yes.
+ */
+async function chosenHarnesses(projectPath: string, ask: Ask): Promise<readonly Harness[]> {
+  const named = namedHarnesses();
+  if (named.length > 0) {
+    return named;
+  }
+
+  const offered = candidates(projectPath);
+  if (!interactive() || args.includes('--yes')) {
+    for (const candidate of offered.filter((one) => one.reason !== 'configured')) {
+      console.log(
+        `${candidate.harness.name}: found, not touched. Pass --${candidate.harness.id} to set it up.`,
+      );
+    }
+    return offered.filter((one) => one.reason === 'configured').map((one) => one.harness);
+  }
+
+  const picked: Harness[] = [];
+  for (const candidate of offered) {
+    const { question, fallback } = offer(candidate);
+    if (await ask.confirm(question, fallback)) {
+      picked.push(candidate.harness);
+    }
+  }
+  return picked;
 }
 
 function reportConnection(group: Group, launch: Launch, projectPath: string): void {
@@ -138,24 +184,18 @@ async function setup(): Promise<void> {
   if (!args.includes('--no-connect')) {
     // The version is the running one, so the config pins the server that installed these addons.
     const launch = launchFor(getLocalVersion(), godot.godotPath);
-    const { harnesses, named } = chosenHarnesses(projectPath);
+    const ask = new Ask();
+    let harnesses: readonly Harness[];
+    try {
+      harnesses = await chosenHarnesses(projectPath, ask);
+    } finally {
+      ask.close();
+    }
     if (harnesses.length === 0) {
-      console.log(
-        'no harness set up in this project; name one with --claude-code, or see gdharness harnesses',
-      );
+      console.log('no harness configured; name one yourself, and gdharness harnesses lists them all');
     }
     for (const group of groupByFile(harnesses, projectPath)) {
       reportConnection(group, launch, projectPath);
-    }
-
-    // Named on the command line and nowhere else: a machine-wide config is the reader's to change,
-    // so the most this does unasked is say which one it found and what would write it.
-    if (!named) {
-      for (const harness of detectGlobal(projectPath)) {
-        console.log(
-          `${harness.name}: found, not touched. Its config is machine-wide; pass --${harness.id} to write it.`,
-        );
-      }
     }
   }
 
@@ -231,13 +271,16 @@ gdharness v${getLocalVersion()}, a harness for driving a Godot 4 project from an
 
 Usage:
   gdharness                          Start the MCP server (default)
-  gdharness setup <project> [--runtime] [--no-connect] [--<harness>]
+  gdharness setup <project> [--runtime] [--no-connect] [--yes] [--<harness>]
                                      Install the addons into the project, enable the editor
                                      ones, register the runtime autoload with --runtime, and
-                                     rebuild the class list. Then register the server with the
-                                     harnesses already set up in this project, writing only files
-                                     inside it. A harness with no project-level config is named
-                                     and left alone unless you ask for it by flag.
+                                     rebuild the class list. Then register the server with your
+                                     harnesses: the ones you name by flag, or, at a terminal,
+                                     whichever are found here or on this machine, one question
+                                     each. With no terminal and no flags it writes the ones this
+                                     project already uses and names the rest. --yes skips the
+                                     questions and does the same. Nothing outside the project is
+                                     written without a flag or a typed yes.
   gdharness harnesses                Every harness, its flag and the file it reads
   gdharness doctor <project> [--json]
                                      Say what holds and what does not; exit 1 on a problem

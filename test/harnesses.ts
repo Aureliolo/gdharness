@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import process from 'node:process';
 import {
+  candidates,
   configPath,
   connect,
   detect,
@@ -201,6 +202,24 @@ function testAConfigThatDoesNotParseIsLeftAlone(): void {
 }
 
 /**
+ * Every project-scoped harness made to look set up, by whatever evidence that harness actually
+ * leaves: its own directory, the directory it is recognised by, or the config file itself for the
+ * ones that keep it at the project root.
+ */
+function makeEveryProjectHarnessPresent(root: string): void {
+  for (const harness of HARNESSES.filter((known) => known.scope === 'project')) {
+    const path = configPath(harness, root);
+    if (dirname(path) !== root) {
+      mkdirSync(dirname(path), { recursive: true });
+    } else if (harness.marker !== undefined) {
+      mkdirSync(join(root, harness.marker), { recursive: true });
+    } else {
+      writeFileSync(path, '', 'utf8');
+    }
+  }
+}
+
+/**
  * The whole point of the split. Installing gdharness into one project must not register it for
  * every project the reader opens with a harness whose configuration is machine-wide.
  */
@@ -209,11 +228,7 @@ function testDetectionNeverReachesOutOfTheProject(): void {
   try {
     // Every harness in the table made to look present at once, so the assertions below are about
     // the whole table rather than about whichever ones happen to exist on the machine running this.
-    for (const harness of HARNESSES) {
-      if (harness.scope === 'project') {
-        mkdirSync(dirname(configPath(harness, root)), { recursive: true });
-      }
-    }
+    makeEveryProjectHarnessPresent(root);
 
     const found = detect(root);
     assert.equal(
@@ -246,6 +261,62 @@ function testDetectionNeverReachesOutOfTheProject(): void {
     );
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+}
+
+/**
+ * What the prompt is built from. A candidate that is already configured here is a different
+ * question from one that merely exists on the machine, and a machine-wide one is a different
+ * question again, so the reason has to survive detection rather than being inferred later.
+ */
+function testEveryCandidateCarriesWhyItIsOffered(): void {
+  const root = project();
+  try {
+    assert.equal(
+      candidates(root).some((one) => one.reason === 'configured'),
+      false,
+      'an empty project has nothing configured in it',
+    );
+
+    makeEveryProjectHarnessPresent(root);
+
+    const offered = candidates(root);
+    const configured = offered.filter((one) => one.reason === 'configured');
+    assert.equal(
+      configured.length,
+      HARNESSES.filter((harness) => harness.scope === 'project').length,
+      'every project-scoped harness is offered once its directory is there',
+    );
+    for (const one of configured) {
+      assert.ok(
+        configPath(one.harness, root).startsWith(root),
+        `${one.harness.id} is offered as a project write but would land outside it`,
+      );
+    }
+    for (const one of offered.filter((candidate) => candidate.reason === 'machine-wide')) {
+      assert.equal(one.harness.scope, 'home', `${one.harness.id} is only machine-wide if it has to be`);
+      assert.equal(
+        configPath(one.harness, root).startsWith(root),
+        false,
+        `${one.harness.id} is only worth asking about because its config is outside the project`,
+      );
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+/** A marker we would read to decide a harness is installed has to be one it documents. */
+function testEveryInstalledMarkerIsUnderHome(): void {
+  const marked = HARNESSES.filter((harness) => harness.home !== undefined);
+  assert.ok(marked.length > 0, 'some harnesses carry a home marker, or this proves nothing');
+  for (const harness of marked) {
+    assert.equal(harness.scope, 'project', `${harness.id} only needs a marker if it is project-scoped`);
+    assert.ok(
+      !(harness.home ?? '').startsWith('/'),
+      `${harness.id} names a path under home, not an absolute one`,
+    );
+    assert.ok(!(harness.home ?? '').includes('..'), `${harness.id} does not climb out of home`);
   }
 }
 
@@ -314,6 +385,8 @@ const TESTS = [
   testWritingTwiceReplacesRatherThanDuplicates,
   testAConfigThatDoesNotParseIsLeftAlone,
   testDetectionNeverReachesOutOfTheProject,
+  testEveryCandidateCarriesWhyItIsOffered,
+  testEveryInstalledMarkerIsUnderHome,
   testAHarnessIsDetectedByItsOwnDirectory,
   testAHarnessWeCannotWriteIsNeverWrittenTo,
   testCodexCarriesTheGodotPath,
