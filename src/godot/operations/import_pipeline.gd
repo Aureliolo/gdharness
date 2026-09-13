@@ -162,9 +162,7 @@ func reimport_resource(params: Dictionary) -> Dictionary:
 
 
 # List export presets
-func list_export_presets(params: Dictionary) -> Dictionary:
-	var include_template_status: bool = bool(params.get("include_template_status", true))
-
+func list_export_presets(_params: Dictionary) -> Dictionary:
 	_log.info("Listing export presets")
 
 	var presets_file: String = "res://export_presets.cfg"
@@ -200,10 +198,6 @@ func list_export_presets(params: Dictionary) -> Dictionary:
 
 		if config.has_section_key(section, "custom_features"):
 			preset["custom_features"] = config.get_value(section, "custom_features", "")
-
-		# Whether a template is installed is a runtime question the editor answers, not this.
-		if include_template_status:
-			preset["template_status"] = "unknown (headless mode)"
 
 		presets.append(preset)
 		preset_idx += 1

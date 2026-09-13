@@ -2,7 +2,16 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { createServer, type Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -1241,6 +1250,33 @@ async function testParametersReachTheEngine(): Promise<void> {
         const deep = await namesAt(3);
         assert.ok(deep.includes('res://chain/leaf.gd'), `depth 3 reaches leaf: ${deep.join(', ')}`);
 
+        // Detail levels, while the project still has something to complain about: summary names
+        // the finding, full says what to do about it, and the two have to differ or the argument
+        // is decoration.
+        const complaint = async (detail: string): Promise<unknown> =>
+          JSON.parse(
+            await call(
+              'project_info',
+              { projectPath: projectDir, include: ['validation'], detail },
+              ENGINE_CALL_TIMEOUT_MS,
+            ),
+          );
+        const finding = (report: unknown): unknown =>
+          asArray(get(report, 'validation', 'issues')).find((issue) => get(issue, 'check') === 'main_scene');
+        const summarised = finding(await complaint('summary'));
+        const full = finding(await complaint('full'));
+        assert.ok(summarised, 'a project with no main scene should be an issue at either detail');
+        assert.equal(get(summarised, 'suggestion'), undefined, 'summary should stop at the finding');
+        assert.match(text(get(full, 'suggestion')), /Main Scene/, 'and full should say what to do');
+
+        // Export presets, which this project has none of: the answer is that there are none,
+        // rather than an empty list that reads the same as a project with no presets configured.
+        const presets: unknown = JSON.parse(
+          await call('project_export', { projectPath: projectDir, op: 'list' }, ENGINE_CALL_TIMEOUT_MS),
+        );
+        assert.equal(get(presets, 'presets_file_exists'), false, JSON.stringify(presets));
+        assert.match(text(get(presets, 'note')), /No export_presets\.cfg/);
+
         // The boot check. With no main scene the engine would block on a modal box rather than
         // exit, so that is refused before anything is spawned.
         const noScene = await call(
@@ -1682,9 +1718,86 @@ function testEveryEngineParameterCanBeSent(): void {
   assert.ok(read >= 40, `only ${read} parameter reads were found, so this proved little`);
 }
 
+/** The parameter names of one tool: the top-level keys of its own parameters block. */
+function parametersOf(block: string): string[] {
+  const open = block.indexOf('parameters: {');
+  if (open === -1) return [];
+  let depth = 0;
+  let end = block.length;
+  for (let at = block.indexOf('{', open); at < block.length; at += 1) {
+    if (block[at] === '{') depth += 1;
+    if (block[at] === '}') {
+      depth -= 1;
+      if (depth === 0) {
+        end = at;
+        break;
+      }
+    }
+  }
+  return [...block.slice(open, end).matchAll(/^ {6}([A-Za-z]+):/gm)].map(captured);
+}
+
+/**
+ * Every parameter a tool declares is read by something.
+ *
+ * The other half of the question above, and the one that reads as a working tool for longest:
+ * a declared argument nothing looks at is a setting a caller can pass, watch accepted, and
+ * never see obeyed. `scene_node` had one, and there was nothing to notice it with.
+ */
+function testEveryToolParameterIsRead(): void {
+  const named = new Set<string>();
+  const snaked = new Set<string>();
+  const remember = (source: string, pattern: RegExp, into: Set<string>): void => {
+    for (const match of source.matchAll(pattern)) into.add(captured(match));
+  };
+
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(path);
+        continue;
+      }
+      if (path.endsWith('tool-definitions.ts')) continue;
+      const source = (): string => readFileSync(path, 'utf8');
+      // The addon is handed the arguments under the names the tool gave them; the headless
+      // operations are handed them snake_cased, and those are the only files where that
+      // spelling counts as a read.
+      if (path.endsWith('.gd')) {
+        remember(source(), /"([A-Za-z_]+)"/g, path.includes('operations') ? snaked : named);
+      }
+      if (path.endsWith('.ts')) {
+        const code = source();
+        remember(code, /read[A-Za-z]*\(\s*\w*[Aa]rgs\w*\s*,\s*'([A-Za-z]+)'/g, named);
+        remember(code, /\w*[Aa]rgs\w*\[\s*'([A-Za-z]+)'\s*\]/g, named);
+        remember(code, /\b(?:safeArgs|args|arguments_)\.([A-Za-z]+)\b/g, named);
+        remember(code, /\{\s*(?:[A-Za-z]+(?:: \w+)?,\s*)*([A-Za-z]+)(?:: \w+)?[^}]*\}\s*=\s*args/g, named);
+      }
+    }
+  };
+  walk('src');
+  assert.ok(named.size >= 40, `only ${named.size} argument reads were found, so this proved little`);
+
+  const definitions = readFileSync('src/tool-definitions.ts', 'utf8');
+  let checked = 0;
+  for (const block of definitions.split(/\n {2}\{\n/)) {
+    const tool = /name: '([a-z_]+)',/.exec(block)?.[1];
+    if (tool === undefined) continue;
+    for (const parameter of parametersOf(block)) {
+      checked += 1;
+      assert.ok(
+        named.has(parameter) || snaked.has(snakeCased(parameter)),
+        `${tool} declares ${parameter}, which nothing reads`,
+      );
+    }
+  }
+  assert.ok(checked >= 60, `only ${checked} tool parameters were checked, so this proved little`);
+}
+
 async function main(): Promise<void> {
   testEveryDispatchedNameExistsOnBothSides();
   testEveryEngineParameterCanBeSent();
+  testEveryToolParameterIsRead();
   testStaleDisconnectRegression();
   testSceneToolsVectorRegression();
   testRunArgumentsLeaveTheLocalDebuggerOff();
