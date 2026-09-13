@@ -3,7 +3,8 @@
 MCP server and Godot addons for driving a Godot 4 project from an agent: the editor that is open,
 the game that is running, and the project on disk.
 
-Requires Godot 4.7.0 or newer and [Bun](https://bun.sh) 1.4.0 or newer.
+Requires Godot 4.7.0 or newer, and Node 22 or newer for `npx`. It runs under [Bun](https://bun.sh)
+1.4.0 or newer too.
 
 ```jsonc a call and its answer
 runtime_inspect { "op": "rect", "nodePath": "/root/Hall/Ledger/BuyButton" }
@@ -19,12 +20,13 @@ runtime_inspect { "op": "rect", "nodePath": "/root/Hall/Ledger/BuyButton" }
 
 ## Install
 
-1. Download a release and verify its attestation.
-2. Point your MCP client at `build/index.js`, with `GODOT_PATH` set.
-3. `gdharness setup /path/to/project`
-4. `gdharness doctor /path/to/project`
+```bash from the project directory
+npx -y gdharness@{{version}} setup . --runtime
+```
 
-[Install](install.html) has the commands.
+Addons in, editor plugins on, class list rebuilt, and the server written into every agent harness
+found on the machine. [Install](install.html) has the rest, including the signed archive for a
+pinned or offline install.
 
 To have an agent do it, paste:
 
@@ -41,7 +43,8 @@ game answerable, and reload the editor's view when files change on disk.
 
 **The MCP server.** What your agent calls: {{tools}} tools and four `godot://` resources.
 
-**The CLI.** Installs the addons, checks them, rebuilds the class cache.
+**The CLI.** Installs the addons, registers the server with the harnesses on the machine, checks
+them, rebuilds the class cache.
 
 [How it works](architecture.html) is what talks to what.
 

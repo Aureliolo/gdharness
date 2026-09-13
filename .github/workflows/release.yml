@@ -102,3 +102,86 @@ jobs:
             --verify-tag \
             --generate-notes \
             --title "gdharness ${VERSION}"
+
+  # npm is how every harness actually installs a server: each one's config is some spelling of
+  # `npx -y gdharness@VERSION`. The archive published here is the one the attest job signed, so
+  # the Sigstore attestation and the SBOM cover the bytes npm serves, and npm adds its own
+  # provenance on top. Runs after the release so a published npm version always has a release
+  # behind it to verify against.
+  npm:
+    name: npm
+    if: github.repository == 'Aureliolo/gdharness'
+    needs: [build, publish]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      id-token: write # npm's trusted publishing takes this instead of a token, and signs provenance with it.
+
+    steps:
+      - name: Download the bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-bundle
+          path: dist
+
+      - name: Verify the checksum once more
+        shell: bash
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          (cd dist && sha256sum --check "gdharness-${VERSION}.tgz.sha256")
+
+      # Trusted publishing needs npm 11.5.1 or newer and the runner ships 10.9.8. The npm that
+      # comes with a pinned Node is the way to get one: installing a package into the job that
+      # holds id-token would be an unpinned fetch in the one place it matters most.
+      # renovate: datasource=node-version depName=node
+      - name: Node, for an npm new enough to publish
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.21.0
+          registry-url: https://registry.npmjs.org
+          # Nothing is installed here, only a prebuilt archive published, so a cache would carry
+          # no benefit and would be a way into the one job that holds id-token.
+          package-manager-cache: false
+
+      - name: Publish to npm
+        shell: bash
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Checked rather than assumed: too old an npm publishes with no provenance and says
+          # nothing about it, which is the one failure that would not be noticed.
+          required=11.5.1
+          have="$(npm --version)"
+          if [ "$(printf '%s\n%s\n' "${required}" "${have}" | sort -V | head -1)" != "${required}" ]; then
+            echo "npm ${have} cannot use trusted publishing; ${required} or newer is needed." >&2
+            exit 1
+          fi
+
+          # No NPM_TOKEN anywhere: the OIDC token this job asked for is the credential, and npm
+          # generates and publishes its own provenance attestation from it without being asked.
+          npm publish "dist/gdharness-${VERSION}.tgz" --access public
+
+      # The claim made in the documentation is that what npm serves is the archive this repository
+      # signed, so somebody can install from npm and verify against the release bundle. That is
+      # only true if the registry stores the bytes it was given, which is checked rather than
+      # assumed: if npm ever repacks, this fails on the release that first did it.
+      - name: The published tarball is the archive that was signed
+        shell: bash
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          expected="$(cut -d' ' -f1 < "dist/gdharness-${VERSION}.tgz.sha256")"
+          url="$(npm view "gdharness@${VERSION}" dist.tarball)"
+          curl -fsSL "${url}" -o published.tgz
+          actual="$(sha256sum published.tgz | cut -d' ' -f1)"
+
+          if [[ "${expected}" != "${actual}" ]]; then
+            echo "npm serves ${actual}; the signed archive is ${expected}." >&2
+            echo "The attestation no longer covers what npm hands out. Fix the docs or the job." >&2
+            exit 1
+          fi
+          echo "npm serves the signed archive: ${actual}."

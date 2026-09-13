@@ -3,7 +3,7 @@
   "version": "0.3.1",
   "packageManager": "bun@1.4.2",
   "mcpName": "io.github.Aureliolo/gdharness",
-  "description": "A harness for driving a Godot 4 project from an agent: editor addons, a runtime bridge into the running game, and an MCP server in front of them.",
+  "description": "A harness for driving a Godot 4 project from an agent: editor addons, a runtime bridge into the running game, an MCP server in front of them, and a CLI that installs and diagnoses the Godot side.",
   "type": "module",
   "main": "./build/index.js",
   "bin": {
@@ -42,7 +42,9 @@
     "test:fuzz": "bun test/fuzz.ts",
     "test:game-log": "bun test/game-log.ts",
     "test:junit": "bun test/junit.ts",
-    "test:ci": "bun test/smoke.ts && bun test/regressions.ts && bun test/godot-detection.ts && bun test/zip-extract.ts && bun test/game-log.ts && bun test/junit.ts && bun test/fuzz.ts",
+    "test:harnesses": "bun test/harnesses.ts",
+    "test:node-runtime": "bun run build && bun test/node-runtime.ts",
+    "test:ci": "bun test/smoke.ts && bun test/regressions.ts && bun test/godot-detection.ts && bun test/zip-extract.ts && bun test/game-log.ts && bun test/junit.ts && bun test/harnesses.ts && bun test/node-runtime.ts && bun test/fuzz.ts",
     "test:metadata": "bun run build && bun test/metadata-consistency.ts && bun test/version-bump.ts",
     "test:version-bump": "bun test/version-bump.ts",
     "test:packaging": "bun run release:pack && bun test/packaging-consistency.ts",
@@ -53,6 +55,7 @@
     "version:bump": "bun scripts/bump-version.ts"
   },
   "engines": {
+    "node": ">=22.0.0",
     "bun": ">=1.4.0"
   },
   "dependencies": {

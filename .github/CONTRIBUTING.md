@@ -103,6 +103,7 @@ whose executables are world-writable. Releases are cut by CI.
 │   ├── runtime-client.ts  # Talking to a running game
 │   ├── project-scan.ts    # Reading a project directory without the engine
 │   ├── resources.ts       # MCP resources
+│   ├── harnesses.ts       # Which agent harnesses setup can register the server with
 │   ├── godot-bridge.ts    # Bridge transport to the editor addon
 │   ├── lsp_client.ts      # Godot language server client
 │   ├── dap_client.ts      # Godot debug adapter client
