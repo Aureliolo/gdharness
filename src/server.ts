@@ -46,7 +46,7 @@ import type {
   SpawnedGame,
   ToolResponse,
 } from './server-types.js';
-import { DEBUG_MODE, GODOT_DEBUG_MODE_DEFAULT, SERVER_VERSION } from './server-version.js';
+import { addonMismatch, DEBUG_MODE, GODOT_DEBUG_MODE_DEFAULT, SERVER_VERSION } from './server-version.js';
 import {
   asParams,
   readArray,
@@ -1416,8 +1416,8 @@ class GodotServer {
     const status = this.godotBridge.getStatus();
     const isPortConflict = this.bridgeStartupError?.includes('EADDRINUSE') ?? false;
     // The addon an editor loaded at startup, against the one this server ships. An install
-    // replaces the files under a running editor without changing what it is serving, and until
-    // now the only sign of that was a tool answering as the old version did.
+    // replaces the files under a running editor without changing what it is serving, and the
+    // only other sign of that is a tool answering as the old version did.
     const stale = status.connected && status.addonVersion !== SERVER_VERSION;
     return {
       ...status,
@@ -1425,9 +1425,7 @@ class GodotServer {
       addonIsStale: status.connected ? stale : undefined,
       bridgeAvailable: this.bridgeStartupError === null,
       startupError: this.bridgeStartupError,
-      staleNote: stale
-        ? `The editor is running the ${status.addonVersion === '' ? 'addon from before versions were reported' : status.addonVersion} addon while this server ships ${SERVER_VERSION}. Restart it with editor_launch restart to pick the new one up.`
-        : undefined,
+      staleNote: stale ? addonMismatch(status.addonVersion, SERVER_VERSION) : undefined,
       note: isPortConflict
         ? 'Bridge port is already in use. Another gdharness instance may own the editor bridge, so this server cannot report that editor connection.'
         : undefined,
@@ -1547,6 +1545,7 @@ class GodotServer {
       addonVersion: now.addonVersion,
       serverVersion: SERVER_VERSION,
       addonIsStale: now.addonVersion !== SERVER_VERSION,
+      staleNote: addonMismatch(now.addonVersion, SERVER_VERSION),
       tookMs: Date.now() - began,
     });
   }
