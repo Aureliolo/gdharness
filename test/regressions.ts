@@ -1228,6 +1228,21 @@ function testProjectDefaultsToTheWorkingDirectory(): void {
       `doctor with no argument should report on the directory it ran in: ${here.output}`,
     );
 
+    // A flag where the path used to be. With the directory optional this is the natural thing to
+    // type, and it is what the install guide tells people to run; taken positionally, `--json`
+    // was resolved as a directory and the command refused itself.
+    const flagged = spawnSync(
+      process.execPath,
+      [join(process.cwd(), 'build', 'cli.js'), 'doctor', '--json'],
+      { encoding: 'utf8', cwd: project, timeout: 60000 },
+    );
+    const report: unknown = JSON.parse(flagged.stdout);
+    assert.equal(
+      get(report, 'projectPath'),
+      project,
+      `a flag is not a path: ${flagged.stdout}${flagged.stderr}`,
+    );
+
     const nowhere = cli(elsewhere);
     assert.match(
       nowhere.output,
@@ -1775,6 +1790,24 @@ function testCommandLineSetup(): void {
     } finally {
       rmSync(bare, { recursive: true, force: true });
     }
+
+    // An upgrade puts the same things back in the same places. It once wrote the skill into every
+    // directory any harness could read it from, rather than the ones an install chose, so running
+    // it created two directories that setup had deliberately not created. Nothing new appears.
+    const skillDirs = (): string[] =>
+      ['.agents', '.claude', '.github', '.cursor', '.kiro', '.cline', '.opencode']
+        .map((dir) => join(projectDir, dir, 'skills', 'gdharness'))
+        .filter((path) => existsSync(path))
+        .sort();
+    const beforeUpgrade = skillDirs();
+    const upgraded = cli('upgrade', projectDir);
+    assert.equal(upgraded.status, 0, `upgrade:\n${upgraded.stdout}${upgraded.stderr}`);
+    assert.deepEqual(
+      skillDirs(),
+      beforeUpgrade,
+      'an upgrade should write the skill where the install put it, and nowhere else',
+    );
+    assert.equal(get(JSON.parse(cli('doctor', projectDir, '--json').stdout), 'runtimeAutoload'), true);
 
     // A class written after the cache was built is what doctor is for.
     writeFileSync(join(projectDir, 'late.gd'), 'class_name LateArrival\nextends Node\n');
