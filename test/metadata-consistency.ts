@@ -8,6 +8,14 @@ import { isRecord } from './support/json-rpc.js';
 import { ServerProcess } from './support/server.js';
 
 assert.equal(serverManifest.version, pkg.version, 'server.json version should match package.json');
+// How the registry decides this repository owns the name it is publishing: it reads `mcpName`
+// out of the package npm serves and refuses anything that is not exactly the server's name. The
+// two sit in different files, so without this they drift and the release job is where it shows.
+assert.equal(
+  pkg.mcpName,
+  serverManifest.name,
+  'package.json mcpName should be the name server.json publishes under',
+);
 // The registry entry is installable only if it names a package, and correct only if that package
 // is the npm one at this exact version. A manifest pointing at a version nobody published is
 // worse than no manifest: a client believes it and fails at install.

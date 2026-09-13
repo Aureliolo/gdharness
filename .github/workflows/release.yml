@@ -243,3 +243,114 @@ jobs:
             exit 1
           fi
           echo "npm serves the signed archive: ${actual}."
+
+  # The official MCP registry is the record every marketplace downstream of it reads: they scrape
+  # its server list on their own schedule and show whatever it holds. So a registry entry that
+  # lags the releases is a stale listing everywhere at once, and the only way it does not lag is
+  # for the tag to publish it.
+  #
+  # Tokenless, like npm above: the registry has no accounts and no API keys. It grants the
+  # `io.github.Aureliolo/*` namespace to whatever the OIDC token below proves this workflow is,
+  # and refuses that namespace to anything else.
+  #
+  # Last, after npm, because the registry checks that the package server.json names really exists
+  # at this version and carries an `mcpName` matching the server name. Run this any earlier and
+  # that check fails on a package that is seconds from existing.
+  registry:
+    name: MCP registry
+    if: github.repository == 'Aureliolo/gdharness'
+    needs: [build, publish, npm]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read # Reads server.json at the tag, which is the thing being published.
+      id-token: write # The registry takes this instead of a token, the way npm does above.
+
+    # On the job rather than beside the step that reads it: the marker Renovate needs carries a
+    # versioning regex, and four more columns of indentation put that one unwrappable line past
+    # what every other line here is held to.
+    env:
+      # renovate: datasource=github-release-attachments depName=modelcontextprotocol/registry versioning=regex:^v(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)$
+      MCP_PUBLISHER_TAG: v1.8.1
+      MCP_PUBLISHER_SHA256: a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The release archive, refused unless it matches the digest written here. The documented
+      # install line fetches `releases/latest` and verifies nothing, which is not something to run
+      # in a job that holds id-token.
+      - name: Install mcp-publisher
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/mcp-publisher_linux_amd64.tar.gz"
+          curl -fsSL --proto '=https' --tlsv1.2 --retry 2 -o "${archive}" \
+            "https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_TAG}/mcp-publisher_linux_amd64.tar.gz"
+          echo "${MCP_PUBLISHER_SHA256}  ${archive}" | sha256sum --check --strict
+          tar -xzf "${archive}" -C "${RUNNER_TEMP}" mcp-publisher
+
+      # server.json is not edited here. bump-version.ts writes the version into it, and both
+      # release-tag.yml and release-build.yml refuse a tag where it disagrees with package.json,
+      # so the file at this commit already names this release. `validate` is the cheap proof of
+      # that before a publish that would otherwise fail with the entry half made.
+      - name: Publish to the MCP registry
+        shell: bash
+        run: |
+          set -euo pipefail
+          "${RUNNER_TEMP}/mcp-publisher" validate
+          "${RUNNER_TEMP}/mcp-publisher" login github-oidc
+          "${RUNNER_TEMP}/mcp-publisher" publish
+
+      # Read back what the registry serves rather than believe what the publish printed, which is
+      # the rule every tool here is held to. A version that published but is not served reaches
+      # nobody, and would otherwise surface weeks later as a marketplace showing an old version.
+      - name: The registry serves this version
+        shell: bash
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Read from the manifest rather than written twice: a name that drifts from server.json
+          # would check some other server, or nothing, and pass either way.
+          name="$(jq -er '.name' server.json)"
+          url="https://registry.modelcontextprotocol.io/v0.1/servers/${name//\//%2F}/versions/${VERSION}"
+
+          # A version the registry has just accepted takes a moment to be served, and "not yet"
+          # and "never" look identical from here, so it is asked again rather than read as a
+          # verdict the first time.
+          body=""
+          for attempt in $(seq 1 12); do
+            if body="$(curl -fsSL --proto '=https' --tlsv1.2 "${url}")" && [ -n "${body}" ]; then
+              break
+            fi
+            echo "The registry does not serve ${VERSION} yet; asked ${attempt} times."
+            body=""
+            sleep 5
+          done
+
+          if [ -z "${body}" ]; then
+            echo "The registry never served ${name} ${VERSION}, a minute after publishing it." >&2
+            exit 1
+          fi
+
+          # The version, the package it sends clients to, and that this is the version they get
+          # when they ask for the latest one. An entry pointing at the wrong package installs
+          # somebody else's server on somebody's machine.
+          served="$(printf '%s' "${body}" | jq -er '
+            [.server.version,
+             .server.packages[0].identifier + "@" + .server.packages[0].version,
+             (._meta["io.modelcontextprotocol.registry/official"].isLatest | tostring)]
+            | join(" ")')"
+          package="$(jq -er '.packages[0].identifier' server.json)"
+          expected="${VERSION} ${package}@${VERSION} true"
+
+          if [ "${served}" != "${expected}" ]; then
+            echo "The registry serves: ${served}" >&2
+            echo "Expected:            ${expected}" >&2
+            exit 1
+          fi
+          echo "The registry serves ${name} ${VERSION}, pointing at gdharness@${VERSION}."
