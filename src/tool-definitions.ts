@@ -297,7 +297,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         enum: ['forward', 'reverse'],
         description:
-          'forward: what this resource loads, with cycles reported. reverse: every file that references it. Default forward.',
+          'forward: what this resource loads, with cycles reported. reverse: every file that refers to it and how, a scene instancing it, a script extending, preloading or loading it, and for a script with a class_name every use of that name. Default forward.',
       },
       depth: { type: 'number', description: 'forward: how many levels to follow. Default unlimited.' },
       includeBuiltin: {

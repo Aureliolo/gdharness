@@ -528,13 +528,40 @@ function testOperations(godotPath: string, projectDir: string): void {
   assert.match(asString(get(health, 'grade')), /^[A-F]$/);
   assert.ok(asNumber(get(health, 'checks', 'scripts', 'total_scripts')) > 0, 'the project has scripts in it');
 
-  // The chain the dependency walk was pointed at is also what refers to leaf.gd.
+  // The chain the dependency walk was pointed at is also what refers to leaf.gd, and each
+  // reference says how: middle.gd preloads it.
   const usages = operation('find_resource_usages', { resource_path: 'chain/leaf.gd' });
-  assert.ok(asNumber(get(usages, 'summary', 'total_usages')) > 0, 'leaf.gd is preloaded by middle.gd');
-  assert.ok(
-    asArray(get(usages, 'usages')).some((entry) => get(entry, 'file') === 'res://chain/middle.gd'),
-    'the file holding the reference should be named',
+  const middle = asArray(get(usages, 'usages')).find(
+    (entry) => get(entry, 'file') === 'res://chain/middle.gd',
   );
+  assert.ok(middle, `the file holding the reference should be named:\n${JSON.stringify(usages)}`);
+  assert.equal(get(middle, 'references', 0, 'kind'), 'preload');
+  assert.equal(get(usages, 'summary', 'by_kind', 'preload'), 1);
+  assert.equal(get(usages, 'class_name'), null, 'leaf.gd declares no class_name');
+
+  // A script with a class_name is referred to by that name, which no path search finds: one
+  // script extends it, another instances it, and a scene attaches it by path.
+  writeFileSync(join(projectDir, 'made', 'knight.gd'), 'extends FixtureHero\n');
+  writeFileSync(
+    join(projectDir, 'made', 'spawner.gd'),
+    'extends Node\n\nfunc spawn() -> FixtureHero:\n\treturn FixtureHero.new()\n',
+  );
+  writeFileSync(
+    join(projectDir, 'made', 'hero.tscn'),
+    '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://made/hero.gd" id="1"]\n\n[node name="Hero" type="Node2D"]\nscript = ExtResource("1")\n',
+  );
+  const byName = operation('find_resource_usages', { resource_path: 'made/hero.gd' });
+  assert.equal(get(byName, 'class_name'), 'FixtureHero');
+  const kinds = new Map(
+    asArray(get(byName, 'usages')).map((entry) => [
+      asString(get(entry, 'file')),
+      asArray(get(entry, 'references')).map((reference) => get(reference, 'kind')),
+    ]),
+  );
+  assert.deepEqual(kinds.get('res://made/knight.gd'), ['extends'], JSON.stringify(byName));
+  assert.deepEqual(kinds.get('res://made/spawner.gd'), ['class_name', 'class_name']);
+  assert.deepEqual(kinds.get('res://made/hero.tscn'), ['ext_resource']);
+  assert.equal(get(byName, 'summary', 'files_with_usages'), 3);
 
   // The resave walks the project and writes every scene and script back.
   assert.equal(get(operation('get_uid', { resource_path: 'made/hero.gd' }), 'exists'), false);
