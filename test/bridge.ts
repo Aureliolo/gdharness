@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * The bridge end to end: the MCP protocol over stdio, the prompts, the tool list, the tools that
+ * The bridge end to end: the MCP protocol over stdio, the tool list, the tools that
  * relay to the runtime addon over its socket, and the editor addon's WebSocket, driven by a mock
  * Godot on each side so that what is asserted is the relay and not the engine.
  */
@@ -332,38 +332,15 @@ async function main(): Promise<void> {
   };
 
   try {
-    // The protocol handshake and the prompts.
+    // The protocol handshake.
     const init = await server.initialize('bridge-test');
     assert.ok(get(init.result, 'serverInfo', 'name'), 'initialize reports a server name');
-    assert.ok(get(init.result, 'capabilities', 'prompts'), 'the server advertises the prompts capability');
-
-    const prompts = asArray(get((await server.request('prompts/list')).result, 'prompts'), 'prompts');
-    const promptNames = new Set(prompts.map((prompt) => get(prompt, 'name')));
-    assert.ok(
-      promptNames.has('godot.scene_bootstrap') && promptNames.has('godot.debug_triage'),
-      'the two prompts are listed',
-    );
-
-    const bootstrap = await server.request('prompts/get', {
-      name: 'godot.scene_bootstrap',
-      arguments: { project_path: '/tmp/demo-project', scene_path: 'res://scenes/Player.tscn' },
-    });
-    const promptText = asArray(get(bootstrap.result, 'messages'), 'prompt messages')
-      .map((message) => text(get(message, 'content', 'text')))
-      .join('\n');
-    assert.ok(
-      promptText.includes('/tmp/demo-project') && promptText.includes('res://scenes/Player.tscn'),
-      'prompts/get returns the template with its arguments filled in',
-    );
-
-    const unknownPrompt = await server.request('prompts/get', {
-      name: 'godot.unknown_prompt',
-      arguments: {},
-    });
-    assert.match(
-      unknownPrompt.error?.message ?? '',
-      /Unknown prompt/,
-      'an unknown prompt is refused by name',
+    // An advertised capability is one a client will call, so advertising prompts the server does
+    // not serve is a promise it breaks on the first request.
+    assert.equal(
+      get(init.result, 'capabilities', 'prompts'),
+      undefined,
+      'the server does not advertise prompts',
     );
 
     // The whole surface in one page, under names a strict client accepts, each refusing what

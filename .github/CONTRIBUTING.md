@@ -77,6 +77,7 @@ bun run lint               # Biome, then oxlint with its type-aware rules, then 
 uv run bun run lint:gd     # gdlint, from .venv
 uv run bun run format:gd   # gdformat, writes
 uv run yamllint --strict .
+bun run docs               # the public site, into site/; refuses a page nothing links to
 bun run watch              # TypeScript watch mode
 ```
 
@@ -102,7 +103,6 @@ whose executables are world-writable. Releases are cut by CI.
 │   ├── runtime-client.ts  # Talking to a running game
 │   ├── project-scan.ts    # Reading a project directory without the engine
 │   ├── resources.ts       # MCP resources
-│   ├── prompts.ts         # MCP prompts
 │   ├── godot-bridge.ts    # Bridge transport to the editor addon
 │   ├── lsp_client.ts      # Godot language server client
 │   ├── dap_client.ts      # Godot debug adapter client
@@ -111,9 +111,19 @@ whose executables are world-writable. Releases are cut by CI.
 │       └── operations/    # Headless engine operations
 ├── test/
 │   └── support/           # Shared helpers, not suites
-├── docs/
-└── scripts/               # Build, pack and release tooling
+├── docs/                  # The public site's source
+│   └── theme/             # Its template and stylesheet, both hand-written
+└── scripts/               # Build, pack, release and site tooling
 ```
+
+[release-process.md](./release-process.md) is how a release is cut, signed and verified, which is a
+maintainer's job rather than a reader's, so it lives here rather than on the site.
+
+The site at <https://aureliolo.github.io/gdharness> is built from `docs/` by
+`scripts/build-docs.ts` and published by `.github/workflows/docs.yml`. The tool reference is
+rendered from `src/tool-definitions.ts` at build time rather than written by hand, so it says what
+the server says; a page added to `docs/` has to be listed in the generator, which is what stops one
+publishing with nothing linking to it.
 
 ## Style
 

@@ -16,6 +16,7 @@
   ],
   "scripts": {
     "build": "bun scripts/build-release.ts",
+    "docs": "bun scripts/build-docs.ts",
     "typecheck": "tsc --noEmit",
     "format": "bun x biome format --write . && bun run format:prose",
     "format:check": "bun x biome format . && bun run format:prose:check",
@@ -67,6 +68,7 @@
     "fast-check": "4.10.0",
     "knip": "6.35.1",
     "markdownlint-cli2": "0.23.2",
+    "marked": "18.0.13",
     "oxlint": "1.82.0",
     "oxlint-tsgolint": "7.0.2001",
     "prettier": "3.9.6",
