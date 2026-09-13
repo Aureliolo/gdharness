@@ -33,6 +33,7 @@ import {
   setRuntime,
   shippedOperationsScript,
 } from './setup.js';
+import { skillDirectories, writeSkill } from './skill.js';
 import { getLocalVersion } from './version.js';
 
 const args = process.argv.slice(2);
@@ -72,7 +73,7 @@ function said(outcome: HeadlessOutcome, what: string): void {
 }
 
 /** setup's own flags, so anything else beginning with -- is read as naming a harness. */
-const SETUP_FLAGS = new Set(['--runtime', '--no-runtime', '--no-connect', '--json', '--yes']);
+const SETUP_FLAGS = new Set(['--runtime', '--no-runtime', '--no-connect', '--no-skill', '--json', '--yes']);
 
 /**
  * The harnesses named on the command line, which is how an agent drives this.
@@ -230,6 +231,13 @@ async function setup(): Promise<void> {
     if (chosen.harnesses.length === 0) {
       console.log('no harness configured; name one yourself, and gdharness harnesses lists them all');
     }
+
+    if (!args.includes('--no-skill')) {
+      const directories = skillDirectories(chosen.harnesses, projectPath, existsSync);
+      for (const written of writeSkill(directories, getLocalVersion())) {
+        console.log(`skill: ${written.replaced ? 'replaced' : 'written'} ${written.path}`);
+      }
+    }
   }
 
   doctorReport(projectPath);
@@ -307,7 +315,7 @@ gdharness v${getLocalVersion()}, a harness for driving a Godot 4 project from an
 
 Usage:
   gdharness                          Start the MCP server (default)
-  gdharness setup <project> [--no-runtime] [--no-connect] [--yes] [--<harness>]
+  gdharness setup <project> [--no-runtime] [--no-connect] [--no-skill] [--yes] [--<harness>]
                                      Install the addons into the project, enable the editor
                                      ones, register the runtime autoload unless --no-runtime,
                                      and rebuild the class list. Then register the server with your
@@ -316,7 +324,8 @@ Usage:
                                      each. With no terminal and no flags it writes the ones this
                                      project already uses and names the rest. --yes skips the
                                      questions and does the same. Nothing outside the project is
-                                     written without a flag or a typed yes.
+                                     written without a flag or a typed yes. It also writes the
+                                     gdharness skill into .agents/skills, unless --no-skill.
   gdharness harnesses                Every harness, its flag and the file it reads
   gdharness doctor <project> [--json]
                                      Say what holds and what does not; exit 1 on a problem
