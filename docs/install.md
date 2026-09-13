@@ -56,9 +56,9 @@ npx -y gdharness@{{version}} setup --no-connect
 
 ## What it writes, and where
 
-**Nothing outside the project directory without a flag or a typed yes.** Eight harnesses have no
-project-level config at all, and for those a yes writes the machine-wide file, because that is
-their limitation rather than a choice we can make better.
+**Nothing outside the project directory without a flag or a typed yes.** {{home-count}} of the
+{{harness-count}} have no project-level config at all, and for those a yes writes the machine-wide
+file, because that is their limitation rather than a choice we can make better.
 
 ```text
 Claude Code, Copilot CLI, Qoder, Command Code: written /home/you/game/.mcp.json
@@ -66,9 +66,9 @@ skill: written /home/you/game/.agents/skills/gdharness
 skill: written /home/you/game/.claude/skills/gdharness
 ```
 
-Four harnesses read the same `.mcp.json`, so it is written once and all four are named. The skill
-goes to `.agents/skills/`, which nine of them read, and to its own directory for each of the three
-that do not. `--no-skill` leaves it out.
+{{mcp-json-count}} harnesses read the same `.mcp.json`, so it is written once and all of them are
+named. The skill goes to `.agents/skills/`, which {{shared-skill-count}} of them read, and to its
+own directory for each of the {{own-skill-count}} that do not. `--no-skill` leaves it out.
 
 [How it works](architecture.html) has every harness, its file, and what `setup` decides.
 

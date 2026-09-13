@@ -222,6 +222,27 @@ function renderPickerText(): string {
 }
 
 /**
+ * Whether this harness reads the shared skills directory, or needs its own copy.
+ *
+ * A harness that names no directory of its own reads the shared one, which is the common case and
+ * the reason the convention exists.
+ */
+function readsSharedSkills(harness: Harness): boolean {
+  return harness.skills === undefined || harness.skills.shared;
+}
+
+/**
+ * A count of the table, for prose that would otherwise state one and be wrong later.
+ *
+ * Both numbers this replaced were written when there were eleven harnesses and never raised:
+ * "eight have no project-level config" when it was eleven, and "nine read the shared skills
+ * directory" when it was thirty-two of thirty-five.
+ */
+function counted(fits: (harness: Harness) => boolean): number {
+  return HARNESSES.filter(fits).length;
+}
+
+/**
  * The placeholders every page carries, so a command on the page is one the reader can run.
  *
  * The markdown twin gets the same facts without the markup: a reader who asked for markdown is
@@ -231,6 +252,11 @@ function filled(text: string, markup = true): string {
   return text
     .replaceAll('{{version}}', SERVER_VERSION)
     .replaceAll('{{tools}}', TOOL_COUNT)
+    .replaceAll('{{harness-count}}', String(HARNESSES.length))
+    .replaceAll('{{home-count}}', String(counted((harness) => harness.scope === 'home')))
+    .replaceAll('{{shared-skill-count}}', String(counted(readsSharedSkills)))
+    .replaceAll('{{own-skill-count}}', String(counted((harness) => !readsSharedSkills(harness))))
+    .replaceAll('{{mcp-json-count}}', String(counted((harness) => harness.file === '.mcp.json')))
     .replaceAll('{{harnesses}}', renderHarnesses())
     .replaceAll('{{picker}}', markup ? renderPicker() : renderPickerText())
     .replaceAll('{{flow}}', markup ? renderFlow() : renderFlowText());

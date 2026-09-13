@@ -15,8 +15,8 @@ your-project/
 |-- project.godot              two plugin entries and one autoload
 |-- .mcp.json                  Claude Code, Copilot CLI, Qoder, Command Code
 |-- .cursor/mcp.json           Cursor, and one file per other harness
-|-- .agents/skills/gdharness/  the skill, read by nine of the harnesses
-`-- .claude/skills/gdharness/  a copy for each of the three that do not read it
+|-- .agents/skills/gdharness/  the skill, read by all but three harnesses
+`-- .claude/skills/gdharness/  a copy for each of the three that do not
 
 ~/                             touched only when you say so
 `-- .codex/config.toml         Codex, and the others with no project config
@@ -58,7 +58,8 @@ The two exceptions are nanobot and Autohand. Their config file is documented; th
 servers under is not, and an invented key writes a file that parses, loads and does nothing. Those
 print the block instead.
 
-Four harnesses read the same `.mcp.json`, so it is written once and all four are named.
+{{mcp-json-count}} harnesses read the same `.mcp.json`, so it is written once and all of them are
+named.
 
 {{harnesses}}
 
@@ -67,10 +68,10 @@ Four harnesses read the same `.mcp.json`, so it is written once and all four are
 `.agents/skills/<name>/SKILL.md` is the cross-tool convention, and the reason there is one skill
 rather than an integration per harness.
 
-| Where it goes          | Which harnesses                                                                                               |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------- |
-| Reads `.agents/skills` | Codex, which looks nowhere else, plus Cursor, VS Code, Copilot, Gemini CLI, opencode, Junie, Windsurf, Hermes |
-| Needs its own copy     | Claude Code `.claude/skills`, Kiro `.kiro/skills`, Cline `.cline/skills`                                      |
+| Where it goes          | Which harnesses                                                                             |
+| ---------------------- | ------------------------------------------------------------------------------------------- |
+| Reads `.agents/skills` | {{shared-skill-count}} of the {{harness-count}}, Codex among them, which looks nowhere else |
+| Needs its own copy     | Claude Code `.claude/skills`, Kiro `.kiro/skills`, Cline `.cline/skills`                    |
 
 A harness that does read the shared directory still gets its own copy when this project already
 keeps skills there, because that is where its author will look.
