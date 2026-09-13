@@ -86,7 +86,7 @@ const NEEDS_ZIP64 = 0xffffffff;
 
 /** The release asset, or a throw naming what came back instead. Two attempts, because a
  * transient network failure here is a red build that says nothing about the code. */
-async function download(url: string): Promise<Buffer> {
+export async function download(url: string): Promise<Buffer> {
   let lastFailure: unknown = null;
 
   for (let attempt = 1; attempt <= 2; attempt += 1) {
@@ -286,7 +286,8 @@ async function main(): Promise<void> {
   console.log(`${reported} installed at ${executable}`);
 }
 
-// Imported by test/zip-extract.ts for the reader alone, which must not install an engine.
+// Imported by test/zip-extract.ts for the reader alone and by install-gdunit4.ts for the
+// reader and the download, neither of which must install an engine.
 if (import.meta.main) {
   await main();
 }

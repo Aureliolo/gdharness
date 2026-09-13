@@ -1264,12 +1264,108 @@ async function testParametersReachTheEngine(): Promise<void> {
   }
 }
 
+/**
+ * project_test against a real gdUnit4: a suite with a pass, a failure and a skip, read back as
+ * cases rather than a console. The failing case has to be named with what the assertion said,
+ * a project without the runner has to be refused, and nothing of the run may be left behind.
+ */
+async function testGdUnitRunner(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
+    }
+    console.log('gdUnit4 runner regression skipped (Godot or gdUnit4 not found)');
+    return;
+  }
+
+  const projectDir = mkdtempSync(join(tmpdir(), 'gdharness-gdunit-'));
+  try {
+    writeFileSync(
+      join(projectDir, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="GdUnitRegression"\n',
+    );
+    mkdirSync(join(projectDir, 'test'));
+    writeFileSync(
+      join(projectDir, 'test', 'sums_test.gd'),
+      [
+        'extends GdUnitTestSuite',
+        '',
+        '',
+        'func test_two_and_two() -> void:',
+        '\tassert_int(2 + 2).is_equal(4)',
+        '',
+        '',
+        'func test_two_and_two_is_not_five() -> void:',
+        '\tassert_int(2 + 2).is_equal(5)',
+        '',
+        '',
+        'func test_skipped_for_now(_do_skip: bool = true, _skip_reason: String = "not today") -> void:',
+        '\tassert_bool(true).is_true()',
+        '',
+      ].join('\n'),
+    );
+
+    await withStdioServer(
+      async (call) => {
+        const missing = await call('project_test', { projectPath: projectDir }, ENGINE_CALL_TIMEOUT_MS);
+        assert.match(missing, /gdUnit4 is not installed/, missing);
+
+        cpSync(gdunit, join(projectDir, 'addons', 'gdUnit4'), { recursive: true });
+        const run: unknown = JSON.parse(
+          await call('project_test', { projectPath: projectDir }, ENGINE_CALL_TIMEOUT_MS * 3),
+        );
+        assert.equal(get(run, 'passed'), false, JSON.stringify(run, null, 2));
+        assert.equal(get(run, 'verdict'), 'failures');
+        assert.deepEqual(
+          {
+            tests: get(run, 'tests'),
+            failures: get(run, 'failures'),
+            errors: get(run, 'errors'),
+            skipped: get(run, 'skipped'),
+          },
+          { tests: 3, failures: 1, errors: 0, skipped: 1 },
+        );
+        const [failed] = asArray(get(run, 'failed'));
+        assert.equal(get(failed, 'name'), 'test_two_and_two_is_not_five');
+        assert.equal(get(failed, 'path'), 'res://test/sums_test.gd');
+        assert.match(text(get(failed, 'message')), /sums_test\.gd:9/);
+        assert.match(text(get(failed, 'detail')), /Expecting:\s+5\s+but was\s+4/);
+        assert.ok(
+          asArray(get(run, 'classes', 'added')).includes('GdUnitTestCIRunner'),
+          'the runner was made resolvable by the class list rebuild',
+        );
+        assert.equal(
+          existsSync(join(projectDir, '.godot', 'gdharness-reports')),
+          false,
+          'the report is cleaned up',
+        );
+
+        const only: unknown = JSON.parse(
+          await call(
+            'project_test',
+            { projectPath: projectDir, ignore: ['sums_test:test_two_and_two_is_not_five'] },
+            ENGINE_CALL_TIMEOUT_MS * 3,
+          ),
+        );
+        assert.equal(get(only, 'passed'), true, JSON.stringify(only, null, 2));
+        assert.equal(get(only, 'tests'), 2);
+      },
+      { GODOT_PATH: godotPath },
+    );
+  } finally {
+    rmSync(projectDir, { recursive: true, force: true });
+  }
+}
+
 async function main(): Promise<void> {
   testStaleDisconnectRegression();
   testSceneToolsVectorRegression();
   testRunArgumentsLeaveTheLocalDebuggerOff();
   testHeadlessFollowsTheDisplay();
   await testParametersReachTheEngine();
+  await testGdUnitRunner();
 
   testProjectGodotMultilineValues();
   testProjectGodotResistsPrototypeKeys();

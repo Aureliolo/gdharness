@@ -37,8 +37,9 @@ not a gate, and we have been bitten by exactly that.
 **Nothing from outside the repository runs unverified.** Every file CI downloads is refused
 unless it matches a digest written in this repository: the Bun that runs every job
 (`.github/actions/install-bun`), uv and the interpreter and gdtoolkit under it (`ci.yml`,
-`.github/requirements/`), actionlint (`workflows.yml`), and the engine
-(`scripts/install-godot.ts`). npm packages carry theirs in `bun.lock`, actions are pinned by
+`.github/requirements/`), actionlint (`workflows.yml`), the engine
+(`scripts/install-godot.ts`) and the gdUnit4 the runner fixture drives
+(`scripts/install-gdunit4.ts`). npm packages carry theirs in `bun.lock`, actions are pinned by
 commit, and zizmor runs from a container image whose digest is fixed by the action's commit. A
 tool that arrives without a digest arrives with one in the same change.
 
@@ -91,6 +92,7 @@ whose executables are world-writable. Releases are cut by CI.
 │   ├── headless.ts        # Running one operation of the engine script
 │   ├── godot-path.ts      # Finding the engine
 │   ├── game-log.ts        # What a game prints, read as problems
+│   ├── junit.ts           # The JUnit report a test runner writes, read as cases
 │   ├── launch.ts          # How a game is started
 │   ├── runtime-client.ts  # Talking to a running game
 │   ├── project-scan.ts    # Reading a project directory without the engine

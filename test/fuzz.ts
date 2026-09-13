@@ -18,6 +18,7 @@ import fc from 'fast-check';
 import { extract } from '../scripts/install-godot.js';
 import { type Frame, FrameReader, frame, MAX_MESSAGE_BYTES, OversizedStreamError } from '../src/framing.js';
 import { GameLog } from '../src/game-log.js';
+import { MalformedReportError, parseJUnit } from '../src/junit.js';
 import { isWithinRoot, resolveWithinProject } from '../src/paths.js';
 import { parseProjectGodot } from '../src/resources.js';
 import { buildZip, DEFLATED, STORED, type ZipEntrySpec } from './support/zip.js';
@@ -595,8 +596,21 @@ function damagedArchivesFailCleanly(): void {
 // The game log
 // ---------------------------------------------------------------------------------------------
 
+/** Whether any character is a control character, other than the ones named. */
+function hasControlCharacter(text: string, allowed: readonly number[] = []): boolean {
+  for (const character of text) {
+    const code = character.codePointAt(0) ?? 0;
+    if (code < 0x20 && !allowed.includes(code)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 const logLine = fc.oneof(
-  fc.string({ unit: 'grapheme', maxLength: 40 }).filter((line) => !/[\r\n]/.test(line)),
+  // Line endings are the property's own to add, and colour codes are what the reader strips,
+  // so neither may sit inside a line that is counted.
+  fc.string({ unit: 'grapheme', maxLength: 40 }).filter((line) => !hasControlCharacter(line, [0x09])),
   fc.constantFrom('ERROR: x', 'SCRIPT ERROR: y', 'WARNING: z', 'USER ERROR: w', 'USER WARNING: v'),
   fc.constantFrom('   at: here (res://a.gd:1)', '\tGDScript backtrace', '       [0] _init'),
   fc.constant(''),
@@ -632,6 +646,115 @@ function logsReadTheSameInAnyPieces(): void {
   );
 }
 
+// ---------------------------------------------------------------------------------------------
+// JUnit reports
+// ---------------------------------------------------------------------------------------------
+
+/** Text as XML may carry it: no control characters, which XML 1.0 has no spelling for. */
+const xmlText = fc
+  .string({ unit: 'grapheme', maxLength: 30 })
+  .filter((text) => !hasControlCharacter(text, [0x09, 0x0a, 0x0d]) && text.trim() === text);
+
+const reportCase = fc.record({
+  name: xmlText.filter((name) => name !== ''),
+  status: fc.constantFrom('passed', 'failed', 'error', 'skipped'),
+  message: xmlText,
+  detail: xmlText,
+  time: fc
+    .float({ min: 0, max: 10, noNaN: true, noDefaultInfinity: true })
+    .map((seconds) => Number(seconds.toFixed(3))),
+});
+const reportSuite = fc.record({
+  name: fc.stringMatching(/^[a-z_][a-z0-9_]{0,15}$/),
+  cases: fc.array(reportCase, { maxLength: 6 }),
+});
+
+function attribute(value: string): string {
+  return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('"', '&quot;');
+}
+
+/** Detail as a writer may spell it: CDATA where it can, escaped text where it cannot. */
+function body(value: string, cdata: boolean): string {
+  if (cdata && !value.includes(']]>')) {
+    return `<![CDATA[${value}]]>`;
+  }
+  return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+}
+
+/** Whatever a writer puts in a report comes back out of it, spelled either way it may be. */
+function reportsRoundTrip(): void {
+  fc.assert(
+    fc.property(fc.array(reportSuite, { minLength: 1, maxLength: 4 }), fc.boolean(), (suites, cdata) => {
+      const xml = [
+        '<?xml version="1.0" encoding="UTF-8" ?>',
+        '<testsuites>',
+        ...suites.flatMap((suite) => [
+          `<testsuite name="${suite.name}" package="test" tests="${suite.cases.length}" time="1.5">`,
+          ...suite.cases.flatMap((entry) => {
+            const outcome =
+              entry.status === 'passed'
+                ? ''
+                : `<${entry.status === 'failed' ? 'failure' : entry.status} message="${attribute(entry.message)}">${body(entry.detail, cdata)}</${entry.status === 'failed' ? 'failure' : entry.status}>`;
+            return [`<testcase name="${attribute(entry.name)}" time="${entry.time}">${outcome}</testcase>`];
+          }),
+          '</testsuite>',
+        ]),
+        '</testsuites>',
+      ].join('\n');
+
+      const report = parseJUnit(xml);
+      assert.deepEqual(
+        report.suites.map((suite) => ({
+          name: suite.name,
+          cases: suite.cases.map((entry) => ({
+            name: entry.name,
+            status: entry.status,
+            message: entry.message,
+            detail: entry.detail,
+            time: entry.time,
+          })),
+        })),
+        suites.map((suite) => ({
+          name: suite.name,
+          cases: suite.cases.map((entry) => ({
+            name: entry.name,
+            status: entry.status,
+            message: entry.status === 'passed' ? null : entry.message,
+            detail: entry.status === 'passed' || entry.detail === '' ? null : entry.detail,
+            time: entry.time,
+          })),
+        })),
+      );
+      assert.equal(
+        report.tests,
+        suites.reduce((sum, suite) => sum + suite.cases.length, 0),
+      );
+      assert.equal(report.time, suites.length * 1.5);
+    }),
+    { numRuns: 300 },
+  );
+}
+
+/** Bytes that are not a report are refused as such, never read as a run with no tests. */
+function junkIsNeverAReport(): void {
+  fc.assert(
+    fc.property(fc.string({ unit: 'binary', maxLength: 200 }), (text) => {
+      try {
+        const report = parseJUnit(text);
+        // Only a document with a real suite element parses, and one with none has no cases.
+        assert.ok(/<testsuites?[\s/>]/.test(text), `read a report out of ${JSON.stringify(text)}`);
+        assert.ok(report.suites.every((suite) => suite.cases.length === 0 || text.includes('<testcase')));
+      } catch (error) {
+        assert.ok(
+          error instanceof MalformedReportError,
+          `only MalformedReportError may escape, not ${String(error)}`,
+        );
+      }
+    }),
+    { numRuns: 1000 },
+  );
+}
+
 framesRoundTripUnderAnyChunking();
 everyHeaderSpellingIsRead();
 junkNeverEscapesTheContract();
@@ -646,5 +769,7 @@ hostileEntriesWriteNothing();
 bytesThatAreNotAnArchiveWriteNothing();
 damagedArchivesFailCleanly();
 logsReadTheSameInAnyPieces();
+reportsRoundTrip();
+junkIsNeverAReport();
 
 console.log('fuzz properties held');

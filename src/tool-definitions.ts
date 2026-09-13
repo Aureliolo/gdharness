@@ -368,6 +368,32 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       run: { summary: 'export with a preset', requires: ['preset', 'outputPath'] },
     },
   },
+  {
+    name: 'project_test',
+    description:
+      "Runs the project's gdUnit4 tests headless and answers with every case: which failed, where, and what the assertion said. The class list is rebuilt first, so a suite written a moment ago is found. Needs gdUnit4 under addons/gdUnit4.",
+    parameters: {
+      projectPath: PROJECT_PATH,
+      path: {
+        type: 'string',
+        description: 'A test directory or one suite file inside the project. Default test.',
+      },
+      ignore: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Suites or cases to leave out, as "suite_name" or "suite_name:test_name".',
+      },
+      failFast: {
+        type: 'boolean',
+        description: 'Stop at the first failure. Default false: the whole set runs.',
+      },
+      timeoutMs: {
+        type: 'number',
+        description: 'How long the run may take before it is killed. Default 600000.',
+      },
+    },
+    requires: ['projectPath'],
+  },
 
   // -------------------------------------------------------------------------------------------
   // scene

@@ -9,7 +9,7 @@
  */
 
 import { execFile, spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -31,6 +31,7 @@ import { GameLog } from './game-log.js';
 import { type GodotBridge, getDefaultBridge } from './godot-bridge.js';
 import { GodotLocator } from './godot-path.js';
 import { type HeadlessOutcome, runOperation } from './headless.js';
+import { parseJUnit, type TestReport } from './junit.js';
 import { envValue, resolveHeadless, runArguments } from './launch.js';
 import { GodotLSPClient, handleLSPTool } from './lsp_client.js';
 import { resolveWithinProject } from './paths.js';
@@ -466,6 +467,8 @@ class GodotServer {
         );
       case 'project_export':
         return await this.handleExportProject(args);
+      case 'project_test':
+        return await this.handleRunTests(args);
 
       case 'scene_create':
         return op === 'create' ? await bridge('create_scene') : await bridge('save_scene');
@@ -909,6 +912,162 @@ class GodotServer {
       };
     }
     return this.jsonTextResponse(verdict);
+  }
+
+  /**
+   * project_test: gdUnit4's command line runner, driven the way its own runtest script does
+   * and read through the JUnit report it writes rather than its console. The class list is
+   * rebuilt first because the runner is itself a set of class_names the engine has to resolve,
+   * and so is any suite written since the editor last scanned.
+   */
+  private async handleRunTests(args: OperationParams): Promise<ToolResponse> {
+    const project = this.project(args);
+    if (!project.ok) {
+      return project.response;
+    }
+    const contained = this.containProjectFiles({ ...args, path: readNonEmptyString(args, 'path') ?? 'test' });
+    if (!contained.ok) {
+      return contained.response;
+    }
+    const runner = 'addons/gdUnit4/bin/GdUnitCmdTool.gd';
+    if (!existsSync(join(project.value.path, runner))) {
+      return this.createErrorResponse(`gdUnit4 is not installed in this project: no ${runner}.`, [
+        'Install gdUnit4 under addons/gdUnit4, from https://github.com/godot-gdunit-labs/gdUnit4',
+      ]);
+    }
+    const engine = await this.engine();
+    if (!engine.ok) {
+      return engine.response;
+    }
+
+    const classes = await this.operation('refresh_class_cache', {}, project.value.path);
+    if (!classes.ok) {
+      return this.answer(classes);
+    }
+
+    const reports = 'res://.godot/gdharness-reports';
+    const ignored = readStringArray(args, 'ignore') ?? [];
+    const cmdArgs = [
+      '--headless',
+      '--path',
+      project.value.path,
+      '-s',
+      `res://${runner}`,
+      '--ignoreHeadlessMode',
+      ...(readBoolean(args, 'failFast') === true ? [] : ['-c']),
+      '-a',
+      readString(contained.value, 'path') ?? 'res://test',
+      ...ignored.flatMap((entry) => ['-i', entry]),
+      '-rd',
+      reports,
+      '-rc',
+      '1',
+    ];
+    const timeoutMs = readPositiveNumber(args, 'timeoutMs') ?? 600000;
+    this.logDebug(`Running tests: ${engine.value} ${cmdArgs.join(' ')}`);
+    const run = this.spawnGame(engine.value, cmdArgs);
+    const hung = await new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => {
+        run.process.kill();
+        resolve(true);
+      }, timeoutMs);
+      run.process.once('exit', () => {
+        clearTimeout(timer);
+        resolve(false);
+      });
+      run.process.once('error', () => {
+        clearTimeout(timer);
+        resolve(false);
+      });
+    });
+
+    const reportsDir = join(project.value.path, '.godot', 'gdharness-reports');
+    let report: TestReport | null = null;
+    let reportProblem: string | null = null;
+    try {
+      const written = existsSync(reportsDir)
+        ? readdirSync(reportsDir)
+            .filter((name) => name.startsWith('report_'))
+            .sort((a, b) => Number(a.slice('report_'.length)) - Number(b.slice('report_'.length)))
+        : [];
+      const newest = written.at(-1);
+      if (newest !== undefined) {
+        report = parseJUnit(readFileSync(join(reportsDir, newest, 'results.xml'), 'utf8'));
+      }
+    } catch (error) {
+      reportProblem = errorMessage(error);
+    } finally {
+      rmSync(reportsDir, { recursive: true, force: true });
+    }
+
+    const engineEntries = run.log.select({ severity: 'warning', sinceLastCall: false, limit: 200 }).entries;
+    const verdicts: Readonly<Record<number, string>> = {
+      0: 'passed',
+      100: 'failures',
+      101: 'warnings',
+      103: 'headless not supported by this gdUnit4',
+      104: 'Godot version not supported by this gdUnit4',
+      105: 'script errors',
+    };
+    const exitCode = run.exitCode;
+    const verdict = hung
+      ? `hung: killed after ${timeoutMs} ms`
+      : (verdicts[exitCode ?? -1] ?? `exit ${exitCode ?? 'unknown'}`);
+
+    if (report === null) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `The test run wrote no report (${verdict}${reportProblem ? `; ${reportProblem}` : ''}).`,
+          },
+          {
+            type: 'text',
+            text: JSON.stringify(
+              {
+                exitCode,
+                hung,
+                arguments: cmdArgs,
+                entries: run.log.select({ severity: 'info', sinceLastCall: false, limit: 60 }).entries,
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+        isError: true,
+      };
+    }
+
+    const failed = report.suites.flatMap((suite) =>
+      suite.cases
+        .filter((entry) => entry.status === 'failed' || entry.status === 'error')
+        .map((entry) => ({ ...entry, path: suite.path })),
+    );
+    return this.jsonTextResponse({
+      passed: !hung && exitCode === 0 && report.failures === 0 && report.errors === 0,
+      verdict,
+      exitCode,
+      tests: report.tests,
+      failures: report.failures,
+      errors: report.errors,
+      skipped: report.skipped,
+      time: report.time,
+      failed,
+      suites: report.suites.map((suite) => ({
+        name: suite.name,
+        path: suite.path,
+        tests: suite.tests,
+        failures: suite.failures,
+        errors: suite.errors,
+        skipped: suite.skipped,
+        time: suite.time,
+      })),
+      engineErrors: run.log.count('error'),
+      engineWarnings: run.log.count('warning'),
+      engineEntries,
+      classes: classes.payload,
+    });
   }
 
   private async godotVersion(godotPath: string): Promise<string | null> {
