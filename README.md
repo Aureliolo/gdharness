@@ -50,8 +50,8 @@ itself; there is nothing to copy by hand, no Python, and no Node.
 
 ## Tools
 
-Thirty, named `domain_verb`. A tool that does several related things takes an `op`, and its
-description says which arguments each op needs; a call with an argument the tool does not
+Thirty-one, named `domain_verb`. A tool that does several related things takes an `op`, and
+its description says which arguments each op needs; a call with an argument the tool does not
 name, an op it does not have, or a required argument missing is refused with the valid set
 spelled out.
 
@@ -62,8 +62,15 @@ spelled out.
 | `script_*` | `edit`, `info`, `diagnostics` |
 | `resource_*` | `edit` |
 | `editor_*` | `launch`, `run`, `stop`, `output`, `status`, `rescan`, `classes` |
-| `runtime_*` | `inspect`, `invoke`, `capture`, `input` |
+| `runtime_*` | `inspect`, `invoke`, `capture`, `input`, `wait` |
 | `debug_*` | `breakpoint`, `control`, `state` |
+
+The `runtime_*` tools ask the game rather than the tree dump: `runtime_inspect find` answers
+with the paths of the nodes matching a class, script, name pattern or group, `rect` with where
+one is on screen in window pixels, `runtime_input click` presses and releases a Control by
+path and says what was under the pointer, and `runtime_wait` lets frames pass or waits for a
+signal or a property before answering. A node-valued property comes back as its path, so an
+answer can be fed straight into the next call.
 
 The `scene_*` and `resource_*` tools and `editor_rescan` go through the editor addon and need
 the editor open; `script_diagnostics`, `script_info` beyond `structure`, and the `debug_*`
