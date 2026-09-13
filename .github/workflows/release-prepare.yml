@@ -61,15 +61,17 @@ jobs:
           echo "version=${next}" >> "${GITHUB_OUTPUT}"
           echo "branch=release/v${next}" >> "${GITHUB_OUTPUT}"
 
-      - name: Refuse a version that is already released
+      # A tag rather than a release: a version can be tagged with no release attached, and the
+      # tag ruleset lets nothing move or delete one, so that number is spent either way.
+      - name: Refuse a version whose tag is taken
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           VERSION: ${{ steps.bump.outputs.version }}
         run: |
           set -euo pipefail
-          if gh release view "v${VERSION}" >/dev/null 2>&1; then
-            echo "v${VERSION} is already released. Pick a higher version." >&2
+          if gh api "repos/${GH_REPO}/git/ref/tags/v${VERSION}" >/dev/null 2>&1; then
+            echo "v${VERSION} is already tagged. Pick a version whose tag is free." >&2
             exit 1
           fi
 
