@@ -9,15 +9,24 @@
   "timezone": "Europe/Zurich",
   "schedule": ["before 6am on monday"],
   "minimumReleaseAge": "7 days",
-  "osvVulnerabilityAlerts": true,
   "rangeStrategy": "pin",
   "separateMajorMinor": false,
   "commitMessageAction": "Raise",
   "commitMessageTopic": "{{depName}}",
   "commitMessageExtra": "to {{newVersion}}",
+  "vulnerabilityAlerts": {
+    "description": "Off, so that a vulnerability fix rides in the one weekly pull request like every other raise instead of arriving as its own. The default would open one per advisory, on its own branch, outside the schedule.",
+    "enabled": false
+  },
+  "configMigration": false,
+  "lockFileMaintenance": {
+    "description": "The second pull request of the week, the day after the first: bun.lock and the hash-locked requirements regenerated, which is where the transitive dependencies move. Nothing this repository names changes in it, which is why it is not folded into the first.",
+    "enabled": true,
+    "schedule": ["before 6am on tuesday"]
+  },
   "packageRules": [
     {
-      "description": "One pull request for everything, majors included (separateMajorMinor is off for that). Every version here is pinned exactly and every check has to be green before anything merges, so a week's updates arriving as separate pull requests is that many rounds of CI to land one week's work. A vulnerability fix is the exception and arrives on its own the day it exists; the weekly lock file refreshes are the other, because they change nothing this file names.",
+      "description": "One pull request for everything, majors and vulnerability fixes included (separateMajorMinor and vulnerabilityAlerts are off for that). Every version here is pinned exactly and every check has to be green before anything merges, so a week's updates arriving as separate pull requests is that many rounds of CI to land one week's work.",
       "matchPackageNames": ["*"],
       "groupName": "all dependencies",
       "groupSlug": "all"
