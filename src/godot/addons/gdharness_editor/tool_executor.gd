@@ -8,12 +8,14 @@ extends Node
 const SceneTools = preload("tools/scene_tools.gd")
 const ResourceTools = preload("tools/resource_tools.gd")
 const AnimationTools = preload("tools/animation_tools.gd")
+const PlayTools = preload("tools/play_tools.gd")
 
 var _editor_plugin: EditorPlugin = null
 
 var _scene_tools: SceneTools = null
 var _resource_tools: ResourceTools = null
 var _animation_tools: AnimationTools = null
+var _play_tools: PlayTools = null
 
 var _tool_map: Dictionary = {}
 var _initialized: bool = false
@@ -25,6 +27,7 @@ func set_editor_plugin(plugin: EditorPlugin) -> void:
 	_scene_tools.set_editor_plugin(plugin)
 	_resource_tools.set_editor_plugin(plugin)
 	_animation_tools.set_editor_plugin(plugin)
+	_play_tools.set_editor_plugin(plugin)
 
 
 func _init_tools() -> void:
@@ -43,6 +46,10 @@ func _init_tools() -> void:
 	_animation_tools = AnimationTools.new()
 	_animation_tools.name = "AnimationTools"
 	add_child(_animation_tools)
+
+	_play_tools = PlayTools.new()
+	_play_tools.name = "PlayTools"
+	add_child(_play_tools)
 
 	_tool_map = {
 		# Scene tools
@@ -69,6 +76,9 @@ func _init_tools() -> void:
 		"set_theme_color": [_resource_tools, "set_theme_color"],
 		"set_theme_font_size": [_resource_tools, "set_theme_font_size"],
 		# Animation tools
+		"play_scene": [_play_tools, "play_scene"],
+		"stop_playing": [_play_tools, "stop_playing"],
+		"playing_status": [_play_tools, "playing_status"],
 		"create_animation": [_animation_tools, "create_animation"],
 		"add_animation_track": [_animation_tools, "add_animation_track"],
 		"add_animation_state": [_animation_tools, "add_animation_state"],

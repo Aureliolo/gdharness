@@ -3,11 +3,26 @@ import type { GameLog } from './game-log.js';
 
 /** The game editor_run started, and everything it has said. */
 export interface GodotProcess {
-  process: ChildProcess;
+  /**
+   * The game's own process, or null when the editor is playing it.
+   *
+   * A game the editor plays belongs to the editor's debugger, which is what makes the debug
+   * tools answer at all. Nothing here holds a handle to it, and its console arrives over the
+   * debug adapter rather than down a pipe.
+   */
+  process: ChildProcess | null;
   log: GameLog;
   startedAt: number;
   /** Set once the process has ended; null while it runs. */
   exitCode: number | null;
+  /** True when the editor was asked to play it, so stopping it is the editor's job too. */
+  throughEditor: boolean;
+}
+
+/** A game this server started itself, which therefore always has a process behind it. */
+export interface SpawnedGame extends GodotProcess {
+  process: ChildProcess;
+  throughEditor: false;
 }
 
 /**

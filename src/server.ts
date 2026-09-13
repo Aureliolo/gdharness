@@ -9,7 +9,7 @@
  */
 
 import { execFile, spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -39,7 +39,13 @@ import { findGodotProjects, projectStructure, searchProject } from './project-sc
 import { getPrompt, listPrompts } from './prompts.js';
 import { parseProjectGodot, setupResourceHandlers } from './resources.js';
 import { chooseRuntime, discoverRuntimes, runtimeRequest } from './runtime-client.js';
-import type { GodotProcess, MCPToolDefinition, OperationParams, ToolResponse } from './server-types.js';
+import type {
+  GodotProcess,
+  MCPToolDefinition,
+  OperationParams,
+  SpawnedGame,
+  ToolResponse,
+} from './server-types.js';
 import { DEBUG_MODE, GODOT_DEBUG_MODE_DEFAULT, SERVER_VERSION } from './server-version.js';
 import {
   asParams,
@@ -134,10 +140,32 @@ const PROJECT_INFO_SECTIONS: Readonly<
   },
 });
 
+/** The path with every symlink on it resolved, or the path itself when there is nothing there. */
+function realPathOr(path: string): string {
+  try {
+    return realpathSync.native(path);
+  } catch {
+    return path;
+  }
+}
+
 /** Whether project.godot names a scene for the game to start in. */
 function hasMainScene(projectFile: string): boolean {
   const scene = parseProjectGodot(readFileSync(projectFile, 'utf8'))['application']?.['run/main_scene'];
   return typeof scene === 'string' && scene !== '';
+}
+
+/**
+ * Whether the editor would play this project without a window.
+ *
+ * The editor appends `editor/run/main_run_args` to the game it starts, so a project that carries
+ * `--headless` there is one the editor plays headless. It is the only way a game the editor owns
+ * can be known to open no window, and it is what lets a headless request still go through the
+ * editor, which is the only route with a debugger attached.
+ */
+function editorPlaysHeadless(projectFile: string): boolean {
+  const runArgs = parseProjectGodot(readFileSync(projectFile, 'utf8'))['editor']?.['run/main_run_args'];
+  return typeof runArgs === 'string' && /(?:^|\s)--headless(?:\s|$)/.test(runArgs);
 }
 
 /**
@@ -258,7 +286,9 @@ class GodotServer {
   private async cleanup(): Promise<void> {
     this.logDebug('Cleaning up resources');
     if (this.activeProcess) {
-      this.activeProcess.process.kill();
+      // Killed rather than stopped through the editor: a shutdown cannot wait on a round trip,
+      // and a game the editor plays outlives this server anyway, which is the editor's to end.
+      this.activeProcess.process?.kill();
       this.activeProcess = null;
     }
     // Each of these is allowed to fail without stopping the rest of the shutdown, but a
@@ -337,7 +367,7 @@ class GodotServer {
     // await it are SIGINT, SIGTERM, SIGHUP and beforeExit, which all go through cleanup().
     if (this.activeProcess) {
       try {
-        this.activeProcess.process.kill();
+        this.activeProcess.process?.kill();
       } catch (error) {
         console.error('[SERVER] Failed to kill the Godot process on exit:', errorMessage(error));
       }
@@ -547,7 +577,7 @@ class GodotServer {
       case 'editor_run':
         return await this.handleRunProject(args, op);
       case 'editor_stop':
-        return this.handleStopProject();
+        return await this.handleStopProject();
       case 'editor_output':
         return this.handleGetDebugOutput(args);
       case 'editor_status':
@@ -610,8 +640,25 @@ class GodotServer {
       case 'runtime_wait':
         return await this.handleRuntimeWait(op, args);
 
-      case 'debug_breakpoint':
-        return await this.handleDAP(op === 'set' ? 'dap_set_breakpoint' : 'dap_remove_breakpoint', args);
+      case 'debug_breakpoint': {
+        // The adapter names the file the way this machine spells it, not the way the project
+        // does, so the projectPath every other tool takes is what turns `res://main.gd` into one.
+        const project = this.project(args);
+        if (!project.ok) {
+          return project.response;
+        }
+        const located = resolveWithinProject(project.value.path, readString(args, 'scriptPath') ?? '');
+        if (!located.ok) {
+          return this.createErrorResponse(located.reason, PATH_SOLUTIONS);
+        }
+        // Resolved, because the adapter refuses a path that does not start with the project as
+        // it holds it, and a symlink on the way makes two spellings of the same file: on macOS
+        // every /var/folders path is really /private/var/folders.
+        return await this.handleDAP(op === 'set' ? 'dap_set_breakpoint' : 'dap_remove_breakpoint', {
+          ...args,
+          scriptPath: realPathOr(located.absolutePath),
+        });
+      }
       case 'debug_control':
         return await this.handleDAP(`dap_${op}`, args);
       case 'debug_state':
@@ -1124,8 +1171,13 @@ class GodotServer {
     toolName: string,
     args: unknown,
   ): Promise<{ content: { type: string; text: string }[] }> {
+    return handleDAPTool(this.dap(), toolName, args);
+  }
+
+  /** The one debug adapter client, which the debug tools and an editor-played game share. */
+  private dap(): GodotDAPClient {
     this.dapClient ??= new GodotDAPClient();
-    return handleDAPTool(this.dapClient, toolName, args);
+    return this.dapClient;
   }
 
   // -------------------------------------------------------------------------------------------
@@ -1250,12 +1302,28 @@ class GodotServer {
     }
 
     if (this.activeProcess) {
-      this.logDebug('Killing existing Godot process before starting a new one');
-      this.activeProcess.process.kill();
+      this.logDebug('Ending the running game before starting another');
+      await this.endActiveGame();
     }
+
+    // The editor when it is there: a game it plays is a game its debugger is holding, and that
+    // session is the only thing the debug tools can reach. A game started here as its own
+    // process is invisible to them, whatever port they are pointed at.
+    //
+    // A headless run goes through the editor only when the project's own run arguments say the
+    // editor would play it headless too. Otherwise it is spawned: answering a request for no
+    // window with a window would be answering a different question.
+    const headless = resolveHeadless(args['headless'], {
+      platform: process.platform,
+      variables: process.env,
+    });
+    if (this.godotBridge.isConnected() && (!headless || editorPlaysHeadless(project.value.file))) {
+      return await this.playThroughEditor(sceneArgument);
+    }
+
     const cmdArgs = runArguments({
       projectPath: project.value.path,
-      headless: resolveHeadless(args['headless'], { platform: process.platform, variables: process.env }),
+      headless,
       scene: sceneArgument,
     });
     this.logDebug(`Running Godot project: ${engine.value} ${cmdArgs.join(' ')}`);
@@ -1268,17 +1336,103 @@ class GodotServer {
     });
     return this.jsonTextResponse({
       started: true,
+      through: 'gdharness',
       pid: started.process.pid ?? null,
       arguments: cmdArgs,
       message: 'Use editor_output for what it prints and editor_stop to end it.',
     });
   }
 
+  /**
+   * The editor plays the game, and the debug adapter is connected first so nothing is missed.
+   *
+   * The adapter is where an editor-played game's console comes from: there is no pipe to read,
+   * and the editor's own Output dock is not something a server can see. Connecting before the
+   * game starts is what puts its first lines in the log rather than losing them, and the
+   * breakpoints a caller set earlier are already registered by then.
+   */
+  private async playThroughEditor(scene: string | null): Promise<ToolResponse> {
+    const log = new GameLog();
+    try {
+      await this.dap().connect();
+    } catch (error) {
+      return this.createErrorResponse(
+        `The editor is connected but its debug adapter is not: ${errorMessage(error)}`,
+        [
+          'Godot serves the debug adapter on 6006 unless --dap-port says otherwise',
+          'GDHARNESS_DAP_PORT points this server at another one',
+        ],
+      );
+    }
+
+    const answer = await this.handleViaBridge(
+      'play_scene',
+      scene === null ? {} : { scenePath: `res://${scene}` },
+    );
+    if (answer.isError === true) {
+      return answer;
+    }
+
+    const played: GodotProcess = {
+      process: null,
+      log,
+      startedAt: Date.now(),
+      exitCode: null,
+      throughEditor: true,
+    };
+    this.activeProcess = played;
+
+    return this.jsonTextResponse({
+      started: true,
+      through: 'editor',
+      scene: scene === null ? 'the main scene' : `res://${scene}`,
+      message:
+        'The editor is playing it, so its debugger holds it: the debug_* tools can reach it, ' +
+        'editor_output reads its console through the debug adapter, and editor_stop ends it.',
+    });
+  }
+
+  /**
+   * Moves what the debug adapter has heard into the game's log.
+   *
+   * Pulled when somebody asks rather than pushed as it arrives, so the one buffer the adapter
+   * keeps is read in order and nothing is counted twice. A game this server spawned has a pipe
+   * instead and nothing to drain.
+   */
+  private drainEditorOutput(game: GodotProcess): void {
+    if (!game.throughEditor || !this.dapClient) {
+      return;
+    }
+    for (const line of this.dapClient.getOutput(true)) {
+      game.log.append('stdout', line.endsWith('\n') ? line : `${line}\n`);
+    }
+  }
+
+  /** Ends whatever is running, whichever way it was started. */
+  private async endActiveGame(): Promise<void> {
+    const running = this.activeProcess;
+    this.activeProcess = null;
+    if (!running) {
+      return;
+    }
+    if (running.throughEditor) {
+      await this.handleViaBridge('stop_playing', {});
+      return;
+    }
+    running.process?.kill();
+  }
+
   /** The engine as a child process, with everything it prints read into a log as it comes. */
-  private spawnGame(godotPath: string, cmdArgs: string[]): GodotProcess {
+  private spawnGame(godotPath: string, cmdArgs: string[]): SpawnedGame {
     const child = spawn(godotPath, cmdArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
     const log = new GameLog();
-    const started: GodotProcess = { process: child, log, startedAt: Date.now(), exitCode: null };
+    const started: SpawnedGame = {
+      process: child,
+      log,
+      startedAt: Date.now(),
+      exitCode: null,
+      throughEditor: false,
+    };
     child.stdout.on('data', (data: Buffer) => {
       log.append('stdout', data);
     });
@@ -1348,6 +1502,7 @@ class GodotServer {
     if (!this.activeProcess) {
       return this.createErrorResponse('No game is running. Start one with editor_run.');
     }
+    this.drainEditorOutput(this.activeProcess);
     const severity = readString(args, 'severity');
     const selected = this.activeProcess.log.select({
       severity: severity === 'error' || severity === 'warning' ? severity : 'info',
@@ -1358,7 +1513,8 @@ class GodotServer {
     return this.jsonTextResponse({
       running: this.activeProcess.exitCode === null,
       exitCode: this.activeProcess.exitCode,
-      pid: this.activeProcess.process.pid ?? null,
+      through: this.activeProcess.throughEditor ? 'editor' : 'gdharness',
+      pid: this.activeProcess.process?.pid ?? null,
       errors: this.activeProcess.log.count('error'),
       warnings: this.activeProcess.log.count('warning'),
       clean: this.activeProcess.log.count('error') === 0,
@@ -1368,16 +1524,17 @@ class GodotServer {
   }
 
   /** editor_stop: the game is ended and its verdict answered, the errors and warnings kept. */
-  private handleStopProject(): ToolResponse {
+  private async handleStopProject(): Promise<ToolResponse> {
     if (!this.activeProcess) {
       return this.createErrorResponse('No game is running. Start one with editor_run.');
     }
     const stopped = this.activeProcess;
-    this.activeProcess = null;
-    this.logDebug('Stopping active Godot process');
-    stopped.process.kill();
+    this.drainEditorOutput(stopped);
+    this.logDebug('Stopping the running game');
+    await this.endActiveGame();
     return this.jsonTextResponse({
       stopped: true,
+      through: stopped.throughEditor ? 'editor' : 'gdharness',
       exitedBeforeStop: stopped.exitCode !== null,
       exitCode: stopped.exitCode,
       errors: stopped.log.count('error'),
