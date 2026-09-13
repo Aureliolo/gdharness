@@ -721,7 +721,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'editor_status',
     description:
-      'Whether the editor addon is connected, which Godot answers, and whether a game with the runtime addon is reachable.',
+      'Whether the editor addon is connected, which Godot answers, whether the editor is playing something, and whether a game with the runtime addon is reachable.',
     parameters: {},
     requires: [],
   },
@@ -947,12 +947,12 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   },
   {
     name: 'debug_control',
-    description: "Continues, pauses or steps the debugged game through the editor's debug adapter.",
+    description:
+      "Continues or steps the debugged game through the editor's debug adapter. There is no pause: measured on 4.7.2, Godot takes a pause request, reports the game as stopped and leaves it running, so hold the game where you want it with a breakpoint.",
     parameters: {},
     requires: [],
     operations: {
-      continue: { summary: 'resume after a breakpoint or pause', requires: [] },
-      pause: { summary: 'pause the game', requires: [] },
+      continue: { summary: 'resume after a breakpoint', requires: [] },
       step_over: { summary: 'run the current line', requires: [] },
     },
   },

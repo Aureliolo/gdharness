@@ -33,18 +33,6 @@ func get_tree(params: Dictionary) -> Dictionary:
 	return {"type": "tree", "root": _serialize_node_tree(root, 0, max_depth, include_properties)}
 
 
-func get_node(params: Dictionary) -> Dictionary:
-	var node_path: String = str(params.get("path", ""))
-	if node_path.is_empty():
-		return {"type": "error", "message": "Node path required"}
-
-	var node: Node = _host.get_tree().root.get_node_or_null(node_path)
-	if node == null:
-		return {"type": "error", "message": "Node not found: " + node_path}
-
-	return {"type": "node", "data": _serialize_node(node, true)}
-
-
 ## Nodes matching every filter given, as paths, so a caller can name what it wants without
 ## reading the whole tree to find it. `class` matches native classes and their subclasses, and
 ## the global name of a script class; `name` is a case-insensitive glob; `script` is a path.

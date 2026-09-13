@@ -14,7 +14,6 @@ func _init(p_log: Log) -> void:
 # Get a project setting value
 func get_project_setting(params: Dictionary) -> Dictionary:
 	var setting_path: String = str(params.get("setting", ""))
-	var include_metadata: bool = bool(params.get("include_metadata", false))
 
 	_log.info("Getting project setting: " + setting_path)
 
@@ -23,12 +22,7 @@ func get_project_setting(params: Dictionary) -> Dictionary:
 	}
 
 	if result["exists"]:
-		var value: Variant = ProjectSettings.get_setting(setting_path)
-		result["value"] = _values.serialize_value(value)
-
-		if include_metadata:
-			result["type"] = typeof(value)
-			result["type_name"] = type_string(typeof(value))
+		result["value"] = _values.serialize_value(ProjectSettings.get_setting(setting_path))
 	else:
 		result["value"] = null
 		result["message"] = "Setting does not exist"
@@ -113,9 +107,7 @@ func remove_autoload(params: Dictionary) -> Dictionary:
 
 
 # List all autoload singletons
-func list_autoloads(params: Dictionary) -> Dictionary:
-	var include_status: bool = bool(params.get("include_status", true))
-
+func list_autoloads(_params: Dictionary) -> Dictionary:
 	_log.info("Listing autoloads")
 
 	var autoloads: Array[Dictionary] = []
@@ -128,12 +120,11 @@ func list_autoloads(params: Dictionary) -> Dictionary:
 		var path: String = value.trim_prefix("*")
 
 		var autoload_info: Dictionary = {
-			"name": setting.trim_prefix("autoload/"), "path": path, "enabled": value.begins_with("*")
+			"name": setting.trim_prefix("autoload/"),
+			"path": path,
+			"enabled": value.begins_with("*"),
+			"file_exists": FileAccess.file_exists(path),
 		}
-
-		if include_status:
-			autoload_info["file_exists"] = FileAccess.file_exists(path)
-
 		autoloads.append(autoload_info)
 
 	return {"autoloads": autoloads, "count": autoloads.size()}

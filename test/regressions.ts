@@ -15,6 +15,8 @@ import { editorArguments, envValue, resolveHeadless, runArguments } from '../src
 import { GodotLSPClient } from '../src/lsp_client.js';
 import { isWithinRoot, resolveWithinProject } from '../src/paths.js';
 import { parseProjectGodot } from '../src/resources.js';
+import { HEADLESS_OPERATIONS } from '../src/server.js';
+import { TOOL_SPECS } from '../src/tool-definitions.js';
 import { asArray, asNumber, get, text } from './support/json.js';
 import { isRecord, type JsonRpcMessage, parseTextContent, textOf } from './support/json-rpc.js';
 import { ServerProcess } from './support/server.js';
@@ -1501,7 +1503,188 @@ function testCommandLineSetup(): void {
   }
 }
 
+/** The first group of a match, which a pattern written with one group always has. */
+function captured(match: RegExpMatchArray): string {
+  return match[1] ?? '';
+}
+
+/** A tool's argument name as the engine operations spell it, which is the one rule between them. */
+function snakeCased(name: string): string {
+  return name.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
+}
+
+/** The names in one table of a GDScript file, by the shape that table is written in. */
+function namesIn(path: string, pattern: RegExp, what: string, least: number): Set<string> {
+  const found = new Set([...readFileSync(path, 'utf8').matchAll(pattern)].map(captured));
+  // The reader is a regex over source, so it can come back empty for a table that was merely
+  // reformatted, and an empty set agrees with everything. A floor is what makes it speak up.
+  assert.ok(found.size >= least, `only ${found.size} of the ${what} were read from ${path}`);
+  return found;
+}
+
+/** Every name the server sends, by the call that sends it, with its multi-line spellings. */
+function namesSent(pattern: RegExp, what: string, least: number): Set<string> {
+  const source = readFileSync('src/server.ts', 'utf8');
+  const found = new Set([...source.matchAll(pattern)].map(captured));
+  assert.ok(found.size >= least, `only ${found.size} of the ${what} were read from src/server.ts`);
+  return found;
+}
+
+/**
+ * Every name quoted in the arguments of one kind of call.
+ *
+ * Wider than reading the first argument, because the name is sometimes chosen in place: a
+ * ternary, a section table, a template. Used only to ask whether anything reaches a name at
+ * all, so reaching too far costs nothing but a name that would have been reported as dead.
+ */
+function namesPassedTo(opener: RegExp, what: string, least: number): Set<string> {
+  const source = readFileSync('src/server.ts', 'utf8');
+  const found = new Set<string>();
+  for (const call of source.matchAll(opener)) {
+    for (const quoted of source.slice(call.index, call.index + 200).matchAll(/'([a-z][a-z_]+)'/g)) {
+      found.add(captured(quoted));
+    }
+  }
+  assert.ok(found.size >= least, `only ${found.size} of the ${what} were read from src/server.ts`);
+  return found;
+}
+
+/**
+ * Every name the server sends is one the other end answers to, and every name the other end
+ * answers to is one the server sends.
+ *
+ * Each side is covered on its own: the engine operations and the addon commands against a real
+ * engine, the tools from the outside. The table between them is not, and it is three tables: a
+ * misspelling in one of them is a tool that refuses at run time with every test on both sides
+ * still green. The other direction matters as much, because a command nothing sends is dead
+ * code no coverage report can see, GDScript being invisible to the dead-code linter.
+ */
+function testEveryDispatchedNameExistsOnBothSides(): void {
+  const engine = namesIn(
+    'src/godot/operations/godot_operations.gd',
+    /^\t\t"([a-z_]+)":$/gm,
+    'engine operations',
+    30,
+  );
+  for (const [tool, operations] of Object.entries(HEADLESS_OPERATIONS)) {
+    for (const [op, operation] of Object.entries(operations)) {
+      assert.ok(
+        engine.has(operation),
+        `${tool} ${op} is dispatched to ${operation}, which the engine has not`,
+      );
+    }
+  }
+  const dispatched = new Set(Object.values(HEADLESS_OPERATIONS).flatMap((ops) => Object.values(ops)));
+  // project_info's sections and the CLI reach operations no tool op names, so those are read
+  // from the source that names them rather than assumed.
+  const otherwise = namesPassedTo(/this\.(?:headless|operation)\(|operation: '/g, 'engine operations', 10);
+  const fromCli = namesIn('src/cli.ts', /'([a-z_]+)'/g, 'names in the CLI', 5);
+  for (const operation of engine) {
+    assert.ok(
+      dispatched.has(operation) || otherwise.has(operation) || fromCli.has(operation),
+      `the engine answers ${operation}, which nothing asks for`,
+    );
+  }
+
+  const addon = namesIn(
+    'src/godot/addons/gdharness_editor/tool_executor.gd',
+    /^\t\t"([a-z_]+)": \[/gm,
+    'editor commands',
+    25,
+  );
+  const bridged = namesSent(/(?:[Bb]ridge|invokeTool)\(\s*'([a-z_]+)'/g, 'editor commands', 25);
+  for (const command of bridged) {
+    assert.ok(addon.has(command), `the server sends ${command}, which the editor addon has not`);
+  }
+  for (const command of addon) {
+    assert.ok(bridged.has(command), `the editor addon answers ${command}, which nothing sends`);
+  }
+
+  const runtime = namesIn(
+    'src/godot/addons/gdharness_runtime/runtime_autoload.gd',
+    /^\t\t"([a-z_]+)": (?:_ping|_[a-z]+\.[a-z_]+),$/gm,
+    'runtime commands',
+    15,
+  );
+  const asked = namesSent(
+    /(?:handleRuntimeCommand|runtimeRequest)\([^,]*,?\s*'([a-z_]+)'/g,
+    'runtime commands',
+    6,
+  );
+  // runtime_input builds the command from the op, so the op list is what has to line up.
+  const input = TOOL_SPECS.find((spec) => spec.name === 'runtime_input');
+  assert.ok(input, 'runtime_input should be a tool');
+  const injected = new Set(
+    Object.keys(input.operations ?? {})
+      .filter((op) => op !== 'click')
+      .map((op) => `inject_${op}`),
+  );
+  const captured = new Set(['capture_screenshot', 'capture_viewport']);
+  const sent = new Set([...asked, ...injected, ...captured]);
+  for (const command of sent) {
+    assert.ok(runtime.has(command), `the server sends ${command}, which the runtime addon has not`);
+  }
+  for (const command of runtime) {
+    assert.ok(sent.has(command), `the runtime addon answers ${command}, which nothing sends`);
+  }
+}
+
+/**
+ * Every key an engine operation reads is one a tool can actually send.
+ *
+ * The conversion from the tool's arguments to the operation's is one rule for every operation,
+ * so what breaks is not the rule but the spelling: an operation reading a name no tool declares
+ * is a parameter that can never arrive, and it reads as a working tool with a setting that does
+ * nothing. That has happened here once, to an audio bus name.
+ */
+function testEveryEngineParameterCanBeSent(): void {
+  const dispatcher = readFileSync('src/godot/operations/godot_operations.gd', 'utf8');
+  const files = new Map(
+    [...dispatcher.matchAll(/const ([A-Za-z]+) = preload\("([a-z_]+\.gd)"\)/g)].map((match) => [
+      captured(match),
+      readFileSync(join('src/godot/operations', match[2] ?? ''), 'utf8'),
+    ]),
+  );
+
+  const declared = new Set(
+    [...readFileSync('src/tool-definitions.ts', 'utf8').matchAll(/^ {6}([A-Za-z]+):/gm)].map((match) =>
+      snakeCased(captured(match)),
+    ),
+  );
+  assert.ok(declared.size >= 40, `only ${declared.size} tool parameters were read`);
+  // What the server adds on the way through, which no tool declares.
+  const added = new Set(
+    [...readFileSync('src/server.ts', 'utf8').matchAll(/\b([a-z][A-Za-z0-9]*): /g)].map((match) =>
+      snakeCased(captured(match)),
+    ),
+  );
+
+  let read = 0;
+  for (const route of dispatcher.matchAll(
+    /"([a-z_]+)":\s*\n[^\n]*?([A-Za-z]+)\.new\([^)]*\)\.([a-z_]+)\(/g,
+  )) {
+    const [, operation = '', module = '', method = ''] = route;
+    const source = files.get(module);
+    assert.ok(source, `${operation} is answered by ${module}, which is not preloaded`);
+    const at = source.indexOf(`\nfunc ${method}(`);
+    assert.ok(at !== -1, `${module} has no ${method} for ${operation}`);
+    const next = source.indexOf('\nfunc ', at + 1);
+    const body = source.slice(at, next === -1 ? source.length : next);
+    for (const key of body.matchAll(/params(?:\.get\(|\[)"([a-z_]+)"/g)) {
+      read += 1;
+      const name = captured(key);
+      assert.ok(
+        declared.has(name) || added.has(name),
+        `${operation} reads ${name}, which no tool parameter spells`,
+      );
+    }
+  }
+  assert.ok(read >= 40, `only ${read} parameter reads were found, so this proved little`);
+}
+
 async function main(): Promise<void> {
+  testEveryDispatchedNameExistsOnBothSides();
+  testEveryEngineParameterCanBeSent();
   testStaleDisconnectRegression();
   testSceneToolsVectorRegression();
   testRunArgumentsLeaveTheLocalDebuggerOff();
