@@ -131,6 +131,11 @@ Nothing is sent from here, and no issue is opened without somebody seeing what i
 the report is about their project, and a public tracker is their decision. The link it offers is
 the issue form with those lines already filled in.
 
+It asks to be reported even when it turns out to be wrong. A failure that was really the project's
+or the environment's doing, arriving dressed as a defect, is a misclassification: the refusal that
+should have named what would have worked is missing, and every later caller hits the same wall. So
+that report is the more useful of the two, and the message and the form both say so.
+
 Rarely, one answer in a few hundred also carries an invitation to say what is missing. A tool that
 should exist and does not is invisible from inside the server, and the only party that knows is the
 one that just worked around it. It asks for the same yes before anything is filed.

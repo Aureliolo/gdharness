@@ -3,8 +3,10 @@
  *
  * Two occasions, and they are not the same. A defect is a failure nobody modelled: every other
  * failure here is a refusal that names what to do instead, so a call that fell through to this
- * one did nothing wrong and repeating it changes nothing. A gap is the opposite, a tool that
- * should exist and does not, which only whoever is driving the harness can notice.
+ * one did nothing wrong and repeating it changes nothing. One that turns out to have been the
+ * project's or the environment's doing after all is still worth hearing about, because it means a
+ * failure this program knows about arrived dressed as one it does not. A gap is the other
+ * occasion: a tool that should exist and does not, which only whoever drives the harness sees.
  *
  * Nothing is sent from here. Both produce text and a link, and an issue is opened by a person
  * who has read what it would contain, or not at all: a machine reporting on somebody's project
@@ -108,6 +110,10 @@ function filledTemplate(where: string, message: string, godotVersion?: string): 
     '',
     `Signature: \`${defectSignature(where, message)}\``,
     '',
+    'If the real cause turned out to be the project, the environment or the call, say so here:',
+    'reaching you as a defect rather than as a refusal naming what would have worked is then the',
+    'thing to fix.',
+    '',
     '## Anything that makes it reproducible',
     '',
   ].join('\n');
@@ -147,5 +153,10 @@ export function defectReport(where: string, error: unknown, godotVersion?: strin
     '',
     'If they say yes and you have no way to open an issue yourself, give them that link and',
     'those lines, and stay with them while they file it.',
+    '',
+    'Worth reporting either way. If you can see that what actually went wrong was the project,',
+    'the environment or the call, then this message is the defect: a failure gdharness knows',
+    'about is meant to arrive as a refusal naming what would have worked, not as this. Say that',
+    'in the report and it is the more useful of the two.',
   ].join('\n');
 }

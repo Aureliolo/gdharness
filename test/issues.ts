@@ -31,6 +31,11 @@ assert.match(report, /Do not open an issue on your own initiative/, 'and hand th
 assert.match(report, /ask whether you may report it/, 'by asking the user first');
 assert.match(report, /no way to open an issue yourself/, 'with the case where it cannot file at all');
 
+// The one report nobody would think to send: the message itself being wrong. A failure this
+// program anticipates arriving dressed as one it does not is the misclassification that keeps
+// every future caller chasing a bug that is not there.
+assert.match(report, /this message is the defect/, 'a misfiled failure should invite its own report');
+
 // A link that does not open is worse than no link: the agent hands it over and the user is stuck.
 const link = /(https:\/\/github\.com\/\S+)/.exec(report)?.[1];
 assert.ok(link !== undefined, 'the report should carry a link');
@@ -40,6 +45,11 @@ assert.equal(url.searchParams.get('template'), 'bug_report.md', 'against the bug
 const body = url.searchParams.get('body') ?? '';
 assert.match(body, /Cannot read properties of undefined/, 'the prefilled body should carry the error');
 assert.match(body, /## What you did/, 'and the headings the template asks for');
+assert.match(
+  body,
+  /rather than as a refusal naming what would have worked/,
+  'and leave a place to say the message itself was the mistake',
+);
 assert.match(
   url.searchParams.get('title') ?? '',
   /^Defect [0-9a-f]{8}: editor_scene op=open$/,
