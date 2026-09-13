@@ -8,15 +8,23 @@
  * Every path here was read from that harness's own documentation. A guessed path is worse than no
  * row: it fails silently, in a file the reader then has to find themselves.
  *
- * Nothing here parses TOML or YAML. A harness whose config is either gets the command that its
- * own CLI documents, or the block to paste, because rewriting a file we cannot round-trip would
- * cost somebody their comments to save them one paste.
+ * JSON, TOML and YAML are all written rather than printed, because a block to paste is a step that
+ * gets skipped or pasted into the wrong file. Each shape here was read from that harness's own
+ * documentation too: a guessed shape writes a file that silently does nothing.
  */
 
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import process from 'node:process';
+import {
+  parsedYamlHas,
+  removeToml,
+  removeYaml,
+  type TomlEntry,
+  writeToml,
+  writeYaml,
+} from './config-formats.js';
 
 /** What gdharness is called wherever it is registered. */
 export const SERVER_KEY = 'gdharness';
@@ -96,45 +104,41 @@ export interface Harness {
     /** Whether it reads the shared directory as well. False means its own is the only one. */
     readonly shared: boolean;
   };
+  /** For a harness whose config is TOML: the block to write, and how to find an older one. */
+  readonly toml?: TomlEntry;
+  /** For a harness whose config is YAML: the key path our entry sits at, and the entry. */
+  readonly yaml?: {
+    readonly path: readonly string[];
+    readonly entry: (launch: Launch) => Record<string, unknown>;
+  };
   /**
-   * Its own command for adding a server, for a harness whose config this cannot safely write.
-   * Present means the file is TOML or YAML, or its exact shape is not documented.
+   * What the reader still has to do themselves, for a harness that will not take our word for it.
+   * Named rather than glossed over: a trust prompt nobody mentions is an install that looks done
+   * and answers nothing.
    */
-  readonly addCommand?: (launch: Launch) => readonly string[];
-  /** Its own command for taking the server out again, where it documents one. */
-  readonly removeCommand?: () => readonly string[];
+  readonly manual?: string;
   /**
-   * What to put in the file by hand, for a harness with neither a config this can write nor a
-   * documented command. Shown rather than guessed at: a command invented from a blog post is the
-   * one thing worse than asking somebody to paste six lines.
+   * What to put in the file by hand, for a harness whose file is documented but whose shape is
+   * not. Shown rather than guessed at: writing an invented key produces a config that parses,
+   * loads, and does nothing.
    */
   readonly snippet?: (launch: Launch) => string;
 }
 
-function tomlServer(launch: Launch, table: string, nameKey = 'name'): string {
-  return [
-    `[[${table}]]`,
-    `${nameKey} = "${SERVER_KEY}"`,
-    'transport = "stdio"',
-    `command = "${launch.command}"`,
-    `args = [${launch.args.map((argument) => `"${argument}"`).join(', ')}]`,
-    ...Object.entries(launch.env).map(([name, value]) => `env = { ${name} = "${value}" }`),
-  ].join('\n');
+/** A TOML array of strings, which is the one value shape every one of these files needs. */
+function tomlArray(values: readonly string[]): string {
+  return `[${values.map((value) => `"${value}"`).join(', ')}]`;
 }
 
-function yamlServer(launch: Launch, container: string, pad = ''): string {
-  const one = `${pad}  `;
-  const two = `${pad}    `;
-  const three = `${pad}      `;
-  return [
-    `${pad}${container}:`,
-    `${one}${SERVER_KEY}:`,
-    `${two}command: ${launch.command}`,
-    `${two}args:`,
-    ...launch.args.map((argument) => `${three}- "${argument}"`),
-    `${two}env:`,
-    ...Object.entries(launch.env).map(([name, value]) => `${three}${name}: "${value}"`),
-  ].join('\n');
+/**
+ * The environment as an inline table rather than its own `[x.env]` header.
+ *
+ * Both are valid TOML and mean the same thing. Inline keeps our entry one contiguous block, which
+ * is what lets it be found and replaced without touching the tables around it.
+ */
+function tomlEnv(launch: Launch): string {
+  const pairs = Object.entries(launch.env).map(([name, value]) => `${name} = "${value}"`);
+  return `env = { ${pairs.join(', ')} }`;
 }
 
 function jsonSnippet(launch: Launch, container: string, shape: Shape): string {
@@ -350,17 +354,42 @@ export const HARNESSES: readonly Harness[] = [
     file: join('.vibe', 'config.toml'),
     container: 'mcp_servers',
     shape: 'plain',
-    snippet: (launch) => tomlServer(launch, 'mcp_servers'),
+    toml: {
+      header: '[[mcp_servers]]',
+      identity: `name = "${SERVER_KEY}"`,
+      block: (launch) =>
+        [
+          '[[mcp_servers]]',
+          `name = "${SERVER_KEY}"`,
+          'transport = "stdio"',
+          `command = "${launch.command}"`,
+          `args = ${tomlArray(launch.args)}`,
+          tomlEnv(launch),
+        ].join('\n'),
+    },
   },
   {
     id: 'vtcode',
     name: 'VT Code',
     scope: 'project',
     file: 'vtcode.toml',
-    container: 'mcp.servers',
+    container: 'mcp.providers',
     shape: 'plain',
     marker: '.vtcode',
-    snippet: (launch) => tomlServer(launch, 'mcp.servers'),
+    toml: {
+      header: '[[mcp.providers]]',
+      identity: `name = "${SERVER_KEY}"`,
+      enable: { header: '[mcp]', line: 'enabled = true' },
+      block: (launch) =>
+        [
+          '[[mcp.providers]]',
+          `name = "${SERVER_KEY}"`,
+          'enabled = true',
+          `command = "${launch.command}"`,
+          `args = ${tomlArray(launch.args)}`,
+          tomlEnv(launch),
+        ].join('\n'),
+    },
   },
   {
     id: 'fast-agent',
@@ -369,7 +398,10 @@ export const HARNESSES: readonly Harness[] = [
     file: 'fastagent.config.yaml',
     container: 'mcp',
     shape: 'plain',
-    snippet: (launch) => `mcp:\n${yamlServer(launch, 'servers', '  ')}`,
+    yaml: {
+      path: ['mcp', 'servers', SERVER_KEY],
+      entry: (launch) => ({ command: launch.command, args: [...launch.args], env: { ...launch.env } }),
+    },
   },
 
   // Machine-wide: these harnesses have no project-level config at all, so the only way to wire
@@ -381,17 +413,17 @@ export const HARNESSES: readonly Harness[] = [
     file: join('.codex', 'config.toml'),
     container: 'mcp_servers',
     shape: 'plain',
-    addCommand: (launch) => [
-      'codex',
-      'mcp',
-      'add',
-      SERVER_KEY,
-      ...Object.entries(launch.env).flatMap(([name, value]) => ['--env', `${name}=${value}`]),
-      '--',
-      launch.command,
-      ...launch.args,
-    ],
-    removeCommand: () => ['codex', 'mcp', 'remove', SERVER_KEY],
+    manual: 'Codex reads its config at startup, so restart it.',
+    toml: {
+      header: `[mcp_servers.${SERVER_KEY}]`,
+      block: (launch) =>
+        [
+          `[mcp_servers.${SERVER_KEY}]`,
+          `command = "${launch.command}"`,
+          `args = ${tomlArray(launch.args)}`,
+          tomlEnv(launch),
+        ].join('\n'),
+    },
   },
   {
     // Cline keeps rules, skills, hooks and agents per project but not servers: cline/cline#2418.
@@ -415,18 +447,18 @@ export const HARNESSES: readonly Harness[] = [
     },
     container: 'extensions',
     shape: 'plain',
-    snippet: (launch) =>
-      [
-        'extensions:',
-        `  ${SERVER_KEY}:`,
-        '    type: stdio',
-        '    enabled: true',
-        `    cmd: ${launch.command}`,
-        '    args:',
-        ...launch.args.map((argument) => `      - "${argument}"`),
-        '    envs:',
-        ...Object.entries(launch.env).map(([name, value]) => `      ${name}: "${value}"`),
-      ].join('\n'),
+    yaml: {
+      path: ['extensions', SERVER_KEY],
+      entry: (launch) => ({
+        name: SERVER_KEY,
+        type: 'stdio',
+        enabled: true,
+        cmd: launch.command,
+        args: [...launch.args],
+        envs: { ...launch.env },
+        timeout: 300,
+      }),
+    },
   },
   {
     id: 'windsurf',
@@ -445,7 +477,15 @@ export const HARNESSES: readonly Harness[] = [
     container: 'mcp_servers',
     shape: 'plain',
     skills: { dir: join('.hermes', 'skills'), shared: true },
-    snippet: (launch) => `${yamlServer(launch, 'mcp_servers')}\n    enabled: true`,
+    yaml: {
+      path: ['mcp_servers', SERVER_KEY],
+      entry: (launch) => ({
+        command: launch.command,
+        args: [...launch.args],
+        env: { ...launch.env },
+        enabled: true,
+      }),
+    },
   },
   {
     id: 'openclaw',
@@ -474,7 +514,19 @@ export const HARNESSES: readonly Harness[] = [
     file: join('.zeroclaw', 'config.toml'),
     container: 'mcp.servers',
     shape: 'plain',
-    snippet: (launch) => tomlServer(launch, 'mcp.servers'),
+    toml: {
+      header: '[[mcp.servers]]',
+      identity: `name = "${SERVER_KEY}"`,
+      enable: { header: '[mcp]', line: 'enabled = true' },
+      block: (launch) =>
+        [
+          '[[mcp.servers]]',
+          `name = "${SERVER_KEY}"`,
+          `command = "${launch.command}"`,
+          `args = ${tomlArray(launch.args)}`,
+          tomlEnv(launch),
+        ].join('\n'),
+    },
   },
   {
     id: 'deepcode',
@@ -692,7 +744,7 @@ export function groupByFile(harnesses: readonly Harness[], projectPath: string):
   const groups = new Map<string, { path: string; harnesses: Harness[]; writer: Harness }>();
   for (const harness of harnesses) {
     const path = configPath(harness, projectPath);
-    const key = `${path} ${harness.container} ${harness.shape}`;
+    const key = `${path}\u0000${harness.container}\u0000${harness.shape}`;
     const held = groups.get(key);
     if (held === undefined) {
       groups.set(key, { path, harnesses: [harness], writer: harness });
@@ -727,10 +779,17 @@ export function disconnect(harness: Harness, projectPath: string): Removed {
     return { harness, path, action: 'absent' };
   }
   // A file we could not write we cannot read our way out of either, so the most this can say is
-  // that the file is there and what would take the entry out of it.
-  if (harness.addCommand !== undefined || harness.snippet !== undefined) {
-    const command = harness.removeCommand?.();
-    return { harness, path, action: 'manual', ...(command === undefined ? {} : { command }) };
+  // that the file is there and that our entry has to come out of it by hand.
+  if (harness.snippet !== undefined) {
+    return { harness, path, action: 'manual' };
+  }
+
+  const text = readFileSync(path, 'utf8');
+  if (harness.toml !== undefined) {
+    return taken(harness, path, text, removeToml(text, harness.toml));
+  }
+  if (harness.yaml !== undefined) {
+    return taken(harness, path, text, removeYaml(text, harness.yaml.path));
   }
 
   let existing: unknown;
@@ -784,14 +843,21 @@ export interface Written {
  */
 export function connect(harness: Harness, projectPath: string, launch: Launch): Written {
   const path = configPath(harness, projectPath);
-  if (harness.addCommand !== undefined) {
-    return { harness, path, action: 'command', command: harness.addCommand(launch) };
-  }
   if (harness.snippet !== undefined) {
     return { harness, path, action: 'snippet', snippet: harness.snippet(launch) };
   }
 
   const held = existsSync(path) ? readFileSync(path, 'utf8') : '';
+
+  if (harness.toml !== undefined) {
+    const already = held.includes(harness.toml.identity ?? harness.toml.header);
+    return put(harness, path, writeToml(held, harness.toml, launch), already);
+  }
+  if (harness.yaml !== undefined) {
+    const already = parsedYamlHas(held, harness.yaml.path);
+    return put(harness, path, writeYaml(held, harness.yaml.path, harness.yaml.entry(launch)), already);
+  }
+
   let existing: unknown = {};
   if (held.trim() !== '') {
     try {
@@ -806,7 +872,30 @@ export function connect(harness: Harness, projectPath: string, launch: Launch): 
       : undefined;
   const already = typeof container === 'object' && container !== null && SERVER_KEY in container;
 
+  return put(harness, path, `${JSON.stringify(merged(existing, harness, launch), null, 2)}\n`, already);
+}
+
+/** One file written, and the one line that says whether it was new. */
+function put(harness: Harness, path: string, contents: string, already: boolean): Written {
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, `${JSON.stringify(merged(existing, harness, launch), null, 2)}\n`, 'utf8');
+  writeFileSync(path, contents, 'utf8');
   return { harness, path, action: already ? 'replaced' : 'written' };
+}
+
+/**
+ * One entry taken out of a file that is not JSON.
+ *
+ * Unchanged means there was nothing of ours in it. Emptied means the file held only our entry, and
+ * a file we created and then emptied is litter.
+ */
+function taken(harness: Harness, path: string, held: string, stripped: string): Removed {
+  if (stripped === held) {
+    return { harness, path, action: 'absent' };
+  }
+  if (stripped.trim() === '' || stripped.trim() === '{}') {
+    rmSync(path, { force: true });
+    return { harness, path, action: 'deleted' };
+  }
+  writeFileSync(path, stripped, 'utf8');
+  return { harness, path, action: 'removed' };
 }

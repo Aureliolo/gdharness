@@ -2,12 +2,16 @@
 
 ## Requirements
 
-|       |                                                        |
-| ----- | ------------------------------------------------------ |
-| Godot | 4.7.0 or newer. Keep the absolute path to the binary.  |
-| Node  | 22 or newer, for `npx`. Bun 1.4.0 or newer also works. |
+|              |                                                            |
+| ------------ | ---------------------------------------------------------- |
+| Godot        | 4.7.0 or newer                                             |
+| Node, or Bun | Node 22 or newer for `npx`, or Bun 1.4 or newer for `bunx` |
 
-Godot does not have to be on `PATH`.
+One of the two runtimes, not both: `npx` ships with Node, `bunx` with Bun, and the server runs
+under either.
+
+`setup` finds Godot itself, in the usual install locations. Set `GODOT_PATH` to the binary if
+yours is somewhere else, and it will write that path into the config it generates.
 
 ## One command
 

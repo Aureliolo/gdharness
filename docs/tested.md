@@ -30,16 +30,7 @@ misspelled, an operation reading an argument nobody sends, a connection saved wi
 | `runtime_capture`    | No CI machine has a display                     | That it refuses in a headless game |
 | `editor_launch open` | Would leave an editor running on the CI machine | The command line it builds         |
 
-## Removed rather than documented
-
-`debug_control pause` was removed after measurement: Godot answers the request, reports the game as
-stopped, and leaves it running.
-
-`debug_control step_out` went the same way. The request times out, because Godot's adapter parser
-implements `req_next` and `req_stepIn` and nothing for `stepOut`. A fixture asks for the op and
-expects the refusal, so an engine that grows one is noticed rather than left unused.
-
-## Where to look
+## The checks themselves
 
 - [`ci.yml`](https://github.com/Aureliolo/gdharness/blob/main/.github/workflows/ci.yml). Every job
   is a required check.

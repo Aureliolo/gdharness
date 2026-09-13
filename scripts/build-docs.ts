@@ -14,7 +14,7 @@ import { cpSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } f
 import { join } from 'node:path';
 import process from 'node:process';
 import { marked, type Tokens } from 'marked';
-import { displayPath, HARNESSES, type Harness, launchFor } from '../src/harnesses.js';
+import { displayPath, HARNESSES, type Harness } from '../src/harnesses.js';
 import { SERVER_VERSION } from '../src/server-version.js';
 import { TOOL_SPECS } from '../src/tool-definitions.js';
 import { renderToolsMarkdown } from '../src/tool-reference.js';
@@ -35,12 +35,7 @@ const TOOL_COUNT = String(TOOL_SPECS.length);
 function renderHarnesses(): string {
   const rows = HARNESSES.map((harness) => {
     const file = `\`${displayPath(harness, 'linux')}\``;
-    const how =
-      harness.addCommand !== undefined
-        ? `runs \`${harness.addCommand(EXAMPLE_LAUNCH).join(' ')}\``
-        : harness.snippet !== undefined
-          ? 'prints the block to paste'
-          : 'written for you';
+    const how = harness.snippet === undefined ? 'written for you' : 'prints the block to paste';
     const scope = harness.scope === 'project' ? 'project' : 'machine-wide';
     const skills =
       harness.skills === undefined ? '`.agents/skills`' : `\`${harness.skills.dir.replaceAll('\\', '/')}\``;
@@ -52,9 +47,6 @@ function renderHarnesses(): string {
     ...rows,
   ].join('\n');
 }
-
-/** A launch line for the documentation: this version, and a path a reader will recognise. */
-const EXAMPLE_LAUNCH = launchFor(SERVER_VERSION, '/path/to/godot');
 
 /**
  * Every harness, by name.
@@ -88,16 +80,15 @@ function renderPicker(): string {
         ? `Writes <code>${escaped(displayPath(harness, 'linux'))}</code> inside the project.`
         : `${escaped(harness.name)} has no project-level config, so this writes <code>${escaped(displayPath(harness, 'linux'))}</code> and affects every project you open with it.`;
     const how =
-      harness.addCommand !== undefined
-        ? ' It prints the command to run rather than editing the file itself.'
-        : harness.snippet !== undefined
-          ? ' The file is not JSON, so it prints the block to paste rather than rewriting it.'
-          : '';
+      harness.snippet === undefined
+        ? ''
+        : ' Its file is documented but the key it holds servers under is not, so this prints the block rather than guessing.';
+    const left = harness.manual === undefined ? '' : ` ${escaped(harness.manual)}`;
     const skill = harness.skills === undefined ? '.agents/skills' : harness.skills.dir.replaceAll('\\', '/');
     return [
       `<div class="panel panel-${harness.id}">`,
       `<pre><code>${escaped(command)}</code></pre>`,
-      `<p>${where}${how} The skill goes to <code>${escaped(skill)}</code>.</p>`,
+      `<p>${where}${how} The skill goes to <code>${escaped(skill)}</code>.${left}</p>`,
       '</div>',
     ].join('');
   });
@@ -216,7 +207,7 @@ function renderHome(): string {
   return [
     '<section class="hero">',
     '<h1>Make the engine answer.</h1>',
-    '<p class="sub">Drive a Godot 4 project from an agent: the editor that is open, the game that is running, and the project on disk. An agent cannot see a running game; this makes one answerable.</p>',
+    '<p class="sub">Your agent can see the editor you have open, the game that is running, and the project on disk, and it can change all three.</p>',
     '</section>',
     `<div class="cards">${cards.join('')}</div>`,
     '<section class="install">',

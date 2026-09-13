@@ -60,10 +60,18 @@ and never writes there.
 
 {{harnesses}}
 
-Three kinds. Most are a JSON file we can write and re-read, so gdharness merges itself in and
-leaves everything else in the file alone. A few keep their config in TOML or YAML, which we will
-not rewrite because round-tripping it would cost somebody their comments, so those get the command
-their own CLI documents or the block to paste. And eight have no project-level config at all.
+All but two are written for you, whatever the format, because a block to paste is a step that gets
+skipped or pasted into the wrong file.
+
+| Format | How it is written                          | What survives                                          |
+| ------ | ------------------------------------------ | ------------------------------------------------------ |
+| JSON   | Merged                                     | Every other server and key in the file                 |
+| TOML   | Our table appended, or replaced in place   | Every other byte: TOML tables are position-independent |
+| YAML   | Through a parser that round-trips comments | Their servers and the comments about them              |
+
+The two exceptions are nanobot and Autohand. Their config file is documented; the key they hold
+servers under is not, and an invented key writes a file that parses, loads and does nothing. Those
+print the block instead.
 
 Four harnesses read the same `.mcp.json`, so it is written once and all four are named.
 
