@@ -60,6 +60,14 @@
       "matchStrings": [
         "# renovate: datasource=(?<datasource>github-runners) depName=(?<depName>ubuntu|windows|macos)\\n\\s*runner: (?:ubuntu|windows|macos)-(?<currentValue>[0-9.]+(?:-[a-z0-9]+)?)"
       ]
+    },
+    {
+      "description": "npm raised in place in the release job, because trusted publishing needs a newer npm than the runner ships and nothing else here installs one.",
+      "customType": "regex",
+      "managerFilePatterns": ["/^\\.github/.+\\.ya?ml$/"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>npm) depName=(?<depName>\\S+)\\n\\s*npm install --global \\S+@(?<currentValue>\\S+)"
+      ]
     }
   ]
 }

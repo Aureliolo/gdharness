@@ -1,11 +1,29 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.Aureliolo/gdharness",
-  "description": "A harness for driving a Godot 4 project from an agent: editor addons, runtime bridge, MCP server.",
+  "description": "A harness for driving a Godot 4 project from an agent: addons, runtime bridge, MCP server, CLI.",
   "repository": {
     "url": "https://github.com/Aureliolo/gdharness",
     "source": "github"
   },
   "websiteUrl": "https://github.com/Aureliolo/gdharness#readme",
-  "version": "0.3.1"
+  "version": "0.3.1",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "gdharness",
+      "version": "0.3.1",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "GODOT_PATH",
+          "description": "Absolute path to the Godot 4.7 or newer executable. Without it, the usual install locations are searched.",
+          "isRequired": false,
+          "isSecret": false
+        }
+      ]
+    }
+  ]
 }

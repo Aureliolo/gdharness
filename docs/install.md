@@ -2,21 +2,107 @@
 
 ## Requirements
 
-|       |                                                       |
-| ----- | ----------------------------------------------------- |
-| Godot | 4.7.0 or newer. Keep the absolute path to the binary. |
-| Bun   | 1.4.0 or newer.                                       |
+|       |                                                        |
+| ----- | ------------------------------------------------------ |
+| Godot | 4.7.0 or newer. Keep the absolute path to the binary.  |
+| Node  | 22 or newer, for `npx`. Bun 1.4.0 or newer also works. |
 
-Neither has to be on `PATH`. Node is not supported.
+Godot does not have to be on `PATH`.
 
-## 1. Download and verify
+## One command
 
-Two checks. The checksum proves the bytes match the release. The attestation proves GitHub Actions
-built them from this repository at that tag on a hosted runner.
+```bash from the project directory
+npx -y gdharness@{{version}} setup . --runtime
+```
 
-With [`gh`](https://cli.github.com), authenticated:
+That installs the addons, enables the editor plugins, registers the runtime autoload, rebuilds
+the class list, and writes the server into every agent harness it finds on this machine.
 
-```bash verify with gh
+Then reconnect the harness so it spawns the server, and check `editor_status` answers.
+
+## What it writes, and where
+
+Detected harnesses are written to. Name them instead to pick:
+
+```bash
+npx -y gdharness@{{version}} setup . --cursor --vscode
+npx -y gdharness@{{version}} setup . --no-connect    # addons only
+```
+
+{{harnesses}}
+
+A `project` scope writes inside the project, which is right for gdharness: the entry carries this
+project's Godot path. A `home` scope harness has no per-project config, so its entry is global and
+the Godot path in it is the one from the machine that ran `setup`.
+
+The entry is the same everywhere:
+
+```jsonc the server, as most harnesses spell it
+{
+  "mcpServers": {
+    "gdharness": {
+      "command": "npx",
+      "args": ["-y", "gdharness@{{version}}"],
+      "env": { "GODOT_PATH": "/path/to/godot" },
+    },
+  },
+}
+```
+
+The version is pinned rather than `latest`. The server and the addons it installed have to match,
+and `latest` is how they drift apart: `editor_status` reports that as `addonIsStale`.
+
+`GODOT_PATH` is the only environment variable read. Every tool call carries its own `projectPath`.
+
+An existing config keeps everything already in it, including other servers. One that does not
+parse is refused rather than replaced.
+
+## Check it works
+
+| Call                                         | Expected                                                   |
+| -------------------------------------------- | ---------------------------------------------------------- |
+| `editor_status`, nothing open                | Reports no editor. Does not fail.                          |
+| `editor_status`, editor open                 | `connected` true, `addonVersion` equal to `serverVersion`. |
+| `project_info`                               | The project name and main scene.                           |
+| `editor_run`, `editor_output`, `editor_stop` | The game starts, its console comes back, it stops.         |
+
+`gdharness doctor .` exits 1 on any problem and names it.
+
+## Updating
+
+```bash
+npx -y gdharness@<new> setup .
+```
+
+It rewrites the addons and the harness entries to the new version together. Then two things that
+are easy to miss, because the old version keeps answering until they are done:
+
+1. Reconnect the MCP server so the harness re-spawns it. In Claude Code, `/mcp` and reconnect.
+   Restarting the harness is not required.
+2. Restart an open editor: `editor_launch restart`, about seven seconds. A headless editor cannot
+   be restarted and has to be started again by hand.
+
+`editor_status` confirms: `addonVersion` equal to `serverVersion`, `addonIsStale` false.
+
+## The runtime autoload
+
+It is an autoload, so an export ships it unless it is removed. It refuses to serve outside a debug
+build, so it is not a server on a player's machine, but leave it off in anything you ship.
+
+```bash
+gdharness runtime on  /path/to/project
+gdharness runtime off /path/to/project
+```
+
+Without it the `runtime_*` tools have nothing to talk to.
+
+## Installing from the signed archive
+
+For a pinned or offline install, and for anything that verifies its own supply chain. The archive
+on the release is the same bytes npm serves, so either source verifies against the same
+attestation.
+
+```bash download and verify
 VERSION={{version}}
 gh release download "v${VERSION}" --repo Aureliolo/gdharness
 sha256sum -c "gdharness-${VERSION}.tgz.sha256"
@@ -27,106 +113,30 @@ gh attestation verify "gdharness-${VERSION}.tgz" --repo Aureliolo/gdharness \
   --deny-self-hosted-runners
 ```
 
-Without `gh`:
+Without `gh`, with `cosign` instead:
 
-```bash download and check the checksum
-VERSION={{version}}
-BASE="https://github.com/Aureliolo/gdharness/releases/download/v${VERSION}"
-curl -fsSLO "${BASE}/gdharness-${VERSION}.tgz"
-curl -fsSLO "${BASE}/gdharness-${VERSION}.tgz.sha256"
-sha256sum -c "gdharness-${VERSION}.tgz.sha256"
+```bash verify with cosign
+cosign verify-blob-attestation "gdharness-${VERSION}.tgz" \
+  --bundle "gdharness-${VERSION}.intoto.jsonl" \
+  --new-bundle-format \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity "https://github.com/Aureliolo/gdharness/.github/workflows/release-build.yml@refs/tags/v${VERSION}"
 ```
+
+With neither, hash the file and look the digest up in a browser at
+[github.com/Aureliolo/gdharness/attestations](https://github.com/Aureliolo/gdharness/attestations).
+That needs nothing installed, and it trusts GitHub over TLS rather than verifying a signature,
+which is weaker than either command above.
 
 macOS: `shasum -a 256 -c`. PowerShell: `Get-FileHash gdharness-$VERSION.tgz -Algorithm SHA256`.
 
-The attestation needs a tool. Either install `gh` and run the command above, or verify the
-`.intoto.jsonl` bundle with [Sigstore tooling](https://docs.sigstore.dev/cosign/verifying/verify/)
-against:
-
-- identity `https://github.com/Aureliolo/gdharness/.github/workflows/release-build.yml@refs/tags/v${VERSION}`
-- issuer `https://token.actions.githubusercontent.com`
-
-A failed check means stop.
-
-## 2. Unpack
+**A failed check means stop.** Then unpack and run it from where it landed:
 
 ```bash
 mkdir -p .tools/gdharness
 tar -xzf "gdharness-${VERSION}.tgz" -C .tools/gdharness --strip-components=1
-bun .tools/gdharness/build/cli.js version
+node .tools/gdharness/build/cli.js setup /path/to/project
 ```
-
-## 3. Configure the MCP client
-
-One stdio server. Absolute paths for all three values: clients do not expand `${...}` and do not
-reliably inherit `PATH`.
-
-```jsonc .mcp.json
-{
-  "mcpServers": {
-    "gdharness": {
-      "command": "/absolute/path/to/bun",
-      "args": ["/absolute/path/to/.tools/gdharness/build/index.js"],
-      "env": { "GODOT_PATH": "/absolute/path/to/godot" },
-    },
-  },
-}
-```
-
-`GODOT_PATH` is the only environment variable read. Every tool call carries its own `projectPath`.
-
-Reconnect or restart the client, then check the tools are listed.
-
-## 4. Install the addons
-
-```bash
-bun .tools/gdharness/build/cli.js setup /absolute/path/to/project
-bun .tools/gdharness/build/cli.js doctor /absolute/path/to/project
-```
-
-`setup` installs `gdharness_editor` and `auto_reload` and enables them. `doctor` exits 1 on any
-problem and names it.
-
-The runtime addon is an autoload and reaches an exported build, so it is off by default:
-
-```bash
-bun .tools/gdharness/build/cli.js runtime on  /absolute/path/to/project
-bun .tools/gdharness/build/cli.js runtime off /absolute/path/to/project
-```
-
-Without it the `runtime_*` tools have nothing to talk to.
-
-## 5. Check it works
-
-| Call                                         | Expected                                                   |
-| -------------------------------------------- | ---------------------------------------------------------- |
-| `editor_status`, nothing open                | Reports no editor. Does not fail.                          |
-| `editor_status`, editor open                 | `connected` true, `addonVersion` equal to `serverVersion`. |
-| `project_info`                               | The project name and main scene.                           |
-| `editor_run`, `editor_output`, `editor_stop` | The game starts, its console comes back, it stops.         |
-
-`addonIsStale` true means the editor is running an older addon than the server ships. Restart it
-with `editor_launch restart`.
-
-## Updating
-
-```bash
-VERSION=<new>
-# download and verify as in step 1, then
-rm -rf .tools/gdharness && mkdir -p .tools/gdharness
-tar -xzf "gdharness-${VERSION}.tgz" -C .tools/gdharness --strip-components=1
-bun .tools/gdharness/build/cli.js setup  /absolute/path/to/project
-bun .tools/gdharness/build/cli.js doctor /absolute/path/to/project
-```
-
-Then two things that are easy to miss, because the old version keeps answering until they are done:
-
-1. Reconnect the MCP server so the client re-spawns it. In Claude Code, `/mcp` and reconnect.
-   Restarting the client is not required.
-2. Restart an open editor: `editor_launch restart`, about seven seconds. A headless editor cannot
-   be restarted and has to be started again by hand.
-
-`editor_status` confirms: `addonVersion` equal to `serverVersion`, `addonIsStale` false.
 
 ## Conventions to recommend
 

@@ -8,6 +8,15 @@
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { GodotLocator } from './godot-path.js';
+import {
+  connect,
+  detect,
+  HARNESSES,
+  type Harness,
+  harnessById,
+  launchFor,
+  type Written,
+} from './harnesses.js';
 import { type HeadlessEngine, type HeadlessOutcome, runOperation } from './headless.js';
 import { GODOT_DEBUG_MODE_DEFAULT } from './server-version.js';
 import {
@@ -57,6 +66,45 @@ function said(outcome: HeadlessOutcome, what: string): void {
   }
 }
 
+/** setup's own flags, so anything else beginning with -- is read as naming a harness. */
+const SETUP_FLAGS = new Set(['--runtime', '--no-connect', '--json']);
+
+/**
+ * The harnesses to write into: the ones named, else the ones this machine appears to run.
+ *
+ * An unknown flag is refused rather than ignored, because a silently dropped `--curser` leaves
+ * somebody believing a harness is configured when nothing was written.
+ */
+function chosenHarnesses(projectPath: string): readonly Harness[] {
+  const named = args.filter((arg) => arg.startsWith('--') && !SETUP_FLAGS.has(arg));
+  const picked: Harness[] = [];
+  for (const flag of named) {
+    const harness = harnessById(flag.slice(2));
+    if (harness === undefined) {
+      throw new UsageError(
+        `Unknown option ${flag}. Harnesses: ${HARNESSES.map((known) => `--${known.id}`).join(', ')}.`,
+      );
+    }
+    picked.push(harness);
+  }
+  return picked.length > 0 ? picked : detect(projectPath);
+}
+
+function reportConnection(written: Written): void {
+  if (written.action === 'command') {
+    console.log(`${written.harness.name}: run  ${(written.command ?? []).join(' ')}`);
+    return;
+  }
+  if (written.action === 'snippet') {
+    console.log(`${written.harness.name}: put this in ${written.path}`);
+    for (const line of (written.snippet ?? '').split('\n')) {
+      console.log(`  ${line}`);
+    }
+    return;
+  }
+  console.log(`${written.harness.name}: ${written.action} ${written.path}`);
+}
+
 async function setup(): Promise<void> {
   const projectPath = projectArgument(1);
   const runtime = args.includes('--runtime');
@@ -80,6 +128,19 @@ async function setup(): Promise<void> {
   if (classes.ok) {
     console.log(`class list rebuilt: ${String(classes.payload['classes'])} classes`);
   }
+
+  if (!args.includes('--no-connect')) {
+    // The version is the running one, so the config pins the server that installed these addons.
+    const launch = launchFor(getLocalVersion(), godot.godotPath);
+    const harnesses = chosenHarnesses(projectPath);
+    if (harnesses.length === 0) {
+      console.log(`no harness detected; name one with --${HARNESSES.map((h) => h.id).join(' or --')}`);
+    }
+    for (const harness of harnesses) {
+      reportConnection(connect(harness, projectPath, launch));
+    }
+  }
+
   doctorReport(projectPath);
 }
 
@@ -137,10 +198,12 @@ gdharness v${getLocalVersion()}, a harness for driving a Godot 4 project from an
 
 Usage:
   gdharness                          Start the MCP server (default)
-  gdharness setup <project> [--runtime]
+  gdharness setup <project> [--runtime] [--no-connect] [--<harness>]
                                      Install the addons into the project, enable the editor
                                      ones, register the runtime autoload with --runtime, and
-                                     rebuild the class list
+                                     rebuild the class list. Then register the server with the
+                                     harnesses found here, or with the ones named:
+                                     ${HARNESSES.map((harness) => `--${harness.id}`).join(', ')}
   gdharness doctor <project> [--json]
                                      Say what holds and what does not; exit 1 on a problem
   gdharness runtime on|off <project> Register or remove the runtime autoload, which reaches

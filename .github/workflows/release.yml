@@ -102,3 +102,70 @@ jobs:
             --verify-tag \
             --generate-notes \
             --title "gdharness ${VERSION}"
+
+  # npm is how every harness actually installs a server: each one's config is some spelling of
+  # `npx -y gdharness@VERSION`. The archive published here is the one the attest job signed, so
+  # the Sigstore attestation and the SBOM cover the bytes npm serves, and npm adds its own
+  # provenance on top. Runs after the release so a published npm version always has a release
+  # behind it to verify against.
+  npm:
+    name: npm
+    if: github.repository == 'Aureliolo/gdharness'
+    needs: [build, publish]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      id-token: write # npm's trusted publishing takes this instead of a token, and signs provenance with it.
+
+    steps:
+      - name: Download the bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-bundle
+          path: dist
+
+      - name: Verify the checksum once more
+        shell: bash
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          (cd dist && sha256sum --check "gdharness-${VERSION}.tgz.sha256")
+
+      # Trusted publishing needs npm 11.5.1 or newer and the runner's bundled npm is older, so the
+      # only thing wanted from Node here is a current npm. Raising it in place beats adding a
+      # setup action: one less third party in the release path, and one less digest to watch.
+      - name: Publish to npm
+        shell: bash
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          # renovate: datasource=npm depName=npm
+          npm install --global npm@12.0.2
+          npm --version
+          # No NPM_TOKEN anywhere: the OIDC token this job asked for is the credential, and npm
+          # generates and publishes its own provenance attestation from it without being asked.
+          npm publish "dist/gdharness-${VERSION}.tgz" --access public
+
+      # The claim made in the documentation is that what npm serves is the archive this repository
+      # signed, so somebody can install from npm and verify against the release bundle. That is
+      # only true if the registry stores the bytes it was given, which is checked rather than
+      # assumed: if npm ever repacks, this fails on the release that first did it.
+      - name: The published tarball is the archive that was signed
+        shell: bash
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          expected="$(cut -d' ' -f1 < "dist/gdharness-${VERSION}.tgz.sha256")"
+          url="$(npm view "gdharness@${VERSION}" dist.tarball)"
+          curl -fsSL "${url}" -o published.tgz
+          actual="$(sha256sum published.tgz | cut -d' ' -f1)"
+
+          if [[ "${expected}" != "${actual}" ]]; then
+            echo "npm serves ${actual}; the signed archive is ${expected}." >&2
+            echo "The attestation no longer covers what npm hands out. Fix the docs or the job." >&2
+            exit 1
+          fi
+          echo "npm serves the signed archive: ${actual}."
