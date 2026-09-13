@@ -24,9 +24,10 @@ runtime_inspect { "op": "rect", "nodePath": "/root/Hall/Ledger/BuyButton" }
 npx -y gdharness@{{version}} setup . --runtime
 ```
 
-Addons in, editor plugins on, class list rebuilt, and the server written into every agent harness
-found on the machine. [Install](install.html) has the rest, including the signed archive for a
-pinned or offline install.
+Addons in, editor plugins on, class list rebuilt, and the server registered with the harnesses
+already set up in this project. It writes nothing outside the project directory unless you name a
+harness yourself. [Install](install.html) has the rest, including the signed archive for a pinned
+or offline install.
 
 To have an agent do it, paste:
 

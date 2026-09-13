@@ -43,9 +43,11 @@ From the project directory:
 npx -y gdharness@0.4.2 setup . --runtime
 ```
 
-Addons in, editor plugins on, class list rebuilt, and the server written into every agent harness
-found on the machine: Claude Code, Cursor, VS Code, opencode, Codex, Gemini CLI, Windsurf, Hermes
-and the rest. Reconnect the harness, then check `editor_status` answers.
+Addons in, editor plugins on, class list rebuilt, and the server registered with the harnesses
+already set up in this project: Claude Code, Cursor, VS Code, opencode, Junie, Kiro. It writes
+nothing outside the project directory; a harness whose config is machine-wide, such as Codex or
+Gemini CLI, is named and left alone unless you ask for it by flag. Reconnect the harness, then
+check `editor_status` answers.
 
 [Install](https://aureliolo.github.io/gdharness/install.html) has the rest, including the signed
 archive for a pinned or offline install. To have an agent do it, paste:

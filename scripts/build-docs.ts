@@ -40,9 +40,12 @@ function renderHarnesses(): string {
         : harness.snippet !== undefined
           ? 'prints the block to paste'
           : 'written for you';
-    return `| ${harness.name} | \`--${harness.id}\` | ${file} | ${how} |`;
+    const when = harness.scope === 'project' ? 'when set up here' : 'only if named';
+    return `| ${harness.name} | \`--${harness.id}\` | ${file} | ${when} | ${how} |`;
   });
-  return ['| Harness | Flag | Config | How |', '| --- | --- | --- | --- |', ...rows].join('\n');
+  return ['| Harness | Flag | Config | Written | How |', '| --- | --- | --- | --- | --- |', ...rows].join(
+    '\n',
+  );
 }
 
 /** A launch line for the documentation: this version, and a path a reader will recognise. */
