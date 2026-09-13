@@ -2,12 +2,15 @@ name: Prepare release
 
 # Cutting a tag by hand is the one release step nobody can check afterwards, and it is the step
 # most often done at the wrong time, from the wrong branch, against the wrong version. This puts
-# it behind a button: pick the bump, get a branch with the signed version commit, open the pull
-# request it prints, merge it. Tagging and publishing follow from the merge without anyone
-# typing a version again.
+# it behind a button: pick the bump, and out comes a branch with the signed version commit and a
+# pull request for it. Merge that and the tagging and publishing follow, with nobody typing a
+# version again.
 #
-# The pull request is opened by a person and not here: a pull request opened with the job token
-# starts no workflow, so nothing would check it and the merge would stay blocked.
+# The checks on that pull request are created in an approval-required state and wait for a click.
+# That is GitHub's rule for anything a workflow opens with the job token: the runs exist, they
+# are held, and a banner in the merge box offers "Approve workflows to run". Getting them to
+# start by themselves would mean a GitHub App or a personal access token, which is a standing
+# credential bought to save one click.
 on:
   workflow_dispatch:
     inputs:
@@ -38,6 +41,7 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: write # Creates the release branch and the signed version-bump commit on it.
+      pull-requests: write # Opens the release pull request for that branch.
 
     steps:
       - name: Checkout main
@@ -98,8 +102,9 @@ jobs:
           bun scripts/commit-signed.ts "${BRANCH}" "Release v${VERSION}" \
             package.json server.json README.md
 
-      - name: Say how to open the pull request
+      - name: Open the release pull request
         env:
+          GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           BRANCH: ${{ steps.bump.outputs.branch }}
           VERSION: ${{ steps.bump.outputs.version }}
@@ -107,14 +112,15 @@ jobs:
           set -euo pipefail
           body="Raises the version to ${VERSION} in package.json, server.json and the README."
           body="${body} Merging this tags v${VERSION}, which builds, signs and publishes the release."
+
+          url="$(gh pr create --base main --head "${BRANCH}" \
+            --title "Release v${VERSION}" --body "${body}")"
+
           {
-            echo "## Release v${VERSION} is ready on \`${BRANCH}\`"
+            echo "## Release v${VERSION}"
             echo
-            echo "Open the pull request, which starts the checks, and merge it to tag and publish:"
+            echo "${url}"
             echo
-            echo '```sh'
-            echo "gh pr create --repo ${GH_REPO} --base main --head ${BRANCH} \\"
-            echo "  --title 'Release v${VERSION}' \\"
-            echo "  --body '${body}'"
-            echo '```'
+            echo 'Its checks are waiting on **Approve workflows to run** in the merge box.'
+            echo 'Approve them, and merge once they are green: that tags and publishes.'
           } >> "${GITHUB_STEP_SUMMARY}"
