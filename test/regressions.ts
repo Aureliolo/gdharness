@@ -14,7 +14,7 @@ import {
 } from 'node:fs';
 import { createServer, type Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 import { GodotDAPClient } from '../src/dap_client.js';
@@ -1561,6 +1561,25 @@ function testCommandLineSetup(): void {
     assert.match(stale.stdout, /class cache: stale for LateArrival/);
     assert.equal(cli('classes', projectDir).status, 0);
     assert.equal(cli('doctor', projectDir).status, 0, 'and rebuilding it is the cure');
+
+    // Everything back out, with the reader's own file left holding what was theirs.
+    const shared = join(projectDir, '.cursor', 'mcp.json');
+    mkdirSync(dirname(shared), { recursive: true });
+    writeFileSync(shared, JSON.stringify({ mcpServers: { other: { command: 'theirs' } } }), 'utf8');
+    assert.equal(cli('setup', projectDir, '--cursor').status, 0);
+    assert.ok(existsSync(join(projectDir, '.agents', 'skills', 'gdharness', 'SKILL.md')), 'the skill is in');
+
+    const removed = cli('uninstall', projectDir);
+    assert.equal(removed.status, 0, `uninstall:\n${removed.stdout}${removed.stderr}`);
+    for (const addon of ['gdharness_editor', 'gdharness_runtime', 'auto_reload']) {
+      assert.equal(existsSync(join(projectDir, 'addons', addon)), false, `${addon} is gone`);
+    }
+    const stripped = readFileSync(join(projectDir, 'project.godot'), 'utf8');
+    assert.doesNotMatch(stripped, /GdharnessRuntime/, 'the autoload is gone');
+    assert.doesNotMatch(stripped, /gdharness_editor\/plugin\.cfg/, 'and the editor plugin is off');
+    assert.equal(existsSync(join(projectDir, '.agents')), false, 'the directory the skill made is gone');
+    const theirs = JSON.parse(readFileSync(shared, 'utf8')) as Record<string, Record<string, unknown>>;
+    assert.deepEqual(theirs['mcpServers'], { other: { command: 'theirs' } }, 'their server survives ours');
   } finally {
     rmSync(projectDir, { recursive: true, force: true });
   }

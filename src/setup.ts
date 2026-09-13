@@ -68,6 +68,32 @@ export function installAddons(
   return installed;
 }
 
+/** Each addon taken back out, naming the ones that were there to remove. */
+export function removeAddons(projectPath: string): readonly string[] {
+  const removed: string[] = [];
+  for (const name of ADDONS) {
+    const target = join(projectPath, 'addons', name);
+    if (existsSync(target)) {
+      rmSync(target, { recursive: true, force: true });
+      removed.push(target);
+    }
+  }
+  return removed;
+}
+
+/** The plugins turned off in project.godot, through the engine, the way they were turned on. */
+export async function disablePlugins(
+  engine: HeadlessEngine,
+  projectPath: string,
+  names: readonly string[],
+): Promise<HeadlessOutcome[]> {
+  const outcomes: HeadlessOutcome[] = [];
+  for (const name of names) {
+    outcomes.push(await runOperation(engine, 'disable_plugin', { pluginName: name }, projectPath));
+  }
+  return outcomes;
+}
+
 /** The plugins turned on in project.godot, through the engine. */
 export async function enablePlugins(
   engine: HeadlessEngine,

@@ -124,13 +124,32 @@ are easy to miss, because the old version keeps answering until they are done:
 ```bash
 gdharness setup /path/to/project              # addons in, editor ones enabled, class list rebuilt
 gdharness setup /path/to/project --no-connect # and write no harness configuration
+gdharness uninstall /path/to/project          # take all of it back out again
 gdharness doctor /path/to/project             # exits 1 on a problem and names it
 gdharness classes /path/to/project            # rebuild the class cache from disk
+gdharness harnesses                           # every harness, its flag and the file it reads
 ```
 
 `setup` copies each addon whole and writes the version beside it, so `doctor` can tell an old copy
 from the shipped one. An editor that was already open keeps serving the addon it loaded at startup
 until it is restarted.
+
+## Uninstalling
+
+```bash
+gdharness uninstall /path/to/project
+```
+
+The addons, the editor plugin entries, the runtime autoload, the skill, and gdharness's own entry
+in every config it can parse. Other servers in those files keep their entries and the file stays; a
+file that held nothing but gdharness goes with it, and so does the `.agents/skills` directory it
+created. A harness's own directory is left alone, empty or not, because it is theirs.
+
+A machine-wide config may be serving another project, so it is named rather than edited:
+
+```text
+Codex CLI: left alone. Its config is machine-wide and may serve another project; pass --codex to remove it.
+```
 
 Writes to `project.godot` go through the engine, so the file keeps its comments and formatting.
 

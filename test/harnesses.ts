@@ -18,6 +18,7 @@ import {
   connect,
   detect,
   detectGlobal,
+  disconnect,
   displayPath,
   entryFor,
   groupByFile,
@@ -374,6 +375,99 @@ function testCodexCarriesTheGodotPath(): void {
   ]);
 }
 
+/**
+ * Taking gdharness out again. The file belongs to the harness, so the only thing that may change
+ * is our own entry: everything else in it, servers and settings alike, comes through untouched.
+ */
+function testRemovingTakesOnlyOurEntry(): void {
+  const harness = harnessById('cursor');
+  assert.ok(harness, 'cursor is in the table');
+  const root = project();
+  try {
+    const path = join(root, harness.file as string);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(
+      path,
+      JSON.stringify({
+        mcpServers: { other: { command: 'other-server' } },
+        somethingElse: { kept: true },
+      }),
+      'utf8',
+    );
+    connect(harness, root, LAUNCH);
+
+    const removal = disconnect(harness, root);
+    assert.equal(removal.action, 'removed');
+    const config = read(path);
+    const servers = config['mcpServers'] as Record<string, unknown>;
+    assert.deepEqual(servers['other'], { command: 'other-server' }, 'their server survives');
+    assert.deepEqual(config['somethingElse'], { kept: true }, 'and so does a key we know nothing about');
+    assert.equal(SERVER_KEY in servers, false, 'ours is gone');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+/** A file that held nothing but gdharness is one we created, and leaving it empty is litter. */
+function testAFileThatHeldOnlyUsIsDeleted(): void {
+  const harness = harnessById('claude-code');
+  assert.ok(harness, 'claude-code is in the table');
+  const root = project();
+  try {
+    const written = connect(harness, root, LAUNCH);
+    assert.equal(written.action, 'written');
+
+    const removal = disconnect(harness, root);
+    assert.equal(removal.action, 'deleted');
+    assert.equal(existsSync(written.path), false, 'the file goes with the entry');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Nothing to say is better than something wrong to say. A config that is not there, or is there
+ * without us in it, or cannot be parsed, all mean the same thing: we have nothing to remove.
+ */
+function testThereIsNothingToReportWhenWeWereNeverThere(): void {
+  const harness = harnessById('cursor');
+  const toml = harnessById('vtcode');
+  assert.ok(harness && toml, 'both are in the table');
+  const root = project();
+  try {
+    assert.equal(disconnect(harness, root).action, 'absent', 'no file at all');
+    assert.equal(disconnect(toml, root).action, 'absent', 'and no advice about a file that is not there');
+
+    const path = join(root, harness.file as string);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, JSON.stringify({ mcpServers: { other: { command: 'other' } } }), 'utf8');
+    assert.equal(disconnect(harness, root).action, 'absent', 'a config holding only their servers');
+
+    writeFileSync(path, '{ not json at all', 'utf8');
+    assert.equal(disconnect(harness, root).action, 'absent', 'and one we could never have written to');
+    assert.equal(readFileSync(path, 'utf8'), '{ not json at all', 'which is left exactly as it was');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+/** A config we cannot edit gets described instead, and only once its file actually exists. */
+function testAConfigWeCannotEditIsDescribedRatherThanTouched(): void {
+  const harness = harnessById('codex');
+  assert.ok(harness?.removeCommand, 'codex documents how to take a server out');
+  const root = project();
+  try {
+    const path = join(root, 'config.toml');
+    writeFileSync(path, '[mcp_servers.gdharness]\n', 'utf8');
+    const removal = disconnect({ ...harness, scope: 'project', file: 'config.toml' }, root);
+    assert.equal(removal.action, 'manual');
+    assert.deepEqual(removal.command, ['codex', 'mcp', 'remove', 'gdharness']);
+    assert.equal(readFileSync(path, 'utf8'), '[mcp_servers.gdharness]\n', 'the file is not touched');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 const TESTS = [
   testEveryIdIsUniqueAndFindable,
   testTheLaunchIsTheSameEverywhere,
@@ -390,6 +484,10 @@ const TESTS = [
   testAHarnessIsDetectedByItsOwnDirectory,
   testAHarnessWeCannotWriteIsNeverWrittenTo,
   testCodexCarriesTheGodotPath,
+  testRemovingTakesOnlyOurEntry,
+  testAFileThatHeldOnlyUsIsDeleted,
+  testThereIsNothingToReportWhenWeWereNeverThere,
+  testAConfigWeCannotEditIsDescribedRatherThanTouched,
 ];
 
 for (const test of TESTS) {
