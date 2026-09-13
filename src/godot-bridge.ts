@@ -4,6 +4,7 @@ import http from 'node:http';
 import type { RawData } from 'ws';
 import { WebSocket, WebSocketServer } from 'ws';
 import { errorMessage, toError } from './errors.js';
+import { portFromEnv } from './ports.js';
 
 const DEFAULT_PORT = 6505;
 const DEFAULT_HOST = '127.0.0.1';
@@ -11,21 +12,9 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 const KEEPALIVE_INTERVAL_MS = 10_000;
 const SECOND_CONNECTION_CLOSE_CODE = 4000;
 
-/**
- * The port the bridge listens on: GDHARNESS_BRIDGE_PORT, which the editor addon reads too, so
- * the two agree by construction. A value that is not a port is a configuration to fix, and
- * a server that quietly listened on the default instead would be one the editor cannot find.
- */
+/** The editor addon reads GDHARNESS_BRIDGE_PORT too, so the two agree by construction. */
 function resolveDefaultBridgePort(): number {
-  const raw = process.env['GDHARNESS_BRIDGE_PORT']?.trim();
-  if (!raw) {
-    return DEFAULT_PORT;
-  }
-  const parsed = Number.parseInt(raw, 10);
-  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535 || String(parsed) !== raw) {
-    throw new Error(`GDHARNESS_BRIDGE_PORT is "${raw}", not a port between 1 and 65535.`);
-  }
-  return parsed;
+  return portFromEnv('GDHARNESS_BRIDGE_PORT', DEFAULT_PORT);
 }
 
 function resolveDefaultBridgeHost(): string {

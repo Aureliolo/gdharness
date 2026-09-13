@@ -106,6 +106,11 @@ tools talk to the editor's language server and debug adapter; the `runtime_*` to
 a running game, whether `editor_run` started it or the editor's play button did. Everything
 else runs the engine headless and needs nothing open.
 
+Those three connections are on 6505, 6005 and 6006, and `GDHARNESS_BRIDGE_PORT`,
+`GDHARNESS_LSP_PORT` and `GDHARNESS_DAP_PORT` move them. Godot takes the last two on its own
+command line as `--lsp-port` and `--dap-port`, so an editor that had to be moved off a default is
+still reachable; a variable holding something that is not a port is said so rather than ignored.
+
 What a game prints comes back as entries rather than lines: `editor_output` reads the engine's
 `ERROR:`, `SCRIPT ERROR:` and `WARNING:` headlines with the `at:` line and backtrace under each,
 answers with the counts and a `clean` verdict, and filters by severity, by text, or to what has

@@ -1,5 +1,8 @@
 import { createConnection, type Socket } from 'node:net';
 import { FrameReader, frame, OversizedStreamError } from './framing.js';
+import { portFromEnv } from './ports.js';
+
+const DEFAULT_DAP_PORT = 6006;
 
 interface PendingRequest {
   resolve: (value: DAPBody | PromiseLike<DAPBody>) => void;
@@ -47,7 +50,7 @@ export class GodotDAPClient {
   private lastThreadId = 1;
   private breakpoints = new Map<string, Set<number>>();
 
-  constructor(port = 6006, host = '127.0.0.1') {
+  constructor(port = portFromEnv('GDHARNESS_DAP_PORT', DEFAULT_DAP_PORT), host = '127.0.0.1') {
     this.port = port;
     this.host = host;
     this.pendingRequests = new Map();

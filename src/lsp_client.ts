@@ -1,9 +1,13 @@
+import { realpathSync } from 'node:fs';
 import { readFile, realpath } from 'node:fs/promises';
 import { createConnection, type Socket } from 'node:net';
 import { dirname, resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { FrameReader, frame, OversizedStreamError } from './framing.js';
-import { isWithinRoot } from './paths.js';
+import { isWithinRoot, resolveWithinProject } from './paths.js';
+import { portFromEnv } from './ports.js';
+
+const DEFAULT_LSP_PORT = 6005;
 
 interface PendingRequest {
   resolve: (value: unknown) => void;
@@ -24,22 +28,35 @@ const DIAGNOSTICS_TIMEOUT_MS = 5000;
 /**
  * Normalise a file URI so the same file always produces the same key.
  *
- * Godot and Node spell a Windows path differently. Since Godot 4.5 the language server
- * encodes URIs per RFC 3986, which percent-encodes the drive colon:
+ * Windows spells one path several ways, and a waiter registered under one spelling is never
+ * found under another, so diagnostics simply never arrive while every other request answers.
  *
- *   Godot: file:///C%3A/Users/me/game/player.gd
- *   Node:  file:///C:/Users/me/game/player.gd    (pathToFileURL, per WHATWG URL)
+ *   file:///C%3A/Users/me/game/player.gd   Godot, which encodes per RFC 3986 since 4.5
+ *   file:///C:/Users/me/game/player.gd     Node's pathToFileURL, per WHATWG URL
+ *   file:///C:/Users/RUNNER~1/...          the 8.3 name, which is what TEMP holds on a runner
  *
- * Both are valid and both name the same file, but they are not equal as strings, so a
- * waiter registered under one is never found under the other. Decoding puts them in the
- * same shape. On Linux and macOS there is no drive letter, the two already agree, and this
- * is a no-op.
+ * Decoding settles the first, and resolving the path settles the rest: the OS answers with the
+ * long name in the case the filesystem holds, and lowercasing matches the way Windows compares
+ * its own paths. On Linux and macOS the spellings already agree and only the decode applies.
  */
 function diagnosticsKey(uri: string): string {
+  let decoded: string;
   try {
-    return decodeURIComponent(uri);
+    decoded = decodeURIComponent(uri);
   } catch {
-    return uri;
+    decoded = uri;
+  }
+
+  if (process.platform !== 'win32') {
+    return decoded;
+  }
+
+  try {
+    return realpathSync.native(fileURLToPath(decoded)).toLowerCase();
+  } catch {
+    // A URI for a file that is gone, or one that is not a file URI at all. Both sides still
+    // agree on the string, which is all a key has to do.
+    return decoded.toLowerCase();
   }
 }
 
@@ -58,7 +75,7 @@ export class GodotLSPClient {
   private diagnosticsWaiters = new Map<string, DiagnosticsWaiter>();
   private documentVersions = new Map<string, number>();
 
-  constructor(port = 6005, host = '127.0.0.1') {
+  constructor(port = portFromEnv('GDHARNESS_LSP_PORT', DEFAULT_LSP_PORT), host = '127.0.0.1') {
     this.port = port;
     this.host = host;
     this.pendingRequests = new Map<number, PendingRequest>();
@@ -538,7 +555,7 @@ function normalizeLSPError(error: unknown): string {
       error.message.includes('Failed to connect to Godot LSP') ||
       error.message.includes('socket closed')
     ) {
-      return 'Godot LSP is unavailable. Start the Godot editor and enable Language Server in Editor Settings (port 6005 by default).';
+      return `Godot LSP is unavailable on port ${portFromEnv('GDHARNESS_LSP_PORT', DEFAULT_LSP_PORT)}. Start the Godot editor and enable Language Server in Editor Settings, or set GDHARNESS_LSP_PORT to the port it serves.`;
     }
     return error.message;
   }
@@ -558,12 +575,19 @@ async function resolveLSPPaths(
     throw new Error(`Project path does not exist: ${requestedProjectPath}`);
   }
 
-  const requestedScriptPath = resolve(projectPath, scriptPathValue);
+  // The project's own reader rather than a plain resolve, so `res://scripts/a.gd` names the same
+  // file here as it does everywhere else in the server: it is the spelling Godot itself uses, and
+  // resolving it literally made a path with `res:` in the middle and reported the file missing.
+  const contained = resolveWithinProject(projectPath, scriptPathValue);
+  if (!contained.ok) {
+    throw new Error(contained.reason);
+  }
+
   let scriptPath: string;
   try {
-    scriptPath = await realpath(requestedScriptPath);
+    scriptPath = await realpath(contained.absolutePath);
   } catch {
-    throw new Error(`Script file does not exist: ${requestedScriptPath}`);
+    throw new Error(`Script file does not exist: ${contained.absolutePath}`);
   }
 
   if (!isWithinRoot(projectPath, scriptPath)) {
