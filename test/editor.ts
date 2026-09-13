@@ -21,7 +21,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
-import { asArray, asString, get } from './support/json.js';
+import { asArray, asNumber, asString, get, text } from './support/json.js';
 import { parseTextContent, textOf } from './support/json-rpc.js';
 import { reservePort, ServerProcess } from './support/server.js';
 
@@ -95,12 +95,45 @@ function createProject(): string {
     ].join('\n'),
   );
 
+  // Two scripts for the language server: one that parses and one that does not, because a
+  // diagnostics tool that answers "clean" for everything looks exactly like a working one.
+  writeFileSync(
+    join(dir, 'sound.gd'),
+    [
+      'extends Node',
+      '',
+      'signal rang(times: int)',
+      '',
+      'var count: int = 0',
+      '',
+      '',
+      'func ring(times: int) -> int:',
+      '\tcount += times',
+      '\trang.emit(count)',
+      '\treturn count',
+      '',
+    ].join('\n'),
+  );
+
+  writeFileSync(
+    join(dir, 'broken.gd'),
+    ['extends Node', '', '', 'func ring( -> int:', '\tpass', ''].join('\n'),
+  );
+
   return dir;
 }
 
 /** A file the engine wrote, which is the only answer it cannot fake. */
 function fileText(project: string, name: string): string {
   return readFileSync(join(project, name), 'utf8');
+}
+
+/** Every name in a document symbol answer, nested ones included. */
+function symbolNames(symbols: unknown[]): string[] {
+  return symbols.flatMap((symbol) => [
+    asString(get(symbol, 'name'), 'name'),
+    ...symbolNames(asArray(get(symbol, 'children') ?? [], 'children')),
+  ]);
 }
 
 /** Every node path in a scene_tree answer, sorted, so a case says what the scene holds. */
@@ -127,7 +160,12 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
   const dapPort = await reservePort();
 
   const server = new ServerProcess({
-    env: { GDHARNESS_BRIDGE_PORT: String(bridgePort), GODOT_PATH: godotPath },
+    env: {
+      GDHARNESS_BRIDGE_PORT: String(bridgePort),
+      GDHARNESS_LSP_PORT: String(lspPort),
+      GDHARNESS_DAP_PORT: String(dapPort),
+      GODOT_PATH: godotPath,
+    },
   });
 
   const invoke = async (name: string, args: Record<string, unknown>) =>
@@ -378,6 +416,57 @@ async function testEditorRescan({ call, project }: Editor): Promise<void> {
   assert.match(fileText(project, 'custom.tres'), /late\.gd/, 'the script should be on the resource');
 }
 
+/**
+ * The language server tools, which answer from the editor's own server rather than from the addon.
+ *
+ * Both scripts are driven, the one that parses and the one that does not. A diagnostics tool
+ * that has quietly stopped answering returns nothing for every file, which reads exactly like a
+ * clean project, so the case that matters is the one where something is wrong.
+ */
+async function testLanguageServer({ call, project }: Editor): Promise<void> {
+  const sound = { projectPath: project, scriptPath: 'res://sound.gd' };
+
+  const clean = await call('script_diagnostics', sound);
+  assert.equal(get(clean, 'clean'), true, 'a script that parses should come back clean');
+  assert.equal(get(clean, 'errors'), 0);
+  assert.equal(get(clean, 'warnings'), 0, 'and with no warnings on it either');
+
+  const broken = await call('script_diagnostics', { projectPath: project, scriptPath: 'res://broken.gd' });
+  assert.equal(get(broken, 'clean'), false, 'and a script that does not parse should not');
+  assert.ok(asNumber(get(broken, 'errors'), 'errors') >= 1, 'with the errors counted');
+  assert.match(
+    asArray(get(broken, 'diagnostics'), 'diagnostics')
+      .map((entry) => asString(get(entry, 'message'), 'message'))
+      .join('\n'),
+    /Expected parameter name/,
+    'and the parser saying what it wanted',
+  );
+
+  const symbols = symbolNames(
+    asArray(get(await call('script_info', { ...sound, op: 'symbols' }), 'symbols')),
+  );
+  for (const declared of ['ring', 'count', 'rang']) {
+    assert.ok(symbols.includes(declared), `symbols should name ${declared}: ${symbols.join(', ')}`);
+  }
+
+  // Line 8 is `count += times`, and column 6 is the end of `count`.
+  const hover = await call('script_info', { ...sound, op: 'hover', line: 8, character: 6 });
+  assert.match(
+    text(get(hover, 'hover', 'contents', 'value')),
+    /var count: int/,
+    'hover should answer with the declaration under the cursor',
+  );
+
+  const completions = asArray(
+    get(await call('script_info', { ...sound, op: 'completion', line: 8, character: 6 }), 'completions'),
+    'completions',
+  ).map((entry) => asString(get(entry, 'label'), 'label'));
+  assert.ok(
+    completions.includes('rang'),
+    `completions should offer the script's own names: ${completions.length}`,
+  );
+}
+
 async function main(): Promise<void> {
   const godotPath = resolveGodotPath();
   if (!godotPath) {
@@ -395,6 +484,7 @@ async function main(): Promise<void> {
     await testSceneAnimation(editor);
     await testResources(editor);
     await testEditorRescan(editor);
+    await testLanguageServer(editor);
   });
 
   console.log('editor tests passed');

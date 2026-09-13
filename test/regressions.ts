@@ -673,6 +673,32 @@ async function testEditorStatusPortConflict(): Promise<void> {
   });
 }
 
+/**
+ * A port variable holding something that is not a port is said so, rather than fallen back on.
+ *
+ * Three of them now name a port outside this process, and the failure they share is the quiet
+ * one: a server that used the default instead would talk to whatever holds it, or to nothing,
+ * and report the editor unavailable while the value the user set sat there being ignored.
+ */
+async function testABadPortIsReported(): Promise<void> {
+  const server = new ServerProcess({ env: { GDHARNESS_LSP_PORT: 'banana' } });
+  try {
+    await server.initialize('regression-test');
+    const response = await server.request('tools/call', {
+      name: 'script_diagnostics',
+      arguments: { projectPath: process.cwd(), scriptPath: 'src/godot/operations/logger.gd' },
+    });
+    assert.match(
+      text(get(response, 'error', 'message')),
+      /GDHARNESS_LSP_PORT is "banana"/,
+      'the answer should name the variable and what is wrong with it',
+    );
+    assert.equal(server.exited, false, 'and the server should still be serving everything else');
+  } finally {
+    await server.stop();
+  }
+}
+
 type ToolCall = (name: string, args: unknown, timeoutMs?: number) => Promise<string>;
 type RawRequest = (method: string, params: unknown, timeoutMs?: number) => Promise<JsonRpcMessage>;
 
@@ -1008,7 +1034,7 @@ async function testToolsRefusePathsOutsideTheProject(): Promise<void> {
         // accepting side would connect to whatever editor is serving 6005 on this machine.
         assert.match(
           await call('script_diagnostics', { projectPath, scriptPath: '../outside.gd' }),
-          /outside the project root boundary/,
+          /resolves outside the project directory/,
           'script_diagnostics should refuse a script outside the project',
         );
 
@@ -1443,6 +1469,7 @@ async function main(): Promise<void> {
   testProjectGodotResistsPrototypeKeys();
 
   await testEditorStatusPortConflict();
+  await testABadPortIsReported();
   await testDiagnosticsSurviveUriReEncoding();
   await testDiagnosticsTimeoutIsNotAnEmptyResult();
   await testLspFramesBodiesByBytes();

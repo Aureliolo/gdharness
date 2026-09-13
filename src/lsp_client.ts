@@ -3,7 +3,10 @@ import { createConnection, type Socket } from 'node:net';
 import { dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { FrameReader, frame, OversizedStreamError } from './framing.js';
-import { isWithinRoot } from './paths.js';
+import { isWithinRoot, resolveWithinProject } from './paths.js';
+import { portFromEnv } from './ports.js';
+
+const DEFAULT_LSP_PORT = 6005;
 
 interface PendingRequest {
   resolve: (value: unknown) => void;
@@ -58,7 +61,7 @@ export class GodotLSPClient {
   private diagnosticsWaiters = new Map<string, DiagnosticsWaiter>();
   private documentVersions = new Map<string, number>();
 
-  constructor(port = 6005, host = '127.0.0.1') {
+  constructor(port = portFromEnv('GDHARNESS_LSP_PORT', DEFAULT_LSP_PORT), host = '127.0.0.1') {
     this.port = port;
     this.host = host;
     this.pendingRequests = new Map<number, PendingRequest>();
@@ -538,7 +541,7 @@ function normalizeLSPError(error: unknown): string {
       error.message.includes('Failed to connect to Godot LSP') ||
       error.message.includes('socket closed')
     ) {
-      return 'Godot LSP is unavailable. Start the Godot editor and enable Language Server in Editor Settings (port 6005 by default).';
+      return `Godot LSP is unavailable on port ${portFromEnv('GDHARNESS_LSP_PORT', DEFAULT_LSP_PORT)}. Start the Godot editor and enable Language Server in Editor Settings, or set GDHARNESS_LSP_PORT to the port it serves.`;
     }
     return error.message;
   }
@@ -558,12 +561,19 @@ async function resolveLSPPaths(
     throw new Error(`Project path does not exist: ${requestedProjectPath}`);
   }
 
-  const requestedScriptPath = resolve(projectPath, scriptPathValue);
+  // The project's own reader rather than a plain resolve, so `res://scripts/a.gd` names the same
+  // file here as it does everywhere else in the server: it is the spelling Godot itself uses, and
+  // resolving it literally made a path with `res:` in the middle and reported the file missing.
+  const contained = resolveWithinProject(projectPath, scriptPathValue);
+  if (!contained.ok) {
+    throw new Error(contained.reason);
+  }
+
   let scriptPath: string;
   try {
-    scriptPath = await realpath(requestedScriptPath);
+    scriptPath = await realpath(contained.absolutePath);
   } catch {
-    throw new Error(`Script file does not exist: ${requestedScriptPath}`);
+    throw new Error(`Script file does not exist: ${contained.absolutePath}`);
   }
 
   if (!isWithinRoot(projectPath, scriptPath)) {
