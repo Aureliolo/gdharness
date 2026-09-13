@@ -141,6 +141,9 @@ jobs:
         with:
           node-version: 24.21.0
           registry-url: https://registry.npmjs.org
+          # Nothing is installed here, only a prebuilt archive published, so a cache would carry
+          # no benefit and would be a way into the one job that holds id-token.
+          package-manager-cache: false
 
       - name: Publish to npm
         shell: bash
