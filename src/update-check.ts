@@ -10,6 +10,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { currentRunner, runLine } from './runner.js';
 
 /** Only this host, only https, and nothing built from anything a caller supplies. */
 const REGISTRY = 'https://registry.npmjs.org/gdharness/latest';
@@ -242,7 +243,9 @@ export class UpdateCheck {
       current: this.current,
       latest,
       releaseNotes: `${RELEASES}/v${latest}`,
-      upgrade: `npx -y gdharness@${latest} upgrade <project>`,
+      // Under whichever runner is running us, and with no path on it: somebody who installed with
+      // bunx may have no Node at all, and upgrade takes the directory it is run in.
+      upgrade: runLine(currentRunner(), latest, 'upgrade'),
     };
   }
 }

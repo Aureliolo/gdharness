@@ -14,7 +14,7 @@ import {
 } from 'node:fs';
 import { createServer, type Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 import { staleClassNames } from '../src/class-cache.js';
@@ -1228,6 +1228,29 @@ function testProjectDefaultsToTheWorkingDirectory(): void {
       `doctor with no argument should report on the directory it ran in: ${here.output}`,
     );
 
+    // A flag where the path used to be. With the directory optional this is the natural thing to
+    // type, and it is what the install guide tells people to run; taken positionally, `--json`
+    // was resolved as a directory and the command refused itself.
+    const flagged = spawnSync(
+      process.execPath,
+      [join(process.cwd(), 'build', 'cli.js'), 'doctor', '--json'],
+      { encoding: 'utf8', cwd: project, timeout: 60000 },
+    );
+    // Parsing at all is half the assertion: a flag taken as the path refuses with a sentence.
+    // The directory it settled on is compared by name rather than in full, because the spelling
+    // of a temporary directory is the platform's business: macOS resolves /var/folders to
+    // /private/var/folders, and a Windows runner reports Temp under an 8.3 short name.
+    const report: unknown = JSON.parse(flagged.stdout);
+    assert.equal(
+      basename(text(get(report, 'projectPath'))),
+      'game',
+      `a flag is not a path: ${flagged.stdout}${flagged.stderr}`,
+    );
+    assert.ok(
+      asArray(get(report, 'problems')).length > 0,
+      'and the report is about that project, not an empty answer',
+    );
+
     const nowhere = cli(elsewhere);
     assert.match(
       nowhere.output,
@@ -1292,7 +1315,14 @@ async function testUpdateNoticeRidesOnAnAnswer(): Promise<void> {
       assert.match(first, /update_available/, 'the first answer should carry the notice');
       assert.match(first, /99\.9\.9/, 'naming the version that is out');
       assert.match(first, /releases\/tag\/v99\.9\.9/, 'and where the notes for it are');
-      assert.match(first, /upgrade/, 'and the command that takes it');
+      // Under the runner that is actually running, and with no path: the reader who installed
+      // with bunx may have no Node, and upgrade takes the directory it is run in.
+      assert.match(
+        first,
+        /(?:npx -y|bunx) gdharness@99\.9\.9 upgrade/,
+        'and the command that takes it, spelled for this runtime',
+      );
+      assert.doesNotMatch(first, /upgrade <project>/, 'without a placeholder path to fill in');
 
       assert.doesNotMatch(
         await call('editor_status', {}),
@@ -1775,6 +1805,24 @@ function testCommandLineSetup(): void {
     } finally {
       rmSync(bare, { recursive: true, force: true });
     }
+
+    // An upgrade puts the same things back in the same places. It once wrote the skill into every
+    // directory any harness could read it from, rather than the ones an install chose, so running
+    // it created two directories that setup had deliberately not created. Nothing new appears.
+    const skillDirs = (): string[] =>
+      ['.agents', '.claude', '.github', '.cursor', '.kiro', '.cline', '.opencode']
+        .map((dir) => join(projectDir, dir, 'skills', 'gdharness'))
+        .filter((path) => existsSync(path))
+        .sort();
+    const beforeUpgrade = skillDirs();
+    const upgraded = cli('upgrade', projectDir);
+    assert.equal(upgraded.status, 0, `upgrade:\n${upgraded.stdout}${upgraded.stderr}`);
+    assert.deepEqual(
+      skillDirs(),
+      beforeUpgrade,
+      'an upgrade should write the skill where the install put it, and nowhere else',
+    );
+    assert.equal(get(JSON.parse(cli('doctor', projectDir, '--json').stdout), 'runtimeAutoload'), true);
 
     // A class written after the cache was built is what doctor is for.
     writeFileSync(join(projectDir, 'late.gd'), 'class_name LateArrival\nextends Node\n');

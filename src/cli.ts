@@ -57,7 +57,12 @@ class UsageError extends Refusal {}
  * on somewhere that is not a Godot project.
  */
 function projectArgument(at: number): string {
-  const projectPath = resolve(args[at] ?? '.');
+  // The first thing that is not a flag. With the directory optional, `setup --cursor` is the
+  // natural thing to type and reads as a flag where the path used to be; taking the argument
+  // positionally made it resolve `--cursor` as a directory and refuse the command the install
+  // guide tells people to run.
+  const named = args.slice(at).find((value) => !value.startsWith('--'));
+  const projectPath = resolve(named ?? '.');
   if (!existsSync(join(projectPath, 'project.godot'))) {
     throw new UsageError(`Not a Godot project: ${projectPath} holds no project.godot.`);
   }
@@ -199,8 +204,11 @@ function nextSteps(projectPath: string, runtime: boolean): void {
   console.log('  1. Reconnect the MCP server in your harness, so it spawns this version.');
   console.log('  2. Restart an open editor, or open the project. Then editor_status should answer.');
   if (runtime) {
+    // The path only when it is not the one you are standing in. Spelling out a temp directory the
+    // reader is already inside turns a command they can copy into a line that wraps twice.
+    const where = projectPath === process.cwd() ? '' : ` ${projectPath}`;
     console.log(
-      `\nThe runtime autoload is registered, which is what the runtime_* tools talk to. It reaches an\nexport, so turn it off before you ship: gdharness runtime off ${projectPath}`,
+      `\nThe runtime autoload is registered, which is what the runtime_* tools talk to. It reaches an\nexport, so turn it off before you ship: gdharness runtime off${where}`,
     );
   }
 }
@@ -369,7 +377,10 @@ async function upgrade(): Promise<void> {
   if (already.length === 0) {
     console.log('no harness config names gdharness, so none was re-pinned');
   }
-  for (const written of writeSkill(everySkillDirectory(projectPath, already), version)) {
+  // The same rule setup uses, not the one uninstall uses. everySkillDirectory names every place a
+  // copy could be, which is what you want when removing them and is how an upgrade came to create
+  // two directories the install had deliberately not created.
+  for (const written of writeSkill(skillDirectories(already, projectPath, existsSync), version)) {
     console.log(`skill: ${written.replaced ? 'replaced' : 'written'} ${written.path}`);
   }
 

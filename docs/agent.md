@@ -11,9 +11,12 @@ For an agent. Version `{{version}}`. MCP server plus three Godot addons.
 ## 1. Requirements
 
 ```bash
-godot --version   # >= 4.7.0, keep the absolute path
-node --version    # >= 22, for npx
+godot --version   # >= 4.7.0
+node --version    # >= 22, for npx; or bun --version >= 1.4, for bunx
 ```
+
+Either runtime, not both. `setup` finds Godot itself; set `GODOT_PATH` to the binary if it is
+somewhere unusual.
 
 ## 2. Install
 
@@ -26,6 +29,11 @@ It installs the addons, enables the editor plugins, registers the runtime autolo
 class list, writes the skill, and registers the server with the harnesses already set up in this
 project. It prints what it wrote and where. Anything it hands back as a command or a block to
 paste is yours to apply.
+
+Some harnesses want something from the reader after the file is written: a folder to trust, a
+server to trust, a toggle, a restart. `setup` prints that line under the harness it applies to.
+Pass it on rather than reporting the install as finished, because until it is done the config is
+written and nothing answers.
 
 **It writes nothing outside the project directory without a flag or an answered prompt.** Run from
 a pipe, as you are, it asks nothing: it writes the harnesses this project already uses and names
@@ -48,7 +56,7 @@ Reconnect the harness, then confirm the tools are listed.
 The runtime addon is an autoload and reaches an export. Turn it off before committing:
 
 ```bash
-npx -y gdharness@{{version}} runtime off /absolute/path/to/project
+npx -y gdharness@{{version}} runtime off
 ```
 
 Without it, `runtime_*` has nothing to talk to.
@@ -63,14 +71,18 @@ Without it, `runtime_*` has nothing to talk to.
 
 ## Updating
 
+The server tells you when there is a newer release: a tool answer carries an `update_available`
+block naming the version, its notes and the command. Tell the reader, and run it only if they
+agree, because it restarts their editor.
+
 ```bash
-npx -y gdharness@<new> setup /absolute/path/to/project
+npx -y gdharness@<new> upgrade
 ```
 
-The addons and the harness entries move to the new version together. Then reconnect the MCP
-server, and restart an open editor with `editor_launch restart`. Confirm with `editor_status`:
-`addonVersion` equal to `serverVersion`, `addonIsStale` false. Skipping either leaves the old
-version answering.
+`upgrade` re-pins every config that already names gdharness and touches no config that does not.
+Then reconnect the MCP server, and restart an open editor with `editor_launch restart`. Confirm
+with `editor_status`: `addonVersion` equal to `serverVersion`, `addonIsStale` false. Skipping
+either leaves the old version answering.
 
 ## Installing from the signed archive instead
 
@@ -87,7 +99,7 @@ gh attestation verify "gdharness-${VERSION}.tgz" --repo Aureliolo/gdharness \
   --deny-self-hosted-runners
 mkdir -p .tools/gdharness
 tar -xzf "gdharness-${VERSION}.tgz" -C .tools/gdharness --strip-components=1
-node .tools/gdharness/build/cli.js setup /absolute/path/to/project
+node .tools/gdharness/build/cli.js setup
 ```
 
 A failed check stops the install. Without `gh`, `install.md` has the `cosign` command and the
@@ -95,18 +107,13 @@ browser lookup. If no check ran, say so rather than calling it verified.
 
 ## Rules
 
-- After writing a `class_name`, call `project_import refresh_classes` before running the game.
-  Otherwise the game fails with "Could not find type" at the first screen.
-- Use `editor_run start` / `editor_output` / `editor_run stop`. A game started as its own process
-  has no debugger session.
-- Set breakpoints before running.
+- Use `editor_run start` / `editor_output` / `editor_run stop`. The editor plays the game, so its
+  debugger holds it, which is what the `debug_*` tools answer for.
+- Set breakpoints before running. They are waiting when it starts.
 - Read `editor_output` after every run.
 - Measure the running game: `runtime_inspect` for what is on screen, `runtime_invoke` for a value,
   `runtime_wait` instead of sleeping.
-- `runtime_capture` needs a window and refuses headless.
-- There is no `debug_control pause` and no `step_out`. Use a breakpoint, `debug_state variables`
-  for what is in scope, and `step_over` / `step_into` to move.
-- A refusal lists the valid set. Read it.
+- A refusal names the state it is in and what changes it. Read it rather than retrying.
 
 ## Reference
 
