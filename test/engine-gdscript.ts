@@ -667,6 +667,8 @@ function main(): void {
     runFixture(godotPath, projectDir, 'operations_serialize');
     runFixture(godotPath, projectDir, 'runtime_serialize');
     runFixture(godotPath, projectDir, 'runtime_input');
+    runFixture(godotPath, projectDir, 'runtime_query');
+    runFixture(godotPath, projectDir, 'runtime_wait');
     // The game announces itself under the engine's temporary directory and the server looks
     // under Bun's; a platform where the two differ is one where no game is ever found. Both go
     // through the filesystem's own spelling, because Windows hands one side the 8.3 short name

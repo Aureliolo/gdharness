@@ -1,0 +1,180 @@
+extends SceneTree
+
+## The commands that take time: a click that presses and releases a frame apart, and the
+## waits for frames, a signal and a property. They need the main loop running, so the checks
+## start on the first frame rather than in _init, and the fixture quits when they are done.
+
+const Runtime = preload("res://addons/godot_mcp_runtime/mcp_runtime_autoload.gd")
+
+var failures: Array[String] = []
+var node: Runtime
+var button: Button
+var frames_seen: int = 0
+var presses: int = 0
+
+
+func _init() -> void:
+	# In the tree, because the commands ask it for the tree; announced somewhere private, so the
+	# fixture does not look like a game to a server running on this machine.
+	OS.set_environment(
+		"GDHARNESS_RUNTIME_DIR", OS.get_temp_dir().path_join("gdharness-wait-%d" % OS.get_process_id())
+	)
+	node = Runtime.new()
+	root.add_child(node)
+
+	var panel: Panel = Panel.new()
+	panel.name = "Panel"
+	panel.position = Vector2(10, 20)
+	panel.size = Vector2(300, 200)
+	root.add_child(panel)
+
+	button = Button.new()
+	button.name = "Go"
+	button.position = Vector2(30, 40)
+	button.size = Vector2(80, 30)
+	button.pressed.connect(func() -> void: presses += 1)
+	panel.add_child(button)
+
+	process_frame.connect(func() -> void: frames_seen += 1)
+	process_frame.connect(_run, CONNECT_ONE_SHOT)
+
+
+func _fail(message: String) -> void:
+	failures.append(message)
+
+
+func _run() -> void:
+	# A headless window is 64 by 64 and the GUI delivers nothing outside the window; the new
+	# size is only in force from the next frame.
+	root.size = Vector2i(640, 480)
+	await process_frame
+
+	await _check_click()
+	await _check_frames()
+	await _check_signal()
+	await _check_until()
+
+	node._cleanup()
+	DirAccess.remove_absolute(OS.get_environment("GDHARNESS_RUNTIME_DIR"))
+	if failures.is_empty():
+		print(JSON.stringify({"ok": true}))
+		quit(0)
+		return
+
+	printerr("\n".join(failures))
+	quit(1)
+
+
+func _check_click() -> void:
+	var clicked: Dictionary = await node._execute_command("click", {"path": "/root/Panel/Go"})
+	if clicked.get("type") != "clicked":
+		_fail("click: %s" % str(clicked))
+		return
+	if clicked.get("landed") != true or clicked.get("hovered") != "/root/Panel/Go":
+		_fail("the click should land on the button it was aimed at: %s" % str(clicked))
+	var position: Dictionary = clicked.get("position", {})
+	if position.get("x") != 80.0 or position.get("y") != 75.0:
+		_fail("the click should be at the button's centre in window pixels: %s" % str(clicked))
+	if presses != 1:
+		_fail("one click should press the button once, pressed %d times" % presses)
+
+	var doubled: Dictionary = await node._execute_command("click", {"path": "/root/Panel/Go", "double": true})
+	if doubled.get("double") != true:
+		_fail("a double click should say so: %s" % str(doubled))
+
+	button.hide()
+	var hidden: Dictionary = await node._execute_command("click", {"path": "/root/Panel/Go"})
+	if hidden.get("type") != "error":
+		_fail("a hidden control cannot be clicked: %s" % str(hidden))
+	button.show()
+
+	var not_control: Dictionary = await node._execute_command("click", {"path": "/root"})
+	if not_control.get("type") != "error":
+		_fail("a node that is not a Control cannot be clicked: %s" % str(not_control))
+
+	var far: Button = Button.new()
+	far.name = "Far"
+	far.position = Vector2(900, 900)
+	far.size = Vector2(80, 30)
+	button.get_parent().add_child(far)
+	var off_screen: Dictionary = await node._execute_command("click", {"path": "/root/Panel/Far"})
+	if (
+		off_screen.get("type") != "error"
+		or not str(off_screen.get("message", "")).contains("outside the viewport")
+	):
+		_fail("a control outside the window cannot be clicked, and the answer says so: %s" % str(off_screen))
+	far.free()
+
+
+func _check_frames() -> void:
+	var before: int = frames_seen
+	var waited: Dictionary = await node._execute_command("wait_frames", {"frames": 3})
+	if waited.get("frames") != 3 or frames_seen - before != 3:
+		_fail(
+			(
+				"wait_frames should let exactly that many frames pass: %s, saw %d"
+				% [str(waited), frames_seen - before]
+			)
+		)
+
+
+func _check_signal() -> void:
+	var timer: Timer = Timer.new()
+	timer.name = "Fuse"
+	timer.one_shot = true
+	timer.wait_time = 0.05
+	root.add_child(timer)
+	timer.start()
+	var fired: Dictionary = await node._execute_command(
+		"wait_signal", {"path": "/root/Fuse", "signal": "timeout"}
+	)
+	if fired.get("fired") != true:
+		_fail("a signal that fires should be reported as fired: %s" % str(fired))
+
+	var expired: Dictionary = await node._execute_command(
+		"wait_signal", {"path": "/root/Fuse", "signal": "timeout", "timeout_ms": 60}
+	)
+	if expired.get("fired") != false or int(expired.get("elapsed_ms", 0)) < 60:
+		_fail(
+			"a signal that never fires should be reported as not fired after the timeout: %s" % str(expired)
+		)
+	if not timer.timeout.get_connections().is_empty():
+		_fail("the catcher should be disconnected once the wait gives up")
+
+	var with_args: Dictionary = await node._execute_command(
+		"wait_signal", {"path": "/root/Panel/Go", "signal": "toggled", "timeout_ms": 500}
+	)
+	if with_args.get("fired") != false:
+		_fail("toggled should not fire on its own: %s" % str(with_args))
+
+	var unknown: Dictionary = await node._execute_command(
+		"wait_signal", {"path": "/root/Fuse", "signal": "nonesuch"}
+	)
+	if unknown.get("type") != "error":
+		_fail("a signal the node does not have is refused: %s" % str(unknown))
+	timer.free()
+
+
+func _check_until() -> void:
+	var late: Callable = func() -> void:
+		await process_frame
+		await process_frame
+		button.visible = false
+	late.call()
+	var met: Dictionary = await node._execute_command(
+		"wait_until", {"path": "/root/Panel/Go", "property": "visible", "value": false}
+	)
+	if met.get("met") != true or met.get("value") != false:
+		_fail("wait_until should see the property change: %s" % str(met))
+
+	var unmet: Dictionary = await node._execute_command(
+		"wait_until", {"path": "/root/Panel/Go", "property": "visible", "value": true, "timeout_ms": 60}
+	)
+	if unmet.get("met") != false or unmet.get("value") != false:
+		_fail("wait_until should report the last value when the time runs out: %s" % str(unmet))
+
+	var no_value: Dictionary = await node._execute_command(
+		"wait_until", {"path": "/root/Panel/Go", "property": "visible"}
+	)
+	if no_value.get("type") != "error":
+		_fail("wait_until without a value is refused: %s" % str(no_value))

@@ -1,5 +1,5 @@
 /**
- * The tool surface: thirty tools, each shaped like a task rather than an engine call.
+ * The tool surface: a few dozen tools, each shaped like a task rather than an engine call.
  *
  * A tool that does several related things takes an `op`. Which arguments each op needs is
  * written once, in `operations`, and read twice: rendered into the description the client
@@ -715,15 +715,29 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'runtime_inspect',
     description:
-      'The scene tree or the performance metrics of the running game. Needs the game running with the runtime addon.',
+      'Questions about the running game: the scene tree, the nodes matching a query, where one node is on screen, or the performance metrics. Needs the game running with the runtime addon.',
     parameters: {
       projectPath: RUNNING_PROJECT_PATH,
-      nodePath: { type: 'string', description: 'tree: where to start. Default /root.' },
+      nodePath: {
+        type: 'string',
+        description: 'tree, find: where to start, default /root. rect: the node to place.',
+      },
       depth: { type: 'number', description: 'tree: levels to descend. Default 3.' },
       includeProperties: {
         type: 'boolean',
         description: "tree: include each node's properties. Default false.",
       },
+      className: {
+        type: 'string',
+        description: 'find: a native class, matching its subclasses too, or a class_name.',
+      },
+      script: { type: 'string', description: 'find: the script file the node carries.' },
+      namePattern: {
+        type: 'string',
+        description: 'find: a case-insensitive glob on the node name, such as "Enemy*".',
+      },
+      group: { type: 'string', description: 'find: a group the node is in.' },
+      limit: { type: 'number', description: 'find: the most nodes to answer with. Default 100.' },
       metrics: {
         type: 'array',
         items: { type: 'string' },
@@ -733,6 +747,14 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     requires: [],
     operations: {
       tree: { summary: 'the live scene tree', requires: [] },
+      find: {
+        summary: 'the paths of every node matching className, script, namePattern or group',
+        requires: [],
+      },
+      rect: {
+        summary: "one node's rectangle or position, in canvas and in window pixels",
+        requires: ['nodePath'],
+      },
       metrics: { summary: 'frame time, memory, draw calls and the rest', requires: [] },
     },
     defaultOperation: 'tree',
@@ -767,7 +789,6 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       width: { type: 'number', description: 'Scale the image to this width.' },
       height: { type: 'number', description: 'Scale the image to this height.' },
-      format: { type: 'string', enum: ['png', 'jpg'], description: 'screenshot: default png.' },
     },
     requires: [],
     operations: {
@@ -779,9 +800,10 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'runtime_input',
     description:
-      'Injects input into the running game: an action, a key, a mouse click or mouse motion. Needs the game running with a window.',
+      'Input to the running game: a whole click on a Control named by path, or a raw action, key, mouse button or mouse motion. click works headless too; the rest need a window.',
     parameters: {
       projectPath: RUNNING_PROJECT_PATH,
+      nodePath: { type: 'string', description: 'click: the Control to click, at its centre.' },
       action: { type: 'string', description: 'action: the InputMap action name.' },
       pressed: { type: 'boolean', description: 'Press or release. Default true.' },
       strength: { type: 'number', description: 'action: 0 to 1. Default 1.' },
@@ -794,18 +816,51 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       button: {
         type: 'string',
         enum: ['left', 'right', 'middle'],
-        description: 'mouse_click: default left.',
+        description: 'click, mouse_click: default left.',
       },
-      doubleClick: { type: 'boolean', description: 'mouse_click: default false.' },
+      doubleClick: { type: 'boolean', description: 'click, mouse_click: default false.' },
       relativeX: { type: 'number', description: 'mouse_motion: movement since the last event.' },
       relativeY: { type: 'number', description: 'mouse_motion: movement since the last event.' },
     },
     requires: [],
     operations: {
+      click: {
+        summary: 'press and release on a Control, a frame apart, and answer with what was under the pointer',
+        requires: ['nodePath'],
+      },
       action: { summary: 'press or release an action', requires: ['action'] },
       key: { summary: 'press or release a key', requires: ['keycode'] },
-      mouse_click: { summary: 'a mouse button at a position', requires: ['x', 'y'] },
+      mouse_click: { summary: 'one mouse button event at a position', requires: ['x', 'y'] },
       mouse_motion: { summary: 'move the mouse to a position', requires: ['x', 'y'] },
+    },
+  },
+  {
+    name: 'runtime_wait',
+    description:
+      'Lets the running game get on with it and answers when something has happened: a number of frames, a signal, or a property reaching a value. Needs the game running with the runtime addon.',
+    parameters: {
+      projectPath: RUNNING_PROJECT_PATH,
+      frames: { type: 'number', description: 'frames: how many to let pass, 1 to 600.' },
+      nodePath: { type: 'string', description: 'signal, until: the node.' },
+      signal: { type: 'string', description: 'signal: the signal name.' },
+      property: { type: 'string', description: 'until: the property name.' },
+      value: { description: "until: the value to wait for, fitted to the property's type." },
+      timeoutMs: {
+        type: 'number',
+        description: 'signal, until: how long to wait before answering anyway. Default 5000.',
+      },
+    },
+    requires: [],
+    operations: {
+      frames: { summary: 'let frames pass', requires: ['frames'] },
+      signal: {
+        summary: 'wait for a signal and answer with what it carried',
+        requires: ['nodePath', 'signal'],
+      },
+      until: {
+        summary: 'wait for a property to read as a value and answer with what it read',
+        requires: ['nodePath', 'property', 'value'],
+      },
     },
   },
 

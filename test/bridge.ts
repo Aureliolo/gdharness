@@ -29,7 +29,7 @@ const GODOT_PATH = resolveGodotPath(process.env['GODOT_PATH']);
 const HAS_USABLE_GODOT = Boolean(GODOT_PATH && isExecutableFile(GODOT_PATH));
 /** domain_verb, which every client accepts: no dots, no case, nothing a strict client rejects. */
 const TOOL_NAME_PATTERN = /^[a-z][a-z0-9_]{1,63}$/;
-const TOOL_COUNT = 30;
+const TOOL_COUNT = 31;
 const ONE_PIXEL_PNG_BASE64 =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO7Z0r0AAAAASUVORK5CYII=';
 
@@ -186,6 +186,30 @@ function startMockRuntime(directory: string, options: MockRuntimeOptions): Promi
           break;
         case 'get_metrics':
           reply({ type: 'metrics', id, data: { fps: 60, object_node_count: 42 } });
+          break;
+        case 'find_nodes':
+          reply({
+            type: 'nodes',
+            id,
+            count: 1,
+            truncated: false,
+            nodes: [{ name: 'Player', type: 'CharacterBody2D', path: '/root/Player' }],
+            // Echoed so the test can see the filters arrived under the names the addon reads.
+            asked: params,
+          });
+          break;
+        case 'click':
+          reply({
+            type: 'clicked',
+            id,
+            path: params['path'],
+            hovered: params['path'],
+            landed: true,
+            asked: params,
+          });
+          break;
+        case 'wait_signal':
+          reply({ type: 'signal', id, fired: true, args: [3], elapsed_ms: 12, asked: params });
           break;
         case 'capture_screenshot':
         case 'capture_viewport': {
@@ -483,6 +507,46 @@ async function main(): Promise<void> {
       const metrics = await payload('runtime_inspect', { op: 'metrics', metrics: ['fps'] });
       assert.equal(get(metrics, 'type'), 'metrics');
       assert.equal(get(metrics, 'data', 'fps'), 60, 'runtime_inspect metrics relays the addon metrics');
+
+      // The newer questions, each carried to the addon under the names it reads.
+      const found = await payload('runtime_inspect', {
+        op: 'find',
+        className: 'CharacterBody2D',
+        namePattern: 'Play*',
+        limit: 5,
+      });
+      assert.equal(get(found, 'nodes', 0, 'path'), '/root/Player', 'runtime_inspect find relays the paths');
+      assert.deepEqual(
+        get(found, 'asked'),
+        { class: 'CharacterBody2D', name: 'Play*', root: '/root', limit: 5 },
+        'only the filters given are sent, under the addon names',
+      );
+      assert.match(
+        textOf(await call('runtime_inspect', { op: 'find' })) ?? '',
+        /needs at least one of className, script, namePattern, group/,
+        'a find with nothing to find by is refused before the game is asked',
+      );
+
+      const clicked = await payload('runtime_input', { op: 'click', nodePath: '/root/Menu/Play' });
+      assert.equal(get(clicked, 'landed'), true, 'runtime_input click relays the addon answer');
+      assert.deepEqual(
+        get(clicked, 'asked'),
+        { path: '/root/Menu/Play', button: 'left', double: false },
+        'click carries the path, the button and whether it is a double click',
+      );
+
+      const waited = await payload('runtime_wait', {
+        op: 'signal',
+        nodePath: '/root/Player',
+        signal: 'died',
+        timeoutMs: 250,
+      });
+      assert.equal(get(waited, 'fired'), true, 'runtime_wait signal relays the addon answer');
+      assert.deepEqual(
+        get(waited, 'asked'),
+        { path: '/root/Player', signal: 'died', timeout_ms: 250 },
+        'the wait carries its timeout to the game',
+      );
 
       for (const args of [{}, { op: 'viewport', viewportPath: '/root' }] as const) {
         const label = `runtime_capture ${JSON.stringify(args)}`;
