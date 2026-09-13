@@ -68,8 +68,14 @@ spelled out.
 The `scene_*` and `resource_*` tools and `editor_rescan` go through the editor addon and need
 the editor open; `script_diagnostics`, `script_info` beyond `structure`, and the `debug_*`
 tools talk to the editor's language server and debug adapter; the `runtime_*` tools talk to
-the game started by `editor_run`. Everything else runs the engine headless and needs nothing
-open.
+a running game, whether `editor_run` started it or the editor's play button did. Everything
+else runs the engine headless and needs nothing open.
+
+A game finds its own port: the runtime addon listens on whatever the operating system hands
+out and announces the port in a file named by its process id, under `$GDHARNESS_RUNTIME_DIR`,
+else `$XDG_RUNTIME_DIR/gdharness`, else the temporary directory. The server reads that, so two
+games can run at once (`projectPath` picks one) and a headless operation never takes the port
+a game wanted. `editor_status` lists every game it can reach and why it cannot reach the rest.
 
 ## Security
 

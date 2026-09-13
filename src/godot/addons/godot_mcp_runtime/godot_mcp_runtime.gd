@@ -1,33 +1,17 @@
 @tool
 extends EditorPlugin
 
-## Godot MCP Runtime Plugin
-## Enables real-time communication between a running Godot game and the MCP server.
-##
-## This plugin provides:
-## - WebSocket server for bidirectional communication
-## - Scene tree inspection
-## - Property modification at runtime
-## - Method calling at runtime
-## - Performance metrics reporting
-## - Signal watching
+## Registers the runtime autoload, which is the whole of what the game side of gdharness needs
+## from the editor: with the plugin enabled, every run of the project carries the server that
+## the runtime tools talk to.
 
-const DEFAULT_PORT = 7777
-const PROTOCOL_VERSION = "1.0"
-
-var _server: TCPServer
-var _clients: Array[StreamPeerTCP] = []
-var _port: int = DEFAULT_PORT
-var _enabled: bool = false
+const AUTOLOAD_NAME: String = "MCPRuntime"
+const AUTOLOAD_PATH: String = "res://addons/godot_mcp_runtime/mcp_runtime_autoload.gd"
 
 
 func _enter_tree() -> void:
-	# Plugin initialization
-	print("[MCP Runtime] Plugin loaded")
-	add_autoload_singleton("MCPRuntime", "res://addons/godot_mcp_runtime/mcp_runtime_autoload.gd")
+	add_autoload_singleton(AUTOLOAD_NAME, AUTOLOAD_PATH)
 
 
 func _exit_tree() -> void:
-	# Cleanup
-	remove_autoload_singleton("MCPRuntime")
-	print("[MCP Runtime] Plugin unloaded")
+	remove_autoload_singleton(AUTOLOAD_NAME)
