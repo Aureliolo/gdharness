@@ -43,7 +43,8 @@ that is running, and the project on disk. ${TOOL_SPECS.length} tools, named \`do
 - Every call takes \`projectPath\`, except \`runtime_*\` and \`debug_*\`, where it picks between
   running games. There is no ambient project.
 - \`editor_status\` says whether an editor is connected and whether its addon matches the server.
-  \`addonIsStale\` means the editor is serving an older addon and needs restarting.
+  \`addonIsStale\` means they differ, and \`staleNote\` says which half is behind: an editor that
+  needs restarting, or a server that needs reconnecting in your harness.
 - Start the game with \`editor_run start\`, never by spawning an engine. The editor plays it, so
   its debugger holds it, which is what gives the \`debug_*\` tools something to talk to.
 - Read \`editor_output\` after every run. It returns the engine's errors and warnings as entries
