@@ -112,11 +112,6 @@ func add_input_action(params: Dictionary) -> Dictionary:
 	_log.debug("Events: " + JSON.stringify(events))
 	_log.debug("Deadzone: " + str(deadzone))
 
-	var config: ConfigFile = ConfigFile.new()
-	var err: Error = config.load("res://project.godot")
-	if err != OK:
-		return _log.failure("Failed to load project.godot: " + str(err))
-
 	# One bad event fails the whole action: an action written with the events that happened to
 	# parse is a binding the caller did not ask for, reported as the one they did.
 	var events_config: Array[Dictionary] = []
@@ -173,11 +168,12 @@ func add_input_action(params: Dictionary) -> Dictionary:
 	if action.is_empty():
 		return {}
 
-	config.set_value("input", action_name, action)
-
-	err = config.save("res://project.godot")
+	# Through ProjectSettings so the file is saved the way the editor saves it, header and
+	# every other line kept; a ConfigFile of project.godot drops the comments on the way out.
+	ProjectSettings.set_setting("input/" + action_name, action)
+	var err: Error = ProjectSettings.save()
 	if err != OK:
-		return _log.failure("Failed to save project.godot: " + str(err))
+		return _log.failure("Failed to save project.godot: " + error_string(err))
 
 	return {
 		"action_name": action_name,
@@ -189,8 +185,8 @@ func add_input_action(params: Dictionary) -> Dictionary:
 
 # The value project.godot stores for one input action.
 #
-# It has to be a Dictionary holding real InputEvent objects. ConfigFile writes those as the
-# unquoted expression Godot parses back into an action; hand it the same thing as assembled
+# It has to be a Dictionary holding real InputEvent objects. The engine writes those as the
+# unquoted expression it parses back into an action; hand it the same thing as assembled
 # text and it writes a quoted, escaped string, which loads as a String and leaves InputMap
 # with no action at all while add_input_action still reports the events it was given.
 func build_input_action(deadzone: float, events: Array) -> Dictionary:
