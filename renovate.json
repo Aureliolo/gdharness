@@ -18,7 +18,6 @@
     "description": "Off, so that a vulnerability fix rides in the one weekly pull request like every other raise instead of arriving as its own. The default would open one per advisory, on its own branch, outside the schedule.",
     "enabled": false
   },
-  "configMigration": false,
   "lockFileMaintenance": {
     "description": "The second pull request of the week, the day after the first: bun.lock and the hash-locked requirements regenerated, which is where the transitive dependencies move. Nothing this repository names changes in it, which is why it is not folded into the first.",
     "enabled": true,
