@@ -23,11 +23,7 @@ func list_plugins(_params: Dictionary) -> Dictionary:
 			"message": "No addons directory found in the project"
 		}
 
-	var config: ConfigFile = ConfigFile.new()
-	var enabled_plugins: Array[String] = []
-	if config.load("res://project.godot") == OK:
-		enabled_plugins = _enabled_plugin_names(config)
-
+	var enabled_plugins: Array[String] = _enabled_plugin_names()
 	_log.debug("Enabled plugins: " + str(enabled_plugins))
 
 	var plugins: Array[Dictionary] = []
@@ -83,12 +79,7 @@ func enable_plugin(params: Dictionary) -> Dictionary:
 		_log.error("Plugin not found: " + plugin_name)
 		return _log.failure("Expected plugin.cfg at: " + plugin_cfg_path)
 
-	var config: ConfigFile = ConfigFile.new()
-	var err: Error = config.load("res://project.godot")
-	if err != OK:
-		return _log.failure("Failed to load project.godot: " + str(err))
-
-	var enabled_plugins: Array[String] = _enabled_plugin_names(config)
+	var enabled_plugins: Array[String] = _enabled_plugin_names()
 
 	if plugin_name in enabled_plugins:
 		return {
@@ -96,11 +87,9 @@ func enable_plugin(params: Dictionary) -> Dictionary:
 		}
 
 	enabled_plugins.append(plugin_name)
-	_write_enabled_plugins(config, enabled_plugins)
-
-	err = config.save("res://project.godot")
+	var err: Error = _save_enabled_plugins(enabled_plugins)
 	if err != OK:
-		return _log.failure("Failed to save project.godot: " + str(err))
+		return _log.failure("Failed to save project.godot: " + error_string(err))
 
 	return {"plugin_name": plugin_name, "action": "enabled", "enabled_plugins": enabled_plugins}
 
@@ -111,12 +100,7 @@ func disable_plugin(params: Dictionary) -> Dictionary:
 
 	_log.info("Disabling plugin: " + plugin_name)
 
-	var config: ConfigFile = ConfigFile.new()
-	var err: Error = config.load("res://project.godot")
-	if err != OK:
-		return _log.failure("Failed to load project.godot: " + str(err))
-
-	var enabled_plugins: Array[String] = _enabled_plugin_names(config)
+	var enabled_plugins: Array[String] = _enabled_plugin_names()
 
 	if not plugin_name in enabled_plugins:
 		return {
@@ -126,24 +110,22 @@ func disable_plugin(params: Dictionary) -> Dictionary:
 		}
 
 	enabled_plugins.erase(plugin_name)
-	_write_enabled_plugins(config, enabled_plugins)
-
-	err = config.save("res://project.godot")
+	var err: Error = _save_enabled_plugins(enabled_plugins)
 	if err != OK:
-		return _log.failure("Failed to save project.godot: " + str(err))
+		return _log.failure("Failed to save project.godot: " + error_string(err))
 
 	return {"plugin_name": plugin_name, "action": "disabled", "enabled_plugins": enabled_plugins}
 
 
 # The addon directory names in [editor_plugins]. The editor stores them as the engine
-# expression PackedStringArray("res://addons/<name>/plugin.cfg", ...), which ConfigFile reads
-# back as that type; the String form is what an older hand-edited file can carry.
-func _enabled_plugin_names(config: ConfigFile) -> Array[String]:
+# expression PackedStringArray("res://addons/<name>/plugin.cfg", ...), which loads as that
+# type; the String form is what an older hand-edited file can carry.
+func _enabled_plugin_names() -> Array[String]:
 	var names: Array[String] = []
 	var regex: RegEx = RegEx.new()
 	regex.compile("res://addons/([^/]+)/plugin.cfg")
 
-	var enabled_value: Variant = config.get_value("editor_plugins", "enabled", PackedStringArray())
+	var enabled_value: Variant = ProjectSettings.get_setting("editor_plugins/enabled", PackedStringArray())
 	if enabled_value is PackedStringArray:
 		var paths: PackedStringArray = enabled_value
 		for path: String in paths:
@@ -158,17 +140,20 @@ func _enabled_plugin_names(config: ConfigFile) -> Array[String]:
 	return names
 
 
-# Written as a real PackedStringArray: ConfigFile serialises that as the unquoted engine
-# expression the editor reads, whereas the same text handed over as a String is written quoted
-# and loads as a String the editor does not recognise as a plugin list.
-func _write_enabled_plugins(config: ConfigFile, names: Array[String]) -> void:
+# Written through ProjectSettings rather than a ConfigFile of project.godot: the engine saves
+# the file the way the editor does, header comment and all, where ConfigFile drops every
+# comment and reorders what it kept. A real PackedStringArray, because that is serialised as
+# the unquoted expression the editor reads, whereas the same text handed over as a String is
+# written quoted and loads as a String the editor does not recognise as a plugin list. An
+# empty list is the setting removed, which is what the editor writes for no plugins.
+func _save_enabled_plugins(names: Array[String]) -> Error:
 	if names.is_empty():
-		if config.has_section_key("editor_plugins", "enabled"):
-			config.erase_section_key("editor_plugins", "enabled")
-		return
+		ProjectSettings.set_setting("editor_plugins/enabled", null)
+		return ProjectSettings.save()
 
 	var enabled_paths: PackedStringArray = PackedStringArray()
 	for name: String in names:
 		enabled_paths.append("res://addons/" + name + "/plugin.cfg")
 
-	config.set_value("editor_plugins", "enabled", enabled_paths)
+	ProjectSettings.set_setting("editor_plugins/enabled", enabled_paths)
+	return ProjectSettings.save()
