@@ -89,6 +89,12 @@ otherwise does by hand with a grep. The engine's own stdin debugger is never tur
 breaks into a prompt on the first script error and, with no terminal to read from, never comes
 back.
 
+`project_import refresh_classes` rewrites `.godot/global_script_class_cache.cfg` from the
+`class_name` declarations on disk. The editor fixes that list at startup and refreshes it only on
+a filesystem scan it does not always run (godotengine/godot#42786), and a game started from a
+stale editor cannot resolve any class written since; the rebuilt file is the one the engine reads
+at boot, and the answer says which classes were added, removed or changed.
+
 A game finds its own port: the runtime addon listens on whatever the operating system hands
 out and announces the port in a file named by its process id, under `$GDHARNESS_RUNTIME_DIR`,
 else `$XDG_RUNTIME_DIR/gdharness`, else the temporary directory. The server reads that, so two

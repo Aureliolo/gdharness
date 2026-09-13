@@ -103,6 +103,7 @@ const HEADLESS_OPERATIONS: Readonly<Record<string, Readonly<Record<string, strin
     reimport: 'reimport_resource',
     uid: 'get_uid',
     refresh_uids: 'resave_resources',
+    refresh_classes: 'refresh_class_cache',
   }),
   project_export: dictionary({ list: 'list_export_presets' }),
   script_edit: dictionary({ create: 'create_script', modify: 'modify_script' }),

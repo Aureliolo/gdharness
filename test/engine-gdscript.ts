@@ -563,6 +563,28 @@ function testOperations(godotPath: string, projectDir: string): void {
   assert.deepEqual(kinds.get('res://made/hero.tscn'), ['ext_resource']);
   assert.equal(get(byName, 'summary', 'files_with_usages'), 3);
 
+  // The global class list, rebuilt from the scripts on disk over a stale one, then read back
+  // by a fresh engine: the file is only right if the engine itself lists the classes from it.
+  writeFileSync(join(projectDir, 'made', 'squire.gd'), 'class_name FixtureSquire\nextends FixtureHero\n');
+  mkdirSync(join(projectDir, '.godot'), { recursive: true });
+  writeFileSync(
+    join(projectDir, '.godot', 'global_script_class_cache.cfg'),
+    'list=[{\n"base": &"Node",\n"class": &"Stale",\n"icon": "",\n"is_abstract": false,\n"is_tool": false,\n"language": &"GDScript",\n"path": "res://gone.gd"\n}]\n',
+  );
+  const rebuilt = operation('refresh_class_cache', {});
+  assert.deepEqual(get(rebuilt, 'removed'), ['Stale'], JSON.stringify(rebuilt));
+  const listed = asArray(get(rebuilt, 'added'));
+  assert.ok(
+    listed.includes('FixtureHero') && listed.includes('FixtureSquire'),
+    `added: ${listed.join(', ')}`,
+  );
+  assert.deepEqual(get(rebuilt, 'skipped'), [], 'every script with a class_name loads');
+  const known = runFixture(godotPath, projectDir, 'class_list');
+  assert.equal(get(known, 'classes', 'FixtureSquire', 'base'), 'FixtureHero', JSON.stringify(known));
+  assert.equal(get(known, 'classes', 'FixtureHero', 'base'), 'Node2D');
+  assert.equal(get(known, 'classes', 'FixtureHero', 'path'), 'res://made/hero.gd');
+  assert.equal(get(known, 'classes', 'Stale'), undefined, 'the stale entry is gone');
+
   // The resave walks the project and writes every scene and script back.
   assert.equal(get(operation('get_uid', { resource_path: 'made/hero.gd' }), 'exists'), false);
   const resaved = operation('resave_resources', {});

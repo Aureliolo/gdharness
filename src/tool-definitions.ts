@@ -310,7 +310,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   },
   {
     name: 'project_import',
-    description: 'The import pipeline: what needs importing, how a resource is imported, reimports and UIDs.',
+    description:
+      'The import pipeline: what needs importing, how a resource is imported, reimports, UIDs, and the global class list the editor and the engine read.',
     parameters: {
       projectPath: PROJECT_PATH,
       resourcePath: RESOURCE_PATH,
@@ -341,6 +342,11 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       uid: { summary: 'the UID of one file', requires: ['resourcePath'] },
       refresh_uids: { summary: 'resave every resource so UID references are current', requires: [] },
+      refresh_classes: {
+        summary:
+          'rewrite .godot/global_script_class_cache.cfg from the class_name declarations on disk, for an editor whose list has gone stale',
+        requires: [],
+      },
     },
   },
   {
