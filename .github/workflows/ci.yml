@@ -85,12 +85,60 @@ jobs:
             --requirements .github/requirements/gdtoolkit.txt
           echo "${RUNNER_TEMP}/gdtoolkit/bin" >> "${GITHUB_PATH}"
 
+      # Bun only runs the package scripts, so the directories gdformat and gdlint cover are
+      # written once, in package.json, and are the same here as on a developer's machine.
+      - name: Install Bun
+        uses: ./.github/actions/install-bun # zizmor: ignore[self-repository]
+
       - name: Check formatting
-        run: gdformat --check --line-length=110 src/godot
+        run: bun run format:gd:check
 
       - name: Lint
         if: '!cancelled()'
-        run: gdlint src/godot
+        run: bun run lint:gd
+
+  # The workflows are linted by actionlint and zizmor for what they do; this is for what every
+  # YAML file here is as YAML, the syft and yamllint configs included. yamllint is Python, so
+  # it is installed the way gdtoolkit is above.
+  yaml:
+    name: yaml
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        env:
+          # renovate: datasource=github-release-attachments depName=astral-sh/uv versioning=semver
+          UV_TAG: 0.12.13
+          UV_SHA256: 745765a3b6e360ad76743599ae5c42e9278c7edf8bbff9fc76d05bf2623a04dd
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/uv-x86_64-unknown-linux-gnu.tar.gz"
+          curl -fsSL --proto '=https' --tlsv1.2 --retry 2 -o "${archive}" \
+            "https://github.com/astral-sh/uv/releases/download/${UV_TAG}/uv-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${UV_SHA256}  ${archive}" | sha256sum --check --strict
+          tar -xzf "${archive}" -C "${RUNNER_TEMP}"
+          echo "${RUNNER_TEMP}/uv-x86_64-unknown-linux-gnu" >> "${GITHUB_PATH}"
+
+      - name: Install yamllint
+        env:
+          # renovate: datasource=python-version depName=python
+          PYTHON_VERSION: 3.14.7
+          UV_MANAGED_PYTHON: '1'
+        run: |
+          set -euo pipefail
+          uv venv --python "${PYTHON_VERSION}" "${RUNNER_TEMP}/yamllint"
+          uv pip install --python "${RUNNER_TEMP}/yamllint" --require-hashes \
+            --requirements .github/requirements/yamllint.txt
+          echo "${RUNNER_TEMP}/yamllint/bin" >> "${GITHUB_PATH}"
+
+      - name: Lint
+        run: yamllint --strict .
 
   # The GDScript that ships in the bundle, driven against a real engine on every platform we
   # claim to support. It is a separate job from build-and-test because it is the only one that

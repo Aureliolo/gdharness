@@ -1,0 +1,9 @@
+# Prettier formats the prose and the YAML; Biome owns the TypeScript and the JSON.
+*
+!*.md
+!*.yml
+!*.yaml
+!**/
+build/
+dist/
+node_modules/
