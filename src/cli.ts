@@ -174,6 +174,13 @@ function reportConnection(group: Group, launch: Launch, projectPath: string): vo
     return;
   }
   console.log(`${who}: ${written.action} ${written.path}`);
+  // A harness that will not take the config's word for it: a trust prompt or an approval nobody
+  // mentions is an install that reports success and then answers nothing.
+  for (const harness of group.harnesses) {
+    if (harness.manual !== undefined) {
+      console.log(`  ${harness.name}: ${harness.manual}`);
+    }
+  }
 }
 
 /**

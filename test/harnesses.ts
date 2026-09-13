@@ -275,6 +275,33 @@ function testDetectionNeverReachesOutOfTheProject(): void {
 }
 
 /**
+ * A harness that will not take the config's word for it says so.
+ *
+ * Writing the file is not the same as being connected: one reads its config only at startup, one
+ * asks you to trust the folder, one asks you to trust the server, one asks before every tool
+ * call, and one will not start a project server until you toggle it on. Each of those is an
+ * install that reports success and then answers nothing, so the sentence explaining it has to
+ * exist and has to be a sentence.
+ */
+function testEveryManualStepIsSaidOutLoud(): void {
+  const named = HARNESSES.filter((harness) => harness.manual !== undefined);
+  for (const harness of named) {
+    const line = harness.manual ?? '';
+    assert.match(line, /^[A-Z]/, `${harness.id}: the line should read as a sentence: ${line}`);
+    assert.match(line, /\.$/, `${harness.id}: and end like one: ${line}`);
+    assert.ok(line.length > 20, `${harness.id}: and actually say something: ${line}`);
+  }
+  // Each of these was read off that harness's own documentation rather than assumed from how a
+  // similar one behaves, and each holds the reader up before anything answers.
+  for (const id of ['codex', 'cursor', 'vscode', 'copilot-cli', 'warp']) {
+    assert.ok(
+      named.some((harness) => harness.id === id),
+      `${id} makes the reader do something, and should say so`,
+    );
+  }
+}
+
+/**
  * What the prompt is built from. A candidate that is already configured here is a different
  * question from one that merely exists on the machine, and a machine-wide one is a different
  * question again, so the reason has to survive detection rather than being inferred later.
@@ -544,6 +571,7 @@ const TESTS = [
   testAConfigThatDoesNotParseIsLeftAlone,
   testDetectionNeverReachesOutOfTheProject,
   testEveryCandidateCarriesWhyItIsOffered,
+  testEveryManualStepIsSaidOutLoud,
   testEveryInstalledMarkerIsUnderHome,
   testAHarnessIsDetectedByItsOwnDirectory,
   testAHarnessWeCannotWriteIsNeverWrittenTo,
