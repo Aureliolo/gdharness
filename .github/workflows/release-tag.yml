@@ -23,7 +23,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
-      contents: write # Creates the tag, which is the whole job.
+      contents: write # Creates the tag.
+      actions: write # Starts the release workflow on it, since a tag made with this token starts nothing by itself.
 
     steps:
       - name: Checkout
@@ -57,3 +58,8 @@ jobs:
             -f "ref=refs/tags/v${version}" \
             -f "sha=${GITHUB_SHA}"
           echo "Tagged v${version} at ${GITHUB_SHA}."
+
+          # An event caused by the job token starts no workflow, so the tag push above is
+          # invisible to the release workflow's trigger; a dispatch is not.
+          gh workflow run release.yml --ref "v${version}"
+          echo "Started the release workflow on v${version}."
