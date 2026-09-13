@@ -658,7 +658,14 @@ function main(): void {
     runFixture(godotPath, projectDir, 'operations_serialize');
     runFixture(godotPath, projectDir, 'runtime_serialize');
     runFixture(godotPath, projectDir, 'runtime_input');
-    runFixture(godotPath, projectDir, 'runtime_clients');
+    // The game announces itself under the engine's temporary directory and the server looks
+    // under Bun's; a platform where the two differ is one where no game is ever found.
+    const clients = runFixture(godotPath, projectDir, 'runtime_clients');
+    assert.equal(
+      resolve(asString(get(clients, 'temp_dir'))),
+      resolve(tmpdir()),
+      'the engine and the server should agree on the temporary directory',
+    );
     runFixture(godotPath, projectDir, 'input_action');
     testDependencyWalk(godotPath, projectDir);
     testOperations(godotPath, projectDir);

@@ -1,17 +1,20 @@
 extends Node
 
-## MCP Runtime Autoload
-## This singleton runs in the game and provides runtime inspection capabilities.
-## It starts a TCP server that the MCP server can connect to.
+## The runtime autoload: a TCP server inside the running game that the gdharness server asks
+## about the scene tree, drives with input, and captures.
+##
+## The port is whatever the operating system hands out, and the game announces it by writing
+## one file named after its process id into a directory the server derives the same way. Two
+## games can therefore run at once, and a headless operation never takes the port a game
+## wanted. Both directions of the socket carry one JSON object per line. Every request names an
+## id and the reply carries it back.
 
-signal client_connected
-signal client_disconnected
-signal command_received(command: String, params: Dictionary)
-
-const DEFAULT_PORT: int = 7777
+const PROTOCOL: int = 2
 const DEFAULT_BIND_ADDRESS: String = "127.0.0.1"
-const BIND_ADDRESS_SETTING: String = "godot_mcp/runtime/bind_address"
-const PROTOCOL_VERSION: String = "1.0"
+const BIND_ADDRESS_SETTING: String = "gdharness/runtime/bind_address"
+## 0 asks the operating system for a free port, which is the default and what the server
+## expects. A fixed port is for a client that cannot read the announcement.
+const PORT_SETTING: String = "gdharness/runtime/port"
 
 # What each Godot type becomes on the wire, keyed on typeof() rather than written as a chain of
 # `is` tests whose order has to be trusted: Resource had to be tested before Object, or every
@@ -35,11 +38,30 @@ const SERIALISERS: Dictionary = {
 	TYPE_OBJECT: "_serialize_object",
 }
 
+## Every command, by the name a request uses. Method names rather than Callables for the same
+## reason as the serialisers, and so the welcome can list them without building anything.
+const COMMANDS: Dictionary = {
+	"ping": "_cmd_ping",
+	"get_tree": "_cmd_get_tree",
+	"get_node": "_cmd_get_node",
+	"set_property": "_cmd_set_property",
+	"call_method": "_cmd_call_method",
+	"get_metrics": "_cmd_get_metrics",
+	"capture_screenshot": "_cmd_capture_screenshot",
+	"capture_viewport": "_cmd_capture_viewport",
+	"inject_action": "_cmd_inject_action",
+	"inject_key": "_cmd_inject_key",
+	"inject_mouse_click": "_cmd_inject_mouse_click",
+	"inject_mouse_motion": "_cmd_inject_mouse_motion",
+}
+
 var _server: TCPServer
 var _clients: Array[StreamPeerTCP] = []
-var _port: int = DEFAULT_PORT
+## Bytes received from each client that do not yet end in a newline, keyed by the peer.
+var _pending: Dictionary = {}
+var _port: int = 0
 var _enabled: bool = true
-var _watched_signals: Dictionary = {}  # { "node_path:signal_name": callable }
+var _announcement: String = ""
 
 
 func _ready() -> void:
@@ -50,43 +72,53 @@ func _ready() -> void:
 	# is frozen, to inspect, capture, inject or resume it.
 	process_mode = Node.PROCESS_MODE_ALWAYS
 	_start_server()
-	print("[MCP Runtime] Autoload ready, server starting on port %d" % _port)
+
+
+func _exit_tree() -> void:
+	_cleanup()
 
 
 func _process(_delta: float) -> void:
 	if not _enabled or _server == null:
 		return
 
-	# Accept new connections
 	if _server.is_connection_available():
 		var client: StreamPeerTCP = _server.take_connection()
 		if client:
 			_clients.append(client)
-			print("[MCP Runtime] Client connected")
-			client_connected.emit()
 			_send_welcome(client)
 
-	# Process client messages
-	var clients_to_remove: Array[StreamPeerTCP] = []
+	var gone: Array[StreamPeerTCP] = []
 	for client: StreamPeerTCP in _clients:
-		if client.get_status() != StreamPeerTCP.STATUS_CONNECTED:
-			clients_to_remove.append(client)
-			continue
-
 		client.poll()
 		if client.get_status() != StreamPeerTCP.STATUS_CONNECTED:
-			clients_to_remove.append(client)
+			gone.append(client)
 			continue
 		var available: int = client.get_available_bytes()
 		if available > 0:
-			var data: String = client.get_utf8_string(available)
-			_handle_message(client, data)
+			var received: Array = client.get_data(available)
+			var bytes: PackedByteArray = received[1]
+			_receive(client, bytes)
 
-	# Remove disconnected clients
-	for client: StreamPeerTCP in clients_to_remove:
+	for client: StreamPeerTCP in gone:
 		_clients.erase(client)
-		print("[MCP Runtime] Client disconnected")
-		client_disconnected.emit()
+		_pending.erase(client)
+
+
+## Bytes arrive in whatever pieces the socket makes of them, so a request is only handled once
+## its newline has arrived, and two that arrive together are handled one after the other.
+func _receive(client: StreamPeerTCP, bytes: PackedByteArray) -> void:
+	var buffered: PackedByteArray = _pending.get(client, PackedByteArray())
+	buffered.append_array(bytes)
+	var start: int = 0
+	var newline: int = buffered.find(10, start)
+	while newline != -1:
+		var line: String = buffered.slice(start, newline).get_string_from_utf8().strip_edges()
+		start = newline + 1
+		newline = buffered.find(10, start)
+		if not line.is_empty():
+			_handle_message(client, line)
+	_pending[client] = buffered.slice(start)
 
 
 func _start_server() -> void:
@@ -99,84 +131,118 @@ func _start_server() -> void:
 	_server = TCPServer.new()
 	# listen() defaults bind_address to "*", which exposes the game to the whole network.
 	var bind_address: String = str(ProjectSettings.get_setting(BIND_ADDRESS_SETTING, DEFAULT_BIND_ADDRESS))
-	var error: Error = _server.listen(_port, bind_address)
+	var wanted_port: int = int(ProjectSettings.get_setting(PORT_SETTING, 0))
+	var error: Error = _server.listen(wanted_port, bind_address)
 	if error != OK:
-		# A warning, not an error. The usual cause is that another instance of this project
-		# already owns the port, which happens every time a tool runs a headless operation
-		# while the game is open. This instance carries on without a runtime server, which
-		# is what it wants anyway, and callers treat any ERROR line on stderr as a failed
-		# operation, so reporting a handled condition as one breaks working tools.
-		push_warning("[MCP Runtime] Port %d is unavailable (%s), running without a server" % [_port, error])
+		# A warning, not an error: callers treat any ERROR line on stderr as a failed
+		# operation, and a game without a runtime server is a handled condition.
+		push_warning(
+			"[gdharness] runtime port %d is unavailable (%s), running without a server" % [wanted_port, error]
+		)
 		_enabled = false
-	else:
-		print("[MCP Runtime] Server listening on port %d" % _port)
+		return
+
+	_port = _server.get_local_port()
+	_announce(bind_address)
+	print("[gdharness] runtime listening on %s:%d, announced at %s" % [bind_address, _port, _announcement])
+
+
+## Where the announcement goes. The server derives the same path with the same precedence, so
+## the two only meet if this stays in step with `runtimeDirectory` in src/runtime-client.ts.
+func _announcement_directory() -> String:
+	var explicit: String = OS.get_environment("GDHARNESS_RUNTIME_DIR")
+	if not explicit.is_empty():
+		return explicit
+	var per_user: String = OS.get_environment("XDG_RUNTIME_DIR")
+	var base: String = per_user if not per_user.is_empty() else OS.get_temp_dir()
+	return base.path_join("gdharness")
+
+
+func _announce(bind_address: String) -> void:
+	var directory: String = _announcement_directory()
+	var made: Error = DirAccess.make_dir_recursive_absolute(directory)
+	if made != OK and made != ERR_ALREADY_EXISTS:
+		push_warning(
+			"[gdharness] cannot create %s (%s); the server will not find this game" % [directory, made]
+		)
+		return
+	var path: String = directory.path_join("runtime-%d.json" % OS.get_process_id())
+	var file: FileAccess = FileAccess.open(path, FileAccess.WRITE)
+	if file == null:
+		push_warning(
+			(
+				"[gdharness] cannot write %s (%s); the server will not find this game"
+				% [path, FileAccess.get_open_error()]
+			)
+		)
+		return
+	file.store_string(JSON.stringify(_identity(bind_address)))
+	file.close()
+	_announcement = path
+
+
+## What the announcement file and the welcome both carry: enough to pick this game out of
+## several and to know whether the server speaks its protocol.
+func _identity(bind_address: String) -> Dictionary:
+	return {
+		"protocol": PROTOCOL,
+		"pid": OS.get_process_id(),
+		"port": _port,
+		"address": bind_address,
+		"project":
+		{
+			"name": str(ProjectSettings.get_setting("application/config/name", "")),
+			"path": ProjectSettings.globalize_path("res://").rstrip("/")
+		},
+		"godot": Engine.get_version_info().get("string", ""),
+	}
 
 
 func _send_welcome(client: StreamPeerTCP) -> void:
-	var welcome: Dictionary = {
-		"type": "welcome",
-		"protocol_version": PROTOCOL_VERSION,
-		"godot_version": Engine.get_version_info(),
-		"project_name": ProjectSettings.get_setting("application/config/name", "Unknown")
-	}
+	var welcome: Dictionary = _identity(
+		str(ProjectSettings.get_setting(BIND_ADDRESS_SETTING, DEFAULT_BIND_ADDRESS))
+	)
+	welcome["type"] = "welcome"
+	welcome["commands"] = COMMANDS.keys()
 	_send_response(client, welcome)
 
 
-func _handle_message(client: StreamPeerTCP, data: String) -> void:
+func _handle_message(client: StreamPeerTCP, line: String) -> void:
 	var json := JSON.new()
-	var error: Error = json.parse(data)
-	if error != OK:
-		_send_error(client, "Invalid JSON: " + json.get_error_message())
+	if json.parse(line) != OK:
+		_send_error(client, null, "Invalid JSON: " + json.get_error_message())
 		return
 
 	var message: Variant = json.get_data()
 	if not message is Dictionary:
-		_send_error(client, "Message must be an object")
+		_send_error(client, null, "A request must be an object")
 		return
 
 	var fields: Dictionary = message
+	var request_id: Variant = fields.get("id", null)
+	if request_id == null:
+		_send_error(client, null, "A request must carry an id")
+		return
+
 	var command: String = str(fields.get("command", ""))
 	var params: Variant = fields.get("params", {})
 	if not params is Dictionary:
-		_send_error(client, "params must be an object")
+		_send_error(client, request_id, "params must be an object")
 		return
-	var request_id: Variant = fields.get("id", null)
-
-	command_received.emit(command, params)
 
 	var result: Dictionary = _execute_command(command, params)
-	if request_id != null:
-		result["id"] = request_id
-
+	result["id"] = request_id
 	_send_response(client, result)
 
 
 func _execute_command(command: String, params: Dictionary) -> Dictionary:
-	var handler: Callable = _command_handlers().get(command, Callable())
-	if not handler.is_valid():
-		return {"type": "error", "message": "Unknown command: " + command}
-	return handler.call(params)
-
-
-## The command table. A dictionary rather than a match arm per command, so the set of commands
-## is one list that can be read, counted and answered with, instead of a branch each.
-func _command_handlers() -> Dictionary:
-	return {
-		"ping": _cmd_ping,
-		"get_tree": _cmd_get_tree,
-		"get_node": _cmd_get_node,
-		"set_property": _cmd_set_property,
-		"call_method": _cmd_call_method,
-		"get_metrics": _cmd_get_metrics,
-		"capture_screenshot": _cmd_capture_screenshot,
-		"capture_viewport": _cmd_capture_viewport,
-		"inject_action": _cmd_inject_action,
-		"inject_key": _cmd_inject_key,
-		"inject_mouse_click": _cmd_inject_mouse_click,
-		"inject_mouse_motion": _cmd_inject_mouse_motion,
-		"watch_signal": _cmd_watch_signal,
-		"unwatch_signal": _cmd_unwatch_signal,
-	}
+	var handler: String = COMMANDS.get(command, "")
+	if handler.is_empty():
+		return {
+			"type": "error",
+			"message": "Unknown command: %s. Commands: %s" % [command, ", ".join(COMMANDS.keys())]
+		}
+	return call(handler, params)
 
 
 func _cmd_ping(_params: Dictionary) -> Dictionary:
@@ -505,60 +571,6 @@ func _cmd_inject_mouse_motion(params: Dictionary) -> Dictionary:
 	}
 
 
-func _cmd_watch_signal(params: Dictionary) -> Dictionary:
-	var node_path: String = str(params.get("path", ""))
-	var signal_name: String = str(params.get("signal", ""))
-
-	if node_path.is_empty() or signal_name.is_empty():
-		return {"type": "error", "message": "Node path and signal name required"}
-
-	var node: Node = get_tree().root.get_node_or_null(node_path)
-	if node == null:
-		return {"type": "error", "message": "Node not found: " + node_path}
-
-	if not node.has_signal(signal_name):
-		return {"type": "error", "message": "Signal not found: " + signal_name}
-
-	var key: String = node_path + ":" + signal_name
-	if _watched_signals.has(key):
-		return {"type": "error", "message": "Signal already being watched"}
-
-	var callable: Callable = func(args: Array = []) -> void:
-		_broadcast_signal_event(node_path, signal_name, args)
-
-	node.connect(signal_name, callable)
-	_watched_signals[key] = callable
-
-	return {"type": "signal_watched", "path": node_path, "signal": signal_name}
-
-
-func _cmd_unwatch_signal(params: Dictionary) -> Dictionary:
-	var node_path: String = str(params.get("path", ""))
-	var signal_name: String = str(params.get("signal", ""))
-
-	var key: String = node_path + ":" + signal_name
-	if not _watched_signals.has(key):
-		return {"type": "error", "message": "Signal not being watched"}
-
-	var node: Node = get_tree().root.get_node_or_null(node_path)
-	if node != null:
-		node.disconnect(signal_name, _watched_signals[key])
-
-	_watched_signals.erase(key)
-
-	return {"type": "signal_unwatched", "path": node_path, "signal": signal_name}
-
-
-func _broadcast_signal_event(node_path: String, signal_name: String, args: Array) -> void:
-	var event: Dictionary = {"type": "signal_event", "path": node_path, "signal": signal_name, "args": []}
-	for arg: Variant in args:
-		event["args"].append(_serialize_value(arg))
-
-	for client: StreamPeerTCP in _clients:
-		if client.get_status() == StreamPeerTCP.STATUS_CONNECTED:
-			_send_response(client, event)
-
-
 func _serialize_node_tree(node: Node, depth: int, max_depth: int, include_properties: bool) -> Dictionary:
 	var result: Dictionary = _serialize_node(node, include_properties)
 
@@ -739,13 +751,15 @@ func _resolve_mouse_button(raw: Variant) -> int:
 	return int(raw)
 
 
+## One JSON object and a newline. put_data rather than put_utf8_string, which would prefix the
+## bytes with a length the other side is not expecting.
 func _send_response(client: StreamPeerTCP, data: Dictionary) -> void:
-	var json_str: String = JSON.stringify(data) + "\n"
-	client.put_utf8_string(json_str)
+	client.put_data((JSON.stringify(data) + "\n").to_utf8_buffer())
 
 
-func _send_error(client: StreamPeerTCP, message: String) -> void:
-	_send_response(client, {"type": "error", "message": message})
+## A request that could not be read far enough to find its id is answered with a null one.
+func _send_error(client: StreamPeerTCP, request_id: Variant, message: String) -> void:
+	_send_response(client, {"type": "error", "message": message, "id": request_id})
 
 
 func _notification(what: int) -> void:
@@ -757,9 +771,14 @@ func _cleanup() -> void:
 	for client: StreamPeerTCP in _clients:
 		client.disconnect_from_host()
 	_clients.clear()
+	_pending.clear()
 
 	if _server:
 		_server.stop()
 		_server = null
 
-	print("[MCP Runtime] Cleanup complete")
+	# The announcement is what tells the server this game exists, so it goes before the
+	# process does. A crash leaves it behind, and the server drops one whose process is gone.
+	if not _announcement.is_empty():
+		DirAccess.remove_absolute(_announcement)
+		_announcement = ""

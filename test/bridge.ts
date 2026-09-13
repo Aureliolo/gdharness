@@ -5,13 +5,15 @@
  * Godot on each side so that what is asserted is the relay and not the engine.
  */
 import assert from 'node:assert/strict';
-import { accessSync, constants, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { createServer, type Server, type Socket } from 'node:net';
+import { spawn } from 'node:child_process';
+import { accessSync, constants, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { type RawData, WebSocket } from 'ws';
+import { RUNTIME_PROTOCOL } from '../src/runtime-client.js';
 import { asArray, get, text } from './support/json.js';
 import {
   isRecord,
@@ -25,8 +27,6 @@ import { reservePort, ServerProcess } from './support/server.js';
 const BRIDGE_HOST = process.env['GDHARNESS_BRIDGE_HOST'] ?? '127.0.0.1';
 const GODOT_PATH = resolveGodotPath(process.env['GODOT_PATH']);
 const HAS_USABLE_GODOT = Boolean(GODOT_PATH && isExecutableFile(GODOT_PATH));
-// The runtime addon listens on a fixed port, so the mock of it has to as well.
-const RUNTIME_PORT = 7777;
 /** domain_verb, which every client accepts: no dots, no case, nothing a strict client rejects. */
 const TOOL_NAME_PATTERN = /^[a-z][a-z0-9_]{1,63}$/;
 const TOOL_COUNT = 30;
@@ -84,93 +84,171 @@ function contentOf(response: JsonRpcMessage): ToolContentBlock[] {
   return Array.isArray(content) ? (content as ToolContentBlock[]) : [];
 }
 
-/** A mock of the runtime addon's socket protocol: one request per connection, answered by command. */
-function startMockRuntime(): Promise<Server> {
+interface MockRuntimeOptions {
+  /** The process the announcement claims to be. It has to be alive or the server drops it. */
+  pid: number;
+  projectPath: string;
+  name: string;
+  /** What the welcome claims to speak. The announcement always says the real one. */
+  protocol?: number;
+  /** Accept connections and never answer, which is what a game paused at a breakpoint does. */
+  silent?: boolean;
+}
+
+interface MockRuntime {
+  port: number;
+  announcement: string;
+  close(): Promise<void>;
+}
+
+/**
+ * A mock of the runtime addon: it announces itself the way the addon does, greets a client
+ * with a welcome, and answers each request by id on the same line-delimited socket.
+ */
+function startMockRuntime(directory: string, options: MockRuntimeOptions): Promise<MockRuntime> {
+  // Every connection is remembered so that closing the mock tears them down, rather than
+  // waiting on a peer that has already given up on it.
+  const open = new Set<Socket>();
   const runtime = createServer((socket: Socket) => {
+    open.add(socket);
+    socket.once('close', () => {
+      open.delete(socket);
+    });
     socket.setEncoding('utf8');
+    const reply = (payload: unknown): void => {
+      socket.write(`${JSON.stringify(payload)}\n`);
+    };
+    reply({
+      type: 'welcome',
+      protocol: options.protocol ?? RUNTIME_PROTOCOL,
+      pid: options.pid,
+      commands: ['ping', 'get_tree'],
+    });
+    if (options.silent) {
+      socket.resume();
+      return;
+    }
+
     let buffer = '';
     socket.on('data', (chunk: string) => {
       buffer += chunk;
-      if (!buffer.includes('\n')) return;
-
-      const line = (buffer.split('\n')[0] ?? '').trim();
-      if (!line) {
-        socket.end();
-        return;
-      }
-
-      const reply = (payload: unknown): void => {
-        socket.write(`${JSON.stringify(payload)}\n`);
-      };
-
-      try {
-        const request = JSON.parse(line) as Record<string, unknown>;
-        const id = request['id'];
-        const params = isRecord(request['params']) ? request['params'] : {};
-        reply({ type: 'welcome', protocol: 'godot_mcp_runtime', version: '1.0.0' });
-        switch (request['command']) {
-          case 'ping':
-            reply({ type: 'pong', id, timestamp: Date.now() });
-            break;
-          case 'get_tree': {
-            const root = typeof params['root'] === 'string' ? params['root'] : '/root';
-            reply({
-              type: 'tree',
-              id,
-              root: {
-                name: 'root',
-                type: 'Node',
-                path: root,
-                children: [{ name: 'Player', type: 'CharacterBody2D', path: `${root}/Player` }],
-              },
-            });
-            break;
-          }
-          case 'set_property':
-            reply({
-              type: 'property_set',
-              id,
-              path: params['path'],
-              property: params['property'],
-              old_value: false,
-              new_value: params['value'],
-            });
-            break;
-          case 'call_method':
-            reply({
-              type: 'method_result',
-              id,
-              path: params['path'],
-              method: params['method'],
-              result: { echoed_args: params['args'] ?? [] },
-            });
-            break;
-          case 'get_metrics':
-            reply({ type: 'metrics', id, data: { fps: 60, object_node_count: 42 } });
-            break;
-          case 'capture_screenshot':
-            reply({ type: 'screenshot', id, data: ONE_PIXEL_PNG_BASE64, width: 1, height: 1, format: 'png' });
-            break;
-          case 'capture_viewport': {
-            const screenshotPath = text(params['output_path'] ?? params['outputPath']);
-            writeFileSync(screenshotPath, Buffer.from(ONE_PIXEL_PNG_BASE64, 'base64'));
-            reply({ type: 'screenshot_file', id, path: screenshotPath, width: 1, height: 1, format: 'png' });
-            break;
-          }
-          default:
-            reply({ type: 'error', id, error: `unknown command ${String(request['command'])}` });
+      let newline = buffer.indexOf('\n');
+      while (newline !== -1) {
+        const line = buffer.slice(0, newline).trim();
+        buffer = buffer.slice(newline + 1);
+        newline = buffer.indexOf('\n');
+        if (line) {
+          answer(line);
         }
-      } catch {
-        reply({ error: 'invalid_json' });
       }
-      socket.end();
     });
+
+    const answer = (line: string): void => {
+      const request = JSON.parse(line) as Record<string, unknown>;
+      const id = request['id'];
+      const params = isRecord(request['params']) ? request['params'] : {};
+      switch (request['command']) {
+        case 'ping':
+          reply({ type: 'pong', id, timestamp: Date.now() });
+          break;
+        case 'get_tree': {
+          const root = typeof params['root'] === 'string' ? params['root'] : '/root';
+          reply({
+            type: 'tree',
+            id,
+            root: {
+              name: options.name,
+              type: 'Node',
+              path: root,
+              children: [{ name: 'Player', type: 'CharacterBody2D', path: `${root}/Player` }],
+            },
+          });
+          break;
+        }
+        case 'set_property':
+          reply({
+            type: 'property_set',
+            id,
+            path: params['path'],
+            property: params['property'],
+            old_value: false,
+            new_value: params['value'],
+          });
+          break;
+        case 'call_method':
+          reply({
+            type: 'method_result',
+            id,
+            path: params['path'],
+            method: params['method'],
+            result: { echoed_args: params['args'] ?? [] },
+          });
+          break;
+        case 'get_metrics':
+          reply({ type: 'metrics', id, data: { fps: 60, object_node_count: 42 } });
+          break;
+        case 'capture_screenshot':
+        case 'capture_viewport': {
+          const screenshotPath = text(params['output_path']);
+          writeFileSync(screenshotPath, Buffer.from(ONE_PIXEL_PNG_BASE64, 'base64'));
+          reply({ type: 'screenshot_file', id, path: screenshotPath, width: 1, height: 1, format: 'png' });
+          break;
+        }
+        default:
+          reply({ type: 'error', id, message: `Unknown command: ${String(request['command'])}` });
+      }
+    };
   });
 
-  return new Promise<Server>((resolve, reject) => {
+  return new Promise<MockRuntime>((resolve, reject) => {
     runtime.once('error', reject);
-    runtime.listen(RUNTIME_PORT, '127.0.0.1', () => {
-      resolve(runtime);
+    runtime.listen(0, '127.0.0.1', () => {
+      const address = runtime.address();
+      if (!address || typeof address === 'string') {
+        reject(new Error('the mock runtime has no port'));
+        return;
+      }
+      const announcement = join(directory, `runtime-${options.pid}.json`);
+      writeFileSync(
+        announcement,
+        JSON.stringify({
+          protocol: RUNTIME_PROTOCOL,
+          pid: options.pid,
+          port: address.port,
+          address: '127.0.0.1',
+          project: { name: options.name, path: options.projectPath },
+        }),
+      );
+      resolve({
+        port: address.port,
+        announcement,
+        close: () =>
+          new Promise<void>((done, fail) => {
+            rmSync(announcement, { force: true });
+            for (const socket of open) {
+              socket.destroy();
+            }
+            runtime.close((error) => {
+              if (error) fail(error);
+              else done();
+            });
+          }),
+      });
+    });
+  });
+}
+
+/** The id of a process that has already exited, for an announcement nobody is behind. */
+function deadProcessId(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ['-e', '0'], { stdio: 'ignore' });
+    child.once('error', reject);
+    child.once('exit', () => {
+      if (child.pid === undefined) {
+        reject(new Error('the short-lived child had no pid'));
+        return;
+      }
+      resolve(child.pid);
     });
   });
 }
@@ -205,11 +283,16 @@ function parseFrame(data: RawData): Record<string, unknown> | null {
 async function main(): Promise<void> {
   const bridgePort = await reservePort();
   const projectPath = createTestProjectFixture();
+  // Announcements go to a directory of this test's own, so a game running on the machine is
+  // neither found by the server under test nor confused by the mocks.
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-runtime-'));
   const server = new ServerProcess({
     env: {
       DEBUG: 'true',
       GDHARNESS_BRIDGE_PORT: String(bridgePort),
       GODOT_BRIDGE_HOST: BRIDGE_HOST,
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+      GDHARNESS_RUNTIME_TIMEOUT_MS: '1500',
       ...(GODOT_PATH ? { GODOT_PATH } : {}),
     },
   });
@@ -332,16 +415,34 @@ async function main(): Promise<void> {
       `project_search finds the file that carries the match, got ${search}`,
     );
 
-    // The runtime tools, relayed to a mock addon over its socket.
+    // The runtime tools, relayed to a mock addon found through its announcement.
     const notRunning = await payload('editor_status', {});
     assert.equal(
       get(notRunning, 'game', 'runtimeConnected'),
       false,
-      'editor_status reports no runtime without an addon',
+      'editor_status reports no runtime without an announcement',
     );
     assert.equal(get(notRunning, 'game', 'processActive'), false);
+    assert.match(
+      textOf(await call('runtime_inspect', {})) ?? '',
+      /No game with the runtime addon is running/,
+      'a runtime tool with no game says so',
+    );
 
-    const runtime = await startMockRuntime();
+    // An announcement left behind by a game that is gone is dropped, and deleted on the way.
+    const stale = join(runtimeDir, `runtime-${await deadProcessId()}.json`);
+    writeFileSync(
+      stale,
+      JSON.stringify({ protocol: RUNTIME_PROTOCOL, pid: 0, port: 1, address: '127.0.0.1' }),
+    );
+    assert.equal(get(await payload('editor_status', {}), 'game', 'runtimeConnected'), false);
+    assert.ok(!existsSync(stale), 'a stale announcement is deleted when it is found');
+
+    const runtime = await startMockRuntime(runtimeDir, {
+      pid: process.pid,
+      projectPath,
+      name: 'fixture',
+    });
     try {
       const connected = await payload('editor_status', {});
       assert.equal(
@@ -349,10 +450,13 @@ async function main(): Promise<void> {
         true,
         'editor_status reports the runtime once the addon answers a ping',
       );
+      assert.equal(get(connected, 'game', 'runtimes', 0, 'pid'), process.pid, 'the game is named by pid');
+      assert.equal(get(connected, 'game', 'runtimes', 0, 'port'), runtime.port);
 
       const tree = await payload('runtime_inspect', { nodePath: '/root', depth: 2 });
       assert.equal(get(tree, 'type'), 'tree');
       assert.equal(get(tree, 'root', 'path'), '/root', 'runtime_inspect relays the addon tree');
+      assert.equal(get(tree, 'id'), undefined, 'the request id is the relay business, not the answer');
 
       const set = await payload('runtime_invoke', {
         op: 'set',
@@ -391,13 +495,91 @@ async function main(): Promise<void> {
           `${label} image block carries no text field, as the MCP schema requires`,
         );
       }
-    } finally {
-      await new Promise<void>((resolve, reject) => {
-        runtime.close((error) => {
-          if (error) reject(error);
-          else resolve();
-        });
+
+      // A second game: the tools refuse to guess between the two, and projectPath picks one.
+      const otherProject = join(tmpdir(), 'gdharness-other-project');
+      const serverPid = server.child.pid ?? 0;
+      assert.ok(serverPid > 0, 'the server child has a pid to announce under');
+      const other = await startMockRuntime(runtimeDir, {
+        pid: serverPid,
+        projectPath: otherProject,
+        name: 'other',
       });
+      try {
+        assert.match(
+          textOf(await call('runtime_inspect', {})) ?? '',
+          /Several games are running: .*Pass projectPath/,
+          'two games and no projectPath is refused with both named',
+        );
+        const chosen = await payload('runtime_inspect', { projectPath: otherProject });
+        assert.equal(get(chosen, 'root', 'name'), 'other', 'projectPath picks the game running that project');
+        const first = await payload('runtime_inspect', { projectPath });
+        assert.equal(get(first, 'root', 'name'), 'fixture');
+        assert.match(
+          textOf(await call('runtime_inspect', { projectPath: join(tmpdir(), 'nowhere') })) ?? '',
+          /No running game is from /,
+          'a projectPath no game runs is refused with the games that are',
+        );
+      } finally {
+        await other.close();
+      }
+    } finally {
+      await runtime.close();
+    }
+
+    // The three ways a game that exists can still fail to answer.
+    const silent = await startMockRuntime(runtimeDir, {
+      pid: process.pid,
+      projectPath,
+      name: 'silent',
+      silent: true,
+    });
+    try {
+      assert.match(
+        textOf(await call('runtime_inspect', {})) ?? '',
+        /did not answer 'get_tree' within \d+ms/,
+        'a game that accepts and says nothing is reported as busy',
+      );
+    } finally {
+      await silent.close();
+    }
+
+    const older = await startMockRuntime(runtimeDir, {
+      pid: process.pid,
+      projectPath,
+      name: 'older',
+      protocol: 1,
+    });
+    try {
+      assert.match(
+        textOf(await call('runtime_inspect', {})) ?? '',
+        /speaks runtime protocol 1 and this server speaks 2/,
+        'an addon from before this protocol is told apart from a broken one',
+      );
+    } finally {
+      await older.close();
+    }
+
+    const closedPort = await reservePort();
+    const nobody = join(runtimeDir, `runtime-${process.pid}.json`);
+    writeFileSync(
+      nobody,
+      JSON.stringify({
+        protocol: RUNTIME_PROTOCOL,
+        pid: process.pid,
+        port: closedPort,
+        address: '127.0.0.1',
+        project: { name: 'nobody', path: projectPath },
+      }),
+    );
+    try {
+      assert.match(
+        textOf(await call('runtime_inspect', {})) ?? '',
+        /nothing answered on its port/,
+        'an announced port nobody listens on is reported as refused',
+      );
+    } finally {
+      rmSync(nobody, { force: true });
     }
 
     // The editor bridge over WebSocket.
@@ -506,6 +688,7 @@ async function main(): Promise<void> {
   } finally {
     await server.stop();
     rmSync(projectPath, { recursive: true, force: true });
+    rmSync(runtimeDir, { recursive: true, force: true });
   }
 }
 
