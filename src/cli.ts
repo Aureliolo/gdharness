@@ -12,6 +12,7 @@ import {
   type Candidate,
   candidates,
   connect,
+  disconnect,
   displayPath,
   type Group,
   groupByFile,
@@ -25,15 +26,17 @@ import { type HeadlessEngine, type HeadlessOutcome, runOperation } from './headl
 import { Ask, interactive } from './prompt.js';
 import { GODOT_DEBUG_MODE_DEFAULT } from './server-version.js';
 import {
+  disablePlugins,
   EDITOR_PLUGINS,
   enablePlugins,
   inspectProject,
   installAddons,
   RUNTIME_AUTOLOAD,
+  removeAddons,
   setRuntime,
   shippedOperationsScript,
 } from './setup.js';
-import { skillDirectories, writeSkill } from './skill.js';
+import { everySkillDirectory, removeSkill, skillDirectories, writeSkill } from './skill.js';
 import { getLocalVersion } from './version.js';
 
 const args = process.argv.slice(2);
@@ -246,6 +249,62 @@ async function setup(): Promise<void> {
   }
 }
 
+/**
+ * Everything setup put in, taken back out.
+ *
+ * Only our own entry is removed from a harness config, and a machine-wide one is left alone unless
+ * it is named, because that entry may be serving another project: the same reason writing it needs
+ * a flag or an answer.
+ */
+async function uninstall(): Promise<void> {
+  const projectPath = projectArgument(1);
+  const godot = await engine();
+
+  const named = namedHarnesses();
+  const from = named.length > 0 ? named : HARNESSES;
+
+  for (const harness of from) {
+    const removal = disconnect(harness, projectPath);
+    if (removal.action === 'absent') {
+      continue;
+    }
+    if (harness.scope === 'home' && named.length === 0) {
+      console.log(
+        `${harness.name}: left alone. Its config is machine-wide and may serve another project; pass --${harness.id} to remove it.`,
+      );
+      continue;
+    }
+    if (removal.action === 'manual') {
+      console.log(
+        removal.command === undefined
+          ? `${harness.name}: take gdharness out of ${removal.path} by hand.`
+          : `${harness.name}: run  ${removal.command.join(' ')}`,
+      );
+      continue;
+    }
+    console.log(`${harness.name}: ${removal.action} ${removal.path}`);
+  }
+
+  for (const directory of removeSkill(everySkillDirectory(projectPath, HARNESSES), projectPath)) {
+    console.log(`skill: removed ${directory}`);
+  }
+
+  const disabled = await disablePlugins(godot, projectPath, EDITOR_PLUGINS);
+  for (const [index, outcome] of disabled.entries()) {
+    const name = EDITOR_PLUGINS[index] ?? '';
+    said(outcome, `disabling ${name}`);
+    console.log(`${name}: ${outcome.ok ? String(outcome.payload['action']) : 'failed'}`);
+  }
+  said(await setRuntime(godot, projectPath, false), 'removing the runtime autoload');
+  console.log(`${RUNTIME_AUTOLOAD.name} autoload removed`);
+
+  for (const path of removeAddons(projectPath)) {
+    console.log(`removed ${path}`);
+  }
+
+  console.log('\nReconnect your harness so it stops spawning a server that is no longer installed.');
+}
+
 function doctorReport(projectPath: string): void {
   const report = inspectProject(projectPath);
   if (args.includes('--json')) {
@@ -326,6 +385,12 @@ Usage:
                                      questions and does the same. Nothing outside the project is
                                      written without a flag or a typed yes. It also writes the
                                      gdharness skill into .agents/skills, unless --no-skill.
+  gdharness uninstall <project> [--<harness>]
+                                     Take it all back out: the addons, the editor plugins, the
+                                     runtime autoload, the skill, and our own entry in every
+                                     config it can parse. Other servers in those files are
+                                     untouched. A machine-wide config may serve another project,
+                                     so it is named rather than edited unless you ask by flag.
   gdharness harnesses                Every harness, its flag and the file it reads
   gdharness doctor <project> [--json]
                                      Say what holds and what does not; exit 1 on a problem
@@ -360,6 +425,9 @@ async function main(): Promise<void> {
       return;
     case 'classes':
       await classes();
+      return;
+    case 'uninstall':
+      await uninstall();
       return;
     case 'harnesses':
       printHarnesses();
