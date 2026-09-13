@@ -16,7 +16,16 @@
 
 import assert from 'node:assert/strict';
 import { type ChildProcess, spawn, spawnSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import process from 'node:process';
@@ -30,10 +39,10 @@ const CONNECT_TIMEOUT_MS = 120_000;
 const TOOL_TIMEOUT_MS = 60_000;
 /** The editor serves its language server after the addon has connected, and takes its time. */
 const LSP_READY_TIMEOUT_MS = 90_000;
+/** A game the editor plays is a second engine starting, on a runner that is already busy. */
+const GAME_STOP_TIMEOUT_MS = 90_000;
 
 const SCENE = 'res://fixture.tscn';
-const ONE_PIXEL_PNG_BASE64 =
-  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO7Z0r0AAAAASUVORK5CYII=';
 
 interface Editor {
   /** Calls a tool and answers with its payload, failing on a refusal. */
@@ -73,7 +82,10 @@ function resolveGodotPath(): string | null {
  * starts, because a file written afterwards is not in its filesystem until a rescan.
  */
 function createProject(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'gdharness-editor-'));
+  // Resolved, because the editor answers with the path the filesystem really has and the
+  // temporary directory is behind a symlink on macOS and an 8.3 name on a Windows runner: the
+  // fixture would then be holding one spelling of the project while the editor holds another.
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'gdharness-editor-')));
 
   cpSync('src/godot/addons', join(dir, 'addons'), { recursive: true });
 
@@ -85,6 +97,14 @@ function createProject(): string {
       '',
       '[application]',
       'config/name="GdharnessEditorFixture"',
+      'run/main_scene="res://main.tscn"',
+      '',
+      // What the editor appends to the game's command line when it plays it. Headless because a
+      // fixture must not put a window on the desktop of whoever runs it, and because a runner
+      // has no display to put one on.
+      '[editor]',
+      '',
+      'run/main_run_args="--headless"',
       '',
       '[debug]',
       'gdscript/warnings/exclude_addons=false',
@@ -126,9 +146,33 @@ function createProject(): string {
     ['extends Node', '', '', 'func ring( -> int:', '\tpass', ''].join('\n'),
   );
 
-  // A real texture, written before the editor starts so its first scan imports it: a sprite and
-  // a tile set both need one the engine can load rather than a path that merely exists.
-  writeFileSync(join(dir, 'dot.png'), Buffer.from(ONE_PIXEL_PNG_BASE64, 'base64'));
+  // A main scene for the debug cases, which need a game the editor is actually playing. It runs
+  // until it is stopped rather than quitting on the line after the print: a game that ends that
+  // instant can take its debugger connection down before the console it wrote comes over it.
+  writeFileSync(
+    join(dir, 'main.gd'),
+    [
+      'extends Node',
+      '',
+      '',
+      'func _ready() -> void:',
+      '\tvar total: int = 2 + 2',
+      '\tprint("the game said ", total)',
+      '',
+    ].join('\n'),
+  );
+  writeFileSync(
+    join(dir, 'main.tscn'),
+    [
+      '[gd_scene load_steps=2 format=3]',
+      '',
+      '[ext_resource type="Script" path="res://main.gd" id="1_main"]',
+      '',
+      '[node name="Main" type="Node"]',
+      'script = ExtResource("1_main")',
+      '',
+    ].join('\n'),
+  );
 
   // An AnimationTree whose root is a state machine. The state ops need one and nothing makes
   // one: a tool that writes a node cannot build the resource that goes inside it.
@@ -148,6 +192,41 @@ function createProject(): string {
   );
 
   return dir;
+}
+
+/** Waits for a killed engine to actually be gone, which is not the same moment. */
+async function exited(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return;
+  }
+  await new Promise<void>((resolve) => {
+    child.once('exit', () => {
+      resolve();
+    });
+    setTimeout(resolve, 10_000);
+  });
+}
+
+/**
+ * Removes the fixture project once nothing is holding it.
+ *
+ * Windows refuses to unlink a directory a process still has open, and the game the editor played
+ * is a second engine closing in its own time, so the first attempt can land while it is still on
+ * its way out.
+ */
+async function removeWhenFree(directory: string): Promise<string | null> {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    try {
+      rmSync(directory, { recursive: true, force: true });
+      return null;
+    } catch (error) {
+      await delay(250);
+      if (attempt === 39) {
+        return `${directory} is still held: ${error instanceof Error ? error.message : String(error)}`;
+      }
+    }
+  }
+  return null;
 }
 
 /** A file the engine wrote, which is the only answer it cannot fake. */
@@ -275,9 +354,18 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
       `${failure instanceof Error ? failure.stack : String(failure)}\n\nThe editor said:\n${said}`,
     );
   } finally {
+    // The game first: it is the editor's child and outlives it, so a run that failed part way
+    // through would otherwise leave an engine behind holding the fixture project.
+    await invoke('editor_stop', {}).catch(() => undefined);
     editor.kill();
+    await exited(editor);
     await server.stop();
-    rmSync(project, { recursive: true, force: true });
+    // Reported rather than thrown: a directory still held is worth saying, and an exception from
+    // here would replace whatever the cases were failing on, which is the thing worth reading.
+    const held = await removeWhenFree(project);
+    if (held !== null) {
+      console.warn(held);
+    }
   }
 }
 
@@ -638,6 +726,59 @@ async function testLanguageServer({ call, attempt, project }: Editor): Promise<v
   );
 }
 
+/**
+ * The debug tools, against a game the editor is playing.
+ *
+ * They only answer for a game the editor's own debugger is holding, which is why editor_run asks
+ * the editor to play rather than starting the engine itself: a game started as its own process
+ * has no debug session, so a breakpoint set through the adapter is never hit and the stack is
+ * always empty. Everything here is asserted off the session: the stop, the frame it stopped in,
+ * and the line the game printed after being let go.
+ */
+async function testDebugging({ call, attempt, project }: Editor): Promise<void> {
+  const main = { projectPath: project, scriptPath: 'res://main.gd' };
+
+  // Line 6 is the print, so the frame the game stops in is _ready with the sum already worked out.
+  await call('debug_breakpoint', { ...main, op: 'set', line: 6 });
+
+  const run = await call('editor_run', { projectPath: project });
+  assert.equal(get(run, 'through'), 'editor', 'the editor should be the one playing it');
+
+  const deadline = Date.now() + GAME_STOP_TIMEOUT_MS;
+  let frames: unknown[] = [];
+  let said = '';
+  while (frames.length === 0 && Date.now() < deadline) {
+    const stack = await attempt('debug_state', { op: 'stack' });
+    said = stack.text;
+    frames = stack.ok ? asArray(JSON.parse(stack.text), 'stackFrames') : [];
+    if (frames.length === 0) await delay(500);
+  }
+  assert.ok(frames.length > 0, `the game should stop at the breakpoint; the adapter said: ${said}`);
+  assert.equal(get(frames[0], 'name'), '_ready', 'in the function the breakpoint is in');
+  assert.equal(get(frames[0], 'line'), 6, 'on the line it was set on');
+
+  await call('debug_control', { op: 'continue' });
+
+  // Waited for rather than slept on: the line arrives as a debug adapter event, and how long
+  // that takes is how long a second engine takes to get past the line it was held on.
+  const printed = Date.now() + GAME_STOP_TIMEOUT_MS;
+  let console_ = '';
+  let through = '';
+  while (!console_.includes('the game said 4') && Date.now() < printed) {
+    const output = await call('editor_output', {});
+    through = text(get(output, 'through'));
+    console_ = asArray(get(output, 'entries'), 'entries')
+      .map((entry) => text(get(entry, 'text')))
+      .join('\n');
+    if (!console_.includes('the game said 4')) await delay(500);
+  }
+  assert.equal(through, 'editor', 'the console should come from the editor session');
+  assert.match(console_, /the game said 4/, `and carry what the game printed; it carried:\n${console_}`);
+
+  await call('debug_breakpoint', { ...main, op: 'remove', line: 6 });
+  await call('editor_stop', {});
+}
+
 async function main(): Promise<void> {
   const godotPath = resolveGodotPath();
   if (!godotPath) {
@@ -657,6 +798,7 @@ async function main(): Promise<void> {
     await testResourcesOnNodes(editor);
     await testEditorRescan(editor);
     await testLanguageServer(editor);
+    await testDebugging(editor);
   });
 
   console.log('editor tests passed');

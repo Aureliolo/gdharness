@@ -111,6 +111,15 @@ Those three connections are on 6505, 6005 and 6006, and `GDHARNESS_BRIDGE_PORT`,
 command line as `--lsp-port` and `--dap-port`, so an editor that had to be moved off a default is
 still reachable; a variable holding something that is not a port is said so rather than ignored.
 
+**`editor_run` asks the editor to play when the editor is there.** A game started as its own
+process is a game nothing is debugging, so a breakpoint set on it is never hit and the stack is
+always empty; one the editor plays belongs to the editor's debugger, which is the session the
+`debug_*` tools speak to. Its console comes back over that same session, so `editor_output`
+answers the same way either way. Set the breakpoints first and then run: they are registered on
+the adapter rather than on a session, so they are waiting when the game starts. A run asked for
+headless is still spawned, unless the project's own `editor/run/main_run_args` says the editor
+would play it headless too, and `editor_run check` always is.
+
 What a game prints comes back as entries rather than lines: `editor_output` reads the engine's
 `ERROR:`, `SCRIPT ERROR:` and `WARNING:` headlines with the `at:` line and backtrace under each,
 answers with the counts and a `clean` verdict, and filters by severity, by text, or to what has

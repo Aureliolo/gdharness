@@ -926,12 +926,14 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   // -------------------------------------------------------------------------------------------
   {
     name: 'debug_breakpoint',
-    description: "Sets or removes a breakpoint through the editor's debug adapter. Needs the editor running.",
+    description:
+      "Sets or removes a breakpoint through the editor's debug adapter. Needs the editor, not a running game: set them first, then editor_run, and the game stops where you asked.",
     parameters: {
+      projectPath: PROJECT_PATH,
       scriptPath: SCRIPT_PATH,
       line: { type: 'number', description: 'One-based line.' },
     },
-    requires: ['scriptPath', 'line'],
+    requires: ['projectPath', 'scriptPath', 'line'],
     operations: {
       set: { summary: 'set a breakpoint', requires: [] },
       remove: { summary: 'remove a breakpoint', requires: [] },
