@@ -21,6 +21,7 @@ import {
   harnessById,
   type Launch,
   launchFor,
+  registered,
 } from './harnesses.js';
 import { type HeadlessEngine, type HeadlessOutcome, runOperation } from './headless.js';
 import { Ask, interactive } from './prompt.js';
@@ -305,6 +306,69 @@ async function uninstall(): Promise<void> {
   console.log('\nReconnect your harness so it stops spawning a server that is no longer installed.');
 }
 
+/**
+ * The same project, on this version of gdharness.
+ *
+ * Setup asks which harnesses to write; an upgrade asks nothing, because the answer is already in
+ * the files: every config that has a gdharness entry gets it re-pinned, and one that has not is a
+ * harness nobody asked us to write to. A machine-wide config is included when it holds our entry,
+ * since a config we wrote pinning a version that is no longer installed is worse than a corrected
+ * one.
+ *
+ * What this cannot do is either of the two restarts. The editor is holding addons that have just
+ * been replaced underneath it, and the harness is running a server spawned from the version its
+ * config used to name, so both are named at the end for the caller to carry out.
+ */
+async function upgrade(): Promise<void> {
+  const projectPath = projectArgument(1);
+  const version = getLocalVersion();
+  const before = inspectProject(projectPath);
+  const installed = before.addons.find((addon) => addon.installed)?.version ?? null;
+  if (installed === null) {
+    throw new UsageError(
+      `gdharness is not installed in ${projectPath}. Run  gdharness setup ${projectPath}  instead.`,
+    );
+  }
+  console.log(installed === version ? `already ${version}; reinstalling` : `${installed} -> ${version}`);
+
+  const godot = await engine();
+  for (const addon of installAddons(projectPath)) {
+    console.log(`${addon.replaced ? 'replaced' : 'installed'} ${addon.path}`);
+  }
+  const enabled = await enablePlugins(godot, projectPath, EDITOR_PLUGINS);
+  for (const [index, outcome] of enabled.entries()) {
+    said(outcome, `enabling ${EDITOR_PLUGINS[index] ?? ''}`);
+  }
+  // Only when it was already on: an upgrade must not put back an autoload somebody turned off
+  // deliberately, which is the one thing here that would reach a shipped build.
+  if (before.runtimeAutoload) {
+    said(await setRuntime(godot, projectPath, true), 'registering the runtime autoload');
+  }
+  said(await runOperation(godot, 'refresh_class_cache', {}, projectPath), 'rebuilding the class list');
+
+  const launch = launchFor(version, godot.godotPath);
+  const already = HARNESSES.filter((harness) => registered(harness, projectPath));
+  for (const group of groupByFile(already, projectPath)) {
+    reportConnection(group, launch, projectPath);
+  }
+  if (already.length === 0) {
+    console.log('no harness config names gdharness, so none was re-pinned');
+  }
+  for (const written of writeSkill(everySkillDirectory(projectPath, already), version)) {
+    console.log(`skill: ${written.replaced ? 'replaced' : 'written'} ${written.path}`);
+  }
+
+  console.log(`\nOn ${version}. Two things this could not do for you:`);
+  console.log(
+    '  1. The open editor is still running the addons it loaded at startup. Restart it with the\n' +
+      '     editor_launch restart tool, which closes and reopens the window.',
+  );
+  console.log(
+    `  2. Your harness is still running gdharness ${installed}: its config named that version when\n` +
+      '     the server was spawned. Reconnect the MCP server, or restart the harness.',
+  );
+}
+
 function doctorReport(projectPath: string): void {
   const report = inspectProject(projectPath);
   if (args.includes('--json')) {
@@ -385,6 +449,11 @@ Usage:
                                      questions and does the same. Nothing outside the project is
                                      written without a flag or a typed yes. It also writes the
                                      gdharness skill into .agents/skills, unless --no-skill.
+  gdharness upgrade <project>        Reinstall the addons at this version and re-pin every config
+                                     that already names gdharness. Asks nothing: it touches only
+                                     what is already ours. Afterwards the editor needs restarting
+                                     so it loads the new addons, and the MCP server needs
+                                     reconnecting so it is spawned at the new version.
   gdharness uninstall <project> [--<harness>]
                                      Take it all back out: the addons, the editor plugins, the
                                      runtime autoload, the skill, and our own entry in every
@@ -425,6 +494,9 @@ async function main(): Promise<void> {
       return;
     case 'classes':
       await classes();
+      return;
+    case 'upgrade':
+      await upgrade();
       return;
     case 'uninstall':
       await uninstall();

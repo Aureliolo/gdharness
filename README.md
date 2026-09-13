@@ -18,16 +18,16 @@
 Drive a Godot 4 project from an agent: the editor that is open, the game that is running, and the
 project on disk.
 
-**Install, and pick your harness:
-[aureliolo.github.io/gdharness](https://aureliolo.github.io/gdharness)**
-
-Or hand it to your agent:
+**Hand this to your agent:**
 
 ```text
 Install gdharness into this project by following
 https://aureliolo.github.io/gdharness/agent.md, then tell me what it asked you to
 recommend back to me.
 ```
+
+Or do it yourself, and pick your harness:
+[aureliolo.github.io/gdharness](https://aureliolo.github.io/gdharness)
 
 ## What it is for
 

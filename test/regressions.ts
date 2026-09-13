@@ -27,6 +27,7 @@ import { isWithinRoot, resolveWithinProject } from '../src/paths.js';
 import { parseProjectGodot } from '../src/resources.js';
 import { HEADLESS_OPERATIONS } from '../src/server.js';
 import { TOOL_SPECS } from '../src/tool-definitions.js';
+import { cacheFile, isNewer } from '../src/update-check.js';
 import { asArray, asNumber, get, text } from './support/json.js';
 import { isRecord, type JsonRpcMessage, parseTextContent, textOf } from './support/json-rpc.js';
 import { ServerProcess } from './support/server.js';
@@ -1196,6 +1197,102 @@ function testStaleClassesAreReadFromDisk(): void {
 }
 
 /**
+ * The ordering an update notice is decided by.
+ *
+ * Getting this wrong in either direction is bad in its own way: too eager and every session is
+ * told to install something it already has, too shy and a release goes unmentioned forever.
+ */
+function testVersionOrdering(): void {
+  const newer: [string, string][] = [
+    ['0.4.3', '0.4.2'],
+    ['0.5.0', '0.4.9'],
+    ['1.0.0', '0.99.99'],
+    ['0.4.10', '0.4.9'],
+    ['1.0.0', '1.0.0-rc.1'],
+  ];
+  for (const [candidate, current] of newer) {
+    assert.ok(isNewer(candidate, current), `${candidate} should count as newer than ${current}`);
+  }
+  const notNewer: [string, string][] = [
+    ['0.4.2', '0.4.2'],
+    ['0.4.1', '0.4.2'],
+    ['0.4.2-rc.1', '0.4.2'],
+    ['0.4.2+build.7', '0.4.2'],
+    ['0.9.9', '1.0.0'],
+  ];
+  for (const [candidate, current] of notNewer) {
+    assert.ok(!isNewer(candidate, current), `${candidate} should not count as newer than ${current}`);
+  }
+}
+
+/**
+ * The update notice reaches the agent, once, and says what to do about it.
+ *
+ * Driven off a seeded cache rather than the registry: the point is the answer a tool carries, and
+ * a fixture that needs the network to make that assertion is one that fails on a train. A fresh
+ * timestamp is also what stops the server making a request during the test.
+ */
+async function testUpdateNoticeRidesOnAnAnswer(): Promise<void> {
+  const home = mkdtempSync(join(tmpdir(), 'gdharness-update-home-'));
+  const environment = { HOME: home, LOCALAPPDATA: home, XDG_CACHE_HOME: home };
+  try {
+    writeFileSync(
+      cacheFile(environment),
+      JSON.stringify({ checkedAt: Date.now(), latest: '99.9.9' }),
+      'utf8',
+    );
+    await withStdioServer(async (call) => {
+      const first = await call('editor_status', {});
+      assert.match(first, /update_available/, 'the first answer should carry the notice');
+      assert.match(first, /99\.9\.9/, 'naming the version that is out');
+      assert.match(first, /releases\/tag\/v99\.9\.9/, 'and where the notes for it are');
+      assert.match(first, /upgrade/, 'and the command that takes it');
+
+      assert.doesNotMatch(
+        await call('editor_status', {}),
+        /update_available/,
+        'and the next answer should not repeat it',
+      );
+    }, environment);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
+/**
+ * The check can be turned off, and off means no cache is even read.
+ *
+ * It is one request to one host and nothing about the project goes with it, but a dev machine
+ * that is not supposed to talk to the internet is a real thing, and a switch that only silences
+ * the message would not be one.
+ */
+async function testUpdateCheckHasAnOffSwitch(): Promise<void> {
+  const home = mkdtempSync(join(tmpdir(), 'gdharness-update-off-'));
+  const environment = {
+    HOME: home,
+    LOCALAPPDATA: home,
+    XDG_CACHE_HOME: home,
+    GDHARNESS_NO_UPDATE_CHECK: '1',
+  };
+  try {
+    writeFileSync(
+      cacheFile(environment),
+      JSON.stringify({ checkedAt: Date.now(), latest: '99.9.9' }),
+      'utf8',
+    );
+    await withStdioServer(async (call) => {
+      assert.doesNotMatch(
+        await call('editor_status', {}),
+        /update_available/,
+        'GDHARNESS_NO_UPDATE_CHECK should stop the notice as well as the request',
+      );
+    }, environment);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
+/**
  * The engine's argument list is not visible from any response, so it is asserted directly.
  * No -d in either branch: the local debugger it turns on breaks into a `debug>` prompt on the
  * first script error and, with no stdin to read a command from, loops on that prompt forever.
@@ -1928,6 +2025,7 @@ async function main(): Promise<void> {
   testRunArgumentsLeaveTheLocalDebuggerOff();
   testHeadlessFollowsTheDisplay();
   testStaleClassesAreReadFromDisk();
+  testVersionOrdering();
   await testParametersReachTheEngine();
   await testGdUnitRunner();
   testCommandLineSetup();
@@ -1949,6 +2047,8 @@ async function main(): Promise<void> {
   await testToolAndOpLookupsCannotReachThePrototype();
   await testToolsRefusePathsOutsideTheProject();
   await testDebugToolsRefuseWithoutASession();
+  await testUpdateNoticeRidesOnAnAnswer();
+  await testUpdateCheckHasAnOffSwitch();
   console.log('regression tests passed');
 }
 
