@@ -14,10 +14,11 @@ import { cpSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } f
 import { join } from 'node:path';
 import process from 'node:process';
 import { marked, type Tokens } from 'marked';
-import { displayPath, HARNESSES, type Harness } from '../src/harnesses.js';
+import { displayPath, HARNESSES, type Harness, runLine } from '../src/harnesses.js';
 import { SERVER_VERSION } from '../src/server-version.js';
 import { TOOL_SPECS } from '../src/tool-definitions.js';
 import { renderToolsMarkdown } from '../src/tool-reference.js';
+import { renderTraps } from '../src/traps.js';
 
 const DOCS = 'docs';
 const THEME = join(DOCS, 'theme');
@@ -49,6 +50,16 @@ function renderHarnesses(): string {
 }
 
 /**
+ * The same command under both runners, one line each.
+ *
+ * Either works, so showing one and mentioning the other in prose leaves half the readers doing a
+ * translation in their head.
+ */
+function bothRunners(rest: string): string {
+  return [runLine('npx', SERVER_VERSION, rest), runLine('bunx', SERVER_VERSION, rest)].join('\n');
+}
+
+/**
  * Every harness, by name.
  *
  * All of them rather than a chosen few, and alphabetical rather than in table order: any shorter
@@ -74,7 +85,7 @@ function renderPicker(): string {
   );
   const chips = chosen.map((harness) => `<label for="pick-${harness.id}">${escaped(harness.name)}</label>`);
   const panels = chosen.map((harness) => {
-    const command = `npx -y gdharness@${SERVER_VERSION} setup . --${harness.id}`;
+    const command = bothRunners(`setup . --${harness.id}`);
     const where =
       harness.scope === 'project'
         ? `Writes <code>${escaped(displayPath(harness, 'linux'))}</code> inside the project.`
@@ -100,7 +111,7 @@ function renderPicker(): string {
   panels.push(
     [
       '<div class="panel panel-other">',
-      `<pre><code>${escaped(`npx -y gdharness@${SERVER_VERSION} setup .`)}</code></pre>`,
+      `<pre><code>${escaped(bothRunners('setup .'))}</code></pre>`,
       '<p>Any MCP client that can spawn a local stdio server will do. With no harness named it asks about the ones it finds, and the entry it writes is the same everywhere. <a href="architecture.html">How it works</a> has every file and key, and says which ones it cannot write for you.</p>',
       '</div>',
     ].join(''),
@@ -130,8 +141,13 @@ function renderPickerText(): string {
     (harness) => `| ${harness.name} | \`--${harness.id}\` | \`${displayPath(harness, 'linux')}\` |`,
   );
   return [
-    `Every harness takes the same command, \`npx -y gdharness@${SERVER_VERSION} setup .\`, with its own`,
-    'flag. Leave the flag off and it asks about the ones it finds.',
+    'Every harness takes the same command with its own flag, under either runner:',
+    '',
+    '```bash',
+    bothRunners('setup . --<harness>'),
+    '```',
+    '',
+    'Leave the flag off and it asks about the ones it finds.',
     '',
     '| Harness | Flag | Writes |',
     '| --- | --- | --- |',
@@ -152,7 +168,8 @@ function filled(text: string, markup = true): string {
     .replaceAll('{{version}}', SERVER_VERSION)
     .replaceAll('{{tools}}', TOOL_COUNT)
     .replaceAll('{{harnesses}}', renderHarnesses())
-    .replaceAll('{{picker}}', markup ? renderPicker() : renderPickerText());
+    .replaceAll('{{picker}}', markup ? renderPicker() : renderPickerText())
+    .replaceAll('{{traps}}', renderTraps('##'));
 }
 
 /** The three things gdharness is made of, and where each one is documented. */

@@ -15,6 +15,7 @@ import { basename, dirname, join } from 'node:path';
 import type { Harness } from './harnesses.js';
 import { TOOL_SPECS } from './tool-definitions.js';
 import { renderToolsMarkdown } from './tool-reference.js';
+import { renderTraps } from './traps.js';
 
 /** The skill's name, which is also its directory. The format requires them to match. */
 export const SKILL_NAME = 'gdharness';
@@ -47,18 +48,11 @@ that is running, and the project on disk. ${TOOL_SPECS.length} tools, named \`do
 
 ## The five that cost the most time
 
-1. **After writing a \`class_name\`, call \`project_import refresh_classes\` before running the
-   game.** The editor fixes its list of global classes at startup, so the game it launches cannot
-   resolve a class written since, and fails with "Could not find type" at the first screen.
-2. **Start the game with \`editor_run start\`, never by spawning an engine.** A game started as its
-   own process has no debugger session, so every \`debug_*\` tool has nothing to talk to.
-3. **Read \`editor_output\` after every run.** It returns the engine's errors and warnings as
-   entries with their backtraces, and a \`clean\` verdict, so a run that printed an error is one
-   call away from being known.
-4. **Set breakpoints before the run**, with \`debug_breakpoint set\`. They are waiting when it
-   starts.
-5. **Never start a second editor while one is open.** The language server and the bridge hold one
-   client each, and a second engine takes the port from the first, which then stops answering.
+${renderTraps('###')}
+
+Read \`editor_output\` after every run as well. It returns the engine's errors and warnings as
+entries with their backtraces, and a \`clean\` verdict, so a run that printed an error is one call
+away from being known.
 
 ## Measuring a running game
 

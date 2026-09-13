@@ -88,6 +88,43 @@ rather than an integration per harness.
 A harness that does read the shared directory still gets its own copy when this project already
 keeps skills there, because that is where its author will look.
 
+## What gdharness is made of
+
+One npm package. It is the MCP server by default, and the CLI when given a command.
+
+```text
+gdharness
+├── cli.ts                the commands: setup, uninstall, doctor, runtime, classes, harnesses
+│   ├── harnesses.ts      the table: every harness, its file, its shape, its skills directory
+│   ├── config-formats.ts writing TOML by table, and YAML through a comment-preserving parser
+│   ├── skill.ts          the skill written into the project, and where copies of it go
+│   ├── setup.ts          the addons, the editor plugins, the runtime autoload
+│   └── prompt.ts         the questions, and the silence when there is nobody to ask
+│
+└── server.ts             the MCP server: one tool call in, one answer out
+    ├── tool-definitions  every tool, op and argument, in one table
+    ├── tool-args.ts      the refusals, which name the valid set rather than guessing
+    │
+    ├── godot-bridge.ts   websocket, 6505, the editor addon connects in
+    ├── lsp_client.ts     tcp, 6005, script diagnostics and symbols
+    ├── dap_client.ts     tcp, 6006, breakpoints, stepping and the console
+    ├── runtime-client.ts tcp, the running game, on a port it announces in a file
+    └── headless.ts       one short engine per call, for what needs nothing open
+
+addons, installed into your project
+├── gdharness_editor      the bridge: scenes, resources, running the game from the editor
+├── gdharness_runtime     an autoload: the running game answers through it
+└── auto_reload           reloads the open scene when a file changes on disk
+```
+
+The CLI half never loads the MCP SDK, and the server half never reads the harness table. They share
+the engine locator and the project parsers and nothing else, which is why `setup` starts in well
+under a second on a machine that has never run the server.
+
+Every tool is declared in one table and dispatched from it, so a tool the server answers is a tool
+the documentation lists and a fixture drives. The reference on this site is rendered from that same
+table.
+
 ## What talks to what
 
 ```text

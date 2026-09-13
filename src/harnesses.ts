@@ -36,15 +36,37 @@ export interface Launch {
   readonly env: Readonly<Record<string, string>>;
 }
 
+/** The two runners that fetch and run a published package without installing it first. */
+export type Runner = 'npx' | 'bunx';
+
+/**
+ * Whichever runner is running us.
+ *
+ * Somebody who installed with `bunx` may not have Node at all, so writing `npx` into their config
+ * would leave them an entry nothing can spawn.
+ */
+function currentRunner(): Runner {
+  // Bun's own types declare versions.bun as always present, which it is not under Node.
+  const versions: Readonly<Record<string, string | undefined>> = process.versions;
+  return versions['bun'] === undefined ? 'npx' : 'bunx';
+}
+
+/** What a runner is typed as, which is the same line the config holds. */
+export function runLine(runner: Runner, version: string, rest = ''): string {
+  const flag = runner === 'npx' ? '-y ' : '';
+  return `${runner} ${flag}gdharness@${version}${rest === '' ? '' : ` ${rest}`}`;
+}
+
 /**
  * The version is pinned rather than left as `latest` because the server and the addons it
  * installed into the project have to be the same version: `editor_status` reports a mismatch as
  * `addonIsStale`, and `latest` is how a project silently acquires one.
  */
-export function launchFor(version: string, godotPath: string): Launch {
+export function launchFor(version: string, godotPath: string, runner: Runner = currentRunner()): Launch {
   return {
-    command: 'npx',
-    args: ['-y', `gdharness@${version}`],
+    command: runner,
+    // `-y` is npm's "do not stop and ask before fetching this"; bunx has no such prompt.
+    args: runner === 'npx' ? ['-y', `gdharness@${version}`] : [`gdharness@${version}`],
     env: { GODOT_PATH: godotPath },
   };
 }

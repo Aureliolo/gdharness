@@ -28,7 +28,7 @@ import {
   SERVER_KEY,
 } from '../src/harnesses.js';
 
-const LAUNCH = launchFor('9.9.9', '/opt/godot/godot');
+const LAUNCH = launchFor('9.9.9', '/opt/godot/godot', 'npx');
 
 function project(): string {
   return mkdtempSync(join(tmpdir(), 'gdharness-harness-'));
@@ -62,6 +62,11 @@ function testTheLaunchIsTheSameEverywhere(): void {
   assert.equal(LAUNCH.command, 'npx');
   assert.deepEqual(LAUNCH.args, ['-y', 'gdharness@9.9.9'], 'the version is pinned, never latest');
   assert.deepEqual(LAUNCH.env, { GODOT_PATH: '/opt/godot/godot' });
+
+  // Whoever installed with bunx may have no Node at all, so the config has to name their runner.
+  const bun = launchFor('9.9.9', '/opt/godot/godot', 'bunx');
+  assert.equal(bun.command, 'bunx');
+  assert.deepEqual(bun.args, ['gdharness@9.9.9'], 'bunx has no prompt to answer, so no -y');
 }
 
 function testEachShapeIsWrittenAsItsHarnessReadsIt(): void {
@@ -179,7 +184,7 @@ function testWritingTwiceReplacesRatherThanDuplicates(): void {
   const root = project();
   try {
     assert.equal(connect(harness, root, LAUNCH).action, 'written');
-    const second = connect(harness, root, launchFor('9.9.10', '/opt/godot/other'));
+    const second = connect(harness, root, launchFor('9.9.10', '/opt/godot/other', 'npx'));
     assert.equal(second.action, 'replaced', 'the second write says it replaced the entry');
 
     const servers = read(second.path)['mcpServers'] as Record<string, Record<string, unknown>>;
@@ -381,7 +386,7 @@ function testATomlConfigIsWrittenAndCarriesTheGodotPath(): void {
     assert.match(written, /GODOT_PATH = "\/opt\/godot\/godot"/, 'carrying this machine\u2019s engine');
 
     // Twice over is once: an entry replaced rather than a second copy appended.
-    assert.equal(connect(local, root, launchFor('9.9.10', '/opt/godot/other')).action, 'replaced');
+    assert.equal(connect(local, root, launchFor('9.9.10', '/opt/godot/other', 'npx')).action, 'replaced');
     const again = readFileSync(path, 'utf8');
     assert.equal(again.match(/\[mcp_servers\.gdharness]/g)?.length, 1, 'still one entry');
     assert.match(again, /gdharness@9\.9\.10/, 'and it is the new version');
