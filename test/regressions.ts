@@ -1315,7 +1315,14 @@ async function testUpdateNoticeRidesOnAnAnswer(): Promise<void> {
       assert.match(first, /update_available/, 'the first answer should carry the notice');
       assert.match(first, /99\.9\.9/, 'naming the version that is out');
       assert.match(first, /releases\/tag\/v99\.9\.9/, 'and where the notes for it are');
-      assert.match(first, /upgrade/, 'and the command that takes it');
+      // Under the runner that is actually running, and with no path: the reader who installed
+      // with bunx may have no Node, and upgrade takes the directory it is run in.
+      assert.match(
+        first,
+        /(?:npx -y|bunx) gdharness@99\.9\.9 upgrade/,
+        'and the command that takes it, spelled for this runtime',
+      );
+      assert.doesNotMatch(first, /upgrade <project>/, 'without a placeholder path to fill in');
 
       assert.doesNotMatch(
         await call('editor_status', {}),
