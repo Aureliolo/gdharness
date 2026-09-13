@@ -1,9 +1,13 @@
 import type { ChildProcess } from 'node:child_process';
+import type { GameLog } from './game-log.js';
 
+/** The game editor_run started, and everything it has said. */
 export interface GodotProcess {
   process: ChildProcess;
-  output: string[];
-  errors: string[];
+  log: GameLog;
+  startedAt: number;
+  /** Set once the process has ended; null while it runs. */
+  exitCode: number | null;
 }
 
 export interface GodotServerConfig {
