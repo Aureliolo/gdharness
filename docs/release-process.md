@@ -65,8 +65,7 @@ The checksum proves the bytes match what the release lists. The attestation prov
 Actions built those bytes from this repository, by the steps in `release-build.yml` at that
 tag, on a GitHub-hosted runner, which the checksum alone cannot: a checksum generated
 alongside a tampered archive agrees with it perfectly. Drop `--bundle` to read the same
-attestations from GitHub's API instead. Releases up to 0.2.3 were signed by `attest.yml`, which
-only signed; give that name to `--signer-workflow` for them, and no `--bundle`.
+attestations from GitHub's API instead.
 
 ## SLSA
 
@@ -81,10 +80,14 @@ Inside it, the build and the signing are separate jobs. `id-token: write` puts t
 token within reach of every step in the job that holds it, and the build runs `bun install`,
 so only the attest job, which downloads the finished bytes and signs them, is given that
 permission. Runners are GitHub-hosted and ephemeral, and signing is keyless: there is no key
-anywhere to take.
+anywhere to take. The release build restores no Actions cache, which is the one way one run can
+reach into another on this platform: a cache entry can be written by any job on any branch,
+including a pull request from a fork.
 
-Up to 0.2.3 the archive was built in `release.yml` and only the signing ran in a reusable
-workflow, which names the signer but not the build; those releases are SLSA Build Level 2.
+The 0.2.1 to 0.2.3 releases were built in `release.yml`, with only the signing in a reusable
+workflow, which names the signer but not the build. They were deleted rather than left to make
+this a claim with an exception in it; their tags remain, and the versions they carried are in
+`package.json`'s history.
 
 ## When a release job fails
 
