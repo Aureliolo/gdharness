@@ -161,6 +161,126 @@ function filled(text: string, markup = true): string {
     .replaceAll('{{picker}}', markup ? renderPicker() : renderPickerText());
 }
 
+/** The three things gdharness is made of, and where each one is documented. */
+const PARTS = [
+  {
+    kicker: 'Inside Godot',
+    title: 'Three addons',
+    body: 'They make the open editor and the running game answerable, and reload the editor when files change on disk.',
+    link: 'architecture.html',
+    linkText: 'How it works',
+  },
+  {
+    kicker: 'The server',
+    title: `${TOOL_COUNT} tools`,
+    body: 'Named <code>domain_verb</code>, with four <code>godot://</code> resources. An unknown op is refused with the valid set listed.',
+    link: 'tools.html',
+    linkText: 'Tool reference',
+  },
+  {
+    kicker: 'The CLI',
+    title: 'One command',
+    body: 'Addons in, plugins on, class list rebuilt, the skill written, and the server registered with your harness.',
+    link: 'install.html',
+    linkText: 'Install',
+  },
+];
+
+/**
+ * The front page: a statement, the two ways in, and three cards that route you onward.
+ *
+ * Built here rather than from markdown because a hero and a row of cards are not prose, and
+ * writing them as raw HTML inside a markdown file would be the worst of both.
+ */
+function renderHome(): string {
+  const paste = [
+    'Install gdharness into this project by following',
+    'https://aureliolo.github.io/gdharness/agent.md, then tell me what it asked you to',
+    'recommend back to me.',
+  ].join('\n');
+
+  const cards = PARTS.map((part) =>
+    [
+      '<div class="card">',
+      `<span class="kicker">${escaped(part.kicker)}</span>`,
+      `<h3>${escaped(part.title)}</h3>`,
+      `<p>${part.body}</p>`,
+      `<a class="go" href="${part.link}">${escaped(part.linkText)}</a>`,
+      '</div>',
+    ].join(''),
+  );
+
+  return [
+    '<section class="hero">',
+    '<h1>Make the engine answer.</h1>',
+    '<p class="sub">Drive a Godot 4 project from an agent: the editor that is open, the game that is running, and the project on disk. An agent cannot see a running game; this makes one answerable.</p>',
+    '<h2 class="step">Hand it to your agent</h2>',
+    `<figure class="code"><figcaption>paste this</figcaption><pre><code>${escaped(paste)}</code></pre></figure>`,
+    '<p class="note">It reads the guide, installs the addons, writes the config for the harness it is running in, and reports the two things it cannot do for itself.</p>',
+    '<h2 class="step">Or do it yourself</h2>',
+    renderPicker(),
+    '<p class="note">With no harness named it asks about each one it finds, here or on this machine, and writes nothing outside the project directory without a flag or a typed yes. <a href="architecture.html">How it works</a> has every harness it knows.</p>',
+    '</section>',
+    `<div class="cards">${cards.join('')}</div>`,
+    '<p class="smallprint">Fork of <a href="https://github.com/HaD0Yun/Doyunha-Gopeak">GoPeak</a> v2.3.9, September 2026, MIT, by Solomon Elias originally and completely reworked since to be hardened, condensed and more streamlined. Not affiliated with GoPeak or the Godot Foundation.</p>',
+  ].join('\n');
+}
+
+/** The same page as markdown, which is what an agent is pointed at. */
+function renderHomeText(): string {
+  return [
+    '# gdharness',
+    '',
+    'Drive a Godot 4 project from an agent: the editor that is open, the game that is running, and',
+    'the project on disk. An agent cannot see a running game; this makes one answerable.',
+    '',
+    'Godot 4.7 or newer, and Node 22 or newer for `npx`. It runs under Bun 1.4 too.',
+    '',
+    '## Install',
+    '',
+    '```text hand this to an agent',
+    'Install gdharness into this project by following',
+    'https://aureliolo.github.io/gdharness/agent.md, then tell me what it asked you to',
+    'recommend back to me.',
+    '```',
+    '',
+    'Or run it yourself. It is the same command every time; what changes is the file it writes.',
+    '',
+    '{{picker}}',
+    '',
+    'With no harness named it asks about each one it finds, here or on this machine, and writes',
+    'nothing outside the project directory without a flag or a typed yes.',
+    '',
+    '## Three parts',
+    '',
+    '**Inside Godot.** Three addons in your project. They make the open editor and the running game',
+    'answerable, and reload the editor when files change on disk.',
+    '',
+    `**The MCP server.** ${TOOL_COUNT} tools named \`domain_verb\`, and four \`godot://\` resources. An`,
+    'unknown op or argument is refused with the valid set listed, and every answer is read back from',
+    'the engine rather than echoed from the request.',
+    '',
+    '**The CLI.** Installs the addons, writes the skill, registers the server, checks all of it, and',
+    'takes it back out again.',
+    '',
+    '## Pages',
+    '',
+    '- [Install](install.md): install, verify, update, uninstall.',
+    '- [How it works](architecture.md): what an install writes, how it decides, and what talks to',
+    '  what once it is running.',
+    '- [Tools](tools.md): every tool, op and argument.',
+    '- [Traps](traps.md): five Godot behaviours you still have to know.',
+    '- [What is proven](tested.md): what CI drives against a real engine, and what it does not.',
+    '',
+    '## Project',
+    '',
+    'Fork of GoPeak v2.3.9, September 2026, MIT, by Solomon Elias originally and completely reworked',
+    'since to be hardened, condensed and more streamlined. Not affiliated with GoPeak or the Godot',
+    'Foundation.',
+    '',
+  ].join('\n');
+}
+
 /** Where the site lives, for the canonical links and llms.txt. */
 const SITE_URL = 'https://aureliolo.github.io/gdharness';
 
@@ -185,13 +305,14 @@ interface Page {
 
 const PAGES: readonly Page[] = [
   {
-    source: 'index.md',
     path: 'index.html',
     text: 'index.md',
     title: 'gdharness',
     summary: 'What gdharness is, what it is made of, and the rules it is built to.',
     group: 'Start',
     home: true,
+    render: renderHome,
+    renderText: renderHomeText,
   },
   {
     source: 'install.md',
