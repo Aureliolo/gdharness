@@ -9,6 +9,10 @@
   valid set, never a silent default.
 - **Every mutation reads back.** A tool that writes returns the engine's actual state
   afterwards, read from the engine, not an echo of the request.
+- **A failure nobody modelled says so.** A refusal names what would have worked; anything that
+  reaches the tool boundary as a throw is a defect, and answers as one. Never dress an
+  unmodelled failure as a refusal: the caller then spends its turns rephrasing a call that was
+  right, and the bug is never heard about.
 - **Answers are sized.** Anything that can return a lot takes a detail level and defaults to
   the smallest useful one. Anything unbounded paginates.
 

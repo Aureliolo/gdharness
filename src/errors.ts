@@ -7,6 +7,20 @@
  */
 
 /**
+ * A failure that was anticipated, thrown where returning it is not an option.
+ *
+ * The line it draws is what tells the other kind apart: a port variable holding "banana", a
+ * script path outside the project, an editor that is not connected are all the caller's or their
+ * machine's to fix, and they say so in their own words. Anything else reaching a boundary as a
+ * throw is a state this program does not model, which is a defect, and answering one as though
+ * it were the other sends somebody to fix their own typo or buries a bug in advice.
+ *
+ * Most refusals are returned rather than thrown. This is for the places that cannot: a
+ * constructor's default argument, a validator several frames below the tool that called it.
+ */
+export class Refusal extends Error {}
+
+/**
  * The sentence to show a caller. `fallback` is what a throw with no usable message reads as.
  * Objects and symbols are deliberately not stringified: "[object Object]" tells a reader
  * nothing, and `String(symbol)` throws. `toError` keeps the thrown value on `cause` instead.

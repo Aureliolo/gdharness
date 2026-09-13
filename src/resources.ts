@@ -7,6 +7,7 @@ import {
   ReadResourceRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { emptyRecord } from './dictionary.js';
+import { Refusal } from './errors.js';
 import { resolveWithinProject } from './paths.js';
 
 const STATIC_RESOURCES = [
@@ -46,7 +47,7 @@ type ParsedGodotUri =
 function ensureProjectPath(getProjectPath: () => string | null): string {
   const projectPath = getProjectPath();
   if (!projectPath) {
-    throw new Error('Project path is not set. Set a Godot project path first.');
+    throw new Refusal('Project path is not set. Set a Godot project path first.');
   }
 
   return resolve(projectPath);
@@ -66,7 +67,7 @@ function ensureProjectPath(getProjectPath: () => string | null): string {
 function uriPathToProjectPath(inputPath: string): string {
   const normalized = inputPath.replace(/\\/g, '/').trim();
   if (normalized.replace(/\//g, '') === '') {
-    throw new Error('Resource path is empty.');
+    throw new Refusal('Resource path is empty.');
   }
 
   return normalized.replace(/^\/+/, '');
@@ -75,7 +76,7 @@ function uriPathToProjectPath(inputPath: string): string {
 function resolveProjectFile(projectPath: string, resourcePath: string): string {
   const contained = resolveWithinProject(projectPath, resourcePath);
   if (!contained.ok) {
-    throw new Error(contained.reason);
+    throw new Refusal(contained.reason);
   }
 
   return contained.absolutePath;
@@ -90,16 +91,16 @@ function parseGodotUri(uri: string): ParsedGodotUri {
   try {
     parsed = new URL(uri);
   } catch {
-    throw new Error(`Invalid URI: ${uri}`);
+    throw new Refusal(`Invalid URI: ${uri}`);
   }
 
   if (parsed.protocol !== 'godot:') {
-    throw new Error(`Unsupported URI scheme: ${parsed.protocol}`);
+    throw new Refusal(`Unsupported URI scheme: ${parsed.protocol}`);
   }
 
   const host = parsed.hostname;
   if (host !== 'scene' && host !== 'script' && host !== 'resource') {
-    throw new Error(`Unsupported Godot resource type: ${host}`);
+    throw new Refusal(`Unsupported Godot resource type: ${host}`);
   }
 
   const resourcePath = uriPathToProjectPath(decodeURIComponent(parsed.pathname));
@@ -111,15 +112,15 @@ function ensureAllowedExtension(kind: 'scene' | 'script' | 'resource', filePath:
   const extension = extname(filePath).toLowerCase();
 
   if (kind === 'scene' && extension !== '.tscn') {
-    throw new Error('Scene resources must use .tscn extension.');
+    throw new Refusal('Scene resources must use .tscn extension.');
   }
 
   if (kind === 'script' && extension !== '.gd') {
-    throw new Error('Script resources must use .gd extension.');
+    throw new Refusal('Script resources must use .gd extension.');
   }
 
   if (kind === 'resource' && !['.tres', '.tscn', '.gd'].includes(extension)) {
-    throw new Error('Resource URIs support only .tres, .tscn, and .gd files.');
+    throw new Refusal('Resource URIs support only .tres, .tscn, and .gd files.');
   }
 }
 
@@ -294,10 +295,10 @@ export function setupResourceHandlers(mcp: McpServer, getProjectPath: () => stri
       // The cause carries the errno and the stack: ENOENT, EACCES and a symlink loop are
       // otherwise the same sentence by the time they reach the client.
       if (error instanceof Error) {
-        throw new Error(`Failed to read resource '${uri}': ${error.message}`, { cause: error });
+        throw new Refusal(`Failed to read resource '${uri}': ${error.message}`, { cause: error });
       }
 
-      throw new Error(`Failed to read resource '${uri}'.`, { cause: error });
+      throw new Refusal(`Failed to read resource '${uri}'.`, { cause: error });
     }
   });
 }

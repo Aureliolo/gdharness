@@ -25,6 +25,7 @@ import {
   writeToml,
   writeYaml,
 } from './config-formats.js';
+import { Refusal } from './errors.js';
 
 /** What gdharness is called wherever it is registered. */
 export const SERVER_KEY = 'gdharness';
@@ -923,7 +924,7 @@ export function connect(harness: Harness, projectPath: string, launch: Launch): 
     try {
       existing = JSON.parse(held);
     } catch (cause) {
-      throw new Error(`${path} is not valid JSON, so gdharness was not added to it.`, { cause });
+      throw new Refusal(`${path} is not valid JSON, so gdharness was not added to it.`, { cause });
     }
   }
   const container =

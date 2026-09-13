@@ -1,5 +1,6 @@
 import { createConnection, type Socket } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
+import { Refusal } from './errors.js';
 import { FrameReader, frame, OversizedStreamError } from './framing.js';
 import { portFromEnv } from './ports.js';
 
@@ -220,7 +221,7 @@ export class GodotDAPClient {
     await this.ensureConnected();
 
     if (!this.socket) {
-      throw new Error('DAP socket is not available');
+      throw new Refusal('DAP socket is not available');
     }
 
     const requestSeq = this.seq++;
@@ -600,7 +601,7 @@ export async function handleDAPTool(
 
       case 'dap_set_breakpoint': {
         if (typeof safeArgs.scriptPath !== 'string' || typeof safeArgs.line !== 'number') {
-          throw new Error('dap_set_breakpoint requires { scriptPath: string, line: number }');
+          throw new Refusal('dap_set_breakpoint requires { scriptPath: string, line: number }');
         }
 
         const result = await client.setBreakpoint(safeArgs.scriptPath, safeArgs.line);
@@ -611,7 +612,7 @@ export async function handleDAPTool(
 
       case 'dap_remove_breakpoint': {
         if (typeof safeArgs.scriptPath !== 'string' || typeof safeArgs.line !== 'number') {
-          throw new Error('dap_remove_breakpoint requires { scriptPath: string, line: number }');
+          throw new Refusal('dap_remove_breakpoint requires { scriptPath: string, line: number }');
         }
 
         const result = await client.removeBreakpoint(safeArgs.scriptPath, safeArgs.line);
@@ -661,6 +662,8 @@ export async function handleDAPTool(
       }
 
       default:
+        // Not a refusal: the caller never names a DAP tool, this server does, so one it does not
+        // know is a routing table that disagrees with itself.
         throw new Error(`Unknown DAP tool: ${toolName}`);
     }
   } catch (error) {
