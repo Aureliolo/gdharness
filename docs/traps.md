@@ -32,11 +32,15 @@ It refuses to serve outside a debug build, so it is not a server on a player's m
 viewport, which is 64 by 64 regardless of project settings. A control at (400, 20) cannot be
 clicked headless.
 
-### There is no pause
+### There is no pause, and no step out
 
 Godot's debug adapter answers a pause request, sends a stopped event, and leaves the game running.
-`debug_control` continues and steps but cannot pause. Stop the game with a breakpoint, then
-`debug_state variables` reads what is in scope there.
+It implements no `stepOut` at all, so that request is never answered and the call waits out its
+timeout.
+
+`debug_control` has `continue`, `step_over` and `step_into`. Stop the game with a breakpoint,
+read what is in scope with `debug_state variables`, and step over from inside a function to run it
+to its end and come back to the caller.
 
 ### One editor
 

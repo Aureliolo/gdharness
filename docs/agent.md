@@ -95,8 +95,8 @@ browser lookup. If no check ran, say so rather than calling it verified.
 - Measure the running game: `runtime_inspect` for what is on screen, `runtime_invoke` for a value,
   `runtime_wait` instead of sleeping.
 - `runtime_capture` needs a window and refuses headless.
-- There is no `debug_control pause`. Use a breakpoint, then `debug_state variables` for what is in
-  scope and `debug_control step_into` / `step_out` to move.
+- There is no `debug_control pause` and no `step_out`. Use a breakpoint, `debug_state variables`
+  for what is in scope, and `step_over` / `step_into` to move.
 - A refusal lists the valid set. Read it.
 
 ## Reference

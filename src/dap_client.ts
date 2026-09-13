@@ -377,16 +377,15 @@ export class GodotDAPClient {
     await this.sendRequest('next', { threadId: resolvedThreadId });
   }
 
+  /**
+   * There is no stepOut beside this. Godot's debug adapter parser implements req_next and
+   * req_stepIn and nothing for stepOut, so the request is never answered and the call waits out
+   * its timeout. Measured on 4.7.2, then read in the engine's own source.
+   */
   async stepInto(threadId?: number): Promise<void> {
     await this.attach();
     const resolvedThreadId = await this.resolveThreadId(threadId);
     await this.sendRequest('stepIn', { threadId: resolvedThreadId });
-  }
-
-  async stepOut(threadId?: number): Promise<void> {
-    await this.attach();
-    const resolvedThreadId = await this.resolveThreadId(threadId);
-    await this.sendRequest('stepOut', { threadId: resolvedThreadId });
   }
 
   async getStackTrace(threadId?: number): Promise<DAPArrayItem[]> {
@@ -555,12 +554,9 @@ export async function handleDAPTool(
       }
 
       case 'dap_step_over':
-      case 'dap_step_into':
-      case 'dap_step_out': {
+      case 'dap_step_into': {
         if (toolName === 'dap_step_into') {
           await client.stepInto();
-        } else if (toolName === 'dap_step_out') {
-          await client.stepOut();
         } else {
           await client.stepOver();
         }

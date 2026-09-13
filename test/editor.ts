@@ -1046,8 +1046,12 @@ async function testDebugging({ call, refusal, attempt, project }: Editor): Promi
     (stack) => stack.length > 0 && asNumber(get(stack[0], 'line')) > BREAK_LINE,
   );
 
-  // Into the call on that line, and back out of it. Judged by the function the top frame is in,
-  // which is the only thing that tells a step_into from a step_over that happened to move.
+  // Into the call on that line. Judged by the function the top frame is in, which is the only
+  // thing that tells a step_into from a step_over that happened to move.
+  //
+  // There is no step_out to come back with: Godot's adapter parser implements req_next and
+  // req_stepIn and nothing for stepOut, so the request is never answered. Stepping over from
+  // inside the function runs it to its end and returns to the caller, which is the way back.
   await call('debug_control', { op: 'step_into' });
   const inside = await stackWithin(
     attempt,
@@ -1055,13 +1059,6 @@ async function testDebugging({ call, refusal, attempt, project }: Editor): Promi
     (stack) => stack.length > 0 && text(get(stack[0], 'name')) === '_twice',
   );
   assert.ok(inside.length > 1, 'with the caller still under it on the stack');
-
-  await call('debug_control', { op: 'step_out' });
-  await stackWithin(
-    attempt,
-    'step_out should leave the game back in the caller',
-    (stack) => stack.length > 0 && text(get(stack[0], 'name')) === '_ready',
-  );
 
   await call('debug_control', { op: 'continue' });
 
@@ -1090,8 +1087,16 @@ async function testDebugging({ call, refusal, attempt, project }: Editor): Promi
   // becoming one of the two that work.
   assert.match(
     await refusal('debug_control', { op: 'pause' }),
-    /continue, step_over, step_into, step_out/,
+    /continue, step_over, step_into/,
     'an op that does not exist should be refused with the ones that do',
+  );
+
+  // The other one Godot has not got. Asked for rather than assumed absent, so that an engine
+  // which grows a stepOut is noticed here instead of going unused.
+  assert.match(
+    await refusal('debug_control', { op: 'step_out' }),
+    /continue, step_over, step_into/,
+    'step_out should be refused: the adapter never answers a stepOut request',
   );
 
   await call('debug_breakpoint', { ...main, op: 'remove', line: BREAK_LINE });
