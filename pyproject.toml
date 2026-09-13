@@ -1,0 +1,16 @@
+# gdharness is TypeScript, and nothing here is packaged. This file holds the two Python tools
+# the checks run: gdtoolkit (gdformat and gdlint, for the GDScript that ships) and yamllint.
+# uv.lock pins every package they pull in with its hashes, and `uv sync --locked` refuses
+# anything that does not match. The interpreter is pinned here too, and this is the only place
+# it is written: uv installs exactly this one, in CI and on a contributor's machine alike.
+[project]
+name = "gdharness-checks"
+version = "0"
+requires-python = "==3.14.7"
+dependencies = []
+
+[dependency-groups]
+dev = ["gdtoolkit==4.5.0", "yamllint==1.38.0"]
+
+[tool.uv]
+package = false

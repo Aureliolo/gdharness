@@ -37,19 +37,20 @@ not a gate, and we have been bitten by exactly that.
 **Nothing from outside the repository runs unverified.** Every file CI downloads is refused
 unless it matches a digest written in this repository: the Bun that runs every job
 (`.github/actions/install-bun`), uv and the interpreter, gdtoolkit and yamllint under it
-(`ci.yml`, `.github/requirements/`), actionlint (`workflows.yml`), the engine
+(`ci.yml`, `uv.lock`), actionlint (`workflows.yml`), the engine
 (`scripts/install-godot.ts`) and the gdUnit4 the runner fixture drives
 (`scripts/install-gdunit4.ts`). npm packages carry theirs in `bun.lock`, actions are pinned by
 commit, and zizmor runs from a container image whose digest is fixed by the action's commit. A
 tool that arrives without a digest arrives with one in the same change.
 
 **Every pin is watched by Renovate, digest included.** `renovate.json` is the whole of it: the
-`bun` and `github-actions` managers cover `package.json`, the lockfile and every `uses:`; the
-`pip-compile` manager recompiles the gdtoolkit and yamllint locks with new hashes; and two regex
-managers read the `# renovate:` line above any other pin, so a new one is watched the moment it
-is annotated.
-One pull request a week carries everything, a vulnerability fix arrives on its own the day it
-exists, and the lock file refresh is its own weekly pull request because it changes nothing this
+`bun` and `github-actions` managers cover `package.json`, `bun.lock` and every `uses:`; the `uv`
+manager covers gdtoolkit and yamllint in `pyproject.toml` and `uv.lock`, hashes included; and
+three regex managers read the `# renovate:` line above any other pin, so a new one is watched
+the moment it is annotated.
+Renovate opens two pull requests a week and no others. Monday's carries every raise, majors and
+vulnerability fixes included. Tuesday's regenerates `bun.lock` and `uv.lock`, which is where the
+transitive dependencies move, and it is its own pull request because it changes nothing this
 file names. A pin without an annotation is a pin nothing watches, and the review refuses it.
 
 Pick the newest stable version of a tool rather than the familiar one, and read what the release
@@ -61,6 +62,7 @@ actually changed before taking it.
 git clone https://github.com/Aureliolo/gdharness.git
 cd gdharness
 bun install
+uv sync --locked           # gdtoolkit and yamllint, into .venv
 bun run build
 ```
 
@@ -72,9 +74,9 @@ bun run test:integration   # the bridge against a mock editor and a mock runtime
 bun run test:metadata
 bun run format             # Biome for the code, Prettier for the prose and YAML; writes
 bun run lint               # Biome, then oxlint with its type-aware rules, then knip, then markdownlint
-bun run lint:gd            # gdlint, needs gdtoolkit from .github/requirements/gdtoolkit.txt
-bun run format:gd          # gdformat, writes
-yamllint --strict .        # needs yamllint from .github/requirements/yamllint.txt
+uv run bun run lint:gd     # gdlint, from .venv
+uv run bun run format:gd   # gdformat, writes
+uv run yamllint --strict .
 bun run watch              # TypeScript watch mode
 ```
 

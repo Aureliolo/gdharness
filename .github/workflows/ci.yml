@@ -56,8 +56,8 @@ jobs:
       # uv rather than setup-python and pip: setup-python fetches an interpreter by version and
       # checks nothing about it, and pip trusts whatever the index serves. uv is the one download
       # done on trust here, and it is refused unless it matches the digest written below; the
-      # interpreter it then installs is checked against the hashes uv itself carries, and the
-      # packages against the hashes in the requirements file.
+      # interpreter it then installs is checked against the hashes uv itself carries, and every
+      # package against the hashes in uv.lock.
       - name: Install uv
         env:
           # renovate: datasource=github-release-attachments depName=astral-sh/uv versioning=semver
@@ -72,18 +72,16 @@ jobs:
           tar -xzf "${archive}" -C "${RUNNER_TEMP}"
           echo "${RUNNER_TEMP}/uv-x86_64-unknown-linux-gnu" >> "${GITHUB_PATH}"
 
+      # --locked refuses a uv.lock that no longer matches pyproject.toml instead of re-resolving,
+      # and the interpreter is the one pyproject.toml pins.
       - name: Install gdtoolkit
         env:
-          # renovate: datasource=python-version depName=python
-          PYTHON_VERSION: 3.14.7
           # The interpreter uv downloads and verifies, never one the runner image happens to have.
           UV_MANAGED_PYTHON: '1'
         run: |
           set -euo pipefail
-          uv venv --python "${PYTHON_VERSION}" "${RUNNER_TEMP}/gdtoolkit"
-          uv pip install --python "${RUNNER_TEMP}/gdtoolkit" --require-hashes \
-            --requirements .github/requirements/gdtoolkit.txt
-          echo "${RUNNER_TEMP}/gdtoolkit/bin" >> "${GITHUB_PATH}"
+          uv sync --locked
+          echo "${GITHUB_WORKSPACE}/.venv/bin" >> "${GITHUB_PATH}"
 
       # Bun only runs the package scripts, so the directories gdformat and gdlint cover are
       # written once, in package.json, and are the same here as on a developer's machine.
@@ -127,15 +125,11 @@ jobs:
 
       - name: Install yamllint
         env:
-          # renovate: datasource=python-version depName=python
-          PYTHON_VERSION: 3.14.7
           UV_MANAGED_PYTHON: '1'
         run: |
           set -euo pipefail
-          uv venv --python "${PYTHON_VERSION}" "${RUNNER_TEMP}/yamllint"
-          uv pip install --python "${RUNNER_TEMP}/yamllint" --require-hashes \
-            --requirements .github/requirements/yamllint.txt
-          echo "${RUNNER_TEMP}/yamllint/bin" >> "${GITHUB_PATH}"
+          uv sync --locked
+          echo "${GITHUB_WORKSPACE}/.venv/bin" >> "${GITHUB_PATH}"
 
       - name: Lint
         run: yamllint --strict .
