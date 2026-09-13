@@ -101,7 +101,6 @@ whose executables are world-writable. Releases are cut by CI.
 │   ├── godot-bridge.ts    # Bridge transport to the editor addon
 │   ├── lsp_client.ts      # Godot language server client
 │   ├── dap_client.ts      # Godot debug adapter client
-│   ├── visualizer/        # Browser visualiser, bundled into the release
 │   └── godot/             # GDScript, copied verbatim into the bundle
 │       ├── addons/        # The Godot addons: editor, runtime, auto reload
 │       └── operations/    # Headless engine operations

@@ -314,7 +314,7 @@ async function main(): Promise<void> {
     env: {
       DEBUG: 'true',
       GDHARNESS_BRIDGE_PORT: String(bridgePort),
-      GODOT_BRIDGE_HOST: BRIDGE_HOST,
+      GDHARNESS_BRIDGE_HOST: BRIDGE_HOST,
       GDHARNESS_RUNTIME_DIR: runtimeDir,
       GDHARNESS_RUNTIME_TIMEOUT_MS: '1500',
       ...(GODOT_PATH ? { GODOT_PATH } : {}),
@@ -664,8 +664,15 @@ async function main(): Promise<void> {
       ) ?? '';
     assert.match(noEditor, /Editor not connected/, 'scene_create refuses when no editor is connected');
 
-    const visualizer = await connect(`ws://${BRIDGE_HOST}:${bridgePort}/visualizer`);
-    visualizer.close();
+    // Only the editor's path is served: the bridge port is not a place for a browser tab to
+    // reach anything, over WebSocket or over HTTP.
+    await assert.rejects(
+      connect(`ws://${BRIDGE_HOST}:${bridgePort}/visualizer`),
+      'a socket to another path is closed',
+    );
+    const page = await fetch(`http://${BRIDGE_HOST}:${bridgePort}/`);
+    assert.equal(page.status, 404, 'a plain request gets nothing');
+    assert.equal(page.headers.get('access-control-allow-origin'), null, 'and no CORS header inviting one');
 
     const godot = await connect(`ws://${BRIDGE_HOST}:${bridgePort}/godot`);
     try {

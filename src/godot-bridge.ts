@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { readFileSync } from 'node:fs';
 import http from 'node:http';
 import type { RawData } from 'ws';
 import { WebSocket, WebSocketServer } from 'ws';
@@ -11,51 +10,27 @@ const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_TIMEOUT_MS = 30_000;
 const KEEPALIVE_INTERVAL_MS = 10_000;
 const SECOND_CONNECTION_CLOSE_CODE = 4000;
-const BRIDGE_PORT_ENV_KEYS = ['GODOT_BRIDGE_PORT', 'MCP_BRIDGE_PORT', 'GDHARNESS_BRIDGE_PORT'] as const;
-const BRIDGE_HOST_ENV_KEYS = ['GODOT_BRIDGE_HOST', 'MCP_BRIDGE_HOST', 'GDHARNESS_BRIDGE_HOST'] as const;
-const BRIDGE_VERSION = (() => {
-  try {
-    const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
-      version?: string;
-    };
-    return typeof pkg.version === 'string' ? pkg.version : '0.0.0';
-  } catch {
-    return '0.0.0';
-  }
-})();
 
+/**
+ * The port the bridge listens on: GDHARNESS_BRIDGE_PORT, which the editor addon reads too, so
+ * the two agree by construction. A value that is not a port is a configuration to fix, and
+ * a server that quietly listened on the default instead would be one the editor cannot find.
+ */
 function resolveDefaultBridgePort(): number {
-  for (const key of BRIDGE_PORT_ENV_KEYS) {
-    const raw = process.env[key];
-    if (!raw || raw.trim().length === 0) {
-      continue;
-    }
-
-    const parsed = Number.parseInt(raw, 10);
-    if (Number.isInteger(parsed) && parsed >= 1 && parsed <= 65535) {
-      return parsed;
-    }
-
-    console.error(`[GodotBridge] Ignoring invalid ${key}="${raw}". Expected an integer between 1 and 65535.`);
+  const raw = process.env['GDHARNESS_BRIDGE_PORT']?.trim();
+  if (!raw) {
+    return DEFAULT_PORT;
   }
-
-  return DEFAULT_PORT;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535 || String(parsed) !== raw) {
+    throw new Error(`GDHARNESS_BRIDGE_PORT is "${raw}", not a port between 1 and 65535.`);
+  }
+  return parsed;
 }
 
 function resolveDefaultBridgeHost(): string {
-  for (const key of BRIDGE_HOST_ENV_KEYS) {
-    const raw = process.env[key];
-    if (!raw) {
-      continue;
-    }
-
-    const host = raw.trim();
-    if (host.length > 0) {
-      return host;
-    }
-  }
-
-  return DEFAULT_HOST;
+  const host = process.env['GDHARNESS_BRIDGE_HOST']?.trim();
+  return host === undefined || host === '' ? DEFAULT_HOST : host;
 }
 
 interface ToolInvokeMessage {
@@ -127,13 +102,11 @@ interface BridgeStatus {
 export class GodotBridge extends EventEmitter {
   private httpServer: http.Server | null = null;
   private godotWss: WebSocketServer | null = null;
-  private vizWss: WebSocketServer | null = null;
   private socket: WebSocket | null = null;
   private pingInterval: NodeJS.Timeout | null = null;
   private connectionInfo: GodotConnectionInfo | null = null;
   private pendingRequests = new Map<string, PendingRequest>();
   private resourceQueues = new Map<string, Promise<void>>();
-  private visualizerHtml = this.getDefaultVisualizerHtml();
 
   private readonly port: number;
   private readonly host: string;
@@ -156,19 +129,24 @@ export class GodotBridge extends EventEmitter {
     }
 
     return new Promise((resolve, reject) => {
-      const server = http.createServer((req, res) => {
-        this.handleHttpRequest(req, res);
+      // The HTTP server exists to take the WebSocket upgrade for /godot and nothing else: no
+      // page, no health endpoint, no CORS. Every other request is a 404, and an upgrade for
+      // any other path is closed, so the port carries the editor's socket and nothing a browser
+      // tab could reach.
+      const server = http.createServer((_req, res) => {
+        res.writeHead(404);
+        res.end();
       });
       const godotWss = new WebSocketServer({ noServer: true });
-      const vizWss = new WebSocketServer({ noServer: true });
       let settled = false;
 
       server.on('upgrade', (request, socket, head) => {
-        const pathname = this.getRequestPathname(request.url);
-        const target = pathname === '/godot' ? godotWss : vizWss;
-
-        target.handleUpgrade(request, socket, head, (ws) => {
-          target.emit('connection', ws, request);
+        if (this.getRequestPathname(request.url) !== '/godot') {
+          socket.destroy();
+          return;
+        }
+        godotWss.handleUpgrade(request, socket, head, (ws) => {
+          godotWss.emit('connection', ws, request);
         });
       });
 
@@ -180,8 +158,7 @@ export class GodotBridge extends EventEmitter {
         settled = true;
         this.httpServer = server;
         this.godotWss = godotWss;
-        this.vizWss = vizWss;
-        this.log('info', `Unified HTTP+WS bridge listening on ${this.host}:${this.port}`);
+        this.log('info', `Editor bridge listening on ${this.host}:${this.port}`);
         resolve();
       });
 
@@ -197,10 +174,6 @@ export class GodotBridge extends EventEmitter {
 
       godotWss.on('error', (error) => {
         this.log('error', `Godot WebSocket server error: ${error.message}`);
-      });
-
-      vizWss.on('error', (error) => {
-        this.log('error', `Visualizer WebSocket server error: ${error.message}`);
       });
 
       server.listen(this.port, this.host);
@@ -237,19 +210,6 @@ export class GodotBridge extends EventEmitter {
       this.godotWss = null;
     }
 
-    if (this.vizWss) {
-      const vizWss = this.vizWss;
-      for (const client of vizWss.clients) {
-        try {
-          client.close();
-        } catch (error) {
-          this.log('debug', `Visualizer client did not close cleanly: ${errorMessage(error)}`);
-        }
-      }
-      closeTasks.push(this.closeWebSocketServer(vizWss));
-      this.vizWss = null;
-    }
-
     if (this.httpServer) {
       const httpServer = this.httpServer;
       closeTasks.push(this.closeHttpServer(httpServer));
@@ -259,7 +219,6 @@ export class GodotBridge extends EventEmitter {
     await Promise.all(closeTasks);
 
     this.connectionInfo = null;
-    this.visualizerHtml = this.getDefaultVisualizerHtml();
     this.log('info', 'WebSocket bridge stopped');
   }
 
@@ -287,119 +246,6 @@ export class GodotBridge extends EventEmitter {
     }
 
     return this.enqueueResourceRequest(resourceKey, () => this.invokeToolDirect(toolName, args, resourceKey));
-  }
-
-  public getVisualizerWss(): WebSocketServer | null {
-    return this.vizWss;
-  }
-
-  public broadcastToVisualizer(message: object): void {
-    if (!this.vizWss) {
-      return;
-    }
-
-    const payload = JSON.stringify(message);
-    this.vizWss.clients.forEach((client) => {
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(payload);
-      }
-    });
-  }
-
-  public setVisualizerHtml(html: string): void {
-    this.visualizerHtml = html;
-  }
-
-  private handleHttpRequest(req: http.IncomingMessage, res: http.ServerResponse): void {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Accept');
-
-    if (req.method === 'OPTIONS') {
-      res.writeHead(204);
-      res.end();
-      return;
-    }
-
-    if (
-      req.method === 'POST' &&
-      (this.getRequestPathname(req.url) === '/' || this.getRequestPathname(req.url) === '/mcp')
-    ) {
-      let body = '';
-      req.on('data', (chunk: Buffer) => {
-        body += chunk.toString();
-      });
-      req.on('end', () => {
-        try {
-          const parsed = JSON.parse(body) as {
-            method?: unknown;
-            id?: unknown;
-            params?: { protocolVersion?: unknown };
-          };
-          if (parsed.method === 'initialize') {
-            res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-            res.end(
-              JSON.stringify({
-                jsonrpc: '2.0',
-                id: typeof parsed.id === 'number' || typeof parsed.id === 'string' ? parsed.id : 1,
-                result: {
-                  protocolVersion:
-                    typeof parsed.params?.protocolVersion === 'string'
-                      ? parsed.params.protocolVersion
-                      : '2025-06-18',
-                  capabilities: {},
-                  serverInfo: { name: 'gopeak', version: BRIDGE_VERSION },
-                },
-              }),
-            );
-            return;
-          }
-
-          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
-          res.end(JSON.stringify({ error: 'Unsupported method' }));
-        } catch {
-          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
-          res.end(JSON.stringify({ error: 'Invalid JSON' }));
-        }
-      });
-      return;
-    }
-
-    if (req.method !== 'GET') {
-      res.writeHead(405, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Method not allowed' }));
-      return;
-    }
-
-    const pathname = this.getRequestPathname(req.url);
-    if (pathname === '/health') {
-      const payload = {
-        status: 'ok',
-        serverName: 'gopeak',
-        version: BRIDGE_VERSION,
-        bridge: this.getStatus(),
-        uptime: process.uptime(),
-        timestamp: new Date().toISOString(),
-      };
-      res.writeHead(200, {
-        'Content-Type': 'application/json; charset=utf-8',
-        'Cache-Control': 'no-cache',
-      });
-      res.end(JSON.stringify(payload));
-      return;
-    }
-
-    if (pathname === '/' || pathname === '/index.html') {
-      res.writeHead(200, {
-        'Content-Type': 'text/html; charset=utf-8',
-        'Cache-Control': 'no-cache',
-      });
-      res.end(this.visualizerHtml);
-      return;
-    }
-
-    res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify({ error: 'Not found' }));
   }
 
   private getRequestPathname(url: string | undefined): string {
@@ -659,21 +505,6 @@ export class GodotBridge extends EventEmitter {
 
   private emitBridgeEvent<K extends keyof BridgeEventMap>(eventName: K, payload: BridgeEventMap[K]): void {
     this.emit(eventName, payload);
-  }
-
-  private getDefaultVisualizerHtml(): string {
-    return `<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Godot MCP Visualizer</title>
-  </head>
-  <body>
-    <h1>Godot MCP Visualizer</h1>
-    <p>Run the map_project tool to load visualization data.</p>
-  </body>
-</html>`;
   }
 
   private rejectAllPending(error: Error): void {

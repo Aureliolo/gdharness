@@ -1,68 +1,49 @@
 @tool
 extends EditorPlugin
 
-## Auto Reload Plugin for Godot MCP
-## Automatically reloads scenes and scripts when modified externally
-##
-## Features:
-## - Auto-detects external file changes (scenes, scripts, resources)
-## - Reloads without confirmation popup
-## - Lightweight 1-second polling (negligible performance impact)
-## - Perfect for MCP integration workflow
+## Reloads the open scene and the scripts it carries when they change on disk, without the
+## editor's confirmation popup. Every edit made through gdharness lands on disk, and an editor
+## that keeps showing the old file is how a change reads as one that never happened. The
+## files are polled once a second; the editor's own watcher only fires on window focus.
 
-var check_interval: float = 1.0  # Check every 1 second
-var timer: Timer
-var watched_files: Dictionary = {}  # {path: last_modified_time}
-var editor_interface: EditorInterface
+const CHECK_INTERVAL_SECONDS: float = 1.0
 
-# File extensions to watch
-var watched_extensions: Array[String] = [".tscn", ".scn", ".gd", ".tres", ".res"]
+var _timer: Timer
+## The last modification time seen, by path.
+var _watched_files: Dictionary = {}
 
 
 func _enter_tree() -> void:
-	editor_interface = get_editor_interface()
-
-	# Create timer for periodic file checking
-	timer = Timer.new()
-	timer.wait_time = check_interval
-	timer.timeout.connect(_check_for_changes)
-	add_child(timer)
-	timer.start()
-
-	# Initial scan of open scenes
+	_timer = Timer.new()
+	_timer.wait_time = CHECK_INTERVAL_SECONDS
+	_timer.timeout.connect(_check_for_changes)
+	add_child(_timer)
+	_timer.start()
 	_update_watched_files()
-
-	print("[Godot MCP - AutoReload] Plugin activated - watching for external changes")
 
 
 func _exit_tree() -> void:
-	if timer:
-		timer.stop()
-		timer.queue_free()
-	print("[Godot MCP - AutoReload] Plugin deactivated")
+	if _timer:
+		_timer.stop()
+		_timer.queue_free()
 
 
 func _update_watched_files() -> void:
-	# Get currently edited scene
-	var edited_scene: Node = editor_interface.get_edited_scene_root()
+	var edited_scene: Node = EditorInterface.get_edited_scene_root()
 	if edited_scene and edited_scene.scene_file_path:
 		var path: String = edited_scene.scene_file_path
-		if not watched_files.has(path):
-			watched_files[path] = _get_modified_time(path)
-
-		# Also watch attached scripts
+		if not _watched_files.has(path):
+			_watched_files[path] = _get_modified_time(path)
 		_watch_node_scripts(edited_scene)
 
 
 func _watch_node_scripts(node: Node) -> void:
-	# Watch the script attached to this node
 	var script: Variant = node.get_script()
-	if script is Script and (script as Script).resource_path:
-		var path: String = (script as Script).resource_path
-		if not watched_files.has(path):
-			watched_files[path] = _get_modified_time(path)
-
-	# Recursively watch children
+	if script is Script:
+		var attached: Script = script
+		var path: String = attached.resource_path
+		if not path.is_empty() and not _watched_files.has(path):
+			_watched_files[path] = _get_modified_time(path)
 	for child: Node in node.get_children():
 		_watch_node_scripts(child)
 
@@ -77,61 +58,32 @@ func _get_modified_time(path: String) -> int:
 func _check_for_changes() -> void:
 	_update_watched_files()
 
-	var files_to_reload: Array[String] = []
+	var scenes_to_reload: Array[String] = []
 	var scripts_to_reload: Array[String] = []
-
-	for path: String in watched_files.keys():
+	for path: String in _watched_files.keys():
 		var current_time: int = _get_modified_time(path)
-		var last_time: int = watched_files[path]
-
+		var last_time: int = _watched_files[path]
 		if current_time > last_time:
 			if path.ends_with(".gd"):
 				scripts_to_reload.append(path)
 			else:
-				files_to_reload.append(path)
-			watched_files[path] = current_time
+				scenes_to_reload.append(path)
+			_watched_files[path] = current_time
 
-	# Reload changed scripts first
+	# Scripts first, so a scene reloaded after them instantiates the new code.
 	for path: String in scripts_to_reload:
 		_reload_script(path)
-
-	# Then reload changed scenes
-	for path: String in files_to_reload:
+	for path: String in scenes_to_reload:
 		_reload_scene(path)
 
 
 func _reload_script(path: String) -> void:
-	print("[Godot MCP - AutoReload] Script changed: ", path)
-
-	# Reload the script resource
-	var script: Resource = load(path)
-	if script:
-		ResourceLoader.load(path, "", ResourceLoader.CACHE_MODE_REPLACE)
-		print("[Godot MCP - AutoReload] Script reloaded: ", path)
+	print("[gdharness] Script changed on disk, reloading: ", path)
+	ResourceLoader.load(path, "", ResourceLoader.CACHE_MODE_REPLACE)
 
 
 func _reload_scene(path: String) -> void:
-	print("[Godot MCP - AutoReload] Scene changed: ", path)
-
-	# Check if this is the currently edited scene
-	var edited_scene: Node = editor_interface.get_edited_scene_root()
+	var edited_scene: Node = EditorInterface.get_edited_scene_root()
 	if edited_scene and edited_scene.scene_file_path == path:
-		# Reload the current scene
-		editor_interface.reload_scene_from_path(path)
-		print("[Godot MCP - AutoReload] Scene reloaded: ", path)
-
-
-# Public API for configuration
-func set_check_interval(interval: float) -> void:
-	check_interval = interval
-	if timer:
-		timer.wait_time = interval
-
-
-func add_watched_extension(ext: String) -> void:
-	if not watched_extensions.has(ext):
-		watched_extensions.append(ext)
-
-
-func clear_watched_files() -> void:
-	watched_files.clear()
+		print("[gdharness] Scene changed on disk, reloading: ", path)
+		EditorInterface.reload_scene_from_path(path)

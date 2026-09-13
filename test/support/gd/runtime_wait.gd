@@ -4,7 +4,7 @@ extends SceneTree
 ## waits for frames, a signal and a property. They need the main loop running, so the checks
 ## start on the first frame rather than in _init, and the fixture quits when they are done.
 
-const Runtime = preload("res://addons/godot_mcp_runtime/mcp_runtime_autoload.gd")
+const Runtime = preload("res://addons/gdharness_runtime/runtime_autoload.gd")
 
 var failures: Array[String] = []
 var node: Runtime

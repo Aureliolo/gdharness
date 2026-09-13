@@ -4,7 +4,7 @@ extends SceneTree
 ## the operations script and with a different key order, and the same round trip is asserted
 ## against it.
 
-const Values = preload("res://addons/godot_mcp_runtime/runtime_values.gd")
+const Values = preload("res://addons/gdharness_runtime/runtime_values.gd")
 
 var failures: Array[String] = []
 

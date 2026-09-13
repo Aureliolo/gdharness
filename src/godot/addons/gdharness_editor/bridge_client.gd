@@ -1,6 +1,8 @@
 @tool
-class_name MCPEditorClient
 extends Node
+
+## The editor's end of the bridge: one WebSocket to the gdharness server, reconnected on its
+## own when it drops, carrying tool requests in and their results out.
 
 signal connected
 signal disconnected
@@ -71,15 +73,12 @@ func _resolve_server_url(explicit_url: String) -> String:
 	if explicit_url != "":
 		return explicit_url
 
-	var env_keys: Array[String] = ["GODOT_BRIDGE_PORT", "MCP_BRIDGE_PORT", "GDHARNESS_BRIDGE_PORT"]
-	for key: String in env_keys:
-		var raw := OS.get_environment(key)
-		if raw == "":
-			continue
-		if raw.is_valid_int():
-			var port := int(raw)
-			if port >= 1 and port <= 65535:
-				return "ws://127.0.0.1:%d/godot" % port
+	# The same variable the server reads, so the two agree on the port by construction.
+	var raw: String = OS.get_environment("GDHARNESS_BRIDGE_PORT")
+	if raw != "":
+		if raw.is_valid_int() and int(raw) >= 1 and int(raw) <= 65535:
+			return "ws://127.0.0.1:%d/godot" % int(raw)
+		push_error("GDHARNESS_BRIDGE_PORT is %s, not a port; using %s" % [raw, DEFAULT_URL])
 
 	return DEFAULT_URL
 
@@ -97,9 +96,9 @@ func _attempt_connection() -> void:
 	if socket.get_ready_state() != WebSocketPeer.STATE_CLOSED:
 		socket.close()
 
-	var err := socket.connect_to_url(server_url)
+	var err: Error = socket.connect_to_url(server_url)
 	if err != OK:
-		push_error("[MCP Editor] Failed to connect: %s" % err)
+		push_error("[gdharness] Failed to connect to %s: %s" % [server_url, error_string(err)])
 		_schedule_reconnect()
 
 
@@ -134,7 +133,7 @@ func _on_reconnect_timer() -> void:
 func _handle_message(json_string: String) -> void:
 	var parsed: Variant = JSON.parse_string(json_string)
 	if not parsed is Dictionary:
-		push_error("[MCP Editor] Failed to parse message: %s" % json_string)
+		push_error("[gdharness] The server sent something that is not a message: %s" % json_string)
 		return
 	var message: Dictionary = parsed
 

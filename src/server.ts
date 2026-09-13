@@ -234,7 +234,7 @@ class GodotServer {
     process.stdin.once('end', () => {
       void this.handleShutdown('stdin:end', 0);
     });
-    console.error('Godot MCP server running on stdio');
+    console.error('gdharness running on stdio');
 
     // A bridge that cannot bind must not take the stdio server down with it: the tools that
     // need no editor still work, and editor_status says what happened.

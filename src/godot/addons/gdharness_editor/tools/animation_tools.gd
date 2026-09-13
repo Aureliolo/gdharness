@@ -1,6 +1,7 @@
 @tool
-class_name MCPAnimationTools
 extends Node
+
+## Animations and animation trees, edited in the open editor.
 
 var _editor_plugin: EditorPlugin = null
 

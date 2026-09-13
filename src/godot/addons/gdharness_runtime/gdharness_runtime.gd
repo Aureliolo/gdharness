@@ -5,8 +5,8 @@ extends EditorPlugin
 ## from the editor: with the plugin enabled, every run of the project carries the server that
 ## the runtime tools talk to.
 
-const AUTOLOAD_NAME: String = "MCPRuntime"
-const AUTOLOAD_PATH: String = "res://addons/godot_mcp_runtime/mcp_runtime_autoload.gd"
+const AUTOLOAD_NAME: String = "GdharnessRuntime"
+const AUTOLOAD_PATH: String = "res://addons/gdharness_runtime/runtime_autoload.gd"
 
 
 func _enter_tree() -> void:
