@@ -492,6 +492,8 @@ function testOperations(godotPath: string, projectDir: string): void {
     'a script the engine refuses is reported as not parsing',
   );
   assert.match(broken.stderr, /loose/, 'the reason is on stderr, where the server reads it from');
+  // Gone again before the resave below walks the project, which would trip over it.
+  rmSync(join(projectDir, 'made', 'broken.gd'));
 
   // What gets written has to parse where an untyped declaration is an error, which the
   // autoload check further down proves by booting the project with this script as one.
