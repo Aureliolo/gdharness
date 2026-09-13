@@ -6,5 +6,6 @@
 !**/
 build/
 dist/
+site/
 node_modules/
 .venv/

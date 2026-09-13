@@ -20,8 +20,6 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import {
   CallToolRequestSchema,
   ErrorCode,
-  GetPromptRequestSchema,
-  ListPromptsRequestSchema,
   ListToolsRequestSchema,
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
@@ -37,7 +35,6 @@ import { editorArguments, envValue, resolveHeadless, runArguments } from './laun
 import { GodotLSPClient, handleLSPTool } from './lsp_client.js';
 import { resolveWithinProject } from './paths.js';
 import { findGodotProjects, projectStructure, searchProject } from './project-scan.js';
-import { getPrompt, listPrompts } from './prompts.js';
 import { parseProjectGodot, setupResourceHandlers } from './resources.js';
 import { chooseRuntime, discoverRuntimes, runtimeRequest } from './runtime-client.js';
 import type {
@@ -216,7 +213,7 @@ class GodotServer {
     this.godotBridge = getDefaultBridge();
     this.mcp = new McpServer(
       { name: 'gdharness', version: SERVER_VERSION },
-      { capabilities: { tools: {}, prompts: {}, resources: {} } },
+      { capabilities: { tools: {}, resources: {} } },
     );
     this.setupToolHandlers();
     setupResourceHandlers(this.mcp, () => this.lastProjectPath);
@@ -386,12 +383,6 @@ class GodotServer {
   // -------------------------------------------------------------------------------------------
 
   private setupToolHandlers(): void {
-    this.mcp.server.setRequestHandler(ListPromptsRequestSchema, (request) =>
-      listPrompts(request.params?.cursor),
-    );
-    this.mcp.server.setRequestHandler(GetPromptRequestSchema, (request) =>
-      getPrompt(request.params.name, request.params.arguments),
-    );
     this.mcp.server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: this.tools }));
     this.mcp.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       this.logDebug(`Handling tool request: ${request.params.name}`);

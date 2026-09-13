@@ -53,13 +53,8 @@ async function main(): Promise<void> {
   try {
     const init = await server.initialize('ci-smoke');
     const capabilities = isRecord(init.result) ? init.result['capabilities'] : undefined;
-    if (!isRecord(capabilities) || !capabilities['prompts']) {
-      throw new Error('missing prompts capability');
-    }
-
-    const prompts = await server.request('prompts/list');
-    if (listOf(prompts.result, 'prompts').length < 2) {
-      throw new Error('missing prompts/list response');
+    if (!isRecord(capabilities) || !capabilities['tools'] || !capabilities['resources']) {
+      throw new Error('missing tools or resources capability');
     }
 
     const tools = listOf((await server.request('tools/list')).result, 'tools');
