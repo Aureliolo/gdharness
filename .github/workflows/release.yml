@@ -97,9 +97,6 @@ jobs:
       - name: Runtime regression tests
         run: bun run test:ci
 
-      - name: Dynamic groups test
-        run: bun run test:dynamic-groups
-
       - name: Bridge integration test
         run: bun run test:integration
 

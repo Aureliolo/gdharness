@@ -50,7 +50,7 @@ func _round_trip(action: Dictionary) -> Variant:
 
 
 func _events_of(label: String, action: Dictionary, expected_count: int) -> Array:
-	var stored = _round_trip(action)
+	var stored: Variant = _round_trip(action)
 	if not stored is Dictionary:
 		_fail(
 			"%s did not survive project.godot as a dictionary, got %s" % [label, type_string(typeof(stored))]
@@ -65,17 +65,20 @@ func _events_of(label: String, action: Dictionary, expected_count: int) -> Array
 
 
 func _check_key() -> void:
-	var action := actions.build_input_action(
-		0.5,
-		[
-			{
-				"class_name": "InputEventKey",
-				"keycode": KEY_SPACE,
-				"ctrl_pressed": true,
-				"alt_pressed": false,
-				"shift_pressed": true,
-			}
-		]
+	var action := (
+		actions
+		. build_input_action(
+			0.5,
+			[
+				{
+					"class_name": "InputEventKey",
+					"keycode": KEY_SPACE,
+					"ctrl_pressed": true,
+					"alt_pressed": false,
+					"shift_pressed": true,
+				}
+			]
+		)
 	)
 
 	if not is_equal_approx(action.get("deadzone", -1.0), 0.5):
@@ -117,12 +120,15 @@ func _check_mouse_button() -> void:
 
 
 func _check_joypad() -> void:
-	var action := actions.build_input_action(
-		0.3,
-		[
-			{"class_name": "InputEventJoypadButton", "button_index": JOY_BUTTON_A},
-			{"class_name": "InputEventJoypadMotion", "axis": JOY_AXIS_LEFT_X, "axis_value": -1.0},
-		]
+	var action := (
+		actions
+		. build_input_action(
+			0.3,
+			[
+				{"class_name": "InputEventJoypadButton", "button_index": JOY_BUTTON_A},
+				{"class_name": "InputEventJoypadMotion", "axis": JOY_AXIS_LEFT_X, "axis_value": -1.0},
+			]
+		)
 	)
 
 	var events := _events_of("joypad action", action, 2)

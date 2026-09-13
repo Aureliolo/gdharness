@@ -7,13 +7,13 @@ extends RefCounted
 
 
 # Files under `path` whose name ends with `extension`, which is passed with its dot.
-func find_files(path: String, extension: String) -> Array:
-	var files = []
-	var dir = DirAccess.open(path)
+func find_files(path: String, extension: String) -> Array[String]:
+	var files: Array[String] = []
+	var dir: DirAccess = DirAccess.open(path)
 
 	if dir:
 		dir.list_dir_begin()
-		var file_name = dir.get_next()
+		var file_name: String = dir.get_next()
 
 		while file_name != "":
 			if dir.current_is_dir() and not file_name.begins_with("."):
@@ -27,24 +27,24 @@ func find_files(path: String, extension: String) -> Array:
 
 
 # Files under `path` whose extension is in `extensions`, which are passed without their dot.
-func find_files_with_extensions(path: String, extensions: Array) -> Array:
-	var files = []
-	var dir = DirAccess.open(path)
+func find_files_with_extensions(path: String, extensions: Array) -> Array[String]:
+	var files: Array[String] = []
+	var dir: DirAccess = DirAccess.open(path)
 
 	if dir:
 		dir.list_dir_begin()
-		var file_name = dir.get_next()
+		var file_name: String = dir.get_next()
 
 		while file_name != "":
 			if file_name.begins_with("."):
 				file_name = dir.get_next()
 				continue
 
-			var full_path = path + file_name
+			var full_path: String = path + file_name
 			if dir.current_is_dir():
 				files.append_array(find_files_with_extensions(full_path + "/", extensions))
 			else:
-				var ext = file_name.get_extension().to_lower()
+				var ext: String = file_name.get_extension().to_lower()
 				if ext in extensions:
 					files.append(full_path)
 

@@ -74,21 +74,16 @@ func _init_tools() -> void:
 		# Resource tools
 		"create_resource": [_resource_tools, "create_resource"],
 		"modify_resource": [_resource_tools, "modify_resource"],
-		"create_material": [_resource_tools, "create_material"],
 		"create_shader": [_resource_tools, "create_shader"],
 		"create_tileset": [_resource_tools, "create_tileset"],
 		"set_tilemap_cells": [_resource_tools, "set_tilemap_cells"],
 		"set_theme_color": [_resource_tools, "set_theme_color"],
 		"set_theme_font_size": [_resource_tools, "set_theme_font_size"],
-		"apply_theme_shader": [_resource_tools, "apply_theme_shader"],
 		# Animation tools
 		"create_animation": [_animation_tools, "create_animation"],
 		"add_animation_track": [_animation_tools, "add_animation_track"],
-		"create_animation_tree": [_animation_tools, "create_animation_tree"],
 		"add_animation_state": [_animation_tools, "add_animation_state"],
 		"connect_animation_states": [_animation_tools, "connect_animation_states"],
-		"create_navigation_region": [_animation_tools, "create_navigation_region"],
-		"create_navigation_agent": [_animation_tools, "create_navigation_agent"]
 	}
 
 
@@ -106,7 +101,7 @@ func execute_tool(tool_name: String, args: Dictionary) -> Dictionary:
 	if not node.has_method(method):
 		return {"ok": false, "error": "Tool method not found: %s.%s" % [node.name, method]}
 
-	var result = node.call(method, args)
+	var result: Variant = node.call(method, args)
 	if result is Dictionary:
 		return result
 

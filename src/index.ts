@@ -50,7 +50,6 @@ import {
   readBoolean,
   readBooleanEither,
   readNonEmptyString,
-  readNonEmptyStringEither,
   readNumber,
   readNumberLike,
   readParams,
@@ -59,9 +58,7 @@ import {
   readStringArray,
   readStringEither,
 } from './tool-args.js';
-import { buildToolDefinitions as buildToolDefinitionsForServer } from './tool-definitions.js';
-import { CORE_TOOL_GROUPS, TOOL_GROUPS } from './tool-groups.js';
-import { sanitizeExportedToolName } from './tool-names.js';
+import { buildToolDefinitions, TOOL_SPECS, type ToolSpec, toolSpec } from './tool-definitions.js';
 
 // execFile, not exec: no shell means no quoting, and no quoting means no way to escape out
 // of it. Every argument below is an array element, so a path full of backslashes, spaces or
@@ -82,9 +79,9 @@ const PATH_SOLUTIONS = [
  * Main server class for the Godot MCP server
  */
 class GodotServer {
-  // The tool surface here is built by hand: names are sanitised and aliased, the list changes
-  // as groups activate, and pagination is ours. That is the "advanced use case" McpServer's
-  // own docs point at its `.server` for, so registration goes through the protocol object.
+  // Registration goes through the protocol object rather than McpServer's registerTool: the
+  // schemas are authored as data in tool-definitions.ts and validated against the same data
+  // before dispatch, which is the "advanced use case" McpServer's own docs point at `.server` for.
   private mcp: McpServer;
   private activeProcess: GodotProcess | null = null;
   private godotPath: string | null = null;
@@ -98,46 +95,7 @@ class GodotServer {
   private lastProjectPath: string | null = null;
   private godotBridge: GodotBridge;
   private shutdownInitiated = false;
-  private cachedToolDefinitions: MCPToolDefinition[] = [];
-  private toolDefinitionFactory: (() => MCPToolDefinition[]) | null = null;
-  private readonly toolExposureProfile: 'compact' | 'full' | 'legacy';
-  private readonly toolsListPageSize: number;
-  private activeGroups = new Set<string>();
-  private readonly compactAliasToLegacy: Record<string, string> = {
-    'tool.catalog': 'tool_catalog',
-    'project.list': 'list_projects',
-    'project.info': 'get_project_info',
-    'project.search': 'search_project',
-    'project.setting.get': 'get_project_setting',
-    'project.setting.set': 'set_project_setting',
-    'editor.launch': 'launch_editor',
-    'editor.run': 'run_project',
-    'editor.stop': 'stop_project',
-    'editor.debug_output': 'get_debug_output',
-    'editor.status': 'get_editor_status',
-    'editor.version': 'get_godot_version',
-    'scene.create': 'create_scene',
-    'scene.save': 'save_scene',
-    'scene.nodes': 'list_scene_nodes',
-    'project.rescan': 'rescan_filesystem',
-    'scene.node.add': 'add_node',
-    'scene.node.properties': 'get_node_properties',
-    'scene.node.set': 'set_node_properties',
-    'scene.node.delete': 'delete_node',
-    'script.create': 'create_script',
-    'script.modify': 'modify_script',
-    'script.info': 'get_script_info',
-    'class.query': 'query_classes',
-    'class.info': 'query_class_info',
-    'signal.connect': 'connect_signal',
-    'resource.dependencies': 'get_dependencies',
-    'export.presets': 'list_export_presets',
-    'export.run': 'export_project',
-    'runtime.status': 'get_runtime_status',
-    'lsp.diagnostics': 'lsp_get_diagnostics',
-    'dap.output': 'dap_get_output',
-    'tool.groups': 'manage_tool_groups',
-  };
+  private readonly tools: MCPToolDefinition[] = buildToolDefinitions();
 
   /**
    * Parameter name mappings between snake_case and camelCase
@@ -189,21 +147,6 @@ class GodotServer {
   private reverseParameterMappings: Record<string, string> = emptyRecord();
 
   constructor(config?: GodotServerConfig) {
-    const rawProfile = (
-      envValue('GDHARNESS_TOOL_PROFILE') ??
-      envValue('MCP_TOOL_PROFILE') ??
-      'compact'
-    ).toLowerCase();
-    if (rawProfile === 'full' || rawProfile === 'legacy' || rawProfile === 'compact') {
-      this.toolExposureProfile = rawProfile;
-    } else {
-      this.toolExposureProfile = 'compact';
-    }
-
-    const rawToolsPageSize = parseInt(envValue('GDHARNESS_TOOLS_PAGE_SIZE') ?? '33', 10);
-    this.toolsListPageSize =
-      Number.isFinite(rawToolsPageSize) && rawToolsPageSize > 0 ? rawToolsPageSize : 33;
-
     // Initialize reverse parameter mappings
     for (const [snakeCase, camelCase] of Object.entries(this.parameterMappings)) {
       this.reverseParameterMappings[camelCase] = snakeCase;
@@ -254,7 +197,7 @@ class GodotServer {
       },
       {
         capabilities: {
-          tools: { listChanged: true },
+          tools: {},
           prompts: {},
           resources: {},
         },
@@ -783,62 +726,7 @@ class GodotServer {
     return handleDAPTool(this.dapClient, toolName, args);
   }
 
-  private buildToolNameResolutionMap(allTools: MCPToolDefinition[]): Map<string, string> {
-    const resolutionMap = new Map<string, string>();
-
-    const register = (candidateName: string, resolvedName: string) => {
-      const existing = resolutionMap.get(candidateName);
-      if (existing && existing !== resolvedName) {
-        throw new Error(
-          `Sanitized tool name collision: "${candidateName}" maps to both "${existing}" and "${resolvedName}"`,
-        );
-      }
-      resolutionMap.set(candidateName, resolvedName);
-    };
-
-    for (const tool of allTools) {
-      register(tool.name, tool.name);
-      register(sanitizeExportedToolName(tool.name), tool.name);
-    }
-
-    for (const [compactName, legacyName] of Object.entries(this.compactAliasToLegacy)) {
-      register(compactName, legacyName);
-      register(sanitizeExportedToolName(compactName), legacyName);
-    }
-
-    return resolutionMap;
-  }
-
-  private resolveToolAlias(requestedToolName: string): string {
-    const allTools = this.getAllToolDefinitions();
-    const resolutionMap = this.buildToolNameResolutionMap(allTools);
-    return (
-      resolutionMap.get(requestedToolName) ??
-      resolutionMap.get(sanitizeExportedToolName(requestedToolName)) ??
-      requestedToolName
-    );
-  }
-
-  private buildCompactTools(allTools: MCPToolDefinition[]): MCPToolDefinition[] {
-    const compactTools: MCPToolDefinition[] = [];
-
-    for (const [compactName, legacyName] of Object.entries(this.compactAliasToLegacy)) {
-      const source = allTools.find((tool) => tool.name === legacyName);
-      if (!source) {
-        continue;
-      }
-
-      compactTools.push({
-        ...source,
-        name: compactName,
-        description: `[compact alias of ${legacyName}] ${source.description}`,
-      });
-    }
-
-    return compactTools;
-  }
-
-  private jsonTextResponse(payload: unknown): { content: { type: string; text: string }[] } {
+  private jsonTextResponse(payload: unknown): ToolResponse {
     return {
       content: [
         {
@@ -849,388 +737,65 @@ class GodotServer {
     };
   }
 
-  private buildLegacyToCompactAliasMap(): Map<string, string> {
-    return new Map(
-      Object.entries(this.compactAliasToLegacy).map(([compactName, legacyName]) => [legacyName, compactName]),
-    );
-  }
-
-  private buildToolGroupLookup(): Map<string, { group: string; type: 'core' | 'dynamic' }> {
-    const toolToGroup = new Map<string, { group: string; type: 'core' | 'dynamic' }>();
-    const registerGroups = (groups: Record<string, { tools: string[] }>, type: 'core' | 'dynamic') => {
-      for (const [groupName, group] of Object.entries(groups)) {
-        for (const toolName of group.tools) {
-          toolToGroup.set(toolName, { group: groupName, type });
-        }
-      }
-    };
-
-    registerGroups(CORE_TOOL_GROUPS, 'core');
-    registerGroups(TOOL_GROUPS, 'dynamic');
-
-    return toolToGroup;
-  }
-
-  private getActivatedToolNames(): Set<string> {
-    const activatedToolNames = new Set<string>();
-
-    for (const groupName of this.activeGroups) {
-      const group = TOOL_GROUPS[groupName];
-      if (!group) {
-        continue;
-      }
-
-      for (const toolName of group.tools) {
-        activatedToolNames.add(toolName);
-      }
+  /**
+   * The arguments of a call checked against the tool's spec: nothing the schema does not name,
+   * an op from the enum, and every argument the tool and its op require. Returns the op to
+   * dispatch on, or the refusal to send back. Own properties only: a required argument
+   * satisfied by something inherited from Object.prototype is not supplied.
+   */
+  private validateArguments(
+    spec: ToolSpec,
+    args: OperationParams,
+  ): { ok: true; op: string | null } | { ok: false; response: ToolResponse } {
+    const known = new Set([...Object.keys(spec.parameters), ...(spec.operations ? ['op'] : [])]);
+    const unknown = Object.keys(args).filter((key) => !known.has(key));
+    if (unknown.length > 0) {
+      return {
+        ok: false,
+        response: this.createErrorResponse(
+          `${spec.name} does not take ${unknown.join(', ')}. It takes: ${[...known].join(', ')}.`,
+        ),
+      };
     }
 
-    return activatedToolNames;
-  }
-
-  private getAvailableDynamicGroups(): string[] {
-    return Object.keys(TOOL_GROUPS);
-  }
-
-  private getUnknownDynamicGroupError(groupName: string): string {
-    return `Unknown group '${groupName}'. Available dynamic groups: ${this.getAvailableDynamicGroups().join(', ')}`;
-  }
-
-  private notifyToolListChanged(): void {
-    this.cachedToolDefinitions = [];
-    this.mcp.server.sendToolListChanged().catch((error: unknown) => {
-      // A client that has gone away cannot be told the list changed, and that is not a
-      // failure of the call that changed it; it is still worth having in the log.
-      this.logDebug(`Could not send the tool list change notification: ${errorMessage(error)}`);
-    });
-  }
-
-  private autoActivateMatchingGroups(query: string): string[] {
-    if (!query || this.toolExposureProfile !== 'compact') {
-      return [];
-    }
-
-    const newlyActivated: string[] = [];
-    for (const [groupName, group] of Object.entries(TOOL_GROUPS)) {
-      if (this.activeGroups.has(groupName)) {
-        continue;
-      }
-
-      const hasMatchingKeyword = group.keywords.some((kw) => query.includes(kw) || kw.includes(query));
-      const hasMatchingToolName = group.tools.some((toolName) => toolName.toLowerCase().includes(query));
-      if (hasMatchingKeyword || hasMatchingToolName) {
-        this.activeGroups.add(groupName);
-        newlyActivated.push(groupName);
-      }
-    }
-
-    if (newlyActivated.length > 0) {
-      this.notifyToolListChanged();
-    }
-
-    return newlyActivated;
-  }
-
-  private setDynamicGroupActivation(groupName: string, active: boolean): boolean {
-    const wasActive = this.activeGroups.has(groupName);
-
-    if (active) {
-      this.activeGroups.add(groupName);
-    } else {
-      this.activeGroups.delete(groupName);
-    }
-
-    if (wasActive !== active) {
-      this.notifyToolListChanged();
-    }
-
-    return wasActive;
-  }
-
-  private sanitizeToolsForList(tools: MCPToolDefinition[]): MCPToolDefinition[] {
-    const seenNames = new Map<string, string>();
-
-    return tools.map((tool) => {
-      const sanitizedName = sanitizeExportedToolName(tool.name);
-      const existing = seenNames.get(sanitizedName);
-      if (existing && existing !== tool.name) {
-        throw new Error(
-          `Sanitized tool name collision in tools/list: "${sanitizedName}" from "${existing}" and "${tool.name}"`,
-        );
-      }
-
-      seenNames.set(sanitizedName, tool.name);
-
-      if (sanitizedName !== tool.name) {
-        this.logDebug(`Exporting tool "${tool.name}" as "${sanitizedName}" for OpenAI-compatible clients`);
-      }
-
-      return sanitizedName === tool.name
-        ? tool
-        : {
-            ...tool,
-            name: sanitizedName,
+    let op: string | null = null;
+    if (spec.operations) {
+      const valid = Object.keys(spec.operations);
+      const requested = args['op'];
+      if (requested === undefined) {
+        if (!spec.defaultOperation) {
+          return {
+            ok: false,
+            response: this.createErrorResponse(`${spec.name} needs op, one of: ${valid.join(', ')}.`),
           };
-    });
-  }
-
-  private getExposedTools(allTools: MCPToolDefinition[]): MCPToolDefinition[] {
-    if (this.toolExposureProfile === 'full' || this.toolExposureProfile === 'legacy') {
-      return allTools;
-    }
-
-    // Start with compact profile tools
-    const exposed = this.buildCompactTools(allTools);
-
-    // Add dynamically activated group tools (using their legacy names)
-    if (this.activeGroups.size > 0) {
-      const activatedToolNames = this.getActivatedToolNames();
-
-      for (const tool of allTools) {
-        if (activatedToolNames.has(tool.name)) {
-          exposed.push({
-            ...tool,
-            description: `[dynamic] ${tool.description}`,
-          });
         }
+        op = spec.defaultOperation;
+      } else if (typeof requested === 'string' && Object.hasOwn(spec.operations, requested)) {
+        op = requested;
+      } else {
+        return {
+          ok: false,
+          response: this.createErrorResponse(
+            `${spec.name} has no op ${JSON.stringify(requested)}. Valid ops: ${valid.join(', ')}.`,
+          ),
+        };
       }
     }
 
-    return exposed;
-  }
-
-  private parseToolsListCursor(cursor: unknown, total: number): number {
-    if (typeof cursor !== 'string' || cursor.length === 0) {
-      return 0;
-    }
-
-    const offset = Number.parseInt(cursor, 10);
-    if (!Number.isInteger(offset) || offset < 0 || offset > total) {
-      throw new McpError(ErrorCode.InvalidParams, `Invalid tools/list cursor: ${cursor}`);
-    }
-
-    return offset;
-  }
-
-  private paginateToolsForList(
-    tools: MCPToolDefinition[],
-    cursor: unknown,
-  ): { tools: MCPToolDefinition[]; nextCursor?: string } {
-    const start = this.parseToolsListCursor(cursor, tools.length);
-    const end = Math.min(start + this.toolsListPageSize, tools.length);
-    const page = tools.slice(start, end);
-
-    if (end < tools.length) {
+    const required = [...spec.requires, ...(op !== null ? (spec.operations?.[op]?.requires ?? []) : [])];
+    const missing = required.filter((field) => {
+      const value = Object.hasOwn(args, field) ? args[field] : undefined;
+      return value === undefined || value === null || (typeof value === 'string' && value.trim() === '');
+    });
+    if (missing.length > 0) {
+      const where = op !== null ? `${spec.name} ${op}` : spec.name;
       return {
-        tools: page,
-        nextCursor: String(end),
+        ok: false,
+        response: this.createErrorResponse(`${where} needs ${missing.join(', ')}.`),
       };
     }
 
-    return { tools: page };
-  }
-
-  private getAllToolDefinitions(): MCPToolDefinition[] {
-    if (this.cachedToolDefinitions.length > 0) {
-      return this.cachedToolDefinitions;
-    }
-
-    if (this.toolDefinitionFactory) {
-      this.cachedToolDefinitions = this.toolDefinitionFactory();
-    }
-
-    return this.cachedToolDefinitions;
-  }
-
-  private getMissingRequiredArguments(toolName: string, args: Record<string, unknown>): string[] {
-    const toolDefinition = this.getAllToolDefinitions().find((tool) => tool.name === toolName);
-    const required = (toolDefinition?.inputSchema as { required?: unknown } | undefined)?.required;
-
-    if (!Array.isArray(required) || required.length === 0) {
-      return [];
-    }
-
-    return required
-      .filter((field): field is string => typeof field === 'string')
-      .filter((field) => {
-        // Own properties only: a required argument satisfied by something inherited from
-        // Object.prototype, or by a value a `__proto__` member put there, is not supplied.
-        const value = Object.hasOwn(args, field) ? args[field] : undefined;
-        return value === undefined || value === null || (typeof value === 'string' && value.trim() === '');
-      });
-  }
-
-  private handleToolCatalog(args: unknown): { content: { type: string; text: string }[] } {
-    const normalizedArgs = this.normalizeParameters(args);
-    const query = (readString(normalizedArgs, 'query') ?? '').trim().toLowerCase();
-    const limit = Math.max(1, Math.min(100, readNumber(normalizedArgs, 'limit') ?? 30));
-
-    const tools = this.getAllToolDefinitions();
-    const reverseAlias = this.buildLegacyToCompactAliasMap();
-    const toolToGroup = this.buildToolGroupLookup();
-
-    // Any term rather than the whole query as one substring. A caller describing what they want
-    // types several words, and no single tool name or description contains all of them: "inject
-    // mouse click viewport capture" returned nothing while "inject" returned four. Tools matching
-    // more terms come first, and the whole query appearing as written still wins.
-    const terms = query.split(/\s+/).filter((term) => term.length > 0);
-    const scored = tools
-      .map((tool) => {
-        const haystack = `${tool.name} ${tool.description}`.toLowerCase();
-        const hits = terms.filter((term) => haystack.includes(term)).length;
-        const exact = hits > 0 && terms.length > 1 && haystack.includes(query) ? terms.length : 0;
-        return { tool, score: terms.length === 0 ? 1 : hits + exact };
-      })
-      .filter((entry) => entry.score > 0)
-      .sort((left, right) => right.score - left.score);
-
-    const items = scored.slice(0, limit).map(({ tool }) => {
-      const groupInfo = toolToGroup.get(tool.name) ?? null;
-      const compactAlias = reverseAlias.get(tool.name) ?? null;
-      return {
-        tool: tool.name,
-        compactAlias,
-        // The name to actually pass to tools/call. A tool without a compact alias is not
-        // uncallable: once its group is active it is exposed under its sanitized name,
-        // where underscores are hyphens. Reporting only a null alias reads as "this tool
-        // cannot be called", which is how it was read in #74.
-        callAs: compactAlias ?? sanitizeExportedToolName(tool.name),
-        requiresGroupActivation:
-          !compactAlias && groupInfo?.type === 'dynamic' && !this.activeGroups.has(groupInfo.group),
-        group: groupInfo?.group ?? null,
-        groupType: groupInfo?.type ?? null,
-        description: tool.description,
-      };
-    });
-
-    // Auto-activate matching tool groups when query matches their keywords
-    // or when the query directly matches a group's tool NAME (not description).
-    // This prevents over-activation from incidental description matches.
-    const newlyActivated = this.autoActivateMatchingGroups(query);
-
-    return this.jsonTextResponse({
-      profile: this.toolExposureProfile,
-      totalTools: tools.length,
-      query: query || null,
-      returned: items.length,
-      activeGroups: Array.from(this.activeGroups),
-      newlyActivated: newlyActivated.length > 0 ? newlyActivated : undefined,
-      tools: items,
-    });
-  }
-
-  private handleManageToolGroups(args: unknown): { content: { type: string; text: string }[] } {
-    const normalizedArgs = this.normalizeParameters(args);
-    const action = (readString(normalizedArgs, 'action') ?? 'status').toLowerCase();
-    const groupName = readString(normalizedArgs, 'group') ?? '';
-
-    switch (action) {
-      case 'list': {
-        const coreGroups = Object.entries(CORE_TOOL_GROUPS).map(([name, group]) => ({
-          name,
-          type: 'core' as const,
-          description: group.description,
-          tools: group.tools,
-          toolCount: group.tools.length,
-          alwaysVisible: true,
-        }));
-        const dynamicGroups = Object.entries(TOOL_GROUPS).map(([name, group]) => ({
-          name,
-          type: 'dynamic' as const,
-          description: group.description,
-          tools: group.tools,
-          toolCount: group.tools.length,
-          active: this.activeGroups.has(name),
-        }));
-        const allGroups = [...coreGroups, ...dynamicGroups];
-        const totalCoreTools = coreGroups.reduce((sum, g) => sum + g.toolCount, 0);
-        const totalDynTools = dynamicGroups.reduce((sum, g) => sum + g.toolCount, 0);
-        return this.jsonTextResponse({
-          totalGroups: allGroups.length,
-          coreGroups: coreGroups.length,
-          dynamicGroups: dynamicGroups.length,
-          coreTools: totalCoreTools,
-          dynamicTools: totalDynTools,
-          groups: allGroups,
-        });
-      }
-
-      case 'activate': {
-        if (groupName && CORE_TOOL_GROUPS[groupName]) {
-          return this.jsonTextResponse({
-            error: `'${groupName}' is a core group and always visible. No activation needed.`,
-          });
-        }
-        if (!groupName || !TOOL_GROUPS[groupName]) {
-          return this.jsonTextResponse({ error: this.getUnknownDynamicGroupError(groupName) });
-        }
-        const wasAlreadyActive = this.setDynamicGroupActivation(groupName, true);
-        return this.jsonTextResponse({
-          activated: groupName,
-          tools: TOOL_GROUPS[groupName].tools,
-          wasAlreadyActive,
-          activeGroups: Array.from(this.activeGroups),
-        });
-      }
-
-      case 'deactivate': {
-        if (groupName && CORE_TOOL_GROUPS[groupName]) {
-          return this.jsonTextResponse({
-            error: `'${groupName}' is a core group and cannot be deactivated.`,
-          });
-        }
-        if (!groupName || !TOOL_GROUPS[groupName]) {
-          return this.jsonTextResponse({ error: this.getUnknownDynamicGroupError(groupName) });
-        }
-        const wasActive = this.setDynamicGroupActivation(groupName, false);
-        return this.jsonTextResponse({
-          deactivated: groupName,
-          wasActive,
-          activeGroups: Array.from(this.activeGroups),
-        });
-      }
-
-      case 'reset': {
-        const previouslyActive = Array.from(this.activeGroups);
-        this.activeGroups.clear();
-        if (previouslyActive.length > 0) {
-          this.notifyToolListChanged();
-        }
-        return this.jsonTextResponse({
-          reset: true,
-          deactivated: previouslyActive,
-          activeGroups: [],
-        });
-      }
-
-      // 'status' lands here too: an unrecognised action reports the state rather than failing.
-      default: {
-        const coreGroupDetails = Object.entries(CORE_TOOL_GROUPS).map(([name, group]) => ({
-          name,
-          type: 'core' as const,
-          description: group.description,
-          tools: group.tools,
-          alwaysVisible: true,
-        }));
-        const activeGroupDetails = Array.from(this.activeGroups).map((name) => ({
-          name,
-          type: 'dynamic' as const,
-          description: TOOL_GROUPS[name]?.description,
-          tools: TOOL_GROUPS[name]?.tools,
-        }));
-        const totalCoreTools = coreGroupDetails.reduce((sum, g) => sum + g.tools.length, 0);
-        const totalDynamicTools = activeGroupDetails.reduce((sum, g) => sum + (g.tools?.length ?? 0), 0);
-        return this.jsonTextResponse({
-          coreGroups: { count: coreGroupDetails.length, tools: totalCoreTools, groups: coreGroupDetails },
-          dynamicGroups: {
-            activeCount: this.activeGroups.size,
-            tools: totalDynamicTools,
-            groups: activeGroupDetails,
-          },
-          availableDynamicGroups: this.getAvailableDynamicGroups(),
-        });
-      }
-    }
+    return { ok: true, op };
   }
 
   /**
@@ -1485,245 +1050,314 @@ class GodotServer {
       return getPrompt(request.params.name, request.params.arguments);
     });
 
-    // Define available tools
-    const buildToolDefinitions = (): MCPToolDefinition[] => buildToolDefinitionsForServer();
+    this.mcp.server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: this.tools }));
 
-    this.toolDefinitionFactory = buildToolDefinitions;
-    this.cachedToolDefinitions = buildToolDefinitions();
-
-    this.mcp.server.setRequestHandler(ListToolsRequestSchema, (request) => {
-      const allTools = buildToolDefinitions();
-      this.cachedToolDefinitions = allTools;
-
-      const exposedTools = this.sanitizeToolsForList(this.getExposedTools(allTools));
-      return this.paginateToolsForList(exposedTools, request.params?.cursor);
-    });
-
-    // Handle tool calls
     this.mcp.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       this.logDebug(`Handling tool request: ${request.params.name}`);
-      const rawArgs = request.params.arguments;
-      const normalizedArgs = this.normalizeParameters(rawArgs);
-      if (typeof normalizedArgs['projectPath'] === 'string') {
-        this.lastProjectPath = normalizedArgs['projectPath'];
+      const spec = toolSpec(request.params.name);
+      if (!spec) {
+        throw new McpError(
+          ErrorCode.MethodNotFound,
+          `Unknown tool: ${request.params.name}. Tools: ${TOOL_SPECS.map((tool) => tool.name).join(', ')}`,
+        );
       }
-      const resolvedToolName = this.resolveToolAlias(request.params.name);
-      switch (resolvedToolName) {
-        case 'launch_editor':
-          return await this.handleLaunchEditor(request.params.arguments);
-        case 'run_project':
-          return await this.handleRunProject(request.params.arguments);
-        case 'get_debug_output':
-          return this.handleGetDebugOutput();
-        case 'stop_project':
-          return this.handleStopProject();
-        case 'get_godot_version':
-          return await this.handleGetGodotVersion();
-        case 'list_projects':
-          return this.handleListProjects(request.params.arguments);
-        case 'get_project_info':
-          return await this.handleGetProjectInfo(request.params.arguments);
-        case 'validate_patch_with_lsp':
-          return await this.handleValidatePatchWithLsp(request.params.arguments);
-        case 'enforce_version_gate':
-          return await this.handleEnforceVersionGate(request.params.arguments);
-        case 'tool_catalog':
-          return this.handleToolCatalog(request.params.arguments);
-        case 'manage_tool_groups':
-          return this.handleManageToolGroups(request.params.arguments);
-        case 'create_scene':
-          return await this.handleViaBridge('create_scene', normalizedArgs);
-        case 'add_node':
-          return await this.handleViaBridge('add_node', normalizedArgs);
-        case 'load_sprite':
-          return await this.handleViaBridge('load_sprite', normalizedArgs);
-        case 'save_scene':
-          return await this.handleViaBridge('save_scene', normalizedArgs);
-        case 'get_uid':
-          return await this.handleGetUid(request.params.arguments);
-        case 'update_project_uids':
-          return await this.handleUpdateProjectUids(request.params.arguments);
-        case 'rescan_filesystem':
-          return await this.handleRescanFilesystem(normalizedArgs);
-        // Phase 1: Scene Operations handlers
-        case 'list_scene_nodes':
-          return await this.handleViaBridge('list_scene_nodes', normalizedArgs);
-        case 'get_node_properties':
-          return await this.handleViaBridge('get_node_properties', normalizedArgs);
-        case 'set_node_properties':
-          return await this.handleViaBridge('set_node_properties', normalizedArgs);
-        case 'delete_node':
-          return await this.handleViaBridge('delete_node', normalizedArgs);
-        case 'duplicate_node':
-          return await this.handleViaBridge('duplicate_node', normalizedArgs);
-        case 'reparent_node':
-          return await this.handleViaBridge('reparent_node', normalizedArgs);
-        // Phase 2: Import/Export Pipeline handlers
-        case 'get_import_status':
-          return await this.handleGetImportStatus(request.params.arguments);
-        case 'get_import_options':
-          return await this.handleGetImportOptions(request.params.arguments);
-        case 'set_import_options':
-          return await this.handleSetImportOptions(request.params.arguments);
-        case 'reimport_resource':
-          return await this.handleReimportResource(request.params.arguments);
-        case 'list_export_presets':
-          return await this.handleListExportPresets(request.params.arguments);
-        case 'export_project':
-          return await this.handleExportProject(request.params.arguments);
-        case 'validate_project':
-          return await this.handleValidateProject(request.params.arguments);
-        // Phase 3: DX Tools handlers
-        case 'get_dependencies':
-          return await this.handleGetDependencies(request.params.arguments);
-        case 'find_resource_usages':
-          return await this.handleFindResourceUsages(request.params.arguments);
-        case 'parse_error_log':
-          return await this.handleParseErrorLog(request.params.arguments);
-        case 'get_project_health':
-          return await this.handleGetProjectHealth(request.params.arguments);
-        // Phase 3: Config Tools handlers
-        case 'get_project_setting':
-          return await this.handleGetProjectSetting(request.params.arguments);
-        case 'set_project_setting':
-          return await this.handleSetProjectSetting(request.params.arguments);
-        case 'add_autoload':
-          return await this.handleAddAutoload(request.params.arguments);
-        case 'remove_autoload':
-          return await this.handleRemoveAutoload(request.params.arguments);
-        case 'list_autoloads':
-          return await this.handleListAutoloads(request.params.arguments);
-        case 'set_main_scene':
-          return await this.handleSetMainScene(request.params.arguments);
-        // Signal Management handlers
-        case 'connect_signal':
-          return await this.handleViaBridge('connect_signal', normalizedArgs);
-        case 'disconnect_signal':
-          return await this.handleViaBridge('disconnect_signal', normalizedArgs);
-        case 'list_connections':
-          return await this.handleViaBridge('list_connections', normalizedArgs);
-        // Phase 4: Runtime Tools handlers
-        case 'get_runtime_status':
-          return await this.handleGetRuntimeStatus(request.params.arguments);
-        case 'inspect_runtime_tree':
-          return await this.handleInspectRuntimeTree(request.params.arguments);
-        case 'set_runtime_property':
-          return await this.handleSetRuntimeProperty(request.params.arguments);
-        case 'call_runtime_method':
-          return await this.handleCallRuntimeMethod(request.params.arguments);
-        case 'get_runtime_metrics':
-          return await this.handleGetRuntimeMetrics(request.params.arguments);
-        // Resource Creation Tools handlers
-        case 'create_resource':
-          return await this.handleViaBridge('create_resource', normalizedArgs);
-        case 'create_material':
-          return await this.handleViaBridge('create_material', normalizedArgs);
-        case 'create_shader':
-          return await this.handleViaBridge('create_shader', normalizedArgs);
-        // GDScript File Operations handlers
-        case 'create_script':
-          return await this.handleCreateScript(request.params.arguments);
-        case 'modify_script':
-          return await this.handleModifyScript(request.params.arguments);
-        case 'get_script_info':
-          return await this.handleGetScriptInfo(request.params.arguments);
-        // Animation Tools handlers
-        case 'create_animation':
-          return await this.handleViaBridge('create_animation', normalizedArgs);
-        case 'add_animation_track':
-          return await this.handleViaBridge('add_animation_track', normalizedArgs);
-        // Plugin Management handlers
-        case 'list_plugins':
-          return await this.handleListPlugins(request.params.arguments);
-        case 'enable_plugin':
-          return await this.handleEnablePlugin(request.params.arguments);
-        case 'disable_plugin':
-          return await this.handleDisablePlugin(request.params.arguments);
-        // Input Action handlers
-        case 'add_input_action':
-          return await this.handleAddInputAction(request.params.arguments);
-        // Project Search handlers
-        case 'search_project':
-          return this.handleSearchProject(request.params.arguments);
-        // 2D Tile Tools handlers
-        case 'create_tileset':
-          return await this.handleViaBridge('create_tileset', normalizedArgs);
-        case 'set_tilemap_cells':
-          return await this.handleViaBridge('set_tilemap_cells', normalizedArgs);
-        // Audio System Tools handlers
-        case 'create_audio_bus':
-          return await this.handleCreateAudioBus(request.params.arguments);
-        case 'get_audio_buses':
-          return await this.handleGetAudioBuses(request.params.arguments);
-        case 'set_audio_bus_effect':
-          return await this.handleSetAudioBusEffect(request.params.arguments);
-        case 'set_audio_bus_volume':
-          return await this.handleSetAudioBusVolume(request.params.arguments);
-        // Networking Tools handlers
-        // Physics Tools handlers
-        // Navigation Tools handlers
-        case 'create_navigation_region':
-          return await this.handleViaBridge('create_navigation_region', normalizedArgs);
-        case 'create_navigation_agent':
-          return await this.handleViaBridge('create_navigation_agent', normalizedArgs);
-        // Rendering Tools handlers
-        // Animation Tree Tools handlers
-        case 'create_animation_tree':
-          return await this.handleViaBridge('create_animation_tree', normalizedArgs);
-        case 'add_animation_state':
-          return await this.handleViaBridge('add_animation_state', normalizedArgs);
-        case 'connect_animation_states':
-          return await this.handleViaBridge('connect_animation_states', normalizedArgs);
-        // UI/Theme Tools handlers
-        case 'set_theme_color':
-          return await this.handleViaBridge('set_theme_color', normalizedArgs);
-        case 'set_theme_font_size':
-          return await this.handleViaBridge('set_theme_font_size', normalizedArgs);
-        case 'apply_theme_shader':
-          return await this.handleViaBridge('apply_theme_shader', normalizedArgs);
-        // ClassDB Introspection Tools
-        case 'query_classes':
-          return await this.handleQueryClasses(request.params.arguments);
-        case 'query_class_info':
-          return await this.handleQueryClassInfo(request.params.arguments);
-        case 'inspect_inheritance':
-          return await this.handleInspectInheritance(request.params.arguments);
-        // Resource Modification Tool
-        case 'modify_resource':
-          return await this.handleViaBridge('modify_resource', normalizedArgs);
-        // Editor Plugin Bridge Status
-        case 'get_editor_status':
-          return {
-            content: [{ type: 'text', text: JSON.stringify(this.getEditorStatusPayload(), null, 2) }],
-          };
-        case 'capture_screenshot':
-          return await this.handleRuntimeCommand('capture_screenshot', request.params.arguments);
-        case 'capture_viewport':
-          return await this.handleRuntimeCommand('capture_viewport', request.params.arguments);
-        case 'inject_action':
-          return await this.handleRuntimeCommand('inject_action', request.params.arguments);
-        case 'inject_key':
-          return await this.handleRuntimeCommand('inject_key', request.params.arguments);
-        case 'inject_mouse_click':
-          return await this.handleRuntimeCommand('inject_mouse_click', request.params.arguments);
-        case 'inject_mouse_motion':
-          return await this.handleRuntimeCommand('inject_mouse_motion', request.params.arguments);
-        case 'lsp_get_diagnostics':
-        case 'lsp_get_completions':
-        case 'lsp_get_hover':
-        case 'lsp_get_symbols':
-          return await this.handleLSP(resolvedToolName, request.params.arguments);
-        case 'dap_get_output':
-        case 'dap_set_breakpoint':
-        case 'dap_remove_breakpoint':
-        case 'dap_continue':
-        case 'dap_pause':
-        case 'dap_step_over':
-        case 'dap_get_stack_trace':
-          return await this.handleDAP(resolvedToolName, request.params.arguments);
-        default:
-          throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${request.params.name}`);
+
+      const args = this.normalizeParameters(request.params.arguments);
+      const checked = this.validateArguments(spec, args);
+      if (!checked.ok) {
+        return checked.response;
       }
+      if (typeof args['projectPath'] === 'string') {
+        this.lastProjectPath = args['projectPath'];
+      }
+
+      return await this.dispatch(spec.name, checked.op ?? '', args);
+    });
+  }
+
+  /**
+   * One tool call to the code that does it. The handlers below were written one per engine
+   * call and keep their own argument names, so an op that renamed an argument hands it over
+   * under the old name here; the editor addon and the runtime addon keep their command names.
+   * `op` is empty for a tool that has none.
+   */
+  private async dispatch(tool: string, op: string, args: OperationParams): Promise<ToolResponse> {
+    const { op: _op, ...arguments_ } = args;
+    const bridge = async (command: string, extra: OperationParams = {}): Promise<ToolResponse> => {
+      const contained = this.containBridgePaths({ ...arguments_, ...extra });
+      return contained.ok ? await this.handleViaBridge(command, contained.args) : contained.response;
+    };
+
+    switch (tool) {
+      case 'project_list':
+        return this.handleListProjects(args);
+      case 'project_info':
+        return await this.handleProjectInfo(args);
+      case 'project_settings':
+        switch (op) {
+          case 'get':
+            return await this.handleGetProjectSetting(args);
+          case 'set':
+            return await this.handleSetProjectSetting(args);
+          case 'add_autoload':
+            return await this.handleAddAutoload(args);
+          case 'remove_autoload':
+            return await this.handleRemoveAutoload(args);
+          case 'set_main_scene':
+            return await this.handleSetMainScene(args);
+          case 'add_input_action':
+            return await this.handleAddInputAction(args);
+          case 'enable_plugin':
+            return await this.handleEnablePlugin(args);
+          case 'disable_plugin':
+            return await this.handleDisablePlugin(args);
+          case 'add_audio_bus':
+            return await this.handleCreateAudioBus(args);
+          case 'set_audio_bus_effect':
+            return await this.handleSetAudioBusEffect(args);
+          default:
+            return await this.handleSetAudioBusVolume(args);
+        }
+      case 'project_search':
+        return this.handleSearchProject(args);
+      case 'project_dependencies':
+        return args['direction'] === 'reverse'
+          ? await this.handleFindResourceUsages(args)
+          : await this.handleGetDependencies(args);
+      case 'project_import':
+        switch (op) {
+          case 'status':
+            return await this.handleGetImportStatus(args);
+          case 'options':
+            return await this.handleGetImportOptions(args);
+          case 'set_options':
+            return await this.handleSetImportOptions(args);
+          case 'reimport':
+            return await this.handleReimportResource(args);
+          case 'uid':
+            return await this.handleGetUid({ ...args, filePath: args['resourcePath'] });
+          default:
+            return await this.handleUpdateProjectUids(args);
+        }
+      case 'project_export':
+        return op === 'list'
+          ? await this.handleListExportPresets(args)
+          : await this.handleExportProject(args);
+
+      case 'scene_create':
+        return op === 'create' ? await bridge('create_scene') : await bridge('save_scene');
+      case 'scene_tree':
+        return await bridge('list_scene_nodes');
+      case 'scene_node':
+        switch (op) {
+          case 'add':
+            return await bridge('add_node');
+          case 'get':
+            return await bridge('get_node_properties');
+          case 'set':
+            return await bridge('set_node_properties');
+          case 'duplicate':
+            return await bridge('duplicate_node', { parentPath: args['parentNodePath'] });
+          case 'reparent':
+            return await bridge('reparent_node');
+          case 'delete':
+            return await bridge('delete_node');
+          case 'load_sprite':
+            return await bridge('load_sprite');
+          default:
+            return await bridge('set_tilemap_cells', { tilemapNodePath: args['nodePath'] });
+        }
+      case 'scene_signal':
+        switch (op) {
+          case 'connect':
+            return await bridge('connect_signal');
+          case 'disconnect':
+            return await bridge('disconnect_signal');
+          default:
+            return await bridge('list_connections');
+        }
+      case 'scene_animation':
+        switch (op) {
+          case 'create':
+            return await bridge('create_animation');
+          case 'add_track':
+            return await bridge('add_animation_track');
+          case 'add_state':
+            return await bridge('add_animation_state');
+          default:
+            return await bridge('connect_animation_states');
+        }
+
+      case 'script_edit':
+        return op === 'create' ? await this.handleCreateScript(args) : await this.handleModifyScript(args);
+      case 'script_info':
+        switch (op) {
+          case 'structure':
+            return await this.handleGetScriptInfo(args);
+          case 'symbols':
+            return await this.handleLSP('lsp_get_symbols', args);
+          case 'completion':
+            return await this.handleLSP('lsp_get_completions', args);
+          default:
+            return await this.handleLSP('lsp_get_hover', args);
+        }
+      case 'script_diagnostics':
+        return await this.handleScriptDiagnostics(args);
+
+      case 'resource_edit':
+        switch (op) {
+          case 'create':
+            return await bridge('create_resource');
+          case 'modify':
+            return await bridge('modify_resource');
+          case 'create_shader':
+            return await bridge('create_shader', { shaderPath: args['resourcePath'] });
+          case 'create_tileset':
+            return await bridge('create_tileset', { tilesetPath: args['resourcePath'] });
+          case 'set_theme_color':
+            return await bridge('set_theme_color', { themePath: args['resourcePath'] });
+          default:
+            return await bridge('set_theme_font_size', { themePath: args['resourcePath'] });
+        }
+
+      case 'editor_launch':
+        return await this.handleLaunchEditor(args);
+      case 'editor_run':
+        return await this.handleRunProject(args);
+      case 'editor_stop':
+        return this.handleStopProject();
+      case 'editor_output':
+        return this.handleGetDebugOutput();
+      case 'editor_status':
+        return await this.handleEditorStatus();
+      case 'editor_rescan':
+        return await this.handleRescanFilesystem(args);
+      case 'editor_classes':
+        switch (op) {
+          case 'query':
+            return await this.handleQueryClasses(args);
+          case 'info':
+            return await this.handleQueryClassInfo(args);
+          default:
+            return await this.handleInspectInheritance(args);
+        }
+
+      case 'runtime_inspect':
+        return op === 'tree'
+          ? await this.handleInspectRuntimeTree(args)
+          : await this.handleGetRuntimeMetrics(args);
+      case 'runtime_invoke':
+        return op === 'set'
+          ? await this.handleSetRuntimeProperty(args)
+          : await this.handleCallRuntimeMethod(args);
+      case 'runtime_capture':
+        return await this.handleRuntimeCommand(
+          op === 'screenshot' ? 'capture_screenshot' : 'capture_viewport',
+          args,
+        );
+      case 'runtime_input':
+        return await this.handleRuntimeCommand(`inject_${op}`, args);
+
+      case 'debug_breakpoint':
+        return await this.handleDAP(op === 'set' ? 'dap_set_breakpoint' : 'dap_remove_breakpoint', args);
+      case 'debug_control':
+        return await this.handleDAP(`dap_${op}`, args);
+      case 'debug_state':
+        return await this.handleDAP(op === 'stack' ? 'dap_get_stack_trace' : 'dap_get_output', args);
+
+      default:
+        throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${tool}`);
+    }
+  }
+
+  /**
+   * project_info: the project's own metadata, then whichever sections were asked for. Each
+   * section is the answer the matching reader gives on its own, under its own heading, so a
+   * section that fails says so without hiding the rest.
+   */
+  private async handleProjectInfo(args: OperationParams): Promise<ToolResponse> {
+    const detailed = args['detail'] === 'full';
+    const sections: Record<string, () => Promise<ToolResponse>> = dictionary({
+      autoloads: () => this.handleListAutoloads(args),
+      plugins: () => this.handleListPlugins(args),
+      export_presets: () => this.handleListExportPresets({ ...args, includeTemplateStatus: detailed }),
+      audio_buses: () => this.handleGetAudioBuses(args),
+      health: () => this.handleGetProjectHealth({ ...args, includeDetails: detailed }),
+      validation: () => this.handleValidateProject({ ...args, includeSuggestions: detailed }),
+    });
+
+    const include = readStringArray(args, 'include') ?? [];
+    const unknown = include.filter((name) => sections[name] === undefined);
+    if (unknown.length > 0) {
+      return this.createErrorResponse(
+        `project_info cannot include ${unknown.join(', ')}. Sections: ${Object.keys(sections).join(', ')}.`,
+      );
+    }
+
+    const info = await this.handleGetProjectInfo(args);
+    if (info.isError || include.length === 0) {
+      return info;
+    }
+
+    const content = [...info.content];
+    for (const name of include) {
+      const answer = await sections[name]?.();
+      if (answer) {
+        content.push({ type: 'text', text: `## ${name}` }, ...answer.content);
+      }
+    }
+    return { content };
+  }
+
+  /** script_diagnostics: what the language server reports, and the verdict that follows. */
+  private async handleScriptDiagnostics(args: OperationParams): Promise<ToolResponse> {
+    const answer = await this.handleLSP('lsp_get_diagnostics', args);
+    const payload = asParams(JSON.parse(answer.content[0]?.text ?? '{}'));
+    if (payload['error'] !== undefined) {
+      const reason = payload['error'];
+      return this.createErrorResponse(
+        `Diagnostics unavailable: ${typeof reason === 'string' ? reason : JSON.stringify(reason)}`,
+        ['Ensure the Godot editor is running with the language server enabled on port 6005'],
+      );
+    }
+
+    const diagnostics = readArray(payload, 'diagnostics') ?? [];
+    const errors = diagnostics.filter((entry) => {
+      const severity = asParams(entry)['severity'];
+      return severity === 1 || severity === 'error' || severity === 'ERROR';
+    }).length;
+    return this.jsonTextResponse({
+      scriptPath: readString(args, 'scriptPath'),
+      clean: errors === 0,
+      errors,
+      warnings: diagnostics.length - errors,
+      diagnostics,
+    });
+  }
+
+  /** editor_status: the three things an agent asks before doing anything else, in one answer. */
+  private async handleEditorStatus(): Promise<ToolResponse> {
+    const version = await this.handleGetGodotVersion();
+    const runtime = await this.handleRuntimeCommand('ping', {});
+    let runtimePayload: OperationParams | null = null;
+    try {
+      runtimePayload = asParams(JSON.parse(runtime.content[0]?.text ?? ''));
+    } catch {
+      runtimePayload = null;
+    }
+    const runtimeConnected = runtimePayload !== null && readString(runtimePayload, 'type') === 'pong';
+
+    return this.jsonTextResponse({
+      editor: this.getEditorStatusPayload(),
+      godot: {
+        path: this.godotPath,
+        version: version.isError ? null : (version.content[0]?.text ?? null),
+      },
+      game: {
+        processActive: this.activeProcess !== null,
+        runtimeConnected,
+        runtime: runtimeConnected ? runtimePayload : null,
+      },
     });
   }
 
@@ -1759,7 +1393,7 @@ class GodotServer {
       if (!existsSync(projectFile)) {
         return this.createErrorResponse(`Not a valid Godot project: ${projectPath}`, [
           'Ensure the path points to a directory containing a project.godot file',
-          'Use list_projects to find valid Godot projects',
+          'Use project_list to find valid Godot projects',
         ]);
       }
 
@@ -1825,7 +1459,7 @@ class GodotServer {
       if (!existsSync(projectFile)) {
         return this.createErrorResponse(`Not a valid Godot project: ${projectPath}`, [
           'Ensure the path points to a directory containing a project.godot file',
-          'Use list_projects to find valid Godot projects',
+          'Use project_list to find valid Godot projects',
         ]);
       }
 
@@ -1882,7 +1516,7 @@ class GodotServer {
         content: [
           {
             type: 'text',
-            text: `Godot project started in debug mode. Use get_debug_output to see output.`,
+            text: `Godot project started in debug mode. Use editor_output to see output.`,
           },
         ],
       };
@@ -1948,6 +1582,44 @@ class GodotServer {
     };
   }
 
+  /** The arguments of an editor-side tool that name files, each read as a path inside the project. */
+  private static readonly BRIDGE_PATH_ARGUMENTS = [
+    'scenePath',
+    'newPath',
+    'texturePath',
+    'resourcePath',
+    'script',
+  ];
+
+  /**
+   * Every file argument judged before the editor sees it, and handed over as the `res://` path
+   * the project knows it by. The editor addon prefixes `res://` to whatever it receives, which
+   * reads `../outside.tscn` as a scene to write and an absolute path as a project file; the
+   * boundary belongs on this side, where it is the same check every other tool makes.
+   */
+  private containBridgePaths(
+    args: OperationParams,
+  ): { ok: true; args: OperationParams } | { ok: false; response: ToolResponse } {
+    const projectPath = readString(args, 'projectPath');
+    if (!projectPath) {
+      return { ok: true, args };
+    }
+
+    const contained: OperationParams = { ...args };
+    for (const key of GodotServer.BRIDGE_PATH_ARGUMENTS) {
+      const value = readNonEmptyString(args, key);
+      if (value === undefined) {
+        continue;
+      }
+      const location = resolveWithinProject(projectPath, value);
+      if (!location.ok) {
+        return { ok: false, response: this.createErrorResponse(location.reason, PATH_SOLUTIONS) };
+      }
+      contained[key] = `res://${location.relativePath}`;
+    }
+    return { ok: true, args: contained };
+  }
+
   private async handleViaBridge(toolName: string, args: unknown): Promise<ToolResponse> {
     if (!this.godotBridge.isConnected()) {
       return {
@@ -1959,7 +1631,7 @@ class GodotServer {
                 error:
                   'Godot Editor not connected. Launch Godot Editor and enable the "Godot MCP Editor" plugin to use this tool.',
                 suggestion:
-                  'Use the launch_editor tool to open the Godot Editor, then enable the plugin in Project > Project Settings > Plugins.',
+                  'Use editor_launch to open the Godot Editor, then enable the plugin in Project > Project Settings > Plugins.',
               },
               null,
               2,
@@ -1970,15 +1642,7 @@ class GodotServer {
       };
     }
     try {
-      const normalizedArgs = this.normalizeParameters(args);
-      const missingRequiredArgs = this.getMissingRequiredArguments(toolName, normalizedArgs);
-      if (missingRequiredArgs.length > 0) {
-        return this.createErrorResponse(
-          `Missing required arguments for ${toolName}: ${missingRequiredArgs.join(', ')}`,
-          [`Provide required argument(s): ${missingRequiredArgs.join(', ')}`],
-        );
-      }
-      const result = await this.godotBridge.invokeTool(toolName, normalizedArgs);
+      const result = await this.godotBridge.invokeTool(toolName, this.normalizeParameters(args));
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     } catch (error) {
       return {
@@ -2005,7 +1669,7 @@ class GodotServer {
   private handleGetDebugOutput(): ToolResponse {
     if (!this.activeProcess) {
       return this.createErrorResponse('No active Godot process.', [
-        'Use run_project to start a Godot project first',
+        'Use editor_run to start a Godot project first',
         'Check if the Godot process crashed unexpectedly',
       ]);
     }
@@ -2033,7 +1697,7 @@ class GodotServer {
   private handleStopProject(): ToolResponse {
     if (!this.activeProcess) {
       return this.createErrorResponse('No active Godot process to stop.', [
-        'Use run_project to start a Godot project first',
+        'Use editor_run to start a Godot project first',
         'The process may have already terminated',
       ]);
     }
@@ -2232,7 +1896,7 @@ class GodotServer {
       if (!existsSync(projectFile)) {
         return this.createErrorResponse(`Not a valid Godot project: ${projectPath}`, [
           'Ensure the path points to a directory containing a project.godot file',
-          'Use list_projects to find valid Godot projects',
+          'Use project_list to find valid Godot projects',
         ]);
       }
 
@@ -2281,160 +1945,6 @@ class GodotServer {
         'Ensure Godot is installed correctly',
         'Check if the GODOT_PATH environment variable is set correctly',
         'Verify the project path is accessible',
-      ]);
-    }
-  }
-
-  private compareMajorMinorVersions(actual: string, minimum: string): boolean {
-    const parse = (value: string): [number, number] => {
-      const m = /(\d+)\.(\d+)/.exec(value);
-      if (!m?.[1] || !m[2]) return [0, 0];
-      return [parseInt(m[1], 10), parseInt(m[2], 10)];
-    };
-
-    const [aMaj, aMin] = parse(actual);
-    const [mMaj, mMin] = parse(minimum);
-
-    if (aMaj > mMaj) return true;
-    if (aMaj < mMaj) return false;
-    return aMin >= mMin;
-  }
-
-  /**
-   * Pre-apply LSP validation gate
-   */
-  private async handleValidatePatchWithLsp(rawArgs: unknown) {
-    const args = this.normalizeParameters(rawArgs);
-    const projectPath = readString(args, 'projectPath');
-    const scriptPath = readString(args, 'scriptPath');
-
-    if (!projectPath || !scriptPath) {
-      return this.createErrorResponse('Missing required parameters', ['Provide projectPath and scriptPath']);
-    }
-
-    try {
-      const lspResult = await this.handleLSP('lsp_get_diagnostics', {
-        projectPath,
-        scriptPath,
-      });
-
-      const textPayload = lspResult.content[0]?.text ?? '{}';
-      let diagnostics: unknown[] = [];
-      try {
-        const parsed = asParams(JSON.parse(textPayload));
-        diagnostics = readArray(parsed, 'diagnostics') ?? [];
-      } catch {
-        diagnostics = [];
-      }
-
-      const hasBlocking = diagnostics.some((entry) => {
-        const severity = asParams(entry)['severity'];
-        return severity === 1 || severity === 'error' || severity === 'ERROR';
-      });
-
-      return {
-        content: [
-          {
-            type: 'text',
-            text: JSON.stringify(
-              {
-                scriptPath,
-                diagnosticsCount: diagnostics.length,
-                blockOnError: hasBlocking,
-                canApply: !hasBlocking,
-                diagnostics,
-              },
-              null,
-              2,
-            ),
-          },
-        ],
-      };
-    } catch (error) {
-      return this.createErrorResponse(`Failed LSP validation: ${errorMessage(error)}`, [
-        'Ensure Godot editor is running with LSP enabled (port 6005)',
-      ]);
-    }
-  }
-
-  /**
-   * Version and protocol gate
-   */
-  private async handleEnforceVersionGate(rawArgs: unknown) {
-    const args = this.normalizeParameters(rawArgs);
-    const projectPath = readString(args, 'projectPath');
-
-    if (!projectPath) {
-      return this.createErrorResponse('Project path is required', ['Provide projectPath']);
-    }
-
-    const minGodotVersion = readNonEmptyString(args, 'minGodotVersion') ?? '4.2';
-    const minProtocolVersion = readNonEmptyString(args, 'minProtocolVersion') ?? '1.0';
-
-    try {
-      const versionResult = await this.handleGetGodotVersion();
-      const godotVersion = (versionResult.content[0]?.text ?? '').trim();
-      const godotOk = this.compareMajorMinorVersions(godotVersion, minGodotVersion);
-
-      let runtimeProtocol = 'unknown';
-      let runtimeConnected = false;
-      let protocolOk = false;
-      let capabilityInfo: OperationParams = {};
-
-      const runtime = await this.handleRuntimeCommand('ping', {});
-      const runtimeText = runtime.content[0]?.text ?? '{}';
-      try {
-        const parsed = asParams(JSON.parse(runtimeText));
-        runtimeConnected = !parsed['error'];
-        runtimeProtocol = readNonEmptyStringEither(parsed, 'protocol_version', 'protocolVersion') ?? '1.0';
-        capabilityInfo = {
-          hasRuntime: runtimeConnected,
-          responseType: readString(parsed, 'type') ?? null,
-        };
-      } catch {
-        runtimeConnected = false;
-      }
-
-      protocolOk = this.compareMajorMinorVersions(runtimeProtocol, minProtocolVersion);
-
-      return {
-        content: [
-          {
-            type: 'text',
-            text: JSON.stringify(
-              {
-                success: godotOk && (runtimeConnected ? protocolOk : true),
-                requirements: {
-                  minGodotVersion,
-                  minProtocolVersion,
-                },
-                actual: {
-                  godotVersion,
-                  runtimeConnected,
-                  runtimeProtocol,
-                },
-                checks: {
-                  godotOk,
-                  protocolOk: runtimeConnected ? protocolOk : null,
-                },
-                capabilityInfo,
-                recommendation: godotOk
-                  ? runtimeConnected
-                    ? protocolOk
-                      ? 'Version gate passed.'
-                      : 'Runtime protocol is below minimum. Update runtime addon.'
-                    : 'Godot version is compatible. Runtime addon not connected; run project/addon for full protocol check.'
-                  : 'Godot version below minimum requirement. Upgrade Godot.',
-              },
-              null,
-              2,
-            ),
-          },
-        ],
-      };
-    } catch (error) {
-      return this.createErrorResponse(`Failed to enforce version gate: ${errorMessage(error)}`, [
-        'Ensure Godot is installed and runtime addon is available',
       ]);
     }
   }
@@ -2519,7 +2029,7 @@ class GodotServer {
       if (!existsSync(projectFile)) {
         return this.createErrorResponse(`Not a valid Godot project: ${projectPath}`, [
           'Ensure the path points to a directory containing a project.godot file',
-          'Use list_projects to find valid Godot projects',
+          'Use project_list to find valid Godot projects',
         ]);
       }
 
@@ -2594,7 +2104,7 @@ class GodotServer {
       if (!existsSync(projectFile)) {
         return this.createErrorResponse(`Not a valid Godot project: ${projectPath}`, [
           'Ensure the path points to a directory containing a project.godot file',
-          'Use list_projects to find valid Godot projects',
+          'Use project_list to find valid Godot projects',
         ]);
       }
 
@@ -3156,53 +2666,6 @@ class GodotServer {
   }
 
   /**
-   * Handle the parse_error_log tool
-   */
-  private async handleParseErrorLog(rawArgs: unknown) {
-    const args = this.normalizeParameters(rawArgs);
-    const projectPath = readString(args, 'projectPath');
-    const logContent = readString(args, 'logContent');
-    const maxErrors = readPositiveNumber(args, 'maxErrors');
-
-    if (!projectPath) {
-      return this.createErrorResponse('Project path is required', [
-        'Provide a valid path to a Godot project directory',
-      ]);
-    }
-
-    try {
-      const projectFile = join(projectPath, 'project.godot');
-      if (!existsSync(projectFile)) {
-        return this.createErrorResponse(`Not a valid Godot project: ${projectPath}`, [
-          'Ensure the path points to a directory containing a project.godot file',
-        ]);
-      }
-
-      const params: OperationParams = {
-        logContent: logContent ?? '',
-        maxErrors: maxErrors ?? 50,
-      };
-
-      const { stdout, stderr } = await this.executeOperation('parse_error_log', params, projectPath);
-
-      if (stderr.includes('ERROR')) {
-        return this.createErrorResponse(`Failed to parse error log: ${stderr}`, [
-          'Verify the log content or ensure godot.log exists',
-        ]);
-      }
-
-      return {
-        content: [{ type: 'text', text: this.extractLastJsonLine(stdout) ?? stdout.trim() }],
-      };
-    } catch (error) {
-      return this.createErrorResponse(`Failed to parse error log: ${errorMessage(error)}`, [
-        'Ensure Godot is installed correctly',
-        'Verify the project path is accessible',
-      ]);
-    }
-  }
-
-  /**
    * Handle the get_project_health tool
    */
   private async handleGetProjectHealth(rawArgs: unknown) {
@@ -3538,116 +3001,13 @@ class GodotServer {
   // ============================================
 
   /**
-   * Handle the get_runtime_status tool
-   */
-  private async handleGetRuntimeStatus(rawArgs: unknown) {
-    const args = this.normalizeParameters(rawArgs);
-    const projectPath = readString(args, 'projectPath');
-
-    if (!projectPath) {
-      return this.createErrorResponse('Project path is required', [
-        'Provide a valid path to a Godot project directory',
-      ]);
-    }
-
-    try {
-      const runtime = await this.handleRuntimeCommand('ping', {});
-      const runtimeText = runtime.content[0]?.text ?? '';
-
-      let runtimePayload: OperationParams | null = null;
-      try {
-        runtimePayload = asParams(JSON.parse(runtimeText));
-      } catch {
-        runtimePayload = null;
-      }
-
-      const runtimeConnected = runtimePayload !== null && readString(runtimePayload, 'type') === 'pong';
-
-      if (runtimeConnected) {
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(
-                {
-                  connected: true,
-                  status: 'running',
-                  processActive: Boolean(this.activeProcess),
-                  runtimeAddon: 'connected',
-                  note: 'Godot runtime addon responded to ping. Use inspect_runtime_tree to explore.',
-                  runtimeResponse: runtimePayload,
-                },
-                null,
-                2,
-              ),
-            },
-          ],
-        };
-      }
-
-      if (this.activeProcess) {
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(
-                {
-                  connected: false,
-                  status: 'process_running_runtime_disconnected',
-                  processActive: true,
-                  runtimeAddon: 'unreachable',
-                  note: 'A Godot process is active, but the runtime addon did not respond on port 7777.',
-                  runtimeResponse: runtimeText,
-                },
-                null,
-                2,
-              ),
-            },
-          ],
-        };
-      }
-
-      return {
-        content: [
-          {
-            type: 'text',
-            text: JSON.stringify(
-              {
-                connected: false,
-                status: 'not_running',
-                processActive: false,
-                runtimeAddon: 'unreachable',
-                note: 'No active Godot process or runtime addon detected. Use run_project to start one.',
-                runtimeResponse: runtimeText,
-              },
-              null,
-              2,
-            ),
-          },
-        ],
-      };
-    } catch (error) {
-      return this.createErrorResponse(`Failed to get runtime status: ${errorMessage(error)}`, [
-        'Ensure Godot is installed correctly',
-      ]);
-    }
-  }
-
-  /**
    * Handle the inspect_runtime_tree tool
    */
   private async handleInspectRuntimeTree(rawArgs: unknown) {
     const args = this.normalizeParameters(rawArgs);
-    const projectPath = readString(args, 'projectPath');
     const nodePath = readNonEmptyString(args, 'nodePath');
     const depth = readPositiveNumber(args, 'depth');
     const includeProperties = readBoolean(args, 'includeProperties') ?? false;
-
-    if (!projectPath) {
-      return this.createErrorResponse('Project path is required', [
-        'Provide a valid path to a Godot project directory',
-      ]);
-    }
 
     try {
       return await this.handleRuntimeCommand('get_tree', {
@@ -3667,13 +3027,12 @@ class GodotServer {
    */
   private async handleSetRuntimeProperty(rawArgs: unknown) {
     const args = this.normalizeParameters(rawArgs);
-    const projectPath = readString(args, 'projectPath');
     const nodePath = readNonEmptyString(args, 'nodePath');
     const property = readString(args, 'property');
 
-    if (!projectPath || !nodePath || !property || args['value'] === undefined) {
+    if (!nodePath || !property || args['value'] === undefined) {
       return this.createErrorResponse('Missing required parameters', [
-        'Provide projectPath, nodePath, property, and value',
+        'Provide nodePath, property, and value',
       ]);
     }
 
@@ -3695,14 +3054,11 @@ class GodotServer {
    */
   private async handleCallRuntimeMethod(rawArgs: unknown) {
     const args = this.normalizeParameters(rawArgs);
-    const projectPath = readString(args, 'projectPath');
     const nodePath = readNonEmptyString(args, 'nodePath');
     const method = readString(args, 'method');
 
-    if (!projectPath || !nodePath || !method) {
-      return this.createErrorResponse('Missing required parameters', [
-        'Provide projectPath, nodePath, and method',
-      ]);
+    if (!nodePath || !method) {
+      return this.createErrorResponse('Missing required parameters', ['Provide nodePath and method']);
     }
 
     try {
@@ -3723,14 +3079,7 @@ class GodotServer {
    */
   private async handleGetRuntimeMetrics(rawArgs: unknown) {
     const args = this.normalizeParameters(rawArgs);
-    const projectPath = readString(args, 'projectPath');
     const metrics = readArray(args, 'metrics');
-
-    if (!projectPath) {
-      return this.createErrorResponse('Project path is required', [
-        'Provide a valid path to a Godot project directory',
-      ]);
-    }
 
     try {
       return await this.handleRuntimeCommand('get_metrics', {

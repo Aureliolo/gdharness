@@ -71,8 +71,8 @@ func _resolve_server_url(explicit_url: String) -> String:
 	if explicit_url != "":
 		return explicit_url
 
-	var env_keys := ["GODOT_BRIDGE_PORT", "MCP_BRIDGE_PORT", "GDHARNESS_BRIDGE_PORT"]
-	for key in env_keys:
+	var env_keys: Array[String] = ["GODOT_BRIDGE_PORT", "MCP_BRIDGE_PORT", "GDHARNESS_BRIDGE_PORT"]
+	for key: String in env_keys:
 		var raw := OS.get_environment(key)
 		if raw == "":
 			continue
@@ -132,10 +132,11 @@ func _on_reconnect_timer() -> void:
 
 
 func _handle_message(json_string: String) -> void:
-	var message = JSON.parse_string(json_string)
-	if message == null:
+	var parsed: Variant = JSON.parse_string(json_string)
+	if not parsed is Dictionary:
 		push_error("[MCP Editor] Failed to parse message: %s" % json_string)
 		return
+	var message: Dictionary = parsed
 
 	match message.get("type", ""):
 		"ping":
@@ -151,7 +152,7 @@ func _handle_message(json_string: String) -> void:
 			pass
 
 
-func send_tool_result(request_id: String, success: bool, result = null, error: String = "") -> void:
+func send_tool_result(request_id: String, success: bool, result: Variant = null, error: String = "") -> void:
 	var response := {"type": "tool_result", "id": request_id, "success": success}
 
 	if success:

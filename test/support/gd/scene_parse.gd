@@ -6,11 +6,13 @@ extends SceneTree
 ## tag that names a type it cannot build has to fall through rather than answer with a wrong
 ## value, and a tag that legitimately means nothing has to answer null rather than fall through.
 
+const SceneTools = preload("res://addons/godot_mcp_editor/tools/scene_tools.gd")
+
 var failures: Array[String] = []
 
 
 func _init() -> void:
-	var tools = load("res://addons/godot_mcp_editor/tools/scene_tools.gd").new()
+	var tools: SceneTools = SceneTools.new()
 
 	_check_tagged(tools)
 	_check_shaped(tools)
@@ -32,7 +34,7 @@ func _fail(message: String) -> void:
 	failures.append(message)
 
 
-func _check_tagged(tools: Object) -> void:
+func _check_tagged(tools: SceneTools) -> void:
 	if tools._parse_value({"_type": "Vector2", "x": 1, "y": 2}) != Vector2(1, 2):
 		_fail("tagged Vector2")
 	if tools._parse_value({"type": "Vector2", "x": 1, "y": 2}) != Vector2(1, 2):
@@ -51,11 +53,11 @@ func _check_tagged(tools: Object) -> void:
 	if tools._parse_value({"_type": "NodePath", "path": "Root/Child"}) != NodePath("Root/Child"):
 		_fail("tagged NodePath")
 
-	var rect = tools._parse_value({"_type": "Rect2", "x": 1, "y": 2, "width": 3, "height": 4})
+	var rect: Variant = tools._parse_value({"_type": "Rect2", "x": 1, "y": 2, "width": 3, "height": 4})
 	if rect != Rect2(1, 2, 3, 4):
 		_fail("tagged Rect2: %s" % str(rect))
 
-	var transform2d = (
+	var transform2d: Variant = (
 		tools
 		. _parse_value(
 			{
@@ -71,7 +73,7 @@ func _check_tagged(tools: Object) -> void:
 	elif transform2d.origin != Vector2(3, 4):
 		_fail("tagged Transform2D origin: %s" % str(transform2d.origin))
 
-	var transform3d = (
+	var transform3d: Variant = (
 		tools
 		. _parse_value(
 			{
@@ -87,7 +89,7 @@ func _check_tagged(tools: Object) -> void:
 		_fail("tagged Transform3D origin: %s" % str(transform3d.origin))
 
 
-func _check_shaped(tools: Object) -> void:
+func _check_shaped(tools: SceneTools) -> void:
 	if tools._parse_value({"x": 1, "y": 2}, TYPE_VECTOR2) != Vector2(1, 2):
 		_fail("untagged dictionary against a declared Vector2")
 	if tools._parse_value({"x": 1, "y": 2, "z": 3}, TYPE_VECTOR3) != Vector3(1, 2, 3):
@@ -98,12 +100,12 @@ func _check_shaped(tools: Object) -> void:
 		_fail("untagged dictionary against a declared NodePath")
 
 	# With no declared type there is nothing to read it as, so it stays a dictionary.
-	var plain = tools._parse_value({"x": 1, "y": 2})
+	var plain: Variant = tools._parse_value({"x": 1, "y": 2})
 	if not plain is Dictionary:
 		_fail("untagged dictionary with no declared type should stay a dictionary: %s" % str(plain))
 
 
-func _check_positional(tools: Object) -> void:
+func _check_positional(tools: SceneTools) -> void:
 	if tools._parse_value([1, 2], TYPE_VECTOR2) != Vector2(1, 2):
 		_fail("array against a declared Vector2")
 	if tools._parse_value([1, 2, 3], TYPE_VECTOR3) != Vector3(1, 2, 3):
@@ -112,32 +114,32 @@ func _check_positional(tools: Object) -> void:
 		_fail("array against a declared Vector2i")
 
 	# Too short for the declared type, so it is a list rather than a vector.
-	var short = tools._parse_value([1], TYPE_VECTOR2)
+	var short: Variant = tools._parse_value([1], TYPE_VECTOR2)
 	if not short is Array:
 		_fail("a too-short array should stay an array: %s" % str(short))
 
 	# A list parses per item, so a tagged member inside it comes back built.
-	var nested = tools._parse_value([{"_type": "Vector2", "x": 1, "y": 1}])
+	var nested: Variant = tools._parse_value([{"_type": "Vector2", "x": 1, "y": 1}])
 	if not nested is Array or nested.size() != 1:
 		_fail("array shape: %s" % str(nested))
 	elif nested[0] != Vector2(1, 1):
 		_fail("array does not parse its members: %s" % str(nested))
 
 
-func _check_gaps(tools: Object) -> void:
+func _check_gaps(tools: SceneTools) -> void:
 	# A Resource with no path means nothing, which is not the same as the tag not matching.
-	var empty_resource = tools._parse_value({"_type": "Resource", "path": ""})
+	var empty_resource: Variant = tools._parse_value({"_type": "Resource", "path": ""})
 	if empty_resource != null:
 		_fail("a pathless Resource should parse to null, got %s" % str(empty_resource))
 
 	# A tag naming a type it has not got the keys to build falls through to the declared type,
 	# rather than answering with a Transform2D built out of defaults.
-	var incomplete = tools._parse_value({"_type": "Transform2D", "x": 1, "y": 2}, TYPE_VECTOR2)
+	var incomplete: Variant = tools._parse_value({"_type": "Transform2D", "x": 1, "y": 2}, TYPE_VECTOR2)
 	if incomplete != Vector2(1, 2):
 		_fail("an incomplete Transform2D should fall through to the declared type, got %s" % str(incomplete))
 
 	# A tag nobody builds is left alone.
-	var unknown = tools._parse_value({"_type": "Nonesuch", "x": 1})
+	var unknown: Variant = tools._parse_value({"_type": "Nonesuch", "x": 1})
 	if not unknown is Dictionary:
 		_fail("an unknown tag should stay a dictionary: %s" % str(unknown))
 

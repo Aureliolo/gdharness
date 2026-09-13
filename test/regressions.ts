@@ -128,7 +128,7 @@ function testSceneToolsVectorRegression(): void {
 
     writeFileSync(
       join(projectDir, 'runner.gd'),
-      `extends SceneTree\n\nfunc _fail(message: String) -> void:\n\tprinterr(message)\n\tquit(1)\n\nfunc _init() -> void:\n\tvar root := Node2D.new()\n\troot.name = "Root"\n\tvar packed := PackedScene.new()\n\tif packed.pack(root) != OK:\n\t\t_fail("failed to pack root scene")\n\t\treturn\n\tif ResourceSaver.save(packed, "res://scenes/Test.tscn") != OK:\n\t\t_fail("failed to save root scene")\n\t\treturn\n\troot.queue_free()\n\n\tvar scene_tools = load("res://addons/godot_mcp_editor/tools/scene_tools.gd").new()\n\tvar project_path := ProjectSettings.globalize_path("res://")\n\n\tvar add_result: Dictionary = scene_tools.add_node({\n\t\t"projectPath": project_path,\n\t\t"scenePath": "res://scenes/Test.tscn",\n\t\t"nodeType": "Node2D",\n\t\t"nodeName": "TestNode",\n\t\t"parentNodePath": ".",\n\t\t"properties": {\n\t\t\t"position": {"x": 100, "y": 200},\n\t\t\t"scale": {"_type": "Vector2", "x": 2, "y": 2}\n\t\t}\n\t})\n\tif not add_result.get("ok", false):\n\t\t_fail("add_node failed: %s" % JSON.stringify(add_result))\n\t\treturn\n\n\tvar set_result: Dictionary = scene_tools.set_node_properties({\n\t\t"projectPath": project_path,\n\t\t"scenePath": "res://scenes/Test.tscn",\n\t\t"nodePath": "TestNode",\n\t\t"properties": {\n\t\t\t"position": [300, 400]\n\t\t}\n\t})\n\tif not set_result.get("ok", false):\n\t\t_fail("set_node_properties failed: %s" % JSON.stringify(set_result))\n\t\treturn\n\n\tvar loaded := load("res://scenes/Test.tscn") as PackedScene\n\tif loaded == null:\n\t\t_fail("failed to reload saved scene")\n\t\treturn\n\n\tvar instance := loaded.instantiate()\n\tvar node := instance.get_node_or_null("TestNode") as Node2D\n\tif node == null:\n\t\t_fail("saved node missing")\n\t\treturn\n\n\tif node.position != Vector2(300, 400):\n\t\t_fail("position mismatch: %s" % node.position)\n\t\treturn\n\tif node.scale != Vector2(2, 2):\n\t\t_fail("scale mismatch: %s" % node.scale)\n\t\treturn\n\n\tprint(JSON.stringify({"ok": true, "position": [node.position.x, node.position.y], "scale": [node.scale.x, node.scale.y]}))\n\tinstance.queue_free()\n\tquit(0)\n`,
+      `extends SceneTree\n\nfunc _fail(message: String) -> void:\n\tprinterr(message)\n\tquit(1)\n\nfunc _init() -> void:\n\tvar root := Node2D.new()\n\troot.name = "Root"\n\tvar packed := PackedScene.new()\n\tif packed.pack(root) != OK:\n\t\t_fail("failed to pack root scene")\n\t\treturn\n\tif ResourceSaver.save(packed, "res://scenes/Test.tscn") != OK:\n\t\t_fail("failed to save root scene")\n\t\treturn\n\troot.queue_free()\n\n\tvar scene_tools = load("res://addons/godot_mcp_editor/tools/scene_tools.gd").new()\n\tvar project_path := ProjectSettings.globalize_path("res://")\n\n\tvar add_result: Dictionary = scene_tools.add_node({\n\t\t"projectPath": project_path,\n\t\t"scenePath": "res://scenes/Test.tscn",\n\t\t"nodeType": "Node2D",\n\t\t"nodeName": "TestNode",\n\t\t"parentNodePath": ".",\n\t\t"properties": {\n\t\t\t"position": {"x": 100, "y": 200},\n\t\t\t"scale": {"_type": "Vector2", "x": 2, "y": 2}\n\t\t}\n\t})\n\tif not add_result.get("ok", false):\n\t\t_fail("add_node failed: %s" % JSON.stringify(add_result))\n\t\treturn\n\n\tvar set_result: Dictionary = scene_tools.set_node_properties({\n\t\t"projectPath": project_path,\n\t\t"scenePath": "res://scenes/Test.tscn",\n\t\t"nodePath": "TestNode",\n\t\t"properties": {\n\t\t\t"position": [300, 400]\n\t\t}\n\t})\n\tif not set_result.get("ok", false):\n\t\t_fail("set_node_properties failed: %s" % JSON.stringify(set_result))\n\t\treturn\n\n\t# A tagged Resource class is built on the spot, which is how a region gets its polygon and a\n\t# tree its root without a wrapper tool per node class.\n\tvar nav_result: Dictionary = scene_tools.add_node({\n\t\t"projectPath": project_path,\n\t\t"scenePath": "res://scenes/Test.tscn",\n\t\t"nodeType": "NavigationRegion2D",\n\t\t"nodeName": "Walkable",\n\t\t"parentNodePath": ".",\n\t\t"properties": {"navigation_polygon": {"_type": "NavigationPolygon"}}\n\t})\n\tif not nav_result.get("ok", false):\n\t\t_fail("add_node NavigationRegion2D failed: %s" % JSON.stringify(nav_result))\n\t\treturn\n\tvar tree_result: Dictionary = scene_tools.add_node({\n\t\t"projectPath": project_path,\n\t\t"scenePath": "res://scenes/Test.tscn",\n\t\t"nodeType": "AnimationTree",\n\t\t"nodeName": "Tree",\n\t\t"parentNodePath": ".",\n\t\t"properties": {\n\t\t\t"anim_player": {"_type": "NodePath", "path": "../TestNode"},\n\t\t\t"tree_root": {"_type": "AnimationNodeStateMachine"}\n\t\t}\n\t})\n\tif not tree_result.get("ok", false):\n\t\t_fail("add_node AnimationTree failed: %s" % JSON.stringify(tree_result))\n\t\treturn\n\n\tvar loaded := load("res://scenes/Test.tscn") as PackedScene\n\tif loaded == null:\n\t\t_fail("failed to reload saved scene")\n\t\treturn\n\n\tvar instance := loaded.instantiate()\n\tvar node := instance.get_node_or_null("TestNode") as Node2D\n\tif node == null:\n\t\t_fail("saved node missing")\n\t\treturn\n\n\tif node.position != Vector2(300, 400):\n\t\t_fail("position mismatch: %s" % node.position)\n\t\treturn\n\tif node.scale != Vector2(2, 2):\n\t\t_fail("scale mismatch: %s" % node.scale)\n\t\treturn\n\tvar walkable := instance.get_node_or_null("Walkable") as NavigationRegion2D\n\tif walkable == null or walkable.navigation_polygon == null:\n\t\t_fail("the tagged NavigationPolygon should be built and saved")\n\t\treturn\n\tvar tree := instance.get_node_or_null("Tree") as AnimationTree\n\tif tree == null or not (tree.tree_root is AnimationNodeStateMachine) or tree.anim_player != NodePath("../TestNode"):\n\t\t_fail("the tagged AnimationNodeStateMachine and NodePath should be built and saved")\n\t\treturn\n\n\tprint(JSON.stringify({"ok": true, "position": [node.position.x, node.position.y], "scale": [node.scale.x, node.scale.y]}))\n\tinstance.queue_free()\n\tquit(0)\n`,
     );
 
     const run = spawnSync(
@@ -656,14 +656,14 @@ function testProjectGodotResistsPrototypeKeys(): void {
 
 async function testEditorStatusPortConflict(): Promise<void> {
   await withOccupiedBridgePort(async () => {
-    const server = new ServerProcess({ env: { GDHARNESS_TOOL_PROFILE: 'compact' } });
+    const server = new ServerProcess();
     try {
       await delay(500);
       assert.equal(server.exited, false, 'server should stay alive when the bridge port is occupied');
       await server.initialize('regression-test');
 
-      const response = await server.request('tools/call', { name: 'get_editor_status', arguments: {} });
-      const payload = parseTextContent(response);
+      const response = await server.request('tools/call', { name: 'editor_status', arguments: {} });
+      const payload = get(parseTextContent(response), 'editor');
       assert.equal(get(payload, 'bridgeAvailable'), false);
       assert.match(text(get(payload, 'startupError')), /EADDRINUSE/i);
       assert.match(text(get(payload, 'note')), /Another gdharness instance may own the editor bridge/i);
@@ -689,7 +689,7 @@ async function withStdioServer(
   body: (call: ToolCall, request: RawRequest) => Promise<void>,
   env: Record<string, string> = {},
 ): Promise<void> {
-  const server = new ServerProcess({ env: { GDHARNESS_TOOL_PROFILE: 'compact', ...env } });
+  const server = new ServerProcess({ env });
 
   const request: RawRequest = async (method, params, timeoutMs) =>
     await server.request(method, params, timeoutMs);
@@ -714,8 +714,8 @@ async function withStdioServer(
 /**
  * The dictionaries every untrusted name is looked up in have nothing behind them.
  *
- * This is the one mechanism the sites in index.ts and tool-groups.ts all rely on, so it is
- * asserted directly rather than only through whichever of them a fixture can reach. A name
+ * This is the one mechanism every lookup site in index.ts relies on, so it is asserted
+ * directly rather than only through whichever of them a fixture can reach. A name
  * belonging to Object.prototype must read as absent, and writing `__proto__` must store a key
  * rather than re-parent the object.
  */
@@ -747,23 +747,21 @@ function testDictionariesHaveNothingBehindThem(): void {
 }
 
 /**
- * The tool-group tables are indexed by an argument off the wire, so a name belonging to
- * Object.prototype must not resolve to a group. `constructor` is truthy on a plain literal, so
- * the existence checks pass and the handler answers about a group that does not exist; with the
- * branches in the other order it dereferences a function looking for `.tools`.
+ * The tool table, the op table and the project_info sections are indexed by names off the wire,
+ * so a name belonging to Object.prototype must not resolve. `constructor` is truthy on a plain
+ * literal, so an existence check passes and the server dispatches on a function.
  */
-async function testToolGroupLookupsCannotReachThePrototype(): Promise<void> {
-  await withStdioServer(async (call) => {
-    for (const group of ['constructor', 'toString', 'hasOwnProperty', '__proto__']) {
-      for (const action of ['activate', 'deactivate']) {
-        const answer = await call('manage_tool_groups', { action, group });
-        assert.match(
-          answer,
-          /unknown/i,
-          `${action} ${group} should be refused as unknown, not treated as a group`,
-        );
-        assert.doesNotMatch(answer, /core group/i, `${group} must not be reported as a core group`);
-      }
+async function testToolAndOpLookupsCannotReachThePrototype(): Promise<void> {
+  await withStdioServer(async (call, request) => {
+    for (const name of ['constructor', 'toString', 'hasOwnProperty', '__proto__']) {
+      const unknownTool = await request('tools/call', { name, arguments: {} });
+      assert.match(unknownTool.error?.message ?? '', /Unknown tool/, `${name} must not resolve to a tool`);
+
+      const unknownOp = await call('scene_node', { projectPath: '/p', scenePath: 'a.tscn', op: name });
+      assert.match(unknownOp, /has no op/, `${name} must not resolve to an op`);
+
+      const unknownSection = await call('project_info', { projectPath: process.cwd(), include: [name] });
+      assert.match(unknownSection, /cannot include/, `${name} must not resolve to a section`);
     }
   });
 }
@@ -927,22 +925,38 @@ async function testToolsRefusePathsOutsideTheProject(): Promise<void> {
 
   const outsideScript = '../outside.gd';
   const hostile: [string, Record<string, unknown>][] = [
-    ['create_script', { scriptPath: '../escaped.gd' }],
-    ['modify_script', { scriptPath: outsideScript, modifications: [{ type: 'add_signal', name: 'died' }] }],
-    ['get_script_info', { scriptPath: outsideScript }],
-    ['get_uid', { filePath: '../outside.png' }],
-    ['get_import_status', { resourcePath: '../outside.png' }],
-    ['get_import_options', { resourcePath: '../outside.png' }],
-    ['set_import_options', { resourcePath: '../outside.png', options: { flag: true } }],
-    ['reimport_resource', { resourcePath: '../outside.png' }],
-    ['get_dependencies', { resourcePath: outsideScript }],
-    ['find_resource_usages', { resourcePath: '../outside.png' }],
-    ['add_autoload', { name: 'Escaped', path: outsideScript }],
-    ['set_main_scene', { scenePath: '../outside.tscn' }],
-    ['run_project', { scene: '../outside.tscn' }],
-    ['export_project', { preset: 'Linux', outputPath: '../escaped.bin' }],
-    ['enable_plugin', { pluginName: '../../outsideplugin' }],
-    ['disable_plugin', { pluginName: '../../outsideplugin' }],
+    ['script_edit', { op: 'create', scriptPath: '../escaped.gd' }],
+    [
+      'script_edit',
+      { op: 'modify', scriptPath: outsideScript, modifications: [{ type: 'add_signal', name: 'died' }] },
+    ],
+    ['script_info', { scriptPath: outsideScript }],
+    ['project_import', { op: 'uid', resourcePath: '../outside.png' }],
+    ['project_import', { op: 'status', resourcePath: '../outside.png' }],
+    ['project_import', { op: 'options', resourcePath: '../outside.png' }],
+    ['project_import', { op: 'set_options', resourcePath: '../outside.png', options: { flag: true } }],
+    ['project_import', { op: 'reimport', resourcePath: '../outside.png' }],
+    ['project_dependencies', { resourcePath: outsideScript }],
+    ['project_dependencies', { direction: 'reverse', resourcePath: '../outside.png' }],
+    ['project_settings', { op: 'add_autoload', name: 'Escaped', path: outsideScript }],
+    ['project_settings', { op: 'set_main_scene', scenePath: '../outside.tscn' }],
+    ['editor_run', { scene: '../outside.tscn' }],
+    ['project_export', { op: 'run', preset: 'Linux', outputPath: '../escaped.bin' }],
+    ['project_settings', { op: 'enable_plugin', pluginName: '../../outsideplugin' }],
+    ['project_settings', { op: 'disable_plugin', pluginName: '../../outsideplugin' }],
+    // The editor-side tools are judged here before the editor is even asked for.
+    ['scene_tree', { scenePath: '../outside.tscn' }],
+    ['scene_node', { op: 'get', scenePath: '../outside.tscn', nodePath: '.' }],
+    [
+      'scene_node',
+      { op: 'load_sprite', scenePath: 'inside.tscn', nodePath: 'S', texturePath: '../outside.png' },
+    ],
+    ['scene_create', { op: 'save_as', scenePath: 'inside.tscn', newPath: '../copy.tscn' }],
+    ['resource_edit', { op: 'create', resourcePath: '../outside.tres', resourceType: 'Resource' }],
+    [
+      'resource_edit',
+      { op: 'create', resourcePath: 'inside.tres', resourceType: 'Resource', script: '/etc/x.gd' },
+    ],
   ];
 
   // An absolute destination is the one that matters most for the export: the engine writes it,
@@ -962,19 +976,24 @@ async function testToolsRefusePathsOutsideTheProject(): Promise<void> {
         }
 
         assert.match(
-          await call('export_project', { projectPath, preset: 'Linux', outputPath: absoluteOutput }),
+          await call('project_export', {
+            projectPath,
+            op: 'run',
+            preset: 'Linux',
+            outputPath: absoluteOutput,
+          }),
           /is absolute|resolves outside the project directory/,
-          'export_project should refuse an absolute destination outside the project',
+          'project_export should refuse an absolute destination outside the project',
         );
 
         // The accepting half. These reach the engine, which is not Godot here, so the answer is
         // whatever that failure says; what matters is that containment was not the thing that
         // stopped them.
         const accepted: [string, Record<string, unknown>][] = [
-          ['create_script', { scriptPath: 'scripts/player.gd' }],
-          ['get_uid', { filePath: 'inside.gd' }],
-          ['get_script_info', { scriptPath: 'inside.gd' }],
-          ['export_project', { preset: 'Linux', outputPath: 'builds/game.bin' }],
+          ['script_edit', { op: 'create', scriptPath: 'scripts/player.gd' }],
+          ['project_import', { op: 'uid', resourcePath: 'inside.gd' }],
+          ['script_info', { scriptPath: 'inside.gd' }],
+          ['project_export', { op: 'run', preset: 'Linux', outputPath: 'builds/game.bin' }],
         ];
         for (const [tool, args] of accepted) {
           assert.doesNotMatch(
@@ -988,9 +1007,9 @@ async function testToolsRefusePathsOutsideTheProject(): Promise<void> {
         // the refusal is observable with no language server anywhere. Only the refusal: the
         // accepting side would connect to whatever editor is serving 6005 on this machine.
         assert.match(
-          await call('lsp_get_diagnostics', { projectPath, scriptPath: '../outside.gd' }),
+          await call('script_diagnostics', { projectPath, scriptPath: '../outside.gd' }),
           /outside the project root boundary/,
-          'lsp_get_diagnostics should refuse a script outside the project',
+          'script_diagnostics should refuse a script outside the project',
         );
 
         // The resource handler reads the same kind of path out of a URI. The URL parser folds
@@ -1097,8 +1116,13 @@ async function testParametersReachTheEngine(): Promise<void> {
     await withStdioServer(
       async (call) => {
         const updated = await call(
-          'set_project_setting',
-          { projectPath: projectDir, setting: 'fixture/anchor', value: { _type: 'Vector2', x: 3, y: 4 } },
+          'project_settings',
+          {
+            projectPath: projectDir,
+            op: 'set',
+            setting: 'fixture/anchor',
+            value: { _type: 'Vector2', x: 3, y: 4 },
+          },
           ENGINE_CALL_TIMEOUT_MS,
         );
         assert.match(updated, /Setting updated/, updated);
@@ -1111,7 +1135,7 @@ async function testParametersReachTheEngine(): Promise<void> {
 
         const namesAt = async (depth: number): Promise<string[]> => {
           const answer = await call(
-            'get_dependencies',
+            'project_dependencies',
             { projectPath: projectDir, resourcePath: 'chain/top.gd', depth },
             ENGINE_CALL_TIMEOUT_MS,
           );
@@ -1163,7 +1187,7 @@ async function main(): Promise<void> {
   await testFramingCeilingFailsLoudly();
   testDictionariesHaveNothingBehindThem();
   testProjectPathsAreContained();
-  await testToolGroupLookupsCannotReachThePrototype();
+  await testToolAndOpLookupsCannotReachThePrototype();
   await testToolsRefusePathsOutsideTheProject();
   console.log('regression tests passed');
 }

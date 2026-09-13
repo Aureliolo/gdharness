@@ -8,7 +8,7 @@ extends RefCounted
 # Method names rather than Callables: a table of Callables bound to this object is a reference
 # cycle that nothing breaks, so the object outlives the run and the engine reports its script as
 # a resource still in use at exit, on the same stderr the server reads failures off.
-const SERIALISERS = {
+const SERIALISERS: Dictionary = {
 	TYPE_NIL: "_serialize_nil",
 	TYPE_VECTOR2: "_serialize_vector2",
 	TYPE_VECTOR3: "_serialize_vector3",
@@ -33,44 +33,46 @@ func serialize_value(value: Variant) -> Variant:
 
 
 # Rebuilds a Godot value from the shape serialize_value gave it.
-func deserialize_value(value) -> Variant:
+func deserialize_value(value: Variant) -> Variant:
 	if value == null:
 		return null
 	if value is Array:
-		var arr = []
-		for item in value:
-			arr.append(deserialize_value(item))
-		return arr
+		var items: Array = value
+		var rebuilt: Array = []
+		for item: Variant in items:
+			rebuilt.append(deserialize_value(item))
+		return rebuilt
 	if not value is Dictionary:
 		return value
 
-	if not value.has("_type"):
-		var dict = {}
-		for key in value:
-			dict[key] = deserialize_value(value[key])
-		return dict
+	var fields: Dictionary = value
+	if not fields.has("_type"):
+		var rebuilt: Dictionary = {}
+		for key: Variant in fields:
+			rebuilt[key] = deserialize_value(fields[key])
+		return rebuilt
 
-	match value["_type"]:
+	match fields["_type"]:
 		"Vector2":
-			return Vector2(value.get("x", 0), value.get("y", 0))
+			return Vector2(fields.get("x", 0), fields.get("y", 0))
 		"Vector3":
-			return Vector3(value.get("x", 0), value.get("y", 0), value.get("z", 0))
+			return Vector3(fields.get("x", 0), fields.get("y", 0), fields.get("z", 0))
 		"Vector2i":
-			return Vector2i(value.get("x", 0), value.get("y", 0))
+			return Vector2i(fields.get("x", 0), fields.get("y", 0))
 		"Vector3i":
-			return Vector3i(value.get("x", 0), value.get("y", 0), value.get("z", 0))
+			return Vector3i(fields.get("x", 0), fields.get("y", 0), fields.get("z", 0))
 		"Color":
-			return Color(value.get("r", 0), value.get("g", 0), value.get("b", 0), value.get("a", 1))
+			return Color(fields.get("r", 0), fields.get("g", 0), fields.get("b", 0), fields.get("a", 1))
 		"Rect2":
-			var pos = deserialize_value(value.get("position", {}))
-			var size = deserialize_value(value.get("size", {}))
-			return Rect2(pos, size)
+			var position: Variant = deserialize_value(fields.get("position", {}))
+			var size: Variant = deserialize_value(fields.get("size", {}))
+			return Rect2(position, size)
 		"NodePath":
-			return NodePath(value.get("path", ""))
-	return value
+			return NodePath(fields.get("path", ""))
+	return fields
 
 
-func _serialize_nil(_value) -> Variant:
+func _serialize_nil(_value: Variant) -> Variant:
 	return null
 
 
@@ -131,8 +133,8 @@ func _serialize_transform3d(value: Transform3D) -> Dictionary:
 
 
 func _serialize_dictionary(value: Dictionary) -> Dictionary:
-	var serialised := {}
-	for key in value:
+	var serialised: Dictionary = {}
+	for key: Variant in value:
 		serialised[str(key)] = serialize_value(value[key])
 	return serialised
 
@@ -146,6 +148,7 @@ func _serialize_object(value: Object) -> Variant:
 		return null
 	if not value is Resource:
 		return {"_type": "Object", "class": value.get_class()}
-	if value.resource_path.is_empty():
-		return {"_type": "Resource", "class": value.get_class()}
-	return {"path": value.resource_path, "_type": "Resource", "class": value.get_class()}
+	var resource: Resource = value
+	if resource.resource_path.is_empty():
+		return {"_type": "Resource", "class": resource.get_class()}
+	return {"path": resource.resource_path, "_type": "Resource", "class": resource.get_class()}

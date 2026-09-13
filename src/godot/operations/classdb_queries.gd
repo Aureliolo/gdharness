@@ -3,7 +3,7 @@ extends RefCounted
 const Log = preload("logger.gd")
 
 # The base class each category name stands for.
-const CATEGORY_BASES = {
+const CATEGORY_BASES: Dictionary = {
 	"node": "Node",
 	"node2d": "Node2D",
 	"node3d": "Node3D",
@@ -24,10 +24,10 @@ func _init(p_log: Log) -> void:
 
 
 # Query available classes from ClassDB with optional filtering
-func query_classes(params) -> Dictionary:
-	var filter = params.get("filter", "")
-	var category = params.get("category", "")
-	var instantiable_only = params.get("instantiable_only", false)
+func query_classes(params: Dictionary) -> Dictionary:
+	var filter: String = str(params.get("filter", ""))
+	var category: String = str(params.get("category", ""))
+	var instantiable_only: bool = bool(params.get("instantiable_only", false))
 
 	_log.info(
 		(
@@ -41,27 +41,24 @@ func query_classes(params) -> Dictionary:
 		)
 	)
 
-	var base_class = ""
+	var base_class: String = ""
 	if not category.is_empty():
 		base_class = CATEGORY_BASES.get(category.to_lower(), "")
 		if base_class.is_empty():
 			return _log.failure("Unknown category: " + category + ". Valid: " + str(CATEGORY_BASES.keys()))
 
-	var all_classes = ClassDB.get_class_list()
+	var all_classes: PackedStringArray = ClassDB.get_class_list()
 	all_classes.sort()
 
-	var filtered_classes = []
+	var filtered_classes: Array[String] = []
 
-	for class_name_str in all_classes:
-		# Apply instantiable filter
+	for class_name_str: String in all_classes:
 		if instantiable_only and not ClassDB.can_instantiate(class_name_str):
 			continue
 
-		# Apply name filter (case-insensitive substring match)
 		if not filter.is_empty() and not class_name_str.to_lower().contains(filter.to_lower()):
 			continue
 
-		# Apply category filter
 		if not base_class.is_empty():
 			if not ClassDB.is_parent_class(class_name_str, base_class) and class_name_str != base_class:
 				continue
@@ -83,9 +80,9 @@ func query_classes(params) -> Dictionary:
 
 
 # Query detailed info about a specific class from ClassDB
-func query_class_info(params) -> Dictionary:
-	var class_name_str = params.class_name
-	var include_inherited = params.get("include_inherited", false)
+func query_class_info(params: Dictionary) -> Dictionary:
+	var class_name_str: String = str(params.get("class_name", ""))
+	var include_inherited: bool = bool(params.get("include_inherited", false))
 
 	_log.info(
 		"Querying class info for: " + class_name_str + " (include_inherited: " + str(include_inherited) + ")"
@@ -94,15 +91,14 @@ func query_class_info(params) -> Dictionary:
 	if not ClassDB.class_exists(class_name_str):
 		return _log.failure("Class not found: " + class_name_str)
 
-	var methods = _methods_of(class_name_str, include_inherited)
-	var properties = _properties_of(class_name_str, include_inherited)
-	var signals = _signals_of(class_name_str, include_inherited)
+	var methods: Array[Dictionary] = _methods_of(class_name_str, include_inherited)
+	var properties: Array[Dictionary] = _properties_of(class_name_str, include_inherited)
+	var signals: Array[Dictionary] = _signals_of(class_name_str, include_inherited)
 
-	# Get enums
-	var enums = {}
-	for e in ClassDB.class_get_enum_list(class_name_str, !include_inherited):
-		var enum_values = {}
-		for c in ClassDB.class_get_enum_constants(class_name_str, e, !include_inherited):
+	var enums: Dictionary = {}
+	for e: String in ClassDB.class_get_enum_list(class_name_str, not include_inherited):
+		var enum_values: Dictionary = {}
+		for c: String in ClassDB.class_get_enum_constants(class_name_str, e, not include_inherited):
 			enum_values[c] = ClassDB.class_get_integer_constant(class_name_str, c)
 		enums[e] = enum_values
 
@@ -134,36 +130,33 @@ func query_class_info(params) -> Dictionary:
 
 
 # Inspect class inheritance hierarchy
-func inspect_inheritance(params) -> Dictionary:
-	var class_name_str = params.class_name
+func inspect_inheritance(params: Dictionary) -> Dictionary:
+	var class_name_str: String = str(params.get("class_name", ""))
 
 	_log.info("Inspecting inheritance for: " + class_name_str)
 
 	if not ClassDB.class_exists(class_name_str):
 		return _log.failure("Class not found: " + class_name_str)
 
-	# Build ancestor chain
-	var ancestors = []
-	var current = class_name_str
+	var ancestors: Array[String] = []
+	var current: String = class_name_str
 	while not current.is_empty():
-		var parent = ClassDB.get_parent_class(current)
+		var parent: String = ClassDB.get_parent_class(current)
 		if parent.is_empty():
 			break
 		ancestors.append(parent)
 		current = parent
 
-	var all_classes = ClassDB.get_class_list()
+	var all_classes: PackedStringArray = ClassDB.get_class_list()
 
-	# Get direct subclasses
-	var direct_children = []
-	for c in all_classes:
+	var direct_children: Array[String] = []
+	for c: String in all_classes:
 		if ClassDB.get_parent_class(c) == class_name_str:
 			direct_children.append(c)
 	direct_children.sort()
 
-	# Get all descendants (recursive)
-	var all_descendants = []
-	for c in all_classes:
+	var all_descendants: Array[String] = []
+	for c: String in all_classes:
 		if c != class_name_str and ClassDB.is_parent_class(c, class_name_str):
 			all_descendants.append(c)
 	all_descendants.sort()
@@ -192,12 +185,13 @@ func inspect_inheritance(params) -> Dictionary:
 	}
 
 
-func _methods_of(class_name_str: String, include_inherited: bool) -> Array:
-	var methods = []
+func _methods_of(class_name_str: String, include_inherited: bool) -> Array[Dictionary]:
+	var methods: Array[Dictionary] = []
 
-	for m in ClassDB.class_get_method_list(class_name_str, !include_inherited):
-		var args = []
-		for a in m.get("args", []):
+	for m: Dictionary in ClassDB.class_get_method_list(class_name_str, not include_inherited):
+		var args: Array[Dictionary] = []
+		var declared_args: Array = m.get("args", [])
+		for a: Dictionary in declared_args:
 			args.append(
 				{
 					"name": a.get("name", ""),
@@ -206,15 +200,13 @@ func _methods_of(class_name_str: String, include_inherited: bool) -> Array:
 					"hint_string": a.get("hint_string", "")
 				}
 			)
+		var return_info: Dictionary = m.get("return", {})
 		methods.append(
 			{
 				"name": m.get("name", ""),
 				"args": args,
 				"return":
-				{
-					"type": m.get("return", {}).get("type", 0),
-					"class_name": m.get("return", {}).get("class_name", "")
-				},
+				{"type": return_info.get("type", 0), "class_name": return_info.get("class_name", "")},
 				"flags": m.get("flags", 0),
 				"default_args": m.get("default_args", [])
 			}
@@ -223,12 +215,12 @@ func _methods_of(class_name_str: String, include_inherited: bool) -> Array:
 	return methods
 
 
-func _properties_of(class_name_str: String, include_inherited: bool) -> Array:
-	var properties = []
+func _properties_of(class_name_str: String, include_inherited: bool) -> Array[Dictionary]:
+	var properties: Array[Dictionary] = []
 
-	for p in ClassDB.class_get_property_list(class_name_str, !include_inherited):
+	for p: Dictionary in ClassDB.class_get_property_list(class_name_str, not include_inherited):
 		# A category, group or subgroup is an editor heading rather than a property.
-		var usage = p.get("usage", 0)
+		var usage: int = int(p.get("usage", 0))
 		if usage & PROPERTY_USAGE_CATEGORY or usage & PROPERTY_USAGE_GROUP or usage & PROPERTY_USAGE_SUBGROUP:
 			continue
 		properties.append(
@@ -245,12 +237,13 @@ func _properties_of(class_name_str: String, include_inherited: bool) -> Array:
 	return properties
 
 
-func _signals_of(class_name_str: String, include_inherited: bool) -> Array:
-	var signals = []
+func _signals_of(class_name_str: String, include_inherited: bool) -> Array[Dictionary]:
+	var signals: Array[Dictionary] = []
 
-	for s in ClassDB.class_get_signal_list(class_name_str, !include_inherited):
-		var sig_args = []
-		for a in s.get("args", []):
+	for s: Dictionary in ClassDB.class_get_signal_list(class_name_str, not include_inherited):
+		var sig_args: Array[Dictionary] = []
+		var declared_args: Array = s.get("args", [])
+		for a: Dictionary in declared_args:
 			sig_args.append(
 				{"name": a.get("name", ""), "type": a.get("type", 0), "class_name": a.get("class_name", "")}
 			)
