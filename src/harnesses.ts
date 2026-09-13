@@ -86,6 +86,17 @@ export interface Harness {
    */
   readonly marker?: string;
   /**
+   * Where this harness looks for skills, when the shared `.agents/skills` is not the whole story.
+   * Absent means it reads the shared directory and only that, which is true of most of them and is
+   * the reason there is one skill rather than one per harness.
+   */
+  readonly skills?: {
+    /** Its own directory, relative to the project. */
+    readonly dir: string;
+    /** Whether it reads the shared directory as well. False means its own is the only one. */
+    readonly shared: boolean;
+  };
+  /**
    * Its own command for adding a server, for a harness whose config this cannot safely write.
    * Present means the file is TOML or YAML, or its exact shape is not documented.
    */
@@ -140,6 +151,7 @@ export const HARNESSES: readonly Harness[] = [
     shape: 'plain',
     home: '.claude',
     marker: '.claude',
+    skills: { dir: join('.claude', 'skills'), shared: false },
   },
   {
     id: 'copilot-cli',
@@ -149,6 +161,7 @@ export const HARNESSES: readonly Harness[] = [
     container: 'mcpServers',
     shape: 'plain',
     home: '.copilot',
+    skills: { dir: join('.github', 'skills'), shared: true },
   },
   {
     id: 'qoder',
@@ -177,6 +190,7 @@ export const HARNESSES: readonly Harness[] = [
     container: 'mcpServers',
     shape: 'plain',
     home: '.cursor',
+    skills: { dir: join('.cursor', 'skills'), shared: true },
   },
   {
     id: 'vscode',
@@ -186,6 +200,7 @@ export const HARNESSES: readonly Harness[] = [
     container: 'servers',
     shape: 'typed',
     home: '.vscode',
+    skills: { dir: join('.github', 'skills'), shared: true },
   },
   {
     id: 'opencode',
@@ -196,6 +211,7 @@ export const HARNESSES: readonly Harness[] = [
     shape: 'opencode',
     home: join('.config', 'opencode'),
     marker: '.opencode',
+    skills: { dir: join('.opencode', 'skills'), shared: true },
   },
   {
     id: 'junie',
@@ -205,6 +221,7 @@ export const HARNESSES: readonly Harness[] = [
     container: 'mcpServers',
     shape: 'plain',
     home: '.junie',
+    skills: { dir: join('.junie', 'skills'), shared: true },
   },
   {
     id: 'kiro',
@@ -214,6 +231,7 @@ export const HARNESSES: readonly Harness[] = [
     container: 'mcpServers',
     shape: 'plain',
     home: '.kiro',
+    skills: { dir: join('.kiro', 'skills'), shared: false },
   },
   {
     id: 'gemini',
@@ -223,6 +241,7 @@ export const HARNESSES: readonly Harness[] = [
     container: 'mcpServers',
     shape: 'plain',
     home: '.gemini',
+    skills: { dir: join('.gemini', 'skills'), shared: true },
   },
   {
     id: 'roo',
@@ -380,6 +399,7 @@ export const HARNESSES: readonly Harness[] = [
     container: 'mcpServers',
     shape: 'plain',
     marker: '.cline',
+    skills: { dir: join('.cline', 'skills'), shared: false },
   },
   {
     id: 'goose',
@@ -412,6 +432,7 @@ export const HARNESSES: readonly Harness[] = [
     file: join('.codeium', 'windsurf', 'mcp_config.json'),
     container: 'mcpServers',
     shape: 'plain',
+    skills: { dir: join('.windsurf', 'skills'), shared: true },
   },
   {
     id: 'hermes',
@@ -420,6 +441,7 @@ export const HARNESSES: readonly Harness[] = [
     file: join('.hermes', 'config.yaml'),
     container: 'mcp_servers',
     shape: 'plain',
+    skills: { dir: join('.hermes', 'skills'), shared: true },
     snippet: (launch) => `${yamlServer(launch, 'mcp_servers')}\n    enabled: true`,
   },
   {
