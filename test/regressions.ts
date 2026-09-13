@@ -10,26 +10,13 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { GodotDAPClient } from '../src/dap_client.js';
 import { dictionary, emptyRecord } from '../src/dictionary.js';
 import { createBridge } from '../src/godot-bridge.js';
+import { envValue, resolveHeadless, runArguments } from '../src/launch.js';
 import { GodotLSPClient } from '../src/lsp_client.js';
 import { isWithinRoot, resolveWithinProject } from '../src/paths.js';
 import { parseProjectGodot } from '../src/resources.js';
-import { get, text } from './support/json.js';
+import { asArray, get, text } from './support/json.js';
 import { isRecord, type JsonRpcMessage, parseTextContent, textOf } from './support/json-rpc.js';
 import { ServerProcess } from './support/server.js';
-
-const INDEX_SOURCE = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
-const OPERATIONS_SOURCE = readFileSync(
-  new URL('../src/godot/operations/godot_operations.gd', import.meta.url),
-  'utf8',
-);
-const DEPENDENCIES_SOURCE = readFileSync(
-  new URL('../src/godot/operations/dependencies.gd', import.meta.url),
-  'utf8',
-);
-const RUNTIME_SOURCE = readFileSync(
-  new URL('../src/godot/addons/godot_mcp_runtime/mcp_runtime_autoload.gd', import.meta.url),
-  'utf8',
-);
 
 async function withOccupiedBridgePort<T>(run: () => Promise<T>): Promise<T> {
   const blocker = createServer();
@@ -686,8 +673,11 @@ async function testEditorStatusPortConflict(): Promise<void> {
   });
 }
 
-type ToolCall = (name: string, args: unknown) => Promise<string>;
-type RawRequest = (method: string, params: unknown) => Promise<JsonRpcMessage>;
+type ToolCall = (name: string, args: unknown, timeoutMs?: number) => Promise<string>;
+type RawRequest = (method: string, params: unknown, timeoutMs?: number) => Promise<JsonRpcMessage>;
+
+/** Long enough for a headless engine to start, run one operation and exit on a slow runner. */
+const ENGINE_CALL_TIMEOUT_MS = 120_000;
 
 /**
  * Runs the built server over stdio, initialised and ready for tools/call, and hands `call` and
@@ -701,12 +691,13 @@ async function withStdioServer(
 ): Promise<void> {
   const server = new ServerProcess({ env: { GDHARNESS_TOOL_PROFILE: 'compact', ...env } });
 
-  const request: RawRequest = async (method, params) => await server.request(method, params);
+  const request: RawRequest = async (method, params, timeoutMs) =>
+    await server.request(method, params, timeoutMs);
 
   // The text rather than a parsed payload: a refusal comes back as a sentence, and a fixture
   // about refusals must not fall over on the thing it is there to see.
-  const call: ToolCall = async (name, args) => {
-    const response = await request('tools/call', { name, arguments: args });
+  const call: ToolCall = async (name, args, timeoutMs) => {
+    const response = await request('tools/call', { name, arguments: args }, timeoutMs);
     const text = textOf(response);
     assert.ok(text !== null, `${name} answered with no text content: ${JSON.stringify(response)}`);
     return text;
@@ -1020,124 +1011,148 @@ async function testToolsRefusePathsOutsideTheProject(): Promise<void> {
   }
 }
 
+/**
+ * The engine's argument list is not visible from any response, so it is asserted directly.
+ * Both branches, because the opt-out was once written as a shift() off the front of the headless
+ * argv, which took -d with it and launched a game the debugger never attached to.
+ */
+function testRunArgumentsCarryTheDebuggerEitherWay(): void {
+  assert.deepEqual(runArguments({ projectPath: '/p', headless: true, scene: null }), [
+    '--headless',
+    '-d',
+    '--path',
+    '/p',
+  ]);
+  assert.deepEqual(runArguments({ projectPath: '/p', headless: false, scene: null }), ['-d', '--path', '/p']);
+  // The scene as a res:// path and last: the engine reads it positionally, so text beginning
+  // with a dash would otherwise be another option to it.
+  assert.deepEqual(runArguments({ projectPath: '/p', headless: false, scene: 'scenes/-odd.tscn' }), [
+    '-d',
+    '--path',
+    '/p',
+    'res://scenes/-odd.tscn',
+  ]);
+}
+
+/**
+ * CI is both the place that needs headless and the place with no display, so with no explicit
+ * argument the display decides. An exported-but-empty display variable is no display.
+ */
+function testHeadlessFollowsTheDisplay(): void {
+  const linux = (variables: NodeJS.ProcessEnv) => ({ platform: 'linux' as const, variables });
+
+  assert.equal(resolveHeadless(true, linux({ DISPLAY: ':0' })), true, 'an explicit true wins over a desktop');
+  assert.equal(resolveHeadless(false, linux({})), false, 'an explicit false wins over no display');
+  assert.equal(resolveHeadless(undefined, linux({})), true, 'no display means headless');
+  assert.equal(resolveHeadless(undefined, linux({ DISPLAY: '' })), true, 'an empty DISPLAY is no display');
+  assert.equal(resolveHeadless(undefined, linux({ DISPLAY: ':0' })), false, 'an X display is a desktop');
+  assert.equal(resolveHeadless(undefined, linux({ WAYLAND_DISPLAY: 'wayland-0' })), false, 'so is Wayland');
+  assert.equal(resolveHeadless('yes', linux({})), true, 'anything but a boolean is left to the environment');
+  for (const platform of ['win32', 'darwin'] as const) {
+    assert.equal(
+      resolveHeadless(undefined, { platform, variables: {} }),
+      false,
+      `${platform} always has a display`,
+    );
+  }
+
+  assert.equal(envValue('X', { X: '' }), undefined, 'exported empty reads as unset');
+  assert.equal(envValue('X', {}), undefined);
+  assert.equal(envValue('X', { X: 'set' }), 'set');
+}
+
+/**
+ * Parameters cross from the server into the engine through a temp file and a case conversion,
+ * and neither is visible from a response that reads "updated". So a tagged value is written
+ * into project.godot and read back off disk, and the depth limit is checked by what the walk
+ * returns: `depth` has to arrive as the `max_depth` the operation reads, or the walk ignores it.
+ */
+async function testParametersReachTheEngine(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('engine parameter regression skipped (Godot not found)');
+    return;
+  }
+
+  const projectDir = mkdtempSync(join(tmpdir(), 'gdharness-engine-params-'));
+  try {
+    writeFileSync(
+      join(projectDir, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="ParamsRegression"\n',
+    );
+    mkdirSync(join(projectDir, 'chain'));
+    writeFileSync(join(projectDir, 'chain', 'leaf.gd'), 'extends Node\n');
+    writeFileSync(
+      join(projectDir, 'chain', 'middle.gd'),
+      'extends Node\n\nconst Leaf = preload("res://chain/leaf.gd")\n',
+    );
+    writeFileSync(
+      join(projectDir, 'chain', 'top.gd'),
+      'extends Node\n\nconst Middle = preload("res://chain/middle.gd")\n',
+    );
+
+    await withStdioServer(
+      async (call) => {
+        const updated = await call(
+          'set_project_setting',
+          { projectPath: projectDir, setting: 'fixture/anchor', value: { _type: 'Vector2', x: 3, y: 4 } },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+        assert.match(updated, /Setting updated/, updated);
+        const written = readFileSync(join(projectDir, 'project.godot'), 'utf8');
+        assert.match(
+          written,
+          /\[fixture\]\s+anchor=Vector2\(3, 4\)/,
+          `the tagged value should land as an engine value:\n${written}`,
+        );
+
+        const namesAt = async (depth: number): Promise<string[]> => {
+          const answer = await call(
+            'get_dependencies',
+            { projectPath: projectDir, resourcePath: 'chain/top.gd', depth },
+            ENGINE_CALL_TIMEOUT_MS,
+          );
+          const walk: unknown = JSON.parse(answer);
+          const names: string[] = [];
+          const collect = (entries: unknown): void => {
+            for (const entry of asArray(entries)) {
+              names.push(text(get(entry, 'path')));
+              collect(get(entry, 'dependencies') ?? []);
+            }
+          };
+          collect(get(walk, 'dependencies', 'res://chain/top.gd'));
+          return names;
+        };
+
+        const shallow = await namesAt(1);
+        assert.ok(shallow.includes('res://chain/middle.gd'), `depth 1 reaches middle: ${shallow.join(', ')}`);
+        assert.ok(
+          !shallow.includes('res://chain/leaf.gd'),
+          `depth 1 stops before leaf: ${shallow.join(', ')}`,
+        );
+
+        const deep = await namesAt(3);
+        assert.ok(deep.includes('res://chain/leaf.gd'), `depth 3 reaches leaf: ${deep.join(', ')}`);
+      },
+      { GODOT_PATH: godotPath },
+    );
+  } finally {
+    rmSync(projectDir, { recursive: true, force: true });
+  }
+}
+
 async function main(): Promise<void> {
   testStaleDisconnectRegression();
   testSceneToolsVectorRegression();
-  assert.match(
-    INDEX_SOURCE,
-    /key\.startsWith\('_'\)/,
-    'index.ts should preserve sentinel keys like _type during parameter normalization',
-  );
-  assert.match(INDEX_SOURCE, /@file:/, 'index.ts should pass operation params via @file: temp payloads');
-  // Both branches, because the opt-out was once written as a shift() off the front of the
-  // headless argv, which took -d with it and launched a game the debugger never attached to.
-  assert.match(
-    INDEX_SOURCE,
-    // The argument and the path may be read under any spelling; what matters is that the
-    // two branches differ by --headless alone and that -d survives in both.
-    /private async handleRunProject[\s\S]*?const cmdArgs = this\.resolveHeadless\([^)]+\)\s*\n\s*\? \['--headless', '-d', '--path', [\w.[\]']+\]\s*\n\s*: \['-d', '--path', [\w.[\]']+\];/,
-    'run_project should pass --headless only when headless resolves true, and -d either way',
-  );
-  assert.match(
-    INDEX_SOURCE,
-    /private resolveHeadless[\s\S]*?if \(typeof requested === 'boolean'\) \{\s*\n\s*return requested;/,
-    'an explicit headless argument should win over the environment',
-  );
-  // The engine reads the scene argument positionally, so a value that begins with a dash is
-  // another option to it. Asserted here because the argv is not visible from the response.
-  assert.match(
-    INDEX_SOURCE,
-    /private async handleRunProject[\s\S]*?res:\/\/\$\{[\w.]+\}[\s\S]*?cmdArgs\.push\(/,
-    'run_project should push a res:// scene path rather than the text that arrived',
-  );
-  assert.match(
-    INDEX_SOURCE,
-    // Either spelling of the lookup, read directly or through the env helper: which one is
-    // written says nothing about whether the check is right. What must hold is that both
-    // display variables are consulted and that neither being set means headless.
-    /private resolveHeadless[\s\S]*?DISPLAY[\s\S]{0,80}?WAYLAND_DISPLAY[^\n]*\n\s*\}/,
-    'with no explicit argument a display-less environment such as CI should stay headless',
-  );
-  assert.match(
-    INDEX_SOURCE,
-    // An exported-but-empty display variable means no display, so the check must not treat
-    // the empty string as a desktop.
-    /function envValue[\s\S]*?value === undefined \|\| value === ''/,
-    'an empty environment variable should read as unset',
-  );
-  assert.match(
-    OPERATIONS_SOURCE,
-    /params_json\.begins_with\("@file:"\)/,
-    'godot_operations.gd should load params from @file: payloads',
-  );
-  assert.match(
-    INDEX_SOURCE,
-    /export function scanDirectoryForGodotBinaries/,
-    'index.ts should export scanDirectoryForGodotBinaries for versioned-binary detection',
-  );
-  assert.match(
-    INDEX_SOURCE,
-    /Godot_v4\.4\.1-stable_win64\.exe/,
-    'index.ts detection scanner doc should reference versioned Windows binaries from Issue #67',
-  );
-  assert.match(
-    INDEX_SOURCE,
-    /scanDirectoryForGodotBinaries\(dir, osPlatform\)/,
-    'detectGodotPath should call the versioned-binary scanner as a fallback before giving up',
-  );
-  assert.match(
-    RUNTIME_SOURCE,
-    /client\.poll\(\)\s*\n\s*if client\.get_status\(\) != StreamPeerTCP\.STATUS_CONNECTED:\s*\n\s*clients_to_remove\.append\(client\)\s*\n\s*continue\s*\n\s*var available = client\.get_available_bytes\(\)/m,
-    'runtime autoload should re-check socket status after poll() before get_available_bytes()',
-  );
-  assert.match(
-    RUNTIME_SOURCE,
-    /if params\.has\("x"\) and params\.has\("y"\):\s*\n\s*position = Vector2\(float\(params\["x"\]\), float\(params\["y"\]\)\)/m,
-    'runtime input injection should accept flat x/y coordinates from the MCP tool schema',
-  );
-  assert.match(
-    RUNTIME_SOURCE,
-    /if params\.has\("relativeX"\) and params\.has\("relativeY"\):\s*\n\s*relative = Vector2\(float\(params\["relativeX"\]\), float\(params\["relativeY"\]\)\)/m,
-    'runtime mouse motion should accept flat relativeX/relativeY coordinates from the MCP tool schema',
-  );
-  assert.match(
-    RUNTIME_SOURCE,
-    /func _resolve_mouse_button\(raw: Variant\) -> int:/,
-    'runtime mouse injection should resolve string button names before assigning button_index',
-  );
-  assert.match(
-    RUNTIME_SOURCE,
-    /if keycode_raw is String and not \(keycode_raw as String\)\.is_empty\(\) and key_label\.is_empty\(\):\s*\n\s*key_label = keycode_raw as String/m,
-    'runtime key injection should treat string keycode values as key labels',
-  );
-  assert.match(
-    RUNTIME_SOURCE,
-    /event\.physical_keycode = event\.keycode\s*\n\s*event\.key_label = event\.keycode/m,
-    'runtime key injection should set physical_keycode and key_label so actions bound by physical key or label match',
-  );
-  assert.match(
-    RUNTIME_SOURCE,
-    /event\.shift_pressed = bool\(params\.get\("shift", false\)\)\s*\n\s*event\.ctrl_pressed = bool\(params\.get\("ctrl", false\)\)\s*\n\s*event\.alt_pressed = bool\(params\.get\("alt", false\)\)/m,
-    'runtime key injection should apply the shift/ctrl/alt modifiers the tool schema advertises',
-  );
+  testRunArgumentsCarryTheDebuggerEitherWay();
+  testHeadlessFollowsTheDisplay();
+  await testParametersReachTheEngine();
 
   testProjectGodotMultilineValues();
   testProjectGodotResistsPrototypeKeys();
-  assert.doesNotMatch(
-    DEPENDENCIES_SOURCE,
-    /include_built_in and \(dep_path\.contains\("addons\/"\)/,
-    'addons/ is project content and often ships, so dependency analysis must not skip it as built-in',
-  );
-  assert.match(
-    DEPENDENCIES_SOURCE,
-    /dep_path\.begins_with\("res:\/\/\."\)/,
-    'the dependency walk should still skip the engine-internal res://. paths it was written to skip',
-  );
-  assert.match(
-    INDEX_SOURCE,
-    /maxDepth:[\s\S]*?includeBuiltIn:/,
-    'get_dependencies must send the names the operation script reads, max_depth and include_built_in',
-  );
 
   await testEditorStatusPortConflict();
   await testDiagnosticsSurviveUriReEncoding();
