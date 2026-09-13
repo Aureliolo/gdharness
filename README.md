@@ -6,7 +6,7 @@
 [![SBOM](https://img.shields.io/badge/SBOM-SPDX-2f6f4e?style=flat)](docs/release-process.md#what-a-release-carries)
 [![Signed releases](https://img.shields.io/badge/releases-Sigstore%20signed-2f6f4e?style=flat)](docs/release-process.md#verifying-a-release)
 [![Release](https://img.shields.io/github/v/release/Aureliolo/gdharness?display_name=tag&sort=semver)](https://github.com/Aureliolo/gdharness/releases)
-[![](https://badge.mcpx.dev?type=server 'MCP Server')](https://modelcontextprotocol.io/introduction)
+[![MCP server](https://badge.mcpx.dev?type=server 'MCP Server')](https://modelcontextprotocol.io/introduction)
 [![Made for Godot 4.7+](https://img.shields.io/badge/Made%20for-Godot%204.7%2B-478CBF?style=flat&logo=godot%20engine&logoColor=white)](https://godotengine.org)
 [![Bun](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2FAureliolo%2Fgdharness%2Fmain%2Fpackage.json&query=%24.engines.bun&label=bun&color=f9f1e1&logo=bun&logoColor=black)](https://bun.sh/)
 [![Licence](https://img.shields.io/github/license/Aureliolo/gdharness)](LICENSE)
@@ -81,23 +81,24 @@ spelled out. Every answer is JSON, read back from the engine after the change ra
 echoed from the request, and anything the engine said on stderr on the way comes back with it
 under `engine_messages`.
 
-| Domain | Tools |
-| --- | --- |
-| `project_*` | `list`, `info`, `settings`, `search`, `dependencies`, `import`, `export`, `test` |
-| `scene_*` | `create`, `tree`, `node`, `signal`, `animation` |
-| `script_*` | `edit`, `info`, `diagnostics` |
-| `resource_*` | `edit` |
-| `editor_*` | `launch`, `run`, `stop`, `output`, `status`, `rescan`, `classes` |
-| `runtime_*` | `inspect`, `invoke`, `capture`, `input`, `wait` |
-| `debug_*` | `breakpoint`, `control`, `state` |
+| Domain       | Tools                                                                            |
+| ------------ | -------------------------------------------------------------------------------- |
+| `project_*`  | `list`, `info`, `settings`, `search`, `dependencies`, `import`, `export`, `test` |
+| `scene_*`    | `create`, `tree`, `node`, `signal`, `animation`                                  |
+| `script_*`   | `edit`, `info`, `diagnostics`                                                    |
+| `resource_*` | `edit`                                                                           |
+| `editor_*`   | `launch`, `run`, `stop`, `output`, `status`, `rescan`, `classes`                 |
+| `runtime_*`  | `inspect`, `invoke`, `capture`, `input`, `wait`                                  |
+| `debug_*`    | `breakpoint`, `control`, `state`                                                 |
 
 The `runtime_*` tools ask the game rather than the tree dump: `runtime_inspect find` answers
 with the paths of the nodes matching a class, script, name pattern or group, `rect` with where
 one is on screen in window pixels, `runtime_input click` presses and releases a Control by
 path and says what was under the pointer and what became of the control (a menu button that
 opens the next screen takes itself out of the tree, and the answer says so), and
-`runtime_wait` lets frames pass or waits for a signal or a property before answering. A node-valued property comes back as its path, so an
-answer can be fed straight into the next call.
+`runtime_wait` lets frames pass or waits for a signal or a property before answering. A
+node-valued property comes back as its path, so an answer can be fed straight into the next
+call.
 
 The `scene_*` and `resource_*` tools and `editor_rescan` go through the editor addon and need
 the editor open; `script_diagnostics`, `script_info` beyond `structure`, and the `debug_*`

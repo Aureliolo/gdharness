@@ -103,6 +103,8 @@ jobs:
           VERSION: ${{ steps.bump.outputs.version }}
         run: |
           set -euo pipefail
+          body="Raises the version to ${VERSION} in package.json, server.json and the README."
+          body="${body} Merging this tags v${VERSION}, which builds, signs and publishes the release."
           {
             echo "## Release v${VERSION} is ready on \`${BRANCH}\`"
             echo
@@ -111,6 +113,6 @@ jobs:
             echo '```sh'
             echo "gh pr create --repo ${GH_REPO} --base main --head ${BRANCH} \\"
             echo "  --title 'Release v${VERSION}' \\"
-            echo "  --body 'Raises the version to ${VERSION} in package.json, server.json and the README. Merging this tags v${VERSION}, which builds, signs and publishes the release.'"
+            echo "  --body '${body}'"
             echo '```'
           } >> "${GITHUB_STEP_SUMMARY}"

@@ -1,0 +1,11 @@
+{
+  // Every rule markdownlint has, at its default. The one adjustment is the line length, which
+  // the prose here wraps at 100 rather than 80; a line with no space past the limit, which is
+  // a URL, is allowed by the rule itself, and code and tables wrap where they can.
+  "config": {
+    "default": true,
+    "MD013": { "line_length": 100, "code_blocks": false, "tables": false }
+  },
+  "globs": ["**/*.md"],
+  "ignores": ["node_modules", "build", "dist"]
+}

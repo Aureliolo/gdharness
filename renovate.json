@@ -42,7 +42,7 @@
     "enabled": false
   },
   "pip-compile": {
-    "description": "gdtoolkit is installed with --require-hashes from a lock uv compiles, so a bump rewrites the lock with the new hashes rather than the bare version.",
+    "description": "gdtoolkit and yamllint are installed with --require-hashes from locks uv compiles, so a bump rewrites the lock with the new hashes rather than the bare version.",
     "managerFilePatterns": ["/^\\.github/requirements/.+\\.txt$/"]
   },
   "customManagers": [

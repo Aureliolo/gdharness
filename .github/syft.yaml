@@ -4,7 +4,7 @@
 # set the bundler never saw. The package cataloger is off for a directory by default and it is
 # what reads the shipped package.json.
 select-catalogers:
-  - "+javascript-package-cataloger"
+  - '+javascript-package-cataloger'
 
 # Every file that ships, with its digest, so a consumer can check the archive against the SBOM
 # member by member rather than only as a whole.
