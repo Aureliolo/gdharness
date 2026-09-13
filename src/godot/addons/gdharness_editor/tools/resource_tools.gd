@@ -56,9 +56,9 @@ func _ensure_res_path(path: String) -> String:
 	if path.begins_with("res://"):
 		return path
 	if path.begins_with("/"):
-		var project_abs := ProjectSettings.globalize_path("res://")
+		var project_abs: String = ProjectSettings.globalize_path("res://")
 		if path.begins_with(project_abs):
-			var rel := path.substr(project_abs.length())
+			var rel: String = path.substr(project_abs.length())
 			return "res://" + rel
 	return "res://" + path
 
@@ -114,7 +114,7 @@ func _parse_properties_dict(raw: Variant) -> Dictionary:
 	if typeof(raw) == TYPE_DICTIONARY:
 		return raw
 	if typeof(raw) == TYPE_STRING and raw != "":
-		var json := JSON.new()
+		var json: JSON = JSON.new()
 		if json.parse(raw) == OK and typeof(json.data) == TYPE_DICTIONARY:
 			return json.data
 	return {}
@@ -127,17 +127,17 @@ func _load_theme(theme_path: String) -> Theme:
 	return Theme.new()
 
 
-func _save_scene_root(root: Node, scene_path: String) -> int:
-	var packed := PackedScene.new()
-	var pack_result := packed.pack(root)
+func _save_scene_root(root: Node, scene_path: String) -> Error:
+	var packed: PackedScene = PackedScene.new()
+	var pack_result: Error = packed.pack(root)
 	if pack_result != OK:
 		return pack_result
 	return ResourceSaver.save(packed, scene_path)
 
 
 func create_resource(args: Dictionary) -> Dictionary:
-	var res_path := _ensure_res_path(str(args.get("resourcePath", "")))
-	var resource_type := str(args.get("resourceType", "Resource"))
+	var res_path: String = _ensure_res_path(str(args.get("resourcePath", "")))
+	var resource_type: String = str(args.get("resourceType", "Resource"))
 	if res_path == "res://":
 		return {"ok": false, "error": "resourcePath is required"}
 
@@ -146,7 +146,7 @@ func create_resource(args: Dictionary) -> Dictionary:
 		return {"ok": false, "error": "Failed to instantiate resource type", "resourceType": resource_type}
 	var resource: Resource = instance
 
-	var script_path := str(args.get("script", ""))
+	var script_path: String = str(args.get("script", ""))
 	if script_path != "":
 		var script_obj: Resource = load(_ensure_res_path(script_path))
 		if script_obj:
@@ -155,7 +155,7 @@ func create_resource(args: Dictionary) -> Dictionary:
 	if args.has("properties"):
 		_set_resource_properties(resource, args.get("properties"))
 
-	var save_result := ResourceSaver.save(resource, res_path)
+	var save_result: Error = ResourceSaver.save(resource, res_path)
 	if save_result != OK:
 		return {"ok": false, "error": "Failed to save resource", "code": save_result}
 
@@ -164,7 +164,7 @@ func create_resource(args: Dictionary) -> Dictionary:
 
 
 func modify_resource(args: Dictionary) -> Dictionary:
-	var res_path := _ensure_res_path(str(args.get("resourcePath", "")))
+	var res_path: String = _ensure_res_path(str(args.get("resourcePath", "")))
 	if res_path == "res://":
 		return {"ok": false, "error": "resourcePath is required"}
 
@@ -173,7 +173,7 @@ func modify_resource(args: Dictionary) -> Dictionary:
 		return {"ok": false, "error": "Resource not found", "resourcePath": res_path}
 
 	_set_resource_properties(resource, args.get("properties", ""))
-	var save_result := ResourceSaver.save(resource, res_path)
+	var save_result: Error = ResourceSaver.save(resource, res_path)
 	if save_result != OK:
 		return {"ok": false, "error": "Failed to save resource", "code": save_result}
 
@@ -182,13 +182,13 @@ func modify_resource(args: Dictionary) -> Dictionary:
 
 
 func create_shader(args: Dictionary) -> Dictionary:
-	var shader_path := _ensure_res_path(str(args.get("shaderPath", "")))
-	var shader_type := str(args.get("shaderType", "canvas_item"))
+	var shader_path: String = _ensure_res_path(str(args.get("shaderPath", "")))
+	var shader_type: String = str(args.get("shaderType", "canvas_item"))
 	if shader_path == "res://":
 		return {"ok": false, "error": "shaderPath is required"}
 
-	var code := str(args.get("code", ""))
-	var template := str(args.get("template", ""))
+	var code: String = str(args.get("code", ""))
+	var template: String = str(args.get("template", ""))
 
 	if code == "":
 		match template:
@@ -201,7 +201,7 @@ func create_shader(args: Dictionary) -> Dictionary:
 			_:
 				code = SHADER_EMPTY % shader_type
 
-	var file := FileAccess.open(shader_path, FileAccess.WRITE)
+	var file: FileAccess = FileAccess.open(shader_path, FileAccess.WRITE)
 	if file == null:
 		return {"ok": false, "error": "Failed to open shader file for writing", "shaderPath": shader_path}
 	file.store_string(code)
@@ -212,22 +212,23 @@ func create_shader(args: Dictionary) -> Dictionary:
 
 
 func create_tileset(args: Dictionary) -> Dictionary:
-	var tileset_path := _ensure_res_path(str(args.get("tilesetPath", "")))
+	var tileset_path: String = _ensure_res_path(str(args.get("tilesetPath", "")))
 	if tileset_path == "res://":
 		return {"ok": false, "error": "tilesetPath is required"}
 
-	var tileset := TileSet.new()
+	var tileset: TileSet = TileSet.new()
 	var sources: Variant = args.get("sources", [])
 	if typeof(sources) != TYPE_ARRAY:
 		sources = []
 
-	for source: Variant in sources:
-		if typeof(source) != TYPE_DICTIONARY:
+	for entry: Variant in sources:
+		if typeof(entry) != TYPE_DICTIONARY:
 			continue
-		var atlas := TileSetAtlasSource.new()
-		var tex_path := _ensure_res_path(str(source.get("texture", "")))
-		var tex: Resource = load(tex_path)
-		if not tex is Texture2D:
+		var source: Dictionary = entry
+		var atlas: TileSetAtlasSource = TileSetAtlasSource.new()
+		var tex_path: String = _ensure_res_path(str(source.get("texture", "")))
+		var tex: Texture2D = load(tex_path) as Texture2D
+		if tex == null:
 			continue
 		atlas.texture = tex
 
@@ -244,7 +245,7 @@ func create_tileset(args: Dictionary) -> Dictionary:
 
 		tileset.add_source(atlas)
 
-	var save_result := ResourceSaver.save(tileset, tileset_path)
+	var save_result: Error = ResourceSaver.save(tileset, tileset_path)
 	if save_result != OK:
 		return {"ok": false, "error": "Failed to save TileSet", "code": save_result}
 
@@ -253,16 +254,16 @@ func create_tileset(args: Dictionary) -> Dictionary:
 
 
 func set_tilemap_cells(args: Dictionary) -> Dictionary:
-	var scene_path := _ensure_res_path(str(args.get("scenePath", "")))
-	var node_path := str(args.get("tilemapNodePath", ""))
+	var scene_path: String = _ensure_res_path(str(args.get("scenePath", "")))
+	var node_path: String = str(args.get("tilemapNodePath", ""))
 	if scene_path == "res://":
 		return {"ok": false, "error": "scenePath is required"}
 
-	var scene_res: Resource = load(scene_path)
-	if not scene_res is PackedScene:
+	var scene_res: PackedScene = load(scene_path) as PackedScene
+	if scene_res == null:
 		return {"ok": false, "error": "Scene not found", "scenePath": scene_path}
 
-	var root: Node = (scene_res as PackedScene).instantiate()
+	var root: Node = scene_res.instantiate()
 	if root == null:
 		return {"ok": false, "error": "Failed to instantiate scene"}
 
@@ -276,14 +277,16 @@ func set_tilemap_cells(args: Dictionary) -> Dictionary:
 		root.queue_free()
 		return {"ok": false, "error": "TileMap node not found", "tilemapNodePath": node_path}
 
-	var layer := int(args.get("layer", 0))
+	var layer: int = int(args.get("layer", 0))
 	var cells: Variant = args.get("cells", [])
 	if typeof(cells) != TYPE_ARRAY:
 		cells = []
+	var placed: Array = cells
 
-	for cell: Variant in cells:
-		if typeof(cell) != TYPE_DICTIONARY:
+	for entry: Variant in placed:
+		if typeof(entry) != TYPE_DICTIONARY:
 			continue
+		var cell: Dictionary = entry
 		var coords: Dictionary = cell.get("coords", {})
 		var atlas_coords: Dictionary = cell.get("atlasCoords", {})
 		tilemap.set_cell(
@@ -294,28 +297,28 @@ func set_tilemap_cells(args: Dictionary) -> Dictionary:
 			int(cell.get("alternativeTile", 0))
 		)
 
-	var save_result := _save_scene_root(root, scene_path)
+	var save_result: Error = _save_scene_root(root, scene_path)
 	root.queue_free()
 	if save_result != OK:
 		return {"ok": false, "error": "Failed to save scene", "code": save_result}
 
 	_refresh_filesystem()
-	return {"ok": true, "cellCount": cells.size()}
+	return {"ok": true, "cellCount": placed.size()}
 
 
 func set_theme_color(args: Dictionary) -> Dictionary:
-	var theme_path := _ensure_res_path(str(args.get("themePath", "")))
+	var theme_path: String = _ensure_res_path(str(args.get("themePath", "")))
 	if theme_path == "res://":
 		return {"ok": false, "error": "themePath is required"}
 
-	var theme := _load_theme(theme_path)
+	var theme: Theme = _load_theme(theme_path)
 	var c: Dictionary = args.get("color", {})
-	var color := Color(
+	var color: Color = Color(
 		float(c.get("r", 1.0)), float(c.get("g", 1.0)), float(c.get("b", 1.0)), float(c.get("a", 1.0))
 	)
 	theme.set_color(str(args.get("colorName", "")), str(args.get("controlType", "")), color)
 
-	var save_result := ResourceSaver.save(theme, theme_path)
+	var save_result: Error = ResourceSaver.save(theme, theme_path)
 	if save_result != OK:
 		return {"ok": false, "error": "Failed to save theme", "code": save_result}
 
@@ -324,16 +327,16 @@ func set_theme_color(args: Dictionary) -> Dictionary:
 
 
 func set_theme_font_size(args: Dictionary) -> Dictionary:
-	var theme_path := _ensure_res_path(str(args.get("themePath", "")))
+	var theme_path: String = _ensure_res_path(str(args.get("themePath", "")))
 	if theme_path == "res://":
 		return {"ok": false, "error": "themePath is required"}
 
-	var theme := _load_theme(theme_path)
+	var theme: Theme = _load_theme(theme_path)
 	theme.set_font_size(
 		str(args.get("fontSizeName", "")), str(args.get("controlType", "")), int(args.get("size", 0))
 	)
 
-	var save_result := ResourceSaver.save(theme, theme_path)
+	var save_result: Error = ResourceSaver.save(theme, theme_path)
 	if save_result != OK:
 		return {"ok": false, "error": "Failed to save theme", "code": save_result}
 

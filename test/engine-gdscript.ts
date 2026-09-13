@@ -72,9 +72,13 @@ function shippedScripts(): string[] {
  * reachable that way. The addons are copied whole for the same reason, plugin.cfg included,
  * which is also what lets the plugin operations be driven against real ones.
  *
- * The warning settings make an untyped declaration a parse error, in the addons as well,
- * which the engine otherwise leaves out of its warnings. Every script the fixtures load is
- * parsed under those settings, so a script that regresses to `var x = ...` stops loading here.
+ * The warning settings make every GDScript warning a parse error, in the addons as well,
+ * which the engine otherwise leaves out of its warnings. That is the strictest project Godot
+ * can be configured as, and a project configured that way parses the shipped scripts under
+ * it: the operations script from wherever the package is installed, the addons from its own
+ * addons/. Every script the fixtures load is parsed under those settings, so a script that
+ * regresses to `var x = ...`, `var x := ...`, a method called on a Variant or a static
+ * function called on an instance stops loading here rather than in somebody's project.
  */
 function createProject(): string {
   const dir = mkdtempSync(join(tmpdir(), 'gdharness-engine-'));
@@ -93,13 +97,60 @@ function createProject(): string {
       '',
       '[debug]',
       'gdscript/warnings/exclude_addons=false',
-      'gdscript/warnings/untyped_declaration=2',
+      ...EVERY_WARNING.map((warning) => `gdscript/warnings/${warning}=2`),
       '',
     ].join('\n'),
   );
 
   return dir;
 }
+
+/** Every warning GDScript has in 4.7, each raised to an error in the fixture project. */
+const EVERY_WARNING = [
+  'unassigned_variable',
+  'unassigned_variable_op_assign',
+  'unused_variable',
+  'unused_local_constant',
+  'unused_private_class_variable',
+  'unused_parameter',
+  'unused_signal',
+  'shadowed_variable',
+  'shadowed_variable_base_class',
+  'shadowed_global_identifier',
+  'unreachable_code',
+  'unreachable_pattern',
+  'standalone_expression',
+  'standalone_ternary',
+  'incompatible_ternary',
+  'untyped_declaration',
+  'inferred_declaration',
+  'unsafe_property_access',
+  'unsafe_method_access',
+  'unsafe_cast',
+  'unsafe_void_return',
+  'static_called_on_instance',
+  'missing_tool',
+  'redundant_static_unload',
+  'redundant_await',
+  'missing_await',
+  'assert_always_true',
+  'assert_always_false',
+  'integer_division',
+  'narrowing_conversion',
+  'int_as_enum_without_cast',
+  'int_as_enum_without_match',
+  'enum_variable_without_default',
+  'empty_file',
+  'deprecated_keyword',
+  'confusable_identifier',
+  'confusable_local_declaration',
+  'confusable_local_usage',
+  'confusable_capture_reassignment',
+  'confusable_temporary_modification',
+  'property_used_as_function',
+  'constant_used_as_function',
+  'function_used_as_property',
+];
 
 function runScript(
   godotPath: string,
@@ -419,14 +470,26 @@ function testOperations(godotPath: string, projectDir: string): void {
     modifications: [
       { type: 'add_variable', name: 'speed', varType: 'float', defaultValue: '4.0' },
       { type: 'add_variable', name: 'lives', defaultValue: '3' },
+      { type: 'add_variable', name: 'home', defaultValue: 'Vector2(1, 2)' },
+      { type: 'add_variable', name: 'owner_node', defaultValue: 'get_parent()' },
       { type: 'add_variable', name: 'target' },
       { type: 'add_function', name: 'halt', body: 'speed = 0.0' },
     ],
   });
-  assert.equal(get(modified, 'total_modifications'), 4, 'every modification should be applied');
+  assert.equal(get(modified, 'total_modifications'), 6, 'every modification should be applied');
   const modifiedSource = readFileSync(join(projectDir, 'made', 'hero.gd'), 'utf8');
   assert.match(modifiedSource, /var speed: float = 4\.0/, 'the variable should carry its type and default');
-  assert.match(modifiedSource, /var lives := 3/, 'a value with no type is inferred rather than left untyped');
+  assert.match(
+    modifiedSource,
+    /var lives: int = 3/,
+    'a value with no type gets the type it evaluates to, so it parses where an inferred declaration is an error',
+  );
+  assert.match(modifiedSource, /var home: Vector2 = Vector2\(1, 2\)/, 'a constructor evaluates to its type');
+  assert.match(
+    modifiedSource,
+    /var owner_node: Variant = get_parent\(\)/,
+    'a value nothing can evaluate here is Variant rather than a guess the engine would refuse',
+  );
   assert.match(modifiedSource, /var target: Variant/, 'no type and no value is spelled out as Variant');
   assert.match(
     modifiedSource,
