@@ -134,6 +134,11 @@ jobs:
       - name: Install Godot
         run: bun scripts/install-godot.ts
 
+      # The test runner project_test drives, pinned by commit and digest the same way. It
+      # exports GDUNIT4_PATH, and the regression that needs it fails rather than skips here.
+      - name: Install gdUnit4
+        run: bun scripts/install-gdunit4.ts
+
       - name: Install dependencies
         run: bun install --frozen-lockfile
 

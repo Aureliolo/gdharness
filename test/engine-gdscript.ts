@@ -122,8 +122,8 @@ function runScript(
 function assertNoEngineErrors(label: string, output: string): void {
   const errors = output
     .split('\n')
-    .filter((line) => /^(SCRIPT ERROR|USER SCRIPT ERROR|ERROR|USER ERROR):/.test(line.trim()));
-  assert.equal(errors.length, 0, `${label} hit engine errors:\n${errors.join('\n')}`);
+    .filter((line) => /^(USER )?(SCRIPT ERROR|ERROR|WARNING):/.test(line.trim()));
+  assert.equal(errors.length, 0, `${label} hit engine errors or warnings:\n${errors.join('\n')}`);
 }
 
 /** Runs one of the fixture scripts in test/support/gd and returns the JSON it reported. */
@@ -204,7 +204,7 @@ function testDependencyWalk(godotPath: string, projectDir: string): void {
   );
 
   const paramsPath = join(projectDir, 'deps.json');
-  writeFileSync(paramsPath, JSON.stringify({ resource_path: 'res://chain/top.gd', max_depth: 5 }));
+  writeFileSync(paramsPath, JSON.stringify({ resource_path: 'res://chain/top.gd', depth: 5 }));
 
   const run = runScript(godotPath, projectDir, join(projectDir, 'operations', 'godot_operations.gd'), [
     'get_dependencies',
@@ -235,7 +235,7 @@ function testDependencyWalk(godotPath: string, projectDir: string): void {
   );
 
   // A cycle has to be reported rather than walked forever.
-  writeFileSync(paramsPath, JSON.stringify({ resource_path: 'res://chain/ouro.gd', max_depth: 10 }));
+  writeFileSync(paramsPath, JSON.stringify({ resource_path: 'res://chain/ouro.gd' }));
   const cyclic = runScript(godotPath, projectDir, join(projectDir, 'operations', 'godot_operations.gd'), [
     'get_dependencies',
     `@file:${paramsPath}`,
@@ -261,7 +261,7 @@ function testDependencyWalk(godotPath: string, projectDir: string): void {
     join(projectDir, 'chain', 'shipping.gd'),
     'extends Node\n\nconst Helper = preload("res://addons/fixture/helper.gd")\n\n\nfunc _cache() -> Variant:\n\treturn load("res://.godot/fixture_cache.gd")\n',
   );
-  writeFileSync(paramsPath, JSON.stringify({ resource_path: 'res://chain/shipping.gd', max_depth: 3 }));
+  writeFileSync(paramsPath, JSON.stringify({ resource_path: 'res://chain/shipping.gd', depth: 3 }));
   const shipping = runScript(godotPath, projectDir, join(projectDir, 'operations', 'godot_operations.gd'), [
     'get_dependencies',
     `@file:${paramsPath}`,
@@ -312,7 +312,11 @@ function runOperation(
   if (run.status !== 0) {
     throw new Error(`${operation} failed (${run.status ?? run.signal}):\n${output.trim()}`);
   }
-  assertNoEngineErrors(operation, output);
+  // Anything on stderr from an operation that succeeded is the engine complaining about
+  // something the operation did, a leaked object or a resource still in use at exit included,
+  // and the server hands every such line on to the caller. So an operation that passes here is
+  // one that answers cleanly.
+  assert.equal(run.stderr.trim(), '', `${operation} succeeded but wrote to stderr:\n${run.stderr.trim()}`);
 
   return lastJsonLine(run.stdout, operation);
 }
@@ -399,7 +403,7 @@ function testOperations(godotPath: string, projectDir: string): void {
   const created = operation('create_script', {
     script_path: 'made/hero.gd',
     class_name: 'FixtureHero',
-    extends_class: 'Node2D',
+    extends: 'Node2D',
     template: 'state_machine',
   });
   assert.equal(get(created, 'registered'), true, 'a script given a class_name is registered');
@@ -524,16 +528,65 @@ function testOperations(godotPath: string, projectDir: string): void {
   assert.match(asString(get(health, 'grade')), /^[A-F]$/);
   assert.ok(asNumber(get(health, 'checks', 'scripts', 'total_scripts')) > 0, 'the project has scripts in it');
 
-  // The chain the dependency walk was pointed at is also what refers to leaf.gd.
+  // The chain the dependency walk was pointed at is also what refers to leaf.gd, and each
+  // reference says how: middle.gd preloads it.
   const usages = operation('find_resource_usages', { resource_path: 'chain/leaf.gd' });
-  assert.ok(asNumber(get(usages, 'summary', 'total_usages')) > 0, 'leaf.gd is preloaded by middle.gd');
-  assert.ok(
-    asArray(get(usages, 'usages')).some((entry) => get(entry, 'file') === 'res://chain/middle.gd'),
-    'the file holding the reference should be named',
+  const middle = asArray(get(usages, 'usages')).find(
+    (entry) => get(entry, 'file') === 'res://chain/middle.gd',
   );
+  assert.ok(middle, `the file holding the reference should be named:\n${JSON.stringify(usages)}`);
+  assert.equal(get(middle, 'references', 0, 'kind'), 'preload');
+  assert.equal(get(usages, 'summary', 'by_kind', 'preload'), 1);
+  assert.equal(get(usages, 'class_name'), null, 'leaf.gd declares no class_name');
+
+  // A script with a class_name is referred to by that name, which no path search finds: one
+  // script extends it, another instances it, and a scene attaches it by path.
+  writeFileSync(join(projectDir, 'made', 'knight.gd'), 'extends FixtureHero\n');
+  writeFileSync(
+    join(projectDir, 'made', 'spawner.gd'),
+    'extends Node\n\nfunc spawn() -> FixtureHero:\n\treturn FixtureHero.new()\n',
+  );
+  writeFileSync(
+    join(projectDir, 'made', 'hero.tscn'),
+    '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://made/hero.gd" id="1"]\n\n[node name="Hero" type="Node2D"]\nscript = ExtResource("1")\n',
+  );
+  const byName = operation('find_resource_usages', { resource_path: 'made/hero.gd' });
+  assert.equal(get(byName, 'class_name'), 'FixtureHero');
+  const kinds = new Map(
+    asArray(get(byName, 'usages')).map((entry) => [
+      asString(get(entry, 'file')),
+      asArray(get(entry, 'references')).map((reference) => get(reference, 'kind')),
+    ]),
+  );
+  assert.deepEqual(kinds.get('res://made/knight.gd'), ['extends'], JSON.stringify(byName));
+  assert.deepEqual(kinds.get('res://made/spawner.gd'), ['class_name', 'class_name']);
+  assert.deepEqual(kinds.get('res://made/hero.tscn'), ['ext_resource']);
+  assert.equal(get(byName, 'summary', 'files_with_usages'), 3);
+
+  // The global class list, rebuilt from the scripts on disk over a stale one, then read back
+  // by a fresh engine: the file is only right if the engine itself lists the classes from it.
+  writeFileSync(join(projectDir, 'made', 'squire.gd'), 'class_name FixtureSquire\nextends FixtureHero\n');
+  mkdirSync(join(projectDir, '.godot'), { recursive: true });
+  writeFileSync(
+    join(projectDir, '.godot', 'global_script_class_cache.cfg'),
+    'list=[{\n"base": &"Node",\n"class": &"Stale",\n"icon": "",\n"is_abstract": false,\n"is_tool": false,\n"language": &"GDScript",\n"path": "res://gone.gd"\n}]\n',
+  );
+  const rebuilt = operation('refresh_class_cache', {});
+  assert.deepEqual(get(rebuilt, 'removed'), ['Stale'], JSON.stringify(rebuilt));
+  const listed = asArray(get(rebuilt, 'added'));
+  assert.ok(
+    listed.includes('FixtureHero') && listed.includes('FixtureSquire'),
+    `added: ${listed.join(', ')}`,
+  );
+  assert.deepEqual(get(rebuilt, 'skipped'), [], 'every script with a class_name loads');
+  const known = runFixture(godotPath, projectDir, 'class_list');
+  assert.equal(get(known, 'classes', 'FixtureSquire', 'base'), 'FixtureHero', JSON.stringify(known));
+  assert.equal(get(known, 'classes', 'FixtureHero', 'base'), 'Node2D');
+  assert.equal(get(known, 'classes', 'FixtureHero', 'path'), 'res://made/hero.gd');
+  assert.equal(get(known, 'classes', 'Stale'), undefined, 'the stale entry is gone');
 
   // The resave walks the project and writes every scene and script back.
-  assert.equal(get(operation('get_uid', { file_path: 'made/hero.gd' }), 'exists'), false);
+  assert.equal(get(operation('get_uid', { resource_path: 'made/hero.gd' }), 'exists'), false);
   const resaved = operation('resave_resources', {});
   assert.ok(asNumber(get(resaved, 'scenes_saved')) > 0, 'the fixture scene should be resaved');
   assert.equal(get(resaved, 'scenes_with_errors'), 0);
@@ -541,7 +594,7 @@ function testOperations(godotPath: string, projectDir: string): void {
   // Measured on 4.7.2: outside the editor ResourceSaver answers OK and writes no .uid
   // sidecar, so a script that had none still has none. The count above is resaves, not UIDs.
   assert.equal(
-    get(operation('get_uid', { file_path: 'made/hero.gd' }), 'exists'),
+    get(operation('get_uid', { resource_path: 'made/hero.gd' }), 'exists'),
     false,
     'a headless resave cannot mint a UID, and saying it did would be the lie to catch',
   );
@@ -581,10 +634,18 @@ function testOperations(godotPath: string, projectDir: string): void {
   assert.equal(get(action, 'events', 0, 'ctrl_pressed'), true);
 
   // Audio buses live in the AudioServer and only survive the run if the layout is saved.
-  assert.equal(get(operation('create_audio_bus', { busName: 'Fixture' }), 'success'), true);
+  const fixtureBus = operation('create_audio_bus', { bus_name: 'Fixture' });
+  assert.equal(get(fixtureBus, 'bus', 'name'), 'Fixture', 'the bus carries the name it was given');
+  assert.equal(get(fixtureBus, 'layout'), 'res://default_bus_layout.tres');
   const buses = operation('get_audio_buses', {});
-  assert.ok(asNumber(get(buses, 'bus_count')) >= 1);
   assert.ok(named(get(buses, 'buses'), 'Master'), 'every project has a Master bus');
+  assert.ok(named(get(buses, 'buses'), 'Fixture'), 'the layout was written, so a fresh process sees the bus');
+  const reverb = operation('set_audio_bus_effect', {
+    bus_index: asNumber(get(fixtureBus, 'bus', 'index')),
+    effect_index: 0,
+    effect_type: 'AudioEffectReverb',
+  });
+  assert.equal(get(reverb, 'bus', 'effects', 0, 'type'), 'AudioEffectReverb', JSON.stringify(reverb));
 
   // ClassDB, which is the one source of answers that does not touch the project at all.
   const classes = operation('query_classes', { filter: 'camera', category: 'node' });

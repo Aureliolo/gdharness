@@ -1132,7 +1132,7 @@ async function testParametersReachTheEngine(): Promise<void> {
           },
           ENGINE_CALL_TIMEOUT_MS,
         );
-        assert.match(updated, /Setting updated/, updated);
+        assert.equal(get(JSON.parse(updated), 'saved'), true, updated);
         const written = readFileSync(join(projectDir, 'project.godot'), 'utf8');
         assert.match(
           written,
@@ -1188,7 +1188,7 @@ async function testParametersReachTheEngine(): Promise<void> {
           { projectPath: projectDir, op: 'set_main_scene', scenePath: 'main.tscn' },
           ENGINE_CALL_TIMEOUT_MS,
         );
-        assert.match(chosen, /Main scene set to 'main\.tscn'/, chosen);
+        assert.equal(get(JSON.parse(chosen), 'new_main_scene'), 'res://main.tscn', chosen);
         const clean: unknown = JSON.parse(
           await call('editor_run', { projectPath: projectDir, op: 'check' }, ENGINE_CALL_TIMEOUT_MS),
         );
@@ -1196,6 +1196,40 @@ async function testParametersReachTheEngine(): Promise<void> {
         assert.equal(get(clean, 'exitCode'), 0);
         assert.equal(get(clean, 'errors'), 0);
         assert.equal(get(clean, 'hung'), false);
+
+        // The audio bus layout lives in a file the engine loads at startup, and each of these
+        // is a separate engine process: the name and the volume have to survive between them.
+        // The name once did not, because the operation read a spelling the server never sent.
+        const bus: unknown = JSON.parse(
+          await call(
+            'project_settings',
+            { projectPath: projectDir, op: 'add_audio_bus', busName: 'Music' },
+            ENGINE_CALL_TIMEOUT_MS,
+          ),
+        );
+        assert.equal(get(bus, 'bus', 'name'), 'Music', JSON.stringify(bus));
+        const busIndex = asNumber(get(bus, 'bus', 'index'));
+        const quieter: unknown = JSON.parse(
+          await call(
+            'project_settings',
+            { projectPath: projectDir, op: 'set_audio_bus_volume', busIndex, volumeDb: -6 },
+            ENGINE_CALL_TIMEOUT_MS,
+          ),
+        );
+        assert.equal(get(quieter, 'bus', 'name'), 'Music', JSON.stringify(quieter));
+        const listed: unknown = JSON.parse(
+          await call(
+            'project_info',
+            { projectPath: projectDir, include: ['audio_buses'] },
+            ENGINE_CALL_TIMEOUT_MS,
+          ),
+        );
+        const music = asArray(get(listed, 'audio_buses', 'buses')).find(
+          (entry) => get(entry, 'name') === 'Music',
+        );
+        assert.ok(music, `the bus is still there in a fresh process:\n${JSON.stringify(listed, null, 2)}`);
+        assert.equal(asNumber(get(music, 'volume_db')), -6, 'and so is its volume');
+        assert.equal(get(listed, 'mainScene'), 'res://main.tscn');
 
         writeFileSync(
           join(projectDir, 'broken.gd'),
@@ -1230,12 +1264,108 @@ async function testParametersReachTheEngine(): Promise<void> {
   }
 }
 
+/**
+ * project_test against a real gdUnit4: a suite with a pass, a failure and a skip, read back as
+ * cases rather than a console. The failing case has to be named with what the assertion said,
+ * a project without the runner has to be refused, and nothing of the run may be left behind.
+ */
+async function testGdUnitRunner(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
+    }
+    console.log('gdUnit4 runner regression skipped (Godot or gdUnit4 not found)');
+    return;
+  }
+
+  const projectDir = mkdtempSync(join(tmpdir(), 'gdharness-gdunit-'));
+  try {
+    writeFileSync(
+      join(projectDir, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="GdUnitRegression"\n',
+    );
+    mkdirSync(join(projectDir, 'test'));
+    writeFileSync(
+      join(projectDir, 'test', 'sums_test.gd'),
+      [
+        'extends GdUnitTestSuite',
+        '',
+        '',
+        'func test_two_and_two() -> void:',
+        '\tassert_int(2 + 2).is_equal(4)',
+        '',
+        '',
+        'func test_two_and_two_is_not_five() -> void:',
+        '\tassert_int(2 + 2).is_equal(5)',
+        '',
+        '',
+        'func test_skipped_for_now(_do_skip: bool = true, _skip_reason: String = "not today") -> void:',
+        '\tassert_bool(true).is_true()',
+        '',
+      ].join('\n'),
+    );
+
+    await withStdioServer(
+      async (call) => {
+        const missing = await call('project_test', { projectPath: projectDir }, ENGINE_CALL_TIMEOUT_MS);
+        assert.match(missing, /gdUnit4 is not installed/, missing);
+
+        cpSync(gdunit, join(projectDir, 'addons', 'gdUnit4'), { recursive: true });
+        const run: unknown = JSON.parse(
+          await call('project_test', { projectPath: projectDir }, ENGINE_CALL_TIMEOUT_MS * 3),
+        );
+        assert.equal(get(run, 'passed'), false, JSON.stringify(run, null, 2));
+        assert.equal(get(run, 'verdict'), 'failures');
+        assert.deepEqual(
+          {
+            tests: get(run, 'tests'),
+            failures: get(run, 'failures'),
+            errors: get(run, 'errors'),
+            skipped: get(run, 'skipped'),
+          },
+          { tests: 3, failures: 1, errors: 0, skipped: 1 },
+        );
+        const [failed] = asArray(get(run, 'failed'));
+        assert.equal(get(failed, 'name'), 'test_two_and_two_is_not_five');
+        assert.equal(get(failed, 'path'), 'res://test/sums_test.gd');
+        assert.match(text(get(failed, 'message')), /sums_test\.gd:9/);
+        assert.match(text(get(failed, 'detail')), /Expecting:\s+5\s+but was\s+4/);
+        assert.ok(
+          asArray(get(run, 'classes', 'added')).includes('GdUnitTestCIRunner'),
+          'the runner was made resolvable by the class list rebuild',
+        );
+        assert.equal(
+          existsSync(join(projectDir, '.godot', 'gdharness-reports')),
+          false,
+          'the report is cleaned up',
+        );
+
+        const only: unknown = JSON.parse(
+          await call(
+            'project_test',
+            { projectPath: projectDir, ignore: ['sums_test:test_two_and_two_is_not_five'] },
+            ENGINE_CALL_TIMEOUT_MS * 3,
+          ),
+        );
+        assert.equal(get(only, 'passed'), true, JSON.stringify(only, null, 2));
+        assert.equal(get(only, 'tests'), 2);
+      },
+      { GODOT_PATH: godotPath },
+    );
+  } finally {
+    rmSync(projectDir, { recursive: true, force: true });
+  }
+}
+
 async function main(): Promise<void> {
   testStaleDisconnectRegression();
   testSceneToolsVectorRegression();
   testRunArgumentsLeaveTheLocalDebuggerOff();
   testHeadlessFollowsTheDisplay();
   await testParametersReachTheEngine();
+  await testGdUnitRunner();
 
   testProjectGodotMultilineValues();
   testProjectGodotResistsPrototypeKeys();

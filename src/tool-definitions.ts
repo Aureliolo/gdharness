@@ -202,7 +202,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'project_info',
     description:
-      'What a project is: name, main scene, structure and settings from project.godot, with optional sections on top.',
+      'What a project is: its name and main scene from project.godot, the Godot that answers, and how many scenes, scripts and assets it holds, with optional sections on top.',
     parameters: {
       projectPath: PROJECT_PATH,
       include: {
@@ -297,7 +297,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         enum: ['forward', 'reverse'],
         description:
-          'forward: what this resource loads, with cycles reported. reverse: every file that references it. Default forward.',
+          'forward: what this resource loads, with cycles reported. reverse: every file that refers to it and how, a scene instancing it, a script extending, preloading or loading it, and for a script with a class_name every use of that name. Default forward.',
       },
       depth: { type: 'number', description: 'forward: how many levels to follow. Default unlimited.' },
       includeBuiltin: {
@@ -310,7 +310,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   },
   {
     name: 'project_import',
-    description: 'The import pipeline: what needs importing, how a resource is imported, reimports and UIDs.',
+    description:
+      'The import pipeline: what needs importing, how a resource is imported, reimports, UIDs, and the global class list the editor and the engine read.',
     parameters: {
       projectPath: PROJECT_PATH,
       resourcePath: RESOURCE_PATH,
@@ -341,6 +342,11 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       uid: { summary: 'the UID of one file', requires: ['resourcePath'] },
       refresh_uids: { summary: 'resave every resource so UID references are current', requires: [] },
+      refresh_classes: {
+        summary:
+          'rewrite .godot/global_script_class_cache.cfg from the class_name declarations on disk, for an editor whose list has gone stale',
+        requires: [],
+      },
     },
   },
   {
@@ -361,6 +367,32 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       list: { summary: 'the presets in export_presets.cfg', requires: [] },
       run: { summary: 'export with a preset', requires: ['preset', 'outputPath'] },
     },
+  },
+  {
+    name: 'project_test',
+    description:
+      "Runs the project's gdUnit4 tests headless and answers with every case: which failed, where, and what the assertion said. The class list is rebuilt first, so a suite written a moment ago is found. Needs gdUnit4 under addons/gdUnit4.",
+    parameters: {
+      projectPath: PROJECT_PATH,
+      path: {
+        type: 'string',
+        description: 'A test directory or one suite file inside the project. Default test.',
+      },
+      ignore: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Suites or cases to leave out, as "suite_name" or "suite_name:test_name".',
+      },
+      failFast: {
+        type: 'boolean',
+        description: 'Stop at the first failure. Default false: the whole set runs.',
+      },
+      timeoutMs: {
+        type: 'number',
+        description: 'How long the run may take before it is killed. Default 600000.',
+      },
+    },
+    requires: ['projectPath'],
   },
 
   // -------------------------------------------------------------------------------------------

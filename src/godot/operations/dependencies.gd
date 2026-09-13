@@ -38,8 +38,10 @@ func _init(p_log: Log) -> void:
 # Get dependencies for a resource with circular reference detection
 func get_dependencies(params: Dictionary) -> Dictionary:
 	var resource_path: String = str(params.get("resource_path", ""))
-	var max_depth: int = int(params.get("max_depth", 10))
-	var include_built_in: bool = bool(params.get("include_built_in", false))
+	# No depth, or a depth of zero or less, means the whole chain; the walk stops at cycles.
+	var depth: int = int(params.get("depth", 0))
+	var max_depth: int = depth if depth > 0 else 1000
+	var include_built_in: bool = bool(params.get("include_builtin", false))
 
 	_log.info(
 		(
@@ -95,68 +97,117 @@ func get_dependencies(params: Dictionary) -> Dictionary:
 	}
 
 
-# Find all usages of a resource across the project
+# What refers to a resource, and how: the scenes that instance it, the scripts that extend or
+# preload it, and for a script with a class_name, every use of that name.
 func find_resource_usages(params: Dictionary) -> Dictionary:
 	var resource_path: String = str(params.get("resource_path", ""))
-	var search_patterns: Array = params.get("search_patterns", [])
 	var file_types: Array = params.get("file_types", ["tscn", "tres", "gd", "gdshader"])
 
 	if not resource_path.begins_with("res://"):
 		resource_path = "res://" + resource_path
+	if not FileAccess.file_exists(resource_path):
+		return _log.failure("Resource file does not exist: " + resource_path)
 
 	_log.info("Finding usages of: " + resource_path)
 
-	var patterns_to_search: Array[String] = [resource_path]
-	for pattern: Variant in search_patterns:
-		patterns_to_search.append(str(pattern))
-
-	# A reference written without the scheme still points at the same file.
-	patterns_to_search.append(resource_path.substr(6))
+	var class_name_declared: String = _declared_class_name(resource_path)
+	var by_path: RegEx = RegEx.new()
+	by_path.compile('"(res://)?' + _regex_escaped(resource_path.substr(6)) + '"')
+	var by_class: RegEx = null
+	if not class_name_declared.is_empty():
+		by_class = RegEx.new()
+		by_class.compile("\\b" + _regex_escaped(class_name_declared) + "\\b")
 
 	var all_files: Array[String] = []
 	for ext: Variant in file_types:
 		all_files.append_array(_files.find_files("res://", "." + str(ext)))
 
 	var usages: Array[Dictionary] = []
-	var total_usages: int = 0
+	var by_kind: Dictionary = {}
+	var total: int = 0
 
 	for file_path: String in all_files:
 		if file_path == resource_path:
 			continue
-
 		var file: FileAccess = FileAccess.open(file_path, FileAccess.READ)
 		if not file:
 			continue
-
-		var content: String = file.get_as_text()
+		var lines: PackedStringArray = file.get_as_text().split("\n")
 		file.close()
 
-		var file_usages: Array[Dictionary] = []
-		var lines: PackedStringArray = content.split("\n")
-
+		var references: Array[Dictionary] = []
 		for i: int in range(lines.size()):
 			var line: String = lines[i]
-			for pattern: String in patterns_to_search:
-				if pattern in line:
-					file_usages.append(
-						{"line_number": i + 1, "line_content": line.strip_edges(), "pattern_matched": pattern}
-					)
-					break
+			var kind: String = ""
+			if by_path.search(line) != null:
+				kind = _path_reference_kind(line)
+			elif by_class != null and by_class.search(line) != null:
+				kind = "extends" if line.strip_edges().begins_with("extends ") else "class_name"
+			if kind.is_empty():
+				continue
+			references.append({"line": i + 1, "kind": kind, "text": line.strip_edges()})
+			by_kind[kind] = int(by_kind.get(kind, 0)) + 1
 
-		if file_usages.size() > 0:
-			usages.append({"file": file_path, "occurrences": file_usages})
-			total_usages += file_usages.size()
+		if not references.is_empty():
+			usages.append({"file": file_path, "references": references})
+			total += references.size()
 
+	var declared: Variant = null
+	if not class_name_declared.is_empty():
+		declared = class_name_declared
 	return {
 		"resource_path": resource_path,
+		"class_name": declared,
 		"usages": usages,
 		"summary":
 		{
-			"total_files_searched": all_files.size(),
+			"files_searched": all_files.size(),
 			"files_with_usages": usages.size(),
-			"total_usages": total_usages
-		}
+			"total": total,
+			"by_kind": by_kind,
+		},
 	}
+
+
+# The class_name a script declares, or empty for a scene, a resource or a script without one.
+func _declared_class_name(path: String) -> String:
+	if not path.ends_with(".gd"):
+		return ""
+	var file: FileAccess = FileAccess.open(path, FileAccess.READ)
+	if not file:
+		return ""
+	var declaration: RegEx = RegEx.new()
+	declaration.compile("^class_name\\s+([A-Za-z_][A-Za-z0-9_]*)")
+	while not file.eof_reached():
+		var found: RegExMatch = declaration.search(file.get_line())
+		if found != null:
+			file.close()
+			return found.get_string(1)
+	file.close()
+	return ""
+
+
+# How a line that names the resource by path uses it.
+func _path_reference_kind(line: String) -> String:
+	var trimmed: String = line.strip_edges()
+	if trimmed.begins_with("extends "):
+		return "extends"
+	if trimmed.begins_with("[ext_resource"):
+		return "ext_resource"
+	if "preload(" in trimmed:
+		return "preload"
+	if "load(" in trimmed:
+		return "load"
+	return "path"
+
+
+func _regex_escaped(text: String) -> String:
+	var escaped: String = ""
+	for character: String in text:
+		if character in "\\^$.|?*+()[]{}/":
+			escaped += "\\"
+		escaped += character
+	return escaped
 
 
 func _count_recursive(deps: Array[Dictionary]) -> int:
