@@ -5,14 +5,12 @@ gitignored. The generator is `scripts/build-docs.ts`; the theme is `theme/`.
 
 | File              | Page                                                                   |
 | ----------------- | ---------------------------------------------------------------------- |
-| `index.md`        | Front page                                                             |
 | `install.md`      | Install, verify, configure, update                                     |
-| `architecture.md` | What connects to what, the ports, and what each tool needs running     |
-| `traps.md`        | Godot behaviours that affect use                                       |
-| `tested.md`       | What CI covers and what it does not                                    |
+| `architecture.md` | What an install writes, what connects to what, and every harness       |
 | `agent.md`        | The install written for an agent. Markdown only, not in the navigation |
 
-The tool reference has no file here. It is rendered from `src/tool-definitions.ts` at build time.
+The front page and the tool reference have no file here. Both are rendered at build time, the
+first by `renderHome` and the second from `src/tool-definitions.ts`.
 
 Every page is published as HTML and as its markdown. `llms.txt` indexes the markdown;
 `llms-full.txt` is all of it in one file. A page in `docs/` that the generator does not list fails

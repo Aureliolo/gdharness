@@ -28,7 +28,7 @@ import {
   SERVER_KEY,
 } from '../src/harnesses.js';
 
-const LAUNCH = launchFor('9.9.9', '/opt/godot/godot');
+const LAUNCH = launchFor('9.9.9', '/opt/godot/godot', 'npx');
 
 function project(): string {
   return mkdtempSync(join(tmpdir(), 'gdharness-harness-'));
@@ -39,9 +39,13 @@ function read(path: string): Record<string, unknown> {
 }
 
 /** Every harness whose config this writes, rather than handing the reader a command or a block. */
-const WRITERS = HARNESSES.filter(
-  (harness) => harness.addCommand === undefined && harness.snippet === undefined,
+/** The harnesses whose config is JSON, which is the shape this file reads back. */
+const JSON_WRITERS = HARNESSES.filter(
+  (harness) => harness.snippet === undefined && harness.toml === undefined && harness.yaml === undefined,
 );
+
+/** The two whose file is documented but whose key is not, so the block is printed. */
+const PRINTERS = HARNESSES.filter((harness) => harness.snippet !== undefined);
 
 function testEveryIdIsUniqueAndFindable(): void {
   const ids = HARNESSES.map((harness) => harness.id);
@@ -58,6 +62,11 @@ function testTheLaunchIsTheSameEverywhere(): void {
   assert.equal(LAUNCH.command, 'npx');
   assert.deepEqual(LAUNCH.args, ['-y', 'gdharness@9.9.9'], 'the version is pinned, never latest');
   assert.deepEqual(LAUNCH.env, { GODOT_PATH: '/opt/godot/godot' });
+
+  // Whoever installed with bunx may have no Node at all, so the config has to name their runner.
+  const bun = launchFor('9.9.9', '/opt/godot/godot', 'bunx');
+  assert.equal(bun.command, 'bunx');
+  assert.deepEqual(bun.args, ['gdharness@9.9.9'], 'bunx has no prompt to answer, so no -y');
 }
 
 function testEachShapeIsWrittenAsItsHarnessReadsIt(): void {
@@ -77,7 +86,7 @@ function testEachShapeIsWrittenAsItsHarnessReadsIt(): void {
 }
 
 function testAConfigIsWrittenWhereTheHarnessLooks(): void {
-  for (const harness of WRITERS.filter((known) => known.scope === 'project')) {
+  for (const harness of JSON_WRITERS.filter((known) => known.scope === 'project')) {
     const root = project();
     try {
       const written = connect(harness, root, LAUNCH);
@@ -175,7 +184,7 @@ function testWritingTwiceReplacesRatherThanDuplicates(): void {
   const root = project();
   try {
     assert.equal(connect(harness, root, LAUNCH).action, 'written');
-    const second = connect(harness, root, launchFor('9.9.10', '/opt/godot/other'));
+    const second = connect(harness, root, launchFor('9.9.10', '/opt/godot/other', 'npx'));
     assert.equal(second.action, 'replaced', 'the second write says it replaced the entry');
 
     const servers = read(second.path)['mcpServers'] as Record<string, Record<string, unknown>>;
@@ -337,7 +346,7 @@ function testAHarnessIsDetectedByItsOwnDirectory(): void {
 }
 
 function testAHarnessWeCannotWriteIsNeverWrittenTo(): void {
-  for (const harness of HARNESSES.filter((known) => !WRITERS.includes(known))) {
+  for (const harness of PRINTERS) {
     const root = project();
     try {
       const written = connect(harness, root, LAUNCH);
@@ -355,24 +364,96 @@ function testAHarnessWeCannotWriteIsNeverWrittenTo(): void {
   }
 }
 
-function testCodexCarriesTheGodotPath(): void {
-  // The one thing a plain copy-paste config block cannot do, and the reason setup writes these
-  // rather than printing them: the engine path is this machine's.
+/**
+ * TOML is written, not printed. The engine path is this machine's, which is the one thing a block
+ * of copy-paste cannot carry, and the reason a paste step was worth removing.
+ */
+function testATomlConfigIsWrittenAndCarriesTheGodotPath(): void {
   const harness = harnessById('codex');
-  assert.ok(harness?.addCommand, 'codex is in the table with its own command');
-  const command = harness.addCommand(LAUNCH);
-  assert.deepEqual(command, [
-    'codex',
-    'mcp',
-    'add',
-    'gdharness',
-    '--env',
-    'GODOT_PATH=/opt/godot/godot',
-    '--',
-    'npx',
-    '-y',
-    'gdharness@9.9.9',
-  ]);
+  assert.ok(harness?.toml, 'codex is in the table with a TOML block');
+  const root = project();
+  const local = { ...harness, scope: 'project' as const, file: 'config.toml' };
+  try {
+    const path = join(root, 'config.toml');
+    writeFileSync(path, '# mine\nmodel = "something"\n\n[tools]\nweb_search = true\n', 'utf8');
+
+    assert.equal(connect(local, root, LAUNCH).action, 'written');
+    const written = readFileSync(path, 'utf8');
+    assert.match(written, /^# mine$/m, 'their comment survives');
+    assert.match(written, /^model = "something"$/m, 'and their keys');
+    assert.match(written, /^\[tools]$/m, 'and their other tables');
+    assert.match(written, /\[mcp_servers\.gdharness]/, 'ours is in it');
+    assert.match(written, /GODOT_PATH = "\/opt\/godot\/godot"/, 'carrying this machine\u2019s engine');
+
+    // Twice over is once: an entry replaced rather than a second copy appended.
+    assert.equal(connect(local, root, launchFor('9.9.10', '/opt/godot/other', 'npx')).action, 'replaced');
+    const again = readFileSync(path, 'utf8');
+    assert.equal(again.match(/\[mcp_servers\.gdharness]/g)?.length, 1, 'still one entry');
+    assert.match(again, /gdharness@9\.9\.10/, 'and it is the new version');
+
+    assert.equal(disconnect(local, root).action, 'removed');
+    const left = readFileSync(path, 'utf8');
+    assert.doesNotMatch(left, /gdharness/, 'ours is gone');
+    assert.match(left, /^# mine$/m, 'theirs is not');
+    assert.match(left, /^\[tools]$/m);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+/** YAML goes through a parser, because the comments in these files are the reader's. */
+function testAYamlConfigKeepsItsComments(): void {
+  const harness = harnessById('hermes');
+  assert.ok(harness?.yaml, 'hermes is in the table with a YAML path');
+  const root = project();
+  const local = { ...harness, scope: 'project' as const, file: 'config.yaml' };
+  try {
+    const path = join(root, 'config.yaml');
+    writeFileSync(
+      path,
+      '# my notes\nmodel: something\n\nmcp_servers:\n  # theirs, do not touch\n  other:\n    command: other\n',
+      'utf8',
+    );
+
+    assert.equal(connect(local, root, LAUNCH).action, 'written');
+    const written = readFileSync(path, 'utf8');
+    assert.match(written, /# my notes/, 'the comment at the top survives');
+    assert.match(written, /# theirs, do not touch/, 'and the one inside the mapping');
+    assert.match(written, /^\s+other:$/m, 'their server survives');
+    assert.match(written, /gdharness/, 'and ours is there');
+    assert.match(written, /\/opt\/godot\/godot/, 'carrying the engine path');
+
+    assert.equal(disconnect(local, root).action, 'removed');
+    const left = readFileSync(path, 'utf8');
+    assert.doesNotMatch(left, /gdharness/, 'ours is gone');
+    assert.match(left, /# theirs, do not touch/, 'their comment is not');
+    assert.match(left, /^\s+other:$/m, 'nor their server');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+/** A file we could not write we cannot read our way out of either, so it is described instead. */
+function testAConfigWeCannotEditIsDescribedRatherThanTouched(): void {
+  const harness = harnessById('nanobot');
+  assert.ok(harness?.snippet, 'nanobot is one whose key is not documented');
+  const root = project();
+  const local = { ...harness, scope: 'project' as const, file: 'config.json' };
+  try {
+    const path = join(root, 'config.json');
+    const theirs = '{ "something": true }';
+    writeFileSync(path, theirs, 'utf8');
+
+    const written = connect(local, root, LAUNCH);
+    assert.equal(written.action, 'snippet');
+    assert.match(written.snippet ?? '', /gdharness@9\.9\.9/, 'the block names the pinned version');
+    assert.equal(readFileSync(path, 'utf8'), theirs, 'and the file is untouched');
+
+    assert.equal(disconnect(local, root).action, 'manual');
+    assert.equal(readFileSync(path, 'utf8'), theirs, 'removal leaves it alone too');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 }
 
 /**
@@ -451,23 +532,6 @@ function testThereIsNothingToReportWhenWeWereNeverThere(): void {
   }
 }
 
-/** A config we cannot edit gets described instead, and only once its file actually exists. */
-function testAConfigWeCannotEditIsDescribedRatherThanTouched(): void {
-  const harness = harnessById('codex');
-  assert.ok(harness?.removeCommand, 'codex documents how to take a server out');
-  const root = project();
-  try {
-    const path = join(root, 'config.toml');
-    writeFileSync(path, '[mcp_servers.gdharness]\n', 'utf8');
-    const removal = disconnect({ ...harness, scope: 'project', file: 'config.toml' }, root);
-    assert.equal(removal.action, 'manual');
-    assert.deepEqual(removal.command, ['codex', 'mcp', 'remove', 'gdharness']);
-    assert.equal(readFileSync(path, 'utf8'), '[mcp_servers.gdharness]\n', 'the file is not touched');
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-}
-
 const TESTS = [
   testEveryIdIsUniqueAndFindable,
   testTheLaunchIsTheSameEverywhere,
@@ -483,7 +547,8 @@ const TESTS = [
   testEveryInstalledMarkerIsUnderHome,
   testAHarnessIsDetectedByItsOwnDirectory,
   testAHarnessWeCannotWriteIsNeverWrittenTo,
-  testCodexCarriesTheGodotPath,
+  testATomlConfigIsWrittenAndCarriesTheGodotPath,
+  testAYamlConfigKeepsItsComments,
   testRemovingTakesOnlyOurEntry,
   testAFileThatHeldOnlyUsIsDeleted,
   testThereIsNothingToReportWhenWeWereNeverThere,

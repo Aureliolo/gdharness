@@ -72,6 +72,13 @@ export class GodotDAPClient {
   private initialized = false;
   private attached = false;
   private lastThreadId = 1;
+  /**
+   * Whether the game is sitting at a breakpoint right now.
+   *
+   * Without it every question about the stack answers with an empty array, which reads the same
+   * whether nothing is running, the game is running freely, or the stack is genuinely empty.
+   */
+  private stopped = false;
   private breakpoints = new Map<string, Set<number>>();
 
   constructor(port = portFromEnv('GDHARNESS_DAP_PORT', DEFAULT_DAP_PORT), host = '127.0.0.1') {
@@ -135,6 +142,7 @@ export class GodotDAPClient {
           this.connected = false;
           this.initialized = false;
           this.attached = false;
+          this.stopped = false;
           this.socket = null;
           this.failPendingRequests(new Error('DAP connection closed'));
         });
@@ -160,6 +168,7 @@ export class GodotDAPClient {
       this.connected = false;
       this.initialized = false;
       this.attached = false;
+      this.stopped = false;
       return;
     }
 
@@ -194,6 +203,7 @@ export class GodotDAPClient {
     this.connected = false;
     this.initialized = false;
     this.attached = false;
+    this.stopped = false;
   }
 
   private async ensureConnected(): Promise<void> {
@@ -293,11 +303,15 @@ export class GodotDAPClient {
       if (typeof threadId === 'number') {
         this.lastThreadId = threadId;
       }
+      this.stopped = true;
       return;
     }
 
+    // Godot's adapter sends no `continued`, so the only other thing that clears this is the
+    // request that resumed the game.
     if (eventName === 'terminated' || eventName === 'exited') {
       this.attached = false;
+      this.stopped = false;
     }
   }
 
@@ -394,6 +408,7 @@ export class GodotDAPClient {
     await this.attach();
     const resolvedThreadId = await this.resolveThreadId(threadId);
     await this.sendRequest('continue', { threadId: resolvedThreadId });
+    this.stopped = false;
   }
 
   async stepOver(threadId?: number): Promise<void> {
@@ -505,6 +520,11 @@ export class GodotDAPClient {
     return this.connected;
   }
 
+  /** Whether a game is sitting at a breakpoint, which is the only state the stack is real in. */
+  isStopped(): boolean {
+    return this.stopped;
+  }
+
   private async resolveThreadId(threadId?: number): Promise<number> {
     if (typeof threadId === 'number' && threadId > 0) {
       this.lastThreadId = threadId;
@@ -544,6 +564,7 @@ export class GodotDAPClient {
     this.connected = false;
     this.initialized = false;
     this.attached = false;
+    this.stopped = false;
     this.reader = new FrameReader();
     socket?.destroy();
 

@@ -45,20 +45,11 @@ that is running, and the project on disk. ${TOOL_SPECS.length} tools, named \`do
 - \`editor_status\` says whether an editor is connected and whether its addon matches the server.
   \`addonIsStale\` means the editor is serving an older addon and needs restarting.
 
-## The five that cost the most time
-
-1. **After writing a \`class_name\`, call \`project_import refresh_classes\` before running the
-   game.** The editor fixes its list of global classes at startup, so the game it launches cannot
-   resolve a class written since, and fails with "Could not find type" at the first screen.
-2. **Start the game with \`editor_run start\`, never by spawning an engine.** A game started as its
-   own process has no debugger session, so every \`debug_*\` tool has nothing to talk to.
-3. **Read \`editor_output\` after every run.** It returns the engine's errors and warnings as
-   entries with their backtraces, and a \`clean\` verdict, so a run that printed an error is one
-   call away from being known.
-4. **Set breakpoints before the run**, with \`debug_breakpoint set\`. They are waiting when it
-   starts.
-5. **Never start a second editor while one is open.** The language server and the bridge hold one
-   client each, and a second engine takes the port from the first, which then stops answering.
+- Read \`editor_output\` after every run. It returns the engine's errors and warnings as entries
+  with their backtraces, and a \`clean\` verdict, so a run that printed an error is one call away
+  from being known.
+- Start the game with \`editor_run start\`, never by spawning an engine. The editor plays it, so
+  its debugger holds it, which is what gives the \`debug_*\` tools something to talk to.
 
 ## Measuring a running game
 
@@ -101,7 +92,7 @@ said on stderr comes back under \`engine_messages\`.
 ## More
 
 - \`references/tools.md\`: every tool, generated from the server.
-- <https://aureliolo.github.io/gdharness>: how the parts connect, what CI proves, and the traps.
+- <https://aureliolo.github.io/gdharness>: what an install writes, and what talks to what.
 `;
 }
 

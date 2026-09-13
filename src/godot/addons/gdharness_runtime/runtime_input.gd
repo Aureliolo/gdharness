@@ -162,14 +162,22 @@ func click(params: Dictionary) -> Dictionary:
 	var centre: Vector2 = control.get_global_transform_with_canvas() * (control.size * 0.5)
 	var position: Vector2 = viewport.get_final_transform() * centre
 	# The GUI only delivers to what is inside the viewport, so a centre outside it would be a
-	# click that silently reached nothing.
+	# click that silently reached nothing. A game with no window has a 64 by 64 viewport
+	# whatever the project settings say, which is the usual reason to be here and is not
+	# something the caller can read off the rect on its own.
 	if not viewport.get_visible_rect().has_point(centre):
+		var why: String = ""
+		if not _host.get_tree().root.can_draw():
+			why = (
+				". This game has no window, and a game with no window has a 64 by 64 viewport "
+				+ "whatever the project settings say: run it with a window to reach this control"
+			)
 		return {
 			"type": "error",
 			"message":
 			(
-				"%s has its centre at %s, outside the viewport %s, so nothing can click it"
-				% [node_path, centre, viewport.get_visible_rect()]
+				"%s has its centre at %s, outside the viewport %s, so nothing can click it%s"
+				% [node_path, centre, viewport.get_visible_rect(), why]
 			)
 		}
 	var button: int = _resolve_mouse_button(params.get("button", MOUSE_BUTTON_LEFT))
