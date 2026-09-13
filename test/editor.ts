@@ -21,13 +21,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
-import { asArray, asString, get } from './support/json.js';
+import { asArray, asNumber, asString, get, text } from './support/json.js';
 import { parseTextContent, textOf } from './support/json-rpc.js';
 import { reservePort, ServerProcess } from './support/server.js';
 
 /** Long enough for a cold editor to finish its first filesystem scan on a slow runner. */
 const CONNECT_TIMEOUT_MS = 120_000;
 const TOOL_TIMEOUT_MS = 60_000;
+/** The editor serves its language server after the addon has connected, and takes its time. */
+const LSP_READY_TIMEOUT_MS = 90_000;
 
 const SCENE = 'res://fixture.tscn';
 
@@ -36,6 +38,8 @@ interface Editor {
   call: (name: string, args: Record<string, unknown>) => Promise<unknown>;
   /** Calls a tool that must be refused and answers with the sentence it was refused with. */
   refusal: (name: string, args: Record<string, unknown>) => Promise<string>;
+  /** Calls a tool and answers with how it went, for waiting on something to come up. */
+  attempt: (name: string, args: Record<string, unknown>) => Promise<{ ok: boolean; text: string }>;
   project: string;
 }
 
@@ -95,12 +99,45 @@ function createProject(): string {
     ].join('\n'),
   );
 
+  // Two scripts for the language server: one that parses and one that does not, because a
+  // diagnostics tool that answers "clean" for everything looks exactly like a working one.
+  writeFileSync(
+    join(dir, 'sound.gd'),
+    [
+      'extends Node',
+      '',
+      'signal rang(times: int)',
+      '',
+      'var count: int = 0',
+      '',
+      '',
+      'func ring(times: int) -> int:',
+      '\tcount += times',
+      '\trang.emit(count)',
+      '\treturn count',
+      '',
+    ].join('\n'),
+  );
+
+  writeFileSync(
+    join(dir, 'broken.gd'),
+    ['extends Node', '', '', 'func ring( -> int:', '\tpass', ''].join('\n'),
+  );
+
   return dir;
 }
 
 /** A file the engine wrote, which is the only answer it cannot fake. */
 function fileText(project: string, name: string): string {
   return readFileSync(join(project, name), 'utf8');
+}
+
+/** Every name in a document symbol answer, nested ones included. */
+function symbolNames(symbols: unknown[]): string[] {
+  return symbols.flatMap((symbol) => [
+    asString(get(symbol, 'name'), 'name'),
+    ...symbolNames(asArray(get(symbol, 'children') ?? [], 'children')),
+  ]);
 }
 
 /** Every node path in a scene_tree answer, sorted, so a case says what the scene holds. */
@@ -127,7 +164,12 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
   const dapPort = await reservePort();
 
   const server = new ServerProcess({
-    env: { GDHARNESS_BRIDGE_PORT: String(bridgePort), GODOT_PATH: godotPath },
+    env: {
+      GDHARNESS_BRIDGE_PORT: String(bridgePort),
+      GDHARNESS_LSP_PORT: String(lspPort),
+      GDHARNESS_DAP_PORT: String(dapPort),
+      GODOT_PATH: godotPath,
+    },
   });
 
   const invoke = async (name: string, args: Record<string, unknown>) =>
@@ -147,6 +189,11 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
     const response = await invoke(name, args);
     assert.equal(get(response, 'result', 'isError'), true, `${name} should have been refused`);
     return textOf(response) ?? '';
+  };
+
+  const attempt = async (name: string, args: Record<string, unknown>) => {
+    const response = await invoke(name, args);
+    return { ok: get(response, 'result', 'isError') !== true, text: textOf(response) ?? '' };
   };
 
   const editor: ChildProcess = spawn(
@@ -195,7 +242,15 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
     }
     assert.ok(connected, `the editor never reached the bridge:\n${engineOutput.join('')}`);
 
-    await body({ call, refusal, project });
+    await body({ call, refusal, attempt, project });
+  } catch (failure) {
+    // What the engine said on its way to failing, which is the half of the evidence a tool
+    // answer does not carry: a fixture that reports only its own assertion sends whoever reads
+    // the run back to guessing about an editor that is no longer there to ask.
+    const said = engineOutput.join('').trim();
+    throw new Error(
+      `${failure instanceof Error ? failure.stack : String(failure)}\n\nThe editor said:\n${said}`,
+    );
   } finally {
     editor.kill();
     await server.stop();
@@ -378,6 +433,76 @@ async function testEditorRescan({ call, project }: Editor): Promise<void> {
   assert.match(fileText(project, 'custom.tres'), /late\.gd/, 'the script should be on the resource');
 }
 
+/**
+ * The language server tools, which answer from the editor's own server rather than from the addon.
+ *
+ * Both scripts are driven, the one that parses and the one that does not. A diagnostics tool
+ * that has quietly stopped answering returns nothing for every file, which reads exactly like a
+ * clean project, so the case that matters is the one where something is wrong.
+ */
+async function testLanguageServer({ call, attempt, project }: Editor): Promise<void> {
+  const sound = { projectPath: project, scriptPath: 'res://sound.gd' };
+
+  // The bridge is up as soon as the plugin loads, which is well before the editor is serving
+  // diagnostics on a cold runner, so the first answer is waited for rather than assumed. Only
+  // the first: everything after it asserts once, so a tool that stops working still fails.
+  const ready = Date.now() + LSP_READY_TIMEOUT_MS;
+  let attempted = await attempt('script_diagnostics', sound);
+  while (!attempted.ok && Date.now() < ready) {
+    await delay(500);
+    attempted = await attempt('script_diagnostics', sound);
+  }
+  if (!attempted.ok) {
+    // Asked a second way, so the failure says which half is missing: a server that answers for
+    // symbols but publishes no diagnostics is a different fault from one that is not there.
+    const symbols = await attempt('script_info', { ...sound, op: 'symbols' });
+    assert.fail(
+      `the language server never published diagnostics: ${attempted.text}\n` +
+        `symbols ${symbols.ok ? 'answered' : 'was refused'}: ${symbols.text.slice(0, 400)}`,
+    );
+  }
+
+  const clean = await call('script_diagnostics', sound);
+  assert.equal(get(clean, 'clean'), true, 'a script that parses should come back clean');
+  assert.equal(get(clean, 'errors'), 0);
+  assert.equal(get(clean, 'warnings'), 0, 'and with no warnings on it either');
+
+  const broken = await call('script_diagnostics', { projectPath: project, scriptPath: 'res://broken.gd' });
+  assert.equal(get(broken, 'clean'), false, 'and a script that does not parse should not');
+  assert.ok(asNumber(get(broken, 'errors'), 'errors') >= 1, 'with the errors counted');
+  assert.match(
+    asArray(get(broken, 'diagnostics'), 'diagnostics')
+      .map((entry) => asString(get(entry, 'message'), 'message'))
+      .join('\n'),
+    /Expected parameter name/,
+    'and the parser saying what it wanted',
+  );
+
+  const symbols = symbolNames(
+    asArray(get(await call('script_info', { ...sound, op: 'symbols' }), 'symbols')),
+  );
+  for (const declared of ['ring', 'count', 'rang']) {
+    assert.ok(symbols.includes(declared), `symbols should name ${declared}: ${symbols.join(', ')}`);
+  }
+
+  // Line 8 is `count += times`, and column 6 is the end of `count`.
+  const hover = await call('script_info', { ...sound, op: 'hover', line: 8, character: 6 });
+  assert.match(
+    text(get(hover, 'hover', 'contents', 'value')),
+    /var count: int/,
+    'hover should answer with the declaration under the cursor',
+  );
+
+  const completions = asArray(
+    get(await call('script_info', { ...sound, op: 'completion', line: 8, character: 6 }), 'completions'),
+    'completions',
+  ).map((entry) => asString(get(entry, 'label'), 'label'));
+  assert.ok(
+    completions.includes('rang'),
+    `completions should offer the script's own names: ${completions.length}`,
+  );
+}
+
 async function main(): Promise<void> {
   const godotPath = resolveGodotPath();
   if (!godotPath) {
@@ -395,6 +520,7 @@ async function main(): Promise<void> {
     await testSceneAnimation(editor);
     await testResources(editor);
     await testEditorRescan(editor);
+    await testLanguageServer(editor);
   });
 
   console.log('editor tests passed');

@@ -7,6 +7,7 @@ import { createServer, type Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { pathToFileURL } from 'node:url';
 import { GodotDAPClient } from '../src/dap_client.js';
 import { dictionary, emptyRecord } from '../src/dictionary.js';
 import { createBridge } from '../src/godot-bridge.js';
@@ -269,6 +270,46 @@ async function testDiagnosticsSurviveUriReEncoding(): Promise<void> {
     );
     await client.disconnect();
   });
+}
+
+/**
+ * Windows hands out two names for the same directory, and Godot answers with the one it was
+ * given while the server asks with the one the filesystem resolves to.
+ *
+ * A runner's TEMP holds the 8.3 name, so the editor publishes under `RUNNER~1` while the client
+ * waits under `runneradmin`, and diagnostics simply never arrive: every other request answers,
+ * and the caller is told the language server may not be running. Measured on a Windows runner,
+ * and reproduced here by publishing under the short name of a real directory.
+ */
+async function testDiagnosticsSurviveAnotherSpellingOfTheSamePath(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('path spelling diagnostics regression skipped (one spelling off Windows)');
+    return;
+  }
+
+  const root = mkdtempSync(join(tmpdir(), 'gdharness-spelling-'));
+  try {
+    const scriptPath = join(root, 'player.gd');
+    writeFileSync(scriptPath, 'extends Node\n');
+
+    // Upper case here, the 8.3 name on a runner: either way it is a second spelling of the same
+    // file, and a key that compares the strings finds neither.
+    await withFakeLanguageServer(
+      () => pathToFileURL(join(root, 'player.gd').toUpperCase()).href,
+      async (port) => {
+        const client = new GodotLSPClient(port, '127.0.0.1');
+        const diagnostics = await client.getDiagnostics(scriptPath, 'extends Node\n');
+        assert.equal(
+          diagnostics.length,
+          1,
+          'diagnostics published under another spelling of the same path should still arrive',
+        );
+        await client.disconnect();
+      },
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 }
 
 /**
@@ -673,6 +714,32 @@ async function testEditorStatusPortConflict(): Promise<void> {
   });
 }
 
+/**
+ * A port variable holding something that is not a port is said so, rather than fallen back on.
+ *
+ * Three of them now name a port outside this process, and the failure they share is the quiet
+ * one: a server that used the default instead would talk to whatever holds it, or to nothing,
+ * and report the editor unavailable while the value the user set sat there being ignored.
+ */
+async function testABadPortIsReported(): Promise<void> {
+  const server = new ServerProcess({ env: { GDHARNESS_LSP_PORT: 'banana' } });
+  try {
+    await server.initialize('regression-test');
+    const response = await server.request('tools/call', {
+      name: 'script_diagnostics',
+      arguments: { projectPath: process.cwd(), scriptPath: 'src/godot/operations/logger.gd' },
+    });
+    assert.match(
+      text(get(response, 'error', 'message')),
+      /GDHARNESS_LSP_PORT is "banana"/,
+      'the answer should name the variable and what is wrong with it',
+    );
+    assert.equal(server.exited, false, 'and the server should still be serving everything else');
+  } finally {
+    await server.stop();
+  }
+}
+
 type ToolCall = (name: string, args: unknown, timeoutMs?: number) => Promise<string>;
 type RawRequest = (method: string, params: unknown, timeoutMs?: number) => Promise<JsonRpcMessage>;
 
@@ -1008,7 +1075,7 @@ async function testToolsRefusePathsOutsideTheProject(): Promise<void> {
         // accepting side would connect to whatever editor is serving 6005 on this machine.
         assert.match(
           await call('script_diagnostics', { projectPath, scriptPath: '../outside.gd' }),
-          /outside the project root boundary/,
+          /resolves outside the project directory/,
           'script_diagnostics should refuse a script outside the project',
         );
 
@@ -1443,7 +1510,9 @@ async function main(): Promise<void> {
   testProjectGodotResistsPrototypeKeys();
 
   await testEditorStatusPortConflict();
+  await testABadPortIsReported();
   await testDiagnosticsSurviveUriReEncoding();
+  await testDiagnosticsSurviveAnotherSpellingOfTheSamePath();
   await testDiagnosticsTimeoutIsNotAnEmptyResult();
   await testLspFramesBodiesByBytes();
   await testLspReassemblesBodySplitMidCharacter();

@@ -1092,7 +1092,9 @@ class GodotServer {
       const reason = payload['error'];
       return this.createErrorResponse(
         `Diagnostics unavailable: ${typeof reason === 'string' ? reason : JSON.stringify(reason)}`,
-        ['Ensure the Godot editor is running with the language server enabled on port 6005'],
+        [
+          'Ensure the Godot editor is running with its language server enabled, on port 6005 or on the port GDHARNESS_LSP_PORT names',
+        ],
       );
     }
 
