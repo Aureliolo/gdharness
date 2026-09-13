@@ -17,6 +17,7 @@ import fc from 'fast-check';
 
 import { extract } from '../scripts/install-godot.js';
 import { type Frame, FrameReader, frame, MAX_MESSAGE_BYTES, OversizedStreamError } from '../src/framing.js';
+import { GameLog } from '../src/game-log.js';
 import { isWithinRoot, resolveWithinProject } from '../src/paths.js';
 import { parseProjectGodot } from '../src/resources.js';
 import { buildZip, DEFLATED, STORED, type ZipEntrySpec } from './support/zip.js';
@@ -590,6 +591,47 @@ function damagedArchivesFailCleanly(): void {
   );
 }
 
+// ---------------------------------------------------------------------------------------------
+// The game log
+// ---------------------------------------------------------------------------------------------
+
+const logLine = fc.oneof(
+  fc.string({ unit: 'grapheme', maxLength: 40 }).filter((line) => !/[\r\n]/.test(line)),
+  fc.constantFrom('ERROR: x', 'SCRIPT ERROR: y', 'WARNING: z', 'USER ERROR: w', 'USER WARNING: v'),
+  fc.constantFrom('   at: here (res://a.gd:1)', '\tGDScript backtrace', '       [0] _init'),
+  fc.constant(''),
+);
+const logText = fc
+  .tuple(fc.array(logLine, { maxLength: 24 }), fc.constantFrom('\n', '\r\n'))
+  .map(([lines, ending]) => ({ text: lines.map((line) => `${line}${ending}`).join(''), ending }));
+
+/**
+ * The pipe may cut the bytes anywhere, inside a line or inside a character, and the entries
+ * are the same as if the whole text had arrived at once; every non-blank line lands in exactly
+ * one entry, and the severity counts add up to the entries.
+ */
+function logsReadTheSameInAnyPieces(): void {
+  fc.assert(
+    fc.property(logText, cuts, ({ text, ending }, points) => {
+      const whole = new GameLog();
+      whole.append('stderr', text);
+      whole.finish();
+
+      const pieces = new GameLog();
+      for (const piece of chunked(Buffer.from(text, 'utf8'), points)) {
+        pieces.append('stderr', piece);
+      }
+      pieces.finish();
+
+      assert.deepEqual(pieces.all, whole.all);
+      const said = text.split(ending).filter((line) => line.trim() !== '').length;
+      const kept = whole.all.reduce((sum, entry) => sum + 1 + entry.detail.length, 0);
+      assert.equal(kept, said, 'every non-blank line is in exactly one entry');
+      assert.equal(whole.count('error') + whole.count('warning') + whole.count('info'), whole.all.length);
+    }),
+  );
+}
+
 framesRoundTripUnderAnyChunking();
 everyHeaderSpellingIsRead();
 junkNeverEscapesTheContract();
@@ -603,5 +645,6 @@ archivesRoundTrip();
 hostileEntriesWriteNothing();
 bytesThatAreNotAnArchiveWriteNothing();
 damagedArchivesFailCleanly();
+logsReadTheSameInAnyPieces();
 
 console.log('fuzz properties held');

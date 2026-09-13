@@ -14,7 +14,7 @@ import { envValue, resolveHeadless, runArguments } from '../src/launch.js';
 import { GodotLSPClient } from '../src/lsp_client.js';
 import { isWithinRoot, resolveWithinProject } from '../src/paths.js';
 import { parseProjectGodot } from '../src/resources.js';
-import { asArray, get, text } from './support/json.js';
+import { asArray, asNumber, get, text } from './support/json.js';
 import { isRecord, type JsonRpcMessage, parseTextContent, textOf } from './support/json-rpc.js';
 import { ServerProcess } from './support/server.js';
 
@@ -1032,24 +1032,31 @@ async function testToolsRefusePathsOutsideTheProject(): Promise<void> {
 
 /**
  * The engine's argument list is not visible from any response, so it is asserted directly.
- * Both branches, because the opt-out was once written as a shift() off the front of the headless
- * argv, which took -d with it and launched a game the debugger never attached to.
+ * No -d in either branch: the local debugger it turns on breaks into a `debug>` prompt on the
+ * first script error and, with no stdin to read a command from, loops on that prompt forever.
  */
-function testRunArgumentsCarryTheDebuggerEitherWay(): void {
+function testRunArgumentsLeaveTheLocalDebuggerOff(): void {
   assert.deepEqual(runArguments({ projectPath: '/p', headless: true, scene: null }), [
     '--headless',
-    '-d',
     '--path',
     '/p',
   ]);
-  assert.deepEqual(runArguments({ projectPath: '/p', headless: false, scene: null }), ['-d', '--path', '/p']);
+  assert.deepEqual(runArguments({ projectPath: '/p', headless: false, scene: null }), ['--path', '/p']);
   // The scene as a res:// path and last: the engine reads it positionally, so text beginning
   // with a dash would otherwise be another option to it.
   assert.deepEqual(runArguments({ projectPath: '/p', headless: false, scene: 'scenes/-odd.tscn' }), [
-    '-d',
     '--path',
     '/p',
     'res://scenes/-odd.tscn',
+  ]);
+  // A boot check quits on its own, and the option goes before the scene for the same reason.
+  assert.deepEqual(runArguments({ projectPath: '/p', headless: true, scene: 'a.tscn', quitAfter: 3 }), [
+    '--headless',
+    '--path',
+    '/p',
+    '--quit-after',
+    '3',
+    'res://a.tscn',
   ]);
 }
 
@@ -1160,6 +1167,61 @@ async function testParametersReachTheEngine(): Promise<void> {
 
         const deep = await namesAt(3);
         assert.ok(deep.includes('res://chain/leaf.gd'), `depth 3 reaches leaf: ${deep.join(', ')}`);
+
+        // The boot check. With no main scene the engine would block on a modal box rather than
+        // exit, so that is refused before anything is spawned.
+        const noScene = await call(
+          'editor_run',
+          { projectPath: projectDir, op: 'check' },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+        assert.match(noScene, /no main scene/, `a project with nothing to run is refused: ${noScene}`);
+
+        // Then a project that comes up clean, then the same project with an autoload that cannot
+        // parse, which is the one kind of break a green test tier never sees.
+        writeFileSync(
+          join(projectDir, 'main.tscn'),
+          '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n',
+        );
+        const chosen = await call(
+          'project_settings',
+          { projectPath: projectDir, op: 'set_main_scene', scenePath: 'main.tscn' },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+        assert.match(chosen, /Main scene set to 'main\.tscn'/, chosen);
+        const clean: unknown = JSON.parse(
+          await call('editor_run', { projectPath: projectDir, op: 'check' }, ENGINE_CALL_TIMEOUT_MS),
+        );
+        assert.equal(get(clean, 'booted'), true, `a bare project boots clean: ${JSON.stringify(clean)}`);
+        assert.equal(get(clean, 'exitCode'), 0);
+        assert.equal(get(clean, 'errors'), 0);
+        assert.equal(get(clean, 'hung'), false);
+
+        writeFileSync(
+          join(projectDir, 'broken.gd'),
+          'extends Node\n\nfunc _ready() -> void:\n\tthis is not gdscript\n',
+        );
+        writeFileSync(
+          join(projectDir, 'project.godot'),
+          `${readFileSync(join(projectDir, 'project.godot'), 'utf8')}\n[autoload]\n\nBroken="*res://broken.gd"\n`,
+        );
+        const broken: unknown = JSON.parse(
+          await call('editor_run', { projectPath: projectDir, op: 'check' }, ENGINE_CALL_TIMEOUT_MS),
+        );
+        assert.equal(
+          get(broken, 'booted'),
+          false,
+          `a broken autoload fails the boot: ${JSON.stringify(broken)}`,
+        );
+        assert.ok(asNumber(get(broken, 'errors')) > 0, 'the parse error is counted');
+        const mentions = asArray(get(broken, 'entries')).filter(
+          (entry) =>
+            get(entry, 'severity') === 'error' &&
+            [text(get(entry, 'text')), ...asArray(get(entry, 'detail')).map(text)].some((line) =>
+              line.includes('broken.gd'),
+            ),
+        );
+        assert.ok(mentions.length > 0, `the error names the script:\n${JSON.stringify(broken, null, 2)}`);
       },
       { GODOT_PATH: godotPath },
     );
@@ -1171,7 +1233,7 @@ async function testParametersReachTheEngine(): Promise<void> {
 async function main(): Promise<void> {
   testStaleDisconnectRegression();
   testSceneToolsVectorRegression();
-  testRunArgumentsCarryTheDebuggerEitherWay();
+  testRunArgumentsLeaveTheLocalDebuggerOff();
   testHeadlessFollowsTheDisplay();
   await testParametersReachTheEngine();
 

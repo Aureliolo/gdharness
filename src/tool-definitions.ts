@@ -636,24 +636,47 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'editor_run',
     description:
-      'Runs the project under the debugger and keeps collecting its output until editor_stop. Windowed where there is a display and headless where there is not, unless headless says otherwise; the runtime tools need a window.',
+      'Runs the project. start keeps it running and collecting output until editor_stop, windowed where there is a display and headless where there is not, unless headless says otherwise; the runtime tools need a window. check boots it headless for a few frames, waits for it to quit, and answers with the verdict: whether it came up, and every error and warning it printed on the way.',
     parameters: {
       projectPath: PROJECT_PATH,
       scene: { type: 'string', description: 'A scene to run instead of the main scene.' },
-      headless: { type: 'boolean', description: 'Force a window or no window.' },
+      headless: { type: 'boolean', description: 'start: force a window or no window.' },
+      frames: { type: 'number', description: 'check: frames to run before quitting. Default 3.' },
+      timeoutMs: {
+        type: 'number',
+        description: 'check: how long to give the boot before it is called hung. Default 60000.',
+      },
     },
     requires: ['projectPath'],
+    operations: {
+      start: { summary: 'run the project until editor_stop', requires: [] },
+      check: { summary: 'boot headless, quit after a few frames, and report the verdict', requires: [] },
+    },
+    defaultOperation: 'start',
   },
   {
     name: 'editor_stop',
-    description: 'Stops the project started by editor_run.',
+    description: 'Stops the project started by editor_run and answers with what it printed last.',
     parameters: {},
     requires: [],
   },
   {
     name: 'editor_output',
-    description: 'What the project started by editor_run has printed so far, stdout and stderr.',
-    parameters: {},
+    description:
+      'What the project started by editor_run has printed, as entries with a severity: the errors and warnings the engine reported, each with where it happened, and everything else as info. Answers with the counts and the verdict as well as the entries.',
+    parameters: {
+      severity: {
+        type: 'string',
+        enum: ['error', 'warning', 'info'],
+        description: 'The least severe entry to include. Default info, which is everything.',
+      },
+      sinceLastCall: {
+        type: 'boolean',
+        description: 'Only entries printed since the previous editor_output. Default false.',
+      },
+      contains: { type: 'string', description: 'Only entries mentioning this text.' },
+      limit: { type: 'number', description: 'The most entries to answer with, newest kept. Default 200.' },
+    },
     requires: [],
   },
   {
