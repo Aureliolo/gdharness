@@ -47,7 +47,7 @@ function replaceReleaseVersionReferences(content: string, nextVersion: string, p
         new RegExp(`(${packageName}-)${SEMVER_SOURCE}(\\.tgz(?:\\.sha256)?)`, 'g'),
         `$1${nextVersion}$2`,
       )
-      // The install line, which is the one a reader copies: `npx -y gdharness@0.3.1 setup .`.
+      // The install line, which is the one a reader copies: `npx -y gdharness@0.3.1 setup`.
       // Left out of here it stays on the last release forever, pinning every new project to a
       // version older than the one the page it sits on describes.
       .replace(new RegExp(`(${packageName}@)${SEMVER_SOURCE}`, 'g'), `$1${nextVersion}`)

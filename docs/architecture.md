@@ -9,17 +9,17 @@ copy of the addons, its own pinned version and its own engine path.
 
 ```text
 your-project/
-├── addons/gdharness_editor/      editor plugin: the bridge behind the scene and editor tools
-├── addons/gdharness_runtime/     autoload: the running game answers through this
-├── addons/auto_reload/           editor plugin: reloads what changed on disk
-├── project.godot                 two plugin entries and one autoload, written by the engine
-├── .mcp.json                     Claude Code, Copilot CLI, Qoder, Command Code
-├── .cursor/mcp.json              Cursor, and one file per other harness set up here
-├── .agents/skills/gdharness/     the skill, read by nine of the harnesses
-└── .claude/skills/gdharness/     and a copy for each of the three that do not read .agents
+|-- addons/gdharness_editor/   the bridge: scenes, resources, running the game
+|-- addons/gdharness_runtime/  an autoload: the running game answers here
+|-- addons/auto_reload/        reloads what changed on disk
+|-- project.godot              two plugin entries and one autoload
+|-- .mcp.json                  Claude Code, Copilot CLI, Qoder, Command Code
+|-- .cursor/mcp.json           Cursor, and one file per other harness
+|-- .agents/skills/gdharness/  the skill, read by nine of the harnesses
+`-- .claude/skills/gdharness/  a copy for each of the three that do not read it
 
-~/                                touched only when you say so
-└── .codex/config.toml            Codex, and the other harnesses with no project-level config
+~/                             touched only when you say so
+`-- .codex/config.toml         Codex, and the others with no project config
 ```
 
 The entry written into each config is the same everywhere: `npx -y gdharness@{{version}}` with
@@ -29,24 +29,11 @@ The entry written into each config is the same everywhere: `npx -y gdharness@{{v
 
 ## How setup decides what to write
 
-```text
-                       gdharness setup .
-                              │
-              ┌───────────────┴───────────────┐
-      harnesses named                    none named
-      by flag                                 │
-              │                     ┌─────────┴─────────┐
-      write exactly those,     a terminal            a pipe, CI,
-      no questions             to ask                or an agent
-              │                     │                     │
-              │            ask about each one    write the ones this
-              │            found here or on      project already uses,
-              │            this machine          name the rest with the
-              │                     │            flag that writes them
-              └─────────────────────┴─────────────────────┘
-                              │
-                    write the skill, unless --no-skill
-```
+{{flow}}
+
+`setup` takes the directory to install into, and defaults to the one you are in. The third way out
+is a pipe, a CI job or an agent, where there is nobody to answer a question: it writes what the
+project has already committed to rather than hanging on an answer that is never coming.
 
 **Nothing outside the project is written without a flag or a typed yes.** A harness with no
 project-level config at all is then written where it lives, because that is its limitation rather
@@ -57,8 +44,6 @@ and whether it is on this machine at all. The second reads the harness's own dir
 and never writes there.
 
 ## Every harness
-
-{{harnesses}}
 
 All but two are written for you, whatever the format, because a block to paste is a step that gets
 skipped or pasted into the wrong file.
@@ -75,12 +60,14 @@ print the block instead.
 
 Four harnesses read the same `.mcp.json`, so it is written once and all four are named.
 
+{{harnesses}}
+
 ## Where the skill goes
 
 `.agents/skills/<name>/SKILL.md` is the cross-tool convention, and the reason there is one skill
 rather than an integration per harness.
 
-|                        |                                                                                                               |
+| Where it goes          | Which harnesses                                                                                               |
 | ---------------------- | ------------------------------------------------------------------------------------------------------------- |
 | Reads `.agents/skills` | Codex, which looks nowhere else, plus Cursor, VS Code, Copilot, Gemini CLI, opencode, Junie, Windsurf, Hermes |
 | Needs its own copy     | Claude Code `.claude/skills`, Kiro `.kiro/skills`, Cline `.cline/skills`                                      |
@@ -94,27 +81,27 @@ One npm package. It is the MCP server by default, and the CLI when given a comma
 
 ```text
 gdharness
-├── cli.ts                the commands: setup, uninstall, doctor, runtime, classes, harnesses
-│   ├── harnesses.ts      the table: every harness, its file, its shape, its skills directory
-│   ├── config-formats.ts writing TOML by table, and YAML through a comment-preserving parser
-│   ├── skill.ts          the skill written into the project, and where copies of it go
-│   ├── setup.ts          the addons, the editor plugins, the runtime autoload
-│   └── prompt.ts         the questions, and the silence when there is nobody to ask
-│
-└── server.ts             the MCP server: one tool call in, one answer out
-    ├── tool-definitions  every tool, op and argument, in one table
-    ├── tool-args.ts      the refusals, which name the valid set rather than guessing
-    │
-    ├── godot-bridge.ts   websocket, 6505, the editor addon connects in
-    ├── lsp_client.ts     tcp, 6005, script diagnostics and symbols
-    ├── dap_client.ts     tcp, 6006, breakpoints, stepping and the console
-    ├── runtime-client.ts tcp, the running game, on a port it announces in a file
-    └── headless.ts       one short engine per call, for what needs nothing open
+|-- cli.ts                setup, upgrade, uninstall, doctor, runtime, classes
+|   |-- harnesses.ts      every harness: its file, its shape, its skills dir
+|   |-- config-formats.ts TOML by table, YAML through a comment-keeping parser
+|   |-- skill.ts          the skill, and which directories get a copy
+|   |-- setup.ts          the addons, the editor plugins, the autoload
+|   `-- prompt.ts         the questions, and the silence when nobody can answer
+|
+`-- server.ts             the MCP server: one call in, one answer out
+    |-- tool-definitions  every tool, op and argument, in one table
+    |-- tool-args.ts      the refusals, which name the valid set
+    |
+    |-- godot-bridge.ts   websocket, 6505, the editor addon connects in
+    |-- lsp_client.ts     tcp, 6005, diagnostics and symbols
+    |-- dap_client.ts     tcp, 6006, breakpoints, stepping, the console
+    |-- runtime-client.ts tcp, the running game, on a port it announces
+    `-- headless.ts       one short engine per call, nothing open needed
 
 addons, installed into your project
-├── gdharness_editor      the bridge: scenes, resources, running the game from the editor
-├── gdharness_runtime     an autoload: the running game answers through it
-└── auto_reload           reloads the open scene when a file changes on disk
+|-- gdharness_editor      the bridge: scenes, resources, running the game
+|-- gdharness_runtime     an autoload: the running game answers through it
+`-- auto_reload           reloads the open scene when a file changes
 ```
 
 The CLI half never loads the MCP SDK, and the server half never reads the harness table. They share
@@ -128,14 +115,14 @@ table.
 ## What talks to what
 
 ```text
-                stdio
-  agent  ◄─────────────►  gdharness server
-                                │
-                                ├─ 6505   websocket, the editor connects in  ──►  gdharness_editor
-                                ├─ 6005   tcp, the server connects out       ──►  language server
-                                ├─ 6006   tcp, the server connects out       ──►  debug adapter
-                                ├─ auto   tcp, port read from a file         ──►  gdharness_runtime
-                                └─ spawn  one engine per call                ──►  godot --headless
+            stdio
+  agent  <--------->  gdharness server
+                            |
+                            +- 6505  -->  gdharness_editor   websocket, in
+                            +- 6005  -->  language server    tcp, out
+                            +- 6006  -->  debug adapter      tcp, out
+                            +- auto  -->  gdharness_runtime  tcp, port in a file
+                            `- spawn -->  godot --headless   one engine per call
 ```
 
 `gdharness_editor`, the language server and the debug adapter are all inside the Godot editor you

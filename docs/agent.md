@@ -19,7 +19,7 @@ node --version    # >= 22, for npx
 
 ```bash
 cd /absolute/path/to/project
-npx -y gdharness@{{version}} setup .
+npx -y gdharness@{{version}} setup
 ```
 
 It installs the addons, enables the editor plugins, registers the runtime autoload, rebuilds the

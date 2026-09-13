@@ -45,13 +45,16 @@ const command = args[0];
 
 class UsageError extends Error {}
 
-/** The project a command was given, checked to be one. */
+/**
+ * The project a command works on: the directory named, or the one you are standing in.
+ *
+ * Defaulting to the working directory rather than demanding a `.` for it, because every other
+ * command line does, and because a required argument whose value is nearly always one character
+ * is carrying no information. It still has to hold a `project.godot`, so the default cannot act
+ * on somewhere that is not a Godot project.
+ */
 function projectArgument(at: number): string {
-  const given = args[at];
-  if (given === undefined) {
-    throw new UsageError('A project directory is required.');
-  }
-  const projectPath = resolve(given);
+  const projectPath = resolve(args[at] ?? '.');
   if (!existsSync(join(projectPath, 'project.godot'))) {
     throw new UsageError(`Not a Godot project: ${projectPath} holds no project.godot.`);
   }
@@ -438,7 +441,7 @@ gdharness v${getLocalVersion()}, a harness for driving a Godot 4 project from an
 
 Usage:
   gdharness                          Start the MCP server (default)
-  gdharness setup <project> [--no-runtime] [--no-connect] [--no-skill] [--yes] [--<harness>]
+  gdharness setup [project] [--no-runtime] [--no-connect] [--no-skill] [--yes] [--<harness>]
                                      Install the addons into the project, enable the editor
                                      ones, register the runtime autoload unless --no-runtime,
                                      and rebuild the class list. Then register the server with your
@@ -449,26 +452,27 @@ Usage:
                                      questions and does the same. Nothing outside the project is
                                      written without a flag or a typed yes. It also writes the
                                      gdharness skill into .agents/skills, unless --no-skill.
-  gdharness upgrade <project>        Reinstall the addons at this version and re-pin every config
+  gdharness upgrade [project]        Reinstall the addons at this version and re-pin every config
                                      that already names gdharness. Asks nothing: it touches only
                                      what is already ours. Afterwards the editor needs restarting
                                      so it loads the new addons, and the MCP server needs
                                      reconnecting so it is spawned at the new version.
-  gdharness uninstall <project> [--<harness>]
+  gdharness uninstall [project] [--<harness>]
                                      Take it all back out: the addons, the editor plugins, the
                                      runtime autoload, the skill, and our own entry in every
                                      config it can parse. Other servers in those files are
                                      untouched. A machine-wide config may serve another project,
                                      so it is named rather than edited unless you ask by flag.
   gdharness harnesses                Every harness, its flag and the file it reads
-  gdharness doctor <project> [--json]
+  gdharness doctor [project] [--json]
                                      Say what holds and what does not; exit 1 on a problem
-  gdharness runtime on|off <project> Register or remove the runtime autoload, which reaches
+  gdharness runtime on|off [project] Register or remove the runtime autoload, which reaches
                                      an export if it is left on
-  gdharness classes <project>        Rebuild .godot/global_script_class_cache.cfg from disk
+  gdharness classes [project]        Rebuild .godot/global_script_class_cache.cfg from disk
   gdharness version                  Show the installed version
   gdharness help                     Show this help
 
+The project defaults to the directory you are in, and has to hold a project.godot either way.
 Godot is found through GODOT_PATH, else in the usual places.
 More info: https://github.com/Aureliolo/gdharness
 `.trim(),

@@ -7,5 +7,8 @@
     "MD013": { "line_length": 100, "code_blocks": false, "tables": false }
   },
   "globs": ["**/*.md"],
-  "ignores": ["node_modules", ".venv", "build", "dist", "site"]
+  // node_modules matched only at the top level, so a git worktree under .claude/worktrees brought
+  // its own dependencies' READMEs into the lint and buried our dozen files under nine thousand
+  // findings about somebody else's markdown.
+  "ignores": ["**/node_modules", ".venv", "build", "dist", "site", ".claude"]
 }
