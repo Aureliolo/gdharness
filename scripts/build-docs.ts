@@ -41,12 +41,16 @@ function renderHarnesses(): string {
         : harness.snippet !== undefined
           ? 'prints the block to paste'
           : 'written for you';
-    const when = harness.scope === 'project' ? 'when set up here' : 'only if named';
-    return `| ${harness.name} | \`--${harness.id}\` | ${file} | ${when} | ${how} |`;
+    const scope = harness.scope === 'project' ? 'project' : 'machine-wide';
+    const skills =
+      harness.skills === undefined ? '`.agents/skills`' : `\`${harness.skills.dir.replaceAll('\\', '/')}\``;
+    return `| ${harness.name} | \`--${harness.id}\` | ${file} | ${scope} | ${how} | ${skills} |`;
   });
-  return ['| Harness | Flag | Config | Written | How |', '| --- | --- | --- | --- | --- |', ...rows].join(
-    '\n',
-  );
+  return [
+    '| Harness | Flag | Config | Scope | How | Skill |',
+    '| --- | --- | --- | --- | --- | --- |',
+    ...rows,
+  ].join('\n');
 }
 
 /** A launch line for the documentation: this version, and a path a reader will recognise. */

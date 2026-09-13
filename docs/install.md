@@ -45,9 +45,9 @@ npx -y gdharness@{{version}} setup . --no-connect      # addons only, no configu
 
 ## What it writes, and where
 
-**Nothing outside the project directory without a flag or a typed yes.** Eight of the harnesses
-below have no project-level config at all, and for those a yes writes the machine-wide file,
-because that is their limitation rather than a choice we can make better.
+**Nothing outside the project directory without a flag or a typed yes.** Eight harnesses have no
+project-level config at all, and for those a yes writes the machine-wide file, because that is
+their limitation rather than a choice we can make better.
 
 ```text
 Claude Code, Copilot CLI, Qoder, Command Code: written /home/you/game/.mcp.json
@@ -55,20 +55,11 @@ skill: written /home/you/game/.agents/skills/gdharness
 skill: written /home/you/game/.claude/skills/gdharness
 ```
 
-Four harnesses read the same `.mcp.json`, so it is written once and all four are named.
+Four harnesses read the same `.mcp.json`, so it is written once and all four are named. The skill
+goes to `.agents/skills/`, which nine of them read, and to its own directory for each of the three
+that do not. `--no-skill` leaves it out.
 
-## The skill
-
-`setup` writes `.agents/skills/gdharness/`, which is the cross-tool skills convention: Codex looks
-nowhere else, and Cursor, VS Code, Copilot, Gemini CLI, opencode, Junie, Windsurf and Hermes all
-read it too. Claude Code, Kiro and Cline do not, so they get a copy in their own directory when
-they are one of the harnesses being set up.
-
-It holds the five Godot behaviours that cost the most time, how to drive a running game, and a
-generated reference for every tool. Without it each agent rediscovers them by hitting them.
-`--no-skill` leaves it out.
-
-{{harnesses}}
+[How it works](architecture.html) has every harness, its file, and what `setup` decides.
 
 The entry is the same everywhere:
 
