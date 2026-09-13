@@ -33,9 +33,9 @@ things worth reporting:
 Every release is built in CI on Linux from a signed commit on `main`, with a frozen
 lockfile, by `release-build.yml`. Each one ships the archive, a SHA-256 sidecar and an SPDX
 SBOM, and carries two Sigstore attestations: build provenance, and the SBOM bound to the
-archive. From 0.2.4 the build and the signing both run in that one reusable workflow, which is
-SLSA Build Level 3, and the attestations are also attached to the release as
-`gdharness-<version>.intoto.jsonl`, so they verify without GitHub's API. Releases are immutable
+archive. The build and the signing both run in that one reusable workflow, which is SLSA Build
+Level 3, and the attestations are attached to the release as `gdharness-<version>.intoto.jsonl`
+as well as stored on the repository, so they verify from the file alone. Releases are immutable
 and the `v*` tags cannot be moved.
 
 ```bash
