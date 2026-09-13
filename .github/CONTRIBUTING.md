@@ -43,11 +43,11 @@ unless it matches a digest written in this repository: the Bun that runs every j
 commit, and zizmor runs from a container image whose digest is fixed by the action's commit. A
 tool that arrives without a digest arrives with one in the same change.
 
-**Every pin is watched by Renovate, digest included.** `renovate.json` is the whole of it: the
-`bun` and `github-actions` managers cover `package.json`, `bun.lock` and every `uses:`; the `uv`
-manager covers gdtoolkit and yamllint in `pyproject.toml` and `uv.lock`, hashes included; and
-three regex managers read the `# renovate:` line above any other pin, so a new one is watched
-the moment it is annotated.
+**Every pin is watched by Renovate, digest included.** `.github/renovate.json` is the whole of
+it: the `bun` and `github-actions` managers cover `package.json`, `bun.lock` and every `uses:`;
+the `uv` manager covers gdtoolkit and yamllint in `pyproject.toml` and `uv.lock`, hashes
+included; and three regex managers read the `# renovate:` line above any other pin, so a new one
+is watched the moment it is annotated.
 Renovate opens two pull requests a week and no others. Monday's carries every raise, majors and
 vulnerability fixes included. Tuesday's regenerates `bun.lock` and `uv.lock`, which is where the
 transitive dependencies move, and it is its own pull request because it changes nothing this
