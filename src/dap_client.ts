@@ -28,6 +28,8 @@ type DAPArrayItem = Record<string, unknown>;
 
 interface ToolResponse {
   content: { type: string; text: string }[];
+  /** Set on a handled failure, so a caller does not read the reason as the answer. */
+  isError?: boolean;
 }
 
 interface ToolArgs {
@@ -320,8 +322,16 @@ export class GodotDAPClient {
     return lines;
   }
 
+  /**
+   * Breakpoints are set on the adapter rather than on a session, so no game has to be running.
+   *
+   * Attaching first would make the useful order impossible: set the breakpoint, start the game,
+   * stop on the line. Attach refuses when nothing is playing, so a caller could only ever set
+   * one on a game already past it.
+   */
   async setBreakpoint(filePath: string, line: number): Promise<DAPBody> {
-    await this.attach();
+    await this.ensureConnected();
+    await this.initialize();
 
     const fileBreakpoints = this.breakpoints.get(filePath) ?? new Set<number>();
     fileBreakpoints.add(line);
@@ -335,7 +345,8 @@ export class GodotDAPClient {
   }
 
   async removeBreakpoint(filePath: string, line: number): Promise<DAPBody> {
-    await this.attach();
+    await this.ensureConnected();
+    await this.initialize();
 
     const fileBreakpoints = this.breakpoints.get(filePath) ?? new Set<number>();
     fileBreakpoints.delete(line);
@@ -500,24 +511,35 @@ export async function handleDAPTool(
         };
       }
 
+      // JSON like every other answer, and with the stack after the step rather than a sentence
+      // about it: where the game is now is the thing the next call is decided on, and a step that
+      // ran off the end of the program has an empty one.
       case 'dap_continue': {
         await client.continue();
-        return {
-          content: [{ type: 'text', text: 'Execution continued.' }],
-        };
+        return { content: [{ type: 'text', text: JSON.stringify({ continued: true }, null, 2) }] };
       }
 
       case 'dap_pause': {
         await client.pause();
         return {
-          content: [{ type: 'text', text: 'Execution paused.' }],
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ paused: true, stack: await client.getStackTrace() }, null, 2),
+            },
+          ],
         };
       }
 
       case 'dap_step_over': {
         await client.stepOver();
         return {
-          content: [{ type: 'text', text: 'Step-over completed.' }],
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ stepped: true, stack: await client.getStackTrace() }, null, 2),
+            },
+          ],
         };
       }
 
@@ -534,12 +556,15 @@ export async function handleDAPTool(
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return {
+      // Marked as the failure it is: without this a caller reads a sentence about what went
+      // wrong as the answer to what it asked, which is the one thing a tool must never do.
+      isError: true,
       content: [
         {
           type: 'text',
           text:
             `DAP tool '${toolName}' failed: ${message}. ` +
-            'If Godot is not running in debug mode, start it with DAP enabled and retry.',
+            'The debug tools answer for a game the editor is playing: start one with editor_run.',
         },
       ],
     };
