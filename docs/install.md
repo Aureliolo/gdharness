@@ -16,29 +16,57 @@ npx -y gdharness@{{version}} setup .
 ```
 
 That installs the addons, enables the editor plugins, registers the runtime autoload, rebuilds the
-class list, and registers the server with the harnesses already set up **in this project**.
+class list, writes the gdharness skill, and registers the server with your harnesses.
 
 Then reconnect the harness so it spawns the server, and check `editor_status` answers.
 
-## What it writes, and where
+## It asks
 
-**Only files inside the project directory, unless you name a harness yourself.** A harness whose
-configuration is machine-wide is reported and left alone:
+Run at a terminal with no harness named, it asks about each one it finds, and writes nothing you
+did not answer for:
 
 ```text
-Cursor: written /home/you/game/.cursor/mcp.json
-Codex CLI: found, not touched. Its config is machine-wide; pass --codex to write it.
+Claude Code is set up here. Add gdharness to it? [Y/n]
+Cursor is installed. Set it up for this project? [Y/n]
+Codex CLI is on this machine and has no project-level config. Write ~/.codex/config.toml?
+That affects every project you open with it. [y/N]
 ```
 
-That is deliberate. Registering a project's Godot path in `~/.codex/config.toml` would put this
-project's server in front of every other project you open with Codex, and installing one project
-is not consent to that. Name it and it is written:
+Name harnesses by flag and it asks nothing, which is how a script or an agent runs it. With no
+terminal and no flags, it writes the harnesses this project already uses and names the rest, so it
+can never hang waiting for an answer nobody can give.
 
 ```bash
-npx -y gdharness@{{version}} setup . --codex          # yes, write the machine-wide one
-npx -y gdharness@{{version}} setup . --cursor --vscode # only these two, detected or not
+npx -y gdharness@{{version}} setup . --cursor --vscode # exactly these two, no questions
+npx -y gdharness@{{version}} setup . --codex           # yes, write the machine-wide one
+npx -y gdharness@{{version}} setup . --yes             # no questions, no machine-wide writes
 npx -y gdharness@{{version}} setup . --no-connect      # addons only, no configuration at all
 ```
+
+## What it writes, and where
+
+**Nothing outside the project directory without a flag or a typed yes.** Eight of the harnesses
+below have no project-level config at all, and for those a yes writes the machine-wide file,
+because that is their limitation rather than a choice we can make better.
+
+```text
+Claude Code, Copilot CLI, Qoder, Command Code: written /home/you/game/.mcp.json
+skill: written /home/you/game/.agents/skills/gdharness
+skill: written /home/you/game/.claude/skills/gdharness
+```
+
+Four harnesses read the same `.mcp.json`, so it is written once and all four are named.
+
+## The skill
+
+`setup` writes `.agents/skills/gdharness/`, which is the cross-tool skills convention: Codex looks
+nowhere else, and Cursor, VS Code, Copilot, Gemini CLI, opencode, Junie, Windsurf and Hermes all
+read it too. Claude Code, Kiro and Cline do not, so they get a copy in their own directory when
+they are one of the harnesses being set up.
+
+It holds the five Godot behaviours that cost the most time, how to drive a running game, and a
+generated reference for every tool. Without it each agent rediscovers them by hitting them.
+`--no-skill` leaves it out.
 
 {{harnesses}}
 

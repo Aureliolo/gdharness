@@ -23,16 +23,21 @@ npx -y gdharness@{{version}} setup .
 ```
 
 It installs the addons, enables the editor plugins, registers the runtime autoload, rebuilds the
-class list, and registers the server with the harnesses already set up in this project. It prints
-what it wrote and where. Anything it hands back as a command or a block to paste is yours to apply.
+class list, writes the skill, and registers the server with the harnesses already set up in this
+project. It prints what it wrote and where. Anything it hands back as a command or a block to
+paste is yours to apply.
 
-**It writes nothing outside the project directory unless a harness is named.** One whose config is
-machine-wide is reported instead, with the flag that would write it. Do not pass that flag on the
-reader's behalf: it changes every other project they open with that harness.
+**It writes nothing outside the project directory without a flag or an answered prompt.** Run from
+a pipe, as you are, it asks nothing: it writes the harnesses this project already uses and names
+the rest. Do not pass a machine-wide harness's flag on the reader's behalf, because it changes
+every other project they open with that harness. Report what it named and let them choose.
 
-Name harnesses with `--claude-code`, `--cursor`, `--vscode`, `--opencode`, `--junie`, `--kiro`,
-`--codex`, `--gemini`, `--copilot-cli`, `--windsurf`, `--hermes`. `--no-connect` installs the
-addons and writes no config at all.
+It also writes `.agents/skills/gdharness/`, the operating contract for this server in the format
+your harness reads, plus a copy in `.claude/skills`, `.kiro/skills` or `.cline/skills` for the
+three that do not read the shared directory. Read `SKILL.md` before your first tool call.
+
+`gdharness harnesses` lists every flag. `--no-connect` installs the addons and writes no config at
+all; `--no-skill` leaves the skill out; `--no-runtime` leaves the autoload out.
 
 If this project generates its MCP config from a template, pass `--no-connect` and edit the
 template instead.
