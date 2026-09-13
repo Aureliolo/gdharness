@@ -52,8 +52,9 @@ purpose rather than being satisfied by an account that approves without reading:
 - **Code-Review** counts changesets approved by someone other than their author.
 - **Branch-Protection** scores in tiers, and every tier past the first needs required
   approvals. Everything a single maintainer can enforce on `main` is on: pull requests, the
-  required checks, up-to-date branches, last-push approval, stale reviews dismissed, no force
-  pushes, no deletion, and administrators bound by all of it.
+  required checks, up-to-date branches, stale reviews dismissed, no force pushes, no deletion,
+  and administrators bound by all of it. Last-push approval is not: it blocks a merge that
+  nobody else has approved even when no approvals are required.
 - **Contributors** counts the organisations behind recent committers.
 
 **Maintained** reads 0 until the repository is 90 days old, and **Packaging** is not scored
