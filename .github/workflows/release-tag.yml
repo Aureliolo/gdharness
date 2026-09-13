@@ -50,8 +50,18 @@ jobs:
           fi
 
           if gh api "repos/${GH_REPO}/git/ref/tags/v${version}" >/dev/null 2>&1; then
-            echo "v${version} is already tagged; nothing to do."
-            exit 0
+            # Resolved through commits/ so an annotated tag answers with its commit too. A failing
+            # gh api writes the response body to stdout, so it is only run once the ref is known.
+            tagged="$(gh api "repos/${GH_REPO}/commits/v${version}" --jq .sha)"
+
+            if [[ "${tagged}" == "${GITHUB_SHA}" ]]; then
+              echo "v${version} already points at this commit; nothing to do."
+              exit 0
+            fi
+
+            echo "v${version} is tagged at ${tagged}, not ${GITHUB_SHA}, so this version cannot" >&2
+            echo "be released. The fork inherited GoPeak's tags: v1.1.0 and the v2 line are taken." >&2
+            exit 1
           fi
 
           gh api "repos/${GH_REPO}/git/refs" \
