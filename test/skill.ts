@@ -63,6 +63,21 @@ function testTheSkillMeetsTheFormat(): void {
   // that matches, while the references are read when they are needed.
   const lines = skill.split('\n').length;
   assert.ok(lines < 500, `SKILL.md is ${lines} lines, and the format asks for under 500`);
+
+  // A blank line between two bullets ends the list and starts another, which reads as two
+  // unrelated lists to anything that renders markdown. One got in here by editing around a
+  // bullet, and it is invisible in the source.
+  const rows = skill.split('\n');
+  for (const [index, line] of rows.entries()) {
+    if (line.trim() !== '' || !rows[index - 1]?.startsWith('- ') || !rows[index + 1]?.startsWith('- ')) {
+      continue;
+    }
+    assert.fail(`a blank line splits the list at line ${index + 1}: ${rows[index - 1]}`);
+  }
+
+  // The project directory is the one you are standing in, so a command here should not carry a
+  // placeholder for it.
+  assert.doesNotMatch(skill, /<project>/, 'no command in the skill should ask for a path to fill in');
 }
 
 function testTheReferenceIsTheServersOwnToolList(): void {
