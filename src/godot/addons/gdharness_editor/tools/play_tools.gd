@@ -8,6 +8,9 @@ extends Node
 ## editor to play means the debugger it owns is holding the game, which is what makes the debug
 ## tools answer at all.
 
+## What the display server calls itself when the engine was started with no display at all.
+const HEADLESS_DISPLAY: String = "headless"
+
 var _editor_plugin: EditorPlugin = null
 
 
@@ -56,7 +59,12 @@ func restart_editor(_args: Dictionary) -> Dictionary:
 	# editor restarted by anybody comes up as a project manager with no project, holding the
 	# desktop of whoever was unlucky enough to be watching. A windowed editor was started with
 	# none of that, so Godot's own restart brings back the same editor on the same project.
-	if not DisplayServer.window_can_draw():
+	#
+	# Asked of the display server rather than of the window, because window_can_draw answers no
+	# for a window that is merely minimised. An editor sitting in the taskbar was told it was
+	# headless and refused to restart, which is exactly the editor somebody wants restarted after
+	# an upgrade: nobody minimises a window they are watching.
+	if DisplayServer.get_name() == HEADLESS_DISPLAY:
 		return {
 			"ok": false,
 			"error":

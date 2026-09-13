@@ -38,7 +38,7 @@ import { GodotLSPClient, handleLSPTool } from './lsp_client.js';
 import { resolveWithinProject } from './paths.js';
 import { projectStructure, searchProject } from './project-scan.js';
 import { parseProjectGodot, setupResourceHandlers } from './resources.js';
-import { chooseRuntime, discoverRuntimes, runtimeRequest } from './runtime-client.js';
+import { chooseRuntime, discoverRuntimes, runtimeDirectory, runtimeRequest } from './runtime-client.js';
 import type {
   GodotProcess,
   MCPToolDefinition,
@@ -1591,9 +1591,14 @@ class GodotServer {
       return engine.response;
     }
     this.logDebug(`Launching Godot editor for project: ${project.value.path}`);
+    // Told rather than left to derive. A game is started by the editor and inherits its
+    // environment, not this server's, so an editor opened without TMP or TEMP set announces its
+    // games somewhere this server never looks first. Passing the directory down makes the two
+    // agree by construction for every editor gdharness opened.
     const editor = spawn(engine.value, editorArguments(project.value.path), {
       stdio: 'ignore',
       detached: true,
+      env: { ...process.env, GDHARNESS_RUNTIME_DIR: runtimeDirectory() },
     });
     const started = await new Promise<string | null>((resolve) => {
       editor.once('spawn', () => {
