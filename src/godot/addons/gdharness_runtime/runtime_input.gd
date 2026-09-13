@@ -25,7 +25,7 @@ func inject_action(params: Dictionary) -> Dictionary:
 	if not InputMap.has_action(action):
 		return {"type": "error", "message": "Action not found: " + action}
 
-	var event := InputEventAction.new()
+	var event: InputEventAction = InputEventAction.new()
 	event.action = action
 	event.pressed = pressed
 	event.strength = strength
@@ -45,7 +45,7 @@ func inject_key(params: Dictionary) -> Dictionary:
 			key_label = named
 	var keycode: int = 0 if keycode_raw is String else int(keycode_raw)
 
-	var event := InputEventKey.new()
+	var event: InputEventKey = InputEventKey.new()
 	event.pressed = pressed
 
 	if not key_label.is_empty():
@@ -218,7 +218,7 @@ func click(params: Dictionary) -> Dictionary:
 
 
 func _motion(position: Vector2, relative: Vector2) -> InputEventMouseMotion:
-	var event := InputEventMouseMotion.new()
+	var event: InputEventMouseMotion = InputEventMouseMotion.new()
 	event.position = position
 	event.global_position = position
 	event.relative = relative
@@ -226,7 +226,7 @@ func _motion(position: Vector2, relative: Vector2) -> InputEventMouseMotion:
 
 
 func _button(position: Vector2, button: int, pressed: bool, double: bool) -> InputEventMouseButton:
-	var event := InputEventMouseButton.new()
+	var event: InputEventMouseButton = InputEventMouseButton.new()
 	event.position = position
 	event.global_position = position
 	event.button_index = button as MouseButton

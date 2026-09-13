@@ -28,6 +28,10 @@ complete, hardened and actually working.
   naming the valid set, never a silent default.
 - **Every mutation reads back.** A tool that writes returns the engine's actual state
   afterwards, read back from the engine, never an echo of the request.
+- **Strict projects are the baseline.** Every shipped script, and every script the tools
+  write, parses with all of GDScript's warnings raised to errors, and CI parses them that
+  way: a project configured like that parses the addons and the operations under its own
+  settings, and a harness that will not load there is no harness.
 - **Few tools, shaped like tasks.** Around 30, not 100. A server whose tool list does not
   fit in a context window has too many tools, not a missing pagination feature.
 - **Answers are sized.** Anything that can return a lot takes a detail level and defaults to

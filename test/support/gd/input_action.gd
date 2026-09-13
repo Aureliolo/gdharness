@@ -10,7 +10,7 @@ const InputActions = preload("res://operations/input_actions.gd")
 const Log = preload("res://operations/logger.gd")
 
 var failures: Array[String] = []
-var actions := InputActions.new(Log.new())
+var actions: InputActions = InputActions.new(Log.new())
 
 
 func _init() -> void:
@@ -35,14 +35,14 @@ func _fail(message: String) -> void:
 ## Saves one action and reads it back through ConfigFile, which is how Godot itself loads
 ## project.godot, and hands back whatever the engine made of the stored value.
 func _round_trip(action: Dictionary) -> Variant:
-	var path := "user://input_action_fixture.cfg"
-	var config := ConfigFile.new()
+	var path: String = "user://input_action_fixture.cfg"
+	var config: ConfigFile = ConfigFile.new()
 	config.set_value("input", "fixture", action)
 	if config.save(path) != OK:
 		_fail("could not save the fixture config")
 		return null
 
-	var reread := ConfigFile.new()
+	var reread: ConfigFile = ConfigFile.new()
 	if reread.load(path) != OK:
 		_fail("could not load the fixture config back")
 		return null
@@ -57,7 +57,8 @@ func _events_of(label: String, action: Dictionary, expected_count: int) -> Array
 		)
 		return []
 
-	var events: Array = stored.get("events", [])
+	var loaded: Dictionary = stored
+	var events: Array = loaded.get("events", [])
 	if events.size() != expected_count:
 		_fail("%s event count: expected %d, got %d" % [label, expected_count, events.size()])
 		return []
@@ -65,7 +66,7 @@ func _events_of(label: String, action: Dictionary, expected_count: int) -> Array
 
 
 func _check_key() -> void:
-	var action := (
+	var action: Dictionary = (
 		actions
 		. build_input_action(
 			0.5,
@@ -84,14 +85,14 @@ func _check_key() -> void:
 	if not is_equal_approx(action.get("deadzone", -1.0), 0.5):
 		_fail("key action deadzone: %s" % str(action.get("deadzone")))
 
-	var events := _events_of("key action", action, 1)
+	var events: Array = _events_of("key action", action, 1)
 	if events.is_empty():
 		return
 
-	var event := events[0] as InputEventKey
-	if event == null:
+	if not events[0] is InputEventKey:
 		_fail("key action event is not an InputEventKey: %s" % str(events[0]))
 		return
+	var event: InputEventKey = events[0]
 	if event.keycode != KEY_SPACE:
 		_fail("key action keycode: %d" % event.keycode)
 	if not event.ctrl_pressed:
@@ -103,24 +104,24 @@ func _check_key() -> void:
 
 
 func _check_mouse_button() -> void:
-	var action := actions.build_input_action(
+	var action: Dictionary = actions.build_input_action(
 		0.2, [{"class_name": "InputEventMouseButton", "button_index": MOUSE_BUTTON_RIGHT}]
 	)
 
-	var events := _events_of("mouse action", action, 1)
+	var events: Array = _events_of("mouse action", action, 1)
 	if events.is_empty():
 		return
 
-	var event := events[0] as InputEventMouseButton
-	if event == null:
+	if not events[0] is InputEventMouseButton:
 		_fail("mouse action event is not an InputEventMouseButton: %s" % str(events[0]))
 		return
+	var event: InputEventMouseButton = events[0]
 	if event.button_index != MOUSE_BUTTON_RIGHT:
 		_fail("mouse action button index: %d" % event.button_index)
 
 
 func _check_joypad() -> void:
-	var action := (
+	var action: Dictionary = (
 		actions
 		. build_input_action(
 			0.3,
@@ -131,20 +132,21 @@ func _check_joypad() -> void:
 		)
 	)
 
-	var events := _events_of("joypad action", action, 2)
+	var events: Array = _events_of("joypad action", action, 2)
 	if events.is_empty():
 		return
 
-	var button := events[0] as InputEventJoypadButton
-	if button == null:
+	if not events[0] is InputEventJoypadButton:
 		_fail("joypad button event is not an InputEventJoypadButton: %s" % str(events[0]))
-	elif button.button_index != JOY_BUTTON_A:
-		_fail("joypad button index: %d" % button.button_index)
+	else:
+		var button: InputEventJoypadButton = events[0]
+		if button.button_index != JOY_BUTTON_A:
+			_fail("joypad button index: %d" % button.button_index)
 
-	var motion := events[1] as InputEventJoypadMotion
-	if motion == null:
+	if not events[1] is InputEventJoypadMotion:
 		_fail("joypad motion event is not an InputEventJoypadMotion: %s" % str(events[1]))
 		return
+	var motion: InputEventJoypadMotion = events[1]
 	if motion.axis != JOY_AXIS_LEFT_X:
 		_fail("joypad motion axis: %d" % motion.axis)
 	if not is_equal_approx(motion.axis_value, -1.0):
@@ -155,14 +157,14 @@ func _check_joypad() -> void:
 ## and every assertion above would have caught that, but the file itself is what a human opens,
 ## so the shape on disk is pinned too.
 func _check_written_form() -> void:
-	var path := "user://input_action_written.cfg"
-	var config := ConfigFile.new()
+	var path: String = "user://input_action_written.cfg"
+	var config: ConfigFile = ConfigFile.new()
 	config.set_value("input", "fixture", actions.build_input_action(0.5, [{"class_name": "InputEventKey"}]))
 	if config.save(path) != OK:
 		_fail("could not save the written-form config")
 		return
 
-	var text := FileAccess.get_file_as_string(path)
+	var text: String = FileAccess.get_file_as_string(path)
 	if text.contains('fixture="'):
 		_fail("the action was written as a quoted string:\n%s" % text)
 	if not text.contains("Object(InputEventKey"):

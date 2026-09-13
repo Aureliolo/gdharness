@@ -66,15 +66,18 @@ func _check_serialize() -> void:
 
 	# Arrays and dictionaries recurse, so a flattened branch shows up as an untagged member.
 	var nested: Variant = values.serialize_value([Vector2(1, 1), {"inner": Vector3(2, 2, 2)}])
-	if not nested is Array or nested.size() != 2:
+	if not nested is Array:
 		_fail("array shape: %s" % JSON.stringify(nested))
 	else:
 		var members: Array = nested
-		var inner: Dictionary = members[1]
-		if _tag_of(members[0]) != "Vector2":
-			_fail("array member: %s" % JSON.stringify(nested))
-		elif _tag_of(inner["inner"]) != "Vector3":
-			_fail("nested dictionary member: %s" % JSON.stringify(nested))
+		if members.size() != 2:
+			_fail("array shape: %s" % JSON.stringify(members))
+		else:
+			var inner: Dictionary = members[1]
+			if _tag_of(members[0]) != "Vector2":
+				_fail("array member: %s" % JSON.stringify(members))
+			elif _tag_of(inner["inner"]) != "Vector3":
+				_fail("nested dictionary member: %s" % JSON.stringify(members))
 
 	# A Resource is also an Object, so the Resource branch has to be reached first or the path
 	# is dropped and the caller gets a bare class name back.

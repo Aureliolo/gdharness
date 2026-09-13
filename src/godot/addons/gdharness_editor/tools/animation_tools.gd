@@ -40,7 +40,7 @@ func _reload_scene_in_editor(scene_path: String) -> void:
 func _load_scene(scene_path: String) -> Array:
 	if not FileAccess.file_exists(scene_path):
 		return [null, {"ok": false, "error": "Scene not found: " + scene_path}]
-	var packed: PackedScene = load(scene_path) as PackedScene
+	var packed: PackedScene = load(scene_path)
 	if not packed:
 		return [null, {"ok": false, "error": "Failed to load: " + scene_path}]
 	var root: Node = packed.instantiate()
@@ -50,7 +50,7 @@ func _load_scene(scene_path: String) -> Array:
 
 
 func _save_scene(scene_root: Node, scene_path: String) -> Dictionary:
-	var packed := PackedScene.new()
+	var packed: PackedScene = PackedScene.new()
 	if packed.pack(scene_root) != OK:
 		scene_root.queue_free()
 		return {"ok": false, "error": "Failed to pack scene"}
@@ -112,12 +112,15 @@ func _get_default_animation_library(player: AnimationPlayer) -> AnimationLibrary
 	if anim_lib:
 		return anim_lib
 	anim_lib = AnimationLibrary.new()
-	var add_lib_err := player.add_animation_library("", anim_lib)
+	var add_lib_err: Error = player.add_animation_library("", anim_lib)
 	if add_lib_err != OK:
 		return null
 	return anim_lib
 
 
+## The state machine at a slash-separated path of nested state machine names, or null when
+## any step of the path is not one. Every node in a tree of state machines is a state machine
+## itself, so the walk asks each step for the child by name and refuses anything else.
 func _get_state_machine(
 	anim_tree: AnimationTree, state_machine_path: String = ""
 ) -> AnimationNodeStateMachine:
@@ -126,14 +129,14 @@ func _get_state_machine(
 	if state_machine_path.is_empty() or state_machine_path == "root":
 		return anim_tree.tree_root as AnimationNodeStateMachine
 
-	var current: Variant = anim_tree.tree_root
+	var current: AnimationNodeStateMachine = anim_tree.tree_root as AnimationNodeStateMachine
 	for segment: String in state_machine_path.split("/", false):
 		if segment.is_empty():
 			continue
-		if current == null or not current.has_method("get_node"):
+		if current == null or not current.has_node(StringName(segment)):
 			return null
-		current = current.call("get_node", StringName(segment))
-	return current as AnimationNodeStateMachine
+		current = current.get_node(StringName(segment)) as AnimationNodeStateMachine
+	return current
 
 
 # =============================================================================
@@ -150,9 +153,10 @@ func create_animation(args: Dictionary) -> Dictionary:
 	if animation_name.strip_edges().is_empty():
 		return {"ok": false, "error": "Missing animationName"}
 
-	var loaded := _load_scene(scene_path)
-	if not loaded[1].is_empty():
-		return loaded[1]
+	var loaded: Array = _load_scene(scene_path)
+	var refused: Dictionary = loaded[1]
+	if not refused.is_empty():
+		return refused
 
 	var scene_root: Node = loaded[0]
 	var player: AnimationPlayer = _find_node(scene_root, player_node_path) as AnimationPlayer
@@ -160,7 +164,7 @@ func create_animation(args: Dictionary) -> Dictionary:
 		scene_root.queue_free()
 		return {"ok": false, "error": "AnimationPlayer not found at: " + player_node_path}
 
-	var anim_lib := _get_default_animation_library(player)
+	var anim_lib: AnimationLibrary = _get_default_animation_library(player)
 	if not anim_lib:
 		scene_root.queue_free()
 		return {"ok": false, "error": "Failed to create default AnimationLibrary"}
@@ -168,7 +172,7 @@ func create_animation(args: Dictionary) -> Dictionary:
 		scene_root.queue_free()
 		return {"ok": false, "error": "Animation already exists: " + animation_name}
 
-	var loop_mode := Animation.LOOP_NONE
+	var loop_mode: Animation.LoopMode = Animation.LOOP_NONE
 	match loop_mode_name:
 		"linear":
 			loop_mode = Animation.LOOP_LINEAR
@@ -178,17 +182,17 @@ func create_animation(args: Dictionary) -> Dictionary:
 			loop_mode_name = "none"
 			loop_mode = Animation.LOOP_NONE
 
-	var anim := Animation.new()
+	var anim: Animation = Animation.new()
 	anim.length = float(args.get("length", 1.0))
 	anim.loop_mode = loop_mode
 	anim.step = float(args.get("step", 0.1))
 
-	var add_err := anim_lib.add_animation(StringName(animation_name), anim)
+	var add_err: Error = anim_lib.add_animation(StringName(animation_name), anim)
 	if add_err != OK:
 		scene_root.queue_free()
-		return {"ok": false, "error": "Failed to add animation: " + str(add_err)}
+		return {"ok": false, "error": "Failed to add animation: " + error_string(add_err)}
 
-	var save_err := _save_scene(scene_root, scene_path)
+	var save_err: Dictionary = _save_scene(scene_root, scene_path)
 	if not save_err.is_empty():
 		return save_err
 
@@ -216,9 +220,10 @@ func add_animation_track(args: Dictionary) -> Dictionary:
 	if track.is_empty():
 		return {"ok": false, "error": "Missing track"}
 
-	var loaded := _load_scene(scene_path)
-	if not loaded[1].is_empty():
-		return loaded[1]
+	var loaded: Array = _load_scene(scene_path)
+	var refused: Dictionary = loaded[1]
+	if not refused.is_empty():
+		return refused
 
 	var scene_root: Node = loaded[0]
 	var player: AnimationPlayer = _find_node(scene_root, player_node_path) as AnimationPlayer
@@ -237,7 +242,7 @@ func add_animation_track(args: Dictionary) -> Dictionary:
 		return {"ok": false, "error": "Animation not found: " + animation_name}
 
 	var track_type: String = str(track.get("type", ""))
-	var track_idx := -1
+	var track_idx: int = -1
 	var keyframes: Array = track.get("keyframes", [])
 
 	match track_type:
@@ -249,9 +254,10 @@ func add_animation_track(args: Dictionary) -> Dictionary:
 				return {"ok": false, "error": "track.property is required for property track"}
 			track_idx = anim.add_track(Animation.TYPE_VALUE)
 			anim.track_set_path(track_idx, NodePath(node_path_str + ":" + prop_name))
-			for keyframe: Variant in keyframes:
-				if typeof(keyframe) != TYPE_DICTIONARY:
+			for entry: Variant in keyframes:
+				if typeof(entry) != TYPE_DICTIONARY:
 					continue
+				var keyframe: Dictionary = entry
 				var raw_value: Variant = keyframe.get("value")
 				var parsed_value: Variant = (
 					_parse_json_maybe(raw_value) if typeof(raw_value) == TYPE_STRING else raw_value
@@ -266,26 +272,20 @@ func add_animation_track(args: Dictionary) -> Dictionary:
 				return {"ok": false, "error": "track.method is required for method track"}
 			track_idx = anim.add_track(Animation.TYPE_METHOD)
 			anim.track_set_path(track_idx, NodePath(method_node_path))
-			for keyframe: Variant in keyframes:
-				if typeof(keyframe) != TYPE_DICTIONARY:
+			for entry: Variant in keyframes:
+				if typeof(entry) != TYPE_DICTIONARY:
 					continue
-				(
-					anim
-					. track_insert_key(
-						track_idx,
-						float(keyframe.get("time", 0.0)),
-						{
-							"method": method_name,
-							"args": _parse_method_args(keyframe.get("args", [])),
-						}
-					)
-				)
+				var keyframe: Dictionary = entry
+				var invocation: Dictionary = {
+					"method": method_name, "args": _parse_method_args(keyframe.get("args", []))
+				}
+				anim.track_insert_key(track_idx, float(keyframe.get("time", 0.0)), invocation)
 
 		_:
 			scene_root.queue_free()
 			return {"ok": false, "error": "Unsupported track.type: " + track_type}
 
-	var save_err := _save_scene(scene_root, scene_path)
+	var save_err: Dictionary = _save_scene(scene_root, scene_path)
 	if not save_err.is_empty():
 		return save_err
 
@@ -311,9 +311,10 @@ func add_animation_state(args: Dictionary) -> Dictionary:
 	if animation_name.is_empty():
 		return {"ok": false, "error": "Missing animationName"}
 
-	var loaded := _load_scene(scene_path)
-	if not loaded[1].is_empty():
-		return loaded[1]
+	var loaded: Array = _load_scene(scene_path)
+	var refused: Dictionary = loaded[1]
+	if not refused.is_empty():
+		return refused
 
 	var scene_root: Node = loaded[0]
 	var anim_tree: AnimationTree = _find_node(scene_root, anim_tree_path) as AnimationTree
@@ -321,16 +322,16 @@ func add_animation_state(args: Dictionary) -> Dictionary:
 		scene_root.queue_free()
 		return {"ok": false, "error": "AnimationTree not found at: " + anim_tree_path}
 
-	var sm := _get_state_machine(anim_tree, state_machine_path)
+	var sm: AnimationNodeStateMachine = _get_state_machine(anim_tree, state_machine_path)
 	if not sm:
 		scene_root.queue_free()
 		return {"ok": false, "error": "AnimationNodeStateMachine not found"}
 
-	var anim_node := AnimationNodeAnimation.new()
+	var anim_node: AnimationNodeAnimation = AnimationNodeAnimation.new()
 	anim_node.animation = StringName(animation_name)
 	sm.add_node(StringName(state_name), anim_node)
 
-	var save_err := _save_scene(scene_root, scene_path)
+	var save_err: Dictionary = _save_scene(scene_root, scene_path)
 	if not save_err.is_empty():
 		return save_err
 
@@ -356,9 +357,10 @@ func connect_animation_states(args: Dictionary) -> Dictionary:
 	if from_state.is_empty() or to_state.is_empty():
 		return {"ok": false, "error": "Missing fromState or toState"}
 
-	var loaded := _load_scene(scene_path)
-	if not loaded[1].is_empty():
-		return loaded[1]
+	var loaded: Array = _load_scene(scene_path)
+	var refused: Dictionary = loaded[1]
+	if not refused.is_empty():
+		return refused
 
 	var scene_root: Node = loaded[0]
 	var anim_tree: AnimationTree = _find_node(scene_root, anim_tree_path) as AnimationTree
@@ -366,12 +368,12 @@ func connect_animation_states(args: Dictionary) -> Dictionary:
 		scene_root.queue_free()
 		return {"ok": false, "error": "AnimationTree not found at: " + anim_tree_path}
 
-	var sm := _get_state_machine(anim_tree, state_machine_path)
+	var sm: AnimationNodeStateMachine = _get_state_machine(anim_tree, state_machine_path)
 	if not sm:
 		scene_root.queue_free()
 		return {"ok": false, "error": "AnimationNodeStateMachine not found"}
 
-	var transition := AnimationNodeStateMachineTransition.new()
+	var transition: AnimationNodeStateMachineTransition = AnimationNodeStateMachineTransition.new()
 	match transition_type:
 		"sync":
 			transition.switch_mode = AnimationNodeStateMachineTransition.SWITCH_MODE_SYNC
@@ -388,7 +390,7 @@ func connect_animation_states(args: Dictionary) -> Dictionary:
 
 	sm.add_transition(StringName(from_state), StringName(to_state), transition)
 
-	var save_err := _save_scene(scene_root, scene_path)
+	var save_err: Dictionary = _save_scene(scene_root, scene_path)
 	if not save_err.is_empty():
 		return save_err
 

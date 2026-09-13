@@ -55,7 +55,7 @@ func _init() -> void:
 
 	_log.info("Executing operation: " + operation)
 
-	var payload := _run(operation, params)
+	var payload: Dictionary = _run(operation, params)
 	if payload.is_empty():
 		quit(1)
 		return
@@ -68,11 +68,11 @@ func _init() -> void:
 # because a blob on the command line runs into Windows parsing of \t, \r and \" whatever the
 # quoting. Null means the parameters could not be read, and the reason is already on stderr.
 func _read_params(argument: String) -> Variant:
-	var params_json := argument
+	var params_json: String = argument
 
 	if params_json.begins_with("@file:"):
-		var params_file_path := params_json.substr(6)
-		var params_file := FileAccess.open(params_file_path, FileAccess.READ)
+		var params_file_path: String = params_json.substr(6)
+		var params_file: FileAccess = FileAccess.open(params_file_path, FileAccess.READ)
 		if params_file == null:
 			_log.error("Failed to open params file: " + params_file_path)
 			return null
@@ -81,7 +81,7 @@ func _read_params(argument: String) -> Variant:
 
 	_log.debug("Params JSON: " + params_json)
 
-	var json := JSON.new()
+	var json: JSON = JSON.new()
 	if json.parse(params_json) != OK:
 		_log.error("Failed to parse JSON parameters: " + params_json)
 		_log.error("JSON Error: " + json.get_error_message() + " at line " + str(json.get_error_line()))

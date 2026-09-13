@@ -120,10 +120,13 @@ func _check_positional(tools: SceneTools) -> void:
 
 	# A list parses per item, so a tagged member inside it comes back built.
 	var nested: Variant = tools._parse_value([{"_type": "Vector2", "x": 1, "y": 1}])
-	if not nested is Array or nested.size() != 1:
+	var members: Array = []
+	if nested is Array:
+		members = nested
+	if members.size() != 1:
 		_fail("array shape: %s" % str(nested))
-	elif nested[0] != Vector2(1, 1):
-		_fail("array does not parse its members: %s" % str(nested))
+	elif members[0] != Vector2(1, 1):
+		_fail("array does not parse its members: %s" % str(members))
 
 
 func _check_gaps(tools: SceneTools) -> void:

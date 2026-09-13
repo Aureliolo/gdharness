@@ -63,15 +63,18 @@ func _check(values: Values) -> void:
 		_fail("Transform2D origin: %s" % JSON.stringify(transform))
 
 	var nested: Variant = values.serialize([Vector2(1, 1), {"inner": Vector3(2, 2, 2)}])
-	if not nested is Array or nested.size() != 2:
+	var members: Array = []
+	if nested is Array:
+		members = nested
+	if members.size() != 2:
 		_fail("array shape: %s" % JSON.stringify(nested))
-	elif _tag_of(nested[0]) != "Vector2":
-		_fail("array member: %s" % JSON.stringify(nested))
-
-	var restored: Array = values.deserialize(nested)
-	var restored_inner: Dictionary = restored[1]
-	if restored[0] != Vector2(1, 1) or restored_inner["inner"] != Vector3(2, 2, 2):
-		_fail("nested round trip: %s" % str(restored))
+	elif _tag_of(members[0]) != "Vector2":
+		_fail("array member: %s" % JSON.stringify(members))
+	else:
+		var restored: Array = values.deserialize(members)
+		var restored_inner: Dictionary = restored[1]
+		if restored[0] != Vector2(1, 1) or restored_inner["inner"] != Vector3(2, 2, 2):
+			_fail("nested round trip: %s" % str(restored))
 
 	# A Resource is also an Object, so the Resource branch has to be reached first or the path
 	# is dropped and the caller gets a bare class name back.

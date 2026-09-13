@@ -213,7 +213,7 @@ func _send_welcome(client: StreamPeerTCP) -> void:
 
 
 func _handle_message(client: StreamPeerTCP, line: String) -> void:
-	var json := JSON.new()
+	var json: JSON = JSON.new()
 	if json.parse(line) != OK:
 		_send_error(client, null, "Invalid JSON: " + json.get_error_message())
 		return

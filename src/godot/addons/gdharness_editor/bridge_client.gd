@@ -8,18 +8,18 @@ signal connected
 signal disconnected
 signal tool_requested(request_id: String, tool_name: String, args: Dictionary)
 
-const DEFAULT_URL := "ws://127.0.0.1:6505/godot"
-const RECONNECT_DELAY := 3.0
-const MAX_RECONNECT_DELAY := 30.0
+const DEFAULT_URL: String = "ws://127.0.0.1:6505/godot"
+const RECONNECT_DELAY: float = 3.0
+const MAX_RECONNECT_DELAY: float = 30.0
 
 var socket: WebSocketPeer = WebSocketPeer.new()
 var server_url: String = DEFAULT_URL
-var _is_connected := false
+var _is_connected: bool = false
 var _reconnect_timer: Timer
-var _current_reconnect_delay := RECONNECT_DELAY
-var _should_reconnect := true
+var _current_reconnect_delay: float = RECONNECT_DELAY
+var _should_reconnect: bool = true
 var _project_path: String
-var _initialized := false
+var _initialized: bool = false
 
 
 func _ready() -> void:
@@ -51,7 +51,7 @@ func _process(_delta: float) -> void:
 				_handle_connect()
 
 			while socket.get_available_packet_count() > 0:
-				var packet := socket.get_packet()
+				var packet: PackedByteArray = socket.get_packet()
 				_handle_message(packet.get_string_from_utf8())
 
 		WebSocketPeer.STATE_CLOSING:
@@ -152,7 +152,7 @@ func _handle_message(json_string: String) -> void:
 
 
 func send_tool_result(request_id: String, success: bool, result: Variant = null, error: String = "") -> void:
-	var response := {"type": "tool_result", "id": request_id, "success": success}
+	var response: Dictionary = {"type": "tool_result", "id": request_id, "success": success}
 
 	if success:
 		response["result"] = result
