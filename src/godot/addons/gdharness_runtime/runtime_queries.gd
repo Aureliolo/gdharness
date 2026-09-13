@@ -137,6 +137,35 @@ func get_rect(params: Dictionary) -> Dictionary:
 	}
 
 
+func get_property(params: Dictionary) -> Dictionary:
+	var node_path: String = str(params.get("path", ""))
+	var property: String = str(params.get("property", ""))
+
+	if node_path.is_empty() or property.is_empty():
+		return {"type": "error", "message": "Node path and property required"}
+
+	var node: Node = _host.get_tree().root.get_node_or_null(node_path)
+	if node == null:
+		return {"type": "error", "message": "Node not found: " + node_path}
+
+	# Asked of the property list rather than read and compared to null, because a property the
+	# node does not have and a property that is null both read as null.
+	var known: bool = false
+	for entry: Dictionary in node.get_property_list():
+		if str(entry["name"]) == property:
+			known = true
+			break
+	if not known:
+		return {"type": "error", "message": "%s has no property %s" % [node_path, property]}
+
+	return {
+		"type": "property",
+		"path": node_path,
+		"property": property,
+		"value": _values.serialize(node.get(property)),
+	}
+
+
 func set_property(params: Dictionary) -> Dictionary:
 	var node_path: String = str(params.get("path", ""))
 	var property: String = str(params.get("property", ""))

@@ -59,12 +59,12 @@ parse is refused rather than replaced.
 
 ## Check it works
 
-| Call                                         | Expected                                                   |
-| -------------------------------------------- | ---------------------------------------------------------- |
-| `editor_status`, nothing open                | Reports no editor. Does not fail.                          |
-| `editor_status`, editor open                 | `connected` true, `addonVersion` equal to `serverVersion`. |
-| `project_info`                               | The project name and main scene.                           |
-| `editor_run`, `editor_output`, `editor_stop` | The game starts, its console comes back, it stops.         |
+| Call                                      | Expected                                                   |
+| ----------------------------------------- | ---------------------------------------------------------- |
+| `editor_status`, nothing open             | Reports no editor. Does not fail.                          |
+| `editor_status`, editor open              | `connected` true, `addonVersion` equal to `serverVersion`. |
+| `project_info`                            | The project name and main scene.                           |
+| `editor_run` start, `editor_output`, stop | The game starts, its console comes back, it stops.         |
 
 `gdharness doctor .` exits 1 on any problem and names it.
 

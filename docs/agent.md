@@ -50,7 +50,7 @@ Without it, `runtime_*` has nothing to talk to.
 2. Open the project in the editor. `editor_status`: `connected` true, `addonVersion` equal to
    `serverVersion`. If `addonIsStale`, run `editor_launch restart`.
 3. `project_info`: returns the project name and main scene.
-4. `editor_run`, `editor_output`, `editor_stop`.
+4. `editor_run`, `editor_output`, `editor_run stop`.
 
 ## Updating
 
@@ -88,14 +88,15 @@ browser lookup. If no check ran, say so rather than calling it verified.
 
 - After writing a `class_name`, call `project_import refresh_classes` before running the game.
   Otherwise the game fails with "Could not find type" at the first screen.
-- Use `editor_run` / `editor_output` / `editor_stop`. A game started as its own process has no
-  debugger session.
+- Use `editor_run start` / `editor_output` / `editor_run stop`. A game started as its own process
+  has no debugger session.
 - Set breakpoints before running.
 - Read `editor_output` after every run.
 - Measure the running game: `runtime_inspect` for what is on screen, `runtime_invoke` for a value,
   `runtime_wait` instead of sleeping.
 - `runtime_capture` needs a window and refuses headless.
-- There is no `debug_control pause`. Use a breakpoint.
+- There is no `debug_control pause`. Use a breakpoint, then `debug_state variables` for what is in
+  scope and `debug_control step_into` / `step_out` to move.
 - A refusal lists the valid set. Read it.
 
 ## Reference

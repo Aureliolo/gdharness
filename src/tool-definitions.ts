@@ -186,15 +186,6 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   // project
   // -------------------------------------------------------------------------------------------
   {
-    name: 'project_list',
-    description: 'Finds Godot projects under a directory: every folder holding a project.godot.',
-    parameters: {
-      directory: { type: 'string', description: 'Absolute directory to look in.' },
-      recursive: { type: 'boolean', description: 'Look in subdirectories too. Default false.' },
-    },
-    requires: ['directory'],
-  },
-  {
     name: 'project_info',
     description:
       'What a project is: its name and main scene from project.godot, the Godot that answers, and how many scenes, scripts and assets it holds, with optional sections on top.',
@@ -422,7 +413,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'scene_node',
     description:
-      'One node in a scene file: add, read, set, duplicate, reparent or delete it, give a Sprite2D a texture, or paint TileMap cells. Any ClassDB node type can be added, so a NavigationRegion2D, an AnimationTree or a Camera3D is an add with that nodeType and its properties. Needs the editor connected.',
+      'One node in a scene file: add, read, set, duplicate, reparent or delete it, or paint TileMap cells. Any ClassDB node type can be added, so a NavigationRegion2D, an AnimationTree or a Camera3D is an add with that nodeType and its properties. A property holding a Resource takes the res:// path of one, so a texture, a material or a theme is a set like any other. Needs the editor connected.',
     parameters: {
       projectPath: PROJECT_PATH,
       scenePath: SCENE_PATH,
@@ -440,7 +431,6 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'boolean',
         description: 'get: include properties still at their default. Default false.',
       },
-      texturePath: { type: 'string', description: 'load_sprite: the texture file inside the project.' },
       layer: { type: 'number', description: 'set_tilemap_cells: the TileMap layer. Default 0.' },
       cells: TILEMAP_CELLS,
     },
@@ -452,7 +442,6 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       duplicate: { summary: 'copy a node and its children', requires: ['nodePath', 'newName'] },
       reparent: { summary: 'move a node under another parent', requires: ['nodePath', 'newParentPath'] },
       delete: { summary: 'remove a node and its children', requires: ['nodePath'] },
-      load_sprite: { summary: 'assign a texture to a Sprite2D', requires: ['nodePath', 'texturePath'] },
       set_tilemap_cells: { summary: 'place tiles in a TileMap', requires: ['nodePath', 'cells'] },
     },
   },
@@ -665,7 +654,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'editor_run',
     description:
-      'Runs the project. start keeps it running and collecting output until editor_stop, windowed where there is a display and headless where there is not, unless headless says otherwise; only runtime_capture needs the window. check boots it headless for a few frames, waits for it to quit, and answers with the verdict: whether it came up, and every error and warning it printed on the way.',
+      'The run: starting the project, stopping it, or booting it once to see whether it comes up clean. start keeps it running and collecting output until stop, windowed where there is a display and headless where there is not, unless headless says otherwise; only runtime_capture needs the window. check boots it headless for a few frames, waits for it to quit, and answers with the verdict: whether it came up, and every error and warning it printed on the way.',
     parameters: {
       projectPath: PROJECT_PATH,
       scene: { type: 'string', description: 'A scene to run instead of the main scene.' },
@@ -678,16 +667,11 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     },
     requires: ['projectPath'],
     operations: {
-      start: { summary: 'run the project until editor_stop', requires: [] },
+      start: { summary: 'run the project until stop', requires: [] },
+      stop: { summary: 'end the run and answer with what it printed last', requires: [] },
       check: { summary: 'boot headless, quit after a few frames, and report the verdict', requires: [] },
     },
     defaultOperation: 'start',
-  },
-  {
-    name: 'editor_stop',
-    description: 'Stops the project started by editor_run and answers with what it printed last.',
-    parameters: {},
-    requires: [],
   },
   {
     name: 'editor_output',
@@ -767,13 +751,15 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'runtime_inspect',
     description:
-      'Questions about the running game: the scene tree, the nodes matching a query, where one node is on screen, or the performance metrics. Needs the game running with the runtime addon.',
+      'Questions about the running game: the scene tree, the nodes matching a query, where one node is on screen, what one property reads, or the performance metrics. Needs the game running with the runtime addon.',
     parameters: {
       projectPath: RUNNING_PROJECT_PATH,
       nodePath: {
         type: 'string',
-        description: 'tree, find: where to start, default /root. rect: the node to place.',
+        description:
+          'tree, find: where to start, default /root. rect: the node to place. property: the node to read.',
       },
+      property: { type: 'string', description: 'property: which one to read.' },
       depth: { type: 'number', description: 'tree: levels to descend. Default 3.' },
       includeProperties: {
         type: 'boolean',
@@ -806,6 +792,10 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       rect: {
         summary: "one node's rectangle or position, in canvas and in window pixels",
         requires: ['nodePath'],
+      },
+      property: {
+        summary: 'what one property reads on a node, refusing a property the node does not have',
+        requires: ['nodePath', 'property'],
       },
       metrics: { summary: 'frame time, memory, draw calls and the rest', requires: [] },
     },
@@ -938,21 +928,30 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'debug_control',
     description:
-      "Continues or steps the debugged game through the editor's debug adapter. There is no pause: measured on 4.7.2, Godot takes a pause request, reports the game as stopped and leaves it running, so hold the game where you want it with a breakpoint.",
+      "Continues or steps the debugged game through the editor's debug adapter, answering with the stack where it ended up. There is no pause: measured on 4.7.2, Godot takes a pause request, reports the game as stopped and leaves it running, so hold the game where you want it with a breakpoint.",
     parameters: {},
     requires: [],
     operations: {
       continue: { summary: 'resume after a breakpoint', requires: [] },
       step_over: { summary: 'run the current line', requires: [] },
+      step_into: { summary: 'run the current line, stopping inside whatever it calls', requires: [] },
+      step_out: { summary: 'run to the end of this function and stop in its caller', requires: [] },
     },
   },
   {
     name: 'debug_state',
-    description: "The stack trace at the current break, or the debug adapter's console output so far.",
-    parameters: {},
+    description:
+      "Where the debugged game is stopped: the stack trace, what is in scope at a frame with the values, or the debug adapter's console output so far.",
+    parameters: {
+      frameId: {
+        type: 'number',
+        description: 'variables: which frame, from a stack answer. Default the innermost.',
+      },
+    },
     requires: [],
     operations: {
       stack: { summary: 'the stack trace', requires: [] },
+      variables: { summary: 'locals, members and globals at a frame, with their values', requires: [] },
       output: { summary: 'console output captured through the debug adapter', requires: [] },
     },
     defaultOperation: 'stack',

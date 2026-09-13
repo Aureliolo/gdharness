@@ -50,6 +50,7 @@ func _init() -> void:
 		"get_tree": _queries.get_tree,
 		"find_nodes": _queries.find_nodes,
 		"get_rect": _queries.get_rect,
+		"get_property": _queries.get_property,
 		"set_property": _queries.set_property,
 		"call_method": _queries.call_method,
 		"get_metrics": _queries.get_metrics,

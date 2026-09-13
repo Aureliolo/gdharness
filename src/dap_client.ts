@@ -35,6 +35,7 @@ interface ToolResponse {
 interface ToolArgs {
   scriptPath?: unknown;
   line?: unknown;
+  frameId?: unknown;
 }
 
 export class GodotDAPClient {
@@ -376,6 +377,18 @@ export class GodotDAPClient {
     await this.sendRequest('next', { threadId: resolvedThreadId });
   }
 
+  async stepInto(threadId?: number): Promise<void> {
+    await this.attach();
+    const resolvedThreadId = await this.resolveThreadId(threadId);
+    await this.sendRequest('stepIn', { threadId: resolvedThreadId });
+  }
+
+  async stepOut(threadId?: number): Promise<void> {
+    await this.attach();
+    const resolvedThreadId = await this.resolveThreadId(threadId);
+    await this.sendRequest('stepOut', { threadId: resolvedThreadId });
+  }
+
   async getStackTrace(threadId?: number): Promise<DAPArrayItem[]> {
     await this.attach();
     const resolvedThreadId = await this.resolveThreadId(threadId);
@@ -402,6 +415,37 @@ export class GodotDAPClient {
     }
 
     return [];
+  }
+
+  /**
+   * What is in scope at a frame: locals, members and globals, each with its values.
+   *
+   * Three requests deep, because that is the shape DAP has: a frame has scopes, and a scope has a
+   * reference that the values hang off. Nobody stopped at a breakpoint wants to make all three.
+   */
+  async getScopes(frameId?: number): Promise<{ name: string; variables: DAPArrayItem[] }[]> {
+    await this.attach();
+    const frames = await this.getStackTrace();
+    const frame = frameId === undefined ? frames[0] : frames.find((each) => each['id'] === frameId);
+    if (frame === undefined) {
+      return [];
+    }
+
+    const response = await this.sendRequest('scopes', { frameId: frame['id'] });
+    const scopes = response['scopes'];
+    if (!Array.isArray(scopes)) {
+      return [];
+    }
+
+    const named: { name: string; variables: DAPArrayItem[] }[] = [];
+    for (const scope of scopes as DAPArrayItem[]) {
+      const reference = scope['variablesReference'];
+      named.push({
+        name: typeof scope['name'] === 'string' ? scope['name'] : 'scope',
+        variables: typeof reference === 'number' ? await this.getVariables(reference) : [],
+      });
+    }
+    return named;
   }
 
   isConnected(): boolean {
@@ -510,8 +554,16 @@ export async function handleDAPTool(
         return { content: [{ type: 'text', text: JSON.stringify({ continued: true }, null, 2) }] };
       }
 
-      case 'dap_step_over': {
-        await client.stepOver();
+      case 'dap_step_over':
+      case 'dap_step_into':
+      case 'dap_step_out': {
+        if (toolName === 'dap_step_into') {
+          await client.stepInto();
+        } else if (toolName === 'dap_step_out') {
+          await client.stepOut();
+        } else {
+          await client.stepOver();
+        }
         return {
           content: [
             {
@@ -526,6 +578,14 @@ export async function handleDAPTool(
         const stack = await client.getStackTrace();
         return {
           content: [{ type: 'text', text: JSON.stringify(stack, null, 2) }],
+        };
+      }
+
+      case 'dap_get_variables': {
+        const frameId = typeof safeArgs.frameId === 'number' ? safeArgs.frameId : undefined;
+        const scopes = await client.getScopes(frameId);
+        return {
+          content: [{ type: 'text', text: JSON.stringify({ scopes }, null, 2) }],
         };
       }
 

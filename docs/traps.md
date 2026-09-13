@@ -35,7 +35,8 @@ clicked headless.
 ### There is no pause
 
 Godot's debug adapter answers a pause request, sends a stopped event, and leaves the game running.
-`debug_control` has `continue` and `step_over` only. Use a breakpoint.
+`debug_control` continues and steps but cannot pause. Stop the game with a breakpoint, then
+`debug_state variables` reads what is in scope there.
 
 ### One editor
 
