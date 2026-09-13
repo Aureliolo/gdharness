@@ -198,7 +198,25 @@ jobs:
         run: |
           set -euo pipefail
           expected="$(cut -d' ' -f1 < "dist/gdharness-${VERSION}.tgz.sha256")"
-          url="$(npm view "gdharness@${VERSION}" dist.tarball)"
+
+          # The registry takes a moment to serve a version it has just accepted, and a first
+          # publish takes longer still: this answered 404 for gdharness@0.4.1 seconds after
+          # publishing it, for a package that was there all along. Asked again rather than read
+          # as a verdict, because "not found yet" and "not published" look identical here.
+          url=""
+          for attempt in $(seq 1 30); do
+            if url="$(npm view "gdharness@${VERSION}" dist.tarball 2>/dev/null)" && [ -n "${url}" ]; then
+              break
+            fi
+            echo "The registry does not serve ${VERSION} yet; asked ${attempt} times."
+            sleep 10
+          done
+
+          if [ -z "${url}" ]; then
+            echo "The registry never served gdharness@${VERSION}, five minutes after publishing it." >&2
+            exit 1
+          fi
+
           curl -fsSL "${url}" -o published.tgz
           actual="$(sha256sum published.tgz | cut -d' ' -f1)"
 
