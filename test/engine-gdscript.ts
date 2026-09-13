@@ -468,14 +468,37 @@ function testOperations(godotPath: string, projectDir: string): void {
     'the setting should come back as the vector it went in as',
   );
 
+  // Every write to project.godot goes through the engine's own save, which keeps the header
+  // the editor writes and every line it did not touch. The file is in the engine's own form
+  // from the setting saved above, so from here on a round trip has to give the bytes back
+  // and an addition has to keep every line that was there.
+  const projectFile = join(projectDir, 'project.godot');
+  const keptWhole = (before: string, after: string, what: string): void => {
+    assert.match(after, /^; Engine configuration file\.$/m, `${what} should keep the editor's header`);
+    const lines = after.split('\n');
+    let from = 0;
+    for (const line of before.split('\n')) {
+      const at = lines.indexOf(line, from);
+      assert.notEqual(at, -1, `${what} should keep the line ${JSON.stringify(line)}`);
+      from = at + 1;
+    }
+  };
+
   // Autoloads are written into project.godot by hand, so the round trip is the only proof.
+  const beforeAutoload = readFileSync(projectFile, 'utf8');
   const added = operation('add_autoload', { name: 'Hero', path: 'made/hero.gd' });
   assert.equal(get(added, 'action'), 'added');
+  keptWhole(beforeAutoload, readFileSync(projectFile, 'utf8'), 'adding an autoload');
   const hero = named(get(operation('list_autoloads', {}), 'autoloads'), 'Hero');
   assert.ok(hero, 'the autoload that was just added should be listed');
   assert.equal(get(hero, 'enabled'), true, 'the leading asterisk means enabled');
   assert.equal(get(hero, 'file_exists'), true);
   assert.equal(get(operation('remove_autoload', { name: 'Hero' }), 'removed'), true);
+  assert.equal(
+    readFileSync(projectFile, 'utf8'),
+    beforeAutoload,
+    'adding then removing an autoload should give project.godot back byte for byte',
+  );
 
   // The main scene is a project setting with a file behind it, so both halves are checked.
   writeFixtureScene(projectDir);
@@ -607,12 +630,15 @@ function testOperations(godotPath: string, projectDir: string): void {
   assert.equal(get(named(get(plugins, 'plugins'), 'gdharness_editor'), 'enabled'), false);
   assert.equal(get(plugins, 'enabled_count'), 0);
 
+  const beforePlugin = readFileSync(projectFile, 'utf8');
   assert.equal(get(operation('enable_plugin', { plugin_name: 'gdharness_editor' }), 'action'), 'enabled');
+  const withPlugin = readFileSync(projectFile, 'utf8');
   assert.match(
-    readFileSync(join(projectDir, 'project.godot'), 'utf8'),
+    withPlugin,
     /^enabled=PackedStringArray\("res:\/\/addons\/gdharness_editor\/plugin\.cfg"\)$/m,
     'the enabled list should be written as the expression the editor reads, not a quoted string',
   );
+  keptWhole(beforePlugin, withPlugin, 'enabling a plugin');
   const enabled = operation('list_plugins', {});
   assert.equal(get(named(get(enabled, 'plugins'), 'gdharness_editor'), 'enabled'), true);
   assert.equal(get(enabled, 'enabled_count'), 1);
@@ -623,8 +649,14 @@ function testOperations(godotPath: string, projectDir: string): void {
 
   assert.equal(get(operation('disable_plugin', { plugin_name: 'gdharness_editor' }), 'action'), 'disabled');
   assert.equal(get(operation('list_plugins', {}), 'enabled_count'), 0);
+  assert.equal(
+    readFileSync(projectFile, 'utf8'),
+    beforePlugin,
+    'enabling then disabling a plugin should give project.godot back byte for byte',
+  );
 
   // Input actions, which are stored as an engine expression rather than as JSON.
+  const beforeAction = readFileSync(projectFile, 'utf8');
   const action = operation('add_input_action', {
     action_name: 'fixture_jump',
     events: [{ type: 'key', keycode: 'Space', ctrl: true }],
@@ -632,6 +664,7 @@ function testOperations(godotPath: string, projectDir: string): void {
   assert.equal(get(action, 'events_count'), 1);
   assert.equal(get(action, 'events', 0, 'keycode'), 32, 'Space is KEY_SPACE');
   assert.equal(get(action, 'events', 0, 'ctrl_pressed'), true);
+  keptWhole(beforeAction, readFileSync(projectFile, 'utf8'), 'adding an input action');
 
   // Audio buses live in the AudioServer and only survive the run if the layout is saved.
   const fixtureBus = operation('create_audio_bus', { bus_name: 'Fixture' });

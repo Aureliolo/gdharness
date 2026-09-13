@@ -79,19 +79,16 @@ func add_autoload(params: Dictionary) -> Dictionary:
 	if not FileAccess.file_exists(path):
 		return _log.failure("Autoload file does not exist: " + path)
 
-	var config: ConfigFile = ConfigFile.new()
-	var err: Error = config.load("res://project.godot")
-	if err != OK:
-		return _log.failure("Failed to load project.godot: " + str(err))
-
-	var was_updated: bool = config.has_section_key("autoload", name)
+	# Through ProjectSettings so the file is saved the way the editor saves it, header and
+	# every other line kept; a ConfigFile of project.godot drops the comments on the way out.
+	var setting: String = "autoload/" + name
+	var was_updated: bool = ProjectSettings.has_setting(setting)
 
 	# An asterisk in front of the path is how project.godot marks an autoload as enabled.
-	config.set_value("autoload", name, ("*" if enabled else "") + path)
-
-	err = config.save("res://project.godot")
+	ProjectSettings.set_setting(setting, ("*" if enabled else "") + path)
+	var err: Error = ProjectSettings.save()
 	if err != OK:
-		return _log.failure("Failed to save project.godot: " + str(err))
+		return _log.failure("Failed to save project.godot: " + error_string(err))
 
 	return {"name": name, "path": path, "enabled": enabled, "action": "updated" if was_updated else "added"}
 
@@ -102,20 +99,15 @@ func remove_autoload(params: Dictionary) -> Dictionary:
 
 	_log.info("Removing autoload: " + name)
 
-	var config: ConfigFile = ConfigFile.new()
-	var err: Error = config.load("res://project.godot")
-	if err != OK:
-		return _log.failure("Failed to load project.godot: " + str(err))
-
-	if not config.has_section_key("autoload", name):
+	var setting: String = "autoload/" + name
+	if not ProjectSettings.has_setting(setting):
 		return _log.failure("Autoload not found: " + name)
 
-	var old_value: String = str(config.get_value("autoload", name, ""))
-	config.erase_section_key("autoload", name)
-
-	err = config.save("res://project.godot")
+	var old_value: String = str(ProjectSettings.get_setting(setting))
+	ProjectSettings.set_setting(setting, null)
+	var err: Error = ProjectSettings.save()
 	if err != OK:
-		return _log.failure("Failed to save project.godot: " + str(err))
+		return _log.failure("Failed to save project.godot: " + error_string(err))
 
 	return {"name": name, "removed": true, "old_path": old_value.trim_prefix("*")}
 
@@ -126,24 +118,23 @@ func list_autoloads(params: Dictionary) -> Dictionary:
 
 	_log.info("Listing autoloads")
 
-	var config: ConfigFile = ConfigFile.new()
-	var err: Error = config.load("res://project.godot")
-	if err != OK:
-		return _log.failure("Failed to load project.godot: " + str(err))
-
 	var autoloads: Array[Dictionary] = []
 
-	if config.has_section("autoload"):
-		for key: String in config.get_section_keys("autoload"):
-			var value: String = str(config.get_value("autoload", key, ""))
-			var path: String = value.trim_prefix("*")
+	for property: Dictionary in ProjectSettings.get_property_list():
+		var setting: String = str(property.get("name", ""))
+		if not setting.begins_with("autoload/"):
+			continue
+		var value: String = str(ProjectSettings.get_setting(setting))
+		var path: String = value.trim_prefix("*")
 
-			var autoload_info: Dictionary = {"name": key, "path": path, "enabled": value.begins_with("*")}
+		var autoload_info: Dictionary = {
+			"name": setting.trim_prefix("autoload/"), "path": path, "enabled": value.begins_with("*")
+		}
 
-			if include_status:
-				autoload_info["file_exists"] = FileAccess.file_exists(path)
+		if include_status:
+			autoload_info["file_exists"] = FileAccess.file_exists(path)
 
-			autoloads.append(autoload_info)
+		autoloads.append(autoload_info)
 
 	return {"autoloads": autoloads, "count": autoloads.size()}
 
