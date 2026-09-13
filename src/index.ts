@@ -506,7 +506,11 @@ class GodotServer {
    * through a file the server names, so a game cannot point the reader at a path of its own
    * choosing, and the file is gone again before the image is returned.
    */
-  private async handleRuntimeCommand(command: string, args: unknown): Promise<ToolResponse> {
+  private async handleRuntimeCommand(
+    command: string,
+    args: unknown,
+    timeoutMs: number = this.runtimeTimeoutMs(),
+  ): Promise<ToolResponse> {
     const { op: _op, projectPath, ...params } = asParams(args);
     const choice = chooseRuntime(
       discoverRuntimes(),
@@ -526,7 +530,7 @@ class GodotServer {
         choice.endpoint,
         command,
         screenshotPath ? { ...params, output_path: screenshotPath } : params,
-        this.runtimeTimeoutMs(),
+        timeoutMs,
       );
       if (!reply.ok) {
         return this.createErrorResponse(reply.message);
@@ -1095,9 +1099,19 @@ class GodotServer {
         }
 
       case 'runtime_inspect':
-        return op === 'tree'
-          ? await this.handleInspectRuntimeTree(args)
-          : await this.handleGetRuntimeMetrics(args);
+        switch (op) {
+          case 'tree':
+            return await this.handleInspectRuntimeTree(args);
+          case 'find':
+            return await this.handleFindRuntimeNodes(args);
+          case 'rect':
+            return await this.handleRuntimeCommand('get_rect', {
+              projectPath: args['projectPath'],
+              path: readNonEmptyString(args, 'nodePath') ?? '',
+            });
+          default:
+            return await this.handleGetRuntimeMetrics(args);
+        }
       case 'runtime_invoke':
         return op === 'set'
           ? await this.handleSetRuntimeProperty(args)
@@ -1108,7 +1122,16 @@ class GodotServer {
           args,
         );
       case 'runtime_input':
-        return await this.handleRuntimeCommand(`inject_${op}`, args);
+        return op === 'click'
+          ? await this.handleRuntimeCommand('click', {
+              projectPath: args['projectPath'],
+              path: readNonEmptyString(args, 'nodePath') ?? '',
+              button: readString(args, 'button') ?? 'left',
+              double: readBoolean(args, 'doubleClick') ?? false,
+            })
+          : await this.handleRuntimeCommand(`inject_${op}`, args);
+      case 'runtime_wait':
+        return await this.handleRuntimeWait(op, args);
 
       case 'debug_breakpoint':
         return await this.handleDAP(op === 'set' ? 'dap_set_breakpoint' : 'dap_remove_breakpoint', args);
@@ -2895,6 +2918,71 @@ class GodotServer {
       projectPath: args['projectPath'],
       metrics: readArray(args, 'metrics') ?? [],
     });
+  }
+
+  /** runtime_inspect find: only the filters that were given are sent, so the game decides. */
+  private async handleFindRuntimeNodes(args: OperationParams): Promise<ToolResponse> {
+    const filters: Record<string, unknown> = {};
+    const className = readNonEmptyString(args, 'className');
+    const script = readNonEmptyString(args, 'script');
+    const namePattern = readNonEmptyString(args, 'namePattern');
+    const group = readNonEmptyString(args, 'group');
+    if (className !== undefined) filters['class'] = className;
+    if (script !== undefined) filters['script'] = script;
+    if (namePattern !== undefined) filters['name'] = namePattern;
+    if (group !== undefined) filters['group'] = group;
+    if (Object.keys(filters).length === 0) {
+      return this.createErrorResponse(
+        'runtime_inspect find needs at least one of className, script, namePattern, group.',
+      );
+    }
+    return await this.handleRuntimeCommand('find_nodes', {
+      ...filters,
+      projectPath: args['projectPath'],
+      root: readNonEmptyString(args, 'nodePath') ?? '/root',
+      limit: readPositiveNumber(args, 'limit') ?? 100,
+    });
+  }
+
+  /**
+   * runtime_wait: the game is given as long as the wait asks for, and a little longer for the
+   * answer to travel, before it is called busy.
+   */
+  private async handleRuntimeWait(op: string, args: OperationParams): Promise<ToolResponse> {
+    const timeoutMs = readPositiveNumber(args, 'timeoutMs') ?? 5000;
+    const nodePath = readNonEmptyString(args, 'nodePath') ?? '';
+    const patience = Math.max(this.runtimeTimeoutMs(), timeoutMs + 5000);
+    switch (op) {
+      case 'frames':
+        return await this.handleRuntimeCommand(
+          'wait_frames',
+          { projectPath: args['projectPath'], frames: readPositiveNumber(args, 'frames') ?? 1 },
+          patience,
+        );
+      case 'signal':
+        return await this.handleRuntimeCommand(
+          'wait_signal',
+          {
+            projectPath: args['projectPath'],
+            path: nodePath,
+            signal: readString(args, 'signal') ?? '',
+            timeout_ms: timeoutMs,
+          },
+          patience,
+        );
+      default:
+        return await this.handleRuntimeCommand(
+          'wait_until',
+          {
+            projectPath: args['projectPath'],
+            path: nodePath,
+            property: readString(args, 'property') ?? '',
+            value: args['value'],
+            timeout_ms: timeoutMs,
+          },
+          patience,
+        );
+    }
   }
 
   // ============================================
