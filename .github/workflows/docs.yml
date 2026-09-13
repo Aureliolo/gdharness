@@ -1,0 +1,69 @@
+name: docs
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+# One deployment at a time, and never a cancelled one: a half-published site is worse than an
+# old one, so a superseded run waits rather than being killed.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  # On a pull request this is the whole job: the site has to build, and the build refuses a page
+  # nothing links to, so a new document cannot land unreachable.
+  build:
+    name: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Bun
+        uses: ./.github/actions/install-bun # zizmor: ignore[self-repository]
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build the site
+        run: bun run docs
+
+      - name: Package it for Pages
+        if: github.event_name == 'push'
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: site
+
+  deploy:
+    name: deploy
+    if: github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    # Only this job can publish, and only through the OIDC token Pages mints for it: nothing
+    # here holds a credential that outlives the run.
+    permissions:
+      pages: write
+      id-token: write
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

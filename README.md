@@ -11,161 +11,63 @@
 [![Bun](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2FAureliolo%2Fgdharness%2Fmain%2Fpackage.json&query=%24.engines.bun&label=bun&color=f9f1e1&logo=bun&logoColor=black)](https://bun.sh/)
 [![Licence](https://img.shields.io/github/license/Aureliolo/gdharness)](LICENSE)
 
-**A harness for driving a Godot 4 project from an agent.** It installs and manages the
-Godot side: two editor addons, a runtime bridge into the running game, the class cache, and
-the fixtures that prove any of it works. It speaks MCP, so the agent driving it can be
-Claude Code, Cursor, Cline, OpenCode or anything else that speaks the protocol.
+**A harness for driving a Godot 4 project from an agent.** An MCP server that hands the agent the
+three things it otherwise has to guess at: the editor that is open, the game that is running, and
+the project on disk. Thirty-two tools, each shaped like a task rather than an engine call, and
+every answer read back from the engine rather than echoed from the request.
 
-Forked from [GoPeak](https://github.com/HaD0Yun/Doyunha-Gopeak), and being rebuilt to be more
-complete, hardened and actually working.
+📖 **[Documentation](https://aureliolo.github.io/gdharness)** — what it is, how to install it, every
+tool, and what Godot does that costs an afternoon.
+
+## Installing
+
+Godot 4.7 or newer and [Bun](https://bun.sh) 1.4 or newer, and nothing else: gdharness installs the
+Godot addons into your project itself, and there is no Python and no Node.
+
+[Install](https://aureliolo.github.io/gdharness/install.html) is the whole of it, written for the
+agent doing the work, including verifying the release before running it. The short version:
+download a release, check its attestation, point your MCP client at `build/index.js` with
+`GODOT_PATH` set, then `gdharness setup /path/to/project`.
+
+There are no one-click install links, deliberately. A link that configures an editor for you is the
+exact shape of a known attack; a line of text the agent reads is as convenient without teaching
+anybody that clicking one is safe.
 
 ## Rules
 
-- **No fixture, no ship.** Every tool is driven against a pinned Godot in CI before it
-  exists in a release. Anything nobody will write a fixture for is cut instead of shipped.
-- **A tool fails rather than answers.** No success payload for an empty or partial result
-  that could be a silent failure. An unknown argument or an unknown enum value is an error
-  naming the valid set, never a silent default.
-- **Every mutation reads back.** A tool that writes returns the engine's actual state
-  afterwards, read back from the engine, never an echo of the request.
-- **Strict projects are the baseline.** Every shipped script, and every script the tools
-  write, parses with all of GDScript's warnings raised to errors, and CI parses them that
-  way: a project configured like that parses the addons and the operations under its own
-  settings, and a harness that will not load there is no harness.
-- **Few tools, shaped like tasks.** Around 30, not 100. A server whose tool list does not
+- **No fixture, no ship.** Every tool is driven against a pinned Godot in CI before it exists in
+  a release. Anything nobody will write a fixture for is cut instead of shipped.
+- **A tool fails rather than answers.** No success payload for an empty or partial result that
+  could be a silent failure. An unknown argument or an unknown enum value is an error naming the
+  valid set, never a silent default.
+- **Every mutation reads back.** A tool that writes returns the engine's actual state afterwards,
+  read back from the engine, never an echo of the request.
+- **Strict projects are the baseline.** Every shipped script, and every script the tools write,
+  parses with all of GDScript's warnings raised to errors, and CI parses them that way: a project
+  configured like that loads the addons and the operations under its own settings, and a harness
+  that will not load there is no harness.
+- **Few tools, shaped like tasks.** Around thirty, not a hundred. A server whose tool list does not
   fit in a context window has too many tools, not a missing pagination feature.
-- **Answers are sized.** Anything that can return a lot takes a detail level and defaults to
-  the smallest useful one; anything unbounded paginates. A tree comes back as paths, not as
-  nested objects that repeat their keys a thousand times.
-
-## Requirements
-
-Two things, and nothing else:
-
-- **Godot 4.7 or newer.** That is the version CI drives every fixture against, on Linux,
-  Windows and macOS. Older engines are not supported and will not be: the work in front of this
-  wants `UDSServer` for the runtime bridge and the 4.7 input device ids, and carrying shims for
-  engines nobody here tests against is how a harness starts lying about what it verified.
-- **Bun 1.4.0 or newer.** 1.4 is the floor because the lockfile is `lockfileVersion: 2`,
-  which older Bun cannot read.
-
-Then point any MCP client at it. gdharness installs the Godot addons into your project
-itself; there is nothing to copy by hand, no Python, and no Node.
-
-## Setting up a project
-
-```sh
-gdharness setup /path/to/project             # the addons in, the editor ones enabled, the class list rebuilt
-gdharness setup /path/to/project --runtime   # and the runtime autoload registered
-gdharness doctor /path/to/project            # what holds and what does not; exit 1 on a problem
-gdharness runtime on|off /path/to/project    # the runtime autoload, which reaches an export if left on
-gdharness classes /path/to/project           # rebuild .godot/global_script_class_cache.cfg from disk
-```
-
-`setup` copies each addon whole, over whatever was there, and writes the version it came
-from beside it, so an upgrade never leaves a file of the old version behind and `doctor` can
-tell an old copy from the shipped one. An editor that was already open goes on serving the
-addon it read at startup, so `editor_status` reports the version the connected editor is
-actually holding and `editor_launch restart` is what puts the new one in front of it. `doctor`
-also compares every `class_name` on disk with the class cache, which is the check the editor
-cannot make for itself. Every write to
-`project.godot` goes through the engine, so the file is written the way the editor writes it.
-
-The runtime addon is an autoload and nothing else. An autoload reaches an export, and its
-command set includes calling methods and injecting input, so it is registered only when asked
-for and refuses to serve outside a debug build.
-
-## Tools
-
-Thirty-two, named `domain_verb`. A tool that does several related things takes an `op`, and
-its description says which arguments each op needs; a call with an argument the tool does not
-name, an op it does not have, or a required argument missing is refused with the valid set
-spelled out. Every answer is JSON, read back from the engine after the change rather than
-echoed from the request, and anything the engine said on stderr on the way comes back with it
-under `engine_messages`.
-
-| Domain       | Tools                                                                            |
-| ------------ | -------------------------------------------------------------------------------- |
-| `project_*`  | `list`, `info`, `settings`, `search`, `dependencies`, `import`, `export`, `test` |
-| `scene_*`    | `create`, `tree`, `node`, `signal`, `animation`                                  |
-| `script_*`   | `edit`, `info`, `diagnostics`                                                    |
-| `resource_*` | `edit`                                                                           |
-| `editor_*`   | `launch`, `run`, `stop`, `output`, `status`, `rescan`, `classes`                 |
-| `runtime_*`  | `inspect`, `invoke`, `capture`, `input`, `wait`                                  |
-| `debug_*`    | `breakpoint`, `control`, `state`                                                 |
-
-The `runtime_*` tools ask the game rather than the tree dump: `runtime_inspect find` answers
-with the paths of the nodes matching a class, script, name pattern or group, `rect` with where
-one is on screen in window pixels, `runtime_input click` presses and releases a Control by
-path and says what was under the pointer and what became of the control (a menu button that
-opens the next screen takes itself out of the tree, and the answer says so), and
-`runtime_wait` lets frames pass or waits for a signal or a property before answering. A
-node-valued property comes back as its path, so an answer can be fed straight into the next
-call.
-
-The `scene_*` and `resource_*` tools and `editor_rescan` go through the editor addon and need
-the editor open; `script_diagnostics`, `script_info` beyond `structure`, and the `debug_*`
-tools talk to the editor's language server and debug adapter; the `runtime_*` tools talk to
-a running game, whether `editor_run` started it or the editor's play button did. Everything
-else runs the engine headless and needs nothing open.
-
-Those three connections are on 6505, 6005 and 6006, and `GDHARNESS_BRIDGE_PORT`,
-`GDHARNESS_LSP_PORT` and `GDHARNESS_DAP_PORT` move them. Godot takes the last two on its own
-command line as `--lsp-port` and `--dap-port`, so an editor that had to be moved off a default is
-still reachable; a variable holding something that is not a port is said so rather than ignored.
-
-**`editor_run` asks the editor to play when the editor is there.** A game started as its own
-process is a game nothing is debugging, so a breakpoint set on it is never hit and the stack is
-always empty; one the editor plays belongs to the editor's debugger, which is the session the
-`debug_*` tools speak to. Its console comes back over that same session, so `editor_output`
-answers the same way either way. Set the breakpoints first and then run: they are registered on
-the adapter rather than on a session, so they are waiting when the game starts. A run asked for
-headless is still spawned, unless the project's own `editor/run/main_run_args` says the editor
-would play it headless too, and `editor_run check` always is.
-
-What a game prints comes back as entries rather than lines: `editor_output` reads the engine's
-`ERROR:`, `SCRIPT ERROR:` and `WARNING:` headlines with the `at:` line and backtrace under each,
-answers with the counts and a `clean` verdict, and filters by severity, by text, or to what has
-arrived since the last call. `editor_run check` boots the project headless for a few frames,
-waits for it to quit and answers whether it came up clean, which is the boot gate a commit hook
-otherwise does by hand with a grep. The engine's own stdin debugger is never turned on: it
-breaks into a prompt on the first script error and, with no terminal to read from, never comes
-back.
-
-`project_test` runs the project's gdUnit4 suites headless and answers with every case rather
-than a console to read: which failed, at what line, and what the assertion said, along with
-anything the engine printed on the way. The class list is rebuilt before the run, because the
-runner is itself a set of `class_name`s the engine has to resolve, and so is any suite written
-since the editor last scanned.
-
-`project_import refresh_classes` rewrites `.godot/global_script_class_cache.cfg` from the
-`class_name` declarations on disk. The editor fixes that list at startup and refreshes it only on
-a filesystem scan it does not always run (godotengine/godot#42786), and a game started from a
-stale editor cannot resolve any class written since; the rebuilt file is the one the engine reads
-at boot, and the answer says which classes were added, removed or changed.
-
-A game finds its own port: the runtime addon listens on whatever the operating system hands
-out and announces the port in a file named by its process id, under `$GDHARNESS_RUNTIME_DIR`,
-else `$XDG_RUNTIME_DIR/gdharness`, else the temporary directory. The server reads that, so two
-games can run at once (`projectPath` picks one) and a headless operation never takes the port
-a game wanted. `editor_status` lists every game it can reach and why it cannot reach the rest.
+- **Answers are sized.** Anything that can return a lot takes a detail level and defaults to the
+  smallest useful one; anything unbounded paginates. A tree comes back as paths, not as nested
+  objects that repeat their keys a thousand times.
 
 ## Security
 
 An MCP server is a program you hand an agent, and it usually arrives as an unsigned tarball of
-unpinned dependencies. Every claim below is one you can check rather than take on trust.
+unpinned dependencies. Every claim here is one you can check rather than take on trust.
 
-**What it does on your machine.** The runtime bridge binds `127.0.0.1` and refuses to listen at
-all outside a debug build, because its command set includes calling arbitrary methods, setting
+**What it does on your machine.** The runtime bridge binds `127.0.0.1` and refuses to listen at all
+outside a debug build, because its command set includes calling arbitrary methods, setting
 arbitrary properties and injecting input, none of it authenticated. No exported game serves it.
-Every subprocess is spawned with `execFile` and an argument array, never a shell: there is no
-string for a path full of quotes or backslashes to escape out of.
+Every subprocess is spawned with an argument array, never a shell: there is no string for a path
+full of quotes or backslashes to escape out of.
 
-**What the release is.** Each one carries an SPDX SBOM and a Sigstore build-provenance
-attestation over the archive, its checksum and the SBOM. The signing is keyless, so there is no
-signing key anywhere, including in CI, and the whole build runs in one reusable workflow whose
-identity the certificate carries, which is [SLSA Build Level 3](docs/release-process.md#slsa).
-Published releases are immutable. Verify one before you install it:
+**What the release is.** Each one carries an SPDX SBOM and a Sigstore build-provenance attestation
+over the archive, its checksum and the SBOM. The signing is keyless, so there is no signing key
+anywhere, including in CI, and the whole build runs in one reusable workflow whose identity the
+certificate carries, which is [SLSA Build Level 3](docs/release-process.md#slsa). Published
+releases are immutable.
 
 ```bash
 gh attestation verify gdharness-X.Y.Z.tgz --repo Aureliolo/gdharness \
@@ -174,34 +76,39 @@ gh attestation verify gdharness-X.Y.Z.tgz --repo Aureliolo/gdharness \
 
 **What goes into it.** Every dependency is an exact version and every GitHub action is pinned by
 commit digest. No carets, no ranges, no floating tags; the only version ranges in the repository
-are the two support floors above. Nothing fetched from outside the repository runs unchecked:
-the engine CI drives the fixtures against, the Bun that runs every job, uv, the interpreter and
+are the two support floors above. Nothing fetched from outside the repository runs unchecked: the
+engine CI drives the fixtures against, the Bun that runs every job, uv, the interpreter and
 gdtoolkit under it, and actionlint are each refused unless they match a digest written here, and
 the npm packages carry theirs in the lockfile. Renovate proposes the bumps, digests included, in
 one pull request a week, and a human takes them.
 
-**What guards the branch.** `main` takes pull requests only, with linear history and nine
-required status checks: the build and its tests, both formatters, both linters, the GDScript
-lint, and the engine fixtures on Linux, Windows and macOS. Every job CI runs is one of them, so
-there is no check that can be red at the moment something merges. Nobody can bypass it, and every
-commit on every branch has to be signed. CodeQL, OpenSSF Scorecard, actionlint, zizmor and secret
-scanning run against every change, and zizmor's findings fail the build rather than filing a
-ticket somebody has to notice.
+**What guards the branch.** `main` takes pull requests only, with linear history and nine required
+status checks: the build and its tests, both formatters, both linters, the GDScript lint, and the
+engine fixtures on Linux, Windows and macOS. Every job CI runs is one of them, so there is no check
+that can be red at the moment something merges. Nobody can bypass it, and every commit on every
+branch has to be signed. CodeQL, OpenSSF Scorecard, actionlint, zizmor and secret scanning run
+against every change, and zizmor's findings fail the build rather than filing a ticket somebody has
+to notice.
 
 Found something? [SECURITY.md](.github/SECURITY.md) says how to report it.
 
-## Building
+## Working on it
 
 ```bash
 bun install
 bun run build
 bun run ci
+bun run docs          # the site, into site/
 ```
+
+[CONTRIBUTING.md](.github/CONTRIBUTING.md) is what a change has to clear, and what every language
+in here is held to.
 
 ## Licence
 
-MIT. Copyright (c) 2025 Solomon Elias for the original work, and Aurelio Amoroso for changes
-since the fork. See [LICENSE](LICENSE).
+MIT. Copyright (c) 2025 Solomon Elias for the original work, and Aurelio Amoroso for changes since
+the fork. See [LICENSE](LICENSE).
 
-This project is not affiliated with or endorsed by the GoPeak project or the Godot
-Foundation.
+Forked from [GoPeak](https://github.com/HaD0Yun/Doyunha-Gopeak), rebuilt to be complete, hardened
+and actually tested. This project is not affiliated with or endorsed by the GoPeak project or the
+Godot Foundation.

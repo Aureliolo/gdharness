@@ -1,0 +1,492 @@
+/*
+ * Slate and signal.
+ *
+ * One accent, and it means the same thing everywhere: this is live, or this is the thing you
+ * came for. Slate carries everything else, so the green is never decoration. Archivo sets the
+ * prose, IBM Plex Mono every name the engine knows, and nothing that is not a name is set in
+ * mono, so a monospaced word on this site is always something you can type at the engine.
+ */
+
+:root {
+  color-scheme: dark;
+
+  --ground: #1c1f26;
+  --raised: #232730;
+  --sunken: #14171c;
+  --rule: #2a2f39;
+  --rule-soft: #242832;
+
+  --ink: #f2f4f8;
+  --body: #cfd4dd;
+  --muted: #8d95a3;
+  --faint: #767e8b;
+
+  --signal: #57d98a;
+  --signal-ink: #0f2a1b;
+  --warn: #e8b04b;
+
+  --sans: "Archivo", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  --measure: 68ch;
+  --gutter: clamp(20px, 4vw, 40px);
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+
+    --ground: #f7f7f5;
+    --raised: #ffffff;
+    --sunken: #ecedea;
+    --rule: #dcdedb;
+    --rule-soft: #e6e7e4;
+
+    --ink: #14171c;
+    --body: #33383f;
+    --muted: #5c636d;
+    --faint: #737a85;
+
+    --signal: #12784a;
+    --signal-ink: #eaf7ef;
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--body);
+  font-family: var(--sans);
+  font-size: 16px;
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+}
+
+.skip {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  background: var(--signal);
+  color: var(--signal-ink);
+  padding: 10px 16px;
+  z-index: 10;
+}
+
+.skip:focus {
+  left: 0;
+}
+
+a {
+  color: var(--ink);
+  text-decoration-color: color-mix(in srgb, var(--signal) 55%, transparent);
+  text-underline-offset: 3px;
+}
+
+a:hover {
+  text-decoration-color: var(--signal);
+}
+
+:focus-visible {
+  outline: 2px solid var(--signal);
+  outline-offset: 2px;
+}
+
+/* ------------------------------------------------------------------ chrome */
+
+.top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px 24px;
+  flex-wrap: wrap;
+  padding: 16px var(--gutter);
+  border-bottom: 1px solid var(--rule);
+}
+
+.wordmark {
+  font-weight: 700;
+  font-size: 17px;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+  text-decoration: none;
+}
+
+/* The signal, on the one element that stands for the project itself. */
+.wordmark::after {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--signal);
+  margin-left: 7px;
+  vertical-align: 0.18em;
+}
+
+.links {
+  display: flex;
+  gap: 18px;
+  font-size: 14px;
+  color: var(--muted);
+}
+
+.links a {
+  color: var(--muted);
+  text-decoration: none;
+}
+
+.links a:hover {
+  color: var(--ink);
+}
+
+.cols {
+  display: grid;
+  grid-template-columns: 216px minmax(0, 1fr);
+  align-items: start;
+  max-width: 1180px;
+  margin: 0 auto;
+}
+
+.side {
+  position: sticky;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 28px var(--gutter) 40px;
+  font-size: 14.5px;
+  border-right: 1px solid var(--rule-soft);
+}
+
+.side .grp {
+  font-family: var(--mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.11em;
+  color: var(--faint);
+  margin-top: 18px;
+}
+
+.side .grp:first-child {
+  margin-top: 0;
+}
+
+.side a {
+  color: var(--muted);
+  text-decoration: none;
+  padding: 2px 0;
+}
+
+.side a:hover {
+  color: var(--ink);
+}
+
+.side a.on {
+  color: var(--signal);
+  font-weight: 500;
+}
+
+main {
+  padding: 28px var(--gutter) 80px;
+  min-width: 0;
+}
+
+.foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 22px;
+  padding: 18px var(--gutter);
+  border-top: 1px solid var(--rule);
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--faint);
+}
+
+@media (max-width: 760px) {
+  .cols {
+    grid-template-columns: 1fr;
+  }
+
+  .side {
+    position: static;
+    border-right: 0;
+    border-bottom: 1px solid var(--rule-soft);
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 6px 16px;
+    padding-block: 16px;
+  }
+
+  .side .grp {
+    margin-top: 0;
+    width: 100%;
+  }
+}
+
+/* ------------------------------------------------------------------ prose */
+
+main > * {
+  max-width: var(--measure);
+}
+
+h1,
+h2,
+h3,
+h4 {
+  color: var(--ink);
+  letter-spacing: -0.025em;
+  text-wrap: balance;
+  margin: 0;
+}
+
+h1 {
+  font-size: clamp(30px, 4.4vw, 38px);
+  font-weight: 700;
+  line-height: 1.12;
+  margin-bottom: 18px;
+}
+
+h2 {
+  font-size: 23px;
+  font-weight: 600;
+  line-height: 1.25;
+  margin-top: 44px;
+  margin-bottom: 14px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--rule);
+}
+
+h3 {
+  font-size: 17px;
+  font-weight: 600;
+  margin-top: 30px;
+  margin-bottom: 10px;
+}
+
+h4 {
+  font-size: 15px;
+  font-weight: 600;
+  margin-top: 22px;
+  margin-bottom: 8px;
+}
+
+p,
+ul,
+ol {
+  margin: 0 0 16px;
+}
+
+ul,
+ol {
+  padding-left: 22px;
+}
+
+li {
+  margin-bottom: 6px;
+}
+
+li::marker {
+  color: var(--faint);
+}
+
+strong {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.lede {
+  font-size: 17.5px;
+  line-height: 1.6;
+  color: var(--body);
+}
+
+hr {
+  border: 0;
+  border-top: 1px solid var(--rule);
+  margin: 36px 0;
+}
+
+blockquote {
+  margin: 0 0 16px;
+  padding: 2px 0 2px 18px;
+  border-left: 3px solid var(--signal);
+  color: var(--muted);
+}
+
+/* ------------------------------------------------------------------ code */
+
+code {
+  font-family: var(--mono);
+  font-size: 0.875em;
+  color: var(--ink);
+  background: var(--sunken);
+  border: 1px solid var(--rule-soft);
+  border-radius: 3px;
+  padding: 0.08em 0.34em;
+  word-break: break-word;
+}
+
+pre {
+  margin: 0 0 18px;
+  padding: 15px 17px;
+  background: var(--sunken);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+pre code {
+  font-size: 13px;
+  line-height: 1.62;
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--body);
+  white-space: pre;
+  word-break: normal;
+}
+
+/* ------------------------------------------------------------------ tables */
+
+.scroll {
+  overflow-x: auto;
+  max-width: 100%;
+  margin-bottom: 18px;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 14px;
+}
+
+th {
+  text-align: left;
+  font-family: var(--mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--faint);
+  font-weight: 500;
+  padding: 0 14px 8px 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+td {
+  padding: 9px 14px 9px 0;
+  border-bottom: 1px solid var(--rule-soft);
+  vertical-align: top;
+}
+
+td:last-child,
+th:last-child {
+  padding-right: 0;
+}
+
+/* ------------------------------------------------------------------ the tool reference */
+
+.tool {
+  margin: 0 0 34px;
+  padding-left: 16px;
+  border-left: 2px solid var(--rule);
+  max-width: var(--measure);
+}
+
+.tool:target,
+.tool:hover {
+  border-left-color: var(--signal);
+}
+
+.tool h3 {
+  margin-top: 0;
+}
+
+.tool h3 code {
+  background: none;
+  border: 0;
+  padding: 0;
+  font-size: 1em;
+  color: var(--ink);
+}
+
+.tool .needs {
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.tag {
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--signal);
+  border: 1px solid color-mix(in srgb, var(--signal) 40%, transparent);
+  border-radius: 2px;
+  padding: 1px 5px;
+  vertical-align: 1px;
+}
+
+details {
+  margin-bottom: 10px;
+}
+
+summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 14px;
+  font-family: var(--mono);
+}
+
+summary:hover {
+  color: var(--ink);
+}
+
+.args {
+  margin: 12px 0 0;
+  display: grid;
+  grid-template-columns: minmax(120px, max-content) 1fr;
+  gap: 6px 18px;
+  font-size: 14px;
+}
+
+.args dt {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.args dt code {
+  background: none;
+  border: 0;
+  padding: 0;
+  font-size: 1em;
+}
+
+.args dd {
+  margin: 0;
+  color: var(--muted);
+}
+
+.args .type {
+  color: var(--faint);
+  font-size: 11px;
+}
+
+@media (max-width: 560px) {
+  .args {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+
+  .args dd {
+    margin-bottom: 10px;
+  }
+}
