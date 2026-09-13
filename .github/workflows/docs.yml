@@ -56,8 +56,8 @@ jobs:
     # Only this job can publish, and only through the OIDC token Pages mints for it: nothing
     # here holds a credential that outlives the run.
     permissions:
-      pages: write
-      id-token: write
+      pages: write # Publishes the built site.
+      id-token: write # Pages verifies the deployment against this token.
 
     environment:
       name: github-pages
