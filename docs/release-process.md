@@ -3,18 +3,22 @@
 ## What a human does
 
 Run **Prepare release** from the Actions tab and pick `patch`, `minor` or `major`, or type an
-exact version. It raises the version in `package.json`, `server.json` and the README, and opens
-a pull request.
+exact version. It raises the version in `package.json`, `server.json` and the README on a
+`release/vX.Y.Z` branch, with a signed commit, and prints the `gh pr create` line to open the
+pull request with.
 
-Merge that pull request. Everything after it is automatic.
+Open that pull request and merge it. Everything after it is automatic. The pull request is
+yours to open rather than the workflow's because one opened with the job token starts no
+workflow: nothing would check it and the merge would stay blocked.
 
 Nobody types a version twice and nobody creates a tag by hand, which is the release step that
 cannot be checked afterwards and the one most likely to be done from the wrong branch.
 
 ## What happens on the merge
 
-`release-tag.yml` sees a new version on `main` with no matching tag and creates `vX.Y.Z`. That
-tag starts `release.yml`, which runs four jobs in order:
+`release-tag.yml` sees a new version on `main` with no matching tag, creates `vX.Y.Z`, and
+dispatches `release.yml` on it, since a tag it makes with the job token would otherwise start
+nothing. `release.yml` runs four jobs in order:
 
 1. **build_test** refuses to go on unless the tag matches `package.json` and `server.json`, the
    release commit is reachable from `main`, and that commit carries a valid signature. Then it
