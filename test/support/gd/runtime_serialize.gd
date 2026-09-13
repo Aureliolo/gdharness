@@ -4,11 +4,13 @@ extends SceneTree
 ## in the operations script and with a different key order. It is a Node, so it instantiates
 ## normally, and the same round trip is asserted against it.
 
+const Runtime = preload("res://addons/godot_mcp_runtime/mcp_runtime_autoload.gd")
+
 var failures: Array[String] = []
 
 
 func _init() -> void:
-	var node = load("res://addons/godot_mcp_runtime/mcp_runtime_autoload.gd").new()
+	var node: Runtime = Runtime.new()
 
 	_check(node)
 	node.free()
@@ -26,12 +28,19 @@ func _fail(message: String) -> void:
 	failures.append(message)
 
 
-func _check(node: Node) -> void:
-	var vec2 = node._serialize_value(Vector2(1.5, -2.5))
+func _tag_of(value: Variant) -> String:
+	if value is Dictionary:
+		var fields: Dictionary = value
+		return str(fields.get("_type", ""))
+	return ""
+
+
+func _check(node: Runtime) -> void:
+	var vec2: Variant = node._serialize_value(Vector2(1.5, -2.5))
 	if vec2 != {"_type": "Vector2", "x": 1.5, "y": -2.5}:
 		_fail("Vector2: %s" % JSON.stringify(vec2))
 	if node._deserialize_value(vec2) != Vector2(1.5, -2.5):
-		_fail("Vector2 round trip: %s" % node._deserialize_value(vec2))
+		_fail("Vector2 round trip: %s" % str(node._deserialize_value(vec2)))
 
 	if node._deserialize_value(node._serialize_value(Vector3(1, 2, 3))) != Vector3(1, 2, 3):
 		_fail("Vector3 round trip")
@@ -44,39 +53,40 @@ func _check(node: Node) -> void:
 	if node._deserialize_value(node._serialize_value(NodePath("Root/Child"))) != NodePath("Root/Child"):
 		_fail("NodePath round trip")
 
-	var rect = node._serialize_value(Rect2(Vector2(1, 2), Vector2(3, 4)))
-	if rect.get("_type", "") != "Rect2":
+	var rect: Dictionary = node._serialize_value(Rect2(Vector2(1, 2), Vector2(3, 4)))
+	if _tag_of(rect) != "Rect2":
 		_fail("Rect2 tag: %s" % JSON.stringify(rect))
-	elif rect["position"].get("_type", "") != "Vector2":
+	elif _tag_of(rect["position"]) != "Vector2":
 		_fail("Rect2 does not recurse into its position: %s" % JSON.stringify(rect))
 
-	var transform = node._serialize_value(Transform2D(0.0, Vector2(3, 4)))
-	if transform.get("_type", "") != "Transform2D":
+	var transform: Dictionary = node._serialize_value(Transform2D(0.0, Vector2(3, 4)))
+	if _tag_of(transform) != "Transform2D":
 		_fail("Transform2D tag: %s" % JSON.stringify(transform))
-	elif transform["origin"].get("_type", "") != "Vector2":
+	elif _tag_of(transform["origin"]) != "Vector2":
 		_fail("Transform2D origin: %s" % JSON.stringify(transform))
 
-	var nested = node._serialize_value([Vector2(1, 1), {"inner": Vector3(2, 2, 2)}])
+	var nested: Variant = node._serialize_value([Vector2(1, 1), {"inner": Vector3(2, 2, 2)}])
 	if not nested is Array or nested.size() != 2:
 		_fail("array shape: %s" % JSON.stringify(nested))
-	elif nested[0].get("_type", "") != "Vector2":
+	elif _tag_of(nested[0]) != "Vector2":
 		_fail("array member: %s" % JSON.stringify(nested))
 
-	var restored = node._deserialize_value(nested)
-	if restored[0] != Vector2(1, 1) or restored[1]["inner"] != Vector3(2, 2, 2):
+	var restored: Array = node._deserialize_value(nested)
+	var restored_inner: Dictionary = restored[1]
+	if restored[0] != Vector2(1, 1) or restored_inner["inner"] != Vector3(2, 2, 2):
 		_fail("nested round trip: %s" % str(restored))
 
 	# A Resource is also an Object, so the Resource branch has to be reached first or the path
 	# is dropped and the caller gets a bare class name back.
-	var resource := Resource.new()
+	var resource: Resource = Resource.new()
 	resource.resource_path = "res://thing.tres"
-	var serialised = node._serialize_value(resource)
-	if serialised.get("_type", "") != "Resource":
+	var serialised: Dictionary = node._serialize_value(resource)
+	if _tag_of(serialised) != "Resource":
 		_fail("Resource tag: %s" % JSON.stringify(serialised))
 	elif serialised.get("path", "") != "res://thing.tres":
 		_fail("Resource path: %s" % JSON.stringify(serialised))
 
-	if node._serialize_value(RefCounted.new()).get("_type", "") != "Object":
+	if _tag_of(node._serialize_value(RefCounted.new())) != "Object":
 		_fail("Object tag: %s" % JSON.stringify(node._serialize_value(RefCounted.new())))
 
 	if node._serialize_value(null) != null:
@@ -86,11 +96,11 @@ func _check(node: Node) -> void:
 	if node._deserialize_value(7) != 7:
 		_fail("deserialize passthrough int")
 
-	var untagged = node._deserialize_value({"a": {"_type": "Vector2", "x": 9, "y": 9}})
+	var untagged: Dictionary = node._deserialize_value({"a": {"_type": "Vector2", "x": 9, "y": 9}})
 	if untagged["a"] != Vector2(9, 9):
 		_fail("untagged dictionary recursion: %s" % str(untagged))
 
-	var unknown := {"_type": "Nonesuch", "x": 1}
+	var unknown: Dictionary = {"_type": "Nonesuch", "x": 1}
 	if node._deserialize_value(unknown) != unknown:
 		_fail("unknown tag: %s" % str(node._deserialize_value(unknown)))
 

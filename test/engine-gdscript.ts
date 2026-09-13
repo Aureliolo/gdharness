@@ -9,10 +9,10 @@
 
 import assert from 'node:assert/strict';
 import { type SpawnSyncReturns, spawnSync } from 'node:child_process';
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { asArray, asNumber, asString, get, lastJsonLine, text } from './support/json.js';
+import { asArray, asNumber, asString, get, lastJsonLine } from './support/json.js';
 
 const tried: string[] = [];
 
@@ -45,32 +45,48 @@ function resolveGodotPath(): string | null {
   );
 }
 
+/** Every GDScript file the package ships, as the engine will see it inside the fixture project. */
+function shippedScripts(): string[] {
+  return ['operations', 'addons'].flatMap((root) =>
+    readdirSync(join('src', 'godot', root), { recursive: true, encoding: 'utf8' })
+      .filter((entry) => entry.endsWith('.gd'))
+      .map((entry) => `res://${root}/${entry.replaceAll('\\', '/')}`),
+  );
+}
+
 /**
  * A project holding the shipped GDScript exactly where the bundle puts it, so the fixtures
  * load the same paths the addons and the operations script use in the field.
  *
  * The whole operations directory is copied rather than the entry script alone: the entry
  * dispatches to sibling modules it preloads by relative path, and half of them are only
- * reachable that way.
+ * reachable that way. The addons are copied whole for the same reason, plugin.cfg included,
+ * which is also what lets the plugin operations be driven against real ones.
+ *
+ * The warning settings make an untyped declaration a parse error, in the addons as well,
+ * which the engine otherwise leaves out of its warnings. Every script the fixtures load is
+ * parsed under those settings, so a script that regresses to `var x = ...` stops loading here.
  */
 function createProject(): string {
   const dir = mkdtempSync(join(tmpdir(), 'gdharness-engine-'));
-  mkdirSync(join(dir, 'addons', 'godot_mcp_editor', 'tools'), { recursive: true });
-  mkdirSync(join(dir, 'addons', 'godot_mcp_runtime'), { recursive: true });
-  mkdirSync(join(dir, 'operations'), { recursive: true });
 
-  cpSync('src/godot/addons/godot_mcp_editor/tools', join(dir, 'addons', 'godot_mcp_editor', 'tools'), {
-    recursive: true,
-  });
-  cpSync(
-    'src/godot/addons/godot_mcp_runtime/mcp_runtime_autoload.gd',
-    join(dir, 'addons', 'godot_mcp_runtime', 'mcp_runtime_autoload.gd'),
-  );
+  cpSync('src/godot/addons', join(dir, 'addons'), { recursive: true });
   cpSync('src/godot/operations', join(dir, 'operations'), { recursive: true });
 
   writeFileSync(
     join(dir, 'project.godot'),
-    '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="GdharnessEngineFixture"\n',
+    [
+      '; Engine configuration file.',
+      'config_version=5',
+      '',
+      '[application]',
+      'config/name="GdharnessEngineFixture"',
+      '',
+      '[debug]',
+      'gdscript/warnings/exclude_addons=false',
+      'gdscript/warnings/untyped_declaration=2',
+      '',
+    ].join('\n'),
   );
 
   return dir;
@@ -101,8 +117,8 @@ function assertNoEngineErrors(label: string, output: string): void {
   assert.equal(errors.length, 0, `${label} hit engine errors:\n${errors.join('\n')}`);
 }
 
-/** Runs one of the fixture scripts in test/support/gd and asserts it reported success. */
-function runFixture(godotPath: string, projectDir: string, name: string): void {
+/** Runs one of the fixture scripts in test/support/gd and returns the JSON it reported. */
+function runFixture(godotPath: string, projectDir: string, name: string): unknown {
   const scriptPath = join(projectDir, `${name}.gd`);
   cpSync(join('test', 'support', 'gd', `${name}.gd`), scriptPath);
 
@@ -112,7 +128,44 @@ function runFixture(godotPath: string, projectDir: string, name: string): void {
     throw new Error(`${name} failed (${run.status ?? run.signal}):\n${output.trim()}`);
   }
   assertNoEngineErrors(name, output);
-  assert.match(output, /"ok"\s*:\s*true/, `${name} should report success JSON`);
+  const payload = lastJsonLine(run.stdout, name);
+  assert.equal(get(payload, 'ok'), true, `${name} should report success JSON`);
+  return payload;
+}
+
+/**
+ * The typing gate: every shipped script parses with an untyped declaration as an error.
+ *
+ * The count of what was checked is pinned to the files on disk, so a walk that finds nothing
+ * cannot pass, and the gate is then shown to bite by planting one untyped script and watching
+ * it refuse. A check that only ever says yes has not been shown to be a check.
+ */
+function testTypedGate(godotPath: string, projectDir: string): void {
+  const shipped = shippedScripts();
+  assert.ok(shipped.length >= 15, `the package ships GDScript: ${shipped.length} files`);
+  assert.equal(
+    get(runFixture(godotPath, projectDir, 'typed'), 'checked'),
+    shipped.length,
+    `every shipped script should be parsed: ${shipped.join(', ')}`,
+  );
+
+  const probeDir = join(projectDir, 'addons', 'probe');
+  mkdirSync(probeDir, { recursive: true });
+  writeFileSync(join(probeDir, 'untyped.gd'), 'extends Node\n\nvar loose = 1\n');
+  const refused = runScript(godotPath, projectDir, join(projectDir, 'typed.gd'));
+  rmSync(probeDir, { recursive: true, force: true });
+
+  assert.notEqual(refused.status, 0, 'an untyped declaration in an addon should fail the gate');
+  assert.match(
+    refused.stderr,
+    /res:\/\/addons\/probe\/untyped\.gd/,
+    `the refused script should be named:\n${refused.stderr.trim()}`,
+  );
+  assert.match(
+    refused.stderr,
+    /has no static type/,
+    `the reason should be the missing type:\n${refused.stderr.trim()}`,
+  );
 }
 
 /**
@@ -346,17 +399,27 @@ function testOperations(godotPath: string, projectDir: string): void {
   assert.match(heroSource, /^class_name FixtureHero/m, 'the class_name should be written first');
   assert.match(heroSource, /func change_state/, 'the state_machine template should be the one used');
 
+  // What gets written has to parse where an untyped declaration is an error, which the
+  // autoload check further down proves by booting the project with this script as one.
   const modified = operation('modify_script', {
     script_path: 'made/hero.gd',
     modifications: [
       { type: 'add_variable', name: 'speed', varType: 'float', defaultValue: '4.0' },
+      { type: 'add_variable', name: 'lives', defaultValue: '3' },
+      { type: 'add_variable', name: 'target' },
       { type: 'add_function', name: 'halt', body: 'speed = 0.0' },
     ],
   });
-  assert.equal(get(modified, 'total_modifications'), 2, 'both modifications should be applied');
+  assert.equal(get(modified, 'total_modifications'), 4, 'every modification should be applied');
   const modifiedSource = readFileSync(join(projectDir, 'made', 'hero.gd'), 'utf8');
   assert.match(modifiedSource, /var speed: float = 4\.0/, 'the variable should carry its type and default');
-  assert.match(modifiedSource, /func halt\(\):\n\tspeed = 0\.0/, 'the function body should be indented');
+  assert.match(modifiedSource, /var lives := 3/, 'a value with no type is inferred rather than left untyped');
+  assert.match(modifiedSource, /var target: Variant/, 'no type and no value is spelled out as Variant');
+  assert.match(
+    modifiedSource,
+    /func halt\(\) -> void:\n\tspeed = 0\.0/,
+    'a function with no return type returns void',
+  );
 
   const info = operation('get_script_info', { script_path: 'made/hero.gd' });
   assert.equal(get(info, 'class_name'), 'FixtureHero');
@@ -401,121 +464,12 @@ function testOperations(godotPath: string, projectDir: string): void {
   assert.equal(get(hero, 'file_exists'), true);
   assert.equal(get(operation('remove_autoload', { name: 'Hero' }), 'removed'), true);
 
-  operation('configure_physics_layer', { layerType: '2d', layerIndex: 1, layerName: 'Solid' });
-  assert.equal(
-    get(operation('get_project_setting', { setting: 'layer_names/2d_physics/layer_1' }), 'value'),
-    'Solid',
-    'a named layer should be readable back out of project.godot',
-  );
-
-  // Scenes: read the tree, write a property into it, and add a node to it.
+  // The main scene is a project setting with a file behind it, so both halves are checked.
   writeFixtureScene(projectDir);
   assert.equal(get(operation('set_main_scene', { scene_path: 'fixture_scene.tscn' }), 'saved'), true);
-
-  const tree = operation('list_scene_nodes', { scene_path: 'fixture_scene.tscn' });
-  assert.equal(get(tree, 'root', 'name'), 'Root');
-  const children = asArray(get(tree, 'root', 'children'), 'the root children');
-  assert.deepEqual(
-    children.map((child) => text(get(child, 'name'))).sort((a, b) => a.localeCompare(b)),
-    ['Child', 'Panel', 'Zone'],
-    'every child of the scene root should be listed',
-  );
-
-  const set = operation('set_node_properties', {
-    scene_path: 'fixture_scene.tscn',
-    node_path: 'root/Child',
-    properties: { position: { _type: 'Vector2', x: 12, y: 34 } },
-  });
-  assert.equal(get(set, 'properties_set'), 1);
-  assert.equal(get(set, 'scene_saved'), true);
-  const withProperties = operation('list_scene_nodes', {
-    scene_path: 'fixture_scene.tscn',
-    include_properties: true,
-  });
-  const child = named(get(withProperties, 'root', 'children'), 'Child');
-  assert.deepEqual(
-    { x: get(child, 'properties', 'position', 'x'), y: get(child, 'properties', 'position', 'y') },
-    { x: 12, y: 34 },
-    'the property should have been saved into the scene as the vector it was given as',
-  );
-
   assert.equal(
-    get(
-      operation('create_camera', { scenePath: 'fixture_scene.tscn', nodeName: 'Eye', is3D: false }),
-      'node_name',
-    ),
-    'Eye',
-  );
-  const withCamera = operation('list_scene_nodes', { scene_path: 'fixture_scene.tscn' });
-  const camera = named(get(withCamera, 'root', 'children'), 'Eye');
-  assert.ok(camera, 'the camera should have been added to the saved scene');
-  assert.equal(get(camera, 'type'), 'Camera2D', 'is3D false means a 2D camera');
-
-  // Both of these pick their node type through a helper that hands back an untyped value,
-  // because the classes it chooses between share the settings but not a base class that
-  // declares them. Building one of each is what shows that the value still lands as a node.
-  assert.equal(
-    get(
-      operation('create_light', {
-        scenePath: 'fixture_scene.tscn',
-        nodeName: 'Sun',
-        lightType: 'PointLight2D',
-        color: { r: 1, g: 0.5, b: 0 },
-        energy: 2,
-      }),
-      'light_type',
-    ),
-    'PointLight2D',
-  );
-  assert.equal(
-    get(
-      operation('create_audio_stream_player', {
-        scenePath: 'fixture_scene.tscn',
-        nodeName: 'Speaker',
-        playerType: 'AudioStreamPlayer2D',
-        bus: 'Master',
-      }),
-      'player_type',
-    ),
-    'AudioStreamPlayer2D',
-  );
-  const built = operation('list_scene_nodes', { scene_path: 'fixture_scene.tscn' });
-  assert.deepEqual(
-    asArray(get(built, 'root', 'children'))
-      .filter((entry) => get(entry, 'name') === 'Sun' || get(entry, 'name') === 'Speaker')
-      .map((entry) => text(get(entry, 'type')))
-      .sort((a, b) => a.localeCompare(b)),
-    ['AudioStreamPlayer2D', 'PointLight2D'],
-    'each node should have been saved as the type it was asked for',
-  );
-
-  const masked = operation('set_collision_layer_mask', {
-    scenePath: 'fixture_scene.tscn',
-    nodePath: 'root/Zone',
-    collisionLayer: 3,
-    collisionMask: 5,
-  });
-  assert.deepEqual(
-    { layer: get(masked, 'collision_layer'), mask: get(masked, 'collision_mask') },
-    { layer: 3, mask: 5 },
-  );
-
-  // Resources saved on their own, and the one operation that applies one to a node.
-  assert.equal(get(operation('create_theme', { themePath: 'made/ui.tres' }), 'success'), true);
-  assert.equal(
-    get(operation('create_physics_material', { materialPath: 'made/bouncy.tres', bounce: 0.5 }), 'success'),
-    true,
-  );
-  assert.equal(
-    get(
-      operation('apply_theme_to_node', {
-        scenePath: 'fixture_scene.tscn',
-        nodePath: 'root/Panel',
-        themePath: 'made/ui.tres',
-      }),
-      'success',
-    ),
-    true,
+    get(operation('get_project_setting', { setting: 'application/run/main_scene' }), 'value'),
+    'res://fixture_scene.tscn',
   );
 
   // The import pipeline reads and writes the .import sidecar, which is a ConfigFile.
@@ -556,19 +510,7 @@ function testOperations(godotPath: string, projectDir: string): void {
     'a project with no export presets should be warned about',
   );
 
-  // Diagnostics: the log parser, the health score, and the project-wide text search.
-  const parsed = operation('parse_error_log', {
-    log_content: 'SCRIPT ERROR: Invalid call on null\nWARNING: something mild\n',
-  });
-  assert.equal(get(parsed, 'summary', 'total_errors'), 1);
-  assert.equal(
-    get(parsed, 'errors', 0, 'category'),
-    'Script',
-    'a SCRIPT ERROR line should be categorised as one',
-  );
-  assert.ok(get(parsed, 'errors', 0, 'suggestion'), 'suggestions are on by default');
-  assert.equal(get(parsed, 'summary', 'total_warnings'), 1);
-
+  // Diagnostics: the health score and the reverse dependency search.
   const health = operation('get_project_health', {});
   assert.match(asString(get(health, 'grade')), /^[A-F]$/);
   assert.ok(asNumber(get(health, 'checks', 'scripts', 'total_scripts')) > 0, 'the project has scripts in it');
@@ -579,16 +521,6 @@ function testOperations(godotPath: string, projectDir: string): void {
   assert.ok(
     asArray(get(usages, 'usages')).some((entry) => get(entry, 'file') === 'res://chain/middle.gd'),
     'the file holding the reference should be named',
-  );
-
-  const found = operation('search_project', { query: 'state_changed' });
-  assert.ok(
-    asNumber(get(found, 'summary', 'total_matches')) > 0,
-    'the signal written into the new script should be found',
-  );
-  assert.ok(
-    asArray(get(found, 'results')).some((entry) => get(entry, 'file') === 'res://made/hero.gd'),
-    'the file that carries the match should be named',
   );
 
   // The resave walks the project and writes every scene and script back.
@@ -605,10 +537,30 @@ function testOperations(godotPath: string, projectDir: string): void {
     'a headless resave cannot mint a UID, and saying it did would be the lie to catch',
   );
 
-  // Plugins: the fixture copies addon code without a plugin.cfg, so none are installed.
+  // Plugins: the shipped addons are installed and none is enabled until one is asked for.
+  // The enabled list in project.godot is an engine expression the editor reads, so what was
+  // written is read back through the same file rather than trusted from the answer.
   const plugins = operation('list_plugins', {});
   assert.equal(get(plugins, 'addons_directory_exists'), true);
-  assert.deepEqual(get(plugins, 'plugins'), [], 'an addon directory without a plugin.cfg holds no plugins');
+  assert.equal(get(named(get(plugins, 'plugins'), 'godot_mcp_editor'), 'enabled'), false);
+  assert.equal(get(plugins, 'enabled_count'), 0);
+
+  assert.equal(get(operation('enable_plugin', { plugin_name: 'godot_mcp_editor' }), 'action'), 'enabled');
+  assert.match(
+    readFileSync(join(projectDir, 'project.godot'), 'utf8'),
+    /^enabled=PackedStringArray\("res:\/\/addons\/godot_mcp_editor\/plugin\.cfg"\)$/m,
+    'the enabled list should be written as the expression the editor reads, not a quoted string',
+  );
+  const enabled = operation('list_plugins', {});
+  assert.equal(get(named(get(enabled, 'plugins'), 'godot_mcp_editor'), 'enabled'), true);
+  assert.equal(get(enabled, 'enabled_count'), 1);
+  assert.equal(
+    get(operation('enable_plugin', { plugin_name: 'godot_mcp_editor' }), 'action'),
+    'already_enabled',
+  );
+
+  assert.equal(get(operation('disable_plugin', { plugin_name: 'godot_mcp_editor' }), 'action'), 'disabled');
+  assert.equal(get(operation('list_plugins', {}), 'enabled_count'), 0);
 
   // Input actions, which are stored as an engine expression rather than as JSON.
   const action = operation('add_input_action', {
@@ -701,8 +653,8 @@ function main(): void {
 
   const projectDir = createProject();
   try {
+    testTypedGate(godotPath, projectDir);
     runFixture(godotPath, projectDir, 'scene_parse');
-    runFixture(godotPath, projectDir, 'operations_modules');
     runFixture(godotPath, projectDir, 'operations_serialize');
     runFixture(godotPath, projectDir, 'runtime_serialize');
     runFixture(godotPath, projectDir, 'runtime_input');

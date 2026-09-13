@@ -8,28 +8,46 @@ signal client_connected
 signal client_disconnected
 signal command_received(command: String, params: Dictionary)
 
-const DEFAULT_PORT = 7777
-const DEFAULT_BIND_ADDRESS = "127.0.0.1"
-const BIND_ADDRESS_SETTING = "godot_mcp/runtime/bind_address"
-const PROTOCOL_VERSION = "1.0"
+const DEFAULT_PORT: int = 7777
+const DEFAULT_BIND_ADDRESS: String = "127.0.0.1"
+const BIND_ADDRESS_SETTING: String = "godot_mcp/runtime/bind_address"
+const PROTOCOL_VERSION: String = "1.0"
+
+# What each Godot type becomes on the wire, keyed on typeof() rather than written as a chain of
+# `is` tests whose order has to be trusted: Resource had to be tested before Object, or every
+# resource came back as a bare class name with its path dropped.
+#
+# Method names rather than Callables or lambdas: a lambda spanning more than one line inside a
+# dictionary literal is where gdformat loses track of every comment in the file and writes them
+# all again into the lambda body, on every run.
+const SERIALISERS: Dictionary = {
+	TYPE_NIL: "_serialize_nil",
+	TYPE_VECTOR2: "_serialize_vector2",
+	TYPE_VECTOR3: "_serialize_vector3",
+	TYPE_VECTOR2I: "_serialize_vector2i",
+	TYPE_VECTOR3I: "_serialize_vector3i",
+	TYPE_COLOR: "_serialize_color",
+	TYPE_NODE_PATH: "_serialize_node_path",
+	TYPE_ARRAY: "_serialize_array",
+	TYPE_RECT2: "_serialize_rect2",
+	TYPE_TRANSFORM2D: "_serialize_transform2d",
+	TYPE_DICTIONARY: "_serialize_dictionary",
+	TYPE_OBJECT: "_serialize_object",
+}
 
 var _server: TCPServer
 var _clients: Array[StreamPeerTCP] = []
 var _port: int = DEFAULT_PORT
 var _enabled: bool = true
 var _watched_signals: Dictionary = {}  # { "node_path:signal_name": callable }
-# Built on first use rather than at load, because the table holds Callables bound to this node.
-var _serialisers: Dictionary = {}
 
 
 func _ready() -> void:
 	name = "MCPRuntime"
-	# The TCP control loop runs in _process (accept connections, poll clients, handle
-	# messages). With the default PROCESS_MODE_INHERIT that loop STOPS while the game tree
-	# is paused (get_tree().paused = true) — the runtime silently goes unreachable and the
-	# game can't even be un-paused over the socket. An introspection/debug server must stay
-	# responsive while the game is frozen, so it can inspect / capture / inject / resume a
-	# paused game; PROCESS_MODE_ALWAYS keeps _process running regardless of pause.
+	# The TCP control loop runs in _process. With the default PROCESS_MODE_INHERIT it stops
+	# while the tree is paused, so the runtime silently goes unreachable and the game cannot
+	# even be un-paused over the socket. A debug server has to stay responsive while the game
+	# is frozen, to inspect, capture, inject or resume it.
 	process_mode = Node.PROCESS_MODE_ALWAYS
 	_start_server()
 	print("[MCP Runtime] Autoload ready, server starting on port %d" % _port)
@@ -41,7 +59,7 @@ func _process(_delta: float) -> void:
 
 	# Accept new connections
 	if _server.is_connection_available():
-		var client = _server.take_connection()
+		var client: StreamPeerTCP = _server.take_connection()
 		if client:
 			_clients.append(client)
 			print("[MCP Runtime] Client connected")
@@ -50,7 +68,7 @@ func _process(_delta: float) -> void:
 
 	# Process client messages
 	var clients_to_remove: Array[StreamPeerTCP] = []
-	for client in _clients:
+	for client: StreamPeerTCP in _clients:
 		if client.get_status() != StreamPeerTCP.STATUS_CONNECTED:
 			clients_to_remove.append(client)
 			continue
@@ -59,13 +77,13 @@ func _process(_delta: float) -> void:
 		if client.get_status() != StreamPeerTCP.STATUS_CONNECTED:
 			clients_to_remove.append(client)
 			continue
-		var available = client.get_available_bytes()
+		var available: int = client.get_available_bytes()
 		if available > 0:
-			var data = client.get_utf8_string(available)
+			var data: String = client.get_utf8_string(available)
 			_handle_message(client, data)
 
 	# Remove disconnected clients
-	for client in clients_to_remove:
+	for client: StreamPeerTCP in clients_to_remove:
 		_clients.erase(client)
 		print("[MCP Runtime] Client disconnected")
 		client_disconnected.emit()
@@ -80,8 +98,8 @@ func _start_server() -> void:
 
 	_server = TCPServer.new()
 	# listen() defaults bind_address to "*", which exposes the game to the whole network.
-	var bind_address = str(ProjectSettings.get_setting(BIND_ADDRESS_SETTING, DEFAULT_BIND_ADDRESS))
-	var error = _server.listen(_port, bind_address)
+	var bind_address: String = str(ProjectSettings.get_setting(BIND_ADDRESS_SETTING, DEFAULT_BIND_ADDRESS))
+	var error: Error = _server.listen(_port, bind_address)
 	if error != OK:
 		# A warning, not an error. The usual cause is that another instance of this project
 		# already owns the port, which happens every time a tool runs a headless operation
@@ -95,7 +113,7 @@ func _start_server() -> void:
 
 
 func _send_welcome(client: StreamPeerTCP) -> void:
-	var welcome = {
+	var welcome: Dictionary = {
 		"type": "welcome",
 		"protocol_version": PROTOCOL_VERSION,
 		"godot_version": Engine.get_version_info(),
@@ -105,24 +123,28 @@ func _send_welcome(client: StreamPeerTCP) -> void:
 
 
 func _handle_message(client: StreamPeerTCP, data: String) -> void:
-	var json = JSON.new()
-	var error = json.parse(data)
+	var json := JSON.new()
+	var error: Error = json.parse(data)
 	if error != OK:
 		_send_error(client, "Invalid JSON: " + json.get_error_message())
 		return
 
-	var message = json.get_data()
+	var message: Variant = json.get_data()
 	if not message is Dictionary:
 		_send_error(client, "Message must be an object")
 		return
 
-	var command = message.get("command", "")
-	var params = message.get("params", {})
-	var request_id = message.get("id", null)
+	var fields: Dictionary = message
+	var command: String = str(fields.get("command", ""))
+	var params: Variant = fields.get("params", {})
+	if not params is Dictionary:
+		_send_error(client, "params must be an object")
+		return
+	var request_id: Variant = fields.get("id", null)
 
 	command_received.emit(command, params)
 
-	var result = _execute_command(command, params)
+	var result: Dictionary = _execute_command(command, params)
 	if request_id != null:
 		result["id"] = request_id
 
@@ -162,11 +184,11 @@ func _cmd_ping(_params: Dictionary) -> Dictionary:
 
 
 func _cmd_get_tree(params: Dictionary) -> Dictionary:
-	var root_path = params.get("root", "/root")
-	var max_depth = params.get("depth", 3)
-	var include_properties = params.get("include_properties", false)
+	var root_path: String = str(params.get("root", "/root"))
+	var max_depth: int = int(params.get("depth", 3))
+	var include_properties: bool = bool(params.get("include_properties", false))
 
-	var root = get_tree().root.get_node_or_null(root_path)
+	var root: Node = get_tree().root.get_node_or_null(root_path)
 	if root == null:
 		return {"type": "error", "message": "Node not found: " + root_path}
 
@@ -174,11 +196,11 @@ func _cmd_get_tree(params: Dictionary) -> Dictionary:
 
 
 func _cmd_get_node(params: Dictionary) -> Dictionary:
-	var node_path = params.get("path", "")
+	var node_path: String = str(params.get("path", ""))
 	if node_path.is_empty():
 		return {"type": "error", "message": "Node path required"}
 
-	var node = get_tree().root.get_node_or_null(node_path)
+	var node: Node = get_tree().root.get_node_or_null(node_path)
 	if node == null:
 		return {"type": "error", "message": "Node not found: " + node_path}
 
@@ -186,18 +208,18 @@ func _cmd_get_node(params: Dictionary) -> Dictionary:
 
 
 func _cmd_set_property(params: Dictionary) -> Dictionary:
-	var node_path = params.get("path", "")
-	var property = params.get("property", "")
-	var value = params.get("value")
+	var node_path: String = str(params.get("path", ""))
+	var property: String = str(params.get("property", ""))
+	var value: Variant = params.get("value")
 
 	if node_path.is_empty() or property.is_empty():
 		return {"type": "error", "message": "Node path and property required"}
 
-	var node = get_tree().root.get_node_or_null(node_path)
+	var node: Node = get_tree().root.get_node_or_null(node_path)
 	if node == null:
 		return {"type": "error", "message": "Node not found: " + node_path}
 
-	var old_value = node.get(property)
+	var old_value: Variant = node.get(property)
 	node.set(property, _as_type(value, typeof(old_value)))
 
 	return {
@@ -210,32 +232,32 @@ func _cmd_set_property(params: Dictionary) -> Dictionary:
 
 
 func _cmd_call_method(params: Dictionary) -> Dictionary:
-	var node_path = params.get("path", "")
-	var method = params.get("method", "")
-	var args = params.get("args", [])
+	var node_path: String = str(params.get("path", ""))
+	var method: String = str(params.get("method", ""))
+	var args: Array = params.get("args", [])
 
 	if node_path.is_empty() or method.is_empty():
 		return {"type": "error", "message": "Node path and method required"}
 
-	var node = get_tree().root.get_node_or_null(node_path)
+	var node: Node = get_tree().root.get_node_or_null(node_path)
 	if node == null:
 		return {"type": "error", "message": "Node not found: " + node_path}
 
 	if not node.has_method(method):
 		return {"type": "error", "message": "Method not found: " + method}
 
-	var deserialized_args = []
-	for index in args.size():
+	var deserialized_args: Array = []
+	for index: int in args.size():
 		deserialized_args.append(_as_type(args[index], _parameter_type(node, method, index)))
 
-	var result = node.callv(method, deserialized_args)
+	var result: Variant = node.callv(method, deserialized_args)
 
 	return {"type": "method_result", "path": node_path, "method": method, "result": _serialize_value(result)}
 
 
 func _cmd_get_metrics(params: Dictionary) -> Dictionary:
-	var metrics = params.get("metrics", [])
-	var result = {"type": "metrics", "data": {}}
+	var metrics: Array = params.get("metrics", [])
+	var result: Dictionary = {"type": "metrics", "data": {}}
 
 	# Always include basic metrics
 	result["data"]["fps"] = Engine.get_frames_per_second()
@@ -263,22 +285,40 @@ func _cmd_get_metrics(params: Dictionary) -> Dictionary:
 		Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME
 	)
 
+	# A caller that names metrics gets those and no others, and hears about a name that is
+	# not one rather than getting everything back as if the list had not been sent.
+	if not metrics.is_empty():
+		var all: Dictionary = result["data"]
+		var unknown: Array = []
+		var selected: Dictionary = {}
+		for metric: Variant in metrics:
+			if all.has(metric):
+				selected[metric] = all[metric]
+			else:
+				unknown.append(metric)
+		if not unknown.is_empty():
+			return {
+				"type": "error",
+				"message": "Unknown metrics: %s. Available: %s" % [", ".join(unknown), ", ".join(all.keys())]
+			}
+		result["data"] = selected
+
 	return result
 
 
 func _cmd_capture_screenshot(params: Dictionary) -> Dictionary:
-	var viewport = get_viewport()
+	var viewport: Viewport = get_viewport()
 	if viewport == null:
 		return {"type": "error", "message": "No viewport available"}
 	return _capture_viewport_image(viewport, params)
 
 
 func _cmd_capture_viewport(params: Dictionary) -> Dictionary:
-	var viewport_path = String(params.get("viewportPath", params.get("viewport_path", "")))
+	var viewport_path: String = String(params.get("viewportPath", params.get("viewport_path", "")))
 	if viewport_path.is_empty():
 		return _cmd_capture_screenshot(params)
 
-	var node = get_tree().root.get_node_or_null(viewport_path)
+	var node: Node = get_tree().root.get_node_or_null(viewport_path)
 	if node == null:
 		return {"type": "error", "message": "Viewport not found: " + viewport_path}
 	if not node is Viewport:
@@ -287,22 +327,22 @@ func _cmd_capture_viewport(params: Dictionary) -> Dictionary:
 
 
 func _capture_viewport_image(viewport: Viewport, params: Dictionary) -> Dictionary:
-	var viewport_texture = viewport.get_texture()
+	var viewport_texture: ViewportTexture = viewport.get_texture()
 	if viewport_texture == null:
 		return {"type": "error", "message": "No viewport texture available"}
 
-	var image = viewport_texture.get_image()
+	var image: Image = viewport_texture.get_image()
 	if image == null:
 		return {"type": "error", "message": "Failed to capture viewport image"}
 
-	var width = int(params.get("width", 0))
-	var height = int(params.get("height", 0))
+	var width: int = int(params.get("width", 0))
+	var height: int = int(params.get("height", 0))
 	if width > 0 and height > 0:
 		image.resize(width, height)
 
-	var requested_path = String(params.get("output_path", params.get("outputPath", "")))
+	var requested_path: String = String(params.get("output_path", params.get("outputPath", "")))
 	if requested_path.is_empty():
-		var png_bytes = image.save_png_to_buffer()
+		var png_bytes: PackedByteArray = image.save_png_to_buffer()
 		if png_bytes.is_empty():
 			return {"type": "error", "message": "Failed to encode screenshot as PNG"}
 
@@ -315,10 +355,10 @@ func _capture_viewport_image(viewport: Viewport, params: Dictionary) -> Dictiona
 			"data": Marshalls.raw_to_base64(png_bytes)
 		}
 
-	var screenshot_path = requested_path
+	var screenshot_path: String = requested_path
 	if screenshot_path.begins_with("user://") or screenshot_path.begins_with("res://"):
 		screenshot_path = ProjectSettings.globalize_path(screenshot_path)
-	var save_error = image.save_png(screenshot_path)
+	var save_error: Error = image.save_png(screenshot_path)
 	if save_error != OK:
 		return {"type": "error", "message": "Failed to save screenshot as PNG: " + str(save_error)}
 
@@ -333,9 +373,9 @@ func _capture_viewport_image(viewport: Viewport, params: Dictionary) -> Dictiona
 
 
 func _cmd_inject_action(params: Dictionary) -> Dictionary:
-	var action = String(params.get("action", ""))
-	var pressed = bool(params.get("pressed", true))
-	var strength = float(params.get("strength", 1.0))
+	var action: String = String(params.get("action", ""))
+	var pressed: bool = bool(params.get("pressed", true))
+	var strength: float = float(params.get("strength", 1.0))
 
 	if action.is_empty():
 		return {"type": "error", "message": "Action name required"}
@@ -343,7 +383,7 @@ func _cmd_inject_action(params: Dictionary) -> Dictionary:
 	if not InputMap.has_action(action):
 		return {"type": "error", "message": "Action not found: " + action}
 
-	var event = InputEventAction.new()
+	var event := InputEventAction.new()
 	event.action = action
 	event.pressed = pressed
 	event.strength = strength
@@ -354,14 +394,16 @@ func _cmd_inject_action(params: Dictionary) -> Dictionary:
 
 func _cmd_inject_key(params: Dictionary) -> Dictionary:
 	var keycode_raw: Variant = params.get("keycode", 0)
-	var pressed = bool(params.get("pressed", true))
-	var key_label = String(params.get("key_label", ""))
+	var pressed: bool = bool(params.get("pressed", true))
+	var key_label: String = String(params.get("key_label", ""))
 
-	if keycode_raw is String and not (keycode_raw as String).is_empty() and key_label.is_empty():
-		key_label = keycode_raw as String
+	if keycode_raw is String:
+		var named: String = keycode_raw
+		if not named.is_empty() and key_label.is_empty():
+			key_label = named
 	var keycode: int = 0 if keycode_raw is String else int(keycode_raw)
 
-	var event = InputEventKey.new()
+	var event := InputEventKey.new()
 	event.pressed = pressed
 
 	if not key_label.is_empty():
@@ -369,7 +411,7 @@ func _cmd_inject_key(params: Dictionary) -> Dictionary:
 		if event.keycode == KEY_NONE:
 			return {"type": "error", "message": "Invalid key_label: " + key_label}
 	elif keycode > 0:
-		event.keycode = keycode
+		event.keycode = keycode as Key
 	else:
 		return {"type": "error", "message": "keycode or key_label required"}
 
@@ -399,27 +441,34 @@ func _cmd_inject_key(params: Dictionary) -> Dictionary:
 	}
 
 
-func _cmd_inject_mouse_click(params: Dictionary) -> Dictionary:
-	var position: Vector2
-	if params.has("x") and params.has("y"):
-		position = Vector2(float(params["x"]), float(params["y"]))
-	else:
-		var pos_raw = params.get("position", Vector2.ZERO)
-		if pos_raw is Array:
-			if pos_raw.size() < 2:
-				return {"type": "error", "message": "position array must contain [x, y]"}
-			position = Vector2(float(pos_raw[0]), float(pos_raw[1]))
-		elif pos_raw is Vector2:
-			position = pos_raw
-		else:
-			return {"type": "error", "message": "position must be Vector2 or [x, y]"}
-	var button: int = _resolve_mouse_button(params.get("button", MOUSE_BUTTON_LEFT))
-	var pressed = bool(params.get("pressed", true))
+## A point the tool schema sends as two flat numbers, or the older form of one [x, y] value.
+## Answers a Vector2, or the String that says what was wrong with it.
+func _read_point(params: Dictionary, x_key: String, y_key: String, pair_key: String) -> Variant:
+	if params.has(x_key) and params.has(y_key):
+		return Vector2(float(params[x_key]), float(params[y_key]))
+	var raw: Variant = params.get(pair_key, Vector2.ZERO)
+	if raw is Vector2:
+		return raw
+	if raw is Array:
+		var pair: Array = raw
+		if pair.size() < 2:
+			return "%s array must contain [x, y]" % pair_key
+		return Vector2(float(pair[0]), float(pair[1]))
+	return "%s must be Vector2 or [x, y]" % pair_key
 
-	var event = InputEventMouseButton.new()
+
+func _cmd_inject_mouse_click(params: Dictionary) -> Dictionary:
+	var point: Variant = _read_point(params, "x", "y", "position")
+	if point is String:
+		return {"type": "error", "message": point}
+	var position: Vector2 = point
+	var button: int = _resolve_mouse_button(params.get("button", MOUSE_BUTTON_LEFT))
+	var pressed: bool = bool(params.get("pressed", true))
+
+	var event := InputEventMouseButton.new()
 	event.position = position
 	event.global_position = position
-	event.button_index = button
+	event.button_index = button as MouseButton
 	event.pressed = pressed
 	Input.parse_input_event(event)
 
@@ -433,33 +482,16 @@ func _cmd_inject_mouse_click(params: Dictionary) -> Dictionary:
 
 
 func _cmd_inject_mouse_motion(params: Dictionary) -> Dictionary:
-	var position: Vector2
-	if params.has("x") and params.has("y"):
-		position = Vector2(float(params["x"]), float(params["y"]))
-	else:
-		var pos_raw = params.get("position", Vector2.ZERO)
-		if pos_raw is Array:
-			if pos_raw.size() < 2:
-				return {"type": "error", "message": "position array must contain [x, y]"}
-			position = Vector2(float(pos_raw[0]), float(pos_raw[1]))
-		elif pos_raw is Vector2:
-			position = pos_raw
-		else:
-			return {"type": "error", "message": "position must be Vector2 or [x, y]"}
-	var rel_raw = params.get("relative", Vector2.ZERO)
-	var relative: Vector2
-	if params.has("relativeX") and params.has("relativeY"):
-		relative = Vector2(float(params["relativeX"]), float(params["relativeY"]))
-	elif rel_raw is Array:
-		if rel_raw.size() < 2:
-			return {"type": "error", "message": "relative array must contain [x, y]"}
-		relative = Vector2(float(rel_raw[0]), float(rel_raw[1]))
-	elif rel_raw is Vector2:
-		relative = rel_raw
-	else:
-		return {"type": "error", "message": "relative must be Vector2 or [x, y]"}
+	var point: Variant = _read_point(params, "x", "y", "position")
+	if point is String:
+		return {"type": "error", "message": point}
+	var position: Vector2 = point
+	var movement: Variant = _read_point(params, "relativeX", "relativeY", "relative")
+	if movement is String:
+		return {"type": "error", "message": movement}
+	var relative: Vector2 = movement
 
-	var event = InputEventMouseMotion.new()
+	var event := InputEventMouseMotion.new()
 	event.position = position
 	event.global_position = position
 	event.relative = relative
@@ -474,24 +506,25 @@ func _cmd_inject_mouse_motion(params: Dictionary) -> Dictionary:
 
 
 func _cmd_watch_signal(params: Dictionary) -> Dictionary:
-	var node_path = params.get("path", "")
-	var signal_name = params.get("signal", "")
+	var node_path: String = str(params.get("path", ""))
+	var signal_name: String = str(params.get("signal", ""))
 
 	if node_path.is_empty() or signal_name.is_empty():
 		return {"type": "error", "message": "Node path and signal name required"}
 
-	var node = get_tree().root.get_node_or_null(node_path)
+	var node: Node = get_tree().root.get_node_or_null(node_path)
 	if node == null:
 		return {"type": "error", "message": "Node not found: " + node_path}
 
 	if not node.has_signal(signal_name):
 		return {"type": "error", "message": "Signal not found: " + signal_name}
 
-	var key = node_path + ":" + signal_name
+	var key: String = node_path + ":" + signal_name
 	if _watched_signals.has(key):
 		return {"type": "error", "message": "Signal already being watched"}
 
-	var callable = func(args = []): _broadcast_signal_event(node_path, signal_name, args)
+	var callable: Callable = func(args: Array = []) -> void:
+		_broadcast_signal_event(node_path, signal_name, args)
 
 	node.connect(signal_name, callable)
 	_watched_signals[key] = callable
@@ -500,14 +533,14 @@ func _cmd_watch_signal(params: Dictionary) -> Dictionary:
 
 
 func _cmd_unwatch_signal(params: Dictionary) -> Dictionary:
-	var node_path = params.get("path", "")
-	var signal_name = params.get("signal", "")
+	var node_path: String = str(params.get("path", ""))
+	var signal_name: String = str(params.get("signal", ""))
 
-	var key = node_path + ":" + signal_name
+	var key: String = node_path + ":" + signal_name
 	if not _watched_signals.has(key):
 		return {"type": "error", "message": "Signal not being watched"}
 
-	var node = get_tree().root.get_node_or_null(node_path)
+	var node: Node = get_tree().root.get_node_or_null(node_path)
 	if node != null:
 		node.disconnect(signal_name, _watched_signals[key])
 
@@ -517,21 +550,21 @@ func _cmd_unwatch_signal(params: Dictionary) -> Dictionary:
 
 
 func _broadcast_signal_event(node_path: String, signal_name: String, args: Array) -> void:
-	var event = {"type": "signal_event", "path": node_path, "signal": signal_name, "args": []}
-	for arg in args:
+	var event: Dictionary = {"type": "signal_event", "path": node_path, "signal": signal_name, "args": []}
+	for arg: Variant in args:
 		event["args"].append(_serialize_value(arg))
 
-	for client in _clients:
+	for client: StreamPeerTCP in _clients:
 		if client.get_status() == StreamPeerTCP.STATUS_CONNECTED:
 			_send_response(client, event)
 
 
 func _serialize_node_tree(node: Node, depth: int, max_depth: int, include_properties: bool) -> Dictionary:
-	var result = _serialize_node(node, include_properties)
+	var result: Dictionary = _serialize_node(node, include_properties)
 
 	if depth < max_depth:
-		var children = []
-		for child in node.get_children():
+		var children: Array = []
+		for child: Node in node.get_children():
 			children.append(_serialize_node_tree(child, depth + 1, max_depth, include_properties))
 		result["children"] = children
 
@@ -539,50 +572,60 @@ func _serialize_node_tree(node: Node, depth: int, max_depth: int, include_proper
 
 
 func _serialize_node(node: Node, include_properties: bool) -> Dictionary:
-	var result = {"name": node.name, "type": node.get_class(), "path": str(node.get_path())}
+	var result: Dictionary = {"name": node.name, "type": node.get_class(), "path": str(node.get_path())}
 
-	if node.get_script():
-		result["script"] = node.get_script().resource_path
+	var script: Variant = node.get_script()
+	if script is Script:
+		result["script"] = (script as Script).resource_path
 
 	if include_properties:
 		result["properties"] = {}
-		for prop in node.get_property_list():
+		for prop: Dictionary in node.get_property_list():
 			if prop["usage"] & PROPERTY_USAGE_STORAGE:
-				var name = prop["name"]
-				if not name.begins_with("_"):
-					result["properties"][name] = _serialize_value(node.get(name))
+				var property_name: String = prop["name"]
+				if not property_name.begins_with("_"):
+					result["properties"][property_name] = _serialize_value(node.get(property_name))
 
 	return result
 
 
-## Converts a Godot value into something JSON can carry.
-##
-## The set of types that survive the wire is a table keyed on typeof(), rather than an order of
-## `is` tests you have to trust. That order used to be load bearing and documented only by a
-## comment: Resource had to be checked before Object, or every resource came back as a bare
-## class name with its path dropped. Nothing else here depends on being asked in order.
+## Converts a Godot value into something JSON can carry. A type with no entry in the table
+## passes through as itself, which is what the JSON-native ones want.
 func _serialize_value(value: Variant) -> Variant:
-	if _serialisers.is_empty():
-		_serialisers = _build_serialisers()
-	var converter: Callable = _serialisers.get(typeof(value), Callable())
-	return converter.call(value) if converter.is_valid() else value
+	var serialiser: String = SERIALISERS.get(typeof(value), "")
+	return call(serialiser, value) if not serialiser.is_empty() else value
 
 
-func _build_serialisers() -> Dictionary:
-	return {
-		TYPE_NIL: func(_value): return null,
-		TYPE_VECTOR2: func(v): return {"_type": "Vector2", "x": v.x, "y": v.y},
-		TYPE_VECTOR3: func(v): return {"_type": "Vector3", "x": v.x, "y": v.y, "z": v.z},
-		TYPE_VECTOR2I: func(v): return {"_type": "Vector2i", "x": v.x, "y": v.y},
-		TYPE_VECTOR3I: func(v): return {"_type": "Vector3i", "x": v.x, "y": v.y, "z": v.z},
-		TYPE_COLOR: func(v): return {"_type": "Color", "r": v.r, "g": v.g, "b": v.b, "a": v.a},
-		TYPE_NODE_PATH: func(v): return {"_type": "NodePath", "path": str(v)},
-		TYPE_ARRAY: func(v): return v.map(_serialize_value),
-		TYPE_RECT2: _serialize_rect2,
-		TYPE_TRANSFORM2D: _serialize_transform2d,
-		TYPE_DICTIONARY: _serialize_dictionary,
-		TYPE_OBJECT: _serialize_object,
-	}
+func _serialize_nil(_value: Variant) -> Variant:
+	return null
+
+
+func _serialize_vector2(value: Vector2) -> Dictionary:
+	return {"_type": "Vector2", "x": value.x, "y": value.y}
+
+
+func _serialize_vector3(value: Vector3) -> Dictionary:
+	return {"_type": "Vector3", "x": value.x, "y": value.y, "z": value.z}
+
+
+func _serialize_vector2i(value: Vector2i) -> Dictionary:
+	return {"_type": "Vector2i", "x": value.x, "y": value.y}
+
+
+func _serialize_vector3i(value: Vector3i) -> Dictionary:
+	return {"_type": "Vector3i", "x": value.x, "y": value.y, "z": value.z}
+
+
+func _serialize_color(value: Color) -> Dictionary:
+	return {"_type": "Color", "r": value.r, "g": value.g, "b": value.b, "a": value.a}
+
+
+func _serialize_node_path(value: NodePath) -> Dictionary:
+	return {"_type": "NodePath", "path": str(value)}
+
+
+func _serialize_array(value: Array) -> Array:
+	return value.map(_serialize_value)
 
 
 func _serialize_rect2(value: Rect2) -> Dictionary:
@@ -601,8 +644,8 @@ func _serialize_transform2d(value: Transform2D) -> Dictionary:
 
 
 func _serialize_dictionary(value: Dictionary) -> Dictionary:
-	var serialised := {}
-	for key in value:
+	var serialised: Dictionary = {}
+	for key: Variant in value:
 		serialised[str(key)] = _serialize_value(value[key])
 	return serialised
 
@@ -611,65 +654,67 @@ func _serialize_dictionary(value: Dictionary) -> Dictionary:
 ## its path is the half worth having.
 func _serialize_object(value: Object) -> Dictionary:
 	if value is Resource:
-		return {"_type": "Resource", "path": value.resource_path, "class": value.get_class()}
+		var resource: Resource = value
+		return {"_type": "Resource", "path": resource.resource_path, "class": resource.get_class()}
 	return {"_type": "Object", "class": value.get_class()}
 
 
-func _deserialize_value(value) -> Variant:
+func _deserialize_value(value: Variant) -> Variant:
 	if value == null:
 		return null
 	if value is Array:
-		var arr = []
-		for item in value:
+		var arr: Array = []
+		for item: Variant in value:
 			arr.append(_deserialize_value(item))
 		return arr
 	if not value is Dictionary:
 		return value
 
-	if not value.has("_type"):
-		var dict = {}
-		for key in value:
-			dict[key] = _deserialize_value(value[key])
+	var fields: Dictionary = value
+	if not fields.has("_type"):
+		var dict: Dictionary = {}
+		for key: Variant in fields:
+			dict[key] = _deserialize_value(fields[key])
 		return dict
 
-	match value["_type"]:
+	match fields["_type"]:
 		"Vector2":
-			return Vector2(value.get("x", 0), value.get("y", 0))
+			return Vector2(fields.get("x", 0), fields.get("y", 0))
 		"Vector3":
-			return Vector3(value.get("x", 0), value.get("y", 0), value.get("z", 0))
+			return Vector3(fields.get("x", 0), fields.get("y", 0), fields.get("z", 0))
 		"Vector2i":
-			return Vector2i(value.get("x", 0), value.get("y", 0))
+			return Vector2i(fields.get("x", 0), fields.get("y", 0))
 		"Vector3i":
-			return Vector3i(value.get("x", 0), value.get("y", 0), value.get("z", 0))
+			return Vector3i(fields.get("x", 0), fields.get("y", 0), fields.get("z", 0))
 		"Color":
-			return Color(value.get("r", 0), value.get("g", 0), value.get("b", 0), value.get("a", 1))
+			return Color(fields.get("r", 0), fields.get("g", 0), fields.get("b", 0), fields.get("a", 1))
 		"NodePath":
-			return NodePath(value.get("path", ""))
+			return NodePath(fields.get("path", ""))
 	return value
 
 
 func _parameter_type(node: Object, method: String, index: int) -> int:
-	for entry in node.get_method_list():
+	for entry: Dictionary in node.get_method_list():
 		if entry.get("name", "") != method:
 			continue
-		var params = entry.get("args", [])
+		var params: Array = entry.get("args", [])
 		if index < 0 or index >= params.size():
 			return TYPE_NIL
 		return int(params[index].get("type", TYPE_NIL))
 	return TYPE_NIL
 
 
-func _as_type(value, type: int) -> Variant:
-	var fitted = _deserialize_value(value)
+func _as_type(value: Variant, type: int) -> Variant:
+	var fitted: Variant = _deserialize_value(value)
 	if type == TYPE_NIL or typeof(fitted) == type:
 		return fitted
 
-	var simple = [TYPE_BOOL, TYPE_INT, TYPE_FLOAT, TYPE_STRING]
+	var simple: Array[int] = [TYPE_BOOL, TYPE_INT, TYPE_FLOAT, TYPE_STRING]
 	if not simple.has(type) or not simple.has(typeof(fitted)):
 		return fitted
 
 	if fitted is String and type != TYPE_STRING:
-		var parsed = JSON.parse_string(fitted)
+		var parsed: Variant = JSON.parse_string(fitted)
 		if typeof(parsed) != TYPE_NIL and typeof(parsed) != TYPE_STRING:
 			fitted = parsed
 
@@ -695,7 +740,7 @@ func _resolve_mouse_button(raw: Variant) -> int:
 
 
 func _send_response(client: StreamPeerTCP, data: Dictionary) -> void:
-	var json_str = JSON.stringify(data) + "\n"
+	var json_str: String = JSON.stringify(data) + "\n"
 	client.put_utf8_string(json_str)
 
 
@@ -709,7 +754,7 @@ func _notification(what: int) -> void:
 
 
 func _cleanup() -> void:
-	for client in _clients:
+	for client: StreamPeerTCP in _clients:
 		client.disconnect_from_host()
 	_clients.clear()
 

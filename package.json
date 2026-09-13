@@ -30,8 +30,6 @@
     "test": "bun run test:ci",
     "test:smoke": "bun test/smoke.ts",
     "test:integration": "bun test/bridge.ts",
-    "test:dynamic-groups": "bun test/dynamic-groups.ts",
-    "test:e2e-groups": "bun test/e2e-dynamic-groups.ts",
     "test:regressions": "bun test/regressions.ts",
     "test:detection": "bun test/godot-detection.ts",
     "test:engine": "bun test/engine-gdscript.ts",

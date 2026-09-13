@@ -99,15 +99,11 @@ func _check_mouse(node: Runtime) -> void:
 	if short.get("type", "") != "error":
 		_fail("a one-element position should be refused: %s" % JSON.stringify(short))
 
-	var motion: Dictionary = node._cmd_inject_mouse_motion(
-		{"x": 1, "y": 2, "relativeX": 3, "relativeY": 4}
-	)
+	var motion: Dictionary = node._cmd_inject_mouse_motion({"x": 1, "y": 2, "relativeX": 3, "relativeY": 4})
 	if motion.get("position", []) != [1.0, 2.0] or motion.get("relative", []) != [3.0, 4.0]:
 		_fail("flat motion: %s" % JSON.stringify(motion))
 
-	var nested_motion: Dictionary = node._cmd_inject_mouse_motion(
-		{"position": [5, 6], "relative": [7, 8]}
-	)
+	var nested_motion: Dictionary = node._cmd_inject_mouse_motion({"position": [5, 6], "relative": [7, 8]})
 	if nested_motion.get("relative", []) != [7.0, 8.0]:
 		_fail("nested motion: %s" % JSON.stringify(nested_motion))
 

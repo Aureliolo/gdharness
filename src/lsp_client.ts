@@ -520,67 +520,6 @@ export class GodotLSPClient {
   }
 }
 
-export function createLSPTools(): {
-  name: string;
-  description: string;
-  inputSchema: Record<string, unknown>;
-}[] {
-  return [
-    {
-      name: 'lsp_get_diagnostics',
-      description: 'Get GDScript diagnostics from Godot Language Server for a script file.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          projectPath: { type: 'string', description: 'Absolute path to Godot project root' },
-          scriptPath: { type: 'string', description: 'Path to script relative to project root' },
-        },
-        required: ['projectPath', 'scriptPath'],
-      },
-    },
-    {
-      name: 'lsp_get_completions',
-      description: 'Get code completions from Godot Language Server at a given position.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          projectPath: { type: 'string', description: 'Absolute path to Godot project root' },
-          scriptPath: { type: 'string', description: 'Path to script relative to project root' },
-          line: { type: 'number', description: 'Zero-based line number' },
-          character: { type: 'number', description: 'Zero-based character offset' },
-        },
-        required: ['projectPath', 'scriptPath', 'line', 'character'],
-      },
-    },
-    {
-      name: 'lsp_get_hover',
-      description: 'Get hover information from Godot Language Server at a given position.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          projectPath: { type: 'string', description: 'Absolute path to Godot project root' },
-          scriptPath: { type: 'string', description: 'Path to script relative to project root' },
-          line: { type: 'number', description: 'Zero-based line number' },
-          character: { type: 'number', description: 'Zero-based character offset' },
-        },
-        required: ['projectPath', 'scriptPath', 'line', 'character'],
-      },
-    },
-    {
-      name: 'lsp_get_symbols',
-      description: 'Get document symbols for a GDScript file from Godot Language Server.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          projectPath: { type: 'string', description: 'Absolute path to Godot project root' },
-          scriptPath: { type: 'string', description: 'Path to script relative to project root' },
-        },
-        required: ['projectPath', 'scriptPath'],
-      },
-    },
-  ];
-}
-
 function asToolResponse(payload: unknown): { content: { type: string; text: string }[] } {
   return {
     content: [

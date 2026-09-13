@@ -3,7 +3,7 @@ extends RefCounted
 const Log = preload("logger.gd")
 
 # The key names a caller may write, and what the engine calls them.
-const KEY_NAMES = {
+const KEY_NAMES: Dictionary = {
 	"A": KEY_A,
 	"B": KEY_B,
 	"C": KEY_C,
@@ -103,62 +103,65 @@ func _init(p_log: Log) -> void:
 
 
 # Add an input action to the InputMap
-func add_input_action(params) -> Dictionary:
-	var action_name = params.action_name
-	var events = params.events
-	var deadzone = params.get("deadzone", 0.5)
+func add_input_action(params: Dictionary) -> Dictionary:
+	var action_name: String = str(params.get("action_name", ""))
+	var events: Array = params.get("events", [])
+	var deadzone: float = float(params.get("deadzone", 0.5))
 
 	_log.info("Adding input action: " + action_name)
 	_log.debug("Events: " + JSON.stringify(events))
 	_log.debug("Deadzone: " + str(deadzone))
 
-	# Read project.godot
-	var config = ConfigFile.new()
-	var err = config.load("res://project.godot")
+	var config: ConfigFile = ConfigFile.new()
+	var err: Error = config.load("res://project.godot")
 	if err != OK:
 		return _log.failure("Failed to load project.godot: " + str(err))
 
-	# Build the input action configuration
-	var events_config = []
+	var events_config: Array[Dictionary] = []
 
-	for event in events:
-		var event_type = event.get("type", "")
+	for event: Variant in events:
+		if not event is Dictionary:
+			_log.error("Event must be an object")
+			continue
+		var fields: Dictionary = event
+		var event_type: String = str(fields.get("type", ""))
 
 		match event_type:
 			"key":
-				var keycode = event.get("keycode", "")
+				var keycode: String = str(fields.get("keycode", ""))
 				if keycode.is_empty():
 					_log.error("Keycode is required for key events")
 					continue
 
-				var event_config = {"class_name": "InputEventKey", "keycode": _keycode_value(keycode)}
+				var event_config: Dictionary = {
+					"class_name": "InputEventKey", "keycode": _keycode_value(keycode)
+				}
 
-				# Add modifiers
-				if event.get("ctrl", false):
+				if fields.get("ctrl", false):
 					event_config["ctrl_pressed"] = true
-				if event.get("alt", false):
+				if fields.get("alt", false):
 					event_config["alt_pressed"] = true
-				if event.get("shift", false):
+				if fields.get("shift", false):
 					event_config["shift_pressed"] = true
 
 				events_config.append(event_config)
 
 			"mouse_button":
 				events_config.append(
-					{"class_name": "InputEventMouseButton", "button_index": event.get("button", 1)}
+					{"class_name": "InputEventMouseButton", "button_index": fields.get("button", 1)}
 				)
 
 			"joypad_button":
 				events_config.append(
-					{"class_name": "InputEventJoypadButton", "button_index": event.get("button", 0)}
+					{"class_name": "InputEventJoypadButton", "button_index": fields.get("button", 0)}
 				)
 
 			"joypad_axis":
 				events_config.append(
 					{
 						"class_name": "InputEventJoypadMotion",
-						"axis": event.get("axis", 0),
-						"axis_value": event.get("axis_value", event.get("axisValue", 1))
+						"axis": fields.get("axis", 0),
+						"axis_value": fields.get("axis_value", fields.get("axisValue", 1))
 					}
 				)
 
@@ -168,13 +171,12 @@ func add_input_action(params) -> Dictionary:
 	if events_config.size() == 0:
 		return _log.failure("No valid events provided")
 
-	var action = build_input_action(deadzone, events_config)
+	var action: Dictionary = build_input_action(deadzone, events_config)
 	if action.is_empty():
 		return {}
 
 	config.set_value("input", action_name, action)
 
-	# Save project.godot
 	err = config.save("res://project.godot")
 	if err != OK:
 		return _log.failure("Failed to save project.godot: " + str(err))
@@ -194,53 +196,49 @@ func add_input_action(params) -> Dictionary:
 # text and it writes a quoted, escaped string, which loads as a String and leaves InputMap
 # with no action at all while add_input_action still reports the events it was given.
 func build_input_action(deadzone: float, events: Array) -> Dictionary:
+	# Untyped on purpose: the editor writes this list untyped, and a typed one would be
+	# serialised with an Array[InputEvent] prefix the editor's own project.godot never carries.
 	var built: Array = []
 
-	for event in events:
-		var evt_class = event.get("class_name", "")
+	for event: Dictionary in events:
+		var evt_class: String = str(event.get("class_name", ""))
 
 		match evt_class:
 			"InputEventKey":
-				var key := InputEventKey.new()
-				key.keycode = int(event.get("keycode", 0))
+				var key: InputEventKey = InputEventKey.new()
+				key.keycode = int(event.get("keycode", 0)) as Key
 				key.ctrl_pressed = bool(event.get("ctrl_pressed", false))
 				key.alt_pressed = bool(event.get("alt_pressed", false))
 				key.shift_pressed = bool(event.get("shift_pressed", false))
 				built.append(key)
 
 			"InputEventMouseButton":
-				var mouse := InputEventMouseButton.new()
-				mouse.button_index = int(event.get("button_index", MOUSE_BUTTON_LEFT))
+				var mouse: InputEventMouseButton = InputEventMouseButton.new()
+				mouse.button_index = (int(event.get("button_index", MOUSE_BUTTON_LEFT)) as MouseButton)
 				built.append(mouse)
 
 			"InputEventJoypadButton":
-				var pad := InputEventJoypadButton.new()
-				pad.button_index = int(event.get("button_index", 0))
+				var pad: InputEventJoypadButton = InputEventJoypadButton.new()
+				pad.button_index = int(event.get("button_index", 0)) as JoyButton
 				built.append(pad)
 
 			"InputEventJoypadMotion":
-				var motion := InputEventJoypadMotion.new()
-				motion.axis = int(event.get("axis", 0))
+				var motion: InputEventJoypadMotion = InputEventJoypadMotion.new()
+				motion.axis = int(event.get("axis", 0)) as JoyAxis
 				motion.axis_value = float(event.get("axis_value", 1.0))
 				built.append(motion)
 
 			_:
-				return _log.failure("Unknown input event class: " + str(evt_class))
+				return _log.failure("Unknown input event class: " + evt_class)
 
 	return {"deadzone": deadzone, "events": built}
 
 
 func _keycode_value(key_name: String) -> int:
-	var upper_key = key_name.to_upper()
-	if KEY_NAMES.has(upper_key):
-		return KEY_NAMES[upper_key]
-	if KEY_NAMES.has(key_name):
-		return KEY_NAMES[key_name]
-
-	# If not found, try to find by exact match or lowercase version
-	for k in KEY_NAMES:
-		if k.to_lower() == key_name.to_lower():
-			return KEY_NAMES[k]
+	var wanted: String = key_name.to_lower()
+	for name: String in KEY_NAMES:
+		if name.to_lower() == wanted:
+			return KEY_NAMES[name]
 
 	_log.error("Unknown key: " + key_name)
 	return 0

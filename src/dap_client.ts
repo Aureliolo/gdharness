@@ -23,12 +23,6 @@ type DAPBody = Record<string, unknown>;
 
 type DAPArrayItem = Record<string, unknown>;
 
-interface ToolDefinition {
-  name: string;
-  description: string;
-  inputSchema: Record<string, unknown>;
-}
-
 interface ToolResponse {
   content: { type: string; text: string }[];
 }
@@ -458,82 +452,6 @@ export class GodotDAPClient {
       this.pendingRequests.delete(seq);
     });
   }
-}
-
-export function createDAPTools(): ToolDefinition[] {
-  return [
-    {
-      name: 'dap_get_output',
-      description: 'Get captured Godot DAP console output lines',
-      inputSchema: {
-        type: 'object',
-        properties: {},
-        additionalProperties: false,
-      },
-    },
-    {
-      name: 'dap_set_breakpoint',
-      description: 'Set a breakpoint in a Godot script at a specific line',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          scriptPath: { type: 'string', description: 'Absolute or project-relative script path' },
-          line: { type: 'number', description: '1-based line number' },
-        },
-        required: ['scriptPath', 'line'],
-        additionalProperties: false,
-      },
-    },
-    {
-      name: 'dap_remove_breakpoint',
-      description: 'Remove a breakpoint in a Godot script at a specific line',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          scriptPath: { type: 'string', description: 'Absolute or project-relative script path' },
-          line: { type: 'number', description: '1-based line number' },
-        },
-        required: ['scriptPath', 'line'],
-        additionalProperties: false,
-      },
-    },
-    {
-      name: 'dap_continue',
-      description: 'Continue execution after a breakpoint or pause',
-      inputSchema: {
-        type: 'object',
-        properties: {},
-        additionalProperties: false,
-      },
-    },
-    {
-      name: 'dap_pause',
-      description: 'Pause execution of the running Godot debug target',
-      inputSchema: {
-        type: 'object',
-        properties: {},
-        additionalProperties: false,
-      },
-    },
-    {
-      name: 'dap_step_over',
-      description: 'Step over the current line in the debugger',
-      inputSchema: {
-        type: 'object',
-        properties: {},
-        additionalProperties: false,
-      },
-    },
-    {
-      name: 'dap_get_stack_trace',
-      description: 'Get the current stack trace from the Godot debugger',
-      inputSchema: {
-        type: 'object',
-        properties: {},
-        additionalProperties: false,
-      },
-    },
-  ];
 }
 
 export async function handleDAPTool(

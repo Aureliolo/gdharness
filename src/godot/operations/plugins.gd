@@ -10,45 +10,45 @@ func _init(p_log: Log) -> void:
 
 
 # List all plugins in the project with their status
-func list_plugins(_params) -> Dictionary:
+func list_plugins(_params: Dictionary) -> Dictionary:
 	_log.info("Listing plugins")
 
-	var result = {"plugins": [], "addons_directory_exists": false, "enabled_count": 0, "disabled_count": 0}
-
-	# Check if addons directory exists
-	var addons_path = "res://addons/"
+	var addons_path: String = "res://addons/"
 	if not DirAccess.dir_exists_absolute(ProjectSettings.globalize_path(addons_path)):
-		result["message"] = "No addons directory found in the project"
-		return result
+		return {
+			"plugins": [],
+			"addons_directory_exists": false,
+			"enabled_count": 0,
+			"disabled_count": 0,
+			"message": "No addons directory found in the project"
+		}
 
-	result["addons_directory_exists"] = true
-
-	var config = ConfigFile.new()
-	var enabled_plugins = []
+	var config: ConfigFile = ConfigFile.new()
+	var enabled_plugins: Array[String] = []
 	if config.load("res://project.godot") == OK:
 		enabled_plugins = _enabled_plugin_names(config)
 
 	_log.debug("Enabled plugins: " + str(enabled_plugins))
 
-	# Scan addons directory
-	var dir = DirAccess.open(addons_path)
+	var plugins: Array[Dictionary] = []
+	var enabled_count: int = 0
+
+	var dir: DirAccess = DirAccess.open(addons_path)
 	if dir:
 		dir.list_dir_begin()
-		var folder_name = dir.get_next()
+		var folder_name: String = dir.get_next()
 
 		while folder_name != "":
 			if dir.current_is_dir() and not folder_name.begins_with("."):
-				var plugin_cfg_path = addons_path + folder_name + "/plugin.cfg"
+				var plugin_cfg_path: String = addons_path + folder_name + "/plugin.cfg"
 
 				if FileAccess.file_exists(plugin_cfg_path):
-					var plugin_info = {
-						"name": folder_name,
-						"path": addons_path + folder_name,
-						"enabled": folder_name in enabled_plugins
+					var enabled: bool = folder_name in enabled_plugins
+					var plugin_info: Dictionary = {
+						"name": folder_name, "path": addons_path + folder_name, "enabled": enabled
 					}
 
-					# Read plugin.cfg for additional info
-					var plugin_config = ConfigFile.new()
+					var plugin_config: ConfigFile = ConfigFile.new()
 					if plugin_config.load(plugin_cfg_path) == OK:
 						plugin_info["display_name"] = plugin_config.get_value("plugin", "name", folder_name)
 						plugin_info["description"] = plugin_config.get_value("plugin", "description", "")
@@ -56,41 +56,40 @@ func list_plugins(_params) -> Dictionary:
 						plugin_info["version"] = plugin_config.get_value("plugin", "version", "")
 						plugin_info["script"] = plugin_config.get_value("plugin", "script", "")
 
-					result["plugins"].append(plugin_info)
-
-					if plugin_info["enabled"]:
-						result["enabled_count"] += 1
-					else:
-						result["disabled_count"] += 1
+					plugins.append(plugin_info)
+					if enabled:
+						enabled_count += 1
 
 			folder_name = dir.get_next()
 
 		dir.list_dir_end()
 
-	return result
+	return {
+		"plugins": plugins,
+		"addons_directory_exists": true,
+		"enabled_count": enabled_count,
+		"disabled_count": plugins.size() - enabled_count
+	}
 
 
 # Enable a plugin
-func enable_plugin(params) -> Dictionary:
-	var plugin_name = params.plugin_name
+func enable_plugin(params: Dictionary) -> Dictionary:
+	var plugin_name: String = str(params.get("plugin_name", ""))
 
 	_log.info("Enabling plugin: " + plugin_name)
 
-	# Check if plugin exists
-	var plugin_cfg_path = "res://addons/" + plugin_name + "/plugin.cfg"
+	var plugin_cfg_path: String = "res://addons/" + plugin_name + "/plugin.cfg"
 	if not FileAccess.file_exists(plugin_cfg_path):
 		_log.error("Plugin not found: " + plugin_name)
 		return _log.failure("Expected plugin.cfg at: " + plugin_cfg_path)
 
-	# Read project.godot
-	var config = ConfigFile.new()
-	var err = config.load("res://project.godot")
+	var config: ConfigFile = ConfigFile.new()
+	var err: Error = config.load("res://project.godot")
 	if err != OK:
 		return _log.failure("Failed to load project.godot: " + str(err))
 
-	var enabled_plugins = _enabled_plugin_names(config)
+	var enabled_plugins: Array[String] = _enabled_plugin_names(config)
 
-	# Check if already enabled
 	if plugin_name in enabled_plugins:
 		return {
 			"plugin_name": plugin_name, "action": "already_enabled", "message": "Plugin is already enabled"
@@ -107,20 +106,18 @@ func enable_plugin(params) -> Dictionary:
 
 
 # Disable a plugin
-func disable_plugin(params) -> Dictionary:
-	var plugin_name = params.plugin_name
+func disable_plugin(params: Dictionary) -> Dictionary:
+	var plugin_name: String = str(params.get("plugin_name", ""))
 
 	_log.info("Disabling plugin: " + plugin_name)
 
-	# Read project.godot
-	var config = ConfigFile.new()
-	var err = config.load("res://project.godot")
+	var config: ConfigFile = ConfigFile.new()
+	var err: Error = config.load("res://project.godot")
 	if err != OK:
 		return _log.failure("Failed to load project.godot: " + str(err))
 
-	var enabled_plugins = _enabled_plugin_names(config)
+	var enabled_plugins: Array[String] = _enabled_plugin_names(config)
 
-	# Check if plugin is in enabled list
 	if not plugin_name in enabled_plugins:
 		return {
 			"plugin_name": plugin_name,
@@ -138,34 +135,40 @@ func disable_plugin(params) -> Dictionary:
 	return {"plugin_name": plugin_name, "action": "disabled", "enabled_plugins": enabled_plugins}
 
 
-# The addon directory names in [editor_plugins], which project.godot stores as the engine
-# expression PackedStringArray("res://addons/<name>/plugin.cfg", ...).
-func _enabled_plugin_names(config: ConfigFile) -> Array:
-	var names = []
-
-	if not config.has_section("editor_plugins"):
-		return names
-
-	var enabled_value = config.get_value("editor_plugins", "enabled", "")
-	if not enabled_value is String or enabled_value.is_empty():
-		return names
-
-	var regex = RegEx.new()
+# The addon directory names in [editor_plugins]. The editor stores them as the engine
+# expression PackedStringArray("res://addons/<name>/plugin.cfg", ...), which ConfigFile reads
+# back as that type; the String form is what an older hand-edited file can carry.
+func _enabled_plugin_names(config: ConfigFile) -> Array[String]:
+	var names: Array[String] = []
+	var regex: RegEx = RegEx.new()
 	regex.compile("res://addons/([^/]+)/plugin.cfg")
-	for m in regex.search_all(enabled_value):
-		names.append(m.get_string(1))
+
+	var enabled_value: Variant = config.get_value("editor_plugins", "enabled", PackedStringArray())
+	if enabled_value is PackedStringArray:
+		var paths: PackedStringArray = enabled_value
+		for path: String in paths:
+			var m: RegExMatch = regex.search(path)
+			if m:
+				names.append(m.get_string(1))
+	elif enabled_value is String:
+		var listed: String = enabled_value
+		for m: RegExMatch in regex.search_all(listed):
+			names.append(m.get_string(1))
 
 	return names
 
 
-func _write_enabled_plugins(config: ConfigFile, names: Array) -> void:
+# Written as a real PackedStringArray: ConfigFile serialises that as the unquoted engine
+# expression the editor reads, whereas the same text handed over as a String is written quoted
+# and loads as a String the editor does not recognise as a plugin list.
+func _write_enabled_plugins(config: ConfigFile, names: Array[String]) -> void:
 	if names.is_empty():
 		if config.has_section_key("editor_plugins", "enabled"):
 			config.erase_section_key("editor_plugins", "enabled")
 		return
 
-	var enabled_paths = []
-	for p in names:
-		enabled_paths.append("res://addons/" + p + "/plugin.cfg")
+	var enabled_paths: PackedStringArray = PackedStringArray()
+	for name: String in names:
+		enabled_paths.append("res://addons/" + name + "/plugin.cfg")
 
-	config.set_value("editor_plugins", "enabled", 'PackedStringArray("' + '", "'.join(enabled_paths) + '")')
+	config.set_value("editor_plugins", "enabled", enabled_paths)

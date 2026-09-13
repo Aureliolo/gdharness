@@ -4,7 +4,8 @@ import { WebSocket } from 'ws';
 import { isRecord } from './support/json-rpc.js';
 import { reservePort, ServerProcess } from './support/server.js';
 
-const OPENAI_COMPATIBLE_TOOL_NAME_PATTERN = /^[a-zA-Z0-9-]{1,128}$/;
+/** domain_verb, which every client accepts: no dots, no case, nothing a strict client rejects. */
+const TOOL_NAME_PATTERN = /^[a-z][a-z0-9_]{1,63}$/;
 
 async function connectWebSocket(url: string): Promise<void> {
   await new Promise<void>((resolve, reject) => {
@@ -43,7 +44,6 @@ async function main(): Promise<void> {
       GODOT_PATH: process.env['GODOT_PATH'] ?? process.execPath,
       GDHARNESS_BRIDGE_PORT: String(port),
       GDHARNESS_BRIDGE_HOST: host,
-      GDHARNESS_TOOL_PROFILE: 'compact',
     },
   });
 
@@ -65,11 +65,9 @@ async function main(): Promise<void> {
     }
     const invalidToolNames = tools
       .map((tool) => (isRecord(tool) ? tool['name'] : undefined))
-      .filter((name) => typeof name !== 'string' || !OPENAI_COMPATIBLE_TOOL_NAME_PATTERN.test(name));
+      .filter((name) => typeof name !== 'string' || !TOOL_NAME_PATTERN.test(name));
     if (invalidToolNames.length > 0) {
-      throw new Error(
-        `tools/list exposed invalid OpenAI-compatible tool names: ${invalidToolNames.join(', ')}`,
-      );
+      throw new Error(`tools/list exposed names outside domain_verb: ${invalidToolNames.join(', ')}`);
     }
 
     await connectWebSocket(`ws://${host}:${port}/visualizer`);

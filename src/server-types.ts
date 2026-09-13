@@ -40,20 +40,17 @@ interface ToolResponseContent {
   mimeType?: string;
 }
 
-/** What every tool handler returns. `isError` marks a handled failure, not a thrown one. */
-export interface ToolResponse {
+/**
+ * What every tool handler returns. `isError` marks a handled failure, not a thrown one. A type
+ * rather than an interface so that it satisfies the SDK's indexed result type as it is.
+ */
+export type ToolResponse = {
   content: ToolResponseContent[];
   isError?: boolean;
-}
+};
 
 export interface MCPToolDefinition {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
-}
-
-export interface ToolGroupDefinition {
-  description: string;
-  tools: string[];
-  keywords: string[];
 }

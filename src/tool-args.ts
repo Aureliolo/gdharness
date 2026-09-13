@@ -37,15 +37,6 @@ export function readNonEmptyString(params: OperationParams, key: string): string
   return value !== undefined && value.trim() !== '' ? value : undefined;
 }
 
-/** Under either spelling, empty treated as absent. */
-export function readNonEmptyStringEither(
-  params: OperationParams,
-  first: string,
-  second: string,
-): string | undefined {
-  return readNonEmptyString(params, first) ?? readNonEmptyString(params, second);
-}
-
 /**
  * A number greater than zero. Zero is not a usable limit or depth anywhere it is read here,
  * so it means the same as not sending the argument at all.

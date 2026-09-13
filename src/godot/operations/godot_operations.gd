@@ -20,27 +20,24 @@ const Log = preload("logger.gd")
 const Plugins = preload("plugins.gd")
 const ProjectConfig = preload("project_config.gd")
 const ProjectDiagnostics = preload("project_diagnostics.gd")
-const ResourceBuilders = preload("resource_builders.gd")
 const ResourceFiles = preload("resource_files.gd")
-const SceneBuilders = preload("scene_builders.gd")
-const SceneNodes = preload("scene_nodes.gd")
 
 var _log: Log
 
 
-func _init():
-	var args = OS.get_cmdline_args()
+func _init() -> void:
+	var args: PackedStringArray = OS.get_cmdline_args()
 	_log = Log.new("--debug-godot" in args)
 
 	# The script path is the argument after --script, so the operation and its parameters are
 	# the two that follow it.
-	var script_index = args.find("--script")
+	var script_index: int = args.find("--script")
 	if script_index == -1:
 		_log.error("Could not find --script argument")
 		quit(1)
 		return
 
-	var params_index = script_index + 3
+	var params_index: int = script_index + 3
 	if args.size() <= params_index:
 		_log.error("Usage: godot --headless --script godot_operations.gd <operation> <json_params>")
 		_log.error("Not enough command-line arguments provided.")
@@ -49,9 +46,9 @@ func _init():
 
 	_log.debug("All arguments: " + str(args))
 
-	var operation = args[script_index + 2]
-	var params = _read_params(args[params_index])
-	if params == null:
+	var operation: String = args[script_index + 2]
+	var params: Variant = _read_params(args[params_index])
+	if not params is Dictionary:
 		quit(1)
 		return
 
@@ -89,31 +86,24 @@ func _read_params(argument: String) -> Variant:
 		_log.error("JSON Error: " + json.get_error_message() + " at line " + str(json.get_error_line()))
 		return null
 
-	var params = json.get_data()
-	if params == null:
-		_log.error("Failed to parse JSON parameters: " + params_json)
+	var params: Variant = json.get_data()
+	if not params is Dictionary:
+		_log.error("Parameters must be a JSON object: " + params_json)
+		return null
 	return params
 
 
 # The payload one operation answers with, or an empty dictionary when it failed or nobody
 # owns the name.
-func _run(operation: String, params) -> Dictionary:
+func _run(operation: String, params: Dictionary) -> Dictionary:
 	var payload: Dictionary = {}
 
 	match operation:
 		# Resource files
-		"export_mesh_library":
-			payload = ResourceFiles.new(_log).export_mesh_library(params)
 		"get_uid":
 			payload = ResourceFiles.new(_log).get_uid(params)
 		"resave_resources":
 			payload = ResourceFiles.new(_log).resave_resources(params)
-
-		# Scenes
-		"list_scene_nodes":
-			payload = SceneNodes.new(_log).list_scene_nodes(params)
-		"set_node_properties":
-			payload = SceneNodes.new(_log).set_node_properties(params)
 
 		# Import and export pipeline
 		"get_import_status":
@@ -134,12 +124,8 @@ func _run(operation: String, params) -> Dictionary:
 			payload = Dependencies.new(_log).get_dependencies(params)
 		"find_resource_usages":
 			payload = Dependencies.new(_log).find_resource_usages(params)
-		"parse_error_log":
-			payload = ProjectDiagnostics.new(_log).parse_error_log(params)
 		"get_project_health":
 			payload = ProjectDiagnostics.new(_log).get_project_health(params)
-		"search_project":
-			payload = ProjectDiagnostics.new(_log).search_project(params)
 
 		# project.godot
 		"get_project_setting":
@@ -154,10 +140,6 @@ func _run(operation: String, params) -> Dictionary:
 			payload = ProjectConfig.new(_log).list_autoloads(params)
 		"set_main_scene":
 			payload = ProjectConfig.new(_log).set_main_scene(params)
-		"configure_physics_layer":
-			payload = ProjectConfig.new(_log).configure_physics_layer(params)
-		"configure_navigation_layers":
-			payload = ProjectConfig.new(_log).configure_navigation_layers(params)
 
 		# GDScript files
 		"create_script":
@@ -186,38 +168,6 @@ func _run(operation: String, params) -> Dictionary:
 			payload = AudioBuses.new(_log).set_audio_bus_effect(params)
 		"set_audio_bus_volume":
 			payload = AudioBuses.new(_log).set_audio_bus_volume(params)
-		"create_audio_stream_player":
-			payload = SceneBuilders.new(_log).create_audio_stream_player(params)
-
-		# Nodes built into a scene
-		"create_http_request":
-			payload = SceneBuilders.new(_log).create_http_request(params)
-		"create_multiplayer_spawner":
-			payload = SceneBuilders.new(_log).create_multiplayer_spawner(params)
-		"create_multiplayer_synchronizer":
-			payload = SceneBuilders.new(_log).create_multiplayer_synchronizer(params)
-		"create_raycast":
-			payload = SceneBuilders.new(_log).create_raycast(params)
-		"set_collision_layer_mask":
-			payload = SceneBuilders.new(_log).set_collision_layer_mask(params)
-		"create_world_environment":
-			payload = SceneBuilders.new(_log).create_world_environment(params)
-		"create_light":
-			payload = SceneBuilders.new(_log).create_light(params)
-		"create_camera":
-			payload = SceneBuilders.new(_log).create_camera(params)
-		"set_animation_tree_parameter":
-			payload = SceneBuilders.new(_log).set_animation_tree_parameter(params)
-		"apply_theme_to_node":
-			payload = SceneBuilders.new(_log).apply_theme_to_node(params)
-
-		# Resources saved on their own
-		"create_physics_material":
-			payload = ResourceBuilders.new().create_physics_material(params)
-		"create_environment":
-			payload = ResourceBuilders.new().create_environment_resource(params)
-		"create_theme":
-			payload = ResourceBuilders.new().create_theme_resource(params)
 
 		# ClassDB
 		"query_classes":

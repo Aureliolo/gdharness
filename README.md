@@ -48,6 +48,29 @@ Two things, and nothing else:
 Then point any MCP client at it. gdharness installs the Godot addons into your project
 itself; there is nothing to copy by hand, no Python, and no Node.
 
+## Tools
+
+Thirty, named `domain_verb`. A tool that does several related things takes an `op`, and its
+description says which arguments each op needs; a call with an argument the tool does not
+name, an op it does not have, or a required argument missing is refused with the valid set
+spelled out.
+
+| Domain | Tools |
+| --- | --- |
+| `project_*` | `list`, `info`, `settings`, `search`, `dependencies`, `import`, `export` |
+| `scene_*` | `create`, `tree`, `node`, `signal`, `animation` |
+| `script_*` | `edit`, `info`, `diagnostics` |
+| `resource_*` | `edit` |
+| `editor_*` | `launch`, `run`, `stop`, `output`, `status`, `rescan`, `classes` |
+| `runtime_*` | `inspect`, `invoke`, `capture`, `input` |
+| `debug_*` | `breakpoint`, `control`, `state` |
+
+The `scene_*` and `resource_*` tools and `editor_rescan` go through the editor addon and need
+the editor open; `script_diagnostics`, `script_info` beyond `structure`, and the `debug_*`
+tools talk to the editor's language server and debug adapter; the `runtime_*` tools talk to
+the game started by `editor_run`. Everything else runs the engine headless and needs nothing
+open.
+
 ## Security
 
 An MCP server is a program you hand an agent, and it usually arrives as an unsigned tarball of

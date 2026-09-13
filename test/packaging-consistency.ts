@@ -82,10 +82,7 @@ const operationsModules = [
   'plugins.gd',
   'project_config.gd',
   'project_diagnostics.gd',
-  'resource_builders.gd',
   'resource_files.gd',
-  'scene_builders.gd',
-  'scene_nodes.gd',
   'serialisation.gd',
 ];
 

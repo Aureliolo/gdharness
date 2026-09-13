@@ -10,19 +10,19 @@ func _init(p_log: Log) -> void:
 
 
 func create_audio_bus(params: Dictionary) -> Dictionary:
-	var bus_name = params.get("busName", "NewBus")
-	var parent_idx = int(params.get("parentBusIndex", 0))
+	var bus_name: String = str(params.get("busName", "NewBus"))
+	var parent_idx: int = int(params.get("parentBusIndex", 0))
 
 	AudioServer.add_bus(parent_idx + 1)
-	var new_idx = AudioServer.bus_count - 1
+	var new_idx: int = AudioServer.bus_count - 1
 	AudioServer.set_bus_name(new_idx, bus_name)
 
 	if parent_idx > 0:
 		AudioServer.set_bus_send(new_idx, AudioServer.get_bus_name(parent_idx))
 
 	# The layout is a project resource, so the bus only survives the run if it is saved.
-	var save_path = "res://default_bus_layout.tres"
-	var err = ResourceSaver.save(AudioServer.generate_bus_layout(), save_path)
+	var save_path: String = "res://default_bus_layout.tres"
+	var err: Error = ResourceSaver.save(AudioServer.generate_bus_layout(), save_path)
 
 	return {
 		"success": err == OK,
@@ -33,8 +33,8 @@ func create_audio_bus(params: Dictionary) -> Dictionary:
 
 
 func get_audio_buses(_params: Dictionary) -> Dictionary:
-	var buses = []
-	for i in range(AudioServer.bus_count):
+	var buses: Array[Dictionary] = []
+	for i: int in range(AudioServer.bus_count):
 		buses.append(
 			{
 				"index": i,
@@ -51,16 +51,16 @@ func get_audio_buses(_params: Dictionary) -> Dictionary:
 
 
 func set_audio_bus_effect(params: Dictionary) -> Dictionary:
-	var bus_idx = int(params.get("busIndex", 0))
-	var effect_idx = int(params.get("effectIndex", 0))
-	var effect_type = params.get("effectType", "Reverb")
-	var enabled = params.get("enabled", true)
+	var bus_idx: int = int(params.get("busIndex", 0))
+	var effect_idx: int = int(params.get("effectIndex", 0))
+	var effect_type: String = str(params.get("effectType", "Reverb"))
+	var enabled: bool = bool(params.get("enabled", true))
 
-	var effect = _effect_named(effect_type)
+	var effect: AudioEffect = _effect_named(effect_type)
 	if effect == null:
 		return _log.failure("Unknown effect type: " + effect_type)
 
-	# Ensure enough effect slots
+	# The slot has to exist before an effect can be placed at that index.
 	while AudioServer.get_bus_effect_count(bus_idx) <= effect_idx:
 		AudioServer.add_bus_effect(bus_idx, AudioEffectAmplify.new())
 
@@ -71,8 +71,8 @@ func set_audio_bus_effect(params: Dictionary) -> Dictionary:
 
 
 func set_audio_bus_volume(params: Dictionary) -> Dictionary:
-	var bus_idx = int(params.get("busIndex", 0))
-	var volume_db = float(params.get("volumeDb", 0.0))
+	var bus_idx: int = int(params.get("busIndex", 0))
+	var volume_db: float = float(params.get("volumeDb", 0.0))
 
 	AudioServer.set_bus_volume_db(bus_idx, volume_db)
 
