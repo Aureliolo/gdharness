@@ -13,7 +13,7 @@
  * cost somebody their comments to save them one paste.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import process from 'node:process';
@@ -101,6 +101,8 @@ export interface Harness {
    * Present means the file is TOML or YAML, or its exact shape is not documented.
    */
   readonly addCommand?: (launch: Launch) => readonly string[];
+  /** Its own command for taking the server out again, where it documents one. */
+  readonly removeCommand?: () => readonly string[];
   /**
    * What to put in the file by hand, for a harness with neither a config this can write nor a
    * documented command. Shown rather than guessed at: a command invented from a blog post is the
@@ -389,6 +391,7 @@ export const HARNESSES: readonly Harness[] = [
       launch.command,
       ...launch.args,
     ],
+    removeCommand: () => ['codex', 'mcp', 'remove', SERVER_KEY],
   },
   {
     // Cline keeps rules, skills, hooks and agents per project but not servers: cline/cline#2418.
@@ -698,6 +701,69 @@ export function groupByFile(harnesses: readonly Harness[], projectPath: string):
     }
   }
   return [...groups.values()];
+}
+
+export interface Removed {
+  readonly harness: Harness;
+  readonly path: string;
+  /**
+   * `removed` took our entry out, `deleted` took the file with it because nothing else was in it,
+   * `absent` found nothing of ours, and `manual` is a file we cannot edit and must describe.
+   */
+  readonly action: 'removed' | 'deleted' | 'absent' | 'manual';
+  /** For `manual`, the command that removes it, when the harness documents one. */
+  readonly command?: readonly string[];
+}
+
+/**
+ * gdharness taken back out of one harness's configuration.
+ *
+ * Only our own key is touched. A file that held other servers keeps them and stays; one that held
+ * nothing but gdharness is removed, because a file we created and then emptied is litter.
+ */
+export function disconnect(harness: Harness, projectPath: string): Removed {
+  const path = configPath(harness, projectPath);
+  if (!existsSync(path)) {
+    return { harness, path, action: 'absent' };
+  }
+  // A file we could not write we cannot read our way out of either, so the most this can say is
+  // that the file is there and what would take the entry out of it.
+  if (harness.addCommand !== undefined || harness.snippet !== undefined) {
+    const command = harness.removeCommand?.();
+    return { harness, path, action: 'manual', ...(command === undefined ? {} : { command }) };
+  }
+
+  let existing: unknown;
+  try {
+    existing = JSON.parse(readFileSync(path, 'utf8'));
+  } catch {
+    // A config we cannot parse is one we never wrote to either, so there is nothing of ours in it.
+    return { harness, path, action: 'absent' };
+  }
+  if (typeof existing !== 'object' || existing === null || Array.isArray(existing)) {
+    return { harness, path, action: 'absent' };
+  }
+
+  const root = { ...(existing as Record<string, unknown>) };
+  const held = root[harness.container];
+  if (typeof held !== 'object' || held === null || Array.isArray(held) || !(SERVER_KEY in held)) {
+    return { harness, path, action: 'absent' };
+  }
+
+  const servers: Record<string, unknown> = { ...(held as Record<string, unknown>) };
+  delete servers[SERVER_KEY];
+  if (Object.keys(servers).length === 0) {
+    delete root[harness.container];
+  } else {
+    root[harness.container] = servers;
+  }
+
+  if (Object.keys(root).length === 0) {
+    rmSync(path, { force: true });
+    return { harness, path, action: 'deleted' };
+  }
+  writeFileSync(path, `${JSON.stringify(root, null, 2)}\n`, 'utf8');
+  return { harness, path, action: 'removed' };
 }
 
 export interface Written {

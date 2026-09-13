@@ -12,7 +12,14 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { HARNESSES, harnessById } from '../src/harnesses.js';
-import { SHARED_SKILLS, SKILL_NAME, skillDirectories, skillFiles, writeSkill } from '../src/skill.js';
+import {
+  removeSkill,
+  SHARED_SKILLS,
+  SKILL_NAME,
+  skillDirectories,
+  skillFiles,
+  writeSkill,
+} from '../src/skill.js';
 import { TOOL_SPECS } from '../src/tool-definitions.js';
 
 function project(): string {
@@ -142,12 +149,63 @@ function testRewritingLeavesNothingStaleBehind(): void {
   }
 }
 
+/**
+ * Uninstalling has to leave the project as it found it. The shared directory is one gdharness
+ * creates, so its husk goes too; a harness's own directory is that harness's, and stays.
+ */
+function testRemovingTakesOurDirectoriesAndNobodyElses(): void {
+  const root = project();
+  try {
+    const claude = harnessById('claude-code');
+    assert.ok(claude?.skills);
+    const directories = skillDirectories([claude], root, existsSync);
+    writeSkill(directories, '9.9.9');
+    assert.deepEqual([...removeSkill(directories, root)].sort(), [...directories].sort());
+
+    assert.equal(existsSync(join(root, '.agents')), false, 'the directory gdharness made is gone');
+    assert.equal(
+      existsSync(join(root, '.claude')),
+      true,
+      'the harness own directory stays, because it is theirs rather than ours',
+    );
+    assert.equal(
+      existsSync(join(root, claude.skills.dir)),
+      false,
+      'but the empty skills folder inside it does not',
+    );
+
+    assert.deepEqual(removeSkill(directories, root), [], 'removing twice reports nothing the second time');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+/** A skills directory holding somebody else's skill is not ours to tidy away. */
+function testAnotherSkillBesideOursSurvives(): void {
+  const root = project();
+  try {
+    const directories = skillDirectories([], root, existsSync);
+    writeSkill(directories, '9.9.9');
+    const theirs = join(root, SHARED_SKILLS, 'their-skill');
+    mkdirSync(theirs, { recursive: true });
+    writeFileSync(join(theirs, 'SKILL.md'), '---\nname: their-skill\ndescription: theirs\n---\n', 'utf8');
+
+    removeSkill(directories, root);
+    assert.equal(existsSync(theirs), true, 'their skill is untouched');
+    assert.equal(existsSync(join(root, SHARED_SKILLS)), true, 'and the directory holding it stays');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 const TESTS = [
   testTheSkillMeetsTheFormat,
   testTheReferenceIsTheServersOwnToolList,
   testItLandsWhereTheChosenHarnessesLook,
   testEveryHarnessThatNeedsItsOwnDirectoryHasOne,
   testRewritingLeavesNothingStaleBehind,
+  testRemovingTakesOurDirectoriesAndNobodyElses,
+  testAnotherSkillBesideOursSurvives,
 ];
 
 for (const test of TESTS) {

@@ -10,8 +10,8 @@
  * same five Godot behaviours by hitting them, which is what this project exists to stop.
  */
 
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 import type { Harness } from './harnesses.js';
 import { TOOL_SPECS } from './tool-definitions.js';
 import { renderToolsMarkdown } from './tool-reference.js';
@@ -136,6 +136,55 @@ export function skillDirectories(
     }
   }
   return directories;
+}
+
+/**
+ * Every directory a skill could have been written into, whether or not this run would choose it.
+ *
+ * Uninstalling has to find what an older version wrote, or what was written when a different set
+ * of harnesses was set up here, so it looks everywhere rather than only where it would write now.
+ */
+export function everySkillDirectory(projectPath: string, harnesses: readonly Harness[]): readonly string[] {
+  const directories = new Set([join(projectPath, SHARED_SKILLS, SKILL_NAME)]);
+  for (const harness of harnesses) {
+    if (harness.skills !== undefined) {
+      directories.add(join(projectPath, harness.skills.dir, SKILL_NAME));
+    }
+  }
+  return [...directories];
+}
+
+/** The skill taken out of wherever it was put, naming only what was actually there. */
+export function removeSkill(directories: readonly string[], projectPath: string): readonly string[] {
+  const removed: string[] = [];
+  for (const directory of directories) {
+    if (existsSync(directory)) {
+      rmSync(directory, { recursive: true, force: true });
+      pruneEmpty(dirname(directory), projectPath);
+      removed.push(directory);
+    }
+  }
+  return removed;
+}
+
+/**
+ * The directories that held the skill and now hold nothing.
+ *
+ * Only the ones gdharness itself creates: the `skills` folder it wrote into, and the shared
+ * `.agents` above it. A harness's own directory is that harness's, empty or not, and removing it
+ * would be deleting somebody else's folder rather than uninstalling ours.
+ */
+function pruneEmpty(directory: string, projectPath: string): void {
+  const shared = join(projectPath, '.agents');
+  let path = directory;
+  while (path !== projectPath && (basename(path) === 'skills' || path === shared)) {
+    if (readdirSync(path).length > 0) {
+      return;
+    }
+    // Recursive even though it is empty: a plain unlink refuses a directory on Windows.
+    rmSync(path, { recursive: true, force: true });
+    path = dirname(path);
+  }
 }
 
 export interface SkillWritten {
