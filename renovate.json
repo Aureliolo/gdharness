@@ -8,7 +8,6 @@
   ],
   "timezone": "Europe/Zurich",
   "schedule": ["before 6am on monday"],
-  "minimumReleaseAge": "7 days",
   "rangeStrategy": "pin",
   "separateMajorMinor": false,
   "commitMessageAction": "Raise",
@@ -29,16 +28,6 @@
       "matchPackageNames": ["*"],
       "groupName": "all dependencies",
       "groupSlug": "all"
-    },
-    {
-      "description": "A major gets a fortnight rather than a week. A compromised release is usually caught within days of publication, and a major is where the surprises live.",
-      "matchUpdateTypes": ["major"],
-      "minimumReleaseAge": "14 days"
-    },
-    {
-      "description": "A new interpreter reaches uv's download list a few days after python.org publishes it, and uv installs the one requires-python pins in pyproject.toml. Waiting a fortnight keeps the two from crossing.",
-      "matchDatasources": ["python-version"],
-      "minimumReleaseAge": "14 days"
     },
     {
       "description": "engines.bun is the floor a contributor's machine has to clear, not a pin, and it moves only when the code starts needing something newer.",
