@@ -138,9 +138,9 @@ because the old version keeps answering until they are done:
 | `classes`            | Rebuilds the class cache from disk                      |
 | `harnesses`          | Every harness, its flag and the file it reads           |
 
-Each of these takes the project directory as its argument and defaults to the one you are in. It
-has to hold a `project.godot` either way, so the default cannot act on somewhere that is not a
-Godot project.
+Each of these except `harnesses` takes the project directory as its argument and defaults to the
+one you are in. It has to hold a `project.godot` either way, so the default cannot act on somewhere
+that is not a Godot project. An unknown flag stops the command before it does anything.
 
 `setup` copies each addon whole and writes the version beside it, so `doctor` can tell an old copy
 from the shipped one. An editor that was already open keeps serving the addon it loaded at startup
