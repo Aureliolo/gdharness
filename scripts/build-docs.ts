@@ -14,7 +14,7 @@ import { cpSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } f
 import { join } from 'node:path';
 import process from 'node:process';
 import { marked, type Tokens } from 'marked';
-import { HARNESSES, launchFor } from '../src/harnesses.js';
+import { displayPath, HARNESSES, launchFor } from '../src/harnesses.js';
 import { SERVER_VERSION } from '../src/server-version.js';
 import { TOOL_SPECS } from '../src/tool-definitions.js';
 
@@ -33,7 +33,7 @@ const TOOL_COUNT = String(TOOL_SPECS.length);
  */
 function renderHarnesses(): string {
   const rows = HARNESSES.map((harness) => {
-    const file = `\`${harness.scope === 'home' ? '~/' : ''}${harness.file.replaceAll('\\', '/')}\``;
+    const file = `\`${displayPath(harness, 'linux')}\``;
     const how =
       harness.addCommand !== undefined
         ? `runs \`${harness.addCommand(EXAMPLE_LAUNCH).join(' ')}\``

@@ -5,14 +5,18 @@
  * command to spawn. The disagreement is only ever the file, the key and the shape, so this is a
  * table rather than an integration per harness.
  *
+ * Every path here was read from that harness's own documentation. A guessed path is worse than no
+ * row: it fails silently, in a file the reader then has to find themselves.
+ *
  * Nothing here parses TOML or YAML. A harness whose config is either gets the command that its
- * own CLI documents, because rewriting a file we cannot round-trip would cost somebody their
- * comments to save them one paste.
+ * own CLI documents, or the block to paste, because rewriting a file we cannot round-trip would
+ * cost somebody their comments to save them one paste.
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+import process from 'node:process';
 
 /** What gdharness is called wherever it is registered. */
 export const SERVER_KEY = 'gdharness';
@@ -38,29 +42,40 @@ export function launchFor(version: string, godotPath: string): Launch {
 }
 
 /**
- * How a harness holds its servers.
+ * The shape of one server entry.
  *
- * `mcpServers` is the shape most of them took from Claude Desktop. VS Code named the same thing
- * `servers`, and opencode disagrees about every key, which is why the shape is a function rather
- * than a key name.
+ * `plain` is what most of them took from Claude Desktop. `typed` is the same with the transport
+ * named, which VS Code and Factory both document. opencode disagrees about every key.
  */
-export type Dialect = 'mcpServers' | 'servers' | 'opencode';
+export type Shape = 'plain' | 'typed' | 'opencode';
+
+/** A home-scoped path that is not in the same place on every platform. */
+interface PlatformPaths {
+  readonly win32: HomePath;
+  readonly darwin: HomePath;
+  readonly linux: HomePath;
+}
+
+/** Relative to the home directory, or to roaming application data where Windows keeps it. */
+type HomePath = string | { readonly appData: string };
 
 export interface Harness {
-  /** The flag that selects it, and what `init` prints. */
+  /** The flag that selects it, and what `setup` prints. */
   readonly id: string;
   readonly name: string;
   /**
-   * Where the entry goes. A project path is preferred wherever the harness has one: gdharness is
+   * Where the entry goes. Project wherever the harness has a project file: gdharness is
    * per-project, since it carries that project's Godot path and installed its addons.
    */
   readonly scope: 'project' | 'home';
   /** Relative to the project, or to the home directory. */
-  readonly file: string;
-  readonly dialect: Dialect;
+  readonly file: string | PlatformPaths;
+  /** The top-level key the servers hang off. */
+  readonly container: string;
+  readonly shape: Shape;
   /**
    * Its own command for adding a server, for a harness whose config this cannot safely write.
-   * Present means the file is TOML or YAML, or the harness only configures through a GUI.
+   * Present means the file is TOML or YAML, or its exact shape is not documented.
    */
   readonly addCommand?: (launch: Launch) => readonly string[];
   /**
@@ -71,77 +86,247 @@ export interface Harness {
   readonly snippet?: (launch: Launch) => string;
 }
 
+function tomlServer(launch: Launch, table: string, nameKey = 'name'): string {
+  return [
+    `[[${table}]]`,
+    `${nameKey} = "${SERVER_KEY}"`,
+    'transport = "stdio"',
+    `command = "${launch.command}"`,
+    `args = [${launch.args.map((argument) => `"${argument}"`).join(', ')}]`,
+    ...Object.entries(launch.env).map(([name, value]) => `env = { ${name} = "${value}" }`),
+  ].join('\n');
+}
+
+function yamlServer(launch: Launch, container: string, pad = ''): string {
+  const one = `${pad}  `;
+  const two = `${pad}    `;
+  const three = `${pad}      `;
+  return [
+    `${pad}${container}:`,
+    `${one}${SERVER_KEY}:`,
+    `${two}command: ${launch.command}`,
+    `${two}args:`,
+    ...launch.args.map((argument) => `${three}- "${argument}"`),
+    `${two}env:`,
+    ...Object.entries(launch.env).map(([name, value]) => `${three}${name}: "${value}"`),
+  ].join('\n');
+}
+
+function jsonSnippet(launch: Launch, container: string, shape: Shape): string {
+  return JSON.stringify({ [container]: { [SERVER_KEY]: entryFor(shape, launch) } }, null, 2);
+}
+
 /** Everything that shows up on a config path we can name exactly. */
 export const HARNESSES: readonly Harness[] = [
+  // Four harnesses read this one file, so writing it once serves all of them.
   {
     id: 'claude-code',
     name: 'Claude Code',
     scope: 'project',
     file: '.mcp.json',
-    dialect: 'mcpServers',
+    container: 'mcpServers',
+    shape: 'plain',
+  },
+  {
+    id: 'copilot-cli',
+    name: 'Copilot CLI',
+    scope: 'project',
+    file: '.mcp.json',
+    container: 'mcpServers',
+    shape: 'plain',
+  },
+  {
+    id: 'qoder',
+    name: 'Qoder',
+    scope: 'project',
+    file: '.mcp.json',
+    container: 'mcpServers',
+    shape: 'plain',
+  },
+  {
+    id: 'command-code',
+    name: 'Command Code',
+    scope: 'project',
+    file: '.mcp.json',
+    container: 'mcpServers',
+    shape: 'plain',
   },
   {
     id: 'cursor',
     name: 'Cursor',
     scope: 'project',
     file: join('.cursor', 'mcp.json'),
-    dialect: 'mcpServers',
+    container: 'mcpServers',
+    shape: 'plain',
   },
   {
     id: 'vscode',
     name: 'VS Code',
     scope: 'project',
     file: join('.vscode', 'mcp.json'),
-    dialect: 'servers',
+    container: 'servers',
+    shape: 'typed',
   },
   {
     id: 'opencode',
     name: 'opencode',
     scope: 'project',
     file: 'opencode.json',
-    dialect: 'opencode',
+    container: 'mcp',
+    shape: 'opencode',
   },
   {
     id: 'junie',
     name: 'Junie',
     scope: 'project',
     file: join('.junie', 'mcp', 'mcp.json'),
-    dialect: 'mcpServers',
+    container: 'mcpServers',
+    shape: 'plain',
   },
   {
     id: 'kiro',
     name: 'Kiro',
     scope: 'project',
     file: join('.kiro', 'settings', 'mcp.json'),
-    dialect: 'mcpServers',
+    container: 'mcpServers',
+    shape: 'plain',
   },
   {
     id: 'gemini',
     name: 'Gemini CLI',
-    scope: 'home',
+    scope: 'project',
     file: join('.gemini', 'settings.json'),
-    dialect: 'mcpServers',
+    container: 'mcpServers',
+    shape: 'plain',
   },
   {
-    id: 'copilot-cli',
-    name: 'Copilot CLI',
-    scope: 'home',
-    file: join('.copilot', 'mcp-config.json'),
-    dialect: 'mcpServers',
+    id: 'roo',
+    name: 'Roo Code',
+    scope: 'project',
+    file: join('.roo', 'mcp.json'),
+    container: 'mcpServers',
+    shape: 'plain',
   },
   {
-    id: 'windsurf',
-    name: 'Windsurf',
-    scope: 'home',
-    file: join('.codeium', 'windsurf', 'mcp_config.json'),
-    dialect: 'mcpServers',
+    id: 'kilo',
+    name: 'Kilo Code',
+    scope: 'project',
+    file: join('.kilocode', 'mcp.json'),
+    container: 'mcpServers',
+    shape: 'plain',
   },
+  {
+    id: 'amazon-q',
+    name: 'Amazon Q Developer CLI',
+    scope: 'project',
+    file: join('.amazonq', 'mcp.json'),
+    container: 'mcpServers',
+    shape: 'plain',
+  },
+  {
+    id: 'zed',
+    name: 'Zed',
+    scope: 'project',
+    file: join('.zed', 'settings.json'),
+    container: 'context_servers',
+    shape: 'plain',
+  },
+  {
+    // Amp hangs its servers off a dotted key at the top level rather than a nested object.
+    id: 'amp',
+    name: 'Amp',
+    scope: 'project',
+    file: join('.amp', 'settings.json'),
+    container: 'amp.mcpServers',
+    shape: 'plain',
+  },
+  {
+    id: 'warp',
+    name: 'Warp',
+    scope: 'project',
+    file: join('.warp', '.mcp.json'),
+    container: 'mcpServers',
+    shape: 'plain',
+  },
+  {
+    id: 'trae',
+    name: 'Trae',
+    scope: 'project',
+    file: join('.trae', 'mcp.json'),
+    container: 'mcpServers',
+    shape: 'plain',
+  },
+  {
+    id: 'factory',
+    name: 'Factory Droid',
+    scope: 'project',
+    file: join('.factory', 'mcp.json'),
+    container: 'mcpServers',
+    shape: 'typed',
+  },
+  {
+    id: 'tabnine',
+    name: 'Tabnine',
+    scope: 'project',
+    file: join('.tabnine', 'mcp_servers.json'),
+    container: 'mcpServers',
+    shape: 'plain',
+  },
+  {
+    id: 'firebender',
+    name: 'Firebender',
+    scope: 'project',
+    file: 'firebender.json',
+    container: 'mcpServers',
+    shape: 'plain',
+  },
+  {
+    id: 'pi',
+    name: 'pi',
+    scope: 'project',
+    file: join('.pi', 'mcp.json'),
+    container: 'mcpServers',
+    shape: 'plain',
+  },
+
+  // Project-scoped, but the file is TOML or YAML, so it is printed rather than written.
+  {
+    id: 'mistral-vibe',
+    name: 'Mistral Vibe',
+    scope: 'project',
+    file: join('.vibe', 'config.toml'),
+    container: 'mcp_servers',
+    shape: 'plain',
+    snippet: (launch) => tomlServer(launch, 'mcp_servers'),
+  },
+  {
+    id: 'vtcode',
+    name: 'VT Code',
+    scope: 'project',
+    file: 'vtcode.toml',
+    container: 'mcp.servers',
+    shape: 'plain',
+    snippet: (launch) => tomlServer(launch, 'mcp.servers'),
+  },
+  {
+    id: 'fast-agent',
+    name: 'fast-agent',
+    scope: 'project',
+    file: 'fastagent.config.yaml',
+    container: 'mcp',
+    shape: 'plain',
+    snippet: (launch) => `mcp:\n${yamlServer(launch, 'servers', '  ')}`,
+  },
+
+  // Machine-wide: these harnesses have no project-level config at all, so the only way to wire
+  // one up is outside the project. Never written without a flag or an answered prompt.
   {
     id: 'codex',
     name: 'Codex CLI',
     scope: 'home',
     file: join('.codex', 'config.toml'),
-    dialect: 'mcpServers',
+    container: 'mcp_servers',
+    shape: 'plain',
     addCommand: (launch) => [
       'codex',
       'mcp',
@@ -154,33 +339,157 @@ export const HARNESSES: readonly Harness[] = [
     ],
   },
   {
+    // Cline keeps rules, skills, hooks and agents per project but not servers: cline/cline#2418.
+    id: 'cline',
+    name: 'Cline',
+    scope: 'home',
+    file: join('.cline', 'data', 'settings', 'cline_mcp_settings.json'),
+    container: 'mcpServers',
+    shape: 'plain',
+  },
+  {
+    id: 'goose',
+    name: 'Goose',
+    scope: 'home',
+    file: {
+      win32: { appData: join('Block', 'goose', 'config', 'config.yaml') },
+      darwin: join('.config', 'goose', 'config.yaml'),
+      linux: join('.config', 'goose', 'config.yaml'),
+    },
+    container: 'extensions',
+    shape: 'plain',
+    snippet: (launch) =>
+      [
+        'extensions:',
+        `  ${SERVER_KEY}:`,
+        '    type: stdio',
+        '    enabled: true',
+        `    cmd: ${launch.command}`,
+        '    args:',
+        ...launch.args.map((argument) => `      - "${argument}"`),
+        '    envs:',
+        ...Object.entries(launch.env).map(([name, value]) => `      ${name}: "${value}"`),
+      ].join('\n'),
+  },
+  {
+    id: 'windsurf',
+    name: 'Windsurf',
+    scope: 'home',
+    file: join('.codeium', 'windsurf', 'mcp_config.json'),
+    container: 'mcpServers',
+    shape: 'plain',
+  },
+  {
     id: 'hermes',
     name: 'Hermes',
     scope: 'home',
     file: join('.hermes', 'config.yaml'),
-    dialect: 'mcpServers',
-    snippet: (launch) =>
-      [
-        'mcp_servers:',
-        `  ${SERVER_KEY}:`,
-        `    command: ${launch.command}`,
-        '    args:',
-        ...launch.args.map((argument) => `      - "${argument}"`),
-        '    env:',
-        ...Object.entries(launch.env).map(([name, value]) => `      ${name}: "${value}"`),
-        '    enabled: true',
-      ].join('\n'),
+    container: 'mcp_servers',
+    shape: 'plain',
+    snippet: (launch) => `${yamlServer(launch, 'mcp_servers')}\n    enabled: true`,
   },
+  {
+    id: 'openclaw',
+    name: 'OpenClaw',
+    scope: 'home',
+    file: join('.openclaw', 'openclaw.json'),
+    container: 'mcpServers',
+    shape: 'plain',
+  },
+  {
+    id: 'claude-desktop',
+    name: 'Claude Desktop',
+    scope: 'home',
+    file: {
+      win32: { appData: join('Claude', 'claude_desktop_config.json') },
+      darwin: join('Library', 'Application Support', 'Claude', 'claude_desktop_config.json'),
+      linux: join('.config', 'Claude', 'claude_desktop_config.json'),
+    },
+    container: 'mcpServers',
+    shape: 'plain',
+  },
+  {
+    id: 'zeroclaw',
+    name: 'ZeroClaw',
+    scope: 'home',
+    file: join('.zeroclaw', 'config.toml'),
+    container: 'mcp.servers',
+    shape: 'plain',
+    snippet: (launch) => tomlServer(launch, 'mcp.servers'),
+  },
+  {
+    id: 'deepcode',
+    name: 'Deep Code',
+    scope: 'home',
+    file: join('.deepcode', 'settings.json'),
+    container: 'mcpServers',
+    shape: 'plain',
+  },
+  {
+    // The file is documented, the key it holds servers under is not, so it is printed.
+    id: 'nanobot',
+    name: 'nanobot',
+    scope: 'home',
+    file: join('.nanobot', 'config.json'),
+    container: 'mcpServers',
+    shape: 'plain',
+    snippet: (launch) => jsonSnippet(launch, 'mcpServers', 'plain'),
+  },
+  {
+    id: 'autohand',
+    name: 'Autohand',
+    scope: 'home',
+    file: join('.autohand', 'config.json'),
+    container: 'mcpServers',
+    shape: 'plain',
+    snippet: (launch) => jsonSnippet(launch, 'mcpServers', 'plain'),
+  },
+  // bub is deliberately absent: neither its config path nor its `bub mcp add` flags are
+  // documented well enough to write or to print, and a guess would fail in a file nobody can find.
 ];
+
+/** Roaming application data, which is where Windows keeps what other platforms put under home. */
+function appDataRoot(): string {
+  return process.env['APPDATA'] ?? join(homedir(), 'AppData', 'Roaming');
+}
+
+function homePath(path: HomePath): string {
+  return typeof path === 'string' ? join(homedir(), path) : join(appDataRoot(), path.appData);
+}
+
+/** The harness's file for this platform, relative to wherever its scope puts it. */
+function fileFor(harness: Harness, platform: NodeJS.Platform = process.platform): string | HomePath {
+  if (typeof harness.file === 'string') {
+    return harness.file;
+  }
+  return platform === 'win32'
+    ? harness.file.win32
+    : platform === 'darwin'
+      ? harness.file.darwin
+      : harness.file.linux;
+}
 
 /** Where a harness's config actually is, for a given project. */
 export function configPath(harness: Harness, projectPath: string): string {
-  return join(harness.scope === 'project' ? projectPath : homedir(), harness.file);
+  const file = fileFor(harness);
+  if (harness.scope === 'project') {
+    return join(projectPath, file as string);
+  }
+  return homePath(file);
+}
+
+/** The path as it should be read by a person, which for a home-scoped harness is not absolute. */
+export function displayPath(harness: Harness, platform: NodeJS.Platform = process.platform): string {
+  const file = fileFor(harness, platform);
+  if (typeof file !== 'string') {
+    return `%APPDATA%/${file.appData.replaceAll('\\', '/')}`;
+  }
+  return `${harness.scope === 'home' ? '~/' : ''}${file.replaceAll('\\', '/')}`;
 }
 
 /** The server entry, in the shape the harness reads it in. */
-export function entryFor(dialect: Dialect, launch: Launch): Record<string, unknown> {
-  if (dialect === 'opencode') {
+export function entryFor(shape: Shape, launch: Launch): Record<string, unknown> {
+  if (shape === 'opencode') {
     return {
       type: 'local',
       command: [launch.command, ...launch.args],
@@ -188,19 +497,14 @@ export function entryFor(dialect: Dialect, launch: Launch): Record<string, unkno
       enabled: true,
     };
   }
-  // VS Code defaults an entry with no type to stdio, but writes the type itself, and a reader
-  // that sees one is never left guessing which transport was meant.
+  // A reader that sees the transport named is never left guessing which one was meant, and both
+  // harnesses using this shape document it.
   return {
-    ...(dialect === 'servers' ? { type: 'stdio' } : {}),
+    ...(shape === 'typed' ? { type: 'stdio' } : {}),
     command: launch.command,
     args: [...launch.args],
     env: { ...launch.env },
   };
-}
-
-/** The top-level key the entry hangs off. */
-export function containerKey(dialect: Dialect): string {
-  return dialect === 'opencode' ? 'mcp' : dialect;
 }
 
 /**
@@ -209,19 +513,18 @@ export function containerKey(dialect: Dialect): string {
  * Anything the file already held is kept, including other servers and any key this does not know
  * about: a harness config is the user's file that gdharness is a guest in.
  */
-function merged(existing: unknown, dialect: Dialect, launch: Launch): Record<string, unknown> {
+function merged(existing: unknown, harness: Harness, launch: Launch): Record<string, unknown> {
   const root: Record<string, unknown> =
     typeof existing === 'object' && existing !== null && !Array.isArray(existing)
       ? { ...(existing as Record<string, unknown>) }
       : {};
-  const key = containerKey(dialect);
-  const held = root[key];
+  const held = root[harness.container];
   const servers: Record<string, unknown> =
     typeof held === 'object' && held !== null && !Array.isArray(held)
       ? { ...(held as Record<string, unknown>) }
       : {};
-  servers[SERVER_KEY] = entryFor(dialect, launch);
-  root[key] = servers;
+  servers[SERVER_KEY] = entryFor(harness.shape, launch);
+  root[harness.container] = servers;
   return root;
 }
 
@@ -245,9 +548,8 @@ export function detect(projectPath: string): readonly Harness[] {
 /**
  * The machine-wide harnesses on this computer, which are named and never written to unasked.
  *
- * Their configuration belongs to the machine rather than to the project, so writing one on
- * detection would put this project's Godot path in front of every other project the reader opens
- * with that harness. Installing one project is not consent to that, so these take their own flag.
+ * These are the ones with no project-level config at all, so wiring them up means writing outside
+ * the project, and that is the reader's call rather than a side effect of installing one project.
  */
 export function detectGlobal(projectPath: string): readonly Harness[] {
   return HARNESSES.filter((harness) => harness.scope === 'home' && present(harness, projectPath));
@@ -256,6 +558,35 @@ export function detectGlobal(projectPath: string): readonly Harness[] {
 function present(harness: Harness, projectPath: string): boolean {
   const path = configPath(harness, projectPath);
   return existsSync(path) || existsSync(dirname(path));
+}
+
+/** One file, and every harness that reads it. */
+export interface Group {
+  readonly path: string;
+  readonly harnesses: readonly Harness[];
+  /** The one whose container and shape the write uses. The rest of the group agree with it. */
+  readonly writer: Harness;
+}
+
+/**
+ * The harnesses collapsed to one entry per file they share.
+ *
+ * Four harnesses read `.mcp.json`, so writing it once and naming all four is both less work and a
+ * truer report than writing the same bytes four times.
+ */
+export function groupByFile(harnesses: readonly Harness[], projectPath: string): readonly Group[] {
+  const groups = new Map<string, { path: string; harnesses: Harness[]; writer: Harness }>();
+  for (const harness of harnesses) {
+    const path = configPath(harness, projectPath);
+    const key = `${path} ${harness.container} ${harness.shape}`;
+    const held = groups.get(key);
+    if (held === undefined) {
+      groups.set(key, { path, harnesses: [harness], writer: harness });
+    } else {
+      held.harnesses.push(harness);
+    }
+  }
+  return [...groups.values()];
 }
 
 export interface Written {
@@ -294,11 +625,11 @@ export function connect(harness: Harness, projectPath: string, launch: Launch): 
   }
   const container =
     typeof existing === 'object' && existing !== null && !Array.isArray(existing)
-      ? (existing as Record<string, unknown>)[containerKey(harness.dialect)]
+      ? (existing as Record<string, unknown>)[harness.container]
       : undefined;
   const already = typeof container === 'object' && container !== null && SERVER_KEY in container;
 
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, `${JSON.stringify(merged(existing, harness.dialect, launch), null, 2)}\n`, 'utf8');
+  writeFileSync(path, `${JSON.stringify(merged(existing, harness, launch), null, 2)}\n`, 'utf8');
   return { harness, path, action: already ? 'replaced' : 'written' };
 }
