@@ -507,7 +507,7 @@ summary:hover {
 }
 
 .hero {
-  padding: 56px 0 40px;
+  padding: 60px 0 6px;
   max-width: 74ch;
 }
 
@@ -522,10 +522,15 @@ summary:hover {
   font-size: 18.5px;
   line-height: 1.55;
   color: var(--body);
-  margin: 0 0 30px;
+  margin: 0;
 }
 
-.hero .step {
+.install {
+  max-width: 74ch;
+  padding-bottom: 34px;
+}
+
+.step {
   font-size: 13px;
   font-weight: 600;
   letter-spacing: 0.09em;
@@ -534,7 +539,11 @@ summary:hover {
   margin: 30px 0 10px;
 }
 
-.hero .note {
+.install .step:first-child {
+  margin-top: 0;
+}
+
+.note {
   font-size: 13.5px;
   line-height: 1.6;
   color: var(--muted);
@@ -545,7 +554,7 @@ summary:hover {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 14px;
-  padding: 22px 0 30px;
+  padding: 34px 0 40px;
 }
 
 .card {

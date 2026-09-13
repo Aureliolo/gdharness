@@ -14,7 +14,7 @@ import { cpSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } f
 import { join } from 'node:path';
 import process from 'node:process';
 import { marked, type Tokens } from 'marked';
-import { displayPath, HARNESSES, launchFor } from '../src/harnesses.js';
+import { displayPath, HARNESSES, type Harness, launchFor } from '../src/harnesses.js';
 import { SERVER_VERSION } from '../src/server-version.js';
 import { TOOL_SPECS } from '../src/tool-definitions.js';
 import { renderToolsMarkdown } from '../src/tool-reference.js';
@@ -56,21 +56,16 @@ function renderHarnesses(): string {
 /** A launch line for the documentation: this version, and a path a reader will recognise. */
 const EXAMPLE_LAUNCH = launchFor(SERVER_VERSION, '/path/to/godot');
 
-/** The harnesses the picker offers by name, before the reader falls back to the full table. */
-const PICKED = [
-  'claude-code',
-  'cursor',
-  'vscode',
-  'opencode',
-  'codex',
-  'gemini',
-  'cline',
-  'copilot-cli',
-  'zed',
-  'roo',
-  'windsurf',
-  'amazon-q',
-];
+/**
+ * Every harness, by name.
+ *
+ * All of them rather than a chosen few, and alphabetical rather than in table order: any shorter
+ * list is somebody's judgement about whose harness matters, and the table's own order puts the
+ * four that share `.mcp.json` first, which would read as a ranking it is not.
+ */
+function pickable(): readonly Harness[] {
+  return [...HARNESSES].sort((left, right) => left.name.localeCompare(right.name, 'en'));
+}
 
 /**
  * The install picker: choose a harness, read the one command and the one file it writes.
@@ -79,12 +74,7 @@ const PICKED = [
  * the harness table so a panel cannot describe a harness `setup` does not know.
  */
 function renderPicker(): string {
-  const chosen = PICKED.map((id) => HARNESSES.find((harness) => harness.id === id)).filter(
-    (harness) => harness !== undefined,
-  );
-  if (chosen.length !== PICKED.length) {
-    throw new Error('The picker names a harness the table does not have.');
-  }
+  const chosen = pickable();
 
   const inputs = chosen.map(
     (harness, index) =>
@@ -112,12 +102,25 @@ function renderPicker(): string {
     ].join('');
   });
 
+  // Last, and deliberately at the same level as the rest: the reader whose harness is not here is
+  // not out of luck, because the thing being installed is an ordinary MCP server.
+  inputs.push('<input type="radio" name="harness" id="pick-other" />');
+  chips.push('<label for="pick-other">Something else</label>');
+  panels.push(
+    [
+      '<div class="panel panel-other">',
+      `<pre><code>${escaped(`npx -y gdharness@${SERVER_VERSION} setup .`)}</code></pre>`,
+      '<p>Any MCP client that can spawn a local stdio server will do. With no harness named it asks about the ones it finds, and the entry it writes is the same everywhere. <a href="architecture.html">How it works</a> has every file and key, and says which ones it cannot write for you.</p>',
+      '</div>',
+    ].join(''),
+  );
+
   // The rules tying each input to its chip and its panel are generated with them, so a harness
-  // added to the list above cannot outrun a hand-maintained stylesheet.
-  const rules = chosen.flatMap((harness) => [
-    `#pick-${harness.id}:checked ~ .panels .panel-${harness.id}{display:block}`,
-    `#pick-${harness.id}:checked ~ .chips label[for="pick-${harness.id}"]{color:var(--signal-ink);background:var(--signal);border-color:var(--signal)}`,
-    `#pick-${harness.id}:focus-visible ~ .chips label[for="pick-${harness.id}"]{outline:2px solid var(--signal);outline-offset:2px}`,
+  // added to the table cannot outrun a hand-maintained stylesheet.
+  const rules = [...chosen.map((harness) => harness.id), 'other'].flatMap((id) => [
+    `#pick-${id}:checked ~ .panels .panel-${id}{display:block}`,
+    `#pick-${id}:checked ~ .chips label[for="pick-${id}"]{color:var(--signal-ink);background:var(--signal);border-color:var(--signal)}`,
+    `#pick-${id}:focus-visible ~ .chips label[for="pick-${id}"]{outline:2px solid var(--signal);outline-offset:2px}`,
   ]);
 
   return [
@@ -132,18 +135,18 @@ function renderPicker(): string {
 
 /** The same choice as plain markdown, for the twin an agent reads. */
 function renderPickerText(): string {
-  const rows = PICKED.map((id) => HARNESSES.find((harness) => harness.id === id))
-    .filter((harness) => harness !== undefined)
-    .map(
-      (harness) =>
-        `| ${harness.name} | \`npx -y gdharness@${SERVER_VERSION} setup . --${harness.id}\` | \`${displayPath(harness, 'linux')}\` |`,
-    );
+  const rows = pickable().map(
+    (harness) => `| ${harness.name} | \`--${harness.id}\` | \`${displayPath(harness, 'linux')}\` |`,
+  );
   return [
-    '| Harness | Command | Writes |',
+    `Every harness takes the same command, \`npx -y gdharness@${SERVER_VERSION} setup .\`, with its own`,
+    'flag. Leave the flag off and it asks about the ones it finds.',
+    '',
+    '| Harness | Flag | Writes |',
     '| --- | --- | --- |',
     ...rows,
     '',
-    'Leave the flag off and it asks about every harness it finds.',
+    'Not listed is not unsupported: any MCP client that can spawn a local stdio server will do.',
   ].join('\n');
 }
 
@@ -214,6 +217,9 @@ function renderHome(): string {
     '<section class="hero">',
     '<h1>Make the engine answer.</h1>',
     '<p class="sub">Drive a Godot 4 project from an agent: the editor that is open, the game that is running, and the project on disk. An agent cannot see a running game; this makes one answerable.</p>',
+    '</section>',
+    `<div class="cards">${cards.join('')}</div>`,
+    '<section class="install">',
     '<h2 class="step">Hand it to your agent</h2>',
     `<figure class="code"><figcaption>paste this</figcaption><pre><code>${escaped(paste)}</code></pre></figure>`,
     '<p class="note">It reads the guide, installs the addons, writes the config for the harness it is running in, and reports the two things it cannot do for itself.</p>',
@@ -221,7 +227,6 @@ function renderHome(): string {
     renderPicker(),
     '<p class="note">With no harness named it asks about each one it finds, here or on this machine, and writes nothing outside the project directory without a flag or a typed yes. <a href="architecture.html">How it works</a> has every harness it knows.</p>',
     '</section>',
-    `<div class="cards">${cards.join('')}</div>`,
     '<p class="smallprint">Fork of <a href="https://github.com/HaD0Yun/Doyunha-Gopeak">GoPeak</a> v2.3.9, September 2026, MIT, by Solomon Elias originally and completely reworked since to be hardened, condensed and more streamlined. Not affiliated with GoPeak or the Godot Foundation.</p>',
   ].join('\n');
 }
