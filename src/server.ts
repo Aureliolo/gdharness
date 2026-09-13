@@ -9,7 +9,7 @@
  */
 
 import { execFile, spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -139,6 +139,15 @@ const PROJECT_INFO_SECTIONS: Readonly<
     params: (args, detailed) => ({ preset: readString(args, 'preset') ?? '', includeSuggestions: detailed }),
   },
 });
+
+/** The path with every symlink on it resolved, or the path itself when there is nothing there. */
+function realPathOr(path: string): string {
+  try {
+    return realpathSync.native(path);
+  } catch {
+    return path;
+  }
+}
 
 /** Whether project.godot names a scene for the game to start in. */
 function hasMainScene(projectFile: string): boolean {
@@ -642,9 +651,12 @@ class GodotServer {
         if (!located.ok) {
           return this.createErrorResponse(located.reason, PATH_SOLUTIONS);
         }
+        // Resolved, because the adapter refuses a path that does not start with the project as
+        // it holds it, and a symlink on the way makes two spellings of the same file: on macOS
+        // every /var/folders path is really /private/var/folders.
         return await this.handleDAP(op === 'set' ? 'dap_set_breakpoint' : 'dap_remove_breakpoint', {
           ...args,
-          scriptPath: located.absolutePath,
+          scriptPath: realPathOr(located.absolutePath),
         });
       }
       case 'debug_control':

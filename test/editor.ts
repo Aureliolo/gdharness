@@ -16,7 +16,16 @@
 
 import assert from 'node:assert/strict';
 import { type ChildProcess, spawn, spawnSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import process from 'node:process';
@@ -73,7 +82,10 @@ function resolveGodotPath(): string | null {
  * starts, because a file written afterwards is not in its filesystem until a rescan.
  */
 function createProject(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'gdharness-editor-'));
+  // Resolved, because the editor answers with the path the filesystem really has and the
+  // temporary directory is behind a symlink on macOS and an 8.3 name on a Windows runner: the
+  // fixture would then be holding one spelling of the project while the editor holds another.
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'gdharness-editor-')));
 
   cpSync('src/godot/addons', join(dir, 'addons'), { recursive: true });
 
