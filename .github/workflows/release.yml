@@ -1,9 +1,13 @@
 name: Release
 
+# The tag is created by the tag workflow with the job token, and an event caused by that token
+# starts no workflow, so a push trigger alone would never fire; the tag workflow dispatches
+# this one on the tag instead. The push trigger stays for a tag pushed by hand.
 on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
 
 permissions: {}
 
