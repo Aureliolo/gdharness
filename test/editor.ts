@@ -243,6 +243,14 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
     assert.ok(connected, `the editor never reached the bridge:\n${engineOutput.join('')}`);
 
     await body({ call, refusal, attempt, project });
+  } catch (failure) {
+    // What the engine said on its way to failing, which is the half of the evidence a tool
+    // answer does not carry: a fixture that reports only its own assertion sends whoever reads
+    // the run back to guessing about an editor that is no longer there to ask.
+    const said = engineOutput.join('').trim();
+    throw new Error(
+      `${failure instanceof Error ? failure.stack : String(failure)}\n\nThe editor said:\n${said}`,
+    );
   } finally {
     editor.kill();
     await server.stop();
@@ -444,7 +452,15 @@ async function testLanguageServer({ call, attempt, project }: Editor): Promise<v
     await delay(500);
     attempted = await attempt('script_diagnostics', sound);
   }
-  assert.ok(attempted.ok, `the language server never answered: ${attempted.text}`);
+  if (!attempted.ok) {
+    // Asked a second way, so the failure says which half is missing: a server that answers for
+    // symbols but publishes no diagnostics is a different fault from one that is not there.
+    const symbols = await attempt('script_info', { ...sound, op: 'symbols' });
+    assert.fail(
+      `the language server never published diagnostics: ${attempted.text}\n` +
+        `symbols ${symbols.ok ? 'answered' : 'was refused'}: ${symbols.text.slice(0, 400)}`,
+    );
+  }
 
   const clean = await call('script_diagnostics', sound);
   assert.equal(get(clean, 'clean'), true, 'a script that parses should come back clean');
