@@ -7,6 +7,7 @@
 
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { Refusal } from './errors.js';
 import { GodotLocator } from './godot-path.js';
 import {
   type Candidate,
@@ -24,6 +25,7 @@ import {
   registered,
 } from './harnesses.js';
 import { type HeadlessEngine, type HeadlessOutcome, runOperation } from './headless.js';
+import { defectReport } from './issues.js';
 import { Ask, interactive } from './prompt.js';
 import { GODOT_DEBUG_MODE_DEFAULT } from './server-version.js';
 import {
@@ -43,7 +45,8 @@ import { getLocalVersion } from './version.js';
 const args = process.argv.slice(2);
 const command = args[0];
 
-class UsageError extends Error {}
+/** A {@link Refusal} about how the command was called rather than about what it found. */
+class UsageError extends Refusal {}
 
 /**
  * The project a command works on: the directory named, or the one you are standing in.
@@ -72,7 +75,9 @@ async function engine(): Promise<HeadlessEngine> {
 /** The outcome as a line for a person, and a throw when the engine refused. */
 function said(outcome: HeadlessOutcome, what: string): void {
   if (!outcome.ok) {
-    throw new Error(`${what}: ${outcome.message}`);
+    // The engine's own refusal, which is about the project it was pointed at: a scene that will
+    // not open is the project's, not this program's.
+    throw new Refusal(`${what}: ${outcome.message}`);
   }
   for (const entry of outcome.messages) {
     console.error(`  engine ${entry.severity}: ${entry.text}`);
@@ -531,6 +536,12 @@ async function main(): Promise<void> {
 }
 
 await main().catch((error: unknown) => {
-  console.error('gdharness:', error instanceof Error ? error.message : String(error));
-  process.exit(error instanceof UsageError ? 2 : 1);
+  if (error instanceof Refusal) {
+    console.error('gdharness:', error.message);
+    process.exit(error instanceof UsageError ? 2 : 1);
+  }
+  // Nothing anticipated this, so the person in front of it is owed more than the exception's
+  // message: what broke, that it is not theirs to fix, and what to do with it if they want to.
+  console.error(defectReport(`gdharness ${command ?? 'server'}`, error));
+  process.exit(1);
 });

@@ -112,6 +112,34 @@ Every tool is declared in one table and dispatched from it, so a tool the server
 the documentation lists and a fixture drives. The reference on this site is rendered from that same
 table.
 
+## When a call fails
+
+Two kinds of failure, and the answer says which one it is.
+
+A **refusal** is a failure the tool anticipated: an argument outside the valid set, a node that is
+not in the scene, an editor that is not connected. It names what would have worked instead, and it
+is the ordinary way a tool says no. Most of them are written by `tool-args.ts`.
+
+A **defect** is everything left over: a throw nobody modelled, caught at the tool boundary in
+`server.ts` or by the catch at the bottom of `cli.ts`. That answer says up front that repeating the
+call will not help, since an exception message handed to an agent otherwise reads as something it
+did wrong. It carries the version, the runtime, the platform and a short signature that comes out
+the same for one bug on two machines, and it asks whoever is reading to tell the person whose
+machine this is and ask whether they may report it on their behalf.
+
+Nothing is sent from here, and no issue is opened without somebody seeing what it would contain:
+the report is about their project, and a public tracker is their decision. The link it offers is
+the issue form with those lines already filled in.
+
+It asks to be reported even when it turns out to be wrong. A failure that was really the project's
+or the environment's doing, arriving dressed as a defect, is a misclassification: the refusal that
+should have named what would have worked is missing, and every later caller hits the same wall. So
+that report is the more useful of the two, and the message and the form both say so.
+
+Rarely, one answer in a few hundred also carries an invitation to say what is missing. A tool that
+should exist and does not is invisible from inside the server, and the only party that knows is the
+one that just worked around it. It asks for the same yes before anything is filed.
+
 ## What talks to what
 
 ```text
