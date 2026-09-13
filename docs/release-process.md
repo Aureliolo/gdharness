@@ -24,7 +24,11 @@ nothing. `release.yml` runs four jobs in order:
    release commit is reachable from `main`, and that commit carries a valid signature. Then it
    builds, typechecks, runs the tests, audits production dependencies, checks the working tree
    is still clean, and packs the archive and its SHA-256.
-2. **sbom** builds an SPDX SBOM from the packed archive, so what it lists is what ships.
+2. **sbom** builds an SPDX SBOM of the archive: every file in it with its SHA-256, and every
+   production package the bundle was built from, read from the lockfile at the tag, since a
+   bundle names nothing on its own. The job then checks the SBOM against the archive's members
+   and `package.json`, because an SBOM that lists nothing looks exactly like a passing step
+   (`.github/syft.yaml` says what syft reads).
 3. **attest** signs the archive, its checksum and the SBOM through Sigstore, and attests the
    SBOM against the archive. It is a separate reusable workflow on purpose: see below.
 4. **publish** rechecks the checksum and creates the GitHub Release with all three files.
@@ -69,3 +73,7 @@ worth something; "some job in this repository signed it" is not.
   fires if that ruleset was bypassed or removed. That is exactly when you want to hear about it.
 - **Tests or build steps modified the checked-out release source**: something in the build
   writes into the tree, which would mean the archive does not match the tagged commit.
+- **The SBOM's files are not the archive's members**, or **The SBOM does not list X**: syft
+  read something other than the unpacked archive and the lockfile, or a syft upgrade changed
+  what its catalogers see. The SBOM is wrong, not the archive; fix the sbom job and rerun the
+  workflow on the tag.
