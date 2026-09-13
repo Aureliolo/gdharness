@@ -62,11 +62,11 @@
       ]
     },
     {
-      "description": "npm raised in place in the release job, because trusted publishing needs a newer npm than the runner ships and nothing else here installs one.",
+      "description": "The Node the release job sets up, which is there only for the npm that comes with it: trusted publishing needs a newer one than the runner ships.",
       "customType": "regex",
       "managerFilePatterns": ["/^\\.github/.+\\.ya?ml$/"],
       "matchStrings": [
-        "# renovate: datasource=(?<datasource>npm) depName=(?<depName>\\S+)\\n\\s*npm install --global \\S+@(?<currentValue>\\S+)"
+        "# renovate: datasource=(?<datasource>node-version) depName=(?<depName>\\S+)\\n(?:.*\\n)*?\\s*node-version: (?<currentValue>[0-9.]+)"
       ]
     }
   ]
