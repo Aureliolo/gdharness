@@ -145,54 +145,14 @@ a:hover {
   color: var(--ink);
 }
 
-.cols {
-  display: grid;
-  grid-template-columns: 216px minmax(0, 1fr);
-  align-items: start;
-  max-width: 1180px;
-  margin: 0 auto;
-}
-
-.side {
-  position: sticky;
-  top: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 28px var(--gutter) 40px;
-  font-size: 14.5px;
-  border-right: 1px solid var(--rule-soft);
-}
-
-.side .grp {
-  font-family: var(--mono);
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.11em;
-  color: var(--faint);
-  margin-top: 18px;
-}
-
-.side .grp:first-child {
-  margin-top: 0;
-}
-
-.side a {
-  color: var(--muted);
-  text-decoration: none;
-  padding: 2px 0;
-}
-
-.side a:hover {
-  color: var(--ink);
-}
-
-.side a.on {
+.links a.on {
   color: var(--signal);
   font-weight: 500;
 }
 
 main {
+  max-width: calc(var(--measure) + 2 * var(--gutter));
+  margin: 0 auto;
   padding: 28px var(--gutter) 80px;
   min-width: 0;
 }
@@ -208,25 +168,10 @@ main {
   color: var(--faint);
 }
 
-@media (max-width: 760px) {
-  .cols {
-    grid-template-columns: 1fr;
-  }
-
-  .side {
-    position: static;
-    border-right: 0;
-    border-bottom: 1px solid var(--rule-soft);
-    flex-direction: row;
+@media (max-width: 560px) {
+  .links {
+    gap: 8px 14px;
     flex-wrap: wrap;
-    align-items: baseline;
-    gap: 6px 16px;
-    padding-block: 16px;
-  }
-
-  .side .grp {
-    margin-top: 0;
-    width: 100%;
   }
 }
 
@@ -492,8 +437,8 @@ summary:hover {
 }
 
 /*
- * The front page. A statement, the two ways in, and three cards that route you onward. No side
- * rail and no measure on the cards: this page is looked at rather than read.
+ * The front page. A statement, the two ways in, and three cards that route you onward. Wider
+ * than a page of prose and with no measure on the cards: this one is looked at, not read.
  */
 
 .home main {
@@ -596,8 +541,13 @@ summary:hover {
   text-decoration: none;
 }
 
+/*
+ * The escape rather than the character. A literal arrow here was mangled into a control byte by
+ * a tool that wrote this file once already, and it rendered as a tofu box on the live site for
+ * as long as nobody looked; an escape is plain ASCII and cannot be damaged that way.
+ */
 .card .go::after {
-  content: " 92";
+  content: " \2192";
 }
 
 .card .go:hover {

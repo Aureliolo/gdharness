@@ -790,6 +790,38 @@ export interface Removed {
 }
 
 /**
+ * Whether this harness already has a gdharness entry, whatever version it pins.
+ *
+ * What an upgrade goes by: a config with our entry in it is one we wrote and may rewrite, and a
+ * config without one is a harness the reader never asked us to touch. A file we can only print a
+ * snippet for cannot be read back either, so it answers false and is named instead.
+ */
+export function registered(harness: Harness, projectPath: string): boolean {
+  const path = configPath(harness, projectPath);
+  if (harness.snippet !== undefined || !existsSync(path)) {
+    return false;
+  }
+  const text = readFileSync(path, 'utf8');
+  if (harness.toml !== undefined) {
+    return text.includes(harness.toml.identity ?? harness.toml.header);
+  }
+  if (harness.yaml !== undefined) {
+    return parsedYamlHas(text, harness.yaml.path);
+  }
+  let existing: unknown;
+  try {
+    existing = JSON.parse(text);
+  } catch {
+    return false;
+  }
+  if (typeof existing !== 'object' || existing === null || Array.isArray(existing)) {
+    return false;
+  }
+  const held = (existing as Record<string, unknown>)[harness.container];
+  return typeof held === 'object' && held !== null && !Array.isArray(held) && SERVER_KEY in held;
+}
+
+/**
  * gdharness taken back out of one harness's configuration.
  *
  * Only our own key is touched. A file that held other servers keeps them and stays; one that held

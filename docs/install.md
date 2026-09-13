@@ -100,12 +100,17 @@ parse is refused rather than replaced.
 
 ## Updating
 
+The server asks the npm registry once every four hours, in the background, while it is being used,
+and tells your agent when there is a newer release. One request to one host, carrying nothing about
+you or the project. `GDHARNESS_NO_UPDATE_CHECK=1` in the server's environment stops it.
+
 ```bash
-npx -y gdharness@<new> setup .
+npx -y gdharness@<new> upgrade .
 ```
 
-It rewrites the addons and the harness entries to the new version together. Then two things that
-are easy to miss, because the old version keeps answering until they are done:
+`upgrade` asks nothing: it reinstalls the addons at the new version and re-pins every config that
+already names gdharness, and touches no config that does not. Then two things it cannot do for you,
+because the old version keeps answering until they are done:
 
 1. Reconnect the MCP server so the harness re-spawns it. In Claude Code, `/mcp` and reconnect.
    Restarting the harness is not required.
@@ -119,6 +124,7 @@ are easy to miss, because the old version keeps answering until they are done:
 ```bash
 gdharness setup /path/to/project              # addons in, editor ones enabled, class list rebuilt
 gdharness setup /path/to/project --no-connect # and write no harness configuration
+gdharness upgrade /path/to/project            # the same project, on this version
 gdharness uninstall /path/to/project          # take all of it back out again
 gdharness doctor /path/to/project             # exits 1 on a problem and names it
 gdharness classes /path/to/project            # rebuild the class cache from disk

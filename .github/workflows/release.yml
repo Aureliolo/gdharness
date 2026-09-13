@@ -94,12 +94,37 @@ jobs:
           VERSION: ${{ needs.build.outputs.version }}
         run: |
           set -euo pipefail
+          # printf rather than a heredoc: an unquoted heredoc runs the backticks in the code
+          # fences as commands, and a quoted one cannot see VERSION. Single quotes keep the
+          # fences literal, double quotes take the version.
+          printf '%s\n' \
+            '## Install' \
+            '' \
+            'Point your agent at <https://aureliolo.github.io/gdharness>, or do it yourself:' \
+            '' \
+            '```bash' \
+            "npx -y gdharness@${VERSION} setup ." \
+            '```' \
+            '' \
+            '## Upgrade from an earlier version' \
+            '' \
+            '```bash' \
+            "npx -y gdharness@${VERSION} upgrade ." \
+            '```' \
+            '' \
+            'Then restart the editor so it loads the new addons, and reconnect the MCP server so' \
+            'your harness spawns this version.' \
+            '' \
+            "[Install guide](https://aureliolo.github.io/gdharness/install.html) · [What it writes](https://aureliolo.github.io/gdharness/architecture.html) · [Tools](https://aureliolo.github.io/gdharness/tools.html)" \
+            '' \
+            > notes.md
           gh release create "${GITHUB_REF_NAME}" \
             "dist/gdharness-${VERSION}.tgz" \
             "dist/gdharness-${VERSION}.tgz.sha256" \
             "dist/gdharness-${VERSION}.spdx.json" \
             "dist/gdharness-${VERSION}.intoto.jsonl" \
             --verify-tag \
+            --notes-file notes.md \
             --generate-notes \
             --title "gdharness ${VERSION}"
 
