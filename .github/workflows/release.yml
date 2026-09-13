@@ -167,6 +167,11 @@ jobs:
             exit 1
           fi
 
+          # ./ and not dist/: npm reads a bare `a/b` as a GitHub shorthand, so the plain path sends
+          # it looking for ssh://git@github.com/dist/gdharness-X.Y.Z.tgz.git rather than at the
+          # archive sitting right there. The leading ./ is what makes it a path.
+          archive="./dist/gdharness-${VERSION}.tgz"
+
           if [ -n "${NODE_AUTH_TOKEN:-}" ]; then
             # The first publish only, and the reason it exists: npm has no pending publisher, so
             # a package has to be on the registry before a trusted publisher can be attached to
@@ -175,11 +180,11 @@ jobs:
             # only the trusted-publishing path generates it unasked. Delete the secret once the
             # publisher is configured, and this branch goes with it.
             echo "Publishing with NPM_TOKEN. Delete the secret once trusted publishing is set up."
-            npm publish "dist/gdharness-${VERSION}.tgz" --access public --provenance
+            npm publish "${archive}" --access public --provenance
           else
             # No token anywhere: the OIDC token this job asked for is the credential, and npm
             # generates and publishes its own provenance attestation from it without being asked.
-            npm publish "dist/gdharness-${VERSION}.tgz" --access public
+            npm publish "${archive}" --access public
           fi
 
       # The claim made in the documentation is that what npm serves is the archive this repository
