@@ -137,10 +137,7 @@ const PROJECT_INFO_SECTIONS: Readonly<
 > = dictionary({
   autoloads: { operation: 'list_autoloads', params: () => ({}) },
   plugins: { operation: 'list_plugins', params: () => ({}) },
-  export_presets: {
-    operation: 'list_export_presets',
-    params: (_args, detailed) => ({ includeTemplateStatus: detailed }),
-  },
+  export_presets: { operation: 'list_export_presets', params: () => ({}) },
   audio_buses: { operation: 'get_audio_buses', params: () => ({}) },
   health: { operation: 'get_project_health', params: () => ({}) },
   validation: {

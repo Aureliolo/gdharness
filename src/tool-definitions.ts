@@ -56,11 +56,6 @@ const NODE_PATH: JsonSchema = {
   type: 'string',
   description: 'Node path from the scene root, such as "Player/Sprite2D". "." is the root.',
 };
-const SAVE_SCENE: JsonSchema = {
-  type: 'boolean',
-  description:
-    'Save the scene after the change. Default true; false batches several changes before one save.',
-};
 const PROPERTIES: JsonSchema = {
   type: 'object',
   description:
@@ -218,7 +213,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       detail: {
         type: 'string',
         enum: ['summary', 'full'],
-        description: 'How much the health and validation sections say. Default summary.',
+        description: 'full adds what to do about it to every validation finding. Default summary.',
       },
     },
     requires: ['projectPath'],
@@ -357,10 +352,6 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       preset: { type: 'string', description: 'Preset name from export_presets.cfg.' },
       outputPath: { type: 'string', description: 'Where the export is written, inside the project.' },
       debug: { type: 'boolean', description: 'run: a debug export. Default false.' },
-      includeTemplateStatus: {
-        type: 'boolean',
-        description: 'list: say whether each preset has its templates installed.',
-      },
     },
     requires: ['projectPath'],
     operations: {
@@ -452,7 +443,6 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       texturePath: { type: 'string', description: 'load_sprite: the texture file inside the project.' },
       layer: { type: 'number', description: 'set_tilemap_cells: the TileMap layer. Default 0.' },
       cells: TILEMAP_CELLS,
-      saveScene: SAVE_SCENE,
     },
     requires: ['projectPath', 'scenePath'],
     operations: {
