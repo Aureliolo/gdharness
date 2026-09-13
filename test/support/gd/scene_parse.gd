@@ -6,7 +6,7 @@ extends SceneTree
 ## tag that names a type it cannot build has to fall through rather than answer with a wrong
 ## value, and a tag that legitimately means nothing has to answer null rather than fall through.
 
-const SceneTools = preload("res://addons/godot_mcp_editor/tools/scene_tools.gd")
+const SceneTools = preload("res://addons/gdharness_editor/tools/scene_tools.gd")
 
 var failures: Array[String] = []
 

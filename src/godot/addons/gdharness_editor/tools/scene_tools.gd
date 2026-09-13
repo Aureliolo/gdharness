@@ -1,6 +1,7 @@
 @tool
-class_name MCPSceneTools
 extends Node
+
+## Scenes and their nodes, edited in the open editor and read back from what it holds.
 
 var _editor_plugin: EditorPlugin = null
 

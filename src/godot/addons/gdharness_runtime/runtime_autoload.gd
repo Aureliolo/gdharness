@@ -68,7 +68,7 @@ func _init() -> void:
 
 
 func _ready() -> void:
-	name = "MCPRuntime"
+	name = "GdharnessRuntime"
 	# The TCP control loop runs in _process. With the default PROCESS_MODE_INHERIT it stops
 	# while the tree is paused, so the runtime silently goes unreachable and the game cannot
 	# even be un-paused over the socket. A debug server has to stay responsive while the game

@@ -7,8 +7,9 @@ import { reservePort, ServerProcess } from './support/server.js';
 /** domain_verb, which every client accepts: no dots, no case, nothing a strict client rejects. */
 const TOOL_NAME_PATTERN = /^[a-z][a-z0-9_]{1,63}$/;
 
-async function connectWebSocket(url: string): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
+/** Whether a WebSocket to the URL opens, or is refused, within a few seconds. */
+async function webSocketOpens(url: string): Promise<boolean> {
+  return await new Promise<boolean>((resolve, reject) => {
     const ws = new WebSocket(url);
     const timer = setTimeout(() => {
       ws.terminate();
@@ -18,11 +19,13 @@ async function connectWebSocket(url: string): Promise<void> {
     ws.once('open', () => {
       clearTimeout(timer);
       ws.close();
-      resolve();
+      resolve(true);
     });
-    ws.once('error', (error) => {
+    // A refused socket can report more than one error; the promise settles once and the rest
+    // must still land on a listener.
+    ws.on('error', () => {
       clearTimeout(timer);
-      reject(error);
+      resolve(false);
     });
   });
 }
@@ -70,8 +73,13 @@ async function main(): Promise<void> {
       throw new Error(`tools/list exposed names outside domain_verb: ${invalidToolNames.join(', ')}`);
     }
 
-    await connectWebSocket(`ws://${host}:${port}/visualizer`);
-    await connectWebSocket(`ws://${host}:${port}/godot`);
+    // The bridge port carries the editor's socket and nothing else.
+    if (!(await webSocketOpens(`ws://${host}:${port}/godot`))) {
+      throw new Error('the editor socket at /godot did not open');
+    }
+    if (await webSocketOpens(`ws://${host}:${port}/visualizer`)) {
+      throw new Error('a socket to a path other than /godot was accepted');
+    }
 
     console.log(`ci smoke passed with ${tools.length} tools on ${host}:${port}`);
     await server.stop();

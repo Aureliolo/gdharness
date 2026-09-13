@@ -5,7 +5,7 @@ extends SceneTree
 ## here, with the answers checked against what was built. Nothing is in the tree until the
 ## main loop starts, so the checks run on the first frame rather than in _init.
 
-const Runtime = preload("res://addons/godot_mcp_runtime/mcp_runtime_autoload.gd")
+const Runtime = preload("res://addons/gdharness_runtime/runtime_autoload.gd")
 const HERO_SCRIPT: String = "res://query_hero.gd"
 
 var failures: Array[String] = []

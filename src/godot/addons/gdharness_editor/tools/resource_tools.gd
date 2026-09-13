@@ -1,6 +1,7 @@
 @tool
-class_name MCPResourceTools
 extends Node
+
+## Resource files, shaders, tilesets and themes, written through the open editor.
 
 # Shader templates. Written as real multi-line source rather than escaped one-liners so that
 # what ends up in the .gdshader can be read here. The %s is the shader type.
