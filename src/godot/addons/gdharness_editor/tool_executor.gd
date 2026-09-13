@@ -61,7 +61,6 @@ func _init_tools() -> void:
 		"reparent_node": [_scene_tools, "reparent_node"],
 		"set_node_properties": [_scene_tools, "set_node_properties"],
 		"get_node_properties": [_scene_tools, "get_node_properties"],
-		"load_sprite": [_scene_tools, "load_sprite"],
 		"save_scene": [_scene_tools, "save_scene"],
 		"connect_signal": [_scene_tools, "connect_signal"],
 		"disconnect_signal": [_scene_tools, "disconnect_signal"],

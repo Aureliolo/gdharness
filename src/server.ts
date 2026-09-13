@@ -34,7 +34,7 @@ import { parseJUnit, type TestReport } from './junit.js';
 import { editorArguments, envValue, resolveHeadless, runArguments } from './launch.js';
 import { GodotLSPClient, handleLSPTool } from './lsp_client.js';
 import { resolveWithinProject } from './paths.js';
-import { findGodotProjects, projectStructure, searchProject } from './project-scan.js';
+import { projectStructure, searchProject } from './project-scan.js';
 import { parseProjectGodot, setupResourceHandlers } from './resources.js';
 import { chooseRuntime, discoverRuntimes, runtimeRequest } from './runtime-client.js';
 import type {
@@ -84,15 +84,36 @@ const PATH_SOLUTIONS = [
  * project knows it by: both read `../outside.tscn` as a file to open and an absolute path as a
  * project file, so the boundary belongs on this side.
  */
-const PROJECT_FILE_ARGUMENTS = [
-  'scenePath',
-  'scriptPath',
-  'resourcePath',
-  'texturePath',
-  'newPath',
-  'path',
-  'script',
-];
+const PROJECT_FILE_ARGUMENTS = ['scenePath', 'scriptPath', 'resourcePath', 'newPath', 'path', 'script'];
+
+/**
+ * The first value in `properties` that walks out of the project, if there is one.
+ *
+ * A `..` segment in something that is also shaped like a path is the whole test: a caption reading
+ * "and/or" has no `..`, and a resource path has no reason to hold one. Anything subtler than that
+ * would have to know which properties take a Resource, which only the engine does.
+ */
+function escapingPropertyValue(properties: unknown): string | undefined {
+  if (typeof properties !== 'object' || properties === null) {
+    return undefined;
+  }
+  for (const value of Object.values(properties as Record<string, unknown>)) {
+    if (typeof value !== 'string' || !value.includes('/')) {
+      continue;
+    }
+    if (value.split(/[/\\]/).includes('..')) {
+      return JSON.stringify(value);
+    }
+  }
+  return undefined;
+}
+
+/** Which debug adapter call each debug_state op is. */
+const DEBUG_STATE_CALLS: Readonly<Record<string, string>> = dictionary({
+  stack: 'dap_get_stack_trace',
+  output: 'dap_get_output',
+  variables: 'dap_get_variables',
+});
 
 /** The headless operation behind each tool and op that needs neither the editor nor a game. */
 export const HEADLESS_OPERATIONS: Readonly<Record<string, Readonly<Record<string, string>>>> = dictionary({
@@ -481,8 +502,6 @@ class GodotServer {
     };
 
     switch (tool) {
-      case 'project_list':
-        return this.handleListProjects(args);
       case 'project_info':
         return await this.handleProjectInfo(args);
       case 'project_search':
@@ -515,8 +534,6 @@ class GodotServer {
             return await bridge('reparent_node');
           case 'delete':
             return await bridge('delete_node');
-          case 'load_sprite':
-            return await bridge('load_sprite');
           default:
             return await bridge('set_tilemap_cells', { tilemapNodePath: args['nodePath'] });
         }
@@ -572,9 +589,7 @@ class GodotServer {
       case 'editor_launch':
         return op === 'restart' ? await this.handleRestartEditor() : await this.handleLaunchEditor(args);
       case 'editor_run':
-        return await this.handleRunProject(args, op);
-      case 'editor_stop':
-        return await this.handleStopProject();
+        return op === 'stop' ? await this.handleStopProject() : await this.handleRunProject(args, op);
       case 'editor_output':
         return this.handleGetDebugOutput(args);
       case 'editor_status':
@@ -597,6 +612,12 @@ class GodotServer {
             return await this.handleRuntimeCommand('get_rect', {
               projectPath: args['projectPath'],
               path: readNonEmptyString(args, 'nodePath') ?? '',
+            });
+          case 'property':
+            return await this.handleRuntimeCommand('get_property', {
+              projectPath: args['projectPath'],
+              path: readNonEmptyString(args, 'nodePath') ?? '',
+              property: readNonEmptyString(args, 'property') ?? '',
             });
           default:
             return await this.handleRuntimeCommand('get_metrics', {
@@ -659,7 +680,7 @@ class GodotServer {
       case 'debug_control':
         return await this.handleDAP(`dap_${op}`, args);
       case 'debug_state':
-        return await this.handleDAP(op === 'stack' ? 'dap_get_stack_trace' : 'dap_get_output', args);
+        return await this.handleDAP(DEBUG_STATE_CALLS[op] ?? 'dap_get_stack_trace', args);
 
       default:
         throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${tool}`);
@@ -694,7 +715,6 @@ class GodotServer {
         ok: false,
         response: this.createErrorResponse(`Not a Godot project: ${path}`, [
           'Point projectPath at the directory holding project.godot',
-          'project_list finds the projects under a directory',
         ]),
       };
     }
@@ -722,6 +742,22 @@ class GodotServer {
       }
       contained[key] = `res://${location.relativePath}`;
     }
+    // A property whose type is a Resource takes the path of one, so `properties` carries file
+    // paths that no argument name announces. Only the engine knows which of them are paths, so
+    // what is judged here is the one thing a path can do that a caption cannot: leave the
+    // project. The engine refuses anything that is not a res:// or uid:// path once it knows the
+    // type, and the two together keep `properties` inside the same boundary as scenePath.
+    const escaping = escapingPropertyValue(args['properties']);
+    if (escaping !== undefined) {
+      return {
+        ok: false,
+        response: this.createErrorResponse(
+          `The property value ${escaping} resolves outside the project directory.`,
+          PATH_SOLUTIONS,
+        ),
+      };
+    }
+
     const pluginName = readNonEmptyString(args, 'pluginName');
     if (pluginName !== undefined) {
       const plugin = resolveWithinProject(projectPath, `addons/${pluginName}/plugin.cfg`);
@@ -796,18 +832,6 @@ class GodotServer {
   // -------------------------------------------------------------------------------------------
   // project
   // -------------------------------------------------------------------------------------------
-
-  private handleListProjects(args: OperationParams): ToolResponse {
-    const directory = readNonEmptyString(args, 'directory') ?? '';
-    if (!existsSync(directory)) {
-      return this.createErrorResponse(`Directory does not exist: ${directory}`);
-    }
-    try {
-      return this.jsonTextResponse(findGodotProjects(directory, readBoolean(args, 'recursive') ?? false));
-    } catch (error) {
-      return this.createErrorResponse(`Could not read ${directory}: ${errorMessage(error)}`);
-    }
-  }
 
   /**
    * project_info: the project's own metadata, then whichever sections were asked for, each the
@@ -1439,7 +1463,7 @@ class GodotServer {
       through: 'gdharness',
       pid: started.process.pid ?? null,
       arguments: cmdArgs,
-      message: 'Use editor_output for what it prints and editor_stop to end it.',
+      message: 'Use editor_output for what it prints and editor_run stop to end it.',
     });
   }
 
@@ -1488,7 +1512,7 @@ class GodotServer {
       scene: scene === null ? 'the main scene' : `res://${scene}`,
       message:
         'The editor is playing it, so its debugger holds it: the debug_* tools can reach it, ' +
-        'editor_output reads its console through the debug adapter, and editor_stop ends it.',
+        'editor_output reads its console through the debug adapter, and editor_run stop ends it.',
     });
   }
 
@@ -1623,7 +1647,7 @@ class GodotServer {
     });
   }
 
-  /** editor_stop: the game is ended and its verdict answered, the errors and warnings kept. */
+  /** editor_run stop: the game is ended and its verdict answered, errors and warnings kept. */
   private async handleStopProject(): Promise<ToolResponse> {
     if (!this.activeProcess) {
       return this.createErrorResponse('No game is running. Start one with editor_run.');

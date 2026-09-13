@@ -1025,9 +1025,17 @@ async function testToolsRefusePathsOutsideTheProject(): Promise<void> {
     // The editor-side tools are judged here before the editor is even asked for.
     ['scene_tree', { scenePath: '../outside.tscn' }],
     ['scene_node', { op: 'get', scenePath: '../outside.tscn', nodePath: '.' }],
+    // A path inside `properties`, which no argument name announces as one. The server cannot know
+    // which properties hold a Resource, so what it judges is the one thing a caption never does:
+    // walk out of the project.
     [
       'scene_node',
-      { op: 'load_sprite', scenePath: 'inside.tscn', nodePath: 'S', texturePath: '../outside.png' },
+      {
+        op: 'set',
+        scenePath: 'inside.tscn',
+        nodePath: 'S',
+        properties: { texture: 'res://../outside.png' },
+      },
     ],
     ['scene_create', { op: 'save_as', scenePath: 'inside.tscn', newPath: '../copy.tscn' }],
     ['resource_edit', { op: 'create', resourcePath: '../outside.tres', resourceType: 'Resource' }],

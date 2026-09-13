@@ -36,7 +36,7 @@ exits when the call is answered.
 | `debug_*`, and the console `editor_output` returns                    | Debug adapter                                                       |
 | `runtime_*`                                                           | Runtime                                                             |
 | `project_*`, `editor_classes`, `script_info structure`, `script_edit` | Headless operations                                                 |
-| `editor_run`, `editor_stop`                                           | Editor bridge when an editor is connected, otherwise a spawned game |
+| `editor_run`                                                          | Editor bridge when an editor is connected, otherwise a spawned game |
 | `editor_status`                                                       | All of them, reporting what answers                                 |
 
 ## Running the game

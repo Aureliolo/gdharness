@@ -35,6 +35,10 @@ misspelled, an operation reading an argument nobody sends, a connection saved wi
 `debug_control pause` was removed after measurement: Godot answers the request, reports the game as
 stopped, and leaves it running.
 
+`debug_control step_out` went the same way. The request times out, because Godot's adapter parser
+implements `req_next` and `req_stepIn` and nothing for `stepOut`. A fixture asks for the op and
+expects the refusal, so an engine that grows one is noticed rather than left unused.
+
 ## Where to look
 
 - [`ci.yml`](https://github.com/Aureliolo/gdharness/blob/main/.github/workflows/ci.yml). Every job
