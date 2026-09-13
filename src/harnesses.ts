@@ -231,16 +231,31 @@ export function harnessById(id: string): Harness | undefined {
 }
 
 /**
- * The harnesses this machine appears to run, by their config already being there.
+ * The harnesses already set up inside this project, which are the only ones written without being
+ * asked. Everything they write is a file in the project directory, so installing gdharness into
+ * one project changes nothing outside it.
  *
- * Its own directory counts as much as the file, because a harness that has been opened once has
- * a directory and may not have a config until something writes one.
+ * A harness's own directory counts as much as its config file, because one that has been opened
+ * once has a directory and may not have a config until something writes one.
  */
 export function detect(projectPath: string): readonly Harness[] {
-  return HARNESSES.filter((harness) => {
-    const path = configPath(harness, projectPath);
-    return existsSync(path) || existsSync(dirname(path));
-  });
+  return HARNESSES.filter((harness) => harness.scope === 'project' && present(harness, projectPath));
+}
+
+/**
+ * The machine-wide harnesses on this computer, which are named and never written to unasked.
+ *
+ * Their configuration belongs to the machine rather than to the project, so writing one on
+ * detection would put this project's Godot path in front of every other project the reader opens
+ * with that harness. Installing one project is not consent to that, so these take their own flag.
+ */
+export function detectGlobal(projectPath: string): readonly Harness[] {
+  return HARNESSES.filter((harness) => harness.scope === 'home' && present(harness, projectPath));
+}
+
+function present(harness: Harness, projectPath: string): boolean {
+  const path = configPath(harness, projectPath);
+  return existsSync(path) || existsSync(dirname(path));
 }
 
 export interface Written {

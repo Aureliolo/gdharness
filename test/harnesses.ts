@@ -17,6 +17,7 @@ import {
   connect,
   containerKey,
   detect,
+  detectGlobal,
   entryFor,
   HARNESSES,
   harnessById,
@@ -153,6 +154,55 @@ function testAConfigThatDoesNotParseIsLeftAlone(): void {
   }
 }
 
+/**
+ * The whole point of the split. Installing gdharness into one project must not register it for
+ * every project the reader opens with a harness whose configuration is machine-wide.
+ */
+function testDetectionNeverReachesOutOfTheProject(): void {
+  const root = project();
+  try {
+    // Every harness in the table made to look present at once, so the assertions below are about
+    // the whole table rather than about whichever ones happen to exist on the machine running this.
+    for (const harness of HARNESSES) {
+      if (harness.scope === 'project') {
+        mkdirSync(dirname(configPath(harness, root)), { recursive: true });
+      }
+    }
+
+    const found = detect(root);
+    assert.equal(
+      found.length,
+      HARNESSES.filter((harness) => harness.scope === 'project').length,
+      'every project-scoped harness is found once its directory is there',
+    );
+    for (const harness of found) {
+      assert.ok(
+        configPath(harness, root).startsWith(root),
+        `${harness.id} would be written at ${configPath(harness, root)}, outside the project`,
+      );
+    }
+
+    // The other half: a machine-wide config is never something detection writes, whatever is on
+    // the machine. Installing one project is not consent to change every other one.
+    const global = HARNESSES.filter((harness) => harness.scope === 'home');
+    assert.ok(global.length > 0, 'the table has machine-wide harnesses, or this proves nothing');
+    for (const harness of global) {
+      assert.equal(found.includes(harness), false, `${harness.id} must never be written unasked`);
+      assert.equal(
+        configPath(harness, root).startsWith(root),
+        false,
+        `${harness.id} is only worth this test because its config is outside the project`,
+      );
+    }
+    assert.equal(
+      detectGlobal(root).every((harness) => global.includes(harness)),
+      true,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 function testAHarnessIsDetectedByItsOwnDirectory(): void {
   const harness = harnessById('vscode');
   assert.ok(harness, 'vscode is in the table');
@@ -215,6 +265,7 @@ const TESTS = [
   testNothingAlreadyInTheFileIsLost,
   testWritingTwiceReplacesRatherThanDuplicates,
   testAConfigThatDoesNotParseIsLeftAlone,
+  testDetectionNeverReachesOutOfTheProject,
   testAHarnessIsDetectedByItsOwnDirectory,
   testAHarnessWeCannotWriteIsNeverWrittenTo,
   testCodexCarriesTheGodotPath,
