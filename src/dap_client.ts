@@ -1,8 +1,18 @@
 import { createConnection, type Socket } from 'node:net';
+import { setTimeout as delay } from 'node:timers/promises';
 import { FrameReader, frame, OversizedStreamError } from './framing.js';
 import { portFromEnv } from './ports.js';
 
 const DEFAULT_DAP_PORT = 6006;
+
+/**
+ * How long to let a frame's scopes arrive before giving up on them.
+ *
+ * The dump comes from the stopped game over the editor's debugger, so it is a round trip through
+ * two processes rather than a local read. Generous, because the alternative is answering "no
+ * variables" about a frame that has them.
+ */
+const SCOPES_TIMEOUT_MS = 10_000;
 
 interface PendingRequest {
   resolve: (value: DAPBody | PromiseLike<DAPBody>) => void;
@@ -419,8 +429,15 @@ export class GodotDAPClient {
   /**
    * What is in scope at a frame: locals, members and globals, each with its values.
    *
-   * Three requests deep, because that is the shape DAP has: a frame has scopes, and a scope has a
-   * reference that the values hang off. Nobody stopped at a breakpoint wants to make all three.
+   * Asking once is not enough, and the engine's own source says why. `req_scopes` both answers
+   * and asks: it calls `request_stack_dump` for the frame, so the first call sets the dump going
+   * and answers with an empty list, and while the dump is partway in it answers with the error
+   * "unknown". Only once the game has sent all three scopes does it answer with them. `req_variables`
+   * has the matching half, answering nothing at all while `_remaining_vars` is above zero.
+   *
+   * So the scopes are asked for until they are all there. A single pass happens to work whenever
+   * the dump has already arrived, which is most of the time and is why this surfaced as a flake on
+   * one platform rather than as a failure.
    */
   async getScopes(frameId?: number): Promise<{ name: string; variables: DAPArrayItem[] }[]> {
     await this.attach();
@@ -430,14 +447,23 @@ export class GodotDAPClient {
       return [];
     }
 
-    const response = await this.sendRequest('scopes', { frameId: frame['id'] });
-    const scopes = response['scopes'];
-    if (!Array.isArray(scopes)) {
-      return [];
+    const deadline = Date.now() + SCOPES_TIMEOUT_MS;
+    let scopes: DAPArrayItem[] = [];
+    while (scopes.length === 0 && Date.now() < deadline) {
+      try {
+        const answered = (await this.sendRequest('scopes', { frameId: frame['id'] }))['scopes'];
+        if (Array.isArray(answered) && answered.length > 0) {
+          scopes = answered as DAPArrayItem[];
+          break;
+        }
+      } catch {
+        // "unknown", which is what a half-filled frame answers. Asking again is the whole fix.
+      }
+      await delay(200);
     }
 
     const named: { name: string; variables: DAPArrayItem[] }[] = [];
-    for (const scope of scopes as DAPArrayItem[]) {
+    for (const scope of scopes) {
       const reference = scope['variablesReference'];
       named.push({
         name: typeof scope['name'] === 'string' ? scope['name'] : 'scope',
