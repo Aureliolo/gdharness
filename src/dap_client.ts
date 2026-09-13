@@ -3,8 +3,6 @@ import { FrameReader, frame, OversizedStreamError } from './framing.js';
 import { portFromEnv } from './ports.js';
 
 const DEFAULT_DAP_PORT = 6006;
-/** How long a pause is given to actually stop the game before it is called a pause that did not. */
-const PAUSE_TIMEOUT_MS = 5000;
 
 interface PendingRequest {
   resolve: (value: DAPBody | PromiseLike<DAPBody>) => void;
@@ -372,31 +370,6 @@ export class GodotDAPClient {
     await this.sendRequest('continue', { threadId: resolvedThreadId });
   }
 
-  async pause(threadId?: number): Promise<void> {
-    await this.attach();
-    const resolvedThreadId = await this.resolveThreadId(threadId);
-    await this.sendRequest('pause', { threadId: resolvedThreadId });
-  }
-
-  /**
-   * The stack once the game is held, or nothing if it never was.
-   *
-   * Neither the request nor the event that follows it is evidence: the request is answered
-   * before anything happens, and Godot sends the stopped event for a pause it did not make.
-   * A game that is held has a stack, and one that is running has none, so that is what is
-   * waited for.
-   */
-  async heldWithin(timeoutMs: number): Promise<DAPArrayItem[]> {
-    const deadline = Date.now() + timeoutMs;
-    let stack = await this.getStackTrace();
-    while (stack.length === 0 && Date.now() < deadline) {
-      // Unhurried: every ask goes through the editor, which is also the thing being waited for.
-      await new Promise((resolve) => setTimeout(resolve, 500));
-      stack = await this.getStackTrace();
-    }
-    return stack;
-  }
-
   async stepOver(threadId?: number): Promise<void> {
     await this.attach();
     const resolvedThreadId = await this.resolveThreadId(threadId);
@@ -535,22 +508,6 @@ export async function handleDAPTool(
       case 'dap_continue': {
         await client.continue();
         return { content: [{ type: 'text', text: JSON.stringify({ continued: true }, null, 2) }] };
-      }
-
-      // The stop is waited for rather than assumed. An editor with no window takes the request,
-      // answers it, sends the stopped event and leaves the game running: what Godot pauses is
-      // its own toolbar button, and there is none to press. Reporting that as a pause is the one
-      // answer a tool must never give, so a game that is not held is a refusal.
-      case 'dap_pause': {
-        await client.pause();
-        const stack = await client.heldWithin(PAUSE_TIMEOUT_MS);
-        if (stack.length === 0) {
-          throw new Error(
-            'the editor took the request and the game is still running, with no stack to read. ' +
-              'Godot pauses from its toolbar, which an editor started with --headless has not got',
-          );
-        }
-        return { content: [{ type: 'text', text: JSON.stringify({ paused: true, stack }, null, 2) }] };
       }
 
       case 'dap_step_over': {

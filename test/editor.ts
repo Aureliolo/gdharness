@@ -146,10 +146,6 @@ const MAIN_GD = [
   '\treturn stash',
   '',
   '',
-  'func peek_ticks() -> int:',
-  '\treturn ticks',
-  '',
-  '',
   'func peek_clicks() -> int:',
   '\treturn clicks',
   '',
@@ -1015,30 +1011,15 @@ async function testDebugging({ call, refusal, attempt, project }: Editor): Promi
     .join('\n');
   assert.match(console_, /the game said 4/, `and reach editor_output; it carried:\n${console_}`);
 
-  // Pausing is the editor's own toolbar button, and an editor started headless has no toolbar:
-  // measured here, the request is taken and answered while the game runs on, its tree never
-  // paused. So the refusal is what a headless editor owes the caller, and the game going on
-  // with its counter is the evidence behind it.
-  const ticks = async (): Promise<number> =>
-    asNumber(
-      get(
-        await call('runtime_invoke', {
-          projectPath: project,
-          op: 'call',
-          nodePath: '/root/Main',
-          method: 'peek_ticks',
-        }),
-        'result',
-      ),
-    );
-
-  const before = await ticks();
+  // There is no pause op, and this is why: the adapter takes a pause, answers it, sends the
+  // stopped event, and the game goes on for as long as anybody watches, with an empty stack
+  // throughout. Asking for it has to be refused as the unknown op it is rather than quietly
+  // becoming one of the two that work.
   assert.match(
     await refusal('debug_control', { op: 'pause' }),
-    /still running, with no stack to read/,
-    'a pause that did not stop the game should say so rather than report a pause',
+    /continue, step_over/,
+    'an op that does not exist should be refused with the ones that do',
   );
-  assert.ok((await ticks()) > before, 'and the game should indeed still be getting on with it');
 
   await call('debug_breakpoint', { ...main, op: 'remove', line: BREAK_LINE });
   // The game is left running: it is past the breakpoint and answering, which is what the runtime

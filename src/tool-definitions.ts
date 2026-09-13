@@ -947,16 +947,12 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   },
   {
     name: 'debug_control',
-    description: "Continues, pauses or steps the debugged game through the editor's debug adapter.",
+    description:
+      "Continues or steps the debugged game through the editor's debug adapter. There is no pause: measured on 4.7.2, Godot takes a pause request, reports the game as stopped and leaves it running, so hold the game where you want it with a breakpoint.",
     parameters: {},
     requires: [],
     operations: {
-      continue: { summary: 'resume after a breakpoint or pause', requires: [] },
-      pause: {
-        summary:
-          'pause the game, which needs an editor with a window: Godot pauses from its toolbar, and a pause that did not stop the game is refused rather than reported',
-        requires: [],
-      },
+      continue: { summary: 'resume after a breakpoint', requires: [] },
       step_over: { summary: 'run the current line', requires: [] },
     },
   },
