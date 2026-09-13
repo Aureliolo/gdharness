@@ -23,6 +23,7 @@ import {
   ListToolsRequestSchema,
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
+import { staleClassNames } from './class-cache.js';
 import { GodotDAPClient, handleDAPTool } from './dap_client.js';
 import { dictionary, emptyRecord } from './dictionary.js';
 import { errorMessage } from './errors.js';
@@ -678,9 +679,20 @@ class GodotServer {
         });
       }
       case 'debug_control':
-        return await this.handleDAP(`dap_${op}`, args);
-      case 'debug_state':
-        return await this.handleDAP(DEBUG_STATE_CALLS[op] ?? 'dap_get_stack_trace', args);
+      case 'debug_state': {
+        // The console the adapter buffered outlives the game it came from, so reading it needs
+        // no session. A stack, a scope and a step all need one, and one that is stopped.
+        if (tool === 'debug_state' && op === 'output') {
+          return await this.handleDAP('dap_get_output', args);
+        }
+        const held = await this.debuggedGame();
+        if (!held.ok) {
+          return held.response;
+        }
+        return tool === 'debug_control'
+          ? await this.handleDAP(`dap_${op}`, args)
+          : await this.handleDAP(DEBUG_STATE_CALLS[op] ?? 'dap_get_stack_trace', args);
+      }
 
       default:
         throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${tool}`);
@@ -719,6 +731,87 @@ class GodotServer {
       };
     }
     return { ok: true, value: { path, file } };
+  }
+
+  /**
+   * The game the editor's debugger is holding, stopped, or the refusal saying which part is
+   * missing.
+   *
+   * Every one of these used to answer with an empty stack, and an empty stack reads the same
+   * whether nothing is running, the game this server spawned has no debugger behind it, or the
+   * game is running freely and was never going to have a frame to show.
+   */
+  private async debuggedGame(): Promise<Checked<GodotProcess>> {
+    const game = this.activeProcess;
+    if (game === null) {
+      return {
+        ok: false,
+        response: this.createErrorResponse(
+          'No game is running, so there is no debug session to answer for.',
+          ['Start one with editor_run start, which has the editor play it'],
+        ),
+      };
+    }
+    if (!game.throughEditor) {
+      return {
+        ok: false,
+        response: this.createErrorResponse(
+          'The running game is its own process, so no debugger is holding it: breakpoints never hit and there is no stack to read.',
+          [
+            'editor_run start plays it through the open editor, whose debugger the debug_* tools speak to',
+            'editor_status says whether an editor has reached this server',
+          ],
+        ),
+      };
+    }
+    // Godot's adapter sends no stopped event until a session has been opened on it, so asking
+    // whether the game is stopped before this has run would answer "no" forever.
+    try {
+      await this.dap().attach();
+    } catch (error) {
+      return {
+        ok: false,
+        response: this.createErrorResponse(
+          `The editor is playing the game but its debug adapter did not answer: ${errorMessage(error)}`,
+          [
+            'Godot serves the debug adapter on 6006 unless --dap-port says otherwise',
+            'GDHARNESS_DAP_PORT points this server at another one',
+          ],
+        ),
+      };
+    }
+    if (!this.dap().isStopped()) {
+      return {
+        ok: false,
+        response: this.createErrorResponse(
+          'The game is running, not stopped, so it has no stack and no scope to read.',
+          [
+            'debug_breakpoint set puts a breakpoint on before the run, and it is waiting when the game starts',
+            'editor_output reads what the running game is printing',
+          ],
+        ),
+      };
+    }
+    return { ok: true, value: game };
+  }
+
+  /**
+   * Rebuilds the engine's class cache when the declarations on disk have outgrown it, and
+   * answers with the names that were missing from it.
+   *
+   * The staleness is read from files, so a project whose cache is current pays a directory walk
+   * and starts no engine.
+   */
+  private async refreshStaleClasses(projectPath: string): Promise<Checked<readonly string[]>> {
+    const stale = staleClassNames(projectPath);
+    if (stale.length === 0) {
+      return { ok: true, value: [] };
+    }
+    const refreshed = await this.operation('refresh_class_cache', {}, projectPath);
+    if (!refreshed.ok) {
+      return { ok: false, response: this.answer(refreshed) };
+    }
+    return { ok: true, value: stale };
   }
 
   /**
@@ -1367,6 +1460,19 @@ class GodotServer {
     if (!project.ok) {
       return project.response;
     }
+    // The language server and the debug adapter hold one client each, whatever project they were
+    // opened on, and a second editor takes both from the first, which then gives up without
+    // retrying. The answers after that come from a process nobody can see.
+    if (this.godotBridge.isConnected()) {
+      return this.createErrorResponse(
+        'An editor is already connected to this server, and a second one would take the language server and debug adapter ports from it.',
+        [
+          'editor_status says which editor is answering, and for which project',
+          'editor_launch restart replaces the connected editor rather than joining it',
+          'Close the open editor first if the new project is the one you want',
+        ],
+      );
+    }
     const engine = await this.engine();
     if (!engine.ok) {
       return engine.response;
@@ -1420,6 +1526,15 @@ class GodotServer {
       return engine.response;
     }
 
+    // The engine fixes its list of global classes when it starts and the editor writes that
+    // list back over the cache, so a game launched after a `class_name` was written dies at its
+    // first screen on "Could not find type". Rebuilt here from the declarations on disk rather
+    // than reported: the caller asked for a game, and this is what it takes to have one.
+    const refreshed = await this.refreshStaleClasses(project.value.path);
+    if (!refreshed.ok) {
+      return refreshed.response;
+    }
+
     const sceneArgument = sceneToRun?.ok ? sceneToRun.relativePath : null;
     if (op === 'check') {
       return await this.checkBoot(engine.value, project.value.path, sceneArgument, args);
@@ -1442,7 +1557,7 @@ class GodotServer {
       variables: process.env,
     });
     if (this.godotBridge.isConnected() && (!headless || editorPlaysHeadless(project.value.file))) {
-      return await this.playThroughEditor(sceneArgument);
+      return await this.playThroughEditor(sceneArgument, refreshed.value);
     }
 
     const cmdArgs = runArguments({
@@ -1463,6 +1578,7 @@ class GodotServer {
       through: 'gdharness',
       pid: started.process.pid ?? null,
       arguments: cmdArgs,
+      refreshedClasses: refreshed.value,
       message: 'Use editor_output for what it prints and editor_run stop to end it.',
     });
   }
@@ -1475,7 +1591,10 @@ class GodotServer {
    * game starts is what puts its first lines in the log rather than losing them, and the
    * breakpoints a caller set earlier are already registered by then.
    */
-  private async playThroughEditor(scene: string | null): Promise<ToolResponse> {
+  private async playThroughEditor(
+    scene: string | null,
+    refreshedClasses: readonly string[],
+  ): Promise<ToolResponse> {
     const log = new GameLog();
     try {
       await this.dap().connect();
@@ -1510,6 +1629,7 @@ class GodotServer {
       started: true,
       through: 'editor',
       scene: scene === null ? 'the main scene' : `res://${scene}`,
+      refreshedClasses,
       message:
         'The editor is playing it, so its debugger holds it: the debug_* tools can reach it, ' +
         'editor_output reads its console through the debug adapter, and editor_run stop ends it.',

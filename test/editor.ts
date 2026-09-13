@@ -1014,6 +1014,19 @@ async function stackWithin(
 async function testDebugging({ call, refusal, attempt, project }: Editor): Promise<void> {
   const main = { projectPath: project, scriptPath: 'res://main.gd' };
 
+  // Nothing is running yet, and the whole trap this replaces was that every one of these
+  // answered with an empty stack: the same answer a game stopped in an empty frame gives.
+  assert.match(
+    await refusal('debug_state', { op: 'stack' }),
+    /No game is running.*editor_run start/s,
+    'a stack asked for with no game should name the command that starts one',
+  );
+  assert.match(
+    await refusal('debug_control', { op: 'continue' }),
+    /No game is running/,
+    'and so should a step asked for with no game',
+  );
+
   // The print, so the frame the game stops in is _ready with the sum already worked out.
   await call('debug_breakpoint', { ...main, op: 'set', line: BREAK_LINE });
 
@@ -1102,6 +1115,16 @@ async function testDebugging({ call, refusal, attempt, project }: Editor): Promi
     await refusal('debug_control', { op: 'step_out' }),
     /continue, step_over, step_into/,
     'step_out should be refused: the adapter never answers a stepOut request',
+  );
+
+  // The game was let go above, so it is running rather than held, which is the third thing an
+  // empty stack used to mean. The console is the one debug_state op that still answers here,
+  // and it answered a few lines up, which is what makes this refusal about the state and not
+  // about the session.
+  assert.match(
+    await refusal('debug_state', { op: 'stack' }),
+    /running, not stopped.*debug_breakpoint set/s,
+    'a stack asked for while the game runs should say so and name what stops it',
   );
 
   await call('debug_breakpoint', { ...main, op: 'remove', line: BREAK_LINE });
@@ -1358,6 +1381,15 @@ async function testEditorRestart({ call, refusal, project }: Editor): Promise<vo
   );
   assert.equal(get(before, 'addonIsStale'), false, 'which is the one this server ships');
   assert.equal(typeof get(before, 'editorPid'), 'number', 'and say which process it is');
+
+  // A second editor takes the language server and debug adapter ports off the first, which then
+  // gives up without retrying, and every answer after that comes from a process nobody can see.
+  // Refused rather than written down somewhere, because the tool that would do it is this one.
+  assert.match(
+    await refusal('editor_launch', { projectPath: project, op: 'open' }),
+    /already connected.*editor_launch restart/s,
+    'opening a second editor should be refused while one is connected',
+  );
 
   // The editor here is headless, and a headless editor must refuse: the engine hands back none
   // of the arguments it consumed, so a restart brings up a project manager with no project

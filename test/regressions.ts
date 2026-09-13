@@ -17,6 +17,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
+import { staleClassNames } from '../src/class-cache.js';
 import { GodotDAPClient } from '../src/dap_client.js';
 import { dictionary, emptyRecord } from '../src/dictionary.js';
 import { createBridge } from '../src/godot-bridge.js';
@@ -1117,6 +1118,84 @@ async function testToolsRefusePathsOutsideTheProject(): Promise<void> {
 }
 
 /**
+ * A debug tool with nothing to debug refuses, rather than answering with an empty stack.
+ *
+ * An empty array was the answer to three different situations: no game, a game this server
+ * spawned and no debugger behind it, and a game running freely. None of them is a stack, and
+ * a caller cannot tell which one it got, which is the shape of a check that agrees with
+ * everything. The console is the exception: the adapter buffers it, and that buffer outlives
+ * the game it came from.
+ */
+async function testDebugToolsRefuseWithoutASession(): Promise<void> {
+  await withStdioServer(async (call) => {
+    for (const [tool, args] of [
+      ['debug_state', { op: 'stack' }],
+      ['debug_state', { op: 'variables' }],
+      ['debug_control', { op: 'continue' }],
+      ['debug_control', { op: 'step_over' }],
+      ['debug_control', { op: 'step_into' }],
+    ] as [string, Record<string, unknown>][]) {
+      assert.match(
+        await call(tool, args),
+        /No game is running[\s\S]*editor_run start/,
+        `${tool} ${JSON.stringify(args)} should refuse and name the command that starts one`,
+      );
+    }
+
+    assert.doesNotMatch(
+      await call('debug_state', { op: 'output' }),
+      /No game is running/,
+      'the buffered console is readable without a session, because it outlives the game',
+    );
+  });
+}
+
+/**
+ * Whether the engine's class list has fallen behind the scripts, read from files alone.
+ *
+ * Godot fixes its global class list when it starts, so a game launched after a `class_name` was
+ * written dies at its first screen. editor_run asks this before every run and rebuilds the cache
+ * when the answer is not empty, which is why it must cost no engine and must not answer "current"
+ * for a cache recording the right name at the wrong path.
+ */
+function testStaleClassesAreReadFromDisk(): void {
+  const sandbox = mkdtempSync(join(tmpdir(), 'gdharness-class-cache-'));
+  const cache = join(sandbox, '.godot', 'global_script_class_cache.cfg');
+  const entry = (name: string, path: string): string =>
+    `list=[{\n"base": &"Node",\n"class": &"${name}",\n"icon": "",\n"is_abstract": false,\n"is_tool": false,\n"language": &"GDScript",\n"path": "${path}"\n}]\n`;
+  try {
+    mkdirSync(join(sandbox, 'scripts'), { recursive: true });
+    writeFileSync(join(sandbox, 'scripts', 'hero.gd'), 'class_name Hero\nextends Node\n');
+    writeFileSync(join(sandbox, 'scripts', 'plain.gd'), 'extends Node\n');
+
+    assert.deepEqual(
+      staleClassNames(sandbox),
+      ['Hero'],
+      'with no cache at all the engine knows no class_name, so every declaration is stale',
+    );
+
+    mkdirSync(join(sandbox, '.godot'), { recursive: true });
+    writeFileSync(cache, entry('Hero', 'res://scripts/hero.gd'));
+    assert.deepEqual(staleClassNames(sandbox), [], 'a cache listing it where it is is current');
+
+    // The half a name check misses: the class was moved, the cache still names it, and the
+    // engine loads the script that is no longer there.
+    writeFileSync(cache, entry('Hero', 'res://old/hero.gd'));
+    assert.deepEqual(
+      staleClassNames(sandbox),
+      ['Hero'],
+      'a cache recording it at a path it has left is stale, not current',
+    );
+
+    writeFileSync(join(sandbox, 'scripts', 'squire.gd'), 'class_name Squire\nextends Hero\n');
+    writeFileSync(cache, entry('Hero', 'res://scripts/hero.gd'));
+    assert.deepEqual(staleClassNames(sandbox), ['Squire'], 'and a declaration written since is too');
+  } finally {
+    rmSync(sandbox, { recursive: true, force: true });
+  }
+}
+
+/**
  * The engine's argument list is not visible from any response, so it is asserted directly.
  * No -d in either branch: the local debugger it turns on breaks into a `debug>` prompt on the
  * first script error and, with no stdin to read a command from, loops on that prompt forever.
@@ -1848,6 +1927,7 @@ async function main(): Promise<void> {
   testSceneToolsVectorRegression();
   testRunArgumentsLeaveTheLocalDebuggerOff();
   testHeadlessFollowsTheDisplay();
+  testStaleClassesAreReadFromDisk();
   await testParametersReachTheEngine();
   await testGdUnitRunner();
   testCommandLineSetup();
@@ -1868,6 +1948,7 @@ async function main(): Promise<void> {
   testProjectPathsAreContained();
   await testToolAndOpLookupsCannotReachThePrototype();
   await testToolsRefusePathsOutsideTheProject();
+  await testDebugToolsRefuseWithoutASession();
   console.log('regression tests passed');
 }
 
