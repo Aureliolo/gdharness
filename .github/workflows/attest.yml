@@ -25,6 +25,10 @@ on:
         description: Path inside the artifact of the archive the SBOM describes
         required: true
         type: string
+      bundle:
+        description: File name the signed attestations are uploaded under, as JSON Lines
+        required: true
+        type: string
 
 permissions: {}
 
@@ -47,12 +51,41 @@ jobs:
           path: dist
 
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        id: provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: ${{ inputs.subjects }}
 
       - name: Attest SBOM
-        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        id: sbom
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: ${{ inputs.archive }}
           sbom-path: ${{ inputs.sbom }}
+
+      # The attestations are stored on the repository too, but only a verifier with GitHub's
+      # API reaches them there. A copy beside the archive verifies from the file alone
+      # (`gh attestation verify --bundle`), and it is the only form OpenSSF Scorecard counts as
+      # a signed release.
+      - name: Gather the signed attestations into one file
+        env:
+          PROVENANCE: ${{ steps.provenance.outputs.bundle-path }}
+          SBOM: ${{ steps.sbom.outputs.bundle-path }}
+          BUNDLE: ${{ inputs.bundle }}
+        run: |
+          set -euo pipefail
+          mkdir -p attestations
+          cat "${PROVENANCE}" "${SBOM}" > "attestations/${BUNDLE}"
+          lines=$(wc -l < "attestations/${BUNDLE}")
+          if [ "${lines}" -ne 2 ]; then
+            echo "Expected one provenance and one SBOM attestation, found ${lines} lines." >&2
+            exit 1
+          fi
+
+      - name: Upload the signed attestations
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: attestations
+          path: attestations/${{ inputs.bundle }}
+          if-no-files-found: error
+          retention-days: 1

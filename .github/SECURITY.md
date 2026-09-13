@@ -32,11 +32,30 @@ things worth reporting:
 
 Every release is built in CI on Linux from a signed commit on `main`, with a frozen
 lockfile. Each one ships the archive, a SHA-256 sidecar and an SPDX SBOM, and carries two
-Sigstore attestations: build provenance, and the SBOM bound to the archive. Releases are
-immutable and the `v*` tags cannot be moved.
+Sigstore attestations: build provenance, and the SBOM bound to the archive. From 0.2.4 the
+attestations are also attached to the release as `gdharness-<version>.intoto.jsonl`, so they
+verify without GitHub's API. Releases are immutable and the `v*` tags cannot be moved.
 
 ```bash
 gh attestation verify gdharness-<version>.tgz --repo Aureliolo/gdharness
 gh attestation verify gdharness-<version>.tgz --repo Aureliolo/gdharness --predicate-type https://spdx.dev/Document
+gh attestation verify gdharness-<version>.tgz --repo Aureliolo/gdharness --bundle gdharness-<version>.intoto.jsonl
 sha256sum --check gdharness-<version>.tgz.sha256
 ```
+
+## OpenSSF Scorecard
+
+The [published score](https://scorecard.dev/viewer/?uri=github.com/Aureliolo/gdharness) has
+three checks that cannot reach 10 while gdharness has one maintainer. They stay low on
+purpose rather than being satisfied by an account that approves without reading:
+
+- **Code-Review** counts changesets approved by someone other than their author.
+- **Branch-Protection** scores in tiers, and every tier past the first needs required
+  approvals. Everything a single maintainer can enforce on `main` is on: pull requests, the
+  required checks, up-to-date branches, stale reviews dismissed, no force pushes, no deletion,
+  and administrators bound by all of it. Last-push approval is not: it blocks a merge that
+  nobody else has approved even when no approvals are required.
+- **Contributors** counts the organisations behind recent committers.
+
+**Maintained** reads 0 until the repository is 90 days old, and **Packaging** is not scored
+until releases are published to a package registry.

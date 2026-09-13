@@ -300,6 +300,7 @@ jobs:
       artifact: release-bundle
       archive: dist/gdharness-${{ needs.build_test.outputs.version }}.tgz
       sbom: dist/gdharness-${{ needs.build_test.outputs.version }}.spdx.json
+      bundle: gdharness-${{ needs.build_test.outputs.version }}.intoto.jsonl
       subjects: |
         dist/gdharness-${{ needs.build_test.outputs.version }}.tgz
         dist/gdharness-${{ needs.build_test.outputs.version }}.tgz.sha256
@@ -321,6 +322,12 @@ jobs:
           name: release-bundle
           path: dist
 
+      - name: Download the signed attestations
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: attestations
+          path: dist
+
       # The bytes have moved between jobs twice by now, and they are the bytes the attestation
       # was made over, so the last thing before publishing is to check they still hash right.
       - name: Verify the checksum once more
@@ -330,6 +337,27 @@ jobs:
         run: |
           set -euo pipefail
           (cd dist && sha256sum --check "gdharness-${VERSION}.tgz.sha256")
+
+      # The file that ships has to verify the way a user will run it, from the file alone, and
+      # has to name attest.yml at this tag; otherwise it only looks like proof.
+      - name: Verify the attestations that will ship
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build_test.outputs.version }}
+        run: |
+          set -euo pipefail
+          bundle="dist/gdharness-${VERSION}.intoto.jsonl"
+          signer="${GITHUB_REPOSITORY}/.github/workflows/attest.yml"
+          for subject in "gdharness-${VERSION}.tgz" "gdharness-${VERSION}.tgz.sha256" "gdharness-${VERSION}.spdx.json"; do
+            gh attestation verify "dist/${subject}" --bundle "${bundle}" \
+              --repo "${GITHUB_REPOSITORY}" --signer-workflow "${signer}" \
+              --source-ref "${GITHUB_REF}" --deny-self-hosted-runners
+          done
+          gh attestation verify "dist/gdharness-${VERSION}.tgz" --bundle "${bundle}" \
+            --predicate-type https://spdx.dev/Document/v2.3 \
+            --repo "${GITHUB_REPOSITORY}" --signer-workflow "${signer}" \
+            --source-ref "${GITHUB_REF}" --deny-self-hosted-runners
 
       - name: Create GitHub Release
         env:
@@ -342,6 +370,7 @@ jobs:
             "dist/gdharness-${VERSION}.tgz" \
             "dist/gdharness-${VERSION}.tgz.sha256" \
             "dist/gdharness-${VERSION}.spdx.json" \
+            "dist/gdharness-${VERSION}.intoto.jsonl" \
             --verify-tag \
             --generate-notes \
             --title "gdharness ${VERSION}"
