@@ -2094,6 +2094,22 @@ function parametersOf(block: string): string[] {
  * a declared argument nothing looks at is a setting a caller can pass, watch accepted, and
  * never see obeyed. `scene_node` had one, and there was nothing to notice it with.
  */
+/**
+ * Every tool is named by a fixture, which is the rule this repository is built to and the claim
+ * the README makes about it.
+ *
+ * Nothing held it before now: the consistency checks prove a tool's dispatch name exists on both
+ * sides and that its arguments are read, all of which a tool nobody ever calls would pass. A tool
+ * added with no fixture is the one shape of change this project says it does not ship.
+ */
+function testEveryToolIsDrivenSomewhere(): void {
+  const fixtures = ['editor.ts', 'engine-gdscript.ts', 'bridge.ts', 'regressions.ts', 'smoke.ts']
+    .map((name) => readFileSync(join('test', name), 'utf8'))
+    .join('\n');
+  const undriven = TOOL_SPECS.filter((spec) => !fixtures.includes(`'${spec.name}'`)).map((spec) => spec.name);
+  assert.deepEqual(undriven, [], 'every tool should be called by a fixture, not only declared');
+}
+
 function testEveryToolParameterIsRead(): void {
   const named = new Set<string>();
   const snaked = new Set<string>();
@@ -2148,6 +2164,7 @@ async function main(): Promise<void> {
   testEveryDispatchedNameExistsOnBothSides();
   testEveryEngineParameterCanBeSent();
   testEveryToolParameterIsRead();
+  testEveryToolIsDrivenSomewhere();
   testStaleDisconnectRegression();
   testSceneToolsVectorRegression();
   testRunArgumentsLeaveTheLocalDebuggerOff();
