@@ -60,7 +60,7 @@ jobs:
             fi
 
             echo "v${version} is tagged at ${tagged}, not ${GITHUB_SHA}, so this version cannot" >&2
-            echo "be released. The fork inherited GoPeak's tags: v1.1.0 and the v2 line are taken." >&2
+            echo "be released. Nothing can move that tag; raise the version past it." >&2
             exit 1
           fi
 

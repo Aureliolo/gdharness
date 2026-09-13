@@ -86,17 +86,18 @@ including a pull request from a fork.
 
 ## Versions that cannot be released
 
-The fork carries GoPeak's tags, so `v1.1.0` and everything in the `v2` line already exist here
-and point at somebody else's commits. The tag ruleset allows no deletion and no update, by
-anyone, which is what makes a published tag worth verifying against; the cost is that those
-version numbers are spent. Prepare release refuses one, naming it, before it writes a branch.
+A version whose tag exists cannot be released again, whether or not a release is attached to
+that tag. The ruleset on `v*` allows no deletion and no update by anyone, which is what makes a
+tag worth verifying a build against, and the cost is that the number is spent for good: cutting
+one twice would leave two different builds answering to one version. Prepare release refuses
+such a version, naming it, before it writes a branch.
 
 ## When a release job fails
 
 - **Tag does not match package version**: the tag was created outside `release-tag.yml`. Delete
   the tag and go through Prepare release.
-- **vX.Y.Z is tagged at another commit**: an inherited tag holds that version. Nothing can move
-  it, so raise the version past it; see above.
+- **vX.Y.Z is tagged at another commit**: that version is already spent. Nothing can move the
+  tag, so raise the version past it; see above.
 - **Release commit is not reachable from main**: the tag points at a commit that never landed.
 - **Release commit carries no valid signature**: `main` requires signed commits, so this only
   fires if that ruleset was bypassed or removed. That is exactly when you want to hear about it.

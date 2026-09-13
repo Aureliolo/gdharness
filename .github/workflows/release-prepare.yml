@@ -61,9 +61,8 @@ jobs:
           echo "version=${next}" >> "${GITHUB_OUTPUT}"
           echo "branch=release/v${next}" >> "${GITHUB_OUTPUT}"
 
-      # A tag rather than a release: the fork inherited GoPeak's tags, so v1.1.0 and the whole
-      # v2 line are taken here without ever having been released from this repository, and the
-      # tag ruleset does not let anything move or delete them.
+      # A tag rather than a release: a version can be tagged with no release attached, and the
+      # tag ruleset lets nothing move or delete one, so that number is spent either way.
       - name: Refuse a version whose tag is taken
         env:
           GH_TOKEN: ${{ github.token }}
