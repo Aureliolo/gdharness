@@ -2,7 +2,7 @@
 
 ## Requirements
 
-|              |                                                            |
+| What         | Version                                                    |
 | ------------ | ---------------------------------------------------------- |
 | Godot        | 4.7.0 or newer                                             |
 | Node, or Bun | Node 22 or newer for `npx`, or Bun 1.4 or newer for `bunx` |
@@ -32,8 +32,8 @@ did not answer for:
 ```text
 Claude Code is set up here. Add gdharness to it? [Y/n]
 Cursor is installed. Set it up for this project? [Y/n]
-Codex CLI is on this machine and has no project-level config. Write ~/.codex/config.toml?
-That affects every project you open with it. [y/N]
+Codex CLI is on this machine and has no project-level config.
+Write ~/.codex/config.toml? That affects every project. [y/N]
 ```
 
 Name harnesses by flag and it asks nothing, which is how a script or an agent runs it. With no
@@ -41,10 +41,17 @@ terminal and no flags, it writes the harnesses this project already uses and nam
 can never hang waiting for an answer nobody can give.
 
 ```bash
-npx -y gdharness@{{version}} setup . --cursor --vscode # exactly these two, no questions
-npx -y gdharness@{{version}} setup . --codex           # yes, write the machine-wide one
-npx -y gdharness@{{version}} setup . --yes             # no questions, no machine-wide writes
-npx -y gdharness@{{version}} setup . --no-connect      # addons only, no configuration at all
+# exactly these two, no questions
+npx -y gdharness@{{version}} setup . --cursor --vscode
+
+# yes, write the machine-wide one
+npx -y gdharness@{{version}} setup . --codex
+
+# no questions, and nothing outside the project
+npx -y gdharness@{{version}} setup . --yes
+
+# the addons only, no configuration at all
+npx -y gdharness@{{version}} setup . --no-connect
 ```
 
 ## What it writes, and where
@@ -121,15 +128,15 @@ because the old version keeps answering until they are done:
 
 ## The rest of the CLI
 
-```bash
-gdharness setup /path/to/project              # addons in, editor ones enabled, class list rebuilt
-gdharness setup /path/to/project --no-connect # and write no harness configuration
-gdharness upgrade /path/to/project            # the same project, on this version
-gdharness uninstall /path/to/project          # take all of it back out again
-gdharness doctor /path/to/project             # exits 1 on a problem and names it
-gdharness classes /path/to/project            # rebuild the class cache from disk
-gdharness harnesses                           # every harness, its flag and the file it reads
-```
+| Command                        | What it does                                            |
+| ------------------------------ | ------------------------------------------------------- |
+| `setup <project>`              | Addons in, editor plugins on, class list rebuilt        |
+| `setup <project> --no-connect` | The same, and no harness configuration written          |
+| `upgrade <project>`            | The same project, on this version                       |
+| `uninstall <project>`          | All of it back out again                                |
+| `doctor <project>`             | Says what holds and what does not; exits 1 on a problem |
+| `classes <project>`            | Rebuilds the class cache from disk                      |
+| `harnesses`                    | Every harness, its flag and the file it reads           |
 
 `setup` copies each addon whole and writes the version beside it, so `doctor` can tell an old copy
 from the shipped one. An editor that was already open keeps serving the addon it loaded at startup
@@ -149,7 +156,8 @@ created. A harness's own directory is left alone, empty or not, because it is th
 A machine-wide config may be serving another project, so it is named rather than edited:
 
 ```text
-Codex CLI: left alone. Its config is machine-wide and may serve another project; pass --codex to remove it.
+Codex CLI: left alone. Its config is machine-wide and may serve
+another project; pass --codex to remove it.
 ```
 
 Writes to `project.godot` go through the engine, so the file keeps its comments and formatting.
@@ -189,11 +197,14 @@ gh attestation verify "gdharness-${VERSION}.tgz" --repo Aureliolo/gdharness \
 Without `gh`, with `cosign` instead:
 
 ```bash verify with cosign
+IDENTITY="https://github.com/Aureliolo/gdharness"
+IDENTITY="$IDENTITY/.github/workflows/release-build.yml@refs/tags/v${VERSION}"
+
 cosign verify-blob-attestation "gdharness-${VERSION}.tgz" \
   --bundle "gdharness-${VERSION}.intoto.jsonl" \
   --new-bundle-format \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  --certificate-identity "https://github.com/Aureliolo/gdharness/.github/workflows/release-build.yml@refs/tags/v${VERSION}"
+  --certificate-identity "$IDENTITY"
 ```
 
 With neither, hash the file and look the digest up in a browser at

@@ -28,12 +28,16 @@
   --sans: "Archivo", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 
-  --measure: 68ch;
   --gutter: clamp(20px, 4vw, 40px);
-  /* One frame for the header, the content and the footer, so every page has the same left edge
-     and the wordmark sits directly above the first word of the page under it. Prose is held to
-     the measure inside it; only the front page's cards use the full width. */
-  --frame: 1060px;
+  /*
+   * One width, for everything, on every page: the header bar, the content under it, the front
+   * page's cards, the footer. There were five of these, and `ch` was one of them, which resolves
+   * against each element's own font size: a heading's rule, the table beside it and the paragraph
+   * under it all stopped in three different places on the same page, and the front page and the
+   * rest read as two different sites. Narrow enough that a line of prose filling it is still a
+   * line somebody can read, so nothing needs a second, narrower width of its own.
+   */
+  --frame: 880px;
 }
 
 @media (prefers-color-scheme: light) {
@@ -159,6 +163,18 @@ a:hover {
   font-weight: 500;
 }
 
+/* The two that leave the site, kept together and marked as leaving it. */
+.links .off {
+  width: 1px;
+  height: 15px;
+  background: var(--rule);
+}
+
+.links a.out::after {
+  content: " \2197";
+  color: var(--faint);
+}
+
 main {
   max-width: var(--frame);
   margin: 0 auto;
@@ -190,10 +206,6 @@ main {
 }
 
 /* ------------------------------------------------------------------ prose */
-
-main > * {
-  max-width: var(--measure);
-}
 
 h1,
 h2,
@@ -292,14 +304,48 @@ code {
   word-break: break-word;
 }
 
+/*
+ * A code block is a figure, with the caption the fence's info string carries. Browsers indent a
+ * figure by 40px of their own, which put every block on the site one step to the right of the
+ * prose above it.
+ */
+figure {
+  margin: 0 0 18px;
+}
+
+/*
+ * One label, wherever something small and quiet names the thing under it: a code block's caption,
+ * a table's column, a card's kicker, a step on the front page. They were four near-identical
+ * rules at three sizes and two families, which is the sort of difference a reader cannot name
+ * but can see.
+ */
+figcaption,
+th,
+.card .kicker,
+.step {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--faint);
+}
+
+figcaption {
+  margin-bottom: 8px;
+}
+
 pre {
   margin: 0 0 18px;
   padding: 15px 17px;
   background: var(--sunken);
   border: 1px solid var(--rule);
   border-radius: 4px;
-  overflow-x: auto;
   max-width: 100%;
+}
+
+figure > pre {
+  margin-bottom: 0;
 }
 
 pre code {
@@ -309,8 +355,13 @@ pre code {
   border: 0;
   padding: 0;
   color: var(--body);
-  white-space: pre;
-  word-break: normal;
+  /*
+   * Wrapped, never scrolled. A block that slides sideways hides half of itself behind a gesture
+   * nobody makes, and on a phone every block would be one. The documents are written to fit the
+   * column instead, so this is the guard rather than the everyday behaviour.
+   */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 /* ------------------------------------------------------------------ tables */
@@ -329,12 +380,6 @@ table {
 
 th {
   text-align: left;
-  font-family: var(--mono);
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.09em;
-  color: var(--faint);
-  font-weight: 500;
   padding: 0 14px 8px 0;
   border-bottom: 1px solid var(--rule);
 }
@@ -356,7 +401,6 @@ th:last-child {
   margin: 0 0 34px;
   padding-left: 16px;
   border-left: 2px solid var(--rule);
-  max-width: var(--measure);
 }
 
 .tool:target,
@@ -451,21 +495,17 @@ summary:hover {
 }
 
 /*
- * The front page. A statement, the two ways in, and three cards that route you onward. Wider
- * than a page of prose and with no measure on the cards: this one is looked at, not read.
+ * The front page. A statement, the two ways in, and three cards that route you onward. Same
+ * width as every other page, because it is the same site; what differs is that this one is
+ * looked at rather than read, so it opens on a hero instead of a heading.
  */
 
 .home main {
   padding: 0 var(--gutter) 64px;
 }
 
-.home main > * {
-  max-width: none;
-}
-
 .hero {
   padding: 60px 0 6px;
-  max-width: 74ch;
 }
 
 .hero h1 {
@@ -483,16 +523,10 @@ summary:hover {
 }
 
 .install {
-  max-width: 74ch;
   padding-bottom: 34px;
 }
 
 .step {
-  font-size: 13px;
-  font-weight: 600;
-  letter-spacing: 0.09em;
-  text-transform: uppercase;
-  color: var(--faint);
   margin: 30px 0 10px;
 }
 
@@ -524,11 +558,6 @@ summary:hover {
 }
 
 .card .kicker {
-  font-family: var(--mono);
-  font-size: 11px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--faint);
   margin-bottom: 9px;
 }
 
@@ -570,7 +599,6 @@ summary:hover {
   font-size: 12.5px;
   line-height: 1.6;
   color: var(--faint);
-  max-width: 74ch;
   margin: 0;
 }
 
@@ -620,15 +648,16 @@ summary:hover {
   padding: 16px;
 }
 
+/*
+ * The same code block as everywhere else, in the accent: this one is the command the reader came
+ * for, which is what the accent is reserved for. Everything about its shape stays shared, so it
+ * reads as the same object emphasised rather than as a second kind of code block.
+ */
 .picker .panel pre {
   margin: 0 0 10px;
-  padding: 12px 14px;
-  background: var(--sunken);
-  border: 1px solid var(--rule);
-  border-radius: 8px;
-  overflow-x: auto;
-  font-family: var(--mono);
-  font-size: 13.5px;
+}
+
+.picker .panel pre code {
   color: var(--signal);
 }
 
@@ -639,7 +668,7 @@ summary:hover {
   color: var(--muted);
 }
 
-.picker .panel code {
+.picker .panel p code {
   color: var(--body);
 }
 

@@ -424,6 +424,9 @@ function escaped(text: string): string {
 /** The tool reference, from the definitions the server answers with. */
 function renderTools(): string {
   const parts: string[] = [
+    // Every other page opens with its own name, because the markdown behind it starts with one.
+    // This page is built rather than parsed, so it has to say so itself.
+    '<h1>Tools</h1>\n',
     `<p class="lede">${TOOL_SPECS.length} tools, named <code>domain_verb</code>. A tool that does several `,
     'related things takes an <code>op</code>. An unknown op or argument is refused with the valid set ',
     'listed. Generated from the server.</p>\n',
@@ -628,6 +631,30 @@ function build(): void {
   console.log(`built ${PAGES.length} pages, ${PAGES.length + 1} text files, into ${OUT}/`);
 }
 
+/**
+ * How wide a line of code may be before it stops fitting the one column.
+ *
+ * A block that does not fit either slides sideways, hiding half of itself behind a gesture
+ * nobody makes, or wraps and loses the alignment it was drawn with. Both are the document's
+ * fault rather than the stylesheet's, so the build says which line is too long and the document
+ * is written to fit.
+ */
+const CODE_COLUMNS = 84;
+
+/** The text of every code block on a page, one line per entry, with the markup taken back out. */
+function codeLinesIn(html: string): string[] {
+  return [...html.matchAll(/<pre><code[^>]*>([\s\S]*?)<\/code><\/pre>/g)].flatMap((match) =>
+    (match[1] ?? '')
+      .replaceAll(/<[^>]+>/g, '')
+      .replaceAll('&lt;', '<')
+      .replaceAll('&gt;', '>')
+      .replaceAll('&quot;', '"')
+      .replaceAll('&#39;', "'")
+      .replaceAll('&amp;', '&')
+      .split('\n'),
+  );
+}
+
 /** Every id a page offers, which is what a `#fragment` pointed at it has to find. */
 function anchorsIn(html: string): Set<string> {
   return new Set([...html.matchAll(/\sid="([^"]*)"/g)].map((match) => match[1] ?? ''));
@@ -678,6 +705,14 @@ function checkOutput(): void {
   }
 
   const wrong: string[] = [];
+  for (const name of names.filter((file) => file.endsWith('.html'))) {
+    for (const line of codeLinesIn(readFileSync(join(OUT, name), 'utf8'))) {
+      if (line.length > CODE_COLUMNS) {
+        wrong.push(`${name} has a code line of ${line.length} characters: ${line.slice(0, 60)}...`);
+      }
+    }
+  }
+
   for (const name of names.filter((file) => /\.(?:html|md|txt|css)$/.test(file))) {
     const text = readFileSync(join(OUT, name), 'utf8');
     for (const code of controlCharactersIn(text)) {
