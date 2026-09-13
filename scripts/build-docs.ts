@@ -690,6 +690,26 @@ function linksIn(text: string): string[] {
  * putting escapes in a regular expression, and an escape in this file is exactly what got
  * mangled into a raw control byte last time.
  */
+/**
+ * Box drawing and block elements, which look like the obvious way to draw a diagram and are not.
+ *
+ * IBM Plex Mono has no glyphs in these blocks, so the browser draws them from whatever other font
+ * it can find, at that font's advance width. The verticals then sit off the columns they were
+ * aligned to and the horizontals come apart, which is what every one of these diagrams did on the
+ * live site. ASCII draws the same picture out of characters the face actually has.
+ */
+function drawingCharactersIn(text: string): string[] {
+  const found = new Set<string>();
+  for (const character of text) {
+    const code = character.codePointAt(0) ?? 0;
+    // U+2190..U+21FF arrows, U+2500..U+257F box drawing, U+2580..U+259F block elements.
+    if ((code >= 0x2190 && code <= 0x21ff) || (code >= 0x2500 && code <= 0x259f)) {
+      found.add(character);
+    }
+  }
+  return [...found];
+}
+
 function controlCharactersIn(text: string): number[] {
   const found: number[] = [];
   for (let index = 0; index < text.length; index += 1) {
@@ -721,6 +741,12 @@ function checkOutput(): void {
   for (const line of codeBlocks.flatMap((block) => block.split('\n'))) {
     if (line.length > CODE_COLUMNS) {
       wrong.push(`a code line is ${line.length} characters, ${CODE_COLUMNS} fit: ${line.slice(0, 56)}...`);
+    }
+    const drawn = drawingCharactersIn(line);
+    if (drawn.length > 0) {
+      wrong.push(
+        `a code line draws with ${drawn.join(' ')}, which the mono face has no glyphs for: ${line.slice(0, 40)}...`,
+      );
     }
   }
 
