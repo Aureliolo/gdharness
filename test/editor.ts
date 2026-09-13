@@ -32,6 +32,8 @@ const TOOL_TIMEOUT_MS = 60_000;
 const LSP_READY_TIMEOUT_MS = 90_000;
 
 const SCENE = 'res://fixture.tscn';
+const ONE_PIXEL_PNG_BASE64 =
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO7Z0r0AAAAASUVORK5CYII=';
 
 interface Editor {
   /** Calls a tool and answers with its payload, failing on a refusal. */
@@ -122,6 +124,27 @@ function createProject(): string {
   writeFileSync(
     join(dir, 'broken.gd'),
     ['extends Node', '', '', 'func ring( -> int:', '\tpass', ''].join('\n'),
+  );
+
+  // A real texture, written before the editor starts so its first scan imports it: a sprite and
+  // a tile set both need one the engine can load rather than a path that merely exists.
+  writeFileSync(join(dir, 'dot.png'), Buffer.from(ONE_PIXEL_PNG_BASE64, 'base64'));
+
+  // An AnimationTree whose root is a state machine. The state ops need one and nothing makes
+  // one: a tool that writes a node cannot build the resource that goes inside it.
+  writeFileSync(
+    join(dir, 'states.tscn'),
+    [
+      '[gd_scene load_steps=2 format=3]',
+      '',
+      '[sub_resource type="AnimationNodeStateMachine" id="StateMachine_1"]',
+      '',
+      '[node name="Root" type="Node2D"]',
+      '',
+      '[node name="Tree" type="AnimationTree" parent="."]',
+      'tree_root = SubResource("StateMachine_1")',
+      '',
+    ].join('\n'),
   );
 
   return dir;
@@ -417,6 +440,118 @@ async function testResources({ call, refusal, project }: Editor): Promise<void> 
   assert.match(written, /Button\/font_sizes\/font_size = 21/);
 }
 
+/**
+ * The ops that need a resource in hand: a texture on a sprite, a tile set under a tile map,
+ * states in an AnimationTree.
+ *
+ * Setting a resource-valued property is what ties them together, and it is the thing that had
+ * no way through: `Object.set` takes a Resource, a caller has a path, and nothing turned one
+ * into the other, so a TileMap could never be given the TileSet its cells are placed from.
+ */
+async function testResourcesOnNodes({ call, refusal, project }: Editor): Promise<void> {
+  const scene = { projectPath: project, scenePath: SCENE };
+
+  // A texture resource rather than an image: a headless editor writes the .import file for a
+  // PNG and leaves it `valid=false`, so nothing can load one. The tools under test assign a
+  // Texture2D, which this is, and the import pipeline is somebody else's fixture.
+  await call('resource_edit', {
+    projectPath: project,
+    resourcePath: 'res://dot.tres',
+    op: 'create',
+    resourceType: 'PlaceholderTexture2D',
+    properties: { size: { type: 'Vector2', x: 8, y: 8 } },
+  });
+
+  await call('scene_node', { ...scene, op: 'add', nodeType: 'Sprite2D', nodeName: 'Dot' });
+  await call('scene_node', { ...scene, op: 'load_sprite', nodePath: 'Dot', texturePath: 'res://dot.tres' });
+  assert.match(fileText(project, 'fixture.tscn'), /dot\.tres/, 'the texture should be on the sprite');
+
+  const tiles = { projectPath: project, resourcePath: 'res://tiles.tres' };
+  await call('resource_edit', {
+    ...tiles,
+    op: 'create_tileset',
+    sources: [{ texture: 'res://dot.tres', tileSize: { x: 8, y: 8 } }],
+  });
+  assert.match(fileText(project, 'tiles.tres'), /TileSetAtlasSource/, 'the atlas should be in the tile set');
+
+  await call('scene_node', { ...scene, op: 'add', nodeType: 'TileMap', nodeName: 'Map' });
+  await call('scene_node', {
+    ...scene,
+    op: 'set',
+    nodePath: 'Map',
+    properties: { tile_set: 'res://tiles.tres' },
+  });
+  assert.match(fileText(project, 'fixture.tscn'), /tile_set = ExtResource/, 'and on the tile map');
+
+  const placed = await call('scene_node', {
+    ...scene,
+    op: 'set_tilemap_cells',
+    nodePath: 'Map',
+    cells: [
+      { coords: { x: 0, y: 0 }, sourceId: 0, atlasCoords: { x: 0, y: 0 } },
+      { coords: { x: 1, y: 0 }, sourceId: 0, atlasCoords: { x: 0, y: 0 } },
+    ],
+  });
+  assert.equal(get(placed, 'placed'), 2, 'both cells should be on the map afterwards');
+
+  // set_cell takes any source id and a tile set without it simply draws nothing, so a cell
+  // naming a source that is not there has to be refused rather than counted.
+  assert.match(
+    await refusal('scene_node', {
+      ...scene,
+      op: 'set_tilemap_cells',
+      nodePath: 'Map',
+      cells: [{ coords: { x: 5, y: 5 }, sourceId: 7, atlasCoords: { x: 0, y: 0 } }],
+    }),
+    /has no source 7/,
+    'a cell from a source the tile set has not should be refused',
+  );
+
+  assert.match(
+    await refusal('scene_node', { ...scene, op: 'set', nodePath: 'Map', properties: { nonesuch: 1 } }),
+    /has no property nonesuch/,
+    'a property the node has not should be refused rather than ignored',
+  );
+  assert.match(
+    await refusal('scene_node', {
+      ...scene,
+      op: 'set',
+      nodePath: 'Map',
+      properties: { tile_set: 'res://absent.tres' },
+    }),
+    /No resource at res:\/\/absent\.tres/,
+    'and so should a resource path with nothing at it',
+  );
+
+  const states = { projectPath: project, scenePath: 'res://states.tscn' };
+  await call('scene_animation', {
+    ...states,
+    op: 'add_state',
+    animTreePath: 'Tree',
+    stateName: 'idle',
+    animationName: 'stand',
+  });
+  await call('scene_animation', {
+    ...states,
+    op: 'add_state',
+    animTreePath: 'Tree',
+    stateName: 'walk',
+    animationName: 'step',
+  });
+  await call('scene_animation', {
+    ...states,
+    op: 'connect_states',
+    animTreePath: 'Tree',
+    fromState: 'idle',
+    toState: 'walk',
+  });
+
+  const written = fileText(project, 'states.tscn');
+  assert.match(written, /states\/idle\/node = SubResource/, 'the state should be in the machine');
+  assert.match(written, /states\/walk\/node = SubResource/);
+  assert.match(written, /transitions = \[/, 'and the transition with it');
+}
+
 /** editor_rescan is how a file written from outside the editor becomes loadable. */
 async function testEditorRescan({ call, project }: Editor): Promise<void> {
   writeFileSync(join(project, 'late.gd'), 'extends Node\n');
@@ -519,6 +654,7 @@ async function main(): Promise<void> {
     await testSceneSignals(editor);
     await testSceneAnimation(editor);
     await testResources(editor);
+    await testResourcesOnNodes(editor);
     await testEditorRescan(editor);
     await testLanguageServer(editor);
   });
