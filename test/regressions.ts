@@ -21,7 +21,7 @@ import { staleClassNames } from '../src/class-cache.js';
 import { GodotDAPClient } from '../src/dap_client.js';
 import { dictionary, emptyRecord } from '../src/dictionary.js';
 import { createBridge } from '../src/godot-bridge.js';
-import { editorArguments, envValue, resolveHeadless, runArguments } from '../src/launch.js';
+import { editorArguments, envValue, resolveHeadless, runArguments, userDataIn } from '../src/launch.js';
 import { GodotLSPClient } from '../src/lsp_client.js';
 import { isWithinRoot, resolveWithinProject } from '../src/paths.js';
 import { parseProjectGodot } from '../src/resources.js';
@@ -1322,6 +1322,24 @@ function testVersionOrdering(): void {
 }
 
 /**
+ * A test run writes its saves nowhere near the ones somebody keeps.
+ *
+ * Godot resolves `user://` from the environment, so a suite that saves a game writes into the same
+ * folder as the copy of that game being played. Found by using this server on a project whose own
+ * gate had been overriding these two variables for months to keep its test tier out of the saves
+ * directory, which is a workaround every project would otherwise have to find for itself.
+ */
+function testATestRunKeepsOutOfThePlayersSaves(): void {
+  const home = join(tmpdir(), 'gdharness-tests-fixture');
+  const environment = userDataIn(home);
+
+  assert.equal(environment['APPDATA'], home, 'Windows reads the user directory out of APPDATA');
+  assert.equal(environment['XDG_DATA_HOME'], home, 'and Linux out of XDG_DATA_HOME');
+  assert.equal(environment['PATH'], process.env['PATH'], 'everything else is the environment we have');
+  assert.notEqual(home, process.env['APPDATA'], 'which is not where the player keeps theirs');
+}
+
+/**
  * A game is found wherever it announced itself, not only where this server would have.
  *
  * The two sides derive the path the same way and do not share an environment, which is the whole
@@ -2251,6 +2269,7 @@ async function main(): Promise<void> {
   testVersionOrdering();
   testTheStaleHalfIsNamedCorrectly();
   testAGameIsFoundWhereverItAnnounced();
+  testATestRunKeepsOutOfThePlayersSaves();
   await testParametersReachTheEngine();
   await testGdUnitRunner();
   testCommandLineSetup();

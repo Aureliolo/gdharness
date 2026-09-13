@@ -89,3 +89,22 @@ export function runArguments(options: RunOptions): string[] {
 export function editorArguments(projectPath: string): string[] {
   return ['-e', '--path', projectPath];
 }
+
+/**
+ * An environment whose `user://` is `home`, so an engine writes its saves nowhere anybody keeps
+ * theirs.
+ *
+ * A test tier is the case that matters. Godot resolves `user://` from the environment, so a suite
+ * that saves a game writes into the same folder as the copy of that game somebody plays: run the
+ * tier while a guild is open and the tier's own files land in the player's save list, and a suite
+ * that tidies up after itself rewrites every real save on the way out. Found by using this tool on
+ * a project whose own gate had guarded against it for months, which is the sort of thing a harness
+ * should not leave to each project to discover.
+ *
+ * Windows reads `APPDATA` and Linux `XDG_DATA_HOME`. macOS reads neither: its user directory hangs
+ * off `HOME`, and moving that moves far more than saves, so a run there still writes where it
+ * always did.
+ */
+export function userDataIn(home: string): NodeJS.ProcessEnv {
+  return { ...process.env, APPDATA: home, XDG_DATA_HOME: home };
+}
