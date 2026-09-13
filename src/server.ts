@@ -33,7 +33,7 @@ import { GodotLocator } from './godot-path.js';
 import { type HeadlessOutcome, runOperation } from './headless.js';
 import { defectReport, feedbackNotice } from './issues.js';
 import { parseJUnit, type TestReport } from './junit.js';
-import { editorArguments, envValue, resolveHeadless, runArguments } from './launch.js';
+import { editorArguments, envValue, resolveHeadless, runArguments, userDataIn } from './launch.js';
 import { GodotLSPClient, handleLSPTool } from './lsp_client.js';
 import { resolveWithinProject } from './paths.js';
 import { projectStructure, searchProject } from './project-scan.js';
@@ -1240,7 +1240,8 @@ class GodotServer {
     ];
     const timeoutMs = readPositiveNumber(args, 'timeoutMs') ?? 600000;
     this.logDebug(`Running tests: ${engine.value} ${cmdArgs.join(' ')}`);
-    const run = this.spawnGame(engine.value, cmdArgs);
+    const userData = mkdtempSync(join(tmpdir(), 'gdharness-tests-'));
+    const run = this.spawnGame(engine.value, cmdArgs, userDataIn(userData));
     const hung = await new Promise<boolean>((resolve) => {
       const timer = setTimeout(() => {
         run.process.kill();
@@ -1273,6 +1274,7 @@ class GodotServer {
       reportProblem = errorMessage(error);
     } finally {
       rmSync(reportsDir, { recursive: true, force: true });
+      rmSync(userData, { recursive: true, force: true });
     }
 
     const engineEntries = run.log.select({ severity: 'warning', sinceLastCall: false, limit: 200 }).entries;
@@ -1785,8 +1787,8 @@ class GodotServer {
   }
 
   /** The engine as a child process, with everything it prints read into a log as it comes. */
-  private spawnGame(godotPath: string, cmdArgs: string[]): SpawnedGame {
-    const child = spawn(godotPath, cmdArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
+  private spawnGame(godotPath: string, cmdArgs: string[], env?: NodeJS.ProcessEnv): SpawnedGame {
+    const child = spawn(godotPath, cmdArgs, { stdio: ['ignore', 'pipe', 'pipe'], ...(env ? { env } : {}) });
     const log = new GameLog();
     const started: SpawnedGame = {
       process: child,
