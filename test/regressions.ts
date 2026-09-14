@@ -2430,12 +2430,15 @@ function testEveryDispatchedNameExistsOnBothSides(): void {
     'runtime commands',
     6,
   );
-  // runtime_input builds the command from the op, so the op list is what has to line up.
+  // runtime_input builds the command from the op, so the op list is what has to line up. The two
+  // named here send a command of their own rather than an injected event, and both are already in
+  // `asked` for that reason.
+  const NAMED_THEMSELVES = new Set(['click', 'choose']);
   const input = TOOL_SPECS.find((spec) => spec.name === 'runtime_input');
   assert.ok(input, 'runtime_input should be a tool');
   const injected = new Set(
     Object.keys(input.operations ?? {})
-      .filter((op) => op !== 'click')
+      .filter((op) => !NAMED_THEMSELVES.has(op))
       .map((op) => `inject_${op}`),
   );
   const captured = new Set(['capture_screenshot', 'capture_viewport']);
