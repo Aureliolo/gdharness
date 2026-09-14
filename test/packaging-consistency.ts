@@ -113,6 +113,21 @@ assert.deepEqual(
   'the packed operations directory should be exactly the modules listed here',
 );
 
+// Godot 4.4 gives every script a UID and keeps it in a `.uid` beside the file. A shipped
+// addon without one is re-identified by every editor that opens it, which prints a warning
+// per script, gets wiped by the next install, and makes two clones of the same repository
+// disagree about files neither of them wrote. The operations scripts are exempt: they run
+// from outside the project, so nothing scans them.
+const packedAddonScripts = archiveEntries.filter(
+  (entry) => entry.startsWith('package/build/godot/addons/') && entry.endsWith('.gd'),
+);
+assert.ok(packedAddonScripts.length > 0, 'release archive should contain addon scripts to check');
+assert.deepEqual(
+  packedAddonScripts.filter((entry) => !packedFiles.has(`${entry}.uid`)),
+  [],
+  'every packed addon script should carry the .uid that fixes its identity',
+);
+
 for (const forbiddenFile of [
   'package/src/cli.ts',
   'package/build/godot-bridge.js',

@@ -109,6 +109,9 @@ the addons opens the editor, prints one warning per missing addon, `Addon ... fa
 directory found`, and carries on: a warning rather than an error, and `project.godot` is not
 rewritten. So a teammate who has not installed gdharness loses nothing but quiet.
 
+Every script arrives with the `.uid` file that fixes its identity, so two clones commit the same
+one and no editor has to invent it.
+
 **If your project gitignores `addons/`**, which is what the package-manager add-ons like
 [godam](https://github.com/nilsiker/godam) and [GLAM](https://github.com/henriquelalves/glam) are
 for, keep the version somewhere committed and install from it instead. Each addon records its own
