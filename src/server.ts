@@ -23,6 +23,7 @@ import {
   ListToolsRequestSchema,
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
+import { announceBridge, withdrawBridge } from './bridge-announce.js';
 import { staleClassNames } from './class-cache.js';
 import { GodotDAPClient, handleDAPTool } from './dap_client.js';
 import { dictionary, emptyRecord } from './dictionary.js';
@@ -269,8 +270,19 @@ class GodotServer {
   private lastProjectPath: string | null = null;
   private shutdownInitiated = false;
 
+  /**
+   * The project this server was set up for, from the config `setup` wrote, or null.
+   *
+   * Null is every config written before this existed and every one written by hand, and it is
+   * what keeps those working exactly as they did: without it there is nowhere to announce a
+   * bridge, so the port stays the whole contract and the server holds out for it.
+   */
+  private readonly ownProject: string | null;
+  private announcedAt: string | null = null;
+
   constructor() {
-    this.godotBridge = getDefaultBridge();
+    this.ownProject = envValue('GDHARNESS_PROJECT') ?? null;
+    this.godotBridge = getDefaultBridge(this.ownProject !== null);
     this.mcp = new McpServer(
       { name: 'gdharness', version: SERVER_VERSION },
       { capabilities: { tools: {}, resources: {} } },
@@ -334,6 +346,7 @@ class GodotServer {
       this.bridgeStartupError = null;
       const bridgeStatus = this.godotBridge.getStatus();
       console.error(`[SERVER] Godot Editor Bridge started on ${bridgeStatus.host}:${bridgeStatus.port}`);
+      this.announceTheBridge();
     } catch (bridgeError) {
       const code =
         bridgeError instanceof Error && 'code' in bridgeError && typeof bridgeError.code === 'string'
@@ -386,6 +399,26 @@ class GodotServer {
     console.error(
       `[SERVER] Godot Editor Bridge came up on ${bridgeStatus.host}:${bridgeStatus.port}; editor tools are live.`,
     );
+    this.announceTheBridge();
+  }
+
+  /**
+   * Says where the bridge is, inside the project, so the editor can find it wherever it landed.
+   *
+   * Written after every start, which is what makes the newest server the one the editor ends up
+   * on: an abandoned predecessor holding the old port has an older announcement, and the editor
+   * moves off it by itself rather than waiting for somebody to end a process.
+   */
+  private announceTheBridge(): void {
+    if (this.ownProject === null) {
+      return;
+    }
+    const status = this.godotBridge.getStatus();
+    this.announcedAt = announceBridge(this.ownProject, {
+      host: status.host,
+      port: status.port,
+      version: SERVER_VERSION,
+    });
   }
 
   private stopTryingTheBridge(): void {
@@ -398,6 +431,8 @@ class GodotServer {
   private async cleanup(): Promise<void> {
     this.logDebug('Cleaning up resources');
     this.stopTryingTheBridge();
+    withdrawBridge(this.announcedAt);
+    this.announcedAt = null;
     if (this.activeProcess) {
       // Killed rather than stopped through the editor: a shutdown cannot wait on a round trip,
       // and a game the editor plays outlives this server anyway, which is the editor's to end.
@@ -1494,6 +1529,10 @@ class GodotServer {
       startupError: this.bridgeStartupError,
       staleNote: stale ? addonMismatch(status.addonVersion, SERVER_VERSION) : undefined,
       retryingBridge: this.bridgeRetry === null ? undefined : true,
+      // Where the editor was told to look, when this server knows which project to tell. Worth
+      // reporting because it is the difference between an editor that cannot find this server
+      // and one that has not been restarted: both look like an editor that is not there.
+      announcedAt: this.announcedAt ?? undefined,
       note: isPortConflict
         ? 'Bridge port is already in use. Another gdharness instance owns the editor bridge, so this server cannot reach the editor. Usually the server this one replaced, still on its way out.'
         : undefined,

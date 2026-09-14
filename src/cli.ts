@@ -241,7 +241,7 @@ async function setup(): Promise<void> {
 
   if (!args.includes('--no-connect')) {
     // The version is the running one, so the config pins the server that installed these addons.
-    const launch = launchFor(getLocalVersion(), godot.godotPath);
+    const launch = launchFor(getLocalVersion(), godot.godotPath, projectPath);
     const ask = new Ask();
     let chosen: { harnesses: readonly Harness[]; skipped: readonly Candidate[] };
     try {
@@ -389,7 +389,7 @@ async function upgrade(): Promise<void> {
   }
   said(await runOperation(godot, 'refresh_class_cache', {}, projectPath), 'rebuilding the class list');
 
-  const launch = launchFor(version, godot.godotPath);
+  const launch = launchFor(version, godot.godotPath, projectPath);
   const already = HARNESSES.filter((harness) => registered(harness, projectPath));
   for (const group of groupByFile(already, projectPath)) {
     reportConnection(group, launch, projectPath);

@@ -173,7 +173,7 @@ exits when the call is answered.
 
 | Connection          | Transport                                 | Port               | Override                                      | Needs                                          |
 | ------------------- | ----------------------------------------- | ------------------ | --------------------------------------------- | ---------------------------------------------- |
-| Editor bridge       | WebSocket, editor connects to the server  | 6505               | `GDHARNESS_BRIDGE_PORT`                       | Editor open, addon enabled                     |
+| Editor bridge       | WebSocket, editor connects to the server  | 6505, or any free  | `GDHARNESS_BRIDGE_PORT`                       | Editor open, addon enabled                     |
 | Language server     | TCP, server connects to the editor        | 6005               | `GDHARNESS_LSP_PORT`, Godot's `--lsp-port`    | Editor open                                    |
 | Debug adapter       | TCP, server connects to the editor        | 6006               | `GDHARNESS_DAP_PORT`, Godot's `--dap-port`    | Editor open                                    |
 | Runtime             | TCP loopback, server connects to the game | assigned by the OS | `GDHARNESS_RUNTIME_DIR` for the announce file | Game running, autoload registered, debug build |
@@ -181,11 +181,20 @@ exits when the call is answered.
 
 6005 and 6006 hold one client each. A second editor takes them from the first.
 
-6505 is the other way round: the first server to bind it owns the editor bridge and a second gets
-nothing. That happens on every harness reconnect, where the replacement starts before the server it
-replaces has gone, so a server that cannot bind keeps asking and takes the port the moment it is
-free. `editor_status` says it is waiting and why, and the editor tools come back without anything
-being restarted.
+**The editor bridge is not at a number anybody agreed on.** A server set up by `setup` knows which
+project it serves, so it takes 6505 when that is free and any free port when it is not, and writes
+where it landed to `.godot/gdharness-bridge.json` inside that project. The editor addon reads that
+file, and reads it again every few seconds, so it follows whichever server announced last.
+
+Two things fall out of that, and both were real. Two projects open at once used to want the same
+port, and the second editor never had a bridge at all. And a harness reconnect leaves the server it
+replaced running, holding the port and still answering, with the editor no reason to look
+elsewhere: it now moves to the replacement by itself rather than waiting for somebody to end a
+process.
+
+An announcement naming a process that has gone is ignored, and a server with no project to announce
+in, which is any config written by hand, holds out for its configured port instead: it keeps asking
+for it every two seconds and `editor_status` says it is waiting and why.
 
 The editor keeps asking from its end too, so the order the two start in does not matter. A socket
 pointed at a port nothing is listening on sits in its connect for thirty seconds before it gives
