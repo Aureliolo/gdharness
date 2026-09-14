@@ -5,6 +5,13 @@ extends RefCounted
 
 const Values = preload("runtime_values.gd")
 
+## The distance from a capital letter to its small one in Unicode. A keycode holds the capital.
+const TO_SMALL: int = 32
+
+## The two characters a field reads as keys rather than as text.
+const NEWLINE: int = 10
+const TAB: int = 9
+
 var _host: Node
 var _values: Values
 
@@ -69,6 +76,12 @@ func inject_key(params: Dictionary) -> Dictionary:
 	event.ctrl_pressed = bool(params.get("ctrl", false))
 	event.alt_pressed = bool(params.get("alt", false))
 
+	# The fourth thing a real event carries, and the only one a text field reads: LineEdit and
+	# TextEdit insert `unicode` and never consult the keycode, so an injected key could press any
+	# action in the map and still type nothing into a search box. Godot's keycodes for printable
+	# keys are the code points themselves, which is what makes this a mapping and not a table.
+	event.unicode = _glyph_of(event.keycode, event.shift_pressed)
+
 	Input.parse_input_event(event)
 
 	return {
@@ -79,8 +92,71 @@ func inject_key(params: Dictionary) -> Dictionary:
 		"shift": event.shift_pressed,
 		"ctrl": event.ctrl_pressed,
 		"alt": event.alt_pressed,
+		"unicode": event.unicode,
 		"pressed": pressed
 	}
+
+
+## Types [param text] wherever the focus is, one key event per character.
+##
+## A key on its own cannot do this and should not try: which character a key produces is the
+## keyboard layout's business, and shift over a digit is an exclamation mark on one layout and
+## something else on the next. Given the character instead there is nothing to guess, so a field
+## can be filled with anything a player could type, this project's own two typefaces included.
+##
+## A newline and a tab are the two characters a field reads as keys rather than as text, so they
+## are sent as those keys and carry no character of their own: typing a name and submitting it is
+## one call rather than two.
+##
+## Pushed into the viewport for the reason [method click] is, and it matters more here: the focus
+## is what decides where a character lands, so a caller that clicked a field and then typed would
+## otherwise have both waiting in the same queue with nothing said about the order.
+func inject_text(params: Dictionary) -> Dictionary:
+	var text: String = String(params.get("text", ""))
+	if text.is_empty():
+		return {"type": "error", "message": "text required"}
+
+	var viewport: Viewport = _host.get_tree().root
+	for index: int in text.length():
+		var down: InputEventKey = _typed(text.unicode_at(index))
+		viewport.push_input(down)
+		# The release as well, so nothing is left held down behind the caller.
+		var up: InputEventKey = down.duplicate()
+		up.pressed = false
+		viewport.push_input(up)
+
+	return {"type": "input_injected", "input_type": "text", "text": text, "characters": text.length()}
+
+
+## The key press that produces [param glyph], as a keyboard would send it.
+func _typed(glyph: int) -> InputEventKey:
+	var event: InputEventKey = InputEventKey.new()
+	event.pressed = true
+	if glyph == NEWLINE:
+		event.keycode = KEY_ENTER
+	elif glyph == TAB:
+		event.keycode = KEY_TAB
+	else:
+		var capital: int = String.chr(glyph).to_upper().unicode_at(0)
+		event.keycode = capital as Key
+		event.shift_pressed = capital != glyph
+		event.unicode = glyph
+	event.physical_keycode = event.keycode
+	event.key_label = event.keycode
+	return event
+
+
+## The character a key produces, or nothing for a key that produces none.
+##
+## Godot's keycodes below [constant KEY_SPECIAL] are the Unicode code points of the keys that
+## print something, so the mapping is the value itself. Letters are held as their capitals, which
+## is the one place the shift a caller asked for changes the answer rather than the key.
+func _glyph_of(keycode: Key, shifted: bool) -> int:
+	if keycode >= KEY_SPECIAL:
+		return 0
+	if keycode >= KEY_A and keycode <= KEY_Z and not shifted:
+		return keycode + TO_SMALL
+	return keycode
 
 
 ## A point the tool schema sends as two flat numbers, or the older form of one [x, y] value.

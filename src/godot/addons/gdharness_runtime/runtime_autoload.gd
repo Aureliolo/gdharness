@@ -66,6 +66,7 @@ func _init() -> void:
 		"capture_viewport": _capture.capture_viewport,
 		"inject_action": _input.inject_action,
 		"inject_key": _input.inject_key,
+		"inject_text": _input.inject_text,
 		"inject_mouse_click": _input.inject_mouse_click,
 		"inject_mouse_motion": _input.inject_mouse_motion,
 		"click": _input.click,
