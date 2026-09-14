@@ -22,10 +22,16 @@ your-project/
 `-- .codex/config.toml         Codex, and the others with no project config
 ```
 
-The entry written into each config is the same everywhere: `npx -y gdharness@{{version}}` with
-`GODOT_PATH` set to the engine found when it was installed. The version is pinned rather than
-`latest` because the server and the addons have to match; `editor_status` reports a mismatch as
-`addonIsStale`.
+The entry written into each config is the same everywhere: `gdharness@{{version}}` through the
+runner that installed it, with `GODOT_PATH` set to the engine found at the time. The version is
+pinned rather than `latest` because the server and the addons have to match; `editor_status`
+reports a mismatch as `addonIsStale`.
+
+The runner is named by its path rather than as `npx` or `bunx`. A harness spawns what the config
+names, through PATH, and a runner's name is not always on it: a Bun installed under a project
+ships a `bun` and no `bunx` beside it, so an entry saying `bunx` starts nothing. Writing a path
+costs nothing, because the entry carries an absolute `GODOT_PATH` already and so was never
+portable between machines.
 
 ## How setup decides what to write
 

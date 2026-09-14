@@ -26,7 +26,7 @@ import {
   writeYaml,
 } from './config-formats.js';
 import { Refusal } from './errors.js';
-import { currentRunner, type Runner } from './runner.js';
+import { currentRunner, type Runner, spawnFor } from './runner.js';
 
 /** What gdharness is called wherever it is registered. */
 export const SERVER_KEY = 'gdharness';
@@ -44,12 +44,8 @@ export interface Launch {
  * `addonIsStale`, and `latest` is how a project silently acquires one.
  */
 export function launchFor(version: string, godotPath: string, runner: Runner = currentRunner()): Launch {
-  return {
-    command: runner,
-    // `-y` is npm's "do not stop and ask before fetching this"; bunx has no such prompt.
-    args: runner === 'npx' ? ['-y', `gdharness@${version}`] : [`gdharness@${version}`],
-    env: { GODOT_PATH: godotPath },
-  };
+  const spawn = spawnFor(runner, version);
+  return { command: spawn.command, args: spawn.args, env: { GODOT_PATH: godotPath } };
 }
 
 /**
