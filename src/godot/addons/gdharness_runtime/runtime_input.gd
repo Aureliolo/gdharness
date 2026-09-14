@@ -1,9 +1,14 @@
 extends RefCounted
 
 ## Input handed to the running game as if a player had given it: actions, keys, the mouse, and
-## a whole click on a Control found by path.
+## a whole click on a Control or a 3D node found by path.
 
 const Values = preload("runtime_values.gd")
+
+## Where a 3D node is drawn, which is what a click aimed at one has to work out first. Asked of the
+## query module rather than worked out again here, so the place this aims at and the place a rect
+## reports are the same place by construction rather than by agreement.
+const Queries = preload("runtime_queries.gd")
 
 ## The distance from a capital letter to its small one in Unicode. A keycode holds the capital.
 const TO_SMALL: int = 32
@@ -285,8 +290,13 @@ func click(params: Dictionary) -> Dictionary:
 	var node: Node = _host.get_tree().root.get_node_or_null(node_path)
 	if node == null:
 		return {"type": "error", "message": "Node not found: " + node_path}
+	if node is Node3D:
+		return await _click_in_the_world(node_path, node, params)
 	if not node is Control:
-		return {"type": "error", "message": "%s is a %s, not a Control" % [node_path, node.get_class()]}
+		return {
+			"type": "error",
+			"message": "%s is a %s, not a Control or a Node3D" % [node_path, node.get_class()]
+		}
 	var control: Control = node
 	if not control.is_visible_in_tree():
 		return {"type": "error", "message": "%s is not visible, so nothing can click it" % node_path}
@@ -312,18 +322,9 @@ func click(params: Dictionary) -> Dictionary:
 	# whatever the project settings say, which is the usual reason to be here and is not
 	# something the caller can read off the rect on its own.
 	if not viewport.get_visible_rect().has_point(centre):
-		var why: String = ""
+		var why: String = _no_window_note(viewport)
 		if scrolled:
 			why = ". It was scrolled as far as what holds it goes and is still out there"
-		elif not _host.get_tree().root.can_draw():
-			why = ". This game has no window: run it with a window to reach this control"
-			# Only where it is true. The rect is printed just above, so claiming 64 by 64 over a
-			# viewport somebody has resized says two different things in one sentence.
-			if viewport.get_visible_rect().size == HEADLESS_VIEWPORT:
-				why = (
-					". This game has no window, and a game with no window has a 64 by 64 viewport "
-					+ "whatever the project settings say: run it with a window to reach this control"
-				)
 		return {
 			"type": "error",
 			"message":
@@ -380,6 +381,94 @@ func click(params: Dictionary) -> Dictionary:
 		"landed": landed,
 		"control_afterwards": afterwards,
 		"scrolled_into_view": scrolled,
+	}
+
+
+## What to add to a refusal about a point outside the viewport, when the reason is that nobody
+## gave this game a window. The rect on its own does not say it, and it is the usual reason.
+##
+## The size is only claimed where it is true: the rect is printed beside this, so naming 64 by 64
+## over a viewport somebody has resized says two different things in one sentence.
+func _no_window_note(viewport: Viewport) -> String:
+	if _host.get_tree().root.can_draw():
+		return ""
+	if viewport.get_visible_rect().size == HEADLESS_VIEWPORT:
+		return (
+			". This game has no window, and a game with no window has a 64 by 64 viewport whatever "
+			+ "the project settings say: run it with a window to reach this control"
+		)
+	return ". This game has no window: run it with a window to reach this control"
+
+
+## A whole click aimed at where a 3D node is drawn, for a game that picks with a ray out of the
+## cursor rather than with a Control.
+##
+## The alternative was three calls: read the node's position, find the camera, unproject it, then
+## push raw mouse events at the answer. Anything that walks has walked by the third, so the click
+## lands where it used to be, which is a miss that looks exactly like a game that ignored it.
+##
+## What this can honestly say is where the click went and whether the interface took it: a Control
+## under the pointer swallows the press and the room never hears it, and that is the failure worth
+## naming. Whether the game's own picking then chose this node is the game's rule rather than
+## anything the engine can be asked, so it is not claimed.
+func _click_in_the_world(node_path: String, item: Node3D, params: Dictionary) -> Dictionary:
+	if not item.is_visible_in_tree():
+		return {"type": "error", "message": "%s is not visible, so nothing can click it" % node_path}
+
+	var found: Dictionary = Queries.in_frame(item)
+	if found.is_empty():
+		return {
+			"type": "error",
+			"message":
+			"%s is not in a viewport with a current Camera3D, so there is nowhere to click it" % node_path
+		}
+	if not found.has("aim"):
+		return {
+			"type": "error",
+			"message": "%s is behind the camera drawing it, so it is not on screen to click" % node_path
+		}
+
+	var viewport: Viewport = item.get_viewport()
+	var aim: Vector2 = found["aim"]
+	if not viewport.get_visible_rect().has_point(aim):
+		return {
+			"type": "error",
+			"message":
+			(
+				"%s is drawn at %s, outside the viewport %s, so nothing can click it%s"
+				% [node_path, aim, viewport.get_visible_rect(), _no_window_note(viewport)]
+			)
+		}
+
+	var position: Vector2 = viewport.get_final_transform() * aim
+	var button: int = _resolve_mouse_button(params.get("button", MOUSE_BUTTON_LEFT))
+	var double: bool = bool(params.get("double", false))
+
+	viewport.push_input(_motion(position, Vector2.ZERO))
+	# Read before the press, for the reason the Control click reads it: what the caller needs to
+	# know is whether a panel is sitting over the room, and the press is what would change it.
+	var hovered: Control = viewport.gui_get_hovered_control()
+	var hovered_path: Variant = null
+	if hovered != null:
+		hovered_path = str(hovered.get_path())
+
+	viewport.push_input(_button(position, button, true, double))
+	await _host.get_tree().process_frame
+	viewport.push_input(_button(position, button, false, false))
+	await _host.get_tree().process_frame
+
+	return {
+		"type": "clicked",
+		"path": node_path,
+		"position": _values.serialize(position),
+		"button": button,
+		"double": double,
+		"hovered": hovered_path,
+		# The interface did not take it, so it reached the game's own input. As close to "it
+		# landed" as anything outside the game can get, and said in the same word the Control
+		# click says it in.
+		"landed": hovered == null,
+		"camera": found["camera"],
 	}
 
 

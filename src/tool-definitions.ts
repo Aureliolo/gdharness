@@ -795,7 +795,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         requires: [],
       },
       rect: {
-        summary: "one node's rectangle or position, in canvas and in window pixels",
+        summary:
+          "one node's rectangle or position, in canvas and in window pixels. A 3D node answers with the point to aim at, which is the middle of what it draws rather than the origin it stands on, the rectangle it covers under covers, the camera that drew it, and behind_camera when it is not in front of one",
         requires: ['nodePath'],
       },
       property: {
@@ -847,10 +848,14 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'runtime_input',
     description:
-      'Input to the running game: a whole click on a Control named by path, typing into whatever has the focus, or a raw action, key, mouse button or mouse motion. All of it works headless, where the window is 64 by 64 and the GUI only takes what is inside it.',
+      'Input to the running game: a whole click on a Control or a 3D node named by path, typing into whatever has the focus, or a raw action, key, mouse button or mouse motion. All of it works headless, where the window is 64 by 64 and the GUI only takes what is inside it.',
     parameters: {
       projectPath: RUNNING_PROJECT_PATH,
-      nodePath: { type: 'string', description: 'click: the Control to click, at its centre.' },
+      nodePath: {
+        type: 'string',
+        description:
+          'click: the Control to click, at its centre, or the 3D node to click, where it is drawn.',
+      },
       action: { type: 'string', description: 'action: the InputMap action name.' },
       pressed: { type: 'boolean', description: 'Press or release. Default true.' },
       strength: { type: 'number', description: 'action: 0 to 1. Default 1.' },
@@ -877,7 +882,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     operations: {
       click: {
         summary:
-          'press and release on a Control, a frame apart, and answer with what was under the pointer and what became of the control: in_tree, removed or freed. A control out of sight inside a ScrollContainer is scrolled to first, and scrolled_into_view says whether the view moved',
+          'press and release on a Control, a frame apart, and answer with what was under the pointer and what became of the control: in_tree, removed or freed. A control out of sight inside a ScrollContainer is scrolled to first, and scrolled_into_view says whether the view moved. A 3D node is clicked where it is drawn, and landed then says the interface did not swallow the press',
         requires: ['nodePath'],
       },
       action: { summary: 'press or release an action', requires: ['action'] },
