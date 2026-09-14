@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { type SpawnSyncReturns, spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import {
   cpSync,
@@ -14,7 +14,7 @@ import {
 } from 'node:fs';
 import { createServer, type Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 import { staleClassNames } from '../src/class-cache.js';
@@ -2047,6 +2047,89 @@ function testCommandLineSetup(): void {
   }
 }
 
+/**
+ * Whether a program answers `--version`, which both runners do.
+ *
+ * A Windows `.cmd` is a script rather than an image, so CreateProcess refuses it and it has to go
+ * through the command interpreter. Its path holds a space on every GitHub runner, so the line is
+ * quoted and handed over verbatim rather than left to be re-split.
+ */
+function answersVersion(command: string): SpawnSyncReturns<string> {
+  const options = { encoding: 'utf8' as const, timeout: 60000 };
+  if (process.platform === 'win32' && command.toLowerCase().endsWith('.cmd')) {
+    return spawnSync(process.env['ComSpec'] ?? 'cmd.exe', ['/d', '/s', '/c', `"${command}" --version`], {
+      ...options,
+      windowsVerbatimArguments: true,
+    });
+  }
+  return spawnSync(command, ['--version'], options);
+}
+
+/**
+ * What setup wrote into a harness config is a program the operating system can start.
+ *
+ * Everything else about an install can be right while this one thing is wrong, and then setup
+ * reports success and the harness silently starts nothing: it spawns what the config names, the
+ * way the system does, through PATH. `bunx` went in as a bare name and a Bun installed under a
+ * project ships no `bunx` beside its `bun`, so the entry named a program that was not there.
+ *
+ * The unit test covers which spelling each runner gets. This covers the only claim that matters
+ * to somebody who ran the documented line: the thing in their config starts.
+ */
+function testTheWrittenConfigNamesAProgramThatStarts(): void {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('written config regression skipped (Godot not found)');
+    return;
+  }
+
+  const projectDir = mkdtempSync(join(tmpdir(), 'gdharness-config-'));
+  try {
+    writeFileSync(
+      join(projectDir, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="ConfigRegression"\n',
+    );
+
+    const setup = spawnSync(process.execPath, ['build/cli.js', 'setup', projectDir, '--claude-code'], {
+      encoding: 'utf8',
+      timeout: 180000,
+      env: { ...process.env, GODOT_PATH: godotPath },
+    });
+    assert.equal(setup.status, 0, `setup --claude-code:\n${setup.stdout}${setup.stderr}`);
+
+    const written: unknown = JSON.parse(readFileSync(join(projectDir, '.mcp.json'), 'utf8'));
+    const entry = get(get(written, 'mcpServers'), 'gdharness');
+    const command = text(get(entry, 'command'));
+    const spawnArgs = asArray(get(entry, 'args')).map((one) => text(one));
+
+    assert.ok(
+      isAbsolute(command) && existsSync(command),
+      `the runner that installed us should be named by its path, got ${command}`,
+    );
+    assert.match(
+      spawnArgs.at(-1) ?? '',
+      /^gdharness@\d+\.\d+\.\d+/,
+      `and the pinned version should be the last argument, got ${JSON.stringify(spawnArgs)}`,
+    );
+
+    // Starting it is the assertion the bug would have failed: every runner answers --version, and
+    // one that is not there answers nothing at all.
+    const started = answersVersion(command);
+    assert.equal(started.status, 0, `${command} --version: ${started.error?.message ?? started.stderr}`);
+
+    const godotForTheServer = text(get(get(entry, 'env'), 'GODOT_PATH'));
+    assert.ok(
+      isAbsolute(godotForTheServer) && existsSync(godotForTheServer),
+      `and the engine it carries should exist, got ${godotForTheServer}`,
+    );
+  } finally {
+    rmSync(projectDir, { recursive: true, force: true });
+  }
+}
+
 /** The first group of a match, which a pattern written with one group always has. */
 function captured(match: RegExpMatchArray): string {
   return match[1] ?? '';
@@ -2337,6 +2420,7 @@ async function main(): Promise<void> {
   await testParametersReachTheEngine();
   await testGdUnitRunner();
   testCommandLineSetup();
+  testTheWrittenConfigNamesAProgramThatStarts();
 
   testProjectGodotMultilineValues();
   testProjectGodotResistsPrototypeKeys();
