@@ -98,6 +98,14 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  */
 const EDITOR_RESTART_TIMEOUT_MS = 90_000;
 
+/**
+ * How often to ask again for a bridge port somebody else is holding.
+ *
+ * Two seconds: the wait is nearly always a server on its way out, which takes a moment, and the
+ * cost of asking is one bind that fails immediately.
+ */
+const BRIDGE_RETRY_MS = 2_000;
+
 /** What to tell a caller whose file, scene, script or resource path landed outside the project. */
 const PATH_SOLUTIONS = [
   'Give the path relative to the project, such as "scenes/main.tscn" or "res://scenes/main.tscn"',
@@ -257,6 +265,7 @@ class GodotServer {
   private lspClient: GodotLSPClient | null = null;
   private dapClient: GodotDAPClient | null = null;
   private bridgeStartupError: string | null = null;
+  private bridgeRetry: NodeJS.Timeout | null = null;
   private lastProjectPath: string | null = null;
   private shutdownInitiated = false;
 
@@ -333,12 +342,62 @@ class GodotServer {
       const reason = errorMessage(bridgeError);
       this.bridgeStartupError = code && !reason.includes(code) ? `${code}: ${reason}` : reason;
       console.error(`[SERVER] Warning: Godot Editor Bridge failed to start: ${this.bridgeStartupError}`);
-      console.error('[SERVER] Continuing without bridge-backed editor tools.');
+      console.error('[SERVER] Continuing without bridge-backed editor tools, and trying again.');
+      this.keepTryingTheBridge();
+    }
+  }
+
+  /**
+   * Keeps asking for the bridge port, because the reason it is busy is nearly always temporary.
+   *
+   * One server owns the port and the rest get nothing, and the usual way that happens is a
+   * harness reconnecting: the replacement starts while the server it replaces is still on its way
+   * out. Binding once at startup made that permanent. The session then had every editor tool
+   * refusing for the rest of its life, `editor_launch restart` among them, and the only way out
+   * was somebody finding the old process and ending it by hand. Nothing should need that.
+   *
+   * It runs until it succeeds or the server stops, and unref'd, so it never holds the process
+   * open on its own.
+   */
+  private keepTryingTheBridge(): void {
+    if (this.bridgeRetry !== null || this.shutdownInitiated) {
+      return;
+    }
+    this.bridgeRetry = setInterval(() => {
+      void this.tryTheBridgeAgain();
+    }, BRIDGE_RETRY_MS);
+    this.bridgeRetry.unref();
+  }
+
+  private async tryTheBridgeAgain(): Promise<void> {
+    if (this.shutdownInitiated) {
+      this.stopTryingTheBridge();
+      return;
+    }
+    try {
+      await this.godotBridge.start();
+    } catch {
+      // Still somebody else's. The next tick asks again, and until then editor_status says so.
+      return;
+    }
+    this.bridgeStartupError = null;
+    this.stopTryingTheBridge();
+    const bridgeStatus = this.godotBridge.getStatus();
+    console.error(
+      `[SERVER] Godot Editor Bridge came up on ${bridgeStatus.host}:${bridgeStatus.port}; editor tools are live.`,
+    );
+  }
+
+  private stopTryingTheBridge(): void {
+    if (this.bridgeRetry !== null) {
+      clearInterval(this.bridgeRetry);
+      this.bridgeRetry = null;
     }
   }
 
   private async cleanup(): Promise<void> {
     this.logDebug('Cleaning up resources');
+    this.stopTryingTheBridge();
     if (this.activeProcess) {
       // Killed rather than stopped through the editor: a shutdown cannot wait on a round trip,
       // and a game the editor plays outlives this server anyway, which is the editor's to end.
@@ -1434,11 +1493,12 @@ class GodotServer {
       bridgeAvailable: this.bridgeStartupError === null,
       startupError: this.bridgeStartupError,
       staleNote: stale ? addonMismatch(status.addonVersion, SERVER_VERSION) : undefined,
+      retryingBridge: this.bridgeRetry === null ? undefined : true,
       note: isPortConflict
-        ? 'Bridge port is already in use. Another gdharness instance may own the editor bridge, so this server cannot report that editor connection.'
+        ? 'Bridge port is already in use. Another gdharness instance owns the editor bridge, so this server cannot reach the editor. Usually the server this one replaced, still on its way out.'
         : undefined,
       suggestion: isPortConflict
-        ? 'Stop duplicate gdharness/MCP server instances or re-run the command from the same server process that owns the bridge port.'
+        ? `This server is asking for the port again every ${BRIDGE_RETRY_MS / 1000}s and takes it the moment the other one lets go, so editor tools come back on their own. Ask again, or end the older gdharness process to have it now.`
         : undefined,
     };
   }

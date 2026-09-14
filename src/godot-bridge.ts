@@ -162,6 +162,11 @@ export class GodotBridge extends EventEmitter {
       server.once('error', (error) => {
         if (!settled) {
           settled = true;
+          // Closed before the rejection, because a start that failed is tried again: the port is
+          // usually held by a server on its way out, and an attempt per retry left behind would
+          // be a leak that grows for as long as the wait lasts.
+          server.close();
+          godotWss.close();
           reject(error);
           return;
         }

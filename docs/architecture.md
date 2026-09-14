@@ -181,6 +181,12 @@ exits when the call is answered.
 
 6005 and 6006 hold one client each. A second editor takes them from the first.
 
+6505 is the other way round: the first server to bind it owns the editor bridge and a second gets
+nothing. That happens on every harness reconnect, where the replacement starts before the server it
+replaces has gone, so a server that cannot bind keeps asking and takes the port the moment it is
+free. `editor_status` says it is waiting and why, and the editor tools come back without anything
+being restarted.
+
 ## Which tools use which
 
 | Tools                                                                 | Route                                                               | Needs running                                   |
