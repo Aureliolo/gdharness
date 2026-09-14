@@ -11,10 +11,19 @@ import { StringDecoder } from 'node:string_decoder';
 
 export type Severity = 'error' | 'warning' | 'info';
 
+/**
+ * Where an entry came from.
+ *
+ * `debugger` is the odd one and it is not a detail: a game the editor is playing can be broken
+ * on an error the engine prints down neither pipe, and an entry that claimed to be stdout would
+ * be saying the game printed something it never printed.
+ */
+type Source = 'stdout' | 'stderr' | 'debugger';
+
 export interface LogEntry {
   readonly index: number;
   readonly severity: Severity;
-  readonly source: 'stdout' | 'stderr';
+  readonly source: Source;
   /** The headline, without its severity prefix. */
   readonly text: string;
   /** The indented lines the engine printed under the headline, if any. */
@@ -91,6 +100,26 @@ export class GameLog {
     };
     this.entries.push(entry);
     this.lastHeadline = headline ? { index: entry.index, detail } : null;
+  }
+
+  /**
+   * A problem the engine reported somewhere other than its output.
+   *
+   * The editor's debug adapter is what does this. Godot breaks a game on a script error and
+   * names it in the `stopped` event alone, printing nothing an `output` event carries, so a log
+   * built from printed lines held no trace of it: a game sitting dead at an error counted zero
+   * errors and read as clean, which is the answer this whole file exists to get right.
+   */
+  record(severity: Severity, text: string): void {
+    this.entries.push({
+      index: this.entries.length,
+      severity,
+      source: 'debugger',
+      text,
+      detail: [],
+    });
+    // It owns no following lines, so an indented line after it belongs to whatever printed last.
+    this.lastHeadline = null;
   }
 
   get all(): readonly LogEntry[] {

@@ -48,6 +48,26 @@ type DAPBody = Record<string, unknown>;
 
 type DAPArrayItem = Record<string, unknown>;
 
+/**
+ * Why the game is sitting still, as the adapter last said it.
+ *
+ * Godot sends `breakpoint` for one a caller set and `exception` for an error it broke the game
+ * on, and for the second it puts the engine's own sentence in `text`. That sentence is the only
+ * place a script error appears: the adapter prints none of it, so a reader that kept nothing but
+ * a boolean threw away the one report of what had gone wrong.
+ */
+export interface StoppedAt {
+  readonly reason: string;
+  readonly description: string;
+  readonly text: string;
+}
+
+/** One string off a DAP body, or empty for a field the adapter left out. */
+function said(body: DAPBody | undefined, field: string): string {
+  const value = body?.[field];
+  return typeof value === 'string' ? value : '';
+}
+
 interface ToolResponse {
   content: { type: string; text: string }[];
   /** Set on a handled failure, so a caller does not read the reason as the answer. */
@@ -74,12 +94,12 @@ export class GodotDAPClient {
   private attached = false;
   private lastThreadId = 1;
   /**
-   * Whether the game is sitting at a breakpoint right now.
+   * Where the game is sitting still right now, or null while it runs.
    *
    * Without it every question about the stack answers with an empty array, which reads the same
    * whether nothing is running, the game is running freely, or the stack is genuinely empty.
    */
-  private stopped = false;
+  private halt: StoppedAt | null = null;
   private breakpoints = new Map<string, Set<number>>();
 
   constructor(port = portFromEnv('GDHARNESS_DAP_PORT', DEFAULT_DAP_PORT), host = '127.0.0.1') {
@@ -143,7 +163,7 @@ export class GodotDAPClient {
           this.connected = false;
           this.initialized = false;
           this.attached = false;
-          this.stopped = false;
+          this.halt = null;
           this.socket = null;
           this.failPendingRequests(new Error('DAP connection closed'));
         });
@@ -169,7 +189,7 @@ export class GodotDAPClient {
       this.connected = false;
       this.initialized = false;
       this.attached = false;
-      this.stopped = false;
+      this.halt = null;
       return;
     }
 
@@ -204,7 +224,7 @@ export class GodotDAPClient {
     this.connected = false;
     this.initialized = false;
     this.attached = false;
-    this.stopped = false;
+    this.halt = null;
   }
 
   private async ensureConnected(): Promise<void> {
@@ -304,7 +324,11 @@ export class GodotDAPClient {
       if (typeof threadId === 'number') {
         this.lastThreadId = threadId;
       }
-      this.stopped = true;
+      this.halt = {
+        reason: said(body, 'reason'),
+        description: said(body, 'description'),
+        text: said(body, 'text'),
+      };
       return;
     }
 
@@ -312,7 +336,7 @@ export class GodotDAPClient {
     // request that resumed the game.
     if (eventName === 'terminated' || eventName === 'exited') {
       this.attached = false;
-      this.stopped = false;
+      this.halt = null;
     }
   }
 
@@ -409,7 +433,7 @@ export class GodotDAPClient {
     await this.attach();
     const resolvedThreadId = await this.resolveThreadId(threadId);
     await this.sendRequest('continue', { threadId: resolvedThreadId });
-    this.stopped = false;
+    this.halt = null;
   }
 
   async stepOver(threadId?: number): Promise<void> {
@@ -521,9 +545,14 @@ export class GodotDAPClient {
     return this.connected;
   }
 
-  /** Whether a game is sitting at a breakpoint, which is the only state the stack is real in. */
+  /** Whether a game is sitting still, which is the only state the stack is real in. */
   isStopped(): boolean {
-    return this.stopped;
+    return this.halt !== null;
+  }
+
+  /** Why it is sitting still, or null while it runs. See [StoppedAt]. */
+  whereItStopped(): StoppedAt | null {
+    return this.halt;
   }
 
   private async resolveThreadId(threadId?: number): Promise<number> {
@@ -565,7 +594,7 @@ export class GodotDAPClient {
     this.connected = false;
     this.initialized = false;
     this.attached = false;
-    this.stopped = false;
+    this.halt = null;
     this.reader = new FrameReader();
     socket?.destroy();
 

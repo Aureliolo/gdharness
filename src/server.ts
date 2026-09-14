@@ -1881,6 +1881,7 @@ class GodotServer {
       startedAt: Date.now(),
       exitCode: null,
       throughEditor: true,
+      brokeOn: null,
     };
     this.activeProcess = played;
 
@@ -1909,6 +1910,25 @@ class GodotServer {
     for (const line of this.dapClient.getOutput(true)) {
       game.log.append('stdout', line.endsWith('\n') ? line : `${line}\n`);
     }
+    this.recordWhatItBrokeOn(game);
+  }
+
+  /**
+   * The error the editor broke the game on, written into the log the way a printed one would be.
+   *
+   * Godot prints none of it. It halts the game and names the error in the `stopped` event alone,
+   * so a log built from what the adapter printed held no trace of it: a game sitting dead at a
+   * script error counted zero errors and answered `clean`, while every runtime call against it
+   * timed out with nothing anywhere saying why. Measured against a real editor, where a save
+   * carrying one bad field broke the game on load and editor_output reported a clean run.
+   */
+  private recordWhatItBrokeOn(game: GodotProcess): void {
+    const halt = this.dapClient?.whereItStopped() ?? null;
+    if (halt?.reason !== 'exception' || halt.text === '' || game.brokeOn === halt.text) {
+      return;
+    }
+    game.brokeOn = halt.text;
+    game.log.record('error', halt.text);
   }
 
   /** Ends whatever is running, whichever way it was started. */
@@ -1935,6 +1955,7 @@ class GodotServer {
       startedAt: Date.now(),
       exitCode: null,
       throughEditor: false,
+      brokeOn: null,
     };
     child.stdout.on('data', (data: Buffer) => {
       log.append('stdout', data);
@@ -2013,6 +2034,10 @@ class GodotServer {
       contains: readNonEmptyString(args, 'contains'),
       limit: readPositiveNumber(args, 'limit') ?? 200,
     });
+    // A game held at a breakpoint is running in the sense the process is alive and in no sense
+    // that matters to a caller: it draws nothing, answers no runtime call, and the timeouts that
+    // follow read like a hung engine. Said here because this is where somebody asks what it did.
+    const halt = this.activeProcess.throughEditor ? (this.dapClient?.whereItStopped() ?? null) : null;
     return this.jsonTextResponse({
       running: this.activeProcess.exitCode === null,
       exitCode: this.activeProcess.exitCode,
@@ -2021,6 +2046,7 @@ class GodotServer {
       errors: this.activeProcess.log.count('error'),
       warnings: this.activeProcess.log.count('warning'),
       clean: this.activeProcess.log.count('error') === 0,
+      heldAt: halt,
       omitted: selected.omitted,
       entries: selected.entries,
     });

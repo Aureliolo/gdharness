@@ -168,6 +168,18 @@ const MAIN_GD = [
   'func _twice(n: int) -> int:',
   '\treturn n * 2',
   '',
+  '',
+  // A runtime error rather than a parse error, so the project still opens and the game still
+  // plays: the whole point is a game that was fine until somebody called this.
+  //
+  // Through a node that is not there rather than a Variant. The analyser knows every method on
+  // a Variant is unsafe and this project has that warning at error level, so a Variant call is a
+  // parse error and the script never loads at all; a Node the scene has not got is a null the
+  // analyser cannot see, holding a method it knows perfectly well.
+  'func break_on_purpose() -> void:',
+  '\tvar nobody: Node = get_node_or_null("NoSuchNode")',
+  '\tstash = nobody.get_index()',
+  '',
 ];
 
 /**
@@ -1365,6 +1377,86 @@ async function testRuntime({ call, refusal, attempt, project }: Editor): Promise
 }
 
 /**
+ * An error the editor breaks the game on, and the console that said nothing about it.
+ *
+ * Godot prints no script error over the debug adapter. It halts the game and names the error in
+ * the `stopped` event, so a console built from what the adapter printed held no trace of one:
+ * `editor_output` answered `clean` with zero errors about a game sitting dead at a null call,
+ * while every runtime tool timed out and said only that it might be at a breakpoint. Found the
+ * slow way, on a real project whose save carried one bad field.
+ *
+ * Its own game, because it ends with one that cannot run.
+ */
+async function testAnErrorTheGameBrokeOnIsReported({ call, attempt, project }: Editor): Promise<void> {
+  const game = { projectPath: project };
+  await call('editor_run', { projectPath: project });
+
+  const deadline = Date.now() + GAME_STOP_TIMEOUT_MS;
+  let reached = await attempt('runtime_inspect', { ...game, op: 'tree', nodePath: '/root' });
+  while (!reached.ok && Date.now() < deadline) {
+    await delay(500);
+    reached = await attempt('runtime_inspect', { ...game, op: 'tree', nodePath: '/root' });
+  }
+  assert.ok(reached.ok, `the game should be answering before it is broken: ${reached.text}`);
+
+  const clean = await call('editor_output', {});
+  assert.equal(get(clean, 'clean'), true, 'a game that has not broken should read as clean');
+  assert.equal(get(clean, 'heldAt'), null, 'and as held nowhere');
+
+  // The call never returns: the game breaks inside it and stops answering, which is the whole
+  // shape of the failure. What it says is not the subject; what the console says next is.
+  await attempt('runtime_invoke', {
+    ...game,
+    op: 'call',
+    nodePath: '/root/Main',
+    method: 'break_on_purpose',
+  });
+
+  const broke = Date.now() + GAME_STOP_TIMEOUT_MS;
+  let output = await call('editor_output', {});
+  while (get(output, 'clean') !== false && Date.now() < broke) {
+    await delay(500);
+    output = await call('editor_output', {});
+  }
+  assert.equal(
+    get(output, 'clean'),
+    false,
+    `a game broken on an error is not a clean run: ${JSON.stringify(output)}`,
+  );
+  assert.ok(asNumber(get(output, 'errors')) > 0, 'and the error is counted like a printed one');
+
+  const said = asArray(get(output, 'entries'), 'entries').filter(
+    (entry) => text(get(entry, 'severity')) === 'error',
+  );
+  assert.ok(said.length > 0, `the error should be an entry: ${JSON.stringify(output)}`);
+  assert.equal(
+    text(get(said[0], 'source')),
+    'debugger',
+    "marked as the debugger's, because the game printed none of it",
+  );
+  assert.match(
+    text(get(said[0], 'text')),
+    /null/i,
+    `carrying the engine's own words: ${JSON.stringify(said)}`,
+  );
+
+  // Where it is held, so a caller whose runtime calls are timing out is told why rather than
+  // left to guess between a hung engine, a long frame and this.
+  assert.equal(get(output, 'heldAt', 'reason'), 'exception', 'and the console says it is held');
+
+  // Asked twice on purpose: every ask drains the adapter, which goes on reporting the same stop
+  // for as long as the game sits at it, so one error must not become one more error per call.
+  const counted = asNumber(get(output, 'errors'));
+  assert.equal(
+    asNumber(get(await call('editor_output', {}), 'errors')),
+    counted,
+    'and one error stays one error however often the console is read',
+  );
+
+  await call('editor_run', { projectPath: project, op: 'stop' });
+}
+
+/**
  * Restarting the editor, and the staleness that makes it necessary.
  *
  * An install replaces the addon under a running editor, which goes on serving the code it read
@@ -1431,6 +1523,7 @@ async function main(): Promise<void> {
     await testLanguageServer(editor);
     await testDebugging(editor);
     await testRuntime(editor);
+    await testAnErrorTheGameBrokeOnIsReported(editor);
     await testEditorRestart(editor);
   });
 
