@@ -874,6 +874,8 @@ function main(): void {
     // what stops two projects wanting one port and an abandoned server keeping an editor.
     const follows = runFixture(godotPath, projectDir, 'bridge_follows');
     assert.equal(asNumber(get(follows, 'arrivals')), 2, 'the client should have greeted both servers');
+    // And an announcement that does not answer is set aside rather than waited on for good.
+    runFixture(godotPath, projectDir, 'bridge_leftover');
     // The game announces itself under the engine's temporary directory and the server looks
     // under Bun's; a platform where the two differ is one where no game is ever found. Both go
     // through the filesystem's own spelling, because Windows hands one side the 8.3 short name
