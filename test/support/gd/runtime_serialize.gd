@@ -89,6 +89,23 @@ func _check(values: Values) -> void:
 	if _tag_of(values.serialize(RefCounted.new())) != "Object":
 		_fail("Object tag: %s" % JSON.stringify(values.serialize(RefCounted.new())))
 
+	# A method typed as a class that answers nothing hands back a Variant of type OBJECT with
+	# nothing behind it, which is not the plain null below and does not take its branch. Asked for
+	# its class it raises a script error, and the request being serialised then gets no reply at
+	# all while an editor playing the game stops it dead on the error. Through callv because that
+	# is the call the tool makes.
+	var holder: Node = Node.new()
+	var nothing: Variant = holder.callv("find_child", ["nonesuch", true, false])
+	if values.serialize(nothing) != null:
+		_fail("a method that answered nothing: %s" % JSON.stringify(values.serialize(nothing)))
+	holder.free()
+
+	var doomed: Node = Node.new()
+	var stale: Variant = doomed
+	doomed.free()
+	if values.serialize(stale) != null:
+		_fail("an object that has been freed: %s" % JSON.stringify(values.serialize(stale)))
+
 	if values.serialize(null) != null:
 		_fail("null")
 	if values.serialize(7) != 7:

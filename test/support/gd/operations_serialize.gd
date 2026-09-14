@@ -97,6 +97,21 @@ func _check_serialize() -> void:
 	if _tag_of(values.serialize_value(RefCounted.new())) != "Object":
 		_fail("Object tag: %s" % JSON.stringify(values.serialize_value(RefCounted.new())))
 
+	# Object-typed and holding nothing, which is not the plain null below and does not take its
+	# branch: one that was never set, and one that has been freed. The second never reaches the
+	# object serialiser at all, because the call fails on the argument before it runs.
+	var holder: Node = Node.new()
+	var nothing: Variant = holder.callv("find_child", ["nonesuch", true, false])
+	if values.serialize_value(nothing) != null:
+		_fail("a method that answered nothing: %s" % JSON.stringify(values.serialize_value(nothing)))
+	holder.free()
+
+	var doomed: Node = Node.new()
+	var stale: Variant = doomed
+	doomed.free()
+	if values.serialize_value(stale) != null:
+		_fail("an object that has been freed: %s" % JSON.stringify(values.serialize_value(stale)))
+
 	if values.serialize_value(null) != null:
 		_fail("null")
 	if values.serialize_value(42) != 42:

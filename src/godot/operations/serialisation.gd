@@ -27,7 +27,15 @@ const SERIALISERS: Dictionary = {
 
 # Converts a Godot value into something JSON can carry. A type with no entry in the table
 # passes through as itself, which is what the JSON-native ones want.
+#
+# A property that holds no object is Object-typed and null rather than nil, which is most of what
+# a node's property list is, and an object that has been freed is the same shape again. Both are
+# refused here rather than inside _serialize_object, because a freed one never reaches it: the
+# call itself fails on the argument, with "previously freed is not a subclass of the expected
+# argument class", and a guard behind that is a guard that never runs.
 func serialize_value(value: Variant) -> Variant:
+	if typeof(value) == TYPE_OBJECT and not is_instance_valid(value):
+		return null
 	var serialiser: String = SERIALISERS.get(typeof(value), "")
 	return call(serialiser, value) if not serialiser.is_empty() else value
 
@@ -140,12 +148,7 @@ func _serialize_dictionary(value: Dictionary) -> Dictionary:
 
 
 # A pathless Resource says so rather than inventing an empty path for the caller to load.
-#
-# A property that holds no object is Object-typed and null rather than nil, which is most of
-# what a node's property list is, so this is the branch that runs the most.
 func _serialize_object(value: Object) -> Variant:
-	if not is_instance_valid(value):
-		return null
 	if not value is Resource:
 		return {"_type": "Object", "class": value.get_class()}
 	var resource: Resource = value
