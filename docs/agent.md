@@ -4,7 +4,8 @@ For an agent. Version `{{version}}`. MCP server plus three Godot addons.
 
 ## Refuse
 
-- Starting a second Godot editor while one is open. 6005 and 6006 hold one client each.
+- Starting a second Godot editor on a project that already has one. One server serves one editor;
+  another project wants its own server, which is its own session.
 - Spawning an engine for anything a tool already does.
 - Reporting provenance as verified when no check ran.
 

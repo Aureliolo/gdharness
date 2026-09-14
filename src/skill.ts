@@ -50,6 +50,9 @@ that is running, and the project on disk. ${TOOL_SPECS.length} tools, named \`do
 - Read \`editor_output\` after every run. It returns the engine's errors and warnings as entries
   with their backtraces, and a \`clean\` verdict, so a run that printed an error is one call away
   from being known.
+- One server, one editor. A second project is a second harness session with its own server, and
+  that works: each editor is opened on its own language server and debug adapter ports, and says
+  where it serves. Two editors on one project is the thing to refuse.
 
 ## Measuring a running game
 

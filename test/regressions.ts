@@ -26,6 +26,7 @@ import { createBridge } from '../src/godot-bridge.js';
 import { editorArguments, envValue, resolveHeadless, runArguments, userDataIn } from '../src/launch.js';
 import { GodotLSPClient } from '../src/lsp_client.js';
 import { isWithinRoot, resolveWithinProject } from '../src/paths.js';
+import { freePort } from '../src/ports.js';
 import { parseProjectGodot } from '../src/resources.js';
 import {
   chooseRuntime,
@@ -953,6 +954,84 @@ async function testABadPortIsReported(): Promise<void> {
   }
 }
 
+/**
+ * The port an editor is opened on is the default until somebody else has it.
+ *
+ * Godot serves the language server and the debug adapter on one port each for the whole machine,
+ * so the second editor open binds neither and every script and debug tool behind it is answered
+ * by the first editor, about another project. Keeping the default whenever it is free is what
+ * leaves a machine with one editor on it exactly where it was, and an external client that was
+ * pointed at 6005 by hand still looking at the right place.
+ */
+async function testAnEditorPortMovesOnlyWhenItIsHeld(): Promise<void> {
+  const holder = createServer();
+  const held = await new Promise<number>((resolve) => {
+    holder.listen(0, '127.0.0.1', () => {
+      const bound = holder.address();
+      resolve(typeof bound === 'object' && bound !== null ? bound.port : 0);
+    });
+  });
+  try {
+    const moved = await freePort(held);
+    assert.notEqual(moved, held, 'a port somebody is holding is not the one handed back');
+    assert.ok(moved > 0 && moved <= 65535, `and what is handed back is a port: ${moved}`);
+  } finally {
+    await new Promise<void>((resolve) => {
+      holder.close(() => {
+        resolve();
+      });
+    });
+  }
+  assert.equal(await freePort(held), held, 'and the port asked for is kept once nobody holds it');
+}
+
+/**
+ * A server set up for a project answers about that project's game and no other.
+ *
+ * Two projects open in two harness sessions are two games announced on the same machine, and a
+ * server that took whichever one it found would answer about somebody else's project with nothing
+ * in the answer saying so. A caller naming a project still wins; this is only the default.
+ */
+async function testAServerOnlyAnswersAboutItsOwnGame(): Promise<void> {
+  const root = mkdtempSync(join(tmpdir(), 'gdharness-own-'));
+  const announced = join(root, 'announced');
+  const mine = join(root, 'mine');
+  mkdirSync(announced, { recursive: true });
+  mkdirSync(mine, { recursive: true });
+  writeFileSync(
+    join(announced, `runtime-${process.pid}.json`),
+    JSON.stringify({
+      protocol: RUNTIME_PROTOCOL,
+      pid: process.pid,
+      port: 51_234,
+      address: '127.0.0.1',
+      project: { name: 'Elsewhere', path: join(root, 'elsewhere') },
+    }),
+    'utf8',
+  );
+
+  const server = new ServerProcess({
+    env: {
+      GDHARNESS_PROJECT: mine,
+      GDHARNESS_RUNTIME_DIR: announced,
+      GDHARNESS_RUNTIME_TIMEOUT_MS: '1500',
+    },
+  });
+  try {
+    await server.initialize('regression-test');
+    const said = textOf(await server.request('tools/call', { name: 'runtime_inspect', arguments: {} })) ?? '';
+    assert.match(
+      said,
+      /No running game is from /,
+      `the one game running is another project's and should not be answered about: ${said}`,
+    );
+    assert.match(said, /Elsewhere/, 'and the refusal names the game that is running');
+  } finally {
+    await server.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 type ToolCall = (name: string, args: unknown, timeoutMs?: number) => Promise<string>;
 type RawRequest = (method: string, params: unknown, timeoutMs?: number) => Promise<JsonRpcMessage>;
 
@@ -1758,7 +1837,17 @@ function testRunArgumentsLeaveTheLocalDebuggerOff(): void {
 
   // editor_launch spawns detached with its output dropped, so the only thing that can be
   // asserted about it is the argv, and the only thing that can go wrong quietly is the argv.
-  assert.deepEqual(editorArguments('/p'), ['-e', '--path', '/p']);
+  // The two ports are named on it because Godot keeps one language server and one debug adapter
+  // per machine rather than per editor, and the second editor open otherwise binds neither.
+  assert.deepEqual(editorArguments('/p', { lsp: 6005, dap: 6006 }), [
+    '-e',
+    '--path',
+    '/p',
+    '--lsp-port',
+    '6005',
+    '--dap-port',
+    '6006',
+  ]);
   // The scene as a res:// path and last: the engine reads it positionally, so text beginning
   // with a dash would otherwise be another option to it.
   assert.deepEqual(runArguments({ projectPath: '/p', headless: false, scene: 'scenes/-odd.tscn' }), [
@@ -2664,6 +2753,8 @@ async function main(): Promise<void> {
   await testTheBridgeTakesThePortWhenItIsFreed();
   await testAServerEndsWithAnEditorStillOnTheBridge();
   await testABadPortIsReported();
+  await testAnEditorPortMovesOnlyWhenItIsHeld();
+  await testAServerOnlyAnswersAboutItsOwnGame();
   await testDiagnosticsSurviveUriReEncoding();
   await testDiagnosticsSurviveAnotherSpellingOfTheSamePath();
   await testDiagnosticsTimeoutIsNotAnEmptyResult();

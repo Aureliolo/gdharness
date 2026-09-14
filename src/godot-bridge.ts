@@ -50,10 +50,24 @@ interface GodotReadyMessage {
   project_path: string;
   addon_version?: string;
   editor_pid?: number;
+  /** The three ports this editor serves, so a server talks to this one and not another. */
+  lsp_port?: number;
+  dap_port?: number;
+  debug_port?: number;
 }
 
 type IncomingMessage = ToolResultMessage | PongMessage | GodotReadyMessage;
 type OutgoingMessage = ToolInvokeMessage | PingMessage;
+
+/**
+ * A port an editor says it serves on, or undefined for anything that is not one.
+ *
+ * Typed loosely on purpose: what arrives is whatever an addon sent, and an addon older than this
+ * field sends nothing at all.
+ */
+function servedPort(said: unknown): number | undefined {
+  return typeof said === 'number' && Number.isInteger(said) && said > 0 && said <= 65535 ? said : undefined;
+}
 
 interface BridgeEventMap {
   tool_start: { tool: string; id: string; args: Record<string, unknown> };
@@ -81,6 +95,16 @@ interface GodotConnectionInfo {
   addonVersion?: string;
   /** Which process is on the other end, since a restarted editor is a new one. */
   editorPid?: number | undefined;
+  /**
+   * Where this editor serves its language server, its debug adapter and its own debugger.
+   *
+   * Godot keeps one of each per machine rather than per editor, so the numbers are only worth
+   * reporting because a second editor has to be moved off them. Undefined for an addon too old
+   * to say, which is answered by falling back to the defaults it would have been on anyway.
+   */
+  lspPort?: number | undefined;
+  dapPort?: number | undefined;
+  debugPort?: number | undefined;
 }
 
 interface BridgeStatus {
@@ -92,6 +116,9 @@ interface BridgeStatus {
   lastPongAt?: Date | undefined;
   addonVersion?: string | undefined;
   editorPid?: number | undefined;
+  lspPort?: number | undefined;
+  dapPort?: number | undefined;
+  debugPort?: number | undefined;
   pendingRequests: number;
   queuedResources: number;
 }
@@ -277,6 +304,9 @@ export class GodotBridge extends EventEmitter {
       lastPongAt: this.connectionInfo?.lastPongAt,
       addonVersion: this.connectionInfo?.addonVersion,
       editorPid: this.connectionInfo?.editorPid,
+      lspPort: this.connectionInfo?.lspPort,
+      dapPort: this.connectionInfo?.dapPort,
+      debugPort: this.connectionInfo?.debugPort,
       pendingRequests: this.pendingRequests.size,
       queuedResources: this.resourceQueues.size,
     };
@@ -439,6 +469,11 @@ export class GodotBridge extends EventEmitter {
           // installed before this was written, so it is certainly not the shipped one.
           this.connectionInfo.addonVersion = message.addon_version ?? '';
           this.connectionInfo.editorPid = message.editor_pid;
+          // Zero is the addon saying it could not find out, which is the same answer as an addon
+          // too old to be asked, and both are the defaults.
+          this.connectionInfo.lspPort = servedPort(message.lsp_port);
+          this.connectionInfo.dapPort = servedPort(message.dap_port);
+          this.connectionInfo.debugPort = servedPort(message.debug_port);
           this.log('info', `Godot ready: ${message.project_path}`);
           this.emitBridgeEvent('godot_connected', { projectPath: message.project_path });
         }

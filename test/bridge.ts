@@ -649,13 +649,40 @@ async function main(): Promise<void> {
 
     const godot = await connect(`ws://${BRIDGE_HOST}:${bridgePort}/godot`);
     try {
-      godot.send(JSON.stringify({ type: 'godot_ready', project_path: projectPath }));
+      // The three ports with it. Godot keeps one language server, one debug adapter and one
+      // debugger per machine rather than per editor, so a second editor is moved off them and
+      // this is how a server learns where it went. Zero is an addon that could not find out,
+      // which is not a port and is not reported as one.
+      godot.send(
+        JSON.stringify({
+          type: 'godot_ready',
+          project_path: projectPath,
+          lsp_port: 6105,
+          dap_port: 6106,
+          debug_port: 0,
+        }),
+      );
       await delay(300);
       const afterReady = await payload('editor_status', {});
       assert.equal(
         get(afterReady, 'editor', 'connected'),
         true,
         'editor_status reports connected after godot_ready',
+      );
+      assert.equal(get(afterReady, 'editor', 'lspPort'), 6105, 'and where that editor serves the LSP');
+      assert.equal(get(afterReady, 'editor', 'dapPort'), 6106, 'and its debug adapter');
+      assert.equal(
+        get(afterReady, 'editor', 'debugPort'),
+        undefined,
+        'and nothing at all for a port it could not answer',
+      );
+
+      // Followed rather than reported: the tool that cannot reach the language server names the
+      // port it asked on, and that is the editor's rather than the default.
+      assert.match(
+        textOf(await call('script_diagnostics', { projectPath, scriptPath: 'res://player.gd' })) ?? '',
+        /6105/,
+        'script_diagnostics asks on the port the editor reported',
       );
 
       // A tool call becomes a tool_invoke on the editor side, with its arguments normalised.
