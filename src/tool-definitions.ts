@@ -848,13 +848,13 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'runtime_input',
     description:
-      'Input to the running game: a whole click on a Control or a 3D node named by path, typing into whatever has the focus, or a raw action, key, mouse button or mouse motion. All of it works headless, where the window is 64 by 64 and the GUI only takes what is inside it.',
+      'Input to the running game: a whole click on a Control or a 3D node named by path, an item chosen out of a menu, typing into whatever has the focus, or a raw action, key, mouse button or mouse motion. All of it works headless, where the window is 64 by 64 and the GUI only takes what is inside it.',
     parameters: {
       projectPath: RUNNING_PROJECT_PATH,
       nodePath: {
         type: 'string',
         description:
-          'click: the Control to click, at its centre, or the 3D node to click, where it is drawn.',
+          'click: the Control to click, at its centre, or the 3D node to click, where it is drawn. choose: the PopupMenu, or the OptionButton or MenuButton in front of one.',
       },
       action: { type: 'string', description: 'action: the InputMap action name.' },
       pressed: { type: 'boolean', description: 'Press or release. Default true.' },
@@ -862,7 +862,12 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       keycode: { type: 'string', description: 'key: the key name, such as "Space" or "A".' },
       text: {
         type: 'string',
-        description: 'text: what to type. A newline is Enter and a tab is Tab.',
+        description:
+          'text: what to type. A newline is Enter and a tab is Tab. choose: the item to take, by what it says.',
+      },
+      index: {
+        type: 'number',
+        description: 'choose: the item to take, by where it is in the list, when text will not do.',
       },
       shift: { type: 'boolean' },
       ctrl: { type: 'boolean' },
@@ -883,6 +888,11 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       click: {
         summary:
           'press and release on a Control, a frame apart, and answer with what was under the pointer and what became of the control: in_tree, removed or freed. A control out of sight inside a ScrollContainer is scrolled to first, and scrolled_into_view says whether the view moved. A 3D node is clicked where it is drawn, and landed then says the interface did not swallow the press',
+        requires: ['nodePath'],
+      },
+      choose: {
+        summary:
+          "take an item out of a menu, by what it says or by where it is in the list. A menu's items are drawn rather than built, so there is nothing to click: the item takes the focus and Enter presses it, which is the engine's own path and needs no window. Answers with what was chosen and what the button in front of it shows now",
         requires: ['nodePath'],
       },
       action: { summary: 'press or release an action', requires: ['action'] },

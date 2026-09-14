@@ -56,6 +56,7 @@ func _run() -> void:
 
 	await _check_click()
 	await _check_the_room()
+	await _check_a_menu()
 	await _check_frames()
 	await _check_signal()
 	await _check_until()
@@ -248,6 +249,73 @@ func _check_a_body_behind_the_camera(body: Node3D) -> void:
 	if refused.get("type") != "error" or not str(refused.get("message", "")).contains("behind the camera"):
 		_fail("and cannot be clicked: %s" % str(refused))
 	body.position = Vector3(2.5, -3.0, 0.0)
+
+
+## An [OptionButton], which is what a language picker, a filter and every dropdown in a game is.
+##
+## Nothing could work one. A menu's items are drawn rather than built, so there is no node under
+## the pointer and no rectangle to ask for, and a whole click on the button in front of it opens
+## the menu on the press and closes it again on the release: measured in a real game, where the
+## popup came up and was gone by the time the answer came back. What was left was calling `select`
+## and emitting `item_selected` by hand, which sets a number and runs none of the engine's path.
+func _check_a_menu() -> void:
+	var picker: OptionButton = OptionButton.new()
+	picker.name = "Picker"
+	picker.position = Vector2(350, 200)
+	picker.size = Vector2(160, 30)
+	picker.add_item("Everything", 10)
+	picker.add_item("Word back", 20)
+	picker.add_item("Trouble", 30)
+	picker.set_item_disabled(2, true)
+	var chosen: Array[int] = []
+	picker.item_selected.connect(func(index: int) -> void: chosen.append(index))
+	root.add_child(picker)
+	await process_frame
+
+	await _check_choosing_by_what_it_says(chosen)
+	await _check_choosing_by_where_it_is()
+	await _check_a_menu_says_no()
+
+	picker.free()
+
+
+func _check_choosing_by_what_it_says(chosen: Array[int]) -> void:
+	var took: Dictionary = await node._execute_command(
+		"choose", {"path": "/root/Picker", "text": "Word back"}
+	)
+	if took.get("type") != "chosen":
+		_fail("an option should be choosable by what it says: %s" % str(took))
+		return
+	if took.get("index") != 1 or took.get("id") != 20:
+		_fail("and answer with which one it was: %s" % str(took))
+	# The button in front of the menu, because that is what the player is looking at and the one
+	# thing a press that did nothing would leave unchanged.
+	if took.get("selected") != 1 or took.get("shows") != "Word back":
+		_fail("and the button should be showing it: %s" % str(took))
+	if chosen != [1]:
+		_fail("and the engine's own signal should have fired once: %s" % str(chosen))
+
+
+func _check_choosing_by_where_it_is() -> void:
+	var took: Dictionary = await node._execute_command("choose", {"path": "/root/Picker", "index": 0})
+	if took.get("type") != "chosen" or took.get("text") != "Everything":
+		_fail("an option should be choosable by where it is in the list: %s" % str(took))
+
+
+## The two refusals worth having. A menu that answered "nothing happened" to both would be one
+## nobody could tell a typo from a greyed-out row in.
+func _check_a_menu_says_no() -> void:
+	var greyed: Dictionary = await node._execute_command(
+		"choose", {"path": "/root/Picker", "text": "Trouble"}
+	)
+	if greyed.get("type") != "error" or not str(greyed.get("message", "")).contains("disabled"):
+		_fail("a disabled item should be refused and said to be: %s" % str(greyed))
+
+	var missing: Dictionary = await node._execute_command(
+		"choose", {"path": "/root/Picker", "text": "Nothing like it"}
+	)
+	if missing.get("type") != "error" or not str(missing.get("message", "")).contains("Everything"):
+		_fail("an item that is not there should be refused with the ones that are: %s" % str(missing))
 
 
 ## The Yes on a confirmation dialog, which is what stands between a player and every destructive

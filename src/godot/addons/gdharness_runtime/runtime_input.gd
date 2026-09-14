@@ -400,6 +400,148 @@ func _no_window_note(viewport: Viewport) -> String:
 	return ". This game has no window: run it with a window to reach this control"
 
 
+## Chooses an item out of a menu, by what it says or by where it is in the list.
+##
+## A menu's items are drawn rather than built, so there is no node under the pointer to aim at and
+## no rectangle to ask for: [PopupMenu] exposes their text, their ids and which one has the focus,
+## and nothing about where any of them is. So a click cannot reach one, and a whole click on the
+## [OptionButton] in front of it opens the menu on the press and closes it again on the release.
+## Every language picker, every filter and every dropdown in a game was unreachable, and the way
+## past it was to call `select` and emit `item_selected`, which sets a number and runs none of the
+## engine's own path.
+##
+## Chosen the way a keyboard chooses: the item takes the focus and then Enter presses it, which is
+## the same route through [PopupMenu] a pointer takes and which needs no geometry, so it works in a
+## game with no window as well.
+##
+## [param path] may be the menu or the button in front of it. Naming the button is what a caller
+## has, since the menu is an internal child with a generated name that changes between runs.
+func choose(params: Dictionary) -> Dictionary:
+	var node_path: String = str(params.get("path", ""))
+	if node_path.is_empty():
+		return {"type": "error", "message": "Node path required"}
+	var node: Node = _host.get_tree().root.get_node_or_null(node_path)
+	if node == null:
+		return {"type": "error", "message": "Node not found: " + node_path}
+
+	var menu: PopupMenu = _menu_of(node)
+	if menu == null:
+		return {
+			"type": "error",
+			"message":
+			(
+				"%s is a %s, which is neither a PopupMenu nor something holding one"
+				% [node_path, node.get_class()]
+			)
+		}
+
+	var index: int = _wanted_item(menu, params)
+	if index < 0:
+		return {
+			"type": "error",
+			"message": "%s has no such item. It holds: %s" % [node_path, ", ".join(_items_of(menu))]
+		}
+	if menu.is_item_separator(index):
+		return {"type": "error", "message": "%s item %d is a separator, not a choice" % [node_path, index]}
+	if menu.is_item_disabled(index):
+		return {
+			"type": "error",
+			"message": "%s item %d, %s, is disabled" % [node_path, index, menu.get_item_text(index)]
+		}
+
+	# Shown first, because a menu nobody has opened has no focus to move and Enter would go to
+	# whatever is behind it. An OptionButton opens its own; a bare PopupMenu is popped where it
+	# already sits, which leaves a menu that was already open where it is.
+	var opened: bool = _open_the_menu(node, menu)
+	await _host.get_tree().process_frame
+
+	menu.scroll_to_item(index)
+	menu.set_focused_item(index)
+	# Through Input rather than pushed at the menu, which is how a keyboard reaches an open one: a
+	# popup is a Window, it takes the focus when it opens, and Input delivers to whichever window
+	# has it. Pushed straight at the menu the event arrived and nothing happened.
+	Input.parse_input_event(_accept(true))
+	await _host.get_tree().process_frame
+	Input.parse_input_event(_accept(false))
+	await _host.get_tree().process_frame
+
+	var answer: Dictionary = {
+		"type": "chosen",
+		"path": node_path,
+		"index": index,
+		"text": menu.get_item_text(index),
+		"id": menu.get_item_id(index),
+		"opened": opened,
+		"menu": str(menu.get_path()),
+	}
+	# What the button in front of the menu reads now, which is the answer to "did it take": a menu
+	# item that fired changes the thing holding it, and nothing else about the press says so.
+	var chooser: OptionButton = node as OptionButton
+	if chooser != null:
+		answer["selected"] = chooser.get_selected()
+		answer["shows"] = chooser.text
+	return answer
+
+
+## The menu [param node] is, or the one it holds. An [OptionButton] and a [MenuButton] both keep
+## theirs as an internal child, which is a node a caller cannot name and should not have to.
+static func _menu_of(node: Node) -> PopupMenu:
+	var menu: PopupMenu = node as PopupMenu
+	if menu != null:
+		return menu
+	if node.has_method("get_popup"):
+		var held: Variant = node.call("get_popup")
+		if held is PopupMenu:
+			return held
+	return null
+
+
+## Which item was asked for: `text`, matched exactly and then case-insensitively, or `index`.
+## Minus one when neither names one that is there.
+static func _wanted_item(menu: PopupMenu, params: Dictionary) -> int:
+	if params.has("index"):
+		var asked: int = int(params.get("index", -1))
+		return asked if asked >= 0 and asked < menu.get_item_count() else -1
+	var wanted: String = str(params.get("text", ""))
+	if wanted.is_empty():
+		return -1
+	for index: int in menu.get_item_count():
+		if menu.get_item_text(index) == wanted:
+			return index
+	for index: int in menu.get_item_count():
+		if menu.get_item_text(index).nocasecmp_to(wanted) == 0:
+			return index
+	return -1
+
+
+## What the menu says, for a refusal that names the choices rather than the miss.
+static func _items_of(menu: PopupMenu) -> PackedStringArray:
+	var said: PackedStringArray = PackedStringArray()
+	for index: int in menu.get_item_count():
+		said.append("%d: %s" % [index, menu.get_item_text(index)])
+	return said
+
+
+## Opens the menu if it is not already, and answers whether anything opened.
+static func _open_the_menu(node: Node, menu: PopupMenu) -> bool:
+	if menu.visible:
+		return false
+	if node.has_method("show_popup"):
+		node.call("show_popup")
+		return true
+	menu.popup()
+	return true
+
+
+func _accept(pressed: bool) -> InputEventKey:
+	var event: InputEventKey = InputEventKey.new()
+	event.keycode = KEY_ENTER
+	event.physical_keycode = KEY_ENTER
+	event.key_label = KEY_ENTER
+	event.pressed = pressed
+	return event
+
+
 ## A whole click aimed at where a 3D node is drawn, for a game that picks with a ray out of the
 ## cursor rather than with a Control.
 ##
