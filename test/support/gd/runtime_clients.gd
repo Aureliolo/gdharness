@@ -3,15 +3,22 @@ extends SceneTree
 ## The runtime's server against a real socket: it takes the port it is given, announces
 ## itself where the server will look, greets a client, answers requests by id however the
 ## bytes arrive, refuses what it cannot read, drops a client that hangs up without the engine
-## printing an error about it, and takes its announcement down with it.
+## printing an error about it, serves everybody else while one of them has stopped reading, and
+## takes its announcement down with it.
 
 const Runtime = preload("res://addons/gdharness_runtime/runtime_autoload.gd")
 const DEADLINE_MSEC: int = 5000
+
+## Comfortably past any socket buffer, so one reply cannot go out in a single write however the
+## platform happens to be tuned.
+const BLOB_BYTES: int = 4 * 1024 * 1024
 
 var failures: Array[String] = []
 # A member rather than a local, because a lambda cannot assign to a captured local.
 var lines: Array[String] = []
 var received: PackedByteArray = PackedByteArray()
+var second_lines: Array[String] = []
+var second_received: PackedByteArray = PackedByteArray()
 
 
 func _init() -> void:
@@ -21,6 +28,12 @@ func _init() -> void:
 	var node: Runtime = Runtime.new()
 	_check(node, directory)
 	node.free()
+
+	var busy: Runtime = Runtime.new()
+	_check_a_client_that_stopped_reading(busy)
+	busy._cleanup()
+	busy.free()
+
 	DirAccess.remove_absolute(directory)
 
 	if failures.is_empty():
@@ -62,11 +75,100 @@ func _drain(client: StreamPeerTCP) -> void:
 		newline = received.find(10)
 
 
+## The same, for the second client of the pair, which needs a buffer of its own.
+func _drain_second(client: StreamPeerTCP) -> void:
+	var available: int = client.get_available_bytes()
+	if available > 0:
+		var chunk: Array = client.get_data(available)
+		var bytes: PackedByteArray = chunk[1]
+		second_received.append_array(bytes)
+	var newline: int = second_received.find(10)
+	while newline != -1:
+		second_lines.append(second_received.slice(0, newline).get_string_from_utf8())
+		second_received = second_received.slice(newline + 1)
+		newline = second_received.find(10)
+
+
 func _reply(index: int) -> Dictionary:
 	if index >= lines.size():
 		return {}
 	var parsed: Variant = JSON.parse_string(lines[index])
 	return parsed if parsed is Dictionary else {}
+
+
+## A client that asks a large question and then stops reading must not take the game with it.
+##
+## The reply goes out from the frame loop, and `put_data` blocks until the socket has taken every
+## byte, so a peer that has stopped reading freezes that loop: the listener never accepts again
+## and every later request times out, for the rest of the run. Our own server is that peer, since
+## it destroys its socket when a call times out, so one slow answer cost the whole session. Seen
+## on a real game: one query, then nothing ever answered again, ping included.
+func _check_a_client_that_stopped_reading(node: Runtime) -> void:
+	node._start_server()
+	if node._port <= 0:
+		_fail("the second runtime should have been given a port, got %d" % node._port)
+		return
+
+	var quiet: StreamPeerTCP = StreamPeerTCP.new()
+	if quiet.connect_to_host("127.0.0.1", node._port) != OK:
+		_fail("could not start connecting the client that will stop reading")
+		return
+	if not _pump(node, quiet, func() -> bool: return node._clients.size() == 1):
+		_fail("the runtime never accepted the first of the two clients")
+		return
+
+	# Queued rather than written, which is the whole of the fix: nothing reaches the socket until
+	# the frame loop hands over as much as it will take.
+	var peer: StreamPeerTCP = node._clients[0]
+	node._send_response(peer, {"type": "blob", "data": "x".repeat(BLOB_BYTES)})
+	var owed: PackedByteArray = node._outgoing.get(peer, PackedByteArray())
+	if owed.size() < BLOB_BYTES:
+		_fail("a reply should be queued for the frame loop rather than written where it can block")
+		return
+
+	var talker: StreamPeerTCP = StreamPeerTCP.new()
+	if talker.connect_to_host("127.0.0.1", node._port) != OK:
+		_fail("could not start connecting the second of the two clients")
+		return
+	if not _pump(node, talker, func() -> bool: return node._clients.size() == 2):
+		_fail("the runtime never accepted the second client, with the first one not reading")
+		return
+	var asked: PackedByteArray = (
+		(JSON.stringify({"id": 1, "command": "ping", "params": {}}) + "\n").to_utf8_buffer()
+	)
+	talker.put_data(asked)
+
+	# The welcome, then the pong. The first client never reads a byte of its four megabytes.
+	var answered: Callable = func() -> bool:
+		_drain_second(talker)
+		return second_lines.size() >= 2
+	if not _pump(node, talker, answered):
+		_fail("a client that stopped reading stopped the others: %s" % str(second_lines))
+		return
+	var parsed: Variant = JSON.parse_string(second_lines[1])
+	if not parsed is Dictionary:
+		_fail("the second client's answer should be an object: %s" % second_lines[1])
+		return
+	var pong: Dictionary = parsed
+	if pong.get("type") != "pong":
+		_fail("the second client should have been answered with a pong: %s" % second_lines[1])
+
+	# And the client goes away mid-reply, which is what our server does to a call it has given up
+	# on: it destroys the socket. The bytes still owed have nowhere to go, and the runtime has to
+	# notice rather than keep offering them.
+	quiet.disconnect_from_host()
+	var dropped: Callable = func() -> bool: return node._clients.size() == 1
+	if not _pump(node, talker, dropped):
+		_fail("a client that left while owed a reply was never dropped")
+		return
+	if node._outgoing.has(peer):
+		_fail("the bytes owed to a client that left should go with it")
+	talker.put_data(asked)
+	var answered_again: Callable = func() -> bool:
+		_drain_second(talker)
+		return second_lines.size() >= 3
+	if not _pump(node, talker, answered_again):
+		_fail("the runtime stopped answering after a client left mid-reply: %s" % str(second_lines))
 
 
 func _check(node: Runtime, directory: String) -> void:

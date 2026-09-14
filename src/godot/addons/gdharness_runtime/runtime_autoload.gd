@@ -37,6 +37,14 @@ var _server: TCPServer
 var _clients: Array[StreamPeerTCP] = []
 ## Bytes received from each client that do not yet end in a newline, keyed by the peer.
 var _pending: Dictionary = {}
+## Bytes owed to each client that the socket has not taken yet, keyed by the peer.
+##
+## A reply is queued rather than written, because the write happens on the main thread and
+## `put_data` blocks until every byte is gone. A client that asked a large question and then
+## stopped reading, which is exactly what our own server does when a call times out, leaves that
+## write with nowhere to go: the frame never ends, the game freezes, and the listener never
+## accepts again, so every later request times out too. One timeout would take the game with it.
+var _outgoing: Dictionary = {}
 var _port: int = 0
 var _enabled: bool = true
 var _announcement: String = ""
@@ -102,10 +110,27 @@ func _process(_delta: float) -> void:
 			var received: Array = client.get_data(available)
 			var bytes: PackedByteArray = received[1]
 			_receive(client, bytes)
+		if not _drain(client):
+			gone.append(client)
 
 	for client: StreamPeerTCP in gone:
 		_clients.erase(client)
 		_pending.erase(client)
+		_outgoing.erase(client)
+
+
+## Hands the socket as much of what it is owed as it will take, and says whether it is still worth
+## talking to. Reading comes first in the frame, so a client that asked and left is noticed here
+## rather than blocking on a write that can never finish.
+func _drain(client: StreamPeerTCP) -> bool:
+	var owed: PackedByteArray = _outgoing.get(client, PackedByteArray())
+	if owed.is_empty():
+		return true
+	var sent: Array = client.put_partial_data(owed)
+	if sent[0] != OK:
+		return false
+	_outgoing[client] = owed.slice(int(sent[1]))
+	return true
 
 
 ## Bytes arrive in whatever pieces the socket makes of them, so a request is only handled once
@@ -259,10 +284,15 @@ func _ping(_params: Dictionary) -> Dictionary:
 	return {"type": "pong", "timestamp": Time.get_unix_time_from_system()}
 
 
-## One JSON object and a newline. put_data rather than put_utf8_string, which would prefix the
-## bytes with a length the other side is not expecting.
+## One JSON object and a newline, queued for [method _drain] rather than written here.
+##
+## Raw bytes rather than put_utf8_string, which would prefix them with a length the other side is
+## not expecting, and queued rather than put_data, which blocks the frame until the socket has
+## taken the lot: see [member _outgoing].
 func _send_response(client: StreamPeerTCP, data: Dictionary) -> void:
-	client.put_data((JSON.stringify(data) + "\n").to_utf8_buffer())
+	var owed: PackedByteArray = _outgoing.get(client, PackedByteArray())
+	owed.append_array((JSON.stringify(data) + "\n").to_utf8_buffer())
+	_outgoing[client] = owed
 
 
 ## A request that could not be read far enough to find its id is answered with a null one.
@@ -280,6 +310,7 @@ func _cleanup() -> void:
 		client.disconnect_from_host()
 	_clients.clear()
 	_pending.clear()
+	_outgoing.clear()
 
 	if _server:
 		_server.stop()
