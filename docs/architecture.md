@@ -187,6 +187,11 @@ replaces has gone, so a server that cannot bind keeps asking and takes the port 
 free. `editor_status` says it is waiting and why, and the editor tools come back without anything
 being restarted.
 
+The editor keeps asking from its end too, so the order the two start in does not matter. A socket
+pointed at a port nothing is listening on sits in its connect for thirty seconds before it gives
+up, which outlasts a harness reconnect: an editor opened ahead of its server reaches the bridge
+once the server is there, rather than waiting for somebody to restart it.
+
 ## Which tools use which
 
 | Tools                                                                 | Route                                                               | Needs running                                   |
