@@ -811,6 +811,45 @@ async function testTheBridgeTakesThePortWhenItIsFreed(): Promise<void> {
 }
 
 /**
+ * A project upgraded under a running server is said, rather than answered over.
+ *
+ * `upgrade` replaces the addons and re-pins the config while the server it replaces goes on
+ * running, because a stdio server is the harness's process and cannot restart itself. Until this,
+ * nothing anywhere said so: `addonIsStale` compares an editor's loaded addon against the server,
+ * which is the other direction, and it reported false. The session carried on at the old version
+ * with every sign saying it was fine.
+ */
+async function testAProjectUpgradedUnderTheServerIsSaid(): Promise<void> {
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-moved-'));
+  const addon = join(project, 'addons', 'gdharness_editor');
+  mkdirSync(addon, { recursive: true });
+  writeFileSync(join(addon, '.gdharness-version'), '99.99.99\n');
+
+  const server = new ServerProcess({ env: { GDHARNESS_PROJECT: project } });
+  try {
+    await server.initialize('regression-test');
+
+    // Read as text rather than parsed, because an answer carrying a notice is two content blocks
+    // and the two of them joined are not one JSON document. That is what a notice is: a block of
+    // its own beside the answer, which is how the update one has always arrived.
+    const said = textOf(await server.request('tools/call', { name: 'editor_status', arguments: {} }));
+    assert.match(
+      said ?? '',
+      /"projectIs": "99\.99\.99"/,
+      'editor_status should say what the project has moved on to',
+    );
+
+    // And unasked, because what makes it matter is that the agent is acting on answers from a
+    // version the project has left behind.
+    assert.match(said ?? '', /project_upgraded_under_this_server/, 'and say so on the answer');
+    assert.match(said ?? '', /reconnect/i, 'and say what replaces it');
+  } finally {
+    await server.stop();
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
  * The two ends of the bridge announcement agree about where it is and what it says.
  *
  * The server writes it and the editor addon reads it, in different languages, with nothing but
@@ -2594,6 +2633,7 @@ function testEveryAddonScriptKeepsItsIdentity(): void {
 async function main(): Promise<void> {
   testEveryAddonScriptKeepsItsIdentity();
   testBothEndsAgreeAboutTheAnnouncement();
+  await testAProjectUpgradedUnderTheServerIsSaid();
   testEveryDispatchedNameExistsOnBothSides();
   testEveryEngineParameterCanBeSent();
   testEveryToolParameterIsRead();
