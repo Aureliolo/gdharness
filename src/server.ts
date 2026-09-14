@@ -861,6 +861,12 @@ class GodotServer {
             });
           case 'find':
             return await this.handleFindRuntimeNodes(args);
+          case 'text':
+            return await this.handleRuntimeCommand('read_text', {
+              projectPath: args['projectPath'],
+              root: readNonEmptyString(args, 'nodePath') ?? '/root',
+              include_hidden: readBoolean(args, 'includeHidden') ?? false,
+            });
           case 'rect':
             return await this.handleRuntimeCommand('get_rect', {
               projectPath: args['projectPath'],

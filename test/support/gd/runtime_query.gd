@@ -54,6 +54,50 @@ func _paths(reply: Dictionary) -> Array[String]:
 	return paths
 
 
+## What a person reading the screen would read, which is what a caller asking about a panel wants
+## and what it could not have: a find answers off hidden nodes too, and a panel keeps its empty
+## state in the tree beside its rows.
+func _check_reading_the_screen(panel: Panel) -> void:
+	var heading: Label = Label.new()
+	heading.text = "  Your guild  "
+	panel.add_child(heading)
+	# Below its heading in the tree, and read in that order.
+	var quiet: Label = Label.new()
+	quiet.text = "Nothing posted"
+	quiet.visible = false
+	panel.add_child(quiet)
+	var blank: Label = Label.new()
+	panel.add_child(blank)
+	# A button reads the same as a label, and the one above this panel already holds is nameless:
+	# a node that says nothing is not a blank line on the screen.
+	var press: Button = Button.new()
+	press.text = "Sign"
+	panel.add_child(press)
+	await process_frame
+
+	var said: Dictionary = await node._execute_command("read_text", {"root": "/root/Panel"})
+	var lines: Array = Array(said.get("lines", []))
+	if lines != ["Your guild", "Sign"]:
+		_fail("the screen should read as what is drawn on it, in order: %s" % str(said))
+	if said.get("count") != 2 or said.get("truncated") != false:
+		_fail("and say how many lines that was: %s" % str(said))
+
+	var everything: Dictionary = await node._execute_command(
+		"read_text", {"root": "/root/Panel", "include_hidden": true}
+	)
+	if not Array(everything.get("lines", [])).has("Nothing posted"):
+		_fail("and hidden text should be there for the asking: %s" % str(everything))
+
+	var nowhere: Dictionary = await node._execute_command("read_text", {"root": "/root/Nowhere"})
+	if nowhere.get("type") != "error":
+		_fail("a read from a root that is not there is refused: %s" % str(nowhere))
+
+	heading.free()
+	quiet.free()
+	blank.free()
+	press.free()
+
+
 func _check() -> void:
 	var level: Node2D = Node2D.new()
 	level.name = "Level"
@@ -113,6 +157,8 @@ func _check() -> void:
 	)
 	if missing.get("type") != "error":
 		_fail("a find from a root that is not there is refused: %s" % str(missing))
+
+	await _check_reading_the_screen(panel)
 
 	var rect: Dictionary = await node._execute_command("get_rect", {"path": "/root/Panel/Go"})
 	var canvas: Dictionary = rect.get("canvas", {})

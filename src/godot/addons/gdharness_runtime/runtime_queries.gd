@@ -10,6 +10,10 @@ const Values = preload("runtime_values.gd")
 const FIND_LIMIT: int = 100
 const FIND_LIMIT_CEILING: int = 1000
 
+## The most lines one read answers with. A screen is a few dozen; a thousand is a tree somebody
+## pointed this at by mistake.
+const READ_LIMIT: int = 500
+
 var _host: Node
 var _values: Values
 
@@ -138,6 +142,60 @@ func _matches(
 ## is drawn in, in both the canvas coordinates the node reports and the window pixels input
 ## arrives in. The two differ whenever the project stretches its viewport, which is what made a
 ## rect unusable for a click.
+## Every line of text under a node, in the order somebody reads the screen.
+##
+## The question a caller asks most often, and the one that cost the most to answer: reading a panel
+## was a find for every label with the path of each beside it, a few hundred characters apiece to
+## carry a sentence of six words. Long is the smaller half of it. A find answers off nodes nobody
+## can see, and a panel keeps its empty state in the tree beside its rows, so "Nothing posted" came
+## back next to the three things posted and was believed twice in one session.
+##
+## A hidden node is left out and so is everything under it, because what a player reads is what is
+## drawn. [param include_hidden] asks for the lot instead, which is what a caller checking that
+## something is not showing wants.
+func read_text(params: Dictionary) -> Dictionary:
+	var root_path: String = str(params.get("root", "/root"))
+	var include_hidden: bool = bool(params.get("include_hidden", false))
+
+	var root: Node = _host.get_tree().root.get_node_or_null(root_path)
+	if root == null:
+		return {"type": "error", "message": "Node not found: " + root_path}
+
+	var lines: PackedStringArray = PackedStringArray()
+	_read_into(root, include_hidden, lines)
+	return {
+		"type": "text",
+		"root": root_path,
+		"lines": lines,
+		"count": lines.size(),
+		"truncated": lines.size() >= READ_LIMIT,
+	}
+
+
+## Walks [param node] depth first, which is the order the screen is laid out in and the order a
+## person reads it.
+func _read_into(node: Node, include_hidden: bool, into: PackedStringArray) -> void:
+	if into.size() >= READ_LIMIT:
+		return
+	var control: CanvasItem = node as CanvasItem
+	if not include_hidden and control != null and not control.visible:
+		return
+	var said: String = _said_by(node)
+	if not said.is_empty():
+		into.append(said)
+	for child: Node in node.get_children():
+		_read_into(child, include_hidden, into)
+
+
+## What one node says, or "" for a node that says nothing. Anything with a `text` property, which
+## is every label, button and field the interface is built out of.
+static func _said_by(node: Node) -> String:
+	for property: Dictionary in node.get_property_list():
+		if str(property.get("name", "")) == "text" and int(property.get("type", 0)) == TYPE_STRING:
+			return str(node.get("text")).strip_edges()
+	return ""
+
+
 func get_rect(params: Dictionary) -> Dictionary:
 	var node_path: String = str(params.get("path", ""))
 	if node_path.is_empty():
