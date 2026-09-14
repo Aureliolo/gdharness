@@ -94,6 +94,30 @@ and `latest` is how they drift apart: `editor_status` reports that as `addonIsSt
 An existing config keeps everything already in it, including other servers. One that does not
 parse is refused rather than replaced.
 
+## Committing what it installed
+
+The three addons land in `addons/`, and they are yours to commit like any other Godot addon.
+Neither Godot's version-control page nor GitHub's `Godot.gitignore` excludes `addons/`, so a
+project that has not chosen otherwise commits them and everybody on the team has the same version
+without running anything.
+
+Two of them, `gdharness_editor` and `auto_reload`, are also named in `project.godot`'s
+`editor_plugins/enabled`, which almost every project commits.
+
+That is why the files are worth committing alongside it. A clone that has the entries without
+the addons opens the editor, prints one warning per missing addon, `Addon ... failed to load. No
+directory found`, and carries on: a warning rather than an error, and `project.godot` is not
+rewritten. So a teammate who has not installed gdharness loses nothing but quiet.
+
+**If your project gitignores `addons/`**, which is what the package-manager add-ons like
+[godam](https://github.com/nilsiker/godam) and [GLAM](https://github.com/henriquelalves/glam) are
+for, keep the version somewhere committed and install from it instead. Each addon records its own
+at `addons/<name>/.gdharness-version`, which is what `gdharness doctor` reads.
+
+**The runtime autoload is the one to think about before you ship**, whichever way you go: it is an
+autoload rather than an editor plugin, so an export instantiates it. See
+[the runtime autoload](#the-runtime-autoload).
+
 ## Check it works
 
 | Call                                      | Expected                                                   |
