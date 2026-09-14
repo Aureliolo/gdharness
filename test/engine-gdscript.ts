@@ -867,6 +867,9 @@ function main(): void {
       asNumber(get(reconnect, 'waited_msec')) >= asNumber(get(reconnect, 'silence_msec')),
       'the client should have been refused before anything answered it',
     );
+    // Both arrivals, because the version it announces is only wrong on the second one: the
+    // upgrade happens under it between the two.
+    assert.equal(asNumber(get(reconnect, 'arrivals')), 2, 'the client should have arrived twice');
     // The game announces itself under the engine's temporary directory and the server looks
     // under Bun's; a platform where the two differ is one where no game is ever found. Both go
     // through the filesystem's own spelling, because Windows hands one side the 8.3 short name
