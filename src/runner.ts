@@ -49,14 +49,21 @@ export interface Spawn {
  *
  * The bare name is still the answer when the runner asked for is not the one running us, because
  * then there is no path to know: somebody on Node asking for the bunx line gets the bunx line.
+ *
+ * **`--bun` on every Bun entry.** Our published bundles carry a Node shebang, because npx is Node
+ * and that line has to work; a runner honours a shebang, so a plain `bun x` hands the file to
+ * whatever Node the machine happens to have. An entry naming a pinned Bun and then starting a
+ * server under an unpinned Node is a config that says one thing and does another, and it makes
+ * the runtime the server runs under depend on machine state. The flag says run it under the Bun
+ * the entry names. Nothing is lost where there is no Node: that is what Bun would have done.
  */
 export function spawnFor(runner: Runner, version: string, execPath = process.execPath): Spawn {
   const spec = `gdharness@${version}`;
   if (runner !== currentRunner()) {
-    return { command: runner, args: runner === 'npx' ? ['-y', spec] : [spec] };
+    return { command: runner, args: runner === 'npx' ? ['-y', spec] : ['--bun', spec] };
   }
   if (runner === 'bunx') {
-    return { command: execPath, args: ['x', spec] };
+    return { command: execPath, args: ['x', '--bun', spec] };
   }
   return { command: alongside(execPath, 'npx') ?? 'npx', args: ['-y', spec] };
 }

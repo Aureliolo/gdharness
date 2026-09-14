@@ -83,13 +83,35 @@ function testTheRunnerRunningUsIsNamedByItsPathRatherThanItsName(): void {
   assert.ok(here.args.includes('gdharness@9.9.9'), 'and is still asked for the pinned version');
   if (mine === 'bunx') {
     assert.equal(here.command, '/somewhere/bin/bun');
-    assert.deepEqual(here.args, ['x', 'gdharness@9.9.9'], '`bunx` is `bun x`');
+    assert.deepEqual(here.args, ['x', '--bun', 'gdharness@9.9.9'], '`bunx` is `bun x`');
   }
 
   // The other runner is somebody else's, and there is no path here to know: its name is all there
   // is to offer, and offering it is better than offering nothing.
   const theirs: Runner = mine === 'bunx' ? 'npx' : 'bunx';
   assert.equal(spawnFor(theirs, '9.9.9').command, theirs);
+}
+
+/**
+ * A Bun entry starts the server under Bun, rather than under whatever Node is lying around.
+ *
+ * Our bundles carry a Node shebang so that the npx line works, and a runner honours a shebang, so
+ * a plain `bun x` hands the file to Node. An entry that names a pinned Bun and then runs a server
+ * under an unpinned Node says one thing and does another, and which runtime it lands on becomes a
+ * property of the machine. Found by a project that pins Bun under `.tools/` and read its own
+ * config back: it named `npx.cmd` under `C:\\Program Files`.
+ */
+function testABunEntryRunsUnderBun(): void {
+  for (const spawn of [spawnFor('bunx', '9.9.9', '/somewhere/bin/bun'), spawnFor('bunx', '9.9.9')]) {
+    assert.ok(
+      spawn.args.includes('--bun'),
+      `a bunx entry should ask for Bun's own runtime, got ${JSON.stringify(spawn)}`,
+    );
+  }
+  assert.ok(
+    !spawnFor('npx', '9.9.9').args.includes('--bun'),
+    'and npx, which has no such flag, should not be handed one',
+  );
 }
 
 function testEachShapeIsWrittenAsItsHarnessReadsIt(): void {
@@ -588,6 +610,7 @@ const TESTS = [
   testEachShapeIsWrittenAsItsHarnessReadsIt,
   testAConfigIsWrittenWhereTheHarnessLooks,
   testTheRunnerRunningUsIsNamedByItsPathRatherThanItsName,
+  testABunEntryRunsUnderBun,
   testHarnessesSharingAFileAreWrittenOnce,
   testEveryHarnessHasAReadablePathOnEveryPlatform,
   testNothingAlreadyInTheFileIsLost,
