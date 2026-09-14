@@ -170,12 +170,15 @@ const MAIN_GD = [
   '',
   '',
   // A runtime error rather than a parse error, so the project still opens and the game still
-  // plays: the whole point is a game that was fine until somebody called this. Through a
-  // Variant, because the analyser settles a typed one at parse time and the project would then
-  // refuse to open at all.
+  // plays: the whole point is a game that was fine until somebody called this.
+  //
+  // Through a node that is not there rather than a Variant. The analyser knows every method on
+  // a Variant is unsafe and this project has that warning at error level, so a Variant call is a
+  // parse error and the script never loads at all; a Node the scene has not got is a null the
+  // analyser cannot see, holding a method it knows perfectly well.
   'func break_on_purpose() -> void:',
-  '\tvar nothing: Variant = null',
-  '\tstash = int(nothing.no_such_method())',
+  '\tvar nobody: Node = get_node_or_null("NoSuchNode")',
+  '\tstash = nobody.get_index()',
   '',
 ];
 
