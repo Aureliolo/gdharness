@@ -43,9 +43,22 @@ export interface Launch {
  * installed into the project have to be the same version: `editor_status` reports a mismatch as
  * `addonIsStale`, and `latest` is how a project silently acquires one.
  */
-export function launchFor(version: string, godotPath: string, runner: Runner = currentRunner()): Launch {
+export function launchFor(
+  version: string,
+  godotPath: string,
+  projectPath: string,
+  runner: Runner = currentRunner(),
+): Launch {
   const spawn = spawnFor(runner, version);
-  return { command: spawn.command, args: spawn.args, env: { GODOT_PATH: godotPath } };
+  // The project as well, because a server that knows which one it serves can announce its editor
+  // bridge inside it, and an editor can then find that bridge wherever it landed. Without it the
+  // port is a number every project wants and one of them gets: two open at once and the second
+  // editor has no bridge at all.
+  return {
+    command: spawn.command,
+    args: spawn.args,
+    env: { GODOT_PATH: godotPath, GDHARNESS_PROJECT: projectPath },
+  };
 }
 
 /**

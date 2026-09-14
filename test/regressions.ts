@@ -18,6 +18,7 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 import { WebSocket } from 'ws';
+import { announcementPath, BRIDGE_ANNOUNCE_PROTOCOL } from '../src/bridge-announce.js';
 import { staleClassNames } from '../src/class-cache.js';
 import { GodotDAPClient } from '../src/dap_client.js';
 import { dictionary, emptyRecord } from '../src/dictionary.js';
@@ -807,6 +808,33 @@ async function testTheBridgeTakesThePortWhenItIsFreed(): Promise<void> {
     await server.stop();
     await letGo();
   }
+}
+
+/**
+ * The two ends of the bridge announcement agree about where it is and what it says.
+ *
+ * The server writes it and the editor addon reads it, in different languages, with nothing but
+ * two constants holding them together. A path that drifts is an editor that finds no
+ * announcement and falls back to the port, which is the behaviour this replaced: it would read as
+ * working right up until two projects were open at once.
+ */
+function testBothEndsAgreeAboutTheAnnouncement(): void {
+  const addon = readFileSync('src/godot/addons/gdharness_editor/bridge_client.gd', 'utf8');
+
+  const announced = /const ANNOUNCEMENT: String = "res:\/\/(.+)"/.exec(addon)?.[1];
+  assert.ok(announced, 'the addon should name the announcement it reads');
+  assert.equal(
+    announcementPath('project').split(/[\\/]/).slice(1).join('/'),
+    announced,
+    'the server should write the announcement where the addon reads it',
+  );
+
+  const protocol = /const ANNOUNCE_PROTOCOL: int = (\d+)/.exec(addon)?.[1];
+  assert.equal(
+    Number(protocol),
+    BRIDGE_ANNOUNCE_PROTOCOL,
+    'the addon should read the protocol the server writes',
+  );
 }
 
 /**
@@ -2565,6 +2593,7 @@ function testEveryAddonScriptKeepsItsIdentity(): void {
 
 async function main(): Promise<void> {
   testEveryAddonScriptKeepsItsIdentity();
+  testBothEndsAgreeAboutTheAnnouncement();
   testEveryDispatchedNameExistsOnBothSides();
   testEveryEngineParameterCanBeSent();
   testEveryToolParameterIsRead();

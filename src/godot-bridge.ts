@@ -105,26 +105,62 @@ export class GodotBridge extends EventEmitter {
   private pendingRequests = new Map<string, PendingRequest>();
   private resourceQueues = new Map<string, Promise<void>>();
 
-  private readonly port: number;
+  private readonly wantedPort: number;
+  private boundPort: number | null = null;
   private readonly host: string;
   private readonly timeoutMs: number;
+
+  /**
+   * Whether a port somebody else is holding is a reason to take another one.
+   *
+   * Only true when the editor can be told where to look, which is when this server knows its
+   * project and can announce there. Without that the port is the whole contract and moving off
+   * it would mean an editor connecting to nothing.
+   */
+  private readonly mayMove: boolean;
 
   public constructor(
     port: number = DEFAULT_PORT,
     host: string = DEFAULT_HOST,
     timeoutMs: number = DEFAULT_TIMEOUT_MS,
+    mayMove = false,
   ) {
     super();
-    this.port = port;
+    this.wantedPort = port;
     this.host = host;
     this.timeoutMs = timeoutMs;
+    this.mayMove = mayMove;
   }
 
-  public start(): Promise<void> {
-    if (this.httpServer) {
-      return Promise.resolve();
-    }
+  /** The port it is actually on, which is the one it asked for until that one was taken. */
+  public get port(): number {
+    return this.boundPort ?? this.wantedPort;
+  }
 
+  /**
+   * Takes the port it was given, or any free one when that is held and it is allowed to move.
+   *
+   * Two projects open at once both want the same port, because nothing varies it per project, so
+   * the second editor bridge never came up at all. A server that can announce where it landed
+   * does not need the port to be the one anybody agreed on beforehand.
+   */
+  public async start(): Promise<void> {
+    if (this.httpServer) {
+      return;
+    }
+    try {
+      await this.listenOn(this.wantedPort);
+    } catch (error) {
+      const held = error instanceof Error && 'code' in error && error.code === 'EADDRINUSE';
+      if (!held || !this.mayMove) {
+        throw error;
+      }
+      this.log('warn', `Editor bridge port ${this.wantedPort} is held; taking another one.`);
+      await this.listenOn(0);
+    }
+  }
+
+  private listenOn(port: number): Promise<void> {
     return new Promise((resolve, reject) => {
       // The HTTP server exists to take the WebSocket upgrade for /godot and nothing else: no
       // page, no health endpoint, no CORS. Every other request is a 404, and an upgrade for
@@ -155,6 +191,8 @@ export class GodotBridge extends EventEmitter {
         settled = true;
         this.httpServer = server;
         this.godotWss = godotWss;
+        const bound = server.address();
+        this.boundPort = typeof bound === 'object' && bound !== null ? bound.port : port;
         this.log('info', `Editor bridge listening on ${this.host}:${this.port}`);
         resolve();
       });
@@ -178,7 +216,7 @@ export class GodotBridge extends EventEmitter {
         this.log('error', `Godot WebSocket server error: ${error.message}`);
       });
 
-      server.listen(this.port, this.host);
+      server.listen(port, this.host);
     });
   }
 
@@ -220,6 +258,7 @@ export class GodotBridge extends EventEmitter {
 
     await Promise.all(closeTasks);
 
+    this.boundPort = null;
     this.connectionInfo = null;
     this.log('info', 'WebSocket bridge stopped');
   }
@@ -594,8 +633,13 @@ export class GodotBridge extends EventEmitter {
 
 let defaultBridge: GodotBridge | null = null;
 
-export function getDefaultBridge(): GodotBridge {
-  defaultBridge ??= new GodotBridge(resolveDefaultBridgePort(), resolveDefaultBridgeHost());
+export function getDefaultBridge(mayMove = false): GodotBridge {
+  defaultBridge ??= new GodotBridge(
+    resolveDefaultBridgePort(),
+    resolveDefaultBridgeHost(),
+    DEFAULT_TIMEOUT_MS,
+    mayMove,
+  );
   return defaultBridge;
 }
 

@@ -80,7 +80,10 @@ The entry is the same everywhere:
     "gdharness": {
       "command": "npx",
       "args": ["-y", "gdharness@{{version}}"],
-      "env": { "GODOT_PATH": "/path/to/godot" },
+      "env": {
+        "GODOT_PATH": "/path/to/godot",
+        "GDHARNESS_PROJECT": "/path/to/project",
+      },
     },
   },
 }
@@ -89,7 +92,12 @@ The entry is the same everywhere:
 The version is pinned rather than `latest`. The server and the addons it installed have to match,
 and `latest` is how they drift apart: `editor_status` reports that as `addonIsStale`.
 
-`GODOT_PATH` is the only environment variable read. Every tool call carries its own `projectPath`.
+`GDHARNESS_PROJECT` is which project this server was set up for. It writes the editor bridge's
+address into that project so the editor can find it wherever it landed, which is what lets two
+projects be open at once: see [how it works](architecture.html#connections). Leave it out and the
+bridge is the fixed port again, which is the behaviour every config written before this had.
+
+Every tool call still carries its own `projectPath`. Nothing else is read from the environment.
 
 An existing config keeps everything already in it, including other servers. One that does not
 parse is refused rather than replaced.

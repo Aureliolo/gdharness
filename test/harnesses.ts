@@ -29,7 +29,7 @@ import {
 } from '../src/harnesses.js';
 import { currentRunner, type Runner, spawnFor } from '../src/runner.js';
 
-const LAUNCH = launchFor('9.9.9', '/opt/godot/godot', 'npx');
+const LAUNCH = launchFor('9.9.9', '/opt/godot/godot', '/home/you/game', 'npx');
 
 function project(): string {
   return mkdtempSync(join(tmpdir(), 'gdharness-harness-'));
@@ -62,7 +62,13 @@ function testTheLaunchIsTheSameEverywhere(): void {
   // where it is written down.
   assert.equal(LAUNCH.command, 'npx');
   assert.deepEqual(LAUNCH.args, ['-y', 'gdharness@9.9.9'], 'the version is pinned, never latest');
-  assert.deepEqual(LAUNCH.env, { GODOT_PATH: '/opt/godot/godot' });
+  // The project with it, because a server that knows which one it serves announces its bridge
+  // there, and an editor then finds that bridge wherever it landed rather than at one number
+  // every project on the machine wants.
+  assert.deepEqual(LAUNCH.env, {
+    GODOT_PATH: '/opt/godot/godot',
+    GDHARNESS_PROJECT: '/home/you/game',
+  });
 
   // Whoever installed with bunx may have no Node at all, so the config has to name their runner,
   // and it is the other runner here: these tests run under Bun, so `npx` is the one we have no
@@ -126,7 +132,7 @@ function testEachShapeIsWrittenAsItsHarnessReadsIt(): void {
   const open = entryFor('opencode', LAUNCH);
   assert.equal(open['type'], 'local');
   assert.deepEqual(open['command'], ['npx', '-y', 'gdharness@9.9.9'], 'opencode takes one array');
-  assert.deepEqual(open['environment'], { GODOT_PATH: '/opt/godot/godot' });
+  assert.deepEqual(open['environment'], LAUNCH.env, 'opencode calls it environment, not env');
   assert.equal(open['enabled'], true);
 }
 
@@ -229,7 +235,7 @@ function testWritingTwiceReplacesRatherThanDuplicates(): void {
   const root = project();
   try {
     assert.equal(connect(harness, root, LAUNCH).action, 'written');
-    const second = connect(harness, root, launchFor('9.9.10', '/opt/godot/other', 'npx'));
+    const second = connect(harness, root, launchFor('9.9.10', '/opt/godot/other', root, 'npx'));
     assert.equal(second.action, 'replaced', 'the second write says it replaced the entry');
 
     const servers = read(second.path)['mcpServers'] as Record<string, Record<string, unknown>>;
@@ -458,7 +464,10 @@ function testATomlConfigIsWrittenAndCarriesTheGodotPath(): void {
     assert.match(written, /GODOT_PATH = "\/opt\/godot\/godot"/, 'carrying this machine\u2019s engine');
 
     // Twice over is once: an entry replaced rather than a second copy appended.
-    assert.equal(connect(local, root, launchFor('9.9.10', '/opt/godot/other', 'npx')).action, 'replaced');
+    assert.equal(
+      connect(local, root, launchFor('9.9.10', '/opt/godot/other', root, 'npx')).action,
+      'replaced',
+    );
     const again = readFileSync(path, 'utf8');
     assert.equal(again.match(/\[mcp_servers\.gdharness]/g)?.length, 1, 'still one entry');
     assert.match(again, /gdharness@9\.9\.10/, 'and it is the new version');

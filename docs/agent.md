@@ -50,8 +50,9 @@ all; `--no-skill` leaves the skill out; `--no-runtime` leaves the autoload out.
 If this project generates its MCP config from a template, pass `--no-connect` and edit the
 template instead.
 
-`GODOT_PATH` is the only environment variable read. Every tool call carries its own `projectPath`.
-Reconnect the harness, then confirm the tools are listed.
+The config carries `GODOT_PATH` and `GDHARNESS_PROJECT`, and nothing else is read from the
+environment. Every tool call carries its own `projectPath`. Reconnect the harness, then confirm the
+tools are listed.
 
 The runtime addon is an autoload and reaches an export. Turn it off before committing:
 
