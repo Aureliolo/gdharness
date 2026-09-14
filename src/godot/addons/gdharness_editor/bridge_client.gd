@@ -19,7 +19,8 @@ var server_url: String = DEFAULT_URL
 var _is_connected: bool = false
 var _reconnect_timer: Timer
 var _current_reconnect_delay: float = RECONNECT_DELAY
-var _should_reconnect: bool = true
+## Nothing reconnects until somebody has asked to connect once.
+var _should_reconnect: bool = false
 var _project_path: String
 var _initialized: bool = false
 
@@ -43,6 +44,11 @@ func _process(_delta: float) -> void:
 	if socket.get_ready_state() == WebSocketPeer.STATE_CLOSED:
 		if _is_connected:
 			_handle_disconnect()
+		elif _should_reconnect and _reconnect_timer.is_stopped():
+			# A connection refused never opened, so it reaches CLOSED without passing through
+			# _handle_disconnect and nothing would ask again. An editor opened before the server
+			# is the ordinary way that happens, and it then sat there for the rest of the day.
+			_schedule_reconnect()
 		return
 
 	socket.poll()
