@@ -302,8 +302,8 @@ func _check_choosing_by_where_it_is() -> void:
 		_fail("an option should be choosable by where it is in the list: %s" % str(took))
 
 
-## The two refusals worth having. A menu that answered "nothing happened" to both would be one
-## nobody could tell a typo from a greyed-out row in.
+## The three refusals worth having. A menu that answered "nothing happened" to all of them would
+## be one nobody could tell a typo from a greyed-out row in.
 func _check_a_menu_says_no() -> void:
 	var greyed: Dictionary = await node._execute_command(
 		"choose", {"path": "/root/Picker", "text": "Trouble"}
@@ -316,6 +316,10 @@ func _check_a_menu_says_no() -> void:
 	)
 	if missing.get("type") != "error" or not str(missing.get("message", "")).contains("Everything"):
 		_fail("an item that is not there should be refused with the ones that are: %s" % str(missing))
+
+	var unasked: Dictionary = await node._execute_command("choose", {"path": "/root/Picker"})
+	if unasked.get("type") != "error" or not str(unasked.get("message", "")).contains("by text or index"):
+		_fail("naming no item at all should say how to name one: %s" % str(unasked))
 
 
 ## The Yes on a confirmation dialog, which is what stands between a player and every destructive
