@@ -52,6 +52,9 @@ const FIXTURE_ACTION = 'fixture_action';
 /** Godot's KEY_SPACE, which is what the engine reports for the key the input case sends. */
 const SPACE_KEYCODE = 32;
 
+/** What every editor on a machine would hold its debugger on, which is why none of them may. */
+const SHARED_DEBUGGER_PORT = 6007;
+
 /**
  * The game the editor plays: something to break in, something to ask, something to wait for,
  * and something to click.
@@ -198,6 +201,9 @@ interface Editor {
   /** Calls a tool and answers with how it went, for waiting on something to come up. */
   attempt: (name: string, args: Record<string, unknown>) => Promise<{ ok: boolean; text: string }>;
   project: string;
+  /** What this editor was opened on, which is what it should be reporting it serves. */
+  lspPort: number;
+  dapPort: number;
 }
 
 /** True when the binary at this path answers --version, which is the only test that counts. */
@@ -516,6 +522,11 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
       env: {
         ...process.env,
         GDHARNESS_BRIDGE_PORT: String(bridgePort),
+        // The same two the command line above names, which is what editor_launch does: the engine
+        // keeps a port it was given on the command line to itself, so the environment is how the
+        // addon knows what this editor is serving and what to write into its settings.
+        GDHARNESS_LSP_PORT: String(lspPort),
+        GDHARNESS_DAP_PORT: String(dapPort),
         // Its own everything: a fixture must not rewrite the editor settings of the machine it
         // runs on, and on a developer's machine those belong to the editor they have open.
         ...own,
@@ -542,7 +553,7 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
     }
     assert.ok(connected, `the editor never reached the bridge:\n${engineOutput.join('')}`);
 
-    await body({ call, refusal, attempt, project });
+    await body({ call, refusal, attempt, project, lspPort, dapPort });
   } catch (failure) {
     // What the engine said on its way to failing, which is the half of the evidence a tool
     // answer does not carry: a fixture that reports only its own assertion sends whoever reads
@@ -1160,7 +1171,7 @@ async function testDebugging({ call, refusal, attempt, project }: Editor): Promi
  * headless engine draws nothing and its texture holds whatever was drawn last, so a capture that
  * succeeded would be the same frame for ever.
  */
-async function testRuntime({ call, refusal, attempt, project }: Editor): Promise<void> {
+async function testRuntime({ call, refusal, attempt, project, lspPort, dapPort }: Editor): Promise<void> {
   const game = { projectPath: project };
 
   // The game announces itself in a file, which it writes once it is listening, so the first
@@ -1402,6 +1413,11 @@ async function testRuntime({ call, refusal, attempt, project }: Editor): Promise
   // What the editor is playing, which is the half the server cannot see for itself: this game
   // was started through it, so the editor is the one that knows.
   const status = await call('editor_status', {});
+  // And where it serves. Godot keeps one language server and one debug adapter per machine, so
+  // an editor that does not say which ports it took is one a second server cannot tell apart
+  // from the editor that took the defaults.
+  assert.equal(get(status, 'editor', 'lspPort'), lspPort, 'the editor should say where it serves the LSP');
+  assert.equal(get(status, 'editor', 'dapPort'), dapPort, 'and where its debug adapter is');
   assert.equal(
     get(status, 'game', 'playingInEditor', 'playing'),
     true,
@@ -1414,6 +1430,47 @@ async function testRuntime({ call, refusal, attempt, project }: Editor): Promise
   );
 
   await call('editor_run', { projectPath: project, op: 'stop' });
+}
+
+/**
+ * The port the editor's debugger holds while it plays.
+ *
+ * Godot keeps it in a setting shared by every editor on the machine and takes no command line
+ * option for it, so two editors playing at once want the same number and both ways that can go
+ * are wrong: a bind that fails leaves a game with no debugger behind it, and a bind that succeeds
+ * anyway leaves two editors on one port. Measured on the machine this was written on, where a
+ * fixture could not take 6007 because the editor on the desk was holding it.
+ *
+ * So the addon asks the operating system for one before every play. Which means the number is
+ * never the shared default, and the console is the proof that the debugger really did attach to
+ * the game on whatever it got: the console only travels that way.
+ */
+async function testTheDebuggerGetsAPortOfItsOwn({ call, attempt, project }: Editor): Promise<void> {
+  // Attempted rather than called: what came before may have left a game running or may not, and
+  // a stop with nothing to stop is refused.
+  await attempt('editor_run', { projectPath: project, op: 'stop' });
+
+  try {
+    const took = asNumber(get(await call('editor_run', { projectPath: project }), 'debugPort'), 'debugPort');
+    assert.notEqual(took, SHARED_DEBUGGER_PORT, 'the editor should not play on the shared default');
+    assert.ok(took > 0 && took <= 65535, `and what it took should be a port: ${took}`);
+    assert.equal(
+      get(await call('editor_status', {}), 'editor', 'debugPort'),
+      took,
+      'and the editor should report the one it is on',
+    );
+
+    // Accumulated because editor_output takes the lines out of the adapter as it reads them.
+    const deadline = Date.now() + GAME_STOP_TIMEOUT_MS;
+    let said = '';
+    while (!said.includes('the game said 4') && Date.now() < deadline) {
+      said += (await attempt('editor_output', {})).text;
+      if (!said.includes('the game said 4')) await delay(500);
+    }
+    assert.match(said, /the game said 4/, `the console should reach the editor: ${said}`);
+  } finally {
+    await attempt('editor_run', { projectPath: project, op: 'stop' });
+  }
 }
 
 /**
@@ -1563,6 +1620,7 @@ async function main(): Promise<void> {
     await testLanguageServer(editor);
     await testDebugging(editor);
     await testRuntime(editor);
+    await testTheDebuggerGetsAPortOfItsOwn(editor);
     await testAnErrorTheGameBrokeOnIsReported(editor);
     await testEditorRestart(editor);
   });

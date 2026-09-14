@@ -4,7 +4,8 @@ import { Refusal } from './errors.js';
 import { FrameReader, frame, OversizedStreamError } from './framing.js';
 import { portFromEnv } from './ports.js';
 
-const DEFAULT_DAP_PORT = 6006;
+/** What an editor serves the debug adapter on when nothing has moved it. */
+export const DEFAULT_DAP_PORT = 6006;
 
 /** What any request waits before it is called unanswered. */
 const DAP_REQUEST_TIMEOUT_MS = 10_000;
@@ -83,7 +84,8 @@ interface ToolArgs {
 export class GodotDAPClient {
   private socket: Socket | null = null;
   private connected = false;
-  private port: number;
+  /** Public so a caller can tell when the editor it is following has moved to another one. */
+  readonly port: number;
   private host: string;
   private seq = 1;
   private pendingRequests: Map<number, PendingRequest>;

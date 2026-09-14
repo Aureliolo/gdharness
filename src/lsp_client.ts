@@ -8,7 +8,8 @@ import { FrameReader, frame, OversizedStreamError } from './framing.js';
 import { isWithinRoot, resolveWithinProject } from './paths.js';
 import { portFromEnv } from './ports.js';
 
-const DEFAULT_LSP_PORT = 6005;
+/** What an editor serves the language server on when nothing has moved it. */
+export const DEFAULT_LSP_PORT = 6005;
 
 interface PendingRequest {
   resolve: (value: unknown) => void;
@@ -64,7 +65,8 @@ function diagnosticsKey(uri: string): string {
 export class GodotLSPClient {
   private socket: Socket | null = null;
   private connected = false;
-  private port: number;
+  /** Public so a caller can tell when the editor it is following has moved to another one. */
+  readonly port: number;
   private host: string;
   private requestId = 0;
   private pendingRequests: Map<number, PendingRequest>;
@@ -549,14 +551,18 @@ function asToolResponse(payload: unknown): { content: { type: string; text: stri
   };
 }
 
-function normalizeLSPError(error: unknown): string {
+/**
+ * The port is the client's rather than the default's, because the two come apart: an editor that
+ * was moved off 6005 is exactly the case where somebody needs to be told which port was tried.
+ */
+function normalizeLSPError(error: unknown, port: number): string {
   if (error instanceof Error) {
     if (
       error.message.includes('ECONNREFUSED') ||
       error.message.includes('Failed to connect to Godot LSP') ||
       error.message.includes('socket closed')
     ) {
-      return `Godot LSP is unavailable on port ${portFromEnv('GDHARNESS_LSP_PORT', DEFAULT_LSP_PORT)}. Start the Godot editor and enable Language Server in Editor Settings, or set GDHARNESS_LSP_PORT to the port it serves.`;
+      return `Godot LSP is unavailable on port ${port}. Start the Godot editor and enable Language Server in Editor Settings, or set GDHARNESS_LSP_PORT to the port it serves.`;
     }
     return error.message;
   }
@@ -665,7 +671,7 @@ export async function handleLSPTool(
     }
   } catch (error) {
     return asToolResponse({
-      error: normalizeLSPError(error),
+      error: normalizeLSPError(error, client.port),
     });
   }
 }
