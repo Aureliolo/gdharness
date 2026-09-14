@@ -58,6 +58,7 @@ that is running, and the project on disk. ${TOOL_SPECS.length} tools, named \`do
 
 | Ask | Tool |
 | --- | --- |
+| What a screen says | \`runtime_inspect text\`, which reads what is drawn and leaves out what is hidden |
 | Where a control is, and whether it is visible | \`runtime_inspect\` \`find\`, \`rect\` |
 | What a property reads right now | \`runtime_inspect\` \`property\`, \`runtime_invoke\` |
 | Press a button | \`runtime_input click\`, which says what was under the pointer |

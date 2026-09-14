@@ -57,6 +57,7 @@ func _init() -> void:
 		"ping": _ping,
 		"get_tree": _queries.get_tree,
 		"find_nodes": _queries.find_nodes,
+		"read_text": _queries.read_text,
 		"get_rect": _queries.get_rect,
 		"get_property": _queries.get_property,
 		"set_property": _queries.set_property,

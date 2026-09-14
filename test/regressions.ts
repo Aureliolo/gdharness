@@ -35,7 +35,7 @@ import {
   runtimeDirectories,
   runtimesAnnounced,
 } from '../src/runtime-client.js';
-import { HEADLESS_OPERATIONS } from '../src/server.js';
+import { HEADLESS_OPERATIONS, patienceForFrames } from '../src/server.js';
 import { addonMismatch } from '../src/server-version.js';
 import { TOOL_SPECS } from '../src/tool-definitions.js';
 import { cacheFile, isNewer } from '../src/update-check.js';
@@ -1030,6 +1030,29 @@ async function testAServerOnlyAnswersAboutItsOwnGame(): Promise<void> {
     await server.stop();
     rmSync(root, { recursive: true, force: true });
   }
+}
+
+/**
+ * The longest wait the tool offers has to be one it can actually wait out.
+ *
+ * `runtime_wait frames` takes up to 600, which is ten seconds at sixty a second, and every runtime
+ * command was given a flat ten seconds: the answer arrived as the call gave up on it, twice in one
+ * session of driving a game. A wait is given the time those frames take at a rate no game falls
+ * under now, which is a bound on patience rather than a delay: the answer still comes the moment
+ * the frames have passed.
+ */
+function testTheLongestWaitCanBeWaitedOut(): void {
+  const flat = 10_000;
+  const one = patienceForFrames(1, flat);
+  assert.ok(one >= flat && one < flat * 2, `a wait of one frame is given about the usual patience: ${one}`);
+  assert.ok(
+    patienceForFrames(600, flat) > 30_000,
+    `the longest wait is given longer than the frames take: ${patienceForFrames(600, flat)}`,
+  );
+  assert.ok(
+    patienceForFrames(600, flat) > patienceForFrames(60, flat),
+    'and a longer wait is given longer than a shorter one',
+  );
 }
 
 type ToolCall = (name: string, args: unknown, timeoutMs?: number) => Promise<string>;
@@ -2755,6 +2778,7 @@ async function main(): Promise<void> {
   await testABadPortIsReported();
   await testAnEditorPortMovesOnlyWhenItIsHeld();
   await testAServerOnlyAnswersAboutItsOwnGame();
+  testTheLongestWaitCanBeWaitedOut();
   await testDiagnosticsSurviveUriReEncoding();
   await testDiagnosticsSurviveAnotherSpellingOfTheSamePath();
   await testDiagnosticsTimeoutIsNotAnEmptyResult();

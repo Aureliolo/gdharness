@@ -751,13 +751,13 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'runtime_inspect',
     description:
-      'Questions about the running game: the scene tree, the nodes matching a query, where one node is on screen, what one property reads, or the performance metrics. Needs the game running with the runtime addon.',
+      'Questions about the running game: what is written on the screen, the scene tree, the nodes matching a query, where one node is on screen, what one property reads, or the performance metrics. Needs the game running with the runtime addon.',
     parameters: {
       projectPath: RUNNING_PROJECT_PATH,
       nodePath: {
         type: 'string',
         description:
-          'tree, find: where to start, default /root. rect: the node to place. property: the node to read.',
+          'tree, find, text: where to start, default /root. rect: the node to place. property: the node to read.',
       },
       property: {
         type: 'string',
@@ -780,6 +780,11 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       group: { type: 'string', description: 'find: a group the node is in.' },
       limit: { type: 'number', description: 'find: the most nodes to answer with. Default 100.' },
+      includeHidden: {
+        type: 'boolean',
+        description:
+          'text: read hidden nodes as well, for checking that something is not showing. Default false.',
+      },
       metrics: {
         type: 'array',
         items: { type: 'string' },
@@ -789,6 +794,11 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     requires: [],
     operations: {
       tree: { summary: 'the live scene tree', requires: [] },
+      text: {
+        summary:
+          'every line of text under nodePath, in the order somebody reads the screen, leaving out what is hidden and everything under it',
+        requires: [],
+      },
       find: {
         summary:
           'the paths of every node matching className, script, namePattern or group, with property read off each',
