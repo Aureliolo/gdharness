@@ -11,8 +11,26 @@ signal tool_requested(request_id: String, tool_name: String, args: Dictionary)
 const DEFAULT_URL: String = "ws://127.0.0.1:6505/godot"
 ## Written beside the addon by the install, so it names the version this copy came from.
 const VERSION_MARKER: String = "res://addons/gdharness_editor/.gdharness-version"
+## Written by the server that serves this project, saying where its bridge actually is. Kept in
+## step with `announcementPath` in src/bridge-announce.ts.
+const ANNOUNCEMENT: String = "res://.godot/gdharness-bridge.json"
+const ANNOUNCE_PROTOCOL: int = 1
 const RECONNECT_DELAY: float = 3.0
 const MAX_RECONNECT_DELAY: float = 30.0
+
+## How long one attempt is given before the address is called a bad one.
+##
+## A socket pointed at a port nothing holds gives up by itself, in thirty seconds on Windows. One
+## pointed at something that accepts and then never speaks WebSocket does not give up at all:
+## measured here, still connecting after forty-five seconds, because the peer has no handshake
+## timeout of its own in 4.7. A leftover announcement can be either, and a port that has been
+## reused by some other program is the second.
+const CONNECT_TIMEOUT: float = 10.0
+
+## How often the announcement is read again while connected, so a newer server is moved to
+## rather than waited for. A harness reconnect leaves the server it replaced running and holding
+## the old port, and an editor with no reason to look elsewhere stayed on it for the session.
+const FOLLOW_INTERVAL: float = 5.0
 
 var socket: WebSocketPeer = WebSocketPeer.new()
 var server_url: String = DEFAULT_URL
@@ -28,6 +46,17 @@ var _current_reconnect_delay: float = RECONNECT_DELAY
 var _should_reconnect: bool = false
 var _project_path: String
 var _initialized: bool = false
+
+## Whether the address came from a caller rather than from the project, in which case it is not
+## this node's to change.
+var _named_by_caller: bool = false
+var _since_looked: float = 0.0
+
+## The announced address that did not answer, so the fallback gets a turn. Cleared the moment
+## anything connects or the project names a different one.
+var _refused_url: String = ""
+var _tried_announced: bool = false
+var _connecting_for: float = 0.0
 
 
 func _ready() -> void:
@@ -54,6 +83,8 @@ func _process(_delta: float) -> void:
 			# A connection refused never opened, so it reaches CLOSED without passing through
 			# _handle_disconnect and nothing would ask again. An editor opened before the server
 			# is the ordinary way that happens, and it then sat there for the rest of the day.
+			if _tried_announced:
+				_refused_url = server_url
 			_schedule_reconnect()
 		return
 
@@ -63,10 +94,16 @@ func _process(_delta: float) -> void:
 		WebSocketPeer.STATE_OPEN:
 			if not _is_connected:
 				_handle_connect()
+			_follow_whoever_is_newest(_delta)
 
 			while socket.get_available_packet_count() > 0:
 				var packet: PackedByteArray = socket.get_packet()
 				_handle_message(packet.get_string_from_utf8())
+
+		WebSocketPeer.STATE_CONNECTING:
+			_connecting_for += _delta
+			if _connecting_for >= CONNECT_TIMEOUT:
+				_give_up_on_this_address()
 
 		WebSocketPeer.STATE_CLOSING:
 			pass
@@ -76,7 +113,38 @@ func _process(_delta: float) -> void:
 				_handle_disconnect()
 
 
+## Moves to the server the project now names, when that is not the one this is talking to.
+##
+## A harness reconnect leaves the server it replaced running, still holding the port it bound and
+## still answering: the editor has no reason to notice, and stayed on a server nothing was
+## speaking to for the rest of the session. The replacement announces where it landed, so the
+## editor can go to it rather than anybody ending a process.
+##
+## Only while connected by a URL this worked out for itself. A caller that named one is holding
+## this to that address, which is what every fixture does.
+func _follow_whoever_is_newest(delta: float) -> void:
+	if _named_by_caller:
+		return
+	_since_looked += delta
+	if _since_looked < FOLLOW_INTERVAL:
+		return
+	_since_looked = 0.0
+
+	var announced: String = announced_url()
+	if announced == "" or announced == server_url or announced == _refused_url:
+		return
+	server_url = announced
+	# Put down before it is picked up again, because the arrival is what tells a server who this
+	# editor is: left standing, the open socket on the new address would never be greeted and the
+	# server would report no editor while holding one.
+	_is_connected = false
+	disconnected.emit()
+	_current_reconnect_delay = RECONNECT_DELAY
+	_attempt_connection()
+
+
 func connect_to_server(url: String = "") -> void:
+	_named_by_caller = url != ""
 	server_url = _resolve_server_url(url)
 	_should_reconnect = true
 	_current_reconnect_delay = RECONNECT_DELAY
@@ -87,6 +155,12 @@ func _resolve_server_url(explicit_url: String) -> String:
 	if explicit_url != "":
 		return explicit_url
 
+	var announced: String = announced_url()
+	if announced != "" and announced != _refused_url:
+		_tried_announced = true
+		return announced
+	_tried_announced = false
+
 	# The same variable the server reads, so the two agree on the port by construction.
 	var raw: String = OS.get_environment("GDHARNESS_BRIDGE_PORT")
 	if raw != "":
@@ -95,6 +169,48 @@ func _resolve_server_url(explicit_url: String) -> String:
 		push_error("GDHARNESS_BRIDGE_PORT is %s, not a port; using %s" % [raw, DEFAULT_URL])
 
 	return DEFAULT_URL
+
+
+## Stops waiting on an address that is not answering, and asks again elsewhere.
+func _give_up_on_this_address() -> void:
+	if _tried_announced:
+		_refused_url = server_url
+	_connecting_for = 0.0
+	socket.close()
+	_schedule_reconnect()
+
+
+## Where the server says its bridge is, or "" when nothing has said.
+##
+## Written by a server that knows which project it serves, inside that project, so the two sides
+## agree by construction rather than by deriving a temporary directory the same way: they do not
+## share an environment, and the runtime's own announcement cost a session learning that.
+##
+## A leftover is found out by trying it rather than by asking whether its process is still there.
+## `OS.is_process_running` answers that only for a child of the caller on Unix, where it prints
+## "does not exist or is not a child of the calling process" and says no about every server there
+## is: it works on Windows and quietly disables the whole thing everywhere else. So an
+## announcement that does not answer is set aside, the fallback gets the next turn, and a
+## different announcement puts it back in play.
+func announced_url() -> String:
+	if not FileAccess.file_exists(ANNOUNCEMENT):
+		return ""
+	var file: FileAccess = FileAccess.open(ANNOUNCEMENT, FileAccess.READ)
+	if file == null:
+		return ""
+	var said: Variant = JSON.parse_string(file.get_as_text())
+	file.close()
+	if not said is Dictionary:
+		return ""
+
+	var announcement: Dictionary = said
+	if int(announcement.get("protocol", 0)) != ANNOUNCE_PROTOCOL:
+		return ""
+	var port: int = int(announcement.get("port", 0))
+	if port < 1 or port > 65535:
+		return ""
+	var host: String = str(announcement.get("host", "127.0.0.1"))
+	return "ws://%s:%d/godot" % [host, port]
 
 
 func disconnect_from_server() -> void:
@@ -110,6 +226,7 @@ func _attempt_connection() -> void:
 	if socket.get_ready_state() != WebSocketPeer.STATE_CLOSED:
 		socket.close()
 
+	_connecting_for = 0.0
 	var err: Error = socket.connect_to_url(server_url)
 	if err != OK:
 		push_error("[gdharness] Failed to connect to %s: %s" % [server_url, error_string(err)])
@@ -119,6 +236,7 @@ func _attempt_connection() -> void:
 func _handle_connect() -> void:
 	_is_connected = true
 	_current_reconnect_delay = RECONNECT_DELAY
+	_refused_url = ""
 
 	# The version reported is the one this editor loaded at startup, not the one on disk: an
 	# upgrade replaces the files under a running editor, which goes on serving the old code until
@@ -172,6 +290,10 @@ func _schedule_reconnect() -> void:
 
 
 func _on_reconnect_timer() -> void:
+	# Asked again rather than remembered: the reason a connection dropped is often that its server
+	# did, and the one that replaced it has said where it is since.
+	if not _named_by_caller:
+		server_url = _resolve_server_url("")
 	_attempt_connection()
 
 
