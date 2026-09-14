@@ -28,7 +28,16 @@ const SERIALISERS: Dictionary = {
 
 ## Converts a Godot value into something JSON can carry. A type with no entry in the table
 ## passes through as itself, which is what the JSON-native ones want.
+##
+## A method or property typed as a class answers a null with a Variant of type OBJECT that has
+## nothing behind it, and so does one whose object has been freed. Asking either for its class is
+## a script error, and a script error here costs far more than the one answer: the request is
+## never replied to at all, and an editor playing the game stops it dead on the error, so every
+## question after it times out as well. `find_child` for a name nothing has cost a whole session
+## that way.
 func serialize(value: Variant) -> Variant:
+	if typeof(value) == TYPE_OBJECT and not is_instance_valid(value):
+		return null
 	var serialiser: String = SERIALISERS.get(typeof(value), "")
 	return call(serialiser, value) if not serialiser.is_empty() else value
 
