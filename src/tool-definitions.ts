@@ -759,7 +759,11 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         description:
           'tree, find: where to start, default /root. rect: the node to place. property: the node to read.',
       },
-      property: { type: 'string', description: 'property: which one to read.' },
+      property: {
+        type: 'string',
+        description:
+          'property: which one to read. find: read this one off every node matched, so a panel of labels is one call rather than one per label.',
+      },
       depth: { type: 'number', description: 'tree: levels to descend. Default 3.' },
       includeProperties: {
         type: 'boolean',
@@ -786,7 +790,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     operations: {
       tree: { summary: 'the live scene tree', requires: [] },
       find: {
-        summary: 'the paths of every node matching className, script, namePattern or group',
+        summary:
+          'the paths of every node matching className, script, namePattern or group, with property read off each',
         requires: [],
       },
       rect: {

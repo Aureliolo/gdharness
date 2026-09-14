@@ -1184,6 +1184,46 @@ async function testRuntime({ call, refusal, attempt, project }: Editor): Promise
   );
   assert.equal(found.length, 2, `find should answer with both timers: ${JSON.stringify(found)}`);
 
+  // One property off every match, which is what makes a panel one question. Read off the timers
+  // because they differ: a wait_time the same on both would pass against a find that answered with
+  // one node twice. The Panel is in as well, and it has no wait_time at all.
+  const timed = asArray(
+    get(
+      await call('runtime_inspect', {
+        ...game,
+        op: 'find',
+        className: 'Node',
+        namePattern: '*e*',
+        property: 'wait_time',
+      }),
+      'nodes',
+    ),
+    'nodes',
+  );
+  const waits = new Map(
+    timed.map((node) => [
+      text(get(node, 'name')),
+      get(node, 'has_property') === true ? get(node, 'value') : null,
+    ]),
+  );
+  assert.equal(
+    waits.get('Ticker'),
+    0.2,
+    `Ticker's own wait should come back with it: ${JSON.stringify(timed)}`,
+  );
+  assert.equal(waits.get('Late'), 1, "and Late's, which is a different number on a node of the same class");
+  // A node without it says so rather than answering null, because null is what a node holding
+  // null answers, and a find over a panel matches several classes on purpose.
+  assert.equal(waits.get('Panel'), null, 'a matched node without that property should not claim a value');
+  assert.equal(
+    get(
+      timed.find((node) => text(get(node, 'name')) === 'Panel'),
+      'has_property',
+    ),
+    false,
+    'and should say plainly that it has not got it',
+  );
+
   const rect = await call('runtime_inspect', { ...game, op: 'rect', nodePath: '/root/Main/Panel' });
   assert.equal(get(rect, 'canvas', 'size', 'x'), 320, 'rect should measure the control it was given');
   assert.equal(get(rect, 'canvas', 'position', 'y'), 20, 'and place it where the game put it');

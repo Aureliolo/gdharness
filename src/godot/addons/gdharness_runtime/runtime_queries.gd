@@ -36,12 +36,19 @@ func get_tree(params: Dictionary) -> Dictionary:
 ## Nodes matching every filter given, as paths, so a caller can name what it wants without
 ## reading the whole tree to find it. `class` matches native classes and their subclasses, and
 ## the global name of a script class; `name` is a case-insensitive glob; `script` is a path.
+##
+## `property` names one to read off each of them, which is the difference between one question and
+## one call per answer. A panel of a dozen labels took thirteen calls to read, and a tree that
+## rebuilds between them, which any HUD following a clock does, hands back paths that are gone by
+## the time they are asked about. A node without that property says so rather than answering null,
+## because null is what a node holding null answers.
 func find_nodes(params: Dictionary) -> Dictionary:
 	var root_path: String = str(params.get("root", "/root"))
 	var wanted_class: String = str(params.get("class", ""))
 	var wanted_script: String = str(params.get("script", ""))
 	var wanted_name: String = str(params.get("name", ""))
 	var wanted_group: String = str(params.get("group", ""))
+	var wanted_property: String = str(params.get("property", ""))
 	var limit: int = clampi(int(params.get("limit", FIND_LIMIT)), 1, FIND_LIMIT_CEILING)
 
 	if (
@@ -67,12 +74,35 @@ func find_nodes(params: Dictionary) -> Dictionary:
 			if found.size() >= limit:
 				truncated = true
 				break
-			found.append(_serialize_node(node, false))
+			found.append(_found(node, wanted_property))
 		var children: Array[Node] = node.get_children()
 		for index: int in range(children.size() - 1, -1, -1):
 			pending.push_front(children[index])
 
 	return {"type": "nodes", "count": found.size(), "truncated": truncated, "nodes": found}
+
+
+## One match, with the named property on it when one was named.
+##
+## `has_property` alongside the value, because a node that has not got it and a node holding null
+## are different answers and a bare null reads as the second. The same distinction the `property`
+## op makes by refusing, which it cannot do here: a find over a panel matches nodes of several
+## classes on purpose, and refusing the whole answer because one of them has no `text` would make
+## the question unaskable.
+func _found(node: Node, wanted_property: String) -> Dictionary:
+	var entry: Dictionary = _serialize_node(node, false)
+	if wanted_property.is_empty():
+		return entry
+	var has: bool = false
+	for prop: Dictionary in node.get_property_list():
+		if str(prop["name"]) == wanted_property:
+			has = true
+			break
+	entry["property"] = wanted_property
+	entry["has_property"] = has
+	if has:
+		entry["value"] = _values.serialize(node.get(wanted_property))
+	return entry
 
 
 func _matches(

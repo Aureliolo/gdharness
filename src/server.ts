@@ -2223,11 +2223,16 @@ class GodotServer {
         'runtime_inspect find needs at least one of className, script, namePattern, group.',
       );
     }
+    // One property off every node found, when the caller names one. A panel of a dozen labels is
+    // one question and was a dozen calls: find the labels, then read each one, by which time the
+    // panel had been rebuilt and half the paths were gone.
+    const property = readNonEmptyString(args, 'property');
     return await this.handleRuntimeCommand('find_nodes', {
       ...filters,
       projectPath: args['projectPath'],
       root: readNonEmptyString(args, 'nodePath') ?? '/root',
       limit: readPositiveNumber(args, 'limit') ?? 100,
+      ...(property === undefined ? {} : { property }),
     });
   }
 
