@@ -2237,9 +2237,13 @@ class GodotServer {
   ): Promise<ToolResponse> {
     const { op: _op, projectPath, ...params } = asParams(args);
     const announced = runtimesAnnounced();
+    // A server set up for a project answers about that project's game and no other. Two
+    // projects open in two harness sessions are two games announced on the same machine, and
+    // without this the second one to start is a game this server would talk to as readily as
+    // its own, with nothing in the answer saying which it reached.
     const choice = chooseRuntime(
       announced.running,
-      typeof projectPath === 'string' ? projectPath : undefined,
+      typeof projectPath === 'string' ? projectPath : (this.ownProject ?? undefined),
       announced.unspoken,
     );
     if ('problem' in choice) {

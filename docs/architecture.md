@@ -195,8 +195,10 @@ the connected editor says it serves, and the server follows that rather than the
 The debugger is the third, and Godot takes no option for it, so the addon asks the operating system
 for one before every play. `editor_run` answers with the port it got.
 
-Two projects, two harness sessions, two servers and two editors therefore work at once. One server
-still serves one editor: the bridge carries a single connection.
+Two projects, two harness sessions, two servers and two editors therefore work at once. A server
+`setup` wrote answers about its own project's game rather than whichever one it finds announced,
+so `runtime_*` needs no `projectPath` on a machine running two. One server still serves one
+editor: the bridge carries a single connection.
 
 **The editor bridge is not at a number anybody agreed on.** A server set up by `setup` knows which
 project it serves, so it takes 6505 when that is free and any free port when it is not, and writes

@@ -985,6 +985,53 @@ async function testAnEditorPortMovesOnlyWhenItIsHeld(): Promise<void> {
   assert.equal(await freePort(held), held, 'and the port asked for is kept once nobody holds it');
 }
 
+/**
+ * A server set up for a project answers about that project's game and no other.
+ *
+ * Two projects open in two harness sessions are two games announced on the same machine, and a
+ * server that took whichever one it found would answer about somebody else's project with nothing
+ * in the answer saying so. A caller naming a project still wins; this is only the default.
+ */
+async function testAServerOnlyAnswersAboutItsOwnGame(): Promise<void> {
+  const root = mkdtempSync(join(tmpdir(), 'gdharness-own-'));
+  const announced = join(root, 'announced');
+  const mine = join(root, 'mine');
+  mkdirSync(announced, { recursive: true });
+  mkdirSync(mine, { recursive: true });
+  writeFileSync(
+    join(announced, `runtime-${process.pid}.json`),
+    JSON.stringify({
+      protocol: RUNTIME_PROTOCOL,
+      pid: process.pid,
+      port: 51_234,
+      address: '127.0.0.1',
+      project: { name: 'Elsewhere', path: join(root, 'elsewhere') },
+    }),
+    'utf8',
+  );
+
+  const server = new ServerProcess({
+    env: {
+      GDHARNESS_PROJECT: mine,
+      GDHARNESS_RUNTIME_DIR: announced,
+      GDHARNESS_RUNTIME_TIMEOUT_MS: '1500',
+    },
+  });
+  try {
+    await server.initialize('regression-test');
+    const said = textOf(await server.request('tools/call', { name: 'runtime_inspect', arguments: {} })) ?? '';
+    assert.match(
+      said,
+      /No running game is from /,
+      `the one game running is another project's and should not be answered about: ${said}`,
+    );
+    assert.match(said, /Elsewhere/, 'and the refusal names the game that is running');
+  } finally {
+    await server.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 type ToolCall = (name: string, args: unknown, timeoutMs?: number) => Promise<string>;
 type RawRequest = (method: string, params: unknown, timeoutMs?: number) => Promise<JsonRpcMessage>;
 
@@ -2707,6 +2754,7 @@ async function main(): Promise<void> {
   await testAServerEndsWithAnEditorStillOnTheBridge();
   await testABadPortIsReported();
   await testAnEditorPortMovesOnlyWhenItIsHeld();
+  await testAServerOnlyAnswersAboutItsOwnGame();
   await testDiagnosticsSurviveUriReEncoding();
   await testDiagnosticsSurviveAnotherSpellingOfTheSamePath();
   await testDiagnosticsTimeoutIsNotAnEmptyResult();
