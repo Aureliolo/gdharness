@@ -33,6 +33,11 @@ ships a `bun` and no `bunx` beside it, so an entry saying `bunx` starts nothing.
 costs nothing, because the entry carries an absolute `GODOT_PATH` already and so was never
 portable between machines.
 
+A Bun entry carries `--bun`. The published bundles start `#!/usr/bin/env node`, because npx is
+Node and that line has to work, and a runner honours a shebang: without the flag a Bun entry
+starts the server under whatever Node the machine has, which makes the runtime a property of the
+machine rather than of the config.
+
 ## How setup decides what to write
 
 {{flow}}
