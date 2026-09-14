@@ -54,6 +54,7 @@ import type {
   ToolResponse,
 } from './server-types.js';
 import { addonMismatch, DEBUG_MODE, GODOT_DEBUG_MODE_DEFAULT, SERVER_VERSION } from './server-version.js';
+import { installedAddonVersion } from './setup.js';
 import {
   asParams,
   readArray,
@@ -591,34 +592,63 @@ class GodotServer {
     if (this.callsSinceNotice < UPDATE_NOTICE_EVERY && this.noticedUpdate) {
       return answer;
     }
+
+    // Before the one about npm, because this one is certain and about this project rather than
+    // about the world, and because it is the state where the rest of the answer may be wrong.
+    const moved = this.projectHasMovedOn();
+    if (moved !== null) {
+      this.noticedUpdate = true;
+      this.callsSinceNotice = 0;
+      return this.saying(answer, {
+        project_upgraded_under_this_server: {
+          server_is: SERVER_VERSION,
+          project_is: moved,
+          what_to_do:
+            'The project was upgraded while this server has been running, so it is still answering ' +
+            'as the version it was started as. Tell the user to reconnect the MCP server, which is ' +
+            'the only thing that replaces it: a server cannot restart itself.',
+        },
+      });
+    }
+
     const notice = this.updates.notice();
     if (notice === null) {
       return answer;
     }
     this.noticedUpdate = true;
     this.callsSinceNotice = 0;
+    return this.saying(answer, {
+      update_available: {
+        ...notice,
+        what_to_do:
+          'Tell the user a newer gdharness is out, with what changed, and offer to take it. ' +
+          'Only run the upgrade command if they say yes: it restarts their editor and the ' +
+          'MCP server has to be reconnected afterwards.',
+      },
+    });
+  }
+
+  /** One more block on the end of an answer, which is how both notices reach the agent. */
+  private saying(answer: ToolResponse, block: Record<string, unknown>): ToolResponse {
     return {
       ...answer,
-      content: [
-        ...answer.content,
-        {
-          type: 'text',
-          text: JSON.stringify(
-            {
-              update_available: {
-                ...notice,
-                what_to_do:
-                  'Tell the user a newer gdharness is out, with what changed, and offer to take it. ' +
-                  'Only run the upgrade command if they say yes: it restarts their editor and the ' +
-                  'MCP server has to be reconnected afterwards.',
-              },
-            },
-            null,
-            2,
-          ),
-        },
-      ],
+      content: [...answer.content, { type: 'text', text: JSON.stringify(block, null, 2) }],
     };
+  }
+
+  /**
+   * What the project's addons say they are, when that is not what this server is.
+   *
+   * Read from disk rather than from the editor, so it is true whether or not an editor is open,
+   * and cheap enough to ask on the same schedule as the update notice. Only a server that knows
+   * its project can ask at all, which is the same thing that lets it announce its bridge.
+   */
+  private projectHasMovedOn(): string | null {
+    if (this.ownProject === null) {
+      return null;
+    }
+    const installed = installedAddonVersion(this.ownProject);
+    return installed === null || installed === SERVER_VERSION ? null : installed;
   }
 
   /**
@@ -1533,6 +1563,10 @@ class GodotServer {
       // reporting because it is the difference between an editor that cannot find this server
       // and one that has not been restarted: both look like an editor that is not there.
       announcedAt: this.announcedAt ?? undefined,
+      // The third version in play. `addonIsStale` catches an editor that has not been restarted;
+      // this catches the other way round, a project upgraded while this server kept running, and
+      // nothing reported that at all: the answer was that everything was fine.
+      projectIs: this.projectHasMovedOn() ?? undefined,
       note: isPortConflict
         ? 'Bridge port is already in use. Another gdharness instance owns the editor bridge, so this server cannot reach the editor. Usually the server this one replaced, still on its way out.'
         : undefined,

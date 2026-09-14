@@ -69,6 +69,24 @@ export function installAddons(
   return installed;
 }
 
+/**
+ * What the addons installed in this project say they are, or null when none of them say.
+ *
+ * The third version in play, and the one nothing was reading. `addonIsStale` compares what an
+ * editor loaded at startup against this server, which catches an editor nobody has restarted. It
+ * cannot catch the other way round: somebody runs `upgrade` while this server is running, the
+ * project moves on, and the server goes on answering as the version it was started as with
+ * nothing anywhere saying so.
+ */
+export function installedAddonVersion(projectPath: string): string | null {
+  const marker = join(projectPath, 'addons', ADDONS[0], VERSION_MARKER);
+  if (!existsSync(marker)) {
+    return null;
+  }
+  const said = readFileSync(marker, 'utf8').trim();
+  return said === '' ? null : said;
+}
+
 /** Each addon taken back out, naming the ones that were there to remove. */
 export function removeAddons(projectPath: string): readonly string[] {
   const removed: string[] = [];
