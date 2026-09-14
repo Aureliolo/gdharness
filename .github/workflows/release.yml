@@ -218,10 +218,11 @@ jobs:
           # The registry takes a moment to serve a version it has just accepted, and a first
           # publish takes longer still: this answered 404 for gdharness@0.4.1 seconds after
           # publishing it, for a package that was there all along. Asked again rather than read
-          # as a verdict, because "not found yet" and "not published" look identical here.
+          # as a verdict, because "not found yet" and "not published" look identical here, and
+          # asked online each time because a packument that missed is cached for five minutes.
           url=""
           for attempt in $(seq 1 30); do
-            if url="$(npm view "gdharness@${VERSION}" dist.tarball 2>/dev/null)" && [ -n "${url}" ]; then
+            if url="$(npm view --prefer-online "gdharness@${VERSION}" dist.tarball 2>/dev/null)" && [ -n "${url}" ]; then
               break
             fi
             echo "The registry does not serve ${VERSION} yet; asked ${attempt} times."
@@ -277,6 +278,32 @@ jobs:
     timeout-minutes: 15
 
     steps:
+      # The registry is eventually consistent and every runner resolves against whichever edge it
+      # lands on, so one runner having seen the version says nothing about the next: 0.6.3 was
+      # published, the job above downloaded its tarball from the registry, and the linux runner
+      # here was told there was no such version. Each platform waits for the edge it is going to
+      # install from rather than for the one that published.
+      #
+      # `--prefer-online` because a packument is cached for five minutes once fetched: without it
+      # the first ask that missed is what every retry would be answered from, and the loop would
+      # spend its whole budget re-reading a copy from before the publish.
+      - name: Wait for the registry this runner reads
+        shell: bash
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            if npm view --prefer-online "gdharness@${VERSION}" version > /dev/null 2>&1; then
+              echo "The registry serves ${VERSION} here; asked ${attempt} times."
+              exit 0
+            fi
+            echo "The registry does not serve ${VERSION} here yet; asked ${attempt} times."
+            sleep 10
+          done
+          echo "The registry here never served gdharness@${VERSION}, five minutes after publishing it." >&2
+          exit 1
+
       # No checkout: a reader has none of this repository, and anything taken from it here would
       # be a thing the published package was not asked for.
       - name: The published line says who it is
