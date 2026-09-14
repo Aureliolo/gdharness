@@ -113,6 +113,7 @@ func _check_click() -> void:
 	far.free()
 
 	await _check_below_the_fold()
+	await _check_a_dialog()
 
 	if clicked.get("control_afterwards") != "in_tree":
 		_fail("a button that stays put should be reported in the tree: %s" % str(clicked))
@@ -133,6 +134,42 @@ func _check_click() -> void:
 	)
 	if removed.get("control_afterwards") != "removed":
 		_fail("a button taken out of the tree by its own click should be reported removed: %s" % str(removed))
+
+
+## The Yes on a confirmation dialog, which is what stands between a player and every destructive
+## thing a game offers.
+##
+## Two separate faults met here. A dialog builds its buttons as internal children, so nothing
+## walking `get_children()` could see them: a find over the screen for every Button came back
+## without the two the player is being asked to press. And a dialog is a [Window], drawn inside
+## its parent under `gui_embed_subwindows`, so a click pushed into its own viewport reached no
+## control at all. Between them the only way to answer a dialog was to emit `confirmed`, which
+## asks nothing and presses nothing.
+func _check_a_dialog() -> void:
+	var dialog: ConfirmationDialog = ConfirmationDialog.new()
+	dialog.name = "AreYouSure"
+	dialog.dialog_text = "Do the irreversible thing?"
+	var confirmed: Array[int] = []
+	dialog.confirmed.connect(func() -> void: confirmed.append(1))
+	root.add_child(dialog)
+	dialog.popup_centered(Vector2i(240, 120))
+	await process_frame
+
+	var buttons: Dictionary = await node._execute_command(
+		"find_nodes", {"class": "Button", "root": "/root/AreYouSure"}
+	)
+	if int(buttons.get("count", 0)) < 2:
+		_fail("a dialog's own buttons should be findable: %s" % str(buttons))
+
+	var answered: Dictionary = await node._execute_command(
+		"click", {"path": str(dialog.get_ok_button().get_path())}
+	)
+	if answered.get("type") != "clicked" or answered.get("landed") != true:
+		_fail("a click on a dialog's Yes should land on it: %s" % str(answered))
+	if confirmed.size() != 1:
+		_fail("and should confirm it once, confirmed %d times" % confirmed.size())
+
+	dialog.free()
 
 
 ## A button parked far below the fold of a ScrollContainer, which is where the ledger of a game

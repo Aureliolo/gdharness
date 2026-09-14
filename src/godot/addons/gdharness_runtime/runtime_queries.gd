@@ -75,7 +75,13 @@ func find_nodes(params: Dictionary) -> Dictionary:
 				truncated = true
 				break
 			found.append(_found(node, wanted_property))
-		var children: Array[Node] = node.get_children()
+		# Internal children included, which they were not. A ConfirmationDialog builds its Yes and
+		# its No as internal nodes, and a ScrollContainer its bars, so a find over a screen for
+		# every Button came back without the two buttons the player is being asked to press:
+		# nothing here could see the dialog at all, and the way past it was to emit `confirmed`.
+		# A filtered query carries no cost for including them, because they only appear when they
+		# are what was asked for.
+		var children: Array[Node] = node.get_children(true)
 		for index: int in range(children.size() - 1, -1, -1):
 			pending.push_front(children[index])
 
@@ -286,7 +292,11 @@ func _serialize_node_tree(node: Node, depth: int, max_depth: int, include_proper
 
 	if depth < max_depth:
 		var children: Array = []
-		for child: Node in node.get_children():
+		# Internal ones too, for the reason `find` takes them: a tree that answers "no children"
+		# over a ConfirmationDialog holding a Yes and a No is not tidier than one that says so,
+		# it is wrong, and it is what sends somebody looking for another way to press the button.
+		# `depth` is what keeps the answer a size worth reading.
+		for child: Node in node.get_children(true):
 			children.append(_serialize_node_tree(child, depth + 1, max_depth, include_properties))
 		result["children"] = children
 
