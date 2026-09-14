@@ -38,7 +38,7 @@ import { TOOL_SPECS } from '../src/tool-definitions.js';
 import { cacheFile, isNewer } from '../src/update-check.js';
 import { asArray, asNumber, get, text } from './support/json.js';
 import { isRecord, type JsonRpcMessage, parseTextContent, textOf } from './support/json-rpc.js';
-import { ServerProcess } from './support/server.js';
+import { reservePort, ServerProcess } from './support/server.js';
 
 async function withOccupiedBridgePort<T>(run: () => Promise<T>): Promise<T> {
   const blocker = createServer();
@@ -728,11 +728,76 @@ async function testEditorStatusPortConflict(): Promise<void> {
       const payload = get(parseTextContent(response), 'editor');
       assert.equal(get(payload, 'bridgeAvailable'), false);
       assert.match(text(get(payload, 'startupError')), /EADDRINUSE/i);
-      assert.match(text(get(payload, 'note')), /Another gdharness instance may own the editor bridge/i);
+      assert.match(text(get(payload, 'note')), /Another gdharness instance owns the editor bridge/i);
     } finally {
       await server.stop();
     }
   });
+}
+
+/**
+ * The bridge takes its port the moment whoever held it lets go, with nothing restarted.
+ *
+ * One server owns the port and the rest get nothing, and the usual way that happens is a harness
+ * reconnecting: the replacement starts while the server it replaces is still on its way out.
+ * Binding once at startup made that permanent, so a session that lost the race had every editor
+ * tool refusing for the rest of its life, `editor_launch restart` among them, and the only way out
+ * was a person finding the older process and ending it. Seen exactly that way on a real reconnect.
+ *
+ * Its own port rather than 6505, because the machine this runs on may be somebody's and what is
+ * being proved is the handover rather than the number.
+ */
+async function testTheBridgeTakesThePortWhenItIsFreed(): Promise<void> {
+  const port = await reservePort();
+  const blocker = createServer();
+  await new Promise<void>((resolve, reject) => {
+    blocker.once('error', reject);
+    blocker.listen(port, '127.0.0.1', resolve);
+  });
+  let holding = true;
+  const letGo = async (): Promise<void> => {
+    if (!holding) {
+      return;
+    }
+    holding = false;
+    await new Promise<void>((resolve, reject) => {
+      blocker.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve();
+      });
+    });
+  };
+
+  const server = new ServerProcess({ env: { GDHARNESS_BRIDGE_PORT: String(port) } });
+  const editorStatus = async (): Promise<unknown> => {
+    const response = await server.request('tools/call', { name: 'editor_status', arguments: {} });
+    return get(parseTextContent(response), 'editor');
+  };
+  try {
+    await server.initialize('regression-test');
+
+    const blocked = await editorStatus();
+    assert.equal(get(blocked, 'bridgeAvailable'), false, 'the port is held, so the bridge is not up');
+    assert.equal(get(blocked, 'retryingBridge'), true, 'and it should say it is still asking');
+    assert.match(text(get(blocked, 'suggestion')), /on their own/i, 'and say so to whoever reads it');
+
+    await letGo();
+
+    // Asked over several of the retry's own intervals rather than once: what is proved here is
+    // that it comes back by itself, not how quickly.
+    let live = false;
+    for (let attempt = 0; attempt < 15 && !live; attempt += 1) {
+      await delay(1000);
+      live = get(await editorStatus(), 'bridgeAvailable') === true;
+    }
+    assert.ok(live, 'the bridge should take the port once it is free, with nothing restarted');
+  } finally {
+    await server.stop();
+    await letGo();
+  }
 }
 
 /**
@@ -2426,6 +2491,7 @@ async function main(): Promise<void> {
   testProjectGodotResistsPrototypeKeys();
 
   await testEditorStatusPortConflict();
+  await testTheBridgeTakesThePortWhenItIsFreed();
   await testABadPortIsReported();
   await testDiagnosticsSurviveUriReEncoding();
   await testDiagnosticsSurviveAnotherSpellingOfTheSamePath();
