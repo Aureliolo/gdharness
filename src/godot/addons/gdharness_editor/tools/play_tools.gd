@@ -10,6 +10,10 @@ extends Node
 
 ## What the display server calls itself when the engine was started with no display at all.
 const HEADLESS_DISPLAY: String = "headless"
+## Where Godot keeps the port its own debugger listens on for a game it is playing. One setting
+## for every editor on the machine, and bound only while a game runs.
+const DEBUGGER_SETTING: String = "network/debug/remote_port"
+const LOOPBACK: String = "127.0.0.1"
 
 var _editor_plugin: EditorPlugin = null
 
@@ -24,6 +28,8 @@ func play_scene(args: Dictionary) -> Dictionary:
 	if EditorInterface.is_playing_scene():
 		EditorInterface.stop_playing_scene()
 
+	var debugger: int = _a_port_for_the_debugger()
+
 	if scene_path.is_empty():
 		EditorInterface.play_main_scene()
 	else:
@@ -35,8 +41,41 @@ func play_scene(args: Dictionary) -> Dictionary:
 	return {
 		"ok": true,
 		"playing": EditorInterface.is_playing_scene(),
-		"scenePath": EditorInterface.get_playing_scene()
+		"scenePath": EditorInterface.get_playing_scene(),
+		"debugPort": debugger
 	}
+
+
+## Gives this editor's debugger a port of its own, and answers the one the game will be sent to.
+##
+## The editor binds this while a game runs, out of a setting shared by every editor on the
+## machine, and Godot takes --lsp-port and --dap-port on its command line but nothing at all for
+## this one. So two editors playing at once want the same number, and both ways that can go are
+## wrong: a bind that fails leaves a game with no debugger behind it, which is every debug tool
+## and the whole console gone, and a bind that succeeds anyway leaves two editors on one port with
+## the games going to whichever one the operating system picks.
+##
+## Asked of the operating system each time rather than tested first, which is how the runtime
+## addon takes its own port: a port that was free a moment ago is not a port that is still free,
+## and nothing this can ask distinguishes the editor's own debugger from another editor's.
+func _a_port_for_the_debugger() -> int:
+	var settings: EditorSettings = EditorInterface.get_editor_settings()
+	if settings == null or not settings.has_setting(DEBUGGER_SETTING):
+		return 0
+	var spare: int = _any_free_port()
+	if spare > 0:
+		settings.set_setting(DEBUGGER_SETTING, spare)
+	return spare
+
+
+## A port the operating system handed out, or 0 when it would not give one.
+static func _any_free_port() -> int:
+	var probe: TCPServer = TCPServer.new()
+	if probe.listen(0, LOOPBACK) != OK:
+		return 0
+	var port: int = probe.get_local_port()
+	probe.stop()
+	return port
 
 
 func stop_playing(_args: Dictionary) -> Dictionary:
@@ -88,6 +127,17 @@ func restart_editor(_args: Dictionary) -> Dictionary:
 
 func playing_status(_args: Dictionary) -> Dictionary:
 	var playing: bool = EditorInterface.is_playing_scene()
+	# The debugger's port with it, read now rather than remembered: it is taken again before every
+	# play, so the one from when this editor greeted the server is a number it has moved off.
+	var settings: EditorSettings = EditorInterface.get_editor_settings()
+	var debugger: int = (
+		int(settings.get_setting(DEBUGGER_SETTING))
+		if settings != null and settings.has_setting(DEBUGGER_SETTING)
+		else 0
+	)
 	return {
-		"ok": true, "playing": playing, "scenePath": EditorInterface.get_playing_scene() if playing else ""
+		"ok": true,
+		"playing": playing,
+		"scenePath": EditorInterface.get_playing_scene() if playing else "",
+		"debugPort": debugger
 	}

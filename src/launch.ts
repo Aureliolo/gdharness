@@ -79,15 +79,25 @@ export function runArguments(options: RunOptions): string[] {
   return args;
 }
 
+/** Where an editor is told to serve its language server and its debug adapter. */
+export interface EditorPorts {
+  readonly lsp: number;
+  readonly dap: number;
+}
+
 /**
  * The engine's argument list for opening the editor on a project.
  *
  * Never `--headless`: this one exists to put an editor in front of a person, and one nobody can
  * see is not that. Pure for the same reason as the rest of this file, since the editor is
  * spawned detached and its argv appears in no tool's answer.
+ *
+ * The two ports are named rather than left to the editor settings, which are one file for every
+ * editor on the machine: without this the second editor to open binds neither, and every script
+ * and debug tool behind it is answered by the first one about a different project.
  */
-export function editorArguments(projectPath: string): string[] {
-  return ['-e', '--path', projectPath];
+export function editorArguments(projectPath: string, ports: EditorPorts): string[] {
+  return ['-e', '--path', projectPath, '--lsp-port', String(ports.lsp), '--dap-port', String(ports.dap)];
 }
 
 /**

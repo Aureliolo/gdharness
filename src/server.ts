@@ -25,7 +25,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { announceBridge, withdrawBridge } from './bridge-announce.js';
 import { staleClassNames } from './class-cache.js';
-import { GodotDAPClient, handleDAPTool } from './dap_client.js';
+import { DEFAULT_DAP_PORT, GodotDAPClient, handleDAPTool } from './dap_client.js';
 import { dictionary, emptyRecord } from './dictionary.js';
 import { errorMessage, Refusal } from './errors.js';
 import { GameLog } from './game-log.js';
@@ -34,9 +34,17 @@ import { GodotLocator } from './godot-path.js';
 import { type HeadlessOutcome, runOperation } from './headless.js';
 import { defectReport, feedbackNotice } from './issues.js';
 import { parseJUnit, type TestReport } from './junit.js';
-import { editorArguments, envValue, resolveHeadless, runArguments, userDataIn } from './launch.js';
-import { GodotLSPClient, handleLSPTool } from './lsp_client.js';
+import {
+  type EditorPorts,
+  editorArguments,
+  envValue,
+  resolveHeadless,
+  runArguments,
+  userDataIn,
+} from './launch.js';
+import { DEFAULT_LSP_PORT, GodotLSPClient, handleLSPTool } from './lsp_client.js';
 import { resolveWithinProject } from './paths.js';
+import { freePort, portFromEnvOrNull } from './ports.js';
 import { projectStructure, searchProject } from './project-scan.js';
 import { parseProjectGodot, setupResourceHandlers } from './resources.js';
 import {
@@ -1029,7 +1037,7 @@ class GodotServer {
         response: this.createErrorResponse(
           `The editor is playing the game but its debug adapter did not answer: ${errorMessage(error)}`,
           [
-            'Godot serves the debug adapter on 6006 unless --dap-port says otherwise',
+            `This asked on port ${this.dap().port}, which is where the connected editor says it serves`,
             'GDHARNESS_DAP_PORT points this server at another one',
           ],
         ),
@@ -1511,7 +1519,8 @@ class GodotServer {
       return this.createErrorResponse(
         `Diagnostics unavailable: ${typeof reason === 'string' ? reason : JSON.stringify(reason)}`,
         [
-          'Ensure the Godot editor is running with its language server enabled, on port 6005 or on the port GDHARNESS_LSP_PORT names',
+          `Ensure the Godot editor is running with its language server enabled, on port ${this.editorServes('lspPort', 'GDHARNESS_LSP_PORT', DEFAULT_LSP_PORT)}`,
+          'GDHARNESS_LSP_PORT points this server at another one',
         ],
       );
     }
@@ -1534,7 +1543,12 @@ class GodotServer {
     toolName: string,
     args: unknown,
   ): Promise<{ content: { type: string; text: string }[] }> {
-    this.lspClient ??= new GodotLSPClient();
+    const port = this.editorServes('lspPort', 'GDHARNESS_LSP_PORT', DEFAULT_LSP_PORT);
+    if (this.lspClient !== null && this.lspClient.port !== port) {
+      await this.lspClient.disconnect();
+      this.lspClient = null;
+    }
+    this.lspClient ??= new GodotLSPClient(port);
     return handleLSPTool(this.lspClient, toolName, args);
   }
 
@@ -1547,8 +1561,32 @@ class GodotServer {
 
   /** The one debug adapter client, which the debug tools and an editor-played game share. */
   private dap(): GodotDAPClient {
-    this.dapClient ??= new GodotDAPClient();
+    const port = this.editorServes('dapPort', 'GDHARNESS_DAP_PORT', DEFAULT_DAP_PORT);
+    if (this.dapClient !== null && this.dapClient.port !== port) {
+      // Not disconnected first: the client whose port has moved is one whose editor is gone, so
+      // there is nothing on the other end of it to say goodbye to.
+      this.dapClient = null;
+    }
+    this.dapClient ??= new GodotDAPClient(port);
     return this.dapClient;
+  }
+
+  /**
+   * Which port to talk to: one named on purpose, then the one the connected editor says it serves,
+   * then the default.
+   *
+   * Godot keeps the language server and the debug adapter on one port each for the whole machine,
+   * so a second editor is moved off them when this server opens it. Following what the editor
+   * reports is what makes that work for an editor this server did not open, and across a harness
+   * reconnect, where the assignment was made by a process that is gone.
+   */
+  private editorServes(field: 'lspPort' | 'dapPort', variable: string, fallback: number): number {
+    const named = portFromEnvOrNull(variable);
+    if (named !== null) {
+      return named;
+    }
+    const status = this.godotBridge.getStatus();
+    return (status.connected ? status[field] : undefined) ?? fallback;
   }
 
   // -------------------------------------------------------------------------------------------
@@ -1595,7 +1633,11 @@ class GodotServer {
    * an editor holding this version's addon: an older one has no such command, and the staleness
    * in the same payload is what says why the answer is missing.
    */
-  private async editorPlayingState(): Promise<{ playing: boolean; scene: string } | null> {
+  private async editorPlayingState(): Promise<{
+    playing: boolean;
+    scene: string;
+    debugPort: number | undefined;
+  } | null> {
     const status = this.godotBridge.getStatus();
     if (!status.connected || status.addonVersion !== SERVER_VERSION) {
       return null;
@@ -1605,6 +1647,7 @@ class GodotServer {
       return {
         playing: readBoolean(asParams(answer), 'playing') ?? false,
         scene: readString(asParams(answer), 'scenePath') ?? '',
+        debugPort: readNumber(asParams(answer), 'debugPort'),
       };
     } catch {
       // The editor is there but did not answer this one, which the connection fields already
@@ -1632,15 +1675,22 @@ class GodotServer {
       }),
     );
 
+    const playing = await this.editorPlayingState();
     return this.jsonTextResponse({
-      editor: this.getEditorStatusPayload(),
+      editor: {
+        ...this.getEditorStatusPayload(),
+        // Asked of the editor rather than remembered from when it greeted this server: the
+        // debugger takes a port again before every play, so the one in the greeting is a number
+        // it has already moved off.
+        debugPort: playing?.debugPort ?? this.godotBridge.getStatus().debugPort,
+      },
       godot: {
         path: godotPath,
         version: godotPath === null ? null : await this.godotVersion(godotPath),
       },
       game: {
         processActive: this.activeProcess !== null,
-        playingInEditor: await this.editorPlayingState(),
+        playingInEditor: playing,
         runtimeConnected: games.some((game) => game.reachable),
         runtimes: games,
       },
@@ -1725,32 +1775,36 @@ class GodotServer {
     if (!project.ok) {
       return project.response;
     }
-    // The language server and the debug adapter hold one client each, whatever project they were
-    // opened on, and a second editor takes both from the first, which then gives up without
-    // retrying. The answers after that come from a process nobody can see.
+    // One server, one editor: the bridge carries a single connection, and a second editor opened
+    // here would be a second project answering on it rather than a second editor to talk to.
     if (this.godotBridge.isConnected()) {
-      return this.createErrorResponse(
-        'An editor is already connected to this server, and a second one would take the language server and debug adapter ports from it.',
-        [
-          'editor_status says which editor is answering, and for which project',
-          'editor_launch restart replaces the connected editor rather than joining it',
-          'Close the open editor first if the new project is the one you want',
-        ],
-      );
+      return this.createErrorResponse('An editor is already connected to this server.', [
+        'editor_status says which editor is answering, and for which project',
+        'editor_launch restart replaces the connected editor rather than joining it',
+        'Another project wants its own gdharness server, which is its own harness session',
+      ]);
     }
     const engine = await this.engine();
     if (!engine.ok) {
       return engine.response;
     }
     this.logDebug(`Launching Godot editor for project: ${project.value.path}`);
+    const ports = await this.portsForAnEditor();
     // Told rather than left to derive. A game is started by the editor and inherits its
     // environment, not this server's, so an editor opened without TMP or TEMP set announces its
     // games somewhere this server never looks first. Passing the directory down makes the two
-    // agree by construction for every editor gdharness opened.
-    const editor = spawn(engine.value, editorArguments(project.value.path), {
+    // agree by construction for every editor gdharness opened. The two ports are in the
+    // environment as well as on the command line, because the engine keeps what it was told to
+    // itself: this is how the addon knows what to write into the settings a restart reads.
+    const editor = spawn(engine.value, editorArguments(project.value.path, ports), {
       stdio: 'ignore',
       detached: true,
-      env: { ...process.env, GDHARNESS_RUNTIME_DIR: runtimeDirectory() },
+      env: {
+        ...process.env,
+        GDHARNESS_RUNTIME_DIR: runtimeDirectory(),
+        GDHARNESS_LSP_PORT: String(ports.lsp),
+        GDHARNESS_DAP_PORT: String(ports.dap),
+      },
     });
     const started = await new Promise<string | null>((resolve) => {
       editor.once('spawn', () => {
@@ -1768,7 +1822,24 @@ class GodotServer {
       launched: true,
       pid: editor.pid ?? null,
       projectPath: project.value.path,
+      lspPort: ports.lsp,
+      dapPort: ports.dap,
     });
+  }
+
+  /**
+   * The ports to open an editor on: the defaults whenever they are free, and anything else when
+   * they are not.
+   *
+   * Godot serves the language server and the debug adapter on one port each for the whole machine,
+   * so the second editor open binds neither and every script and debug tool behind it is answered
+   * by the first editor, about a different project. A port named in the environment is somebody's
+   * decision and is passed on rather than moved.
+   */
+  private async portsForAnEditor(): Promise<EditorPorts> {
+    const lsp = portFromEnvOrNull('GDHARNESS_LSP_PORT') ?? (await freePort(DEFAULT_LSP_PORT));
+    const dap = portFromEnvOrNull('GDHARNESS_DAP_PORT') ?? (await freePort(DEFAULT_DAP_PORT));
+    return { lsp, dap };
   }
 
   private async handleRunProject(args: OperationParams, op: string): Promise<ToolResponse> {
@@ -1872,7 +1943,7 @@ class GodotServer {
       return this.createErrorResponse(
         `The editor is connected but its debug adapter is not: ${errorMessage(error)}`,
         [
-          'Godot serves the debug adapter on 6006 unless --dap-port says otherwise',
+          `This asked on port ${this.dap().port}, which is where the connected editor says it serves`,
           'GDHARNESS_DAP_PORT points this server at another one',
         ],
       );
@@ -1901,6 +1972,9 @@ class GodotServer {
       through: 'editor',
       scene: scene === null ? 'the main scene' : `res://${scene}`,
       refreshedClasses,
+      // Which port the editor's debugger took, since it is the one port Godot has no command
+      // line option for and the addon moves itself off when another editor is holding it.
+      debugPort: readNumber(asParams(JSON.parse(answer.content[0]?.text ?? '{}')), 'debugPort'),
       message:
         'The editor is playing it, so its debugger holds it: the debug_* tools can reach it, ' +
         'editor_output reads its console through the debug adapter, and editor_run stop ends it.',

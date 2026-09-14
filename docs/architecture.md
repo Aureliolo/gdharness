@@ -159,8 +159,8 @@ one that just worked around it. It asks for the same yes before anything is file
   agent  <--------->  gdharness server
                             |
                             +- 6505  -->  gdharness_editor   websocket, in
-                            +- 6005  -->  language server    tcp, out
-                            +- 6006  -->  debug adapter      tcp, out
+                            +- 6005  -->  language server    tcp, out, moved per editor
+                            +- 6006  -->  debug adapter      tcp, out, moved per editor
                             +- auto  -->  gdharness_runtime  tcp, port in a file
                             `- spawn -->  godot --headless   one engine per call
 ```
@@ -174,12 +174,29 @@ exits when the call is answered.
 | Connection          | Transport                                 | Port               | Override                                      | Needs                                          |
 | ------------------- | ----------------------------------------- | ------------------ | --------------------------------------------- | ---------------------------------------------- |
 | Editor bridge       | WebSocket, editor connects to the server  | 6505, or any free  | `GDHARNESS_BRIDGE_PORT`                       | Editor open, addon enabled                     |
-| Language server     | TCP, server connects to the editor        | 6005               | `GDHARNESS_LSP_PORT`, Godot's `--lsp-port`    | Editor open                                    |
-| Debug adapter       | TCP, server connects to the editor        | 6006               | `GDHARNESS_DAP_PORT`, Godot's `--dap-port`    | Editor open                                    |
+| Language server     | TCP, server connects to the editor        | 6005, or any free  | `GDHARNESS_LSP_PORT`, Godot's `--lsp-port`    | Editor open                                    |
+| Debug adapter       | TCP, server connects to the editor        | 6006, or any free  | `GDHARNESS_DAP_PORT`, Godot's `--dap-port`    | Editor open                                    |
+| Editor debugger     | TCP, the game connects to the editor      | assigned by the OS | none: Godot has no option for it              | A game the editor is playing                   |
 | Runtime             | TCP loopback, server connects to the game | assigned by the OS | `GDHARNESS_RUNTIME_DIR` for the announce file | Game running, autoload registered, debug build |
 | Headless operations | Process, one per call                     | none               | `GODOT_PATH` for the binary                   | Nothing                                        |
 
-6005 and 6006 hold one client each. A second editor takes them from the first.
+**Godot keeps those three per machine, not per editor.** All three live in editor settings, which
+are one file for every editor on the machine, so two editors open at once want the same three
+numbers and the second binds none of them. Every script and debug tool in the session behind it is
+then answered by the first editor, about a different project, which is worse than not answering at
+all.
+
+So `editor_launch` opens an editor on the two Godot takes options for, `--lsp-port` and
+`--dap-port`, keeping 6005 and 6006 whenever they are free and taking anything else when they are
+not. It passes the same two in the environment, and the addon writes them into that editor's
+settings, so an editor that restarts itself comes back where it was. `editor_status` reports where
+the connected editor says it serves, and the server follows that rather than the default.
+
+The debugger is the third, and Godot takes no option for it, so the addon asks the operating system
+for one before every play. `editor_run` answers with the port it got.
+
+Two projects, two harness sessions, two servers and two editors therefore work at once. One server
+still serves one editor: the bridge carries a single connection.
 
 **The editor bridge is not at a number anybody agreed on.** A server set up by `setup` knows which
 project it serves, so it takes 6505 when that is free and any free port when it is not, and writes

@@ -18,6 +18,17 @@ const ANNOUNCE_PROTOCOL: int = 1
 const RECONNECT_DELAY: float = 3.0
 const MAX_RECONNECT_DELAY: float = 30.0
 
+## Where Godot keeps the three ports an editor serves. None of them is per editor: the settings
+## file is one for every editor on the machine, so two open at once want the same three and the
+## second one binds nothing.
+const LSP_SETTING: String = "network/language_server/remote_port"
+const DAP_SETTING: String = "network/debug_adapter/remote_port"
+const DEBUGGER_SETTING: String = "network/debug/remote_port"
+## What a server that opened this editor put in the environment, matching the ports it named on
+## the command line. Kept in step with `editorArguments` in src/launch.ts.
+const LSP_ASKED: String = "GDHARNESS_LSP_PORT"
+const DAP_ASKED: String = "GDHARNESS_DAP_PORT"
+
 ## How long one attempt is given before the address is called a bad one.
 ##
 ## A socket pointed at a port nothing holds gives up by itself, in thirty seconds on Windows. One
@@ -62,6 +73,7 @@ var _connecting_for: float = 0.0
 func _ready() -> void:
 	_project_path = ProjectSettings.globalize_path("res://")
 	version_at_load = _loaded_version()
+	_keep_the_ports_this_editor_was_given()
 
 	_reconnect_timer = Timer.new()
 	_reconnect_timer.one_shot = true
@@ -243,16 +255,71 @@ func _handle_connect() -> void:
 	# somebody restarts it, and nothing else can tell the two apart.
 	# The process id with it, because a restarted editor is a different process from the one
 	# whoever started it is holding, and nothing else says which one is now on the other end.
+	# The three ports with that, because a server that assumes the defaults talks to whichever
+	# editor took them, which on a machine running two is not this one.
 	_send_message(
 		{
 			"type": "godot_ready",
 			"project_path": _project_path,
 			"addon_version": version_at_load,
-			"editor_pid": OS.get_process_id()
+			"editor_pid": OS.get_process_id(),
+			"lsp_port": _serves(LSP_ASKED, LSP_SETTING),
+			"dap_port": _serves(DAP_ASKED, DAP_SETTING),
+			"debug_port": _serving(DEBUGGER_SETTING)
 		}
 	)
 
 	connected.emit()
+
+
+## Writes the ports this editor was started on into the settings it reads them from.
+##
+## The command line moved the language server and the debug adapter for this run and the engine
+## keeps that override to itself: the setting still reads whatever it read before, so an editor
+## that restarts itself comes back on the old number and lands on top of whichever editor holds
+## it. Writing it here is what makes the move survive a restart, and what leaves one place either
+## side has to read.
+func _keep_the_ports_this_editor_was_given() -> void:
+	if not Engine.is_editor_hint():
+		return
+	_keep_port(LSP_ASKED, LSP_SETTING)
+	_keep_port(DAP_ASKED, DAP_SETTING)
+
+
+func _keep_port(variable: String, setting: String) -> void:
+	var port: int = _asked_for(variable)
+	if port < 1 or port == _serving(setting):
+		return
+	var settings: EditorSettings = EditorInterface.get_editor_settings()
+	if settings != null:
+		settings.set_setting(setting, port)
+
+
+## What this editor serves: what it was told to when a server opened it, and what its settings
+## say otherwise. The first is the one that counts, because the settings are the thing the command
+## line was overriding.
+func _serves(variable: String, setting: String) -> int:
+	var asked: int = _asked_for(variable)
+	return asked if asked > 0 else _serving(setting)
+
+
+## The port this variable names, or 0 for anything that is not one.
+static func _asked_for(variable: String) -> int:
+	var said: String = OS.get_environment(variable)
+	if not said.is_valid_int():
+		return 0
+	var port: int = int(said)
+	return port if port >= 1 and port <= 65535 else 0
+
+
+## What the settings say this editor serves on, or 0 when there is nothing to ask.
+func _serving(setting: String) -> int:
+	if not Engine.is_editor_hint():
+		return 0
+	var settings: EditorSettings = EditorInterface.get_editor_settings()
+	if settings == null or not settings.has_setting(setting):
+		return 0
+	return int(settings.get_setting(setting))
 
 
 ## The version marker beside this addon, or "" when the copy was not installed by gdharness.
