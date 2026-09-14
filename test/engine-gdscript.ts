@@ -859,6 +859,14 @@ function main(): void {
     runFixture(godotPath, projectDir, 'runtime_query');
     runFixture(godotPath, projectDir, 'runtime_wait');
     runFixture(godotPath, projectDir, 'runtime_capture');
+    // An editor opened before its server has to keep asking. The wait is read back rather than
+    // trusted: a client that connected before the fixture started listening would otherwise
+    // pass this without ever having been refused.
+    const reconnect = runFixture(godotPath, projectDir, 'bridge_reconnect');
+    assert.ok(
+      asNumber(get(reconnect, 'waited_msec')) >= asNumber(get(reconnect, 'silence_msec')),
+      'the client should have been refused before anything answered it',
+    );
     // The game announces itself under the engine's temporary directory and the server looks
     // under Bun's; a platform where the two differ is one where no game is ever found. Both go
     // through the filesystem's own spelling, because Windows hands one side the 8.3 short name
