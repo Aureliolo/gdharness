@@ -38,7 +38,13 @@ import { GodotLSPClient, handleLSPTool } from './lsp_client.js';
 import { resolveWithinProject } from './paths.js';
 import { projectStructure, searchProject } from './project-scan.js';
 import { parseProjectGodot, setupResourceHandlers } from './resources.js';
-import { chooseRuntime, discoverRuntimes, runtimeDirectory, runtimeRequest } from './runtime-client.js';
+import {
+  chooseRuntime,
+  discoverRuntimes,
+  runtimeDirectory,
+  runtimeRequest,
+  runtimesAnnounced,
+} from './runtime-client.js';
 import type {
   GodotProcess,
   MCPToolDefinition,
@@ -1986,9 +1992,11 @@ class GodotServer {
     timeoutMs: number = this.runtimeTimeoutMs(),
   ): Promise<ToolResponse> {
     const { op: _op, projectPath, ...params } = asParams(args);
+    const announced = runtimesAnnounced();
     const choice = chooseRuntime(
-      discoverRuntimes(),
+      announced.running,
       typeof projectPath === 'string' ? projectPath : undefined,
+      announced.unspoken,
     );
     if ('problem' in choice) {
       return this.createErrorResponse(choice.problem);
