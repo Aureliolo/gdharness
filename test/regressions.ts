@@ -25,7 +25,13 @@ import { editorArguments, envValue, resolveHeadless, runArguments, userDataIn } 
 import { GodotLSPClient } from '../src/lsp_client.js';
 import { isWithinRoot, resolveWithinProject } from '../src/paths.js';
 import { parseProjectGodot } from '../src/resources.js';
-import { discoverRuntimes, runtimeDirectories } from '../src/runtime-client.js';
+import {
+  chooseRuntime,
+  discoverRuntimes,
+  RUNTIME_PROTOCOL,
+  runtimeDirectories,
+  runtimesAnnounced,
+} from '../src/runtime-client.js';
 import { HEADLESS_OPERATIONS } from '../src/server.js';
 import { addonMismatch } from '../src/server-version.js';
 import { TOOL_SPECS } from '../src/tool-definitions.js';
@@ -1395,6 +1401,58 @@ function testAGameIsFoundWhereverItAnnounced(): void {
 }
 
 /**
+ * A game too new to talk to is still a game, and its announcement survives being read.
+ *
+ * The failure this stops is quiet and it is the upgrade path's own doing. `setup.py` writes the
+ * new addon the moment a pin moves; the server a session already spawned stays as it was until the
+ * harness reconnects, so every upgrade has a window where the game speaks a protocol the server
+ * does not. The older server used to delete that announcement on the way past and answer that
+ * nobody was playing anything, which is the one answer that is certainly false, and the deletion
+ * took the game away from the newer server about to replace it as well.
+ */
+function testAGameTooNewToTalkToIsStillAGame(): void {
+  const root = mkdtempSync(join(tmpdir(), 'gdharness-unspoken-'));
+  try {
+    const directory = join(root, 'gdharness');
+    mkdirSync(directory, { recursive: true });
+    const announcement = join(directory, `runtime-${process.pid}.json`);
+    writeFileSync(
+      announcement,
+      JSON.stringify({
+        protocol: RUNTIME_PROTOCOL + 1,
+        pid: process.pid,
+        port: 51_235,
+        address: '127.0.0.1',
+        project: { name: 'Fixture', path: root },
+      }),
+      'utf8',
+    );
+
+    const announced = runtimesAnnounced([directory]);
+
+    assert.deepEqual(announced.running, [], 'there is nothing this server can talk to');
+    assert.equal(announced.unspoken.length, 1, 'but the game is reported rather than dropped');
+    assert.equal(announced.unspoken[0]?.protocol, RUNTIME_PROTOCOL + 1);
+    assert.ok(existsSync(announcement), 'and its announcement is still there for the next server');
+
+    const choice = chooseRuntime(announced.running, undefined, announced.unspoken);
+    assert.ok('problem' in choice, 'the call still fails');
+    const problem = 'problem' in choice ? choice.problem : '';
+    assert.ok(!problem.includes('No game'), `the answer does not claim nobody is playing: ${problem}`);
+    assert.ok(problem.includes('this server is the older half'), `it names the older half: ${problem}`);
+
+    // The check earning its keep: a dead process's announcement is still rubbish, and is still
+    // swept. Without this the one above passes on a function that never deletes anything.
+    const dead = join(directory, 'runtime-999999999.json');
+    writeFileSync(dead, '{}', 'utf8');
+    runtimesAnnounced([directory]);
+    assert.ok(!existsSync(dead), 'an announcement nobody is behind is still deleted');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+/**
  * A version mismatch sends the reader at whichever half is actually behind.
  *
  * Both directions happen, and the second is the one that got told to do the wrong thing: upgrading
@@ -2274,6 +2332,7 @@ async function main(): Promise<void> {
   testVersionOrdering();
   testTheStaleHalfIsNamedCorrectly();
   testAGameIsFoundWhereverItAnnounced();
+  testAGameTooNewToTalkToIsStillAGame();
   testATestRunKeepsOutOfThePlayersSaves();
   await testParametersReachTheEngine();
   await testGdUnitRunner();

@@ -86,18 +86,34 @@ function processAlive(pid: number): boolean {
   }
 }
 
-function parseAnnouncement(file: string, pid: number): RuntimeEndpoint | null {
+/**
+ * What one announcement turned out to be: a game to talk to, a game speaking a protocol this
+ * server does not, or nothing worth keeping.
+ */
+type Announced =
+  | { readonly kind: 'runtime'; readonly endpoint: RuntimeEndpoint }
+  | { readonly kind: 'unspoken'; readonly unspoken: UnspokenRuntime }
+  | { readonly kind: 'rubbish' };
+
+/** A game that is running and announcing, in a protocol this server was not built to speak. */
+export interface UnspokenRuntime {
+  readonly pid: number;
+  readonly protocol: number;
+  readonly project: { readonly name: string; readonly path: string };
+}
+
+function parseAnnouncement(file: string, pid: number): Announced {
   let fields: Record<string, unknown>;
   try {
     fields = asParams(JSON.parse(readFileSync(file, 'utf8')));
   } catch {
-    return null;
+    return { kind: 'rubbish' };
   }
   const project = readParams(fields, 'project');
   const port = readNumber(fields, 'port');
   const address = readString(fields, 'address');
+  const protocol = readNumber(fields, 'protocol');
   if (
-    readNumber(fields, 'protocol') !== RUNTIME_PROTOCOL ||
     readNumber(fields, 'pid') !== pid ||
     port === undefined ||
     !Number.isInteger(port) ||
@@ -106,41 +122,65 @@ function parseAnnouncement(file: string, pid: number): RuntimeEndpoint | null {
     address === undefined ||
     project === undefined
   ) {
-    return null;
+    return { kind: 'rubbish' };
   }
-  return {
-    pid,
-    port,
-    address,
-    project: { name: readString(project, 'name') ?? '', path: readString(project, 'path') ?? '' },
-    file,
+  const named = {
+    name: readString(project, 'name') ?? '',
+    path: readString(project, 'path') ?? '',
   };
+  // A protocol this server does not speak is a running game, not rubbish, and the difference
+  // decides whether its announcement survives. Deleting it takes the game away from the newer
+  // server that is about to replace this one as well: `setup.py` upgrades the addon on disk the
+  // moment a pin moves while the server a session already spawned stays as it was, so every
+  // upgrade has a window where the game is ahead of the server. Kept and named instead, so the
+  // answer is which half is behind rather than that nobody is playing anything.
+  if (protocol !== RUNTIME_PROTOCOL) {
+    return { kind: 'unspoken', unspoken: { pid, protocol: protocol ?? 0, project: named } };
+  }
+  return { kind: 'runtime', endpoint: { pid, port, address, project: named, file } };
+}
+
+/** What a sweep of the announcement directories found: games to talk to, and games too new. */
+export interface RuntimesAnnounced {
+  readonly running: RuntimeEndpoint[];
+  readonly unspoken: UnspokenRuntime[];
 }
 
 /**
  * Every game announced anywhere one could have announced itself, whose process still exists.
  *
  * An announcement whose process is gone, or that cannot be read as one, is deleted on the way
- * past: a game that crashed never removed its own, and nothing else will. The same process id
- * found in two directories is one game, since a game writes one file and only its own.
+ * past: a game that crashed never removed its own, and nothing else will. One whose protocol this
+ * server does not speak is kept and reported, for the reason written on [parseAnnouncement]. The
+ * same process id found in two directories is one game, since a game writes one file and only its
+ * own.
  */
-export function discoverRuntimes(directories: readonly string[] = runtimeDirectories()): RuntimeEndpoint[] {
-  const found = new Map<number, RuntimeEndpoint>();
+export function runtimesAnnounced(directories: readonly string[] = runtimeDirectories()): RuntimesAnnounced {
+  const running = new Map<number, RuntimeEndpoint>();
+  const unspoken = new Map<number, UnspokenRuntime>();
   for (const directory of directories) {
-    for (const endpoint of announcedIn(directory)) {
-      if (!found.has(endpoint.pid)) {
-        found.set(endpoint.pid, endpoint);
+    for (const found of announcedIn(directory)) {
+      if (found.kind === 'runtime' && !running.has(found.endpoint.pid)) {
+        running.set(found.endpoint.pid, found.endpoint);
+      } else if (found.kind === 'unspoken' && !unspoken.has(found.unspoken.pid)) {
+        unspoken.set(found.unspoken.pid, found.unspoken);
       }
     }
   }
-  return [...found.values()].sort((a, b) => b.pid - a.pid);
+  const newest = (a: { pid: number }, b: { pid: number }): number => b.pid - a.pid;
+  return { running: [...running.values()].sort(newest), unspoken: [...unspoken.values()].sort(newest) };
 }
 
-function announcedIn(directory: string): RuntimeEndpoint[] {
+/** Only the games this server can talk to, for a caller with nothing to say about the rest. */
+export function discoverRuntimes(directories: readonly string[] = runtimeDirectories()): RuntimeEndpoint[] {
+  return runtimesAnnounced(directories).running;
+}
+
+function announcedIn(directory: string): Announced[] {
   if (!existsSync(directory)) {
     return [];
   }
-  const found: RuntimeEndpoint[] = [];
+  const found: Announced[] = [];
   for (const entry of readdirSync(directory)) {
     const match = ANNOUNCEMENT_PATTERN.exec(entry);
     if (!match) {
@@ -148,16 +188,16 @@ function announcedIn(directory: string): RuntimeEndpoint[] {
     }
     const file = join(directory, entry);
     const pid = Number.parseInt(match[1] ?? '', 10);
-    const endpoint = processAlive(pid) ? parseAnnouncement(file, pid) : null;
-    if (endpoint) {
-      found.push(endpoint);
-    } else {
+    const announced: Announced = processAlive(pid) ? parseAnnouncement(file, pid) : { kind: 'rubbish' };
+    if (announced.kind === 'rubbish') {
       try {
         unlinkSync(file);
       } catch {
         // Another reader may have cleaned it first, which is the same outcome.
       }
+      continue;
     }
+    found.push(announced);
   }
   return found;
 }
@@ -169,12 +209,38 @@ function describe(endpoint: RuntimeEndpoint): string {
 }
 
 /**
+ * What to say when the only games running speak a protocol this server was not built for.
+ *
+ * Which half is behind, and what to do about it, because "no game is running" is the one answer
+ * that is certainly false here and it sends the reader to start a second game.
+ */
+function tooNew(unspoken: readonly UnspokenRuntime[]): string {
+  const named = unspoken
+    .map(
+      (game) =>
+        `pid ${game.pid} speaks ${game.protocol} (${game.project.name || 'unnamed'} at ${game.project.path})`,
+    )
+    .join('; ');
+  const half = unspoken.some((game) => game.protocol > RUNTIME_PROTOCOL)
+    ? 'this server is the older half: reconnect it so it spawns the installed version'
+    : 'the addon is the older half: reinstall it and restart the game';
+  return `A game is running, in a protocol this server does not speak ${named}. This server speaks ${RUNTIME_PROTOCOL}, so ${half}.`;
+}
+
+/**
  * The one game to talk to. With a project path, the game running that project; without one,
  * the only game running. Two games and no project path is a question this cannot answer, and
  * the answer names both so the caller can.
  */
-export function chooseRuntime(endpoints: readonly RuntimeEndpoint[], projectPath?: string): RuntimeChoice {
+export function chooseRuntime(
+  endpoints: readonly RuntimeEndpoint[],
+  projectPath?: string,
+  unspoken: readonly UnspokenRuntime[] = [],
+): RuntimeChoice {
   if (endpoints.length === 0) {
+    if (unspoken.length > 0) {
+      return { problem: tooNew(unspoken) };
+    }
     return {
       problem:
         'No game with the runtime addon is running. Start one with editor_run, or play the project from the editor with the addon enabled.',
