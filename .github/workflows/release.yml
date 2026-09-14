@@ -243,6 +243,79 @@ jobs:
           fi
           echo "npm serves the signed archive: ${actual}."
 
+  # Publishing is not installing. Everything above reads the bytes the registry holds; nothing
+  # runs them, and the two come apart: a `files` list missing an entry, a bin that does not
+  # resolve, a shebang the runtime will not take, a bundle that only Bun can load. Each of those
+  # publishes green and installs broken, and the first to know is whoever typed the line out of
+  # the documentation.
+  #
+  # So it is typed here first, on every platform it is documented for, against the version that
+  # was published a minute ago. It reports rather than gates: npm is immutable and the release
+  # exists by the time this runs, so a red job is the signal to cut a patch. Knowing is the part
+  # that was missing.
+  installs:
+    name: installs (${{ matrix.platform }})
+    if: github.repository == 'Aureliolo/gdharness'
+    needs: [build, npm]
+    strategy:
+      fail-fast: false
+      matrix:
+        # Renovate reads a runner out of `runs-on:` but not out of a matrix, so each of these
+        # carries its own line for it.
+        include:
+          - platform: linux
+            # renovate: datasource=github-runners depName=ubuntu
+            runner: ubuntu-24.04
+          - platform: windows
+            # renovate: datasource=github-runners depName=windows
+            runner: windows-2025
+          - platform: macos
+            # renovate: datasource=github-runners depName=macos
+            runner: macos-26
+
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+
+    steps:
+      # No checkout: a reader has none of this repository, and anything taken from it here would
+      # be a thing the published package was not asked for.
+      - name: The published line says who it is
+        shell: bash
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          said="$(npx -y "gdharness@${VERSION}" --version)"
+          if [ "${said}" != "gdharness v${VERSION}" ]; then
+            echo "npx -y gdharness@${VERSION} --version said: ${said}" >&2
+            exit 1
+          fi
+          echo "${said}"
+
+      - name: And reads the project it is pointed at
+        shell: bash
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          project="${RUNNER_TEMP}/fixture"
+          mkdir -p "${project}"
+          printf 'config_version=5\n' > "${project}/project.godot"
+          cd "${project}"
+
+          # doctor starts no engine, so this holds on a runner with no Godot on it. A bare project
+          # has problems and exit 1 is how it says so; 2 would mean the command itself was
+          # refused, which is the failure worth telling apart from a project that needs setup.
+          status=0
+          report="$(npx -y "gdharness@${VERSION}" doctor --json)" || status=$?
+          if [ "${status}" != "1" ]; then
+            echo "doctor on a bare project exited ${status}:" >&2
+            printf '%s\n' "${report}" >&2
+            exit 1
+          fi
+          printf '%s' "${report}" | jq -e '.problems | length > 0' > /dev/null
+          echo "doctor read the project and named $(printf '%s' "${report}" | jq -r '.problems | length') problems."
+
   # The official MCP registry is the record every marketplace downstream of it reads: they scrape
   # its server list on their own schedule and show whatever it holds. So a registry entry that
   # lags the releases is a stale listing everywhere at once, and the only way it does not lag is
