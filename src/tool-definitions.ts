@@ -877,7 +877,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     operations: {
       click: {
         summary:
-          'press and release on a Control, a frame apart, and answer with what was under the pointer and what became of the control: in_tree, removed or freed',
+          'press and release on a Control, a frame apart, and answer with what was under the pointer and what became of the control: in_tree, removed or freed. A control out of sight inside a ScrollContainer is scrolled to first, and scrolled_into_view says whether the view moved',
         requires: ['nodePath'],
       },
       action: { summary: 'press or release an action', requires: ['action'] },

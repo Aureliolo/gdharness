@@ -12,6 +12,10 @@ const TO_SMALL: int = 32
 const NEWLINE: int = 10
 const TAB: int = 9
 
+## What a game started without a window gets whatever the project settings say, and the usual
+## reason a control is out of reach. Only worth telling somebody when it is what they have.
+const HEADLESS_VIEWPORT: Vector2 = Vector2(64, 64)
+
 var _host: Node
 var _values: Values
 
@@ -216,10 +220,33 @@ func inject_mouse_motion(params: Dictionary) -> Dictionary:
 	}
 
 
+## Scrolls whatever is holding [param control] until it is on screen, and answers whether
+## anything moved.
+##
+## Innermost container first and outwards, because ensuring visibility inside an inner one moves
+## the control within the outer one, so the outer has to be asked after the inner has finished
+## moving it. A control with no ScrollContainer over it moves nothing and answers false, which is
+## what keeps the refusal below saying the right thing about a control that is simply off screen.
+static func _scroll_into_view(control: Control) -> bool:
+	var moved: bool = false
+	var walking: Node = control.get_parent()
+	while walking != null:
+		var holder: ScrollContainer = walking as ScrollContainer
+		if holder != null:
+			holder.ensure_control_visible(control)
+			moved = true
+		walking = walking.get_parent()
+	return moved
+
+
 ## A whole click on a Control: the pointer moves onto it, the button goes down, a frame passes,
 ## the button comes up. BaseButton fires on the release, which is why a single injected press
 ## never pressed anything. The position is the control's centre carried into window pixels, so
 ## the caller never has to do that arithmetic.
+##
+## A control out of sight inside a ScrollContainer is scrolled to first; the answer says so under
+## `scrolled_into_view`, because the view having moved is a thing that happened to the screen and
+## the caller is the only one who can tell whether that matters.
 func click(params: Dictionary) -> Dictionary:
 	var node_path: String = str(params.get("path", ""))
 	if node_path.is_empty():
@@ -236,6 +263,19 @@ func click(params: Dictionary) -> Dictionary:
 
 	var viewport: Viewport = control.get_viewport()
 	var centre: Vector2 = control.get_global_transform_with_canvas() * (control.size * 0.5)
+
+	# A control below the fold of a ScrollContainer is not out of reach, it is one scroll away,
+	# which is what a person does without thinking about it before they click. Refusing it
+	# instead sent callers to emit the button's own signal, which presses nothing, runs none of
+	# the input path and reports success.
+	var scrolled: bool = false
+	if not viewport.get_visible_rect().has_point(centre):
+		scrolled = _scroll_into_view(control)
+		if scrolled:
+			# A container moves its child on the next layout pass rather than inside the call.
+			await _host.get_tree().process_frame
+			centre = control.get_global_transform_with_canvas() * (control.size * 0.5)
+
 	var position: Vector2 = viewport.get_final_transform() * centre
 	# The GUI only delivers to what is inside the viewport, so a centre outside it would be a
 	# click that silently reached nothing. A game with no window has a 64 by 64 viewport
@@ -243,11 +283,17 @@ func click(params: Dictionary) -> Dictionary:
 	# something the caller can read off the rect on its own.
 	if not viewport.get_visible_rect().has_point(centre):
 		var why: String = ""
-		if not _host.get_tree().root.can_draw():
-			why = (
-				". This game has no window, and a game with no window has a 64 by 64 viewport "
-				+ "whatever the project settings say: run it with a window to reach this control"
-			)
+		if scrolled:
+			why = ". It was scrolled as far as what holds it goes and is still out there"
+		elif not _host.get_tree().root.can_draw():
+			why = ". This game has no window: run it with a window to reach this control"
+			# Only where it is true. The rect is printed just above, so claiming 64 by 64 over a
+			# viewport somebody has resized says two different things in one sentence.
+			if viewport.get_visible_rect().size == HEADLESS_VIEWPORT:
+				why = (
+					". This game has no window, and a game with no window has a 64 by 64 viewport "
+					+ "whatever the project settings say: run it with a window to reach this control"
+				)
 		return {
 			"type": "error",
 			"message":
@@ -298,6 +344,7 @@ func click(params: Dictionary) -> Dictionary:
 		"hovered": hovered_path,
 		"landed": landed,
 		"control_afterwards": afterwards,
+		"scrolled_into_view": scrolled,
 	}
 
 
