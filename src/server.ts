@@ -109,6 +109,23 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const EDITOR_RESTART_TIMEOUT_MS = 90_000;
 
 /**
+ * The frame rate a wait counts at, which is deliberately lower than any game draws.
+ *
+ * Only a bound on patience: the answer comes when the frames have passed, whatever rate they
+ * passed at. Twenty is slow enough to cover a game working through a day turn and fast enough
+ * that a game which has stopped drawing is still called stuck rather than waited on for a minute.
+ */
+const SLOWEST_FRAME_RATE = 20;
+
+/**
+ * How long a wait of this many frames is given before the game is called stuck, which is never
+ * less than [param atLeast], the patience every other command gets.
+ */
+export function patienceForFrames(frames: number, atLeast: number): number {
+  return Math.max(atLeast, (frames / SLOWEST_FRAME_RATE) * 1000 + atLeast);
+}
+
+/**
  * How often to ask again for a bridge port somebody else is holding.
  *
  * Two seconds: the wait is nearly always a server on its way out, which takes a moment, and the
@@ -861,6 +878,12 @@ class GodotServer {
             });
           case 'find':
             return await this.handleFindRuntimeNodes(args);
+          case 'text':
+            return await this.handleRuntimeCommand('read_text', {
+              projectPath: args['projectPath'],
+              root: readNonEmptyString(args, 'nodePath') ?? '/root',
+              include_hidden: readBoolean(args, 'includeHidden') ?? false,
+            });
           case 'rect':
             return await this.handleRuntimeCommand('get_rect', {
               projectPath: args['projectPath'],
@@ -2334,12 +2357,19 @@ class GodotServer {
     const nodePath = readNonEmptyString(args, 'nodePath') ?? '';
     const patience = Math.max(this.runtimeTimeoutMs(), timeoutMs + 5000);
     switch (op) {
-      case 'frames':
+      case 'frames': {
+        const frames = readPositiveNumber(args, 'frames') ?? 1;
+        // Long enough for the frames themselves, which the flat patience is not: 600 frames is ten
+        // seconds at sixty a second and the answer arrived as the call gave up on it, twice in one
+        // session. Counted at a rate no game running at all falls under, because a game busy
+        // enough to be worth waiting on is exactly the one drawing slowly.
+        const waited = patienceForFrames(frames, patience);
         return await this.handleRuntimeCommand(
           'wait_frames',
-          { projectPath: args['projectPath'], frames: readPositiveNumber(args, 'frames') ?? 1 },
-          patience,
+          { projectPath: args['projectPath'], frames },
+          waited,
         );
+      }
       case 'signal':
         return await this.handleRuntimeCommand(
           'wait_signal',
