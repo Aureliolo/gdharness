@@ -2466,7 +2466,45 @@ function testEveryToolParameterIsRead(): void {
   assert.ok(checked >= 60, `only ${checked} tool parameters were checked, so this proved little`);
 }
 
+/**
+ * Every script in an installed addon carries the `.uid` that fixes its identity.
+ *
+ * Godot 4.4 writes one beside each script and reads it back so a reference survives a rename.
+ * An addon shipped without them is re-identified by whichever editor opens it: a warning per
+ * script at every start, a different identity on every machine, and, because installing deletes
+ * the directory and copies it again, the same warnings back after every upgrade. Fourteen of them
+ * turned up in one project's console. The operations scripts run from outside a project, so
+ * nothing scans them and they have none.
+ */
+function testEveryAddonScriptKeepsItsIdentity(): void {
+  const scripts: string[] = [];
+  const walk = (directory: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        walk(path);
+      } else if (entry.name.endsWith('.gd')) {
+        scripts.push(path);
+      }
+    }
+  };
+  walk('src/godot/addons');
+  assert.ok(scripts.length >= 14, `only ${scripts.length} addon scripts were found, so this proved little`);
+
+  const identities = new Map<string, string>();
+  for (const script of scripts) {
+    const beside = `${script}.uid`;
+    assert.ok(existsSync(beside), `${script} ships without the ${basename(beside)} that names it`);
+    const uid = readFileSync(beside, 'utf8').trim();
+    assert.match(uid, /^uid:\/\/[0-9a-z]+$/, `${beside} should hold one uid:// line`);
+    const taken = identities.get(uid);
+    assert.equal(taken, undefined, `${script} and ${taken} both claim ${uid}`);
+    identities.set(uid, script);
+  }
+}
+
 async function main(): Promise<void> {
+  testEveryAddonScriptKeepsItsIdentity();
   testEveryDispatchedNameExistsOnBothSides();
   testEveryEngineParameterCanBeSent();
   testEveryToolParameterIsRead();
