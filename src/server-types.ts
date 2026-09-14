@@ -17,6 +17,14 @@ export interface GodotProcess {
   exitCode: number | null;
   /** True when the editor was asked to play it, so stopping it is the editor's job too. */
   throughEditor: boolean;
+  /**
+   * The last error the editor broke this game on, once it has been written into the log.
+   *
+   * Held so it is written down once. The adapter goes on reporting the same stop for as long as
+   * the game sits at it, and every ask for the console drains the adapter, so without this one
+   * error became one more error on every call.
+   */
+  brokeOn: string | null;
 }
 
 /** A game this server started itself, which therefore always has a process behind it. */
