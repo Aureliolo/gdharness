@@ -842,7 +842,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'runtime_input',
     description:
-      'Input to the running game: a whole click on a Control named by path, or a raw action, key, mouse button or mouse motion. All of it works headless, where the window is 64 by 64 and the GUI only takes what is inside it.',
+      'Input to the running game: a whole click on a Control named by path, typing into whatever has the focus, or a raw action, key, mouse button or mouse motion. All of it works headless, where the window is 64 by 64 and the GUI only takes what is inside it.',
     parameters: {
       projectPath: RUNNING_PROJECT_PATH,
       nodePath: { type: 'string', description: 'click: the Control to click, at its centre.' },
@@ -850,6 +850,10 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       pressed: { type: 'boolean', description: 'Press or release. Default true.' },
       strength: { type: 'number', description: 'action: 0 to 1. Default 1.' },
       keycode: { type: 'string', description: 'key: the key name, such as "Space" or "A".' },
+      text: {
+        type: 'string',
+        description: 'text: what to type. A newline is Enter and a tab is Tab.',
+      },
       shift: { type: 'boolean' },
       ctrl: { type: 'boolean' },
       alt: { type: 'boolean' },
@@ -873,6 +877,10 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       action: { summary: 'press or release an action', requires: ['action'] },
       key: { summary: 'press or release a key', requires: ['keycode'] },
+      text: {
+        summary: 'type a string wherever the focus is, a character at a time',
+        requires: ['text'],
+      },
       mouse_click: { summary: 'one mouse button event at a position', requires: ['x', 'y'] },
       mouse_motion: { summary: 'move the mouse to a position', requires: ['x', 'y'] },
     },

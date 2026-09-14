@@ -58,6 +58,7 @@ that is running, and the project on disk. ${TOOL_SPECS.length} tools, named \`do
 | Where a control is, and whether it is visible | \`runtime_inspect\` \`find\`, \`rect\` |
 | What a property reads right now | \`runtime_inspect\` \`property\`, \`runtime_invoke\` |
 | Press a button | \`runtime_input click\`, which says what was under the pointer |
+| Fill in a field | \`runtime_input click\` on it, then \`runtime_input text\` |
 | Wait for something | \`runtime_wait\`, never a sleep |
 | A picture, for a person who asked to see one | \`runtime_capture\` |
 
