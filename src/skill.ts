@@ -59,6 +59,8 @@ that is running, and the project on disk. ${TOOL_SPECS.length} tools, named \`do
 | What a property reads right now | \`runtime_inspect\` \`property\`, \`runtime_invoke\` |
 | Press a button | \`runtime_input click\`, which says what was under the pointer |
 | Fill in a field | \`runtime_input click\` on it, then \`runtime_input text\` |
+| Click somebody standing in a 3D room | \`runtime_input click\` on the Node3D, which aims at what it draws |
+| Where a 3D node is on screen | \`runtime_inspect\` \`rect\`, rather than unprojecting by hand |
 | Wait for something | \`runtime_wait\`, never a sleep |
 | A picture, for a person who asked to see one | \`runtime_capture\` |
 

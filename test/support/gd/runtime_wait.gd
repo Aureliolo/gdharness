@@ -6,6 +6,11 @@ extends SceneTree
 
 const Runtime = preload("res://addons/gdharness_runtime/runtime_autoload.gd")
 
+## How tall the room's camera sees, in metres. Against a 480 pixel viewport that is 48 pixels a
+## metre, which is what makes every figure in [method _check_the_room] exact rather than read back
+## off whatever the engine answered.
+const ROOM_METRES: float = 10.0
+
 var failures: Array[String] = []
 var node: Runtime
 var button: Button
@@ -50,6 +55,7 @@ func _run() -> void:
 	await process_frame
 
 	await _check_click()
+	await _check_the_room()
 	await _check_frames()
 	await _check_signal()
 	await _check_until()
@@ -134,6 +140,114 @@ func _check_click() -> void:
 	)
 	if removed.get("control_afterwards") != "removed":
 		_fail("a button taken out of the tree by its own click should be reported removed: %s" % str(removed))
+
+
+## Somebody standing in a 3D room, which is the other half of what a game puts on screen and had
+## no answer at all: a rect refused a Node3D, and a click took Controls only.
+##
+## Everything here is arithmetic rather than a picture, so it works in an engine with nothing
+## drawn. An orthographic camera is what makes the expected numbers exact: 480 pixels of viewport
+## over ten metres of camera is 48 pixels a metre, and the figures below are read off that rather
+## than off whatever the engine happened to answer.
+##
+## The body's origin is on the floor and its mesh is a metre above it, the way a character is
+## built, because that gap is the whole reason the aim is the middle of what a node draws rather
+## than the point it is standing on.
+func _check_the_room() -> void:
+	var eye: Camera3D = Camera3D.new()
+	eye.name = "Eye"
+	eye.projection = Camera3D.PROJECTION_ORTHOGONAL
+	eye.size = ROOM_METRES
+	eye.position = Vector3(0.0, 0.0, 10.0)
+	root.add_child(eye)
+	eye.make_current()
+
+	var body: Node3D = Node3D.new()
+	body.name = "Body"
+	# Down and to the right of the middle, which is where the rest of this fixture's panels are
+	# not. A click that landed on one of those would be reported as swallowed and be right.
+	body.position = Vector3(2.5, -3.0, 0.0)
+	root.add_child(body)
+	var shape: MeshInstance3D = MeshInstance3D.new()
+	shape.mesh = BoxMesh.new()
+	shape.position = Vector3(0.0, 1.0, 0.0)
+	body.add_child(shape)
+	await process_frame
+
+	await _check_the_body_is_placed()
+	await _check_the_body_can_be_clicked()
+	await _check_a_panel_over_the_room()
+	await _check_a_body_behind_the_camera(body)
+
+	body.free()
+	eye.free()
+
+
+func _check_the_body_is_placed() -> void:
+	var placed: Dictionary = await node._execute_command("get_rect", {"path": "/root/Body"})
+	if placed.get("type") != "point":
+		_fail("a 3D node should have a place on screen: %s" % str(placed))
+		return
+	var canvas: Dictionary = placed.get("canvas", {})
+	# The mesh's middle, a metre above the floor the body stands on, rather than the body's own
+	# origin: that would be 384 here, and a click there lands at its feet.
+	if canvas.get("x") != 440.0 or canvas.get("y") != 336.0:
+		_fail("a 3D node is placed where its mesh is drawn: %s" % str(placed))
+	if placed.get("behind_camera") != false or placed.get("camera") != "/root/Eye":
+		_fail("and says which camera drew it and that it is in front of it: %s" % str(placed))
+	# A one-metre box seen at 48 pixels a metre, centred on the same point.
+	var covered: Dictionary = placed.get("covers", {})
+	var covers: Dictionary = covered.get("canvas", {})
+	var corner: Dictionary = covers.get("position", {})
+	var across: Dictionary = covers.get("size", {})
+	if corner.get("x") != 416.0 or corner.get("y") != 312.0:
+		_fail("and the rectangle it covers starts at the corner of its box: %s" % str(placed))
+	if across.get("x") != 48.0 or across.get("y") != 48.0:
+		_fail("and is as wide as the box is: %s" % str(placed))
+
+
+func _check_the_body_can_be_clicked() -> void:
+	var clicked: Dictionary = await node._execute_command("click", {"path": "/root/Body"})
+	if clicked.get("type") != "clicked":
+		_fail("a 3D node should be clickable: %s" % str(clicked))
+		return
+	var at: Dictionary = clicked.get("position", {})
+	if at.get("x") != 440.0 or at.get("y") != 336.0:
+		_fail("and the click goes where the rect said it is: %s" % str(clicked))
+	# Nothing on the interface took it, so it reached the game's own input, which is as close to
+	# landing as anything outside the game can say.
+	if clicked.get("landed") != true or clicked.get("hovered") != null:
+		_fail("and lands when no panel is over it: %s" % str(clicked))
+
+
+## A panel over the room, which is the failure worth naming: the press never reaches the floor and
+## the game looks like one that ignored it.
+func _check_a_panel_over_the_room() -> void:
+	var over: Panel = Panel.new()
+	over.name = "Over"
+	over.position = Vector2(400, 300)
+	over.size = Vector2(100, 100)
+	root.add_child(over)
+	await process_frame
+
+	var swallowed: Dictionary = await node._execute_command("click", {"path": "/root/Body"})
+	if swallowed.get("landed") != false or swallowed.get("hovered") != "/root/Over":
+		_fail("a panel over the room should be named as what took the click: %s" % str(swallowed))
+	over.free()
+
+
+func _check_a_body_behind_the_camera(body: Node3D) -> void:
+	body.position = Vector3(2.5, -3.0, 20.0)
+	await process_frame
+
+	var placed: Dictionary = await node._execute_command("get_rect", {"path": "/root/Body"})
+	if placed.get("behind_camera") != true or placed.has("canvas"):
+		_fail("a node behind the camera has no place on screen and says so: %s" % str(placed))
+
+	var refused: Dictionary = await node._execute_command("click", {"path": "/root/Body"})
+	if refused.get("type") != "error" or not str(refused.get("message", "")).contains("behind the camera"):
+		_fail("and cannot be clicked: %s" % str(refused))
+	body.position = Vector3(2.5, -3.0, 0.0)
 
 
 ## The Yes on a confirmation dialog, which is what stands between a player and every destructive

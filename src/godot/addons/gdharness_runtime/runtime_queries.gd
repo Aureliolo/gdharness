@@ -134,9 +134,10 @@ func _matches(
 	return true
 
 
-## Where a node is on screen: a Control's rectangle, or a Node2D's position, in both the
-## canvas coordinates the node reports and the window pixels input arrives in. The two differ
-## whenever the project stretches its viewport, which is what made a rect unusable for a click.
+## Where a node is on screen: a Control's rectangle, a Node2D's position, or the place a 3D node
+## is drawn in, in both the canvas coordinates the node reports and the window pixels input
+## arrives in. The two differ whenever the project stretches its viewport, which is what made a
+## rect unusable for a click.
 func get_rect(params: Dictionary) -> Dictionary:
 	var node_path: String = str(params.get("path", ""))
 	if node_path.is_empty():
@@ -168,9 +169,122 @@ func get_rect(params: Dictionary) -> Dictionary:
 			"canvas": _values.serialize(canvas_position),
 			"window": _values.serialize(window_position),
 		}
+	if node is Node3D:
+		return _in_the_frame(node_path, node)
 	return {
 		"type": "error", "message": "%s is a %s, which has no place on screen" % [node_path, node.get_class()]
 	}
+
+
+## Where a 3D node is in the frame drawing it: the point to aim at, and the rectangle its own
+## geometry covers, each in canvas coordinates and in window pixels.
+##
+## A 3D node had no answer here at all, so placing one meant reading its position, finding the
+## camera and calling unproject_position by hand. Three calls, and anything that walks has walked
+## between the first and the third: the aim lands where the thing used to be.
+##
+## The camera is named in the answer, because "where is it on screen" is a question about a camera
+## and a game with two of them has two answers.
+func _in_the_frame(node_path: String, item: Node3D) -> Dictionary:
+	var found: Dictionary = in_frame(item)
+	if found.is_empty():
+		return {
+			"type": "error",
+			"message": "%s is not in a viewport with a current Camera3D, so nothing is drawing it" % node_path
+		}
+
+	var to_window: Transform2D = item.get_viewport().get_final_transform()
+	var answer: Dictionary = {
+		"type": "point",
+		"path": node_path,
+		"visible": item.is_visible_in_tree(),
+		"camera": found["camera"],
+		"behind_camera": found["behind"],
+	}
+	if found.has("aim"):
+		var aim: Vector2 = found["aim"]
+		answer["canvas"] = _values.serialize(aim)
+		answer["window"] = _values.serialize(to_window * aim)
+	if found.has("rect"):
+		var covered: Rect2 = found["rect"]
+		answer["covers"] = {
+			"canvas": _values.serialize(covered),
+			"window": _values.serialize(to_window * covered),
+		}
+	return answer
+
+
+## What anything aiming at a 3D node needs: the camera that draws it, whether it is behind that
+## camera, the point on screen to aim at, and the rectangle it covers. Empty when no camera is
+## drawing it at all.
+##
+## The aim is the middle of what the node draws rather than its origin, because a person clicking
+## a character clicks the character and a character's origin is on the floor under their feet. A
+## node that draws nothing has no middle and falls back to the origin, which is still a place.
+##
+## Absent keys rather than nulls: nothing drawn, or behind the camera, and each of those is a
+## different answer from a coordinate that happens to be zero. Public and static because the click
+## has to aim at the same point this reports, and two copies of the arithmetic would be two places
+## on screen for one node the first time either changed.
+static func in_frame(item: Node3D) -> Dictionary:
+	var viewport: Viewport = item.get_viewport()
+	if viewport == null:
+		return {}
+	var camera: Camera3D = viewport.get_camera_3d()
+	if camera == null:
+		return {}
+
+	var origin: Vector3 = item.global_transform.origin
+	var found: Dictionary = {"camera": str(camera.get_path()), "behind": camera.is_position_behind(origin)}
+	var box: AABB = drawn_box(item)
+	var draws: bool = box.size != Vector3.ZERO
+	var middle: Vector3 = box.get_center() if draws else origin
+	if not camera.is_position_behind(middle):
+		found["aim"] = camera.unproject_position(middle)
+	if draws:
+		found.merge(_around(box, camera))
+	return found
+
+
+## The rectangle [param box] covers on screen, under the key `rect`, or nothing when any of it is
+## behind the camera.
+##
+## All eight corners, because a box in space is not a box in the frame: an orthographic camera
+## looking down a diagonal draws a cube as a hexagon, and the rectangle worth answering is the one
+## around every corner of it. Nothing rather than a guess when a corner is behind the camera,
+## because [method Camera3D.unproject_position] mirrors those back into view and a rectangle built
+## from one is a rectangle somewhere else entirely.
+static func _around(box: AABB, camera: Camera3D) -> Dictionary:
+	var seen: Rect2 = Rect2()
+	for index: int in 8:
+		var corner: Vector3 = box.get_endpoint(index)
+		if camera.is_position_behind(corner):
+			return {}
+		var point: Vector2 = camera.unproject_position(corner)
+		seen = Rect2(point, Vector2.ZERO) if index == 0 else seen.expand(point)
+	return {"rect": seen}
+
+
+## The box everything drawn under [param item] fits in, in world space, or a box with no size when
+## nothing under it draws.
+##
+## Walked rather than asked of [param item] itself, because the node a caller names is the one that
+## moves and the thing on screen is the mesh hanging off it: a character is a Node3D with a
+## skeleton and a mesh under it, and the Node3D has no extent of its own at all.
+static func drawn_box(item: Node3D) -> AABB:
+	var merged: AABB = AABB()
+	var found: bool = false
+	var pending: Array[Node] = [item]
+	while not pending.is_empty():
+		var node: Node = pending.pop_back()
+		var visual: VisualInstance3D = node as VisualInstance3D
+		if visual != null and visual.is_visible_in_tree():
+			var box: AABB = visual.global_transform * visual.get_aabb()
+			merged = box if not found else merged.merge(box)
+			found = true
+		for child: Node in node.get_children(true):
+			pending.push_back(child)
+	return merged
 
 
 func get_property(params: Dictionary) -> Dictionary:
