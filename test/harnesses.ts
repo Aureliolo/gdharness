@@ -27,6 +27,7 @@ import {
   launchFor,
   SERVER_KEY,
 } from '../src/harnesses.js';
+import { currentRunner, type Runner, spawnFor } from '../src/runner.js';
 
 const LAUNCH = launchFor('9.9.9', '/opt/godot/godot', 'npx');
 
@@ -63,10 +64,32 @@ function testTheLaunchIsTheSameEverywhere(): void {
   assert.deepEqual(LAUNCH.args, ['-y', 'gdharness@9.9.9'], 'the version is pinned, never latest');
   assert.deepEqual(LAUNCH.env, { GODOT_PATH: '/opt/godot/godot' });
 
-  // Whoever installed with bunx may have no Node at all, so the config has to name their runner.
-  const bun = launchFor('9.9.9', '/opt/godot/godot', 'bunx');
-  assert.equal(bun.command, 'bunx');
-  assert.deepEqual(bun.args, ['gdharness@9.9.9'], 'bunx has no prompt to answer, so no -y');
+  // Whoever installed with bunx may have no Node at all, so the config has to name their runner,
+  // and it is the other runner here: these tests run under Bun, so `npx` is the one we have no
+  // path for and can only name.
+  const bun = spawnFor('bunx', '9.9.9', '/somewhere/bin/bun');
+  assert.deepEqual(bun.args.slice(-1), ['gdharness@9.9.9'], 'the version is pinned either way');
+}
+
+function testTheRunnerRunningUsIsNamedByItsPathRatherThanItsName(): void {
+  // A harness spawns what a config names, through PATH, and a runner's name is not always on it:
+  // a Bun installed under a project ships a `bun` and no `bunx` beside it, so an entry saying
+  // `bunx` starts nothing. Found by a project that pins Bun under `.tools/`, where setup reported
+  // success over a config that could not spawn. Nothing is lost by naming a path: every entry
+  // carries an absolute GODOT_PATH already, so none of these was ever portable between machines.
+  const mine = currentRunner();
+  const here = spawnFor(mine, '9.9.9', '/somewhere/bin/bun');
+  assert.notEqual(here.command, mine, 'the runner running us is named by a path, not by a name');
+  assert.ok(here.args.includes('gdharness@9.9.9'), 'and is still asked for the pinned version');
+  if (mine === 'bunx') {
+    assert.equal(here.command, '/somewhere/bin/bun');
+    assert.deepEqual(here.args, ['x', 'gdharness@9.9.9'], '`bunx` is `bun x`');
+  }
+
+  // The other runner is somebody else's, and there is no path here to know: its name is all there
+  // is to offer, and offering it is better than offering nothing.
+  const theirs: Runner = mine === 'bunx' ? 'npx' : 'bunx';
+  assert.equal(spawnFor(theirs, '9.9.9').command, theirs);
 }
 
 function testEachShapeIsWrittenAsItsHarnessReadsIt(): void {
@@ -564,6 +587,7 @@ const TESTS = [
   testTheLaunchIsTheSameEverywhere,
   testEachShapeIsWrittenAsItsHarnessReadsIt,
   testAConfigIsWrittenWhereTheHarnessLooks,
+  testTheRunnerRunningUsIsNamedByItsPathRatherThanItsName,
   testHarnessesSharingAFileAreWrittenOnce,
   testEveryHarnessHasAReadablePathOnEveryPlatform,
   testNothingAlreadyInTheFileIsLost,
