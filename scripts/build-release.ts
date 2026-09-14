@@ -78,12 +78,22 @@ for (const sourcePath of await collectTypeScriptEntries(sourceRoot)) {
 
 await cp(path.join(sourceRoot, 'godot'), path.join(buildRoot, 'godot'), { recursive: true });
 
+// node, though the bundles are built by Bun and neither of them touches a Bun-only API. The
+// shebang is what a package runner hands the file to, and `npx -y gdharness@X`, which is the
+// line on every page of the documentation, is Node: naming bun there asked a Node machine for a
+// runtime it has no reason to own, and the line answered "bun: No such file or directory". The
+// other direction costs nothing, measured rather than assumed: bunx runs a node-shebang bin
+// under Bun's own runtime on a machine with no Node on it at all.
+const SHEBANG = '#!/usr/bin/env node\n';
+
+// Replaced rather than prepended. The bundler carries the entry file's own shebang into the
+// bundle, so a prepend leaves two, and the second one wins nothing and reads as a mistake. What
+// the published file starts with is a packaging decision either way, not the source's.
 for (const executable of ['cli.js', 'index.js']) {
   const executablePath = path.join(buildRoot, executable);
   const contents = await readFile(executablePath, 'utf8');
-  if (!contents.startsWith('#!/usr/bin/env bun\n')) {
-    await writeFile(executablePath, `#!/usr/bin/env bun\n${contents}`, 'utf8');
-  }
+  const body = contents.startsWith('#!') ? contents.slice(contents.indexOf('\n') + 1) : contents;
+  await writeFile(executablePath, `${SHEBANG}${body}`, 'utf8');
   await chmod(executablePath, 0o755);
 }
 

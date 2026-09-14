@@ -182,11 +182,18 @@ try {
     'packed scripts should use Bun, not npm or npx commands',
   );
 
+  // The shebang is what a package runner hands the file to, so it decides whether the documented
+  // line runs at all. It said bun, and `npx -y gdharness@X --version` answered "bun: No such file
+  // or directory" on every machine without Bun: published green, installed broken, on every
+  // release until the job that types the line out on three platforms was added.
   const cliPath = path.join(packedRoot, 'build', 'cli.js');
-  assert.ok(
-    (await readFile(cliPath, 'utf8')).startsWith('#!/usr/bin/env bun\n'),
-    'packed CLI should execute with Bun when linked as a global bin',
-  );
+  for (const executable of ['cli.js', 'index.js']) {
+    const bundle = await readFile(path.join(packedRoot, 'build', executable), 'utf8');
+    assert.ok(
+      bundle.startsWith('#!/usr/bin/env node\n'),
+      `packed ${executable} should start under the runtime npx is, got ${bundle.slice(0, 40)}`,
+    );
+  }
   for (const bundleName of ['cli.js', 'index.js']) {
     const bundle = await readFile(path.join(packedRoot, 'build', bundleName), 'utf8');
     const externalPackageImport =

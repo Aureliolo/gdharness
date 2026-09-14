@@ -5,6 +5,10 @@
  * Every harness spawns a server as `npx -y gdharness@VERSION`, and npx is Node, so a bundle that
  * only Bun can start is one nothing installs. The build targeted Bun until it was measured that
  * the embedded `ws` serves the editor socket under both, and this is what keeps that true.
+ *
+ * The code half only: Node is named here, so the shebang is never consulted. Which runtime the
+ * published file asks for is asserted in `packaging-consistency.ts` and typed out for real by the
+ * release's install job, because that half is what decides whether npx starts it at all.
  */
 
 import assert from 'node:assert/strict';
