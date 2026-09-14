@@ -159,8 +159,8 @@ one that just worked around it. It asks for the same yes before anything is file
   agent  <--------->  gdharness server
                             |
                             +- 6505  -->  gdharness_editor   websocket, in
-                            +- 6005  -->  language server    tcp, out, moved per editor
-                            +- 6006  -->  debug adapter      tcp, out, moved per editor
+                            +- 6005  -->  language server    tcp, out, per editor
+                            +- 6006  -->  debug adapter      tcp, out, per editor
                             +- auto  -->  gdharness_runtime  tcp, port in a file
                             `- spawn -->  godot --headless   one engine per call
 ```
