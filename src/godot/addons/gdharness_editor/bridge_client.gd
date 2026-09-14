@@ -16,6 +16,11 @@ const MAX_RECONNECT_DELAY: float = 30.0
 
 var socket: WebSocketPeer = WebSocketPeer.new()
 var server_url: String = DEFAULT_URL
+
+## What this copy was when it loaded, which is what the editor is running until it is restarted.
+## See [method _loaded_version] for why it is held rather than read when it is wanted.
+var version_at_load: String = ""
+
 var _is_connected: bool = false
 var _reconnect_timer: Timer
 var _current_reconnect_delay: float = RECONNECT_DELAY
@@ -27,6 +32,7 @@ var _initialized: bool = false
 
 func _ready() -> void:
 	_project_path = ProjectSettings.globalize_path("res://")
+	version_at_load = _loaded_version()
 
 	_reconnect_timer = Timer.new()
 	_reconnect_timer.one_shot = true
@@ -123,7 +129,7 @@ func _handle_connect() -> void:
 		{
 			"type": "godot_ready",
 			"project_path": _project_path,
-			"addon_version": _loaded_version(),
+			"addon_version": version_at_load,
 			"editor_pid": OS.get_process_id()
 		}
 	)
@@ -132,6 +138,13 @@ func _handle_connect() -> void:
 
 
 ## The version marker beside this addon, or "" when the copy was not installed by gdharness.
+##
+## Read once, when this copy loads, and never again: an upgrade replaces the files under a
+## running editor and rewrites the marker with them, so reading it at connect time answers with
+## the version on disk rather than the one in memory. That is the wrong answer at the one moment
+## it matters. An upgrade ends with the harness reconnecting, the editor reconnecting behind it,
+## and `addonIsStale` reporting false over an editor still running the old code, which is exactly
+## what it exists to catch.
 func _loaded_version() -> String:
 	if not FileAccess.file_exists(VERSION_MARKER):
 		return ""
