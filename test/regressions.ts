@@ -17,6 +17,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
+import { WebSocket } from 'ws';
 import { staleClassNames } from '../src/class-cache.js';
 import { GodotDAPClient } from '../src/dap_client.js';
 import { dictionary, emptyRecord } from '../src/dictionary.js';
@@ -360,6 +361,14 @@ async function testDiagnosticsTimeoutIsNotAnEmptyResult(): Promise<void> {
  * gap that walks a stream framed by Content-Length off its own message boundaries.
  */
 const MULTIBYTE = 'café 字幕 🎮 Ünterstützung';
+
+/**
+ * How long a server gets to end after its stdin closes before this calls it a hang.
+ *
+ * Long enough that what fails is a shutdown that never finishes rather than one that took a
+ * moment longer than expected on a loaded runner.
+ */
+const SHUTDOWN_LIMIT_MS = 15_000;
 
 function frameJsonRpc(message: unknown): Buffer {
   const body = Buffer.from(JSON.stringify(message), 'utf8');
@@ -797,6 +806,57 @@ async function testTheBridgeTakesThePortWhenItIsFreed(): Promise<void> {
   } finally {
     await server.stop();
     await letGo();
+  }
+}
+
+/**
+ * A server told to go ends, with an editor still holding the bridge.
+ *
+ * Written to catch a hang and it found none, which is worth saying plainly: `http.Server.close`
+ * calls back only once every connection has gone, and an editor on the bridge is an upgraded
+ * socket, so a close that waited on it would never settle and the process would sit there
+ * holding the port for good. It settles. Two abandoned servers were found holding 6505 in one
+ * day and neither of them was this.
+ *
+ * So it stays as what it turned out to be: the thing nobody had pinned. Its stdin is closed and
+ * nothing else, because that is what a harness going away looks like and it is the only shutdown
+ * nobody finishes for us. Every other fixture here kills the server outright, so none of them
+ * says anything about the path a real harness takes.
+ */
+async function testAServerEndsWithAnEditorStillOnTheBridge(): Promise<void> {
+  const port = await reservePort();
+  const server = new ServerProcess({ env: { GDHARNESS_BRIDGE_PORT: String(port) } });
+  let editor: WebSocket | null = null;
+  try {
+    await server.initialize('regression-test');
+
+    const opened = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+    editor = opened;
+    await new Promise<void>((resolve, reject) => {
+      opened.once('open', () => {
+        resolve();
+      });
+      opened.once('error', reject);
+    });
+
+    const status = await server.request('tools/call', { name: 'editor_status', arguments: {} });
+    assert.equal(
+      get(parseTextContent(status), 'editor', 'connected'),
+      true,
+      'the fixture editor should be on the bridge, or this proves nothing',
+    );
+
+    server.child.stdin?.end();
+
+    let ended = false;
+    for (let waited = 0; waited < SHUTDOWN_LIMIT_MS && !ended; waited += 250) {
+      await delay(250);
+      ended = server.exited;
+    }
+    assert.ok(ended, `the server should have ended within ${SHUTDOWN_LIMIT_MS}ms of its stdin closing`);
+  } finally {
+    editor?.terminate();
+    await server.stop();
   }
 }
 
@@ -2530,6 +2590,7 @@ async function main(): Promise<void> {
 
   await testEditorStatusPortConflict();
   await testTheBridgeTakesThePortWhenItIsFreed();
+  await testAServerEndsWithAnEditorStillOnTheBridge();
   await testABadPortIsReported();
   await testDiagnosticsSurviveUriReEncoding();
   await testDiagnosticsSurviveAnotherSpellingOfTheSamePath();
