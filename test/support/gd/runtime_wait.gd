@@ -103,11 +103,16 @@ func _check_click() -> void:
 		or not str(off_screen.get("message", "")).contains("outside the viewport")
 	):
 		_fail("a control outside the window cannot be clicked, and the answer says so: %s" % str(off_screen))
-	# This engine is headless, which is why the viewport is 64 by 64 rather than whatever the
-	# project asked for. The rect on its own does not say that, so the refusal has to.
+	# This engine is headless, so a window is what it would take to reach anything out there and
+	# the refusal has to say so: the rect on its own does not. It does not claim 64 by 64 here,
+	# because this fixture resized the root and the rect printed beside it would contradict it.
 	if not str(off_screen.get("message", "")).contains("run it with a window"):
 		_fail("and names the window as what it would take: %s" % str(off_screen))
+	if str(off_screen.get("message", "")).contains("64 by 64"):
+		_fail("and does not claim a size the rect beside it disagrees with: %s" % str(off_screen))
 	far.free()
+
+	await _check_below_the_fold()
 
 	if clicked.get("control_afterwards") != "in_tree":
 		_fail("a button that stays put should be reported in the tree: %s" % str(clicked))
@@ -128,6 +133,54 @@ func _check_click() -> void:
 	)
 	if removed.get("control_afterwards") != "removed":
 		_fail("a button taken out of the tree by its own click should be reported removed: %s" % str(removed))
+
+
+## A button parked far below the fold of a ScrollContainer, which is where the ledger of a game
+## with more in it than fits keeps most of its buttons.
+##
+## Out of sight is not out of reach: what a person does here is scroll and then click, and a
+## refusal instead is what sends a caller to emit the button's own signal, which presses nothing
+## and reports success. The tall column is the whole of the fixture, because a ScrollContainer
+## only scrolls when what is in it does not fit.
+func _check_below_the_fold() -> void:
+	var scroller: ScrollContainer = ScrollContainer.new()
+	scroller.name = "Ledger"
+	# Clear of the panel the rest of this fixture clicks, or the scroller would sit over its
+	# button and every click aimed at it would land on this instead.
+	scroller.position = Vector2(350, 20)
+	scroller.size = Vector2(200, 120)
+	root.add_child(scroller)
+	var column: VBoxContainer = VBoxContainer.new()
+	column.name = "Column"
+	scroller.add_child(column)
+	for filler: int in 20:
+		var spacer: Control = Control.new()
+		spacer.custom_minimum_size = Vector2(180, 40)
+		column.add_child(spacer)
+	var buried: Button = Button.new()
+	buried.name = "Buried"
+	buried.custom_minimum_size = Vector2(180, 40)
+	var pressed: Array[int] = []
+	buried.pressed.connect(func() -> void: pressed.append(1))
+	column.add_child(buried)
+	await process_frame
+
+	var reached: Dictionary = await node._execute_command("click", {"path": "/root/Ledger/Column/Buried"})
+
+	if reached.get("type") != "clicked" or reached.get("landed") != true:
+		_fail("a button below the fold should be scrolled to and clicked: %s" % str(reached))
+	if reached.get("scrolled_into_view") != true:
+		_fail("and the answer should say the view moved: %s" % str(reached))
+	if pressed.size() != 1:
+		_fail("a button below the fold should be pressed once, pressed %d times" % pressed.size())
+
+	# The control that was already on screen is the other half: nothing should scroll for it, or
+	# every click would be reported as having moved the view.
+	var on_screen: Dictionary = await node._execute_command("click", {"path": "/root/Panel/Go"})
+	if on_screen.get("scrolled_into_view") != false:
+		_fail("a control already on screen should not report a scroll: %s" % str(on_screen))
+
+	scroller.free()
 
 
 ## A fresh panel with one button whose press does `to_it`, clicked; the panel is cleared away
