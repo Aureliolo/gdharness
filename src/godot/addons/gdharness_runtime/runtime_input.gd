@@ -435,6 +435,16 @@ func choose(params: Dictionary) -> Dictionary:
 			)
 		}
 
+	if not params.has("index") and str(params.get("text", "")).is_empty():
+		return {
+			"type": "error",
+			"message":
+			(
+				"%s needs the item named, by text or index. It holds: %s"
+				% [node_path, ", ".join(_items_of(menu))]
+			)
+		}
+
 	var index: int = _wanted_item(menu, params)
 	if index < 0:
 		return {
