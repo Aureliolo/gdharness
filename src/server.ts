@@ -892,14 +892,25 @@ class GodotServer {
           args,
         );
       case 'runtime_input':
-        return op === 'click'
-          ? await this.handleRuntimeCommand('click', {
-              projectPath: args['projectPath'],
-              path: readNonEmptyString(args, 'nodePath') ?? '',
-              button: readString(args, 'button') ?? 'left',
-              double: readBoolean(args, 'doubleClick') ?? false,
-            })
-          : await this.handleRuntimeCommand(`inject_${op}`, args);
+        if (op === 'click') {
+          return await this.handleRuntimeCommand('click', {
+            projectPath: args['projectPath'],
+            path: readNonEmptyString(args, 'nodePath') ?? '',
+            button: readString(args, 'button') ?? 'left',
+            double: readBoolean(args, 'doubleClick') ?? false,
+          });
+        }
+        if (op === 'choose') {
+          // `index` is passed on only when it was given, because the addon reads whether it is
+          // there as which of the two ways the caller named the item.
+          return await this.handleRuntimeCommand('choose', {
+            projectPath: args['projectPath'],
+            path: readNonEmptyString(args, 'nodePath') ?? '',
+            text: readString(args, 'text') ?? '',
+            ...(args['index'] === undefined ? {} : { index: args['index'] }),
+          });
+        }
+        return await this.handleRuntimeCommand(`inject_${op}`, args);
       case 'runtime_wait':
         return await this.handleRuntimeWait(op, args);
 

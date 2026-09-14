@@ -70,6 +70,7 @@ func _init() -> void:
 		"inject_mouse_click": _input.inject_mouse_click,
 		"inject_mouse_motion": _input.inject_mouse_motion,
 		"click": _input.click,
+		"choose": _input.choose,
 		"wait_frames": _waits.wait_frames,
 		"wait_signal": _waits.wait_signal,
 		"wait_until": _waits.wait_until,
