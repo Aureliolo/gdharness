@@ -37,7 +37,7 @@ import {
 } from '../src/runtime-client.js';
 import { HEADLESS_OPERATIONS, patienceForFrames } from '../src/server.js';
 import { addonMismatch } from '../src/server-version.js';
-import { TOOL_SPECS } from '../src/tool-definitions.js';
+import { opTakes, TOOL_SPECS } from '../src/tool-definitions.js';
 import { cacheFile, isNewer } from '../src/update-check.js';
 import { asArray, asNumber, get, text } from './support/json.js';
 import { isRecord, type JsonRpcMessage, parseTextContent, textOf } from './support/json-rpc.js';
@@ -1159,7 +1159,7 @@ async function testToolAndOpLookupsCannotReachThePrototype(): Promise<void> {
 async function testArgumentsOfTheWrongTypeAreRefused(): Promise<void> {
   await withStdioServer(async (call) => {
     assert.match(
-      await call('runtime_inspect', { op: 'find', className: 'Label', includeProperties: ['text'] }),
+      await call('runtime_inspect', { op: 'tree', includeProperties: ['text'] }),
       /includeProperties as boolean, not a list/,
       'a boolean given a list should be refused',
     );
@@ -1179,6 +1179,70 @@ async function testArgumentsOfTheWrongTypeAreRefused(): Promise<void> {
       );
     }
   });
+}
+
+/**
+ * An argument meant for another op is refused too.
+ *
+ * The third way past the same door. The tool takes the word, so the tool-level check waves it
+ * through, and then the op reads nothing of the sort and answers as though it had: `limit` on a
+ * screen read was named in the schema, sent by every caller who wanted the top of a panel, and
+ * thrown away, so two hundred lines came back with truncated saying false.
+ */
+async function testAnArgumentMeantForAnotherOpIsRefused(): Promise<void> {
+  await withStdioServer(async (call) => {
+    assert.match(
+      await call('runtime_inspect', { op: 'text', includeProperties: true }),
+      /runtime_inspect text does not take includeProperties/,
+      'an argument named for tree should be refused on text',
+    );
+    // And the refusal spells out what the op does take, which is what saves the second wrong call.
+    assert.match(
+      await call('runtime_inspect', { op: 'text', depth: 2 }),
+      /text takes: projectPath, nodePath, limit, includeHidden/,
+      'and should say what text takes instead',
+    );
+    // The other half, or this passes against a server that refuses every op-specific argument.
+    for (const call_ of [
+      { op: 'text', limit: 3 },
+      { op: 'find', className: 'Label', limit: 3 },
+      { op: 'tree', depth: 2, includeProperties: true },
+    ]) {
+      assert.doesNotMatch(
+        await call('runtime_inspect', call_),
+        /does not take/,
+        `${JSON.stringify(call_)} is a call the op understands`,
+      );
+    }
+  });
+}
+
+/**
+ * Every op an argument claims is an op its tool has.
+ *
+ * A typo here is the refusal firing on a call that was right, which is worse than the silence it
+ * replaced, and nothing else would catch it: a name nothing matches simply never passes.
+ */
+function testEveryArgumentNamesOpsItsToolHas(): void {
+  for (const spec of TOOL_SPECS) {
+    const ops = new Set(Object.keys(spec.operations ?? {}));
+    for (const [name, schema] of Object.entries(spec.parameters)) {
+      const named = schema.ops;
+      if (named === undefined) {
+        continue;
+      }
+      assert.ok(ops.size > 0, `${spec.name} has no ops, so ${name} cannot name any`);
+      assert.ok(named.length > 0, `${spec.name}.${name} names an empty list of ops`);
+      for (const op of named) {
+        assert.ok(ops.has(op), `${spec.name}.${name} names op ${op}, which ${spec.name} has not`);
+      }
+    }
+    for (const op of ops) {
+      for (const needed of spec.operations?.[op]?.requires ?? []) {
+        assert.ok(opTakes(spec, op, needed), `${spec.name} ${op} requires ${needed} and does not take it`);
+      }
+    }
+  }
 }
 
 function testProjectGodotMultilineValues(): void {
@@ -2823,6 +2887,8 @@ async function main(): Promise<void> {
   testProjectPathsAreContained();
   await testToolAndOpLookupsCannotReachThePrototype();
   await testArgumentsOfTheWrongTypeAreRefused();
+  await testAnArgumentMeantForAnotherOpIsRefused();
+  testEveryArgumentNamesOpsItsToolHas();
   await testToolsRefusePathsOutsideTheProject();
   await testDebugToolsRefuseWithoutASession();
   await testUpdateNoticeRidesOnAnAnswer();
