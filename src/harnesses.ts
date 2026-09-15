@@ -921,6 +921,29 @@ export interface Written {
   /** For `command`, what to run. For `snippet`, what to put in the file. */
   readonly command?: readonly string[];
   readonly snippet?: string;
+  /**
+   * What launched gdharness before this write, when the write moved it. Absent when it did not.
+   *
+   * An install always writes the command and the arguments, because they carry the version and
+   * that is what an upgrade is. So it also replaces one somebody set by hand, and "updated
+   * .mcp.json" says nothing about that: the failure it hides is a session going on running a
+   * different server from the one somebody chose, under a success message.
+   */
+  readonly wasLaunchedBy?: string;
+}
+
+/** How a held entry says gdharness is launched, or nothing when it does not say. */
+function launchedBy(entry: unknown): string | undefined {
+  if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+    return undefined;
+  }
+  const held = entry as Record<string, unknown>;
+  // opencode carries the whole line in `command`; everything else splits it across two keys.
+  const whole = held['command'];
+  const args: unknown[] = Array.isArray(held['args']) ? (held['args'] as unknown[]) : [];
+  const parts: unknown[] = Array.isArray(whole) ? (whole as unknown[]) : [whole, ...args];
+  const said = parts.filter((part): part is string => typeof part === 'string');
+  return said.length === 0 ? undefined : said.join(' ');
 }
 
 /**
@@ -960,7 +983,15 @@ export function connect(harness: Harness, projectPath: string, launch: Launch): 
       : undefined;
   const already = typeof container === 'object' && container !== null && SERVER_KEY in container;
 
-  return put(harness, path, `${JSON.stringify(merged(existing, harness, launch), null, 2)}\n`, already);
+  const written = put(
+    harness,
+    path,
+    `${JSON.stringify(merged(existing, harness, launch), null, 2)}\n`,
+    already,
+  );
+  const was = launchedBy((container as Record<string, unknown> | undefined)?.[SERVER_KEY]);
+  const now = launchedBy(entryFor(harness.shape, launch));
+  return was === undefined || was === now ? written : { ...written, wasLaunchedBy: was };
 }
 
 /** One file written, and the one line that says whether it was new. */

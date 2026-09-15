@@ -184,6 +184,10 @@ function reportConnection(group: Group, launch: Launch, projectPath: string): vo
     return;
   }
   console.log(`${who}: ${written.action} ${written.path}`);
+  if (written.wasLaunchedBy !== undefined) {
+    console.log(`  it was launched by  ${written.wasLaunchedBy}`);
+    console.log(`  now by              ${[launch.command, ...launch.args].join(' ')}`);
+  }
   // A harness that will not take the config's word for it: a trust prompt or an approval nobody
   // mentions is an install that reports success and then answers nothing.
   for (const harness of group.harnesses) {
