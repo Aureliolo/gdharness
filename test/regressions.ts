@@ -2694,11 +2694,13 @@ async function testGdUnitRunner(): Promise<void> {
           { projectPath: projectDir, path: 'res://tests' },
           ENGINE_CALL_TIMEOUT_MS * 3,
         );
-        assert.doesNotMatch(nowhere, /passed/, nowhere);
-        assert.match(nowhere, /No tests ran/, nowhere);
-        assert.match(nowhere, /res:\/\/test\b/, nowhere);
+        const note = nowhere.slice(0, nowhere.indexOf('{'));
+        assert.doesNotMatch(note, /passed/, note);
+        assert.match(note, /No tests ran/, note);
+        assert.match(note, /res:\/\/test\b/, note);
         const empty: unknown = JSON.parse(nowhere.slice(nowhere.indexOf('{')));
         assert.equal(get(empty, 'passed'), false, nowhere);
+        assert.equal(get(empty, 'verdict'), 'nothing at res://tests', nowhere);
         assert.equal(get(empty, 'tests'), 0, nowhere);
       },
       { GODOT_PATH: godotPath },
