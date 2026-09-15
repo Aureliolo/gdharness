@@ -5,6 +5,9 @@
  * element shape with attributes, text and CDATA, and a parser for that is shorter than the
  * supply chain it would replace. Anything it cannot read is a `MalformedReportError`, never a
  * partial report that looks like a run with fewer tests.
+ *
+ * A run that wrote no report at all is the same question's other answer, and `whyNoReport` reads
+ * it off what the runner printed, because the exit code cannot say.
  */
 
 export class MalformedReportError extends Error {
@@ -263,4 +266,28 @@ export function parseJUnit(xml: string): TestReport {
     time: suites.reduce((sum, suite) => sum + suite.time, 0),
     suites,
   };
+}
+
+/** What gdUnit4 prints when it was pointed at something, and there was nothing there to run. */
+const NOTHING_RAN = /no test cases found/i;
+const NO_SUCH_PATH = /given directory or file does not exists:\s*(\S+)/i;
+
+/**
+ * Why a run wrote no report, as a verdict, or nothing when the printed output does not say.
+ *
+ * gdUnit4 exits 0 when it found nothing to run, so a path typo, a renamed suite directory and an
+ * ignore list that excluded everything all arrive as a clean exit and read as `passed`. That is
+ * the one verdict in this program where being wrong costs the most: an agent skimming a long
+ * answer takes the word, and a tier that never ran looks like a tier that is green. The exit code
+ * cannot tell those apart, and the runner's own two lines can.
+ *
+ * [param asked] is the path the run was pointed at, which the answer names because a run that
+ * found nothing is nearly always a run that looked in the wrong place.
+ */
+export function whyNoReport(printed: readonly string[], asked: string): string | null {
+  const missing = printed.map((line) => NO_SUCH_PATH.exec(line)).find((found) => found !== null);
+  if (missing !== undefined) {
+    return `nothing at ${missing[1] ?? asked}`;
+  }
+  return printed.some((line) => NOTHING_RAN.test(line)) ? `no test cases found at ${asked}` : null;
 }

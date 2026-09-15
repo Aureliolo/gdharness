@@ -33,7 +33,7 @@ import { type GodotBridge, getDefaultBridge } from './godot-bridge.js';
 import { GodotLocator } from './godot-path.js';
 import { type HeadlessOutcome, runOperation } from './headless.js';
 import { defectReport, feedbackNotice } from './issues.js';
-import { parseJUnit, type TestReport } from './junit.js';
+import { parseJUnit, type TestReport, whyNoReport } from './junit.js';
 import {
   type EditorPorts,
   editorArguments,
@@ -358,6 +358,34 @@ function aboveTheRunner(entry: LogEntry): LogEntry {
     ...entry,
     detail: [...entry.detail.slice(0, runner), `[and ${cut} frames inside ${RUNNER_DIRECTORY}]`],
   };
+}
+
+/**
+ * Where a run that found nothing might have meant instead, as a sentence, or nothing to add.
+ *
+ * A test path that is not there is usually one letter off one that is: `test` against `tests` is
+ * the whole of what this tool's default and the plural convention disagree about, and the caller
+ * who met it read a clean exit as a green tier. Only directories that are actually there are
+ * named, and only when the one asked for is not, so a project whose suites are simply empty is
+ * never told where else to look.
+ */
+function elsewhereIn(projectPath: string, asked: string): string {
+  const wanted = asked.replace(/^res:\/\//, '').replace(/\/+$/, '');
+  if (wanted === '' || existsSync(join(projectPath, wanted))) {
+    return '';
+  }
+  const root = (wanted.split('/')[0] ?? '').toLowerCase();
+  let near: string[] = [];
+  try {
+    near = readdirSync(projectPath, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && entry.name.toLowerCase() !== root)
+      .map((entry) => entry.name)
+      .filter((name) => name.toLowerCase().startsWith('test') || root.startsWith(name.toLowerCase()));
+  } catch {
+    return '';
+  }
+  const there = near.map((name) => `res://${name}`).join(' and ');
+  return near.length === 0 ? '' : ` The project does have ${there}.`;
 }
 
 /** Whether project.godot names a scene for the game to start in. */
@@ -1625,6 +1653,7 @@ class GodotServer {
 
     const reports = 'res://.godot/gdharness-reports';
     const ignored = readStringArray(args, 'ignore') ?? [];
+    const asked = readString(contained.value, 'path') ?? 'res://test';
     const cmdArgs = [
       '--headless',
       '--path',
@@ -1634,7 +1663,7 @@ class GodotServer {
       '--ignoreHeadlessMode',
       ...(readBoolean(args, 'failFast') === true ? [] : ['-c']),
       '-a',
-      readString(contained.value, 'path') ?? 'res://test',
+      asked,
       ...ignored.flatMap((entry) => ['-i', entry]),
       '-rd',
       reports,
@@ -1692,25 +1721,34 @@ class GodotServer {
       105: 'script errors',
     };
     const exitCode = run.exitCode;
+    const printed = run.log.select({ severity: 'info', sinceLastCall: false, limit: 200 }).entries;
+    // Before the exit code, because gdUnit4 leaves it at zero for a run that found nothing to do,
+    // and `passed` is the one word a skimming reader must never be handed for one of those.
+    const said = printed.map((entry) => entry.text);
+    const nothingRan = hung ? null : whyNoReport(said, asked);
     const verdict = hung
       ? `hung: killed after ${timeoutMs} ms`
-      : (verdicts[exitCode ?? -1] ?? `exit ${exitCode ?? 'unknown'}`);
+      : (nothingRan ?? verdicts[exitCode ?? -1] ?? `exit ${exitCode ?? 'unknown'}`);
 
     if (report === null) {
+      const note =
+        nothingRan === null
+          ? `The test run wrote no report (${verdict}${reportProblem ? `; ${reportProblem}` : ''}).`
+          : `No tests ran: ${verdict}.${elsewhereIn(project.value.path, asked)}`;
       return {
         content: [
-          {
-            type: 'text',
-            text: `The test run wrote no report (${verdict}${reportProblem ? `; ${reportProblem}` : ''}).`,
-          },
+          { type: 'text', text: note },
           {
             type: 'text',
             text: JSON.stringify(
               {
+                passed: false,
+                verdict,
+                tests: 0,
                 exitCode,
                 hung,
                 arguments: cmdArgs,
-                entries: run.log.select({ severity: 'info', sinceLastCall: false, limit: 60 }).entries,
+                entries: printed.slice(0, 60),
               },
               null,
               2,

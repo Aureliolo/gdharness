@@ -5,7 +5,14 @@
  */
 
 import assert from 'node:assert/strict';
-import { MalformedReportError, parseJUnit } from '../src/junit.js';
+import { MalformedReportError, parseJUnit, whyNoReport } from '../src/junit.js';
+
+/** What gdUnit4 printed for a run pointed at a directory that is not there, as it printed it. */
+const NOTHING_THERE = [
+  'Godot Engine v4.7.2.stable.official - https://godotengine.org',
+  'Given directory or file does not exists: res://test',
+  'No test cases found, abort test run!',
+];
 
 const GDUNIT_REPORT = `<?xml version="1.0" encoding="UTF-8" ?>
 <testsuites id="2026-09-13" name="report_1" tests="3" failures="1" skipped="1" flaky="0" time="0.000">
@@ -97,7 +104,35 @@ function testMalformedReportsAreRefused(): void {
   }
 }
 
+function testARunThatFoundNothingIsNotAPass(): void {
+  // The failure this exists for: gdUnit4 exits 0 when it found nothing to run, so every verdict
+  // taken off the exit code alone called a tier that never ran a green one.
+  assert.equal(whyNoReport(NOTHING_THERE, 'res://test'), 'nothing at res://test');
+  assert.equal(
+    whyNoReport(['No test cases found, abort test run!'], 'res://tests'),
+    'no test cases found at res://tests',
+    'an ignore list that excluded everything says so without naming a path that is there',
+  );
+  assert.equal(
+    whyNoReport(NOTHING_THERE, 'res://anything'),
+    'nothing at res://test',
+    'the path the runner named beats the one it was asked for',
+  );
+}
+
+function testARunThatSaidNothingOfTheSortIsLeftAlone(): void {
+  // The half that would pass either way. A run with failures in it must reach the exit code's
+  // own verdict rather than being called empty because this looked at the wrong lines.
+  assert.equal(whyNoReport([], 'res://test'), null);
+  assert.equal(
+    whyNoReport(['Executed test suites: 7', 'Total test cases: 79', 'Failed: 0'], 'res://tests'),
+    null,
+  );
+}
+
 testWhatGdUnitWrites();
 testEntitiesAndShapes();
 testMalformedReportsAreRefused();
+testARunThatFoundNothingIsNotAPass();
+testARunThatSaidNothingOfTheSortIsLeftAlone();
 console.log('junit reader tests passed');
