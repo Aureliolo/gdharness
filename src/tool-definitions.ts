@@ -1010,7 +1010,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'runtime_wait',
     description:
-      'Lets the running game get on with it and answers when something has happened: a number of frames, a signal, or a property reaching a value. Needs the game running with the runtime addon.',
+      'Lets the running game get on with it and answers when something has happened: a number of frames, a signal, a property reaching a value, or words appearing on a screen. Needs the game running with the runtime addon.',
     parameters: {
       projectPath: RUNNING_PROJECT_PATH,
       frames: {
@@ -1022,6 +1022,12 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       signal: { type: 'string', ops: ['signal'], description: 'signal: the signal name.' },
       property: { type: 'string', ops: ['until'], description: 'until: the property name.' },
       value: { ops: ['until'], description: "until: the value to wait for, fitted to the property's type." },
+      says: {
+        type: 'string',
+        ops: ['until'],
+        description:
+          'until: wait for these words to appear anywhere under nodePath instead of for a property, which is how a panel that rebuilds its labels is waited on at all: the labels are named afresh each redraw and the panel is what stays put. Case-insensitive, part of a line, hidden nodes included.',
+      },
       timeoutMs: {
         type: 'number',
         ops: ['signal', 'until'],
@@ -1036,8 +1042,9 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         requires: ['nodePath', 'signal'],
       },
       until: {
-        summary: 'wait for a property to read as a value and answer with what it read',
-        requires: ['nodePath', 'property', 'value'],
+        summary:
+          'wait for a property to read as a value, or for words to appear under a node, and answer with what it found',
+        requires: ['nodePath'],
       },
     },
   },

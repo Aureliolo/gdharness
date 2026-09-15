@@ -3,6 +3,7 @@ extends RefCounted
 ## The commands that take time: they let the game run and answer when what was waited for has
 ## happened, or when the time ran out, so the caller never sleeps for a guessed length.
 
+const Queries = preload("runtime_queries.gd")
 const Values = preload("runtime_values.gd")
 
 ## The longest one wait may last, whatever the request says: past this the server has long
@@ -78,22 +79,27 @@ func wait_signal(params: Dictionary) -> Dictionary:
 	}
 
 
-## Waits until a property reads as the value given, or the time runs out, and answers with
-## what it read last either way.
+## Waits until a property reads as the value given, or until something under the path says what
+## was given, or the time runs out, and answers with what it read last either way.
 func wait_until(params: Dictionary) -> Dictionary:
 	var node_path: String = str(params.get("path", ""))
 	var property: String = str(params.get("property", ""))
+	var says: String = str(params.get("says", ""))
 	var timeout_ms: int = int(params.get("timeout_ms", 5000))
 	if timeout_ms < 1 or timeout_ms > CEILING_MSEC:
 		return _out_of_range("timeout_ms", timeout_ms, 1, CEILING_MSEC)
-	if node_path.is_empty() or property.is_empty():
-		return {"type": "error", "message": "Node path and property required"}
+	if node_path.is_empty():
+		return {"type": "error", "message": "Node path required"}
+	if _host.get_tree().root.get_node_or_null(node_path) == null:
+		return {"type": "error", "message": "Node not found: " + node_path}
+	if not says.is_empty():
+		return await _wait_until_said(node_path, says, timeout_ms)
+	if property.is_empty():
+		return {"type": "error", "message": "A property and a value, or says, are required"}
 	if not params.has("value"):
 		return {"type": "error", "message": "A value to wait for is required"}
 
 	var node: Node = _host.get_tree().root.get_node_or_null(node_path)
-	if node == null:
-		return {"type": "error", "message": "Node not found: " + node_path}
 
 	var current: Variant = node.get(property)
 	var wanted: Variant = _values.fitted(params["value"], typeof(current))
@@ -112,6 +118,45 @@ func wait_until(params: Dictionary) -> Dictionary:
 		"value": _values.serialize(current),
 		"elapsed_ms": Time.get_ticks_msec() - started,
 	}
+
+
+## Waits until something under [param node_path] has [param said] written on it.
+##
+## A screen rather than one node, because a panel following a clock builds its labels again every
+## time it redraws and the engine names those `@Label@1163`. A wait holding one of them is waiting
+## on a node that was freed a frame later, and that is what it answered: the date along the top of a
+## hall could not be waited on at all. What a caller is watching for is a word arriving on a screen,
+## and the screen is the part that stays put.
+func _wait_until_said(node_path: String, said: String, timeout_ms: int) -> Dictionary:
+	var started: int = Time.get_ticks_msec()
+	var found: bool = _anything_says(node_path, said)
+	while not found and Time.get_ticks_msec() - started < timeout_ms:
+		await _host.get_tree().process_frame
+		found = _anything_says(node_path, said)
+
+	return {
+		"type": "condition",
+		"path": node_path,
+		"says": said,
+		"met": found,
+		"elapsed_ms": Time.get_ticks_msec() - started,
+	}
+
+
+## Whether anything under [param node_path] says [param said], the node itself included. Hidden
+## nodes count, for the reason a find answers off them: a caller may be waiting for a dialog that
+## is built before it is shown.
+func _anything_says(node_path: String, said: String) -> bool:
+	var root: Node = _host.get_tree().root.get_node_or_null(node_path)
+	if root == null:
+		return false
+	var pending: Array[Node] = [root]
+	while not pending.is_empty():
+		var node: Node = pending.pop_back()
+		if Queries.said_by(node).containsn(said):
+			return true
+		pending.append_array(node.get_children(true))
+	return false
 
 
 func _signal_arity(node: Node, signal_name: String) -> int:
