@@ -2452,13 +2452,15 @@ class GodotServer {
     const script = readNonEmptyString(args, 'script');
     const namePattern = readNonEmptyString(args, 'namePattern');
     const group = readNonEmptyString(args, 'group');
+    const says = readNonEmptyString(args, 'says');
     if (className !== undefined) filters['class'] = className;
     if (script !== undefined) filters['script'] = script;
     if (namePattern !== undefined) filters['name'] = namePattern;
     if (group !== undefined) filters['group'] = group;
+    if (says !== undefined) filters['says'] = says;
     if (Object.keys(filters).length === 0) {
       return this.createErrorResponse(
-        'runtime_inspect find needs at least one of className, script, namePattern, group.',
+        'runtime_inspect find needs at least one of className, script, namePattern, group, says.',
       );
     }
     // One property off every node found, when the caller names one. A panel of a dozen labels is
