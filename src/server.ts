@@ -23,7 +23,7 @@ import {
   ListToolsRequestSchema,
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
-import { announceBridge, withdrawBridge } from './bridge-announce.js';
+import { announceBridge, announcementPath, readAnnouncement, withdrawBridge } from './bridge-announce.js';
 import { staleClassNames } from './class-cache.js';
 import { DEFAULT_DAP_PORT, GodotDAPClient, handleDAPTool } from './dap_client.js';
 import { dictionary, emptyRecord } from './dictionary.js';
@@ -201,6 +201,19 @@ function wrongTypes(spec: ToolSpec, args: OperationParams): string[] {
  * cost of asking is one bind that fails immediately.
  */
 const BRIDGE_RETRY_MS = 2_000;
+
+/**
+ * How often a server asks whether its project has a newer one.
+ *
+ * A poll rather than a watch on the file, because the failure modes are not the same size: a watch
+ * that misses its event never stands the server down at all, and a read that comes back torn or
+ * unreadable is simply asked again ten seconds later.
+ *
+ * Ten seconds because what a superseded server is holding is the default bridge port, and an
+ * editor with nothing announced falls into whoever has it. The cost is one small file read on an
+ * unreferenced timer.
+ */
+const SUCCESSOR_CHECK_MS = 10_000;
 
 /** What to tell a caller whose file, scene, script or resource path landed outside the project. */
 const PATH_SOLUTIONS = [
@@ -386,6 +399,7 @@ class GodotServer {
   private dapClient: GodotDAPClient | null = null;
   private bridgeStartupError: string | null = null;
   private bridgeRetry: NodeJS.Timeout | null = null;
+  private successorWatch: NodeJS.Timeout | null = null;
   private lastProjectPath: string | null = null;
   private shutdownInitiated = false;
 
@@ -538,6 +552,7 @@ class GodotServer {
       port: status.port,
       version: SERVER_VERSION,
     });
+    this.watchForASuccessor();
   }
 
   private stopTryingTheBridge(): void {
@@ -547,9 +562,72 @@ class GodotServer {
     }
   }
 
+  /**
+   * Stops this server once another one has taken over its project.
+   *
+   * A stdio server's life is its stdin, and there is a handler for the end of it. It never
+   * arrives: a harness that reconnects spawns the replacement and leaves this process running as
+   * its child, still holding the pipe open, so nothing here is ever told it is finished. Six of
+   * them were found alive on one machine, one for every version a project had moved through in a
+   * day, the oldest from nine hours earlier.
+   *
+   * None of them is reachable. The editor follows the announcement and the replacement has
+   * rewritten it. What they do instead is worse than nothing: the first one started took the
+   * default bridge port and the rest moved off it, so the oldest, most out of date server on the
+   * machine is the one every editor with nothing announced falls back to, and it answers them.
+   *
+   * The announcement is the signal because it is already the one both sides read, and it carries
+   * the process that wrote it. A successor has to still be running to count, so that a
+   * replacement which died without withdrawing does not take the last server with it.
+   */
+  private watchForASuccessor(): void {
+    if (this.ownProject === null || this.successorWatch !== null) {
+      return;
+    }
+    const watch = setInterval(() => {
+      const successor = this.supersededBy();
+      if (successor === null) {
+        return;
+      }
+      console.error(
+        `[SERVER] pid ${successor} now serves ${this.ownProject}; this server is finished and is stopping.`,
+      );
+      void this.handleShutdown(`superseded by ${successor}`, 0);
+    }, SUCCESSOR_CHECK_MS);
+    // Never a reason on its own for the process to stay up.
+    watch.unref();
+    this.successorWatch = watch;
+  }
+
+  /** The live server that has taken this project's announcement, or null while it is still ours. */
+  private supersededBy(): number | null {
+    if (this.ownProject === null) {
+      return null;
+    }
+    const announced = readAnnouncement(announcementPath(this.ownProject));
+    if (announced === null || announced.pid === process.pid) {
+      return null;
+    }
+    try {
+      // Signal 0 asks whether it could be signalled rather than signalling it.
+      process.kill(announced.pid, 0);
+      return announced.pid;
+    } catch {
+      return null;
+    }
+  }
+
+  private stopWatchingForASuccessor(): void {
+    if (this.successorWatch !== null) {
+      clearInterval(this.successorWatch);
+      this.successorWatch = null;
+    }
+  }
+
   private async cleanup(): Promise<void> {
     this.logDebug('Cleaning up resources');
     this.stopTryingTheBridge();
+    this.stopWatchingForASuccessor();
     withdrawBridge(this.announcedAt);
     this.announcedAt = null;
     if (this.activeProcess) {
