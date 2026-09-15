@@ -292,6 +292,43 @@ function testAnUpgradeKeepsWhatWasPinnedByHand(): void {
   }
 }
 
+/**
+ * An install that replaces a command somebody set by hand says which one it replaced.
+ *
+ * The command and the arguments are written over on purpose, because they carry the version and
+ * that is the whole of what an upgrade is. So a config pointed at a local build goes back to the
+ * published package, and "replaced .mcp.json" says nothing about it: the session afterwards runs a
+ * different server from the one somebody chose, under a line that read like success. Reported from
+ * a project running gdharness out of a working tree to get at an unreleased fix.
+ */
+function testAnInstallSaysWhatItLaunchedInsteadOf(): void {
+  const harness = harnessById('claude-code');
+  assert.ok(harness, 'claude-code is in the table');
+  const root = project();
+  try {
+    connect(harness, root, LAUNCH);
+    const path = configPath(harness, root);
+    const before = read(path);
+    const entry = (before['mcpServers'] as Record<string, Record<string, unknown>>)[SERVER_KEY];
+    assert.ok(entry, 'the install wrote an entry to point somewhere else');
+    entry['command'] = 'node';
+    entry['args'] = ['../gdharness/build/index.js'];
+    writeFileSync(path, `${JSON.stringify(before, null, 2)}\n`, 'utf8');
+
+    const moved = connect(harness, root, LAUNCH);
+    assert.equal(
+      moved.wasLaunchedBy,
+      'node ../gdharness/build/index.js',
+      'the line it replaced is named rather than dropped in silence',
+    );
+
+    // And a write that moved nothing says nothing, so the line means what it says when it appears.
+    assert.equal(connect(harness, root, LAUNCH).wasLaunchedBy, undefined, 'nothing moved, nothing said');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 function testAConfigThatDoesNotParseIsLeftAlone(): void {
   const harness = harnessById('claude-code');
   assert.ok(harness, 'claude-code is in the table');
@@ -671,6 +708,7 @@ const TESTS = [
   testNothingAlreadyInTheFileIsLost,
   testWritingTwiceReplacesRatherThanDuplicates,
   testAnUpgradeKeepsWhatWasPinnedByHand,
+  testAnInstallSaysWhatItLaunchedInsteadOf,
   testAConfigThatDoesNotParseIsLeftAlone,
   testDetectionNeverReachesOutOfTheProject,
   testEveryCandidateCarriesWhyItIsOffered,
