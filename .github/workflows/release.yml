@@ -277,6 +277,13 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
 
+    # A packument is cached for five minutes once fetched, so the first ask that missed is what
+    # every later one in the job is answered from. On the job rather than on the step that waits,
+    # because npx resolves for itself and reaches the registry again: the wait held `--prefer-online`
+    # alone and npx, one step later, did not.
+    env:
+      npm_config_prefer_online: 'true'
+
     steps:
       # The registry is eventually consistent and every runner resolves against whichever edge it
       # lands on, so one runner having seen the version says nothing about the next: 0.6.3 was
@@ -284,9 +291,11 @@ jobs:
       # here was told there was no such version. Each platform waits for the edge it is going to
       # install from rather than for the one that published.
       #
-      # `--prefer-online` because a packument is cached for five minutes once fetched: without it
-      # the first ask that missed is what every retry would be answered from, and the loop would
-      # spend its whole budget re-reading a copy from before the publish.
+      # Waited on with the command the steps below run, rather than with `npm view`. Those are two
+      # resolvers asking the registry separately and passing one says nothing about the other: on
+      # 0.9.1 `npm view` served the version on its first ask and npx was told there was no such
+      # version 0.97 seconds later. Asking with npx also leaves the package where npx looks, so
+      # what the steps below read is what this step proved.
       - name: Wait for the registry this runner reads
         shell: bash
         env:
@@ -294,11 +303,11 @@ jobs:
         run: |
           set -euo pipefail
           for attempt in $(seq 1 30); do
-            if npm view --prefer-online "gdharness@${VERSION}" version > /dev/null 2>&1; then
-              echo "The registry serves ${VERSION} here; asked ${attempt} times."
+            if npx -y "gdharness@${VERSION}" --version > /dev/null 2>&1; then
+              echo "The registry serves ${VERSION} to npx here; asked ${attempt} times."
               exit 0
             fi
-            echo "The registry does not serve ${VERSION} here yet; asked ${attempt} times."
+            echo "The registry does not serve ${VERSION} to npx here yet; asked ${attempt} times."
             sleep 10
           done
           echo "The registry here never served gdharness@${VERSION}, five minutes after publishing it." >&2
