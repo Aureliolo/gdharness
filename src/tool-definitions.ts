@@ -808,6 +808,12 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         description: 'find: a case-insensitive glob on the node name, such as "Enemy*".',
       },
       group: { type: 'string', ops: ['find'], description: 'find: a group the node is in.' },
+      says: {
+        type: 'string',
+        ops: ['find'],
+        description:
+          'find: part of what the node has written on it, case-insensitively, which is how a button is reached by the word on it rather than by a generated path. Its own text, so a row is found by the label in it, and hidden nodes match.',
+      },
       limit: {
         type: 'number',
         ops: ['find', 'text'],
@@ -837,7 +843,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       find: {
         summary:
-          'the paths of every node matching className, script, namePattern or group, with property read off each',
+          'the paths of every node matching className, script, namePattern, group or says, with property read off each',
         requires: [],
       },
       rect: {

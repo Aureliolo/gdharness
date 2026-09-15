@@ -10,6 +10,10 @@ const Values = preload("runtime_values.gd")
 const FIND_LIMIT: int = 100
 const FIND_LIMIT_CEILING: int = 1000
 
+## What a find can be narrowed by, which is also what it refuses to answer without. Named once so
+## the refusal lists the same set the walk reads.
+const FILTERS: PackedStringArray = ["class", "script", "name", "group", "says"]
+
 ## The most lines one read answers with, unless asked for fewer. A screen is a few dozen; a
 ## thousand is a tree somebody pointed this at by mistake.
 const READ_LIMIT: int = 500
@@ -39,7 +43,8 @@ func get_tree(params: Dictionary) -> Dictionary:
 
 ## Nodes matching every filter given, as paths, so a caller can name what it wants without
 ## reading the whole tree to find it. `class` matches native classes and their subclasses, and
-## the global name of a script class; `name` is a case-insensitive glob; `script` is a path.
+## the global name of a script class; `name` is a case-insensitive glob; `script` is a path;
+## `says` is what the node has written on it.
 ##
 ## `property` names one to read off each of them, which is the difference between one question and
 ## one call per answer. A panel of a dozen labels took thirteen calls to read, and a tree that
@@ -48,22 +53,16 @@ func get_tree(params: Dictionary) -> Dictionary:
 ## because null is what a node holding null answers.
 func find_nodes(params: Dictionary) -> Dictionary:
 	var root_path: String = str(params.get("root", "/root"))
-	var wanted_class: String = str(params.get("class", ""))
-	var wanted_script: String = str(params.get("script", ""))
-	var wanted_name: String = str(params.get("name", ""))
-	var wanted_group: String = str(params.get("group", ""))
+	var wanted: Dictionary[String, String] = {}
+	for filter: String in FILTERS:
+		wanted[filter] = str(params.get(filter, ""))
 	var wanted_property: String = str(params.get("property", ""))
 	var limit: int = clampi(int(params.get("limit", FIND_LIMIT)), 1, FIND_LIMIT_CEILING)
 
-	if (
-		wanted_class.is_empty()
-		and wanted_script.is_empty()
-		and wanted_name.is_empty()
-		and wanted_group.is_empty()
-	):
-		return {"type": "error", "message": "find_nodes needs at least one of class, script, name, group"}
-	if not wanted_script.is_empty() and not wanted_script.begins_with("res://"):
-		wanted_script = "res://" + wanted_script
+	if not _anything_asked(wanted):
+		return {"type": "error", "message": "find_nodes needs at least one of " + ", ".join(FILTERS)}
+	if not wanted["script"].is_empty() and not wanted["script"].begins_with("res://"):
+		wanted["script"] = "res://" + wanted["script"]
 
 	var root: Node = _host.get_tree().root.get_node_or_null(root_path)
 	if root == null:
@@ -74,7 +73,7 @@ func find_nodes(params: Dictionary) -> Dictionary:
 	var truncated: bool = false
 	while not pending.is_empty():
 		var node: Node = pending.pop_front()
-		if _matches(node, wanted_class, wanted_script, wanted_name, wanted_group):
+		if _matches(node, wanted):
 			if found.size() >= limit:
 				truncated = true
 				break
@@ -115,25 +114,37 @@ func _found(node: Node, wanted_property: String) -> Dictionary:
 	return entry
 
 
-func _matches(
-	node: Node, wanted_class: String, wanted_script: String, wanted_name: String, wanted_group: String
-) -> bool:
-	if not wanted_group.is_empty() and not node.is_in_group(wanted_group):
+## Whether the caller named anything to match on, since every filter left out matches everything
+## and a find with none of them is the whole tree by another name.
+static func _anything_asked(wanted: Dictionary[String, String]) -> bool:
+	for filter: String in wanted:
+		if not wanted[filter].is_empty():
+			return true
+	return false
+
+
+func _matches(node: Node, wanted: Dictionary[String, String]) -> bool:
+	if not wanted["group"].is_empty() and not node.is_in_group(wanted["group"]):
 		return false
-	if not wanted_name.is_empty() and not str(node.name).matchn(wanted_name):
+	if not wanted["name"].is_empty() and not str(node.name).matchn(wanted["name"]):
+		return false
+	# What this node says, rather than everything said underneath it. A row is then found by the
+	# label in it, and the path answered is that label's, which is where the words a caller is
+	# looking at actually are: matching every container above it would answer with the screen.
+	if not wanted["says"].is_empty() and not _said_by(node).containsn(wanted["says"]):
 		return false
 	var script: Variant = node.get_script()
-	if not wanted_script.is_empty():
+	if not wanted["script"].is_empty():
 		if not script is Script:
 			return false
 		var attached: Script = script
-		if attached.resource_path != wanted_script:
+		if attached.resource_path != wanted["script"]:
 			return false
-	if not wanted_class.is_empty() and not node.is_class(wanted_class):
+	if not wanted["class"].is_empty() and not node.is_class(wanted["class"]):
 		if not script is Script:
 			return false
 		var attached: Script = script
-		if attached.get_global_name() != wanted_class:
+		if attached.get_global_name() != wanted["class"]:
 			return false
 	return true
 

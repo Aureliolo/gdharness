@@ -157,6 +157,14 @@ func _check() -> void:
 	button.size = Vector2(80, 30)
 	panel.add_child(button)
 
+	# Away from the panel, whose contents are what the reading checks below count. What matters
+	# here is that it carries words rather than what sort of control it is: a label, a button and a
+	# field all answer the same question about themselves.
+	var docket: Label = Label.new()
+	docket.name = "Docket"
+	docket.text = "Sign the docket"
+	level.add_child(docket)
+
 	var by_class: Dictionary = await node._execute_command(
 		"find_nodes", {"class": "Node2D", "root": "/root/Level"}
 	)
@@ -176,12 +184,24 @@ func _check() -> void:
 	)
 	if _paths(by_group) != ["/root/Level/Heroine"]:
 		_fail("filters combine: %s" % str(by_group))
+	# The word on a control, which is what a caller is actually looking at. A screen built in code
+	# is @Button@1412 all the way down, and reaching one meant listing every button on it and
+	# reading them back one at a time to find the one saying "Post".
+	var by_words: Dictionary = await node._execute_command("find_nodes", {"says": "sign THE"})
+	if _paths(by_words) != ["/root/Level/Docket"]:
+		_fail("find by what a node says, in part and whatever the case: %s" % str(by_words))
+	var unsaid: Dictionary = await node._execute_command("find_nodes", {"says": "turn away"})
+	if unsaid.get("count") != 0:
+		_fail("and nothing at all when nothing says it: %s" % str(unsaid))
+	var its_own: Dictionary = await node._execute_command("find_nodes", {"says": "sign the", "name": "Level"})
+	if its_own.get("count") != 0:
+		_fail("what a node says is its own, not what is said under it: %s" % str(its_own))
 	var limited: Dictionary = await node._execute_command("find_nodes", {"class": "Node", "limit": 2})
 	if limited.get("count") != 2 or limited.get("truncated") != true:
 		_fail("a limit truncates and says so: %s" % str(limited))
 	var nothing: Dictionary = await node._execute_command("find_nodes", {})
-	if nothing.get("type") != "error":
-		_fail("a find with no filter is refused: %s" % str(nothing))
+	if nothing.get("type") != "error" or not str(nothing.get("message", "")).contains("says"):
+		_fail("a find with no filter is refused, naming every filter there is: %s" % str(nothing))
 	var missing: Dictionary = await node._execute_command(
 		"find_nodes", {"class": "Node", "root": "/root/Nowhere"}
 	)
