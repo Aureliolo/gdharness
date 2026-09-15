@@ -1245,6 +1245,21 @@ class GodotServer {
    */
   private async debuggedGame(): Promise<Checked<GodotProcess>> {
     const game = this.activeProcess;
+    // A finished run is kept so its output can still be read, and a readable log is not a debug
+    // session. Said apart from "nothing is running", because the two are answered by different
+    // things: one wants a run started, the other has its answer waiting in editor_output.
+    if (game !== null && game.exitCode !== null) {
+      return {
+        ok: false,
+        response: this.createErrorResponse(
+          `The last run has already finished (exit code ${game.exitCode}), so there is no debug session to answer for.`,
+          [
+            'editor_output still reads what it printed, until the next run starts',
+            'editor_run start plays another, which the debugger can hold',
+          ],
+        ),
+      };
+    }
     if (game === null) {
       return {
         ok: false,
@@ -1938,7 +1953,7 @@ class GodotServer {
         version: godotPath === null ? null : await this.godotVersion(godotPath),
       },
       game: {
-        processActive: this.activeProcess !== null,
+        processActive: this.activeProcess?.exitCode === null,
         playingInEditor: playing,
         runtimeConnected: games.some((game) => game.reachable),
         runtimes: games,
@@ -2201,7 +2216,7 @@ class GodotServer {
       return await this.checkBoot(engine.value, project.value.path, sceneArgument, args);
     }
 
-    if (this.activeProcess) {
+    if (this.activeProcess?.exitCode === null) {
       this.logDebug('Ending the running game before starting another');
       await this.endActiveGame();
     }
@@ -2228,12 +2243,12 @@ class GodotServer {
     });
     this.logDebug(`Running Godot project: ${engine.value} ${cmdArgs.join(' ')}`);
     const started = this.spawnGame(engine.value, cmdArgs);
+    // Kept after it exits rather than dropped, because a run that quits on its own is the whole
+    // point of a headless one: a bench, a report, a tool scene. Dropping the reference on exit
+    // threw its output away before anybody could read it, and left editor_output answering "no
+    // game is running" about a run that had just printed its answer. Whether a run is *active* is
+    // exitCode === null, which is what the callers below now ask.
     this.activeProcess = started;
-    started.process.on('exit', () => {
-      if (this.activeProcess === started) {
-        this.activeProcess = null;
-      }
-    });
     return this.jsonTextResponse({
       started: true,
       through: 'gdharness',

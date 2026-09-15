@@ -685,7 +685,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'editor_run',
     description:
-      'The run: starting the project, stopping it, or booting it once to see whether it comes up clean. start keeps it running and collecting output until stop, windowed where there is a display and headless where there is not, unless headless says otherwise; only runtime_capture needs the window. check boots it headless for a few frames, waits for it to quit, and answers with the verdict: whether it came up, and every error and warning it printed on the way.',
+      'The run: starting the project, stopping it, or booting it once to see whether it comes up clean. start keeps it running and collecting output until it quits or is stopped, windowed where there is a display and headless where there is not, unless headless says otherwise; only runtime_capture needs the window. A run that quits on its own is kept, so a scene that prints an answer and quits is start, then editor_output until running is false. check boots it headless for a few frames, waits for it to quit, and answers with the verdict: whether it came up, and every error and warning it printed on the way.',
     parameters: {
       projectPath: PROJECT_PATH,
       scene: { type: 'string', description: 'A scene to run instead of the main scene.' },
@@ -698,7 +698,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     },
     requires: ['projectPath'],
     operations: {
-      start: { summary: 'run the project until stop', requires: [] },
+      start: { summary: 'run the project until it quits or is stopped', requires: [] },
       stop: { summary: 'end the run and answer with what it printed last', requires: [] },
       check: { summary: 'boot headless, quit after a few frames, and report the verdict', requires: [] },
     },
@@ -707,7 +707,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'editor_output',
     description:
-      'What the project started by editor_run has printed, as entries with a severity: the errors and warnings the engine reported, each with where it happened, and everything else as info. Answers with the counts and the verdict as well as the entries.',
+      'What the project started by editor_run has printed, as entries with a severity: the errors and warnings the engine reported, each with where it happened, and everything else as info. Answers with the counts and the verdict as well as the entries. A run that has quit still answers here, with running false and its exit code, until the next one starts.',
     parameters: {
       severity: {
         type: 'string',
