@@ -2467,6 +2467,100 @@ async function testParametersReachTheEngine(): Promise<void> {
 }
 
 /**
+ * A headless run that quits on its own still has its output read back.
+ *
+ * That is the ordinary shape of a headless run, not an edge case: a bench, a report, a one-shot
+ * tool scene all print an answer and call quit. editor_run dropped its reference to the process
+ * the moment it exited, so the log went with it and editor_output answered "No game is running"
+ * about a run that had just finished printing. Everything needed was already there: spawnGame
+ * keeps the log and records exitCode, and editor_output reports `running: false` off it.
+ */
+async function testAFinishedRunCanStillBeRead(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('finished-run output regression skipped (Godot not found)');
+    return;
+  }
+
+  const projectDir = mkdtempSync(join(tmpdir(), 'gdharness-finished-run-'));
+  try {
+    writeFileSync(
+      join(projectDir, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="FinishedRun"\nrun/main_scene="res://main.tscn"\n',
+    );
+    writeFileSync(
+      join(projectDir, 'main.gd'),
+      'extends Node\n\n\nfunc _ready() -> void:\n\tprint("the answer is 42")\n\tget_tree().quit()\n',
+    );
+    writeFileSync(
+      join(projectDir, 'main.tscn'),
+      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+    );
+
+    await withStdioServer(
+      async (call) => {
+        const started: unknown = JSON.parse(
+          await call(
+            'editor_run',
+            { projectPath: projectDir, op: 'start', headless: true },
+            ENGINE_CALL_TIMEOUT_MS,
+          ),
+        );
+        assert.equal(get(started, 'started'), true, JSON.stringify(started));
+
+        // It quits itself, so there is nothing to stop and nothing to wait on but the exit.
+        let output: unknown = null;
+        for (let attempt = 0; attempt < 100; attempt += 1) {
+          await delay(200);
+          const answered = await call('editor_output', { limit: 200 }, ENGINE_CALL_TIMEOUT_MS);
+          assert.doesNotMatch(
+            answered,
+            /No game is running/,
+            'a finished run is still the run editor_output answers about',
+          );
+          output = JSON.parse(answered);
+          if (get(output, 'running') === false) {
+            break;
+          }
+        }
+
+        assert.equal(
+          get(output, 'running'),
+          false,
+          `it should report as finished: ${JSON.stringify(output)}`,
+        );
+        assert.equal(get(output, 'exitCode'), 0, JSON.stringify(output));
+        const printed = asArray(get(output, 'entries')).map((entry) => text(get(entry, 'text')));
+        assert.ok(
+          printed.some((line) => line.includes('the answer is 42')),
+          `what it printed before quitting survives:\n${JSON.stringify(output, null, 2)}`,
+        );
+
+        // And a readable log is not a debug session. The refusal names which of the two states it
+        // is in, because "nothing ran" and "it finished" are answered by different things.
+        const refused = await call('debug_state', { op: 'stack' });
+        assert.match(
+          refused,
+          /already finished \(exit code 0\)/,
+          'a finished run is not something the debugger can answer for',
+        );
+        assert.match(refused, /editor_output still reads what it printed/, refused);
+
+        // editor_status agrees it is not active, so "is something running" stays a real question.
+        const status: unknown = JSON.parse(await call('editor_status', {}, ENGINE_CALL_TIMEOUT_MS));
+        assert.equal(get(status, 'game', 'processActive'), false, JSON.stringify(status));
+      },
+      { GODOT_PATH: godotPath },
+    );
+  } finally {
+    rmSync(projectDir, { recursive: true, force: true });
+  }
+}
+
+/**
  * project_test against a real gdUnit4: a suite with a pass, a failure and a skip, read back as
  * cases rather than a console. The failing case has to be named with what the assertion said,
  * a project without the runner has to be refused, and nothing of the run may be left behind.
@@ -3150,6 +3244,7 @@ async function main(): Promise<void> {
   testAGameTooNewToTalkToIsStillAGame();
   testATestRunKeepsOutOfThePlayersSaves();
   await testParametersReachTheEngine();
+  await testAFinishedRunCanStillBeRead();
   await testGdUnitRunner();
   testCommandLineSetup();
   testTheWrittenConfigNamesAProgramThatStarts();
