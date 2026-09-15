@@ -264,7 +264,8 @@ function testAnUpgradeKeepsWhatWasPinnedByHand(): void {
     const path = configPath(harness, root);
     const before = read(path);
     const servers = before['mcpServers'] as Record<string, Record<string, unknown>>;
-    const entry = servers[SERVER_KEY]!;
+    const entry = servers[SERVER_KEY];
+    assert.ok(entry, 'the install wrote an entry to pin anything in');
     entry['env'] = {
       ...(entry['env'] as Record<string, string>),
       GDHARNESS_BRIDGE_PORT: '6515',
