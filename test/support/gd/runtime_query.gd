@@ -73,13 +73,27 @@ func _check_reading_the_screen(panel: Panel) -> void:
 	var press: Button = Button.new()
 	press.text = "Sign"
 	panel.add_child(press)
+	# The number in a form, which a player reads off the screen like anything else. The engine
+	# builds the field inside the box and leaves it out of `get_children()`, so a screen of forms
+	# read as every label on it and none of the values in it.
+	var grade: SpinBox = SpinBox.new()
+	grade.max_value = 9.0
+	grade.value = 4.0
+	panel.add_child(grade)
+	# And a menu nobody has opened, which is drawn nowhere: its own items are not children, but
+	# what a popup holds is, and a closed one reading as part of the screen would be worse than
+	# silence.
+	var choices: OptionButton = OptionButton.new()
+	choices.add_item("Everything")
+	choices.add_item("A client would not pay")
+	panel.add_child(choices)
 	await process_frame
 
 	var said: Dictionary = await node._execute_command("read_text", {"root": "/root/Panel"})
 	var lines: Array = Array(said.get("lines", []))
-	if lines != ["Your guild", "Sign"]:
+	if lines != ["Your guild", "Sign", "4", "Everything"]:
 		_fail("the screen should read as what is drawn on it, in order: %s" % str(said))
-	if said.get("count") != 2 or said.get("truncated") != false:
+	if said.get("count") != 4 or said.get("truncated") != false:
 		_fail("and say how many lines that was: %s" % str(said))
 
 	var everything: Dictionary = await node._execute_command(
@@ -96,6 +110,8 @@ func _check_reading_the_screen(panel: Panel) -> void:
 	quiet.free()
 	blank.free()
 	press.free()
+	grade.free()
+	choices.free()
 
 
 func _check() -> void:

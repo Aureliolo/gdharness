@@ -174,17 +174,31 @@ func read_text(params: Dictionary) -> Dictionary:
 
 ## Walks [param node] depth first, which is the order the screen is laid out in and the order a
 ## person reads it.
+##
+## Internal children as well, because the number in a SpinBox is one: the field a player reads it
+## in is a LineEdit the engine builds inside the box and leaves out of `get_children()`, so a
+## screen full of forms answered with every label on it and none of the values in it. The hidden
+## check covers a [Window] for the same walk: a dropdown's popup is a child that is not drawn
+## until it is opened, and reading a closed menu would put every item on the screen.
 func _read_into(node: Node, include_hidden: bool, into: PackedStringArray) -> void:
 	if into.size() >= READ_LIMIT:
 		return
-	var control: CanvasItem = node as CanvasItem
-	if not include_hidden and control != null and not control.visible:
+	if not include_hidden and not _drawn(node):
 		return
 	var said: String = _said_by(node)
 	if not said.is_empty():
 		into.append(said)
-	for child: Node in node.get_children():
+	for child: Node in node.get_children(true):
 		_read_into(child, include_hidden, into)
+
+
+## Whether [param node] is on the screen at all, for the two kinds of thing that can be hidden.
+static func _drawn(node: Node) -> bool:
+	var control: CanvasItem = node as CanvasItem
+	if control != null:
+		return control.visible
+	var window: Window = node as Window
+	return window == null or window.visible
 
 
 ## What one node says, or "" for a node that says nothing. Anything with a `text` property, which

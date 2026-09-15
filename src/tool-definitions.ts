@@ -796,7 +796,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       tree: { summary: 'the live scene tree', requires: [] },
       text: {
         summary:
-          'every line of text under nodePath, in the order somebody reads the screen, leaving out what is hidden and everything under it',
+          'every line of text under nodePath, the values in its fields included, in the order somebody reads the screen, leaving out what is hidden and everything under it',
         requires: [],
       },
       find: {
