@@ -1014,6 +1014,81 @@ function testBothEndsAgreeAboutTheAnnouncement(): void {
  * nobody finishes for us. Every other fixture here kills the server outright, so none of them
  * says anything about the path a real harness takes.
  */
+/**
+ * An editor a server opened is restarted by starting it again; one opened by hand restarts itself.
+ *
+ * Godot consumes the arguments an editor was started with and hands none of them back, so an editor
+ * that restarts itself comes up without the ports it was moved to. That was answered by writing
+ * those ports into Godot's editor settings, and there is one of those per engine version per
+ * machine: a port chosen for one project became the number every other project's editor came up on,
+ * and an editor opened by hand for something else inherited it and collided with the one it was
+ * moved away from. Reported by another session, whose editor for one project was attached to a
+ * server for another.
+ *
+ * Driven on the wire, because which of the two an editor gets is the whole of the fix: the fake
+ * editor says whether a server opened it, and what arrives back says which way the server went.
+ */
+async function testAnEditorAServerOpenedIsStartedAgain(): Promise<void> {
+  for (const opened of [true, false]) {
+    const port = await reservePort();
+    const server = new ServerProcess({
+      // An engine that exists and is not Godot: the restart has to get past looking one up, and
+      // nothing here should put a real editor on anybody's desk.
+      env: { GDHARNESS_BRIDGE_PORT: String(port), GODOT_PATH: process.execPath },
+    });
+    let editor: WebSocket | null = null;
+    try {
+      await server.initialize('regression-test');
+      const opening = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+      editor = opening;
+      await new Promise<void>((resolve, reject) => {
+        opening.once('open', () => {
+          resolve();
+        });
+        opening.once('error', reject);
+      });
+
+      const asked: string[] = [];
+      opening.on('message', (data: Buffer) => {
+        const message = JSON.parse(data.toString('utf8')) as { type?: string; tool?: string };
+        if (message.type === 'tool_invoke' && typeof message.tool === 'string') {
+          asked.push(message.tool);
+        }
+      });
+      opening.send(
+        JSON.stringify({
+          type: 'godot_ready',
+          project_path: process.cwd(),
+          editor_pid: process.pid,
+          opened_by_a_server: opened,
+        }),
+      );
+
+      // Not awaited: the answer waits for an editor to come back, which no fixture editor does.
+      // What is being checked is what the server asked for, and that has already been sent.
+      void server
+        .request('tools/call', { name: 'editor_launch', arguments: { op: 'restart' } })
+        .catch(() => {});
+
+      const wanted = opened ? 'quit_editor' : 'restart_editor';
+      let sent = false;
+      for (let waited = 0; waited < 10_000 && !sent; waited += 100) {
+        await delay(100);
+        sent = asked.includes(wanted);
+      }
+      assert.ok(sent, `an editor ${opened ? 'a server opened' : 'opened by hand'} is sent ${wanted}`);
+      assert.equal(
+        asked.includes(opened ? 'restart_editor' : 'quit_editor'),
+        false,
+        'and never the other one',
+      );
+    } finally {
+      editor?.terminate();
+      await server.stop();
+    }
+  }
+}
+
 async function testAServerEndsWithAnEditorStillOnTheBridge(): Promise<void> {
   const port = await reservePort();
   const server = new ServerProcess({ env: { GDHARNESS_BRIDGE_PORT: String(port) } });
@@ -3043,6 +3118,7 @@ async function main(): Promise<void> {
 
   await testEditorStatusPortConflict();
   await testTheBridgeTakesThePortWhenItIsFreed();
+  await testAnEditorAServerOpenedIsStartedAgain();
   await testAServerEndsWithAnEditorStillOnTheBridge();
   await testABadPortIsReported();
   await testAnEditorPortMovesOnlyWhenItIsHeld();
