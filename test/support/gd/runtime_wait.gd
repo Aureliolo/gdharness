@@ -397,6 +397,27 @@ func _check_below_the_fold() -> void:
 	if pressed.size() != 1:
 		_fail("a button below the fold should be pressed once, pressed %d times" % pressed.size())
 
+	# And the other way past the fold. A row scrolled off the top is still inside the viewport, so
+	# a click aimed at it went to whatever is drawn up there and reported that it had not landed.
+	# Found in a real hall: the staff panel's button sat at y 69 with its container starting at 166.
+	var first: Button = Button.new()
+	first.name = "Topmost"
+	first.custom_minimum_size = Vector2(180, 40)
+	var early: Array[int] = []
+	first.pressed.connect(func() -> void: early.append(1))
+	column.add_child(first)
+	column.move_child(first, 0)
+	scroller.set_deferred("scroll_vertical", 400)
+	await process_frame
+	await process_frame
+
+	var above: Dictionary = await node._execute_command("click", {"path": "/root/Ledger/Column/Topmost"})
+
+	if above.get("type") != "clicked" or above.get("landed") != true:
+		_fail("a button above the fold should be scrolled to and clicked: %s" % str(above))
+	if early.size() != 1:
+		_fail("a button above the fold should be pressed once, pressed %d times" % early.size())
+
 	# The control that was already on screen is the other half: nothing should scroll for it, or
 	# every click would be reported as having moved the view.
 	var on_screen: Dictionary = await node._execute_command("click", {"path": "/root/Panel/Go"})
