@@ -533,3 +533,46 @@ func _check_until() -> void:
 	)
 	if no_value.get("type") != "error":
 		_fail("wait_until without a value is refused: %s" % str(no_value))
+
+	await _check_until_something_says_it()
+
+
+## Waiting on a screen rather than on a node, which is the only way a panel that rebuilds its own
+## labels can be waited on at all: the engine names those `@Label@1163`, so a wait holding one is
+## holding a node that is freed on the next redraw, and that is what it answered.
+func _check_until_something_says_it() -> void:
+	var rebuilt: Label = Label.new()
+	rebuilt.text = "Spring 1, year 1"
+	button.get_parent().add_child(rebuilt)
+	var turning: Callable = func() -> void:
+		await process_frame
+		await process_frame
+		# Taken out and built again, the way a panel following a clock redraws itself.
+		rebuilt.get_parent().remove_child(rebuilt)
+		rebuilt.queue_free()
+		var fresh: Label = Label.new()
+		fresh.text = "Spring 2, year 1"
+		button.get_parent().add_child(fresh)
+	turning.call()
+
+	var came: Dictionary = await node._execute_command(
+		"wait_until", {"path": "/root/Panel", "says": "spring 2"}
+	)
+	if came.get("met") != true or came.get("says") != "spring 2":
+		_fail("a wait should see words arrive on a panel, whatever the case: %s" % str(came))
+
+	var never: Dictionary = await node._execute_command(
+		"wait_until", {"path": "/root/Panel", "says": "Autumn 4", "timeout_ms": 60}
+	)
+	if never.get("met") != false or int(never.get("elapsed_ms", 0)) < 60:
+		_fail("and give up saying so when they never come: %s" % str(never))
+
+	var nowhere: Dictionary = await node._execute_command(
+		"wait_until", {"path": "/root/Nowhere", "says": "anything"}
+	)
+	if nowhere.get("type") != "error":
+		_fail("a wait on a screen that is not there is refused: %s" % str(nowhere))
+
+	var unasked: Dictionary = await node._execute_command("wait_until", {"path": "/root/Panel"})
+	if unasked.get("type") != "error" or not str(unasked.get("message", "")).contains("says"):
+		_fail("waiting for nothing in particular says what to ask for: %s" % str(unasked))
