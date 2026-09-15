@@ -73,7 +73,14 @@ import {
   readString,
   readStringArray,
 } from './tool-args.js';
-import { buildToolDefinitions, TOOL_SPECS, type ToolSpec, toolSpec } from './tool-definitions.js';
+import {
+  argumentsOf,
+  buildToolDefinitions,
+  opTakes,
+  TOOL_SPECS,
+  type ToolSpec,
+  toolSpec,
+} from './tool-definitions.js';
 import { UpdateCheck } from './update-check.js';
 
 /**
@@ -805,6 +812,22 @@ class GodotServer {
           ok: false,
           response: this.createErrorResponse(
             `${spec.name} has no op ${JSON.stringify(requested)}. Valid ops: ${valid.join(', ')}.`,
+          ),
+        };
+      }
+    }
+
+    // An argument named for a different op. The tool-level check above passes it, because the tool
+    // does take it, and then the op reads nothing of the sort and answers as though it had: a limit
+    // on a screen read, a property list on a find. That is the same fault as an argument nothing
+    // names, and it is worse, because the caller has read the schema and believes they got it right.
+    if (op !== null) {
+      const elsewhere = Object.keys(args).filter((key) => key !== 'op' && !opTakes(spec, op, key));
+      if (elsewhere.length > 0) {
+        return {
+          ok: false,
+          response: this.createErrorResponse(
+            `${spec.name} ${op} does not take ${elsewhere.join(', ')}. ${op} takes: ${argumentsOf(spec, op).join(', ')}.`,
           ),
         };
       }
@@ -2422,25 +2445,27 @@ class GodotServer {
    * answer to travel, before it is called busy.
    */
   private async handleRuntimeWait(op: string, args: OperationParams): Promise<ToolResponse> {
+    if (op === 'frames') {
+      const frames = readPositiveNumber(args, 'frames') ?? 1;
+      // Long enough for the frames themselves, which the flat patience is not: 600 frames is ten
+      // seconds at sixty a second and the answer arrived as the call gave up on it, twice in one
+      // session. Counted at a rate no game running at all falls under, because a game busy enough
+      // to be worth waiting on is exactly the one drawing slowly. Off the standing patience rather
+      // than off `timeoutMs`, which this op does not take: how long a run of frames is worth
+      // waiting for is the count, and a second knob on it is one nobody could set correctly.
+      const waited = patienceForFrames(frames, this.runtimeTimeoutMs());
+      return await this.handleRuntimeCommand(
+        'wait_frames',
+        { projectPath: args['projectPath'], frames },
+        waited,
+      );
+    }
+
     const timeoutMs = readPositiveNumber(args, 'timeoutMs') ?? 5000;
     const nodePath = readNonEmptyString(args, 'nodePath') ?? '';
     const patience = Math.max(this.runtimeTimeoutMs(), timeoutMs + 5000);
-    switch (op) {
-      case 'frames': {
-        const frames = readPositiveNumber(args, 'frames') ?? 1;
-        // Long enough for the frames themselves, which the flat patience is not: 600 frames is ten
-        // seconds at sixty a second and the answer arrived as the call gave up on it, twice in one
-        // session. Counted at a rate no game running at all falls under, because a game busy
-        // enough to be worth waiting on is exactly the one drawing slowly.
-        const waited = patienceForFrames(frames, patience);
-        return await this.handleRuntimeCommand(
-          'wait_frames',
-          { projectPath: args['projectPath'], frames },
-          waited,
-        );
-      }
-      case 'signal':
-        return await this.handleRuntimeCommand(
+    return op === 'signal'
+      ? await this.handleRuntimeCommand(
           'wait_signal',
           {
             projectPath: args['projectPath'],
@@ -2449,9 +2474,8 @@ class GodotServer {
             timeout_ms: timeoutMs,
           },
           patience,
-        );
-      default:
-        return await this.handleRuntimeCommand(
+        )
+      : await this.handleRuntimeCommand(
           'wait_until',
           {
             projectPath: args['projectPath'],
@@ -2462,7 +2486,6 @@ class GodotServer {
           },
           patience,
         );
-    }
   }
 }
 
