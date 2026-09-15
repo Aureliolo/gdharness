@@ -28,7 +28,7 @@ import { staleClassNames } from './class-cache.js';
 import { DEFAULT_DAP_PORT, GodotDAPClient, handleDAPTool } from './dap_client.js';
 import { dictionary, emptyRecord } from './dictionary.js';
 import { errorMessage, Refusal } from './errors.js';
-import { GameLog } from './game-log.js';
+import { GameLog, type LogEntry } from './game-log.js';
 import { type GodotBridge, getDefaultBridge } from './godot-bridge.js';
 import { GodotLocator } from './godot-path.js';
 import { type HeadlessOutcome, runOperation } from './headless.js';
@@ -301,6 +301,30 @@ function realPathOr(path: string): string {
   } catch {
     return path;
   }
+}
+
+/** Where gdUnit4 lives, which is where a backtrace stops being about the game. */
+const RUNNER_DIRECTORY = 'addons/gdUnit4/';
+
+/**
+ * One engine message with the runner's own frames taken off the bottom of its backtrace.
+ *
+ * An error pushed inside a test carries the twenty frames gdUnit4 took to reach it, and they are
+ * the same twenty every time: twenty-eight messages from one tier came back as seven hundred lines
+ * of stage, execution stage and test case. What is above them is the game, ending in the test that
+ * caused it, which is the whole of what anybody reads. Said rather than dropped, so a backtrace
+ * that looks short is one that says why.
+ */
+function aboveTheRunner(entry: LogEntry): LogEntry {
+  const runner = entry.detail.findIndex((line) => line.includes(RUNNER_DIRECTORY));
+  if (runner < 0) {
+    return entry;
+  }
+  const cut = entry.detail.length - runner;
+  return {
+    ...entry,
+    detail: [...entry.detail.slice(0, runner), `[and ${cut} frames inside ${RUNNER_DIRECTORY}]`],
+  };
 }
 
 /** Whether project.godot names a scene for the game to start in. */
@@ -1541,7 +1565,9 @@ class GodotServer {
       rmSync(userData, { recursive: true, force: true });
     }
 
-    const engineEntries = run.log.select({ severity: 'warning', sinceLastCall: false, limit: 200 }).entries;
+    const engineEntries = run.log
+      .select({ severity: 'warning', sinceLastCall: false, limit: 200 })
+      .entries.map(aboveTheRunner);
     const verdicts: Readonly<Record<number, string>> = {
       0: 'passed',
       100: 'failures',
@@ -1585,6 +1611,13 @@ class GodotServer {
         .filter((entry) => entry.status === 'failed' || entry.status === 'error')
         .map((entry) => ({ ...entry, path: suite.path })),
     );
+    // A suite that passed every case has nothing to say that the totals do not, and a whole tier
+    // of them is most of the answer: a hundred and three clean suites came back as fifteen
+    // kilobytes of names and timings around the one line saying it passed. Counted instead, so the
+    // answer is the size of what went wrong.
+    const unclean = report.suites.filter(
+      (suite) => suite.failures > 0 || suite.errors > 0 || suite.skipped > 0,
+    );
     return this.jsonTextResponse({
       passed: !hung && exitCode === 0 && report.failures === 0 && report.errors === 0,
       verdict,
@@ -1595,7 +1628,7 @@ class GodotServer {
       skipped: report.skipped,
       time: report.time,
       failed,
-      suites: report.suites.map((suite) => ({
+      suites: unclean.map((suite) => ({
         name: suite.name,
         path: suite.path,
         tests: suite.tests,
@@ -1604,6 +1637,7 @@ class GodotServer {
         skipped: suite.skipped,
         time: suite.time,
       })),
+      suitesPassed: report.suites.length - unclean.length,
       engineErrors: run.log.count('error'),
       engineWarnings: run.log.count('warning'),
       engineEntries,

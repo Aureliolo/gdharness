@@ -377,7 +377,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'project_test',
     description:
-      "Runs the project's gdUnit4 tests headless and answers with every case: which failed, where, and what the assertion said. The class list is rebuilt first, so a suite written a moment ago is found. On Windows and Linux the run gets a user:// of its own, so a suite that saves a game writes nowhere near the saves of the copy somebody plays. Needs gdUnit4 under addons/gdUnit4.",
+      "Runs the project's gdUnit4 tests headless and answers with every case that did not pass: where it is, and what the assertion said. Suites where everything passed are counted rather than listed, and an engine message keeps the frames above gdUnit4 rather than the twenty inside it, so a clean tier answers in a few lines. The class list is rebuilt first, so a suite written a moment ago is found. On Windows and Linux the run gets a user:// of its own, so a suite that saves a game writes nowhere near the saves of the copy somebody plays. Needs gdUnit4 under addons/gdUnit4.",
     parameters: {
       projectPath: PROJECT_PATH,
       path: {
