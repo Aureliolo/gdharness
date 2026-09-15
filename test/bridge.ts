@@ -486,17 +486,18 @@ async function main(): Promise<void> {
         op: 'find',
         className: 'CharacterBody2D',
         namePattern: 'Play*',
+        says: 'Carry on',
         limit: 5,
       });
       assert.equal(get(found, 'nodes', 0, 'path'), '/root/Player', 'runtime_inspect find relays the paths');
       assert.deepEqual(
         get(found, 'asked'),
-        { class: 'CharacterBody2D', name: 'Play*', root: '/root', limit: 5 },
+        { class: 'CharacterBody2D', name: 'Play*', says: 'Carry on', root: '/root', limit: 5 },
         'only the filters given are sent, under the addon names',
       );
       assert.match(
         textOf(await call('runtime_inspect', { op: 'find' })) ?? '',
-        /needs at least one of className, script, namePattern, group/,
+        /needs at least one of className, script, namePattern, group, says/,
         'a find with nothing to find by is refused before the game is asked',
       );
 
