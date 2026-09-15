@@ -616,23 +616,61 @@ export function displayPath(harness: Harness, platform: NodeJS.Platform = proces
   return `${harness.scope === 'home' ? '~/' : ''}${file.replaceAll('\\', '/')}`;
 }
 
-/** The server entry, in the shape the harness reads it in. */
-export function entryFor(shape: Shape, launch: Launch): Record<string, unknown> {
+/** The two variables the install decides. Everything else in an entry belongs to somebody else. */
+const OURS: readonly string[] = ['GODOT_PATH', 'GDHARNESS_PROJECT'];
+
+/**
+ * The environment for the entry: whatever was already there, with the two the install owns over it.
+ *
+ * This block was rebuilt from nothing on every write, so an upgrade dropped anything a person had
+ * put in it. The three that matter are `GDHARNESS_BRIDGE_PORT`, `GDHARNESS_LSP_PORT` and
+ * `GDHARNESS_DAP_PORT`, and they are the worst ones to lose: nobody sets them until they already
+ * have a port conflict, so the config that loses them is the one that needed them, and it loses
+ * them to an upgrade that reported success. Reported from a project holding all three, where the
+ * next editor would have come back on the defaults and collided with the project they avoided.
+ */
+function environmentFor(launch: Launch, held: unknown): Record<string, string> {
+  const kept: Record<string, string> = {};
+  if (typeof held === 'object' && held !== null && !Array.isArray(held)) {
+    for (const [name, value] of Object.entries(held as Record<string, unknown>)) {
+      if (typeof value === 'string' && !OURS.includes(name)) {
+        kept[name] = value;
+      }
+    }
+  }
+  return { ...kept, ...launch.env };
+}
+
+/**
+ * The server entry, in the shape the harness reads it in, built onto [param held] where there is
+ * one already.
+ *
+ * What the install decides is written over: the command and the arguments carry the version, which
+ * is the whole of what an upgrade is for. Everything else on the entry stays where it was, for the
+ * same reason [method merged] leaves the rest of the file alone.
+ */
+export function entryFor(shape: Shape, launch: Launch, held?: unknown): Record<string, unknown> {
+  const before: Record<string, unknown> =
+    typeof held === 'object' && held !== null && !Array.isArray(held)
+      ? { ...(held as Record<string, unknown>) }
+      : {};
   if (shape === 'opencode') {
     return {
+      ...before,
       type: 'local',
       command: [launch.command, ...launch.args],
-      environment: { ...launch.env },
+      environment: environmentFor(launch, before['environment']),
       enabled: true,
     };
   }
   // A reader that sees the transport named is never left guessing which one was meant, and both
   // harnesses using this shape document it.
   return {
+    ...before,
     ...(shape === 'typed' ? { type: 'stdio' } : {}),
     command: launch.command,
     args: [...launch.args],
-    env: { ...launch.env },
+    env: environmentFor(launch, before['env']),
   };
 }
 
@@ -652,7 +690,7 @@ function merged(existing: unknown, harness: Harness, launch: Launch): Record<str
     typeof held === 'object' && held !== null && !Array.isArray(held)
       ? { ...(held as Record<string, unknown>) }
       : {};
-  servers[SERVER_KEY] = entryFor(harness.shape, launch);
+  servers[SERVER_KEY] = entryFor(harness.shape, launch, servers[SERVER_KEY]);
   root[harness.container] = servers;
   return root;
 }
