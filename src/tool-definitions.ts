@@ -908,7 +908,12 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         description:
           'click: the Control to click, at its centre, or the 3D node to click, where it is drawn. choose: the PopupMenu, or the OptionButton or MenuButton in front of one.',
       },
-      action: { type: 'string', ops: ['action'], description: 'action: the InputMap action name.' },
+      action: {
+        type: 'string',
+        ops: ['action'],
+        description:
+          'action: the InputMap action name. An engine dialog is not answered this way: AcceptDialog reads the Escape key itself and never asks the InputMap, so ui_cancel goes in and the question stays up. Dismiss one with key Escape, or click its button.',
+      },
       pressed: {
         type: 'boolean',
         ops: ['action', 'key', 'mouse_click'],
