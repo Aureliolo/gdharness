@@ -23,6 +23,12 @@ const BIND_ADDRESS_SETTING: String = "gdharness/runtime/bind_address"
 ## expects. A fixed port is for a client that cannot read the announcement.
 const PORT_SETTING: String = "gdharness/runtime/port"
 
+## How the engine is told to run a script instead of the game: `godot -s thing.gd`.
+const SCRIPT_FLAGS: PackedStringArray = ["-s", "--script"]
+
+## Serve a script run anyway, for somebody driving a `-s` script rather than a game.
+const SCRIPT_RUNS_SETTING: String = "gdharness/runtime/serve_script_runs"
+
 var values: Values = Values.new()
 
 # The modules are members and not locals of _init, because a Callable holds its object by id
@@ -161,6 +167,15 @@ func _start_server() -> void:
 		_enabled = false
 		return
 
+	# And a script run has nothing to serve. Autoloads come up for `godot -s` as well, so a test
+	# tier or a batch tool binds a loopback port and writes an announcement under the project's
+	# own path: a gate that starts sixteen engines at once announces sixteen games that are not
+	# games, and a client asking the runtime anything while they run can be answered by whichever
+	# of them replies first. Measured on two projects before it was written here.
+	if _script_run() and not bool(ProjectSettings.get_setting(SCRIPT_RUNS_SETTING, false)):
+		_enabled = false
+		return
+
 	_server = TCPServer.new()
 	# listen() defaults bind_address to "*", which exposes the game to the whole network.
 	var bind_address: String = str(ProjectSettings.get_setting(BIND_ADDRESS_SETTING, DEFAULT_BIND_ADDRESS))
@@ -178,6 +193,15 @@ func _start_server() -> void:
 	_port = _server.get_local_port()
 	_announce(bind_address)
 	print("[gdharness] runtime listening on %s:%d, announced at %s" % [bind_address, _port, _announcement])
+
+
+## Whether the engine was told to run a script rather than the game.
+func _script_run() -> bool:
+	var given: PackedStringArray = OS.get_cmdline_args()
+	for flag: String in SCRIPT_FLAGS:
+		if given.has(flag):
+			return true
+	return false
 
 
 ## Where the announcement goes. The server derives the same path with the same precedence, so

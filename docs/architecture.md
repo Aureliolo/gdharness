@@ -270,6 +270,12 @@ id, holding the port and the project path. The server reads that directory:
 Two games can run at once. `projectPath` picks between them, and `editor_status` lists what it can
 reach.
 
+A script run is not one of them. Autoloads come up for `godot -s` as well, so a test tier or a
+batch tool would bind a port and announce itself under the project's own path, and a client asking
+the runtime anything while sixteen of those run gets whichever answers first. The addon stays quiet
+there unless `gdharness/runtime/serve_script_runs` is true, which is for driving a `-s` script on
+purpose.
+
 ## Headless operations
 
 One engine per call: `godot --headless --path <project> --script <operations.gd> <operation>

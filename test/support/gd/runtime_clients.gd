@@ -5,6 +5,9 @@ extends SceneTree
 ## bytes arrive, refuses what it cannot read, drops a client that hangs up without the engine
 ## printing an error about it, serves everybody else while one of them has stopped reading, and
 ## takes its announcement down with it.
+##
+## This file is itself the case the runtime refuses to serve: it is a `-s` run, so everything below
+## holds only because it asks for one, which is the other half of what is checked here.
 
 const Runtime = preload("res://addons/gdharness_runtime/runtime_autoload.gd")
 const DEADLINE_MSEC: int = 5000
@@ -25,6 +28,9 @@ func _init() -> void:
 	var directory: String = OS.get_temp_dir().path_join("gdharness-fixture-%d" % OS.get_process_id())
 	OS.set_environment("GDHARNESS_RUNTIME_DIR", directory)
 
+	_check_a_script_run_serves_nobody(directory)
+
+	ProjectSettings.set_setting(Runtime.SCRIPT_RUNS_SETTING, true)
 	var node: Runtime = Runtime.new()
 	_check(node, directory)
 	node.free()
@@ -169,6 +175,27 @@ func _check_a_client_that_stopped_reading(node: Runtime) -> void:
 		return second_lines.size() >= 3
 	if not _pump(node, talker, answered_again):
 		_fail("the runtime stopped answering after a client left mid-reply: %s" % str(second_lines))
+
+
+## A `-s` run is not a game, and every engine that starts one announces itself under the project's
+## own path. Sixteen of them at once is a test tier, and a client asking the runtime anything while
+## they run gets whichever answers first: a process with no game in it, from a path identical to the
+## real one. So it stays quiet unless the project asks, which is what everything below relies on.
+func _check_a_script_run_serves_nobody(directory: String) -> void:
+	ProjectSettings.set_setting(Runtime.SCRIPT_RUNS_SETTING, false)
+	var quiet: Runtime = Runtime.new()
+	quiet._start_server()
+
+	if quiet._enabled:
+		_fail("a script run should not have served: %s" % str(OS.get_cmdline_args()))
+	if quiet._port != 0:
+		_fail("a script run took port %d" % quiet._port)
+	var announcement: String = directory.path_join("runtime-%d.json" % OS.get_process_id())
+	if FileAccess.file_exists(announcement):
+		_fail("a script run announced itself at %s" % announcement)
+
+	quiet._cleanup()
+	quiet.free()
 
 
 func _check(node: Runtime, directory: String) -> void:
