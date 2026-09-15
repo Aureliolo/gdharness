@@ -380,6 +380,14 @@ async function main(): Promise<void> {
     assert.match(noOp, /scene_node needs op, one of: add/, 'a tool with no default op says so');
     const stray = textOf(await call('project_search', { projectPath, query: 'x', depth: 2 })) ?? '';
     assert.match(stray, /project_search does not take depth\. It takes: /, 'a stray argument is refused');
+    // And a tool that takes nothing says so, rather than "It takes: ." over an empty list, which is
+    // the first refusal a session sees: editor_status is the call everything starts with.
+    const takesNothing = textOf(await call('editor_status', { projectPath })) ?? '';
+    assert.match(
+      takesNothing,
+      /editor_status does not take projectPath\. It takes no arguments\./,
+      'a tool with no arguments says that rather than listing none',
+    );
     const missing = textOf(await call('runtime_invoke', { op: 'set', nodePath: '/root' })) ?? '';
     assert.match(missing, /runtime_invoke set needs property, value/, 'a missing op argument is named');
     // Blank is an argument somebody forgot everywhere but the few that carry content: emptying a
