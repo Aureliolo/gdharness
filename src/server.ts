@@ -38,6 +38,7 @@ import {
   type EditorPorts,
   editorArguments,
   envValue,
+  OPENED_BY_A_SERVER,
   resolveHeadless,
   runArguments,
   userDataIn,
@@ -130,6 +131,25 @@ const SLOWEST_FRAME_RATE = 20;
  */
 export function patienceForFrames(frames: number, atLeast: number): number {
   return Math.max(atLeast, (frames / SLOWEST_FRAME_RATE) * 1000 + atLeast);
+}
+
+/**
+ * Whether a process is still running, which is asked of two things this server is waiting on: a
+ * server that may have replaced it, and an editor that was asked to go.
+ *
+ * Undefined reads as gone, because a caller that has no process to name has nothing to wait for.
+ */
+function alive(pid: number | undefined): boolean {
+  if (pid === undefined) {
+    return false;
+  }
+  try {
+    // Signal 0 asks whether it could be signalled rather than signalling it.
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Whether [param value] is the [param kind] a schema asked for. An unknown kind asks nothing. */
@@ -608,13 +628,7 @@ class GodotServer {
     if (announced === null || announced.pid === process.pid) {
       return null;
     }
-    try {
-      // Signal 0 asks whether it could be signalled rather than signalling it.
-      process.kill(announced.pid, 0);
-      return announced.pid;
-    } catch {
-      return null;
-    }
+    return alive(announced.pid) ? announced.pid : null;
   }
 
   private stopWatchingForASuccessor(): void {
@@ -1949,7 +1963,13 @@ class GodotServer {
       ]);
     }
 
-    const asked = await this.handleViaBridge('restart_editor', {});
+    // An editor a server opened is started again rather than restarting itself, because only the
+    // side that wrote its arguments can write them a second time. One opened by hand is on the
+    // ports its own settings name and comes back on them, so Godot's restart is right for it.
+    const mine = before.openedByAServer === true && before.projectPath !== undefined;
+    const asked = mine
+      ? await this.startItAgain(before.projectPath ?? '', before.editorPid)
+      : await this.handleViaBridge('restart_editor', {});
     if (asked.isError === true) {
       return asked;
     }
@@ -1985,6 +2005,50 @@ class GodotServer {
       staleNote: addonMismatch(now.addonVersion, SERVER_VERSION),
       tookMs: Date.now() - began,
     });
+  }
+
+  /**
+   * Restarts an editor this server opened, by asking it to go and then starting it again.
+   *
+   * Godot's own restart cannot do it. The engine consumes the arguments an editor was started with
+   * and hands none of them back, so an editor that restarts itself comes up without the ports it
+   * was moved to. That used to be answered by writing those ports into Godot's editor settings, and
+   * there is one of those for every editor of an engine version on the machine: a port chosen for
+   * one project became the number every other project's editor came up on, so an editor opened by
+   * hand for something else inherited it and collided with the editor it was moved away from.
+   * Nothing is written anywhere now, because whatever wrote the arguments writes them again.
+   *
+   * The same ports rather than fresh ones, so that everything already pointed at this editor still
+   * is. They are this editor's own and nothing else can be holding them once it has gone, which is
+   * what the wait below is for.
+   */
+  private async startItAgain(projectPath: string, editorPid: number | undefined): Promise<ToolResponse> {
+    const engine = await this.engine();
+    if (!engine.ok) {
+      return engine.response;
+    }
+    const ports = {
+      lsp: this.editorServes('lspPort', 'GDHARNESS_LSP_PORT', DEFAULT_LSP_PORT),
+      dap: this.editorServes('dapPort', 'GDHARNESS_DAP_PORT', DEFAULT_DAP_PORT),
+    };
+
+    const asked = await this.handleViaBridge('quit_editor', {});
+    if (asked.isError === true) {
+      return asked;
+    }
+    // Waited for rather than assumed. The editor saves on its way out, so it is not gone the moment
+    // it answers, and starting the replacement while it still holds its ports is how the new one
+    // comes up on neither of them.
+    await this.waitForBridge(() => !alive(editorPid), Date.now() + EDITOR_RESTART_TIMEOUT_MS);
+
+    const opened = await this.openAnEditor(engine.value, projectPath, ports);
+    if (opened.error !== null) {
+      return this.createErrorResponse(
+        `The editor was asked to go and could not be started again: ${opened.error}`,
+        [`editor_launch opens one on ${projectPath}`],
+      );
+    }
+    return this.jsonTextResponse({ restarting: true, pid: opened.pid });
   }
 
   /** Polls until the bridge is in the state asked for, or until the deadline passes. */
@@ -2025,13 +2089,39 @@ class GodotServer {
     }
     this.logDebug(`Launching Godot editor for project: ${project.value.path}`);
     const ports = await this.portsForAnEditor();
+    const opened = await this.openAnEditor(engine.value, project.value.path, ports);
+    if (opened.error !== null) {
+      return this.createErrorResponse(`Could not start the editor: ${opened.error}`);
+    }
+    return this.jsonTextResponse({
+      launched: true,
+      pid: opened.pid,
+      projectPath: project.value.path,
+      lspPort: ports.lsp,
+      dapPort: ports.dap,
+    });
+  }
+
+  /**
+   * Starts an editor on a project, on the ports named, and answers the process or what stopped it.
+   *
+   * Shared with the restart, because they are the same act. The engine consumes the arguments an
+   * editor was started with and hands none of them back, so the only thing that can bring one back
+   * as itself is whatever wrote those arguments in the first place.
+   */
+  private async openAnEditor(
+    engine: string,
+    projectPath: string,
+    ports: EditorPorts,
+  ): Promise<{ pid: number | null; error: string | null }> {
     // Told rather than left to derive. A game is started by the editor and inherits its
     // environment, not this server's, so an editor opened without TMP or TEMP set announces its
     // games somewhere this server never looks first. Passing the directory down makes the two
-    // agree by construction for every editor gdharness opened. The two ports are in the
-    // environment as well as on the command line, because the engine keeps what it was told to
-    // itself: this is how the addon knows what to write into the settings a restart reads.
-    const editor = spawn(engine.value, editorArguments(project.value.path, ports), {
+    // agree by construction for every editor gdharness opened. The two ports are in the environment
+    // as well as on the command line because the engine keeps what it was told to itself, and the
+    // third variable is this server saying it opened this editor, which is what decides who may
+    // open it again.
+    const editor = spawn(engine, editorArguments(projectPath, ports), {
       stdio: 'ignore',
       detached: true,
       env: {
@@ -2039,6 +2129,7 @@ class GodotServer {
         GDHARNESS_RUNTIME_DIR: runtimeDirectory(),
         GDHARNESS_LSP_PORT: String(ports.lsp),
         GDHARNESS_DAP_PORT: String(ports.dap),
+        [OPENED_BY_A_SERVER]: '1',
       },
     });
     const started = await new Promise<string | null>((resolve) => {
@@ -2050,16 +2141,10 @@ class GodotServer {
       });
     });
     if (started !== null) {
-      return this.createErrorResponse(`Could not start the editor: ${started}`);
+      return { pid: null, error: started };
     }
     editor.unref();
-    return this.jsonTextResponse({
-      launched: true,
-      pid: editor.pid ?? null,
-      projectPath: project.value.path,
-      lspPort: ports.lsp,
-      dapPort: ports.dap,
-    });
+    return { pid: editor.pid ?? null, error: null };
   }
 
   /**

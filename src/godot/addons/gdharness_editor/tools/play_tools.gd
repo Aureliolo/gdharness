@@ -125,6 +125,33 @@ func restart_editor(_args: Dictionary) -> Dictionary:
 	return {"ok": true, "restarting": true, "saved": true}
 
 
+## Ends this editor, having saved, so that whoever opened it can open it again.
+##
+## The editor's half of restarting one a server started. Godot's own restart cannot carry the ports
+## such an editor was given, for the reason above: the engine consumes the arguments and hands none
+## of them back. So the server starts it again itself, and this is the part only the editor can do.
+##
+## Saved first, exactly as the restart above saves. The editor is going either way, and unsaved
+## scenes are not this tool's to lose.
+func quit_editor(_args: Dictionary) -> Dictionary:
+	if EditorInterface.is_playing_scene():
+		EditorInterface.stop_playing_scene()
+
+	EditorInterface.save_all_scenes()
+
+	# Deferred so this answer is on its way out before the editor goes.
+	_leave.call_deferred()
+
+	return {"ok": true, "quitting": true, "saved": true}
+
+
+## Asked of the tree the editor's own window is in, because this object is not in one.
+static func _leave() -> void:
+	var base: Control = EditorInterface.get_base_control()
+	if base != null and base.get_tree() != null:
+		base.get_tree().quit()
+
+
 func playing_status(_args: Dictionary) -> Dictionary:
 	var playing: bool = EditorInterface.is_playing_scene()
 	# The debugger's port with it, read now rather than remembered: it is taken again before every

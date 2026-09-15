@@ -188,9 +188,18 @@ all.
 
 So `editor_launch` opens an editor on the two Godot takes options for, `--lsp-port` and
 `--dap-port`, keeping 6005 and 6006 whenever they are free and taking anything else when they are
-not. It passes the same two in the environment, and the addon writes them into that editor's
-settings, so an editor that restarts itself comes back where it was. `editor_status` reports where
-the connected editor says it serves, and the server follows that rather than the default.
+not. It passes the same two in the environment, which is how the addon knows a server opened it.
+`editor_status` reports where the connected editor says it serves, and the server follows that
+rather than the default.
+
+**Nothing is written into those settings, because they are shared.** The engine consumes the two
+options and hands neither back, so an editor that restarts itself comes up without them. Writing
+them into the settings made the restart work, and made a port chosen for one project the number in
+the one file every editor of that version reads: the next editor opened by hand inherited it and
+collided with the editor it had been moved away from. `editor_launch restart` starts such an editor
+again instead, with the same arguments, since whatever wrote them can write them a second time. An
+editor opened by hand is on the ports its own settings name and comes back on them by itself, so
+that one still gets Godot's own restart.
 
 The debugger is the third, and Godot takes no option for it, so the addon asks the operating system
 for one before every play. `editor_run` answers with the port it got.
