@@ -372,7 +372,11 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     parameters: {
       projectPath: PROJECT_PATH,
       preset: { type: 'string', description: 'Preset name from export_presets.cfg.' },
-      outputPath: { type: 'string', description: 'Where the export is written, inside the project.' },
+      outputPath: {
+        type: 'string',
+        description:
+          'Where the export is written, inside the project. The directory is created if it is not there: Godot\'s command-line exporter refuses a missing one with "The given export path doesn\'t exist", which reads as a wrong path in the preset.',
+      },
       debug: { type: 'boolean', description: 'run: a debug export. Default false.' },
     },
     requires: ['projectPath'],

@@ -1729,6 +1729,17 @@ async function testToolsRefusePathsOutsideTheProject(): Promise<void> {
           );
         }
 
+        // And the export made the directory it was told to write into. Godot's command-line
+        // exporter does not, where its own export dialog does, and what it says about a missing one
+        // is "The given export path doesn't exist", which reads as a wrong path in the preset. Two
+        // projects lost their first export to that message. Asserted here rather than in a suite of
+        // its own because the directory is made before the engine is asked, so it happens whether
+        // the engine is Godot or, as here, something that is not going to export anything.
+        assert.ok(
+          existsSync(join(projectPath, 'builds')),
+          'project_export should create the directory its outputPath names',
+        );
+
         // The LSP tools ask the same question of the same helper, before they open a socket, so
         // the refusal is observable with no language server anywhere. Only the refusal: the
         // accepting side would connect to whatever editor is serving 6005 on this machine.
