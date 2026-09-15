@@ -1026,15 +1026,19 @@ function testBothEndsAgreeAboutTheAnnouncement(): void {
  * server for another.
  *
  * Driven on the wire, because which of the two an editor gets is the whole of the fix: the fake
- * editor says whether a server opened it, and what arrives back says which way the server went.
+ * editor says whether a server opened it, and which way the server went is read off what it did
+ * next. The engine is pointed at nothing on purpose. Starting an editor again needs one and looks
+ * it up first, so an editor a server opened stops there and says so, which is the answer no editor
+ * restarting itself could ever produce; and nothing here puts a real editor on anybody's desk.
  */
 async function testAnEditorAServerOpenedIsStartedAgain(): Promise<void> {
   for (const opened of [true, false]) {
     const port = await reservePort();
     const server = new ServerProcess({
-      // An engine that exists and is not Godot: the restart has to get past looking one up, and
-      // nothing here should put a real editor on anybody's desk.
-      env: { GDHARNESS_BRIDGE_PORT: String(port), GODOT_PATH: process.execPath },
+      env: {
+        GDHARNESS_BRIDGE_PORT: String(port),
+        GODOT_PATH: join(tmpdir(), 'gdharness-no-such-engine'),
+      },
     });
     let editor: WebSocket | null = null;
     try {
@@ -1064,24 +1068,29 @@ async function testAnEditorAServerOpenedIsStartedAgain(): Promise<void> {
         }),
       );
 
-      // Not awaited: the answer waits for an editor to come back, which no fixture editor does.
-      // What is being checked is what the server asked for, and that has already been sent.
-      void server
-        .request('tools/call', { name: 'editor_launch', arguments: { op: 'restart' } })
-        .catch(() => {});
+      const restart = server
+        .request('tools/call', { name: 'editor_launch', arguments: { op: 'restart' } }, 20_000)
+        .catch(() => null);
 
-      const wanted = opened ? 'quit_editor' : 'restart_editor';
+      if (opened) {
+        assert.match(
+          textOf(await restart) ?? '',
+          /No Godot executable found/,
+          'an editor a server opened is started again, so it is the engine that stops it',
+        );
+        assert.equal(asked.includes('restart_editor'), false, 'and it is never asked to restart itself');
+        continue;
+      }
+
+      // The other way round waits for an editor to come back, which no fixture editor does, so the
+      // answer is never awaited: what was asked for has already gone down the socket.
       let sent = false;
       for (let waited = 0; waited < 10_000 && !sent; waited += 100) {
         await delay(100);
-        sent = asked.includes(wanted);
+        sent = asked.includes('restart_editor');
       }
-      assert.ok(sent, `an editor ${opened ? 'a server opened' : 'opened by hand'} is sent ${wanted}`);
-      assert.equal(
-        asked.includes(opened ? 'restart_editor' : 'quit_editor'),
-        false,
-        'and never the other one',
-      );
+      assert.ok(sent, 'an editor opened by hand is asked to restart itself');
+      assert.equal(asked.includes('quit_editor'), false, 'and is never asked to go');
     } finally {
       editor?.terminate();
       await server.stop();
