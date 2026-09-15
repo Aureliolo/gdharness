@@ -194,6 +194,9 @@ func _check_typing(input: InputCommands) -> void:
 		_fail("typing should report what it typed: %s" % JSON.stringify(typed))
 	if field.text != "Ash & Marek, 12!":
 		_fail("a field should hold what was typed into it: %s" % field.text)
+	# Where it went, which is the one thing a caller cannot see from their side of the socket.
+	if str(typed.get("into", "")) != str(field.get_path()):
+		_fail("typing should say what it landed in: %s" % JSON.stringify(typed))
 
 	var empty: Dictionary = input.inject_text({})
 	if empty.get("type", "") != "error":
@@ -223,6 +226,17 @@ func _check_what_the_keys_typed() -> void:
 		_fail("a newline should submit the field rather than land in it: %s" % str(submitted))
 	if _field.text != "kK":
 		_fail("and should leave the text alone: %s" % _field.text)
+
+	# And the state that leaves behind, which this fixture has had to work around since it was
+	# written: the field keeps the focus and stops being edited, so the next thing typed reaches
+	# nothing at all. It is refused with what to do about it rather than counted as typed.
+	var shut: Dictionary = _typing.inject_text({"text": "more"})
+	if shut.get("type", "") != "error":
+		_fail("typing into a field that is not being edited is refused: %s" % JSON.stringify(shut))
+	if not str(shut.get("message", "")).contains("not being edited"):
+		_fail("and the refusal says why: %s" % JSON.stringify(shut))
+	if _field.text != "kK":
+		_fail("and nothing lands in it: %s" % _field.text)
 
 	_field.queue_free()
 

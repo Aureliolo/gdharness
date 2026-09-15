@@ -915,7 +915,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       action: { summary: 'press an action, or hold it', requires: ['action'] },
       key: { summary: 'press a key, or hold it', requires: ['keycode'] },
       text: {
-        summary: 'type a string wherever the focus is, a character at a time',
+        summary:
+          'type a string into the field being edited, a character at a time, and say what it landed in',
         requires: ['text'],
       },
       mouse_click: { summary: 'one mouse button event at a position', requires: ['x', 'y'] },

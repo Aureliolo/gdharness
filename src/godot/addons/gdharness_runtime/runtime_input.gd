@@ -161,6 +161,11 @@ func inject_text(params: Dictionary) -> Dictionary:
 		return {"type": "error", "message": "text required"}
 
 	var viewport: Viewport = _host.get_tree().root
+	var focused: Control = viewport.gui_get_focus_owner()
+	var shut: String = _shut_to_typing(focused)
+	if not shut.is_empty():
+		return {"type": "error", "message": shut}
+
 	for index: int in text.length():
 		var down: InputEventKey = _typed(text.unicode_at(index))
 		viewport.push_input(down)
@@ -169,7 +174,41 @@ func inject_text(params: Dictionary) -> Dictionary:
 		up.pressed = false
 		viewport.push_input(up)
 
-	return {"type": "input_injected", "input_type": "text", "text": text, "characters": text.length()}
+	# Where it went, which is the one thing a caller cannot see from here. Null is a game reading
+	# keys for itself with nothing focused, which is a real thing to be typing at.
+	var into: Variant = null
+	if focused != null:
+		into = str(focused.get_path())
+
+	return {
+		"type": "input_injected",
+		"input_type": "text",
+		"text": text,
+		"characters": text.length(),
+		"into": into,
+	}
+
+
+## Why nothing typed would reach [param focused], or "" when it would.
+##
+## Having the focus is not the same as being edited. Since Godot 4.4 a field is focused and shut
+## until something opens it, which is what a click does and what submitting undoes: press Enter in
+## a box and it keeps the focus and drops every key that arrives afterwards. Typing into one
+## answered that the characters had gone in and put nothing anywhere, which is the shape a refusal
+## exists to prevent. Measured on a spin box in a real game: `has_focus` true, `is_editing` false,
+## three characters reported and the field unchanged.
+##
+## Only a [LineEdit] is refused: it is the one control the engine will say this about, since
+## [TextEdit] has no editing state of its own. A game reading keys for itself is typed at with
+## nothing focused at all, and that is not this tool's business to judge.
+static func _shut_to_typing(focused: Control) -> String:
+	var field: LineEdit = focused as LineEdit
+	if field == null or field.is_editing():
+		return ""
+	return (
+		"%s has the focus and is not being edited, so nothing typed lands in it. Click it first."
+		% focused.get_path()
+	)
 
 
 ## The key press that produces [param glyph], as a keyboard would send it.
