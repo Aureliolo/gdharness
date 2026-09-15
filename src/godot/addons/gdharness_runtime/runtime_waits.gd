@@ -53,9 +53,10 @@ func wait_signal(params: Dictionary) -> Dictionary:
 	if node_path.is_empty() or signal_name.is_empty():
 		return {"type": "error", "message": "Node path and signal name required"}
 
-	var node: Node = _host.get_tree().root.get_node_or_null(node_path)
-	if node == null:
-		return {"type": "error", "message": "Node not found: " + node_path}
+	var standing: Dictionary = Values.node_at(_host.get_tree().root, node_path)
+	if standing.has("message"):
+		return standing
+	var node: Node = standing["node"]
 	if not node.has_signal(signal_name):
 		return {"type": "error", "message": "%s has no signal %s" % [node_path, signal_name]}
 
@@ -90,8 +91,9 @@ func wait_until(params: Dictionary) -> Dictionary:
 		return _out_of_range("timeout_ms", timeout_ms, 1, CEILING_MSEC)
 	if node_path.is_empty():
 		return {"type": "error", "message": "Node path required"}
-	if _host.get_tree().root.get_node_or_null(node_path) == null:
-		return {"type": "error", "message": "Node not found: " + node_path}
+	var standing: Dictionary = Values.node_at(_host.get_tree().root, node_path)
+	if standing.has("message"):
+		return standing
 	if not says.is_empty():
 		return await _wait_until_said(node_path, says, timeout_ms)
 	if property.is_empty():
@@ -99,7 +101,7 @@ func wait_until(params: Dictionary) -> Dictionary:
 	if not params.has("value"):
 		return {"type": "error", "message": "A value to wait for is required"}
 
-	var node: Node = _host.get_tree().root.get_node_or_null(node_path)
+	var node: Node = standing["node"]
 
 	var current: Variant = node.get(property)
 	var wanted: Variant = _values.fitted(params["value"], typeof(current))

@@ -34,9 +34,10 @@ func get_tree(params: Dictionary) -> Dictionary:
 	var max_depth: int = int(params.get("depth", 3))
 	var include_properties: bool = bool(params.get("include_properties", false))
 
-	var root: Node = _host.get_tree().root.get_node_or_null(root_path)
-	if root == null:
-		return {"type": "error", "message": "Node not found: " + root_path}
+	var reached: Dictionary = Values.node_at(_host.get_tree().root, root_path)
+	if reached.has("message"):
+		return reached
+	var root: Node = reached["node"]
 
 	return {"type": "tree", "root": _serialize_node_tree(root, 0, max_depth, include_properties)}
 
@@ -64,9 +65,10 @@ func find_nodes(params: Dictionary) -> Dictionary:
 	if not wanted["script"].is_empty() and not wanted["script"].begins_with("res://"):
 		wanted["script"] = "res://" + wanted["script"]
 
-	var root: Node = _host.get_tree().root.get_node_or_null(root_path)
-	if root == null:
-		return {"type": "error", "message": "Node not found: " + root_path}
+	var reached: Dictionary = Values.node_at(_host.get_tree().root, root_path)
+	if reached.has("message"):
+		return reached
+	var root: Node = reached["node"]
 
 	var found: Array[Dictionary] = []
 	var pending: Array[Node] = [root]
@@ -208,9 +210,10 @@ func read_text(params: Dictionary) -> Dictionary:
 	var include_hidden: bool = bool(params.get("include_hidden", false))
 	var limit: int = clampi(int(params.get("limit", READ_LIMIT)), 1, READ_LIMIT)
 
-	var root: Node = _host.get_tree().root.get_node_or_null(root_path)
-	if root == null:
-		return {"type": "error", "message": "Node not found: " + root_path}
+	var reached: Dictionary = Values.node_at(_host.get_tree().root, root_path)
+	if reached.has("message"):
+		return reached
+	var root: Node = reached["node"]
 
 	# One line further than asked for, so that whether anything was left behind is read off the
 	# walk rather than guessed at from the count: a panel of exactly as many lines as the caller
@@ -275,9 +278,10 @@ func get_rect(params: Dictionary) -> Dictionary:
 	if node_path.is_empty():
 		return {"type": "error", "message": "Node path required"}
 
-	var node: Node = _host.get_tree().root.get_node_or_null(node_path)
-	if node == null:
-		return {"type": "error", "message": "Node not found: " + node_path}
+	var standing: Dictionary = Values.node_at(_host.get_tree().root, node_path)
+	if standing.has("message"):
+		return standing
+	var node: Node = standing["node"]
 
 	if node is Control:
 		var control: Control = node
@@ -426,9 +430,10 @@ func get_property(params: Dictionary) -> Dictionary:
 	if node_path.is_empty() or property.is_empty():
 		return {"type": "error", "message": "Node path and property required"}
 
-	var node: Node = _host.get_tree().root.get_node_or_null(node_path)
-	if node == null:
-		return {"type": "error", "message": "Node not found: " + node_path}
+	var standing: Dictionary = Values.node_at(_host.get_tree().root, node_path)
+	if standing.has("message"):
+		return standing
+	var node: Node = standing["node"]
 
 	var reached: Dictionary = _reached(node, node_path, property)
 	if reached.has("message"):
@@ -498,9 +503,10 @@ func set_property(params: Dictionary) -> Dictionary:
 	if node_path.is_empty() or property.is_empty():
 		return {"type": "error", "message": "Node path and property required"}
 
-	var node: Node = _host.get_tree().root.get_node_or_null(node_path)
-	if node == null:
-		return {"type": "error", "message": "Node not found: " + node_path}
+	var standing: Dictionary = Values.node_at(_host.get_tree().root, node_path)
+	if standing.has("message"):
+		return standing
+	var node: Node = standing["node"]
 
 	# Through a path as well, for the reason [method _reached] gives, and read back off the same
 	# holder afterwards: a set that does not take says so by answering with the old value, which is
@@ -531,9 +537,10 @@ func call_method(params: Dictionary) -> Dictionary:
 	if node_path.is_empty() or method.is_empty():
 		return {"type": "error", "message": "Node path and method required"}
 
-	var node: Node = _host.get_tree().root.get_node_or_null(node_path)
-	if node == null:
-		return {"type": "error", "message": "Node not found: " + node_path}
+	var standing: Dictionary = Values.node_at(_host.get_tree().root, node_path)
+	if standing.has("message"):
+		return standing
+	var node: Node = standing["node"]
 
 	# Through a path as well, for the reason [method _reached] gives. What a game does hangs off its
 	# nodes as much as its state does, so reading `_game:run:day` while being unable to call
