@@ -924,11 +924,13 @@ class GodotServer {
     const known = new Set([...Object.keys(spec.parameters), ...(spec.operations ? ['op'] : [])]);
     const unknown = Object.keys(args).filter((key) => !known.has(key));
     if (unknown.length > 0) {
+      // A tool that takes nothing read "It takes: ." and left the caller to work out whether the
+      // list was missing or empty. editor_status is one of them, and it is the tool a session calls
+      // first, so it is the first refusal anybody sees.
+      const takes = known.size === 0 ? 'It takes no arguments.' : `It takes: ${[...known].join(', ')}.`;
       return {
         ok: false,
-        response: this.createErrorResponse(
-          `${spec.name} does not take ${unknown.join(', ')}. It takes: ${[...known].join(', ')}.`,
-        ),
+        response: this.createErrorResponse(`${spec.name} does not take ${unknown.join(', ')}. ${takes}`),
       };
     }
 
