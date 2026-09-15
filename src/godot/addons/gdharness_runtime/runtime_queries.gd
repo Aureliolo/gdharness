@@ -160,6 +160,17 @@ static func _is_literal(pattern: String) -> bool:
 	return not pattern.is_empty() and not pattern.contains("*") and not pattern.contains("?")
 
 
+## Whether [param said] is what a find asked for in [param wanted].
+##
+## A plain word is a contains, which is what somebody looking for the row about a person means. A
+## pattern is a glob, because [code]namePattern[/code] beside it is one and nobody writes `*Still*`
+## in one field meaning a glob and in the other meaning those characters. Written as a contains
+## only, a glob matched nothing at all and an empty answer reads as a control that is not on the
+## screen: twice in one session here, over a button that was.
+static func _says(said: String, wanted: String) -> bool:
+	return said.containsn(wanted) if _is_literal(wanted) else said.matchn(wanted)
+
+
 ## Every filter but the name, so a find that came back empty can say how many nodes the name was
 ## the only thing standing between it and.
 func _matches_apart_from_name(node: Node, wanted: Dictionary[String, String]) -> bool:
@@ -168,7 +179,7 @@ func _matches_apart_from_name(node: Node, wanted: Dictionary[String, String]) ->
 	# What this node says, rather than everything said underneath it. A row is then found by the
 	# label in it, and the path answered is that label's, which is where the words a caller is
 	# looking at actually are: matching every container above it would answer with the screen.
-	if not wanted["says"].is_empty() and not said_by(node).containsn(wanted["says"]):
+	if not wanted["says"].is_empty() and not _says(said_by(node), wanted["says"]):
 		return false
 	var script: Variant = node.get_script()
 	if not wanted["script"].is_empty():
