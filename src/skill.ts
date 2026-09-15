@@ -62,6 +62,7 @@ that is running, and the project on disk. ${TOOL_SPECS.length} tools, named \`do
 | Find a control by the word on it | \`runtime_inspect find\` with \`says\`, rather than listing a screen and reading each one |
 | Where a control is, and whether it is visible | \`runtime_inspect\` \`find\`, \`rect\` |
 | What a property reads right now | \`runtime_inspect\` \`property\`, \`runtime_invoke\` |
+| What a property on an object a node holds reads | the same two, with colons: \`_game:clock:speed\` |
 | Press a button | \`runtime_input click\`, which says what was under the pointer |
 | Fill in a field | \`runtime_input click\` on it, then \`runtime_input text\` with \`replace\`; a submitted field has to be clicked again |
 | Click somebody standing in a 3D room | \`runtime_input click\` on the Node3D, which aims at what it draws |

@@ -788,7 +788,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['property', 'find'],
         description:
-          'property: which one to read. find: read this one off every node matched, so a panel of labels is one call rather than one per label.',
+          'property: which one to read. find: read this one off every node matched, so a panel of labels is one call rather than one per label. Colons read through the objects a node holds, "_game:clock:speed", which is where a game keeps what is worth asking about; a step that is not there is named.',
       },
       depth: { type: 'number', ops: ['tree'], description: 'tree: levels to descend. Default 3.' },
       includeProperties: {
@@ -852,7 +852,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         requires: ['nodePath'],
       },
       property: {
-        summary: 'what one property reads on a node, refusing a property the node does not have',
+        summary:
+          'what one property reads on a node, or through the objects it holds, refusing a name nothing along the way has',
         requires: ['nodePath', 'property'],
       },
       metrics: { summary: 'frame time, memory, draw calls and the rest', requires: [] },
@@ -866,7 +867,12 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     parameters: {
       projectPath: RUNNING_PROJECT_PATH,
       nodePath: { type: 'string', description: 'Absolute node path, such as "/root/Main/Player".' },
-      property: { type: 'string', ops: ['set'] },
+      property: {
+        type: 'string',
+        ops: ['set'],
+        description:
+          'set: which one to write. Colons write through the objects a node holds, "_game:run:day", and the answer reads back off the same holder, so a write a typed container refused shows as an unchanged value.',
+      },
       value: { ops: ['set'], description: "set: the value, fitted to the property's type." },
       method: { type: 'string', ops: ['call'] },
       args: {
@@ -877,7 +883,10 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     },
     requires: ['nodePath'],
     operations: {
-      set: { summary: 'set a property', requires: ['property', 'value'] },
+      set: {
+        summary: 'set a property, on a node or on an object it holds',
+        requires: ['property', 'value'],
+      },
       call: { summary: 'call a method and return its result', requires: ['method'] },
     },
   },
