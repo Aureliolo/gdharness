@@ -382,6 +382,16 @@ async function main(): Promise<void> {
     assert.match(stray, /project_search does not take depth\. It takes: /, 'a stray argument is refused');
     const missing = textOf(await call('runtime_invoke', { op: 'set', nodePath: '/root' })) ?? '';
     assert.match(missing, /runtime_invoke set needs property, value/, 'a missing op argument is named');
+    // Blank is an argument somebody forgot everywhere but the few that carry content: emptying a
+    // field and writing "" to a property are calls a caller means, and both were refused as missing,
+    // which tells them they left out what they deliberately sent.
+    const blankName =
+      textOf(await call('runtime_invoke', { op: 'set', nodePath: '/root', property: ' ', value: 1 })) ?? '';
+    assert.match(blankName, /runtime_invoke set needs property/, 'a blank name is still somebody who forgot');
+    const blankValue =
+      textOf(await call('runtime_invoke', { op: 'set', nodePath: '/root', property: 'name', value: '' })) ??
+      '';
+    assert.doesNotMatch(blankValue, /needs value/, 'a blank value is a value and reaches the game');
 
     // ClassDB introspection and the project search, which reach the engine.
     if (HAS_USABLE_GODOT) {

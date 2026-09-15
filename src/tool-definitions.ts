@@ -23,8 +23,13 @@ type JsonSchema = Readonly<Record<string, unknown>>;
  *
  * Absent means every op takes it, which is the honest answer for a tool that hands its arguments
  * on wholesale and for one whose parameters are all shared.
+ *
+ * `blank` says an empty string is a value here rather than an argument somebody forgot. It belongs
+ * to the few parameters that carry content instead of naming something: clearing a field and
+ * writing "" to a property are both things a caller means, and a required argument that is blank
+ * is otherwise refused as missing. A name left blank stays a caller who meant to fill it in.
  */
-type Parameter = JsonSchema & { readonly ops?: readonly string[] };
+type Parameter = JsonSchema & { readonly ops?: readonly string[]; readonly blank?: boolean };
 
 interface OperationSpec {
   /** One line on what the op does, for the description. */
@@ -241,7 +246,9 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       projectPath: PROJECT_PATH,
       setting: { type: 'string', description: 'Setting path, such as "display/window/size/viewport_width".' },
       value: {
-        description: 'The value to write. Engine types may be tagged, {"_type": "Vector2", "x": 1, "y": 2}.',
+        blank: true,
+        description:
+          'The value to write. Engine types may be tagged, {"_type": "Vector2", "x": 1, "y": 2}. "" writes an empty string.',
       },
       name: { type: 'string', description: 'Autoload name.' },
       path: { type: 'string', description: 'Autoload script or scene inside the project.' },
@@ -874,7 +881,11 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         description:
           'set: which one to write. Colons write through the objects a node holds, "_game:run:day", and the answer reads back off the same holder, so a write a typed container refused shows as an unchanged value.',
       },
-      value: { ops: ['set'], description: "set: the value, fitted to the property's type." },
+      value: {
+        ops: ['set'],
+        blank: true,
+        description: 'set: the value, fitted to the property\'s type. "" writes an empty string.',
+      },
       method: { type: 'string', ops: ['call'] },
       args: {
         type: 'array',
@@ -945,8 +956,9 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       text: {
         type: 'string',
         ops: ['text', 'choose'],
+        blank: true,
         description:
-          'text: what to type. A newline is Enter and a tab is Tab. choose: the item to take, by what it says.',
+          'text: what to type. A newline is Enter and a tab is Tab, a space is a space, and "" with replace empties the field. choose: the item to take, by what it says.',
       },
       replace: {
         type: 'boolean',
@@ -1144,7 +1156,7 @@ export function buildToolDefinitions(): MCPToolDefinition[] {
     for (const [name, schema] of Object.entries(spec.parameters)) {
       // `ops` is ours rather than JSON Schema's, and a client handed a key its validator does not
       // know is a client that may refuse the whole tool. Which ops take what is in the description.
-      const { ops: _ops, ...carried } = schema;
+      const { ops: _ops, blank: _blank, ...carried } = schema;
       properties[name] = carried;
     }
 

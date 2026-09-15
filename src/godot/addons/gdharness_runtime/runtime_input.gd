@@ -162,8 +162,9 @@ func inject_key(params: Dictionary) -> Dictionary:
 ## back now rather than echoed from the request, so a call that typed somewhere unhelpful says so.
 func inject_text(params: Dictionary) -> Dictionary:
 	var text: String = String(params.get("text", ""))
-	if text.is_empty():
-		return {"type": "error", "message": "text required"}
+	var over: bool = bool(params.get("replace", false))
+	if text.is_empty() and not over:
+		return {"type": "error", "message": "text needs something to type, or replace to empty a field"}
 
 	var viewport: Viewport = _host.get_tree().root
 	var focused: Control = viewport.gui_get_focus_owner()
@@ -171,14 +172,13 @@ func inject_text(params: Dictionary) -> Dictionary:
 	if not shut.is_empty():
 		return {"type": "error", "message": shut}
 
-	var replaced: bool = bool(params.get("replace", false)) and _select_everything(focused)
+	var replaced: bool = over and _select_everything(focused)
+	# Emptying a field is a real thing to ask for and the one shape of filling one in that types no
+	# characters. The selection is standing, so the key a player presses over one is what clears it.
+	if replaced and text.is_empty():
+		_press(viewport, _held_down(KEY_DELETE))
 	for index: int in text.length():
-		var down: InputEventKey = _typed(text.unicode_at(index))
-		viewport.push_input(down)
-		# The release as well, so nothing is left held down behind the caller.
-		var up: InputEventKey = down.duplicate()
-		up.pressed = false
-		viewport.push_input(up)
+		_press(viewport, _typed(text.unicode_at(index)))
 
 	# Where it went, which is the one thing a caller cannot see from here. Null is a game reading
 	# keys for itself with nothing focused, which is a real thing to be typing at.
@@ -253,6 +253,24 @@ static func _shut_to_typing(focused: Control) -> String:
 
 
 ## The key press that produces [param glyph], as a keyboard would send it.
+## A whole press: down, then the release, so nothing is left held down behind the caller.
+static func _press(viewport: Viewport, down: InputEventKey) -> void:
+	viewport.push_input(down)
+	var up: InputEventKey = down.duplicate()
+	up.pressed = false
+	viewport.push_input(up)
+
+
+## A key held down by its keycode, for the ones that stand for an edit rather than a character.
+static func _held_down(code: Key) -> InputEventKey:
+	var event: InputEventKey = InputEventKey.new()
+	event.pressed = true
+	event.keycode = code
+	event.physical_keycode = code
+	event.key_label = code
+	return event
+
+
 func _typed(glyph: int) -> InputEventKey:
 	var event: InputEventKey = InputEventKey.new()
 	event.pressed = true
