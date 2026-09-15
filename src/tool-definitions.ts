@@ -805,7 +805,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       namePattern: {
         type: 'string',
         ops: ['find'],
-        description: 'find: a case-insensitive glob on the node name, such as "Enemy*".',
+        description:
+          'find: a case-insensitive glob on the node name, such as "Enemy*". Matched against the whole name, so a bare word finds only a node called exactly that; an answer of none says how many names contain it and what glob would have found them.',
       },
       group: { type: 'string', ops: ['find'], description: 'find: a group the node is in.' },
       says: {
