@@ -1,4 +1,4 @@
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { errorMessage } from './errors.js';
 
@@ -32,6 +32,33 @@ interface BridgeAnnouncement {
 export const BRIDGE_ANNOUNCE_PROTOCOL = 1;
 
 /**
+ * What the announcement for [param projectPath] says, or null when there is not one to read.
+ *
+ * Null for a file that is missing, unreadable or not the shape this writes, because all three mean
+ * the same thing to a caller: nothing here says where a bridge is.
+ */
+export function readAnnouncement(path: string): BridgeAnnouncement | null {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'));
+    if (typeof parsed !== 'object' || parsed === null) {
+      return null;
+    }
+    const said = parsed as Partial<BridgeAnnouncement>;
+    if (typeof said.port !== 'number' || typeof said.pid !== 'number') {
+      return null;
+    }
+    return said as BridgeAnnouncement;
+  } catch {
+    return null;
+  }
+}
+
+/** Whether the announcement at [param path] is the one this process wrote. */
+function announcementIsOurs(path: string): boolean {
+  return readAnnouncement(path)?.pid === process.pid;
+}
+
+/**
  * Writes where this bridge is, and answers the path, or null with a reason on standard error.
  *
  * A failure here is not fatal: without an announcement the editor falls back to the port it was
@@ -60,9 +87,15 @@ export function announceBridge(
   }
 }
 
-/** Takes the announcement down. A file left behind names a process the editor will find gone. */
+/**
+ * Takes the announcement down. A file left behind names a process the editor will find gone.
+ *
+ * Only while it is still this process's own. A server that has been replaced still holds the path
+ * it once announced at, and the file there now is the replacement's: removing it on the way out
+ * would take the live bridge's address with it and leave the editor with nothing to find.
+ */
 export function withdrawBridge(path: string | null): void {
-  if (path === null) {
+  if (path === null || !announcementIsOurs(path)) {
     return;
   }
   try {

@@ -18,7 +18,7 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 import { WebSocket } from 'ws';
-import { announcementPath, BRIDGE_ANNOUNCE_PROTOCOL } from '../src/bridge-announce.js';
+import { announcementPath, BRIDGE_ANNOUNCE_PROTOCOL, readAnnouncement } from '../src/bridge-announce.js';
 import { staleClassNames } from '../src/class-cache.js';
 import { GodotDAPClient } from '../src/dap_client.js';
 import { dictionary, emptyRecord } from '../src/dictionary.js';
@@ -435,6 +435,14 @@ const MULTIBYTE = 'café 字幕 🎮 Ünterstützung';
  * moment longer than expected on a loaded runner.
  */
 const SHUTDOWN_LIMIT_MS = 15_000;
+
+/**
+ * How long a superseded server is given to notice and go.
+ *
+ * Its own figure because it covers a wait this server chooses rather than a shutdown: it asks
+ * whether it has been replaced on a timer, so the answer cannot arrive before that comes round.
+ */
+const SUPERSEDED_LIMIT_MS = 30_000;
 
 function frameJsonRpc(message: unknown): Buffer {
   const body = Buffer.from(JSON.stringify(message), 'utf8');
@@ -910,6 +918,57 @@ async function testAProjectUpgradedUnderTheServerIsSaid(): Promise<void> {
     assert.match(said ?? '', /reconnect/i, 'and say what replaces it');
   } finally {
     await server.stop();
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A server whose project has a newer server stands down instead of sitting there holding a port.
+ *
+ * A stdio server's life is its stdin and there is a handler for the end of it, which never
+ * arrives: a harness that reconnects spawns the replacement and leaves this one running as its
+ * child, still holding the pipe open. Six were found alive on one machine, one for every version a
+ * project had moved through in a day, the oldest nine hours old. None of them was reachable,
+ * because the editor follows the announcement, but the first one started held the default bridge
+ * port and every later one had moved off it, so the oldest and most out of date server on the
+ * machine was the one an editor with nothing announced fell back to. An editor belonging to an
+ * entirely different project was found attached to one.
+ *
+ * Both halves matter. The predecessor goes, and the announcement it leaves behind is the live
+ * server's rather than a file it took down on its way out.
+ */
+async function testASupersededServerStandsDown(): Promise<void> {
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-superseded-'));
+  const announced = announcementPath(project);
+
+  const first = new ServerProcess({ env: { GDHARNESS_PROJECT: project } });
+  let second: ServerProcess | null = null;
+  try {
+    await first.initialize('regression-test');
+    const mine = readAnnouncement(announced);
+    assert.ok(mine, 'the first server should announce, or this proves nothing');
+
+    second = new ServerProcess({ env: { GDHARNESS_PROJECT: project } });
+    await second.initialize('regression-test');
+    const theirs = readAnnouncement(announced);
+    assert.notEqual(theirs?.pid, mine.pid, 'the second server should take the announcement over');
+
+    let ended = false;
+    for (let waited = 0; waited < SUPERSEDED_LIMIT_MS && !ended; waited += 250) {
+      await delay(250);
+      ended = first.exited;
+    }
+    assert.ok(ended, `the superseded server should have stopped within ${SUPERSEDED_LIMIT_MS}ms`);
+
+    assert.equal(
+      readAnnouncement(announced)?.pid,
+      theirs?.pid,
+      'and should leave the live announcement where the editor reads it',
+    );
+    assert.equal(second.exited, false, 'while the server that replaced it carries on');
+  } finally {
+    await first.stop();
+    await second?.stop();
     rmSync(project, { recursive: true, force: true });
   }
 }
@@ -2946,6 +3005,7 @@ function testEveryAddonScriptKeepsItsIdentity(): void {
 async function main(): Promise<void> {
   testEveryAddonScriptKeepsItsIdentity();
   testBothEndsAgreeAboutTheAnnouncement();
+  await testASupersededServerStandsDown();
   await testAProjectUpgradedUnderTheServerIsSaid();
   testEveryDispatchedNameExistsOnBothSides();
   testEveryEngineParameterCanBeSent();
