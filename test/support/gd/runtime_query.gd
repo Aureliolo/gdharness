@@ -18,6 +18,10 @@ class Deeper:
 	extends Resource
 	var depth: int = 7
 
+	func deepen(by: int) -> int:
+		depth += by
+		return depth
+
 
 class Kept:
 	extends Resource
@@ -231,6 +235,44 @@ func _check_reading_through_a_path() -> void:
 		_fail("and a path that goes nowhere on one of them is not having it: %s" % str(absent))
 
 
+## What a game does hangs off its nodes the same way its state does, so the op that calls a method
+## reaches through the same colons the op that writes one does. Reading a guild's day while being
+## unable to ask it for the next one is half of what a node holds.
+##
+## Read back afterwards off the same holder, because a call that answered a number nobody can find
+## again would be a call to something else that happened to return one.
+func _check_calling_through_a_path() -> void:
+	var before: Dictionary = await node._execute_command(
+		"get_property", {"path": "/root/Level/Hero", "property": "held:inner:depth"}
+	)
+	var was: int = int(before.get("value", 0))
+
+	var called: Dictionary = await node._execute_command(
+		"call_method", {"path": "/root/Level/Hero", "method": "held:inner:deepen", "args": [3]}
+	)
+	if called.get("type") != "method_result" or called.get("result") != was + 3:
+		_fail("a method path calls what it names, with its arguments: %s" % str(called))
+
+	var after: Dictionary = await node._execute_command(
+		"get_property", {"path": "/root/Level/Hero", "property": "held:inner:depth"}
+	)
+	if after.get("value") != was + 3:
+		_fail("and it lands on the holder the path walked to: %s" % str(after))
+
+	var astray: Dictionary = await node._execute_command(
+		"call_method", {"path": "/root/Level/Hero", "method": "held:nowhere:deepen"}
+	)
+	if astray.get("type") != "error" or not str(astray.get("message", "")).contains("nowhere"):
+		_fail("a step that is not there names the step rather than the path: %s" % str(astray))
+
+	var unknown: Dictionary = await node._execute_command(
+		"call_method", {"path": "/root/Level/Hero", "method": "held:inner:shallow"}
+	)
+	var said: String = str(unknown.get("message", ""))
+	if unknown.get("type") != "error" or not said.contains("held:inner has no method shallow"):
+		_fail("and a method the holder has not got names the holder it looked on: %s" % str(unknown))
+
+
 func _check() -> void:
 	var level: Node2D = Node2D.new()
 	level.name = "Level"
@@ -328,6 +370,7 @@ func _check() -> void:
 		_fail("a node with no place on screen is refused: %s" % str(placeless))
 
 	await _check_reading_through_a_path()
+	await _check_calling_through_a_path()
 
 	var serialised: Variant = node.values.serialize(hero)
 	if serialised != {"_type": "Node", "class": "Node2D", "path": "/root/Level/Hero"}:

@@ -128,7 +128,7 @@ func _found(node: Node, wanted_property: String) -> Dictionary:
 		entry["has_property"] = false
 		return entry
 	var holder: Object = reached["holder"]
-	var named: String = reached["property"]
+	var named: String = reached["name"]
 	var has: bool = _has_property(holder, named)
 	entry["has_property"] = has
 	if has:
@@ -435,7 +435,7 @@ func get_property(params: Dictionary) -> Dictionary:
 		return reached
 
 	var holder: Object = reached["holder"]
-	var named: String = reached["property"]
+	var named: String = reached["name"]
 	# Asked of the property list rather than read and compared to null, because a property the
 	# holder does not have and a property that is null both read as null.
 	if not _has_property(holder, named):
@@ -449,11 +449,14 @@ func get_property(params: Dictionary) -> Dictionary:
 	}
 
 
-## What [param property] is a property of, which is the node itself until the name has a colon in
-## it, and the last name along that path.
+## What [param reaching] names something on, which is the node itself until the name has a colon
+## in it, and the last name along that path.
 ##
 ## A game's state does not sit on nodes, it hangs off them: the speed of the clock is a property of
 ## a [RefCounted] held by a [RefCounted] held by the root, and that is what an agent asks about.
+## What a game does hangs off them the same way, so the last name is a property to read, a property
+## to write or a method to call, and the walk to it is one walk.
+##
 ## Colons, because that is the separator [method Object.get_indexed] already takes. Walked a step
 ## at a time rather than handed to that method, which answers null for a path that goes wrong
 ## halfway along and for one that ends on null.
@@ -461,8 +464,8 @@ func get_property(params: Dictionary) -> Dictionary:
 ## Answers with a `message` instead when a step along the way is not there or holds something that
 ## is not an object, naming the step rather than the whole path: "/root/Main:_game has no property
 ## clocks" is a typo found, and "no property _game:clocks:speed" is a puzzle.
-func _reached(node: Node, node_path: String, property: String) -> Dictionary:
-	var parts: PackedStringArray = property.split(":")
+func _reached(node: Node, node_path: String, reaching: String) -> Dictionary:
+	var parts: PackedStringArray = reaching.split(":")
 	var holder: Object = node
 	var called: String = node_path
 	for step: int in parts.size() - 1:
@@ -475,7 +478,7 @@ func _reached(node: Node, node_path: String, property: String) -> Dictionary:
 			var wanted: String = parts[step + 1]
 			return {"type": "error", "message": "%s holds no object to read %s off" % [called, wanted]}
 		holder = next
-	return {"holder": holder, "property": parts[parts.size() - 1], "called": called}
+	return {"holder": holder, "name": parts[parts.size() - 1], "called": called}
 
 
 ## Whether [param holder] declares [param named]. Its own function because three ops ask it and a
@@ -507,7 +510,7 @@ func set_property(params: Dictionary) -> Dictionary:
 		return reached
 
 	var holder: Object = reached["holder"]
-	var named: String = reached["property"]
+	var named: String = reached["name"]
 	var old_value: Variant = holder.get(named)
 	holder.set(named, _values.fitted(value, typeof(old_value)))
 
@@ -532,14 +535,23 @@ func call_method(params: Dictionary) -> Dictionary:
 	if node == null:
 		return {"type": "error", "message": "Node not found: " + node_path}
 
-	if not node.has_method(method):
-		return {"type": "error", "message": "Method not found: " + method}
+	# Through a path as well, for the reason [method _reached] gives. What a game does hangs off its
+	# nodes as much as its state does, so reading `_game:run:day` while being unable to call
+	# `_game:run:advance` answers half of what a node holds and refuses the other half.
+	var reached: Dictionary = _reached(node, node_path, method)
+	if reached.has("message"):
+		return reached
+
+	var holder: Object = reached["holder"]
+	var named: String = reached["name"]
+	if not holder.has_method(named):
+		return {"type": "error", "message": "%s has no method %s" % [reached["called"], named]}
 
 	var deserialized_args: Array = []
 	for index: int in args.size():
-		deserialized_args.append(_values.fitted(args[index], _values.parameter_type(node, method, index)))
+		deserialized_args.append(_values.fitted(args[index], _values.parameter_type(holder, named, index)))
 
-	var result: Variant = node.callv(method, deserialized_args)
+	var result: Variant = holder.callv(named, deserialized_args)
 
 	return {"type": "method_result", "path": node_path, "method": method, "result": _values.serialize(result)}
 

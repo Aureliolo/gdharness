@@ -886,7 +886,12 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         blank: true,
         description: 'set: the value, fitted to the property\'s type. "" writes an empty string.',
       },
-      method: { type: 'string', ops: ['call'] },
+      method: {
+        type: 'string',
+        ops: ['call'],
+        description:
+          'call: which one to call. Colons call through the objects a node holds, "_game:run:advance", the same way a property is written through them.',
+      },
       args: {
         type: 'array',
         ops: ['call'],
@@ -899,7 +904,10 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         summary: 'set a property, on a node or on an object it holds',
         requires: ['property', 'value'],
       },
-      call: { summary: 'call a method and return its result', requires: ['method'] },
+      call: {
+        summary: 'call a method, on a node or on an object it holds, and return its result',
+        requires: ['method'],
+      },
     },
   },
   {
