@@ -30,9 +30,19 @@ func _init(host: Node, values: Values) -> void:
 	_values = values
 
 
+## Presses [param params].action, and lets go of it again unless asked to hold it.
+##
+## The whole press by default, for the reason [method click] is the whole click: an action left
+## down is not a press that did nothing, it is a press that never ends, and everything reading
+## [method Input.is_action_pressed] goes on seeing it for the rest of the session. Answering a
+## dialog with `ui_accept` took two calls and left the first one held, which is the shape that
+## found this.
+##
+## `pressed` is how a caller says otherwise: true holds it down, false lets go of one being held.
 func inject_action(params: Dictionary) -> Dictionary:
 	var action: String = String(params.get("action", ""))
-	var pressed: bool = bool(params.get("pressed", true))
+	var held: bool = bool(params.get("pressed", true))
+	var whole: bool = not params.has("pressed")
 	var strength: float = float(params.get("strength", 1.0))
 
 	if action.is_empty():
@@ -41,18 +51,36 @@ func inject_action(params: Dictionary) -> Dictionary:
 	if not InputMap.has_action(action):
 		return {"type": "error", "message": "Action not found: " + action}
 
+	_say_action(action, whole or held, strength)
+	if whole:
+		# A frame between the halves, as a click has: a listener that acts on the press and a
+		# listener that acts on the release both get their own frame to do it in.
+		await _host.get_tree().process_frame
+		_say_action(action, false, strength)
+		await _host.get_tree().process_frame
+
+	return {
+		"type": "input_injected",
+		"input_type": "action",
+		"action": action,
+		"pressed": held and not whole,
+		"whole": whole,
+	}
+
+
+func _say_action(action: String, down: bool, strength: float) -> void:
 	var event: InputEventAction = InputEventAction.new()
 	event.action = action
-	event.pressed = pressed
+	event.pressed = down
 	event.strength = strength
 	Input.parse_input_event(event)
 
-	return {"type": "input_injected", "input_type": "action", "action": action, "pressed": pressed}
 
-
+## Presses one key, and lets go of it again unless asked to hold it. See [method inject_action].
 func inject_key(params: Dictionary) -> Dictionary:
 	var keycode_raw: Variant = params.get("keycode", 0)
-	var pressed: bool = bool(params.get("pressed", true))
+	var held: bool = bool(params.get("pressed", true))
+	var whole: bool = not params.has("pressed")
 	var key_label: String = String(params.get("key_label", ""))
 
 	if keycode_raw is String:
@@ -62,7 +90,7 @@ func inject_key(params: Dictionary) -> Dictionary:
 	var keycode: int = 0 if keycode_raw is String else int(keycode_raw)
 
 	var event: InputEventKey = InputEventKey.new()
-	event.pressed = pressed
+	event.pressed = whole or held
 
 	if not key_label.is_empty():
 		event.keycode = OS.find_keycode_from_string(key_label)
@@ -92,6 +120,12 @@ func inject_key(params: Dictionary) -> Dictionary:
 	event.unicode = _glyph_of(event.keycode, event.shift_pressed)
 
 	Input.parse_input_event(event)
+	if whole:
+		await _host.get_tree().process_frame
+		var up: InputEventKey = event.duplicate()
+		up.pressed = false
+		Input.parse_input_event(up)
+		await _host.get_tree().process_frame
 
 	return {
 		"type": "input_injected",
@@ -102,7 +136,8 @@ func inject_key(params: Dictionary) -> Dictionary:
 		"ctrl": event.ctrl_pressed,
 		"alt": event.alt_pressed,
 		"unicode": event.unicode,
-		"pressed": pressed
+		"pressed": held and not whole,
+		"whole": whole,
 	}
 
 

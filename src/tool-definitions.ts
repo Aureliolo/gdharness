@@ -867,7 +867,11 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
           'click: the Control to click, at its centre, or the 3D node to click, where it is drawn. choose: the PopupMenu, or the OptionButton or MenuButton in front of one.',
       },
       action: { type: 'string', description: 'action: the InputMap action name.' },
-      pressed: { type: 'boolean', description: 'Press or release. Default true.' },
+      pressed: {
+        type: 'boolean',
+        description:
+          'action, key: leave it out and the press is a whole one, down and up a frame apart. true holds it down, false lets go of one being held.',
+      },
       strength: { type: 'number', description: 'action: 0 to 1. Default 1.' },
       keycode: { type: 'string', description: 'key: the key name, such as "Space" or "A".' },
       text: {

@@ -1358,7 +1358,12 @@ async function testRuntime({ call, refusal, attempt, project, lspPort, dapPort }
     'a mouse button sent by position should press what is under it',
   );
 
-  const injected = await call('runtime_input', { ...game, op: 'action', action: FIXTURE_ACTION });
+  const injected = await call('runtime_input', {
+    ...game,
+    op: 'action',
+    action: FIXTURE_ACTION,
+    pressed: true,
+  });
   assert.equal(get(injected, 'action'), FIXTURE_ACTION, 'an action should be injected by name');
   assert.equal(
     get(
@@ -1376,6 +1381,20 @@ async function testRuntime({ call, refusal, attempt, project, lspPort, dapPort }
     ),
     FIXTURE_ACTION,
     'and the tree should have been handed the event',
+  );
+  await call('runtime_input', { ...game, op: 'action', action: FIXTURE_ACTION, pressed: false });
+
+  // And the shape a caller gets by saying nothing. An action left down is a press that never
+  // ends, and everything reading `Input.is_action_pressed` goes on seeing it.
+  const whole = await call('runtime_input', { ...game, op: 'action', action: FIXTURE_ACTION });
+  assert.equal(get(whole, 'whole'), true, 'an action with no pressed should be the whole press');
+  assert.equal(
+    get(
+      await call('runtime_invoke', { ...game, op: 'call', nodePath: '/root/Main', method: 'holding' }),
+      'result',
+    ),
+    false,
+    'and should leave nothing held',
   );
   await call('runtime_input', { ...game, op: 'key', keycode: 'Space' });
   await call('runtime_wait', { ...game, op: 'frames', frames: 2 });
