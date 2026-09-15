@@ -951,6 +951,7 @@ class GodotServer {
               projectPath: args['projectPath'],
               root: readNonEmptyString(args, 'nodePath') ?? '/root',
               include_hidden: readBoolean(args, 'includeHidden') ?? false,
+              limit: readPositiveNumber(args, 'limit') ?? 500,
             });
           case 'rect':
             return await this.handleRuntimeCommand('get_rect', {

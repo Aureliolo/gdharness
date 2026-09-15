@@ -10,8 +10,8 @@ const Values = preload("runtime_values.gd")
 const FIND_LIMIT: int = 100
 const FIND_LIMIT_CEILING: int = 1000
 
-## The most lines one read answers with. A screen is a few dozen; a thousand is a tree somebody
-## pointed this at by mistake.
+## The most lines one read answers with, unless asked for fewer. A screen is a few dozen; a
+## thousand is a tree somebody pointed this at by mistake.
 const READ_LIMIT: int = 500
 
 var _host: Node
@@ -153,22 +153,32 @@ func _matches(
 ## A hidden node is left out and so is everything under it, because what a player reads is what is
 ## drawn. [param include_hidden] asks for the lot instead, which is what a caller checking that
 ## something is not showing wants.
+##
+## [param limit] is the first few lines rather than all of them, which is how the top of a screen
+## is read without the hall under it: the bar along the top of a guild is eleven lines and the
+## panel it sits on is two hundred.
 func read_text(params: Dictionary) -> Dictionary:
 	var root_path: String = str(params.get("root", "/root"))
 	var include_hidden: bool = bool(params.get("include_hidden", false))
+	var limit: int = clampi(int(params.get("limit", READ_LIMIT)), 1, READ_LIMIT)
 
 	var root: Node = _host.get_tree().root.get_node_or_null(root_path)
 	if root == null:
 		return {"type": "error", "message": "Node not found: " + root_path}
 
-	var lines: PackedStringArray = PackedStringArray()
-	_read_into(root, include_hidden, lines)
+	# One line further than asked for, so that whether anything was left behind is read off the
+	# walk rather than guessed at from the count: a panel of exactly as many lines as the caller
+	# asked for is one they have read all of, and saying otherwise sends them back for nothing.
+	var read: PackedStringArray = PackedStringArray()
+	_read_into(root, include_hidden, limit + 1, read)
+	var more: bool = read.size() > limit
+	var lines: PackedStringArray = read.slice(0, limit) if more else read
 	return {
 		"type": "text",
 		"root": root_path,
 		"lines": lines,
 		"count": lines.size(),
-		"truncated": lines.size() >= READ_LIMIT,
+		"truncated": more,
 	}
 
 
@@ -180,8 +190,8 @@ func read_text(params: Dictionary) -> Dictionary:
 ## screen full of forms answered with every label on it and none of the values in it. The hidden
 ## check covers a [Window] for the same walk: a dropdown's popup is a child that is not drawn
 ## until it is opened, and reading a closed menu would put every item on the screen.
-func _read_into(node: Node, include_hidden: bool, into: PackedStringArray) -> void:
-	if into.size() >= READ_LIMIT:
+func _read_into(node: Node, include_hidden: bool, most: int, into: PackedStringArray) -> void:
+	if into.size() >= most:
 		return
 	if not include_hidden and not _drawn(node):
 		return
@@ -189,7 +199,7 @@ func _read_into(node: Node, include_hidden: bool, into: PackedStringArray) -> vo
 	if not said.is_empty():
 		into.append(said)
 	for child: Node in node.get_children(true):
-		_read_into(child, include_hidden, into)
+		_read_into(child, include_hidden, most, into)
 
 
 ## Whether [param node] is on the screen at all, for the two kinds of thing that can be hidden.

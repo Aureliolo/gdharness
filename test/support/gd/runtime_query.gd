@@ -96,6 +96,20 @@ func _check_reading_the_screen(panel: Panel) -> void:
 	if said.get("count") != 4 or said.get("truncated") != false:
 		_fail("and say how many lines that was: %s" % str(said))
 
+	# The first few lines rather than all of them, which is how the top of a screen is read
+	# without the room under it. It was named in the schema, taken by the call and thrown away.
+	var few: Dictionary = await node._execute_command("read_text", {"root": "/root/Panel", "limit": 2})
+	if Array(few.get("lines", [])) != ["Your guild", "Sign"]:
+		_fail("a limit should be the first lines and no more: %s" % str(few))
+	if few.get("count") != 2 or few.get("truncated") != true:
+		_fail("and should say there was more left: %s" % str(few))
+
+	# And a limit the screen exactly fits is a screen that was read whole, which is the reason the
+	# walk goes one line further rather than comparing the count it came back with.
+	var exactly: Dictionary = await node._execute_command("read_text", {"root": "/root/Panel", "limit": 4})
+	if exactly.get("count") != 4 or exactly.get("truncated") != false:
+		_fail("a limit nothing overran should not read as cut short: %s" % str(exactly))
+
 	var everything: Dictionary = await node._execute_command(
 		"read_text", {"root": "/root/Panel", "include_hidden": true}
 	)
