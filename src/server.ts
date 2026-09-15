@@ -9,7 +9,7 @@
  */
 
 import { execFile, spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, normalize } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -1566,6 +1566,21 @@ class GodotServer {
     const engine = await this.engine();
     if (!engine.ok) {
       return engine.response;
+    }
+
+    // Godot's command-line exporter does not create the directory it is told to write into, where
+    // the editor's own export dialog does, and what it says when it is missing is "The given export
+    // path doesn't exist", which reads as a wrong path in the preset and sends the caller to check
+    // the preset. The tool was handed the path and has already contained it inside the project, so
+    // it knows exactly which directory it is about to need. Reported for the first export of two
+    // separate projects, each of which lost the same five minutes to the same message.
+    const folder = dirname(output.absolutePath);
+    try {
+      mkdirSync(folder, { recursive: true });
+    } catch (error) {
+      return this.createErrorResponse(
+        `Cannot create ${dirname(output.relativePath)} to export into: ${errorMessage(error)}`,
+      );
     }
 
     const debug = readBoolean(args, 'debug') ?? false;
