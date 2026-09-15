@@ -401,7 +401,7 @@ class GodotServer {
 
   constructor() {
     this.ownProject = envValue('GDHARNESS_PROJECT') ?? null;
-    this.godotBridge = getDefaultBridge(this.ownProject !== null);
+    this.godotBridge = getDefaultBridge(this.ownProject);
     this.mcp = new McpServer(
       { name: 'gdharness', version: SERVER_VERSION },
       { capabilities: { tools: {}, resources: {} } },

@@ -4,6 +4,7 @@ import http from 'node:http';
 import type { RawData } from 'ws';
 import { WebSocket, WebSocketServer } from 'ws';
 import { errorMessage, Refusal, toError } from './errors.js';
+import { isSameDirectory } from './paths.js';
 import { portFromEnv } from './ports.js';
 
 const DEFAULT_PORT = 6505;
@@ -11,6 +12,15 @@ const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_TIMEOUT_MS = 30_000;
 const KEEPALIVE_INTERVAL_MS = 10_000;
 const SECOND_CONNECTION_CLOSE_CODE = 4000;
+
+/**
+ * An editor belonging to another project, told so rather than served.
+ *
+ * Its own code, because the addon answers it differently from every other close: no amount of
+ * retrying reaches a server that is not this project's, so the reason is worth putting in front of
+ * a person once rather than backing off quietly forever.
+ */
+const OTHER_PROJECT_CLOSE_CODE = 4001;
 
 /** The editor addon reads GDHARNESS_BRIDGE_PORT too, so the two agree by construction. */
 function resolveDefaultBridgePort(): number {
@@ -138,25 +148,36 @@ export class GodotBridge extends EventEmitter {
   private readonly timeoutMs: number;
 
   /**
-   * Whether a port somebody else is holding is a reason to take another one.
+   * The project this bridge serves, or null when nothing said which.
    *
-   * Only true when the editor can be told where to look, which is when this server knows its
-   * project and can announce there. Without that the port is the whole contract and moving off
-   * it would mean an editor connecting to nothing.
+   * Null is every config written by hand and every one written before a server knew its project,
+   * and it is what keeps those working exactly as they did: an editor is taken on the port alone,
+   * because the port is the whole contract when there is nowhere to announce.
    */
-  private readonly mayMove: boolean;
+  private readonly ownProject: string | null;
 
   public constructor(
     port: number = DEFAULT_PORT,
     host: string = DEFAULT_HOST,
     timeoutMs: number = DEFAULT_TIMEOUT_MS,
-    mayMove = false,
+    ownProject: string | null = null,
   ) {
     super();
     this.wantedPort = port;
     this.host = host;
     this.timeoutMs = timeoutMs;
-    this.mayMove = mayMove;
+    this.ownProject = ownProject;
+  }
+
+  /**
+   * Whether a port somebody else is holding is a reason to take another one.
+   *
+   * Only when the editor can be told where to look, which is when this server knows its project
+   * and can announce there. Without that, moving off the port would mean an editor connecting to
+   * nothing.
+   */
+  private get mayMove(): boolean {
+    return this.ownProject !== null;
   }
 
   /** The port it is actually on, which is the one it asked for until that one was taken. */
@@ -464,6 +485,10 @@ export class GodotBridge extends EventEmitter {
 
       case 'godot_ready':
         if (this.connectionInfo) {
+          if (this.belongsElsewhere(message.project_path)) {
+            this.sendElsewhere(message.project_path);
+            return;
+          }
           this.connectionInfo.projectPath = message.project_path;
           // An older addon sends no version at all, which is itself worth reporting: it is one
           // installed before this was written, so it is certainly not the shipped one.
@@ -569,6 +594,41 @@ export class GodotBridge extends EventEmitter {
     this.pingInterval = null;
   }
 
+  /**
+   * Whether the editor that just said hello belongs to a different project than this server.
+   *
+   * The addon falls back to the default port when its own project has no announcement in it, which
+   * is every project whose server has not run yet. Any server holding that port then took the
+   * connection, said "Godot editor connected" and served it: tool calls reached an editor showing
+   * another project's scenes, and both sides reported a healthy bridge. One server serves one
+   * editor was the rule, and nothing anywhere checked it.
+   *
+   * Only when this server knows which project is its own. Without that there is nothing to compare
+   * against and the port stays the whole contract, which is what a hand-written config relies on.
+   */
+  private belongsElsewhere(theirProject: string): boolean {
+    if (this.ownProject === null || theirProject.trim() === '') {
+      return false;
+    }
+    return !isSameDirectory(this.ownProject, theirProject);
+  }
+
+  /**
+   * Turns away an editor from another project, saying whose server this is.
+   *
+   * The socket goes rather than the connection being left half made: it was never this server's
+   * editor, so a reply of any kind would be answering for a project it cannot see.
+   */
+  private sendElsewhere(theirProject: string): void {
+    const said = `this server serves ${this.ownProject ?? ''}, and that editor has ${theirProject} open`;
+    this.log('warn', `Turning away an editor from another project: ${said}`);
+    const stranger = this.socket;
+    this.socket = null;
+    this.connectionInfo = null;
+    this.stopKeepalive();
+    stranger?.close(OTHER_PROJECT_CLOSE_CODE, said);
+  }
+
   private handleDisconnect(disconnectedSocket: WebSocket | null, reason: Error): void {
     if (disconnectedSocket && this.socket && disconnectedSocket !== this.socket) {
       this.log('debug', 'Ignoring stale Godot socket disconnect event');
@@ -668,16 +728,21 @@ export class GodotBridge extends EventEmitter {
 
 let defaultBridge: GodotBridge | null = null;
 
-export function getDefaultBridge(mayMove = false): GodotBridge {
+export function getDefaultBridge(ownProject: string | null = null): GodotBridge {
   defaultBridge ??= new GodotBridge(
     resolveDefaultBridgePort(),
     resolveDefaultBridgeHost(),
     DEFAULT_TIMEOUT_MS,
-    mayMove,
+    ownProject,
   );
   return defaultBridge;
 }
 
-export function createBridge(port?: number, timeoutMs?: number, host?: string): GodotBridge {
-  return new GodotBridge(port, host, timeoutMs);
+export function createBridge(
+  port?: number,
+  timeoutMs?: number,
+  host?: string,
+  ownProject?: string,
+): GodotBridge {
+  return new GodotBridge(port, host, timeoutMs, ownProject ?? null);
 }
