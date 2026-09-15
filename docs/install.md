@@ -127,9 +127,10 @@ at `addons/<name>/.gdharness-version`, which is what `gdharness doctor` reads.
 
 Then mind the autoload, which is the half that breaks quietly. `project.godot` is committed and
 names `res://addons/gdharness_runtime/runtime_autoload.gd`, so a clone or a CI runner boots with a
-missing script. `gdharness doctor` asks git which of your autoloads it will carry and names any it
-will not. Commit the addon, or point the autoload at a script of your own that brings the addon up
-when it is there and does nothing when it is not.
+missing script. `gdharness doctor` asks git which of the files your autoloads name are in the
+index, which is what a clone gets, and names any that are not. Commit the addon, or point the
+autoload at a script of your own that brings the addon up when it is there and does nothing when it
+is not. Outside a repository, or with no git on the machine, it says nothing rather than guessing.
 
 **The runtime autoload is the one to think about before you ship**, whichever way you go: it is an
 autoload rather than an editor plugin, so an export instantiates it. See

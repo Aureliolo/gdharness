@@ -1936,19 +1936,27 @@ function testProjectDefaultsToTheWorkingDirectory(): void {
  * way it treats gdUnit4, is then one line away from a clone that boots with a missing script.
  * Nothing said so at the moment it was created, on either of the two projects it happened to.
  *
+ * Three states, because the question is what a clone gets and only one of the three is about
+ * .gitignore: a file a rule ignores, a file nobody ever added, and a file a rule ignores that
+ * somebody added anyway. Asking git whether a path is ignored gets the middle one wrong in one
+ * direction and the last one wrong in the other, and the middle one is every project between
+ * installing an addon and committing it.
+ *
  * Engine-free, like the doctor test above it: this is git and project.godot and nothing else.
  */
 function testAnAutoloadGitWillNotCarry(): void {
   const project = mkdtempSync(join(tmpdir(), 'gdharness-ignored-'));
   const git = (...gitArgs: string[]): SpawnSyncReturns<string> =>
     spawnSync('git', gitArgs, { cwd: project, encoding: 'utf8', timeout: 60000 });
-  const doctor = (): unknown => {
+  const troubles = (where: string): string[] => {
     const run = spawnSync(process.execPath, [join(process.cwd(), 'build', 'cli.js'), 'doctor', '--json'], {
       encoding: 'utf8',
-      cwd: project,
+      cwd: where,
       timeout: 60000,
     });
-    return JSON.parse(run.stdout);
+    return asArray(get(JSON.parse(run.stdout), 'problems'))
+      .map(text)
+      .filter((problem) => problem.includes('autoload names'));
   };
   try {
     if (git('init').status !== 0) {
@@ -1958,29 +1966,44 @@ function testAnAutoloadGitWillNotCarry(): void {
     writeFileSync(join(project, '.gitignore'), 'addons/\n');
     writeFileSync(
       join(project, 'project.godot'),
-      'config_version=5\n\n[autoload]\n\nInstalled="*res://addons/thing/autoload.gd"\n' +
+      'config_version=5\n\n[autoload]\n\nIgnored="*res://addons/thing/autoload.gd"\n' +
+        'NeverAdded="*res://scripts/forgotten.gd"\n' +
         'Committed="*res://scripts/loader.gd"\n',
     );
     mkdirSync(join(project, 'addons', 'thing'), { recursive: true });
     mkdirSync(join(project, 'scripts'), { recursive: true });
     writeFileSync(join(project, 'addons', 'thing', 'autoload.gd'), 'extends Node\n');
+    writeFileSync(join(project, 'scripts', 'forgotten.gd'), 'extends Node\n');
     writeFileSync(join(project, 'scripts', 'loader.gd'), 'extends Node\n');
+    assert.equal(git('add', 'scripts/loader.gd').status, 0);
 
-    const said = asArray(get(doctor(), 'problems')).map(text);
-    const about = said.filter((problem) => problem.includes('autoload names'));
-    assert.equal(about.length, 1, `one autoload is the problem, not the other: ${said.join(' | ')}`);
-    assert.match(about[0] ?? '', /Installed autoload names res:\/\/addons\/thing\/autoload\.gd/);
-    assert.match(about[0] ?? '', /git does not carry/);
+    const said = troubles(project);
+    assert.equal(said.length, 2, `two of the three are lost, not one and not all: ${said.join(' | ')}`);
+    assert.match(said.join(' '), /Ignored autoload names res:\/\/addons\/thing\/autoload\.gd/);
+    assert.match(said.join(' '), /NeverAdded autoload names res:\/\/scripts\/forgotten\.gd/);
+    assert.doesNotMatch(said.join(' '), /Committed/, 'a file in the index is carried');
 
-    // And it is about what a clone gets rather than about what the rules say. A file git tracks is
-    // carried whatever .gitignore matches, which is the whole question being asked.
+    // And a rule matching a file somebody added anyway is not the question either: -f puts it in
+    // the index, a clone gets it, and doctor has nothing to say about it.
     assert.equal(git('add', '-f', 'addons/thing/autoload.gd').status, 0);
-    const tracked = asArray(get(doctor(), 'problems')).map(text);
-    assert.deepEqual(
-      tracked.filter((problem) => problem.includes('autoload names')),
-      [],
-      `a tracked file is carried: ${tracked.join(' | ')}`,
-    );
+    const forced = troubles(project);
+    assert.equal(forced.length, 1, `only the one nobody added is left: ${forced.join(' | ')}`);
+    assert.match(forced[0] ?? '', /NeverAdded/);
+
+    // Outside a repository there is no answer, and a missing answer is not a clean bill: doctor
+    // says nothing rather than reporting every autoload as lost.
+    const elsewhere = mkdtempSync(join(tmpdir(), 'gdharness-nogit-'));
+    try {
+      const outside = spawnSync('git', ['rev-parse', '--git-dir'], { cwd: elsewhere, encoding: 'utf8' });
+      if (outside.status !== 0) {
+        cpSync(join(project, 'project.godot'), join(elsewhere, 'project.godot'));
+        mkdirSync(join(elsewhere, 'scripts'), { recursive: true });
+        writeFileSync(join(elsewhere, 'scripts', 'loader.gd'), 'extends Node\n');
+        assert.deepEqual(troubles(elsewhere), [], 'no repository is no verdict');
+      }
+    } finally {
+      rmSync(elsewhere, { recursive: true, force: true });
+    }
   } finally {
     rmSync(project, { recursive: true, force: true });
   }

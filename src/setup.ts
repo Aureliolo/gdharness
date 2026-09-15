@@ -176,30 +176,32 @@ function autoloadPaths(settings: Record<string, Record<string, unknown>>): Map<s
 }
 
 /**
- * Which of [param wanted] git will not carry, asked of git rather than parsed out of .gitignore.
+ * Which of [param wanted] are in git's index, or null where git could not say.
  *
- * A tracked file is never reported, whatever the rules say, which is the question worth asking: not
- * whether a rule matches but whether a clone gets the file. Asked once for the lot, and answered
- * with nothing where there is no git to ask or no repository to ask about.
+ * The index is the question, because the question is whether a clone gets the file. Whether a rule
+ * ignores it answers neither half: a path nobody ever added is as absent from a clone as one
+ * .gitignore matches, and a path a rule matches that somebody added with -f is there. That first
+ * half is the window every project sits in between the addon being installed and somebody
+ * committing it, which is the window worth catching.
+ *
+ * Null rather than an empty set where there is no git on the machine and where this is no
+ * repository, so that a missing answer reads as a missing answer rather than as every autoload
+ * being lost. Run from the project root, which is the answer a worktree and a submodule both want.
  */
-function notInGit(projectPath: string, wanted: readonly string[]): Set<string> {
+function trackedByGit(projectPath: string, wanted: readonly string[]): Set<string> | null {
   if (wanted.length === 0) {
     return new Set();
   }
-  const asked = spawnSync('git', ['check-ignore', '--', ...wanted], {
+  // -z, because git quotes a path with a space or a non-ASCII character in it otherwise and the
+  // quoted spelling matches nothing we asked about.
+  const asked = spawnSync('git', ['ls-files', '-z', '--', ...wanted], {
     cwd: projectPath,
     encoding: 'utf8',
   });
-  // 0 is some are ignored, 1 is none; anything else is git saying it could not answer.
   if (asked.status !== 0) {
-    return new Set();
+    return null;
   }
-  return new Set(
-    asked.stdout
-      .split('\n')
-      .map((line) => line.trim())
-      .filter(Boolean),
-  );
+  return new Set(asked.stdout.split('\0').filter(Boolean));
 }
 
 /** The enabled editor plugins, read out of project.godot's PackedStringArray of plugin.cfg paths. */
@@ -249,9 +251,11 @@ export function inspectProject(projectPath: string): ProjectReport {
   // game boots with a missing script and nothing in the repository says why. Found on two projects,
   // and nothing said so at the moment it was created.
   const named = autoloadPaths(settings);
-  const untracked = notInGit(projectPath, [...named.values()]);
+  const tracked = trackedByGit(projectPath, [...named.values()]);
   for (const [name, path] of named) {
-    if (untracked.has(path) && existsSync(join(projectPath, path))) {
+    // A file that is not here at all is a different sentence, and for our own addon doctor has
+    // already said it above.
+    if (tracked !== null && !tracked.has(path) && existsSync(join(projectPath, path))) {
       problems.push(
         `the ${name} autoload names res://${path}, which git does not carry, so a clone boots with a missing script; commit that file, or point the autoload at one the project tracks`,
       );
