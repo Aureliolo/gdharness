@@ -81,6 +81,8 @@ class FakeSocket extends EventEmitter {
   readonly name: string;
   readyState = 1;
   readonly sent: unknown[] = [];
+  /** What the bridge closed it with, for a refusal whose code and reason are the answer. */
+  closedWith: { code: number; reason: string } | null = null;
 
   constructor(name: string) {
     super();
@@ -93,12 +95,18 @@ class FakeSocket extends EventEmitter {
 
   close(code = 1000, reason = ''): void {
     this.readyState = 3;
+    this.closedWith = { code, reason };
     this.emit('close', code, Buffer.from(reason));
   }
 }
 
 function connectFake(bridge: ReturnType<typeof createBridge>, socket: FakeSocket): void {
   (bridge as unknown as { handleConnection: (socket: FakeSocket) => void }).handleConnection(socket);
+}
+
+/** The hello an editor sends once connected, which is where it says whose editor it is. */
+function saysHello(socket: FakeSocket, projectPath: string): void {
+  socket.emit('message', Buffer.from(JSON.stringify({ type: 'godot_ready', project_path: projectPath })));
 }
 
 function resolveGodotPath(): string | null {
@@ -123,6 +131,62 @@ function testStaleDisconnectRegression(): void {
 
   second.emit('close', 1000, Buffer.from('active socket closed'));
   assert.equal(bridge.getStatus().connected, false, 'active socket close should disconnect bridge');
+}
+
+/**
+ * A server that knows its project serves that project's editor and turns away every other one.
+ *
+ * The addon falls back to the default port whenever its own project holds no announcement, which
+ * is every project whose server has not run yet, so any server on that port took the connection
+ * and served it. Tool calls reached an editor showing another project's scenes and both sides
+ * called the bridge healthy. The addon has always said which project it has open; nothing read it.
+ */
+function testOneServerOneProjectRegression(): void {
+  const mine = join(tmpdir(), 'gdharness-one-server-mine');
+  const theirs = join(tmpdir(), 'gdharness-one-server-theirs');
+
+  const bridge = createBridge(0, 1000, '127.0.0.1', mine);
+  const stranger = new FakeSocket('stranger');
+  connectFake(bridge, stranger);
+  saysHello(stranger, theirs);
+
+  assert.equal(bridge.getStatus().connected, false, "another project's editor is not served");
+  const turnedAway = stranger.closedWith;
+  assert.ok(turnedAway, 'and is closed rather than left half connected');
+  assert.equal(turnedAway.code, 4001, 'with its own close code, which the addon reads');
+  assert.match(
+    turnedAway.reason,
+    /this server serves .*and that editor has .* open/,
+    'and a reason naming both projects, since neither side can see the other',
+  );
+
+  // The same project as Godot spells it: forward slashes and a trailing one, against a config
+  // holding a Windows path. A comparison that failed this would refuse the editor it exists for.
+  const own = new FakeSocket('own');
+  connectFake(bridge, own);
+  saysHello(own, `${mine.replaceAll('\\', '/')}/`);
+  assert.equal(bridge.getStatus().connected, true, "its own project's editor is served");
+  assert.equal(own.closedWith, null, 'and is not closed on the way');
+
+  // A project inside another project is a different project, so containment is not the question.
+  const nested = createBridge(0, 1000, '127.0.0.1', mine);
+  const inside = new FakeSocket('inside');
+  connectFake(nested, inside);
+  saysHello(inside, join(mine, 'demo'));
+  assert.equal(nested.getStatus().connected, false, 'a project under this one is still another one');
+
+  // Nothing said which project, which is every hand-written config: the port stays the contract.
+  const anywhere = createBridge(0, 1000, '127.0.0.1');
+  const guest = new FakeSocket('guest');
+  connectFake(anywhere, guest);
+  saysHello(guest, theirs);
+  assert.equal(anywhere.getStatus().connected, true, 'a server with no project takes whoever comes');
+
+  // Every socket the bridge took is holding a keepalive timer, and a timer nobody stopped keeps
+  // the whole run from ever ending. Only the two that were served: a refused one was closed by
+  // the bridge as it turned it away, which is the thing being checked above.
+  own.close();
+  guest.close();
 }
 
 function testSceneToolsVectorRegression(): void {
@@ -2888,6 +2952,7 @@ async function main(): Promise<void> {
   testEveryToolParameterIsRead();
   testEveryToolIsDrivenSomewhere();
   testStaleDisconnectRegression();
+  testOneServerOneProjectRegression();
   testSceneToolsVectorRegression();
   testRunArgumentsLeaveTheLocalDebuggerOff();
   testHeadlessFollowsTheDisplay();

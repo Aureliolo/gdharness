@@ -18,6 +18,10 @@ const ANNOUNCE_PROTOCOL: int = 1
 const RECONNECT_DELAY: float = 3.0
 const MAX_RECONNECT_DELAY: float = 30.0
 
+## What a server closes with when the editor that said hello belongs to another project. Kept in
+## step with `OTHER_PROJECT_CLOSE_CODE` in src/godot-bridge.ts.
+const ELSEWHERE_CLOSE_CODE: int = 4001
+
 ## Where Godot keeps the three ports an editor serves. None of them is per editor: the settings
 ## file is one for every editor on the machine, so two open at once want the same three and the
 ## second one binds nothing.
@@ -67,6 +71,10 @@ var _since_looked: float = 0.0
 ## anything connects or the project names a different one.
 var _refused_url: String = ""
 var _tried_announced: bool = false
+
+## The address this editor has already been told is another project's, so a reconnect loop says it
+## once rather than every few seconds for the rest of the session.
+var _told_about_url: String = ""
 var _connecting_for: float = 0.0
 
 
@@ -343,10 +351,33 @@ func _loaded_version() -> String:
 
 func _handle_disconnect() -> void:
 	_is_connected = false
+	_said_elsewhere()
 	disconnected.emit()
 
 	if _should_reconnect:
 		_schedule_reconnect()
+
+
+## Says so when the server turned this editor away as another project's.
+##
+## The fallback address is tried by every project whose own server has not run yet and so has
+## announced nothing, which means any server holding it took the connection and served it. It is
+## refused now, and the refusal is worth a person's attention rather than a quiet backoff: nothing
+## about waiting reaches a server that is not this project's, and the answer is to start one.
+##
+## Said once per address. This is a reconnect loop, and a line every few seconds for the rest of
+## the session is a line nobody reads.
+func _said_elsewhere() -> void:
+	if socket.get_close_code() != ELSEWHERE_CLOSE_CODE:
+		return
+	if _told_about_url == server_url:
+		return
+	_told_about_url = server_url
+	var said: String = (
+		"[gdharness] %s is another project's server, so this editor is not connected: %s."
+		+ " Start this project's own server, or point it at one with GDHARNESS_BRIDGE_PORT."
+	)
+	push_warning(said % [server_url, socket.get_close_reason()])
 
 
 func _schedule_reconnect() -> void:
