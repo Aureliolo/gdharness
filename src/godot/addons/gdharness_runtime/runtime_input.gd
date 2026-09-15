@@ -155,6 +155,11 @@ func inject_key(params: Dictionary) -> Dictionary:
 ## Pushed into the viewport for the reason [method click] is, and it matters more here: the focus
 ## is what decides where a character lands, so a caller that clicked a field and then typed would
 ## otherwise have both waiting in the same queue with nothing said about the order.
+##
+## [code]replace[/code] is for a field that already says something, which is most of them: typing
+## lands at the caret, so a spin box reading 2.1 typed "0.3" at reads 2.10.3 and parses back to
+## 2.1, and the answer said four characters had gone in. What the field holds afterwards is read
+## back now rather than echoed from the request, so a call that typed somewhere unhelpful says so.
 func inject_text(params: Dictionary) -> Dictionary:
 	var text: String = String(params.get("text", ""))
 	if text.is_empty():
@@ -166,6 +171,7 @@ func inject_text(params: Dictionary) -> Dictionary:
 	if not shut.is_empty():
 		return {"type": "error", "message": shut}
 
+	var replaced: bool = bool(params.get("replace", false)) and _select_everything(focused)
 	for index: int in text.length():
 		var down: InputEventKey = _typed(text.unicode_at(index))
 		viewport.push_input(down)
@@ -186,7 +192,42 @@ func inject_text(params: Dictionary) -> Dictionary:
 		"text": text,
 		"characters": text.length(),
 		"into": into,
+		"replaced": replaced,
+		"holds": _what_it_holds(focused),
 	}
+
+
+## Selects everything in [param focused] so the next character typed writes over it, and answers
+## whether there was a field to select in.
+##
+## Through the control rather than through a Ctrl+A, which is the one part of filling a field that
+## cannot honestly be sent as a key: the shortcut is Cmd+A on macOS and is an [InputMap] action a
+## project is free to unbind, and a caller asking for the field to be replaced would then be typing
+## on the end of what was there. The replacement itself is still every character a player types.
+static func _select_everything(focused: Control) -> bool:
+	var field: LineEdit = focused as LineEdit
+	if field != null:
+		field.select_all()
+		return true
+	var box: TextEdit = focused as TextEdit
+	if box == null:
+		return false
+	box.select_all()
+	return true
+
+
+## What the field says now, or null where the focus is not a field at all.
+##
+## A spin box rewrites its own text out of the number it parsed, so this is the only thing that
+## says whether what was typed became what the field means.
+static func _what_it_holds(focused: Control) -> Variant:
+	var field: LineEdit = focused as LineEdit
+	if field != null:
+		return field.text
+	var box: TextEdit = focused as TextEdit
+	if box == null:
+		return null
+	return box.text
 
 
 ## Why nothing typed would reach [param focused], or "" when it would.
