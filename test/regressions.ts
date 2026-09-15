@@ -1929,6 +1929,64 @@ function testProjectDefaultsToTheWorkingDirectory(): void {
 }
 
 /**
+ * An autoload naming a file the repository does not carry.
+ *
+ * project.godot is committed and what it names may not be. `setup` registers the runtime addon by
+ * its path under addons/, and a project that installs its addons rather than committing them, the
+ * way it treats gdUnit4, is then one line away from a clone that boots with a missing script.
+ * Nothing said so at the moment it was created, on either of the two projects it happened to.
+ *
+ * Engine-free, like the doctor test above it: this is git and project.godot and nothing else.
+ */
+function testAnAutoloadGitWillNotCarry(): void {
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-ignored-'));
+  const git = (...gitArgs: string[]): SpawnSyncReturns<string> =>
+    spawnSync('git', gitArgs, { cwd: project, encoding: 'utf8', timeout: 60000 });
+  const doctor = (): unknown => {
+    const run = spawnSync(process.execPath, [join(process.cwd(), 'build', 'cli.js'), 'doctor', '--json'], {
+      encoding: 'utf8',
+      cwd: project,
+      timeout: 60000,
+    });
+    return JSON.parse(run.stdout);
+  };
+  try {
+    if (git('init').status !== 0) {
+      console.log('autoload tracking regression skipped (no git)');
+      return;
+    }
+    writeFileSync(join(project, '.gitignore'), 'addons/\n');
+    writeFileSync(
+      join(project, 'project.godot'),
+      'config_version=5\n\n[autoload]\n\nInstalled="*res://addons/thing/autoload.gd"\n' +
+        'Committed="*res://scripts/loader.gd"\n',
+    );
+    mkdirSync(join(project, 'addons', 'thing'), { recursive: true });
+    mkdirSync(join(project, 'scripts'), { recursive: true });
+    writeFileSync(join(project, 'addons', 'thing', 'autoload.gd'), 'extends Node\n');
+    writeFileSync(join(project, 'scripts', 'loader.gd'), 'extends Node\n');
+
+    const said = asArray(get(doctor(), 'problems')).map(text);
+    const about = said.filter((problem) => problem.includes('autoload names'));
+    assert.equal(about.length, 1, `one autoload is the problem, not the other: ${said.join(' | ')}`);
+    assert.match(about[0] ?? '', /Installed autoload names res:\/\/addons\/thing\/autoload\.gd/);
+    assert.match(about[0] ?? '', /git does not carry/);
+
+    // And it is about what a clone gets rather than about what the rules say. A file git tracks is
+    // carried whatever .gitignore matches, which is the whole question being asked.
+    assert.equal(git('add', '-f', 'addons/thing/autoload.gd').status, 0);
+    const tracked = asArray(get(doctor(), 'problems')).map(text);
+    assert.deepEqual(
+      tracked.filter((problem) => problem.includes('autoload names')),
+      [],
+      `a tracked file is carried: ${tracked.join(' | ')}`,
+    );
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
  * The ordering an update notice is decided by.
  *
  * Getting this wrong in either direction is bad in its own way: too eager and every session is
@@ -3256,6 +3314,7 @@ async function main(): Promise<void> {
   testHeadlessFollowsTheDisplay();
   testStaleClassesAreReadFromDisk();
   testProjectDefaultsToTheWorkingDirectory();
+  testAnAutoloadGitWillNotCarry();
   testVersionOrdering();
   testTheStaleHalfIsNamedCorrectly();
   testAGameIsFoundWhereverItAnnounced();
