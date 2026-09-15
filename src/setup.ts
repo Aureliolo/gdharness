@@ -7,6 +7,7 @@
  * fresh each time, so an upgrade never leaves a file of the old version behind.
  */
 
+import { spawnSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -161,6 +162,48 @@ export interface ProjectReport {
   readonly problems: readonly string[];
 }
 
+/** Every autoload in project.godot, as the project-relative path each one names. */
+function autoloadPaths(settings: Record<string, Record<string, unknown>>): Map<string, string> {
+  const named = new Map<string, string>();
+  for (const [name, value] of Object.entries(settings['autoload'] ?? {})) {
+    // A leading star is the enabled marker the editor writes, not part of the path.
+    const said = typeof value === 'string' ? value.replace(/^\*/, '') : '';
+    if (said.startsWith('res://')) {
+      named.set(name, said.slice('res://'.length));
+    }
+  }
+  return named;
+}
+
+/**
+ * Which of [param wanted] are in git's index, or null where git could not say.
+ *
+ * The index is the question, because the question is whether a clone gets the file. Whether a rule
+ * ignores it answers neither half: a path nobody ever added is as absent from a clone as one
+ * .gitignore matches, and a path a rule matches that somebody added with -f is there. That first
+ * half is the window every project sits in between the addon being installed and somebody
+ * committing it, which is the window worth catching.
+ *
+ * Null rather than an empty set where there is no git on the machine and where this is no
+ * repository, so that a missing answer reads as a missing answer rather than as every autoload
+ * being lost. Run from the project root, which is the answer a worktree and a submodule both want.
+ */
+function trackedByGit(projectPath: string, wanted: readonly string[]): Set<string> | null {
+  if (wanted.length === 0) {
+    return new Set();
+  }
+  // -z, because git quotes a path with a space or a non-ASCII character in it otherwise and the
+  // quoted spelling matches nothing we asked about.
+  const asked = spawnSync('git', ['ls-files', '-z', '--', ...wanted], {
+    cwd: projectPath,
+    encoding: 'utf8',
+  });
+  if (asked.status !== 0) {
+    return null;
+  }
+  return new Set(asked.stdout.split('\0').filter(Boolean));
+}
+
 /** The enabled editor plugins, read out of project.godot's PackedStringArray of plugin.cfg paths. */
 function enabledPlugins(settings: Record<string, Record<string, unknown>>): string[] {
   const raw = settings['editor_plugins']?.['enabled'];
@@ -201,6 +244,23 @@ export function inspectProject(projectPath: string): ProjectReport {
   const autoload = settings['autoload'];
   const runtimeAutoload =
     autoload !== undefined && typeof readString(autoload, RUNTIME_AUTOLOAD.name) === 'string';
+
+  // project.godot is committed and what it names may not be. setup registers the runtime addon by
+  // its path under addons/, and a project that installs its addons rather than committing them, the
+  // way it treats gdUnit4, then carries a line pointing at a file the next clone will not have: the
+  // game boots with a missing script and nothing in the repository says why. Found on two projects,
+  // and nothing said so at the moment it was created.
+  const named = autoloadPaths(settings);
+  const tracked = trackedByGit(projectPath, [...named.values()]);
+  for (const [name, path] of named) {
+    // A file that is not here at all is a different sentence, and for our own addon doctor has
+    // already said it above.
+    if (tracked !== null && !tracked.has(path) && existsSync(join(projectPath, path))) {
+      problems.push(
+        `the ${name} autoload names res://${path}, which git does not carry, so a clone boots with a missing script; commit that file, or point the autoload at one the project tracks`,
+      );
+    }
+  }
 
   const cached = cachedClasses(projectPath);
   const staleClasses = cached === null ? [] : staleAgainst(cached, projectPath);
