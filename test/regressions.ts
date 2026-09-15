@@ -2257,6 +2257,22 @@ async function testGdUnitRunner(): Promise<void> {
         'func test_skipped_for_now(_do_skip: bool = true, _skip_reason: String = "not today") -> void:',
         '\tassert_bool(true).is_true()',
         '',
+        '',
+        'func test_the_game_said_something() -> void:',
+        '\tpush_error("the game minded about something")',
+        '\tassert_bool(true).is_true()',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(projectDir, 'test', 'quiet_test.gd'),
+      [
+        'extends GdUnitTestSuite',
+        '',
+        '',
+        'func test_nothing_went_wrong() -> void:',
+        '\tassert_bool(true).is_true()',
+        '',
       ].join('\n'),
     );
 
@@ -2278,13 +2294,34 @@ async function testGdUnitRunner(): Promise<void> {
             errors: get(run, 'errors'),
             skipped: get(run, 'skipped'),
           },
-          { tests: 3, failures: 1, errors: 0, skipped: 1 },
+          { tests: 5, failures: 1, errors: 0, skipped: 1 },
         );
         const [failed] = asArray(get(run, 'failed'));
         assert.equal(get(failed, 'name'), 'test_two_and_two_is_not_five');
         assert.equal(get(failed, 'path'), 'res://test/sums_test.gd');
         assert.match(text(get(failed, 'message')), /sums_test\.gd:9/);
         assert.match(text(get(failed, 'detail')), /Expecting:\s+5\s+but was\s+4/);
+        // The suite that passed everything is counted, not listed: a tier of them is otherwise
+        // most of the answer.
+        const named = asArray(get(run, 'suites')).map((suite) => get(suite, 'name'));
+        assert.deepEqual(named, ['sums_test'], JSON.stringify(named));
+        assert.equal(get(run, 'suitesPassed'), 1);
+        // And an engine message keeps the frames above gdUnit4 and says how many it left inside.
+        const said = asArray(get(run, 'engineEntries')).find((entry) =>
+          text(get(entry, 'text')).includes('the game minded about something'),
+        );
+        assert.ok(said !== undefined, JSON.stringify(get(run, 'engineEntries')));
+        const frames = asArray(get(said, 'detail')).map(text);
+        assert.ok(
+          frames.some((line) => line.includes('test_the_game_said_something')),
+          frames.join('\n'),
+        );
+        assert.equal(
+          frames.filter((line) => line.includes('addons/gdUnit4/src')).length,
+          0,
+          frames.join('\n'),
+        );
+        assert.match(frames.at(-1) ?? '', /^\[and \d+ frames inside addons\/gdUnit4\/\]$/);
         assert.ok(
           asArray(get(run, 'classes', 'added')).includes('GdUnitTestCIRunner'),
           'the runner was made resolvable by the class list rebuild',
@@ -2303,7 +2340,7 @@ async function testGdUnitRunner(): Promise<void> {
           ),
         );
         assert.equal(get(only, 'passed'), true, JSON.stringify(only, null, 2));
-        assert.equal(get(only, 'tests'), 2);
+        assert.equal(get(only, 'tests'), 4);
       },
       { GODOT_PATH: godotPath },
     );
