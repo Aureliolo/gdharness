@@ -24,7 +24,7 @@
     "format:prose:check": "prettier --check .",
     "lint": "bun run lint:biome && bun run lint:types && bun run lint:dead && bun run lint:prose",
     "lint:fix": "bun x biome check --write . && oxlint --type-aware --fix src test scripts && markdownlint-cli2 --fix",
-    "lint:biome": "bun x biome check .",
+    "lint:biome": "bun x biome check --error-on-warnings .",
     "lint:types": "oxlint --type-aware --deny-warnings src test scripts",
     "lint:dead": "KNIP_DISABLE_RAW_TRANSFER=1 knip",
     "lint:prose": "markdownlint-cli2",
