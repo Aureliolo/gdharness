@@ -2684,6 +2684,22 @@ async function testGdUnitRunner(): Promise<void> {
         );
         assert.equal(get(only, 'passed'), true, JSON.stringify(only, null, 2));
         assert.equal(get(only, 'tests'), 4);
+
+        // A path with nothing at it. gdUnit4 finds nothing, exits 0 and says why, so a verdict
+        // read off the exit code called this a pass: the one word a skimming reader must never
+        // be handed for a tier that never ran. Met in a project whose suites live in `tests`
+        // while the default here is `test`, which is one letter and a whole false green.
+        const nowhere = await call(
+          'project_test',
+          { projectPath: projectDir, path: 'res://tests' },
+          ENGINE_CALL_TIMEOUT_MS * 3,
+        );
+        assert.doesNotMatch(nowhere, /passed/, nowhere);
+        assert.match(nowhere, /No tests ran/, nowhere);
+        assert.match(nowhere, /res:\/\/test\b/, nowhere);
+        const empty: unknown = JSON.parse(nowhere.slice(nowhere.indexOf('{')));
+        assert.equal(get(empty, 'passed'), false, nowhere);
+        assert.equal(get(empty, 'tests'), 0, nowhere);
       },
       { GODOT_PATH: godotPath },
     );
