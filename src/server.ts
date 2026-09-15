@@ -2518,6 +2518,11 @@ class GodotServer {
             path: nodePath,
             property: readString(args, 'property') ?? '',
             value: args['value'],
+            // Only when asked for, so a caller waiting on a property is not also asking about
+            // words: the game reads whichever of the two it was given and refuses neither.
+            ...(readNonEmptyString(args, 'says') === undefined
+              ? {}
+              : { says: readNonEmptyString(args, 'says') }),
             timeout_ms: timeoutMs,
           },
           patience,

@@ -131,7 +131,7 @@ func _matches(node: Node, wanted: Dictionary[String, String]) -> bool:
 	# What this node says, rather than everything said underneath it. A row is then found by the
 	# label in it, and the path answered is that label's, which is where the words a caller is
 	# looking at actually are: matching every container above it would answer with the screen.
-	if not wanted["says"].is_empty() and not _said_by(node).containsn(wanted["says"]):
+	if not wanted["says"].is_empty() and not said_by(node).containsn(wanted["says"]):
 		return false
 	var script: Variant = node.get_script()
 	if not wanted["script"].is_empty():
@@ -206,7 +206,7 @@ func _read_into(node: Node, include_hidden: bool, most: int, into: PackedStringA
 		return
 	if not include_hidden and not _drawn(node):
 		return
-	var said: String = _said_by(node)
+	var said: String = said_by(node)
 	if not said.is_empty():
 		into.append(said)
 	for child: Node in node.get_children(true):
@@ -224,7 +224,11 @@ static func _drawn(node: Node) -> bool:
 
 ## What one node says, or "" for a node that says nothing. Anything with a `text` property, which
 ## is every label, button and field the interface is built out of.
-static func _said_by(node: Node) -> String:
+##
+## Public because three questions are the same question: what a screen reads as, which nodes say a
+## given word, and whether anything has come to say it yet. Two copies of what a node says is how
+## the three of them come to disagree about a SpinBox.
+static func said_by(node: Node) -> String:
 	for property: Dictionary in node.get_property_list():
 		if str(property.get("name", "")) == "text" and int(property.get("type", 0)) == TYPE_STRING:
 			return str(node.get("text")).strip_edges()
