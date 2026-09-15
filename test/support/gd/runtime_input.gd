@@ -221,11 +221,19 @@ func _check_typing(input: InputCommands) -> void:
 		_fail("and without it typing still lands at the caret: %s" % field.text)
 	if str(appended.get("holds", "")) != "89":
 		_fail("which the answer says: %s" % JSON.stringify(appended))
-	field.clear()
+
+	# Emptying a field, which is filling one in with nothing and the one shape of it that types no
+	# characters. Refused as a missing argument, the only way left was a select-all nobody can send
+	# honestly and a key event of the caller's own.
+	var cleared: Dictionary = input.inject_text({"text": "", "replace": true})
+	if field.text != "":
+		_fail("replace with nothing should empty the field: %s" % field.text)
+	if not bool(cleared.get("replaced", false)) or str(cleared.get("holds", "x")) != "":
+		_fail("and should say so: %s" % JSON.stringify(cleared))
 
 	var empty: Dictionary = input.inject_text({})
 	if empty.get("type", "") != "error":
-		_fail("typing nothing should be refused: %s" % JSON.stringify(empty))
+		_fail("typing nothing over nothing should still be refused: %s" % JSON.stringify(empty))
 
 
 ## The key op types too, which is the half that was missing rather than the whole command.

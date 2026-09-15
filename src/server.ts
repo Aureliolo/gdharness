@@ -860,7 +860,15 @@ class GodotServer {
     const required = [...spec.requires, ...(op !== null ? (spec.operations?.[op]?.requires ?? []) : [])];
     const missing = required.filter((field) => {
       const value = Object.hasOwn(args, field) ? args[field] : undefined;
-      return value === undefined || value === null || (typeof value === 'string' && value.trim() === '');
+      if (value === undefined || value === null) {
+        return true;
+      }
+      // Blank is an argument somebody meant to fill in, everywhere but the few that carry content
+      // rather than name something: emptying a field and writing "" to a property are both calls a
+      // caller means, and refusing them as missing tells them they forgot what they deliberately
+      // sent. See `blank` in tool-definitions.
+      const blank = typeof value === 'string' && value.trim() === '';
+      return blank && spec.parameters[field]?.blank !== true;
     });
     if (missing.length > 0) {
       const where = op !== null ? `${spec.name} ${op}` : spec.name;
