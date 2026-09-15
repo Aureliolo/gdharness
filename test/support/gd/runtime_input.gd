@@ -62,6 +62,7 @@ func _everything() -> void:
 	_check_typing(input)
 	await _type_with_keys(input)
 	_check_what_the_keys_typed()
+	await _check_a_dialog(input)
 
 	host.queue_free()
 	if failures.is_empty():
@@ -299,3 +300,28 @@ func _check_actions(input: InputCommands) -> void:
 			)
 		)
 	watcher.queue_free()
+
+
+## How a dialog is answered, which is not by the action that looks like it.
+##
+## Godot's own [AcceptDialog] reads the Escape key itself and never asks the [InputMap], so
+## `ui_cancel` goes in, is a perfectly good action, and leaves the question standing. Found
+## driving a game: the answer said the action had landed and the dialog was still on screen.
+## Written down here because the tool cannot say it: an action nobody listened for looks exactly
+## like one somebody did.
+func _check_a_dialog(input: InputCommands) -> void:
+	var asking: AcceptDialog = AcceptDialog.new()
+	root.add_child(asking)
+	asking.popup_centered()
+	await root.get_tree().process_frame
+
+	await input.inject_action({"action": "ui_cancel"})
+	await root.get_tree().process_frame
+	if not asking.visible:
+		_fail("ui_cancel closing a dialog would be news: Godot's own reads the key instead")
+
+	await input.inject_key({"keycode": "Escape"})
+	await root.get_tree().process_frame
+	if asking.visible:
+		_fail("the Escape key should close a dialog, which is how a player answers one")
+	asking.queue_free()
