@@ -273,6 +273,29 @@ func _check_calling_through_a_path() -> void:
 		_fail("and a method the holder has not got names the holder it looked on: %s" % str(unknown))
 
 
+## A node path with colons in it, which is where a caller puts the path to what a node holds before
+## reading that the property and the method are what take them.
+##
+## Godot reads everything after the first colon as subnames and [method Node.get_node_or_null]
+## drops them, so every op quietly answered about the node at the front. It is refused now, by the
+## one reader they all go through, and the refusal names the two halves so the caller can see which
+## argument each belongs in.
+func _check_a_node_path_that_reaches_past_a_node() -> void:
+	var asked: Array[Dictionary] = [
+		{"command": "call_method", "params": {"path": "/root/Level/Hero:held:inner", "method": "deepen"}},
+		{"command": "get_property", "params": {"path": "/root/Level/Hero:held", "property": "inner"}},
+		{"command": "get_rect", "params": {"path": "/root/Level/Hero:held"}},
+		{"command": "get_tree", "params": {"root": "/root/Level:held"}},
+	]
+	for one: Dictionary in asked:
+		var answer: Dictionary = await node._execute_command(one["command"], one["params"])
+		var said: String = str(answer.get("message", ""))
+		if answer.get("type") != "error" or not said.contains("colons reach past one"):
+			_fail("%s reads a node path as a node: %s" % [one["command"], str(answer)])
+		if not said.contains('"/root/Level'):
+			_fail("%s says which half is the node: %s" % [one["command"], str(answer)])
+
+
 func _check() -> void:
 	var level: Node2D = Node2D.new()
 	level.name = "Level"
@@ -371,6 +394,7 @@ func _check() -> void:
 
 	await _check_reading_through_a_path()
 	await _check_calling_through_a_path()
+	await _check_a_node_path_that_reaches_past_a_node()
 
 	var serialised: Variant = node.values.serialize(hero)
 	if serialised != {"_type": "Node", "class": "Node2D", "path": "/root/Level/Hero"}:

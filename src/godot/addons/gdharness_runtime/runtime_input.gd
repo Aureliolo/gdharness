@@ -440,9 +440,10 @@ func click(params: Dictionary) -> Dictionary:
 	if node_path.is_empty():
 		return {"type": "error", "message": "Node path required"}
 
-	var node: Node = _host.get_tree().root.get_node_or_null(node_path)
-	if node == null:
-		return {"type": "error", "message": "Node not found: " + node_path}
+	var standing: Dictionary = Values.node_at(_host.get_tree().root, node_path)
+	if standing.has("message"):
+		return standing
+	var node: Node = standing["node"]
 	if node is Node3D:
 		return await _click_in_the_world(node_path, node, params)
 	if not node is Control:
@@ -580,9 +581,10 @@ func choose(params: Dictionary) -> Dictionary:
 	var node_path: String = str(params.get("path", ""))
 	if node_path.is_empty():
 		return {"type": "error", "message": "Node path required"}
-	var node: Node = _host.get_tree().root.get_node_or_null(node_path)
-	if node == null:
-		return {"type": "error", "message": "Node not found: " + node_path}
+	var standing: Dictionary = Values.node_at(_host.get_tree().root, node_path)
+	if standing.has("message"):
+		return standing
+	var node: Node = standing["node"]
 
 	var menu: PopupMenu = _menu_of(node)
 	if menu == null:

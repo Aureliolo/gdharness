@@ -2,6 +2,8 @@ extends RefCounted
 
 ## A picture of the running game, as a PNG written where the server asked for it.
 
+const Values = preload("runtime_values.gd")
+
 var _host: Node
 
 
@@ -18,9 +20,10 @@ func capture_viewport(params: Dictionary) -> Dictionary:
 	if viewport_path.is_empty():
 		return capture_screenshot(params)
 
-	var node: Node = _host.get_tree().root.get_node_or_null(viewport_path)
-	if node == null:
-		return {"type": "error", "message": "Viewport not found: " + viewport_path}
+	var standing: Dictionary = Values.node_at(_host.get_tree().root, viewport_path)
+	if standing.has("message"):
+		return standing
+	var node: Node = standing["node"]
 	if not node is Viewport:
 		return {"type": "error", "message": "Node is not a Viewport: " + viewport_path}
 	return _capture(node, params)
