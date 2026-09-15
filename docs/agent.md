@@ -115,8 +115,9 @@ browser lookup. If no check ran, say so rather than calling it verified.
 - Read `editor_output` after every run.
 - Measure the running game: `runtime_inspect` for what is on screen, `runtime_invoke` for a value,
   `runtime_wait` instead of sleeping.
-- Colons in a property name read and write through the objects a node holds, `_game:clock:speed`,
-  which is where a game keeps its state.
+- Colons in a property or method name reach through the objects a node holds, `_game:clock:speed`
+  to read or write one and `_game:run:advance` to call one, which is where a game keeps its state
+  and most of what it does.
 - A refusal names the state it is in and what changes it. Read it rather than retrying.
 
 ## Reference
