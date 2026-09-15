@@ -211,6 +211,12 @@ installs, each pinned to its own version and its own engine. `--no-runtime` leav
 It is an autoload, so an export ships it unless it is removed. It refuses to serve outside a debug
 build, so it is not a server on a player's machine, but turn it off before you ship.
 
+Autoloads come up for `godot -s` too, which is how a test tier and most batch tools are run. It
+refuses to serve those as well: a script run has no game in it to answer about, and a project whose
+suite starts sixteen engines at once would otherwise announce sixteen games under its own path and
+answer a `runtime_*` call from whichever replied first. Set
+`gdharness/runtime/serve_script_runs` to true in `project.godot` to drive a `-s` script on purpose.
+
 ```bash
 gdharness runtime on
 gdharness runtime off

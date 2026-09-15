@@ -76,6 +76,9 @@ that is running, and the project on disk. ${TOOL_SPECS.length} tools, named \`do
 These need the runtime autoload, which \`gdharness setup\` registers. \`runtime_capture\` needs a
 window and refuses headless rather than handing back the last frame anything drew.
 
+A headless game answers; a \`godot -s\` script run does not. It has no game in it, so the autoload
+stays quiet there rather than announcing a test tier as the project.
+
 The autoload reaches an export. \`gdharness runtime off\` in the project before shipping.
 
 ## At a breakpoint
