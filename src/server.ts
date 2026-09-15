@@ -38,6 +38,7 @@ import {
   type EditorPorts,
   editorArguments,
   envValue,
+  OPENED_BY_A_SERVER,
   resolveHeadless,
   runArguments,
   userDataIn,
@@ -2116,9 +2117,10 @@ class GodotServer {
     // Told rather than left to derive. A game is started by the editor and inherits its
     // environment, not this server's, so an editor opened without TMP or TEMP set announces its
     // games somewhere this server never looks first. Passing the directory down makes the two
-    // agree by construction for every editor gdharness opened. The two ports are in the
-    // environment as well as on the command line, because the engine keeps what it was told to
-    // itself: this is how the addon knows a server opened it, and therefore who may open it again.
+    // agree by construction for every editor gdharness opened. The two ports are in the environment
+    // as well as on the command line because the engine keeps what it was told to itself, and the
+    // third variable is this server saying it opened this editor, which is what decides who may
+    // open it again.
     const editor = spawn(engine, editorArguments(projectPath, ports), {
       stdio: 'ignore',
       detached: true,
@@ -2127,6 +2129,7 @@ class GodotServer {
         GDHARNESS_RUNTIME_DIR: runtimeDirectory(),
         GDHARNESS_LSP_PORT: String(ports.lsp),
         GDHARNESS_DAP_PORT: String(ports.dap),
+        [OPENED_BY_A_SERVER]: '1',
       },
     });
     const started = await new Promise<string | null>((resolve) => {

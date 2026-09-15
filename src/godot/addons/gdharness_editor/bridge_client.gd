@@ -33,6 +33,9 @@ const DEBUGGER_SETTING: String = "network/debug/remote_port"
 ## the command line. Kept in step with `editorArguments` in src/launch.ts.
 const LSP_ASKED: String = "GDHARNESS_LSP_PORT"
 const DAP_ASKED: String = "GDHARNESS_DAP_PORT"
+## What a server that opened this editor says about itself, so that being opened by one is stated
+## rather than guessed at from the ports. Kept in step with `OPENED_BY_A_SERVER` in src/launch.ts.
+const OPENED_BY_A_SERVER: String = "GDHARNESS_OPENED_BY_A_SERVER"
 
 ## How long one attempt is given before the address is called a bad one.
 ##
@@ -284,14 +287,17 @@ func _handle_connect() -> void:
 	connected.emit()
 
 
-## Whether a gdharness server started this editor, which it says by putting the ports it chose in
-## the environment. An editor somebody opened themselves has neither.
+## Whether a gdharness server started this editor, which it says in the environment.
 ##
 ## It decides who may restart this editor by starting it again. Only a server that wrote the
 ## arguments can write them a second time, and only an editor started that way needs it: one opened
 ## by hand is on the ports its own settings name and comes back on them by itself.
+##
+## Said outright rather than read off the two port variables, which a server also sets and anybody
+## else may: an editor started from a shell that exports them is one somebody opened themselves,
+## and taking it for a server's is taking an editor off somebody's desk and putting a new one there.
 static func _opened_by_a_server() -> bool:
-	return _asked_for(LSP_ASKED) > 0 or _asked_for(DAP_ASKED) > 0
+	return not OS.get_environment(OPENED_BY_A_SERVER).is_empty()
 
 
 ## What this editor serves: what it was told to when a server opened it, and what its settings say

@@ -23,7 +23,14 @@ import { staleClassNames } from '../src/class-cache.js';
 import { GodotDAPClient } from '../src/dap_client.js';
 import { dictionary, emptyRecord } from '../src/dictionary.js';
 import { createBridge } from '../src/godot-bridge.js';
-import { editorArguments, envValue, resolveHeadless, runArguments, userDataIn } from '../src/launch.js';
+import {
+  editorArguments,
+  envValue,
+  OPENED_BY_A_SERVER,
+  resolveHeadless,
+  runArguments,
+  userDataIn,
+} from '../src/launch.js';
 import { GodotLSPClient } from '../src/lsp_client.js';
 import { isWithinRoot, resolveWithinProject } from '../src/paths.js';
 import { freePort } from '../src/ports.js';
@@ -998,6 +1005,12 @@ function testBothEndsAgreeAboutTheAnnouncement(): void {
     BRIDGE_ANNOUNCE_PROTOCOL,
     'the addon should read the protocol the server writes',
   );
+
+  // The same pair again, for the variable that says who opened the editor. A name that drifts
+  // reads as an editor nobody opened, which is the one a restart hands to Godot: it comes back
+  // without the ports it was moved to, and every tool behind them is answered by another editor.
+  const opened = /const OPENED_BY_A_SERVER: String = "(.+)"/.exec(addon)?.[1];
+  assert.equal(opened, OPENED_BY_A_SERVER, 'the addon should read the variable the server sets');
 }
 
 /**
@@ -1067,6 +1080,25 @@ async function testAnEditorAServerOpenedIsStartedAgain(): Promise<void> {
           opened_by_a_server: opened,
         }),
       );
+
+      // The greeting goes over the socket and the call over stdio, so the server can answer the
+      // call before it has read the greeting: an editor it has not been told about is one it
+      // restarts the other way, and this fixture then asserts the wrong half. Asked rather than
+      // assumed, which is also what says the flag travelled.
+      let greeted: Record<string, unknown> | null = null;
+      for (let waited = 0; waited < 10_000; waited += 100) {
+        const status = parseTextContent(
+          await server.request('tools/call', { name: 'editor_status', arguments: {} }, 20_000),
+        );
+        const said = isRecord(status) ? status['editor'] : null;
+        if (isRecord(said) && typeof said['projectPath'] === 'string') {
+          greeted = said;
+          break;
+        }
+        await delay(100);
+      }
+      assert.ok(greeted, 'the server should read the greeting the editor sent');
+      assert.equal(greeted['openedByAServer'], opened, 'and take the editor at its word about it');
 
       const restart = server
         .request('tools/call', { name: 'editor_launch', arguments: { op: 'restart' } }, 20_000)
