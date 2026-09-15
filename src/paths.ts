@@ -46,6 +46,22 @@ export type Containment =
     }
   | { readonly ok: false; readonly reason: string };
 
+/**
+ * Whether two paths name the same directory.
+ *
+ * The same arithmetic as the containment test rather than a string comparison, and for the same
+ * reasons: one side arrives from Godot as `C:/Users/x/game/` and the other from the config as
+ * `C:\Users\x\game`, so separators, a trailing separator and the case of a Windows path all differ
+ * between two spellings of one directory. `relative` settles every one of them and answers the
+ * empty string when there is no step between them.
+ *
+ * Containment is the wrong question here. A project inside another project is a different project,
+ * and this is asked where the answer decides whether two sides belong together.
+ */
+export function isSameDirectory(onePath: string, otherPath: string): boolean {
+  return relative(resolve(onePath), resolve(otherPath)) === '';
+}
+
 /** Whether `candidatePath` is `rootPath` or sits underneath it. */
 export function isWithinRoot(rootPath: string, candidatePath: string): boolean {
   const step = relative(resolve(rootPath), resolve(candidatePath));
