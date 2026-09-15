@@ -65,7 +65,8 @@ that is running, and the project on disk. ${TOOL_SPECS.length} tools, named \`do
 | Fill in a field | \`runtime_input click\` on it, then \`runtime_input text\` with \`replace\`; a submitted field has to be clicked again |
 | Click somebody standing in a 3D room | \`runtime_input click\` on the Node3D, which aims at what it draws |
 | Pick something out of a dropdown | \`runtime_input choose\` on it, by what the item says |
-| Answer a dialog, or press a bound key | \`runtime_input action\` or \`key\`, a whole press unless you hold it |
+| Answer a dialog | \`runtime_input click\` on its button, or \`key\` Escape to dismiss it: an [AcceptDialog] reads that key itself and never asks the InputMap, so \`ui_cancel\` leaves it standing |
+| Press a bound key | \`runtime_input action\` or \`key\`, a whole press unless you hold it |
 | Where a 3D node is on screen | \`runtime_inspect\` \`rect\`, rather than unprojecting by hand |
 | Wait for something | \`runtime_wait\`, never a sleep |
 | A picture, for a person who asked to see one | \`runtime_capture\` |
