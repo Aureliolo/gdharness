@@ -13,6 +13,19 @@ import type { MCPToolDefinition } from './server-types.js';
 
 type JsonSchema = Readonly<Record<string, unknown>>;
 
+/**
+ * A parameter's schema, and which ops read it.
+ *
+ * `ops` is what makes an argument belong to some of a tool's ops rather than all of them. A tool
+ * refuses an argument nothing names; without this it took one named for a different op and threw
+ * it away, which is the same fault wearing the tool's own vocabulary: `runtime_inspect text` was
+ * given a limit for a year and answered with every line on the screen.
+ *
+ * Absent means every op takes it, which is the honest answer for a tool that hands its arguments
+ * on wholesale and for one whose parameters are all shared.
+ */
+type Parameter = JsonSchema & { readonly ops?: readonly string[] };
+
 interface OperationSpec {
   /** One line on what the op does, for the description. */
   readonly summary: string;
@@ -23,12 +36,23 @@ interface OperationSpec {
 export interface ToolSpec {
   readonly name: string;
   readonly description: string;
-  readonly parameters: Readonly<Record<string, JsonSchema>>;
+  readonly parameters: Readonly<Record<string, Parameter>>;
   /** Arguments every call needs, whatever the op. */
   readonly requires: readonly string[];
   readonly operations?: Readonly<Record<string, OperationSpec>>;
   /** The op assumed when none is given; absent means op is required. */
   readonly defaultOperation?: string;
+}
+
+/** Whether [op] reads [name] on [spec]. A parameter that names no ops is read by all of them. */
+export function opTakes(spec: ToolSpec, op: string, name: string): boolean {
+  const ops = spec.parameters[name]?.ops;
+  return ops === undefined || ops.includes(op);
+}
+
+/** Every argument [op] takes, in the order the schema declares them. */
+export function argumentsOf(spec: ToolSpec, op: string): string[] {
+  return Object.keys(spec.parameters).filter((name) => opTakes(spec, op, name));
 }
 
 const PROJECT_PATH: JsonSchema = {
@@ -756,42 +780,50 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       projectPath: RUNNING_PROJECT_PATH,
       nodePath: {
         type: 'string',
+        ops: ['tree', 'text', 'find', 'rect', 'property'],
         description:
           'tree, find, text: where to start, default /root. rect: the node to place. property: the node to read.',
       },
       property: {
         type: 'string',
+        ops: ['property', 'find'],
         description:
           'property: which one to read. find: read this one off every node matched, so a panel of labels is one call rather than one per label.',
       },
-      depth: { type: 'number', description: 'tree: levels to descend. Default 3.' },
+      depth: { type: 'number', ops: ['tree'], description: 'tree: levels to descend. Default 3.' },
       includeProperties: {
         type: 'boolean',
+        ops: ['tree'],
         description: "tree: include each node's properties. Default false.",
       },
       className: {
         type: 'string',
+        ops: ['find'],
         description: 'find: a native class, matching its subclasses too, or a class_name.',
       },
-      script: { type: 'string', description: 'find: the script file the node carries.' },
+      script: { type: 'string', ops: ['find'], description: 'find: the script file the node carries.' },
       namePattern: {
         type: 'string',
+        ops: ['find'],
         description: 'find: a case-insensitive glob on the node name, such as "Enemy*".',
       },
-      group: { type: 'string', description: 'find: a group the node is in.' },
+      group: { type: 'string', ops: ['find'], description: 'find: a group the node is in.' },
       limit: {
         type: 'number',
+        ops: ['find', 'text'],
         description:
           'find: the most nodes to answer with, default 100. text: the most lines, default 500, with truncated saying whether there were more.',
       },
       includeHidden: {
         type: 'boolean',
+        ops: ['text'],
         description:
           'text: read hidden nodes as well, for checking that something is not showing. Default false.',
       },
       metrics: {
         type: 'array',
         items: { type: 'string' },
+        ops: ['metrics'],
         description: 'metrics: which to read. Default all.',
       },
     },
@@ -828,10 +860,14 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     parameters: {
       projectPath: RUNNING_PROJECT_PATH,
       nodePath: { type: 'string', description: 'Absolute node path, such as "/root/Main/Player".' },
-      property: { type: 'string' },
-      value: { description: "set: the value, fitted to the property's type." },
-      method: { type: 'string' },
-      args: { type: 'array', description: "call: the arguments, fitted to the method's parameter types." },
+      property: { type: 'string', ops: ['set'] },
+      value: { ops: ['set'], description: "set: the value, fitted to the property's type." },
+      method: { type: 'string', ops: ['call'] },
+      args: {
+        type: 'array',
+        ops: ['call'],
+        description: "call: the arguments, fitted to the method's parameter types.",
+      },
     },
     requires: ['nodePath'],
     operations: {
@@ -847,6 +883,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       projectPath: RUNNING_PROJECT_PATH,
       viewportPath: {
         type: 'string',
+        ops: ['viewport'],
         description: 'viewport: the Viewport node. Default the root viewport.',
       },
       width: { type: 'number', description: 'Scale the image to this width.' },
@@ -867,42 +904,68 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       projectPath: RUNNING_PROJECT_PATH,
       nodePath: {
         type: 'string',
+        ops: ['click', 'choose'],
         description:
           'click: the Control to click, at its centre, or the 3D node to click, where it is drawn. choose: the PopupMenu, or the OptionButton or MenuButton in front of one.',
       },
-      action: { type: 'string', description: 'action: the InputMap action name.' },
+      action: { type: 'string', ops: ['action'], description: 'action: the InputMap action name.' },
       pressed: {
         type: 'boolean',
+        ops: ['action', 'key', 'mouse_click'],
         description:
-          'action, key: leave it out and the press is a whole one, down and up a frame apart. true holds it down, false lets go of one being held.',
+          'action, key: leave it out and the press is a whole one, down and up a frame apart. true holds it down, false lets go of one being held. mouse_click is one raw event, so it is down unless you say false.',
       },
-      strength: { type: 'number', description: 'action: 0 to 1. Default 1.' },
+      strength: { type: 'number', ops: ['action'], description: 'action: 0 to 1. Default 1.' },
       keycode: {
         type: ['string', 'number'],
+        ops: ['key'],
         description: 'key: the key name, such as "Space" or "A", or its Godot keycode.',
       },
       text: {
         type: 'string',
+        ops: ['text', 'choose'],
         description:
           'text: what to type. A newline is Enter and a tab is Tab. choose: the item to take, by what it says.',
       },
       index: {
         type: 'number',
+        ops: ['choose'],
         description: 'choose: the item to take, by where it is in the list, when text will not do.',
       },
-      shift: { type: 'boolean' },
-      ctrl: { type: 'boolean' },
-      alt: { type: 'boolean' },
-      x: { type: 'number', description: 'mouse_click, mouse_motion: window pixels.' },
-      y: { type: 'number', description: 'mouse_click, mouse_motion: window pixels.' },
+      shift: { type: 'boolean', ops: ['key'] },
+      ctrl: { type: 'boolean', ops: ['key'] },
+      alt: { type: 'boolean', ops: ['key'] },
+      x: {
+        type: 'number',
+        ops: ['mouse_click', 'mouse_motion'],
+        description: 'mouse_click, mouse_motion: window pixels.',
+      },
+      y: {
+        type: 'number',
+        ops: ['mouse_click', 'mouse_motion'],
+        description: 'mouse_click, mouse_motion: window pixels.',
+      },
       button: {
         type: ['string', 'number'],
+        ops: ['click', 'mouse_click'],
         description:
           'click, mouse_click: left, right, middle, wheel_up or wheel_down, or a button number. Default left.',
       },
-      doubleClick: { type: 'boolean', description: 'click, mouse_click: default false.' },
-      relativeX: { type: 'number', description: 'mouse_motion: movement since the last event.' },
-      relativeY: { type: 'number', description: 'mouse_motion: movement since the last event.' },
+      doubleClick: {
+        type: 'boolean',
+        ops: ['click', 'mouse_click'],
+        description: 'click, mouse_click: default false.',
+      },
+      relativeX: {
+        type: 'number',
+        ops: ['mouse_motion'],
+        description: 'mouse_motion: movement since the last event.',
+      },
+      relativeY: {
+        type: 'number',
+        ops: ['mouse_motion'],
+        description: 'mouse_motion: movement since the last event.',
+      },
     },
     requires: [],
     operations: {
@@ -935,14 +998,16 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       projectPath: RUNNING_PROJECT_PATH,
       frames: {
         type: 'number',
+        ops: ['frames'],
         description: 'frames: how many to let pass, 1 to 600. More than that is refused.',
       },
-      nodePath: { type: 'string', description: 'signal, until: the node.' },
-      signal: { type: 'string', description: 'signal: the signal name.' },
-      property: { type: 'string', description: 'until: the property name.' },
-      value: { description: "until: the value to wait for, fitted to the property's type." },
+      nodePath: { type: 'string', ops: ['signal', 'until'], description: 'signal, until: the node.' },
+      signal: { type: 'string', ops: ['signal'], description: 'signal: the signal name.' },
+      property: { type: 'string', ops: ['until'], description: 'until: the property name.' },
+      value: { ops: ['until'], description: "until: the value to wait for, fitted to the property's type." },
       timeoutMs: {
         type: 'number',
+        ops: ['signal', 'until'],
         description: 'signal, until: how long to wait before answering anyway, 1 to 120000. Default 5000.',
       },
     },
@@ -997,6 +1062,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     parameters: {
       frameId: {
         type: 'number',
+        ops: ['variables'],
         description: 'variables: which frame, from a stack answer. Default the innermost.',
       },
     },
@@ -1042,7 +1108,10 @@ export function buildToolDefinitions(): MCPToolDefinition[] {
       };
     }
     for (const [name, schema] of Object.entries(spec.parameters)) {
-      properties[name] = schema;
+      // `ops` is ours rather than JSON Schema's, and a client handed a key its validator does not
+      // know is a client that may refuse the whole tool. Which ops take what is in the description.
+      const { ops: _ops, ...carried } = schema;
+      properties[name] = carried;
     }
 
     const required = [...spec.requires];

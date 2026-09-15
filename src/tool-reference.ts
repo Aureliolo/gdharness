@@ -5,7 +5,7 @@
  * so neither can describe a tool the server does not have or miss one it does.
  */
 
-import { TOOL_SPECS } from './tool-definitions.js';
+import { argumentsOf, TOOL_SPECS } from './tool-definitions.js';
 
 /** What a schema's `type` is called in prose, for the one argument or two that take either. */
 export function namedType(declared: unknown): string {
@@ -40,7 +40,12 @@ export function renderToolsMarkdown(): string {
         const needs = [...tool.requires, ...spec.requires];
         const isDefault = tool.defaultOperation === op ? ' (default)' : '';
         const wants = needs.length > 0 ? ` Needs: ${needs.map((name) => `\`${name}\``).join(', ')}.` : '';
-        lines.push(`- \`op: ${op}\`${isDefault}: ${spec.summary}.${wants}`);
+        // What else the op will take, because an argument meant for another op is refused. The
+        // list below says which ops each argument belongs to; this says it the way round somebody
+        // writing one call wants it.
+        const spare = argumentsOf(tool, op).filter((name) => !needs.includes(name) && name !== 'projectPath');
+        const takes = spare.length > 0 ? ` Takes: ${spare.map((name) => `\`${name}\``).join(', ')}.` : '';
+        lines.push(`- \`op: ${op}\`${isDefault}: ${spec.summary}.${wants}${takes}`);
       }
       lines.push('');
     } else if (tool.requires.length > 0) {
