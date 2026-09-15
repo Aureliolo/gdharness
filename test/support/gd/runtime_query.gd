@@ -362,6 +362,15 @@ func _check() -> void:
 	var unsaid: Dictionary = await node._execute_command("find_nodes", {"says": "turn away"})
 	if unsaid.get("count") != 0:
 		_fail("and nothing at all when nothing says it: %s" % str(unsaid))
+	# A glob, because the field beside this one takes one and nobody writes `*sign*` in the two of
+	# them meaning different things. As a contains only, a pattern matched nothing and the empty
+	# answer read as a control that is not on the screen.
+	var by_glob: Dictionary = await node._execute_command("find_nodes", {"says": "*THE dock*"})
+	if _paths(by_glob) != ["/root/Level/Docket"]:
+		_fail("a pattern in says is a glob rather than characters to find: %s" % str(by_glob))
+	var whole_thing: Dictionary = await node._execute_command("find_nodes", {"says": "docket*"})
+	if whole_thing.get("count") != 0:
+		_fail("and a glob is matched against the whole of what is said: %s" % str(whole_thing))
 	var its_own: Dictionary = await node._execute_command("find_nodes", {"says": "sign the", "name": "Level"})
 	if its_own.get("count") != 0:
 		_fail("what a node says is its own, not what is said under it: %s" % str(its_own))
