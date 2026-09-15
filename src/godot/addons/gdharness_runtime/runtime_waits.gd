@@ -9,6 +9,9 @@ const Values = preload("runtime_values.gd")
 ## since given up on the reply.
 const CEILING_MSEC: int = 120000
 
+## The most frames one wait may cover, which is about half a minute of a game drawing slowly.
+const MOST_FRAMES: int = 600
+
 var _host: Node
 var _values: Values
 
@@ -18,8 +21,21 @@ func _init(host: Node, values: Values) -> void:
 	_values = values
 
 
+## Refuses [param asked] rather than bringing it inside [param least] to [param most].
+##
+## A number quietly brought inside the range is a wait that did not last as long as the caller
+## believes and a timeout that gave up sooner: asking for 900 frames and waiting 600 reads as 900
+## frames of the game having passed, and everything measured off it is out by that much.
+static func _out_of_range(named: String, asked: int, least: int, most: int) -> Dictionary:
+	return {
+		"type": "error", "message": "%s is %d, and %s takes %d to %d." % [named, asked, named, least, most]
+	}
+
+
 func wait_frames(params: Dictionary) -> Dictionary:
-	var frames: int = clampi(int(params.get("frames", 1)), 1, 600)
+	var frames: int = int(params.get("frames", 1))
+	if frames < 1 or frames > MOST_FRAMES:
+		return _out_of_range("frames", frames, 1, MOST_FRAMES)
 	var started: int = Time.get_ticks_msec()
 	for _frame: int in frames:
 		await _host.get_tree().process_frame
@@ -30,7 +46,9 @@ func wait_frames(params: Dictionary) -> Dictionary:
 func wait_signal(params: Dictionary) -> Dictionary:
 	var node_path: String = str(params.get("path", ""))
 	var signal_name: String = str(params.get("signal", ""))
-	var timeout_ms: int = clampi(int(params.get("timeout_ms", 5000)), 1, CEILING_MSEC)
+	var timeout_ms: int = int(params.get("timeout_ms", 5000))
+	if timeout_ms < 1 or timeout_ms > CEILING_MSEC:
+		return _out_of_range("timeout_ms", timeout_ms, 1, CEILING_MSEC)
 	if node_path.is_empty() or signal_name.is_empty():
 		return {"type": "error", "message": "Node path and signal name required"}
 
@@ -65,7 +83,9 @@ func wait_signal(params: Dictionary) -> Dictionary:
 func wait_until(params: Dictionary) -> Dictionary:
 	var node_path: String = str(params.get("path", ""))
 	var property: String = str(params.get("property", ""))
-	var timeout_ms: int = clampi(int(params.get("timeout_ms", 5000)), 1, CEILING_MSEC)
+	var timeout_ms: int = int(params.get("timeout_ms", 5000))
+	if timeout_ms < 1 or timeout_ms > CEILING_MSEC:
+		return _out_of_range("timeout_ms", timeout_ms, 1, CEILING_MSEC)
 	if node_path.is_empty() or property.is_empty():
 		return {"type": "error", "message": "Node path and property required"}
 	if not params.has("value"):

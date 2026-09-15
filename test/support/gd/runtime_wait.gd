@@ -462,6 +462,16 @@ func _check_frames() -> void:
 			)
 		)
 
+	# More than it can wait for is refused rather than brought inside the range: 900 frames asked
+	# for and 600 waited reads as 900 frames of the game having passed, and anything measured off
+	# that is out by the difference.
+	var too_many: Dictionary = await node._execute_command("wait_frames", {"frames": 900})
+	if too_many.get("type") != "error" or not str(too_many.get("message", "")).contains("1 to 600"):
+		_fail("more frames than it can wait for should be refused with the range: %s" % str(too_many))
+	var none: Dictionary = await node._execute_command("wait_frames", {"frames": 0})
+	if none.get("type") != "error":
+		_fail("a wait of no frames should be refused: %s" % str(none))
+
 
 func _check_signal() -> void:
 	var timer: Timer = Timer.new()

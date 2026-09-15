@@ -928,14 +928,17 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       'Lets the running game get on with it and answers when something has happened: a number of frames, a signal, or a property reaching a value. Needs the game running with the runtime addon.',
     parameters: {
       projectPath: RUNNING_PROJECT_PATH,
-      frames: { type: 'number', description: 'frames: how many to let pass, 1 to 600.' },
+      frames: {
+        type: 'number',
+        description: 'frames: how many to let pass, 1 to 600. More than that is refused.',
+      },
       nodePath: { type: 'string', description: 'signal, until: the node.' },
       signal: { type: 'string', description: 'signal: the signal name.' },
       property: { type: 'string', description: 'until: the property name.' },
       value: { description: "until: the value to wait for, fitted to the property's type." },
       timeoutMs: {
         type: 'number',
-        description: 'signal, until: how long to wait before answering anyway. Default 5000.',
+        description: 'signal, until: how long to wait before answering anyway, 1 to 120000. Default 5000.',
       },
     },
     requires: [],
