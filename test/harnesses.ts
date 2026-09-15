@@ -24,6 +24,7 @@ import {
   groupByFile,
   HARNESSES,
   harnessById,
+  harnessNote,
   launchFor,
   SERVER_KEY,
 } from '../src/harnesses.js';
@@ -327,6 +328,28 @@ function testAnInstallSaysWhatItLaunchedInsteadOf(): void {
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+}
+
+/**
+ * What an upgrade says the harness is still running is what the config held, not what the addons
+ * were.
+ *
+ * The note inferred one from the other, which holds only while a gdharness install is the thing
+ * that wrote the config. A project pointed at a local build to get at an unreleased fix was told a
+ * version that appeared nowhere in its config, and the instruction beside it was right either way,
+ * which is exactly why a wrong number there could sit for good.
+ */
+function testTheUpgradeNoteNamesTheConfigRatherThanTheAddons(): void {
+  const moved = harnessNote(['node ../gdharness/build/index.js'], 'npx -y gdharness@9.9.10');
+  assert.match(moved, /node \.\.\/gdharness\/build\/index\.js/, 'it names what the config held');
+  assert.match(moved, /npx -y gdharness@9\.9\.10/, 'and what it holds now');
+
+  // Nothing moved, so there is nothing it can honestly name: the server the harness is running is
+  // whichever one it spawned, and an upgrade cannot see into another process.
+  const still = harnessNote([], 'npx -y gdharness@9.9.10');
+  assert.match(still, /already named this version/, 'it says the config was already there');
+  assert.doesNotMatch(still, /9\.9\.10 *\n? *when/, 'and claims nothing about what is running');
+  assert.match(still, /Reconnect the MCP server/, 'and still says what to do');
 }
 
 function testAConfigThatDoesNotParseIsLeftAlone(): void {
@@ -709,6 +732,7 @@ const TESTS = [
   testWritingTwiceReplacesRatherThanDuplicates,
   testAnUpgradeKeepsWhatWasPinnedByHand,
   testAnInstallSaysWhatItLaunchedInsteadOf,
+  testTheUpgradeNoteNamesTheConfigRatherThanTheAddons,
   testAConfigThatDoesNotParseIsLeftAlone,
   testDetectionNeverReachesOutOfTheProject,
   testEveryCandidateCarriesWhyItIsOffered,
