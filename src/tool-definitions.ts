@@ -779,7 +779,11 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         description: 'find: a case-insensitive glob on the node name, such as "Enemy*".',
       },
       group: { type: 'string', description: 'find: a group the node is in.' },
-      limit: { type: 'number', description: 'find: the most nodes to answer with. Default 100.' },
+      limit: {
+        type: 'number',
+        description:
+          'find: the most nodes to answer with, default 100. text: the most lines, default 500, with truncated saying whether there were more.',
+      },
       includeHidden: {
         type: 'boolean',
         description:
