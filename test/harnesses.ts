@@ -246,6 +246,52 @@ function testWritingTwiceReplacesRatherThanDuplicates(): void {
   }
 }
 
+/**
+ * An upgrade keeps what somebody put in gdharness's own entry, not just the rest of the file.
+ *
+ * The entry was rebuilt from nothing on every write, so ports a person had pinned by hand went with
+ * it and nothing said so. They are the worst keys to lose: nobody sets them until they already have
+ * a port conflict, so the only config that loses them is the one that needed them. Reported from a
+ * project holding all three, whose next editor would have come back on the defaults and collided
+ * with the project they were set to avoid.
+ */
+function testAnUpgradeKeepsWhatWasPinnedByHand(): void {
+  const harness = harnessById('claude-code');
+  assert.ok(harness, 'claude-code is in the table');
+  const root = project();
+  try {
+    connect(harness, root, LAUNCH);
+    const path = configPath(harness, root);
+    const before = read(path);
+    const servers = before['mcpServers'] as Record<string, Record<string, unknown>>;
+    const entry = servers[SERVER_KEY];
+    assert.ok(entry, 'the install wrote an entry to pin anything in');
+    entry['env'] = {
+      ...(entry['env'] as Record<string, string>),
+      GDHARNESS_BRIDGE_PORT: '6515',
+      GDHARNESS_LSP_PORT: '6015',
+    };
+    entry['timeout'] = 120;
+    writeFileSync(path, `${JSON.stringify(before, null, 2)}\n`, 'utf8');
+
+    connect(harness, root, launchFor('9.9.10', '/opt/godot/other', root, 'npx'));
+
+    const after = (read(path)['mcpServers'] as Record<string, Record<string, unknown>>)[SERVER_KEY];
+    assert.ok(after, 'gdharness is still in the file');
+    const env = after['env'] as Record<string, string>;
+    assert.equal(env['GDHARNESS_BRIDGE_PORT'], '6515', 'a port pinned by hand survives the upgrade');
+    assert.equal(env['GDHARNESS_LSP_PORT'], '6015', 'and so does the next one');
+    assert.equal(after['timeout'], 120, 'and a key on the entry gdharness knows nothing about');
+
+    // What the upgrade is for still wins, and the two the install decides are still its own.
+    assert.deepEqual(after['args'], ['-y', 'gdharness@9.9.10'], 'the version is re-pinned');
+    assert.equal(env['GODOT_PATH'], '/opt/godot/other', 'and the engine path is written over');
+    assert.equal(env['GDHARNESS_PROJECT'], root, 'and so is the project');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 function testAConfigThatDoesNotParseIsLeftAlone(): void {
   const harness = harnessById('claude-code');
   assert.ok(harness, 'claude-code is in the table');
@@ -624,6 +670,7 @@ const TESTS = [
   testEveryHarnessHasAReadablePathOnEveryPlatform,
   testNothingAlreadyInTheFileIsLost,
   testWritingTwiceReplacesRatherThanDuplicates,
+  testAnUpgradeKeepsWhatWasPinnedByHand,
   testAConfigThatDoesNotParseIsLeftAlone,
   testDetectionNeverReachesOutOfTheProject,
   testEveryCandidateCarriesWhyItIsOffered,
