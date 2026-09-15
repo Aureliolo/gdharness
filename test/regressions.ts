@@ -1148,6 +1148,39 @@ async function testToolAndOpLookupsCannotReachThePrototype(): Promise<void> {
   });
 }
 
+/**
+ * An argument of the wrong type is refused rather than quietly dropped.
+ *
+ * `includeProperties` given the list of properties to include was taken, ignored, and answered as
+ * though it had been read, so a caller saw nodes with no properties on them and no reason why. An
+ * argument the tool does not name has always been refused; one it names and cannot use is the same
+ * mistake wearing the right word.
+ */
+async function testArgumentsOfTheWrongTypeAreRefused(): Promise<void> {
+  await withStdioServer(async (call) => {
+    assert.match(
+      await call('runtime_inspect', { op: 'find', className: 'Label', includeProperties: ['text'] }),
+      /includeProperties as boolean, not a list/,
+      'a boolean given a list should be refused',
+    );
+    assert.match(
+      await call('scene_tree', { projectPath: '/p', scenePath: 'a.tscn', depth: '3' }),
+      /depth as number, not a string/,
+      'a number given a string should be refused',
+    );
+
+    // The other half, or the two above pass against a server that refuses everything. A key is
+    // named or numbered and the schema says both, so neither may be turned away.
+    for (const keycode of ['Space', 32]) {
+      assert.doesNotMatch(
+        await call('runtime_input', { op: 'key', keycode }),
+        /takes keycode as/,
+        `${JSON.stringify(keycode)} is a keycode the tool accepts`,
+      );
+    }
+  });
+}
+
 function testProjectGodotMultilineValues(): void {
   const parsed = parseProjectGodot(
     [
@@ -2789,6 +2822,7 @@ async function main(): Promise<void> {
   testDictionariesHaveNothingBehindThem();
   testProjectPathsAreContained();
   await testToolAndOpLookupsCannotReachThePrototype();
+  await testArgumentsOfTheWrongTypeAreRefused();
   await testToolsRefusePathsOutsideTheProject();
   await testDebugToolsRefuseWithoutASession();
   await testUpdateNoticeRidesOnAnAnswer();
