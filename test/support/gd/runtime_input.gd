@@ -168,6 +168,12 @@ func _check_mouse(input: InputCommands) -> void:
 	if input._resolve_mouse_button(2) != MOUSE_BUTTON_RIGHT:
 		_fail("a numeric button is taken as it is")
 
+	# A spelling nobody recognises used to come back as the left button, so a right click asked for
+	# by the wrong word went left and said it went left.
+	var unknown: Dictionary = input.inject_mouse_click({"x": 1, "y": 1, "button": "scroll_up"})
+	if unknown.get("type", "") != "error":
+		_fail("a button name that is not one should be refused: %s" % JSON.stringify(unknown))
+
 
 ## What a field ends up holding, which is the only thing that says a key typed anything. Every
 ## other assertion here reads the event back, and an event can carry a keycode, a physical

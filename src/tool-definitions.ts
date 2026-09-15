@@ -873,7 +873,10 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
           'action, key: leave it out and the press is a whole one, down and up a frame apart. true holds it down, false lets go of one being held.',
       },
       strength: { type: 'number', description: 'action: 0 to 1. Default 1.' },
-      keycode: { type: 'string', description: 'key: the key name, such as "Space" or "A".' },
+      keycode: {
+        type: ['string', 'number'],
+        description: 'key: the key name, such as "Space" or "A", or its Godot keycode.',
+      },
       text: {
         type: 'string',
         description:
@@ -889,9 +892,9 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       x: { type: 'number', description: 'mouse_click, mouse_motion: window pixels.' },
       y: { type: 'number', description: 'mouse_click, mouse_motion: window pixels.' },
       button: {
-        type: 'string',
-        enum: ['left', 'right', 'middle'],
-        description: 'click, mouse_click: default left.',
+        type: ['string', 'number'],
+        description:
+          'click, mouse_click: left, right, middle, wheel_up or wheel_down, or a button number. Default left.',
       },
       doubleClick: { type: 'boolean', description: 'click, mouse_click: default false.' },
       relativeX: { type: 'number', description: 'mouse_motion: movement since the last event.' },
@@ -909,8 +912,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
           "take an item out of a menu, by what it says or by where it is in the list. A menu's items are drawn rather than built, so there is nothing to click: the item takes the focus and Enter presses it, which is the engine's own path and needs no window. Answers with what was chosen and what the button in front of it shows now",
         requires: ['nodePath'],
       },
-      action: { summary: 'press or release an action', requires: ['action'] },
-      key: { summary: 'press or release a key', requires: ['keycode'] },
+      action: { summary: 'press an action, or hold it', requires: ['action'] },
+      key: { summary: 'press a key, or hold it', requires: ['keycode'] },
       text: {
         summary: 'type a string wherever the focus is, a character at a time',
         requires: ['text'],

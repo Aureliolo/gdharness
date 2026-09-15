@@ -18,7 +18,7 @@ import { displayPath, HARNESSES, type Harness } from '../src/harnesses.js';
 import { runLine } from '../src/runner.js';
 import { SERVER_VERSION } from '../src/server-version.js';
 import { TOOL_SPECS } from '../src/tool-definitions.js';
-import { renderToolsMarkdown } from '../src/tool-reference.js';
+import { namedType, renderToolsMarkdown } from '../src/tool-reference.js';
 
 const DOCS = 'docs';
 const THEME = join(DOCS, 'theme');
@@ -581,7 +581,7 @@ function renderTools(): string {
     if (parameters.length > 0) {
       parts.push('<details><summary>Arguments</summary>\n<dl class="args">\n');
       for (const [name, schema] of parameters) {
-        const type = typeof schema['type'] === 'string' ? schema['type'] : 'any';
+        const type = namedType(schema['type']);
         const note = typeof schema['description'] === 'string' ? schema['description'] : '';
         parts.push(
           `<dt><code>${escaped(name)}</code> <span class="type">${escaped(type)}</span></dt>` +
