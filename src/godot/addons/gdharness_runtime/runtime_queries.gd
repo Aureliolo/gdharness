@@ -102,15 +102,20 @@ func _found(node: Node, wanted_property: String) -> Dictionary:
 	var entry: Dictionary = _serialize_node(node, false)
 	if wanted_property.is_empty():
 		return entry
-	var has: bool = false
-	for prop: Dictionary in node.get_property_list():
-		if str(prop["name"]) == wanted_property:
-			has = true
-			break
 	entry["property"] = wanted_property
+	# Through a path as well, for the reason [method _reached] gives. A step that is not there on
+	# this node reads as not having the property rather than as a refusal, which is the rule this
+	# whole function is written to: a find matches nodes of several classes on purpose.
+	var reached: Dictionary = _reached(node, str(entry["path"]), wanted_property)
+	if reached.has("message"):
+		entry["has_property"] = false
+		return entry
+	var holder: Object = reached["holder"]
+	var named: String = reached["property"]
+	var has: bool = _has_property(holder, named)
 	entry["has_property"] = has
 	if has:
-		entry["value"] = _values.serialize(node.get(wanted_property))
+		entry["value"] = _values.serialize(holder.get(named))
 	return entry
 
 
@@ -395,22 +400,61 @@ func get_property(params: Dictionary) -> Dictionary:
 	if node == null:
 		return {"type": "error", "message": "Node not found: " + node_path}
 
+	var reached: Dictionary = _reached(node, node_path, property)
+	if reached.has("message"):
+		return reached
+
+	var holder: Object = reached["holder"]
+	var named: String = reached["property"]
 	# Asked of the property list rather than read and compared to null, because a property the
-	# node does not have and a property that is null both read as null.
-	var known: bool = false
-	for entry: Dictionary in node.get_property_list():
-		if str(entry["name"]) == property:
-			known = true
-			break
-	if not known:
-		return {"type": "error", "message": "%s has no property %s" % [node_path, property]}
+	# holder does not have and a property that is null both read as null.
+	if not _has_property(holder, named):
+		return {"type": "error", "message": "%s has no property %s" % [reached["called"], named]}
 
 	return {
 		"type": "property",
 		"path": node_path,
 		"property": property,
-		"value": _values.serialize(node.get(property)),
+		"value": _values.serialize(holder.get(named)),
 	}
+
+
+## What [param property] is a property of, which is the node itself until the name has a colon in
+## it, and the last name along that path.
+##
+## A game's state does not sit on nodes, it hangs off them: the speed of the clock is a property of
+## a [RefCounted] held by a [RefCounted] held by the root, and that is what an agent asks about.
+## Colons, because that is the separator [method Object.get_indexed] already takes. Walked a step
+## at a time rather than handed to that method, which answers null for a path that goes wrong
+## halfway along and for one that ends on null.
+##
+## Answers with a `message` instead when a step along the way is not there or holds something that
+## is not an object, naming the step rather than the whole path: "/root/Main:_game has no property
+## clocks" is a typo found, and "no property _game:clocks:speed" is a puzzle.
+func _reached(node: Node, node_path: String, property: String) -> Dictionary:
+	var parts: PackedStringArray = property.split(":")
+	var holder: Object = node
+	var called: String = node_path
+	for step: int in parts.size() - 1:
+		var named: String = parts[step]
+		if not _has_property(holder, named):
+			return {"type": "error", "message": "%s has no property %s" % [called, named]}
+		var next: Variant = holder.get(named)
+		called = "%s:%s" % [called, named]
+		if not next is Object:
+			var wanted: String = parts[step + 1]
+			return {"type": "error", "message": "%s holds no object to read %s off" % [called, wanted]}
+		holder = next
+	return {"holder": holder, "property": parts[parts.size() - 1], "called": called}
+
+
+## Whether [param holder] declares [param named]. Its own function because three ops ask it and a
+## property read back as null answers it wrongly.
+static func _has_property(holder: Object, named: String) -> bool:
+	for entry: Dictionary in holder.get_property_list():
+		if str(entry["name"]) == named:
+			return true
+	return false
 
 
 func set_property(params: Dictionary) -> Dictionary:
@@ -425,15 +469,24 @@ func set_property(params: Dictionary) -> Dictionary:
 	if node == null:
 		return {"type": "error", "message": "Node not found: " + node_path}
 
-	var old_value: Variant = node.get(property)
-	node.set(property, _values.fitted(value, typeof(old_value)))
+	# Through a path as well, for the reason [method _reached] gives, and read back off the same
+	# holder afterwards: a set that does not take says so by answering with the old value, which is
+	# how a typed container refusing a write is told from one accepting it.
+	var reached: Dictionary = _reached(node, node_path, property)
+	if reached.has("message"):
+		return reached
+
+	var holder: Object = reached["holder"]
+	var named: String = reached["property"]
+	var old_value: Variant = holder.get(named)
+	holder.set(named, _values.fitted(value, typeof(old_value)))
 
 	return {
 		"type": "property_set",
 		"path": node_path,
 		"property": property,
 		"old_value": _values.serialize(old_value),
-		"new_value": _values.serialize(node.get(property))
+		"new_value": _values.serialize(holder.get(named))
 	}
 
 
