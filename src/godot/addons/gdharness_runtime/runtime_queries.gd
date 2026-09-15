@@ -71,13 +71,20 @@ func find_nodes(params: Dictionary) -> Dictionary:
 	var found: Array[Dictionary] = []
 	var pending: Array[Node] = [root]
 	var truncated: bool = false
+	# Counted while the tree is already being walked, for the answer below: how many nodes this
+	# find would have matched if the name had been read the way it was probably meant.
+	var literal: bool = _is_literal(wanted["name"])
+	var nearly: int = 0
 	while not pending.is_empty():
 		var node: Node = pending.pop_front()
-		if _matches(node, wanted):
+		var rest: bool = _matches_apart_from_name(node, wanted)
+		if rest and _named(node, wanted["name"]):
 			if found.size() >= limit:
 				truncated = true
 				break
 			found.append(_found(node, wanted_property))
+		elif rest and literal and str(node.name).containsn(wanted["name"]):
+			nearly += 1
 		# Internal children included, which they were not. A ConfirmationDialog builds its Yes and
 		# its No as internal nodes, and a ScrollContainer its bars, so a find over a screen for
 		# every Button came back without the two buttons the player is being asked to press:
@@ -88,7 +95,17 @@ func find_nodes(params: Dictionary) -> Dictionary:
 		for index: int in range(children.size() - 1, -1, -1):
 			pending.push_front(children[index])
 
-	return {"type": "nodes", "count": found.size(), "truncated": truncated, "nodes": found}
+	var answer: Dictionary = {"type": "nodes", "count": found.size(), "truncated": truncated, "nodes": found}
+	# Nothing found is the one answer that cannot be told apart from having asked the wrong
+	# question, and a name written without a wildcard is the way an agent writes "contains".
+	# Said only when it changes the answer, so a genuine nothing stays a plain nothing.
+	if found.is_empty() and nearly > 0:
+		var holding: String = "names contain" if nearly > 1 else "name contains"
+		answer["note"] = (
+			'name is matched as a glob against the whole name; %d node %s "%s", which "*%s*" would find'
+			% [nearly, holding, wanted["name"], wanted["name"]]
+		)
+	return answer
 
 
 ## One match, with the named property on it when one was named.
@@ -128,10 +145,23 @@ static func _anything_asked(wanted: Dictionary[String, String]) -> bool:
 	return false
 
 
-func _matches(node: Node, wanted: Dictionary[String, String]) -> bool:
+## Whether [param node] carries the name a find asked for. Empty matches everything, which is what
+## makes leaving a filter out the same as not having one.
+static func _named(node: Node, pattern: String) -> bool:
+	return pattern.is_empty() or str(node.name).matchn(pattern)
+
+
+## Whether [param pattern] is a name written as a whole word rather than as a glob, which is how a
+## caller writes one when they mean "contains". [method String.matchn] answers nothing to it, and
+## nothing is also what a name that is simply not there answers.
+static func _is_literal(pattern: String) -> bool:
+	return not pattern.is_empty() and not pattern.contains("*") and not pattern.contains("?")
+
+
+## Every filter but the name, so a find that came back empty can say how many nodes the name was
+## the only thing standing between it and.
+func _matches_apart_from_name(node: Node, wanted: Dictionary[String, String]) -> bool:
 	if not wanted["group"].is_empty() and not node.is_in_group(wanted["group"]):
-		return false
-	if not wanted["name"].is_empty() and not str(node.name).matchn(wanted["name"]):
 		return false
 	# What this node says, rather than everything said underneath it. A row is then found by the
 	# label in it, and the path answered is that label's, which is where the words a caller is

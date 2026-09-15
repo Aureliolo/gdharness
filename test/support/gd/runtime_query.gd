@@ -147,6 +147,34 @@ func _check_reading_the_screen(panel: Panel) -> void:
 	choices.free()
 
 
+## A name with no wildcard in it, which is the shape a caller writes when they mean "contains".
+##
+## [method String.matchn] answers nothing to it, and nothing is also what a name that is not in the
+## tree answers, so an empty find was the one answer that could not be told apart from having asked
+## the wrong question. The note says how many the name was the only thing standing between the find
+## and, and only when it would have changed the answer.
+func _check_a_name_written_as_a_word() -> void:
+	var partial: Dictionary = await node._execute_command("find_nodes", {"name": "ero"})
+	if partial.get("count") != 0 or not str(partial.get("note", "")).contains("2 node names"):
+		_fail("a name with no wildcard says what a glob would have matched: %s" % str(partial))
+
+	var nowhere: Dictionary = await node._execute_command("find_nodes", {"name": "Dragon"})
+	if nowhere.get("count") != 0 or nowhere.has("note"):
+		_fail("and a name nothing is near stays a plain nothing: %s" % str(nowhere))
+
+	# Counted past the other filters rather than over the whole tree, or the note offers a glob
+	# that would answer nothing either.
+	var elsewhere: Dictionary = await node._execute_command(
+		"find_nodes", {"name": "ero", "script": "query_hero.gd"}
+	)
+	if elsewhere.get("count") != 0 or not str(elsewhere.get("note", "")).contains("1 node name contains"):
+		_fail("the count is of what every other filter already matched: %s" % str(elsewhere))
+
+	var matched: Dictionary = await node._execute_command("find_nodes", {"name": "Hero"})
+	if _paths(matched) != ["/root/Level/Hero"] or matched.has("note"):
+		_fail("and a whole name that matches is not a near miss: %s" % str(matched))
+
+
 ## A property that is not a property of any node, which is where a game keeps everything worth
 ## asking about: a [RefCounted] hanging off a node, holding another one.
 ##
@@ -254,6 +282,7 @@ func _check() -> void:
 	var by_name: Dictionary = await node._execute_command("find_nodes", {"name": "hero*"})
 	if _paths(by_name) != ["/root/Level/Hero", "/root/Level/Heroine"]:
 		_fail("find by name glob, case-insensitive: %s" % str(by_name))
+	await _check_a_name_written_as_a_word()
 	var by_group: Dictionary = await node._execute_command(
 		"find_nodes", {"group": "heroes", "name": "Heroine"}
 	)
