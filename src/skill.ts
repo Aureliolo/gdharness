@@ -62,7 +62,7 @@ that is running, and the project on disk. ${TOOL_SPECS.length} tools, named \`do
 | Where a control is, and whether it is visible | \`runtime_inspect\` \`find\`, \`rect\` |
 | What a property reads right now | \`runtime_inspect\` \`property\`, \`runtime_invoke\` |
 | Press a button | \`runtime_input click\`, which says what was under the pointer |
-| Fill in a field | \`runtime_input click\` on it, then \`runtime_input text\`; a submitted field has to be clicked again |
+| Fill in a field | \`runtime_input click\` on it, then \`runtime_input text\` with \`replace\`; a submitted field has to be clicked again |
 | Click somebody standing in a 3D room | \`runtime_input click\` on the Node3D, which aims at what it draws |
 | Pick something out of a dropdown | \`runtime_input choose\` on it, by what the item says |
 | Answer a dialog, or press a bound key | \`runtime_input action\` or \`key\`, a whole press unless you hold it |

@@ -927,6 +927,12 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         description:
           'text: what to type. A newline is Enter and a tab is Tab. choose: the item to take, by what it says.',
       },
+      replace: {
+        type: 'boolean',
+        ops: ['text'],
+        description:
+          'text: true writes over what the field already says, which is what filling one in means. Default false types at the caret, so a field reading 2.1 typed "0.3" at reads 2.10.3. The answer says what the field holds afterwards either way.',
+      },
       index: {
         type: 'number',
         ops: ['choose'],

@@ -198,6 +198,30 @@ func _check_typing(input: InputCommands) -> void:
 	if str(typed.get("into", "")) != str(field.get_path()):
 		_fail("typing should say what it landed in: %s" % JSON.stringify(typed))
 
+	# What the field holds afterwards, read off the field rather than echoed back from the request.
+	# Without it the answer to a field that took the text somewhere unhelpful looks exactly like the
+	# answer to one that took it: a spin box reading 2.1 typed "0.3" at reported four characters in
+	# and parsed itself straight back to 2.1.
+	if str(typed.get("holds", "")) != "Ash & Marek, 12!":
+		_fail("typing should say what the field holds: %s" % JSON.stringify(typed))
+	if bool(typed.get("replaced", true)):
+		_fail("and should not claim to have replaced anything: %s" % JSON.stringify(typed))
+
+	# Filling a field in, which is what a caller means nearly every time and could not be asked
+	# for: typing lands at the caret, so whatever the field already said stayed where it was.
+	var over: Dictionary = input.inject_text({"text": "8", "replace": true})
+	if field.text != "8":
+		_fail("replace should write over what the field said: %s" % field.text)
+	if not bool(over.get("replaced", false)) or str(over.get("holds", "")) != "8":
+		_fail("and should say so: %s" % JSON.stringify(over))
+
+	var appended: Dictionary = input.inject_text({"text": "9"})
+	if field.text != "89":
+		_fail("and without it typing still lands at the caret: %s" % field.text)
+	if str(appended.get("holds", "")) != "89":
+		_fail("which the answer says: %s" % JSON.stringify(appended))
+	field.clear()
+
 	var empty: Dictionary = input.inject_text({})
 	if empty.get("type", "") != "error":
 		_fail("typing nothing should be refused: %s" % JSON.stringify(empty))
