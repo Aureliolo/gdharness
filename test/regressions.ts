@@ -2007,8 +2007,9 @@ async function testUpdateNoticeRidesOnAnAnswer(): Promise<void> {
       JSON.stringify({ checkedAt: Date.now(), latest: '99.9.9' }),
       'utf8',
     );
-    await withStdioServer(async (call) => {
-      const first = await call('editor_status', {});
+    await withStdioServer(async (call, request) => {
+      const carrying = await request('tools/call', { name: 'editor_status', arguments: {} });
+      const first = textOf(carrying) ?? '';
       assert.match(first, /update_available/, 'the first answer should carry the notice');
       assert.match(first, /99\.9\.9/, 'naming the version that is out');
       assert.match(first, /releases\/tag\/v99\.9\.9/, 'and where the notes for it are');
@@ -2020,6 +2021,15 @@ async function testUpdateNoticeRidesOnAnAnswer(): Promise<void> {
         'and the command that takes it, spelled for this runtime',
       );
       assert.doesNotMatch(first, /upgrade <project>/, 'without a placeholder path to fill in');
+
+      // A notice is a block of its own, so the answer it rides on has to still read as the
+      // answer. Anything that takes the blocks as one document gets two JSON documents end to
+      // end and reads a tool that answered perfectly well as one that answered nothing.
+      const answer = parseTextContent(carrying);
+      assert.ok(
+        isRecord(answer) && isRecord(answer['editor']) && isRecord(answer['godot']),
+        `the answer under the notice should still be readable: ${first}`,
+      );
 
       assert.doesNotMatch(
         await call('editor_status', {}),

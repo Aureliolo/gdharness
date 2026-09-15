@@ -49,12 +49,23 @@ export function textOf(response: JsonRpcMessage | null | undefined): string | nu
   return text || null;
 }
 
-/** The tool result's text parsed as JSON, or null when there is none or it is not JSON. */
+/**
+ * The tool result's answer parsed as JSON, or null when it is not JSON.
+ *
+ * The first block rather than all of them joined, because a notice is a block of its own on the
+ * end, and two JSON documents end to end are not one document. Joined, an answer that happened to
+ * land on the two hundred and fiftieth call parsed as nothing and read here as a tool that
+ * answered with no content, which is a green suite failing on the count it was run at rather than
+ * on anything it measured. A server that answers JSON answers it in one block; the answers with
+ * two lead with a sentence, and those were never JSON to begin with.
+ */
 export function parseTextContent(response: JsonRpcMessage | null | undefined): unknown {
-  const text = textOf(response);
-  if (text === null) return null;
+  const result = response?.result;
+  if (!isRecord(result) || !Array.isArray(result['content'])) return null;
+  const answer = (result['content'] as ToolContentBlock[])[0]?.text;
+  if (answer === undefined || answer === '') return null;
   try {
-    return JSON.parse(text) as unknown;
+    return JSON.parse(answer) as unknown;
   } catch {
     return null;
   }
