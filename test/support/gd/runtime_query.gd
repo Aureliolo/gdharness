@@ -8,6 +8,25 @@ extends SceneTree
 const Runtime = preload("res://addons/gdharness_runtime/runtime_autoload.gd")
 const HERO_SCRIPT: String = "res://query_hero.gd"
 
+## What the hero carries, which is the shape a game keeps everything in: objects hanging off a
+## node rather than properties of it. Two deep, because one is the easy case and a guild's clock
+## speed is two.
+const HERO_SOURCE: String = """extends Node2D
+
+
+class Deeper:
+	extends Resource
+	var depth: int = 7
+
+
+class Kept:
+	extends Resource
+	var inner: Resource = Deeper.new()
+
+
+var held: Kept = Kept.new()
+"""
+
 var failures: Array[String] = []
 var node: Runtime
 var directory: String
@@ -15,7 +34,7 @@ var directory: String
 
 func _init() -> void:
 	var file: FileAccess = FileAccess.open(HERO_SCRIPT, FileAccess.WRITE)
-	file.store_string("extends Node2D\n")
+	file.store_string(HERO_SOURCE)
 	file.close()
 
 	# Announced somewhere private, so the fixture does not look like a game to a server running
@@ -128,6 +147,62 @@ func _check_reading_the_screen(panel: Panel) -> void:
 	choices.free()
 
 
+## A property that is not a property of any node, which is where a game keeps everything worth
+## asking about: a [RefCounted] hanging off a node, holding another one.
+##
+## Read through colons the way [method Object.get_indexed] does, so the op named after reading
+## properties is the one that reads a guild's day or a clock's speed. Both halves are checked: the
+## value at the end of a path, and what a path that goes wrong says, since a caller who cannot tell
+## a missing step from a null one is back to guessing.
+func _check_reading_through_a_path() -> void:
+	var through: Dictionary = await node._execute_command(
+		"get_property", {"path": "/root/Level/Hero", "property": "held:inner:depth"}
+	)
+	if through.get("type") != "property" or through.get("value") != 7:
+		_fail("a property path reads through what it names: %s" % str(through))
+
+	var plain: Dictionary = await node._execute_command(
+		"get_property", {"path": "/root/Level/Hero", "property": "visible"}
+	)
+	if plain.get("type") != "property" or plain.get("value") != true:
+		_fail("a name with no colon in it is the node's own property: %s" % str(plain))
+
+	var astray: Dictionary = await node._execute_command(
+		"get_property", {"path": "/root/Level/Hero", "property": "held:nowhere:depth"}
+	)
+	var said: String = str(astray.get("message", ""))
+	if astray.get("type") != "error" or not said.contains("nowhere"):
+		_fail("a step that is not there names the step rather than the path: %s" % str(astray))
+
+	var flat: Dictionary = await node._execute_command(
+		"get_property", {"path": "/root/Level/Hero", "property": "visible:deeper"}
+	)
+	if flat.get("type") != "error" or not str(flat.get("message", "")).contains("deeper"):
+		_fail("a step holding no object says so, naming what could not be read: %s" % str(flat))
+
+	var written: Dictionary = await node._execute_command(
+		"set_property", {"path": "/root/Level/Hero", "property": "held:inner:depth", "value": 9}
+	)
+	if written.get("type") != "property_set" or written.get("new_value") != 9:
+		_fail("a path is written through as well, and read back off the same holder: %s" % str(written))
+
+	var found: Dictionary = await node._execute_command(
+		"find_nodes", {"name": "Hero", "property": "held:inner:depth"}
+	)
+	var entries: Array = found.get("nodes", [])
+	var first: Dictionary = entries[0] if not entries.is_empty() else {}
+	if first.get("has_property") != true or first.get("value") != 9:
+		_fail("a find reads a path off everything it matched: %s" % str(found))
+
+	var absent: Dictionary = await node._execute_command(
+		"find_nodes", {"name": "Heroine", "property": "held:inner:depth"}
+	)
+	var missed: Array = absent.get("nodes", [])
+	var only: Dictionary = missed[0] if not missed.is_empty() else {}
+	if only.get("has_property") != false or only.has("value"):
+		_fail("and a path that goes nowhere on one of them is not having it: %s" % str(absent))
+
+
 func _check() -> void:
 	var level: Node2D = Node2D.new()
 	level.name = "Level"
@@ -222,6 +297,8 @@ func _check() -> void:
 	var placeless: Dictionary = await node._execute_command("get_rect", {"path": "/root"})
 	if placeless.get("type") != "error":
 		_fail("a node with no place on screen is refused: %s" % str(placeless))
+
+	await _check_reading_through_a_path()
 
 	var serialised: Variant = node.values.serialize(hero)
 	if serialised != {"_type": "Node", "class": "Node2D", "path": "/root/Level/Hero"}:
