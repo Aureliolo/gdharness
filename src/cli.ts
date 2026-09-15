@@ -20,6 +20,7 @@ import {
   HARNESSES,
   type Harness,
   harnessById,
+  harnessNote,
   type Launch,
   launchFor,
   registered,
@@ -169,19 +170,20 @@ function reportSkipped(candidate: Candidate): void {
   );
 }
 
-function reportConnection(group: Group, launch: Launch, projectPath: string): void {
+/** Writes one harness's config, says what it did, and hands back the launch line it replaced. */
+function reportConnection(group: Group, launch: Launch, projectPath: string): string | undefined {
   const who = group.harnesses.map((harness) => harness.name).join(', ');
   const written = connect(group.writer, projectPath, launch);
   if (written.action === 'command') {
     console.log(`${who}: run  ${(written.command ?? []).join(' ')}`);
-    return;
+    return undefined;
   }
   if (written.action === 'snippet') {
     console.log(`${who}: put this in ${written.path}`);
     for (const line of (written.snippet ?? '').split('\n')) {
       console.log(`  ${line}`);
     }
-    return;
+    return undefined;
   }
   console.log(`${who}: ${written.action} ${written.path}`);
   if (written.wasLaunchedBy !== undefined) {
@@ -195,6 +197,7 @@ function reportConnection(group: Group, launch: Launch, projectPath: string): vo
       console.log(`  ${harness.name}: ${harness.manual}`);
     }
   }
+  return written.wasLaunchedBy;
 }
 
 /**
@@ -395,8 +398,12 @@ async function upgrade(): Promise<void> {
 
   const launch = launchFor(version, godot.godotPath, projectPath);
   const already = HARNESSES.filter((harness) => registered(harness, projectPath));
+  const moved: string[] = [];
   for (const group of groupByFile(already, projectPath)) {
-    reportConnection(group, launch, projectPath);
+    const was = reportConnection(group, launch, projectPath);
+    if (was !== undefined && !moved.includes(was)) {
+      moved.push(was);
+    }
   }
   if (already.length === 0) {
     console.log('no harness config names gdharness, so none was re-pinned');
@@ -413,10 +420,7 @@ async function upgrade(): Promise<void> {
     '  1. The open editor is still running the addons it loaded at startup. Restart it with the\n' +
       '     editor_launch restart tool, which closes and reopens the window.',
   );
-  console.log(
-    `  2. Your harness is still running gdharness ${installed}: its config named that version when\n` +
-      '     the server was spawned. Reconnect the MCP server, or restart the harness.',
-  );
+  console.log(harnessNote(moved, [launch.command, ...launch.args].join(' ')));
 }
 
 function doctorReport(projectPath: string): void {

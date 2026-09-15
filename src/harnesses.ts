@@ -932,6 +932,36 @@ export interface Written {
   readonly wasLaunchedBy?: string;
 }
 
+/**
+ * The second thing an upgrade cannot do for you, said off what the config actually held.
+ *
+ * Off [param moved], the launch lines this install replaced, rather than off the addon version that
+ * was there before, and that is the whole of what was wrong with it. The two agree only while a
+ * gdharness install is the thing that wrote the config: a command somebody set by hand, a local
+ * build most of all, makes the addon version a number about the addons and not about the server the
+ * harness spawned. Reported from a project running gdharness out of a working tree, where the note
+ * named a version that appeared nowhere in its config.
+ *
+ * Nothing moved means there is nothing it can honestly name, so it says less rather than guessing:
+ * what a harness is running is whichever server it spawned when the session started, and no process
+ * can see into another one. The instruction is the same either way, which is exactly why a wrong
+ * number here could have sat for good.
+ */
+export function harnessNote(moved: readonly string[], now: string): string {
+  if (moved.length === 0) {
+    return (
+      '  2. Your harness config already named this version, but the server it is running is\n' +
+      '     whichever one it spawned when the session started, which this cannot see from here.\n' +
+      '     Reconnect the MCP server, or restart the harness.'
+    );
+  }
+  return (
+    `  2. Your harness is still running the server it spawned from ${moved.join(', ')}.\n` +
+    `     Its config names ${now} now.\n` +
+    '     Reconnect the MCP server, or restart the harness.'
+  );
+}
+
 /** How a held entry says gdharness is launched, or nothing when it does not say. */
 function launchedBy(entry: unknown): string | undefined {
   if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
