@@ -299,6 +299,24 @@ static func _centre_of(control: Control) -> Vector2:
 ## the control within the outer one, so the outer has to be asked after the inner has finished
 ## moving it. A control with no ScrollContainer over it moves nothing and answers false, which is
 ## what keeps the refusal below saying the right thing about a control that is simply off screen.
+## Whether [param centre] is somewhere a click can reach it: inside the viewport, and inside every
+## ScrollContainer between the control and the root, each of which clips what it holds.
+static func _in_sight(control: Control, viewport: Viewport, centre: Vector2) -> bool:
+	if not viewport.get_visible_rect().has_point(centre):
+		return false
+	var walking: Node = control.get_parent()
+	while walking != null:
+		var holder: ScrollContainer = walking as ScrollContainer
+		# Carried into the same space the centre is in, which is the canvas rather than the
+		# container's own: the two are only the same while nothing above it is transformed.
+		if holder != null:
+			var seen: Rect2 = holder.get_global_transform_with_canvas() * Rect2(Vector2.ZERO, holder.size)
+			if not seen.has_point(centre):
+				return false
+		walking = walking.get_parent()
+	return true
+
+
 static func _scroll_into_view(control: Control) -> bool:
 	var moved: bool = false
 	var walking: Node = control.get_parent()
@@ -341,12 +359,17 @@ func click(params: Dictionary) -> Dictionary:
 	var viewport: Viewport = _clicking_viewport(control)
 	var centre: Vector2 = _centre_of(control)
 
-	# A control below the fold of a ScrollContainer is not out of reach, it is one scroll away,
+	# A control out of sight inside a ScrollContainer is not out of reach, it is one scroll away,
 	# which is what a person does without thinking about it before they click. Refusing it
 	# instead sent callers to emit the button's own signal, which presses nothing, runs none of
 	# the input path and reports success.
+	#
+	# Out of sight against what it is clipped to rather than against the viewport: a row scrolled
+	# off the top of its container is inside the viewport, behind whatever is drawn up there, so
+	# the click went to that instead and said so. Measured on a hall whose staff panel had been
+	# scrolled past: the button was at y 69 and its container started at y 166.
 	var scrolled: bool = false
-	if not viewport.get_visible_rect().has_point(centre):
+	if not _in_sight(control, viewport, centre):
 		scrolled = _scroll_into_view(control)
 		if scrolled:
 			# A container moves its child on the next layout pass rather than inside the call.
