@@ -101,6 +101,15 @@ export function editorArguments(projectPath: string, ports: EditorPorts): string
 }
 
 /**
+ * What a server puts in the environment of an editor it opens, so that the editor can say who
+ * opened it and the answer decides who may open it again.
+ *
+ * Set to anything rather than to a particular word: the addon reads whether it is there. The other
+ * half of the pair is `OPENED_BY_A_SERVER` in bridge_client.gd.
+ */
+export const OPENED_BY_A_SERVER = 'GDHARNESS_OPENED_BY_A_SERVER';
+
+/**
  * An environment whose `user://` is `home`, so an engine writes its saves nowhere anybody keeps
  * theirs.
  *

@@ -64,6 +64,8 @@ interface GodotReadyMessage {
   lsp_port?: number;
   dap_port?: number;
   debug_port?: number;
+  /** Whether a gdharness server started this editor, which decides who may start it again. */
+  opened_by_a_server?: boolean;
 }
 
 type IncomingMessage = ToolResultMessage | PongMessage | GodotReadyMessage;
@@ -115,6 +117,13 @@ interface GodotConnectionInfo {
   lspPort?: number | undefined;
   dapPort?: number | undefined;
   debugPort?: number | undefined;
+  /**
+   * Whether a gdharness server started this editor.
+   *
+   * Undefined for an addon too old to say, which reads as no: an editor nothing claims is one this
+   * server leaves to restart itself, which is what every editor did before this was asked.
+   */
+  openedByAServer?: boolean | undefined;
 }
 
 interface BridgeStatus {
@@ -129,6 +138,7 @@ interface BridgeStatus {
   lspPort?: number | undefined;
   dapPort?: number | undefined;
   debugPort?: number | undefined;
+  openedByAServer?: boolean | undefined;
   pendingRequests: number;
   queuedResources: number;
 }
@@ -328,6 +338,7 @@ export class GodotBridge extends EventEmitter {
       lspPort: this.connectionInfo?.lspPort,
       dapPort: this.connectionInfo?.dapPort,
       debugPort: this.connectionInfo?.debugPort,
+      openedByAServer: this.connectionInfo?.openedByAServer,
       pendingRequests: this.pendingRequests.size,
       queuedResources: this.resourceQueues.size,
     };
@@ -499,6 +510,7 @@ export class GodotBridge extends EventEmitter {
           this.connectionInfo.lspPort = servedPort(message.lsp_port);
           this.connectionInfo.dapPort = servedPort(message.dap_port);
           this.connectionInfo.debugPort = servedPort(message.debug_port);
+          this.connectionInfo.openedByAServer = message.opened_by_a_server === true;
           this.log('info', `Godot ready: ${message.project_path}`);
           this.emitBridgeEvent('godot_connected', { projectPath: message.project_path });
         }

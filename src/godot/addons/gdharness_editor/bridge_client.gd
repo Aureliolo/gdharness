@@ -23,8 +23,9 @@ const MAX_RECONNECT_DELAY: float = 30.0
 const ELSEWHERE_CLOSE_CODE: int = 4001
 
 ## Where Godot keeps the three ports an editor serves. None of them is per editor: the settings
-## file is one for every editor on the machine, so two open at once want the same three and the
-## second one binds nothing.
+## file is one for every editor of this engine version on the machine, so two open at once want the
+## same three and the second one binds nothing. Read here and never written, for the reason
+## [method _serves] gives.
 const LSP_SETTING: String = "network/language_server/remote_port"
 const DAP_SETTING: String = "network/debug_adapter/remote_port"
 const DEBUGGER_SETTING: String = "network/debug/remote_port"
@@ -32,6 +33,9 @@ const DEBUGGER_SETTING: String = "network/debug/remote_port"
 ## the command line. Kept in step with `editorArguments` in src/launch.ts.
 const LSP_ASKED: String = "GDHARNESS_LSP_PORT"
 const DAP_ASKED: String = "GDHARNESS_DAP_PORT"
+## What a server that opened this editor says about itself, so that being opened by one is stated
+## rather than guessed at from the ports. Kept in step with `OPENED_BY_A_SERVER` in src/launch.ts.
+const OPENED_BY_A_SERVER: String = "GDHARNESS_OPENED_BY_A_SERVER"
 
 ## How long one attempt is given before the address is called a bad one.
 ##
@@ -81,7 +85,6 @@ var _connecting_for: float = 0.0
 func _ready() -> void:
 	_project_path = ProjectSettings.globalize_path("res://")
 	version_at_load = _loaded_version()
-	_keep_the_ports_this_editor_was_given()
 
 	_reconnect_timer = Timer.new()
 	_reconnect_timer.one_shot = true
@@ -273,39 +276,41 @@ func _handle_connect() -> void:
 			"editor_pid": OS.get_process_id(),
 			"lsp_port": _serves(LSP_ASKED, LSP_SETTING),
 			"dap_port": _serves(DAP_ASKED, DAP_SETTING),
-			"debug_port": _serving(DEBUGGER_SETTING)
+			"debug_port": _serving(DEBUGGER_SETTING),
+			# Whether a server started this editor, which is the only kind that can be started again
+			# as itself: the engine hands back none of the arguments it was given, so the arguments
+			# have to come from whoever wrote them. See `restart_editor` in play_tools.gd.
+			"opened_by_a_server": _opened_by_a_server()
 		}
 	)
 
 	connected.emit()
 
 
-## Writes the ports this editor was started on into the settings it reads them from.
+## Whether a gdharness server started this editor, which it says in the environment.
 ##
-## The command line moved the language server and the debug adapter for this run and the engine
-## keeps that override to itself: the setting still reads whatever it read before, so an editor
-## that restarts itself comes back on the old number and lands on top of whichever editor holds
-## it. Writing it here is what makes the move survive a restart, and what leaves one place either
-## side has to read.
-func _keep_the_ports_this_editor_was_given() -> void:
-	if not Engine.is_editor_hint():
-		return
-	_keep_port(LSP_ASKED, LSP_SETTING)
-	_keep_port(DAP_ASKED, DAP_SETTING)
+## It decides who may restart this editor by starting it again. Only a server that wrote the
+## arguments can write them a second time, and only an editor started that way needs it: one opened
+## by hand is on the ports its own settings name and comes back on them by itself.
+##
+## Said outright rather than read off the two port variables, which a server also sets and anybody
+## else may: an editor started from a shell that exports them is one somebody opened themselves,
+## and taking it for a server's is taking an editor off somebody's desk and putting a new one there.
+static func _opened_by_a_server() -> bool:
+	return not OS.get_environment(OPENED_BY_A_SERVER).is_empty()
 
 
-func _keep_port(variable: String, setting: String) -> void:
-	var port: int = _asked_for(variable)
-	if port < 1 or port == _serving(setting):
-		return
-	var settings: EditorSettings = EditorInterface.get_editor_settings()
-	if settings != null:
-		settings.set_setting(setting, port)
-
-
-## What this editor serves: what it was told to when a server opened it, and what its settings
-## say otherwise. The first is the one that counts, because the settings are the thing the command
-## line was overriding.
+## What this editor serves: what it was told to when a server opened it, and what its settings say
+## otherwise. The first is the one that counts, because the settings are what the command line was
+## overriding.
+##
+## The settings are read and never written. They were written for a while, because the engine keeps
+## a command-line port override to itself and hands none of it back, so an editor restarting itself
+## came up on whatever the settings said. But there is one settings file for every editor of this
+## engine version on the machine, so writing a port chosen for one project made it the number every
+## other project's editor came up on: an editor opened by hand for something else inherited it and
+## collided with the editor it was moved away from. Restarting is done by starting the editor again
+## with the same arguments now, which is `editor_launch restart`, so there is nothing to persist.
 func _serves(variable: String, setting: String) -> int:
 	var asked: int = _asked_for(variable)
 	return asked if asked > 0 else _serving(setting)
