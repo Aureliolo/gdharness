@@ -7,6 +7,17 @@
 
 import { TOOL_SPECS } from './tool-definitions.js';
 
+/** What a schema's `type` is called in prose, for the one argument or two that take either. */
+export function namedType(declared: unknown): string {
+  if (typeof declared === 'string') {
+    return declared;
+  }
+  if (Array.isArray(declared) && declared.every((kind) => typeof kind === 'string')) {
+    return declared.join(' or ');
+  }
+  return 'any';
+}
+
 export function renderToolsMarkdown(): string {
   const lines: string[] = [
     '# Tools',
@@ -40,7 +51,7 @@ export function renderToolsMarkdown(): string {
     if (parameters.length > 0) {
       lines.push('Arguments:', '');
       for (const [name, schema] of parameters) {
-        const type = typeof schema['type'] === 'string' ? schema['type'] : 'any';
+        const type = namedType(schema['type']);
         const note = typeof schema['description'] === 'string' ? ` ${schema['description']}` : '';
         lines.push(`- \`${name}\` (${type}):${note}`);
       }

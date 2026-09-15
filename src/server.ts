@@ -125,6 +125,68 @@ export function patienceForFrames(frames: number, atLeast: number): number {
   return Math.max(atLeast, (frames / SLOWEST_FRAME_RATE) * 1000 + atLeast);
 }
 
+/** Whether [param value] is the [param kind] a schema asked for. An unknown kind asks nothing. */
+function isOfType(value: unknown, kind: unknown): boolean {
+  switch (kind) {
+    case 'string':
+      return typeof value === 'string';
+    case 'number':
+      return typeof value === 'number' && Number.isFinite(value);
+    case 'integer':
+      return Number.isInteger(value);
+    case 'boolean':
+      return typeof value === 'boolean';
+    case 'array':
+      return Array.isArray(value);
+    case 'object':
+      return typeof value === 'object' && value !== null && !Array.isArray(value);
+    default:
+      return true;
+  }
+}
+
+/** What arrived, in the words the refusal uses, so a caller can see the two side by side. */
+const VALUE_NAMES: Readonly<Record<string, string>> = {
+  string: 'a string',
+  number: 'a number',
+  boolean: 'a boolean',
+  object: 'an object',
+};
+
+function describeValue(value: unknown): string {
+  if (Array.isArray(value)) {
+    return 'a list';
+  }
+  return VALUE_NAMES[typeof value] ?? typeof value;
+}
+
+/**
+ * Which arguments are not the type their schema declares.
+ *
+ * An argument a tool does not name is refused already, and one it names but cannot use is the
+ * same mistake wearing the right word: `includeProperties` given the list of properties to
+ * include was taken, ignored, and answered as though it had been read, which is exactly the shape
+ * a refusal exists to prevent.
+ *
+ * A schema naming no type asks nothing, because some arguments genuinely have none: a value being
+ * fitted to a property is whatever that property holds, and that is the engine's business.
+ */
+function wrongTypes(spec: ToolSpec, args: OperationParams): string[] {
+  const complaints: string[] = [];
+  for (const [name, value] of Object.entries(args)) {
+    if (value === undefined || value === null) {
+      continue;
+    }
+    const declared = spec.parameters[name]?.['type'];
+    const wanted = typeof declared === 'string' ? [declared] : Array.isArray(declared) ? declared : [];
+    if (wanted.length === 0 || wanted.some((kind) => isOfType(value, kind))) {
+      continue;
+    }
+    complaints.push(`${name} as ${wanted.join(' or ')}, not ${describeValue(value)}`);
+  }
+  return complaints;
+}
+
 /**
  * How often to ask again for a bridge port somebody else is holding.
  *
@@ -699,9 +761,10 @@ class GodotServer {
 
   /**
    * The arguments of a call checked against the tool's spec: nothing the schema does not name,
-   * an op from the enum, and every argument the tool and its op require. Returns the op to
-   * dispatch on, or the refusal to send back. Own properties only: a required argument
-   * satisfied by something inherited from Object.prototype is not supplied.
+   * each one of the type it is declared as, an op from the enum, and every argument the tool and
+   * its op require. Returns the op to dispatch on, or the refusal to send back. Own properties
+   * only: a required argument satisfied by something inherited from Object.prototype is not
+   * supplied.
    */
   private validateArguments(
     spec: ToolSpec,
@@ -716,6 +779,11 @@ class GodotServer {
           `${spec.name} does not take ${unknown.join(', ')}. It takes: ${[...known].join(', ')}.`,
         ),
       };
+    }
+
+    const wrong = wrongTypes(spec, args);
+    if (wrong.length > 0) {
+      return { ok: false, response: this.createErrorResponse(`${spec.name} takes ${wrong.join('; ')}.`) };
     }
 
     let op: string | null = null;

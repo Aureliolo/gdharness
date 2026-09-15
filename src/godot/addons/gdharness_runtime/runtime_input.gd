@@ -225,6 +225,8 @@ func inject_mouse_click(params: Dictionary) -> Dictionary:
 		return {"type": "error", "message": point}
 	var position: Vector2 = point
 	var button: int = _resolve_mouse_button(params.get("button", MOUSE_BUTTON_LEFT))
+	if button < 0:
+		return _no_such_button(params.get("button"))
 	var pressed: bool = bool(params.get("pressed", true))
 	var double: bool = bool(params.get("doubleClick", false))
 
@@ -369,6 +371,8 @@ func click(params: Dictionary) -> Dictionary:
 			)
 		}
 	var button: int = _resolve_mouse_button(params.get("button", MOUSE_BUTTON_LEFT))
+	if button < 0:
+		return _no_such_button(params.get("button"))
 	var double: bool = bool(params.get("double", false))
 
 	# Pushed into the viewport rather than through Input: Input accumulates events and flushes
@@ -629,6 +633,8 @@ func _click_in_the_world(node_path: String, item: Node3D, params: Dictionary) ->
 
 	var position: Vector2 = viewport.get_final_transform() * aim
 	var button: int = _resolve_mouse_button(params.get("button", MOUSE_BUTTON_LEFT))
+	if button < 0:
+		return _no_such_button(params.get("button"))
 	var double: bool = bool(params.get("double", false))
 
 	viewport.push_input(_motion(position, Vector2.ZERO))
@@ -677,6 +683,23 @@ func _button(position: Vector2, button: int, pressed: bool, double: bool) -> Inp
 	return event
 
 
+## What to say about a name that is not a mouse button, with the ones that are.
+func _no_such_button(named: Variant) -> Dictionary:
+	return {
+		"type": "error",
+		"message":
+		(
+			"%s is not a mouse button. It takes: left, right, middle, wheel_up, wheel_down, or the number of one."
+			% JSON.stringify(named)
+		)
+	}
+
+
+## The button [param raw] names, or -1 for a name that is not one of them.
+##
+## A name nobody recognises used to come back as the left button, so a right click asked for by a
+## spelling this does not know went to the left button and reported the left button. The caller
+## reads the answer and believes it, which is the whole reason nothing here guesses.
 func _resolve_mouse_button(raw: Variant) -> int:
 	if raw is String:
 		var named: String = raw
@@ -692,5 +715,5 @@ func _resolve_mouse_button(raw: Variant) -> int:
 			"wheel_down", "wheeldown":
 				return MOUSE_BUTTON_WHEEL_DOWN
 			_:
-				return MOUSE_BUTTON_LEFT
+				return -1
 	return int(raw)
