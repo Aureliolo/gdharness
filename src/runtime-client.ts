@@ -16,6 +16,7 @@ import { existsSync, readdirSync, readFileSync, unlinkSync } from 'node:fs';
 import { createConnection } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { envValue } from './launch.js';
 import { asParams, readNumber, readParams, readString } from './tool-args.js';
 
@@ -200,6 +201,53 @@ function announcedIn(directory: string): Announced[] {
     found.push(announced);
   }
   return found;
+}
+
+/** How often the wait below looks, and the longest it will wait at all. */
+const LOOK_EVERY_MS = 50;
+export const ANNOUNCE_BUDGET_MS = 5_000;
+
+/** How the wait below is bounded: how long, where to look, and when to stop early. */
+export interface WaitingForRuntime {
+  readonly budgetMs?: number;
+  readonly directories?: readonly string[];
+  /** Answered on every look. True ends the wait: a game held at a breakpoint is not booting. */
+  readonly giveUp?: () => boolean;
+}
+
+/**
+ * The game from [projectPath] that announced itself while this waited, or nothing.
+ *
+ * Starting a game and being able to talk to it are two moments, and everything treated them as
+ * one. The editor answers `play_scene` as soon as it has asked the engine to play; the engine
+ * then boots, and the runtime binds a port and writes its announcement somewhere inside that. So
+ * the call straight after a start was answered "No game with the runtime addon is running", about
+ * a game that was starting, and the way through was to make the same call again a moment later.
+ *
+ * By process id rather than by counting, because the game that was just stopped can still be
+ * dying with its announcement on disk: what this waits for is a game nobody had seen before.
+ */
+export async function announcedSince(
+  projectPath: string,
+  before: ReadonlySet<number>,
+  waiting: WaitingForRuntime = {},
+): Promise<RuntimeEndpoint | null> {
+  const wanted = resolve(projectPath);
+  const directories = waiting.directories ?? runtimeDirectories();
+  const until = Date.now() + Math.max(waiting.budgetMs ?? ANNOUNCE_BUDGET_MS, 0);
+  for (;;) {
+    const fresh = discoverRuntimes(directories).find(
+      (endpoint) => !before.has(endpoint.pid) && resolve(endpoint.project.path) === wanted,
+    );
+    if (fresh !== undefined) {
+      return fresh;
+    }
+    const left = until - Date.now();
+    if (left <= 0 || waiting.giveUp?.() === true) {
+      return null;
+    }
+    await delay(Math.min(LOOK_EVERY_MS, left));
+  }
 }
 
 export type RuntimeChoice = { endpoint: RuntimeEndpoint } | { problem: string };

@@ -36,6 +36,7 @@ import { isWithinRoot, resolveWithinProject } from '../src/paths.js';
 import { freePort } from '../src/ports.js';
 import { parseProjectGodot } from '../src/resources.js';
 import {
+  announcedSince,
   chooseRuntime,
   discoverRuntimes,
   RUNTIME_PROTOCOL,
@@ -2268,6 +2269,74 @@ function testAGameTooNewToTalkToIsStillAGame(): void {
 }
 
 /**
+ * Starting a game and being able to talk to it are two moments, and a start waits for both.
+ *
+ * The editor answers `play_scene` as soon as it has asked the engine to play, so the call right
+ * after a start was answered "No game with the runtime addon is running" about a game that was
+ * starting, and the way through was to make the same call again. Twice in one session.
+ */
+async function testAStartWaitsForTheGameToAnnounceItself(): Promise<void> {
+  const root = mkdtempSync(join(tmpdir(), 'gdharness-waiting-'));
+  try {
+    const directory = join(root, 'gdharness');
+    mkdirSync(directory, { recursive: true });
+    const announce = (pid: number, port: number): void => {
+      writeFileSync(
+        join(directory, `runtime-${pid}.json`),
+        JSON.stringify({
+          protocol: RUNTIME_PROTOCOL,
+          pid,
+          port,
+          address: '127.0.0.1',
+          project: { name: 'Fixture', path: root },
+        }),
+        'utf8',
+      );
+    };
+
+    // The game already playing when the start was asked for, which is what a game that has just
+    // been stopped looks like while it is still dying.
+    announce(process.pid, 51_240);
+    const before = new Set([process.pid]);
+
+    const late = setTimeout(() => {
+      announce(process.ppid, 51_241);
+    }, 120);
+    try {
+      const found = await announcedSince(root, before, { budgetMs: 4_000, directories: [directory] });
+      assert.equal(found?.port, 51_241, 'the wait ends on the game that was not there before');
+    } finally {
+      clearTimeout(late);
+    }
+
+    const elsewhere = await announcedSince(join(root, 'elsewhere'), new Set(), {
+      budgetMs: 60,
+      directories: [directory],
+    });
+    assert.equal(elsewhere, null, 'a game from another project is not the one being waited for');
+
+    const started = Date.now();
+    const seen = new Set([process.pid, process.ppid]);
+    const nothing = await announcedSince(root, seen, { budgetMs: 120, directories: [directory] });
+    assert.equal(nothing, null, 'and a game that never announces is given up on');
+    assert.ok(Date.now() - started >= 100, 'after the budget rather than at once');
+
+    // A game held at a breakpoint cannot announce until it is let go, so the wait ends rather
+    // than sitting out the budget on a game that has stopped booting.
+    const gaveUp = Date.now();
+    const held = await announcedSince(root, seen, {
+      budgetMs: 4_000,
+      directories: [directory],
+      giveUp: () => true,
+    });
+    assert.equal(held, null, 'a game that has stopped is not waited for');
+    assert.ok(Date.now() - gaveUp < 1_000, 'and the wait ends at once rather than at the budget');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+/**
  * A version mismatch sends the reader at whichever half is actually behind.
  *
  * Both directions happen, and the second is the one that got told to do the wrong thing: upgrading
@@ -3447,6 +3516,7 @@ async function main(): Promise<void> {
   testTheStaleHalfIsNamedCorrectly();
   testAGameIsFoundWhereverItAnnounced();
   testAGameTooNewToTalkToIsStillAGame();
+  await testAStartWaitsForTheGameToAnnounceItself();
   testATestRunKeepsOutOfThePlayersSaves();
   await testParametersReachTheEngine();
   await testAFinishedRunCanStillBeRead();
