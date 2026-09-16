@@ -168,7 +168,17 @@ export function patienceForFrames(frames: number, atLeast: number): number {
  * the third must never read as the second.
  */
 function stillRunning(run: GodotProcess | null): boolean {
-  return run?.exitCode === null && run.endedUnwatched !== true;
+  if (run?.exitCode !== null || run.endedUnwatched === true) {
+    return false;
+  }
+  // A run with no handle is one this server did not start, so nothing here is listening for it to
+  // exit. Asked of the operating system on every answer rather than remembered from the moment it
+  // was picked up, or a bench that finished an hour ago goes on being reported as running and
+  // whoever is polling for it to end never hears that it has.
+  if (!run.throughEditor && run.process === null && run.pid !== null) {
+    return alive(run.pid);
+  }
+  return true;
 }
 
 export function alive(pid: number | undefined | null): boolean {
@@ -2856,6 +2866,12 @@ class GodotServer {
     }
     this.drainEditorOutput(run);
     this.drainTranscript(run);
+    // A run picked up alive and since ended, caught here rather than left reading as running. The
+    // last of its output is already in, because the drain above ran first.
+    if (run.endedUnwatched !== true && !stillRunning(run)) {
+      run.log.finish();
+      run.endedUnwatched = run.exitCode === null;
+    }
     const severity = readString(args, 'severity');
     const selected = run.log.select({
       severity: severity === 'error' || severity === 'warning' ? severity : 'info',
