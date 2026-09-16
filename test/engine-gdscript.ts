@@ -563,6 +563,36 @@ function testOperations(godotPath: string, projectDir: string): void {
     'the setting should come back as the vector it went in as',
   );
 
+  // JSON has one number type, so an int setting was written as "50.0" and every reader cast it
+  // back: the tool said 50, the editor said 50, and only the file in the commit said otherwise.
+  // The file is the assertion for that reason.
+  const counted = operation('set_project_setting', {
+    setting: 'debug/file_logging/max_log_files',
+    value: 50,
+  });
+  assert.equal(get(counted, 'new_value'), 50, 'an int setting takes an int');
+  assert.match(
+    readFileSync(join(projectDir, 'project.godot'), 'utf8'),
+    /^file_logging\/max_log_files=50$/m,
+    'and project.godot records it as one, not as 50.0',
+  );
+
+  const truncated = runRefusedOperation(godotPath, projectDir, 'set_project_setting', {
+    setting: 'debug/file_logging/max_log_files',
+    value: 50.5,
+  });
+  assert.notEqual(truncated.status, 0, 'a number the setting cannot hold is refused, not truncated');
+  assert.match(
+    `${truncated.stdout}\n${truncated.stderr}`,
+    /cannot be written as that without losing something/,
+    `the refusal should say why:\n${truncated.stderr.trim()}`,
+  );
+  assert.match(
+    readFileSync(join(projectDir, 'project.godot'), 'utf8'),
+    /^file_logging\/max_log_files=50$/m,
+    'and a refused write leaves the file as it was',
+  );
+
   // Every write to project.godot goes through the engine's own save, which keeps the header
   // the editor writes and every line it did not touch. The file is in the engine's own form
   // from the setting saved above, so from here on a round trip has to give the bytes back
