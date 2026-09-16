@@ -2487,6 +2487,19 @@ function testRunArgumentsLeaveTheLocalDebuggerOff(): void {
     '3',
     'res://a.tscn',
   ]);
+  // The game's own arguments go behind a bare `--`, which is where the engine stops reading them
+  // as its own and OS.get_cmdline_user_args() starts. Without the separator every one of them is
+  // an option the engine has never heard of, and the game is handed nothing.
+  assert.deepEqual(
+    runArguments({ projectPath: '/p', headless: true, scene: null, userArgs: ['--screen=hall'] }),
+    ['--headless', '--path', '/p', '--', '--screen=hall'],
+  );
+  // And no separator at all when there are none: a bare `--` is itself something a game can see,
+  // so a run nobody gave arguments to should look exactly like one from before there were any.
+  assert.deepEqual(runArguments({ projectPath: '/p', headless: false, scene: null, userArgs: [] }), [
+    '--path',
+    '/p',
+  ]);
 }
 
 /**
