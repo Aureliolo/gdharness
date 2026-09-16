@@ -3066,8 +3066,12 @@ async function testARunOutlivesItsServer(): Promise<void> {
         // Nothing left to clean up.
       }
     }
-    rmSync(projectDir, { recursive: true, force: true });
-    rmSync(runtimeDir, { recursive: true, force: true });
+    // Retried, because Windows holds the project directory open for as long as the engine has a
+    // handle on anything in it and a killed process releases those on its own schedule: the first
+    // removal after a kill answers EBUSY and the test fails in its own cleanup.
+    const swept = { recursive: true, force: true, maxRetries: 20, retryDelay: 250 };
+    rmSync(projectDir, swept);
+    rmSync(runtimeDir, swept);
   }
 }
 
