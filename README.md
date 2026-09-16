@@ -61,6 +61,29 @@ parts connect, and every tool, op and argument.
 [SECURITY.md](.github/SECURITY.md) is how to report something.
 [CONTRIBUTING.md](.github/CONTRIBUTING.md) is what a change has to clear.
 
+## Versions
+
+0.x, and the number is telling the truth: the tools, their arguments and the shape of their
+answers are still moving, because the projects using this keep finding answers that were wrong or
+missing. Pin an exact version and upgrade deliberately.
+
+Built and measured against Godot 4.7.2 on Windows, Linux and macOS. The editor, engine, runtime
+and integration suites run against a real engine on all three before anything is tagged. Older
+4.x is likely to work and is not tested.
+
+What each kind of release means here:
+
+- **Patch**: an answer that was wrong is now right. The output can change, because a wrong answer
+  corrected is a fix rather than a feature, and leaving one wrong to protect whoever parsed it is
+  how a tool stops being worth asking.
+- **Minor**: a tool, an op, an argument or a field was added, or behaviour a caller can see
+  changed.
+- **Major**: a tool, an op, an argument or a field was renamed or taken away. Nothing else earns
+  one.
+
+1.0 is not a date, it is a condition: the tool surface holding still for a fortnight, and the
+issues arriving being things it cannot do yet rather than things it answers wrongly.
+
 ## Project
 
 Fork of [GoPeak](https://github.com/HaD0Yun/Doyunha-Gopeak) v2.3.9, September 2026, MIT: the
