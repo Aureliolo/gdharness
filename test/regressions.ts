@@ -2956,6 +2956,19 @@ async function testARunEndedUnwatchedIsStillReadable(): Promise<void> {
       },
       { GDHARNESS_RUNTIME_DIR: runtimeDir },
     );
+
+    // The note is per machine, not per project, so a server serving something else must not
+    // answer about this run. The right shape about the wrong game is the worst answer available.
+    await withStdioServer(
+      async (call) => {
+        assert.match(
+          await call('editor_output', { limit: 200 }),
+          /No game is running/,
+          'a run recorded against another project is not this server’s to report',
+        );
+      },
+      { GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: join(runtimeDir, 'elsewhere') },
+    );
   } finally {
     rmSync(runtimeDir, { recursive: true, force: true });
   }

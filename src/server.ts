@@ -2774,7 +2774,7 @@ class GodotServer {
    */
   private adoptRecordedRun(): GodotProcess | null {
     const record = readRunRecord();
-    if (record === null) {
+    if (record === null || !this.couldBeOurs(record.projectPath)) {
       return null;
     }
     const adopted: GodotProcess = {
@@ -2799,6 +2799,25 @@ class GodotServer {
     }
     this.activeProcess = adopted;
     return adopted;
+  }
+
+  /**
+   * Whether a run left on disk belongs to the project this server serves.
+   *
+   * The note lives in the runtime directory, which is per machine rather than per project, so two
+   * servers running beside each other share it. Answering about the other one's run would be the
+   * worst kind of wrong answer: the right shape, about the wrong game, and nothing in it saying
+   * so. Compared against the project this server was told to serve, then against the one the
+   * editor on the bridge has open; with neither there is nothing to compare against, and a run
+   * recorded by the only server that could have recorded it is taken as this one's.
+   */
+  private couldBeOurs(project: string): boolean {
+    if (project === '') {
+      return true;
+    }
+    const status = this.godotBridge.getStatus();
+    const mine = this.ownProject ?? (status.connected ? (status.projectPath ?? null) : null);
+    return mine === null || samePath(mine, project);
   }
 
   /**
