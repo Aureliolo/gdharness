@@ -1285,6 +1285,23 @@ class GodotServer {
     return { ok: true, value: { path, file } };
   }
 
+  /** What the game itself is to be handed, or the refusal saying why this list cannot be. */
+  private gameArguments(args: OperationParams): Checked<readonly string[]> {
+    if (args['args'] === undefined) {
+      return { ok: true, value: [] };
+    }
+    const given = readStringArray(args, 'args');
+    if (given === undefined) {
+      return {
+        ok: false,
+        response: this.createErrorResponse('args must be a list of strings.', [
+          'Pass the game\'s own flags, such as ["--level=2"]',
+        ]),
+      };
+    }
+    return { ok: true, value: given };
+  }
+
   /**
    * The game the editor's debugger is holding, stopped, or the refusal saying which part is
    * missing.
@@ -2264,6 +2281,10 @@ class GodotServer {
     if (sceneToRun && !sceneToRun.ok) {
       return this.createErrorResponse(sceneToRun.reason, PATH_SOLUTIONS);
     }
+    const given = this.gameArguments(args);
+    if (!given.ok) {
+      return given.response;
+    }
     // Asked to run a project with no main scene, the engine puts up a modal box and waits for
     // a click, even headless on Windows: a process on a pipe that never exits.
     if (!sceneToRun && !hasMainScene(project.value.file)) {
@@ -2288,7 +2309,7 @@ class GodotServer {
 
     const sceneArgument = sceneToRun?.ok ? sceneToRun.relativePath : null;
     if (op === 'check') {
-      return await this.checkBoot(engine.value, project.value.path, sceneArgument, args);
+      return await this.checkBoot(engine.value, project.value.path, sceneArgument, args, given.value);
     }
 
     if (this.activeProcess?.exitCode === null) {
@@ -2307,11 +2328,20 @@ class GodotServer {
     // A headless run goes through the editor only when the project's own run arguments say the
     // editor would play it headless too. Otherwise it is spawned: answering a request for no
     // window with a window would be answering a different question.
+    //
+    // And a run carrying the game's own arguments is spawned whatever else is true, because the
+    // editor cannot be given any: it builds the game's command line out of
+    // `editor/run/main_run_args`, which it reads when it opens the project. Measured against
+    // 4.7.2, and both halves: a value the addon wrote into the live settings was not on the
+    // command line of the game played a moment later, saving it to disk did not change that, and
+    // the same value put there before the editor started arrived. So the choice is the debugger
+    // or the arguments, and which one a caller wanted is not this server's to guess.
     const headless = resolveHeadless(args['headless'], {
       platform: process.platform,
       variables: process.env,
     });
-    if (this.godotBridge.isConnected() && (!headless || editorPlaysHeadless(project.value.file))) {
+    const editorWouldPlay = !headless || editorPlaysHeadless(project.value.file);
+    if (this.godotBridge.isConnected() && editorWouldPlay && given.value.length === 0) {
       return await this.playThroughEditor(sceneArgument, refreshed.value, project.value.path, alreadyPlaying);
     }
 
@@ -2319,6 +2349,7 @@ class GodotServer {
       projectPath: project.value.path,
       headless,
       scene: sceneArgument,
+      userArgs: given.value,
     });
     this.logDebug(`Running Godot project: ${engine.value} ${cmdArgs.join(' ')}`);
     const started = this.spawnGame(engine.value, cmdArgs);
@@ -2328,6 +2359,14 @@ class GodotServer {
     // game is running" about a run that had just printed its answer. Whether a run is *active* is
     // exitCode === null, which is what the callers below now ask.
     this.activeProcess = started;
+    // Said rather than left to be noticed: a caller who has an editor open and asked for
+    // arguments has been handed a game that editor is not holding, so the debug tools will not
+    // answer about it however connected the editor is.
+    const spawnedInstead =
+      this.godotBridge.isConnected() && editorWouldPlay && given.value.length > 0
+        ? ' The editor cannot be handed arguments for a game it plays, so this one was started ' +
+          'here: the debug_* tools answer only for a game the editor is playing.'
+        : '';
     return this.jsonTextResponse({
       started: true,
       through: 'gdharness',
@@ -2335,7 +2374,7 @@ class GodotServer {
       arguments: cmdArgs,
       refreshedClasses: refreshed.value,
       runtime: await this.runtimeUp(project.value.path, alreadyPlaying),
-      message: 'Use editor_output for what it prints and editor_run stop to end it.',
+      message: `Use editor_output for what it prints and editor_run stop to end it.${spawnedInstead}`,
     });
   }
 
@@ -2530,10 +2569,11 @@ class GodotServer {
     projectPath: string,
     scene: string | null,
     args: OperationParams,
+    userArgs: readonly string[],
   ): Promise<ToolResponse> {
     const frames = readPositiveNumber(args, 'frames') ?? 3;
     const timeoutMs = readPositiveNumber(args, 'timeoutMs') ?? 60000;
-    const cmdArgs = runArguments({ projectPath, headless: true, scene, quitAfter: frames });
+    const cmdArgs = runArguments({ projectPath, headless: true, scene, quitAfter: frames, userArgs });
     const boot = this.spawnGame(godotPath, cmdArgs);
 
     const hung = await new Promise<boolean>((resolve) => {

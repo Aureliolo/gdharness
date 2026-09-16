@@ -54,6 +54,8 @@ export interface RunOptions {
   readonly scene: string | null;
   /** Frames to run before the engine quits on its own, or null to run until stopped. */
   readonly quitAfter?: number | null;
+  /** What the game itself is to read, which is everything after `--` on the command line. */
+  readonly userArgs?: readonly string[];
 }
 
 /**
@@ -65,6 +67,11 @@ export interface RunOptions {
  * is what the log reads. The scene goes last as a res:// path rather than the text that arrived,
  * because the engine reads that argument positionally and a value beginning with a dash would be
  * another option to it.
+ *
+ * The game's own arguments go last, behind the `--` the engine splits on: everything after it is
+ * what `OS.get_cmdline_user_args()` answers, and everything before it the engine reads as its
+ * own. A caller passing `--screen=hall` means the game's flag, so the separator is added here
+ * rather than left to be remembered.
  */
 export function runArguments(options: RunOptions): string[] {
   const args = options.headless
@@ -75,6 +82,9 @@ export function runArguments(options: RunOptions): string[] {
   }
   if (options.scene !== null) {
     args.push(`res://${options.scene}`);
+  }
+  if (options.userArgs !== undefined && options.userArgs.length > 0) {
+    args.push('--', ...options.userArgs);
   }
   return args;
 }

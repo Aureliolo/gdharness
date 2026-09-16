@@ -260,6 +260,17 @@ will not answer for it, and its console is read from the process pipe instead.
 `editor_run check` always spawns: headless, a few frames, then quit, answering with the boot
 verdict and every error and warning printed.
 
+`args` hands the game its own flags, the ones it reads back with `OS.get_cmdline_user_args()`,
+behind the `--` the engine stops reading at. A run carrying any is spawned rather than played by
+the editor, so `debug_*` will not answer for it.
+
+That is the engine's line, not a preference. The editor builds the game's command line out of
+`editor/run/main_run_args`, and it reads that when it opens the project: measured against 4.7.2,
+a value the addon wrote into the live settings was not on the command line of the game played a
+moment later, saving it to disk did not change that, and the same value put there before the
+editor started arrived. So a run is the debugger or the arguments, and which one was wanted is
+not the server's to guess.
+
 `editor_output` answers with entries rather than lines: each `ERROR:`, `SCRIPT ERROR:` and
 `WARNING:` headline with its `at:` line and backtrace, the counts, and a `clean` verdict. It
 filters by severity, by text, and to what has arrived since the last call. A screenshot cannot do
