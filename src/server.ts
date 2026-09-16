@@ -24,7 +24,7 @@ import {
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
 import { announceBridge, announcementPath, readAnnouncement, withdrawBridge } from './bridge-announce.js';
-import { staleClassNames } from './class-cache.js';
+import { staleClassNames, type UnseenClass, unseenByEditor } from './class-cache.js';
 import { DEFAULT_DAP_PORT, GodotDAPClient, handleDAPTool } from './dap_client.js';
 import { dictionary, emptyRecord } from './dictionary.js';
 import { errorMessage, Refusal } from './errors.js';
@@ -334,6 +334,19 @@ function realPathOr(path: string): string {
   } catch {
     return path;
   }
+}
+
+/**
+ * Whether two paths name the same directory, symlinks, drive letters and trailing slashes aside.
+ *
+ * The editor announces where it is open as the engine globalises it, which is not spelled the way
+ * a caller spells the same directory: a trailing slash on one side, a different case on the drive
+ * letter on Windows, a symlinked temporary directory on macOS.
+ */
+function samePath(one: string, other: string): boolean {
+  const settled = (path: string): string =>
+    realPathOr(path).replaceAll('\\', '/').replace(/\/+$/, '').toLowerCase();
+  return settled(one) === settled(other);
 }
 
 /** Where gdUnit4 lives, which is where a backtrace stops being about the game. */
@@ -1007,7 +1020,12 @@ class GodotServer {
   private async dispatch(tool: string, op: string, args: OperationParams): Promise<ToolResponse> {
     const headless = HEADLESS_OPERATIONS[tool]?.[op];
     if (headless !== undefined) {
-      return await this.headless(headless, args);
+      const answered = await this.headless(headless, args);
+      // The one answer that reads most like a clean bill of health and is not: "added: []" means
+      // the file on disk was already right, which is exactly the state an editor goes blind in.
+      return headless === 'refresh_class_cache' && this.godotBridge.isConnected()
+        ? await this.alsoSayWhatTheEditorCannotSee(answered, args)
+        : answered;
     }
 
     const { op: _op, ...arguments_ } = args;
@@ -2572,14 +2590,97 @@ class GodotServer {
       busy = Boolean(status['scanning']) || Boolean(status['importing']);
     }
 
+    const checked = busy ? { unseen: [] } : await this.classesTheEditorCannotSee(args);
+    const unseen = checked.unseen;
     return this.jsonTextResponse({
-      ok: !busy,
+      ok: !busy && unseen.length === 0 && checked.unchecked === undefined,
       stillWorking: busy,
       waitedMs: Date.now() - started,
+      unseenByEditor: unseen.length > 0 ? unseen : undefined,
+      classesUnchecked: checked.unchecked,
       note: busy
         ? 'The editor was still scanning or importing when the wait ran out, so new files may not be visible yet.'
-        : undefined,
+        : unseen.length > 0
+          ? 'The scan finished and these classes are still not in the list the editor resolves against, so every use of them reads as an unknown identifier. Its walk skips a file another engine has already imported. Change the declaring script and rescan, or restart the editor with editor_launch restart.'
+          : undefined,
     });
+  }
+
+  /**
+   * A rebuilt class cache, with what the editor holding the project still cannot resolve.
+   *
+   * Rebuilding the cache writes a file and nothing rereads it, so an editor that had gone blind
+   * to a class is exactly as blind afterwards and the answer says `added: []`. That sentence is
+   * true and reads as "nothing was wrong", which is how two projects were sent away from the one
+   * call that could have told them. A refusal is left alone: it has its own thing to say.
+   */
+  private async alsoSayWhatTheEditorCannotSee(
+    answered: ToolResponse,
+    args: OperationParams,
+  ): Promise<ToolResponse> {
+    const first = answered.content[0];
+    if (answered.isError || first?.type !== 'text' || typeof first.text !== 'string') {
+      return answered;
+    }
+    const checked = await this.classesTheEditorCannotSee(args);
+    if (checked.unseen.length === 0 && checked.unchecked === undefined) {
+      return answered;
+    }
+    return this.jsonTextResponse({
+      ...asParams(JSON.parse(first.text)),
+      unseenByEditor: checked.unseen.length > 0 ? checked.unseen : undefined,
+      classesUnchecked: checked.unchecked,
+      note:
+        checked.unseen.length > 0
+          ? 'The cache on disk is right now, and the editor holding this project is still not resolving these: rewriting the file does not reach the list it already loaded. Change the declaring script and editor_rescan, or restart the editor with editor_launch restart.'
+          : undefined,
+    });
+  }
+
+  /**
+   * The project's own classes a connected editor is not holding, after a scan has finished.
+   *
+   * Asked of the editor rather than of the cache, because the cache is on disk and the state
+   * worth reporting is the one where disk is right and the editor is not.
+   *
+   * An editor that will not answer says so under `unchecked` rather than answering with nothing.
+   * Nothing is what a clean project answers, and a check whose failure is spelled the same as its
+   * pass is a check that stops being read: this one exists because two projects were told they
+   * were clean by three things in a row that were only silent.
+   */
+  private async classesTheEditorCannotSee(
+    args: OperationParams,
+  ): Promise<{ unseen: UnseenClass[]; unchecked?: string }> {
+    const projectPath = typeof args['projectPath'] === 'string' ? args['projectPath'] : '';
+    if (projectPath === '') {
+      return { unseen: [], unchecked: 'no projectPath, so there was nothing to read the cache from' };
+    }
+    // An editor open on something else holds a list for that project, and every class here would
+    // be missing from it. Comparing them names the whole project as unseen, which is a wrong
+    // answer said loudly, and the failure this exists to end was a wrong answer said quietly.
+    const open = this.godotBridge.getStatus().projectPath;
+    if (open === undefined || !samePath(open, projectPath)) {
+      return {
+        unseen: [],
+        unchecked: `the connected editor is open on ${open ?? 'a project it did not name'}, not this one`,
+      };
+    }
+    // The list itself is the evidence, rather than an `ok` beside it: the editor plugin erases
+    // that key from every result it reports as a success, so a caller waiting to see one waits
+    // for ever and calls the project clean while doing it. A refusal arrives as a rejection.
+    let held: OperationParams;
+    try {
+      held = asParams(await this.godotBridge.invokeTool('global_classes', args));
+    } catch (error) {
+      return {
+        unseen: [],
+        unchecked: `the editor would not say what classes it is holding: ${errorMessage(error)}`,
+      };
+    }
+    if (!Array.isArray(held['classes'])) {
+      return { unseen: [], unchecked: 'the editor answered without a class list in it' };
+    }
+    return { unseen: unseenByEditor(projectPath, held['classes'].map(String)) };
   }
 
   private async handleViaBridge(toolName: string, args: OperationParams): Promise<ToolResponse> {

@@ -97,6 +97,12 @@ formatting. \`script_diagnostics\` and \`script_info\` come from the editor's ow
 \`editor_classes\` need nothing open: they run a short headless engine and are gone before the
 answer is printed.
 
+A wall of "Could not find type" on the project's own classes means the editor is not holding
+them. \`editor_rescan\` asks it to scan and names any class it still cannot resolve under
+\`unseenByEditor\`: its walk skips a file a headless engine has already imported, so the
+declaration and the cache can both be right while the editor stays blind to it. Change the
+declaring script, or restart the editor.
+
 ## Refusals are useful
 
 An unknown op, an argument the tool does not name, or a missing required one is refused with the

@@ -19,7 +19,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 import { WebSocket } from 'ws';
 import { announcementPath, BRIDGE_ANNOUNCE_PROTOCOL, readAnnouncement } from '../src/bridge-announce.js';
-import { staleClassNames } from '../src/class-cache.js';
+import { staleClassNames, unseenByEditor } from '../src/class-cache.js';
 import { GodotDAPClient } from '../src/dap_client.js';
 import { dictionary, emptyRecord } from '../src/dictionary.js';
 import { createBridge } from '../src/godot-bridge.js';
@@ -1883,6 +1883,62 @@ function testStaleClassesAreReadFromDisk(): void {
 }
 
 /**
+ * The staleness no file on disk records: the editor is the one that has fallen behind.
+ *
+ * A class declared in a script and listed in the cache passes every check above, and the editor
+ * can still be unable to resolve it, because its scan skipped a file another engine had already
+ * imported. So the reading that matters is against the list the editor is holding, and a project
+ * where the disk is entirely correct has to come back with the class named rather than empty.
+ */
+function testClassesAnEditorIsNotHolding(): void {
+  const sandbox = mkdtempSync(join(tmpdir(), 'gdharness-editor-classes-'));
+  try {
+    mkdirSync(join(sandbox, 'scripts'), { recursive: true });
+    mkdirSync(join(sandbox, '.godot'), { recursive: true });
+    writeFileSync(join(sandbox, 'scripts', 'hero.gd'), 'class_name Hero\nextends Node\n');
+    writeFileSync(join(sandbox, 'scripts', 'squire.gd'), 'class_name Squire\nextends Node\n');
+    writeFileSync(
+      join(sandbox, '.godot', 'global_script_class_cache.cfg'),
+      'list=[{\n"class": &"Hero",\n"path": "res://scripts/hero.gd"\n}, {\n"class": &"Squire",\n"path": "res://scripts/squire.gd"\n}]\n',
+    );
+
+    assert.deepEqual(staleClassNames(sandbox), [], 'the disk agrees with itself, which is the trap');
+    assert.deepEqual(
+      unseenByEditor(sandbox, ['Hero', 'Squire']),
+      [],
+      'an editor holding both has nothing to report',
+    );
+    assert.deepEqual(
+      unseenByEditor(sandbox, ['Hero']),
+      [{ className: 'Squire', path: 'res://scripts/squire.gd' }],
+      'and one holding only the older class names the newer one, with the script that declares it',
+    );
+
+    // A class the editor is not holding because nothing declares it any more is the editor being
+    // ahead rather than behind, and saying so would send somebody after a file that is not there.
+    assert.deepEqual(
+      unseenByEditor(sandbox, ['Hero', 'Squire', 'Departed']),
+      [],
+      'a name only the editor has is not a class it cannot see',
+    );
+
+    // The engine imports nothing under a .gdignore, so no declaration in there is ever a global
+    // class and no editor will ever hold one. Counted, they make a correct project look blind.
+    mkdirSync(join(sandbox, 'vendor'), { recursive: true });
+    writeFileSync(join(sandbox, 'vendor', '.gdignore'), '');
+    writeFileSync(join(sandbox, 'vendor', 'stowaway.gd'), 'class_name Stowaway\nextends Node\n');
+    assert.deepEqual(
+      unseenByEditor(sandbox, ['Hero', 'Squire']),
+      [],
+      'a declaration the engine itself skips is not one the editor is missing',
+    );
+    assert.deepEqual(staleClassNames(sandbox), [], 'and it is not missing from the cache either');
+  } finally {
+    rmSync(sandbox, { recursive: true, force: true });
+  }
+}
+
+/**
  * No project named means the one you are standing in, and only if it is one.
  *
  * `doctor` is the command to prove it with: it reads the project directory and starts no engine,
@@ -3384,6 +3440,7 @@ async function main(): Promise<void> {
   testRunArgumentsLeaveTheLocalDebuggerOff();
   testHeadlessFollowsTheDisplay();
   testStaleClassesAreReadFromDisk();
+  testClassesAnEditorIsNotHolding();
   testProjectDefaultsToTheWorkingDirectory();
   testAnAutoloadGitWillNotCarry();
   testVersionOrdering();

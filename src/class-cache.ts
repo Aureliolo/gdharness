@@ -13,10 +13,19 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-/** Every `class_name` declared under the project, with the script that declares it. */
+/**
+ * Every `class_name` declared under the project, with the script that declares it.
+ *
+ * A directory holding a `.gdignore` is stepped over, because the engine steps over it: nothing
+ * inside is imported and no declaration in there is ever a global class. Counting them makes a
+ * correct project look like one whose editor has gone blind, every time it is asked.
+ */
 function declaredClasses(projectPath: string): Map<string, string> {
   const declared = new Map<string, string>();
   const visit = (directory: string, prefix: string): void => {
+    if (existsSync(join(directory, '.gdignore'))) {
+      return;
+    }
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
       if (entry.name.startsWith('.')) {
         continue;
@@ -61,4 +70,27 @@ export function staleAgainst(cached: Map<string, string>, projectPath: string): 
 export function staleClassNames(projectPath: string): string[] {
   const cached = cachedClasses(projectPath);
   return cached === null ? [...declaredClasses(projectPath).keys()] : staleAgainst(cached, projectPath);
+}
+
+/** A class the cache records and the editor is not holding, with the script that declares it. */
+export interface UnseenClass {
+  readonly className: string;
+  readonly path: string;
+}
+
+/**
+ * The classes on disk a running editor cannot resolve, whatever the cache says.
+ *
+ * Every other check here compares one file on disk with another, so the state that costs people
+ * a day passes all of them: the class is declared, the cache lists it, and the editor's own list
+ * does not have it because its change-detecting scan walked past a file another engine had
+ * already imported. The editor is the only thing that can report this, so it is asked.
+ */
+export function unseenByEditor(projectPath: string, editorHolds: readonly string[]): UnseenClass[] {
+  const held = new Set(editorHolds);
+  const declared = declaredClasses(projectPath);
+  const source = cachedClasses(projectPath) ?? declared;
+  return [...source]
+    .filter(([name]) => !held.has(name) && declared.has(name))
+    .map(([className, path]) => ({ className, path: declared.get(className) ?? path }));
 }

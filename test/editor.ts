@@ -201,6 +201,8 @@ interface Editor {
   /** Calls a tool and answers with how it went, for waiting on something to come up. */
   attempt: (name: string, args: Record<string, unknown>) => Promise<{ ok: boolean; text: string }>;
   project: string;
+  /** The engine this editor is, for a case that needs a second one against the same project. */
+  godotPath: string;
   /** What this editor was opened on, which is what it should be reporting it serves. */
   lspPort: number;
   dapPort: number;
@@ -553,7 +555,7 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
     }
     assert.ok(connected, `the editor never reached the bridge:\n${engineOutput.join('')}`);
 
-    await body({ call, refusal, attempt, project, lspPort, dapPort });
+    await body({ call, refusal, attempt, project, godotPath, lspPort, dapPort });
   } catch (failure) {
     // What the engine said on its way to failing, which is the half of the evidence a tool
     // answer does not carry: a fixture that reports only its own assertion sends whoever reads
@@ -929,6 +931,68 @@ async function testEditorRescan({ call, project }: Editor): Promise<void> {
   });
   assert.equal(get(attached, 'resourcePath'), 'res://custom.tres');
   assert.match(fileText(project, 'custom.tres'), /late\.gd/, 'the script should be on the resource');
+}
+
+/**
+ * A class declared on disk, listed in the cache, and invisible to the editor.
+ *
+ * This is the state every check gdharness had called clean, because all of them compared one
+ * file on disk against another and both of those are correct here. What is wrong is the list
+ * inside the editor: its scan is change-detecting, a headless engine has already recorded the
+ * file, so the walk reads it as settled and never looks inside for the declaration. Two
+ * projects lost a day each to it, both times to a diagnostic that was right and disbelieved.
+ *
+ * Whether an editor has taken a newly written file in before anybody asks it to scan is the
+ * engine's business and is not the same on every platform: measured, a Linux editor has not and
+ * the rebuild names the class, a Windows one has. Both are true answers about that editor, so
+ * what is asserted is that the answer is true rather than which of the two it is, and that the
+ * cure holds everywhere. The editor is asked whether it can see the class, never told.
+ */
+async function testAClassTheEditorCannotSee({ call, project }: Editor): Promise<void> {
+  writeFileSync(join(project, 'late_class.gd'), 'class_name LateClass\nextends RefCounted\n');
+
+  const rebuilt = await call('project_import', { projectPath: project, op: 'refresh_classes' });
+  const cache = join(project, '.godot', 'global_script_class_cache.cfg');
+  assert.ok(readFileSync(cache, 'utf8').includes('LateClass'), 'the cache on disk should list it');
+  assert.equal(get(rebuilt, 'classesUnchecked'), undefined, `the editor answered: ${text(rebuilt)}`);
+  const named = asArray(get(rebuilt, 'unseenByEditor') ?? []).map((entry) => get(entry, 'className'));
+  assert.ok(
+    named.length === 0 || named.join(',') === 'LateClass',
+    `the only class it could be missing is the one just written: ${text(rebuilt)}`,
+  );
+
+  // A scan is the cure, and it is the half that holds on every platform.
+  const seeing = await call('editor_rescan', { projectPath: project });
+  assert.equal(get(seeing, 'ok'), true, `a scanned project resolves its own classes: ${text(seeing)}`);
+  assert.equal(get(seeing, 'unseenByEditor'), undefined, `with nothing to name: ${text(seeing)}`);
+}
+
+/**
+ * Asked about a project this editor is not open on, the answer is "not checked", never "clean".
+ *
+ * The editor holds the classes of the project it opened, so comparing them against another
+ * project's cache makes every class in it look unseen. Guarding that is worth a case of its own
+ * because it is also the one place the check reports a positive on demand, whatever the platform
+ * does: a silence here is the comparison never running, which is the shape this whole thing
+ * exists to stop and is exactly how it first shipped.
+ */
+async function testTheClassCheckKnowsWhichProjectItIsAbout({ call, project }: Editor): Promise<void> {
+  const elsewhere = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-other-'));
+  try {
+    writeFileSync(join(elsewhere, 'project.godot'), 'config_version=5\n');
+    writeFileSync(join(elsewhere, 'stranger.gd'), 'class_name Stranger\nextends RefCounted\n');
+
+    const rebuilt = await call('project_import', { projectPath: elsewhere, op: 'refresh_classes' });
+    assert.equal(get(rebuilt, 'unseenByEditor'), undefined, `Stranger is not unseen: ${text(rebuilt)}`);
+    assert.match(
+      String(get(rebuilt, 'classesUnchecked')),
+      /open on .*not this one/,
+      `the answer should say it did not check, and why: ${text(rebuilt)}`,
+    );
+    assert.notEqual(project, elsewhere, 'the two projects have to be two projects');
+  } finally {
+    rmSync(elsewhere, { recursive: true, force: true });
+  }
 }
 
 /**
@@ -1636,6 +1700,8 @@ async function main(): Promise<void> {
     await testResources(editor);
     await testResourcesOnNodes(editor);
     await testEditorRescan(editor);
+    await testAClassTheEditorCannotSee(editor);
+    await testTheClassCheckKnowsWhichProjectItIsAbout(editor);
     await testLanguageServer(editor);
     await testDebugging(editor);
     await testRuntime(editor);
