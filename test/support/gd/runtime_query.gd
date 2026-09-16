@@ -373,7 +373,7 @@ func _check_reading_into_a_list() -> void:
 	var called: Dictionary = await node._execute_command(
 		"call_method", {"path": "/root/Level/Hero", "method": "roster:0:loudly"}
 	)
-	if called.get("value") != "ADA":
+	if called.get("result") != "ADA":
 		_fail("a method is called on an element of a list: %s" % str(called))
 
 	# A list is not a thing with methods, and saying "has no method" would read as a misspelling.
