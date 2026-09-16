@@ -5,7 +5,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { MalformedReportError, parseJUnit, whyNoReport } from '../src/junit.js';
+import { MalformedReportError, orphansPrinted, parseJUnit, whyNoReport } from '../src/junit.js';
 
 /** What gdUnit4 printed for a run pointed at a directory that is not there, as it printed it. */
 const NOTHING_THERE = [
@@ -130,9 +130,72 @@ function testARunThatSaidNothingOfTheSortIsLeftAlone(): void {
   );
 }
 
+/**
+ * The orphan counts, which are in the console and nowhere else.
+ *
+ * gdUnit4 decides a run's state on orphan nodes and writes none of it into its JUnit report: an
+ * ORPHAN report produces no element, and no suite attribute carries the count. A tier that passed
+ * every case and left nodes behind came back as `warnings`, exit 101, with `failures` 0, `failed`
+ * empty and `engineEntries` empty, so the word in the verdict was the entire answer and finding
+ * out what it meant cost a guess and another run of a tier that takes minutes.
+ *
+ * The lines below are the shapes the runner prints: the suite is announced on its own line, its
+ * statistics end its block on one line with the state written after them, and the run's totals
+ * come back under `Overall Summary`.
+ */
+function testOrphansAreReadOffTheConsole(): void {
+  const printed = [
+    'Run Test Suite: res://test/guild_test.gd',
+    '	test_recruits	STATUS: PASSED	13ms',
+    'Statistics: 2 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 0 orphans |	PASSED',
+    'Run Test Suite: res://test/docket_test.gd',
+    '	test_posts	STATUS: PASSED	9ms',
+    'Statistics: 3 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 4 orphans |	WARNING',
+    'Overall Summary: 5 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 4 orphans |',
+    'Executed test suites: (2/2)',
+  ];
+
+  const found = orphansPrinted(printed);
+  assert.equal(found.total, 4, 'the run total comes off the summary line');
+  assert.deepEqual(
+    found.suites,
+    [{ path: 'res://test/docket_test.gd', orphans: 4 }],
+    'named per suite, and a suite that left none is not a warning',
+  );
+
+  // A clean run says nothing, which must stay nothing rather than becoming an empty warning.
+  assert.deepEqual(
+    orphansPrinted([
+      'Run Test Suite: res://test/guild_test.gd',
+      'Statistics: 2 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 0 orphans |	PASSED',
+      'Overall Summary: 2 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 0 orphans |',
+    ]),
+    { total: 0, suites: [] },
+  );
+
+  // The totals are not a suite's. A summary line arriving with a suite still open would otherwise
+  // be counted twice: once against that suite and once as the total.
+  const onlyTotals = orphansPrinted([
+    'Run Test Suite: res://test/docket_test.gd',
+    'Overall Summary: 5 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 4 orphans |',
+  ]);
+  assert.deepEqual(onlyTotals, { total: 4, suites: [] });
+
+  // And a summary line this stops recognising costs the total, not the rows under it.
+  const noSummary = orphansPrinted([
+    'Run Test Suite: res://test/docket_test.gd',
+    'Statistics: 3 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 4 orphans |',
+    'Run Test Suite: res://test/purse_test.gd',
+    'Statistics: 1 test case | 0 errors | 0 failures | 0 flaky | 0 skipped | 2 orphans |',
+  ]);
+  assert.equal(noSummary.total, 6, 'summed from the suites when no summary line was read');
+  assert.equal(noSummary.suites.length, 2);
+}
+
 testWhatGdUnitWrites();
 testEntitiesAndShapes();
 testMalformedReportsAreRefused();
 testARunThatFoundNothingIsNotAPass();
 testARunThatSaidNothingOfTheSortIsLeftAlone();
+testOrphansAreReadOffTheConsole();
 console.log('junit reader tests passed');
