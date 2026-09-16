@@ -136,7 +136,33 @@ func _serialize_object(value: Object) -> Dictionary:
 		var node: Node = value
 		if node.is_inside_tree():
 			return {"_type": "Node", "class": node.get_class(), "path": str(node.get_path())}
-	return {"_type": "Object", "class": value.get_class()}
+	return _describe_object(value)
+
+
+## A plain object, said in enough detail to tell it from the one beside it.
+##
+## `{"class": "RefCounted"}` was all of it, so a roster of twelve people came back as the word
+## RefCounted twelve times: correct, useless, and indistinguishable from a list of twelve of
+## anything else. The state worth looking at in a game is lists of these, so each one carries what
+## it is (the `class_name` its script declares, or the script's path when it has no name), what it
+## says about itself when the game has given it a `_to_string`, and an id that is at least
+## different per object. None of it is invented: every field is left out when there is nothing to
+## put in it, because a key holding "" is a worse answer than a key that is not there.
+func _describe_object(value: Object) -> Dictionary:
+	var described: Dictionary = {"_type": "Object", "class": value.get_class()}
+	var script: Script = value.get_script() as Script
+	if script != null:
+		var declared: String = String(script.get_global_name())
+		if not declared.is_empty():
+			described["script_class"] = declared
+		elif not script.resource_path.is_empty():
+			described["script"] = script.resource_path
+	# Only when the game wrote one. The default is "<RefCounted#31098236>", which is the id again
+	# in a costume and reads as if the object had been asked and had nothing to say.
+	if value.has_method("_to_string"):
+		described["says"] = value.to_string()
+	described["id"] = value.get_instance_id()
+	return described
 
 
 ## Rebuilds a Godot value from the shape serialize gave it.

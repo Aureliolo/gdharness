@@ -813,7 +813,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['property', 'find'],
         description:
-          'property: which one to read. find: read this one off every node matched, so a panel of labels is one call rather than one per label. Colons read through the objects a node holds, "_game:clock:speed", which is where a game keeps what is worth asking about; a step that is not there is named.',
+          'property: which one to read. find: read this one off every node matched, so a panel of labels is one call rather than one per label. Colons read through what a node holds, "_game:clock:speed", which is where a game keeps what is worth asking about. A number or a key steps into a list or a map, "_game:run:roster:0:traits", which is how the lists a game keeps its state in are walked: a roster, a board, an in-tray. A negative number counts from the end. A step that is not there is named, and says what was there instead.',
       },
       depth: { type: 'number', ops: ['tree'], description: 'tree: levels to descend. Default 3.' },
       includeProperties: {
@@ -897,7 +897,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['set'],
         description:
-          'set: which one to write. Colons write through the objects a node holds, "_game:run:day", and the answer reads back off the same holder, so a write a typed container refused shows as an unchanged value.',
+          'set: which one to write. Colons write through what a node holds, "_game:run:day", and a number or a key steps into a list or a map on the way, "_game:run:roster:0:name", a negative number counting from the end. The answer reads back off the same holder, so a write a typed container refused shows as an unchanged value.',
       },
       value: {
         ops: ['set'],
@@ -908,7 +908,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['call'],
         description:
-          'call: which one to call. Colons call through the objects a node holds, "_game:run:advance", the same way a property is written through them.',
+          'call: which one to call. Colons call through what a node holds, "_game:run:advance", the same way a property is written through them, and a list or a map is stepped into by index or key, "_game:run:roster:0:retire".',
       },
       args: {
         type: 'array',
