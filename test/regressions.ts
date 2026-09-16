@@ -334,6 +334,43 @@ async function withFakeLanguageServer<T>(
 }
 
 /**
+ * An editor that restarts is a language server with no record of what this client has opened.
+ *
+ * Diagnostics arrive as a publish rather than an answer, and Godot publishes in response to a
+ * document being opened or changed. The client tracks which documents it has opened so that the
+ * second ask about one sends didChange rather than didOpen, and that bookkeeping was kept across
+ * a connection ending: after `editor_launch restart` every file asked about earlier got a
+ * didChange naming a document the new server had never opened, which publishes nothing, so every
+ * call timed out with "the language server may not be running" while documentSymbol on the same
+ * file over the same socket answered completely and currently. Reported by another project on
+ * 0.9.5 and reproduced here on 0.9.6: `guild.gd` answered clean in about a second, and after a
+ * restart the same call timed out.
+ *
+ * The stub publishes on didOpen alone, which is what Godot does, so the second ask is answered
+ * only if the connection ending forgot the document.
+ */
+async function testDiagnosticsSurviveTheEditorRestarting(): Promise<void> {
+  await withFakeLanguageServer(
+    (uri) => uri,
+    async (port) => {
+      const script = join(tmpdir(), 'gdharness-lsp-restart', 'player.gd');
+      const client = new GodotLSPClient(port, '127.0.0.1');
+
+      const first = await client.getDiagnostics(script, 'extends Node\n');
+      assert.equal(first.length, 1, 'the first ask opens the document and is published to');
+
+      // The editor going away and coming back, as this client sees it: the socket ends, and the
+      // next call connects again to something with no memory of the document.
+      await client.disconnect();
+
+      const afterwards = await client.getDiagnostics(script, 'extends Node\n');
+      assert.equal(afterwards.length, 1, 'and so is the ask after the connection was replaced');
+      await client.disconnect();
+    },
+  );
+}
+
+/**
  * Godot builds its own file URI rather than echoing the client's, and since 4.5 it encodes
  * per RFC 3986, which escapes characters Node's pathToFileURL leaves bare. On Windows the
  * real case is the drive colon: the client sends `file:///C:/game/player.gd` and Godot
@@ -3372,6 +3409,7 @@ async function main(): Promise<void> {
   await testAServerOnlyAnswersAboutItsOwnGame();
   testTheLongestWaitCanBeWaitedOut();
   await testDiagnosticsSurviveUriReEncoding();
+  await testDiagnosticsSurviveTheEditorRestarting();
   await testDiagnosticsSurviveAnotherSpellingOfTheSamePath();
   await testDiagnosticsTimeoutIsNotAnEmptyResult();
   await testLspFramesBodiesByBytes();
