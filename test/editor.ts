@@ -1119,6 +1119,15 @@ async function testDebugging({ call, refusal, attempt, project }: Editor): Promi
 
   const run = await call('editor_run', { projectPath: project });
   assert.equal(get(run, 'through'), 'editor', 'the editor should be the one playing it');
+  // A start waits for the game to be something the runtime tools can talk to and says which it
+  // is. The autoload announces itself before the main scene is ready, which is where this run's
+  // breakpoint is, so a game stopped there has already announced.
+  const runtime = asObject(get(run, 'runtime'), 'runtime');
+  assert.equal(
+    runtime['listening'],
+    true,
+    `the start should wait for the runtime: ${JSON.stringify(runtime)}`,
+  );
 
   const frames = await stackWithin(
     attempt,
@@ -1238,14 +1247,10 @@ async function testDebugging({ call, refusal, attempt, project }: Editor): Promi
 async function testRuntime({ call, refusal, attempt, project, lspPort, dapPort }: Editor): Promise<void> {
   const game = { projectPath: project };
 
-  // The game announces itself in a file, which it writes once it is listening, so the first
-  // answer is waited for rather than assumed.
-  const deadline = Date.now() + GAME_STOP_TIMEOUT_MS;
-  let reached = await attempt('runtime_inspect', { ...game, op: 'tree', nodePath: '/root' });
-  while (!reached.ok && Date.now() < deadline) {
-    await delay(500);
-    reached = await attempt('runtime_inspect', { ...game, op: 'tree', nodePath: '/root' });
-  }
+  // Asked once rather than polled for. The start is what waits for the game to announce itself
+  // now, and this loop worked around it not doing so: whether a caller can talk to the game it
+  // was just told had started is the promise being held here.
+  const reached = await attempt('runtime_inspect', { ...game, op: 'tree', nodePath: '/root' });
   assert.ok(reached.ok, `the game should be reachable over the runtime socket: ${reached.text}`);
 
   const tree = await call('runtime_inspect', { ...game, op: 'tree', nodePath: '/root', depth: 3 });
