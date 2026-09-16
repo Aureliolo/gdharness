@@ -164,6 +164,16 @@ const MAIN_GD = [
   '\treturn keyed',
   '',
   '',
+  '## What the game itself was handed, which is whatever followed `--` on its command line.',
+  'func given_args() -> PackedStringArray:',
+  '\treturn OS.get_cmdline_user_args()',
+  '',
+  '',
+  '## The whole command line, so a case that finds nothing above can say what did arrive.',
+  'func given_command_line() -> PackedStringArray:',
+  '\treturn OS.get_cmdline_args()',
+  '',
+  '',
   `func holding() -> bool:`,
   `\treturn Input.is_action_pressed("${FIXTURE_ACTION}")`,
   '',
@@ -1562,6 +1572,61 @@ async function testTheDebuggerGetsAPortOfItsOwn({ call, attempt, project }: Edit
 }
 
 /**
+ * The game's own arguments, and the run that carries them being started here rather than played.
+ *
+ * The editor builds the game's command line out of `editor/run/main_run_args` and reads that when
+ * it opens the project: measured against 4.7.2, a value written into the live settings was not on
+ * the command line of the game played a moment later, saving it to disk did not change it, and the
+ * same value put there before the editor started arrived. So a run with arguments is spawned, and
+ * both halves of that are asserted here, with an editor connected the whole time: the game is
+ * handed what the caller asked for, and the answer says who started it.
+ */
+async function testTheGameIsHandedItsOwnArguments({ call, attempt, project }: Editor): Promise<void> {
+  await attempt('editor_run', { projectPath: project, op: 'stop' });
+
+  try {
+    const run = await call('editor_run', { projectPath: project, args: ['--fixture-flag=7', '--quiet'] });
+    assert.equal(
+      get(run, 'through'),
+      'gdharness',
+      `a run with arguments should be started here: ${JSON.stringify(run)}`,
+    );
+    assert.match(
+      text(get(run, 'message')),
+      /debug_\*/,
+      'and the answer should say the debug tools will not answer for it',
+    );
+
+    const given = await call('runtime_invoke', {
+      projectPath: project,
+      op: 'call',
+      nodePath: '/root/Main',
+      method: 'given_args',
+    });
+    const whole = await call('runtime_invoke', {
+      projectPath: project,
+      op: 'call',
+      nodePath: '/root/Main',
+      method: 'given_command_line',
+    });
+    assert.deepEqual(
+      asArray(get(given, 'result'), 'result'),
+      ['--fixture-flag=7', '--quiet'],
+      `the game should be handed what the caller asked for, and its command line was ${JSON.stringify(whole)}`,
+    );
+
+    const refused = await attempt('editor_run', { projectPath: project, args: [7] });
+    assert.match(
+      refused.text,
+      /list of strings/,
+      `arguments that are not strings should be refused: ${refused.text}`,
+    );
+  } finally {
+    await attempt('editor_run', { projectPath: project, op: 'stop' });
+  }
+}
+
+/**
  * An error the editor breaks the game on, and the console that said nothing about it.
  *
  * Godot prints no script error over the debug adapter. It halts the game and names the error in
@@ -1711,6 +1776,7 @@ async function main(): Promise<void> {
     await testDebugging(editor);
     await testRuntime(editor);
     await testTheDebuggerGetsAPortOfItsOwn(editor);
+    await testTheGameIsHandedItsOwnArguments(editor);
     await testAnErrorTheGameBrokeOnIsReported(editor);
     await testEditorRestart(editor);
   });

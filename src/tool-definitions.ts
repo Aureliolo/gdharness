@@ -689,10 +689,16 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'editor_run',
     description:
-      'The run: starting the project, stopping it, or booting it once to see whether it comes up clean. start keeps it running and collecting output until it quits or is stopped, windowed where there is a display and headless where there is not, unless headless says otherwise; only runtime_capture needs the window. A run that quits on its own is kept, so a scene that prints an answer and quits is start, then editor_output until running is false. What runs is a scene: a SceneTree script is not an entry point here, so put the script on the root of a scene of its own and name that in scene. check boots it headless for a few frames, waits for it to quit, and answers with the verdict: whether it came up, and every error and warning it printed on the way. A start waits for the game to become something the runtime_* tools can talk to and says which it is under runtime: listening with the port it took, or why not, so the first call after a start does not have to be made twice.',
+      'The run: starting the project, stopping it, or booting it once to see whether it comes up clean. start keeps it running and collecting output until it quits or is stopped, windowed where there is a display and headless where there is not, unless headless says otherwise; only runtime_capture needs the window. A run that quits on its own is kept, so a scene that prints an answer and quits is start, then editor_output until running is false. What runs is a scene: a SceneTree script is not an entry point here, so put the script on the root of a scene of its own and name that in scene. args hands the game its own flags, the ones it reads with OS.get_cmdline_user_args(), and a run carrying any is started by this server rather than by the editor. check boots it headless for a few frames, waits for it to quit, and answers with the verdict: whether it came up, and every error and warning it printed on the way. A start waits for the game to become something the runtime_* tools can talk to and says which it is under runtime: listening with the port it took, or why not, so the first call after a start does not have to be made twice.',
     parameters: {
       projectPath: PROJECT_PATH,
       scene: { type: 'string', description: 'A scene to run instead of the main scene.' },
+      args: {
+        type: 'array',
+        items: { type: 'string' },
+        description:
+          'The game\'s own arguments, what OS.get_cmdline_user_args() answers, such as ["--level=2"]. The separator is added here. A run with any is started by this server rather than by the editor, which fixes the game\'s command line when it opens the project, so the debug_* tools do not answer for it.',
+      },
       headless: { type: 'boolean', description: 'start: force a window or no window.' },
       frames: { type: 'number', description: 'check: frames to run before quitting. Default 3.' },
       timeoutMs: {
