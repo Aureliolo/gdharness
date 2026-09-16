@@ -24,7 +24,7 @@ import {
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
 import { announceBridge, announcementPath, readAnnouncement, withdrawBridge } from './bridge-announce.js';
-import { staleClassNames } from './class-cache.js';
+import { staleClassNames, type UnseenClass, unseenByEditor } from './class-cache.js';
 import { DEFAULT_DAP_PORT, GodotDAPClient, handleDAPTool } from './dap_client.js';
 import { dictionary, emptyRecord } from './dictionary.js';
 import { errorMessage, Refusal } from './errors.js';
@@ -2572,14 +2572,46 @@ class GodotServer {
       busy = Boolean(status['scanning']) || Boolean(status['importing']);
     }
 
+    const checked = busy ? { unseen: [] } : await this.classesTheEditorCannotSee(args);
+    const unseen = checked.unseen;
     return this.jsonTextResponse({
-      ok: !busy,
+      ok: !busy && unseen.length === 0 && checked.unchecked === undefined,
       stillWorking: busy,
       waitedMs: Date.now() - started,
+      unseenByEditor: unseen.length > 0 ? unseen : undefined,
+      classesUnchecked: checked.unchecked,
       note: busy
         ? 'The editor was still scanning or importing when the wait ran out, so new files may not be visible yet.'
-        : undefined,
+        : unseen.length > 0
+          ? 'The scan finished and these classes are still not in the list the editor resolves against, so every use of them reads as an unknown identifier. Its walk skips a file another engine has already imported. Change the declaring script and rescan, or restart the editor with editor_launch restart.'
+          : undefined,
     });
+  }
+
+  /**
+   * The project's own classes a connected editor is not holding, after a scan has finished.
+   *
+   * Asked of the editor rather than of the cache, because the cache is on disk and the state
+   * worth reporting is the one where disk is right and the editor is not.
+   *
+   * An editor that will not answer says so under `unchecked` rather than answering with nothing.
+   * Nothing is what a clean project answers, and a check whose failure is spelled the same as its
+   * pass is a check that stops being read: this one exists because two projects were told they
+   * were clean by three things in a row that were only silent.
+   */
+  private async classesTheEditorCannotSee(
+    args: OperationParams,
+  ): Promise<{ unseen: UnseenClass[]; unchecked?: string }> {
+    const projectPath = typeof args['projectPath'] === 'string' ? args['projectPath'] : '';
+    if (projectPath === '') {
+      return { unseen: [], unchecked: 'no projectPath, so there was nothing to read the cache from' };
+    }
+    const held = asParams(await this.godotBridge.invokeTool('global_classes', args));
+    if (held['ok'] !== true || !Array.isArray(held['classes'])) {
+      const said = typeof held['error'] === 'string' ? held['error'] : 'it answered no class list';
+      return { unseen: [], unchecked: `the editor did not say what classes it is holding: ${said}` };
+    }
+    return { unseen: unseenByEditor(projectPath, held['classes'].map(String)) };
   }
 
   private async handleViaBridge(toolName: string, args: OperationParams): Promise<ToolResponse> {
