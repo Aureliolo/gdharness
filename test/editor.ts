@@ -942,8 +942,11 @@ async function testEditorRescan({ call, project }: Editor): Promise<void> {
  * file, so the walk reads it as settled and never looks inside for the declaration. Two
  * projects lost a day each to it, both times to a diagnostic that was right and disbelieved.
  *
- * So the case is written the way it bites: a scan that says it finished while a class stays
- * unresolvable has to answer for it, and a real change to the declaring script has to cure it.
+ * Whether an editor has taken a newly written file in before anybody asks it to scan is the
+ * engine's business and is not the same on every platform: measured, a Linux editor has not and
+ * the rebuild names the class, a Windows one has. Both are true answers about that editor, so
+ * what is asserted is that the answer is true rather than which of the two it is, and that the
+ * cure holds everywhere. The editor is asked whether it can see the class, never told.
  */
 async function testAClassTheEditorCannotSee({ call, project }: Editor): Promise<void> {
   writeFileSync(join(project, 'late_class.gd'), 'class_name LateClass\nextends RefCounted\n');
@@ -952,8 +955,13 @@ async function testAClassTheEditorCannotSee({ call, project }: Editor): Promise<
   const cache = join(project, '.godot', 'global_script_class_cache.cfg');
   assert.ok(readFileSync(cache, 'utf8').includes('LateClass'), 'the cache on disk should list it');
   assert.equal(get(rebuilt, 'classesUnchecked'), undefined, `the editor answered: ${text(rebuilt)}`);
-  assert.equal(get(rebuilt, 'unseenByEditor'), undefined, `and holds this class: ${text(rebuilt)}`);
+  const named = asArray(get(rebuilt, 'unseenByEditor') ?? []).map((entry) => get(entry, 'className'));
+  assert.ok(
+    named.length === 0 || named.join(',') === 'LateClass',
+    `the only class it could be missing is the one just written: ${text(rebuilt)}`,
+  );
 
+  // A scan is the cure, and it is the half that holds on every platform.
   const seeing = await call('editor_rescan', { projectPath: project });
   assert.equal(get(seeing, 'ok'), true, `a scanned project resolves its own classes: ${text(seeing)}`);
   assert.equal(get(seeing, 'unseenByEditor'), undefined, `with nothing to name: ${text(seeing)}`);
@@ -964,11 +972,9 @@ async function testAClassTheEditorCannotSee({ call, project }: Editor): Promise<
  *
  * The editor holds the classes of the project it opened, so comparing them against another
  * project's cache makes every class in it look unseen. Guarding that is worth a case of its own
- * because it is also the one place the check reports a positive on demand: a silence here would
- * be the comparison never running, which is the shape this whole thing exists to stop, and the
- * blind state it was built for cannot be staged in a fixture. It takes a project an editor has
- * been sitting on and an engine that imported underneath it, and a temporary directory holding
- * one file is neither: measured, this editor picks such a file up on its own.
+ * because it is also the one place the check reports a positive on demand, whatever the platform
+ * does: a silence here is the comparison never running, which is the shape this whole thing
+ * exists to stop and is exactly how it first shipped.
  */
 async function testTheClassCheckKnowsWhichProjectItIsAbout({ call, project }: Editor): Promise<void> {
   const elsewhere = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-other-'));
