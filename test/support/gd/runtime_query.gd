@@ -579,9 +579,15 @@ func _check() -> void:
 	if serialised != {"_type": "Node", "class": "Node2D", "path": "/root/Level/Hero"}:
 		_fail("a node in the tree serialises with its path: %s" % str(serialised))
 	var loose: Node = Node.new()
-	var loose_serialised: Variant = node.values.serialize(loose)
-	if loose_serialised != {"_type": "Object", "class": "Node"}:
-		_fail("a node outside the tree has no path to give: %s" % str(loose_serialised))
+	var loose_fields: Dictionary = node.values.serialize(loose)
+	if loose_fields.get("_type") != "Object" or loose_fields.get("class") != "Node":
+		_fail("a node outside the tree serialises as a plain object: %s" % str(loose_fields))
+	if loose_fields.has("path"):
+		_fail("a node outside the tree has no path to give, and must not invent one: %s" % str(loose_fields))
+	# Checked for being there rather than for a value, since it is different per object, which is
+	# the point of it: a list of a dozen of these used to be a dozen identical answers.
+	if not loose_fields.has("id"):
+		_fail("a plain object carries an id, so two of them read as two: %s" % str(loose_fields))
 	loose.free()
 
 	panel.free()
