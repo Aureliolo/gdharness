@@ -241,6 +241,13 @@ once the server is there, rather than waiting for somebody to restart it.
 | `editor_run`                                                          | Editor bridge when an editor is connected, otherwise a spawned game | Nothing, though the editor changes what it does |
 | `editor_status`                                                       | All of them, reporting what answers                                 | Nothing                                         |
 
+`project_import refresh_classes` is the one headless call that also asks the editor, when one is
+connected and open on the same project. Rewriting the cache does not reach the list a running
+editor already loaded, so a class it cannot resolve stays unresolvable and the rebuild still
+answers `added: []`. Any such class comes back under `unseenByEditor`, and `classesUnchecked` says
+so when the editor would not answer, because a check that goes quiet on failure reads exactly like
+a clean project. `editor_rescan` reports the same two after its scan.
+
 ## Running the game
 
 `editor_run` asks the editor to play, and connects the debug adapter first so the game's first

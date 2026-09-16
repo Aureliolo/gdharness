@@ -9,6 +9,7 @@ const SceneTools = preload("tools/scene_tools.gd")
 const ResourceTools = preload("tools/resource_tools.gd")
 const AnimationTools = preload("tools/animation_tools.gd")
 const PlayTools = preload("tools/play_tools.gd")
+const ClassTools = preload("tools/class_tools.gd")
 
 var _editor_plugin: EditorPlugin = null
 
@@ -16,6 +17,7 @@ var _scene_tools: SceneTools = null
 var _resource_tools: ResourceTools = null
 var _animation_tools: AnimationTools = null
 var _play_tools: PlayTools = null
+var _class_tools: ClassTools = null
 
 var _tool_map: Dictionary = {}
 var _initialized: bool = false
@@ -28,6 +30,7 @@ func set_editor_plugin(plugin: EditorPlugin) -> void:
 	_resource_tools.set_editor_plugin(plugin)
 	_animation_tools.set_editor_plugin(plugin)
 	_play_tools.set_editor_plugin(plugin)
+	_class_tools.set_editor_plugin(plugin)
 
 
 func _init_tools() -> void:
@@ -51,6 +54,10 @@ func _init_tools() -> void:
 	_play_tools.name = "PlayTools"
 	add_child(_play_tools)
 
+	_class_tools = ClassTools.new()
+	_class_tools.name = "ClassTools"
+	add_child(_class_tools)
+
 	_tool_map = {
 		# Scene tools
 		"create_scene": [_scene_tools, "create_scene"],
@@ -66,6 +73,7 @@ func _init_tools() -> void:
 		"disconnect_signal": [_scene_tools, "disconnect_signal"],
 		"list_connections": [_scene_tools, "list_connections"],
 		"rescan_filesystem": [_scene_tools, "rescan_filesystem"],
+		"global_classes": [_class_tools, "global_classes"],
 		# Resource tools
 		"create_resource": [_resource_tools, "create_resource"],
 		"modify_resource": [_resource_tools, "modify_resource"],
