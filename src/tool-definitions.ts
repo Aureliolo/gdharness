@@ -728,8 +728,16 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'boolean',
         description: 'Only entries printed since the previous editor_output. Default false.',
       },
-      contains: { type: 'string', description: 'Only entries mentioning this text.' },
-      limit: { type: 'number', description: 'The most entries to answer with, newest kept. Default 200.' },
+      contains: {
+        type: 'string',
+        description:
+          'Only entries mentioning this text, matched against everything the run has printed rather than against the entries this answer would otherwise carry: a line is found however much was printed after it.',
+      },
+      limit: {
+        type: 'number',
+        description:
+          'The most entries to answer with, newest kept. Default 200, and omitted says how many matching entries that left out. A run long enough to pass it needs this raised, not just filtered: filtering narrows what counts as matching, and the newest of those is still all one answer carries.',
+      },
     },
     requires: [],
   },
