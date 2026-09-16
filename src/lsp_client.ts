@@ -155,6 +155,7 @@ export class GodotLSPClient {
     if (!this.socket) {
       this.connected = false;
       this.initialized = false;
+      this.forgetOpenDocuments();
       return;
     }
 
@@ -162,6 +163,7 @@ export class GodotLSPClient {
     this.socket = null;
     this.connected = false;
     this.initialized = false;
+    this.forgetOpenDocuments();
 
     await new Promise<void>((resolveClose) => {
       socketToClose.once('close', () => {
@@ -328,6 +330,7 @@ export class GodotLSPClient {
     this.connected = false;
     this.initialized = false;
     this.socket = null;
+    this.forgetOpenDocuments();
     const failure = new Error(`Godot LSP connection error: ${error.message}`);
     this.rejectAllPending(failure);
     this.rejectAllDiagnosticsWaiters(failure);
@@ -337,9 +340,24 @@ export class GodotLSPClient {
     this.connected = false;
     this.initialized = false;
     this.socket = null;
+    this.forgetOpenDocuments();
     const closed = new Error('Godot LSP socket closed');
     this.rejectAllPending(closed);
     this.rejectAllDiagnosticsWaiters(closed);
+  }
+
+  /**
+   * Forget which documents the server has been told about.
+   *
+   * A version above zero means didOpen has gone out, so the next sync sends didChange instead.
+   * That is true of the connection it went out on and of no other: an editor that restarts is a
+   * language server with no record of the document, and Godot publishes nothing at all for a
+   * didChange naming one it never opened. This client outlives the editor, so every file asked
+   * about before a restart went silent afterwards, with the same socket answering documentSymbol
+   * on the same file completely and currently. Reproduced on two projects and on two versions.
+   */
+  private forgetOpenDocuments(): void {
+    this.documentVersions.clear();
   }
 
   private rejectAllPending(error: Error): void {
