@@ -172,12 +172,12 @@ func _found(node: Node, wanted_property: String) -> Dictionary:
 	if reached.has("message"):
 		entry["has_property"] = false
 		return entry
-	var holder: Object = reached["holder"]
+	var holder: Variant = reached["holder"]
 	var named: String = reached["name"]
-	var has: bool = _has_property(holder, named)
+	var has: bool = _can_read(holder, named)
 	entry["has_property"] = has
 	if has:
-		entry["value"] = _values.serialize(holder.get(named))
+		entry["value"] = _values.serialize(_read(holder, named))
 	return entry
 
 
@@ -500,18 +500,18 @@ func get_property(params: Dictionary) -> Dictionary:
 	if reached.has("message"):
 		return reached
 
-	var holder: Object = reached["holder"]
+	var holder: Variant = reached["holder"]
 	var named: String = reached["name"]
-	# Asked of the property list rather than read and compared to null, because a property the
-	# holder does not have and a property that is null both read as null.
-	if not _has_property(holder, named):
-		return {"type": "error", "message": "%s has no property %s" % [reached["called"], named]}
+	# Asked of the holder rather than read and compared to null, because a property the holder does
+	# not have and a property that is null both read as null.
+	if not _can_read(holder, named):
+		return {"type": "error", "message": _nothing_there(holder, named, str(reached["called"]))}
 
 	return {
 		"type": "property",
 		"path": node_path,
 		"property": property,
-		"value": _values.serialize(holder.get(named)),
+		"value": _values.serialize(_read(holder, named)),
 	}
 
 
@@ -532,19 +532,113 @@ func get_property(params: Dictionary) -> Dictionary:
 ## clocks" is a typo found, and "no property _game:clocks:speed" is a puzzle.
 func _reached(node: Node, node_path: String, reaching: String) -> Dictionary:
 	var parts: PackedStringArray = reaching.split(":")
-	var holder: Object = node
+	var holder: Variant = node
 	var called: String = node_path
 	for step: int in parts.size() - 1:
 		var named: String = parts[step]
-		if not _has_property(holder, named):
-			return {"type": "error", "message": "%s has no property %s" % [called, named]}
-		var next: Variant = holder.get(named)
+		if not _can_read(holder, named):
+			return {"type": "error", "message": _nothing_there(holder, named, called)}
+		holder = _read(holder, named)
 		called = "%s:%s" % [called, named]
-		if not next is Object:
+		if not _can_hold(holder):
 			var wanted: String = parts[step + 1]
 			return {"type": "error", "message": "%s holds no object to read %s off" % [called, wanted]}
-		holder = next
 	return {"holder": holder, "name": parts[parts.size() - 1], "called": called}
+
+
+## Whether a step can be taken into [param value] at all: an object, a list or a map can be walked
+## into, and a number or a string is where a path ends whether the caller meant it to or not.
+static func _can_hold(value: Variant) -> bool:
+	return value is Object or value is Array or value is Dictionary
+
+
+## Whether [param named] is something [param holder] has.
+##
+## Three kinds of holder, because the state a game keeps is not all properties of objects: a roster
+## is a list and an in-tray is a map, and a path that could not step into either stopped at the
+## first one. An index reads the way a property does, and a negative one counts from the end the
+## way GDScript's own does, so reading the last of something does not mean asking how many first.
+static func _can_read(holder: Variant, named: String) -> bool:
+	if holder is Array:
+		var items: Array = holder
+		return _index_in(named, items.size()) != -1
+	if holder is Dictionary:
+		var map: Dictionary = holder
+		return map.has(named) or map.has(StringName(named))
+	if holder is Object:
+		return _has_property(holder, named)
+	return false
+
+
+## Put [param value] where [param named] points. Only ever called once [method _can_read] agrees,
+## and lists and maps are reference types, so writing into one reaches the game's own copy.
+static func _write(holder: Variant, named: String, value: Variant) -> void:
+	if holder is Array:
+		var items: Array = holder
+		items[_index_in(named, items.size())] = value
+		return
+	if holder is Dictionary:
+		var map: Dictionary = holder
+		# Written back under the key it was found under, since a map keyed by StringName and one
+		# keyed by String both read the same way and a write to the wrong one adds a second entry.
+		if map.has(named):
+			map[named] = value
+		else:
+			map[StringName(named)] = value
+		return
+	var object: Object = holder
+	object.set(named, value)
+
+
+## What [param holder] holds under [param named]. Only ever called once [method _can_read] agrees.
+static func _read(holder: Variant, named: String) -> Variant:
+	if holder is Array:
+		var items: Array = holder
+		return items[_index_in(named, items.size())]
+	if holder is Dictionary:
+		var map: Dictionary = holder
+		if map.has(named):
+			return map[named]
+		return map[StringName(named)]
+	var object: Object = holder
+	return object.get(named)
+
+
+## Where [param named] lands in a list of [param size], or -1 for a step that is not in it.
+##
+## -1 for "nowhere" is safe because every answer this gives is an index into a list that long, so a
+## real one is never negative by the time it is returned.
+static func _index_in(named: String, size: int) -> int:
+	if not named.is_valid_int():
+		return -1
+	var index: int = int(named)
+	if index < 0:
+		index += size
+	return index if index >= 0 and index < size else -1
+
+
+## Why a step could not be taken, said in the terms of what was actually there.
+##
+## "has no property 0" about a list is a true sentence that sends somebody looking for a property,
+## so a list says how long it is and a map says what it is keyed by. The step is named rather than
+## the whole path, because the step is the typo.
+static func _nothing_there(holder: Variant, named: String, called: String) -> String:
+	if holder is Array:
+		var items: Array = holder
+		return "%s is a list of %d, so there is no %s in it" % [called, items.size(), named]
+	if holder is Dictionary:
+		var map: Dictionary = holder
+		var keys: Array = map.keys()
+		# Eight of them, because a map keyed by something unexpected is told by the first few and a
+		# map of two hundred would bury the sentence saying which key was missing.
+		var some: PackedStringArray = []
+		for key: Variant in keys.slice(0, 8):
+			some.append(str(key))
+		var rest: String = ""
+		if keys.size() > 8:
+			rest = " and %d more" % [keys.size() - 8]
+		return "%s has no key %s; it is keyed by %s%s" % [called, named, ", ".join(some), rest]
+	return "%s has no property %s" % [called, named]
 
 
 ## Whether [param holder] declares [param named]. Its own function because three ops ask it and a
@@ -576,17 +670,19 @@ func set_property(params: Dictionary) -> Dictionary:
 	if reached.has("message"):
 		return reached
 
-	var holder: Object = reached["holder"]
+	var holder: Variant = reached["holder"]
 	var named: String = reached["name"]
-	var old_value: Variant = holder.get(named)
-	holder.set(named, _values.fitted(value, typeof(old_value)))
+	if not _can_read(holder, named):
+		return {"type": "error", "message": _nothing_there(holder, named, str(reached["called"]))}
+	var old_value: Variant = _read(holder, named)
+	_write(holder, named, _values.fitted(value, typeof(old_value)))
 
 	return {
 		"type": "property_set",
 		"path": node_path,
 		"property": property,
 		"old_value": _values.serialize(old_value),
-		"new_value": _values.serialize(holder.get(named))
+		"new_value": _values.serialize(_read(holder, named))
 	}
 
 
@@ -610,6 +706,19 @@ func call_method(params: Dictionary) -> Dictionary:
 	if reached.has("message"):
 		return reached
 
+	# A list or a map can be stepped through on the way, and is not a thing with methods when the
+	# path stops on one: said in those terms rather than as "has no method", which reads as a
+	# misspelling of a method that was never going to be there.
+	if not reached["holder"] is Object:
+		var sort: String = "a list" if reached["holder"] is Array else "a map"
+		return {
+			"type": "error",
+			"message":
+			(
+				"%s is %s, which has no methods: name the element to call it on, as in %s:0:%s"
+				% [reached["called"], sort, reached["called"], reached["name"]]
+			)
+		}
 	var holder: Object = reached["holder"]
 	var named: String = reached["name"]
 	if not holder.has_method(named):
