@@ -150,8 +150,11 @@ func _serialize_object(value: Object) -> Dictionary:
 ## put in it, because a key holding "" is a worse answer than a key that is not there.
 func _describe_object(value: Object) -> Dictionary:
 	var described: Dictionary = {"_type": "Object", "class": value.get_class()}
-	var script: Script = value.get_script() as Script
-	if script != null:
+	# Asked as a Variant and narrowed, because get_script answers one and an object without a
+	# script answers null: casting that to Script is the unsafe cast the engine refuses to compile.
+	var attached: Variant = value.get_script()
+	if attached is Script:
+		var script: Script = attached
 		var declared: String = String(script.get_global_name())
 		if not declared.is_empty():
 			described["script_class"] = declared

@@ -579,7 +579,12 @@ static func _write(holder: Variant, named: String, value: Variant) -> void:
 		return
 	if holder is Dictionary:
 		var map: Dictionary = holder
-		map[named if map.has(named) else StringName(named)] = value
+		# Written back under the key it was found under, since a map keyed by StringName and one
+		# keyed by String both read the same way and a write to the wrong one adds a second entry.
+		if map.has(named):
+			map[named] = value
+		else:
+			map[StringName(named)] = value
 		return
 	var object: Object = holder
 	object.set(named, value)
@@ -592,7 +597,9 @@ static func _read(holder: Variant, named: String) -> Variant:
 		return items[_index_in(named, items.size())]
 	if holder is Dictionary:
 		var map: Dictionary = holder
-		return map[named] if map.has(named) else map[StringName(named)]
+		if map.has(named):
+			return map[named]
+		return map[StringName(named)]
 	var object: Object = holder
 	return object.get(named)
 
@@ -622,9 +629,15 @@ static func _nothing_there(holder: Variant, named: String, called: String) -> St
 	if holder is Dictionary:
 		var map: Dictionary = holder
 		var keys: Array = map.keys()
-		var some: String = ", ".join(keys.slice(0, 8).map(func(key: Variant) -> String: return str(key)))
-		var rest: String = " and %d more" % [keys.size() - 8] if keys.size() > 8 else ""
-		return "%s has no key %s; it is keyed by %s%s" % [called, named, some, rest]
+		# Eight of them, because a map keyed by something unexpected is told by the first few and a
+		# map of two hundred would bury the sentence saying which key was missing.
+		var some: PackedStringArray = []
+		for key: Variant in keys.slice(0, 8):
+			some.append(str(key))
+		var rest: String = ""
+		if keys.size() > 8:
+			rest = " and %d more" % [keys.size() - 8]
+		return "%s has no key %s; it is keyed by %s%s" % [called, named, ", ".join(some), rest]
 	return "%s has no property %s" % [called, named]
 
 
