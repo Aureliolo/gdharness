@@ -28,7 +28,23 @@ class Kept:
 	var inner: Resource = Deeper.new()
 
 
+class Person:
+	extends RefCounted
+	var called: String = ""
+
+	func _init(name_given: String = "") -> void:
+		called = name_given
+
+	func _to_string() -> String:
+		return "Person(%s)" % called
+
+	func loudly() -> String:
+		return called.to_upper()
+
+
 var held: Kept = Kept.new()
+var roster: Array = [Person.new("Ada"), Person.new("Bram")]
+var tray: Dictionary = {"post": 3, "wages": 12}
 """
 
 var failures: Array[String] = []
@@ -302,6 +318,83 @@ func _check_reading_through_a_path() -> void:
 	if first.get("has_property") != true or first.get("value") != 9:
 		_fail("a find reads a path off everything it matched: %s" % str(found))
 
+	await _check_reading_into_a_list()
+
+
+## The state a management game actually keeps: a list of plain objects hanging off a node.
+##
+## A roster, a board, an in-tray, a town of rival houses. None of them are Nodes, so a find cannot
+## reach them, and the path walk stopped at the list: `roster:0:called` answered that the roster
+## held no object to read 0 off. A project changed what a person is dealt, measured it over
+## eighteen hundred simulated guilds, and could not look at one person in the running game.
+##
+## An index walks into a list the way a name walks into an object, a negative one counts from the
+## end, and a key walks into a map. What is not there says what was there instead, because "has no
+## property 0" about a list sends somebody looking for a property.
+func _check_reading_into_a_list() -> void:
+	var person: Dictionary = await node._execute_command(
+		"get_property", {"path": "/root/Level/Hero", "property": "roster:0:called"}
+	)
+	if person.get("type") != "property" or person.get("value") != "Ada":
+		_fail("an index walks into a list the way a name walks into an object: %s" % str(person))
+
+	var last: Dictionary = await node._execute_command(
+		"get_property", {"path": "/root/Level/Hero", "property": "roster:-1:called"}
+	)
+	if last.get("value") != "Bram":
+		_fail("a negative index counts from the end, so the last needs no count first: %s" % str(last))
+
+	var keyed: Dictionary = await node._execute_command(
+		"get_property", {"path": "/root/Level/Hero", "property": "tray:wages"}
+	)
+	if keyed.get("value") != 12:
+		_fail("a key walks into a map: %s" % str(keyed))
+
+	var past_end: Dictionary = await node._execute_command(
+		"get_property", {"path": "/root/Level/Hero", "property": "roster:5:called"}
+	)
+	var said: String = str(past_end.get("message", ""))
+	if past_end.get("type") != "error" or not said.contains("list of 2"):
+		_fail("an index a list has not got says how long the list is: %s" % str(past_end))
+
+	var no_key: Dictionary = await node._execute_command(
+		"get_property", {"path": "/root/Level/Hero", "property": "tray:rent"}
+	)
+	var missing: String = str(no_key.get("message", ""))
+	if no_key.get("type") != "error" or not missing.contains("post"):
+		_fail("a key a map has not got says what it is keyed by: %s" % str(no_key))
+
+	var written: Dictionary = await node._execute_command(
+		"set_property", {"path": "/root/Level/Hero", "property": "roster:1:called", "value": "Cass"}
+	)
+	if written.get("type") != "property_set" or written.get("new_value") != "Cass":
+		_fail("an element is written through the same path it is read through: %s" % str(written))
+
+	var called: Dictionary = await node._execute_command(
+		"call_method", {"path": "/root/Level/Hero", "method": "roster:0:loudly"}
+	)
+	if called.get("result") != "ADA":
+		_fail("a method is called on an element of a list: %s" % str(called))
+
+	# A list is not a thing with methods, and saying "has no method" would read as a misspelling.
+	var on_the_list: Dictionary = await node._execute_command(
+		"call_method", {"path": "/root/Level/Hero", "method": "roster:loudly"}
+	)
+	if on_the_list.get("type") != "error" or not str(on_the_list.get("message", "")).contains("is a list"):
+		_fail("a path stopping on a list says so in those terms: %s" % str(on_the_list))
+
+	# And the list itself, which was twelve copies of the word RefCounted with nothing to tell them
+	# apart. Each element carries what the game calls it, so a roster reads as people.
+	var whole: Dictionary = await node._execute_command(
+		"get_property", {"path": "/root/Level/Hero", "property": "roster"}
+	)
+	var people: Array = whole.get("value", [])
+	var says: PackedStringArray = []
+	for one: Dictionary in people:
+		says.append(str(one.get("says", "")))
+	if says != PackedStringArray(["Person(Ada)", "Person(Cass)"]):
+		_fail("a list of objects is rendered so its elements can be told apart: %s" % str(whole))
+
 	var absent: Dictionary = await node._execute_command(
 		"find_nodes", {"name": "Heroine", "property": "held:inner:depth"}
 	)
@@ -486,9 +579,15 @@ func _check() -> void:
 	if serialised != {"_type": "Node", "class": "Node2D", "path": "/root/Level/Hero"}:
 		_fail("a node in the tree serialises with its path: %s" % str(serialised))
 	var loose: Node = Node.new()
-	var loose_serialised: Variant = node.values.serialize(loose)
-	if loose_serialised != {"_type": "Object", "class": "Node"}:
-		_fail("a node outside the tree has no path to give: %s" % str(loose_serialised))
+	var loose_fields: Dictionary = node.values.serialize(loose)
+	if loose_fields.get("_type") != "Object" or loose_fields.get("class") != "Node":
+		_fail("a node outside the tree serialises as a plain object: %s" % str(loose_fields))
+	if loose_fields.has("path"):
+		_fail("a node outside the tree has no path to give, and must not invent one: %s" % str(loose_fields))
+	# Checked for being there rather than for a value, since it is different per object, which is
+	# the point of it: a list of a dozen of these used to be a dozen identical answers.
+	if not loose_fields.has("id"):
+		_fail("a plain object carries an id, so two of them read as two: %s" % str(loose_fields))
 	loose.free()
 
 	panel.free()
