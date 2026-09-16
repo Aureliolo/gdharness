@@ -24,7 +24,7 @@ import {
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
 import { announceBridge, announcementPath, readAnnouncement, withdrawBridge } from './bridge-announce.js';
-import { staleClassNames } from './class-cache.js';
+import { staleClassNames, type UnseenClass, unseenByEditor } from './class-cache.js';
 import { DEFAULT_DAP_PORT, GodotDAPClient, handleDAPTool } from './dap_client.js';
 import { dictionary, emptyRecord } from './dictionary.js';
 import { errorMessage, Refusal } from './errors.js';
@@ -2572,14 +2572,37 @@ class GodotServer {
       busy = Boolean(status['scanning']) || Boolean(status['importing']);
     }
 
+    const unseen = busy ? [] : await this.classesTheEditorCannotSee(args);
     return this.jsonTextResponse({
-      ok: !busy,
+      ok: !busy && unseen.length === 0,
       stillWorking: busy,
       waitedMs: Date.now() - started,
+      unseenByEditor: unseen.length > 0 ? unseen : undefined,
       note: busy
         ? 'The editor was still scanning or importing when the wait ran out, so new files may not be visible yet.'
-        : undefined,
+        : unseen.length > 0
+          ? 'The scan finished and these classes are still not in the list the editor resolves against, so every use of them reads as an unknown identifier. Its walk skips a file another engine has already imported. Change the declaring script and rescan, or restart the editor with editor_launch restart.'
+          : undefined,
     });
+  }
+
+  /**
+   * The project's own classes a connected editor is not holding, after a scan has finished.
+   *
+   * Asked of the editor rather than of the cache, because the cache is on disk and the state
+   * worth reporting is the one where disk is right and the editor is not. An editor that cannot
+   * answer is not evidence of anything, so it reports nothing.
+   */
+  private async classesTheEditorCannotSee(args: OperationParams): Promise<UnseenClass[]> {
+    const projectPath = typeof args['projectPath'] === 'string' ? args['projectPath'] : '';
+    if (projectPath === '') {
+      return [];
+    }
+    const held = asParams(await this.godotBridge.invokeTool('global_classes', args));
+    if (held['ok'] !== true || !Array.isArray(held['classes'])) {
+      return [];
+    }
+    return unseenByEditor(projectPath, held['classes'].map(String));
   }
 
   private async handleViaBridge(toolName: string, args: OperationParams): Promise<ToolResponse> {

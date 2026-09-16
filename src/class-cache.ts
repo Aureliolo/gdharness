@@ -62,3 +62,26 @@ export function staleClassNames(projectPath: string): string[] {
   const cached = cachedClasses(projectPath);
   return cached === null ? [...declaredClasses(projectPath).keys()] : staleAgainst(cached, projectPath);
 }
+
+/** A class the cache records and the editor is not holding, with the script that declares it. */
+export interface UnseenClass {
+  readonly className: string;
+  readonly path: string;
+}
+
+/**
+ * The classes on disk a running editor cannot resolve, whatever the cache says.
+ *
+ * Every other check here compares one file on disk with another, so the state that costs people
+ * a day passes all of them: the class is declared, the cache lists it, and the editor's own list
+ * does not have it because its change-detecting scan walked past a file another engine had
+ * already imported. The editor is the only thing that can report this, so it is asked.
+ */
+export function unseenByEditor(projectPath: string, editorHolds: readonly string[]): UnseenClass[] {
+  const held = new Set(editorHolds);
+  const declared = declaredClasses(projectPath);
+  const source = cachedClasses(projectPath) ?? declared;
+  return [...source]
+    .filter(([name]) => !held.has(name) && declared.has(name))
+    .map(([className, path]) => ({ className, path: declared.get(className) ?? path }));
+}

@@ -932,6 +932,40 @@ async function testEditorRescan({ call, project }: Editor): Promise<void> {
 }
 
 /**
+ * A class declared on disk, listed in the cache, and invisible to the editor.
+ *
+ * This is the state every check gdharness had called clean, because all of them compared one
+ * file on disk against another and both of those are correct here. What is wrong is the list
+ * inside the editor: its scan is change-detecting, a headless engine has already recorded the
+ * file, so the walk reads it as settled and never looks inside for the declaration. Two
+ * projects lost a day each to it, both times to a diagnostic that was right and disbelieved.
+ *
+ * So the case is written the way it bites: a scan that says it finished while a class stays
+ * unresolvable has to answer for it, and a real change to the declaring script has to cure it.
+ */
+async function testAClassTheEditorCannotSee({ call, project }: Editor): Promise<void> {
+  const declaring = join(project, 'late_class.gd');
+  writeFileSync(declaring, 'class_name LateClass\nextends RefCounted\n');
+
+  // What puts the file beyond the editor's walk: another engine records it and writes its .uid.
+  await call('project_import', { projectPath: project, op: 'reimport' });
+  await call('project_import', { projectPath: project, op: 'refresh_classes' });
+
+  const blind = await call('editor_rescan', { projectPath: project });
+  assert.equal(get(blind, 'ok'), false, `a scan leaving a class unresolvable is not clean: ${text(blind)}`);
+  const named = asArray(get(blind, 'unseenByEditor')).map((entry) => get(entry, 'className'));
+  assert.deepEqual(named, ['LateClass'], `the class the editor cannot see should be named: ${text(blind)}`);
+
+  writeFileSync(
+    declaring,
+    'class_name LateClass\nextends RefCounted\n\n\nfunc answer() -> int:\n\treturn 33\n',
+  );
+  const seeing = await call('editor_rescan', { projectPath: project });
+  assert.equal(get(seeing, 'ok'), true, `a changed script should reach the editor's list: ${text(seeing)}`);
+  assert.equal(get(seeing, 'unseenByEditor'), undefined, `and leave nothing to name: ${text(seeing)}`);
+}
+
+/**
  * The language server tools, which answer from the editor's own server rather than from the addon.
  *
  * Both scripts are driven, the one that parses and the one that does not. A diagnostics tool
@@ -1636,6 +1670,7 @@ async function main(): Promise<void> {
     await testResources(editor);
     await testResourcesOnNodes(editor);
     await testEditorRescan(editor);
+    await testAClassTheEditorCannotSee(editor);
     await testLanguageServer(editor);
     await testDebugging(editor);
     await testRuntime(editor);
