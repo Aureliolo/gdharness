@@ -737,7 +737,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'editor_rescan',
     description:
-      'Makes the running editor scan the project filesystem, so files written outside it, and any class_name they declare, become visible. Needs the editor connected.',
+      'Makes the running editor scan the project filesystem, so files written outside it are picked up. The scan is a change-detecting walk rather than an unconditional reparse, so a file the editor has already recorded and reads as unchanged is one it does not look inside again: a class_name usually becomes visible this way and on one project did not, with the cache on disk still missing it after the scan said it was done. project_import refresh_classes is the one that rebuilds the class list from the declarations on disk, whatever the editor thinks it has seen. Needs the editor connected.',
     parameters: {
       projectPath: PROJECT_PATH,
       timeoutMs: { type: 'number', description: 'How long to wait for the scan. Default 30000.' },
