@@ -13,10 +13,19 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-/** Every `class_name` declared under the project, with the script that declares it. */
+/**
+ * Every `class_name` declared under the project, with the script that declares it.
+ *
+ * A directory holding a `.gdignore` is stepped over, because the engine steps over it: nothing
+ * inside is imported and no declaration in there is ever a global class. Counting them makes a
+ * correct project look like one whose editor has gone blind, every time it is asked.
+ */
 function declaredClasses(projectPath: string): Map<string, string> {
   const declared = new Map<string, string>();
   const visit = (directory: string, prefix: string): void => {
+    if (existsSync(join(directory, '.gdignore'))) {
+      return;
+    }
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
       if (entry.name.startsWith('.')) {
         continue;

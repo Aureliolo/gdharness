@@ -361,7 +361,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       refresh_uids: { summary: 'resave every resource so UID references are current', requires: [] },
       refresh_classes: {
         summary:
-          'rewrite .godot/global_script_class_cache.cfg from the class_name declarations on disk, for an editor whose list has gone stale',
+          'rewrite .godot/global_script_class_cache.cfg from the class_name declarations on disk, and name under unseenByEditor any class the editor open on this project still cannot resolve: rewriting the file does not reach the list a running editor loaded, so "added: []" means the file was already right rather than that nothing is wrong',
         requires: [],
       },
     },

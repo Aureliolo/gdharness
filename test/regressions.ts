@@ -1921,6 +1921,18 @@ function testClassesAnEditorIsNotHolding(): void {
       [],
       'a name only the editor has is not a class it cannot see',
     );
+
+    // The engine imports nothing under a .gdignore, so no declaration in there is ever a global
+    // class and no editor will ever hold one. Counted, they make a correct project look blind.
+    mkdirSync(join(sandbox, 'vendor'), { recursive: true });
+    writeFileSync(join(sandbox, 'vendor', '.gdignore'), '');
+    writeFileSync(join(sandbox, 'vendor', 'stowaway.gd'), 'class_name Stowaway\nextends Node\n');
+    assert.deepEqual(
+      unseenByEditor(sandbox, ['Hero', 'Squire']),
+      [],
+      'a declaration the engine itself skips is not one the editor is missing',
+    );
+    assert.deepEqual(staleClassNames(sandbox), [], 'and it is not missing from the cache either');
   } finally {
     rmSync(sandbox, { recursive: true, force: true });
   }

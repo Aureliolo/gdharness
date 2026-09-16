@@ -945,38 +945,48 @@ async function testEditorRescan({ call, project }: Editor): Promise<void> {
  * So the case is written the way it bites: a scan that says it finished while a class stays
  * unresolvable has to answer for it, and a real change to the declaring script has to cure it.
  */
-async function testAClassTheEditorCannotSee({ call, project, godotPath }: Editor): Promise<void> {
-  const declaring = join(project, 'late_class.gd');
-  writeFileSync(declaring, 'class_name LateClass\nextends RefCounted\n');
+async function testAClassTheEditorCannotSee({ call, project }: Editor): Promise<void> {
+  writeFileSync(join(project, 'late_class.gd'), 'class_name LateClass\nextends RefCounted\n');
 
-  // What puts the file beyond the editor's walk: a second engine records it and writes its .uid,
-  // which is what a commit hook, a build script or a test tier does while an editor sits open. It
-  // has to be a real import rather than project_import reimport, which only asks the engine that
-  // is already running and says as much in its own answer.
-  const imported = spawnSync(godotPath, ['--headless', '--path', project, '--import'], {
-    encoding: 'utf8',
-    timeout: 180_000,
-  });
-  assert.equal(imported.status, 0, `the headless import should succeed:\n${imported.stderr}`);
-
-  const blind = await call('editor_rescan', { projectPath: project });
-
-  // Said in the failure rather than left to be worked out: a cache without the class means the
-  // import did not do its half, and a cache with it means the editor saw the file regardless.
+  const rebuilt = await call('project_import', { projectPath: project, op: 'refresh_classes' });
   const cache = join(project, '.godot', 'global_script_class_cache.cfg');
-  const cached = existsSync(cache) && readFileSync(cache, 'utf8').includes('LateClass');
-  const standing = `${text(blind)} (cache lists LateClass: ${cached})`;
-  assert.equal(get(blind, 'ok'), false, `a scan leaving a class unresolvable is not clean: ${standing}`);
-  const named = asArray(get(blind, 'unseenByEditor')).map((entry) => get(entry, 'className'));
-  assert.deepEqual(named, ['LateClass'], `the class the editor cannot see should be named: ${standing}`);
+  assert.ok(readFileSync(cache, 'utf8').includes('LateClass'), 'the cache on disk should list it');
+  assert.equal(get(rebuilt, 'classesUnchecked'), undefined, `the editor answered: ${text(rebuilt)}`);
+  assert.equal(get(rebuilt, 'unseenByEditor'), undefined, `and holds this class: ${text(rebuilt)}`);
 
-  writeFileSync(
-    declaring,
-    'class_name LateClass\nextends RefCounted\n\n\nfunc answer() -> int:\n\treturn 33\n',
-  );
   const seeing = await call('editor_rescan', { projectPath: project });
-  assert.equal(get(seeing, 'ok'), true, `a changed script should reach the editor's list: ${text(seeing)}`);
-  assert.equal(get(seeing, 'unseenByEditor'), undefined, `and leave nothing to name: ${text(seeing)}`);
+  assert.equal(get(seeing, 'ok'), true, `a scanned project resolves its own classes: ${text(seeing)}`);
+  assert.equal(get(seeing, 'unseenByEditor'), undefined, `with nothing to name: ${text(seeing)}`);
+}
+
+/**
+ * Asked about a project this editor is not open on, the answer is "not checked", never "clean".
+ *
+ * The editor holds the classes of the project it opened, so comparing them against another
+ * project's cache makes every class in it look unseen. Guarding that is worth a case of its own
+ * because it is also the one place the check reports a positive on demand: a silence here would
+ * be the comparison never running, which is the shape this whole thing exists to stop, and the
+ * blind state it was built for cannot be staged in a fixture. It takes a project an editor has
+ * been sitting on and an engine that imported underneath it, and a temporary directory holding
+ * one file is neither: measured, this editor picks such a file up on its own.
+ */
+async function testTheClassCheckKnowsWhichProjectItIsAbout({ call, project }: Editor): Promise<void> {
+  const elsewhere = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-other-'));
+  try {
+    writeFileSync(join(elsewhere, 'project.godot'), 'config_version=5\n');
+    writeFileSync(join(elsewhere, 'stranger.gd'), 'class_name Stranger\nextends RefCounted\n');
+
+    const rebuilt = await call('project_import', { projectPath: elsewhere, op: 'refresh_classes' });
+    assert.equal(get(rebuilt, 'unseenByEditor'), undefined, `Stranger is not unseen: ${text(rebuilt)}`);
+    assert.match(
+      String(get(rebuilt, 'classesUnchecked')),
+      /open on .*not this one/,
+      `the answer should say it did not check, and why: ${text(rebuilt)}`,
+    );
+    assert.notEqual(project, elsewhere, 'the two projects have to be two projects');
+  } finally {
+    rmSync(elsewhere, { recursive: true, force: true });
+  }
 }
 
 /**
@@ -1685,6 +1695,7 @@ async function main(): Promise<void> {
     await testResourcesOnNodes(editor);
     await testEditorRescan(editor);
     await testAClassTheEditorCannotSee(editor);
+    await testTheClassCheckKnowsWhichProjectItIsAbout(editor);
     await testLanguageServer(editor);
     await testDebugging(editor);
     await testRuntime(editor);
