@@ -45,6 +45,17 @@ func set_project_setting(params: Dictionary) -> Dictionary:
 		old_value = ProjectSettings.get_setting(setting_path)
 
 	var final_value: Variant = _values.deserialize_value(value)
+	var wanted: int = _wanted_type(setting_path, old_value if had_value else null)
+	if wanted > TYPE_NIL and final_value != null and typeof(final_value) != wanted:
+		if not _converts_faithfully(final_value, wanted):
+			return _log.failure(
+				(
+					"%s is declared as %s, and %s (%s) cannot be written as that without losing something."
+					% [setting_path, type_string(wanted), str(final_value), type_string(typeof(final_value))]
+				)
+			)
+		final_value = type_convert(final_value, wanted)
+
 	ProjectSettings.set_setting(setting_path, final_value)
 	var err: Error = ProjectSettings.save()
 	if err != OK:
@@ -57,6 +68,33 @@ func set_project_setting(params: Dictionary) -> Dictionary:
 		"was_new": not had_value,
 		"saved": true,
 	}
+
+
+# The type a setting wants, or TYPE_NIL where the engine names none and there is nothing to go on.
+#
+# JSON carries one number type, so every number arrives as a float and an int setting was written
+# to project.godot as "50.0". Every reader casts it back, so the tool, the editor and the running
+# game all answer 50 afterwards and only the committed file says otherwise, where it reads as
+# something having gone wrong.
+#
+# The engine's own property list is what is asked, rather than the value that is there: a setting
+# already written as "50.0" reads back as a float, so the value on hand agrees with the mistake and
+# no project that has made it once could be set right again. The property list still says int.
+# A setting the engine does not declare has only its current value to go on, and a new one has
+# neither, which is the caller's type to choose.
+func _wanted_type(setting_path: String, current: Variant) -> int:
+	for info: Dictionary in ProjectSettings.get_property_list():
+		if str(info.get("name", "")) == setting_path:
+			return int(info.get("type", TYPE_NIL))
+	return typeof(current)
+
+
+# What separates a narrowing from a guess: 50.0 through int and out again is 50.0, so it was an int
+# all along, while 50.5 comes back as 50.0 and "loud" comes back as "0". Those are a caller meaning
+# something the setting cannot hold, and are refused rather than written as whatever the cast
+# happened to produce.
+func _converts_faithfully(value: Variant, to: int) -> bool:
+	return type_convert(type_convert(value, to), typeof(value)) == value
 
 
 # Add an autoload singleton
