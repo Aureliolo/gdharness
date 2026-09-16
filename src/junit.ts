@@ -291,3 +291,70 @@ export function whyNoReport(printed: readonly string[], asked: string): string |
   }
   return printed.some((line) => NOTHING_RAN.test(line)) ? `no test cases found at ${asked}` : null;
 }
+
+/** One suite that finished with nodes still in the tree, and how many. */
+interface SuiteOrphans {
+  /** The suite's script, as gdUnit4 names it on the line announcing the run. */
+  readonly path: string;
+  readonly orphans: number;
+}
+
+/** What a run left behind, counted per suite and in total. */
+export interface OrphanReport {
+  readonly total: number;
+  readonly suites: readonly SuiteOrphans[];
+}
+
+const RUNNING_SUITE = /Run Test Suite:\s*(\S+)/;
+const ORPHANS = /(\d+)\s+orphans/;
+const OVERALL = 'Overall Summary';
+
+/**
+ * The orphan nodes a run reported, read off what it printed.
+ *
+ * Read from the console because it is the only place they are. gdUnit4 counts orphans per suite
+ * and decides the run's state from them: no errors and no failures, but nodes left in the tree,
+ * is the WARNING state, which is exit 101. Its JUnit writer does not carry any of that: an ORPHAN
+ * report produces no element at all, and neither `testsuite` nor `testsuites` gets an attribute
+ * for it, so a report parsed from the XML has every count at zero and nothing to explain the
+ * verdict with. A project met exactly that: `warnings`, exit 101, `failures` 0, `failed` empty,
+ * `engineWarnings` 0, and no way to find out but to change a suite and run the tier again.
+ *
+ * The two lines it does print are `Run Test Suite: <path>` when a suite starts and a statistics
+ * line ending each one, with the totals repeated under `Overall Summary`. Matched loosely, on the
+ * count and the word, because the runner writes them with colour and cursor moves around them.
+ */
+export function orphansPrinted(printed: readonly string[]): OrphanReport {
+  const suites: SuiteOrphans[] = [];
+  let total: number | null = null;
+  let running: string | null = null;
+  for (const line of printed) {
+    const started = RUNNING_SUITE.exec(line);
+    if (started?.[1] !== undefined) {
+      running = started[1];
+      continue;
+    }
+    const counted = ORPHANS.exec(line);
+    if (counted?.[1] === undefined) {
+      continue;
+    }
+    const orphans = Number(counted[1]);
+    if (line.includes(OVERALL)) {
+      total = orphans;
+      running = null;
+      continue;
+    }
+    if (running !== null && orphans > 0) {
+      suites.push({ path: running, orphans });
+    }
+    // Whether it counted any or not: the suite's statistics line is the end of its block, and the
+    // next count belongs to whatever runs next rather than to this one.
+    running = null;
+  }
+  return {
+    // Summed as a fallback, so a summary line this stops recognising costs the total and not the
+    // per-suite rows, which are the part worth having.
+    total: total ?? suites.reduce((sum, suite) => sum + suite.orphans, 0),
+    suites,
+  };
+}

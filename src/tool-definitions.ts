@@ -388,7 +388,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'project_test',
     description:
-      "Runs the project's gdUnit4 tests headless and answers with every case that did not pass: where it is, and what the assertion said. Suites where everything passed are counted rather than listed, and an engine message keeps the frames above gdUnit4 rather than the twenty inside it, so a clean tier answers in a few lines. The class list is rebuilt first, so a suite written a moment ago is found. On Windows and Linux the run gets a user:// of its own, so a suite that saves a game writes nowhere near the saves of the copy somebody plays. A run that found nothing to run is never called a pass: gdUnit4 exits cleanly for one, so the answer says so and names the path it looked in. Needs gdUnit4 under addons/gdUnit4.",
+      "Runs the project's gdUnit4 tests headless and answers with every case that did not pass: where it is, and what the assertion said. Suites where everything passed are counted rather than listed, and an engine message keeps the frames above gdUnit4 rather than the twenty inside it, so a clean tier answers in a few lines. The class list is rebuilt first, so a suite written a moment ago is found. On Windows and Linux the run gets a user:// of its own, so a suite that saves a game writes nowhere near the saves of the copy somebody plays. A run that found nothing to run is never called a pass: gdUnit4 exits cleanly for one, so the answer says so and names the path it looked in. A run where nothing failed but nodes were left in the tree comes back under warnings, with the count per suite: gdUnit4 decides its verdict on those and keeps them out of its report, so they are read off what it printed. Needs gdUnit4 under addons/gdUnit4.",
     parameters: {
       projectPath: PROJECT_PATH,
       path: {
@@ -840,9 +840,9 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       includeHidden: {
         type: 'boolean',
-        ops: ['text'],
+        ops: ['text', 'find'],
         description:
-          'text: read hidden nodes as well, for checking that something is not showing. Default false.',
+          'text: read hidden nodes as well, for checking that something is not showing. Default false. find: default true, since a find means the node whether or not it is drawn; false answers with what the player can actually see, which is how a panel that keeps a label for every line and hides the ones that do not is read. A node counts as hidden when anything above it is, and how many matches were left out comes back under hidden.',
       },
       metrics: {
         type: 'array',
@@ -861,7 +861,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       find: {
         summary:
-          'the paths of every node matching className, script, namePattern, group or says, with property read off each',
+          'the paths of every node matching className, script, namePattern, group or says, with property read off each, hidden ones included unless includeHidden says otherwise',
         requires: [],
       },
       rect: {

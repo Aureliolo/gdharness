@@ -103,6 +103,11 @@ them. \`editor_rescan\` asks it to scan and names any class it still cannot reso
 declaration and the cache can both be right while the editor stays blind to it. Change the
 declaring script, or restart the editor.
 
+A diagnostic about a member rather than a type, \`Static function "x()" not found in base "Y"\`
+about something the engine compiles, is a different thing and is no longer stale here: each ask
+gives the document back when its answer arrives, so the next one is read off disk. If one turns
+up anyway, believe the run over the diagnostic and say so.
+
 ## Refusals are useful
 
 An unknown op, an argument the tool does not name, or a missing required one is refused with the

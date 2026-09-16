@@ -43,7 +43,7 @@ import {
   runtimeDirectories,
   runtimesAnnounced,
 } from '../src/runtime-client.js';
-import { HEADLESS_OPERATIONS, patienceForFrames } from '../src/server.js';
+import { alive, HEADLESS_OPERATIONS, patienceForFrames } from '../src/server.js';
 import { addonMismatch } from '../src/server-version.js';
 import { opTakes, TOOL_SPECS } from '../src/tool-definitions.js';
 import { cacheFile, isNewer } from '../src/update-check.js';
@@ -266,6 +266,7 @@ function portOf(server: Server): number {
 async function withFakeLanguageServer<T>(
   publishUri: (uri: string) => string | null,
   handler: (port: number) => Promise<T>,
+  seen?: JsonRpcMessage[],
 ): Promise<T> {
   const sockets = new Set<Socket>();
 
@@ -290,6 +291,7 @@ async function withFakeLanguageServer<T>(
 
         const message = JSON.parse(buffer.slice(start, start + length)) as JsonRpcMessage;
         buffer = buffer.slice(start + length);
+        seen?.push(message);
 
         if (message.method === 'initialize') {
           send({ jsonrpc: '2.0', id: message.id, result: { capabilities: {} } });
@@ -368,6 +370,59 @@ async function testDiagnosticsSurviveTheEditorRestarting(): Promise<void> {
       assert.equal(afterwards.length, 1, 'and so is the ask after the connection was replaced');
       await client.disconnect();
     },
+  );
+}
+
+/**
+ * A document left open is a dependency frozen at the version it had when it was opened.
+ *
+ * Godot answers about a file the client has opened from the copy the client handed it, and keeps
+ * that parse alive for as long as the document is open. The parse holds the parses of everything
+ * the file depends on, so a `class_name` script edited outside the editor stays at its old text
+ * for every open file that uses it. A project hit this on 0.10.0 after adding a static method and
+ * a constant to `components.gd` from outside the editor: `script_diagnostics` on two files that
+ * use them answered `Static function "opening()" not found in base "Components"` and four more of
+ * the same shape, about code the engine had just compiled and run green.
+ *
+ * Nothing on the editor side reaches it. `editor_rescan` answered `ok` and changed nothing, and
+ * asking again re-parsed only the file asked about while the other open document went on pinning
+ * the stale copy, so the two files held each other's answer wrong.
+ *
+ * Closing after each answer is what releases it. Asserted on the wire rather than on a symbol,
+ * because the stub has no analyser: what went wrong is that the client owned documents it was
+ * not tracking changes to, and what fixes it is owning none between asks.
+ */
+async function testDiagnosticsLeaveNoDocumentOpen(): Promise<void> {
+  const seen: JsonRpcMessage[] = [];
+  await withFakeLanguageServer(
+    (uri) => uri,
+    async (port) => {
+      const script = join(tmpdir(), 'gdharness-lsp-close', 'set_test.gd');
+      const client = new GodotLSPClient(port, '127.0.0.1');
+
+      await client.getDiagnostics(script, 'extends Node\n');
+      await client.getDiagnostics(script, 'extends Node\n');
+      await client.disconnect();
+    },
+    seen,
+  );
+
+  const documentMethods = seen
+    .map((message) => message.method)
+    .filter((method) => typeof method === 'string' && method.startsWith('textDocument/'));
+
+  assert.deepEqual(
+    documentMethods,
+    ['textDocument/didOpen', 'textDocument/didClose', 'textDocument/didOpen', 'textDocument/didClose'],
+    'each ask opens the document and gives it back, so the server owns none between asks',
+  );
+
+  const opened = seen.find((message) => message.method === 'textDocument/didOpen');
+  const closed = seen.find((message) => message.method === 'textDocument/didClose');
+  assert.equal(
+    get(closed?.params, 'textDocument', 'uri'),
+    get(opened?.params, 'textDocument', 'uri'),
+    'the close names the document that was opened',
   );
 }
 
@@ -2828,6 +2883,212 @@ async function testAFinishedRunCanStillBeRead(): Promise<void> {
 }
 
 /**
+ * A run whose server went away is answered with what it printed, not with "No game is running".
+ *
+ * The MCP server reconnects on its own schedule. Everything about a run used to live in that
+ * process, so a reconnect killed the game and took the log with it, and `editor_output`
+ * afterwards said no game was running: true about the process, and silent about the forty
+ * minutes of bench output that had just been dropped. A project lost two sweeps this way in one
+ * session, a six-setting one after a single row and a nine-cell one after five cells.
+ *
+ * Asserted from the disk side, with no engine in it, because the half worth pinning here is what
+ * a fresh server does with a run it did not start: read the note, read the transcript, and say
+ * which of the two kinds of not-running this is. A run that ended with nobody waiting on it has
+ * no exit code anywhere, and saying so beats reporting a zero nobody collected.
+ */
+async function testARunEndedUnwatchedIsStillReadable(): Promise<void> {
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-unwatched-'));
+  try {
+    const runs = join(runtimeDir, 'runs');
+    mkdirSync(runs, { recursive: true });
+    const transcript = join(runs, 'run-1.log');
+    writeFileSync(
+      transcript,
+      'row 1: 42 wins\nERROR: the bench fell over\n   at: res://bench.gd:12\nrow 2: 17 wins\n',
+    );
+
+    // A process that has certainly ended: spawned to exit at once and waited for right here, so
+    // the number names nothing by the time the server reads it.
+    const ended: SpawnSyncReturns<string> = spawnSync(process.execPath, ['-e', ''], {
+      encoding: 'utf8',
+    });
+    assert.ok(ended.pid > 0, 'the fixture needs a process that has been and gone');
+
+    writeFileSync(
+      join(runs, 'run.json'),
+      JSON.stringify({
+        pid: ended.pid,
+        transcript,
+        startedAt: Date.now() - 60_000,
+        projectPath: join(runtimeDir, 'project'),
+        arguments: ['--headless', '--path', join(runtimeDir, 'project')],
+      }),
+      'utf8',
+    );
+
+    await withStdioServer(
+      async (call) => {
+        const answered = await call('editor_output', { limit: 200 });
+        assert.doesNotMatch(
+          answered,
+          /No game is running/,
+          'a run the server did not start is still a run it can answer about',
+        );
+        const output: unknown = JSON.parse(answered);
+        assert.equal(get(output, 'running'), false, JSON.stringify(output));
+        assert.equal(get(output, 'endedUnwatched'), true, JSON.stringify(output));
+        assert.equal(
+          get(output, 'exitCode'),
+          null,
+          `nobody was waiting on it, so there is no code to report: ${JSON.stringify(output)}`,
+        );
+        assert.equal(get(output, 'errors'), 1, JSON.stringify(output));
+
+        const printed = asArray(get(output, 'entries')).map((entry) => text(get(entry, 'text')));
+        assert.ok(
+          printed.some((line) => line.includes('row 1: 42 wins')),
+          `every row it printed is still readable:\n${JSON.stringify(output, null, 2)}`,
+        );
+        assert.ok(
+          printed.some((line) => line.includes('row 2: 17 wins')),
+          `including the ones after the error:\n${JSON.stringify(output, null, 2)}`,
+        );
+      },
+      { GDHARNESS_RUNTIME_DIR: runtimeDir },
+    );
+
+    // The note is per machine, not per project, so a server serving something else must not
+    // answer about this run. The right shape about the wrong game is the worst answer available.
+    await withStdioServer(
+      async (call) => {
+        assert.match(
+          await call('editor_output', { limit: 200 }),
+          /No game is running/,
+          'a run recorded against another project is not this server’s to report',
+        );
+      },
+      { GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: join(runtimeDir, 'elsewhere') },
+    );
+  } finally {
+    rmSync(runtimeDir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * The run keeps going when the server that started it is killed, and the next one picks it up.
+ *
+ * The reproduction as it was reported: start a headless run, have the server go away under it,
+ * and find the game dead and its output gone. A run started through `editor_run start` outliving
+ * a reconnect is the whole ask, so this kills the server outright, which is the worst version of
+ * what a reconnect does, and then asks a fresh server what is running.
+ */
+async function testARunOutlivesItsServer(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('run-outlives-server regression skipped (Godot not found)');
+    return;
+  }
+
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-outlives-runtime-'));
+  const projectDir = mkdtempSync(join(tmpdir(), 'gdharness-outlives-'));
+  const env = { GODOT_PATH: godotPath, GDHARNESS_RUNTIME_DIR: runtimeDir };
+  let gamePid: number | null = null;
+  try {
+    writeFileSync(
+      join(projectDir, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Outlives"\nrun/main_scene="res://main.tscn"\n',
+    );
+    // Prints as it goes and keeps going, which is the shape of the bench that was being lost:
+    // rows land one at a time and the run is expected to still be there between them.
+    writeFileSync(
+      join(projectDir, 'main.gd'),
+      'extends Node\n\nvar rows := 0\n\n\nfunc _process(_delta: float) -> void:\n\trows += 1\n\tif rows % 30 == 0:\n\t\tprint("row %d" % [rows / 30])\n',
+    );
+    writeFileSync(
+      join(projectDir, 'main.tscn'),
+      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+    );
+
+    const first = new ServerProcess({ env });
+    try {
+      await first.initialize('regression-test');
+      const started: unknown = parseTextContent(
+        await first.request(
+          'tools/call',
+          {
+            name: 'editor_run',
+            arguments: { projectPath: projectDir, op: 'start', headless: true },
+          },
+          ENGINE_CALL_TIMEOUT_MS,
+        ),
+      );
+      assert.equal(get(started, 'started'), true, JSON.stringify(started));
+      gamePid = asNumber(get(started, 'pid'), 'the run needs a process of its own');
+      assert.ok(gamePid > 0, `the run needs a process: ${JSON.stringify(started)}`);
+    } finally {
+      // The reconnect, in its harshest form: the server is gone without being asked to stop.
+      first.child.kill('SIGKILL');
+    }
+    await delay(1500);
+
+    assert.ok(
+      alive(gamePid),
+      'the game is the operating system’s, not the server’s: killing the server must not take it',
+    );
+
+    await withStdioServer(async (call) => {
+      let output: unknown = null;
+      for (let attempt = 0; attempt < 50; attempt += 1) {
+        await delay(200);
+        const answered = await call('editor_output', { limit: 200 }, ENGINE_CALL_TIMEOUT_MS);
+        assert.doesNotMatch(
+          answered,
+          /No game is running/,
+          'the run the previous server started is the run this one answers about',
+        );
+        output = JSON.parse(answered);
+        if (asArray(get(output, 'entries')).length > 0) {
+          break;
+        }
+      }
+
+      assert.equal(get(output, 'running'), true, JSON.stringify(output));
+      const printed = asArray(get(output, 'entries')).map((entry) => text(get(entry, 'text')));
+      assert.ok(
+        printed.some((line) => /row \d+/.test(line)),
+        `what it printed while no server was reading is there too:\n${JSON.stringify(output, null, 2)}`,
+      );
+
+      const stopped: unknown = JSON.parse(
+        await call('editor_run', { projectPath: projectDir, op: 'stop' }, ENGINE_CALL_TIMEOUT_MS),
+      );
+      assert.equal(get(stopped, 'stopped'), true, JSON.stringify(stopped));
+    }, env);
+
+    await delay(1000);
+    assert.equal(alive(gamePid), false, 'and a run with no handle is still one that stop can end');
+    gamePid = null;
+  } finally {
+    if (gamePid !== null && alive(gamePid)) {
+      try {
+        process.kill(gamePid);
+      } catch {
+        // Nothing left to clean up.
+      }
+    }
+    // Retried, because Windows holds the project directory open for as long as the engine has a
+    // handle on anything in it and a killed process releases those on its own schedule: the first
+    // removal after a kill answers EBUSY and the test fails in its own cleanup.
+    const swept = { recursive: true, force: true, maxRetries: 20, retryDelay: 250 };
+    rmSync(projectDir, swept);
+    rmSync(runtimeDir, swept);
+  }
+}
+
+/**
  * project_test against a real gdUnit4: a suite with a pass, a failure and a skip, read back as
  * cases rather than a console. The failing case has to be named with what the assertion said,
  * a project without the runner has to be refused, and nothing of the run may be left behind.
@@ -3533,6 +3794,8 @@ async function main(): Promise<void> {
   testATestRunKeepsOutOfThePlayersSaves();
   await testParametersReachTheEngine();
   await testAFinishedRunCanStillBeRead();
+  await testARunEndedUnwatchedIsStillReadable();
+  await testARunOutlivesItsServer();
   await testGdUnitRunner();
   testCommandLineSetup();
   testTheWrittenConfigNamesAProgramThatStarts();
@@ -3550,6 +3813,7 @@ async function main(): Promise<void> {
   testTheLongestWaitCanBeWaitedOut();
   await testDiagnosticsSurviveUriReEncoding();
   await testDiagnosticsSurviveTheEditorRestarting();
+  await testDiagnosticsLeaveNoDocumentOpen();
   await testDiagnosticsSurviveAnotherSpellingOfTheSamePath();
   await testDiagnosticsTimeoutIsNotAnEmptyResult();
   await testLspFramesBodiesByBytes();
