@@ -201,6 +201,8 @@ interface Editor {
   /** Calls a tool and answers with how it went, for waiting on something to come up. */
   attempt: (name: string, args: Record<string, unknown>) => Promise<{ ok: boolean; text: string }>;
   project: string;
+  /** The engine this editor is, for a case that needs a second one against the same project. */
+  godotPath: string;
   /** What this editor was opened on, which is what it should be reporting it serves. */
   lspPort: number;
   dapPort: number;
@@ -553,7 +555,7 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
     }
     assert.ok(connected, `the editor never reached the bridge:\n${engineOutput.join('')}`);
 
-    await body({ call, refusal, attempt, project, lspPort, dapPort });
+    await body({ call, refusal, attempt, project, godotPath, lspPort, dapPort });
   } catch (failure) {
     // What the engine said on its way to failing, which is the half of the evidence a tool
     // answer does not carry: a fixture that reports only its own assertion sends whoever reads
@@ -943,18 +945,30 @@ async function testEditorRescan({ call, project }: Editor): Promise<void> {
  * So the case is written the way it bites: a scan that says it finished while a class stays
  * unresolvable has to answer for it, and a real change to the declaring script has to cure it.
  */
-async function testAClassTheEditorCannotSee({ call, project }: Editor): Promise<void> {
+async function testAClassTheEditorCannotSee({ call, project, godotPath }: Editor): Promise<void> {
   const declaring = join(project, 'late_class.gd');
   writeFileSync(declaring, 'class_name LateClass\nextends RefCounted\n');
 
-  // What puts the file beyond the editor's walk: another engine records it and writes its .uid.
-  await call('project_import', { projectPath: project, op: 'reimport' });
-  await call('project_import', { projectPath: project, op: 'refresh_classes' });
+  // What puts the file beyond the editor's walk: a second engine records it and writes its .uid,
+  // which is what a commit hook, a build script or a test tier does while an editor sits open. It
+  // has to be a real import rather than project_import reimport, which only asks the engine that
+  // is already running and says as much in its own answer.
+  const imported = spawnSync(godotPath, ['--headless', '--path', project, '--import'], {
+    encoding: 'utf8',
+    timeout: 180_000,
+  });
+  assert.equal(imported.status, 0, `the headless import should succeed:\n${imported.stderr}`);
 
   const blind = await call('editor_rescan', { projectPath: project });
-  assert.equal(get(blind, 'ok'), false, `a scan leaving a class unresolvable is not clean: ${text(blind)}`);
+
+  // Said in the failure rather than left to be worked out: a cache without the class means the
+  // import did not do its half, and a cache with it means the editor saw the file regardless.
+  const cache = join(project, '.godot', 'global_script_class_cache.cfg');
+  const cached = existsSync(cache) && readFileSync(cache, 'utf8').includes('LateClass');
+  const standing = `${text(blind)} (cache lists LateClass: ${cached})`;
+  assert.equal(get(blind, 'ok'), false, `a scan leaving a class unresolvable is not clean: ${standing}`);
   const named = asArray(get(blind, 'unseenByEditor')).map((entry) => get(entry, 'className'));
-  assert.deepEqual(named, ['LateClass'], `the class the editor cannot see should be named: ${text(blind)}`);
+  assert.deepEqual(named, ['LateClass'], `the class the editor cannot see should be named: ${standing}`);
 
   writeFileSync(
     declaring,

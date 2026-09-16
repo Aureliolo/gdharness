@@ -2572,12 +2572,14 @@ class GodotServer {
       busy = Boolean(status['scanning']) || Boolean(status['importing']);
     }
 
-    const unseen = busy ? [] : await this.classesTheEditorCannotSee(args);
+    const checked = busy ? { unseen: [] } : await this.classesTheEditorCannotSee(args);
+    const unseen = checked.unseen;
     return this.jsonTextResponse({
-      ok: !busy && unseen.length === 0,
+      ok: !busy && unseen.length === 0 && checked.unchecked === undefined,
       stillWorking: busy,
       waitedMs: Date.now() - started,
       unseenByEditor: unseen.length > 0 ? unseen : undefined,
+      classesUnchecked: checked.unchecked,
       note: busy
         ? 'The editor was still scanning or importing when the wait ran out, so new files may not be visible yet.'
         : unseen.length > 0
@@ -2590,19 +2592,26 @@ class GodotServer {
    * The project's own classes a connected editor is not holding, after a scan has finished.
    *
    * Asked of the editor rather than of the cache, because the cache is on disk and the state
-   * worth reporting is the one where disk is right and the editor is not. An editor that cannot
-   * answer is not evidence of anything, so it reports nothing.
+   * worth reporting is the one where disk is right and the editor is not.
+   *
+   * An editor that will not answer says so under `unchecked` rather than answering with nothing.
+   * Nothing is what a clean project answers, and a check whose failure is spelled the same as its
+   * pass is a check that stops being read: this one exists because two projects were told they
+   * were clean by three things in a row that were only silent.
    */
-  private async classesTheEditorCannotSee(args: OperationParams): Promise<UnseenClass[]> {
+  private async classesTheEditorCannotSee(
+    args: OperationParams,
+  ): Promise<{ unseen: UnseenClass[]; unchecked?: string }> {
     const projectPath = typeof args['projectPath'] === 'string' ? args['projectPath'] : '';
     if (projectPath === '') {
-      return [];
+      return { unseen: [], unchecked: 'no projectPath, so there was nothing to read the cache from' };
     }
     const held = asParams(await this.godotBridge.invokeTool('global_classes', args));
     if (held['ok'] !== true || !Array.isArray(held['classes'])) {
-      return [];
+      const said = typeof held['error'] === 'string' ? held['error'] : 'it answered no class list';
+      return { unseen: [], unchecked: `the editor did not say what classes it is holding: ${said}` };
     }
-    return unseenByEditor(projectPath, held['classes'].map(String));
+    return { unseen: unseenByEditor(projectPath, held['classes'].map(String)) };
   }
 
   private async handleViaBridge(toolName: string, args: OperationParams): Promise<ToolResponse> {
