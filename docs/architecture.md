@@ -152,6 +152,37 @@ Rarely, one answer in a few hundred also carries an invitation to say what is mi
 should exist and does not is invisible from inside the server, and the only party that knows is the
 one that just worked around it. It asks for the same yes before anything is filed.
 
+## The third kind of failure
+
+Neither of the two above is the failure this surface is most prone to. Every tool here answers in
+JSON, and JSON always looks certain. So the expensive failure is an answer that is well formed,
+confident, and means something other than what a reader will take it to mean.
+
+Five of those were reported by two projects in one day:
+
+- five diagnostics about code the engine had just compiled and run green,
+- `No game is running` about a bench that had printed forty minutes of output,
+- four hidden labels read back as what the player can see,
+- `warnings` naming neither what was warned nor where,
+- a roster of twelve people rendered as the word `RefCounted` twelve times.
+
+Nothing broke in any of them. Each was a confident answer, and each cost somebody hours, because
+the only way to find out was to run the thing the tool was supposed to save them running.
+
+So: a tool here should not be able to say something true in shape and false in meaning without a
+field in the same answer that gives it away. `endedUnwatched` says a run ended with nobody
+collecting its code, so a missing code cannot read as zero. `hidden` says a filter took matches
+out, so none and four-all-hidden stop being the same answer. `omitted` says the cap dropped
+entries. A list that cannot be stepped into says how long it is, rather than saying it has no
+property by that name and sending somebody to look for one.
+
+The sharpest statement of it came from one of the projects reporting these, about why it had
+written a `Get-Process` loop rather than trust an answer: a false negative and a true negative were
+spelled the same way, so the only reliable question was one asked of the operating system. Where
+two states a caller must tell apart arrive as one answer, the caller's only way out is to stop
+trusting the tool and go around it. That is the cost being avoided here, and it is higher than the
+cost of a feature that does not exist yet.
+
 ## What talks to what
 
 ```text
