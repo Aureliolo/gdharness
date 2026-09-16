@@ -27,6 +27,28 @@ runner that installed it, with `GODOT_PATH` set to the engine found at the time.
 pinned rather than `latest` because the server and the addons have to match; `editor_status`
 reports a mismatch as `addonIsStale`.
 
+### What an upgrade reaches, and when
+
+Upgrading writes new files to disk. Which of them are being run is a separate question, and the
+three parts answer it differently:
+
+| Part                       | Loaded                         | So a fix lands                   |
+| -------------------------- | ------------------------------ | -------------------------------- |
+| `addons/gdharness_runtime` | by the game, at every launch   | on the next `editor_run`         |
+| `addons/gdharness_editor`  | by the editor, at startup      | after `editor_launch restart`    |
+| the MCP server             | by the harness, when it spawns | only when the harness reconnects |
+
+So a fix in the runtime addon is live immediately, even to a server several versions old: a
+project upgraded mid-session had `runtime_inspect` walking a path its own server predated, because
+the walk happens in the game. A fix in how an argument is parsed does not, because that happens in
+the server, and a server cannot replace itself: nothing inside it can ask the harness for a
+restart.
+
+That matters when a fix is being verified. "Upgraded and the tier is green" says the files are
+right, not that the thing answering is. `editor_status` is what settles it: `addonIsStale`
+compares what the editor loaded against this server, and `projectIs` catches the other direction,
+a project upgraded while the server kept running, which nothing else reports at all.
+
 The runner is named by its path rather than as `npx` or `bunx`. A harness spawns what the config
 names, through PATH, and a runner's name is not always on it: a Bun installed under a project
 ships a `bun` and no `bunx` beside it, so an entry saying `bunx` starts nothing. Writing a path
