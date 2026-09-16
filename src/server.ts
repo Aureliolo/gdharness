@@ -2593,8 +2593,9 @@ class GodotServer {
     const running = this.activeProcess;
     this.activeProcess = null;
     // A run somebody has ended is not one the next server should offer to pick back up, and the
-    // note outlives this process unless it is taken away here.
-    clearRunRecord();
+    // note outlives this process unless it is taken away here. Only this project's, because the
+    // directories it is looked for in are shared with whatever else is running on this machine.
+    clearRunRecord((record) => this.couldBeOurs(record.projectPath));
     if (!running) {
       return;
     }

@@ -23,7 +23,7 @@
 
 import { mkdirSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { runtimeDirectory } from './runtime-client.js';
+import { runtimeDirectories, runtimeDirectory } from './runtime-client.js';
 
 /** What a run leaves behind so another server can find it. */
 export interface RunRecord {
@@ -46,6 +46,20 @@ function recordPath(): string {
 }
 
 /**
+ * Every place a note could have been left, newest first.
+ *
+ * Written to one directory and looked for in several, because the two servers either side of a
+ * reconnect do not have to agree about where the temporary directory is. They usually do, being
+ * started the same way by the same harness, but "usually" is how this project already lost a
+ * session once: a game announced itself in `C:\Windows\Temp\gdharness` while the server watched
+ * the user's own, and answered that nothing was running while something was. The same fallbacks
+ * are read here, so that mismatch costs a lookup rather than the run.
+ */
+function recordPaths(): string[] {
+  return runtimeDirectories().map((directory) => join(directory, 'runs', 'run.json'));
+}
+
+/**
  * A transcript nothing else is writing to, opened for appending.
  *
  * The descriptor is handed to the child as both its streams and closed here straight afterwards:
@@ -65,9 +79,19 @@ export function writeRunRecord(record: RunRecord): void {
 
 /** The run another server left behind, or null when there is none to read. */
 export function readRunRecord(): RunRecord | null {
+  for (const path of recordPaths()) {
+    const record = recordAt(path);
+    if (record !== null) {
+      return record;
+    }
+  }
+  return null;
+}
+
+function recordAt(path: string): RunRecord | null {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(readFileSync(recordPath(), 'utf8'));
+    parsed = JSON.parse(readFileSync(path, 'utf8'));
   } catch {
     return null;
   }
@@ -91,11 +115,24 @@ export function readRunRecord(): RunRecord | null {
   };
 }
 
-export function clearRunRecord(): void {
-  try {
-    rmSync(recordPath());
-  } catch {
-    // Already gone, which is the state this asks for.
+/**
+ * Take the note away for a run that has ended, wherever it was left.
+ *
+ * Every candidate directory is looked in, for the same reason they are read, and each note is read
+ * before it is removed: two servers share these directories, and the one whose run this is not
+ * must not be the one that deletes it. [param ours] is how the caller says which are its own.
+ */
+export function clearRunRecord(ours: (record: RunRecord) => boolean = () => true): void {
+  for (const path of recordPaths()) {
+    const record = recordAt(path);
+    if (record === null || !ours(record)) {
+      continue;
+    }
+    try {
+      rmSync(path);
+    } catch {
+      // Already gone, which is the state this asks for.
+    }
   }
 }
 
