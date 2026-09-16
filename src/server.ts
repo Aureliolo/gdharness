@@ -8,8 +8,20 @@
  * `dispatch`, and the arguments have been checked against the tool's spec before it is reached.
  */
 
-import { execFile, spawn } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { type ChildProcess, execFile, spawn } from 'node:child_process';
+import {
+  closeSync,
+  existsSync,
+  fstatSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  readSync,
+  realpathSync,
+  rmSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, normalize } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -33,7 +45,7 @@ import { type GodotBridge, getDefaultBridge } from './godot-bridge.js';
 import { GodotLocator } from './godot-path.js';
 import { type HeadlessOutcome, runOperation } from './headless.js';
 import { defectReport, feedbackNotice } from './issues.js';
-import { parseJUnit, type TestReport, whyNoReport } from './junit.js';
+import { orphansPrinted, parseJUnit, type TestReport, whyNoReport } from './junit.js';
 import {
   type EditorPorts,
   editorArguments,
@@ -48,6 +60,13 @@ import { resolveWithinProject } from './paths.js';
 import { freePort, portFromEnvOrNull } from './ports.js';
 import { projectStructure, searchProject } from './project-scan.js';
 import { parseProjectGodot, setupResourceHandlers } from './resources.js';
+import {
+  clearRunRecord,
+  openTranscript,
+  readRunRecord,
+  sweepTranscripts,
+  writeRunRecord,
+} from './run-record.js';
 import {
   ANNOUNCE_BUDGET_MS,
   announcedSince,
@@ -141,16 +160,19 @@ export function patienceForFrames(frames: number, atLeast: number): number {
  *
  * Undefined reads as gone, because a caller that has no process to name has nothing to wait for.
  */
-function alive(pid: number | undefined): boolean {
-  if (pid === undefined) {
+export function alive(pid: number | undefined | null): boolean {
+  if (pid === undefined || pid === null) {
     return false;
   }
   try {
     // Signal 0 asks whether it could be signalled rather than signalling it.
     process.kill(pid, 0);
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    // EPERM is a process that is there and is somebody else's, which is still there. Only ESRCH
+    // says there is nothing under that number, and reading the two the same way reports a run
+    // started by another user as one that has ended.
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
   }
 }
 
@@ -1769,7 +1791,10 @@ class GodotServer {
     const verdicts: Readonly<Record<number, string>> = {
       0: 'passed',
       100: 'failures',
-      101: 'warnings',
+      // Named rather than left as the bare word: with no errors and no failures, gdUnit4 reaches
+      // this state for orphan nodes and nothing else, and "warnings" on its own sent a session
+      // guessing and re-running a tier that takes minutes to find out which kind it meant.
+      101: 'warnings: orphan nodes',
       103: 'headless not supported by this gdUnit4',
       104: 'Godot version not supported by this gdUnit4',
       105: 'script errors',
@@ -1818,12 +1843,26 @@ class GodotServer {
         .filter((entry) => entry.status === 'failed' || entry.status === 'error')
         .map((entry) => ({ ...entry, path: suite.path })),
     );
+    // What the report cannot say. gdUnit4 decides the run's state on orphan nodes and writes none
+    // of that into its XML, so a tier that passed every case and left nodes behind arrived as the
+    // word "warnings" and nothing else: no failure, no entry, nothing naming a suite. Read off
+    // what it printed, which is where the counts are.
+    const orphans = orphansPrinted(said);
+    const leftBehind = new Map(orphans.suites.map((suite) => [suite.path, suite.orphans]));
+    const orphansIn = (path: string | null): number => (path === null ? 0 : (leftBehind.get(path) ?? 0));
+    const warnings = orphans.suites.map((suite) => ({
+      kind: 'orphans',
+      path: suite.path,
+      name: report.suites.find((entry) => entry.path === suite.path)?.name ?? suite.path,
+      orphans: suite.orphans,
+      message: `${suite.orphans} node${suite.orphans === 1 ? '' : 's'} were still in the tree when this suite finished. A node built in a test and neither freed nor added to the tree is the usual cause; free it, or add it with auto_free().`,
+    }));
     // A suite that passed every case has nothing to say that the totals do not, and a whole tier
     // of them is most of the answer: a hundred and three clean suites came back as fifteen
     // kilobytes of names and timings around the one line saying it passed. Counted instead, so the
     // answer is the size of what went wrong.
     const unclean = report.suites.filter(
-      (suite) => suite.failures > 0 || suite.errors > 0 || suite.skipped > 0,
+      (suite) => suite.failures > 0 || suite.errors > 0 || suite.skipped > 0 || orphansIn(suite.path) > 0,
     );
     return this.jsonTextResponse({
       passed: !hung && exitCode === 0 && report.failures === 0 && report.errors === 0,
@@ -1835,6 +1874,15 @@ class GodotServer {
       skipped: report.skipped,
       time: report.time,
       failed,
+      // Alongside `failed` rather than folded into it: a suite that left nodes behind failed
+      // nothing, and an agent reading `failed` for what to fix must not find a passing test in it.
+      warnings: warnings.length > 0 ? warnings : undefined,
+      orphans: orphans.total > 0 ? orphans.total : undefined,
+      // The word on its own was the whole answer, and it named neither what was warned nor where.
+      note:
+        verdict.startsWith('warnings') && warnings.length === 0
+          ? 'gdUnit4 exits 101 for orphan nodes when nothing failed, and this run printed no count of them: orphan reporting may be off in the project settings.'
+          : undefined,
       suites: unclean.map((suite) => ({
         name: suite.name,
         path: suite.path,
@@ -1842,6 +1890,7 @@ class GodotServer {
         failures: suite.failures,
         errors: suite.errors,
         skipped: suite.skipped,
+        orphans: orphansIn(suite.path) > 0 ? orphansIn(suite.path) : undefined,
         time: suite.time,
       })),
       suitesPassed: report.suites.length - unclean.length,
@@ -2352,7 +2401,7 @@ class GodotServer {
       userArgs: given.value,
     });
     this.logDebug(`Running Godot project: ${engine.value} ${cmdArgs.join(' ')}`);
-    const started = this.spawnGame(engine.value, cmdArgs);
+    const started = this.spawnKeptGame(engine.value, cmdArgs, project.value.path);
     // Kept after it exits rather than dropped, because a run that quits on its own is the whole
     // point of a headless one: a bench, a report, a tool scene. Dropping the reference on exit
     // threw its output away before anybody could read it, and left editor_output answering "no
@@ -2456,7 +2505,11 @@ class GodotServer {
 
     const played: GodotProcess = {
       process: null,
+      pid: null,
       log,
+      transcript: null,
+      readOffset: 0,
+      projectPath,
       startedAt: Date.now(),
       exitCode: null,
       throughEditor: true,
@@ -2518,6 +2571,9 @@ class GodotServer {
   private async endActiveGame(): Promise<void> {
     const running = this.activeProcess;
     this.activeProcess = null;
+    // A run somebody has ended is not one the next server should offer to pick back up, and the
+    // note outlives this process unless it is taken away here.
+    clearRunRecord();
     if (!running) {
       return;
     }
@@ -2525,16 +2581,39 @@ class GodotServer {
       await this.handleViaBridge('stop_playing', {});
       return;
     }
-    running.process?.kill();
+    if (running.process !== null) {
+      running.process.kill();
+      return;
+    }
+    if (running.pid !== null) {
+      try {
+        // A run picked back up after a restart. The handle belonged to a server that is gone, so
+        // the number is the only thing left to end it by.
+        process.kill(running.pid);
+      } catch {
+        // Ended between being read and being stopped, which is the state this asks for.
+      }
+    }
   }
 
-  /** The engine as a child process, with everything it prints read into a log as it comes. */
+  /**
+   * The engine as a child process, with everything it prints read into a log as it comes.
+   *
+   * For the runs a caller is waiting on: a test tier, a boot check. These are held rather than
+   * detached on purpose. The answer is the point of them, and an answer belongs to the call that
+   * asked, so a server that goes away mid-run takes the only reader with it; outliving it would
+   * leave an engine nobody is reading and nobody will ever end.
+   */
   private spawnGame(godotPath: string, cmdArgs: string[], env?: NodeJS.ProcessEnv): SpawnedGame {
     const child = spawn(godotPath, cmdArgs, { stdio: ['ignore', 'pipe', 'pipe'], ...(env ? { env } : {}) });
     const log = new GameLog();
     const started: SpawnedGame = {
       process: child,
+      pid: child.pid ?? null,
       log,
+      transcript: null,
+      readOffset: 0,
+      projectPath: null,
       startedAt: Date.now(),
       exitCode: null,
       throughEditor: false,
@@ -2557,6 +2636,159 @@ class GodotServer {
       started.exitCode = -1;
     });
     return started;
+  }
+
+  /**
+   * The engine as a process of its own, printing into a file this server reads rather than into
+   * a pipe this server holds.
+   *
+   * For `editor_run start`, whose whole promise is a run that keeps going and keeps printing
+   * while the caller does other things. The harness restarts this server whenever it likes, and
+   * an ordinary child goes down with its parent: a bench forty minutes into a sweep was killed
+   * twice in one session by a reconnect nobody asked for. Detaching is what makes the run the
+   * operating system's rather than this process's.
+   *
+   * Its output goes to a file for that reason and one more. A pipe with no reader fills and then
+   * blocks whatever is writing into it, so surviving the server down a pipe would only trade a
+   * killed run for a wedged one. A file is read by offset whenever somebody asks, which is also
+   * what leaves the bytes there for the next server to read.
+   */
+  private spawnKeptGame(
+    godotPath: string,
+    cmdArgs: string[],
+    projectPath: string,
+    env?: NodeJS.ProcessEnv,
+  ): SpawnedGame {
+    const startedAt = Date.now();
+    const transcript = openTranscript(startedAt);
+    let child: ChildProcess;
+    try {
+      child = spawn(godotPath, cmdArgs, {
+        stdio: ['ignore', transcript.fd, transcript.fd],
+        detached: true,
+        ...(env ? { env } : {}),
+      });
+    } finally {
+      // The child holds its own copy from here on, and this server only ever reads the file.
+      closeSync(transcript.fd);
+    }
+    // So this server exiting is not itself a reason for the run to end.
+    child.unref();
+    const log = new GameLog();
+    const started: SpawnedGame = {
+      process: child,
+      pid: child.pid ?? null,
+      log,
+      transcript: transcript.path,
+      readOffset: 0,
+      projectPath,
+      startedAt,
+      exitCode: null,
+      throughEditor: false,
+      brokeOn: null,
+    };
+    child.on('exit', (code: number | null) => {
+      this.logDebug(`Godot process exited with code ${code ?? 'none'}`);
+      this.drainTranscript(started);
+      log.finish();
+      started.exitCode = code ?? -1;
+    });
+    child.on('error', (err: Error) => {
+      console.error('Failed to start Godot process:', err);
+      log.append('stderr', `${err.message}\n`);
+      started.exitCode = -1;
+    });
+    if (started.pid !== null) {
+      writeRunRecord({
+        pid: started.pid,
+        transcript: transcript.path,
+        startedAt,
+        projectPath,
+        arguments: cmdArgs,
+      });
+    }
+    sweepTranscripts();
+    return started;
+  }
+
+  /**
+   * Read whatever the run has printed since this was last asked.
+   *
+   * By offset rather than by watching, because the file is written by a process this server may
+   * not have started and may not have been running when the lines were printed. Reading from
+   * where it left off is the same act whether the run is this server's or one it has picked up.
+   */
+  private drainTranscript(game: GodotProcess): void {
+    if (game.transcript === null) {
+      return;
+    }
+    let handle: number;
+    try {
+      handle = openSync(game.transcript, 'r');
+    } catch {
+      // A transcript that is not there yet, or has been swept: neither is worth failing a read
+      // of the log over, and both answer the same as a run that has printed nothing.
+      return;
+    }
+    try {
+      const size = fstatSync(handle).size;
+      if (size <= game.readOffset) {
+        return;
+      }
+      const buffer = Buffer.alloc(size - game.readOffset);
+      const read = readSync(handle, buffer, 0, buffer.length, game.readOffset);
+      game.readOffset += read;
+      game.log.append('transcript', buffer.subarray(0, read));
+    } finally {
+      closeSync(handle);
+    }
+  }
+
+  /**
+   * The run some earlier server started, picked back up.
+   *
+   * What was lost in a reconnect is recovered here: the record names the process and the file, so
+   * a run still going goes on being reported as running and one that ended is answered with
+   * everything it printed. Both beat "No game is running", which was the answer to either.
+   */
+  private adoptRecordedRun(): GodotProcess | null {
+    const record = readRunRecord();
+    if (record === null) {
+      return null;
+    }
+    const adopted: GodotProcess = {
+      process: null,
+      pid: record.pid,
+      log: new GameLog(),
+      transcript: record.transcript,
+      readOffset: 0,
+      projectPath: record.projectPath === '' ? null : record.projectPath,
+      startedAt: record.startedAt,
+      exitCode: null,
+      throughEditor: false,
+      brokeOn: null,
+    };
+    this.drainTranscript(adopted);
+    if (!alive(record.pid)) {
+      adopted.log.finish();
+      // Not a real exit code: nobody was waiting on the process, so what it exited with is not
+      // recorded anywhere. Said as unknown rather than guessed at.
+      adopted.exitCode = null;
+      adopted.endedUnwatched = true;
+    }
+    this.activeProcess = adopted;
+    return adopted;
+  }
+
+  /**
+   * Whichever run this server should answer about: the one it is holding, or one left on disk.
+   *
+   * Asked before every answer about a run, because a reconnect is invisible from here: this
+   * server has no memory of having started anything, and the only sign that something is running
+   * is the record the server before it left.
+   */
+  private currentRun(): GodotProcess | null {
+    return this.activeProcess ?? this.adoptRecordedRun();
   }
 
   /**
@@ -2607,12 +2839,14 @@ class GodotServer {
 
   /** editor_output: the log as entries, filtered the way the caller asked. */
   private handleGetDebugOutput(args: OperationParams): ToolResponse {
-    if (!this.activeProcess) {
+    const run = this.currentRun();
+    if (!run) {
       return this.createErrorResponse('No game is running. Start one with editor_run.');
     }
-    this.drainEditorOutput(this.activeProcess);
+    this.drainEditorOutput(run);
+    this.drainTranscript(run);
     const severity = readString(args, 'severity');
-    const selected = this.activeProcess.log.select({
+    const selected = run.log.select({
       severity: severity === 'error' || severity === 'warning' ? severity : 'info',
       sinceLastCall: readBoolean(args, 'sinceLastCall') ?? false,
       contains: readNonEmptyString(args, 'contains'),
@@ -2621,16 +2855,28 @@ class GodotServer {
     // A game held at a breakpoint is running in the sense the process is alive and in no sense
     // that matters to a caller: it draws nothing, answers no runtime call, and the timeouts that
     // follow read like a hung engine. Said here because this is where somebody asks what it did.
-    const halt = this.activeProcess.throughEditor ? (this.dapClient?.whereItStopped() ?? null) : null;
+    const halt = run.throughEditor ? (this.dapClient?.whereItStopped() ?? null) : null;
+    const running = run.exitCode === null && run.endedUnwatched !== true;
     return this.jsonTextResponse({
-      running: this.activeProcess.exitCode === null,
-      exitCode: this.activeProcess.exitCode,
-      through: this.activeProcess.throughEditor ? 'editor' : 'gdharness',
-      pid: this.activeProcess.process?.pid ?? null,
-      errors: this.activeProcess.log.count('error'),
-      warnings: this.activeProcess.log.count('warning'),
-      clean: this.activeProcess.log.count('error') === 0,
+      running,
+      exitCode: run.exitCode,
+      through: run.throughEditor ? 'editor' : 'gdharness',
+      pid: run.pid,
+      errors: run.log.count('error'),
+      warnings: run.log.count('warning'),
+      clean: run.log.count('error') === 0,
       heldAt: halt,
+      // Which of the two ways of not running this is, since they call for different things. A
+      // run that ended while nothing was watching printed everything below and then stopped
+      // being there, and no exit code was collected because nobody was waiting on it.
+      endedUnwatched: run.endedUnwatched === true ? true : undefined,
+      // Named for a run this server did not start, because the note a run leaves behind is
+      // shared by every server using this runtime directory: a caller can see whose run it is.
+      project: !run.throughEditor && run.process === null ? (run.projectPath ?? undefined) : undefined,
+      note:
+        run.endedUnwatched === true
+          ? 'This run outlived the server that started it and is over now, so its exit code was never collected. Everything it printed is below, read back from its transcript.'
+          : undefined,
       omitted: selected.omitted,
       entries: selected.entries,
     });
@@ -2638,11 +2884,12 @@ class GodotServer {
 
   /** editor_run stop: the game is ended and its verdict answered, errors and warnings kept. */
   private async handleStopProject(): Promise<ToolResponse> {
-    if (!this.activeProcess) {
+    const stopped = this.currentRun();
+    if (!stopped) {
       return this.createErrorResponse('No game is running. Start one with editor_run.');
     }
-    const stopped = this.activeProcess;
     this.drainEditorOutput(stopped);
+    this.drainTranscript(stopped);
     this.logDebug('Stopping the running game');
     await this.endActiveGame();
     return this.jsonTextResponse({
@@ -2904,6 +3151,9 @@ class GodotServer {
       ...filters,
       projectPath: args['projectPath'],
       root: readNonEmptyString(args, 'nodePath') ?? '/root',
+      // True by default, unlike the same argument on text: a find names a class or a group and
+      // means the node whether or not it is drawn, while text is what somebody reads on screen.
+      include_hidden: readBoolean(args, 'includeHidden') ?? true,
       limit: readPositiveNumber(args, 'limit') ?? 100,
       ...(property === undefined ? {} : { property }),
     });

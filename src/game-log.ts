@@ -17,8 +17,14 @@ export type Severity = 'error' | 'warning' | 'info';
  * `debugger` is the odd one and it is not a detail: a game the editor is playing can be broken
  * on an error the engine prints down neither pipe, and an entry that claimed to be stdout would
  * be saying the game printed something it never printed.
+ *
+ * `transcript` is a run this server started, whose two streams are written to one file so the
+ * order the lines landed in is the order they are read back in, and so the run keeps printing
+ * into something when no server is reading. Which stream a line came down is lost in the merge
+ * and nothing asks: severity is read off the headline, not off the stream. Saying `stdout` for
+ * a line the engine wrote to stderr would be the same untruth the paragraph above refuses.
  */
-type Source = 'stdout' | 'stderr' | 'debugger';
+type Source = 'stdout' | 'stderr' | 'debugger' | 'transcript';
 
 export interface LogEntry {
   readonly index: number;
@@ -52,14 +58,23 @@ function announced(line: string): { severity: Severity; text: string } | null {
  * ends it turns up. An indented line after a headline is the headline's detail; anything else
  * starts an entry of its own.
  */
+/** The sources a log is written into as bytes arrive, as against the debugger's own entries. */
+type Stream = 'stdout' | 'stderr' | 'transcript';
+
+const STREAMS: readonly Stream[] = ['stdout', 'stderr', 'transcript'];
+
 export class GameLog {
   private readonly entries: LogEntry[] = [];
-  private readonly decoders = { stdout: new StringDecoder('utf8'), stderr: new StringDecoder('utf8') };
-  private readonly partial = { stdout: '', stderr: '' };
+  private readonly decoders: Record<Stream, StringDecoder> = {
+    stdout: new StringDecoder('utf8'),
+    stderr: new StringDecoder('utf8'),
+    transcript: new StringDecoder('utf8'),
+  };
+  private readonly partial: Record<Stream, string> = { stdout: '', stderr: '', transcript: '' };
   private lastHeadline: { index: number; detail: string[] } | null = null;
   private cursor = 0;
 
-  append(source: 'stdout' | 'stderr', chunk: Buffer | string): void {
+  append(source: Stream, chunk: Buffer | string): void {
     const decoded = typeof chunk === 'string' ? chunk : this.decoders[source].write(chunk);
     const lines = (this.partial[source] + decoded).split('\n');
     this.partial[source] = lines.pop() ?? '';
@@ -70,7 +85,7 @@ export class GameLog {
 
   /** Whatever was printed without a final newline, once the stream has ended. */
   finish(): void {
-    for (const source of ['stdout', 'stderr'] as const) {
+    for (const source of STREAMS) {
       const tail = this.partial[source] + this.decoders[source].end();
       this.partial[source] = '';
       if (tail !== '') {
@@ -79,7 +94,7 @@ export class GameLog {
     }
   }
 
-  private line(source: 'stdout' | 'stderr', raw: string): void {
+  private line(source: Stream, raw: string): void {
     // Colour codes are for a terminal; a caller reading entries wants the words.
     const line = raw.replace(COLOUR_CODE, '');
     if (line.trim() === '') {

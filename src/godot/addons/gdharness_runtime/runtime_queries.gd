@@ -52,12 +52,20 @@ func get_tree(params: Dictionary) -> Dictionary:
 ## rebuilds between them, which any HUD following a clock does, hands back paths that are gone by
 ## the time they are asked about. A node without that property says so rather than answering null,
 ## because null is what a node holding null answers.
+##
+## `include_hidden` defaults to true, because a find is a question about the tree and a caller
+## naming a class or a group means the node whether or not it is on screen. Passing false asks the
+## other question, the one a screen is checked against: a panel that keeps a label for every line
+## that might apply and hides the ones that do not answers with what the player is reading, rather
+## than with every line it is holding in case. How many matches that left out is counted and said,
+## because "none" and "four, all hidden" are different answers and used to read the same.
 func find_nodes(params: Dictionary) -> Dictionary:
 	var root_path: String = str(params.get("root", "/root"))
 	var wanted: Dictionary[String, String] = {}
 	for filter: String in FILTERS:
 		wanted[filter] = str(params.get(filter, ""))
 	var wanted_property: String = str(params.get("property", ""))
+	var include_hidden: bool = bool(params.get("include_hidden", true))
 	var limit: int = clampi(int(params.get("limit", FIND_LIMIT)), 1, FIND_LIMIT_CEILING)
 
 	if not _anything_asked(wanted):
@@ -77,14 +85,18 @@ func find_nodes(params: Dictionary) -> Dictionary:
 	# find would have matched if the name had been read the way it was probably meant.
 	var literal: bool = _is_literal(wanted["name"])
 	var nearly: int = 0
+	var hidden: int = 0
 	while not pending.is_empty():
 		var node: Node = pending.pop_front()
 		var rest: bool = _matches_apart_from_name(node, wanted)
 		if rest and _named(node, wanted["name"]):
-			if found.size() >= limit:
+			if not include_hidden and not _shown(node):
+				hidden += 1
+			elif found.size() >= limit:
 				truncated = true
 				break
-			found.append(_found(node, wanted_property))
+			else:
+				found.append(_found(node, wanted_property))
 		elif rest and literal and str(node.name).containsn(wanted["name"]):
 			nearly += 1
 		# Internal children included, which they were not. A ConfirmationDialog builds its Yes and
@@ -98,16 +110,47 @@ func find_nodes(params: Dictionary) -> Dictionary:
 			pending.push_front(children[index])
 
 	var answer: Dictionary = {"type": "nodes", "count": found.size(), "truncated": truncated, "nodes": found}
+	var notes: PackedStringArray = []
 	# Nothing found is the one answer that cannot be told apart from having asked the wrong
 	# question, and a name written without a wildcard is the way an agent writes "contains".
 	# Said only when it changes the answer, so a genuine nothing stays a plain nothing.
 	if found.is_empty() and nearly > 0:
 		var holding: String = "names contain" if nearly > 1 else "name contains"
-		answer["note"] = (
-			'name is matched as a glob against the whole name; %d node %s "%s", which "*%s*" would find'
-			% [nearly, holding, wanted["name"], wanted["name"]]
+		notes.append(
+			(
+				'name is matched as a glob against the whole name; %d node %s "%s", which "*%s*" would find'
+				% [nearly, holding, wanted["name"], wanted["name"]]
+			)
 		)
+	# How many the filter took out, so a short answer is not read as a small screen. Left out
+	# entirely when nothing was hidden, which keeps a plain answer plain.
+	if hidden > 0:
+		answer["hidden"] = hidden
+		notes.append(
+			(
+				"%d matching node%s hidden and left out; includeHidden true answers with them too"
+				% [hidden, "" if hidden == 1 else "s"]
+			)
+		)
+	if not notes.is_empty():
+		answer["note"] = " ".join(notes)
 	return answer
+
+
+## Whether the player can see [param node], its ancestors counted.
+##
+## Not [method CanvasItem.is_visible_in_tree] on its own, because only the nodes that draw have it:
+## a plain Node sitting between a hidden panel and a label has no visibility to ask about, and the
+## label answers that it is visible while nothing of it is on screen. Walking up is what makes a
+## row hidden because the panel holding it is hidden, which is what somebody checking a screen is
+## asking about.
+static func _shown(node: Node) -> bool:
+	var walk: Node = node
+	while walk != null:
+		if not _drawn(walk):
+			return false
+		walk = walk.get_parent()
+	return true
 
 
 ## One match, with the named property on it when one was named.
@@ -262,11 +305,18 @@ func _read_into(node: Node, include_hidden: bool, most: int, into: PackedStringA
 		_read_into(child, include_hidden, most, into)
 
 
-## Whether [param node] is on the screen at all, for the two kinds of thing that can be hidden.
+## Whether [param node] is on the screen at all, for the three kinds of thing that can be hidden.
+##
+## A Node3D among them because a hidden one draws nothing, Label3D included: reading a screen or
+## finding what is on it counted a hidden 3D subtree as showing, which is the one answer neither
+## question wants.
 static func _drawn(node: Node) -> bool:
 	var control: CanvasItem = node as CanvasItem
 	if control != null:
 		return control.visible
+	var spatial: Node3D = node as Node3D
+	if spatial != null:
+		return spatial.visible
 	var window: Window = node as Window
 	return window == null or window.visible
 

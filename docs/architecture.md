@@ -248,6 +248,18 @@ answers `added: []`. Any such class comes back under `unseenByEditor`, and `clas
 so when the editor would not answer, because a check that goes quiet on failure reads exactly like
 a clean project. `editor_rescan` reports the same two after its scan.
 
+Neither of those reaches the language server, which keeps a cache of its own that nothing on the
+editor side invalidates. Godot answers about a file the client has opened from the copy the client
+handed it, and holds that parse, and that parse holds the parses of everything the file depends
+on. Keeping documents open therefore froze every dependency at the text it had when some open file
+first pulled it in: a `class_name` script edited outside the editor kept answering with the
+members it used to have, a filesystem scan could not touch it, and asking again re-parsed only the
+file asked about while the other open documents went on pinning the stale copy. So each ask gives
+its document back as soon as the answer arrives. A file the client does not own is read from disk,
+and the engine deliberately declines to keep that parse past the request, "since we can't
+invalidate the cache properly"; holding documents open was opting into exactly the cache it is
+refusing to keep.
+
 ## Running the game
 
 `editor_run` asks the editor to play, and connects the debug adapter first so the game's first
@@ -255,7 +267,25 @@ lines are not lost. The game then belongs to the editor's debugger: `debug_*` sp
 session and `editor_output` reads the console over it.
 
 With no editor connected, the server spawns the game itself. It has no debug session, so `debug_*`
-will not answer for it, and its console is read from the process pipe instead.
+will not answer for it, and its console is read from a file rather than over the adapter.
+
+That run belongs to the operating system rather than to the server. It is spawned detached and
+unreferenced, and both its streams are written to a transcript under the runtime directory, with a
+note beside it naming the process and the file. A harness restarts its MCP server whenever it
+likes, and an ordinary child dies with its parent: benches forty minutes into a sweep were killed
+twice in one session by a reconnect nobody asked for, and `editor_output` afterwards answered "No
+game is running" about output that had just been dropped. A file rather than a pipe for the same
+reason and one more, since a pipe with no reader fills and then blocks the writer: surviving the
+server down a pipe would only trade a killed run for a wedged one.
+
+So a server that finds no run of its own reads that note. A process still there is reported as
+running, with everything printed while nobody was reading; one that is gone is answered with its
+output and `endedUnwatched`, because nothing collected an exit code for it and a guessed zero
+reads as a run that finished its work. `editor_run stop` ends it by pid and takes the note away.
+
+The runs a caller waits on, `project_test` and `editor_run check`, stay ordinary children on
+pipes. The answer is the point of them and it belongs to the call that asked, so outliving the
+server would leave an engine nobody is reading and nobody will end.
 
 `editor_run check` always spawns: headless, a few frames, then quit, answering with the boot
 verdict and every error and warning printed.

@@ -416,6 +416,37 @@ export class GodotLSPClient {
     return uri;
   }
 
+  /**
+   * Give the document back once its answer is in.
+   *
+   * A file this client has opened is one the language server answers about from the copy it was
+   * handed, and it keeps that parse for as long as the document stays open. The parse holds the
+   * parses of everything the file depends on, so a `class_name` script edited outside the editor
+   * is frozen at whatever it said when some open file first pulled it in, and every member added
+   * since reads as missing: `Static function "opening()" not found in base "Components"` about a
+   * static function the engine compiles and runs.
+   *
+   * Nothing on the editor side clears that. A filesystem scan, which is all `editor_rescan` can
+   * ask for, rebuilds the editor's own list and reaches neither cache. Asking a second time
+   * re-parses only the file asked about, while every other document still open goes on pinning
+   * the stale dependency, so two files that use one class hold each other's answer wrong.
+   *
+   * Closing releases both. A file the client does not own is read from disk, and the engine
+   * deliberately declines to cache that parse past the request, "since we can't invalidate the
+   * cache properly". Holding documents open opts into exactly the cache it is refusing to keep.
+   */
+  private closeDocument(uri: string): void {
+    if (!this.documentVersions.delete(uri)) {
+      return;
+    }
+    try {
+      this.sendNotification('textDocument/didClose', { textDocument: { uri } });
+    } catch {
+      // A connection that has gone holds no documents to give back, and the close is the last
+      // thing a failing request does: throwing here would bury whatever actually went wrong.
+    }
+  }
+
   async initialize(rootPath: string): Promise<unknown> {
     await this.ensureConnected();
 
@@ -488,8 +519,9 @@ export class GodotLSPClient {
       });
     });
 
+    let opened: string | null = null;
     try {
-      this.syncDocument(filePath, content);
+      opened = this.syncDocument(filePath, content);
       return await diagnosticsPromise;
     } catch (error) {
       const waiter = this.diagnosticsWaiters.get(key);
@@ -498,6 +530,10 @@ export class GodotLSPClient {
         this.diagnosticsWaiters.delete(key);
       }
       throw error;
+    } finally {
+      if (opened !== null) {
+        this.closeDocument(opened);
+      }
     }
   }
 
@@ -511,10 +547,15 @@ export class GodotLSPClient {
     await this.ensureInitializedForFile(filePath);
 
     const uri = this.syncDocument(filePath, content);
-    const result = await this.sendRequest('textDocument/completion', {
-      textDocument: { uri },
-      position: { line, character },
-    });
+    let result: unknown;
+    try {
+      result = await this.sendRequest('textDocument/completion', {
+        textDocument: { uri },
+        position: { line, character },
+      });
+    } finally {
+      this.closeDocument(uri);
+    }
 
     if (Array.isArray(result)) {
       return result as unknown[];
@@ -535,10 +576,14 @@ export class GodotLSPClient {
     await this.ensureInitializedForFile(filePath);
 
     const uri = this.syncDocument(filePath, content);
-    return this.sendRequest('textDocument/hover', {
-      textDocument: { uri },
-      position: { line, character },
-    });
+    try {
+      return await this.sendRequest('textDocument/hover', {
+        textDocument: { uri },
+        position: { line, character },
+      });
+    } finally {
+      this.closeDocument(uri);
+    }
   }
 
   async getDocumentSymbols(filePath: string, content: string): Promise<unknown[]> {
@@ -546,9 +591,14 @@ export class GodotLSPClient {
     await this.ensureInitializedForFile(filePath);
 
     const uri = this.syncDocument(filePath, content);
-    const result = await this.sendRequest('textDocument/documentSymbol', {
-      textDocument: { uri },
-    });
+    let result: unknown;
+    try {
+      result = await this.sendRequest('textDocument/documentSymbol', {
+        textDocument: { uri },
+      });
+    } finally {
+      this.closeDocument(uri);
+    }
 
     return Array.isArray(result) ? (result as unknown[]) : [];
   }

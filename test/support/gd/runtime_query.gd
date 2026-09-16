@@ -179,6 +179,79 @@ func _check_a_name_written_as_a_word() -> void:
 		_fail("and a whole name that matches is not a near miss: %s" % str(matched))
 
 
+## A find answering with what is on screen, rather than with every line the screen is holding.
+##
+## A panel that keeps a label for every line that might apply and hides the ones that do not is the
+## normal way to keep a row rather than rebuild it, and a find over it answered with the lot: a
+## project read back "none of them came back any the wiser" on four dockets nobody had scouted,
+## every line correct and every line hidden. Telling them apart cost a `visible` call per node,
+## which is the cost reading a property off each match exists to avoid.
+##
+## A node hidden because something above it is hidden counts as hidden, since that is what the
+## player sees, and the ones left out are counted rather than silently missing: "none" and "four,
+## all hidden" used to be the same answer.
+func _check_hidden_nodes_can_be_left_out() -> void:
+	var shelf: Control = Control.new()
+	shelf.name = "Shelf"
+	root.add_child(shelf)
+
+	var shown_row: Label = Label.new()
+	shown_row.name = "ShownRow"
+	shown_row.text = "scouted twice"
+	shelf.add_child(shown_row)
+
+	var hidden_row: Label = Label.new()
+	hidden_row.name = "HiddenRow"
+	hidden_row.text = "never scouted"
+	hidden_row.visible = false
+	shelf.add_child(hidden_row)
+
+	# Visible itself, under a parent that is not: what the player sees is nothing, and asking this
+	# node alone says otherwise.
+	var closed: Control = Control.new()
+	closed.name = "ClosedDrawer"
+	closed.visible = false
+	shelf.add_child(closed)
+
+	var inside: Label = Label.new()
+	inside.name = "InsideRow"
+	inside.text = "put away"
+	closed.add_child(inside)
+
+	var everything: Dictionary = await node._execute_command(
+		"find_nodes", {"class": "Label", "root": "/root/Shelf"}
+	)
+	if (
+		_paths(everything)
+		!= ["/root/Shelf/ShownRow", "/root/Shelf/HiddenRow", "/root/Shelf/ClosedDrawer/InsideRow"]
+	):
+		_fail("a find answers with hidden nodes unless asked otherwise: %s" % str(everything))
+	if everything.has("hidden"):
+		_fail("and counts nothing out when it left nothing out: %s" % str(everything))
+
+	var on_screen: Dictionary = await node._execute_command(
+		"find_nodes", {"class": "Label", "root": "/root/Shelf", "include_hidden": false}
+	)
+	if _paths(on_screen) != ["/root/Shelf/ShownRow"]:
+		_fail("include_hidden false answers with what is on screen: %s" % str(on_screen))
+	if on_screen.get("hidden") != 2:
+		_fail("a node under a hidden parent is hidden too, and both are counted: %s" % str(on_screen))
+	if not str(on_screen.get("note", "")).contains("hidden and left out"):
+		_fail("and the answer says so, so none does not read as an empty screen: %s" % str(on_screen))
+
+	# The property goes on being read off each match, which is the whole reason to filter here
+	# rather than by asking each node afterwards.
+	var with_text: Dictionary = await node._execute_command(
+		"find_nodes", {"class": "Label", "root": "/root/Shelf", "include_hidden": false, "property": "text"}
+	)
+	var rows: Array = with_text.get("nodes", [])
+	if rows.size() != 1 or str((rows[0] as Dictionary).get("value", "")) != "scouted twice":
+		_fail("the property is still read off what is left: %s" % str(with_text))
+
+	shelf.queue_free()
+	await node.get_tree().process_frame
+
+
 ## A property that is not a property of any node, which is where a game keeps everything worth
 ## asking about: a [RefCounted] hanging off a node, holding another one.
 ##
@@ -374,6 +447,7 @@ func _check() -> void:
 	var its_own: Dictionary = await node._execute_command("find_nodes", {"says": "sign the", "name": "Level"})
 	if its_own.get("count") != 0:
 		_fail("what a node says is its own, not what is said under it: %s" % str(its_own))
+	await _check_hidden_nodes_can_be_left_out()
 	var limited: Dictionary = await node._execute_command("find_nodes", {"class": "Node", "limit": 2})
 	if limited.get("count") != 2 or limited.get("truncated") != true:
 		_fail("a limit truncates and says so: %s" % str(limited))
