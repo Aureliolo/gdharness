@@ -245,7 +245,10 @@ func _check_hidden_nodes_can_be_left_out() -> void:
 		"find_nodes", {"class": "Label", "root": "/root/Shelf", "include_hidden": false, "property": "text"}
 	)
 	var rows: Array = with_text.get("nodes", [])
-	if rows.size() != 1 or str((rows[0] as Dictionary).get("value", "")) != "scouted twice":
+	var values: PackedStringArray = []
+	for row: Dictionary in rows:
+		values.append(str(row.get("value", "")))
+	if values != PackedStringArray(["scouted twice"]):
 		_fail("the property is still read off what is left: %s" % str(with_text))
 
 	shelf.queue_free()

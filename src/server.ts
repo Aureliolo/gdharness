@@ -160,6 +160,17 @@ export function patienceForFrames(frames: number, atLeast: number): number {
  *
  * Undefined reads as gone, because a caller that has no process to name has nothing to wait for.
  */
+/**
+ * Whether a run is still going.
+ *
+ * Three states rather than two: going, finished with a code somebody collected, and found already
+ * over with no code anywhere because no server was waiting on it. Only the first is running, and
+ * the third must never read as the second.
+ */
+function stillRunning(run: GodotProcess | null): boolean {
+  return run?.exitCode === null && run.endedUnwatched !== true;
+}
+
 export function alive(pid: number | undefined | null): boolean {
   if (pid === undefined || pid === null) {
     return false;
@@ -709,12 +720,13 @@ class GodotServer {
     this.stopWatchingForASuccessor();
     withdrawBridge(this.announcedAt);
     this.announcedAt = null;
-    if (this.activeProcess) {
-      // Killed rather than stopped through the editor: a shutdown cannot wait on a round trip,
-      // and a game the editor plays outlives this server anyway, which is the editor's to end.
-      this.activeProcess.process?.kill();
-      this.activeProcess = null;
-    }
+    // The run is left running. It is spawned detached and its output goes to a file precisely so
+    // that this server going away is not the end of it: the harness restarts this process on its
+    // own schedule, and killing the game here would be this server doing by hand exactly what
+    // detaching was for. A game the editor plays is the editor's to end and was never killed
+    // here anyway. The note on disk is what the next server picks it back up by, and
+    // `editor_run stop` is what ends it.
+    this.activeProcess = null;
     // Each of these is allowed to fail without stopping the rest of the shutdown, but a
     // failure has to leave a trace: a stop that did not release the language server port is
     // indistinguishable from one that did until the next run cannot bind.
@@ -785,18 +797,11 @@ class GodotServer {
       return;
     }
     this.shutdownInitiated = true;
-    // 'exit' runs synchronously and the process is gone the moment this returns, so the child
-    // kill is the only thing that can still happen here. The bridge's close is a promise that
-    // would never settle, and the sockets go with the process anyway; the paths that can
-    // await it are SIGINT, SIGTERM, SIGHUP and beforeExit, which all go through cleanup().
-    if (this.activeProcess) {
-      try {
-        this.activeProcess.process?.kill();
-      } catch (error) {
-        console.error('[SERVER] Failed to kill the Godot process on exit:', errorMessage(error));
-      }
-      this.activeProcess = null;
-    }
+    // Nothing left to do here. 'exit' runs synchronously and the process is gone the moment this
+    // returns, so killing the game was the only thing that could still happen; it no longer
+    // should, for the reason cleanup() gives. The bridge's close is a promise that would never
+    // settle, and the sockets go with the process anyway.
+    this.activeProcess = null;
   }
 
   // -------------------------------------------------------------------------------------------
@@ -2094,7 +2099,9 @@ class GodotServer {
         version: godotPath === null ? null : await this.godotVersion(godotPath),
       },
       game: {
-        processActive: this.activeProcess?.exitCode === null,
+        // The record too, or "is something running" answers no about a run this server did not
+        // start, which after a reconnect is every run.
+        processActive: stillRunning(this.currentRun()),
         playingInEditor: playing,
         runtimeConnected: games.some((game) => game.reachable),
         runtimes: games,
@@ -2361,7 +2368,11 @@ class GodotServer {
       return await this.checkBoot(engine.value, project.value.path, sceneArgument, args, given.value);
     }
 
-    if (this.activeProcess?.exitCode === null) {
+    // Asked of the record as well as of this server, because a run started before a reconnect is
+    // one this process has never heard of. Starting a second engine beside it would leave the
+    // first running with nothing holding it and its note overwritten, which is the one way
+    // detaching a run could turn into a leak.
+    if (stillRunning(this.currentRun())) {
       this.logDebug('Ending the running game before starting another');
       await this.endActiveGame();
     }
@@ -2856,9 +2867,8 @@ class GodotServer {
     // that matters to a caller: it draws nothing, answers no runtime call, and the timeouts that
     // follow read like a hung engine. Said here because this is where somebody asks what it did.
     const halt = run.throughEditor ? (this.dapClient?.whereItStopped() ?? null) : null;
-    const running = run.exitCode === null && run.endedUnwatched !== true;
     return this.jsonTextResponse({
-      running,
+      running: stillRunning(run),
       exitCode: run.exitCode,
       through: run.throughEditor ? 'editor' : 'gdharness',
       pid: run.pid,
@@ -3147,15 +3157,18 @@ class GodotServer {
     // one question and was a dozen calls: find the labels, then read each one, by which time the
     // panel had been rebuilt and half the paths were gone.
     const property = readNonEmptyString(args, 'property');
+    const includeHidden = readBoolean(args, 'includeHidden');
     return await this.handleRuntimeCommand('find_nodes', {
       ...filters,
       projectPath: args['projectPath'],
       root: readNonEmptyString(args, 'nodePath') ?? '/root',
-      // True by default, unlike the same argument on text: a find names a class or a group and
-      // means the node whether or not it is drawn, while text is what somebody reads on screen.
-      include_hidden: readBoolean(args, 'includeHidden') ?? true,
       limit: readPositiveNumber(args, 'limit') ?? 100,
       ...(property === undefined ? {} : { property }),
+      // Sent only when asked for, so what goes over the wire stays what the caller named. The
+      // default lives on the addon side and is true there, unlike the same argument on text: a
+      // find names a class or a group and means the node whether or not it is drawn, while text
+      // is what somebody reads off the screen.
+      ...(includeHidden === undefined ? {} : { include_hidden: includeHidden }),
     });
   }
 

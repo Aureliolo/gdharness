@@ -3049,7 +3049,9 @@ async function testARunOutlivesItsServer(): Promise<void> {
         `what it printed while no server was reading is there too:\n${JSON.stringify(output, null, 2)}`,
       );
 
-      const stopped: unknown = JSON.parse(await call('editor_run', { op: 'stop' }, ENGINE_CALL_TIMEOUT_MS));
+      const stopped: unknown = JSON.parse(
+        await call('editor_run', { projectPath: projectDir, op: 'stop' }, ENGINE_CALL_TIMEOUT_MS),
+      );
       assert.equal(get(stopped, 'stopped'), true, JSON.stringify(stopped));
     }, env);
 
