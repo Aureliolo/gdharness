@@ -49,6 +49,8 @@ import { freePort, portFromEnvOrNull } from './ports.js';
 import { projectStructure, searchProject } from './project-scan.js';
 import { parseProjectGodot, setupResourceHandlers } from './resources.js';
 import {
+  ANNOUNCE_BUDGET_MS,
+  announcedSince,
   chooseRuntime,
   discoverRuntimes,
   runtimeDirectory,
@@ -63,7 +65,7 @@ import type {
   ToolResponse,
 } from './server-types.js';
 import { addonMismatch, DEBUG_MODE, GODOT_DEBUG_MODE_DEFAULT, SERVER_VERSION } from './server-version.js';
-import { installedAddonVersion } from './setup.js';
+import { installedAddonVersion, RUNTIME_AUTOLOAD } from './setup.js';
 import {
   asParams,
   readArray,
@@ -2294,6 +2296,10 @@ class GodotServer {
       await this.endActiveGame();
     }
 
+    // Taken before anything starts, so the game waited for below is one nobody had seen: a game
+    // that has just been ended can still be dying with its announcement on disk.
+    const alreadyPlaying = new Set(discoverRuntimes().map((endpoint) => endpoint.pid));
+
     // The editor when it is there: a game it plays is a game its debugger is holding, and that
     // session is the only thing the debug tools can reach. A game started here as its own
     // process is invisible to them, whatever port they are pointed at.
@@ -2306,7 +2312,7 @@ class GodotServer {
       variables: process.env,
     });
     if (this.godotBridge.isConnected() && (!headless || editorPlaysHeadless(project.value.file))) {
-      return await this.playThroughEditor(sceneArgument, refreshed.value);
+      return await this.playThroughEditor(sceneArgument, refreshed.value, project.value.path, alreadyPlaying);
     }
 
     const cmdArgs = runArguments({
@@ -2328,8 +2334,50 @@ class GodotServer {
       pid: started.process.pid ?? null,
       arguments: cmdArgs,
       refreshedClasses: refreshed.value,
+      runtime: await this.runtimeUp(project.value.path, alreadyPlaying),
       message: 'Use editor_output for what it prints and editor_run stop to end it.',
     });
+  }
+
+  /**
+   * Waits for the game just started to be something the runtime tools can talk to, and says so.
+   *
+   * A start answered the moment the engine was asked to play, and the runtime binds its port and
+   * announces itself some way into the boot after that, so the first `runtime_*` call after a
+   * start was routinely answered "No game with the runtime addon is running" about a game that
+   * was starting. Twice in one session the way through was to make the same call again.
+   *
+   * A project with no runtime addon on disk can never announce, so it is not waited for: the
+   * autoload is deliberately not asked about, because a project is free to bring the addon up
+   * through a script of its own rather than by registering the addon's path.
+   */
+  private async runtimeUp(
+    projectPath: string,
+    before: ReadonlySet<number>,
+  ): Promise<Record<string, unknown>> {
+    if (!existsSync(join(projectPath, RUNTIME_AUTOLOAD.path))) {
+      return {
+        listening: false,
+        note: 'this project has no gdharness_runtime addon, so the runtime_* tools have nothing to talk to',
+      };
+    }
+    const endpoint = await announcedSince(projectPath, before, {
+      // A game held at a breakpoint set before the run is not booting any more, and waiting out
+      // the budget on one says nothing. It cannot announce until it is let go.
+      giveUp: () => this.dapClient?.isStopped() === true,
+    });
+    if (endpoint === null) {
+      const held = this.dapClient?.whereItStopped() ?? null;
+      return {
+        listening: false,
+        note:
+          held === null
+            ? `nothing announced itself within ${ANNOUNCE_BUDGET_MS}ms: the game may be slow to boot, or its runtime is not coming up`
+            : 'the game stopped before its runtime came up, so the runtime_* tools have nothing to talk to yet: debug_control continue lets it carry on',
+        heldAt: held,
+      };
+    }
+    return { listening: true, pid: endpoint.pid, port: endpoint.port };
   }
 
   /**
@@ -2343,6 +2391,8 @@ class GodotServer {
   private async playThroughEditor(
     scene: string | null,
     refreshedClasses: readonly string[],
+    projectPath: string,
+    alreadyPlaying: ReadonlySet<number>,
   ): Promise<ToolResponse> {
     const log = new GameLog();
     try {
@@ -2383,6 +2433,7 @@ class GodotServer {
       // Which port the editor's debugger took, since it is the one port Godot has no command
       // line option for and the addon moves itself off when another editor is holding it.
       debugPort: readNumber(asParams(JSON.parse(answer.content[0]?.text ?? '{}')), 'debugPort'),
+      runtime: await this.runtimeUp(projectPath, alreadyPlaying),
       message:
         'The editor is playing it, so its debugger holds it: the debug_* tools can reach it, ' +
         'editor_output reads its console through the debug adapter, and editor_run stop ends it.',
