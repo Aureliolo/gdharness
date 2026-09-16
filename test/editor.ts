@@ -1580,12 +1580,23 @@ async function testTheDebuggerGetsAPortOfItsOwn({ call, attempt, project }: Edit
  * same value put there before the editor started arrived. So a run with arguments is spawned, and
  * both halves of that are asserted here, with an editor connected the whole time: the game is
  * handed what the caller asked for, and the answer says who started it.
+ *
+ * Headless, like every other game this fixture runs: the editor plays them that way because this
+ * project's own run arguments say so. A spawned run answers that question from the platform
+ * instead, which asked for a window on Windows and macOS and for none on a Linux runner with no
+ * display, and the macOS runner was the one where nothing ever announced itself. Asking for
+ * headless here leaves the editor as the one that would have played it, because the project's run
+ * arguments say headless too, so what moves this run is still the arguments and nothing else.
  */
 async function testTheGameIsHandedItsOwnArguments({ call, attempt, project }: Editor): Promise<void> {
   await attempt('editor_run', { projectPath: project, op: 'stop' });
 
   try {
-    const run = await call('editor_run', { projectPath: project, args: ['--fixture-flag=7', '--quiet'] });
+    const run = await call('editor_run', {
+      projectPath: project,
+      headless: true,
+      args: ['--fixture-flag=7', '--quiet'],
+    });
     assert.equal(
       get(run, 'through'),
       'gdharness',
@@ -1596,6 +1607,14 @@ async function testTheGameIsHandedItsOwnArguments({ call, attempt, project }: Ed
       /debug_\*/,
       'and the answer should say the debug tools will not answer for it',
     );
+
+    // A start is supposed to wait for the game to be something the runtime tools can talk to, so
+    // a run that came back without one is that promise broken rather than a call made too early.
+    // What the game printed goes with it: the next question is always why it did not come up.
+    if (get(run, 'runtime', 'listening') !== true) {
+      const said = (await attempt('editor_output', {})).text;
+      assert.fail(`the game with arguments never came up: ${JSON.stringify(run)}\n${said}`);
+    }
 
     const given = await call('runtime_invoke', {
       projectPath: project,
