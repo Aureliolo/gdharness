@@ -4,11 +4,16 @@
 # every set of notes ends with "Release v0.12.3", which tells a reader that this release released
 # itself and pushes the line that does say something up out of sight.
 #
-# By the label rather than by the author. Excluding `github-actions[bot]`, and `github-actions`
-# beside it, left the line exactly where it was: whatever `exclude.authors` matches, it is not
-# either spelling of an app that opens a pull request with the job token. The label is put on by
-# release-prepare.yml, which is the only thing that opens one of these, and it is the mechanism
-# this was checked against rather than the one that reads as though it should work.
+# By the label, which is the mechanism this was checked against: generating the notes for a tag
+# whose target carries this file drops the labelled pull request, and the header GitHub writes
+# says which commit the configuration came from. release-prepare.yml puts the label on, and it is
+# the only thing that opens one of these.
+#
+# That "which commit" is the part worth knowing: the configuration is read from the release's
+# target, not from the default branch as it is now. So a tag cut before a change here was made
+# does not see it, and regenerating an old tag's notes to check a change tests the old file.
+# Excluding the author was tried first and read as not working for exactly that reason, against a
+# tag that predated it, which is a null result rather than a verdict.
 #
 # Dependency updates stay in. This is distributed as a bundle, so a raised dependency is a change
 # in what somebody installs, and a reader deciding whether to take a release should see it.
