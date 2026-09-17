@@ -258,7 +258,8 @@ func _matches_apart_from_name(node: Node, wanted: Dictionary[String, String]) ->
 ##
 ## [param limit] is the first few lines rather than all of them, which is how the top of a screen
 ## is read without the hall under it: the bar along the top of a guild is eleven lines and the
-## panel it sits on is two hundred.
+## panel it sits on is two hundred. `omitted` says how many lines that left behind, so a screen
+## whose interesting half is below the cut says so in a number rather than in a flag.
 func read_text(params: Dictionary) -> Dictionary:
 	var root_path: String = str(params.get("root", "/root"))
 	var include_hidden: bool = bool(params.get("include_hidden", false))
@@ -269,19 +270,20 @@ func read_text(params: Dictionary) -> Dictionary:
 		return reached
 	var root: Node = reached["node"]
 
-	# One line further than asked for, so that whether anything was left behind is read off the
-	# walk rather than guessed at from the count: a panel of exactly as many lines as the caller
-	# asked for is one they have read all of, and saying otherwise sends them back for nothing.
-	var read: PackedStringArray = PackedStringArray()
-	_read_into(root, include_hidden, limit + 1, read)
-	var more: bool = read.size() > limit
-	var lines: PackedStringArray = read.slice(0, limit) if more else read
+	# The rest of the subtree is walked and counted rather than stopped at. A flag on its own gets
+	# read as a footnote: a screen answered with its first few hundred lines and the dialog the
+	# player is being asked to answer below them reads exactly like a dialog that is not there,
+	# and a bare `truncated: true` was looked straight past twice before the limit was suspected.
+	# A number is what sends somebody back.
+	var lines: PackedStringArray = PackedStringArray()
+	var left_out: int = _read_into(root, include_hidden, limit, lines)
 	return {
 		"type": "text",
 		"root": root_path,
 		"lines": lines,
 		"count": lines.size(),
-		"truncated": more,
+		"truncated": left_out > 0,
+		"omitted": left_out,
 	}
 
 
@@ -293,16 +295,21 @@ func read_text(params: Dictionary) -> Dictionary:
 ## screen full of forms answered with every label on it and none of the values in it. The hidden
 ## check covers a [Window] for the same walk: a dropdown's popup is a child that is not drawn
 ## until it is opened, and reading a closed menu would put every item on the screen.
-func _read_into(node: Node, include_hidden: bool, most: int, into: PackedStringArray) -> void:
-	if into.size() >= most:
-		return
+## Fills [param into] up to [param most] lines and answers with how many further lines the rest of
+## the subtree says, which is what the caller is told rather than left to infer.
+func _read_into(node: Node, include_hidden: bool, most: int, into: PackedStringArray) -> int:
 	if not include_hidden and not _drawn(node):
-		return
+		return 0
+	var left_out: int = 0
 	var said: String = said_by(node)
 	if not said.is_empty():
-		into.append(said)
+		if into.size() < most:
+			into.append(said)
+		else:
+			left_out += 1
 	for child: Node in node.get_children(true):
-		_read_into(child, include_hidden, most, into)
+		left_out += _read_into(child, include_hidden, most, into)
+	return left_out
 
 
 ## Whether [param node] is on the screen at all, for the three kinds of thing that can be hidden.
