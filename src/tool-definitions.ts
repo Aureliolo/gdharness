@@ -861,7 +861,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'number',
         ops: ['find', 'text'],
         description:
-          'find: the most nodes to answer with, default 100. text: the most lines, default 500, with truncated saying whether there were more.',
+          'find: the most nodes to answer with, default 100. text: the most lines, default 500, with omitted saying how many lines that left behind. A screen whose dialog sits under a long list is a screen read with omitted greater than zero, so raise this or point root at the dialog rather than reading the answer as what is on screen.',
       },
       includeHidden: {
         type: 'boolean',
