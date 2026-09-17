@@ -2949,6 +2949,30 @@ class GodotServer {
    * A server that cannot say whose a run is answers "No game is running" about it, which is the
    * true answer to the question it can actually ask.
    */
+  /**
+   * What to say when this server has no run to answer about.
+   *
+   * "No game is running" is two situations now that a server only claims what it can show is its
+   * own: nothing is running anywhere, and something is running that belongs to somebody else.
+   * They call for different things, and a caller who has just started a game and is being told
+   * nothing is running needs the second one spelled out rather than left to be inferred from a
+   * sentence that is true about this server and false about the machine.
+   */
+  private nothingOfOursIsRunning(): string {
+    const record = readRunRecord();
+    if (record === null) {
+      return 'No game is running. Start one with editor_run.';
+    }
+    const status = this.godotBridge.getStatus();
+    const mine = this.ownProject ?? (status.connected ? (status.projectPath ?? null) : null);
+    const whose = record.projectPath === '' ? 'a project it does not name' : record.projectPath;
+    const ours =
+      mine === null
+        ? 'this server was started without GDHARNESS_PROJECT and has no editor connected, so it cannot say whose that run is'
+        : `this server serves ${mine}`;
+    return `No game of this server's is running. A run started from ${whose} is recorded on this machine, and ${ours}, so it is not this server's to answer for or to end. Start one with editor_run.`;
+  }
+
   private couldBeOurs(project: string): boolean {
     const status = this.godotBridge.getStatus();
     const mine = this.ownProject ?? (status.connected ? (status.projectPath ?? null) : null);
@@ -3022,7 +3046,7 @@ class GodotServer {
   private handleGetDebugOutput(args: OperationParams): ToolResponse {
     const run = this.currentRun();
     if (!run) {
-      return this.createErrorResponse('No game is running. Start one with editor_run.');
+      return this.createErrorResponse(this.nothingOfOursIsRunning());
     }
     this.drainEditorOutput(run);
     this.drainTranscript(run);
@@ -3102,7 +3126,7 @@ class GodotServer {
   private async handleStopProject(): Promise<ToolResponse> {
     const stopped = this.currentRun();
     if (!stopped) {
-      return this.createErrorResponse('No game is running. Start one with editor_run.');
+      return this.createErrorResponse(this.nothingOfOursIsRunning());
     }
     this.drainEditorOutput(stopped);
     this.drainTranscript(stopped);

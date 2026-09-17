@@ -3249,11 +3249,17 @@ async function testARunEndedUnwatchedIsStillReadable(): Promise<void> {
     // that cannot answer that question answers the one it can.
     await withStdioServer(
       async (call) => {
+        const said = await call('editor_output', { limit: 200 });
         assert.match(
-          await call('editor_output', { limit: 200 }),
-          /No game is running/,
+          said,
+          /No game of this server's is running/,
           'a server with no project of its own owns no run it merely found',
         );
+        // And says which of the two it is. "No game is running" would be true about this server
+        // and false about the machine, which is how somebody who has just started a game reads an
+        // answer about somebody else's run as an answer about theirs.
+        assert.match(said, /is recorded on this machine/, `the run that is there is named: ${said}`);
+        assert.match(said, /without GDHARNESS_PROJECT/, `and why it is not this server's: ${said}`);
       },
       { GDHARNESS_RUNTIME_DIR: runtimeDir },
     );
@@ -3262,11 +3268,16 @@ async function testARunEndedUnwatchedIsStillReadable(): Promise<void> {
     // answer about this run. The right shape about the wrong game is the worst answer available.
     await withStdioServer(
       async (call) => {
+        const said = await call('editor_output', { limit: 200 });
         assert.match(
-          await call('editor_output', { limit: 200 }),
-          /No game is running/,
+          said,
+          /No game of this server's is running/,
           'a run recorded against another project is not this server’s to report',
         );
+        assert.match(said, /this server serves .*elsewhere/, `naming what it does serve: ${said}`);
+        // Ending it is the half that matters: this is the call that used to kill it.
+        const refused = await call('editor_run', { projectPath: join(runtimeDir, 'elsewhere'), op: 'stop' });
+        assert.match(refused, /not this server's to answer for or to end/, refused);
       },
       { GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: join(runtimeDir, 'elsewhere') },
     );
