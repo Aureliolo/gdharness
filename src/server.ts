@@ -182,6 +182,23 @@ function stillRunning(run: GodotProcess | null): boolean {
   return true;
 }
 
+/**
+ * Whether a run is still up, taking the editor's word for the runs it is playing.
+ *
+ * A run this server spawned has a process to ask the operating system about. A run the editor
+ * plays has none: there is no handle here, `exitCode` stays null for as long as the record lasts,
+ * and reading that as "still going" turns a game that died during boot into one that may yet
+ * announce, which is the answer this was written to stop giving. The editor knows, and is already
+ * asked this by `editor_status`. [param editorSays] is null when it will not say, and then the
+ * record is what is left.
+ */
+export function runIsUp(run: GodotProcess | null, editorSays: boolean | null): boolean {
+  if (run?.throughEditor !== true) {
+    return stillRunning(run);
+  }
+  return editorSays ?? stillRunning(run);
+}
+
 /** What was true when the wait for an announcement ran out. */
 interface AfterWaiting {
   /** Whether the addon is on disk at all, since a project without it can never announce. */
@@ -2505,6 +2522,14 @@ class GodotServer {
     });
   }
 
+  /** Whether the game is still up, asking the editor only about a game the editor is playing. */
+  private async gameIsUp(): Promise<boolean> {
+    const run = this.currentRun();
+    const editorSays =
+      run?.throughEditor === true ? ((await this.editorPlayingState())?.playing ?? null) : null;
+    return runIsUp(run, editorSays);
+  }
+
   /**
    * Waits for the game just started to be something the runtime tools can talk to, and says so.
    *
@@ -2534,14 +2559,18 @@ class GodotServer {
     const endpoint = await announcedSince(projectPath, before, {
       budgetMs,
       // A game held at a breakpoint set before the run is not booting any more, and waiting out
-      // the budget on one says nothing. It cannot announce until it is let go.
-      giveUp: () => this.dapClient?.isStopped() === true,
+      // the budget on one says nothing. It cannot announce until it is let go. Nor is there
+      // anything to wait for once the process is over: a boot that fails on a parse error is
+      // gone in half a second, and sitting out the rest of the budget delays the answer that
+      // says so. The announcement is looked for before this is asked, so a game that announced
+      // and then quit is still found.
+      giveUp: () => this.dapClient?.isStopped() === true || !stillRunning(this.currentRun()),
     });
     return runtimeVerdict(endpoint, {
       addon: true,
       budgetMs,
       heldAt: this.dapClient?.whereItStopped() ?? null,
-      running: stillRunning(this.currentRun()),
+      running: await this.gameIsUp(),
     });
   }
 

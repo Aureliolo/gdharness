@@ -46,7 +46,9 @@ that is running, and the project on disk. ${TOOL_SPECS.length} tools, named \`do
   \`addonIsStale\` means they differ, and \`staleNote\` says which half is behind: an editor that
   needs restarting, or a server that needs reconnecting in your harness.
 - Start the game with \`editor_run start\`, never by spawning an engine. The editor plays it, so
-  its debugger holds it, which is what gives the \`debug_*\` tools something to talk to.
+  its debugger holds it, which is what gives the \`debug_*\` tools something to talk to. Its answer
+  says under \`runtime\` whether the game can be talked to yet; when it cannot, \`mayYetAnnounce\`
+  false is a runtime that is not coming and true is a game still on its way up.
 - Read \`editor_output\` after every run. It returns the engine's errors and warnings as entries
   with their backtraces, and a \`clean\` verdict, so a run that printed an error is one call away
   from being known.
