@@ -2968,6 +2968,22 @@ async function testARunEndedUnwatchedIsStillReadable(): Promise<void> {
           `nobody was waiting on it, so there is no code to report: ${JSON.stringify(output)}`,
         );
         assert.equal(get(output, 'errors'), 1, JSON.stringify(output));
+        assert.equal(
+          get(output, 'transcript'),
+          transcript,
+          `the file holding the whole run is named, since the entries are capped and it is not: ${JSON.stringify(output)}`,
+        );
+
+        // And when the cap actually drops something, the answer says where the rest is rather than
+        // leaving a count of what it left out. A project watching a long bench went looking for a
+        // second channel and found the engine's own log, which every engine start rotates away.
+        const capped: unknown = JSON.parse(await call('editor_output', { limit: 1 }));
+        assert.ok(asNumber(get(capped, 'omitted')) > 0, JSON.stringify(capped));
+        assert.match(
+          text(get(capped, 'note')),
+          /Everything this run has printed is in .*run-1\.log/,
+          `a capped answer points at the uncapped file: ${JSON.stringify(capped)}`,
+        );
 
         const printed = asArray(get(output, 'entries')).map((entry) => text(get(entry, 'text')));
         assert.ok(
