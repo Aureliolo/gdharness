@@ -2903,6 +2903,22 @@ class GodotServer {
     // that matters to a caller: it draws nothing, answers no runtime call, and the timeouts that
     // follow read like a hung engine. Said here because this is where somebody asks what it did.
     const halt = run.throughEditor ? (this.dapClient?.whereItStopped() ?? null) : null;
+    const notes: string[] = [];
+    if (run.endedUnwatched === true) {
+      notes.push(
+        'This run outlived the server that started it and is over now, so its exit code was never collected. Everything it printed is below, read back from its transcript.',
+      );
+    }
+    // Where the rest of it is, which nothing said. A long run is capped at `limit` entries and the
+    // answer said how many it left out without saying that the whole thing is in a file, uncapped,
+    // and readable while the run is still going. A project watching a fifty-minute bench reached
+    // instead for Godot's own log, which every engine start rotates away: two of them, started by
+    // an upgrade, left it holding 239 bytes of somebody else's output while this file was intact.
+    if (run.transcript !== null && selected.omitted > 0) {
+      notes.push(
+        `Everything this run has printed is in ${run.transcript}, uncapped and still being written.`,
+      );
+    }
     return this.jsonTextResponse({
       running: stillRunning(run),
       exitCode: run.exitCode,
@@ -2919,10 +2935,10 @@ class GodotServer {
       // Named for a run this server did not start, because the note a run leaves behind is
       // shared by every server using this runtime directory: a caller can see whose run it is.
       project: !run.throughEditor && run.process === null ? (run.projectPath ?? undefined) : undefined,
-      note:
-        run.endedUnwatched === true
-          ? 'This run outlived the server that started it and is over now, so its exit code was never collected. Everything it printed is below, read back from its transcript.'
-          : undefined,
+      // The file this run's output is written to, so watching a long one is reading a file meant
+      // to be read rather than racing the engine for one that is not.
+      transcript: run.transcript ?? undefined,
+      note: notes.length > 0 ? notes.join(' ') : undefined,
       omitted: selected.omitted,
       entries: selected.entries,
     });
