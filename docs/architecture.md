@@ -362,6 +362,12 @@ running, with everything printed while nobody was reading; one that is gone is a
 output and `endedUnwatched`, because nothing collected an exit code for it and a guessed zero
 reads as a run that finished its work. `editor_run stop` ends it by pid and takes the note away.
 
+A run that has ended also says who ended it. `endedBy` names the call when that was this server,
+and is null when it was not, which is an answer rather than the absence of one: a bench that
+stopped on its own and a bench this server stopped are otherwise the same silence. Six deaths in
+one afternoon were each worked out by hand for want of that distinction, and the reflex they
+produced, watching a log stop growing, is wrong on a run that prints only at the end.
+
 Two things guard that, because reading a note is also claiming the right to end what it names, and
 the runtime directory is one per user rather than one per project.
 
