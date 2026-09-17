@@ -441,7 +441,10 @@ One engine per call: `godot --headless --path <project> --script <operations.gd>
 engine reads. The answer is the last JSON object printed on stdout. Anything on stderr comes back
 under `engine_messages`.
 
-The ones that walk the project stop at a directory holding a `.gdignore`, because the engine does:
-nothing under one is imported, so what is in there is not a resource, not a dependency and not a
-global class. A vendored copy of somebody else's project is the usual reason to have one, and
-answering about its files means naming things the engine will never load.
+Every walk over a project directory stops at the same three things, whether the engine is doing
+the walking or the server is reading the directory itself: a name spelled with a dot,
+`node_modules`, and a directory holding a `.gdignore`. That is what the engine steps over, so
+nothing under one is imported and what is in there is not a resource, not a dependency, not a
+global class and not a search result. A vendored engine, an export directory and somebody else's
+project kept for reference are the usual reasons to have one, and answering about their files
+means naming things the engine will never load.
