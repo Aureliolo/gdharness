@@ -64,6 +64,7 @@ import {
   clearRunRecord,
   openTranscript,
   readRunRecord,
+  stillTheRecordedRun,
   sweepTranscripts,
   writeRunRecord,
 } from './run-record.js';
@@ -2449,9 +2450,16 @@ class GodotServer {
     // one this process has never heard of. Starting a second engine beside it would leave the
     // first running with nothing holding it and its note overwritten, which is the one way
     // detaching a run could turn into a leak.
+    // Kept so the answer can say it. A start that quietly ends the run somebody was reading is
+    // the same silence as a run dying on its own, and the caller reads the second as the first:
+    // a bench that stops mid-measurement with nothing said sends them looking at their engine.
+    let ended: number | null = null;
     if (stillRunning(this.currentRun())) {
       this.logDebug('Ending the running game before starting another');
-      await this.endActiveGame();
+      ended = this.currentRun()?.pid ?? null;
+      await this.endActiveGame(
+        'editor_run start, which ends the run that was going before it starts another',
+      );
     }
 
     // Taken before anything starts, so the game waited for below is one nobody had seen: a game
@@ -2486,6 +2494,7 @@ class GodotServer {
         project.value.path,
         alreadyPlaying,
         runtimeWaitMs,
+        ended,
       );
     }
 
@@ -2511,14 +2520,21 @@ class GodotServer {
         ? ' The editor cannot be handed arguments for a game it plays, so this one was started ' +
           'here: the debug_* tools answer only for a game the editor is playing.'
         : '';
+    const endedForThis =
+      ended === null
+        ? ''
+        : ` The run that was going, pid ${ended}, was ended to start this one; its output is no longer what editor_output answers about.`;
     return this.jsonTextResponse({
       started: true,
       through: 'gdharness',
       pid: started.process.pid ?? null,
       arguments: cmdArgs,
       refreshedClasses: refreshed.value,
+      // Which run this start ended, when it ended one, so a bench that stopped is answered for
+      // here rather than looked for in the engine.
+      endedPreviousRun: ended ?? undefined,
       runtime: await this.runtimeUp(project.value.path, alreadyPlaying, runtimeWaitMs),
-      message: `Use editor_output for what it prints and editor_run stop to end it.${spawnedInstead}`,
+      message: `Use editor_output for what it prints and editor_run stop to end it.${spawnedInstead}${endedForThis}`,
     });
   }
 
@@ -2588,6 +2604,7 @@ class GodotServer {
     projectPath: string,
     alreadyPlaying: ReadonlySet<number>,
     runtimeWaitMs: number,
+    ended: number | null,
   ): Promise<ToolResponse> {
     const log = new GameLog();
     try {
@@ -2632,10 +2649,14 @@ class GodotServer {
       // Which port the editor's debugger took, since it is the one port Godot has no command
       // line option for and the addon moves itself off when another editor is holding it.
       debugPort: readNumber(asParams(JSON.parse(answer.content[0]?.text ?? '{}')), 'debugPort'),
+      endedPreviousRun: ended ?? undefined,
       runtime: await this.runtimeUp(projectPath, alreadyPlaying, runtimeWaitMs),
       message:
         'The editor is playing it, so its debugger holds it: the debug_* tools can reach it, ' +
-        'editor_output reads its console through the debug adapter, and editor_run stop ends it.',
+        'editor_output reads its console through the debug adapter, and editor_run stop ends it.' +
+        (ended === null
+          ? ''
+          : ` The run that was going, pid ${ended}, was ended to start this one; its output is no longer what editor_output answers about.`),
     });
   }
 
@@ -2674,10 +2695,13 @@ class GodotServer {
     game.log.record('error', halt.text);
   }
 
-  /** Ends whatever is running, whichever way it was started. */
-  private async endActiveGame(): Promise<void> {
+  /** Ends whatever is running, whichever way it was started, and says so on the run it ended. */
+  private async endActiveGame(reason: string): Promise<void> {
     const running = this.activeProcess;
     this.activeProcess = null;
+    // Read before the note is taken away, because it is what says the pid below still means this
+    // run: the number alone does not.
+    const recorded = running?.process === null ? readRunRecord() : null;
     // A run somebody has ended is not one the next server should offer to pick back up, and the
     // note outlives this process unless it is taken away here. Only this project's, because the
     // directories it is looked for in are shared with whatever else is running on this machine.
@@ -2685,22 +2709,35 @@ class GodotServer {
     if (!running) {
       return;
     }
+    running.endedHere = reason;
     if (running.throughEditor) {
       await this.handleViaBridge('stop_playing', {});
       return;
     }
     if (running.process !== null) {
+      // Started here, so there is a handle, and a handle cannot come to mean another process.
       running.process.kill();
       return;
     }
-    if (running.pid !== null) {
-      try {
-        // A run picked back up after a restart. The handle belonged to a server that is gone, so
-        // the number is the only thing left to end it by.
-        process.kill(running.pid);
-      } catch {
-        // Ended between being read and being stopped, which is the state this asks for.
-      }
+    if (running.pid === null) {
+      return;
+    }
+    // A run picked back up after a restart: the handle belonged to a server that is gone and the
+    // number is all that is left. A number is not an identity, though. The operating system hands
+    // a pid out again as soon as it is free, so signalling on the strength of it is how a stop
+    // ends up killing whatever came after the run, which is not something that can be taken back.
+    if (recorded === null || recorded.pid !== running.pid || !stillTheRecordedRun(recorded)) {
+      running.endedHere = null;
+      running.log.record(
+        'warning',
+        `This run was not ended here: pid ${running.pid} no longer answers as the run that was recorded, so nothing was signalled. If that process is still the game, end it yourself; if it is not, it belongs to something else.`,
+      );
+      return;
+    }
+    try {
+      process.kill(running.pid);
+    } catch {
+      // Ended between being read and being stopped, which is the state this asks for.
     }
   }
 
@@ -2813,6 +2850,7 @@ class GodotServer {
         startedAt,
         projectPath,
         arguments: cmdArgs,
+        command: godotPath,
       });
     }
     sweepTranscripts();
@@ -2877,7 +2915,10 @@ class GodotServer {
       brokeOn: null,
     };
     this.drainTranscript(adopted);
-    if (!alive(record.pid)) {
+    // Alive, and still the run this record describes. The second half is asked once, here, where
+    // a run is picked up: a pid that came back around belongs to something else, and taking it
+    // for the run would report a finished bench as running and offer its number to be killed.
+    if (!alive(record.pid) || !stillTheRecordedRun(record)) {
       adopted.log.finish();
       // Not a real exit code: nobody was waiting on the process, so what it exited with is not
       // recorded anywhere. Said as unknown rather than guessed at.
@@ -2995,6 +3036,17 @@ class GodotServer {
         'This run outlived the server that started it and is over now, so its exit code was never collected. Everything it printed is below, read back from its transcript.',
       );
     }
+    // Which of the two silences this is. A run gdharness ended and a run that stopped being there
+    // print the same nothing and answer with the same exit code, and the difference is the whole
+    // question when a bench dies mid-measurement: one of them is this tool's doing and is on the
+    // record here, and the other sends the reader to look at their own machine.
+    if (typeof run.endedHere === 'string') {
+      notes.push(`This run was ended here, by ${run.endedHere}.`);
+    } else if (!stillRunning(run) && !run.throughEditor && run.exitCode !== null) {
+      notes.push(
+        'Nothing here ended this run: it stopped on its own or something outside this server stopped it.',
+      );
+    }
     // Where the rest of it is, which nothing said. A long run is capped at `limit` entries and the
     // answer said how many it left out without saying that the whole thing is in a file, uncapped,
     // and readable while the run is still going. A project watching a fifty-minute bench reached
@@ -3018,6 +3070,9 @@ class GodotServer {
       // run that ended while nothing was watching printed everything below and then stopped
       // being there, and no exit code was collected because nobody was waiting on it.
       endedUnwatched: run.endedUnwatched === true ? true : undefined,
+      // What ended it, when that was this server. Null says the run was not ended here, which is
+      // an answer rather than the absence of one.
+      endedBy: stillRunning(run) ? undefined : (run.endedHere ?? null),
       // Named for a run this server did not start, because the note a run leaves behind is
       // shared by every server using this runtime directory: a caller can see whose run it is.
       project: !run.throughEditor && run.process === null ? (run.projectPath ?? undefined) : undefined,
@@ -3039,7 +3094,7 @@ class GodotServer {
     this.drainEditorOutput(stopped);
     this.drainTranscript(stopped);
     this.logDebug('Stopping the running game');
-    await this.endActiveGame();
+    await this.endActiveGame('editor_run stop');
     return this.jsonTextResponse({
       stopped: true,
       through: stopped.throughEditor ? 'editor' : 'gdharness',
