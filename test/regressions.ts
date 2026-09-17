@@ -2028,6 +2028,23 @@ function testClassesAnEditorIsNotHolding(): void {
       'and one holding only the older class names the newer one, with the script that declares it',
     );
 
+    // A class the cache has lost is the one an editor is likeliest to have lost with it, and
+    // reading the cache first is what kept those out: the file that is wrong decided what could
+    // be reported as wrong, so the worst state of the three was the one that answered clean.
+    writeFileSync(
+      join(sandbox, '.godot', 'global_script_class_cache.cfg'),
+      'list=[{\n"class": &"Hero",\n"path": "res://scripts/hero.gd"\n}]\n',
+    );
+    assert.deepEqual(
+      unseenByEditor(sandbox, ['Hero']),
+      [{ className: 'Squire', path: 'res://scripts/squire.gd' }],
+      'a declaration missing from the cache and from the editor is still named',
+    );
+    writeFileSync(
+      join(sandbox, '.godot', 'global_script_class_cache.cfg'),
+      'list=[{\n"class": &"Hero",\n"path": "res://scripts/hero.gd"\n}, {\n"class": &"Squire",\n"path": "res://scripts/squire.gd"\n}]\n',
+    );
+
     // A class the editor is not holding because nothing declares it any more is the editor being
     // ahead rather than behind, and saying so would send somebody after a file that is not there.
     assert.deepEqual(

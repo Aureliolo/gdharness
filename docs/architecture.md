@@ -327,6 +327,12 @@ answers `added: []`. Any such class comes back under `unseenByEditor`, and `clas
 so when the editor would not answer, because a check that goes quiet on failure reads exactly like
 a clean project. `editor_rescan` reports the same two after its scan.
 
+The scan also writes `.godot/global_script_class_cache.cfg` from the list the editor is holding,
+so that file follows the editor rather than the project: a class the editor cannot resolve is one
+the scan drops out of the file, and the next fresh engine, CI run or clone starts from the
+narrower one. Reading the file after a scan therefore says nothing the editor has not already
+said, which is why `unseenByEditor` is the whole answer and not half of it.
+
 Neither of those reaches the language server, which keeps a cache of its own that nothing on the
 editor side invalidates. Godot answers about a file the client has opened from the copy the client
 handed it, and holds that parse, and that parse holds the parses of everything the file depends
