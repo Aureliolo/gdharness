@@ -205,6 +205,12 @@ two states a caller must tell apart arrive as one answer, the caller's only way 
 trusting the tool and go around it. That is the cost being avoided here, and it is higher than the
 cost of a feature that does not exist yet.
 
+A fix is not finished when the code is right. It is finished when the answers are still
+unambiguous afterwards, because a fix makes new states and hands them to the sentence that was
+already there. Teaching a server to claim only its own runs made "No game is running" mean both
+_nothing is running_ and _something is running that I have no claim on_, which is the fault it had
+just fixed, one layer in and written by the fixing. Read the sentences a change leaves behind.
+
 ## How a test here is checked
 
 The same failure has a test-side spelling: an assertion that agrees with almost everything. Written
