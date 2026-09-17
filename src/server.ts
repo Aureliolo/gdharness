@@ -37,7 +37,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { announceBridge, announcementPath, readAnnouncement, withdrawBridge } from './bridge-announce.js';
 import { staleClassNames, type UnseenClass, unseenByEditor } from './class-cache.js';
-import { DEFAULT_DAP_PORT, GodotDAPClient, handleDAPTool } from './dap_client.js';
+import { DEFAULT_DAP_PORT, GodotDAPClient, handleDAPTool, type StoppedAt } from './dap_client.js';
 import { dictionary, emptyRecord } from './dictionary.js';
 import { errorMessage, Refusal } from './errors.js';
 import { GameLog, type LogEntry } from './game-log.js';
@@ -72,6 +72,7 @@ import {
   announcedSince,
   chooseRuntime,
   discoverRuntimes,
+  type RuntimeEndpoint,
   runtimeDirectory,
   runtimeRequest,
   runtimesAnnounced,
@@ -179,6 +180,55 @@ function stillRunning(run: GodotProcess | null): boolean {
     return alive(run.pid);
   }
   return true;
+}
+
+/** What was true when the wait for an announcement ran out. */
+interface AfterWaiting {
+  /** Whether the addon is on disk at all, since a project without it can never announce. */
+  readonly addon: boolean;
+  readonly budgetMs: number;
+  readonly heldAt: StoppedAt | null;
+  readonly running: boolean;
+}
+
+/**
+ * What a start says about the runtime it waited for.
+ *
+ * `listening: false` is four situations, and three of them are not "there is no runtime". A
+ * project that boots slower than the budget was told the same thing as a project with no addon
+ * installed, so the honest answer, one more call, looked like the hopeless one. `mayYetAnnounce`
+ * is the field that separates them: false is final, true means ask again rather than give up.
+ */
+export function runtimeVerdict(
+  endpoint: RuntimeEndpoint | null,
+  after: AfterWaiting,
+): Record<string, unknown> {
+  if (endpoint !== null) {
+    return { listening: true, pid: endpoint.pid, port: endpoint.port };
+  }
+  if (!after.addon) {
+    return {
+      listening: false,
+      mayYetAnnounce: false,
+      note: 'this project has no gdharness_runtime addon, so the runtime_* tools have nothing to talk to',
+    };
+  }
+  if (after.heldAt !== null) {
+    return {
+      listening: false,
+      mayYetAnnounce: true,
+      note: 'the game stopped before its runtime came up, so the runtime_* tools have nothing to talk to yet: debug_control continue lets it carry on',
+      heldAt: after.heldAt,
+    };
+  }
+  return {
+    listening: false,
+    mayYetAnnounce: after.running,
+    note: after.running
+      ? `nothing announced itself within ${after.budgetMs}ms and the game is still running, so it may announce a moment from now: editor_status says whether it has, and editor_run start takes runtimeWaitMs to wait longer than this`
+      : `nothing announced itself within ${after.budgetMs}ms and the game is no longer running, so nothing is going to: editor_output has what it printed on the way down`,
+    heldAt: null,
+  };
 }
 
 export function alive(pid: number | undefined | null): boolean {
@@ -2410,9 +2460,16 @@ class GodotServer {
       platform: process.platform,
       variables: process.env,
     });
+    const runtimeWaitMs = readPositiveNumber(args, 'runtimeWaitMs') ?? ANNOUNCE_BUDGET_MS;
     const editorWouldPlay = !headless || editorPlaysHeadless(project.value.file);
     if (this.godotBridge.isConnected() && editorWouldPlay && given.value.length === 0) {
-      return await this.playThroughEditor(sceneArgument, refreshed.value, project.value.path, alreadyPlaying);
+      return await this.playThroughEditor(
+        sceneArgument,
+        refreshed.value,
+        project.value.path,
+        alreadyPlaying,
+        runtimeWaitMs,
+      );
     }
 
     const cmdArgs = runArguments({
@@ -2443,7 +2500,7 @@ class GodotServer {
       pid: started.process.pid ?? null,
       arguments: cmdArgs,
       refreshedClasses: refreshed.value,
-      runtime: await this.runtimeUp(project.value.path, alreadyPlaying),
+      runtime: await this.runtimeUp(project.value.path, alreadyPlaying, runtimeWaitMs),
       message: `Use editor_output for what it prints and editor_run stop to end it.${spawnedInstead}`,
     });
   }
@@ -2459,34 +2516,33 @@ class GodotServer {
    * A project with no runtime addon on disk can never announce, so it is not waited for: the
    * autoload is deliberately not asked about, because a project is free to bring the addon up
    * through a script of its own rather than by registering the addon's path.
+   *
+   * `listening: false` alone is two situations spelled the same way: a runtime that is never
+   * coming, and one that announced a moment after the budget ran out. A project whose boot takes
+   * longer than the budget was being told its runtime was not there, when one more call would
+   * have found it. `mayYetAnnounce` separates them, and is the field to read before giving up:
+   * false is final, true is not yet. `runtimeWaitMs` waits longer for a project that needs it.
    */
   private async runtimeUp(
     projectPath: string,
     before: ReadonlySet<number>,
+    budgetMs: number,
   ): Promise<Record<string, unknown>> {
     if (!existsSync(join(projectPath, RUNTIME_AUTOLOAD.path))) {
-      return {
-        listening: false,
-        note: 'this project has no gdharness_runtime addon, so the runtime_* tools have nothing to talk to',
-      };
+      return runtimeVerdict(null, { addon: false, budgetMs, heldAt: null, running: false });
     }
     const endpoint = await announcedSince(projectPath, before, {
+      budgetMs,
       // A game held at a breakpoint set before the run is not booting any more, and waiting out
       // the budget on one says nothing. It cannot announce until it is let go.
       giveUp: () => this.dapClient?.isStopped() === true,
     });
-    if (endpoint === null) {
-      const held = this.dapClient?.whereItStopped() ?? null;
-      return {
-        listening: false,
-        note:
-          held === null
-            ? `nothing announced itself within ${ANNOUNCE_BUDGET_MS}ms: the game may be slow to boot, or its runtime is not coming up`
-            : 'the game stopped before its runtime came up, so the runtime_* tools have nothing to talk to yet: debug_control continue lets it carry on',
-        heldAt: held,
-      };
-    }
-    return { listening: true, pid: endpoint.pid, port: endpoint.port };
+    return runtimeVerdict(endpoint, {
+      addon: true,
+      budgetMs,
+      heldAt: this.dapClient?.whereItStopped() ?? null,
+      running: stillRunning(this.currentRun()),
+    });
   }
 
   /**
@@ -2502,6 +2558,7 @@ class GodotServer {
     refreshedClasses: readonly string[],
     projectPath: string,
     alreadyPlaying: ReadonlySet<number>,
+    runtimeWaitMs: number,
   ): Promise<ToolResponse> {
     const log = new GameLog();
     try {
@@ -2546,7 +2603,7 @@ class GodotServer {
       // Which port the editor's debugger took, since it is the one port Godot has no command
       // line option for and the addon moves itself off when another editor is holding it.
       debugPort: readNumber(asParams(JSON.parse(answer.content[0]?.text ?? '{}')), 'debugPort'),
-      runtime: await this.runtimeUp(projectPath, alreadyPlaying),
+      runtime: await this.runtimeUp(projectPath, alreadyPlaying, runtimeWaitMs),
       message:
         'The editor is playing it, so its debugger holds it: the debug_* tools can reach it, ' +
         'editor_output reads its console through the debug adapter, and editor_run stop ends it.',
