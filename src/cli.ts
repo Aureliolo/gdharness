@@ -105,7 +105,19 @@ function said(outcome: HeadlessOutcome, what: string): void {
  * project with a missing script, and "left as it is" on its own would read as approval.
  */
 async function registerRuntime(godot: HeadlessEngine, projectPath: string): Promise<void> {
-  const named = inspectProject(projectPath).runtimeAutoloadPath;
+  const report = inspectProject(projectPath);
+  const named = report.runtimeAutoloadPath;
+  const loader = report.runtimeLoaderAutoload;
+  // Nothing registered under our name, and something registered under another that looks like this
+  // project's own way of bringing the runtime up. Adding ours would put the addon's script in the
+  // tree beside the guard rather than behind it, which is the bug this whole rule exists to stop,
+  // reached through a name instead of a path.
+  if (named === null && loader !== null) {
+    console.log(
+      `${loader.name} autoload already names res://${loader.path}, which is this project bringing the runtime up its own way, so ${RUNTIME_AUTOLOAD.name} was not added: a second entry would come up beside it without whatever that file refuses. If it is not a loader, add ${RUNTIME_AUTOLOAD.name} yourself.`,
+    );
+    return;
+  }
   if (autoloadIsOurs(named)) {
     said(await setRuntime(godot, projectPath, true), 'registering the runtime autoload');
     console.log(`${RUNTIME_AUTOLOAD.name} autoload registered at res://${RUNTIME_AUTOLOAD.path}`);
