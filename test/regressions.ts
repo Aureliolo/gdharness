@@ -3386,6 +3386,23 @@ function testCommandLineSetup(): void {
       /boot\/gdharness_loader\.gd/,
       'and names it, since being specific about five replacements and silent about this one is what cost a project a day',
     );
+    // A wrapper that is not on disk is still not rewritten, because a file can be absent for a
+    // moment and a rewritten line is gone for good. But it is said, since an entry naming nothing
+    // boots the project with a missing script and "left as it is" alone would read as approval.
+    rmSync(join(guard, 'gdharness_loader.gd'));
+    const orphaned = cli('runtime', 'on', projectDir);
+    assert.equal(orphaned.status, 0, `runtime on:\n${orphaned.stdout}${orphaned.stderr}`);
+    assert.match(
+      readFileSync(project, 'utf8'),
+      /GdharnessRuntime="\*res:\/\/boot\/gdharness_loader\.gd"/,
+      'a missing wrapper is still the project’s line to own',
+    );
+    assert.match(
+      orphaned.stdout,
+      /that file is not in this project/,
+      'and the answer says the entry names nothing, rather than reading as approval',
+    );
+
     // Back to ours, so everything after this reads the project the rest of the test expects.
     writeFileSync(
       project,

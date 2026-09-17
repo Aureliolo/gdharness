@@ -91,6 +91,34 @@ function said(outcome: HeadlessOutcome, what: string): void {
   }
 }
 
+/**
+ * The runtime autoload registered, or left where the project put it, with a line saying which.
+ *
+ * One function for setup, upgrade and `runtime on`, because the rule is one rule and three
+ * phrasings of it would drift. An entry naming anything other than the addon's own script is the
+ * project's: `project.godot` is committed and `addons/` often is not, so the install guide asks
+ * projects to point the entry at a script of their own that brings the addon up when it is there,
+ * and rewriting that is rewriting the file the guide asked for.
+ *
+ * A wrapper that is not on disk is still not rewritten, because a file can be absent for a moment
+ * and a line rewritten is gone for good, but it is said plainly: an entry naming nothing boots the
+ * project with a missing script, and "left as it is" on its own would read as approval.
+ */
+async function registerRuntime(godot: HeadlessEngine, projectPath: string): Promise<void> {
+  const named = inspectProject(projectPath).runtimeAutoloadPath;
+  if (autoloadIsOurs(named)) {
+    said(await setRuntime(godot, projectPath, true), 'registering the runtime autoload');
+    console.log(`${RUNTIME_AUTOLOAD.name} autoload registered at res://${RUNTIME_AUTOLOAD.path}`);
+    return;
+  }
+  console.log(`${RUNTIME_AUTOLOAD.name} autoload left at ${named}, which this project registers itself`);
+  if (!existsSync(join(projectPath, (named ?? '').replace(/^res:\/\//, '')))) {
+    console.log(
+      `  that file is not in this project, so it boots with a missing script: restore it, or point the entry at res://${RUNTIME_AUTOLOAD.path}`,
+    );
+  }
+}
+
 /** setup's own flags, so anything else beginning with -- is read as naming a harness. */
 const SETUP_FLAGS = new Set(['--runtime', '--no-runtime', '--no-connect', '--no-skill', '--json', '--yes']);
 
@@ -238,17 +266,7 @@ async function setup(): Promise<void> {
     console.log(`${name}: ${outcome.ok ? String(outcome.payload['action']) : 'failed'}`);
   }
   if (runtime) {
-    // The same rule as the upgrade: a setup run over a project that already brings the runtime up
-    // its own way leaves that alone rather than taking its refusals with it.
-    const registered = inspectProject(projectPath).runtimeAutoloadPath;
-    if (autoloadIsOurs(registered)) {
-      said(await setRuntime(godot, projectPath, true), 'registering the runtime autoload');
-      console.log(`${RUNTIME_AUTOLOAD.name} autoload registered at res://${RUNTIME_AUTOLOAD.path}`);
-    } else {
-      console.log(
-        `${RUNTIME_AUTOLOAD.name} autoload left at ${registered}, which this project registers itself`,
-      );
-    }
+    await registerRuntime(godot, projectPath);
   }
   const classes = await runOperation(godot, 'refresh_class_cache', {}, projectPath);
   said(classes, 'rebuilding the class list');
@@ -405,14 +423,7 @@ async function upgrade(): Promise<void> {
   // and every refusal it makes would go with it. Said either way: this line was rewritten once
   // without being mentioned, beside five replacements that were, and the silence is what cost.
   if (before.runtimeAutoload) {
-    if (autoloadIsOurs(before.runtimeAutoloadPath)) {
-      said(await setRuntime(godot, projectPath, true), 'registering the runtime autoload');
-      console.log(`registered the ${RUNTIME_AUTOLOAD.name} autoload at res://${RUNTIME_AUTOLOAD.path}`);
-    } else {
-      console.log(
-        `kept the ${RUNTIME_AUTOLOAD.name} autoload at ${before.runtimeAutoloadPath}, which is not this addon's own script, so whatever that file decides about release builds and script runs still decides it`,
-      );
-    }
+    await registerRuntime(godot, projectPath);
   }
   said(await runOperation(godot, 'refresh_class_cache', {}, projectPath), 'rebuilding the class list');
 
@@ -479,13 +490,12 @@ async function runtime(): Promise<void> {
   // Turning it on when a project already brings it up its own way is a request that has been met,
   // so the entry is left where it is. Turning it off is always this tool's to do: the ask is that
   // nothing comes up, and a wrapper left registered would still bring something up.
-  const registered = inspectProject(projectPath).runtimeAutoloadPath;
-  if (state === 'on' && !autoloadIsOurs(registered)) {
-    console.log(`${RUNTIME_AUTOLOAD.name} autoload already registered at ${registered}, left as it is`);
+  if (state === 'on') {
+    await registerRuntime(godot, projectPath);
     return;
   }
-  said(await setRuntime(godot, projectPath, state === 'on'), `turning the runtime ${state}`);
-  console.log(`${RUNTIME_AUTOLOAD.name} autoload ${state === 'on' ? 'registered' : 'removed'}`);
+  said(await setRuntime(godot, projectPath, false), 'turning the runtime off');
+  console.log(`${RUNTIME_AUTOLOAD.name} autoload removed`);
 }
 
 async function classes(): Promise<void> {
