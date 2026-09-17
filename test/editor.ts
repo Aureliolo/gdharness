@@ -1562,6 +1562,75 @@ async function testRuntime({ call, refusal, attempt, project, lspPort, dapPort }
 }
 
 /**
+ * A file edited while a game is running does not change the game.
+ *
+ * The `auto_reload` addon is an EditorPlugin: it polls the open scene and the scripts on that
+ * scene's node tree, and reloads them with `CACHE_MODE_REPLACE` in the editor's own process. A
+ * game the editor is playing is a separate process holding its own copy, so nothing here crosses
+ * over. That reading of the source is easy to reach and easy to doubt, and a session that doubts
+ * it stops editing anything for the length of a run: one downstream project came within a
+ * decision of parking a two-hour bench over it.
+ *
+ * So it is measured on the strongest form, which is also the one that is worth relying on:
+ * whatever the editor does with the changed file, the running game answers from the code it
+ * started with. The edit is proved to have landed where the tools look before the game is asked
+ * again, because a write that never reached disk would leave the game unchanged too.
+ */
+async function testAnEditDoesNotReachTheRunningGame({ call, attempt, project }: Editor): Promise<void> {
+  await attempt('editor_run', { projectPath: project, op: 'stop' });
+  const game = { projectPath: project };
+  const source = join(project, 'main.gd');
+  const before = readFileSync(source, 'utf8');
+  const asked = { ...game, op: 'call', nodePath: '/root/Main', method: '_twice', args: [4] };
+  try {
+    await call('editor_run', { projectPath: project });
+    assert.equal(
+      get(await call('runtime_invoke', asked), 'result'),
+      8,
+      'the running game should answer from the code it started with',
+    );
+
+    const changed = before.replace('\treturn n * 2', '\treturn n * 3');
+    assert.notEqual(changed, before, 'the fixture should still hold the line this rewrites');
+    writeFileSync(source, changed);
+    const searched = await call('project_search', {
+      projectPath: project,
+      query: 'return n * 3',
+      fileTypes: ['gd'],
+    });
+    assert.match(
+      text(searched),
+      /main\.gd/,
+      `the edit should be on disk where the tools read it: ${text(searched)}`,
+    );
+
+    // Three passes of a watcher that polls once a second, so a reload that was going to happen
+    // has had its chances rather than been raced.
+    await delay(3000);
+
+    assert.equal(
+      get(await call('runtime_invoke', asked), 'result'),
+      8,
+      'and should still answer from it after the file under it changed',
+    );
+
+    // The same call against a process started since, with nothing changed but which process is
+    // answering. Without this the case passes just as well against a runtime that had stopped
+    // reading the method at all, and 8 would be the sound of nothing happening.
+    await call('editor_run', { projectPath: project, op: 'stop' });
+    await call('editor_run', { projectPath: project });
+    assert.equal(
+      get(await call('runtime_invoke', asked), 'result'),
+      12,
+      'a game started after the edit should answer from the edited file',
+    );
+  } finally {
+    writeFileSync(source, before);
+    await attempt('editor_run', { projectPath: project, op: 'stop' });
+  }
+}
+
+/**
  * The port the editor's debugger holds while it plays.
  *
  * Godot keeps it in a setting shared by every editor on the machine and takes no command line
@@ -1836,6 +1905,7 @@ async function main(): Promise<void> {
     await testLanguageServer(editor);
     await testDebugging(editor);
     await testRuntime(editor);
+    await testAnEditDoesNotReachTheRunningGame(editor);
     await testTheDebuggerGetsAPortOfItsOwn(editor);
     await testTheGameIsHandedItsOwnArguments(editor);
     await testAnErrorTheGameBrokeOnIsReported(editor);
