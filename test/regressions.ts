@@ -4621,8 +4621,36 @@ function testEveryAddonScriptKeepsItsIdentity(): void {
   }
 }
 
+/**
+ * Every fixture in this file is in the list below.
+ *
+ * The list is written by hand, so a fixture can be added and left out of it, and nothing says so:
+ * the suite passes, the count goes up by nothing, and the guard it was written for is unwatched
+ * while its name sits in the file looking like coverage. Four fixtures were added here in one day
+ * and each was registered by hand, which is four chances to have missed one.
+ *
+ * Read from this file's own source, because the thing being checked is exactly the gap between
+ * what is written here and what is called. Anything named like a fixture and not called is either
+ * a fixture nobody runs or a helper that should not be named `test...`, and both want the same
+ * answer from whoever reads the failure.
+ */
+function testEveryFixtureIsCalled(): void {
+  const source = readFileSync(join('test', 'regressions.ts'), 'utf8');
+  const defined = [...source.matchAll(/^(?:async )?function (test[A-Za-z0-9_]*)\(/gm)].map(
+    (match) => captured(match),
+  );
+  assert.ok(defined.length > 50, `the pattern should still find the fixtures: found ${defined.length}`);
+
+  const listed = new Set(
+    [...source.matchAll(/^ {2}(test[A-Za-z0-9_]*),$/gm)].map((match) => captured(match)),
+  );
+  const unreachable = defined.filter((name) => !listed.has(name));
+  assert.deepEqual(unreachable, [], 'every fixture defined here should be in TESTS');
+}
+
 const TESTS: (() => void | Promise<void>)[] = [
   testEveryAddonScriptKeepsItsIdentity,
+  testEveryFixtureIsCalled,
   testBothEndsAgreeAboutTheAnnouncement,
   testASupersededServerStandsDown,
   testAProjectUpgradedUnderTheServerIsSaid,
