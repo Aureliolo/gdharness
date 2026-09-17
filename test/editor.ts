@@ -978,6 +978,37 @@ async function testAClassTheEditorCannotSee({ call, project }: Editor): Promise<
 }
 
 /**
+ * A scan writes the class cache from the list the editor is holding, which is why the file on
+ * disk is never the thing to ask after one.
+ *
+ * What a downstream project saw was a rescan leaving `global_script_class_cache.cfg` narrower
+ * than the project with nothing in the answer about it, and the fix reached for first was a
+ * second check that read the file. Measured here, the file cannot disagree with the editor: an
+ * emptied one comes back full. So what narrows it is the registry behind it, the class the
+ * editor cannot resolve is the class the scan writes the file without, and `unseenByEditor` is
+ * the whole answer rather than half of it.
+ */
+async function testAScanWritesTheCacheFromTheEditor({ call, project }: Editor): Promise<void> {
+  writeFileSync(join(project, 'parted.gd'), 'class_name PartedClass\nextends RefCounted\n');
+  await call('project_import', { projectPath: project, op: 'refresh_classes' });
+  const cache = join(project, '.godot', 'global_script_class_cache.cfg');
+  assert.ok(readFileSync(cache, 'utf8').includes('PartedClass'), 'the rebuild should have listed it');
+
+  writeFileSync(cache, 'list=[]\n');
+  const scanned = await call('editor_rescan', { projectPath: project });
+  assert.equal(get(scanned, 'ok'), true, `the scan should settle: ${text(scanned)}`);
+  assert.ok(
+    readFileSync(cache, 'utf8').includes('PartedClass'),
+    "the scan should write the editor's list back over the emptied file",
+  );
+  assert.equal(
+    get(scanned, 'unseenByEditor'),
+    undefined,
+    `and it holds every class it wrote: ${text(scanned)}`,
+  );
+}
+
+/**
  * Asked about a project this editor is not open on, the answer is "not checked", never "clean".
  *
  * The editor holds the classes of the project it opened, so comparing them against another
@@ -1800,6 +1831,7 @@ async function main(): Promise<void> {
     await testResourcesOnNodes(editor);
     await testEditorRescan(editor);
     await testAClassTheEditorCannotSee(editor);
+    await testAScanWritesTheCacheFromTheEditor(editor);
     await testTheClassCheckKnowsWhichProjectItIsAbout(editor);
     await testLanguageServer(editor);
     await testDebugging(editor);

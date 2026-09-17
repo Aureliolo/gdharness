@@ -88,9 +88,10 @@ export interface UnseenClass {
  */
 export function unseenByEditor(projectPath: string, editorHolds: readonly string[]): UnseenClass[] {
   const held = new Set(editorHolds);
-  const declared = declaredClasses(projectPath);
-  const source = cachedClasses(projectPath) ?? declared;
-  return [...source]
-    .filter(([name]) => !held.has(name) && declared.has(name))
-    .map(([className, path]) => ({ className, path: declared.get(className) ?? path }));
+  // The declarations rather than the cache, because a class the cache has lost is one the editor
+  // is most likely to have lost too, and reading the cache first is what kept those out of this
+  // answer: the one file that is wrong decided what could be reported as wrong.
+  return [...declaredClasses(projectPath)]
+    .filter(([name]) => !held.has(name))
+    .map(([className, path]) => ({ className, path }));
 }
