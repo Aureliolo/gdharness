@@ -6,9 +6,14 @@ Work the tracker to empty, then ship. When issues are open, fix all of them, the
 carrying the fixes rather than leaving them sitting on `main` unreleased. A fix nobody can install
 is not delivered.
 
-Pick the bump between **patch** and **minor** without asking: patch when nothing a caller relies
-on has changed, minor when behaviour a caller can see changes, or a tool, an argument or a field
-is added.
+Pick the bump between **patch** and **minor** without asking, and **the answer is nearly always
+patch**. A fix is a patch. So is an addition nothing has to adapt to: a new argument, a new field
+in an answer, an argument that reaches further than it did. A caller who ignores all of it carries
+on working, which is what makes it a patch.
+
+**Minor** is for a new tool or a new op, meaning gdharness does something it could not do before.
+That is rare, and two of them in one day was wrong: an index reaching into a list and a hidden
+filter are the same tools answering better, not new ones.
 
 A wrong answer corrected is a **patch**, even when the output changes shape. Never leave an answer
 wrong to protect a caller who parsed it, and never let "that would be breaking" become a reason to
