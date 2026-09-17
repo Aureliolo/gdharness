@@ -1,5 +1,16 @@
 # gdharness
 
+## Tests
+
+Check a fixture by disarming what it guards: break the line on purpose, say which tests should
+notice before running them, then run and compare. `bun test/regressions.ts` runs every regression
+whether or not an earlier one failed and names the failures at the end, so one disarm shows every
+test that caught it; arguments select tests by name, loosely matched, for working on one.
+
+Never write an assertion that only says what did not happen. `doesNotMatch` against the one
+complaint you have in mind is satisfied by a crash, a timeout and every other refusal there is.
+Assert what the call reaches when it works.
+
 ## Releasing
 
 Work the tracker to empty, then ship. When issues are open, fix all of them, then cut a release
