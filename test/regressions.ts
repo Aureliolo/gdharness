@@ -22,6 +22,7 @@ import { announcementPath, BRIDGE_ANNOUNCE_PROTOCOL, readAnnouncement } from '..
 import { staleClassNames, unseenByEditor } from '../src/class-cache.js';
 import { GodotDAPClient } from '../src/dap_client.js';
 import { dictionary, emptyRecord } from '../src/dictionary.js';
+import { GameLog } from '../src/game-log.js';
 import { createBridge } from '../src/godot-bridge.js';
 import {
   editorArguments,
@@ -43,7 +44,8 @@ import {
   runtimeDirectories,
   runtimesAnnounced,
 } from '../src/runtime-client.js';
-import { alive, HEADLESS_OPERATIONS, patienceForFrames, runtimeVerdict } from '../src/server.js';
+import { alive, HEADLESS_OPERATIONS, patienceForFrames, runIsUp, runtimeVerdict } from '../src/server.js';
+import type { GodotProcess } from '../src/server-types.js';
 import { addonMismatch } from '../src/server-version.js';
 import { autoloadIsOurs } from '../src/setup.js';
 import { opTakes, TOOL_SPECS } from '../src/tool-definitions.js';
@@ -2363,6 +2365,31 @@ function testAGameTooNewToTalkToIsStillAGame(): void {
  * exactly where the difference matters, since that is the boot most likely to outlast a budget.
  */
 function testANotYetRuntimeIsNotTheSameAsNoRuntime(): void {
+  // Who is asked whether the game is still up, which is what "may yet announce" rests on. A run
+  // the editor plays has no handle and no exit code here, so the record says "going" for as long
+  // as it exists, including for a game that died in its first frame.
+  const played: GodotProcess = {
+    process: null,
+    pid: null,
+    log: new GameLog(),
+    transcript: null,
+    readOffset: 0,
+    projectPath: '/p',
+    startedAt: Date.now(),
+    exitCode: null,
+    throughEditor: true,
+    brokeOn: null,
+  };
+  assert.equal(runIsUp(played, false), false, 'the editor saying it is not playing settles it');
+  assert.equal(runIsUp(played, true), true, 'and so does the editor saying it is');
+  assert.equal(runIsUp(played, null), true, 'an editor that will not say leaves the record');
+  assert.equal(
+    runIsUp({ ...played, throughEditor: false, pid: 999_999_999 }, true),
+    false,
+    'a run this server spawned is asked of the operating system, whatever the editor is playing',
+  );
+  assert.equal(runIsUp(null, true), false, 'and no run at all is not a run that is up');
+
   const listening = runtimeVerdict(
     {
       pid: 4242,
