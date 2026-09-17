@@ -85,6 +85,15 @@ bun run docs               # the public site, into site/; refuses a page nothing
 bun run watch              # TypeScript watch mode
 ```
 
+`bun test/regressions.ts` runs every regression whether or not an earlier one failed and names
+the failures at the end, which is what makes a disarm readable: break the line a fixture guards,
+and the run says which fixtures noticed rather than stopping at the first. Arguments select
+tests by name, loosely matched, for working on one: `bun test/regressions.ts debugtools`.
+
+Install the engine locally and the fixtures that need it stop skipping: `bun scripts/install-godot.ts`
+and `bun scripts/install-gdunit4.ts` each print a path to export as `GODOT_PATH` and `GDUNIT4_PATH`.
+Both verify a published digest and refuse anything else.
+
 `bun run test:packaging` and `bun run release:pack` only work on Linux or macOS. Windows
 cannot record a POSIX file mode, so the packer refuses there rather than shipping an archive
 whose executables are world-writable. Releases are cut by CI.

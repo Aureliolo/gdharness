@@ -22,6 +22,7 @@ import { announcementPath, BRIDGE_ANNOUNCE_PROTOCOL, readAnnouncement } from '..
 import { staleClassNames, unseenByEditor } from '../src/class-cache.js';
 import { GodotDAPClient } from '../src/dap_client.js';
 import { dictionary, emptyRecord } from '../src/dictionary.js';
+import { GameLog } from '../src/game-log.js';
 import { createBridge } from '../src/godot-bridge.js';
 import {
   editorArguments,
@@ -43,7 +44,8 @@ import {
   runtimeDirectories,
   runtimesAnnounced,
 } from '../src/runtime-client.js';
-import { alive, HEADLESS_OPERATIONS, patienceForFrames, runtimeVerdict } from '../src/server.js';
+import { alive, HEADLESS_OPERATIONS, patienceForFrames, runIsUp, runtimeVerdict } from '../src/server.js';
+import type { GodotProcess } from '../src/server-types.js';
 import { addonMismatch } from '../src/server-version.js';
 import { autoloadIsOurs } from '../src/setup.js';
 import { opTakes, TOOL_SPECS } from '../src/tool-definitions.js';
@@ -2363,6 +2365,31 @@ function testAGameTooNewToTalkToIsStillAGame(): void {
  * exactly where the difference matters, since that is the boot most likely to outlast a budget.
  */
 function testANotYetRuntimeIsNotTheSameAsNoRuntime(): void {
+  // Who is asked whether the game is still up, which is what "may yet announce" rests on. A run
+  // the editor plays has no handle and no exit code here, so the record says "going" for as long
+  // as it exists, including for a game that died in its first frame.
+  const played: GodotProcess = {
+    process: null,
+    pid: null,
+    log: new GameLog(),
+    transcript: null,
+    readOffset: 0,
+    projectPath: '/p',
+    startedAt: Date.now(),
+    exitCode: null,
+    throughEditor: true,
+    brokeOn: null,
+  };
+  assert.equal(runIsUp(played, false), false, 'the editor saying it is not playing settles it');
+  assert.equal(runIsUp(played, true), true, 'and so does the editor saying it is');
+  assert.equal(runIsUp(played, null), true, 'an editor that will not say leaves the record');
+  assert.equal(
+    runIsUp({ ...played, throughEditor: false, pid: 999_999_999 }, true),
+    false,
+    'a run this server spawned is asked of the operating system, whatever the editor is playing',
+  );
+  assert.equal(runIsUp(null, true), false, 'and no run at all is not a run that is up');
+
   const listening = runtimeVerdict(
     {
       pid: 4242,
@@ -2399,6 +2426,62 @@ function testANotYetRuntimeIsNotTheSameAsNoRuntime(): void {
   });
   assert.equal(held['mayYetAnnounce'], true, 'a held game announces once it is let go');
   assert.match(String(held['note']), /debug_control continue/, 'and the answer says what lets it go');
+}
+
+/**
+ * A start does not sit out its budget on a game that is already over.
+ *
+ * The wait is for an announcement, and a process that has exited is not going to make one. A boot
+ * that dies on a parse error is gone in half a second, and waiting the rest of the budget out
+ * delays the very answer that says so. Driven with a fake engine, which exits at once, so what is
+ * measured is the waiting rather than anything Godot does.
+ *
+ * The budget is ten seconds here and the answer has to arrive well inside it, which is also the
+ * only assertion that runtimeWaitMs reaches the wait at all: the default is five.
+ */
+async function testAStartStopsWaitingForAGameThatIsOver(): Promise<void> {
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-over-'));
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-over-runtime-'));
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Over"\n' +
+        'run/main_scene="res://main.tscn"\n',
+    );
+    writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
+    // The wait only happens for a project that could announce, which is one with the addon on
+    // disk. Its contents do not matter: nothing runs it here.
+    mkdirSync(join(project, 'addons', 'gdharness_runtime'), { recursive: true });
+    writeFileSync(join(project, 'addons', 'gdharness_runtime', 'runtime_autoload.gd'), 'extends Node\n');
+
+    await withStdioServer(
+      async (call) => {
+        const started = Date.now();
+        const answer: unknown = JSON.parse(
+          await call('editor_run', {
+            projectPath: project,
+            op: 'start',
+            headless: true,
+            runtimeWaitMs: 10_000,
+          }),
+        );
+        const waited = Date.now() - started;
+        const runtime = get(answer, 'runtime');
+        assert.equal(get(runtime, 'listening'), false, JSON.stringify(answer));
+        assert.equal(
+          get(runtime, 'mayYetAnnounce'),
+          false,
+          `a game that is over is not going to announce: ${JSON.stringify(runtime)}`,
+        );
+        assert.match(String(get(runtime, 'note')), /no longer running/, JSON.stringify(runtime));
+        assert.ok(waited < 8_000, `the answer should not wait out the budget: ${waited}ms`);
+      },
+      { GODOT_PATH: process.execPath, GDHARNESS_RUNTIME_DIR: runtimeDir },
+    );
+  } finally {
+    rmSync(project, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+    rmSync(runtimeDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+  }
 }
 
 /**
@@ -4057,6 +4140,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAGameIsFoundWhereverItAnnounced,
   testAGameTooNewToTalkToIsStillAGame,
   testANotYetRuntimeIsNotTheSameAsNoRuntime,
+  testAStartStopsWaitingForAGameThatIsOver,
   testAStartWaitsForTheGameToAnnounceItself,
   testATestRunKeepsOutOfThePlayersSaves,
   testParametersReachTheEngine,
