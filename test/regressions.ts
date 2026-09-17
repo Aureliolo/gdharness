@@ -52,7 +52,7 @@ import type { GodotProcess } from '../src/server-types.js';
 import { addonMismatch } from '../src/server-version.js';
 import { autoloadIsOurs } from '../src/setup.js';
 import { opTakes, TOOL_SPECS } from '../src/tool-definitions.js';
-import { cacheFile, isNewer } from '../src/update-check.js';
+import { cacheFile, isNewer, UpdateCheck } from '../src/update-check.js';
 import { asArray, asNumber, get, text } from './support/json.js';
 import { isRecord, type JsonRpcMessage, parseTextContent, textOf } from './support/json-rpc.js';
 import { reservePort, ServerProcess } from './support/server.js';
@@ -2712,6 +2712,55 @@ function testTheStaleHalfIsNamedCorrectly(): void {
 }
 
 /**
+ * A version the checker has already judged too old to use is not handed to the caller.
+ *
+ * The cache outlives the process that wrote it, so a restarted server starts holding an answer
+ * obtained hours earlier. On its first tool call `refresh()` runs, sees the window has passed and
+ * starts a fetch, and `notice()` used to answer with the stale version anyway, upgrade command and
+ * release-notes link included. A project on a machine where four releases went out in a day was
+ * told by a freshly started server to install a version and a half behind, and the call after that
+ * named the right one.
+ *
+ * Asserted without the network in either direction: `refresh()` sets `checking` before it awaits
+ * anything, so both readings below are taken in the same tick and do not depend on the registry
+ * answering, or existing.
+ */
+function testAStaleUpdateAnswerIsNotHandedOut(): void {
+  const home = mkdtempSync(join(tmpdir(), 'gdharness-stale-notice-'));
+  const environment = {
+    HOME: home,
+    LOCALAPPDATA: home,
+    XDG_CACHE_HOME: home,
+    GDHARNESS_NO_UPDATE_CHECK: '',
+  };
+  const seed = (checkedAt: number): void => {
+    writeFileSync(cacheFile(environment), JSON.stringify({ checkedAt, latest: '99.9.9' }), 'utf8');
+  };
+  const window = 4 * 60 * 60 * 1000;
+
+  try {
+    // The witness first: an answer inside the window is reported, so the silence below is this
+    // guard and not the notice having stopped working altogether.
+    seed(Date.now());
+    const fresh = new UpdateCheck('0.1.0', environment);
+    fresh.refresh();
+    assert.equal(fresh.notice()?.latest, '99.9.9', 'an answer still inside the window is reported');
+
+    seed(Date.now() - window - 60_000);
+    const stale = new UpdateCheck('0.1.0', environment);
+    assert.equal(
+      stale.notice()?.latest,
+      '99.9.9',
+      'the cache is read at construction, which is what makes it available to say',
+    );
+    stale.refresh();
+    assert.equal(stale.notice(), null, 'and it is withheld once a refresh for it is in flight');
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
+/**
  * The update notice reaches the agent, once, and says what to do about it.
  *
  * Driven off a seeded cache rather than the registry: the point is the answer a tool carries, and
@@ -4641,6 +4690,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testDebugToolsRefuseWithoutASession,
   testUpdateNoticeRidesOnAnAnswer,
   testUpdateCheckHasAnOffSwitch,
+  testAStaleUpdateAnswerIsNotHandedOut,
 ];
 
 /**
