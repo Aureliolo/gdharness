@@ -518,7 +518,21 @@ async function runtime(): Promise<void> {
     return;
   }
   // Read before the removal, since the removal is what would make it stale.
-  const loader = inspectProject(projectPath).runtimeLoaderAutoload;
+  const before = inspectProject(projectPath);
+  const loader = before.runtimeLoaderAutoload;
+  // Nothing of ours to take out. The engine refuses to remove an autoload that is not there, so
+  // this failed with "Autoload not found: GdharnessRuntime" on any project that brings the runtime
+  // up its own way: a command that cannot succeed, about an entry the project never had, run by
+  // somebody getting ready to ship.
+  if (before.runtimeAutoloadPath === null) {
+    console.log(`${RUNTIME_AUTOLOAD.name} autoload is not registered, so there was nothing to remove`);
+    if (loader !== null) {
+      console.log(
+        `  ${loader.name} names res://${loader.path}, which brings the runtime up its own way. That line is this project's, not this tool's, so nothing here has changed it: whatever that file decides about a release build still decides it.`,
+      );
+    }
+    return;
+  }
   said(await setRuntime(godot, projectPath, false), 'turning the runtime off');
   console.log(`${RUNTIME_AUTOLOAD.name} autoload removed`);
   if (loader !== null) {

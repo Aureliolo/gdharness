@@ -3454,14 +3454,18 @@ function testCommandLineSetup(): void {
       `doctor names the entry that brings it up: ${seen.stdout}`,
     );
 
-    // Turning it off removes ours and cannot touch theirs, so the answer says the loader is still
-    // there. Somebody running this before an export is asking that nothing comes up.
+    // Turning it off when the project brings the runtime up its own way. There is nothing of ours
+    // registered, and the engine refuses to remove an autoload that is not there, so this used to
+    // fail with "Autoload not found: GdharnessRuntime": a command that could not succeed, about an
+    // entry the project never had, run by somebody getting ready to ship. It succeeds and says
+    // what is actually there, because the loader is the project's line and not this tool's.
     const off = cli('runtime', 'off', projectDir);
     assert.equal(off.status, 0, `runtime off:\n${off.stdout}${off.stderr}`);
+    assert.match(off.stdout, /nothing to remove/, off.stdout);
     assert.match(
       off.stdout,
-      /GdharnessLoader still names res:\/\/boot\/gdharness_loader\.gd/,
-      `a loader left behind by runtime off is said out loud: ${off.stdout}`,
+      /GdharnessLoader names res:\/\/boot\/gdharness_loader\.gd/,
+      `the loader still bringing it up is said out loud: ${off.stdout}`,
     );
 
     writeFileSync(
