@@ -185,6 +185,17 @@ export interface ProjectReport {
    * script of its own and the difference is invisible from a boolean.
    */
   readonly runtimeAutoloadPath: string | null;
+  /**
+   * An autoload that looks like this project bringing the runtime up itself, under a name of its
+   * own, or null when there is none.
+   *
+   * `runtimeAutoloadPath` only sees an entry called `GdharnessRuntime`. A project is free to call
+   * it anything, and one calls it `GdharnessLoader`, so on its project every check for "is the
+   * runtime registered" answered no and registering would have added a second entry beside the
+   * first: the addon's own script, coming up unguarded, next to the guard. Recognised by the path
+   * rather than the name, because the name is the part a project chooses freely.
+   */
+  readonly runtimeLoaderAutoload: { readonly name: string; readonly path: string } | null;
   /** class_name declarations on disk that the class cache does not list, or lists elsewhere. */
   readonly staleClasses: readonly string[];
   readonly classCacheExists: boolean;
@@ -282,6 +293,17 @@ export function inspectProject(projectPath: string): ProjectReport {
   // game boots with a missing script and nothing in the repository says why. Found on two projects,
   // and nothing said so at the moment it was created.
   const named = autoloadPaths(settings);
+  // Found by the path, since the name is the project's to choose and one project calls it
+  // GdharnessLoader. A file with gdharness in its name, registered as an autoload and not our own
+  // script, is a project bringing the runtime up its own way under a name we cannot predict.
+  const loaderEntry =
+    [...named].find(
+      ([entry, path]) =>
+        entry !== RUNTIME_AUTOLOAD.name &&
+        path !== RUNTIME_AUTOLOAD.path &&
+        path.toLowerCase().includes('gdharness'),
+    ) ?? null;
+  const runtimeLoaderAutoload = loaderEntry === null ? null : { name: loaderEntry[0], path: loaderEntry[1] };
   const tracked = trackedByGit(projectPath, [...named.values()]);
   for (const [name, path] of named) {
     // A file that is not here at all is a different sentence, and for our own addon doctor has
@@ -311,6 +333,7 @@ export function inspectProject(projectPath: string): ProjectReport {
     pluginsEnabled,
     runtimeAutoload,
     runtimeAutoloadPath,
+    runtimeLoaderAutoload,
     staleClasses,
     classCacheExists: cached !== null,
     problems,
