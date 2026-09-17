@@ -132,6 +132,12 @@ index, which is what a clone gets, and names any that are not. Commit the addon,
 autoload at a script of your own that brings the addon up when it is there and does nothing when it
 is not. Outside a repository, or with no git on the machine, it says nothing rather than guessing.
 
+An entry naming a script of your own is left where you put it. `setup`, `upgrade` and
+`runtime on` rewrite that line only when it names the addon's own script, and each of them says
+which of the two it did. An upgrade once repointed a wrapper and mentioned five other replacements
+but not that one, and nothing failed: the wrapper was still on disk and still correct, so every
+gate the project had went on passing while `project.godot` no longer named it.
+
 **The runtime autoload is the one to think about before you ship**, whichever way you go: it is an
 autoload rather than an editor plugin, so an export instantiates it. See
 [the runtime autoload](#the-runtime-autoload).
