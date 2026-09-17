@@ -4636,8 +4636,8 @@ function testEveryAddonScriptKeepsItsIdentity(): void {
  */
 function testEveryFixtureIsCalled(): void {
   const source = readFileSync(join('test', 'regressions.ts'), 'utf8');
-  const defined = [...source.matchAll(/^(?:async )?function (test[A-Za-z0-9_]*)\(/gm)].map(
-    (match) => captured(match),
+  const defined = [...source.matchAll(/^(?:async )?function (test[A-Za-z0-9_]*)\(/gm)].map((match) =>
+    captured(match),
   );
   assert.ok(defined.length > 50, `the pattern should still find the fixtures: found ${defined.length}`);
 
