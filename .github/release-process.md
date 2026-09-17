@@ -15,17 +15,30 @@ Everything after the merge is automatic.
 Nobody types a version twice and nobody creates a tag by hand, which is the release step that
 cannot be checked afterwards and the one most likely to be done from the wrong branch.
 
-That pull request is opened with the `release` label, which is how `.github/release.yml` keeps it
-out of the next release's generated notes. The label has to exist in the repository: `gh` fails on
-one it cannot find, so deleting it stops a release being prepared rather than quietly putting the
-line back.
+That pull request is opened with the `release` label, which is how `scripts/release-notes.ts`
+keeps it out of the next release's changelog. The label has to exist in the repository: `gh` fails
+on one it cannot find, so deleting it stops a release being prepared rather than quietly putting
+the line back.
 
-GitHub reads that configuration from the release's target rather than from `main` as it is today,
-so a change to it reaches the next tag cut after it and not the ones before. Checking one by
-regenerating an old tag's notes reads the file as it was at that tag, which looks exactly like a
-configuration that does nothing. Generate against an unused tag name with `target_commitish` at
-the branch instead, and read the header GitHub writes: it names the commit the configuration came
-from.
+## What the changelog says
+
+`scripts/release-notes.ts` writes it, from the files each pull request touched rather than from
+its title. Entries are split into what reaches an installed copy, meaning `src/`, `package.json`,
+`README.md`, `LICENSE` or the packer itself, and what stays in this repository. A title describes
+a change, not its reach: "A live foreign run is not ended" is a fixture and "A transcript answers
+what was printed" is the server behaving differently, and in one flat list they read alike. Two
+projects downstream chose which release to take from that list on the same day and both chose
+wrong in the same direction.
+
+Run it against any published tag to see what a release carried:
+
+```bash
+GITHUB_REPOSITORY=Aureliolo/gdharness GH_TOKEN="$(gh auth token)" bun scripts/release-notes.ts v0.12.5
+```
+
+It picks the newest release below the tag, so it reads the same afterwards as it did at the time.
+An earlier version took the newest release that was not the tag, which is the same thing only at
+the moment of release and compares backwards on anything older.
 
 ## What happens on the merge
 
