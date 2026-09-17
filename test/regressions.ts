@@ -3054,9 +3054,31 @@ async function testARunOutlivesItsServer(): Promise<void> {
       gamePid = asNumber(get(started, 'pid'), 'the run needs a process of its own');
       assert.ok(gamePid > 0, `the run needs a process: ${JSON.stringify(started)}`);
     } finally {
-      // The reconnect, in its harshest form: the server is gone without being asked to stop.
-      first.child.kill('SIGKILL');
+      // A reconnect as the harness actually performs one: stdin ends, and the server shuts itself
+      // down through the same path a SIGINT takes. Not a kill, which is the weaker test and the
+      // wrong one. A killed server runs no shutdown at all, so it cannot exercise the thing that
+      // used to end these runs: the server killed the game itself on the way out, deliberately,
+      // in its own cleanup. Reintroducing that line would leave a SIGKILL test green and every
+      // real reconnect fatal, which is how this was shipped in the first place. Ending stdin is
+      // also the only portable way to ask for a graceful stop: on Windows a SIGTERM through Node
+      // is a TerminateProcess and runs no handlers either.
+      first.child.stdin?.end();
     }
+    await new Promise<void>((gone) => {
+      if (first.exited) {
+        gone();
+        return;
+      }
+      first.child.once('exit', () => {
+        gone();
+      });
+      // Not left to hang if the shutdown path is what broke: the assertions below say more about
+      // why than a test that times out with nothing printed.
+      setTimeout(() => {
+        first.child.kill();
+        gone();
+      }, 15_000);
+    });
     await delay(1500);
 
     assert.ok(
