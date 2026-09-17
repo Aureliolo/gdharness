@@ -184,6 +184,8 @@ interface TestSuite {
   readonly name: string;
   readonly path: string | null;
   readonly tests: number;
+  /** What the suite said it held, which is more than `tests` when the run stopped inside it. */
+  readonly discovered: number;
   readonly failures: number;
   readonly errors: number;
   readonly skipped: number;
@@ -241,20 +243,28 @@ export function parseJUnit(xml: string): TestReport {
   }
   const suiteElements =
     top.name === 'testsuite' ? [top] : top.children.filter((child) => child.name === 'testsuite');
-  const suites = suiteElements.map(
-    (suite): TestSuite => ({
+  const suites = suiteElements.map((suite): TestSuite => {
+    // Counted from the cases rather than read off the attributes, for the same reason the totals
+    // below are. A suite's `tests` attribute is what it discovered; when gdUnit4 stops at a failing
+    // case the cases after it are never written, so the attribute says nine while the body holds
+    // two. Reporting the attribute as the count made one answer contradict itself, with the totals
+    // saying two ran and the suite beside them saying nine tests and one failure, which reads as
+    // eight passing tests that do not exist.
+    const cases = suite.children
+      .filter((child) => child.name === 'testcase')
+      .map((element) => caseOf(suite, element));
+    return {
       name: suite.attributes['name'] ?? '',
       path: pathOf(suite),
-      tests: count(suite.attributes, 'tests'),
-      failures: count(suite.attributes, 'failures'),
-      errors: count(suite.attributes, 'errors'),
-      skipped: count(suite.attributes, 'skipped'),
+      tests: cases.length,
+      discovered: count(suite.attributes, 'tests'),
+      failures: cases.filter((entry) => entry.status === 'failed').length,
+      errors: cases.filter((entry) => entry.status === 'error').length,
+      skipped: cases.filter((entry) => entry.status === 'skipped').length,
       time: count(suite.attributes, 'time'),
-      cases: suite.children
-        .filter((child) => child.name === 'testcase')
-        .map((element) => caseOf(suite, element)),
-    }),
-  );
+      cases,
+    };
+  });
   // Counted from the cases rather than read off the top element: gdUnit4 leaves `errors` off
   // <testsuites> and writes `time` there as zero.
   const all = suites.flatMap((suite) => suite.cases);
