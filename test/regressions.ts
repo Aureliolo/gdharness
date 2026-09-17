@@ -3054,9 +3054,31 @@ async function testARunOutlivesItsServer(): Promise<void> {
       gamePid = asNumber(get(started, 'pid'), 'the run needs a process of its own');
       assert.ok(gamePid > 0, `the run needs a process: ${JSON.stringify(started)}`);
     } finally {
-      // The reconnect, in its harshest form: the server is gone without being asked to stop.
-      first.child.kill('SIGKILL');
+      // A reconnect as the harness actually performs one: stdin ends, and the server shuts itself
+      // down through the same path a SIGINT takes. Not a kill, which is the weaker test and the
+      // wrong one. A killed server runs no shutdown at all, so it cannot exercise the thing that
+      // used to end these runs: the server killed the game itself on the way out, deliberately,
+      // in its own cleanup. Reintroducing that line would leave a SIGKILL test green and every
+      // real reconnect fatal, which is how this was shipped in the first place. Ending stdin is
+      // also the only portable way to ask for a graceful stop: on Windows a SIGTERM through Node
+      // is a TerminateProcess and runs no handlers either.
+      first.child.stdin?.end();
     }
+    await new Promise<void>((gone) => {
+      if (first.exited) {
+        gone();
+        return;
+      }
+      first.child.once('exit', () => {
+        gone();
+      });
+      // Not left to hang if the shutdown path is what broke: the assertions below say more about
+      // why than a test that times out with nothing printed.
+      setTimeout(() => {
+        first.child.kill();
+        gone();
+      }, 15_000);
+    });
     await delay(1500);
 
     assert.ok(
@@ -3386,6 +3408,33 @@ function testCommandLineSetup(): void {
       /boot\/gdharness_loader\.gd/,
       'and names it, since being specific about five replacements and silent about this one is what cost a project a day',
     );
+    // The same guard reached through a name instead of a path. A project is free to call its
+    // loader anything, and one calls it GdharnessLoader, so every check for "is the runtime
+    // registered" answers no: registering would put the addon's own script in the tree beside the
+    // guard rather than behind it. Found by the path, since the name is the part a project chooses.
+    writeFileSync(
+      project,
+      readFileSync(project, 'utf8').replace(
+        /GdharnessRuntime="\*res:\/\/boot\/gdharness_loader\.gd"/,
+        'GdharnessLoader="*res://boot/gdharness_loader.gd"',
+      ),
+    );
+    const underAnotherName = cli('runtime', 'on', projectDir);
+    assert.equal(underAnotherName.status, 0, `runtime on:\n${underAnotherName.stdout}`);
+    assert.doesNotMatch(
+      readFileSync(project, 'utf8'),
+      /GdharnessRuntime=/,
+      'a loader registered under another name is not joined by a second entry',
+    );
+    assert.match(underAnotherName.stdout, /GdharnessLoader autoload already names/, underAnotherName.stdout);
+    writeFileSync(
+      project,
+      readFileSync(project, 'utf8').replace(
+        /GdharnessLoader="\*res:\/\/boot\/gdharness_loader\.gd"/,
+        'GdharnessRuntime="*res://boot/gdharness_loader.gd"',
+      ),
+    );
+
     // A wrapper that is not on disk is still not rewritten, because a file can be absent for a
     // moment and a rewritten line is gone for good. But it is said, since an entry naming nothing
     // boots the project with a missing script and "left as it is" alone would read as approval.
