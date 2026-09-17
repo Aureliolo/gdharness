@@ -3427,6 +3427,129 @@ async function testARunEndedUnwatchedIsStillReadable(): Promise<void> {
 }
 
 /**
+ * A live run belonging to somewhere else is still printing after a start that is not its own.
+ *
+ * The ownership guard is asserted elsewhere against a record naming a process that has been and
+ * gone, which proves the refusal is reachable and nothing more: a dead pid is refused by every
+ * guard there is, including ones that are not about ownership at all, so that fixture would pass
+ * against a build that signals every live foreign run it finds. The incident was a live one.
+ *
+ * `editor_run start` is the call that did it. It ends whatever `currentRun()` says is going before
+ * it decides how to start anything, which is above the engine and above the editor, so this needs
+ * neither: what is being measured is whether the foreign process is alive afterwards.
+ *
+ * Alive is asserted by what the bench writes, not by asking whether the pid is still there. The
+ * fix's own `alive()` would be answering a question about itself, and a process can be a corpse
+ * the operating system has not finished burying. A bench that has printed since the call is a
+ * bench that was still running when the call went through it.
+ */
+async function testAForeignRunSurvivesAStart(): Promise<void> {
+  const theirs = await benchThroughAStart('theirs');
+  assert.doesNotMatch(
+    theirs.answer,
+    /endedPreviousRun/,
+    `a start of this server's own project ends no run of anybody else's: ${theirs.answer}`,
+  );
+  assert.ok(theirs.keptPrinting, 'a bench recorded against another project should still be printing');
+  assert.equal(theirs.exitCode, null, 'and should not have been signalled');
+
+  // The same instrument against a run this server does own, which is what makes the assertions
+  // above mean anything. Without it they are satisfied by a start that ends nothing at all: a
+  // broken `endActiveGame`, an `editor_run` that refuses everything, a server that never read the
+  // record. The guard is that this run is somebody else's, so the witness is the same call
+  // killing the same bench when it is not.
+  const ours = await benchThroughAStart('mine');
+  assert.match(ours.answer, /endedPreviousRun/, `a start does end this server's own run: ${ours.answer}`);
+  assert.equal(ours.keptPrinting, false, 'and the bench standing in for it stops printing');
+}
+
+/**
+ * A live bench recorded as belonging to `owner`, put through one `editor_run start` of `mine`.
+ *
+ * Alive is reported by what the bench writes, not by asking whether the pid is still there. The
+ * fix's own `alive()` would be answering a question about itself, and a process can be a corpse
+ * the operating system has not finished burying.
+ */
+async function benchThroughAStart(
+  owner: 'mine' | 'theirs',
+): Promise<{ answer: string; keptPrinting: boolean; exitCode: number | null }> {
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-foreign-runtime-'));
+  const mine = join(runtimeDir, 'mine');
+  const ticks = join(runtimeDir, 'bench.log');
+  mkdirSync(join(runtimeDir, 'runs'), { recursive: true });
+  mkdirSync(mine, { recursive: true });
+  mkdirSync(join(runtimeDir, 'theirs'), { recursive: true });
+  // A runnable project, not just a directory with a project.godot in it. A start that refuses for
+  // want of a main scene never reaches the block that ends the recorded run, so the foreign half
+  // of this fixture would pass against a server that kills everything it finds.
+  writeFileSync(
+    join(mine, 'project.godot'),
+    '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Mine"\n' +
+      'run/main_scene="res://main.tscn"\n',
+  );
+  writeFileSync(join(mine, 'main.gd'), 'extends Node\n');
+  writeFileSync(
+    join(mine, 'main.tscn'),
+    '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+      '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+  );
+
+  // It prints as it goes and does not stop, which is the shape of the run that was being lost and
+  // the only thing here that can testify to being alive. It carries the recorded project on its
+  // command line because that is what makes it the recorded run rather than a pid that matches:
+  // a bench the identity check disowns would be spared for a reason this fixture is not about.
+  const recorded = join(runtimeDir, owner);
+  const bench = spawn(
+    process.execPath,
+    [
+      '-e',
+      "const {appendFileSync}=require('node:fs');" +
+        `setInterval(() => appendFileSync(${JSON.stringify(ticks)}, 'tick\\n'), 25);`,
+      recorded,
+    ],
+    { stdio: 'ignore' },
+  );
+  const benchPid = bench.pid;
+  assert.ok(benchPid !== undefined, 'the fixture needs a live process to stand in for the bench');
+
+  try {
+    writeFileSync(
+      join(runtimeDir, 'runs', 'run.json'),
+      JSON.stringify({
+        pid: benchPid,
+        command: process.execPath,
+        transcript: join(runtimeDir, 'recorded-run.log'),
+        startedAt: Date.now() - 60_000,
+        projectPath: recorded,
+        arguments: ['--headless', '--path', recorded],
+      }),
+      'utf8',
+    );
+
+    const printed = (): number => (existsSync(ticks) ? readFileSync(ticks, 'utf8').length : 0);
+    // Waited for rather than assumed: a bench that had not yet written its first line would make
+    // the comparison below read as dead whatever happened to it.
+    for (let waited = 0; printed() === 0 && waited < 2000; waited += 25) await delay(25);
+    assert.ok(printed() > 0, 'the bench should be printing before anything is asked of the server');
+
+    let answer = '';
+    await withStdioServer(
+      async (call) => {
+        answer = await call('editor_run', { op: 'start', projectPath: mine, headless: true });
+      },
+      { GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: mine, GODOT_PATH: process.execPath },
+    );
+
+    const afterwards = printed();
+    await delay(250);
+    return { answer, keptPrinting: printed() > afterwards, exitCode: bench.exitCode };
+  } finally {
+    bench.kill('SIGKILL');
+    rmSync(runtimeDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+  }
+}
+
+/**
  * The run keeps going when the server that started it is killed, and the next one picks it up.
  *
  * The reproduction as it was reported: start a headless run, have the server go away under it,
@@ -4482,6 +4605,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testOnlyOurOwnAutoloadIsRewritten,
   testAPidIsNotAnIdentity,
   testARunEndedUnwatchedIsStillReadable,
+  testAForeignRunSurvivesAStart,
   testARunOutlivesItsServer,
   testGdUnitRunner,
   testCommandLineSetup,
