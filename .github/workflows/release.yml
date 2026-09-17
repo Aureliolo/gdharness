@@ -27,6 +27,11 @@ jobs:
       contents: read # The build reads the tagged source.
       id-token: write # Only release-build.yml's attest job uses it, to sign.
       attestations: write # Only release-build.yml's attest job uses it, to store the provenance.
+      # A called workflow cannot ask for more than its caller was given, and a job inside it that
+      # does stops the whole run before a single step executes: `startup_failure`, no logs, and a
+      # tag left standing with no release behind it. Granting it here is not optional once
+      # release-build.yml's build_test job declares it.
+      pull-requests: read # Only release-build.yml's build_test job uses it, to write the changelog.
     # zizmor wants `$/...` here. actionlint 1.7.12 rejects that spelling as neither of the two
     # forms GitHub documents, and this path only runs on a tag, where a syntax error is a failed
     # release rather than a failed check. The two linters disagree; the one that can be verified
