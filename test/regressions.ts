@@ -18,6 +18,7 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 import { WebSocket } from 'ws';
+import { pullRequestNumbers, shipsToUsers } from '../scripts/release-notes.js';
 import { announcementPath, BRIDGE_ANNOUNCE_PROTOCOL, readAnnouncement } from '../src/bridge-announce.js';
 import { staleClassNames, unseenByEditor } from '../src/class-cache.js';
 import { GodotDAPClient } from '../src/dap_client.js';
@@ -2227,6 +2228,57 @@ function testAnAutoloadGitWillNotCarry(): void {
 }
 
 /**
+ * Which changelog section a change is listed under, by the files it touched.
+ *
+ * The split exists because a pull request title says what changed and not how far it reaches. Two
+ * projects downstream read one flat list of titles on the same day and both took a release for a
+ * fixture that changes nothing they install, while the one that answered their problem sat
+ * unmentioned a number below.
+ *
+ * Asserted in both directions in one place, because the failure that matters is a shipped change
+ * filed as repository-only: that is the one nobody upgrades for. The reverse is noise.
+ */
+function testChangelogReach(): void {
+  const installed: string[][] = [
+    ['src/server.ts'],
+    ['src/godot/addons/gdharness_runtime/runtime_queries.gd'],
+    ['package.json', 'bun.lock'],
+    ['README.md'],
+    ['LICENSE'],
+    ['scripts/build-release.ts'],
+    // One shipped file is enough: a fix and the fixture proving it is a change you install.
+    ['src/junit.ts', 'test/regressions.ts'],
+  ];
+  for (const files of installed) {
+    assert.equal(shipsToUsers(files), true, `${files.join(', ')} reaches an installed copy`);
+  }
+
+  const repositoryOnly: string[][] = [
+    ['test/regressions.ts'],
+    ['test/support/server.ts'],
+    ['CLAUDE.md'],
+    ['.github/workflows/ci.yml'],
+    ['.github/CONTRIBUTING.md'],
+    ['docs/architecture.md'],
+    ['scripts/install-godot.ts'],
+    ['biome.json', 'tsconfig.json'],
+  ];
+  for (const files of repositoryOnly) {
+    assert.equal(shipsToUsers(files), false, `${files.join(', ')} stays in the repository`);
+  }
+
+  // The version-bump pull request is not something a release carries, it is the release, and it
+  // touches two shipped files. It is dropped by its label before reach is ever asked.
+  assert.equal(shipsToUsers(['package.json', 'server.json']), true);
+
+  // Every squash subject carries its number, and a range that landed nothing lists nothing rather
+  // than throwing, which is what an empty compare answers with.
+  assert.deepEqual(pullRequestNumbers(['A thing that happened (#274)', 'Another (#275)']), [274, 275]);
+  assert.deepEqual(pullRequestNumbers(['Body lines mention (#99) but the subject does not\n\n(#98)']), []);
+  assert.deepEqual(pullRequestNumbers([]), []);
+}
+
+/**
  * The ordering an update notice is decided by.
  *
  * Getting this wrong in either direction is bad in its own way: too eager and every session is
@@ -4416,6 +4468,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testProjectDefaultsToTheWorkingDirectory,
   testAnAutoloadGitWillNotCarry,
   testVersionOrdering,
+  testChangelogReach,
   testTheStaleHalfIsNamedCorrectly,
   testAGameIsFoundWhereverItAnnounced,
   testAGameTooNewToTalkToIsStillAGame,

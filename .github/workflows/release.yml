@@ -55,6 +55,12 @@ jobs:
           name: attestations
           path: dist
 
+      - name: Download the changelog
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-changelog
+          path: notes
+
       # The bytes have moved between jobs twice by now, and they are the bytes the attestation
       # was made over, so the last thing before publishing is to check they still hash right.
       - name: Verify the checksum once more
@@ -118,7 +124,13 @@ jobs:
             '[Install guide](https://aureliolo.github.io/gdharness/install.html)' \
             '· [What it writes](https://aureliolo.github.io/gdharness/architecture.html)' \
             '· [Tools](https://aureliolo.github.io/gdharness/tools.html)' \
+            '' \
             > notes.md
+          # Written by the build job from the files each pull request touched, rather than by
+          # --generate-notes, which lists every title together and leaves a reader to guess which
+          # of them reach the machine they install onto. Two projects guessed wrong the same way
+          # on the same day.
+          cat notes/changelog.md >> notes.md
           gh release create "${GITHUB_REF_NAME}" \
             "dist/gdharness-${VERSION}.tgz" \
             "dist/gdharness-${VERSION}.tgz.sha256" \
@@ -126,7 +138,6 @@ jobs:
             "dist/gdharness-${VERSION}.intoto.jsonl" \
             --verify-tag \
             --notes-file notes.md \
-            --generate-notes \
             --title "gdharness ${VERSION}"
 
   # npm is how every harness actually installs a server: each one's config is some spelling of

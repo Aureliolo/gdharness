@@ -168,6 +168,29 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+      # Written here rather than where the release is created, because this job has the checkout
+      # and the toolchain and that one deliberately has neither: it holds `contents: write` and
+      # runs no code from the repository. Outside `dist`, which is checked above for holding
+      # exactly the archive and its checksum.
+      - name: Write the changelog
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p notes
+          bun scripts/release-notes.ts "${GITHUB_REF_NAME}" > notes/changelog.md
+          test -s notes/changelog.md
+
+      - name: Upload the changelog
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-changelog
+          path: notes/changelog.md
+          if-no-files-found: error
+          retention-days: 1
+
   # The archive is a bundle, and nothing inside a bundle names what went into it, so scanning
   # the archive alone lists nothing. What it was built from is in the lockfile at the tag; syft
   # reads that beside the unpacked archive, and the SBOM carries every shipped file with its
