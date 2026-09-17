@@ -2559,8 +2559,12 @@ class GodotServer {
     const endpoint = await announcedSince(projectPath, before, {
       budgetMs,
       // A game held at a breakpoint set before the run is not booting any more, and waiting out
-      // the budget on one says nothing. It cannot announce until it is let go.
-      giveUp: () => this.dapClient?.isStopped() === true,
+      // the budget on one says nothing. It cannot announce until it is let go. Nor is there
+      // anything to wait for once the process is over: a boot that fails on a parse error is
+      // gone in half a second, and sitting out the rest of the budget delays the answer that
+      // says so. The announcement is looked for before this is asked, so a game that announced
+      // and then quit is still found.
+      giveUp: () => this.dapClient?.isStopped() === true || !stillRunning(this.currentRun()),
     });
     return runtimeVerdict(endpoint, {
       addon: true,

@@ -2429,6 +2429,62 @@ function testANotYetRuntimeIsNotTheSameAsNoRuntime(): void {
 }
 
 /**
+ * A start does not sit out its budget on a game that is already over.
+ *
+ * The wait is for an announcement, and a process that has exited is not going to make one. A boot
+ * that dies on a parse error is gone in half a second, and waiting the rest of the budget out
+ * delays the very answer that says so. Driven with a fake engine, which exits at once, so what is
+ * measured is the waiting rather than anything Godot does.
+ *
+ * The budget is ten seconds here and the answer has to arrive well inside it, which is also the
+ * only assertion that runtimeWaitMs reaches the wait at all: the default is five.
+ */
+async function testAStartStopsWaitingForAGameThatIsOver(): Promise<void> {
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-over-'));
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-over-runtime-'));
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Over"\n' +
+        'run/main_scene="res://main.tscn"\n',
+    );
+    writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
+    // The wait only happens for a project that could announce, which is one with the addon on
+    // disk. Its contents do not matter: nothing runs it here.
+    mkdirSync(join(project, 'addons', 'gdharness_runtime'), { recursive: true });
+    writeFileSync(join(project, 'addons', 'gdharness_runtime', 'runtime_autoload.gd'), 'extends Node\n');
+
+    await withStdioServer(
+      async (call) => {
+        const started = Date.now();
+        const answer: unknown = JSON.parse(
+          await call('editor_run', {
+            projectPath: project,
+            op: 'start',
+            headless: true,
+            runtimeWaitMs: 10_000,
+          }),
+        );
+        const waited = Date.now() - started;
+        const runtime = get(answer, 'runtime');
+        assert.equal(get(runtime, 'listening'), false, JSON.stringify(answer));
+        assert.equal(
+          get(runtime, 'mayYetAnnounce'),
+          false,
+          `a game that is over is not going to announce: ${JSON.stringify(runtime)}`,
+        );
+        assert.match(String(get(runtime, 'note')), /no longer running/, JSON.stringify(runtime));
+        assert.ok(waited < 8_000, `the answer should not wait out the budget: ${waited}ms`);
+      },
+      { GODOT_PATH: process.execPath, GDHARNESS_RUNTIME_DIR: runtimeDir },
+    );
+  } finally {
+    rmSync(project, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+    rmSync(runtimeDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+  }
+}
+
+/**
  * Starting a game and being able to talk to it are two moments, and a start waits for both.
  *
  * The editor answers `play_scene` as soon as it has asked the engine to play, so the call right
@@ -4069,6 +4125,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAGameIsFoundWhereverItAnnounced,
   testAGameTooNewToTalkToIsStillAGame,
   testANotYetRuntimeIsNotTheSameAsNoRuntime,
+  testAStartStopsWaitingForAGameThatIsOver,
   testAStartWaitsForTheGameToAnnounceItself,
   testATestRunKeepsOutOfThePlayersSaves,
   testParametersReachTheEngine,
