@@ -202,6 +202,44 @@ export interface ProjectReport {
   readonly problems: readonly string[];
 }
 
+/**
+ * The autoload a project uses to bring the runtime up itself, or null when there is none.
+ *
+ * Read out of the script rather than guessed from its name. The first version of this matched a
+ * path with gdharness in it, which is a guess about what people call their files: it happened to
+ * catch `scripts/gdharness_loader.gd` and would have missed `boot/harness.gd` entirely. What
+ * actually identifies a loader is that it names the addon's own script, so that is what is looked
+ * for, in the file the entry points at.
+ *
+ * The name in the entry proves nothing either way, since a project chooses it freely, and the
+ * filename is kept only as a second chance for a loader whose reference is built from pieces
+ * rather than written out. A miss here is not silent: the runtime either answers or it does not,
+ * and doctor now reports which entry brings it up rather than whether ours exists.
+ */
+function loaderAmong(
+  projectPath: string,
+  named: ReadonlyMap<string, string>,
+): { name: string; path: string } | null {
+  let byName: { name: string; path: string } | null = null;
+  for (const [entry, path] of named) {
+    if (entry === RUNTIME_AUTOLOAD.name || path === RUNTIME_AUTOLOAD.path) {
+      continue;
+    }
+    let source = '';
+    try {
+      source = readFileSync(join(projectPath, path), 'utf8');
+    } catch {
+      // A script the entry names and the project does not have. Nothing to read it out of, and
+      // doctor says elsewhere that the entry points at nothing.
+    }
+    if (source.includes(RUNTIME_AUTOLOAD.path)) {
+      return { name: entry, path };
+    }
+    byName ??= path.toLowerCase().includes('gdharness') ? { name: entry, path } : null;
+  }
+  return byName;
+}
+
 /** Every autoload in project.godot, as the project-relative path each one names. */
 function autoloadPaths(settings: Record<string, Record<string, unknown>>): Map<string, string> {
   const named = new Map<string, string>();
@@ -283,7 +321,6 @@ export function inspectProject(projectPath: string): ProjectReport {
   }
   const autoload = settings['autoload'];
   const registered = autoload === undefined ? undefined : readString(autoload, RUNTIME_AUTOLOAD.name);
-  const runtimeAutoload = typeof registered === 'string';
   // The star is the enabled marker the editor writes, not part of the path.
   const runtimeAutoloadPath = typeof registered === 'string' ? registered.replace(/^\*/, '') : null;
 
@@ -293,17 +330,13 @@ export function inspectProject(projectPath: string): ProjectReport {
   // game boots with a missing script and nothing in the repository says why. Found on two projects,
   // and nothing said so at the moment it was created.
   const named = autoloadPaths(settings);
-  // Found by the path, since the name is the project's to choose and one project calls it
-  // GdharnessLoader. A file with gdharness in its name, registered as an autoload and not our own
-  // script, is a project bringing the runtime up its own way under a name we cannot predict.
-  const loaderEntry =
-    [...named].find(
-      ([entry, path]) =>
-        entry !== RUNTIME_AUTOLOAD.name &&
-        path !== RUNTIME_AUTOLOAD.path &&
-        path.toLowerCase().includes('gdharness'),
-    ) ?? null;
-  const runtimeLoaderAutoload = loaderEntry === null ? null : { name: loaderEntry[0], path: loaderEntry[1] };
+  const runtimeLoaderAutoload = loaderAmong(projectPath, named);
+  // Whether the runtime is brought up at all, which is the question the name asks. It used to mean
+  // "is there an entry called GdharnessRuntime", so a project bringing it up through a loader was
+  // told its runtime was not registered while the runtime was answering queries. A false answer of
+  // exactly the shape this project keeps finding: well formed, confident, and about something
+  // other than what the reader takes it for.
+  const runtimeAutoload = runtimeAutoloadPath !== null || runtimeLoaderAutoload !== null;
   const tracked = trackedByGit(projectPath, [...named.values()]);
   for (const [name, path] of named) {
     // A file that is not here at all is a different sentence, and for our own addon doctor has
