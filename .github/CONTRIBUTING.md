@@ -16,6 +16,17 @@
 - **Answers are sized.** Anything that can return a lot takes a detail level and defaults to
   the smallest useful one. Anything unbounded paginates.
 
+## Versions
+
+- **Patch**: nearly everything. An answer that was wrong is now right, and the output may change
+  shape for it, because a wrong answer corrected is a fix rather than a feature and leaving one
+  wrong to protect whoever parsed it is how a tool stops being worth asking. An addition nothing
+  has to adapt to is a patch too: a new argument, a new field, an argument reaching further than it
+  did. Ignore all of it and your calls still work.
+- **Minor**: a new tool or a new op, meaning gdharness does something it could not do before.
+- **Major**: a tool, an op, an argument or a field was renamed or taken away. Nothing else earns
+  one.
+
 ## What every language in here is held to
 
 Five things, for each language present. A language that arrives without all five arrives with
