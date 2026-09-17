@@ -4,14 +4,15 @@
 # every set of notes ends with "Release v0.12.3", which tells a reader that this release released
 # itself and pushes the line that does say something up out of sight.
 #
-# Both spellings of the author, because the login is `github-actions[bot]` and the display name is
-# `github-actions`, and which one this file is matched against is not something the documentation
-# says. Listing both costs nothing; guessing wrong leaves the line in.
+# By the label rather than by the author. Excluding `github-actions[bot]`, and `github-actions`
+# beside it, left the line exactly where it was: whatever `exclude.authors` matches, it is not
+# either spelling of an app that opens a pull request with the job token. The label is put on by
+# release-prepare.yml, which is the only thing that opens one of these, and it is the mechanism
+# this was checked against rather than the one that reads as though it should work.
 #
 # Dependency updates stay in. This is distributed as a bundle, so a raised dependency is a change
 # in what somebody installs, and a reader deciding whether to take a release should see it.
 changelog:
   exclude:
-    authors:
-      - 'github-actions[bot]'
-      - 'github-actions'
+    labels:
+      - release

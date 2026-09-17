@@ -113,7 +113,11 @@ jobs:
           body="Raises the version to ${VERSION} in package.json, server.json and the README."
           body="${body} Merging this tags v${VERSION}, which builds, signs and publishes the release."
 
-          url="$(gh pr create --base main --head "${BRANCH}" \
+          # The label is what keeps this pull request out of the next release's notes, which
+          # .github/release.yml excludes by. It has to exist in the repository: gh fails the
+          # whole command on a label it cannot find, so deleting it would stop a release being
+          # prepared rather than quietly put the line back.
+          url="$(gh pr create --base main --head "${BRANCH}" --label release \
             --title "Release v${VERSION}" --body "${body}")"
 
           {
