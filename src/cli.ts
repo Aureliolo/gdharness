@@ -30,6 +30,7 @@ import { defectReport } from './issues.js';
 import { Ask, interactive } from './prompt.js';
 import { GODOT_DEBUG_MODE_DEFAULT } from './server-version.js';
 import {
+  autoloadIsOurs,
   disablePlugins,
   EDITOR_PLUGINS,
   enablePlugins,
@@ -237,8 +238,17 @@ async function setup(): Promise<void> {
     console.log(`${name}: ${outcome.ok ? String(outcome.payload['action']) : 'failed'}`);
   }
   if (runtime) {
-    said(await setRuntime(godot, projectPath, true), 'registering the runtime autoload');
-    console.log(`${RUNTIME_AUTOLOAD.name} autoload registered`);
+    // The same rule as the upgrade: a setup run over a project that already brings the runtime up
+    // its own way leaves that alone rather than taking its refusals with it.
+    const registered = inspectProject(projectPath).runtimeAutoloadPath;
+    if (autoloadIsOurs(registered)) {
+      said(await setRuntime(godot, projectPath, true), 'registering the runtime autoload');
+      console.log(`${RUNTIME_AUTOLOAD.name} autoload registered at res://${RUNTIME_AUTOLOAD.path}`);
+    } else {
+      console.log(
+        `${RUNTIME_AUTOLOAD.name} autoload left at ${registered}, which this project registers itself`,
+      );
+    }
   }
   const classes = await runOperation(godot, 'refresh_class_cache', {}, projectPath);
   said(classes, 'rebuilding the class list');
@@ -390,9 +400,19 @@ async function upgrade(): Promise<void> {
     said(outcome, `enabling ${EDITOR_PLUGINS[index] ?? ''}`);
   }
   // Only when it was already on: an upgrade must not put back an autoload somebody turned off
-  // deliberately, which is the one thing here that would reach a shipped build.
+  // deliberately, which is the one thing here that would reach a shipped build. And only when it
+  // names this addon's own script, because an entry pointing elsewhere is a project's own wrapper
+  // and every refusal it makes would go with it. Said either way: this line was rewritten once
+  // without being mentioned, beside five replacements that were, and the silence is what cost.
   if (before.runtimeAutoload) {
-    said(await setRuntime(godot, projectPath, true), 'registering the runtime autoload');
+    if (autoloadIsOurs(before.runtimeAutoloadPath)) {
+      said(await setRuntime(godot, projectPath, true), 'registering the runtime autoload');
+      console.log(`registered the ${RUNTIME_AUTOLOAD.name} autoload at res://${RUNTIME_AUTOLOAD.path}`);
+    } else {
+      console.log(
+        `kept the ${RUNTIME_AUTOLOAD.name} autoload at ${before.runtimeAutoloadPath}, which is not this addon's own script, so whatever that file decides about release builds and script runs still decides it`,
+      );
+    }
   }
   said(await runOperation(godot, 'refresh_class_cache', {}, projectPath), 'rebuilding the class list');
 
@@ -456,6 +476,14 @@ async function runtime(): Promise<void> {
   }
   const projectPath = projectArgument(2);
   const godot = await engine();
+  // Turning it on when a project already brings it up its own way is a request that has been met,
+  // so the entry is left where it is. Turning it off is always this tool's to do: the ask is that
+  // nothing comes up, and a wrapper left registered would still bring something up.
+  const registered = inspectProject(projectPath).runtimeAutoloadPath;
+  if (state === 'on' && !autoloadIsOurs(registered)) {
+    console.log(`${RUNTIME_AUTOLOAD.name} autoload already registered at ${registered}, left as it is`);
+    return;
+  }
   said(await setRuntime(godot, projectPath, state === 'on'), `turning the runtime ${state}`);
   console.log(`${RUNTIME_AUTOLOAD.name} autoload ${state === 'on' ? 'registered' : 'removed'}`);
 }
