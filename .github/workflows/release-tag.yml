@@ -10,6 +10,10 @@ on:
       - main
     paths:
       - package.json
+  # The way back when a tag was made and the release behind it did not happen. The tag is deleted
+  # and this is run again, which cannot go through the push trigger: the version has to change for
+  # that to fire, and recovering a release means tagging the same version at a commit that works.
+  workflow_dispatch:
 
 permissions: {}
 
@@ -40,6 +44,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
           version="$(bun -e "console.log((await Bun.file('package.json').json()).version)")"
@@ -53,14 +58,20 @@ jobs:
           # package.json is edited for all sorts of reasons: a script, a dependency, a pin. Only a
           # change to the version is a release, so anything else stops here rather than reaching
           # the tag check below and being reported as a release that cannot happen.
-          git show "${GITHUB_SHA}^:package.json" > parent-package.json 2>/dev/null \
-            || echo '{}' > parent-package.json
-          previous="$(bun -e "console.log((await Bun.file('parent-package.json').json()).version ?? '')")"
-          rm -f parent-package.json
+          #
+          # Skipped when a person asked for this by hand, because that is the recovery case: the
+          # version is the same as it was and the point is to tag it somewhere that works. The tag
+          # check below still refuses to move a tag that exists, so asking for this twice is safe.
+          if [[ "${EVENT_NAME}" != "workflow_dispatch" ]]; then
+            git show "${GITHUB_SHA}^:package.json" > parent-package.json 2>/dev/null \
+              || echo '{}' > parent-package.json
+            previous="$(bun -e "console.log((await Bun.file('parent-package.json').json()).version ?? '')")"
+            rm -f parent-package.json
 
-          if [[ "${previous}" == "${version}" ]]; then
-            echo "package.json changed, but the version is still ${version}. Not a release."
-            exit 0
+            if [[ "${previous}" == "${version}" ]]; then
+              echo "package.json changed, but the version is still ${version}. Not a release."
+              exit 0
+            fi
           fi
 
           if gh api "repos/${GH_REPO}/git/ref/tags/v${version}" >/dev/null 2>&1; then
