@@ -1,8 +1,16 @@
 import { type ChildProcess, spawn } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { createServer } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { type JsonRpcMessage, parseJsonLines } from './json-rpc.js';
+
+/** A runtime directory nothing else on this machine is using. */
+function runtimeDirForTest(): string {
+  return mkdtempSync(join(tmpdir(), 'gdharness-test-runtime-'));
+}
 
 /** A TCP port nothing is listening on right now. */
 export async function reservePort(): Promise<number> {
@@ -52,10 +60,27 @@ export class ServerProcess {
   private readonly abandoned = new Set<(reason: Error) => void>();
   private buffered = '';
 
+  /** The runtime directory this server was given, kept so it can be taken away again. */
+  private readonly runtimeDir: string | null;
+
   constructor(options: ServerOptions = {}) {
+    // A runtime directory of its own, unless the fixture names one. The default is shared by
+    // everything on this machine that speaks gdharness: one directory per user, holding the note
+    // that says which process a run is. A server started without a project of its own reads any
+    // note it finds there as its own and ends that run before starting another, so a test suite
+    // run on a developer's machine killed another project's bench six times in fifty minutes,
+    // silently, while its owner bisected their own code looking for the cause.
+    //
+    // Here rather than in each fixture, because the fixture that forgets is the one that does it,
+    // and what it costs is never its own run.
+    this.runtimeDir = options.env?.['GDHARNESS_RUNTIME_DIR'] === undefined ? runtimeDirForTest() : null;
     this.child = spawn(process.execPath, [options.entry ?? 'build/index.js', ...(options.args ?? [])], {
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, ...options.env },
+      env: {
+        ...process.env,
+        ...(this.runtimeDir === null ? {} : { GDHARNESS_RUNTIME_DIR: this.runtimeDir }),
+        ...options.env,
+      },
     });
     this.child.stdout?.on('data', (chunk: Buffer) => {
       const text = chunk.toString();
@@ -134,12 +159,18 @@ export class ServerProcess {
   }
 
   async stop(): Promise<void> {
-    if (this.exited) return;
-    this.child.stdin?.end();
-    this.child.kill('SIGTERM');
-    await delay(250);
-    // `exited` is a getter over the child, so it can have turned true during the wait.
-    if (this.child.exitCode === null && this.child.signalCode === null) this.child.kill('SIGKILL');
+    try {
+      if (this.exited) return;
+      this.child.stdin?.end();
+      this.child.kill('SIGTERM');
+      await delay(250);
+      // `exited` is a getter over the child, so it can have turned true during the wait.
+      if (this.child.exitCode === null && this.child.signalCode === null) this.child.kill('SIGKILL');
+    } finally {
+      if (this.runtimeDir !== null) {
+        rmSync(this.runtimeDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+      }
+    }
   }
 
   private write(payload: unknown): void {

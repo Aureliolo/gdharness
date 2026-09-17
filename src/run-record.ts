@@ -21,8 +21,9 @@
  * first had already printed stop being anywhere.
  */
 
+import { execFileSync } from 'node:child_process';
 import { mkdirSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { runtimeDirectories, runtimeDirectory } from './runtime-client.js';
 
 /** What a run leaves behind so another server can find it. */
@@ -34,6 +35,13 @@ export interface RunRecord {
   readonly startedAt: number;
   readonly projectPath: string;
   readonly arguments: readonly string[];
+  /**
+   * The engine this run was started with, so the pid can be shown to still mean this run.
+   *
+   * Absent from a record written before this was kept, and a pid on its own is not an identity:
+   * see `stillTheRecordedRun`, which is what decides whether anything may be signalled.
+   */
+  readonly command?: string;
 }
 
 /** Where a run's note and its transcript are kept, beside the runtime's own announcements. */
@@ -112,7 +120,118 @@ function recordAt(path: string): RunRecord | null {
     startedAt,
     projectPath: typeof fields['projectPath'] === 'string' ? fields['projectPath'] : '',
     arguments: Array.isArray(args) ? args.filter((value): value is string => typeof value === 'string') : [],
+    ...(typeof fields['command'] === 'string' ? { command: fields['command'] } : {}),
   };
+}
+
+/**
+ * What the operating system says is running under [param pid], and how much of it it would say.
+ *
+ * `image` is the executable's name alone, `commandLine` is the whole line it was started with.
+ * Null is the operating system declining to answer, which is not the same as nothing running
+ * there and must never be read as one.
+ */
+function runningAs(pid: number): { kind: 'image' | 'commandLine'; text: string } | null {
+  if (process.platform === 'win32') {
+    const line = windowsCommandLine(pid);
+    if (line !== null) {
+      return { kind: 'commandLine', text: line };
+    }
+    // An empty answer from the query above is not "nothing is there": a process owned by another
+    // user, or one this server cannot open, keeps its command line and hands back nothing at all.
+    // tasklist still names the executable, and that is the difference between a weaker check and
+    // no check, so it is asked before this gives up.
+    const image = windowsImage(pid);
+    return image === null ? null : { kind: 'image', text: image };
+  }
+  try {
+    if (process.platform === 'linux') {
+      const raw = readFileSync(`/proc/${pid}/cmdline`, 'utf8').replaceAll('\0', ' ').trim();
+      return raw === '' ? null : { kind: 'commandLine', text: raw };
+    }
+    const args = execFileSync('ps', ['-p', String(pid), '-o', 'args='], {
+      encoding: 'utf8',
+      timeout: 15_000,
+    }).trim();
+    return args === '' ? null : { kind: 'commandLine', text: args };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The whole command line of a Windows process, or null when Windows will not give it.
+ *
+ * Windows keeps a command line out of reach of anything but a query, so this is the one platform
+ * that starts an interpreter to answer. Half a second, on a path that runs once when a run is
+ * picked up and once before one is ended.
+ */
+function windowsCommandLine(pid: number): string | null {
+  try {
+    const answer = execFileSync(
+      'powershell',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`,
+      ],
+      { encoding: 'utf8', timeout: 15_000, windowsHide: true },
+    ).trim();
+    return answer === '' ? null : answer;
+  } catch {
+    return null;
+  }
+}
+
+/** The executable's name alone, from the one tool every Windows has. */
+function windowsImage(pid: number): string | null {
+  try {
+    const csv = execFileSync('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'], {
+      encoding: 'utf8',
+      timeout: 15_000,
+      windowsHide: true,
+    });
+    return /^"([^"]+)"/.exec(csv.trim())?.[1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether the process under the record's pid is still the run the record describes.
+ *
+ * A pid is a number the operating system hands out again the moment it is free, so a record that
+ * outlived its run names whatever came next. Signalling on the strength of that number alone is
+ * killing a stranger's process, and this is the one thing here that does something irreversible
+ * to a process nobody asked about.
+ *
+ * What it compares is what the run was started with: the engine's own path and, where the whole
+ * command line can be read, the project it was pointed at. Two engines of the same build on two
+ * projects are not the same run, which matters because these records are shared by every server
+ * using this runtime directory.
+ *
+ * False when the operating system will not say. Not knowing is not the same as knowing it is
+ * ours, and the caller that acts on this is the one that kills.
+ */
+export function stillTheRecordedRun(record: RunRecord): boolean {
+  const running = runningAs(record.pid);
+  if (running === null) {
+    return false;
+  }
+  const engine = record.command === undefined ? null : basename(record.command);
+  const said = process.platform === 'win32' ? running.text.toLowerCase() : running.text;
+  const wanted = engine === null || process.platform !== 'win32' ? engine : engine.toLowerCase();
+  if (wanted !== null && !said.includes(wanted)) {
+    return false;
+  }
+  if (running.kind === 'image' || record.projectPath === '') {
+    // An older record names no engine and an image name carries no project, so the most that can
+    // be said is that something is there. A record written by this version answers both.
+    return wanted !== null;
+  }
+  const project = process.platform === 'win32' ? record.projectPath.toLowerCase() : record.projectPath;
+  return said.includes(project);
 }
 
 /**
