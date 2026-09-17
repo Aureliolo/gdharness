@@ -52,6 +52,14 @@ export interface GodotProcess {
   /** True when the editor was asked to play it, so stopping it is the editor's job too. */
   throughEditor: boolean;
   /**
+   * Why this server ended the run, or null when it did not.
+   *
+   * A run that vanished and a run this tool killed look the same from outside: the process is
+   * gone and the output stops. They call for different things, and the caller cannot tell them
+   * apart by looking, so the one party that knows says which it was.
+   */
+  endedHere?: string | null;
+  /**
    * The last error the editor broke this game on, once it has been written into the log.
    *
    * Held so it is written down once. The adapter goes on reporting the same stop for as long as

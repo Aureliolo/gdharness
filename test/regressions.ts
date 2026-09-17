@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
-import { type SpawnSyncReturns, spawnSync } from 'node:child_process';
+import { type SpawnSyncReturns, spawn, spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import {
   cpSync,
@@ -36,6 +36,7 @@ import { GodotLSPClient } from '../src/lsp_client.js';
 import { isWithinRoot, resolveWithinProject } from '../src/paths.js';
 import { freePort } from '../src/ports.js';
 import { parseProjectGodot } from '../src/resources.js';
+import { stillTheRecordedRun } from '../src/run-record.js';
 import {
   announcedSince,
   chooseRuntime,
@@ -3050,6 +3051,16 @@ async function testAFinishedRunCanStillBeRead(): Promise<void> {
         // editor_status agrees it is not active, so "is something running" stays a real question.
         const status: unknown = JSON.parse(await call('editor_status', {}, ENGINE_CALL_TIMEOUT_MS));
         assert.equal(get(status, 'game', 'processActive'), false, JSON.stringify(status));
+
+        // And who ended it, which is the question a bench that stopped mid-measurement asks. This
+        // one quit on its own, and the answer says so rather than leaving the two silences to be
+        // told apart by guesswork: a run gdharness ended looks exactly like one that died.
+        assert.equal(get(output, 'endedBy'), null, `nothing ended it: ${JSON.stringify(output)}`);
+        assert.match(
+          text(get(output, 'note')),
+          /Nothing here ended this run/,
+          `and the note says so: ${JSON.stringify(output)}`,
+        );
       },
       { GODOT_PATH: godotPath },
     );
@@ -3080,6 +3091,63 @@ function testOnlyOurOwnAutoloadIsRewritten(): void {
     false,
     'and a path that merely starts the same is not the same path',
   );
+}
+
+/**
+ * A pid is not an identity, and the one thing here that kills asks for an identity.
+ *
+ * A run picked back up after a reconnect has a number and no handle, and the number was signalled
+ * on its own. The operating system hands a pid out again as soon as it is free, so a record that
+ * outlived its run names whatever came next, and `editor_run stop` on it kills a stranger's
+ * process: irreversible, silent, and on Windows indistinguishable from a crash, since terminating
+ * a process there is an exit code of 1 with nothing printed.
+ *
+ * Driven against a real process rather than a fabricated pid, because what is being asserted is
+ * that the operating system was actually asked: three platforms, three ways of asking, and a
+ * fixture that mocked the asking would pass on all three without any of them working.
+ */
+async function testAPidIsNotAnIdentity(): Promise<void> {
+  const marker = join(tmpdir(), `gdharness-identity-${process.pid}`);
+  // Something that stays up and carries a word of ours on its command line, which is what a real
+  // run has: the engine's path and the project it was pointed at.
+  const held = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 120_000)', marker], {
+    stdio: 'ignore',
+  });
+  const pid = held.pid ?? 0;
+  assert.ok(pid > 0, 'the fixture needs a process to ask about');
+  const record = {
+    pid,
+    transcript: join(tmpdir(), 'none.log'),
+    startedAt: Date.now(),
+    projectPath: marker,
+    arguments: [marker],
+    command: process.execPath,
+  };
+  try {
+    assert.equal(stillTheRecordedRun(record), true, 'the process the record describes is the one running');
+    assert.equal(
+      stillTheRecordedRun({ ...record, command: join('nowhere', 'godot.exe') }),
+      false,
+      'a pid running something else is not this run, however alive it is',
+    );
+    assert.equal(
+      stillTheRecordedRun({ ...record, projectPath: join(tmpdir(), 'another-project') }),
+      false,
+      'nor is the same engine on another project, which shares this record directory',
+    );
+    assert.equal(
+      stillTheRecordedRun({ ...record, pid: 999_999_999 }),
+      false,
+      'and a pid nobody holds is nothing to signal',
+    );
+  } finally {
+    held.kill();
+    await new Promise((done) => held.once('exit', done));
+  }
+
+  // The dead pid, asked after the process is gone rather than about a number that was never
+  // anything: this is the state a stale record is actually in.
+  assert.equal(stillTheRecordedRun(record), false, 'a run that has ended is not still the run');
 }
 
 /**
@@ -3170,6 +3238,23 @@ async function testARunEndedUnwatchedIsStillReadable(): Promise<void> {
           `including the ones after the error:\n${JSON.stringify(output, null, 2)}`,
         );
       },
+      { GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: join(runtimeDir, 'project') },
+    );
+
+    // A server that cannot name a project at all does not get to claim this one either, which is
+    // the half that was missing. "I have no project" used to read as "any record is mine", so a
+    // regression suite, whose servers are started exactly like this, adopted a bench belonging to
+    // another project on this machine and ended it to start its own: six times in fifty minutes,
+    // silently, while its owner bisected their own code. The note says whose the run is; a server
+    // that cannot answer that question answers the one it can.
+    await withStdioServer(
+      async (call) => {
+        assert.match(
+          await call('editor_output', { limit: 200 }),
+          /No game is running/,
+          'a server with no project of its own owns no run it merely found',
+        );
+      },
       { GDHARNESS_RUNTIME_DIR: runtimeDir },
     );
 
@@ -3210,7 +3295,13 @@ async function testARunOutlivesItsServer(): Promise<void> {
 
   const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-outlives-runtime-'));
   const projectDir = mkdtempSync(join(tmpdir(), 'gdharness-outlives-'));
-  const env = { GODOT_PATH: godotPath, GDHARNESS_RUNTIME_DIR: runtimeDir };
+  // The project is named, as every configured server names it: picking a run back up is a claim
+  // about whose run it is, and a server that cannot make that claim does not get to.
+  const env = {
+    GODOT_PATH: godotPath,
+    GDHARNESS_RUNTIME_DIR: runtimeDir,
+    GDHARNESS_PROJECT: projectDir,
+  };
   let gamePid: number | null = null;
   try {
     writeFileSync(
@@ -4146,6 +4237,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testParametersReachTheEngine,
   testAFinishedRunCanStillBeRead,
   testOnlyOurOwnAutoloadIsRewritten,
+  testAPidIsNotAnIdentity,
   testARunEndedUnwatchedIsStillReadable,
   testARunOutlivesItsServer,
   testGdUnitRunner,
