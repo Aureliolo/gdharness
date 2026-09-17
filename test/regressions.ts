@@ -1403,6 +1403,21 @@ const ENGINE_CALL_TIMEOUT_MS = 120_000;
  * put on the wire, and reaching into the class directly would not carry a `__proto__` through
  * JSON.parse.
  */
+/**
+ * JSON.parse, with the answer in the failure when it is not JSON.
+ *
+ * A refusal is a sentence, so a fixture expecting an answer and getting one fails with
+ * `SyntaxError: Unable to parse JSON string` and no sign of what the server said, which is a
+ * fixture reporting that it cannot read rather than what it read.
+ */
+function jsonOf(answer: string, what: string): unknown {
+  try {
+    return JSON.parse(answer);
+  } catch {
+    return assert.fail(`${what} answered text rather than JSON: ${answer}`);
+  }
+}
+
 async function withStdioServer(
   body: (call: ToolCall, request: RawRequest) => Promise<void>,
   env: Record<string, string> = {},
@@ -2587,7 +2602,14 @@ function testTheStaleHalfIsNamedCorrectly(): void {
  */
 async function testUpdateNoticeRidesOnAnAnswer(): Promise<void> {
   const home = mkdtempSync(join(tmpdir(), 'gdharness-update-home-'));
-  const environment = { HOME: home, LOCALAPPDATA: home, XDG_CACHE_HOME: home };
+  // The empty string is how a fixture asks for the check that every other server here has turned
+  // off: this is the one fixture that is about the notice, so it opts back in explicitly.
+  const environment = {
+    HOME: home,
+    LOCALAPPDATA: home,
+    XDG_CACHE_HOME: home,
+    GDHARNESS_NO_UPDATE_CHECK: '',
+  };
   try {
     writeFileSync(
       cacheFile(environment),
@@ -3199,10 +3221,10 @@ async function testARunEndedUnwatchedIsStillReadable(): Promise<void> {
         const answered = await call('editor_output', { limit: 200 });
         assert.doesNotMatch(
           answered,
-          /No game is running/,
-          'a run the server did not start is still a run it can answer about',
+          /No game/,
+          `a run the server did not start is still a run it can answer about: ${answered}`,
         );
-        const output: unknown = JSON.parse(answered);
+        const output: unknown = jsonOf(answered, 'editor_output');
         assert.equal(get(output, 'running'), false, JSON.stringify(output));
         assert.equal(get(output, 'endedUnwatched'), true, JSON.stringify(output));
         assert.equal(
@@ -3486,6 +3508,31 @@ async function testGdUnitRunner(): Promise<void> {
         '',
       ].join('\n'),
     );
+    // A suite whose failures are only failures, with no error beside them, because that is the
+    // shape gdUnit4 summarises as passed while reporting them. Measured on 4.7.2 with gdUnit4
+    // v6.2.1, in a project built for the purpose:
+    //
+    //   Statistics: 7 test cases | 0 errors | 3 failures | 0 flaky | 0 skipped | 0 orphans | PASSED
+    //
+    // The counts on that line are right and the word at the end is not, so a verdict read off it
+    // is wrong in the direction that matters. Nothing here reads it: the verdict comes from the
+    // statuses in the JUnit report and the exit code, which was 100. This suite is here so that a
+    // future reader of that console line is caught by a test rather than by a green tier.
+    writeFileSync(
+      join(projectDir, 'test', 'summary_lies_test.gd'),
+      [
+        'extends GdUnitTestSuite',
+        '',
+        '',
+        'func test_the_summary_says_passed() -> void:',
+        '\tassert_int(2 + 2).is_equal(5)',
+        '',
+        '',
+        'func test_and_says_it_again() -> void:',
+        '\tassert_int(2 + 2).is_equal(6)',
+        '',
+      ].join('\n'),
+    );
 
     await withStdioServer(
       async (call) => {
@@ -3505,17 +3552,31 @@ async function testGdUnitRunner(): Promise<void> {
             errors: get(run, 'errors'),
             skipped: get(run, 'skipped'),
           },
-          { tests: 5, failures: 1, errors: 0, skipped: 1 },
+          { tests: 7, failures: 3, errors: 0, skipped: 1 },
         );
-        const [failed] = asArray(get(run, 'failed'));
-        assert.equal(get(failed, 'name'), 'test_two_and_two_is_not_five');
+        // By name rather than by position: two suites fail here, and which of them gdUnit4 runs
+        // first is not something this fixture is about.
+        const failed = asArray(get(run, 'failed')).find(
+          (entry) => get(entry, 'name') === 'test_two_and_two_is_not_five',
+        );
+        assert.ok(failed !== undefined, JSON.stringify(get(run, 'failed'), null, 2));
         assert.equal(get(failed, 'path'), 'res://test/sums_test.gd');
         assert.match(text(get(failed, 'message')), /sums_test\.gd:9/);
         assert.match(text(get(failed, 'detail')), /Expecting:\s+5\s+but was\s+4/);
+        // The suite whose own summary line calls itself passed is reported failed, because the
+        // verdict is read from the statuses rather than from that word.
+        assert.ok(
+          asArray(get(run, 'failed')).some(
+            (entry) => get(entry, 'path') === 'res://test/summary_lies_test.gd',
+          ),
+          JSON.stringify(get(run, 'failed'), null, 2),
+        );
         // The suite that passed everything is counted, not listed: a tier of them is otherwise
         // most of the answer.
-        const named = asArray(get(run, 'suites')).map((suite) => get(suite, 'name'));
-        assert.deepEqual(named, ['sums_test'], JSON.stringify(named));
+        const named = asArray(get(run, 'suites'))
+          .map((suite) => text(get(suite, 'name')))
+          .sort();
+        assert.deepEqual(named, ['summary_lies_test', 'sums_test'], JSON.stringify(named));
         assert.equal(get(run, 'suitesPassed'), 1);
         // And an engine message keeps the frames above gdUnit4 and says how many it left inside.
         const said = asArray(get(run, 'engineEntries')).find((entry) =>
@@ -3546,7 +3607,14 @@ async function testGdUnitRunner(): Promise<void> {
         const only: unknown = JSON.parse(
           await call(
             'project_test',
-            { projectPath: projectDir, ignore: ['sums_test:test_two_and_two_is_not_five'] },
+            {
+              projectPath: projectDir,
+              ignore: [
+                'sums_test:test_two_and_two_is_not_five',
+                'summary_lies_test:test_the_summary_says_passed',
+                'summary_lies_test:test_and_says_it_again',
+              ],
+            },
             ENGINE_CALL_TIMEOUT_MS * 3,
           ),
         );
