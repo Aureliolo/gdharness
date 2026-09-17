@@ -477,7 +477,18 @@ function doctorReport(projectPath: string): void {
       );
     }
     console.log(`editor plugins enabled: ${report.pluginsEnabled.join(', ') || 'none'}`);
-    console.log(`runtime autoload: ${report.runtimeAutoload ? 'registered' : 'not registered'}`);
+    // Which entry brings it up, rather than whether ours exists. "not registered" about a runtime
+    // that was answering queries is what sent a project looking, and naming the file is the half
+    // that can be checked from their end: they can open it and see.
+    console.log(
+      `runtime autoload: ${
+        report.runtimeLoaderAutoload === null
+          ? report.runtimeAutoload
+            ? 'registered'
+            : 'not registered'
+          : `registered through res://${report.runtimeLoaderAutoload.path}, as ${report.runtimeLoaderAutoload.name}`
+      }`,
+    );
     console.log(
       report.classCacheExists
         ? `class cache: ${report.staleClasses.length === 0 ? 'current' : `stale for ${report.staleClasses.join(', ')}`}`
@@ -506,8 +517,32 @@ async function runtime(): Promise<void> {
     await registerRuntime(godot, projectPath);
     return;
   }
+  // Read before the removal, since the removal is what would make it stale.
+  const before = inspectProject(projectPath);
+  const loader = before.runtimeLoaderAutoload;
+  // Nothing of ours to take out. The engine refuses to remove an autoload that is not there, so
+  // this failed with "Autoload not found: GdharnessRuntime" on any project that brings the runtime
+  // up its own way: a command that cannot succeed, about an entry the project never had, run by
+  // somebody getting ready to ship.
+  if (before.runtimeAutoloadPath === null) {
+    console.log(`${RUNTIME_AUTOLOAD.name} autoload is not registered, so there was nothing to remove`);
+    if (loader !== null) {
+      console.log(
+        `  ${loader.name} names res://${loader.path}, which brings the runtime up its own way. That line is this project's, not this tool's, so nothing here has changed it: whatever that file decides about a release build still decides it.`,
+      );
+    }
+    return;
+  }
   said(await setRuntime(godot, projectPath, false), 'turning the runtime off');
   console.log(`${RUNTIME_AUTOLOAD.name} autoload removed`);
+  if (loader !== null) {
+    // The one case where "removed" on its own is dangerous. Somebody running this before an export
+    // is asking that nothing comes up, and a loader this tool will not touch still brings it up:
+    // whatever that file decides, it decides, and this command has not changed it.
+    console.log(
+      `  ${loader.name} still names res://${loader.path}, which brings the runtime up its own way: this command has not touched it, so whatever that file decides about a release build still decides it`,
+    );
+  }
 }
 
 async function classes(): Promise<void> {
