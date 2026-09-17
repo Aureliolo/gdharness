@@ -204,7 +204,7 @@ export class UpdateCheck {
    * a session left open overnight asks nothing until somebody calls a tool again.
    */
   refresh(now = Date.now()): void {
-    if (!this.enabled || this.checking || now < this.retryAt || now - this.checkedAt < CACHE_MS) {
+    if (!this.enabled || this.checking || now < this.retryAt || !this.stale(now)) {
       return;
     }
     this.checking = true;
@@ -228,6 +228,18 @@ export class UpdateCheck {
       });
   }
 
+  /**
+   * Whether the answer in hand is old enough to want asking again.
+   *
+   * One definition, because two methods read it and they must not be able to disagree. Deciding
+   * an answer is too old to use is what starts a fetch, and it is also what stops that answer
+   * being quoted meanwhile; written out twice and inverted, one of them drifts and the notice
+   * goes back to naming a version the fetch beside it was started to replace.
+   */
+  private stale(now: number): boolean {
+    return now - this.checkedAt >= CACHE_MS;
+  }
+
   private scheduleRetry(now: number): void {
     this.retryAt = now + this.backoffMs;
     this.backoffMs = Math.min(this.backoffMs * 2, MAX_RETRY_MS);
@@ -248,7 +260,7 @@ export class UpdateCheck {
     // Only while a fetch is actually in flight. A failed one backs off and leaves `checking`
     // false, and then this reports what it has again, because offline and behind is still worth
     // saying and silence would be permanent.
-    if (this.checking && now - this.checkedAt >= CACHE_MS) {
+    if (this.checking && this.stale(now)) {
       return null;
     }
     return {
