@@ -3686,6 +3686,50 @@ async function testGdUnitRunner(): Promise<void> {
         );
         assert.equal(get(only, 'passed'), true, JSON.stringify(only, null, 2));
         assert.equal(get(only, 'tests'), 4);
+        // Nothing stopped early in the runs above, and the answer says so by leaving the field
+        // out. Asserted here so the presence of it below means something.
+        assert.equal(get(run, 'notRun'), undefined, JSON.stringify(run, null, 2));
+
+        // gdUnit4 stops a suite at its first failing case unless it is told not to, and gdharness
+        // asks it not to unless `failFast` says otherwise. The counts are then of what ran, which
+        // an answer that reported the suite's own `tests` attribute contradicted: the totals said
+        // two ran while the suite beside them said nine tests and one failure, which reads as
+        // eight passes that never happened.
+        const stopped: unknown = JSON.parse(
+          await call('project_test', { projectPath: projectDir, failFast: true }, ENGINE_CALL_TIMEOUT_MS * 3),
+        );
+        assert.equal(get(stopped, 'passed'), false, JSON.stringify(stopped, null, 2));
+        // Read before it is a number, so a run that omitted the field fails saying that rather
+        // than failing inside asNumber about a type.
+        const left = get(stopped, 'notRun');
+        assert.ok(
+          typeof left === 'number' && left > 0,
+          `a run that stopped early says how many cases it left: ${JSON.stringify(stopped, null, 2)}`,
+        );
+        const leftOver = left;
+        assert.ok(
+          asNumber(get(stopped, 'tests')) < asNumber(get(run, 'tests')),
+          `and runs fewer than the whole set: ${JSON.stringify(stopped, null, 2)}`,
+        );
+        assert.match(text(get(stopped, 'note')), /never ran/, text(get(stopped, 'note')));
+        // Every suite's own numbers count what ran, so the totals and the suites agree.
+        for (const suite of asArray(get(stopped, 'suites'))) {
+          const ran = asNumber(get(suite, 'tests'));
+          const missed = get(suite, 'notRun') === undefined ? 0 : asNumber(get(suite, 'notRun'));
+          assert.ok(
+            ran >= asNumber(get(suite, 'failures')) + asNumber(get(suite, 'errors')),
+            `a suite never reports more failures than cases it ran: ${JSON.stringify(suite)}`,
+          );
+          assert.ok(missed >= 0, JSON.stringify(suite));
+        }
+        assert.equal(
+          asArray(get(stopped, 'suites')).reduce<number>(
+            (sum, suite) => sum + (get(suite, 'notRun') === undefined ? 0 : asNumber(get(suite, 'notRun'))),
+            0,
+          ),
+          leftOver,
+          'the total left behind is the sum of what each suite left',
+        );
 
         // A path with nothing at it. gdUnit4 finds nothing, exits 0 and says why, so a verdict
         // read off the exit code called this a pass: the one word a skimming reader must never
