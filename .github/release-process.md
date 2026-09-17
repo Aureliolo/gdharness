@@ -20,6 +20,13 @@ out of the next release's generated notes. The label has to exist in the reposit
 one it cannot find, so deleting it stops a release being prepared rather than quietly putting the
 line back.
 
+GitHub reads that configuration from the release's target rather than from `main` as it is today,
+so a change to it reaches the next tag cut after it and not the ones before. Checking one by
+regenerating an old tag's notes reads the file as it was at that tag, which looks exactly like a
+configuration that does nothing. Generate against an unused tag name with `target_commitish` at
+the branch instead, and read the header GitHub writes: it names the commit the configuration came
+from.
+
 ## What happens on the merge
 
 `release-tag.yml` sees a new version on `main` with no matching tag, creates `vX.Y.Z`, and
