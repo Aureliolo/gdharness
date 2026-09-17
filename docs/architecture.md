@@ -356,6 +356,25 @@ running, with everything printed while nobody was reading; one that is gone is a
 output and `endedUnwatched`, because nothing collected an exit code for it and a guessed zero
 reads as a run that finished its work. `editor_run stop` ends it by pid and takes the note away.
 
+Two things guard that, because reading a note is also claiming the right to end what it names, and
+the runtime directory is one per user rather than one per project.
+
+**Whose run it is.** The note is only picked up by a server that can show the run is its own: the
+project it was told to serve, or the project the editor on the bridge has open. A server that can
+name neither answers that nothing of _its_ is running, and says what is there and why it has no
+claim on it, rather than taking the run. "I cannot name a project" once read as "any note is
+mine", which is how a regression suite, whose servers are started with no project and no editor,
+adopted another project's bench and ended it to start its own: six times in fifty minutes, exit
+code 1 with nothing printed, while its owner bisected their own scenes looking for the cause.
+
+**Which process it is.** A pid is handed out again as soon as it is free, so before anything is
+signalled the process has to answer as the run the note describes: the command line where the
+platform gives it, the executable where it does not, and no when it will not say. Not knowing is
+not the same as knowing, and the caller asking is the one that kills.
+
+The first of those is the one that mattered. The pid in that story was correctly identified as the
+run its note described, and the run was somebody else's.
+
 The runs a caller waits on, `project_test` and `editor_run check`, stay ordinary children on
 pipes. The answer is the point of them and it belongs to the call that asked, so outliving the
 server would leave an engine nobody is reading and nobody will end.
