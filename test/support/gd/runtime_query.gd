@@ -132,21 +132,24 @@ func _check_reading_the_screen(panel: Panel) -> void:
 	var lines: Array = Array(said.get("lines", []))
 	if lines != ["Your guild", "Sign", "4", "Everything"]:
 		_fail("the screen should read as what is drawn on it, in order: %s" % str(said))
-	if said.get("count") != 4 or said.get("truncated") != false:
-		_fail("and say how many lines that was: %s" % str(said))
+	if said.get("count") != 4 or said.get("truncated") != false or said.get("omitted") != 0:
+		_fail("and say how many lines that was, and that none were left behind: %s" % str(said))
 
 	# The first few lines rather than all of them, which is how the top of a screen is read
 	# without the room under it. It was named in the schema, taken by the call and thrown away.
 	var few: Dictionary = await node._execute_command("read_text", {"root": "/root/Panel", "limit": 2})
 	if Array(few.get("lines", [])) != ["Your guild", "Sign"]:
 		_fail("a limit should be the first lines and no more: %s" % str(few))
-	if few.get("count") != 2 or few.get("truncated") != true:
-		_fail("and should say there was more left: %s" % str(few))
+	# How many were left behind rather than that some were: a screen cut two lines short and one
+	# cut two hundred short read the same, and the dialog somebody was looking for was under the
+	# second one.
+	if few.get("count") != 2 or few.get("truncated") != true or few.get("omitted") != 2:
+		_fail("and should say how much was left: %s" % str(few))
 
-	# And a limit the screen exactly fits is a screen that was read whole, which is the reason the
-	# walk goes one line further rather than comparing the count it came back with.
+	# And a limit the screen exactly fits is a screen that was read whole, which is what the count
+	# of what is past the limit settles rather than the length of the answer.
 	var exactly: Dictionary = await node._execute_command("read_text", {"root": "/root/Panel", "limit": 4})
-	if exactly.get("count") != 4 or exactly.get("truncated") != false:
+	if exactly.get("count") != 4 or exactly.get("truncated") != false or exactly.get("omitted") != 0:
 		_fail("a limit nothing overran should not read as cut short: %s" % str(exactly))
 
 	var everything: Dictionary = await node._execute_command(
