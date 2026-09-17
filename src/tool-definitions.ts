@@ -289,7 +289,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'project_search',
     description:
-      'Searches text or a regular expression across project files and returns file paths with line numbers.',
+      'Searches text or a regular expression across project files and returns file paths with line numbers. What the engine steps over is not searched: directories spelled with a dot, node_modules, and any directory holding a .gdignore. A vendored engine or an export directory is therefore absent from the results rather than matching the code you are looking for in a copy nobody runs.',
     parameters: {
       projectPath: PROJECT_PATH,
       query: { type: 'string', description: 'The text or pattern to find.' },

@@ -36,6 +36,7 @@ import {
 import { GodotLSPClient } from '../src/lsp_client.js';
 import { isWithinRoot, resolveWithinProject } from '../src/paths.js';
 import { freePort } from '../src/ports.js';
+import { projectStructure, searchProject } from '../src/project-scan.js';
 import { parseProjectGodot } from '../src/resources.js';
 import { stillTheRecordedRun } from '../src/run-record.js';
 import {
@@ -1991,6 +1992,53 @@ function testStaleClassesAreReadFromDisk(): void {
     writeFileSync(join(sandbox, 'scripts', 'squire.gd'), 'class_name Squire\nextends Hero\n');
     writeFileSync(cache, entry('Hero', 'res://scripts/hero.gd'));
     assert.deepEqual(staleClassNames(sandbox), ['Squire'], 'and a declaration written since is too');
+  } finally {
+    rmSync(sandbox, { recursive: true, force: true });
+  }
+}
+
+/**
+ * The two walks over a project directory answer about the same set of files.
+ *
+ * `project_info` counted what it found and `project_search` searched somewhere else: one skipped
+ * every directory spelled with a dot and the other skipped four of them by name, so a vendored
+ * engine under `.tools/` was absent from the counts and searched anyway. Neither honoured a
+ * `.gdignore`, which the class cache and the engine-side walks both do, so a project with one was
+ * answered about three different ways depending on which question was asked.
+ *
+ * The match that should be found is asserted beside the two that should not, because a search
+ * that had stopped reading files at all satisfies the absences perfectly.
+ */
+function testTheProjectWalksAgreeAboutWhatIsInIt(): void {
+  const sandbox = mkdtempSync(join(tmpdir(), 'gdharness-walks-'));
+  try {
+    const needle = 'extends Node\n\nconst WORD = "findable"\n';
+    mkdirSync(join(sandbox, 'scripts'), { recursive: true });
+    writeFileSync(join(sandbox, 'scripts', 'hero.gd'), needle);
+
+    // Hidden, so the engine's own scanner never looks inside it either.
+    mkdirSync(join(sandbox, '.tools', 'godot'), { recursive: true });
+    writeFileSync(join(sandbox, '.tools', 'godot', 'vendored.gd'), needle);
+
+    // Marked, which is the project saying the same thing about a directory that is not hidden.
+    mkdirSync(join(sandbox, 'export'), { recursive: true });
+    writeFileSync(join(sandbox, 'export', '.gdignore'), '');
+    writeFileSync(join(sandbox, 'export', 'shipped.gd'), needle);
+
+    const found = searchProject(sandbox, {
+      query: 'findable',
+      fileTypes: ['gd'],
+      regex: false,
+      caseSensitive: false,
+      maxResults: 100,
+    });
+    assert.deepEqual(
+      found.results.map((entry) => entry.file),
+      ['res://scripts/hero.gd'],
+      'the search should read the project and nothing standing beside it',
+    );
+    assert.equal(found.summary.files_searched, 1, 'and should not have opened the other two');
+    assert.equal(projectStructure(sandbox).scripts, 1, 'the count should agree with the search');
   } finally {
     rmSync(sandbox, { recursive: true, force: true });
   }
@@ -4681,6 +4729,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testRunArgumentsLeaveTheLocalDebuggerOff,
   testHeadlessFollowsTheDisplay,
   testStaleClassesAreReadFromDisk,
+  testTheProjectWalksAgreeAboutWhatIsInIt,
   testClassesAnEditorIsNotHolding,
   testProjectDefaultsToTheWorkingDirectory,
   testAnAutoloadGitWillNotCarry,

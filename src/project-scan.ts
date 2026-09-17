@@ -3,11 +3,29 @@
  * kinds of file it holds, and where a piece of text occurs.
  */
 
-import { readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-/** Directories that are never part of a project's own files. */
-const SKIPPED = new Set(['.git', '.godot', '.import', 'node_modules']);
+/** Directories that are never part of a project's own files, and are not spelled with a dot. */
+const SKIPPED = new Set(['node_modules']);
+
+/** Whether this entry is one both walks here step over, so that they cannot disagree. */
+function skipped(name: string): boolean {
+  return name.startsWith('.') || SKIPPED.has(name);
+}
+
+/**
+ * A directory holding a `.gdignore` is stepped over, because the engine steps over it.
+ *
+ * A vendored engine, an export directory, somebody else's project kept for reference: what is
+ * under one is not imported, so it is not this project's content and counting or searching it
+ * answers about files the engine will never load. A hundred megabytes of exported binary is the
+ * cheap half of getting this wrong; the expensive half is a search that finds a match in a copy
+ * of the code nobody is running.
+ */
+function steppedOver(directory: string): boolean {
+  return existsSync(join(directory, '.gdignore'));
+}
 
 /** File counts for a project, by kind. */
 export interface ProjectStructure {
@@ -22,8 +40,11 @@ const ASSET_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'webp', 'svg', 'ttf', 'o
 export function projectStructure(projectPath: string): ProjectStructure {
   const structure: ProjectStructure = { scenes: 0, scripts: 0, assets: 0, other: 0 };
   const visit = (directory: string): void => {
+    if (steppedOver(directory)) {
+      return;
+    }
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
-      if (entry.name.startsWith('.')) {
+      if (skipped(entry.name)) {
         continue;
       }
       if (entry.isDirectory()) {
@@ -92,11 +113,14 @@ export function searchProject(projectPath: string, options: SearchOptions): Sear
   };
 
   const visit = (directory: string): void => {
+    if (steppedOver(directory)) {
+      return;
+    }
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
       if (full()) {
         return;
       }
-      if (SKIPPED.has(entry.name)) {
+      if (skipped(entry.name)) {
         continue;
       }
       const entryPath = join(directory, entry.name);
