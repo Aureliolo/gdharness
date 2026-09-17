@@ -1503,11 +1503,13 @@ async function testArgumentsOfTheWrongTypeAreRefused(): Promise<void> {
     );
 
     // The other half, or the two above pass against a server that refuses everything. A key is
-    // named or numbered and the schema says both, so neither may be turned away.
+    // named or numbered and the schema says both, so neither may be turned away. What an accepted
+    // one reaches is the runtime, which is not there, and that sentence is asserted rather than
+    // the absence of a refusal: "not the complaint I named" is also what a crash answers.
     for (const keycode of ['Space', 32]) {
-      assert.doesNotMatch(
+      assert.match(
         await call('runtime_input', { op: 'key', keycode }),
-        /takes keycode as/,
+        /No game with the runtime addon is running/,
         `${JSON.stringify(keycode)} is a keycode the tool accepts`,
       );
     }
@@ -1536,14 +1538,16 @@ async function testAnArgumentMeantForAnotherOpIsRefused(): Promise<void> {
       'and should say what text takes instead',
     );
     // The other half, or this passes against a server that refuses every op-specific argument.
+    // Accepted means reaching the runtime and finding nothing there, which is one sentence; the
+    // absence of "does not take" is every sentence in the program except one.
     for (const call_ of [
       { op: 'text', limit: 3 },
       { op: 'find', className: 'Label', limit: 3 },
       { op: 'tree', depth: 2, includeProperties: true },
     ]) {
-      assert.doesNotMatch(
+      assert.match(
         await call('runtime_inspect', call_),
-        /does not take/,
+        /No game with the runtime addon is running/,
         `${JSON.stringify(call_)} is a call the op understands`,
       );
     }
@@ -1806,20 +1810,25 @@ async function testToolsRefusePathsOutsideTheProject(): Promise<void> {
           'project_export should refuse an absolute destination outside the project',
         );
 
-        // The accepting half. These reach the engine, which is not Godot here, so the answer is
-        // whatever that failure says; what matters is that containment was not the thing that
-        // stopped them.
-        const accepted: [string, Record<string, unknown>][] = [
-          ['script_edit', { op: 'create', scriptPath: 'scripts/player.gd' }],
-          ['project_import', { op: 'uid', resourcePath: 'inside.gd' }],
-          ['script_info', { scriptPath: 'inside.gd' }],
-          ['project_export', { op: 'run', preset: 'Linux', outputPath: 'builds/game.bin' }],
+        // The accepting half. These reach the engine, which is not Godot here, so each answer is
+        // that run failing, named after the operation that was asked for. Naming it is the point:
+        // an answer that merely fails to be the containment refusal is also what a crash, a
+        // timeout or an unrelated refusal looks like.
+        const accepted: [string, Record<string, unknown>, RegExp][] = [
+          ['script_edit', { op: 'create', scriptPath: 'scripts/player.gd' }, /create_script failed \(exit/],
+          ['project_import', { op: 'uid', resourcePath: 'inside.gd' }, /get_uid failed \(exit/],
+          ['script_info', { scriptPath: 'inside.gd' }, /get_script_info failed \(exit/],
+          [
+            'project_export',
+            { op: 'run', preset: 'Linux', outputPath: 'builds/game.bin' },
+            /did not produce builds\/game\.bin/,
+          ],
         ];
-        for (const [tool, args] of accepted) {
-          assert.doesNotMatch(
+        for (const [tool, args, reached] of accepted) {
+          assert.match(
             await call(tool, { projectPath, ...args }),
-            /is absolute|resolves outside the project directory/,
-            `${tool} should accept ${JSON.stringify(args)}`,
+            reached,
+            `${tool} should accept ${JSON.stringify(args)} and ask the engine`,
           );
         }
 
@@ -1886,9 +1895,11 @@ async function testDebugToolsRefuseWithoutASession(): Promise<void> {
       );
     }
 
-    assert.doesNotMatch(
+    // The buffer answers with itself, empty, rather than with a refusal. Asserted as the buffer
+    // it is: "does not say no game is running" is true of every other refusal there is.
+    assert.match(
       await call('debug_state', { op: 'output' }),
-      /No game is running/,
+      /"lines": 0[\s\S]*"output": \[\]/,
       'the buffered console is readable without a session, because it outlives the game',
     );
   });
