@@ -354,6 +354,15 @@ session and `editor_output` reads the console over it.
 With no editor connected, the server spawns the game itself. It has no debug session, so `debug_*`
 will not answer for it, and its console is read from a file rather than over the adapter.
 
+**Editing a file while a game runs does not change that game.** `auto_reload` is an editor plugin:
+it polls the open scene and the scripts on that scene's node tree, and reloads them with
+`CACHE_MODE_REPLACE` in the editor's own process. The game is a separate process holding its own
+copy, and nothing crosses between them. Measured rather than reasoned: the same method answers 8
+throughout a run, and 12 from a game started afterwards, with only the file having changed. So a
+long bench is not a reason to stop editing, and the new code arrives on the next
+`editor_run start`. A script attached to nothing on the open scene, a helper hanging off no node,
+is watched by nothing at all.
+
 That run belongs to the operating system rather than to the server. It is spawned detached and
 unreferenced, and both its streams are written to a transcript under the runtime directory, with a
 note beside it naming the process and the file. A harness restarts its MCP server whenever it
