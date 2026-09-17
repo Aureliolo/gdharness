@@ -717,7 +717,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'editor_output',
     description:
-      'What the project started by editor_run has printed, as entries with a severity: the errors and warnings the engine reported, each with where it happened, and everything else as info. Answers with the counts and the verdict as well as the entries. A run that has quit still answers here, with running false and its exit code, until the next one starts.',
+      "What the project started by editor_run has printed, as entries with a severity: the errors and warnings the engine reported, each with where it happened, and everything else as info. Answers with the counts and the verdict as well as the entries. A run that has quit still answers here, with running false and its exit code, until the next one starts. A run this server started also answers with transcript, the file both its streams are written to: uncapped, written while the run is going, and the thing to read or tail for a long run rather than the engine's own log, which every engine start rotates away.",
     parameters: {
       severity: {
         type: 'string',
