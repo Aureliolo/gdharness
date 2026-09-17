@@ -11,6 +11,16 @@ Never write an assertion that only says what did not happen. `doesNotMatch` agai
 complaint you have in mind is satisfied by a crash, a timeout and every other refusal there is.
 Assert what the call reaches when it works.
 
+When the finding itself is an absence, that nothing was written, nothing was killed, nothing
+changed, pair it with a positive in the same fixture showing the thing under test ran at all. A
+broken instrument reproduces a negative result perfectly: the guard that keeps a test server out
+of the real runtime directory was checked by watching that directory not grow, which a suite that
+had stopped starting servers satisfies exactly as well. Assert the record it did write, then that
+it wrote it nowhere else.
+
+Disarming a containment guard is the one disarm that can escape while it is disarmed. Give the
+disarmed run somewhere harmless to escape to before running it.
+
 ## Releasing
 
 Work the tracker to empty, then ship. When issues are open, fix all of them, then cut a release
