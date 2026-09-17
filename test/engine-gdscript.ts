@@ -824,6 +824,57 @@ function testOperations(godotPath: string, projectDir: string): void {
 }
 
 /**
+ * A `.gdignore` is how a project tells the engine a directory is not part of it: nothing under
+ * one is imported, so nothing in there is a resource, a dependency or a global class. Both
+ * walks have to stop at it, or every answer built on them names files the engine will never
+ * load, and a class list holding one sends a game looking for a script it cannot resolve.
+ *
+ * Each half adds a visible file beside an ignored one and counts, because a walk that had
+ * stopped finding anything at all satisfies the absence just as well.
+ */
+function testAGdignoreStopsTheWalk(godotPath: string, projectDir: string): void {
+  const operation = (name: string, params: unknown): unknown =>
+    runOperation(godotPath, projectDir, name, params);
+
+  const vendor = join(projectDir, 'vendor');
+  mkdirSync(vendor, { recursive: true });
+  writeFileSync(join(vendor, '.gdignore'), '');
+
+  const scripts = (): number =>
+    asNumber(get(operation('get_project_health', {}), 'checks', 'scripts', 'total_scripts'));
+  const scriptsBefore = scripts();
+  writeFileSync(join(projectDir, 'made', 'errand.gd'), 'extends Node\n');
+  writeFileSync(join(vendor, 'stowaway.gd'), 'class_name FixtureStowaway\nextends Node\n');
+  assert.equal(
+    scripts(),
+    scriptsBefore + 1,
+    'the visible script should count and the one under .gdignore should not',
+  );
+
+  // Rebuilt from nothing so the answer is the whole list rather than the difference from a
+  // cache that already holds the project's classes.
+  rmSync(join(projectDir, '.godot', 'global_script_class_cache.cfg'), { force: true });
+  const added = asArray(get(operation('refresh_class_cache', {}), 'added')).map((name) => asString(name));
+  assert.ok(added.includes('FixtureHero'), `the project's own classes are listed: ${added.join(', ')}`);
+  assert.ok(
+    !added.includes('FixtureStowaway'),
+    `a class_name under .gdignore is not a global class: ${added.join(', ')}`,
+  );
+
+  // The extension walk, which import status is built from.
+  const importable = (): number =>
+    asNumber(get(operation('get_import_status', { include_up_to_date: true }), 'summary', 'total'));
+  const importableBefore = importable();
+  writeFileSync(join(projectDir, 'made', 'loose.png'), 'fixture bytes, never decoded');
+  writeFileSync(join(vendor, 'stowed.png'), 'fixture bytes, never decoded');
+  assert.equal(
+    importable(),
+    importableBefore + 1,
+    'the visible resource should be found and the ignored one should not',
+  );
+}
+
+/**
  * An operation that cannot answer has to say so rather than print a payload.
  *
  * The failure path is the half that breaks silently: a module that answers with an empty
@@ -919,6 +970,7 @@ function main(): void {
     runFixture(godotPath, projectDir, 'input_action');
     testDependencyWalk(godotPath, projectDir);
     testOperations(godotPath, projectDir);
+    testAGdignoreStopsTheWalk(godotPath, projectDir);
     testRefusals(godotPath, projectDir);
     testInstalledLayout(godotPath, projectDir);
   } finally {
