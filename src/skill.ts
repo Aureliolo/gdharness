@@ -102,6 +102,11 @@ formatting. \`script_diagnostics\` and \`script_info\` come from the editor's ow
 \`editor_classes\` need nothing open: they run a short headless engine and are gone before the
 answer is printed.
 
+Editing a file while a game is running does not change the running game. \`auto_reload\` is an
+editor plugin and reloads into the editor's own process; the game is a separate process holding
+its own copy. So a long run is not a reason to stop editing, and the new code arrives on the next
+\`editor_run start\`.
+
 A wall of "Could not find type" on the project's own classes means the editor is not holding
 them. \`editor_rescan\` asks it to scan and names any class it still cannot resolve under
 \`unseenByEditor\`: its walk skips a file a headless engine has already imported, so the
