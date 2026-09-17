@@ -43,6 +43,7 @@ import {
   discoverRuntimes,
   RUNTIME_PROTOCOL,
   runtimeDirectories,
+  runtimeDirectory,
   runtimesAnnounced,
 } from '../src/runtime-client.js';
 import { alive, HEADLESS_OPERATIONS, patienceForFrames, runIsUp, runtimeVerdict } from '../src/server.js';
@@ -1410,6 +1411,13 @@ const ENGINE_CALL_TIMEOUT_MS = 120_000;
  * `SyntaxError: Unable to parse JSON string` and no sign of what the server said, which is a
  * fixture reporting that it cannot read rather than what it read.
  */
+/** The environment with any runtime-directory override taken out, to find the shared default. */
+function withoutRuntimeDir(variables: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const copy = { ...variables };
+  delete copy['GDHARNESS_RUNTIME_DIR'];
+  return copy;
+}
+
 function jsonOf(answer: string, what: string): unknown {
   try {
     return JSON.parse(answer);
@@ -2442,6 +2450,64 @@ function testANotYetRuntimeIsNotTheSameAsNoRuntime(): void {
   });
   assert.equal(held['mayYetAnnounce'], true, 'a held game announces once it is let go');
   assert.match(String(held['note']), /debug_control continue/, 'and the answer says what lets it go');
+}
+
+/**
+ * A test server writes its run where no real run is, and is shown to have written one.
+ *
+ * The isolation this asserts was added after a suite run on a developer's machine ended another
+ * project's bench, six times in fifty minutes, by adopting the note it found in the runtime
+ * directory every gdharness on a machine shares. The fix was checked by running the suite and
+ * seeing that directory not grow, which is the weakest kind of evidence there is: a suite that
+ * stopped starting servers leaves it exactly as untouched.
+ *
+ * So both halves are asserted here, and the positive one first. The server must write a record
+ * naming the run it started, which is the instrument reporting that it fired, and that record must
+ * be in the directory this server was given rather than the shared one.
+ */
+async function testATestServerWritesWhereNoRealRunIs(): Promise<void> {
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-isolation-'));
+  const shared = join(runtimeDirectory(withoutRuntimeDir(process.env)), 'runs', 'run.json');
+  // Read rather than removed: something of this machine's may be running, and a fixture that
+  // cleared it would be doing the very thing it is here to prove cannot happen.
+  const before = existsSync(shared) ? readFileSync(shared, 'utf8') : null;
+  const server = new ServerProcess({ env: { GODOT_PATH: process.execPath } });
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Alone"\n' +
+        'run/main_scene="res://main.tscn"\n',
+    );
+    writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
+
+    await server.initialize('regression-test');
+    const started = jsonOf(
+      textOf(
+        await server.request('tools/call', {
+          name: 'editor_run',
+          arguments: { projectPath: project, op: 'start', headless: true },
+        }),
+      ) ?? '',
+      'editor_run start',
+    );
+    const pid = asNumber(get(started, 'pid'));
+    assert.ok(pid > 0, `the fixture needs a run to have been started: ${JSON.stringify(started)}`);
+
+    assert.ok(server.runtimeDir !== null, 'a server given no runtime directory is given one here');
+    const ours = join(server.runtimeDir, 'runs', 'run.json');
+    assert.ok(existsSync(ours), `the run is recorded in this server's own directory: ${ours}`);
+    assert.equal(
+      get(JSON.parse(readFileSync(ours, 'utf8')), 'pid'),
+      pid,
+      'and the record is this run, so the write above is the one being checked',
+    );
+
+    const after = existsSync(shared) ? readFileSync(shared, 'utf8') : null;
+    assert.equal(after, before, 'while the directory every gdharness shares is left as it was');
+  } finally {
+    await server.stop();
+    rmSync(project, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+  }
 }
 
 /**
@@ -4310,6 +4376,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAGameIsFoundWhereverItAnnounced,
   testAGameTooNewToTalkToIsStillAGame,
   testANotYetRuntimeIsNotTheSameAsNoRuntime,
+  testATestServerWritesWhereNoRealRunIs,
   testAStartStopsWaitingForAGameThatIsOver,
   testAStartWaitsForTheGameToAnnounceItself,
   testATestRunKeepsOutOfThePlayersSaves,

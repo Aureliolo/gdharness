@@ -61,7 +61,8 @@ export class ServerProcess {
   private buffered = '';
 
   /** The runtime directory this server was given, kept so it can be taken away again. */
-  private readonly runtimeDir: string | null;
+  /** The runtime directory this server was given, or null when the fixture named its own. */
+  readonly runtimeDir: string | null;
 
   constructor(options: ServerOptions = {}) {
     // A runtime directory of its own, unless the fixture names one. The default is shared by
