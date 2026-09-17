@@ -127,6 +127,28 @@ export async function enablePlugins(
   return outcomes;
 }
 
+/**
+ * Whether an autoload entry is one gdharness wrote, and so one it may rewrite.
+ *
+ * A project is free to bring the runtime up through a script of its own, and the install guide
+ * recommends exactly that: `project.godot` is committed and `addons/` often is not, so an entry
+ * naming the addon directly boots a fresh clone, and every CI runner, with a missing script. A
+ * wrapper is how a project says "only when it is there". Repointing the entry takes that away, and
+ * takes it away from the one file the project wrote to keep it.
+ *
+ * Only that. The addon refuses to serve outside a debug build and refuses for a `-s` script run
+ * unless the project asks, so a repointed entry does not put a socket into an export. The reporting
+ * project believed it did and so did this comment, which is worth recording next to the fix.
+ *
+ * What makes it worth a check rather than a note is that nothing fails when it happens. The wrapper
+ * is still on disk and still correct, every gate a project has goes on passing because they
+ * exercise the script rather than ask what `project.godot` registers, and the state is only visible
+ * in a diff. Found in `git status` after twelve green gates.
+ */
+export function autoloadIsOurs(named: string | null): boolean {
+  return named === null || named === `res://${RUNTIME_AUTOLOAD.path}`;
+}
+
 /** The runtime autoload registered or removed, through the engine. */
 export async function setRuntime(
   engine: HeadlessEngine,
@@ -156,6 +178,13 @@ export interface ProjectReport {
   readonly addons: readonly AddonState[];
   readonly pluginsEnabled: readonly string[];
   readonly runtimeAutoload: boolean;
+  /**
+   * What the runtime autoload entry names, or null when nothing registers it.
+   *
+   * The path and not just the fact, because a project is free to register the runtime through a
+   * script of its own and the difference is invisible from a boolean.
+   */
+  readonly runtimeAutoloadPath: string | null;
   /** class_name declarations on disk that the class cache does not list, or lists elsewhere. */
   readonly staleClasses: readonly string[];
   readonly classCacheExists: boolean;
@@ -242,8 +271,10 @@ export function inspectProject(projectPath: string): ProjectReport {
     }
   }
   const autoload = settings['autoload'];
-  const runtimeAutoload =
-    autoload !== undefined && typeof readString(autoload, RUNTIME_AUTOLOAD.name) === 'string';
+  const registered = autoload === undefined ? undefined : readString(autoload, RUNTIME_AUTOLOAD.name);
+  const runtimeAutoload = typeof registered === 'string';
+  // The star is the enabled marker the editor writes, not part of the path.
+  const runtimeAutoloadPath = typeof registered === 'string' ? registered.replace(/^\*/, '') : null;
 
   // project.godot is committed and what it names may not be. setup registers the runtime addon by
   // its path under addons/, and a project that installs its addons rather than committing them, the
@@ -279,6 +310,7 @@ export function inspectProject(projectPath: string): ProjectReport {
     addons,
     pluginsEnabled,
     runtimeAutoload,
+    runtimeAutoloadPath,
     staleClasses,
     classCacheExists: cached !== null,
     problems,

@@ -45,6 +45,7 @@ import {
 } from '../src/runtime-client.js';
 import { alive, HEADLESS_OPERATIONS, patienceForFrames } from '../src/server.js';
 import { addonMismatch } from '../src/server-version.js';
+import { autoloadIsOurs } from '../src/setup.js';
 import { opTakes, TOOL_SPECS } from '../src/tool-definitions.js';
 import { cacheFile, isNewer } from '../src/update-check.js';
 import { asArray, asNumber, get, text } from './support/json.js';
@@ -2883,6 +2884,30 @@ async function testAFinishedRunCanStillBeRead(): Promise<void> {
 }
 
 /**
+ * Which autoload entries this tool may rewrite, which is only the one it wrote.
+ *
+ * Covered without an engine as well as through the CLI, because the engine-backed test is skipped
+ * on any machine without Godot and this is the rule that decides whether a socket reaches a
+ * shipped build. Nothing else in a project can see the difference: the wrapper stays on disk and
+ * correct, and a suite that exercises the script rather than reading project.godot passes either
+ * way.
+ */
+function testOnlyOurOwnAutoloadIsRewritten(): void {
+  assert.equal(autoloadIsOurs('res://addons/gdharness_runtime/runtime_autoload.gd'), true);
+  assert.equal(autoloadIsOurs(null), true, 'nothing registered is ours to register');
+  assert.equal(
+    autoloadIsOurs('res://boot/gdharness_loader.gd'),
+    false,
+    'a project that brings the runtime up its own way owns that line',
+  );
+  assert.equal(
+    autoloadIsOurs('res://addons/gdharness_runtime/runtime_autoload.gd.uid'),
+    false,
+    'and a path that merely starts the same is not the same path',
+  );
+}
+
+/**
  * A run whose server went away is answered with what it printed, not with "No game is running".
  *
  * The MCP server reconnects on its own schedule. Everything about a run used to live in that
@@ -3324,9 +3349,68 @@ function testCommandLineSetup(): void {
         .map((dir) => join(projectDir, dir, 'skills', 'gdharness'))
         .filter((path) => existsSync(path))
         .sort();
+    // A project that brings the runtime up its own way keeps doing so across an upgrade.
+    //
+    // project.godot is committed and addons/ often is not, so the install guide tells projects to
+    // point this entry at a script of their own that brings the addon up when it is there and does
+    // nothing when it is not. Repointing it at the addon takes away the one refusal the addon
+    // cannot make for itself, and does it to the file written to keep it. Nothing fails: the
+    // wrapper is still on disk and correct, and no gate asks what project.godot registers, so one
+    // project found it in git status after twelve green ones, having been told about five other
+    // replacements and not this.
+    const guard = join(projectDir, 'boot');
+    mkdirSync(guard, { recursive: true });
+    writeFileSync(
+      join(guard, 'gdharness_loader.gd'),
+      'extends Node\n\n\nfunc _ready() -> void:\n\tif OS.has_feature("template"):\n\t\treturn\n',
+    );
+    const project = join(projectDir, 'project.godot');
+    writeFileSync(
+      project,
+      readFileSync(project, 'utf8').replace(
+        /GdharnessRuntime="\*res:\/\/addons\/gdharness_runtime\/runtime_autoload\.gd"/,
+        'GdharnessRuntime="*res://boot/gdharness_loader.gd"',
+      ),
+    );
+
     const beforeUpgrade = skillDirs();
     const upgraded = cli('upgrade', projectDir);
     assert.equal(upgraded.status, 0, `upgrade:\n${upgraded.stdout}${upgraded.stderr}`);
+    assert.match(
+      readFileSync(project, 'utf8'),
+      /GdharnessRuntime="\*res:\/\/boot\/gdharness_loader\.gd"/,
+      'an upgrade leaves an autoload it did not write where the project put it',
+    );
+    assert.match(
+      upgraded.stdout,
+      /boot\/gdharness_loader\.gd/,
+      'and names it, since being specific about five replacements and silent about this one is what cost a project a day',
+    );
+    // A wrapper that is not on disk is still not rewritten, because a file can be absent for a
+    // moment and a rewritten line is gone for good. But it is said, since an entry naming nothing
+    // boots the project with a missing script and "left as it is" alone would read as approval.
+    rmSync(join(guard, 'gdharness_loader.gd'));
+    const orphaned = cli('runtime', 'on', projectDir);
+    assert.equal(orphaned.status, 0, `runtime on:\n${orphaned.stdout}${orphaned.stderr}`);
+    assert.match(
+      readFileSync(project, 'utf8'),
+      /GdharnessRuntime="\*res:\/\/boot\/gdharness_loader\.gd"/,
+      'a missing wrapper is still the project’s line to own',
+    );
+    assert.match(
+      orphaned.stdout,
+      /that file is not in this project/,
+      'and the answer says the entry names nothing, rather than reading as approval',
+    );
+
+    // Back to ours, so everything after this reads the project the rest of the test expects.
+    writeFileSync(
+      project,
+      readFileSync(project, 'utf8').replace(
+        /GdharnessRuntime="\*res:\/\/boot\/gdharness_loader\.gd"/,
+        'GdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"',
+      ),
+    );
     assert.deepEqual(
       skillDirs(),
       beforeUpgrade,
@@ -3794,6 +3878,7 @@ async function main(): Promise<void> {
   testATestRunKeepsOutOfThePlayersSaves();
   await testParametersReachTheEngine();
   await testAFinishedRunCanStillBeRead();
+  testOnlyOurOwnAutoloadIsRewritten();
   await testARunEndedUnwatchedIsStillReadable();
   await testARunOutlivesItsServer();
   await testGdUnitRunner();
