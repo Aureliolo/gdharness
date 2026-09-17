@@ -2593,7 +2593,7 @@ async function testUpdateNoticeRidesOnAnAnswer(): Promise<void> {
       JSON.stringify({ checkedAt: Date.now(), latest: '99.9.9' }),
       'utf8',
     );
-    await withStdioServer(async (call, request) => {
+    await withStdioServer(async (_call, request) => {
       const carrying = await request('tools/call', { name: 'editor_status', arguments: {} });
       const first = textOf(carrying) ?? '';
       assert.match(first, /update_available/, 'the first answer should carry the notice');
@@ -2617,11 +2617,17 @@ async function testUpdateNoticeRidesOnAnAnswer(): Promise<void> {
         `the answer under the notice should still be readable: ${first}`,
       );
 
-      assert.doesNotMatch(
-        await call('editor_status', {}),
-        /update_available/,
-        'and the next answer should not repeat it',
+      // The second answer is read as an answer before it is read for the absence of the notice.
+      // "Does not mention update_available" is true of a crash and of a refusal, so on its own it
+      // would pass against a server that had stopped answering editor_status at all.
+      const again = await request('tools/call', { name: 'editor_status', arguments: {} });
+      const second = textOf(again) ?? '';
+      const payload = parseTextContent(again);
+      assert.ok(
+        isRecord(payload) && isRecord(payload['editor']) && isRecord(payload['godot']),
+        `the second answer should still be an editor_status answer: ${second}`,
       );
+      assert.doesNotMatch(second, /update_available/, 'and it should not repeat the notice');
     }, environment);
   } finally {
     rmSync(home, { recursive: true, force: true });
@@ -2649,9 +2655,18 @@ async function testUpdateCheckHasAnOffSwitch(): Promise<void> {
       JSON.stringify({ checkedAt: Date.now(), latest: '99.9.9' }),
       'utf8',
     );
-    await withStdioServer(async (call) => {
+    await withStdioServer(async (_call, request) => {
+      // Read as an answer first. A server that refused editor_status outright would carry no
+      // notice either, and this fixture is about a switch, not about the tool going quiet.
+      const answered = await request('tools/call', { name: 'editor_status', arguments: {} });
+      const said = textOf(answered) ?? '';
+      const payload = parseTextContent(answered);
+      assert.ok(
+        isRecord(payload) && isRecord(payload['editor']) && isRecord(payload['godot']),
+        `editor_status should still answer with the switch on: ${said}`,
+      );
       assert.doesNotMatch(
-        await call('editor_status', {}),
+        said,
         /update_available/,
         'GDHARNESS_NO_UPDATE_CHECK should stop the notice as well as the request',
       );
