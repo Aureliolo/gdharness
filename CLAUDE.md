@@ -2,13 +2,21 @@
 
 ## Releasing
 
-Work the tracker to empty, then ship. When issues are open, fix all of them, then cut a release
-carrying the fixes rather than leaving them sitting on `main` unreleased. A fix nobody can install
-is not delivered.
+Work the tracker to empty. **Do not cut a release for each fix.** Fixes land on `main` and wait
+there for a batch; unreleased work on `main` is the normal state, not a debt.
 
-Pick the bump between **patch** and **minor** without asking: patch when nothing a caller relies
-on has changed, minor when behaviour a caller can see changes, or a tool, an argument or a field
-is added.
+Cut one when there is a reason to, and the reason is a person rather than a tally: somebody is
+blocked on a fix and cannot proceed without a tag, or Aurelio asks. A fix that only bites on
+upgrade is never urgent, because the upgrade is the release. If nothing is blocked, say what `main`
+is carrying and leave it.
+
+Four tags in one afternoon is the failure this replaces. Every one costs each downstream project an
+upgrade, and an upgrade restarts their editor and drops their MCP connection, so a tag per fix
+spends their day rather than this one's, and leaves whoever is verifying aiming at a moving target.
+
+When one is cut, pick the bump between **patch** and **minor** without asking, over everything the
+batch carries: patch when nothing a caller relies on has changed, minor when behaviour a caller can
+see changes, or a tool, an argument or a field is added.
 
 A wrong answer corrected is a **patch**, even when the output changes shape. Never leave an answer
 wrong to protect a caller who parsed it, and never let "that would be breaking" become a reason to
