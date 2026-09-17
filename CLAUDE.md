@@ -39,8 +39,8 @@ filter are the same tools answering better, not new ones.
 A wrong answer corrected is a **patch**, even when the output changes shape. Never leave an answer
 wrong to protect a caller who parsed it, and never let "that would be breaking" become a reason to
 ship a tool that lies. The surface is worth less than the answers being right, and that is the one
-trade this project does not make. Only a rename or a removal is breaking. `README.md` states this
-publicly, so keep the two in step.
+trade this project does not make. Only a rename or a removal is breaking.
+`.github/CONTRIBUTING.md` states this publicly, so keep the two in step.
 
 **Never raise the major version without asking Aurelio first.** `major` on the "Prepare release"
 workflow, and `1.0.0` above all, is his call alone: ask, and wait for the answer before touching
