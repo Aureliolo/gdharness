@@ -8,5 +8,5 @@
   // gdlint and gdformat come from .venv, and tasklist and powershell are Windows' own: none of
   // them is a dependency anything could install, and a run that needs them is on a machine that
   // has them or answers that it will not say.
-  "ignoreBinaries": ["gdlint", "gdformat", "tasklist", "powershell"]
+  "ignoreBinaries": ["gdlint", "gdformat", "tasklist"]
 }
