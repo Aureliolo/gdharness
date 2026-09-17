@@ -79,6 +79,12 @@ export class ServerProcess {
       env: {
         ...process.env,
         ...(this.runtimeDir === null ? {} : { GDHARNESS_RUNTIME_DIR: this.runtimeDir }),
+        // No update check either, unless the fixture is about one. A server whose version is
+        // behind whatever is published rides a second JSON document on its next answer, so every
+        // fixture that parses an answer starts failing the moment a release goes out and keeps
+        // failing until its branch takes the version bump. That is the suite depending on the
+        // network and on today's date, and it cost an afternoon's confusion once.
+        GDHARNESS_NO_UPDATE_CHECK: '1',
         ...options.env,
       },
     });
