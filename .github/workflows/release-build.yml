@@ -25,7 +25,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
-      contents: read # Reads the tagged source it builds.
+      contents: read # Reads the tagged source it builds, and the releases and commit range.
+      # The changelog is built from the files each pull request touched, which is two endpoints
+      # this token is not given by default. The repository being public does not grant it: the
+      # job token is gated on these permissions whatever the visibility, so leaving it out is a
+      # release that fails at the step after everything expensive has already run.
+      pull-requests: read
     outputs:
       version: ${{ steps.version.outputs.version }}
 
