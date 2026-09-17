@@ -434,3 +434,8 @@ One engine per call: `godot --headless --path <project> --script <operations.gd>
 @file:<params.json>`. Arguments are camelCase in the tool call and snake_case in the file the
 engine reads. The answer is the last JSON object printed on stdout. Anything on stderr comes back
 under `engine_messages`.
+
+The ones that walk the project stop at a directory holding a `.gdignore`, because the engine does:
+nothing under one is imported, so what is in there is not a resource, not a dependency and not a
+global class. A vendored copy of somebody else's project is the usual reason to have one, and
+answering about its files means naming things the engine will never load.
