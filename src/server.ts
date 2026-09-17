@@ -1947,6 +1947,12 @@ class GodotServer {
     const unclean = report.suites.filter(
       (suite) => suite.failures > 0 || suite.errors > 0 || suite.skipped > 0 || orphansIn(suite.path) > 0,
     );
+    // gdUnit4 stops a suite at its first failing case unless told otherwise, which is what
+    // `failFast` asks for. The counts are then of what ran, and the cases after the failure are
+    // neither passes nor failures. Unsaid, that reads as a tier where each run finds one more
+    // fault than the last: a project fixing what was named and running again met the next case
+    // along three times in one afternoon, and read its own suite as flaky.
+    const notRun = report.suites.reduce((sum, suite) => sum + Math.max(0, suite.discovered - suite.tests), 0);
     return this.jsonTextResponse({
       passed: !hung && exitCode === 0 && report.failures === 0 && report.errors === 0,
       verdict,
@@ -1961,15 +1967,21 @@ class GodotServer {
       // nothing, and an agent reading `failed` for what to fix must not find a passing test in it.
       warnings: warnings.length > 0 ? warnings : undefined,
       orphans: orphans.total > 0 ? orphans.total : undefined,
+      notRun: notRun > 0 ? notRun : undefined,
       // The word on its own was the whole answer, and it named neither what was warned nor where.
       note:
         verdict.startsWith('warnings') && warnings.length === 0
           ? 'gdUnit4 exits 101 for orphan nodes when nothing failed, and this run printed no count of them: orphan reporting may be off in the project settings.'
-          : undefined,
+          : notRun > 0
+            ? `This run stopped at the first failure in each suite it failed in, so ${notRun} case${notRun === 1 ? '' : 's'} never ran and count as neither passed nor failed. Leave failFast out to run every case.`
+            : undefined,
       suites: unclean.map((suite) => ({
         name: suite.name,
         path: suite.path,
         tests: suite.tests,
+        // Only when they differ, and named rather than left to be inferred from the counts: a
+        // suite that stopped has cases nobody ran, and they are neither passes nor failures.
+        notRun: suite.discovered > suite.tests ? suite.discovered - suite.tests : undefined,
         failures: suite.failures,
         errors: suite.errors,
         skipped: suite.skipped,

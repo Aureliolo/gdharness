@@ -402,7 +402,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       failFast: {
         type: 'boolean',
-        description: 'Stop at the first failure. Default false: the whole set runs.',
+        description:
+          'Stop each suite at its first failing case. Default false: every case runs. With it on, the counts are of what ran, notRun says how many cases were left, and fixing what is named and running again finds the next one, which looks like a flaky tier and is not.',
       },
       timeoutMs: {
         type: 'number',
