@@ -1596,6 +1596,11 @@ async function testTheGameIsHandedItsOwnArguments({ call, attempt, project }: Ed
       projectPath: project,
       headless: true,
       args: ['--fixture-flag=7', '--quiet'],
+      // The default budget is five seconds and this fixture read it as a guarantee. A loaded
+      // runner went past it once, and the answer said so exactly as designed: `mayYetAnnounce`
+      // true, the game still running, and a note naming this argument as the way to wait longer.
+      // The tool was right and the assertion below was asking for more than the tool promises.
+      runtimeWaitMs: 30_000,
     });
     assert.equal(
       get(run, 'through'),
@@ -1613,7 +1618,12 @@ async function testTheGameIsHandedItsOwnArguments({ call, attempt, project }: Ed
     // What the game printed goes with it: the next question is always why it did not come up.
     if (get(run, 'runtime', 'listening') !== true) {
       const said = (await attempt('editor_output', {})).text;
-      assert.fail(`the game with arguments never came up: ${JSON.stringify(run)}\n${said}`);
+      // Which of the two states it is, because they are different faults and the answer already
+      // distinguishes them: a runtime that is not coming is the promise broken, and one still on
+      // its way after thirty seconds is a machine slower than anything worth waiting for.
+      const stillComing = get(run, 'runtime', 'mayYetAnnounce') === true;
+      const what = stillComing ? 'had still not announced itself' : 'is not coming up at all';
+      assert.fail(`the game with arguments ${what}: ${JSON.stringify(run)}\n${said}`);
     }
 
     const given = await call('runtime_invoke', {
