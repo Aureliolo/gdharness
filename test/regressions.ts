@@ -3443,6 +3443,27 @@ function testCommandLineSetup(): void {
       'a loader registered under another name is not joined by a second entry',
     );
     assert.match(underAnotherName.stdout, /GdharnessLoader autoload already names/, underAnotherName.stdout);
+
+    // And the doctor says the runtime is brought up, naming the file that does it. It used to
+    // answer "not registered" about a runtime that was binding a port and serving queries, because
+    // the only question it asked was whether an entry under our own name existed.
+    const seen = cli('doctor', projectDir);
+    assert.match(
+      seen.stdout,
+      /runtime autoload: registered through res:\/\/boot\/gdharness_loader\.gd, as GdharnessLoader/,
+      `doctor names the entry that brings it up: ${seen.stdout}`,
+    );
+
+    // Turning it off removes ours and cannot touch theirs, so the answer says the loader is still
+    // there. Somebody running this before an export is asking that nothing comes up.
+    const off = cli('runtime', 'off', projectDir);
+    assert.equal(off.status, 0, `runtime off:\n${off.stdout}${off.stderr}`);
+    assert.match(
+      off.stdout,
+      /GdharnessLoader still names res:\/\/boot\/gdharness_loader\.gd/,
+      `a loader left behind by runtime off is said out loud: ${off.stdout}`,
+    );
+
     writeFileSync(
       project,
       readFileSync(project, 'utf8').replace(
