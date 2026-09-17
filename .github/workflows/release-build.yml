@@ -26,11 +26,10 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read # Reads the tagged source it builds, and the releases and commit range.
-      # The changelog is built from the files each pull request touched, which is two endpoints
-      # this token is not given by default. The repository being public does not grant it: the
-      # job token is gated on these permissions whatever the visibility, so leaving it out is a
-      # release that fails at the step after everything expensive has already run.
-      pull-requests: read
+      # Being public does not grant this: the job token is gated on what is declared here whatever
+      # the repository's visibility, and without it the release fails writing its changelog after
+      # everything expensive has already run.
+      pull-requests: read # Reads the files each pull request touched, to split the changelog.
     outputs:
       version: ${{ steps.version.outputs.version }}
 
