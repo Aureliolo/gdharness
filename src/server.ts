@@ -3089,9 +3089,16 @@ class GodotServer {
     // and readable while the run is still going. A project watching a fifty-minute bench reached
     // instead for Godot's own log, which every engine start rotates away: two of them, started by
     // an upgrade, left it holding 239 bytes of somebody else's output while this file was intact.
+    // And what that file cannot answer, since handing somebody a path is also an invitation to
+    // watch it. A run is alive or not by the operating system, which is what `running` above is
+    // asked of; a file that has stopped growing is a run between prints, and an arm of a bench
+    // that prints one row at its end is legitimately silent for minutes. A watcher built on the
+    // file declared a bench dead while its process sat there doing what it was asked, which is
+    // the shape of every liveness proxy: it fails in the direction of the proxy rather than the
+    // direction of the truth.
     if (run.transcript !== null && selected.omitted > 0) {
       notes.push(
-        `Everything this run has printed is in ${run.transcript}, uncapped and still being written.`,
+        `Everything this run has printed is in ${run.transcript}, uncapped and still being written. Read it for output, not for whether the run is alive: running above is asked of the operating system, and a transcript that stops growing is a run between prints.`,
       );
     }
     return this.jsonTextResponse({
