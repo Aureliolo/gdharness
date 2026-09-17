@@ -1,10 +1,18 @@
 # gdharness
 
 [![CI](https://github.com/Aureliolo/gdharness/actions/workflows/ci.yml/badge.svg)](https://github.com/Aureliolo/gdharness/actions/workflows/ci.yml)
-[![npm](https://img.shields.io/npm/v/gdharness?logo=npm&logoColor=white&label=npm&color=cb3837)](https://www.npmjs.com/package/gdharness)
-[![Made for Godot 4.7+](https://img.shields.io/badge/Made%20for-Godot%204.7%2B-478CBF?style=flat&logo=godot%20engine&logoColor=white)](https://godotengine.org)
-[![MCP server](https://badge.mcpx.dev?type=server 'MCP Server')](https://modelcontextprotocol.io/introduction)
 [![Scorecard](https://api.scorecard.dev/projects/github.com/Aureliolo/gdharness/badge)](https://scorecard.dev/viewer/?uri=github.com/Aureliolo/gdharness)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/14619/badge)](https://www.bestpractices.dev/projects/14619)
+[![OpenSSF Baseline](https://www.bestpractices.dev/projects/14619/baseline)](https://www.bestpractices.dev/projects/14619)
+[![SLSA Build 3](https://img.shields.io/badge/SLSA-Build%20L3-2f6f4e?style=flat)](.github/release-process.md#slsa)
+[![SBOM](https://img.shields.io/badge/SBOM-SPDX-2f6f4e?style=flat)](.github/release-process.md#what-a-release-carries)
+[![Signed releases](https://img.shields.io/badge/releases-Sigstore%20signed-2f6f4e?style=flat)](.github/release-process.md#verifying-a-release)
+[![npm](https://img.shields.io/npm/v/gdharness?logo=npm&logoColor=white&label=npm&color=cb3837)](https://www.npmjs.com/package/gdharness)
+[![Release](https://img.shields.io/github/v/release/Aureliolo/gdharness?display_name=tag&sort=semver)](https://github.com/Aureliolo/gdharness/releases)
+[![MCP server](https://badge.mcpx.dev?type=server 'MCP Server')](https://modelcontextprotocol.io/introduction)
+[![Made for Godot 4.7+](https://img.shields.io/badge/Made%20for-Godot%204.7%2B-478CBF?style=flat&logo=godot%20engine&logoColor=white)](https://godotengine.org)
+[![Node](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2FAureliolo%2Fgdharness%2Fmain%2Fpackage.json&query=%24.engines.node&label=node&color=5fa04e&logo=node.js&logoColor=white)](https://nodejs.org/)
+[![Bun](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2FAureliolo%2Fgdharness%2Fmain%2Fpackage.json&query=%24.engines.bun&label=bun&color=f9f1e1&logo=bun&logoColor=black)](https://bun.sh/)
 [![Licence](https://img.shields.io/github/license/Aureliolo/gdharness)](LICENSE)
 
 **An agent cannot see a running game.** It reads your scripts and guesses at the rest: whether the
@@ -45,16 +53,16 @@ emptily, so a call that succeeded is a call that was understood.
 
 ## At a glance
 
-|              |                                                                                  |
-| ------------ | -------------------------------------------------------------------------------- |
-| Needs        | Godot 4.7 or newer, Node 22 or newer. Runs under Bun 1.4 too.                    |
-| Surface      | 30 tools named `domain_verb`, and 4 `godot://` resources                         |
-| Reaches      | The editor that is open, a game it is playing, and the project on disk           |
-| Harnesses    | 35, written inside the project wherever the harness has a project config         |
-| Skill        | Written to `.agents/skills`, which every major harness reads                     |
-| Proven       | Every tool driven against Godot 4.7.2 in CI, on Windows, Linux and macOS         |
-| Supply chain | Sigstore-signed, SBOM, [SLSA Build L3](.github/release-process.md#slsa)          |
-| Status       | 0.x: pin an exact version. [What a bump means](.github/CONTRIBUTING.md#versions) |
+|           |                                                                                  |
+| --------- | -------------------------------------------------------------------------------- |
+| Needs     | Godot 4.7 or newer, Node 22 or newer. Runs under Bun 1.4 too.                    |
+| Surface   | 30 tools named `domain_verb`, and 4 `godot://` resources                         |
+| Reaches   | The editor that is open, a game it is playing, and the project on disk           |
+| Harnesses | 35, written inside the project wherever the harness has a project config         |
+| Skill     | Written to `.agents/skills`, which every major harness reads                     |
+| Install   | npm, or a Sigstore-signed archive with an SBOM, SLSA Build Level 3               |
+| Proven    | Every tool driven against Godot 4.7.2 in CI, on Windows, Linux and macOS         |
+| Status    | 0.x: pin an exact version. [What a bump means](.github/CONTRIBUTING.md#versions) |
 
 Older 4.x is likely to work and is not tested.
 
