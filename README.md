@@ -73,11 +73,12 @@ and integration suites run against a real engine on all three before anything is
 
 What each kind of release means here:
 
-- **Patch**: an answer that was wrong is now right. The output can change, because a wrong answer
-  corrected is a fix rather than a feature, and leaving one wrong to protect whoever parsed it is
-  how a tool stops being worth asking.
-- **Minor**: a tool, an op, an argument or a field was added, or behaviour a caller can see
-  changed.
+- **Patch**: nearly everything. An answer that was wrong is now right, and the output may change
+  shape for it, because a wrong answer corrected is a fix rather than a feature and leaving one
+  wrong to protect whoever parsed it is how a tool stops being worth asking. An addition nothing
+  has to adapt to is a patch too: a new argument, a new field, an argument reaching further than it
+  did. Ignore all of it and your calls still work.
+- **Minor**: a new tool or a new op, meaning this does something it could not do before.
 - **Major**: a tool, an op, an argument or a field was renamed or taken away. Nothing else earns
   one.
 
