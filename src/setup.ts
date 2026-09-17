@@ -130,17 +130,20 @@ export async function enablePlugins(
 /**
  * Whether an autoload entry is one gdharness wrote, and so one it may rewrite.
  *
- * A project is free to bring the runtime up through a script of its own, and that wrapper is where
- * its refusals live: not in a release build, because the runtime serves a socket that reads any
- * property and calls any method; not when `addons/` is absent, which is every fresh clone; not for
- * a `-s` script run, which is what a test gate is. Pointing the entry back at the addon's own
- * script takes all three away.
+ * A project is free to bring the runtime up through a script of its own, and the install guide
+ * recommends exactly that: `project.godot` is committed and `addons/` often is not, so an entry
+ * naming the addon directly boots a fresh clone, and every CI runner, with a missing script. A
+ * wrapper is how a project says "only when it is there". Repointing the entry takes that away, and
+ * takes it away from the one file the project wrote to keep it.
+ *
+ * Only that. The addon refuses to serve outside a debug build and refuses for a `-s` script run
+ * unless the project asks, so a repointed entry does not put a socket into an export. The reporting
+ * project believed it did and so did this comment, which is worth recording next to the fix.
  *
  * What makes it worth a check rather than a note is that nothing fails when it happens. The wrapper
  * is still on disk and still correct, every gate a project has goes on passing because they
  * exercise the script rather than ask what `project.godot` registers, and the state is only visible
- * in a diff. A release exported from it ships the socket. Reported by a project that found it in
- * `git status` after twelve green gates.
+ * in a diff. Found in `git status` after twelve green gates.
  */
 export function autoloadIsOurs(named: string | null): boolean {
   return named === null || named === `res://${RUNTIME_AUTOLOAD.path}`;

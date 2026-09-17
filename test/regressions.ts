@@ -3351,13 +3351,13 @@ function testCommandLineSetup(): void {
         .sort();
     // A project that brings the runtime up its own way keeps doing so across an upgrade.
     //
-    // The runtime serves a socket that reads any property and calls any method, so a project is
-    // right to wrap it in a script of its own: not in a release build, not when addons/ is absent,
-    // not for a -s script run. Repointing the entry at the addon's own script takes all three
-    // refusals away, and it does so without failing anything, because the wrapper is still on disk
-    // and still correct and nothing in a project's suite asks what project.godot registers. One
-    // found it in git status after twelve green gates, having been told about five other
-    // replacements and not this one. A release exported from that state ships the socket.
+    // project.godot is committed and addons/ often is not, so the install guide tells projects to
+    // point this entry at a script of their own that brings the addon up when it is there and does
+    // nothing when it is not. Repointing it at the addon takes away the one refusal the addon
+    // cannot make for itself, and does it to the file written to keep it. Nothing fails: the
+    // wrapper is still on disk and correct, and no gate asks what project.godot registers, so one
+    // project found it in git status after twelve green ones, having been told about five other
+    // replacements and not this.
     const guard = join(projectDir, 'boot');
     mkdirSync(guard, { recursive: true });
     writeFileSync(
