@@ -3238,6 +3238,23 @@ async function testARunEndedUnwatchedIsStillReadable(): Promise<void> {
           `including the ones after the error:\n${JSON.stringify(output, null, 2)}`,
         );
       },
+      { GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: join(runtimeDir, 'project') },
+    );
+
+    // A server that cannot name a project at all does not get to claim this one either, which is
+    // the half that was missing. "I have no project" used to read as "any record is mine", so a
+    // regression suite, whose servers are started exactly like this, adopted a bench belonging to
+    // another project on this machine and ended it to start its own: six times in fifty minutes,
+    // silently, while its owner bisected their own code. The note says whose the run is; a server
+    // that cannot answer that question answers the one it can.
+    await withStdioServer(
+      async (call) => {
+        assert.match(
+          await call('editor_output', { limit: 200 }),
+          /No game is running/,
+          'a server with no project of its own owns no run it merely found',
+        );
+      },
       { GDHARNESS_RUNTIME_DIR: runtimeDir },
     );
 
@@ -3278,7 +3295,13 @@ async function testARunOutlivesItsServer(): Promise<void> {
 
   const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-outlives-runtime-'));
   const projectDir = mkdtempSync(join(tmpdir(), 'gdharness-outlives-'));
-  const env = { GODOT_PATH: godotPath, GDHARNESS_RUNTIME_DIR: runtimeDir };
+  // The project is named, as every configured server names it: picking a run back up is a claim
+  // about whose run it is, and a server that cannot make that claim does not get to.
+  const env = {
+    GODOT_PATH: godotPath,
+    GDHARNESS_RUNTIME_DIR: runtimeDir,
+    GDHARNESS_PROJECT: projectDir,
+  };
   let gamePid: number | null = null;
   try {
     writeFileSync(

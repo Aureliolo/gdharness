@@ -132,31 +132,22 @@ function recordAt(path: string): RunRecord | null {
  * there and must never be read as one.
  */
 function runningAs(pid: number): { kind: 'image' | 'commandLine'; text: string } | null {
+  if (process.platform === 'win32') {
+    const line = windowsCommandLine(pid);
+    if (line !== null) {
+      return { kind: 'commandLine', text: line };
+    }
+    // An empty answer from the query above is not "nothing is there": a process owned by another
+    // user, or one this server cannot open, keeps its command line and hands back nothing at all.
+    // tasklist still names the executable, and that is the difference between a weaker check and
+    // no check, so it is asked before this gives up.
+    const image = windowsImage(pid);
+    return image === null ? null : { kind: 'image', text: image };
+  }
   try {
     if (process.platform === 'linux') {
       const raw = readFileSync(`/proc/${pid}/cmdline`, 'utf8').replaceAll('\0', ' ').trim();
       return raw === '' ? null : { kind: 'commandLine', text: raw };
-    }
-    if (process.platform === 'win32') {
-      // Windows keeps a process's command line out of reach of anything but a query, so this is
-      // the one platform that needs an interpreter started to answer. Half a second, on a path
-      // that runs once when a run is picked up and once before one is ended.
-      const answer = execFileSync(
-        'powershell',
-        [
-          '-NoProfile',
-          '-NonInteractive',
-          '-Command',
-          `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`,
-        ],
-        { encoding: 'utf8', timeout: 15_000, windowsHide: true },
-      ).trim();
-      if (answer !== '') {
-        return { kind: 'commandLine', text: answer };
-      }
-      // PowerShell answering nothing is a pid nobody holds; PowerShell failing outright drops to
-      // tasklist below, which every Windows has and which names the executable if not its line.
-      return null;
     }
     const args = execFileSync('ps', ['-p', String(pid), '-o', 'args='], {
       encoding: 'utf8',
@@ -164,20 +155,46 @@ function runningAs(pid: number): { kind: 'image' | 'commandLine'; text: string }
     }).trim();
     return args === '' ? null : { kind: 'commandLine', text: args };
   } catch {
-    if (process.platform !== 'win32') {
-      return null;
-    }
-    try {
-      const csv = execFileSync('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'], {
-        encoding: 'utf8',
-        timeout: 15_000,
-        windowsHide: true,
-      });
-      const name = /^"([^"]+)"/.exec(csv.trim())?.[1];
-      return name === undefined ? null : { kind: 'image', text: name };
-    } catch {
-      return null;
-    }
+    return null;
+  }
+}
+
+/**
+ * The whole command line of a Windows process, or null when Windows will not give it.
+ *
+ * Windows keeps a command line out of reach of anything but a query, so this is the one platform
+ * that starts an interpreter to answer. Half a second, on a path that runs once when a run is
+ * picked up and once before one is ended.
+ */
+function windowsCommandLine(pid: number): string | null {
+  try {
+    const answer = execFileSync(
+      'powershell',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`,
+      ],
+      { encoding: 'utf8', timeout: 15_000, windowsHide: true },
+    ).trim();
+    return answer === '' ? null : answer;
+  } catch {
+    return null;
+  }
+}
+
+/** The executable's name alone, from the one tool every Windows has. */
+function windowsImage(pid: number): string | null {
+  try {
+    const csv = execFileSync('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'], {
+      encoding: 'utf8',
+      timeout: 15_000,
+      windowsHide: true,
+    });
+    return /^"([^"]+)"/.exec(csv.trim())?.[1] ?? null;
+  } catch {
+    return null;
   }
 }
 

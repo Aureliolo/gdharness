@@ -2936,16 +2936,29 @@ class GodotServer {
    * servers running beside each other share it. Answering about the other one's run would be the
    * worst kind of wrong answer: the right shape, about the wrong game, and nothing in it saying
    * so. Compared against the project this server was told to serve, then against the one the
-   * editor on the bridge has open; with neither there is nothing to compare against, and a run
-   * recorded by the only server that could have recorded it is taken as this one's.
+   * editor on the bridge has open.
+   *
+   * With neither, the answer is no. It used to be yes, on the reasoning that a server which
+   * cannot name a project has nothing to compare against and the run was probably its own. That
+   * reads "I do not know whose this is" as "it is mine", about a note whose whole purpose is to
+   * let a server pick a run back up and end it. A regression suite, whose servers are started
+   * with no project and no editor, adopted a bench belonging to another project on the same
+   * machine and killed it before starting its own run: six times in fifty minutes, silently,
+   * while its owner bisected their own code looking for the cause.
+   *
+   * A server that cannot say whose a run is answers "No game is running" about it, which is the
+   * true answer to the question it can actually ask.
    */
   private couldBeOurs(project: string): boolean {
-    if (project === '') {
-      return true;
-    }
     const status = this.godotBridge.getStatus();
     const mine = this.ownProject ?? (status.connected ? (status.projectPath ?? null) : null);
-    return mine === null || samePath(mine, project);
+    if (mine === null) {
+      return false;
+    }
+    // A note from a version that did not record the project. It cannot be shown to be this
+    // server's, and the reason to keep reading it is the same reason it is not killed by pid
+    // alone: the cost of being wrong lands on somebody else.
+    return project !== '' && samePath(mine, project);
   }
 
   /**
