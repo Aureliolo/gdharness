@@ -131,8 +131,10 @@ such a version, naming it, before it writes a branch.
 
 ## When a release job fails
 
-- **Tag does not match package version**: the tag was created outside `release-tag.yml`. Delete
-  the tag and go through Prepare release.
+- **Tag does not match package version**: the tag was created outside `release-tag.yml`, at a
+  commit whose `package.json` says something else. It cannot be taken back, because a push that
+  deletes a `v*` tag is refused by the ruleset. Go through Prepare release for the version that
+  should ship and leave the tag standing; like the case below, that number is spent.
 - **vX.Y.Z is tagged at another commit**: that version is already spent. Nothing can move the
   tag, so raise the version past it; see above.
 - **Release commit is not reachable from main**: the tag points at a commit that never landed.
