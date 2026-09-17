@@ -40,7 +40,7 @@ runs:
         esac
 
         archive="${RUNNER_TEMP}/bun-${build}.zip"
-        curl -fsSL --proto '=https' --tlsv1.2 --retry 2 -o "${archive}" \
+        curl -fsSL --proto '=https' --tlsv1.2 --retry 3 --retry-all-errors --retry-delay 2 -o "${archive}" \
           "https://github.com/oven-sh/bun/releases/download/${tag}/bun-${build}.zip"
         # Compared here rather than through `sha256sum --check`: the macOS one is BSD's and does
         # not take the GNU options. Hashed from stdin because the GNU one prefixes its output
