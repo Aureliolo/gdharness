@@ -1,24 +1,21 @@
 # gdharness
 
 [![CI](https://github.com/Aureliolo/gdharness/actions/workflows/ci.yml/badge.svg)](https://github.com/Aureliolo/gdharness/actions/workflows/ci.yml)
-[![Scorecard](https://api.scorecard.dev/projects/github.com/Aureliolo/gdharness/badge)](https://scorecard.dev/viewer/?uri=github.com/Aureliolo/gdharness)
-[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/14619/badge)](https://www.bestpractices.dev/projects/14619)
-[![OpenSSF Baseline](https://www.bestpractices.dev/projects/14619/baseline)](https://www.bestpractices.dev/projects/14619)
-[![SLSA Build 3](https://img.shields.io/badge/SLSA-Build%20L3-2f6f4e?style=flat)](.github/release-process.md#slsa)
-[![SBOM](https://img.shields.io/badge/SBOM-SPDX-2f6f4e?style=flat)](.github/release-process.md#what-a-release-carries)
-[![Signed releases](https://img.shields.io/badge/releases-Sigstore%20signed-2f6f4e?style=flat)](.github/release-process.md#verifying-a-release)
 [![npm](https://img.shields.io/npm/v/gdharness?logo=npm&logoColor=white&label=npm&color=cb3837)](https://www.npmjs.com/package/gdharness)
-[![Release](https://img.shields.io/github/v/release/Aureliolo/gdharness?display_name=tag&sort=semver)](https://github.com/Aureliolo/gdharness/releases)
-[![MCP server](https://badge.mcpx.dev?type=server 'MCP Server')](https://modelcontextprotocol.io/introduction)
 [![Made for Godot 4.7+](https://img.shields.io/badge/Made%20for-Godot%204.7%2B-478CBF?style=flat&logo=godot%20engine&logoColor=white)](https://godotengine.org)
-[![Node](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2FAureliolo%2Fgdharness%2Fmain%2Fpackage.json&query=%24.engines.node&label=node&color=5fa04e&logo=node.js&logoColor=white)](https://nodejs.org/)
-[![Bun](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2FAureliolo%2Fgdharness%2Fmain%2Fpackage.json&query=%24.engines.bun&label=bun&color=f9f1e1&logo=bun&logoColor=black)](https://bun.sh/)
+[![MCP server](https://badge.mcpx.dev?type=server 'MCP Server')](https://modelcontextprotocol.io/introduction)
+[![Scorecard](https://api.scorecard.dev/projects/github.com/Aureliolo/gdharness/badge)](https://scorecard.dev/viewer/?uri=github.com/Aureliolo/gdharness)
 [![Licence](https://img.shields.io/github/license/Aureliolo/gdharness)](LICENSE)
 
-Drive a Godot 4 project from an agent: the editor that is open, the game that is running, and the
-project on disk.
+**An agent cannot see a running game.** It reads your scripts and guesses at the rest: whether the
+button is on screen, whether the panel updated, whether that error mattered.
 
-**Hand this to your agent:**
+gdharness makes the engine answerable instead. What the screen says, where a control is, what a
+property reads right now, what the console printed, what broke and on which line.
+
+## Install
+
+Hand this to your agent:
 
 ```text
 Install gdharness into this project by following
@@ -27,31 +24,39 @@ recommend back to me.
 ```
 
 Or do it yourself, and pick your harness:
-[aureliolo.github.io/gdharness](https://aureliolo.github.io/gdharness)
+[aureliolo.github.io/gdharness](https://aureliolo.github.io/gdharness).
 
-## What it is for
-
-An agent cannot see a running game. This makes one answerable: where a control is, what a property
-reads, what the console printed, what broke and on which line.
+## The loop it exists for
 
 ```jsonc
-runtime_inspect { "op": "rect", "nodePath": "/root/Hall/Ledger/BuyButton" }
-
-{ "canvas": { "position": { "x": 812, "y": 418 }, "size": { "x": 180, "y": 34 } },
-  "visible": true }
+editor_run      { "op": "start", "projectPath": "C:/games/hall" }
+runtime_inspect { "op": "find", "says": "Buy" }              // the button, by the word on it
+runtime_input   { "op": "click", "nodePath": "/root/Hall/Ledger/BuyButton" }
+runtime_inspect { "op": "text", "nodePath": "/root/Hall/Ledger" }   // what the panel says now
+editor_output   { "projectPath": "C:/games/hall" }           // errors and warnings, with backtraces
 ```
+
+The open editor plays the game, so its debugger holds it, which is what lets you set a breakpoint
+and read the variables in scope when it stops.
+
+Every answer is read back out of the engine after the fact, never echoed from the request. A tool
+that cannot answer says which state it is in and what would change it, rather than answering
+emptily, so a call that succeeded is a call that was understood.
 
 ## At a glance
 
-|           |                                                                          |
-| --------- | ------------------------------------------------------------------------ |
-| Needs     | Godot 4.7 or newer, Node 22 or newer. Runs under Bun 1.4 too.            |
-| Surface   | 30 tools named `domain_verb`, and 4 `godot://` resources                 |
-| Reaches   | The editor that is open, a game it is playing, and the project on disk   |
-| Harnesses | 35, written inside the project wherever the harness has a project config |
-| Skill     | Written to `.agents/skills`, which every major harness reads             |
-| Install   | npm, or a Sigstore-signed archive with an SBOM, SLSA Build Level 3       |
-| Proven    | Every tool driven against a pinned Godot in CI, on three platforms       |
+|              |                                                                                  |
+| ------------ | -------------------------------------------------------------------------------- |
+| Needs        | Godot 4.7 or newer, Node 22 or newer. Runs under Bun 1.4 too.                    |
+| Surface      | 30 tools named `domain_verb`, and 4 `godot://` resources                         |
+| Reaches      | The editor that is open, a game it is playing, and the project on disk           |
+| Harnesses    | 35, written inside the project wherever the harness has a project config         |
+| Skill        | Written to `.agents/skills`, which every major harness reads                     |
+| Proven       | Every tool driven against Godot 4.7.2 in CI, on Windows, Linux and macOS         |
+| Supply chain | Sigstore-signed, SBOM, [SLSA Build L3](.github/release-process.md#slsa)          |
+| Status       | 0.x: pin an exact version. [What a bump means](.github/CONTRIBUTING.md#versions) |
+
+Older 4.x is likely to work and is not tested.
 
 ## Documentation
 
@@ -60,30 +65,6 @@ parts connect, and every tool, op and argument.
 
 [SECURITY.md](.github/SECURITY.md) is how to report something.
 [CONTRIBUTING.md](.github/CONTRIBUTING.md) is what a change has to clear.
-
-## Versions
-
-0.x, and the number is telling the truth: the tools, their arguments and the shape of their
-answers are still moving, because the projects using this keep finding answers that were wrong or
-missing. Pin an exact version and upgrade deliberately.
-
-Built and measured against Godot 4.7.2 on Windows, Linux and macOS. The editor, engine, runtime
-and integration suites run against a real engine on all three before anything is tagged. Older
-4.x is likely to work and is not tested.
-
-What each kind of release means here:
-
-- **Patch**: nearly everything. An answer that was wrong is now right, and the output may change
-  shape for it, because a wrong answer corrected is a fix rather than a feature and leaving one
-  wrong to protect whoever parsed it is how a tool stops being worth asking. An addition nothing
-  has to adapt to is a patch too: a new argument, a new field, an argument reaching further than it
-  did. Ignore all of it and your calls still work.
-- **Minor**: a new tool or a new op, meaning this does something it could not do before.
-- **Major**: a tool, an op, an argument or a field was renamed or taken away. Nothing else earns
-  one.
-
-1.0 is not a date, it is a condition: the tool surface holding still for a fortnight, and the
-issues arriving being things it cannot do yet rather than things it answers wrongly.
 
 ## Project
 
