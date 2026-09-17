@@ -43,7 +43,7 @@ import {
   runtimeDirectories,
   runtimesAnnounced,
 } from '../src/runtime-client.js';
-import { alive, HEADLESS_OPERATIONS, patienceForFrames } from '../src/server.js';
+import { alive, HEADLESS_OPERATIONS, patienceForFrames, runtimeVerdict } from '../src/server.js';
 import { addonMismatch } from '../src/server-version.js';
 import { autoloadIsOurs } from '../src/setup.js';
 import { opTakes, TOOL_SPECS } from '../src/tool-definitions.js';
@@ -1537,6 +1537,25 @@ async function testAnArgumentMeantForAnotherOpIsRefused(): Promise<void> {
       /text takes: projectPath, nodePath, limit, includeHidden/,
       'and should say what text takes instead',
     );
+    // The run tools ask it of three ops that share a schema, where the wrong-op argument is the
+    // likelier mistake: only one of them boots a fixed number of frames, only one of them can be
+    // told to take a window, and the third takes nothing at all.
+    assert.match(
+      await call('editor_run', { op: 'check', projectPath: '/p', headless: true }),
+      /editor_run check does not take headless/,
+      'an argument only a start reads should be refused on check',
+    );
+    assert.match(
+      await call('editor_run', { op: 'start', projectPath: '/p', frames: 3 }),
+      /start takes: projectPath, scene, args, headless, runtimeWaitMs/,
+      'and the refusal says what start takes instead',
+    );
+    assert.match(
+      await call('editor_run', { op: 'start', projectPath: '/p', runtimeWaitMs: 30_000 }),
+      /Not a Godot project/,
+      'while the argument start does read reaches the project check',
+    );
+
     // The other half, or this passes against a server that refuses every op-specific argument.
     // Accepted means reaching the runtime and finding nothing there, which is one sentence; the
     // absence of "does not take" is every sentence in the program except one.
@@ -2333,6 +2352,53 @@ function testAGameTooNewToTalkToIsStillAGame(): void {
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+}
+
+/**
+ * A runtime that is not listening says whether that is the end of it.
+ *
+ * The wait has a budget, and a project whose first frame arrives after it was told `listening:
+ * false` in the same words as a project with no addon installed: one wanted another call, the
+ * other wanted an install, and the answer was the same sentence. A start on a big project is
+ * exactly where the difference matters, since that is the boot most likely to outlast a budget.
+ */
+function testANotYetRuntimeIsNotTheSameAsNoRuntime(): void {
+  const listening = runtimeVerdict(
+    {
+      pid: 4242,
+      port: 51_300,
+      address: '127.0.0.1',
+      project: { name: 'F', path: '/p' },
+      file: 'runtime-4242.json',
+    },
+    { addon: true, budgetMs: 5_000, heldAt: null, running: true },
+  );
+  assert.deepEqual(listening, { listening: true, pid: 4242, port: 51_300 }, 'a runtime that answered');
+
+  const none = runtimeVerdict(null, { addon: false, budgetMs: 5_000, heldAt: null, running: true });
+  assert.equal(none['listening'], false);
+  assert.equal(none['mayYetAnnounce'], false, 'a project with no addon is never going to announce');
+
+  const booting = runtimeVerdict(null, { addon: true, budgetMs: 5_000, heldAt: null, running: true });
+  assert.equal(booting['listening'], false);
+  assert.equal(booting['mayYetAnnounce'], true, 'a game still running may still announce');
+  assert.match(String(booting['note']), /runtimeWaitMs/, 'and the answer names the way to wait longer');
+
+  const over = runtimeVerdict(null, { addon: true, budgetMs: 5_000, heldAt: null, running: false });
+  assert.equal(over['listening'], false);
+  assert.equal(over['mayYetAnnounce'], false, 'a game that has ended is not going to announce');
+  assert.match(String(over['note']), /editor_output/, 'and the answer says where its output went');
+
+  // Held at a breakpoint is the one case where waiting alone is not enough and the caller has
+  // something to do, so it must not read as either of the two above.
+  const held = runtimeVerdict(null, {
+    addon: true,
+    budgetMs: 5_000,
+    heldAt: { reason: 'breakpoint', description: 'Paused on breakpoint', text: 'res://main.gd:12' },
+    running: true,
+  });
+  assert.equal(held['mayYetAnnounce'], true, 'a held game announces once it is let go');
+  assert.match(String(held['note']), /debug_control continue/, 'and the answer says what lets it go');
 }
 
 /**
@@ -3975,6 +4041,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheStaleHalfIsNamedCorrectly,
   testAGameIsFoundWhereverItAnnounced,
   testAGameTooNewToTalkToIsStillAGame,
+  testANotYetRuntimeIsNotTheSameAsNoRuntime,
   testAStartWaitsForTheGameToAnnounceItself,
   testATestRunKeepsOutOfThePlayersSaves,
   testParametersReachTheEngine,
