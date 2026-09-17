@@ -84,12 +84,21 @@ const DEFLATED = 8;
 /** The marker a zip writes in a 32-bit field it could not fit, which means zip64. */
 const NEEDS_ZIP64 = 0xffffffff;
 
-/** The release asset, or a throw naming what came back instead. Two attempts, because a
- * transient network failure here is a red build that says nothing about the code. */
+/**
+ * The release asset, or a throw naming what came back instead.
+ *
+ * Three attempts, spaced, because a transient network failure here is a red build that says
+ * nothing about the code. Spaced rather than immediate: what fails this way is a reset or a
+ * refusal that lands in milliseconds, and a second attempt in the same millisecond is close
+ * enough to the first to fail with it.
+ */
 export async function download(url: string): Promise<Buffer> {
   let lastFailure: unknown = null;
 
-  for (let attempt = 1; attempt <= 2; attempt += 1) {
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    if (attempt > 1) {
+      await new Promise((wake) => setTimeout(wake, 2_000));
+    }
     try {
       const response = await fetch(url, { redirect: 'follow' });
       if (!response.ok) {

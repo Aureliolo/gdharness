@@ -1,0 +1,17 @@
+# What the generated notes leave out.
+#
+# The version-bump pull request is not something a release carries: it is the release. Left in,
+# every set of notes ends with "Release v0.12.3", which tells a reader that this release released
+# itself and pushes the line that does say something up out of sight.
+#
+# Both spellings of the author, because the login is `github-actions[bot]` and the display name is
+# `github-actions`, and which one this file is matched against is not something the documentation
+# says. Listing both costs nothing; guessing wrong leaves the line in.
+#
+# Dependency updates stay in. This is distributed as a bundle, so a raised dependency is a change
+# in what somebody installs, and a reader deciding whether to take a release should see it.
+changelog:
+  exclude:
+    authors:
+      - 'github-actions[bot]'
+      - 'github-actions'
