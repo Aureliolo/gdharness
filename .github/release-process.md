@@ -15,6 +15,11 @@ Everything after the merge is automatic.
 Nobody types a version twice and nobody creates a tag by hand, which is the release step that
 cannot be checked afterwards and the one most likely to be done from the wrong branch.
 
+That pull request is opened with the `release` label, which is how `.github/release.yml` keeps it
+out of the next release's generated notes. The label has to exist in the repository: `gh` fails on
+one it cannot find, so deleting it stops a release being prepared rather than quietly putting the
+line back.
+
 ## What happens on the merge
 
 `release-tag.yml` sees a new version on `main` with no matching tag, creates `vX.Y.Z`, and
