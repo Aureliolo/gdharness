@@ -108,6 +108,10 @@ them. \`editor_rescan\` asks it to scan and names any class it still cannot reso
 declaration and the cache can both be right while the editor stays blind to it. Change the
 declaring script, or restart the editor.
 
+The scan writes \`.godot/global_script_class_cache.cfg\` from the list the editor is holding, so
+a class it cannot resolve is dropped out of that file too, and the next fresh engine, CI run or
+clone starts from the narrower one. That is the same class \`unseenByEditor\` names.
+
 A diagnostic about a member rather than a type, \`Static function "x()" not found in base "Y"\`
 about something the engine compiles, is a different thing and is no longer stale here: each ask
 gives the document back when its answer arrives, so the next one is read off disk. If one turns
