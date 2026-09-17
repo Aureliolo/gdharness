@@ -234,9 +234,21 @@ export class UpdateCheck {
   }
 
   /** What to tell the agent, or null when this is the newest there is. */
-  notice(): UpdateNotice | null {
+  notice(now = Date.now()): UpdateNotice | null {
     const latest = this.latest;
     if (!this.enabled || latest === null || !isNewer(latest, this.current)) {
+      return null;
+    }
+    // Not an answer this has already judged too old to use. `refresh()` runs first on the same
+    // call and starts a fetch precisely because the window has passed, so naming the version here
+    // hands out something known stale together with an upgrade command for it. A server that had
+    // just restarted read a note left hours earlier by a previous process and told its first
+    // caller to install a version and a half behind; the call after that named the right one.
+    //
+    // Only while a fetch is actually in flight. A failed one backs off and leaves `checking`
+    // false, and then this reports what it has again, because offline and behind is still worth
+    // saying and silence would be permanent.
+    if (this.checking && now - this.checkedAt >= CACHE_MS) {
       return null;
     }
     return {
