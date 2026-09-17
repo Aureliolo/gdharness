@@ -3408,6 +3408,33 @@ function testCommandLineSetup(): void {
       /boot\/gdharness_loader\.gd/,
       'and names it, since being specific about five replacements and silent about this one is what cost a project a day',
     );
+    // The same guard reached through a name instead of a path. A project is free to call its
+    // loader anything, and one calls it GdharnessLoader, so every check for "is the runtime
+    // registered" answers no: registering would put the addon's own script in the tree beside the
+    // guard rather than behind it. Found by the path, since the name is the part a project chooses.
+    writeFileSync(
+      project,
+      readFileSync(project, 'utf8').replace(
+        /GdharnessRuntime="\*res:\/\/boot\/gdharness_loader\.gd"/,
+        'GdharnessLoader="*res://boot/gdharness_loader.gd"',
+      ),
+    );
+    const underAnotherName = cli('runtime', 'on', projectDir);
+    assert.equal(underAnotherName.status, 0, `runtime on:\n${underAnotherName.stdout}`);
+    assert.doesNotMatch(
+      readFileSync(project, 'utf8'),
+      /GdharnessRuntime=/,
+      'a loader registered under another name is not joined by a second entry',
+    );
+    assert.match(underAnotherName.stdout, /GdharnessLoader autoload already names/, underAnotherName.stdout);
+    writeFileSync(
+      project,
+      readFileSync(project, 'utf8').replace(
+        /GdharnessLoader="\*res:\/\/boot\/gdharness_loader\.gd"/,
+        'GdharnessRuntime="*res://boot/gdharness_loader.gd"',
+      ),
+    );
+
     // A wrapper that is not on disk is still not rewritten, because a file can be absent for a
     // moment and a rewritten line is gone for good. But it is said, since an entry naming nothing
     // boots the project with a missing script and "left as it is" alone would read as approval.
