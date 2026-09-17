@@ -3953,70 +3953,114 @@ function testEveryAddonScriptKeepsItsIdentity(): void {
   }
 }
 
+const TESTS: (() => void | Promise<void>)[] = [
+  testEveryAddonScriptKeepsItsIdentity,
+  testBothEndsAgreeAboutTheAnnouncement,
+  testASupersededServerStandsDown,
+  testAProjectUpgradedUnderTheServerIsSaid,
+  testEveryDispatchedNameExistsOnBothSides,
+  testEveryEngineParameterCanBeSent,
+  testEveryToolParameterIsRead,
+  testEveryToolIsDrivenSomewhere,
+  testStaleDisconnectRegression,
+  testOneServerOneProjectRegression,
+  testSceneToolsVectorRegression,
+  testRunArgumentsLeaveTheLocalDebuggerOff,
+  testHeadlessFollowsTheDisplay,
+  testStaleClassesAreReadFromDisk,
+  testClassesAnEditorIsNotHolding,
+  testProjectDefaultsToTheWorkingDirectory,
+  testAnAutoloadGitWillNotCarry,
+  testVersionOrdering,
+  testTheStaleHalfIsNamedCorrectly,
+  testAGameIsFoundWhereverItAnnounced,
+  testAGameTooNewToTalkToIsStillAGame,
+  testAStartWaitsForTheGameToAnnounceItself,
+  testATestRunKeepsOutOfThePlayersSaves,
+  testParametersReachTheEngine,
+  testAFinishedRunCanStillBeRead,
+  testOnlyOurOwnAutoloadIsRewritten,
+  testARunEndedUnwatchedIsStillReadable,
+  testARunOutlivesItsServer,
+  testGdUnitRunner,
+  testCommandLineSetup,
+  testTheWrittenConfigNamesAProgramThatStarts,
+
+  testProjectGodotMultilineValues,
+  testProjectGodotResistsPrototypeKeys,
+
+  testEditorStatusPortConflict,
+  testTheBridgeTakesThePortWhenItIsFreed,
+  testAnEditorAServerOpenedIsStartedAgain,
+  testAServerEndsWithAnEditorStillOnTheBridge,
+  testABadPortIsReported,
+  testAnEditorPortMovesOnlyWhenItIsHeld,
+  testAServerOnlyAnswersAboutItsOwnGame,
+  testTheLongestWaitCanBeWaitedOut,
+  testDiagnosticsSurviveUriReEncoding,
+  testDiagnosticsSurviveTheEditorRestarting,
+  testDiagnosticsLeaveNoDocumentOpen,
+  testDiagnosticsSurviveAnotherSpellingOfTheSamePath,
+  testDiagnosticsTimeoutIsNotAnEmptyResult,
+  testLspFramesBodiesByBytes,
+  testLspReassemblesBodySplitMidCharacter,
+  testDapFramesBodiesByBytes,
+  testFramingCeilingFailsLoudly,
+  testDictionariesHaveNothingBehindThem,
+  testProjectPathsAreContained,
+  testToolAndOpLookupsCannotReachThePrototype,
+  testArgumentsOfTheWrongTypeAreRefused,
+  testAnArgumentMeantForAnotherOpIsRefused,
+  testEveryArgumentNamesOpsItsToolHas,
+  testToolsRefusePathsOutsideTheProject,
+  testDebugToolsRefuseWithoutASession,
+  testUpdateNoticeRidesOnAnAnswer,
+  testUpdateCheckHasAnOffSwitch,
+];
+
+/**
+ * Every regression above, each one run whether or not the one before it failed.
+ *
+ * The way a fixture here is checked is by disarming the line it guards and reading which tests
+ * notice. A run that stops at the first failure answers only "something noticed", and everything
+ * downstream of it never runs, so the four assertions a break should have reached look identical
+ * to the one it did reach. Four disarms in a row had to be narrowed by hand until an unrelated
+ * earlier test stopped firing, which is work spent on the runner rather than on the code.
+ *
+ * An argument names the tests to run, matched loosely against the function name, so a single
+ * fixture can be run on its own while it is being written.
+ */
 async function main(): Promise<void> {
-  testEveryAddonScriptKeepsItsIdentity();
-  testBothEndsAgreeAboutTheAnnouncement();
-  await testASupersededServerStandsDown();
-  await testAProjectUpgradedUnderTheServerIsSaid();
-  testEveryDispatchedNameExistsOnBothSides();
-  testEveryEngineParameterCanBeSent();
-  testEveryToolParameterIsRead();
-  testEveryToolIsDrivenSomewhere();
-  testStaleDisconnectRegression();
-  testOneServerOneProjectRegression();
-  testSceneToolsVectorRegression();
-  testRunArgumentsLeaveTheLocalDebuggerOff();
-  testHeadlessFollowsTheDisplay();
-  testStaleClassesAreReadFromDisk();
-  testClassesAnEditorIsNotHolding();
-  testProjectDefaultsToTheWorkingDirectory();
-  testAnAutoloadGitWillNotCarry();
-  testVersionOrdering();
-  testTheStaleHalfIsNamedCorrectly();
-  testAGameIsFoundWhereverItAnnounced();
-  testAGameTooNewToTalkToIsStillAGame();
-  await testAStartWaitsForTheGameToAnnounceItself();
-  testATestRunKeepsOutOfThePlayersSaves();
-  await testParametersReachTheEngine();
-  await testAFinishedRunCanStillBeRead();
-  testOnlyOurOwnAutoloadIsRewritten();
-  await testARunEndedUnwatchedIsStillReadable();
-  await testARunOutlivesItsServer();
-  await testGdUnitRunner();
-  testCommandLineSetup();
-  testTheWrittenConfigNamesAProgramThatStarts();
+  const wanted = process.argv.slice(2).map((argument) => argument.toLowerCase());
+  const chosen =
+    wanted.length === 0
+      ? TESTS
+      : TESTS.filter((test) => wanted.some((word) => test.name.toLowerCase().includes(word)));
+  if (chosen.length === 0) {
+    console.error(`No regression is named ${process.argv.slice(2).join(' ')}.`);
+    process.exitCode = 2;
+    return;
+  }
 
-  testProjectGodotMultilineValues();
-  testProjectGodotResistsPrototypeKeys();
+  const failed: string[] = [];
+  for (const test of chosen) {
+    try {
+      await test();
+    } catch (error) {
+      failed.push(test.name);
+      console.error(`\n${test.name} failed\n${error instanceof Error ? error.stack : String(error)}\n`);
+    }
+  }
 
-  await testEditorStatusPortConflict();
-  await testTheBridgeTakesThePortWhenItIsFreed();
-  await testAnEditorAServerOpenedIsStartedAgain();
-  await testAServerEndsWithAnEditorStillOnTheBridge();
-  await testABadPortIsReported();
-  await testAnEditorPortMovesOnlyWhenItIsHeld();
-  await testAServerOnlyAnswersAboutItsOwnGame();
-  testTheLongestWaitCanBeWaitedOut();
-  await testDiagnosticsSurviveUriReEncoding();
-  await testDiagnosticsSurviveTheEditorRestarting();
-  await testDiagnosticsLeaveNoDocumentOpen();
-  await testDiagnosticsSurviveAnotherSpellingOfTheSamePath();
-  await testDiagnosticsTimeoutIsNotAnEmptyResult();
-  await testLspFramesBodiesByBytes();
-  await testLspReassemblesBodySplitMidCharacter();
-  await testDapFramesBodiesByBytes();
-  await testFramingCeilingFailsLoudly();
-  testDictionariesHaveNothingBehindThem();
-  testProjectPathsAreContained();
-  await testToolAndOpLookupsCannotReachThePrototype();
-  await testArgumentsOfTheWrongTypeAreRefused();
-  await testAnArgumentMeantForAnotherOpIsRefused();
-  testEveryArgumentNamesOpsItsToolHas();
-  await testToolsRefusePathsOutsideTheProject();
-  await testDebugToolsRefuseWithoutASession();
-  await testUpdateNoticeRidesOnAnAnswer();
-  await testUpdateCheckHasAnOffSwitch();
-  console.log('regression tests passed');
+  if (failed.length > 0) {
+    console.error(`${failed.length} of ${chosen.length} regressions failed:`);
+    for (const name of failed) {
+      console.error(`  ${name}`);
+    }
+    process.exitCode = 1;
+    return;
+  }
+  console.log(`regression tests passed (${chosen.length})`);
 }
 
 await main();

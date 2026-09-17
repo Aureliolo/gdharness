@@ -205,6 +205,26 @@ two states a caller must tell apart arrive as one answer, the caller's only way 
 trusting the tool and go around it. That is the cost being avoided here, and it is higher than the
 cost of a feature that does not exist yet.
 
+## How a test here is checked
+
+The same failure has a test-side spelling: an assertion that agrees with almost everything. Written
+as "the answer is not the complaint I am thinking of", it is satisfied by a crash, a timeout, an
+empty string and every refusal but one, so it stays green through the bug it was put there to hold.
+Four of them sat in `test/regressions.ts`, each guarding a call that was supposed to be accepted.
+An accepted call reaches something, and what it reaches is what gets asserted: the runtime that is
+not running, the console buffer answering with itself, the engine run failing under the operation
+that was asked for.
+
+A fixture is checked by disarming the line it guards: break the code on purpose, say beforehand
+which tests should notice, run them, and compare. A prediction that misses is worth more than a
+green run, because it names a fixture that is not watching what its name says it watches.
+
+For that to be readable the runner does not stop at the first failure. `bun test/regressions.ts`
+runs every regression whether or not the one before it failed and lists the ones that failed at the
+end, so a single disarm answers "which four noticed" rather than "one noticed, and the rest never
+ran". Any arguments select tests by name, loosely matched, for running one on its own while it is
+being written.
+
 ## What talks to what
 
 ```text
