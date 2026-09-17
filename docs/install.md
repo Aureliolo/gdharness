@@ -184,6 +184,7 @@ because the old version keeps answering until they are done:
 | `uninstall`          | All of it back out again                                |
 | `doctor`             | Says what holds and what does not; exits 1 on a problem |
 | `classes`            | Rebuilds the class cache from disk                      |
+| `runtime on` / `off` | Registers the runtime autoload, or takes it out again   |
 | `harnesses`          | Every harness, its flag and the file it reads           |
 
 Each of these except `harnesses` takes the project directory as its argument and defaults to the
