@@ -42,7 +42,7 @@ import { DEFAULT_DAP_PORT, GodotDAPClient, handleDAPTool, type StoppedAt } from 
 import { dictionary, emptyRecord } from './dictionary.js';
 import { errorMessage, Refusal } from './errors.js';
 import { GameLog, type LogEntry } from './game-log.js';
-import { type GodotBridge, getDefaultBridge } from './godot-bridge.js';
+import { type GodotBridge, getDefaultBridge, mayYetConnect } from './godot-bridge.js';
 import { GodotLocator } from './godot-path.js';
 import { type HeadlessOutcome, runOperation } from './headless.js';
 import { defectReport, feedbackNotice } from './issues.js';
@@ -2113,6 +2113,12 @@ class GodotServer {
       serverVersion: SERVER_VERSION,
       addonIsStale: status.connected ? stale : undefined,
       bridgeAvailable: this.bridgeStartupError === null,
+      // Whether a `connected: false` is final. The editor dials in rather than being dialled, and
+      // it backs off between tries, so for the first half-minute of a bridge's life "nothing has
+      // connected" and "there is no editor" are the same answer to two different questions. A
+      // downstream session read the first as the second straight after an upgrade respawned the
+      // server, and went looking through the machine's processes to find the editor still up.
+      mayYetConnect: status.connected ? undefined : mayYetConnect(status.listeningSince),
       startupError: this.bridgeStartupError,
       staleNote: stale ? addonMismatch(status.addonVersion, SERVER_VERSION) : undefined,
       retryingBridge: this.bridgeRetry === null ? undefined : true,

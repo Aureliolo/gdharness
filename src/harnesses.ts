@@ -856,6 +856,53 @@ export function registered(harness: Harness, projectPath: string): boolean {
 }
 
 /**
+ * The engine path this project's own configuration already records, or null for none.
+ *
+ * gdharness writes `GODOT_PATH` into every entry it makes, because a harness spawns the server
+ * with no environment of its own. So a project that has been set up carries a record of where its
+ * engine is, and for one whose engine is vendored under the project root and deliberately kept off
+ * PATH, that record is the only one there is. Asking somebody to re-supply a value the command is
+ * about to copy through unchanged is asking them to retype what it is holding.
+ *
+ * Project-scoped configs only. A machine-wide one may have been written for somebody else's
+ * project, and an engine path taken from there is another project's engine.
+ *
+ * The entry has to be readable as JSON, which is what gdharness reads back everywhere else here.
+ * A TOML or YAML config is written and never re-read, so a project with only one of those falls
+ * through to the ordinary search rather than being guessed at.
+ */
+export function recordedEnginePath(projectPath: string): string | null {
+  for (const harness of HARNESSES) {
+    if (harness.scope !== 'project' || harness.toml || harness.yaml || harness.snippet) {
+      continue;
+    }
+    const path = configPath(harness, projectPath);
+    if (!existsSync(path)) {
+      continue;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(readFileSync(path, 'utf8'));
+    } catch {
+      continue;
+    }
+    const entry = reach(reach(parsed, harness.container), SERVER_KEY);
+    const named = reach(reach(entry, harness.shape === 'opencode' ? 'environment' : 'env'), 'GODOT_PATH');
+    if (typeof named === 'string' && named !== '' && existsSync(named)) {
+      return named;
+    }
+  }
+  return null;
+}
+
+/** One key of a value that may be anything at all, which is what a config file is until read. */
+function reach(held: unknown, key: string): unknown {
+  return typeof held === 'object' && held !== null && !Array.isArray(held)
+    ? (held as Record<string, unknown>)[key]
+    : undefined;
+}
+
+/**
  * gdharness taken back out of one harness's configuration.
  *
  * Only our own key is touched. A file that held other servers keeps them and stays; one that held
