@@ -1,5 +1,6 @@
 extends RefCounted
 
+const Read = preload("reading.gd")
 const Log = preload("logger.gd")
 
 var _log: Log
@@ -58,8 +59,10 @@ func create_gdscript(params: Dictionary) -> Dictionary:
 	if not file:
 		return _log.failure("Failed to create script file: " + full_script_path)
 
-	file.store_string(script_content)
+	var stored: bool = file.store_string(script_content)
 	file.close()
+	if not stored:
+		return _log.failure("Failed to write to script file: " + full_script_path)
 
 	# Whether the engine accepts what was written, parsed under this project's own warning
 	# settings: a script that does not load is a script the caller wants to hear about now,
@@ -132,8 +135,10 @@ func modify_gdscript(params: Dictionary) -> Dictionary:
 	if not file:
 		return _log.failure("Failed to write to script file: " + full_script_path)
 
-	file.store_string("\n".join(lines))
+	var rewrote: bool = file.store_string("\n".join(lines))
 	file.close()
+	if not rewrote:
+		return _log.failure("Failed to write to script file: " + full_script_path)
 
 	return {
 		"success": true,
@@ -143,14 +148,15 @@ func modify_gdscript(params: Dictionary) -> Dictionary:
 	}
 
 
-# Inserts the declaration and answers with its one-based line number.
+# Inserts the declaration and answers with its one-based line number, or 0 for one that could not
+# be placed, which is a number no line has.
 func _add_variable(lines: Array[String], mod: Dictionary) -> int:
 	var var_name: String = str(mod.get("name", ""))
 	var var_type: String = str(mod.get("varType", ""))
 	var default_value: String = str(mod.get("defaultValue", ""))
-	var is_export: bool = bool(mod.get("isExport", false))
+	var is_export: bool = Read.as_bool(mod.get("isExport", false))
 	var export_hint: String = str(mod.get("exportHint", ""))
-	var is_onready: bool = bool(mod.get("isOnready", false))
+	var is_onready: bool = Read.as_bool(mod.get("isOnready", false))
 
 	var var_line: String = ""
 
@@ -179,7 +185,9 @@ func _add_variable(lines: Array[String], mod: Dictionary) -> int:
 		var_line += ": Variant"
 
 	var insert_line: int = _variable_insertion_point(lines)
-	lines.insert(insert_line, var_line)
+	if lines.insert(insert_line, var_line) != OK:
+		push_error("gdharness: could not place a declaration at line " + str(insert_line))
+		return 0
 	return insert_line + 1
 
 
@@ -208,7 +216,9 @@ func _add_signal(lines: Array[String], mod: Dictionary) -> int:
 		signal_line += "(" + signal_params + ")"
 
 	var insert_line: int = _signal_insertion_point(lines)
-	lines.insert(insert_line, signal_line)
+	if lines.insert(insert_line, signal_line) != OK:
+		push_error("gdharness: could not place a signal at line " + str(insert_line))
+		return 0
 	return insert_line + 1
 
 
@@ -234,7 +244,9 @@ func _add_function(lines: Array[String], mod: Dictionary) -> int:
 	var insert_line: int = _function_insertion_point(lines, position)
 
 	for i: int in range(func_lines.size() - 1, -1, -1):
-		lines.insert(insert_line, func_lines[i])
+		if lines.insert(insert_line, func_lines[i]) != OK:
+			push_error("gdharness: could not place a function at line " + str(insert_line))
+			return 0
 
 	return insert_line + 1
 

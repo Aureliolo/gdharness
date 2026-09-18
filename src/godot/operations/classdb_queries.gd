@@ -1,5 +1,6 @@
 extends RefCounted
 
+const Read = preload("reading.gd")
 const Log = preload("logger.gd")
 
 # The base class each category name stands for.
@@ -27,7 +28,7 @@ func _init(p_log: Log) -> void:
 func query_classes(params: Dictionary) -> Dictionary:
 	var filter: String = str(params.get("filter", ""))
 	var category: String = str(params.get("category", ""))
-	var instantiable_only: bool = bool(params.get("instantiable_only", false))
+	var instantiable_only: bool = Read.as_bool(params.get("instantiable_only", false))
 
 	_log.info(
 		(
@@ -82,7 +83,7 @@ func query_classes(params: Dictionary) -> Dictionary:
 # Query detailed info about a specific class from ClassDB
 func query_class_info(params: Dictionary) -> Dictionary:
 	var class_name_str: String = str(params.get("class_name", ""))
-	var include_inherited: bool = bool(params.get("include_inherited", false))
+	var include_inherited: bool = Read.as_bool(params.get("include_inherited", false))
 
 	_log.info(
 		"Querying class info for: " + class_name_str + " (include_inherited: " + str(include_inherited) + ")"
@@ -220,7 +221,7 @@ func _properties_of(class_name_str: String, include_inherited: bool) -> Array[Di
 
 	for p: Dictionary in ClassDB.class_get_property_list(class_name_str, not include_inherited):
 		# A category, group or subgroup is an editor heading rather than a property.
-		var usage: int = int(p.get("usage", 0))
+		var usage: int = Read.as_int(p.get("usage", 0))
 		if usage & PROPERTY_USAGE_CATEGORY or usage & PROPERTY_USAGE_GROUP or usage & PROPERTY_USAGE_SUBGROUP:
 			continue
 		properties.append(

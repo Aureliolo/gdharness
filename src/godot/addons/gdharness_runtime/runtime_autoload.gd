@@ -13,6 +13,7 @@ extends Node
 const Capture = preload("runtime_capture.gd")
 const InputCommands = preload("runtime_input.gd")
 const Queries = preload("runtime_queries.gd")
+const Read = preload("reading.gd")
 const Values = preload("runtime_values.gd")
 const Waits = preload("runtime_waits.gd")
 
@@ -110,8 +111,10 @@ func _process(_delta: float) -> void:
 
 	var gone: Array[StreamPeerTCP] = []
 	for client: StreamPeerTCP in _clients:
-		client.poll()
-		if client.get_status() != StreamPeerTCP.STATUS_CONNECTED:
+		# A poll that fails is a client that has already gone, which the status check below is
+		# about to find; the answer is read so it is not dropped, not because it adds anything.
+		var polled: Error = client.poll()
+		if polled != OK or client.get_status() != StreamPeerTCP.STATUS_CONNECTED:
 			gone.append(client)
 			continue
 		var available: int = client.get_available_bytes()
@@ -124,8 +127,11 @@ func _process(_delta: float) -> void:
 
 	for client: StreamPeerTCP in gone:
 		_clients.erase(client)
-		_pending.erase(client)
-		_outgoing.erase(client)
+		# Dictionary.erase answers with whether the key was there, and underscore-prefixed locals
+		# are how GDScript says an answer is deliberately unwanted: a client that had nothing
+		# pending or owed is as forgotten as one that had both.
+		var _had_pending: bool = _pending.erase(client)
+		var _had_outgoing: bool = _outgoing.erase(client)
 
 
 ## Hands the socket as much of what it is owed as it will take, and says whether it is still worth
@@ -138,7 +144,7 @@ func _drain(client: StreamPeerTCP) -> bool:
 	var sent: Array = client.put_partial_data(owed)
 	if sent[0] != OK:
 		return false
-	_outgoing[client] = owed.slice(int(sent[1]))
+	_outgoing[client] = owed.slice(Read.as_int(sent[1]))
 	return true
 
 
@@ -172,14 +178,14 @@ func _start_server() -> void:
 	# own path: a gate that starts sixteen engines at once announces sixteen games that are not
 	# games, and a client asking the runtime anything while they run can be answered by whichever
 	# of them replies first. Measured on two projects before it was written here.
-	if _script_run() and not bool(ProjectSettings.get_setting(SCRIPT_RUNS_SETTING, false)):
+	if _script_run() and not Read.as_bool(ProjectSettings.get_setting(SCRIPT_RUNS_SETTING, false)):
 		_enabled = false
 		return
 
 	_server = TCPServer.new()
 	# listen() defaults bind_address to "*", which exposes the game to the whole network.
 	var bind_address: String = str(ProjectSettings.get_setting(BIND_ADDRESS_SETTING, DEFAULT_BIND_ADDRESS))
-	var wanted_port: int = int(ProjectSettings.get_setting(PORT_SETTING, 0))
+	var wanted_port: int = Read.as_int(ProjectSettings.get_setting(PORT_SETTING, 0))
 	var error: Error = _server.listen(wanted_port, bind_address)
 	if error != OK:
 		# A warning, not an error: callers treat any ERROR line on stderr as a failed
@@ -233,8 +239,11 @@ func _announce(bind_address: String) -> void:
 			)
 		)
 		return
-	file.store_string(JSON.stringify(_identity(bind_address)))
+	var announced: bool = file.store_string(JSON.stringify(_identity(bind_address)))
 	file.close()
+	if not announced:
+		push_warning("[gdharness] cannot write %s; the server will not find this game" % path)
+		return
 	_announcement = path
 
 
@@ -286,11 +295,12 @@ func _handle_message(client: StreamPeerTCP, line: String) -> void:
 	if not params is Dictionary:
 		_send_error(client, request_id, "params must be an object")
 		return
+	var arguments: Dictionary = params
 
 	# A command that waits on the game (a frame, a signal, a condition) suspends here and answers
 	# when it is done, while _process keeps serving the other clients in the meantime. A client
 	# that hung up while its command waited is simply not written to.
-	var result: Dictionary = await _execute_command(command, params)
+	var result: Dictionary = await _execute_command(command, arguments)
 	result["id"] = request_id
 	if client.get_status() == StreamPeerTCP.STATUS_CONNECTED:
 		_send_response(client, result)
@@ -346,5 +356,9 @@ func _cleanup() -> void:
 	# The announcement is what tells the server this game exists, so it goes before the
 	# process does. A crash leaves it behind, and the server drops one whose process is gone.
 	if not _announcement.is_empty():
-		DirAccess.remove_absolute(_announcement)
+		var removed: Error = DirAccess.remove_absolute(_announcement)
+		if removed != OK:
+			push_warning(
+				"[gdharness] cannot remove %s; the server will find a game that is gone" % _announcement
+			)
 		_announcement = ""

@@ -3,6 +3,8 @@ extends Node
 
 ## Resource files, shaders, tilesets and themes, written through the open editor.
 
+const Read = preload("../reading.gd")
+
 # Shader templates. Written as real multi-line source rather than escaped one-liners so that
 # what ends up in the .gdshader can be read here. The %s is the shader type.
 const SHADER_EMPTY: String = """shader_type %s;
@@ -75,26 +77,37 @@ func _parse_value(value: Variant) -> Variant:
 			var t: Variant = fields.get("type", fields.get("_type", ""))
 			match t:
 				"Vector2":
-					return Vector2(fields.get("x", 0), fields.get("y", 0))
+					return Vector2(Read.as_float(fields.get("x", 0)), Read.as_float(fields.get("y", 0)))
 				"Vector3":
-					return Vector3(fields.get("x", 0), fields.get("y", 0), fields.get("z", 0))
+					return Vector3(
+						Read.as_float(fields.get("x", 0)),
+						Read.as_float(fields.get("y", 0)),
+						Read.as_float(fields.get("z", 0))
+					)
 				"Color":
 					return Color(
-						fields.get("r", 1), fields.get("g", 1), fields.get("b", 1), fields.get("a", 1)
+						Read.as_float(fields.get("r", 1), 1.0),
+						Read.as_float(fields.get("g", 1), 1.0),
+						Read.as_float(fields.get("b", 1), 1.0),
+						Read.as_float(fields.get("a", 1), 1.0)
 					)
 				"Vector2i":
-					return Vector2i(fields.get("x", 0), fields.get("y", 0))
+					return Vector2i(Read.as_int(fields.get("x", 0)), Read.as_int(fields.get("y", 0)))
 				"Vector3i":
-					return Vector3i(fields.get("x", 0), fields.get("y", 0), fields.get("z", 0))
+					return Vector3i(
+						Read.as_int(fields.get("x", 0)),
+						Read.as_int(fields.get("y", 0)),
+						Read.as_int(fields.get("z", 0))
+					)
 				"Rect2":
 					return Rect2(
-						fields.get("x", 0),
-						fields.get("y", 0),
-						fields.get("width", 0),
-						fields.get("height", 0)
+						Read.as_float(fields.get("x", 0)),
+						Read.as_float(fields.get("y", 0)),
+						Read.as_float(fields.get("width", 0)),
+						Read.as_float(fields.get("height", 0))
 					)
 				"NodePath":
-					return NodePath(fields.get("path", ""))
+					return NodePath(str(fields.get("path", "")))
 	if typeof(value) == TYPE_ARRAY:
 		var result: Array = []
 		for item: Variant in value:
@@ -106,16 +119,17 @@ func _parse_value(value: Variant) -> Variant:
 func _set_resource_properties(resource: Resource, properties: Variant) -> void:
 	var props: Dictionary = _parse_properties_dict(properties)
 	for key: Variant in props:
-		var val: Variant = _parse_value(props[key])
-		resource.set(key, val)
+		var named: String = str(key)
+		resource.set(named, _parse_value(props[key]))
 
 
 func _parse_properties_dict(raw: Variant) -> Dictionary:
 	if typeof(raw) == TYPE_DICTIONARY:
 		return raw
 	if typeof(raw) == TYPE_STRING and raw != "":
+		var text: String = raw
 		var json: JSON = JSON.new()
-		if json.parse(raw) == OK and typeof(json.data) == TYPE_DICTIONARY:
+		if json.parse(text) == OK and typeof(json.data) == TYPE_DICTIONARY:
 			return json.data
 	return {}
 
@@ -212,8 +226,10 @@ func create_shader(args: Dictionary) -> Dictionary:
 	var file: FileAccess = FileAccess.open(shader_path, FileAccess.WRITE)
 	if file == null:
 		return {"ok": false, "error": "Failed to open shader file for writing", "shaderPath": shader_path}
-	file.store_string(code)
+	var written: bool = file.store_string(code)
 	file.close()
+	if not written:
+		return {"ok": false, "error": "Failed to write the shader file", "shaderPath": shader_path}
 
 	_refresh_filesystem()
 	return {"ok": true, "shaderPath": shader_path, "shaderType": shader_type}
@@ -241,17 +257,21 @@ func create_tileset(args: Dictionary) -> Dictionary:
 		atlas.texture = tex
 
 		var tile_size: Dictionary = source.get("tileSize", {})
-		atlas.texture_region_size = Vector2i(int(tile_size.get("x", 0)), int(tile_size.get("y", 0)))
+		atlas.texture_region_size = Vector2i(
+			Read.as_int(tile_size.get("x", 0)), Read.as_int(tile_size.get("y", 0))
+		)
 
 		if source.has("separation"):
 			var sep: Dictionary = source.get("separation", {})
-			atlas.separation = Vector2i(int(sep.get("x", 0)), int(sep.get("y", 0)))
+			atlas.separation = Vector2i(Read.as_int(sep.get("x", 0)), Read.as_int(sep.get("y", 0)))
 
 		if source.has("offset"):
 			var off: Dictionary = source.get("offset", {})
-			atlas.margins = Vector2i(int(off.get("x", 0)), int(off.get("y", 0)))
+			atlas.margins = Vector2i(Read.as_int(off.get("x", 0)), Read.as_int(off.get("y", 0)))
 
-		tileset.add_source(atlas)
+		var added: int = tileset.add_source(atlas)
+		if added < 0:
+			return {"ok": false, "error": "Failed to add a tile source", "texture": tex_path}
 
 	var save_result: Error = ResourceSaver.save(tileset, tileset_path)
 	if save_result != OK:
@@ -262,8 +282,8 @@ func create_tileset(args: Dictionary) -> Dictionary:
 
 
 ## The source ids a tile set holds, for saying what a cell could have named instead.
-func _source_ids(tile_set: TileSet) -> PackedInt32Array:
-	var ids: PackedInt32Array = PackedInt32Array()
+func _source_ids(tile_set: TileSet) -> Array[int]:
+	var ids: Array[int] = []
 	for index: int in tile_set.get_source_count():
 		ids.append(tile_set.get_source_id(index))
 	return ids
@@ -293,7 +313,7 @@ func set_tilemap_cells(args: Dictionary) -> Dictionary:
 		root.queue_free()
 		return {"ok": false, "error": "TileMap node not found", "tilemapNodePath": node_path}
 
-	var layer: int = int(args.get("layer", 0))
+	var layer: int = Read.as_int(args.get("layer", 0))
 	var cells: Variant = args.get("cells", [])
 	# Refused rather than skipped: placing nothing and answering success is indistinguishable
 	# from placing everything, and the caller only finds out by opening the scene.
@@ -322,7 +342,7 @@ func set_tilemap_cells(args: Dictionary) -> Dictionary:
 				"ok": false, "error": "every cell must be an object with coords, sourceId and atlasCoords"
 			}
 		var cell: Dictionary = entry
-		var source_id: int = int(cell.get("sourceId", -1))
+		var source_id: int = Read.as_int(cell.get("sourceId", -1), -1)
 		if not tile_set.has_source(source_id):
 			root.queue_free()
 			return {
@@ -332,13 +352,13 @@ func set_tilemap_cells(args: Dictionary) -> Dictionary:
 
 		var coords: Dictionary = cell.get("coords", {})
 		var atlas_coords: Dictionary = cell.get("atlasCoords", {})
-		var at: Vector2i = Vector2i(int(coords.get("x", 0)), int(coords.get("y", 0)))
+		var at: Vector2i = Vector2i(Read.as_int(coords.get("x", 0)), Read.as_int(coords.get("y", 0)))
 		tilemap.set_cell(
 			layer,
 			at,
 			source_id,
-			Vector2i(int(atlas_coords.get("x", 0)), int(atlas_coords.get("y", 0))),
-			int(cell.get("alternativeTile", 0))
+			Vector2i(Read.as_int(atlas_coords.get("x", 0)), Read.as_int(atlas_coords.get("y", 0))),
+			Read.as_int(cell.get("alternativeTile", 0))
 		)
 		if tilemap.get_cell_source_id(layer, at) != -1:
 			written += 1
@@ -368,7 +388,10 @@ func set_theme_color(args: Dictionary) -> Dictionary:
 
 	var c: Dictionary = args.get("color", {})
 	var color: Color = Color(
-		float(c.get("r", 1.0)), float(c.get("g", 1.0)), float(c.get("b", 1.0)), float(c.get("a", 1.0))
+		Read.as_float(c.get("r", 1.0), 1.0),
+		Read.as_float(c.get("g", 1.0), 1.0),
+		Read.as_float(c.get("b", 1.0), 1.0),
+		Read.as_float(c.get("a", 1.0), 1.0)
 	)
 	theme.set_color(color_name, control_type, color)
 
@@ -406,7 +429,7 @@ func set_theme_font_size(args: Dictionary) -> Dictionary:
 	if theme == null:
 		return {"ok": false, "error": "No Theme at %s. Create one there first." % theme_path}
 
-	theme.set_font_size(font_size_name, control_type, int(args.get("size", 0)))
+	theme.set_font_size(font_size_name, control_type, Read.as_int(args.get("size", 0)))
 
 	var save_result: Error = ResourceSaver.save(theme, theme_path)
 	if save_result != OK:

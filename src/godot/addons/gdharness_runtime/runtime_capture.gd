@@ -2,6 +2,7 @@ extends RefCounted
 
 ## A picture of the running game, as a PNG written where the server asked for it.
 
+const Read = preload("reading.gd")
 const Values = preload("runtime_values.gd")
 
 var _host: Node
@@ -16,7 +17,7 @@ func capture_screenshot(params: Dictionary) -> Dictionary:
 
 
 func capture_viewport(params: Dictionary) -> Dictionary:
-	var viewport_path: String = String(params.get("viewportPath", ""))
+	var viewport_path: String = str(params.get("viewportPath", ""))
 	if viewport_path.is_empty():
 		return capture_screenshot(params)
 
@@ -26,13 +27,14 @@ func capture_viewport(params: Dictionary) -> Dictionary:
 	var node: Node = standing["node"]
 	if not node is Viewport:
 		return {"type": "error", "message": "Node is not a Viewport: " + viewport_path}
-	return _capture(node, params)
+	var viewport: Viewport = node
+	return _capture(viewport, params)
 
 
 ## The server names the file, so a game cannot point it at a path of its own choosing; a call
 ## with no path is a call the server did not make.
 func _capture(viewport: Viewport, params: Dictionary) -> Dictionary:
-	var requested_path: String = String(params.get("output_path", ""))
+	var requested_path: String = str(params.get("output_path", ""))
 	if requested_path.is_empty():
 		return {"type": "error", "message": "output_path required"}
 
@@ -59,8 +61,8 @@ func _capture(viewport: Viewport, params: Dictionary) -> Dictionary:
 	if image == null:
 		return {"type": "error", "message": "Failed to capture viewport image"}
 
-	var width: int = int(params.get("width", 0))
-	var height: int = int(params.get("height", 0))
+	var width: int = Read.as_int(params.get("width", 0))
+	var height: int = Read.as_int(params.get("height", 0))
 	if width > 0 and height > 0:
 		image.resize(width, height)
 

@@ -80,9 +80,11 @@ const operationsModules = [
   'import_pipeline.gd',
   'input_actions.gd',
   'logger.gd',
+  'patterns.gd',
   'plugins.gd',
   'project_config.gd',
   'project_diagnostics.gd',
+  'reading.gd',
   'resource_files.gd',
   'serialisation.gd',
 ];

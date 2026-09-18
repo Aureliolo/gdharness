@@ -1,5 +1,6 @@
 extends RefCounted
 
+const Read = preload("reading.gd")
 const FileWalk = preload("file_walk.gd")
 const Log = preload("logger.gd")
 
@@ -18,7 +19,7 @@ func _init(p_log: Log) -> void:
 # Get import status for resources
 func get_import_status(params: Dictionary) -> Dictionary:
 	var resource_path: String = str(params.get("resource_path", ""))
-	var include_up_to_date: bool = bool(params.get("include_up_to_date", false))
+	var include_up_to_date: bool = Read.as_bool(params.get("include_up_to_date", false))
 
 	_log.info(
 		(
@@ -90,7 +91,7 @@ func set_import_options(params: Dictionary) -> Dictionary:
 		resource_path = "res://" + resource_path
 
 	var options: Dictionary = params.get("options", {})
-	var do_reimport: bool = bool(params.get("reimport", true))
+	var do_reimport: bool = Read.as_bool(params.get("reimport", true), true)
 
 	_log.info("Setting import options for: " + resource_path)
 
@@ -131,7 +132,7 @@ func set_import_options(params: Dictionary) -> Dictionary:
 # Reimport a resource or all resources
 func reimport_resource(params: Dictionary) -> Dictionary:
 	var resource_path: String = str(params.get("resource_path", ""))
-	var force: bool = bool(params.get("force", false))
+	var force: bool = Read.as_bool(params.get("force", false))
 
 	_log.info(
 		(
@@ -208,7 +209,7 @@ func list_export_presets(_params: Dictionary) -> Dictionary:
 # Validate project for export
 func validate_project(params: Dictionary) -> Dictionary:
 	var preset_name: String = str(params.get("preset", ""))
-	var include_suggestions: bool = bool(params.get("include_suggestions", true))
+	var include_suggestions: bool = Read.as_bool(params.get("include_suggestions", true), true)
 
 	_log.info("Validating project" + (" for preset: " + preset_name if not preset_name.is_empty() else ""))
 

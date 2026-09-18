@@ -3,6 +3,8 @@ extends Node
 
 ## Animations and animation trees, edited in the open editor.
 
+const Read = preload("../reading.gd")
+
 var _editor_plugin: EditorPlugin = null
 
 
@@ -75,12 +77,19 @@ func _parse_value(value: Variant) -> Variant:
 			var t: Variant = fields.get("type", fields.get("_type", ""))
 			match t:
 				"Vector2":
-					return Vector2(fields.get("x", 0), fields.get("y", 0))
+					return Vector2(Read.as_float(fields.get("x", 0)), Read.as_float(fields.get("y", 0)))
 				"Vector3":
-					return Vector3(fields.get("x", 0), fields.get("y", 0), fields.get("z", 0))
+					return Vector3(
+						Read.as_float(fields.get("x", 0)),
+						Read.as_float(fields.get("y", 0)),
+						Read.as_float(fields.get("z", 0))
+					)
 				"Color":
 					return Color(
-						fields.get("r", 1), fields.get("g", 1), fields.get("b", 1), fields.get("a", 1)
+						Read.as_float(fields.get("r", 1), 1.0),
+						Read.as_float(fields.get("g", 1), 1.0),
+						Read.as_float(fields.get("b", 1), 1.0),
+						Read.as_float(fields.get("a", 1), 1.0)
 					)
 	if typeof(value) == TYPE_ARRAY:
 		var result: Array = []
@@ -93,8 +102,9 @@ func _parse_value(value: Variant) -> Variant:
 func _parse_json_maybe(value: Variant) -> Variant:
 	if typeof(value) != TYPE_STRING:
 		return value
-	var parsed: Variant = JSON.parse_string(value)
-	if parsed == null and value != "null":
+	var text: String = value
+	var parsed: Variant = JSON.parse_string(text)
+	if parsed == null and text != "null":
 		return value
 	return parsed
 
@@ -183,9 +193,9 @@ func create_animation(args: Dictionary) -> Dictionary:
 			loop_mode = Animation.LOOP_NONE
 
 	var anim: Animation = Animation.new()
-	anim.length = float(args.get("length", 1.0))
+	anim.length = Read.as_float(args.get("length", 1.0), 1.0)
 	anim.loop_mode = loop_mode
-	anim.step = float(args.get("step", 0.1))
+	anim.step = Read.as_float(args.get("step", 0.1), 0.1)
 
 	var add_err: Error = anim_lib.add_animation(StringName(animation_name), anim)
 	if add_err != OK:
@@ -262,7 +272,11 @@ func add_animation_track(args: Dictionary) -> Dictionary:
 				var parsed_value: Variant = (
 					_parse_json_maybe(raw_value) if typeof(raw_value) == TYPE_STRING else raw_value
 				)
-				anim.track_insert_key(track_idx, float(keyframe.get("time", 0.0)), _parse_value(parsed_value))
+				var placed: int = anim.track_insert_key(
+					track_idx, Read.as_float(keyframe.get("time", 0.0)), _parse_value(parsed_value)
+				)
+				if placed < 0:
+					push_error("gdharness: could not key " + prop_name + " on " + node_path_str)
 
 		"method":
 			var method_node_path: String = str(track.get("nodePath", ""))
@@ -276,10 +290,14 @@ func add_animation_track(args: Dictionary) -> Dictionary:
 				if typeof(entry) != TYPE_DICTIONARY:
 					continue
 				var keyframe: Dictionary = entry
-				var invocation: Dictionary = {
-					"method": method_name, "args": _parse_method_args(keyframe.get("args", []))
-				}
-				anim.track_insert_key(track_idx, float(keyframe.get("time", 0.0)), invocation)
+				var given: Variant = keyframe.get("args", [])
+				var arguments: Array = given if given is Array else []
+				var invocation: Dictionary = {"method": method_name, "args": _parse_method_args(arguments)}
+				var placed: int = anim.track_insert_key(
+					track_idx, Read.as_float(keyframe.get("time", 0.0)), invocation
+				)
+				if placed < 0:
+					push_error("gdharness: could not key " + method_name + " on " + method_node_path)
 
 		_:
 			scene_root.queue_free()

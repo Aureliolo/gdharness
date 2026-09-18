@@ -34,7 +34,7 @@ func global_classes(_args: Dictionary) -> Dictionary:
 		return {"ok": false, "error": "Editor plugin unavailable"}
 
 	var filesystem: EditorFileSystem = EditorInterface.get_resource_filesystem()
-	var names: PackedStringArray = []
+	var names: Array[String] = []
 	_walk(filesystem.get_filesystem(), names)
 	names.sort()
 	return {
@@ -45,7 +45,10 @@ func global_classes(_args: Dictionary) -> Dictionary:
 	}
 
 
-func _walk(directory: EditorFileSystemDirectory, into: PackedStringArray) -> void:
+# Array[String] rather than PackedStringArray: appending to a packed array answers with whether it
+# worked, and a project holding return_value_discarded at error level refuses a script that drops
+# that answer. Both reach the caller as the same list of strings.
+func _walk(directory: EditorFileSystemDirectory, into: Array[String]) -> void:
 	if directory == null:
 		return
 	for index: int in range(directory.get_file_count()):

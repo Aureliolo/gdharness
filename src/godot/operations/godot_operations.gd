@@ -48,10 +48,15 @@ func _init() -> void:
 	_log.debug("All arguments: " + str(args))
 
 	var operation: String = args[script_index + 2]
-	var params: Variant = _read_params(args[params_index])
-	if not params is Dictionary:
+	var read: Variant = _read_params(args[params_index])
+	if not read is Dictionary:
 		quit(1)
 		return
+	# Through a typed local rather than straight into the call. The check above proves the type to
+	# a reader and not to the analyser, so the call handed a Variant to a Dictionary parameter, and
+	# a project holding unsafe_call_argument at error level then refused to compile this script at
+	# all. It is compiled under the target project's warning levels, not under this package's.
+	var params: Dictionary = read
 
 	_log.info("Executing operation: " + operation)
 

@@ -1,5 +1,7 @@
 extends RefCounted
 
+const Patterns = preload("patterns.gd")
+const Read = preload("reading.gd")
 const FileWalk = preload("file_walk.gd")
 const Log = preload("logger.gd")
 
@@ -39,9 +41,9 @@ func _init(p_log: Log) -> void:
 func get_dependencies(params: Dictionary) -> Dictionary:
 	var resource_path: String = str(params.get("resource_path", ""))
 	# No depth, or a depth of zero or less, means the whole chain; the walk stops at cycles.
-	var depth: int = int(params.get("depth", 0))
+	var depth: int = Read.as_int(params.get("depth", 0))
 	var max_depth: int = depth if depth > 0 else 1000
-	var include_built_in: bool = bool(params.get("include_builtin", false))
+	var include_built_in: bool = Read.as_bool(params.get("include_builtin", false))
 
 	_log.info(
 		(
@@ -83,7 +85,10 @@ func get_dependencies(params: Dictionary) -> Dictionary:
 
 	var dep_count: int = 0
 	for key: String in dependencies:
-		dep_count += _count_recursive(dependencies[key])
+		# Through a typed local: what comes out of a Dictionary is Variant, and a project that
+		# errors on handing one to a typed parameter will not compile this script at all.
+		var walked: Array[Dictionary] = dependencies[key]
+		dep_count += _count_recursive(walked)
 
 	return {
 		"dependencies": dependencies,
@@ -111,12 +116,10 @@ func find_resource_usages(params: Dictionary) -> Dictionary:
 	_log.info("Finding usages of: " + resource_path)
 
 	var class_name_declared: String = _declared_class_name(resource_path)
-	var by_path: RegEx = RegEx.new()
-	by_path.compile('"(res://)?' + _regex_escaped(resource_path.substr(6)) + '"')
+	var by_path: RegEx = Patterns.compiled('"(res://)?' + _regex_escaped(resource_path.substr(6)) + '"')
 	var by_class: RegEx = null
 	if not class_name_declared.is_empty():
-		by_class = RegEx.new()
-		by_class.compile("\\b" + _regex_escaped(class_name_declared) + "\\b")
+		by_class = Patterns.compiled("\\b" + _regex_escaped(class_name_declared) + "\\b")
 
 	var all_files: Array[String] = []
 	for ext: Variant in file_types:
@@ -146,7 +149,7 @@ func find_resource_usages(params: Dictionary) -> Dictionary:
 			if kind.is_empty():
 				continue
 			references.append({"line": i + 1, "kind": kind, "text": line.strip_edges()})
-			by_kind[kind] = int(by_kind.get(kind, 0)) + 1
+			by_kind[kind] = Read.as_int(by_kind.get(kind, 0)) + 1
 
 		if not references.is_empty():
 			usages.append({"file": file_path, "references": references})
@@ -176,8 +179,7 @@ func _declared_class_name(path: String) -> String:
 	var file: FileAccess = FileAccess.open(path, FileAccess.READ)
 	if not file:
 		return ""
-	var declaration: RegEx = RegEx.new()
-	declaration.compile("^class_name\\s+([A-Za-z_][A-Za-z0-9_]*)")
+	var declaration: RegEx = Patterns.compiled("^class_name\\s+([A-Za-z_][A-Za-z0-9_]*)")
 	while not file.eof_reached():
 		var found: RegExMatch = declaration.search(file.get_line())
 		if found != null:
@@ -214,7 +216,8 @@ func _count_recursive(deps: Array[Dictionary]) -> int:
 	var count: int = deps.size()
 	for dep: Dictionary in deps:
 		if dep.has("dependencies"):
-			count += _count_recursive(dep["dependencies"])
+			var deeper: Array[Dictionary] = dep["dependencies"]
+			count += _count_recursive(deeper)
 	return count
 
 
@@ -243,8 +246,7 @@ func _analyze_resource(path: String, current_depth: int, walk: DependencyWalk) -
 		file.close()
 
 		for pattern: String in REFERENCE_PATTERNS:
-			var regex: RegEx = RegEx.new()
-			regex.compile(pattern)
+			var regex: RegEx = Patterns.compiled(pattern)
 			for m: RegExMatch in regex.search_all(content):
 				var dep_path: String = _referenced_path(m.get_string())
 
@@ -282,12 +284,13 @@ func _analyze_resource(path: String, current_depth: int, walk: DependencyWalk) -
 
 # The path inside a preload(), load() or ext_resource match; a bare res:// match is the path.
 func _referenced_path(matched: String) -> String:
-	var inner: RegEx = RegEx.new()
+	var expression: String = ""
 	if "preload" in matched or "load" in matched:
-		inner.compile('"([^"]+)"')
+		expression = '"([^"]+)"'
 	elif "ext_resource" in matched:
-		inner.compile('path="([^"]+)"')
+		expression = 'path="([^"]+)"'
 	else:
 		return matched
+	var inner: RegEx = Patterns.compiled(expression)
 	var inner_match: RegExMatch = inner.search(matched)
 	return inner_match.get_string(1) if inner_match else matched

@@ -16,7 +16,12 @@ var _watched_files: Dictionary = {}
 func _enter_tree() -> void:
 	_timer = Timer.new()
 	_timer.wait_time = CHECK_INTERVAL_SECONDS
-	_timer.timeout.connect(_check_for_changes)
+	# int rather than Error: Signal.connect answers with a plain int, where Object.connect answers
+	# with the enum, and a project holding int_as_enum_without_cast at error level refuses the
+	# assignment that conflates them.
+	var watching: int = _timer.timeout.connect(_check_for_changes)
+	if watching != OK:
+		push_error("gdharness: could not start watching for changes on disk")
 	add_child(_timer)
 	_timer.start()
 	_update_watched_files()
@@ -79,7 +84,9 @@ func _check_for_changes() -> void:
 
 func _reload_script(path: String) -> void:
 	print("[gdharness] Script changed on disk, reloading: ", path)
-	ResourceLoader.load(path, "", ResourceLoader.CACHE_MODE_REPLACE)
+	var reloaded: Resource = ResourceLoader.load(path, "", ResourceLoader.CACHE_MODE_REPLACE)
+	if reloaded == null:
+		push_error("gdharness: could not reload " + path + " from disk")
 
 
 func _reload_scene(path: String) -> void:

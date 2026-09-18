@@ -23,9 +23,9 @@ func _enter_tree() -> void:
 	add_child(_tool_executor)
 	_tool_executor.set_editor_plugin(self)
 
-	_client.connected.connect(_on_connected)
-	_client.disconnected.connect(_on_disconnected)
-	_client.tool_requested.connect(_on_tool_requested)
+	_listen(_client.connected, _on_connected)
+	_listen(_client.disconnected, _on_disconnected)
+	_listen(_client.tool_requested, _on_tool_requested)
 
 	_setup_status_indicator()
 	_client.connect_to_server()
@@ -51,6 +51,18 @@ func _exit_tree() -> void:
 		remove_control_from_container(CONTAINER_TOOLBAR, _status_label)
 		_status_label.queue_free()
 		_status_label = null
+
+
+# A failed connect is a mistake in this plugin rather than anything the editor did, so it goes to
+# the error stream instead of being dropped: a project holding return_value_discarded at error level
+# refuses to compile a script that throws the answer away.
+func _listen(source: Signal, handler: Callable) -> void:
+	# int rather than Error: Signal.connect answers with a plain int, where Object.connect answers
+	# with the enum, and a project holding int_as_enum_without_cast at error level refuses the
+	# assignment that conflates them.
+	var joined: int = source.connect(handler)
+	if joined != OK:
+		push_error("gdharness: could not listen to " + source.get_name())
 
 
 func _setup_status_indicator() -> void:
@@ -82,7 +94,8 @@ func _on_tool_requested(request_id: String, tool_name: String, args: Dictionary)
 
 	if success:
 		var payload: Dictionary = result.duplicate(true)
-		payload.erase("ok")
+		if not payload.erase("ok"):
+			push_error("gdharness: a tool answered ok without an ok field to remove")
 		_client.send_tool_result(request_id, true, payload, "")
 	else:
 		_client.send_tool_result(request_id, false, null, str(result.get("error", "Unknown error")))

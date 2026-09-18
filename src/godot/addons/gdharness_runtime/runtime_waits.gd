@@ -4,6 +4,7 @@ extends RefCounted
 ## happened, or when the time ran out, so the caller never sleeps for a guessed length.
 
 const Queries = preload("runtime_queries.gd")
+const Read = preload("reading.gd")
 const Values = preload("runtime_values.gd")
 
 ## The longest one wait may last, whatever the request says: past this the server has long
@@ -34,7 +35,7 @@ static func _out_of_range(named: String, asked: int, least: int, most: int) -> D
 
 
 func wait_frames(params: Dictionary) -> Dictionary:
-	var frames: int = int(params.get("frames", 1))
+	var frames: int = Read.as_int(params.get("frames", 1), 1)
 	if frames < 1 or frames > MOST_FRAMES:
 		return _out_of_range("frames", frames, 1, MOST_FRAMES)
 	var started: int = Time.get_ticks_msec()
@@ -47,7 +48,7 @@ func wait_frames(params: Dictionary) -> Dictionary:
 func wait_signal(params: Dictionary) -> Dictionary:
 	var node_path: String = str(params.get("path", ""))
 	var signal_name: String = str(params.get("signal", ""))
-	var timeout_ms: int = int(params.get("timeout_ms", 5000))
+	var timeout_ms: int = Read.as_int(params.get("timeout_ms", 5000), 5000)
 	if timeout_ms < 1 or timeout_ms > CEILING_MSEC:
 		return _out_of_range("timeout_ms", timeout_ms, 1, CEILING_MSEC)
 	if node_path.is_empty() or signal_name.is_empty():
@@ -63,7 +64,9 @@ func wait_signal(params: Dictionary) -> Dictionary:
 	var catcher: SignalCatcher = SignalCatcher.new()
 	catcher.arity = _signal_arity(node, signal_name)
 	var callable: Callable = catcher._on_fired
-	node.connect(signal_name, callable, CONNECT_ONE_SHOT)
+	var listening: Error = node.connect(signal_name, callable, CONNECT_ONE_SHOT)
+	if listening != OK:
+		return {"type": "error", "message": "Could not listen to signal: " + signal_name}
 	var started: int = Time.get_ticks_msec()
 	while not catcher.fired and Time.get_ticks_msec() - started < timeout_ms:
 		await _host.get_tree().process_frame
@@ -86,7 +89,7 @@ func wait_until(params: Dictionary) -> Dictionary:
 	var node_path: String = str(params.get("path", ""))
 	var property: String = str(params.get("property", ""))
 	var says: String = str(params.get("says", ""))
-	var timeout_ms: int = int(params.get("timeout_ms", 5000))
+	var timeout_ms: int = Read.as_int(params.get("timeout_ms", 5000), 5000)
 	if timeout_ms < 1 or timeout_ms > CEILING_MSEC:
 		return _out_of_range("timeout_ms", timeout_ms, 1, CEILING_MSEC)
 	if node_path.is_empty():

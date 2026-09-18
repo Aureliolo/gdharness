@@ -3,6 +3,8 @@ extends Node
 
 ## Scenes and their nodes, edited in the open editor and read back from what it holds.
 
+const Read = preload("../reading.gd")
+
 var _editor_plugin: EditorPlugin = null
 
 
@@ -89,13 +91,15 @@ func _find_node(root: Node, path: String) -> Node:
 ## declares, or a bare array positional for a vector. Each is its own function; asking all three
 ## in one was twenty-four exits deep and impossible to follow.
 func _parse_value(value: Variant, expected_type: int = TYPE_NIL) -> Variant:
-	if typeof(value) == TYPE_DICTIONARY:
-		var tagged: Array = _parse_tagged_dictionary(value)
+	if value is Dictionary:
+		var fields: Dictionary = value
+		var tagged: Array = _parse_tagged_dictionary(fields)
 		if tagged[0]:
 			return tagged[1]
-		return _parse_shaped_dictionary(value, expected_type)
-	if typeof(value) == TYPE_ARRAY:
-		return _parse_array(value, expected_type)
+		return _parse_shaped_dictionary(fields, expected_type)
+	if value is Array:
+		var items: Array = value
+		return _parse_array(items, expected_type)
 	return value
 
 
@@ -114,26 +118,53 @@ func _parse_tagged_dictionary(value: Dictionary) -> Array:
 
 	match type_tag:
 		"Vector2":
-			return [true, Vector2(value.get("x", 0), value.get("y", 0))]
+			return [true, Vector2(Read.as_float(value.get("x", 0)), Read.as_float(value.get("y", 0)))]
 		"Vector3":
-			return [true, Vector3(value.get("x", 0), value.get("y", 0), value.get("z", 0))]
+			return [
+				true,
+				Vector3(
+					Read.as_float(value.get("x", 0)),
+					Read.as_float(value.get("y", 0)),
+					Read.as_float(value.get("z", 0))
+				)
+			]
 		"Color":
-			return [true, Color(value.get("r", 1), value.get("g", 1), value.get("b", 1), value.get("a", 1))]
+			return [
+				true,
+				Color(
+					Read.as_float(value.get("r", 1), 1.0),
+					Read.as_float(value.get("g", 1), 1.0),
+					Read.as_float(value.get("b", 1), 1.0),
+					Read.as_float(value.get("a", 1), 1.0)
+				)
+			]
 		"Vector2i":
-			return [true, Vector2i(value.get("x", 0), value.get("y", 0))]
+			return [true, Vector2i(Read.as_int(value.get("x", 0)), Read.as_int(value.get("y", 0)))]
 		"Vector3i":
-			return [true, Vector3i(value.get("x", 0), value.get("y", 0), value.get("z", 0))]
+			return [
+				true,
+				Vector3i(
+					Read.as_int(value.get("x", 0)),
+					Read.as_int(value.get("y", 0)),
+					Read.as_int(value.get("z", 0))
+				)
+			]
 		"Rect2":
 			return [
 				true,
-				Rect2(value.get("x", 0), value.get("y", 0), value.get("width", 0), value.get("height", 0))
+				Rect2(
+					Read.as_float(value.get("x", 0)),
+					Read.as_float(value.get("y", 0)),
+					Read.as_float(value.get("width", 0)),
+					Read.as_float(value.get("height", 0))
+				)
 			]
 		"Transform2D":
 			return _parse_transform2d(value)
 		"Transform3D":
 			return _parse_transform3d(value)
 		"NodePath":
-			return [true, NodePath(value.get("path", ""))]
+			return [true, NodePath(str(value.get("path", "")))]
 		"Resource":
 			var resource_path: String = str(value.get("path", ""))
 			return [true, null if resource_path.is_empty() else load(resource_path)]
@@ -172,9 +203,9 @@ func _parse_transform2d(value: Dictionary) -> Array:
 	return [
 		true,
 		Transform2D(
-			Vector2(basis_x.get("x", 1), basis_x.get("y", 0)),
-			Vector2(basis_y.get("x", 0), basis_y.get("y", 1)),
-			Vector2(origin.get("x", 0), origin.get("y", 0))
+			Vector2(Read.as_float(basis_x.get("x", 1), 1.0), Read.as_float(basis_x.get("y", 0))),
+			Vector2(Read.as_float(basis_y.get("x", 0)), Read.as_float(basis_y.get("y", 1), 1.0)),
+			Vector2(Read.as_float(origin.get("x", 0)), Read.as_float(origin.get("y", 0)))
 		)
 	]
 
@@ -189,11 +220,18 @@ func _parse_transform3d(value: Dictionary) -> Array:
 	var y: Dictionary = b.get("y", {})
 	var z: Dictionary = b.get("z", {})
 	var basis: Basis = Basis(
-		Vector3(x.get("x", 1), x.get("y", 0), x.get("z", 0)),
-		Vector3(y.get("x", 0), y.get("y", 1), y.get("z", 0)),
-		Vector3(z.get("x", 0), z.get("y", 0), z.get("z", 1))
+		Vector3(
+			Read.as_float(x.get("x", 1), 1.0), Read.as_float(x.get("y", 0)), Read.as_float(x.get("z", 0))
+		),
+		Vector3(
+			Read.as_float(y.get("x", 0)), Read.as_float(y.get("y", 1), 1.0), Read.as_float(y.get("z", 0))
+		),
+		Vector3(Read.as_float(z.get("x", 0)), Read.as_float(z.get("y", 0)), Read.as_float(z.get("z", 1), 1.0))
 	)
-	return [true, Transform3D(basis, Vector3(o.get("x", 0), o.get("y", 0), o.get("z", 0)))]
+	var origin: Vector3 = Vector3(
+		Read.as_float(o.get("x", 0)), Read.as_float(o.get("y", 0)), Read.as_float(o.get("z", 0))
+	)
+	return [true, Transform3D(basis, origin)]
 
 
 ## A dictionary with no tag, read against the type the property declares. Falls back to the
@@ -202,27 +240,37 @@ func _parse_shaped_dictionary(value: Dictionary, expected_type: int) -> Variant:
 	match expected_type:
 		TYPE_VECTOR2:
 			if value.has("x") and value.has("y"):
-				return Vector2(value.get("x", 0), value.get("y", 0))
+				return Vector2(Read.as_float(value["x"]), Read.as_float(value["y"]))
 		TYPE_VECTOR2I:
 			if value.has("x") and value.has("y"):
-				return Vector2i(value.get("x", 0), value.get("y", 0))
+				return Vector2i(Read.as_int(value["x"]), Read.as_int(value["y"]))
 		TYPE_VECTOR3:
 			if value.has("x") and value.has("y") and value.has("z"):
-				return Vector3(value.get("x", 0), value.get("y", 0), value.get("z", 0))
+				return Vector3(
+					Read.as_float(value["x"]), Read.as_float(value["y"]), Read.as_float(value["z"])
+				)
 		TYPE_VECTOR3I:
 			if value.has("x") and value.has("y") and value.has("z"):
-				return Vector3i(value.get("x", 0), value.get("y", 0), value.get("z", 0))
+				return Vector3i(Read.as_int(value["x"]), Read.as_int(value["y"]), Read.as_int(value["z"]))
 		TYPE_COLOR:
 			if value.has("r") and value.has("g") and value.has("b"):
-				return Color(value.get("r", 1), value.get("g", 1), value.get("b", 1), value.get("a", 1))
+				return Color(
+					Read.as_float(value["r"]),
+					Read.as_float(value["g"]),
+					Read.as_float(value["b"]),
+					Read.as_float(value.get("a", 1), 1.0)
+				)
 		TYPE_RECT2:
 			if value.has("x") and value.has("y") and value.has("width") and value.has("height"):
 				return Rect2(
-					value.get("x", 0), value.get("y", 0), value.get("width", 0), value.get("height", 0)
+					Read.as_float(value["x"]),
+					Read.as_float(value["y"]),
+					Read.as_float(value["width"]),
+					Read.as_float(value["height"])
 				)
 		TYPE_NODE_PATH:
 			if value.has("path"):
-				return NodePath(value.get("path", ""))
+				return NodePath(str(value["path"]))
 	return value
 
 
@@ -231,23 +279,23 @@ func _parse_array(value: Array, expected_type: int) -> Variant:
 	match expected_type:
 		TYPE_VECTOR2:
 			if value.size() >= 2:
-				return Vector2(value[0], value[1])
+				return Vector2(Read.as_float(value[0]), Read.as_float(value[1]))
 		TYPE_VECTOR2I:
 			if value.size() >= 2:
-				return Vector2i(value[0], value[1])
+				return Vector2i(Read.as_int(value[0]), Read.as_int(value[1]))
 		TYPE_VECTOR3:
 			if value.size() >= 3:
-				return Vector3(value[0], value[1], value[2])
+				return Vector3(Read.as_float(value[0]), Read.as_float(value[1]), Read.as_float(value[2]))
 		TYPE_VECTOR3I:
 			if value.size() >= 3:
-				return Vector3i(value[0], value[1], value[2])
+				return Vector3i(Read.as_int(value[0]), Read.as_int(value[1]), Read.as_int(value[2]))
 	return value.map(func(item: Variant) -> Variant: return _parse_value(item))
 
 
 func _get_property_type(node: Node, prop_name: String) -> int:
 	for prop: Dictionary in node.get_property_list():
 		if str(prop.get("name", "")) == prop_name:
-			return int(prop.get("type", TYPE_NIL))
+			return Read.as_int(prop.get("type", TYPE_NIL), TYPE_NIL)
 	return TYPE_NIL
 
 
@@ -316,7 +364,7 @@ func _set_node_properties(node: Node, properties: Dictionary) -> String:
 		# A resource-valued property takes the path of one, which is how a caller names a
 		# TileSet, a material or a theme: there is no other way to hand a tool a Resource.
 		if expected_type == TYPE_OBJECT and typeof(raw) == TYPE_STRING:
-			var path: String = String(raw)
+			var path: String = str(raw)
 			# The project boundary is enforced here as well as on the server, because only the
 			# engine knows that this property is one holding a path: an absolute path and a
 			# user:// one both load, and neither names a file this project owns.
@@ -344,7 +392,7 @@ func _parse_properties_arg(raw_properties: Variant) -> Dictionary:
 	if typeof(raw_properties) == TYPE_DICTIONARY:
 		return raw_properties
 	if typeof(raw_properties) == TYPE_STRING:
-		var text: String = String(raw_properties)
+		var text: String = str(raw_properties)
 		if text.strip_edges().is_empty():
 			return {}
 		var parsed: Variant = JSON.parse_string(text)
@@ -356,7 +404,9 @@ func _parse_properties_arg(raw_properties: Variant) -> Dictionary:
 func _ensure_parent_dir_for_scene(scene_path: String) -> void:
 	var base_dir: String = scene_path.get_base_dir()
 	if not DirAccess.dir_exists_absolute(base_dir):
-		DirAccess.make_dir_recursive_absolute(base_dir)
+		var made: Error = DirAccess.make_dir_recursive_absolute(base_dir)
+		if made != OK:
+			push_error("gdharness: could not create " + base_dir + ": " + error_string(made))
 
 
 func _set_owner_recursive(node: Node, scene_owner: Node) -> void:
@@ -376,7 +426,7 @@ func _build_node_tree(
 	if include_properties:
 		var props: Dictionary = {}
 		for p: Dictionary in node.get_property_list():
-			if not (int(p.get("usage", 0)) & PROPERTY_USAGE_STORAGE):
+			if not (Read.as_int(p.get("usage", 0)) & PROPERTY_USAGE_STORAGE):
 				continue
 			var pn: String = str(p.get("name", ""))
 			if pn.is_empty():
@@ -439,8 +489,8 @@ func create_scene(args: Dictionary) -> Dictionary:
 func list_scene_nodes(args: Dictionary) -> Dictionary:
 	var project_path: String = str(args.get("projectPath", ""))
 	var scene_path: String = _to_scene_res_path(project_path, str(args.get("scenePath", "")))
-	var depth: int = int(args.get("depth", -1))
-	var include_properties: bool = bool(args.get("includeProperties", false))
+	var depth: int = Read.as_int(args.get("depth", -1), -1)
+	var include_properties: bool = Read.as_bool(args.get("includeProperties", false))
 
 	var loaded: Array = _load_scene(scene_path)
 	var refused: Dictionary = loaded[1]
@@ -652,7 +702,7 @@ func get_node_properties(args: Dictionary) -> Dictionary:
 	var project_path: String = str(args.get("projectPath", ""))
 	var scene_path: String = _to_scene_res_path(project_path, str(args.get("scenePath", "")))
 	var node_path: String = str(args.get("nodePath", "."))
-	var include_defaults: bool = bool(args.get("includeDefaults", false))
+	var include_defaults: bool = Read.as_bool(args.get("includeDefaults", false))
 
 	var loaded: Array = _load_scene(scene_path)
 	var refused: Dictionary = loaded[1]
@@ -671,7 +721,7 @@ func get_node_properties(args: Dictionary) -> Dictionary:
 
 	var props: Dictionary = {}
 	for p: Dictionary in node.get_property_list():
-		var usage: int = int(p.get("usage", 0))
+		var usage: int = Read.as_int(p.get("usage", 0))
 		if not (usage & PROPERTY_USAGE_STORAGE):
 			continue
 		var prop_name: String = str(p.get("name", ""))
@@ -721,7 +771,7 @@ func connect_signal(args: Dictionary) -> Dictionary:
 	var method_name: String = str(args.get("methodName", ""))
 	# A connection without CONNECT_PERSIST is a runtime one, and PackedScene.pack drops those on
 	# the way out: without this the scene saves unchanged and this answers success over nothing.
-	var flags: int = int(args.get("flags", 0)) | Object.CONNECT_PERSIST
+	var flags: int = Read.as_int(args.get("flags", 0)) | Object.CONNECT_PERSIST
 
 	if (
 		source_node_path.is_empty()
@@ -854,7 +904,7 @@ func list_connections(args: Dictionary) -> Dictionary:
 						"signalName": signal_name,
 						"targetNodePath": target_path,
 						"methodName": str(callable.get_method()),
-						"flags": int(conn.get("flags", 0))
+						"flags": Read.as_int(conn.get("flags", 0))
 					}
 				)
 
@@ -877,7 +927,7 @@ func rescan_filesystem(args: Dictionary) -> Dictionary:
 		return {"ok": false, "error": "Editor plugin unavailable"}
 
 	var filesystem: EditorFileSystem = EditorInterface.get_resource_filesystem()
-	if not bool(args.get("statusOnly", false)):
+	if not Read.as_bool(args.get("statusOnly", false)):
 		filesystem.scan()
 
 	# Importing is reported separately from scanning, and a class is not registered until

@@ -5,6 +5,8 @@ extends RefCounted
 # A game started from a stale editor then cannot resolve any class_name written since, and the
 # engine reads the same file headless, so the list is rebuilt here from the scripts themselves.
 
+const Patterns = preload("patterns.gd")
+const Read = preload("reading.gd")
 const FileWalk = preload("file_walk.gd")
 const Log = preload("logger.gd")
 
@@ -33,7 +35,11 @@ func refresh_class_cache(_params: Dictionary) -> Dictionary:
 	var after: Dictionary = _entries_by_class(entries)
 	var config: ConfigFile = ConfigFile.new()
 	config.set_value("", "list", entries)
-	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(CACHE_PATH.get_base_dir()))
+	var made: Error = DirAccess.make_dir_recursive_absolute(
+		ProjectSettings.globalize_path(CACHE_PATH.get_base_dir())
+	)
+	if made != OK and made != ERR_ALREADY_EXISTS:
+		return _log.failure("Could not make " + CACHE_PATH.get_base_dir() + ": " + error_string(made))
 	var err: Error = config.save(CACHE_PATH)
 	if err != OK:
 		return _log.failure("Failed to write " + CACHE_PATH + ": " + error_string(err))
@@ -80,8 +86,8 @@ func _entry_for(path: String, skipped: Array[Dictionary]) -> Dictionary:
 		"base": StringName(base),
 		"class": StringName(declared),
 		"icon": str(header.get("icon", "")),
-		"is_abstract": bool(header.get("abstract", false)),
-		"is_tool": bool(header.get("tool", false)),
+		"is_abstract": Read.as_bool(header.get("abstract", false)),
+		"is_tool": Read.as_bool(header.get("tool", false)),
 		"language": StringName("GDScript"),
 		"path": path,
 	}
@@ -123,12 +129,11 @@ func _header_of(path: String) -> Dictionary:
 	var file: FileAccess = FileAccess.open(path, FileAccess.READ)
 	if not file:
 		return header
-	var annotation: RegEx = RegEx.new()
-	annotation.compile('^@([a-z_]+)(?:\\(\\s*(?:"([^"]*)")?[^)]*\\))?\\s*')
-	var class_line: RegEx = RegEx.new()
-	class_line.compile("^class_name\\s+([A-Za-z_][A-Za-z0-9_]*)(?:\\s+extends\\s+(\\S+))?")
-	var extends_line: RegEx = RegEx.new()
-	extends_line.compile("^extends\\s+(\\S+)")
+	var annotation: RegEx = Patterns.compiled('^@([a-z_]+)(?:\\(\\s*(?:"([^"]*)")?[^)]*\\))?\\s*')
+	var class_line: RegEx = Patterns.compiled(
+		"^class_name\\s+([A-Za-z_][A-Za-z0-9_]*)(?:\\s+extends\\s+(\\S+))?"
+	)
+	var extends_line: RegEx = Patterns.compiled("^extends\\s+(\\S+)")
 	while not file.eof_reached():
 		var rest: String = file.get_line().strip_edges()
 		# Annotations may share a line with what they annotate, as in `@abstract class_name X`.

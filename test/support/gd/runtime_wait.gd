@@ -4,6 +4,8 @@ extends SceneTree
 ## waits for frames, a signal and a property. They need the main loop running, so the checks
 ## start on the first frame rather than in _init, and the fixture quits when they are done.
 
+const Checked = preload("checked.gd")
+const Read = preload("res://addons/gdharness_runtime/reading.gd")
 const Runtime = preload("res://addons/gdharness_runtime/runtime_autoload.gd")
 
 ## How tall the room's camera sees, in metres. Against a 480 pixel viewport that is 48 pixels a
@@ -37,11 +39,11 @@ func _init() -> void:
 	button.name = "Go"
 	button.position = Vector2(30, 40)
 	button.size = Vector2(80, 30)
-	button.pressed.connect(func() -> void: presses += 1)
+	Checked.done(button.pressed.connect(func() -> void: presses += 1) as Error, "counting presses")
 	panel.add_child(button)
 
-	process_frame.connect(func() -> void: frames_seen += 1)
-	process_frame.connect(_run, CONNECT_ONE_SHOT)
+	Checked.done(process_frame.connect(func() -> void: frames_seen += 1) as Error, "counting frames")
+	Checked.done(process_frame.connect(_run, CONNECT_ONE_SHOT) as Error, "waiting for the next frame")
 
 
 func _fail(message: String) -> void:
@@ -62,7 +64,8 @@ func _run() -> void:
 	await _check_until()
 
 	node._cleanup()
-	DirAccess.remove_absolute(OS.get_environment("GDHARNESS_RUNTIME_DIR"))
+	# Not checked: the directory is gone either way by the time the fixture tears itself down.
+	var _removed: Error = DirAccess.remove_absolute(OS.get_environment("GDHARNESS_RUNTIME_DIR"))
 	if failures.is_empty():
 		print(JSON.stringify({"ok": true}))
 		quit(0)
@@ -268,7 +271,10 @@ func _check_a_menu() -> void:
 	picker.add_item("Trouble", 30)
 	picker.set_item_disabled(2, true)
 	var chosen: Array[int] = []
-	picker.item_selected.connect(func(index: int) -> void: chosen.append(index))
+	Checked.done(
+		picker.item_selected.connect(func(index: int) -> void: chosen.append(index)) as Error,
+		"noting which item was chosen"
+	)
 	root.add_child(picker)
 	await process_frame
 
@@ -336,7 +342,7 @@ func _check_a_dialog() -> void:
 	dialog.name = "AreYouSure"
 	dialog.dialog_text = "Do the irreversible thing?"
 	var confirmed: Array[int] = []
-	dialog.confirmed.connect(func() -> void: confirmed.append(1))
+	Checked.done(dialog.confirmed.connect(func() -> void: confirmed.append(1)) as Error, "noting the confirm")
 	root.add_child(dialog)
 	dialog.popup_centered(Vector2i(240, 120))
 	await process_frame
@@ -344,7 +350,7 @@ func _check_a_dialog() -> void:
 	var buttons: Dictionary = await node._execute_command(
 		"find_nodes", {"class": "Button", "root": "/root/AreYouSure"}
 	)
-	if int(buttons.get("count", 0)) < 2:
+	if Read.as_int(buttons.get("count", 0)) < 2:
 		_fail("a dialog's own buttons should be findable: %s" % str(buttons))
 
 	var answered: Dictionary = await node._execute_command(
@@ -384,7 +390,7 @@ func _check_below_the_fold() -> void:
 	buried.name = "Buried"
 	buried.custom_minimum_size = Vector2(180, 40)
 	var pressed: Array[int] = []
-	buried.pressed.connect(func() -> void: pressed.append(1))
+	Checked.done(buried.pressed.connect(func() -> void: pressed.append(1)) as Error, "noting the press")
 	column.add_child(buried)
 	await process_frame
 
@@ -404,7 +410,7 @@ func _check_below_the_fold() -> void:
 	first.name = "Topmost"
 	first.custom_minimum_size = Vector2(180, 40)
 	var early: Array[int] = []
-	first.pressed.connect(func() -> void: early.append(1))
+	Checked.done(first.pressed.connect(func() -> void: early.append(1)) as Error, "noting the early press")
 	column.add_child(first)
 	column.move_child(first, 0)
 	scroller.set_deferred("scroll_vertical", 400)
@@ -439,7 +445,7 @@ func _click_a_button_that(to_it: Callable) -> Dictionary:
 	going.name = "Go"
 	going.position = Vector2(30, 20)
 	going.size = Vector2(80, 30)
-	going.pressed.connect(func() -> void: to_it.call(going))
+	Checked.done(going.pressed.connect(func() -> void: to_it.call(going)) as Error, "noting the press")
 	panel.add_child(going)
 	await process_frame
 
@@ -489,7 +495,7 @@ func _check_signal() -> void:
 	var expired: Dictionary = await node._execute_command(
 		"wait_signal", {"path": "/root/Fuse", "signal": "timeout", "timeout_ms": 60}
 	)
-	if expired.get("fired") != false or int(expired.get("elapsed_ms", 0)) < 60:
+	if expired.get("fired") != false or Read.as_int(expired.get("elapsed_ms", 0)) < 60:
 		_fail(
 			"a signal that never fires should be reported as not fired after the timeout: %s" % str(expired)
 		)
@@ -564,7 +570,7 @@ func _check_until_something_says_it() -> void:
 	var never: Dictionary = await node._execute_command(
 		"wait_until", {"path": "/root/Panel", "says": "Autumn 4", "timeout_ms": 60}
 	)
-	if never.get("met") != false or int(never.get("elapsed_ms", 0)) < 60:
+	if never.get("met") != false or Read.as_int(never.get("elapsed_ms", 0)) < 60:
 		_fail("and give up saying so when they never come: %s" % str(never))
 
 	var nowhere: Dictionary = await node._execute_command(

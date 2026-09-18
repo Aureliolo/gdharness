@@ -1,5 +1,7 @@
 extends RefCounted
 
+const Read = preload("reading.gd")
+
 # What each Godot type becomes on the wire, as one table you can read rather than an order you
 # have to trust. Keyed on typeof() rather than written as a chain of `is` tests, because the
 # order mattered: Resource had to be tested before Object or every resource came back as a bare
@@ -60,24 +62,54 @@ func deserialize_value(value: Variant) -> Variant:
 			rebuilt[key] = deserialize_value(fields[key])
 		return rebuilt
 
+	# Each component read as the type the constructor wants before it is handed over. These come
+	# out of JSON as Variant, and a project holding `unsafe_call_argument` at error level refuses
+	# to compile a script that gives a Variant to a typed parameter: the operations are compiled
+	# under the target project's warning levels, so one such project lost every headless call.
 	match fields["_type"]:
 		"Vector2":
-			return Vector2(fields.get("x", 0), fields.get("y", 0))
+			return Vector2(Read.as_float(fields.get("x", 0)), Read.as_float(fields.get("y", 0)))
 		"Vector3":
-			return Vector3(fields.get("x", 0), fields.get("y", 0), fields.get("z", 0))
+			return Vector3(
+				Read.as_float(fields.get("x", 0)),
+				Read.as_float(fields.get("y", 0)),
+				Read.as_float(fields.get("z", 0))
+			)
 		"Vector2i":
-			return Vector2i(fields.get("x", 0), fields.get("y", 0))
+			return Vector2i(Read.as_int(fields.get("x", 0)), Read.as_int(fields.get("y", 0)))
 		"Vector3i":
-			return Vector3i(fields.get("x", 0), fields.get("y", 0), fields.get("z", 0))
+			return Vector3i(
+				Read.as_int(fields.get("x", 0)),
+				Read.as_int(fields.get("y", 0)),
+				Read.as_int(fields.get("z", 0))
+			)
 		"Color":
-			return Color(fields.get("r", 0), fields.get("g", 0), fields.get("b", 0), fields.get("a", 1))
+			return Color(
+				Read.as_float(fields.get("r", 0)),
+				Read.as_float(fields.get("g", 0)),
+				Read.as_float(fields.get("b", 0)),
+				Read.as_float(fields.get("a", 1), 1.0)
+			)
 		"Rect2":
-			var position: Variant = deserialize_value(fields.get("position", {}))
-			var size: Variant = deserialize_value(fields.get("size", {}))
-			return Rect2(position, size)
+			return _rect_from(fields)
 		"NodePath":
-			return NodePath(fields.get("path", ""))
+			return NodePath(str(fields.get("path", "")))
 	return fields
+
+
+## A Rect2 out of its two tagged corners, or the fields back when they do not describe one.
+##
+## Its own function because the components have to be read as Vector2 before the constructor is
+## given them, and a branch that can also answer with the fields would push the match above past
+## the return count this project holds itself to.
+func _rect_from(fields: Dictionary) -> Variant:
+	var position: Variant = deserialize_value(fields.get("position", {}))
+	var size: Variant = deserialize_value(fields.get("size", {}))
+	if not (position is Vector2 and size is Vector2):
+		return fields
+	var at: Vector2 = position
+	var extent: Vector2 = size
+	return Rect2(at, extent)
 
 
 func _serialize_nil(_value: Variant) -> Variant:

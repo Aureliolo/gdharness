@@ -106,12 +106,17 @@ func _listen(server: TCPServer) -> int:
 func _announce(port: int) -> void:
 	# The server makes this directory when it announces. A project that has never been opened in
 	# the editor has not got one, and this fixture is run against exactly such a project.
-	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(ANNOUNCEMENT).get_base_dir())
+	var made: Error = DirAccess.make_dir_recursive_absolute(
+		ProjectSettings.globalize_path(ANNOUNCEMENT).get_base_dir()
+	)
+	if made != OK and made != ERR_ALREADY_EXISTS:
+		_fail("the fixture could not make the announcement directory")
+		return
 	var file: FileAccess = FileAccess.open(ANNOUNCEMENT, FileAccess.WRITE)
 	if file == null:
 		_fail("the fixture could not write the announcement")
 		return
-	file.store_string(
+	var wrote: bool = file.store_string(
 		JSON.stringify(
 			{
 				"protocol": PROTOCOL,
@@ -124,6 +129,8 @@ func _announce(port: int) -> void:
 		)
 	)
 	file.close()
+	if not wrote:
+		_fail("the fixture could not write the announcement")
 
 
 func _fail(message: String) -> void:
@@ -140,7 +147,9 @@ func _finish(code: int) -> void:
 		_client.disconnect_from_server()
 	_first.stop()
 	_second.stop()
-	DirAccess.remove_absolute(ProjectSettings.globalize_path(ANNOUNCEMENT))
+	# Not checked: the announcement is gone either way by the time this runs, and a fixture that
+	# tore itself down twice is not a failure to report.
+	var _removed: Error = DirAccess.remove_absolute(ProjectSettings.globalize_path(ANNOUNCEMENT))
 	if not failures.is_empty():
 		printerr("\n".join(failures))
 		quit(1)

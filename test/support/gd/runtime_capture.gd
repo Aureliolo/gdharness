@@ -7,6 +7,7 @@ extends SceneTree
 ## got; what it proves is that a frame nobody drew is not handed back as a success.
 
 const CaptureCommands = preload("res://addons/gdharness_runtime/runtime_capture.gd")
+const Checked = preload("checked.gd")
 
 var failures: Array[String] = []
 var host: Node = Node.new()
@@ -14,7 +15,7 @@ var host: Node = Node.new()
 
 func _init() -> void:
 	root.add_child(host)
-	process_frame.connect(_run, CONNECT_ONE_SHOT)
+	Checked.done(process_frame.connect(_run, CONNECT_ONE_SHOT) as Error, "waiting for the next frame")
 
 
 func _run() -> void:
