@@ -5022,16 +5022,22 @@ function testEveryFileArgumentIsContained(): void {
   }
 
   const uncontained: string[] = [];
+  let examined = 0;
   for (const name of declared) {
     const looksLikeAPath = name.endsWith('Path') || name === 'path' || name === 'script';
     if (!looksLikeAPath) {
       continue;
     }
+    examined += 1;
     if (PROJECT_FILE_ARGUMENTS.includes(name) || notAFile.has(name) || judgedAtTheCallSite.has(name)) {
       continue;
     }
     uncontained.push(name);
   }
+  // Counted, because "nothing was uncontained" is what a run that examined nothing says too. A
+  // change to what counts as a path-shaped name, or to how the schemas are read, would empty this
+  // loop and leave the check reading exactly as it does when it is working.
+  assert.ok(examined >= 10, `only ${examined} path-shaped arguments were examined, so this proved little`);
   assert.deepEqual(
     uncontained,
     [],
