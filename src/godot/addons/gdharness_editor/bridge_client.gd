@@ -8,6 +8,8 @@ signal connected
 signal disconnected
 signal tool_requested(request_id: String, tool_name: String, args: Dictionary)
 
+const Read = preload("reading.gd")
+
 const DEFAULT_URL: String = "ws://127.0.0.1:6505/godot"
 ## Written beside the addon by the install, so it names the version this copy came from.
 const VERSION_MARKER: String = "res://addons/gdharness_editor/.gdharness-version"
@@ -88,7 +90,9 @@ func _ready() -> void:
 
 	_reconnect_timer = Timer.new()
 	_reconnect_timer.one_shot = true
-	_reconnect_timer.timeout.connect(_on_reconnect_timer)
+	var waiting: int = _reconnect_timer.timeout.connect(_on_reconnect_timer)
+	if waiting != OK:
+		push_error("gdharness: could not arm the reconnect timer")
 	add_child(_reconnect_timer)
 
 	set_process(true)
@@ -227,9 +231,9 @@ func announced_url() -> String:
 		return ""
 
 	var announcement: Dictionary = said
-	if int(announcement.get("protocol", 0)) != ANNOUNCE_PROTOCOL:
+	if Read.as_int(announcement.get("protocol", 0)) != ANNOUNCE_PROTOCOL:
 		return ""
-	var port: int = int(announcement.get("port", 0))
+	var port: int = Read.as_int(announcement.get("port", 0))
 	if port < 1 or port > 65535:
 		return ""
 	var host: String = str(announcement.get("host", "127.0.0.1"))
@@ -332,7 +336,7 @@ func _serving(setting: String) -> int:
 	var settings: EditorSettings = EditorInterface.get_editor_settings()
 	if settings == null or not settings.has_setting(setting):
 		return 0
-	return int(settings.get_setting(setting))
+	return Read.as_int(settings.get_setting(setting))
 
 
 ## The version marker beside this addon, or "" when the copy was not installed by gdharness.
@@ -434,7 +438,9 @@ func send_tool_result(request_id: String, success: bool, result: Variant = null,
 
 func _send_message(message: Dictionary) -> void:
 	if socket.get_ready_state() == WebSocketPeer.STATE_OPEN:
-		socket.send_text(JSON.stringify(message))
+		var sent: Error = socket.send_text(JSON.stringify(message))
+		if sent != OK:
+			push_error("gdharness: could not send to the server: " + error_string(sent))
 
 
 func is_connected_to_server() -> bool:

@@ -7,6 +7,7 @@ extends SceneTree
 ## loaded back the way the engine loads it, and asserted on the events that came out.
 
 const InputActions = preload("res://operations/input_actions.gd")
+const Read = preload("res://operations/reading.gd")
 const Log = preload("res://operations/logger.gd")
 
 var failures: Array[String] = []
@@ -82,7 +83,8 @@ func _check_key() -> void:
 		)
 	)
 
-	if not is_equal_approx(action.get("deadzone", -1.0), 0.5):
+	var deadzone: float = Read.as_float(action.get("deadzone", -1.0), -1.0)
+	if not is_equal_approx(deadzone, 0.5):
 		_fail("key action deadzone: %s" % str(action.get("deadzone")))
 
 	var events: Array = _events_of("key action", action, 1)

@@ -29,7 +29,8 @@ func _scripts(directory: String) -> Array[String]:
 	var dir: DirAccess = DirAccess.open(directory)
 	if dir == null:
 		return found
-	dir.list_dir_begin()
+	if dir.list_dir_begin() != OK:
+		return found
 	var entry: String = dir.get_next()
 	while not entry.is_empty():
 		var path: String = directory.path_join(entry)
