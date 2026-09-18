@@ -56,7 +56,14 @@ import {
   runtimeDirectory,
   runtimesAnnounced,
 } from '../src/runtime-client.js';
-import { alive, HEADLESS_OPERATIONS, patienceForFrames, runIsUp, runtimeVerdict } from '../src/server.js';
+import {
+  alive,
+  HEADLESS_OPERATIONS,
+  PROJECT_FILE_ARGUMENTS,
+  patienceForFrames,
+  runIsUp,
+  runtimeVerdict,
+} from '../src/server.js';
 import type { GodotProcess } from '../src/server-types.js';
 import { addonMismatch, markIfStale } from '../src/server-version.js';
 import { autoloadIsOurs } from '../src/setup.js';
@@ -4965,6 +4972,81 @@ function testEveryToolParameterIsRead(): void {
 }
 
 /**
+ * Every argument that names a file is one the project boundary reaches, and every exemption from
+ * that names an argument some tool actually takes.
+ *
+ * `containProjectFiles` walks a list of argument names and skips anything not in it, so a tool
+ * gaining a path argument is a tool whose path argument nothing judges: the engine reads
+ * `../outside.tscn` as a file to open and an absolute path as a project file, and the boundary
+ * lives on this side. Nothing held that the list had kept up with the schemas.
+ *
+ * The exemptions are checked in the same breath, because a list of names for things that exist
+ * elsewhere rots the other way: rename the argument and the entry excuses nothing, while the real
+ * argument goes uncontained and the suite stays green either way. Every key below has to be an
+ * argument some tool declares.
+ */
+function testEveryFileArgumentIsContained(): void {
+  // Arguments spelled like a path that do not name a file inside the project.
+  const notAFile = new Map([
+    ['projectPath', 'the project root itself: choosing it is what the argument is for'],
+    ['nodePath', 'a path through the scene tree, which is not the filesystem'],
+    ['parentNodePath', 'the same, for the parent'],
+    ['newParentPath', 'the same, for the parent a node is moved to'],
+    ['sourceNodePath', 'the same, for the node that emits a signal'],
+    ['targetNodePath', 'the same, for the node whose method is called'],
+    ['playerNodePath', 'the same, for an AnimationPlayer node'],
+    ['animTreePath', 'the same, for an AnimationTree node'],
+    ['stateMachinePath', 'a path of nested state machine names inside an AnimationTree'],
+    ['viewportPath', 'a path through the scene tree of a running game, to a Viewport node'],
+  ]);
+  // Arguments judged where they are used rather than by the shared walk, which is fine as long as
+  // somebody says so here and the judging is still there.
+  const judgedAtTheCallSite = new Map([
+    ['outputPath', 'project_export resolves it against the project before the engine is started'],
+  ]);
+
+  const declared = new Set<string>();
+  for (const spec of TOOL_SPECS) {
+    for (const name of Object.keys(spec.parameters)) {
+      declared.add(name);
+    }
+  }
+
+  const uncontained: string[] = [];
+  for (const name of declared) {
+    const looksLikeAPath = name.endsWith('Path') || name === 'path' || name === 'script';
+    if (!looksLikeAPath) {
+      continue;
+    }
+    if (PROJECT_FILE_ARGUMENTS.includes(name) || notAFile.has(name) || judgedAtTheCallSite.has(name)) {
+      continue;
+    }
+    uncontained.push(name);
+  }
+  assert.deepEqual(
+    uncontained,
+    [],
+    'these arguments name a file and nothing judges them against the project: add them to PROJECT_FILE_ARGUMENTS, or say here why they are not files',
+  );
+
+  for (const [name, why] of [...notAFile, ...judgedAtTheCallSite]) {
+    assert.ok(declared.has(name), `no tool takes ${name}, so excusing it (${why}) excuses nothing`);
+  }
+  for (const name of PROJECT_FILE_ARGUMENTS) {
+    assert.ok(declared.has(name), `no tool takes ${name}, so containing it contains nothing`);
+  }
+
+  // The export path is the one judged away from the shared walk, so the judging itself is read
+  // rather than trusted: a call that lost it would still satisfy every list above.
+  const server = readFileSync('src/server.ts', 'utf8');
+  assert.match(
+    server,
+    /resolveWithinProject\(project\.value\.path, readString\(args, 'outputPath'\)/,
+    'project_export should still resolve outputPath against the project',
+  );
+}
+
+/**
  * Every script in an installed addon carries the `.uid` that fixes its identity.
  *
  * Godot 4.4 writes one beside each script and reads it back so a reference survives a rename.
@@ -5029,6 +5111,7 @@ function testEveryFixtureIsCalled(): void {
 }
 
 const TESTS: (() => void | Promise<void>)[] = [
+  testEveryFileArgumentIsContained,
   testEveryAddonScriptKeepsItsIdentity,
   testEveryFixtureIsCalled,
   testBothEndsAgreeAboutTheAnnouncement,
