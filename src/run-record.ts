@@ -131,7 +131,7 @@ function recordAt(path: string): RunRecord | null {
  * Null is the operating system declining to answer, which is not the same as nothing running
  * there and must never be read as one.
  */
-function runningAs(pid: number): { kind: 'image' | 'commandLine'; text: string } | null {
+export function runningAs(pid: number): { kind: 'image' | 'commandLine'; text: string } | null {
   if (process.platform === 'win32') {
     const line = windowsCommandLine(pid);
     if (line !== null) {
@@ -215,7 +215,35 @@ function windowsImage(pid: number): string | null {
  * ours, and the caller that acts on this is the one that kills.
  */
 export function stillTheRecordedRun(record: RunRecord): boolean {
-  const running = runningAs(record.pid);
+  return judgeRun(record, runningAs(record.pid), 'confirmed');
+}
+
+/**
+ * Whether the process under the record's pid could still be this run.
+ *
+ * The weaker question, and the honest one to ask when picking a run back up rather than ending it.
+ * A Windows process whose command line this server cannot read is named by `tasklist` and no more,
+ * so all that can be had there is the executable's name. That is enough to go on calling a bench
+ * running; it is not enough to signal one, and reporting a live bench as finished because an
+ * interpreter would not answer is its own wrong answer.
+ */
+export function couldStillBeTheRecordedRun(record: RunRecord): boolean {
+  return judgeRun(record, runningAs(record.pid), 'possible');
+}
+
+/**
+ * The comparison itself, apart from asking the operating system, so that every answer the
+ * operating system can give is a case that can be written down rather than a platform to be on.
+ *
+ * `confirmed` is for the caller that kills: a record naming a project and an answer that carries
+ * no project is not a confirmation, whatever the executable is called. Two engines of the same
+ * build on two projects are the case, and it is not a rare one on a machine running benches.
+ */
+export function judgeRun(
+  record: RunRecord,
+  running: { kind: 'image' | 'commandLine'; text: string } | null,
+  needed: 'confirmed' | 'possible',
+): boolean {
   if (running === null) {
     return false;
   }
@@ -225,10 +253,13 @@ export function stillTheRecordedRun(record: RunRecord): boolean {
   if (wanted !== null && !said.includes(wanted)) {
     return false;
   }
-  if (running.kind === 'image' || record.projectPath === '') {
-    // An older record names no engine and an image name carries no project, so the most that can
-    // be said is that something is there. A record written by this version answers both.
+  if (record.projectPath === '') {
+    // An older record names no project to compare, so the executable is the whole of what there
+    // is to go on either way. A record written by this version answers both.
     return wanted !== null;
+  }
+  if (running.kind === 'image') {
+    return needed === 'possible' && wanted !== null;
   }
   const project = process.platform === 'win32' ? record.projectPath.toLowerCase() : record.projectPath;
   return said.includes(project);
