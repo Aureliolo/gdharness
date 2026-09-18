@@ -755,6 +755,11 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'boolean',
         description: 'Only entries printed since the previous editor_output. Default false.',
       },
+      cpu: {
+        type: 'boolean',
+        description:
+          'Also answer with cpuSeconds, the processor time the run has used. Default false, because asking costs a subprocess. Worth it when elapsedMs is climbing and nothing is being printed: processor time standing still is a run that has stopped doing anything, rather than one that is slow.',
+      },
       contains: {
         type: 'string',
         description:
