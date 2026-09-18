@@ -77,7 +77,8 @@ that is running, and the project on disk. ${TOOL_SPECS.length} tools, named \`do
 | Answer a dialog | \`runtime_input click\` on its button, or \`key\` Escape to dismiss it: an [AcceptDialog] reads that key itself and never asks the InputMap, so \`ui_cancel\` leaves it standing |
 | Press a bound key | \`runtime_input action\` or \`key\`, a whole press unless you hold it |
 | Where a 3D node is on screen | \`runtime_inspect\` \`rect\`, rather than unprojecting by hand |
-| Wait for something | \`runtime_wait\`, never a sleep; \`until\` with \`says\` for a panel that rebuilds its own labels |
+| Wait for something in a running game | \`runtime_wait\`, never a sleep; \`until\` with \`says\` for a panel that rebuilds its own labels |
+| Wait for a run to finish | \`editor_run wait\`, never a sleep or a shell loop on the pid: it answers as \`editor_output\` does, once the run is over |
 | A picture, for a person who asked to see one | \`runtime_capture\` |
 
 These need the runtime autoload, which \`gdharness setup\` registers. \`runtime_capture\` needs a

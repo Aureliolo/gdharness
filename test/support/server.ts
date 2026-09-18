@@ -1,5 +1,6 @@
+import assert from 'node:assert/strict';
 import { type ChildProcess, spawn } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -45,6 +46,44 @@ export interface ServerOptions {
 }
 
 /**
+ * Refuses to run a suite against a bundle older than the source it was built from.
+ *
+ * These fixtures drive the built server rather than the TypeScript, so a change to src that nobody
+ * rebuilt is a change these tests cannot see: the suite goes green against the old behaviour, and
+ * CI, which builds first, is the one that finds out. That happened, and the shape of it is the same
+ * as every other silent pass, an instrument reporting on something other than what it was pointed
+ * at.
+ *
+ * Checked once per process and only against what the build is made from. The fix is one command, so
+ * the message says it rather than leaving a timestamp comparison to be worked out.
+ */
+let buildChecked = false;
+function refuseAStaleBuild(entry: string): void {
+  if (buildChecked || !entry.startsWith('build/')) {
+    return;
+  }
+  buildChecked = true;
+  const built = statSync(entry, { throwIfNoEntry: false })?.mtimeMs;
+  assert.ok(built !== undefined, `${entry} is not there: run bun run build`);
+  let newest = 0;
+  let newestPath = '';
+  for (const file of readdirSync('src', { recursive: true, encoding: 'utf8' })) {
+    if (!file.endsWith('.ts')) {
+      continue;
+    }
+    const when = statSync(join('src', file), { throwIfNoEntry: false })?.mtimeMs ?? 0;
+    if (when > newest) {
+      newest = when;
+      newestPath = file;
+    }
+  }
+  assert.ok(
+    built >= newest,
+    `${entry} was built before src/${newestPath} was last changed, so this suite would be testing the previous behaviour: run bun run build`,
+  );
+}
+
+/**
  * The built server as a child process speaking JSON-RPC over stdio.
  *
  * Responses are matched by id as they arrive rather than read after a fixed sleep, so a test
@@ -75,7 +114,9 @@ export class ServerProcess {
     // Here rather than in each fixture, because the fixture that forgets is the one that does it,
     // and what it costs is never its own run.
     this.runtimeDir = options.env?.['GDHARNESS_RUNTIME_DIR'] === undefined ? runtimeDirForTest() : null;
-    this.child = spawn(process.execPath, [options.entry ?? 'build/index.js', ...(options.args ?? [])], {
+    const entry = options.entry ?? 'build/index.js';
+    refuseAStaleBuild(entry);
+    this.child = spawn(process.execPath, [entry, ...(options.args ?? [])], {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: {
         ...process.env,

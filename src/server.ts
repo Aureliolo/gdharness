@@ -41,10 +41,11 @@ import { staleClassNames, type UnseenClass, unseenByEditor } from './class-cache
 import { DEFAULT_DAP_PORT, GodotDAPClient, handleDAPTool, type StoppedAt } from './dap_client.js';
 import { dictionary, emptyRecord } from './dictionary.js';
 import { errorMessage, Refusal } from './errors.js';
-import { GameLog, type LogEntry } from './game-log.js';
+import { forAnswer, GameLog, type LogEntry } from './game-log.js';
 import { type GodotBridge, getDefaultBridge, mayYetConnect } from './godot-bridge.js';
 import { GodotLocator } from './godot-path.js';
 import { type HeadlessOutcome, runOperation } from './headless.js';
+import { HEADLESS_OPERATIONS } from './headless-operations.js';
 import { defectReport, feedbackNotice } from './issues.js';
 import { orphansPrinted, parseJUnit, type TestReport, whyNoReport } from './junit.js';
 import {
@@ -59,6 +60,7 @@ import {
 import { DEFAULT_LSP_PORT, GodotLSPClient, handleLSPTool } from './lsp_client.js';
 import { resolveWithinProject } from './paths.js';
 import { freePort, portFromEnvOrNull } from './ports.js';
+import { cpuSecondsOf } from './process-time.js';
 import { projectStructure, searchProject } from './project-scan.js';
 import { parseProjectGodot, setupResourceHandlers } from './resources.js';
 import {
@@ -101,6 +103,7 @@ import {
   readArray,
   readBoolean,
   readNonEmptyString,
+  readNonNegativeNumber,
   readNumber,
   readPositiveNumber,
   readString,
@@ -358,6 +361,16 @@ const BRIDGE_RETRY_MS = 2_000;
 const SUCCESSOR_CHECK_MS = 10_000;
 
 /** What to tell a caller whose file, scene, script or resource path landed outside the project. */
+/**
+ * How long `editor_run wait` waits by default, and how often it looks.
+ *
+ * The budget matches `project_test`, because the run being waited on is the same kind of thing: a
+ * bench or a suite that takes minutes. The interval is what the caller's own shell loops used, and
+ * is cheap because looking is a liveness check on a pid rather than anything that touches the game.
+ */
+const WAIT_FOR_RUN_MS = 600_000;
+const RUN_POLL_MS = 250;
+
 const PATH_SOLUTIONS = [
   'Give the path relative to the project, such as "scenes/main.tscn" or "res://scenes/main.tscn"',
   'Point projectPath at the project the file belongs to',
@@ -405,40 +418,6 @@ const DEBUG_STATE_CALLS: Readonly<Record<string, string>> = dictionary({
   stack: 'dap_get_stack_trace',
   output: 'dap_get_output',
   variables: 'dap_get_variables',
-});
-
-/** The headless operation behind each tool and op that needs neither the editor nor a game. */
-export const HEADLESS_OPERATIONS: Readonly<Record<string, Readonly<Record<string, string>>>> = dictionary({
-  project_settings: dictionary({
-    get: 'get_project_setting',
-    set: 'set_project_setting',
-    add_autoload: 'add_autoload',
-    remove_autoload: 'remove_autoload',
-    set_main_scene: 'set_main_scene',
-    add_input_action: 'add_input_action',
-    enable_plugin: 'enable_plugin',
-    disable_plugin: 'disable_plugin',
-    add_audio_bus: 'create_audio_bus',
-    set_audio_bus_effect: 'set_audio_bus_effect',
-    set_audio_bus_volume: 'set_audio_bus_volume',
-  }),
-  project_import: dictionary({
-    status: 'get_import_status',
-    options: 'get_import_options',
-    set_options: 'set_import_options',
-    reimport: 'reimport_resource',
-    uid: 'get_uid',
-    refresh_uids: 'resave_resources',
-    refresh_classes: 'refresh_class_cache',
-  }),
-  project_export: dictionary({ list: 'list_export_presets' }),
-  script_edit: dictionary({ create: 'create_script', modify: 'modify_script' }),
-  script_info: dictionary({ structure: 'get_script_info' }),
-  editor_classes: dictionary({
-    query: 'query_classes',
-    info: 'query_class_info',
-    inheritance: 'inspect_inheritance',
-  }),
 });
 
 /** The sections project_info can add, each a headless operation, with what it is asked. */
@@ -1245,9 +1224,15 @@ class GodotServer {
       case 'editor_launch':
         return op === 'restart' ? await this.handleRestartEditor() : await this.handleLaunchEditor(args);
       case 'editor_run':
-        return op === 'stop' ? await this.handleStopProject() : await this.handleRunProject(args, op);
+        if (op === 'stop') {
+          return await this.handleStopProject();
+        }
+        if (op === 'wait') {
+          return await this.handleWaitForRun(args);
+        }
+        return await this.handleRunProject(args, op);
       case 'editor_output':
-        return this.handleGetDebugOutput(args);
+        return await this.handleGetDebugOutput(args);
       case 'editor_status':
         return await this.handleEditorStatus();
       case 'editor_rescan':
@@ -1790,7 +1775,7 @@ class GodotServer {
       exitCode,
       errors: log.count('error'),
       warnings: log.count('warning'),
-      entries: problems.entries,
+      entries: forAnswer(problems.entries),
     };
     if (!verdict.exported) {
       return {
@@ -1941,7 +1926,7 @@ class GodotServer {
                 exitCode,
                 hung,
                 arguments: cmdArgs,
-                entries: printed.slice(0, 60),
+                entries: forAnswer(printed.slice(0, 60)),
               },
               null,
               2,
@@ -2534,7 +2519,7 @@ class GodotServer {
       platform: process.platform,
       variables: process.env,
     });
-    const runtimeWaitMs = readPositiveNumber(args, 'runtimeWaitMs') ?? ANNOUNCE_BUDGET_MS;
+    const runtimeWaitMs = readNonNegativeNumber(args, 'runtimeWaitMs') ?? ANNOUNCE_BUDGET_MS;
     const editorWouldPlay = !headless || editorPlaysHeadless(project.value.file);
     if (this.godotBridge.isConnected() && editorWouldPlay && given.value.length === 0) {
       return await this.playThroughEditor(
@@ -3093,12 +3078,40 @@ class GodotServer {
       frames,
       errors,
       warnings,
-      entries: boot.log.select({ severity: 'warning', sinceLastCall: false, limit: 200 }).entries,
+      entries: forAnswer(boot.log.select({ severity: 'warning', sinceLastCall: false, limit: 200 }).entries),
     });
   }
 
   /** editor_output: the log as entries, filtered the way the caller asked. */
-  private handleGetDebugOutput(args: OperationParams): ToolResponse {
+  /**
+   * Waits for the run to end, then answers exactly as editor_output does.
+   *
+   * Without this a caller watching a headless run had to poll the process from a shell, once per
+   * session, and that loop is easy to write inside out: a test with its polarity reversed returns
+   * at once on a live run and reads as a run that finished. The pid and the liveness check are
+   * both already here, so the waiting belongs here too.
+   *
+   * A wait that runs out is not a failure. The answer says `running` either way, and the note says
+   * which of the two happened so that "still going" is never read as "ended and printed nothing".
+   */
+  private async handleWaitForRun(args: OperationParams): Promise<ToolResponse> {
+    const run = this.currentRun();
+    if (!run) {
+      return this.createErrorResponse(this.nothingOfOursIsRunning());
+    }
+    const budgetMs = readPositiveNumber(args, 'timeoutMs') ?? WAIT_FOR_RUN_MS;
+    const until = Date.now() + budgetMs;
+    // Drained as it goes rather than once at the end: the pipes are what the output is read from,
+    // and a run that fills them while nobody reads blocks on its own print.
+    while (stillRunning(run) && Date.now() < until) {
+      this.drainEditorOutput(run);
+      this.drainTranscript(run);
+      await delay(RUN_POLL_MS);
+    }
+    return await this.handleGetDebugOutput(args, stillRunning(run) ? budgetMs : undefined);
+  }
+
+  private async handleGetDebugOutput(args: OperationParams, waitedMs?: number): Promise<ToolResponse> {
     const run = this.currentRun();
     if (!run) {
       return this.createErrorResponse(this.nothingOfOursIsRunning());
@@ -3122,7 +3135,15 @@ class GodotServer {
     // that matters to a caller: it draws nothing, answers no runtime call, and the timeouts that
     // follow read like a hung engine. Said here because this is where somebody asks what it did.
     const halt = run.throughEditor ? (this.dapClient?.whereItStopped() ?? null) : null;
+    // Only while it is going: a process that has exited has no processor time left to report, and
+    // asking after a pid that is gone answers about whatever holds that number next.
+    const cpuSeconds = run.pid !== null && stillRunning(run) ? await cpuSecondsOf(run.pid) : undefined;
     const notes: string[] = [];
+    if (waitedMs !== undefined) {
+      notes.push(
+        `The wait of ${waitedMs}ms ran out and the run is still going, so this is what it had printed by then rather than everything it will print. editor_run wait again to keep waiting.`,
+      );
+    }
     if (run.endedUnwatched === true) {
       notes.push(
         'This run outlived the server that started it and is over now, so its exit code was never collected. Everything it printed is below, read back from its transcript.',
@@ -3135,8 +3156,14 @@ class GodotServer {
     if (typeof run.endedHere === 'string') {
       notes.push(`This run was ended here, by ${run.endedHere}.`);
     } else if (!stillRunning(run) && !run.throughEditor && run.exitCode !== null) {
+      // A zero exit is not one of the two silences: nothing kills a process into exiting cleanly,
+      // so the game reached its own end and said so. Reported as the same open question it used to
+      // be, it read as an incident on every clean finish, which for a bench that prints and quits
+      // is every finish it has.
       notes.push(
-        'Nothing here ended this run: it stopped on its own or something outside this server stopped it.',
+        run.exitCode === 0
+          ? 'This run quit on its own, cleanly: exit code 0.'
+          : 'Nothing here ended this run: it stopped on its own or something outside this server stopped it.',
       );
     }
     // Where the rest of it is, which nothing said. A long run is capped at `limit` entries and the
@@ -3178,9 +3205,17 @@ class GodotServer {
       // The file this run's output is written to, so watching a long one is reading a file meant
       // to be read rather than racing the engine for one that is not.
       transcript: run.transcript ?? undefined,
+      // How long it has been going, and how much of that it spent working. A run that is wedged
+      // and a run that is merely slow look the same from outside, and this is what separates
+      // them: elapsed climbing while processor time stands still is a game that has stopped
+      // doing anything. Asked of the operating system, so cpuSeconds is absent where it will not
+      // say rather than guessed at.
+      startedAt: new Date(run.startedAt).toISOString(),
+      elapsedMs: Date.now() - run.startedAt,
+      cpuSeconds,
       note: notes.length > 0 ? notes.join(' ') : undefined,
       omitted: selected.omitted,
-      entries: selected.entries,
+      entries: forAnswer(selected.entries),
     });
   }
 
@@ -3202,7 +3237,9 @@ class GodotServer {
       errors: stopped.log.count('error'),
       warnings: stopped.log.count('warning'),
       clean: stopped.log.count('error') === 0,
-      entries: stopped.log.select({ severity: 'warning', sinceLastCall: false, limit: 200 }).entries,
+      entries: forAnswer(
+        stopped.log.select({ severity: 'warning', sinceLastCall: false, limit: 200 }).entries,
+      ),
     });
   }
 
