@@ -647,6 +647,59 @@ async function testSceneNodes({ call, project }: Editor): Promise<void> {
 }
 
 /**
+ * The values a property read hands back, for the types JSON cannot carry on its own.
+ *
+ * JSON does not refuse a value it cannot carry: it writes the value's own text instead. So a
+ * Polygon2D's points came back as the string "[(1.0, 2.0), (3.0, 4.0)]", a Line2D's width curve as
+ * a bare class name and a Quaternion as "(0, 0, 0, 1)", each of them reading like an answer and
+ * none of them readable back. What is asked here is that a value survives the trip out and the trip
+ * home: written, read, and written again from what the read gave, the node ends up where it started.
+ */
+async function testValuesSurviveBeingRead({ call, project }: Editor): Promise<void> {
+  const scene = { projectPath: project, scenePath: SCENE };
+  const points = [
+    { _type: 'Vector2', x: 10, y: 20 },
+    { _type: 'Vector2', x: 30, y: 40 },
+  ];
+  await call('scene_node', { ...scene, op: 'add', nodeType: 'Polygon2D', nodeName: 'Shape' });
+  await call('scene_node', {
+    ...scene,
+    op: 'set',
+    nodePath: 'Shape',
+    properties: { polygon: points, color: { _type: 'Color', r: 0.25, g: 0.5, b: 0.75, a: 1 } },
+  });
+
+  const read = await call('scene_node', { ...scene, op: 'get', nodePath: 'Shape' });
+  const held = asArray(get(read, 'properties', 'polygon') ?? []);
+  assert.equal(held.length, 2, `the points should come back as points: ${text(read)}`);
+  assert.equal(asNumber(get(held[0], 'x')), 10, `the first point should be the one written: ${text(read)}`);
+  assert.equal(asString(get(held[1], '_type')), 'Vector2', `each one tagged: ${text(read)}`);
+  assert.equal(
+    asNumber(get(read, 'properties', 'color', 'g')),
+    0.5,
+    `and a colour should be a colour: ${text(read)}`,
+  );
+
+  // The trip home: what the read gave, written back to a second node, leaves the file saying the
+  // same thing about both. A shape that survives the read and not the write is still lost.
+  await call('scene_node', { ...scene, op: 'add', nodeType: 'Polygon2D', nodeName: 'Echo' });
+  await call('scene_node', {
+    ...scene,
+    op: 'set',
+    nodePath: 'Echo',
+    properties: { polygon: held, color: get(read, 'properties', 'color') },
+  });
+  const saved = fileText(project, 'fixture.tscn');
+  const written = [...saved.matchAll(/polygon = PackedVector2Array\(([^)]*)\)/g)].map((one) => one[1]);
+  assert.equal(written.length, 2, `both polygons should be in the scene: ${written.join(' | ')}`);
+  assert.equal(written[0], written[1], `and hold the same points: ${written.join(' | ')}`);
+  assert.match(String(written[0]), /10, 20, 30, 40/, `which are the ones written: ${written[0]}`);
+
+  await call('scene_node', { ...scene, op: 'delete', nodePath: 'Echo' });
+  await call('scene_node', { ...scene, op: 'delete', nodePath: 'Shape' });
+}
+
+/**
  * Connecting and disconnecting a signal, asserted against the scene file.
  *
  * The file rather than the answer, because the answer was right while the file was not: a
@@ -1967,6 +2020,7 @@ async function main(): Promise<void> {
   await withEditor(godotPath, async (editor) => {
     // One editor for all of them, in order: each case builds on the scene the last one left.
     await testSceneNodes(editor);
+    await testValuesSurviveBeingRead(editor);
     await testSceneSignals(editor);
     await testSceneAnimation(editor);
     await testResources(editor);

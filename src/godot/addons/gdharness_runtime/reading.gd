@@ -1,15 +1,22 @@
 extends RefCounted
 
-# A value out of a request that arrived as JSON, as the type the caller wants.
+# A value out of a dictionary that came from JSON, as the type the caller wants.
+#
+# This file is the one beside the operations, and `bun run sync:gd` copies it into each addon,
+# because an addon is installed as a directory and cannot preload out of one. The runtime addon's
+# copy ships inside exported games and the editor addon's does not, which is the other reason
+# neither of them reaches into the other.
 #
 # `int(value)`, `float(value)` and `bool(value)` take a Variant, and a project holding
-# `unsafe_call_argument` at error level will not compile a script that hands one over. The
-# conversion is the same; what changes is that the type is established first, on a typed local, and
-# the conversion happens from that.
+# `unsafe_call_argument` at error level will not compile a script that hands one over. These
+# scripts are compiled under the target project's warning levels rather than under this package's,
+# because `--path` makes that project the loaded one and the file's living in the npm cache
+# changes nothing: one project turning that warning on lost every headless operation at once.
 #
-# A copy rather than a preload of the one beside the operations, because an addon is installed as a
-# directory and has to hold everything it uses. This one ships inside exported games, so it must not
-# reach into the editor addon, which does not.
+# The conversion itself is the same. What changes is that the type is established first, on a
+# typed local, and the conversion happens from that. Here rather than at each of the thirty-one
+# places that read a parameter, because thirty-one is how many chances there are to write the old
+# form again, and the error does not appear until somebody sets the warning.
 #
 # `fallback` answers a value that is there and is null, which is a caller sending JSON null where a
 # number was expected. Absent keys never reach here: the callers pass their own default to
