@@ -50,6 +50,21 @@ export function readPositiveNumber(params: OperationParams, key: string): number
 }
 
 /**
+ * The same, for an argument where zero is an answer rather than an omission.
+ *
+ * A budget of zero is a caller saying "do not wait", and read as positive it is indistinguishable
+ * from not passing the argument at all, so the default comes back and the wait happens anyway.
+ * That is an argument documented as the way to control something that cannot turn it off: a scene
+ * that announces nothing by construction paid the whole budget on every start, and the only escape
+ * was to stop using the tool.
+ */
+export function readNonNegativeNumber(params: OperationParams, key: string): number | undefined {
+  const value = params[key];
+  const number = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
+  return typeof number === 'number' && Number.isFinite(number) && number >= 0 ? number : undefined;
+}
+
+/**
  * A boolean, or the strings "true" and "false". Same reason as readPositiveNumber: a client
  * that builds its arguments as text sends "true", and an untyped read forwarded to Godot is
  * truthy. Anything else is not an answer and reads as absent.

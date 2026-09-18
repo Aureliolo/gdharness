@@ -12,9 +12,15 @@ func _init(p_log: Log) -> void:
 	_log = p_log
 
 
-# Get a project setting value
+# Get a project setting value, or every setting under a prefix.
 func get_project_setting(params: Dictionary) -> Dictionary:
+	var prefix: String = str(params.get("prefix", ""))
+	if not prefix.is_empty():
+		return _settings_under(prefix)
+
 	var setting_path: String = str(params.get("setting", ""))
+	if setting_path.is_empty():
+		return _log.failure("setting is required, or prefix to read every setting under one")
 
 	_log.info("Getting project setting: " + setting_path)
 
@@ -29,6 +35,37 @@ func get_project_setting(params: Dictionary) -> Dictionary:
 		result["message"] = "Setting does not exist"
 
 	return result
+
+
+# Every setting whose name starts with [prefix], with the type the engine registers for each.
+#
+# A caller after a whole family, "everything under debug/gdscript/warnings", had no way to ask: a get
+# takes one name, and the engine is the only thing that knows what the family contains. The way round
+# it was to walk ProjectSettings.get_property_list() from a script written for the purpose, which is
+# an engine start to answer a question the engine was already open for.
+#
+# The type is here because it is the half a name hides. A setting sitting among a family of levels
+# can be a bool, and a caller that assumes otherwise writes a level over it and sees nothing go
+# wrong: 2 is as true as true is. Reading it out of the property list is how that is caught.
+func _settings_under(prefix: String) -> Dictionary:
+	_log.info("Listing project settings under: " + prefix)
+
+	var found: Array[Dictionary] = []
+	for property: Dictionary in ProjectSettings.get_property_list():
+		var name: String = str(property.get("name", ""))
+		if not name.begins_with(prefix):
+			continue
+		var kind: int = Read.as_int(property.get("type", TYPE_NIL), TYPE_NIL)
+		var value: Variant = ProjectSettings.get_setting(name)
+		var described: Dictionary = {
+			"setting": name,
+			"type": type_string(kind),
+			"value": _values.serialize_value(value),
+		}
+		found.append(described)
+
+	found.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return a["setting"] < b["setting"])
+	return {"prefix": prefix, "count": found.size(), "settings": found}
 
 
 # Set a project setting value
