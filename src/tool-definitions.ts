@@ -245,6 +245,12 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     parameters: {
       projectPath: PROJECT_PATH,
       setting: { type: 'string', description: 'Setting path, such as "display/window/size/viewport_width".' },
+      prefix: {
+        type: 'string',
+        ops: ['get'],
+        description:
+          'get: answer with every setting whose name starts with this, and the type the engine registers for each, instead of one setting by name. "debug/gdscript/warnings/" answers the whole family. The type matters: a family of levels can hold a setting that is a bool, and writing a level over it looks like it worked.',
+      },
       value: {
         blank: true,
         description:
@@ -267,7 +273,9 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     },
     requires: ['projectPath'],
     operations: {
-      get: { summary: 'read one setting', requires: ['setting'] },
+      // Neither is required because either will do, and which one is missing is a better refusal
+      // than a list of both: the engine answers that, since it is what reads them.
+      get: { summary: 'read one setting, or every setting under prefix', requires: [] },
       set: { summary: 'write one setting', requires: ['setting', 'value'] },
       add_autoload: { summary: 'register an autoload singleton', requires: ['name', 'path'] },
       remove_autoload: { summary: 'unregister an autoload', requires: ['name'] },
@@ -710,7 +718,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'number',
         ops: ['start'],
         description:
-          'start: how long to wait for the game to announce its runtime before answering. Default 5000. Worth raising for a project that takes longer than that to reach its first frame, which is what leaves runtime listening false on a game whose runtime arrives a moment later.',
+          'start: how long to wait for the game to announce its runtime before answering. Default 5000. Worth raising for a project that takes longer than that to reach its first frame, which is what leaves runtime listening false on a game whose runtime arrives a moment later. 0 does not wait at all, which is the one to pass for a scene that announces nothing by construction, such as a bench that prints and quits.',
       },
       frames: {
         type: 'number',
@@ -719,8 +727,9 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       timeoutMs: {
         type: 'number',
-        ops: ['check'],
-        description: 'check: how long to give the boot before it is called hung. Default 60000.',
+        ops: ['check', 'wait'],
+        description:
+          'check: how long to give the boot before it is called hung. Default 60000. wait: how long to wait for the run to end before answering anyway. Default 600000.',
       },
     },
     requires: ['projectPath'],
@@ -728,6 +737,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       start: { summary: 'run the project until it quits or is stopped', requires: [] },
       stop: { summary: 'end the run and answer with what it printed last', requires: [] },
       check: { summary: 'boot headless, quit after a few frames, and report the verdict', requires: [] },
+      wait: { summary: 'wait for the run to end, then answer as editor_output does', requires: [] },
     },
     defaultOperation: 'start',
   },

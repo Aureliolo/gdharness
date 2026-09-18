@@ -23,8 +23,9 @@ import { announcementPath, BRIDGE_ANNOUNCE_PROTOCOL, readAnnouncement } from '..
 import { staleClassNames, unseenByEditor } from '../src/class-cache.js';
 import { GodotDAPClient } from '../src/dap_client.js';
 import { dictionary, emptyRecord } from '../src/dictionary.js';
-import { GameLog } from '../src/game-log.js';
+import { forAnswer, GameLog } from '../src/game-log.js';
 import { CONNECT_WINDOW_MS, createBridge, mayYetConnect } from '../src/godot-bridge.js';
+import { HEADLESS_OPERATIONS } from '../src/headless-operations.js';
 import {
   editorArguments,
   envValue,
@@ -36,6 +37,7 @@ import {
 import { GodotLSPClient } from '../src/lsp_client.js';
 import { isWithinRoot, resolveWithinProject } from '../src/paths.js';
 import { freePort } from '../src/ports.js';
+import { secondsFromClock } from '../src/process-time.js';
 import { projectStructure, searchProject } from '../src/project-scan.js';
 import { parseProjectGodot } from '../src/resources.js';
 import {
@@ -56,17 +58,11 @@ import {
   runtimeDirectory,
   runtimesAnnounced,
 } from '../src/runtime-client.js';
-import {
-  alive,
-  HEADLESS_OPERATIONS,
-  PROJECT_FILE_ARGUMENTS,
-  patienceForFrames,
-  runIsUp,
-  runtimeVerdict,
-} from '../src/server.js';
+import { alive, PROJECT_FILE_ARGUMENTS, patienceForFrames, runIsUp, runtimeVerdict } from '../src/server.js';
 import type { GodotProcess } from '../src/server-types.js';
 import { addonMismatch, markIfStale } from '../src/server-version.js';
 import { ADDONS, autoloadIsOurs, installAddons } from '../src/setup.js';
+import { readNonNegativeNumber, readPositiveNumber } from '../src/tool-args.js';
 import { opTakes, TOOL_SPECS } from '../src/tool-definitions.js';
 import { cacheFile, isNewer, UpdateCheck } from '../src/update-check.js';
 import { asArray, asNumber, get, text } from './support/json.js';
@@ -3437,9 +3433,12 @@ async function testAFinishedRunCanStillBeRead(): Promise<void> {
         // one quit on its own, and the answer says so rather than leaving the two silences to be
         // told apart by guesswork: a run gdharness ended looks exactly like one that died.
         assert.equal(get(output, 'endedBy'), null, `nothing ended it: ${JSON.stringify(output)}`);
+        // A clean exit is not one of the two silences, so the note says that rather than leaving
+        // the question open: this scene printed its answer and quit, which is what exit code 0
+        // means and what reading it as an incident got wrong on every finish.
         assert.match(
           text(get(output, 'note')),
-          /Nothing here ended this run/,
+          /quit on its own, cleanly: exit code 0/,
           `and the note says so: ${JSON.stringify(output)}`,
         );
       },
@@ -5047,6 +5046,73 @@ function testEveryFileArgumentIsContained(): void {
 }
 
 /**
+ * Processor time is read off whichever clock `ps` felt like printing.
+ *
+ * It prints `MM:SS` for a young process, `HH:MM:SS` once it has been going an hour, and
+ * `DD-HH:MM:SS` after a day, so a reader that assumes one shape is wrong about the other two, and
+ * wrong in the direction that matters: a long run is the one somebody is asking about.
+ */
+function testProcessorTimeIsReadOffEveryClockFormat(): void {
+  assert.equal(secondsFromClock('00:12'), 12);
+  assert.equal(secondsFromClock('01:02:03'), 3723);
+  assert.equal(secondsFromClock('2-03:04:05'), 2 * 86_400 + 3 * 3600 + 4 * 60 + 5);
+  // Nothing to report reads as nothing rather than as zero, which would say a live process had
+  // used no processor time at all.
+  assert.equal(secondsFromClock(''), undefined);
+  assert.equal(secondsFromClock('not a clock'), undefined);
+}
+
+/**
+ * A budget of zero is an answer, and an argument that cannot carry it cannot turn the wait off.
+ *
+ * `runtimeWaitMs` is documented as how long to wait for a game to announce itself. Read as a
+ * positive number, zero was indistinguishable from the argument being absent, so the default came
+ * back and the wait happened anyway: a scene that announces nothing by construction paid five
+ * seconds on every start and the only escape was to stop using the tool.
+ */
+function testAWaitOfNothingIsAWaitOfNothing(): void {
+  assert.equal(readNonNegativeNumber({ runtimeWaitMs: 0 }, 'runtimeWaitMs'), 0);
+  assert.equal(readPositiveNumber({ runtimeWaitMs: 0 }, 'runtimeWaitMs'), undefined);
+  // And the rest of what it read before still reads the same way.
+  assert.equal(readNonNegativeNumber({ runtimeWaitMs: 250 }, 'runtimeWaitMs'), 250);
+  assert.equal(readNonNegativeNumber({ runtimeWaitMs: '250' }, 'runtimeWaitMs'), 250);
+  assert.equal(readNonNegativeNumber({ runtimeWaitMs: -1 }, 'runtimeWaitMs'), undefined);
+  assert.equal(readNonNegativeNumber({}, 'runtimeWaitMs'), undefined);
+}
+
+/**
+ * An entry with nothing under it does not carry an empty list saying so.
+ *
+ * Almost every line an engine prints has no indented detail, so `"detail":[]` rode on nearly every
+ * entry of every answer, and a caller watching a run reads that answer over and over. The lines are
+ * what they came for; the empty list is thirteen characters of envelope each time.
+ */
+function testAnEntryWithNoDetailDoesNotCarryAnEmptyOne(): void {
+  const log = new GameLog();
+  const eol = String.fromCharCode(10);
+  log.append(
+    'stdout',
+    ['a plain line', 'ERROR: something went wrong', '   at: somewhere.gd:12', ''].join(eol),
+  );
+  log.finish();
+  const reported = forAnswer(log.select({ severity: 'info', sinceLastCall: false, limit: 50 }).entries);
+  assert.ok(reported.length >= 2, `the log should have kept what it was given: ${JSON.stringify(reported)}`);
+
+  const plain = reported.find((entry) => entry.text === 'a plain line');
+  assert.ok(plain, 'the plain line should be there');
+  assert.ok(
+    !Object.hasOwn(plain, 'detail'),
+    `a line with nothing under it carries no detail: ${JSON.stringify(plain)}`,
+  );
+
+  // Paired with the positive, because an answer that dropped every detail would satisfy the check
+  // above exactly as well as one that dropped only the empty ones.
+  const withDetail = reported.find((entry) => entry.detail !== undefined);
+  assert.ok(withDetail, `an entry with detail should still carry it: ${JSON.stringify(reported)}`);
+  assert.deepEqual(withDetail.detail, ['at: somewhere.gd:12']);
+}
+
+/**
  * Every addon the package ships is one an install puts in the project.
  *
  * `installAddons` copies the directories `ADDONS` names, one at a time. A name in that list with no
@@ -5162,6 +5228,9 @@ function testEveryFixtureIsCalled(): void {
 
 const TESTS: (() => void | Promise<void>)[] = [
   testEveryFileArgumentIsContained,
+  testProcessorTimeIsReadOffEveryClockFormat,
+  testAWaitOfNothingIsAWaitOfNothing,
+  testAnEntryWithNoDetailDoesNotCarryAnEmptyOne,
   testEveryShippedAddonIsInstalled,
   testEveryAddonScriptKeepsItsIdentity,
   testEveryFixtureIsCalled,

@@ -5,6 +5,7 @@
  * so neither can describe a tool the server does not have or miss one it does.
  */
 
+import { HEADLESS_OPERATIONS } from './headless-operations.js';
 import { argumentsOf, TOOL_SPECS } from './tool-definitions.js';
 
 /** What a schema's `type` is called in prose, for the one argument or two that take either. */
@@ -18,6 +19,36 @@ export function namedType(declared: unknown): string {
   return 'any';
 }
 
+/**
+ * Which calls a push gate can make, listed rather than described.
+ *
+ * The rest of this page says what each tool does and not what it needs to exist before it can do
+ * it, and that is the fact somebody wiring gdharness into CI needs first: an editor is a person's
+ * window, so anything that talks to one cannot be part of an automatic check. The split was stated
+ * in passing and a reader had to infer it tool by tool.
+ *
+ * Rendered from the dispatch table rather than written out, so a tool that stops being headless,
+ * or a new one that is, cannot leave this paragraph quietly wrong.
+ */
+function headlessSection(): string[] {
+  const byTool = Object.entries(HEADLESS_OPERATIONS)
+    .map(([tool, ops]) => `\`${tool}\` (${Object.keys(ops).join(', ')})`)
+    .sort();
+  return [
+    '## What a gate can call',
+    '',
+    'These answer from a short-lived headless engine: no editor window, no port, no running game,',
+    'and nothing left behind. They are the only calls worth putting in a push gate, because every',
+    'other tool needs an editor somebody has open or a game somebody is running.',
+    '',
+    ...byTool.map((line) => `- ${line}`),
+    '',
+    'Everything else needs the editor (`editor_*`, `debug_*`, `scene_*`, `resource_*`) or a running',
+    'game (`runtime_*`).',
+    '',
+  ];
+}
+
 export function renderToolsMarkdown(): string {
   const lines: string[] = [
     '# Tools',
@@ -29,6 +60,7 @@ export function renderToolsMarkdown(): string {
     'between running games. Answers are read from the engine after the change, not echoed from the',
     'request. Engine stderr comes back under `engine_messages`.',
     '',
+    ...headlessSection(),
   ];
 
   for (const tool of TOOL_SPECS) {

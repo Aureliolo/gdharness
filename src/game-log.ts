@@ -63,6 +63,28 @@ type Stream = 'stdout' | 'stderr' | 'transcript';
 
 const STREAMS: readonly Stream[] = ['stdout', 'stderr', 'transcript'];
 
+/**
+ * The entries as an answer carries them, with an empty `detail` left out rather than sent.
+ *
+ * Nearly every line the engine prints has no indented detail under it, so `"detail":[]` rode on
+ * almost every entry of every answer: thirteen characters saying nothing, times two hundred
+ * entries, times each of the thirty reads a session watching a bench makes. A caller reading the
+ * lines pays for the envelope every time and gets nothing back for it.
+ *
+ * Left out rather than nulled, because absent and empty mean the same thing here and absent is the
+ * one that costs nothing. `entry.detail ?? []` reads either.
+ */
+export function forAnswer(entries: readonly LogEntry[]): readonly ReportedEntry[] {
+  return entries.map((entry) =>
+    entry.detail.length === 0
+      ? { index: entry.index, severity: entry.severity, source: entry.source, text: entry.text }
+      : entry,
+  );
+}
+
+/** An entry on its way out: the same fields, with `detail` there only when it says something. */
+export type ReportedEntry = Omit<LogEntry, 'detail'> & { readonly detail?: readonly string[] };
+
 export class GameLog {
   private readonly entries: LogEntry[] = [];
   private readonly decoders: Record<Stream, StringDecoder> = {
