@@ -3,6 +3,7 @@ extends RefCounted
 ## What the server asks about the running tree: its shape, one node, the nodes matching a
 ## question, where one is on screen, a property set, a method called, the metrics.
 
+const Read = preload("reading.gd")
 const Values = preload("runtime_values.gd")
 
 ## The most nodes one find answers with, unless asked for fewer: enough for any real query and
@@ -31,8 +32,8 @@ func _init(host: Node, values: Values) -> void:
 
 func get_tree(params: Dictionary) -> Dictionary:
 	var root_path: String = str(params.get("root", "/root"))
-	var max_depth: int = int(params.get("depth", 3))
-	var include_properties: bool = bool(params.get("include_properties", false))
+	var max_depth: int = Read.as_int(params.get("depth", 3), 3)
+	var include_properties: bool = Read.as_bool(params.get("include_properties", false))
 
 	var reached: Dictionary = Values.node_at(_host.get_tree().root, root_path)
 	if reached.has("message"):
@@ -65,8 +66,8 @@ func find_nodes(params: Dictionary) -> Dictionary:
 	for filter: String in FILTERS:
 		wanted[filter] = str(params.get(filter, ""))
 	var wanted_property: String = str(params.get("property", ""))
-	var include_hidden: bool = bool(params.get("include_hidden", true))
-	var limit: int = clampi(int(params.get("limit", FIND_LIMIT)), 1, FIND_LIMIT_CEILING)
+	var include_hidden: bool = Read.as_bool(params.get("include_hidden", true), true)
+	var limit: int = clampi(Read.as_int(params.get("limit", FIND_LIMIT), FIND_LIMIT), 1, FIND_LIMIT_CEILING)
 
 	if not _anything_asked(wanted):
 		return {"type": "error", "message": "find_nodes needs at least one of " + ", ".join(FILTERS)}
@@ -110,7 +111,7 @@ func find_nodes(params: Dictionary) -> Dictionary:
 			pending.push_front(children[index])
 
 	var answer: Dictionary = {"type": "nodes", "count": found.size(), "truncated": truncated, "nodes": found}
-	var notes: PackedStringArray = []
+	var notes: Array[String] = []
 	# Nothing found is the one answer that cannot be told apart from having asked the wrong
 	# question, and a name written without a wildcard is the way an agent writes "contains".
 	# Said only when it changes the answer, so a genuine nothing stays a plain nothing.
@@ -262,8 +263,8 @@ func _matches_apart_from_name(node: Node, wanted: Dictionary[String, String]) ->
 ## whose interesting half is below the cut says so in a number rather than in a flag.
 func read_text(params: Dictionary) -> Dictionary:
 	var root_path: String = str(params.get("root", "/root"))
-	var include_hidden: bool = bool(params.get("include_hidden", false))
-	var limit: int = clampi(int(params.get("limit", READ_LIMIT)), 1, READ_LIMIT)
+	var include_hidden: bool = Read.as_bool(params.get("include_hidden", false))
+	var limit: int = clampi(Read.as_int(params.get("limit", READ_LIMIT), READ_LIMIT), 1, READ_LIMIT)
 
 	var reached: Dictionary = Values.node_at(_host.get_tree().root, root_path)
 	if reached.has("message"):
@@ -275,7 +276,7 @@ func read_text(params: Dictionary) -> Dictionary:
 	# player is being asked to answer below them reads exactly like a dialog that is not there,
 	# and a bare `truncated: true` was looked straight past twice before the limit was suspected.
 	# A number is what sends somebody back.
-	var lines: PackedStringArray = PackedStringArray()
+	var lines: Array[String] = []
 	var left_out: int = _read_into(root, include_hidden, limit, lines)
 	return {
 		"type": "text",
@@ -297,7 +298,7 @@ func read_text(params: Dictionary) -> Dictionary:
 ## until it is opened, and reading a closed menu would put every item on the screen.
 ## Fills [param into] up to [param most] lines and answers with how many further lines the rest of
 ## the subtree says, which is what the caller is told rather than left to infer.
-func _read_into(node: Node, include_hidden: bool, most: int, into: PackedStringArray) -> int:
+func _read_into(node: Node, include_hidden: bool, most: int, into: Array[String]) -> int:
 	if not include_hidden and not _drawn(node):
 		return 0
 	var left_out: int = 0
@@ -336,7 +337,7 @@ static func _drawn(node: Node) -> bool:
 ## the three of them come to disagree about a SpinBox.
 static func said_by(node: Node) -> String:
 	for property: Dictionary in node.get_property_list():
-		if str(property.get("name", "")) == "text" and int(property.get("type", 0)) == TYPE_STRING:
+		if str(property.get("name", "")) == "text" and Read.as_int(property.get("type", 0)) == TYPE_STRING:
 			return str(node.get("text")).strip_edges()
 	return ""
 
@@ -374,7 +375,8 @@ func get_rect(params: Dictionary) -> Dictionary:
 			"window": _values.serialize(window_position),
 		}
 	if node is Node3D:
-		return _in_the_frame(node_path, node)
+		var spatial: Node3D = node
+		return _in_the_frame(node_path, spatial)
 	return {
 		"type": "error", "message": "%s is a %s, which has no place on screen" % [node_path, node.get_class()]
 	}
@@ -573,7 +575,8 @@ static func _can_read(holder: Variant, named: String) -> bool:
 		var map: Dictionary = holder
 		return map.has(named) or map.has(StringName(named))
 	if holder is Object:
-		return _has_property(holder, named)
+		var object: Object = holder
+		return _has_property(object, named)
 	return false
 
 
@@ -638,7 +641,7 @@ static func _nothing_there(holder: Variant, named: String, called: String) -> St
 		var keys: Array = map.keys()
 		# Eight of them, because a map keyed by something unexpected is told by the first few and a
 		# map of two hundred would bury the sentence saying which key was missing.
-		var some: PackedStringArray = []
+		var some: Array[String] = []
 		for key: Variant in keys.slice(0, 8):
 			some.append(str(key))
 		var rest: String = ""

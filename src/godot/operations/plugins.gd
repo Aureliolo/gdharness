@@ -1,5 +1,6 @@
 extends RefCounted
 
+const Patterns = preload("patterns.gd")
 const Log = preload("logger.gd")
 
 var _log: Log
@@ -30,8 +31,7 @@ func list_plugins(_params: Dictionary) -> Dictionary:
 	var enabled_count: int = 0
 
 	var dir: DirAccess = DirAccess.open(addons_path)
-	if dir:
-		dir.list_dir_begin()
+	if dir and dir.list_dir_begin() == OK:
 		var folder_name: String = dir.get_next()
 
 		while folder_name != "":
@@ -122,8 +122,7 @@ func disable_plugin(params: Dictionary) -> Dictionary:
 # type; the String form is what an older hand-edited file can carry.
 func _enabled_plugin_names() -> Array[String]:
 	var names: Array[String] = []
-	var regex: RegEx = RegEx.new()
-	regex.compile("res://addons/([^/]+)/plugin.cfg")
+	var regex: RegEx = Patterns.compiled("res://addons/([^/]+)/plugin.cfg")
 
 	var enabled_value: Variant = ProjectSettings.get_setting("editor_plugins/enabled", PackedStringArray())
 	if enabled_value is PackedStringArray:
@@ -151,9 +150,14 @@ func _save_enabled_plugins(names: Array[String]) -> Error:
 		ProjectSettings.set_setting("editor_plugins/enabled", null)
 		return ProjectSettings.save()
 
-	var enabled_paths: PackedStringArray = PackedStringArray()
+	# Gathered in an Array[String] and converted at the end, because appending to a packed array
+	# answers with whether it worked and a project holding return_value_discarded at error level
+	# will not compile a script that drops that answer. The conversion is what matters: an
+	# Array[String] handed to set_setting is written as Array[String]([...]), which the editor does
+	# not read as a plugin list at all.
+	var enabled_paths: Array[String] = []
 	for name: String in names:
 		enabled_paths.append("res://addons/" + name + "/plugin.cfg")
 
-	ProjectSettings.set_setting("editor_plugins/enabled", enabled_paths)
+	ProjectSettings.set_setting("editor_plugins/enabled", PackedStringArray(enabled_paths))
 	return ProjectSettings.save()

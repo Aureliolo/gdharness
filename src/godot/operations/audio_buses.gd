@@ -3,6 +3,7 @@ extends RefCounted
 # The bus layout is a project resource the engine loads at startup and this process holds in
 # memory, so every change is written back to that file or it is gone with the process.
 
+const Read = preload("reading.gd")
 const Log = preload("logger.gd")
 
 var _log: Log
@@ -16,7 +17,7 @@ func create_audio_bus(params: Dictionary) -> Dictionary:
 	var bus_name: String = str(params.get("bus_name", ""))
 	if bus_name.is_empty():
 		return _log.failure("bus_name is required")
-	var parent_idx: int = int(params.get("parent_bus_index", 0))
+	var parent_idx: int = Read.as_int(params.get("parent_bus_index", 0))
 	if parent_idx < 0 or parent_idx >= AudioServer.bus_count:
 		return _log.failure("No bus at index " + str(parent_idx))
 
@@ -40,10 +41,10 @@ func get_audio_buses(_params: Dictionary) -> Dictionary:
 
 
 func set_audio_bus_effect(params: Dictionary) -> Dictionary:
-	var bus_idx: int = int(params.get("bus_index", 0))
-	var effect_idx: int = int(params.get("effect_index", 0))
+	var bus_idx: int = Read.as_int(params.get("bus_index", 0))
+	var effect_idx: int = Read.as_int(params.get("effect_index", 0))
 	var effect_type: String = str(params.get("effect_type", ""))
-	var enabled: bool = bool(params.get("enabled", true))
+	var enabled: bool = Read.as_bool(params.get("enabled", true), true)
 	if bus_idx < 0 or bus_idx >= AudioServer.bus_count:
 		return _log.failure("No bus at index " + str(bus_idx))
 
@@ -65,8 +66,8 @@ func set_audio_bus_effect(params: Dictionary) -> Dictionary:
 
 
 func set_audio_bus_volume(params: Dictionary) -> Dictionary:
-	var bus_idx: int = int(params.get("bus_index", 0))
-	var volume_db: float = float(params.get("volume_db", 0.0))
+	var bus_idx: int = Read.as_int(params.get("bus_index", 0))
+	var volume_db: float = Read.as_float(params.get("volume_db", 0.0))
 	if bus_idx < 0 or bus_idx >= AudioServer.bus_count:
 		return _log.failure("No bus at index " + str(bus_idx))
 
