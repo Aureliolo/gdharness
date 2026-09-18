@@ -3550,6 +3550,20 @@ async function testAPidIsNotAnIdentity(): Promise<void> {
     command: process.execPath,
   };
   try {
+    // A pid exists the moment spawn returns it, and the operating system is not necessarily ready
+    // to be asked about it yet: on a loaded Windows runner the answer arrives a little later, and
+    // asked too early it is no answer at all, which reads exactly like a record naming a process
+    // that is not there. Waited for rather than assumed, and the wait is named in its own failure
+    // so the next reader is told the platform never answered rather than that the record was wrong.
+    const until = Date.now() + 10_000;
+    while (runningAs(pid) === null && Date.now() < until) {
+      await delay(100);
+    }
+    assert.ok(
+      runningAs(pid) !== null,
+      `this platform never answered about pid ${pid}, so nothing below is askable`,
+    );
+
     assert.equal(stillTheRecordedRun(record), true, 'the process the record describes is the one running');
     assert.equal(
       couldStillBeTheRecordedRun(record),
