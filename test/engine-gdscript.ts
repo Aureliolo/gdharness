@@ -77,6 +77,10 @@ function shippedScripts(): string[] {
  *
  * Asking also survives the set being rearranged between versions: 4.7.2 has no `exclude_addons`
  * among these at all, and covers addons through `directory_rules` instead.
+ *
+ * What comes back is the settings that take a level, which is not all of them, decided on the type
+ * the engine registers rather than on a list of exceptions kept here. Such a list goes stale the
+ * same way: `renamed_in_godot_4_hint` sits among the warnings and is a bool.
  */
 function everyWarning(godotPath: string): string[] {
   const dir = mkdtempSync(join(tmpdir(), 'gdharness-warnings-'));
@@ -102,8 +106,16 @@ function everyWarning(godotPath: string): string[] {
         '\tvar names: Array[String] = []',
         '\tfor property: Dictionary in ProjectSettings.get_property_list():',
         '\t\tvar setting: String = str(property.get("name", ""))',
-        '\t\tif setting.begins_with("debug/gdscript/warnings/"):',
-        '\t\t\tnames.append(setting.get_slice("/", 3))',
+        '\t\tif not setting.begins_with("debug/gdscript/warnings/"):',
+        '\t\t\tcontinue',
+        // The ones that take a level are the ones registered as an int. Asked of the engine rather
+        // than named here, because a list of exceptions goes stale exactly the way the list of
+        // warnings did: renamed_in_godot_4_hint sits among them and is a bool, so it was being sent
+        // a level, and 2 being truthy is the only reason nothing looked wrong.
+        '\t\tvar kind: int = property.get("type", TYPE_NIL)',
+        '\t\tif kind != TYPE_INT:',
+        '\t\t\tcontinue',
+        '\t\tnames.append(setting.get_slice("/", 3))',
         '\tnames.sort()',
         '\tprint("WARNINGS:" + ",".join(names))',
         '\tquit(0)',
@@ -113,17 +125,22 @@ function everyWarning(godotPath: string): string[] {
     const run = runScript(godotPath, dir, join(dir, 'warnings.gd'));
     const said = [run.stdout, run.stderr].join('\n');
     const line = run.stdout.split('\n').find((text) => text.startsWith('WARNINGS:')) ?? '';
-    // Two that sit among the warnings and take no level: whether warnings are on at all, which
-    // they are by default, and `directory_rules`, a dictionary of directory to level that the
-    // callers here set for themselves. Writing a level over that dictionary would quietly break
-    // the rule rather than clear it.
+    // Already filtered to the settings that take a level, by the engine's own idea of their type.
+    // Three of the 52 do not: `enable`, `directory_rules`, which the callers here set for
+    // themselves, and `renamed_in_godot_4_hint`.
     const names = line
       .slice('WARNINGS:'.length)
       .split(',')
-      .filter((name) => name !== '' && name !== 'enable' && name !== 'directory_rules');
+      .filter((name) => name !== '');
     // A query that answered with nothing would build the laxest project rather than the strictest,
     // and every fixture after it would pass for the wrong reason.
     assert.ok(names.length > 40, `the engine should have named its warnings: ${said}`);
+    // And the two this gate was built for are named, because a count alone still passes while the
+    // filtering above quietly drops them, which is the gate going quiet about the one thing it
+    // exists to catch.
+    for (const wanted of ['unsafe_call_argument', 'return_value_discarded']) {
+      assert.ok(names.includes(wanted), `the derived warnings should include ${wanted}: ${said}`);
+    }
     return names;
   } finally {
     rmSync(dir, { recursive: true, force: true });
