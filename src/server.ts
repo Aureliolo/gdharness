@@ -1042,10 +1042,25 @@ class GodotServer {
       // A tool that takes nothing read "It takes: ." and left the caller to work out whether the
       // list was missing or empty. editor_status is one of them, and it is the tool a session calls
       // first, so it is the first refusal anybody sees.
-      const takes = known.size === 0 ? 'It takes no arguments.' : `It takes: ${[...known].join(', ')}.`;
+      //
+      // Named for the op when one was asked for, because a tool's whole argument list answers a
+      // question nobody asked: a caller who wrote `get` wants to know what `get` takes, not the
+      // twenty arguments the other ten ops between them accept.
+      const asked = readString(args, 'op');
+      const named = asked !== undefined && spec.operations?.[asked] !== undefined ? asked : null;
+      const wanted = named === null ? [...known] : [...argumentsOf(spec, named), 'op'];
+      const takes = wanted.length === 0 ? 'It takes no arguments.' : `It takes: ${wanted.join(', ')}.`;
+      // And the version, because "this tool has no such argument" and "the server you are talking
+      // to does not have it yet" are the same sentence, and a server left running through an
+      // upgrade says the second while sounding like the first. Without it the caller spends two
+      // more calls working out which, and the answer only arrives when something else mentions the
+      // version in passing.
+      const where = named === null ? spec.name : `${spec.name} ${named}`;
       return {
         ok: false,
-        response: this.createErrorResponse(`${spec.name} does not take ${unknown.join(', ')}. ${takes}`),
+        response: this.createErrorResponse(
+          `${where} does not take ${unknown.join(', ')}. ${takes} This is gdharness ${SERVER_VERSION}, which is what decides whether an argument exists.`,
+        ),
       };
     }
 
@@ -2046,13 +2061,25 @@ class GodotServer {
       const severity = asParams(entry)['severity'];
       return severity === 1 || severity === 'error' || severity === 'ERROR';
     }).length;
-    return this.jsonTextResponse({
-      scriptPath: readString(args, 'scriptPath'),
-      clean: errors === 0,
-      errors,
-      warnings: diagnostics.length - errors,
-      diagnostics,
-    });
+    // Marked stale the way a bridge answer is, because this one is worth marking most. These come
+    // from the language server of an editor that has been running since before the addon it holds
+    // was replaced, and a project reported four confident errors naming lines that were not in the
+    // file, all four gone after a restart. Every other answer is wrong about something a caller can
+    // check; this is a tool whose whole job is being right about a file, so it says what it
+    // depended on rather than leaving that to a status call nobody makes first.
+    return this.jsonTextResponse(
+      markIfStale(
+        {
+          scriptPath: readString(args, 'scriptPath'),
+          clean: errors === 0,
+          errors,
+          warnings: diagnostics.length - errors,
+          diagnostics,
+        },
+        this.godotBridge.getStatus().addonVersion,
+        SERVER_VERSION,
+      ),
+    );
   }
 
   private async handleLSP(
