@@ -8,7 +8,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { type SpawnSyncReturns, spawnSync } from 'node:child_process';
+import { type SpawnSyncReturns, spawn, spawnSync } from 'node:child_process';
 import {
   cpSync,
   mkdirSync,
@@ -21,6 +21,9 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
+import { runOperation as runThroughTheServersOwnPath } from '../src/headless.js';
+import { userDataIn } from '../src/launch.js';
 import { asArray, asNumber, asString, get, lastJsonLine } from './support/json.js';
 
 const tried: string[] = [];
@@ -874,6 +877,175 @@ function testAGdignoreStopsTheWalk(godotPath: string, projectDir: string): void 
   );
 }
 
+/** The one `godot.log` under `home`, which is wherever the engine decided `user://` was. */
+function benchLog(home: string): string | null {
+  const look = (directory: string): string | null => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        const found = look(path);
+        if (found !== null) {
+          return found;
+        }
+      } else if (entry.name === 'godot.log') {
+        return path;
+      }
+    }
+    return null;
+  };
+  return look(home);
+}
+
+/**
+ * A headless operation does not touch the log of a run already going against the project.
+ *
+ * The engine renames `user://logs/godot.log` when a process starts, so on a project with file
+ * logging on, one operation rotated a running bench's log out from under it and the bench went on
+ * writing at the offset it still believed it was at. Measured before the fix: the operation's 237
+ * bytes, then 964 zero bytes, then the bench's next row. A downstream project found it with
+ * `project_settings get`, but nothing about that op is special. Every operation here boots the
+ * same way, so the guard belongs where the boot is built rather than on the tool that revealed it.
+ *
+ * The bench is asserted to have gone on logging, because a bench that died at the first boot
+ * leaves a log that is intact in exactly the same way.
+ */
+async function testAnOperationLeavesARunningLogAlone(godotPath: string): Promise<void> {
+  // `user://` comes off APPDATA and XDG_DATA_HOME, and off HOME where neither is read: on macOS
+  // this would write into the Godot directory of whoever is running it, and reaching into a real
+  // one is the thing the whole case is about.
+  if (process.platform === 'darwin') {
+    console.log('the log race is not checked on macOS: user:// cannot be moved off the real HOME');
+    return;
+  }
+
+  const home = mkdtempSync(join(tmpdir(), 'gdharness-userdata-'));
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-lograce-'));
+  const name = `LogRace${process.pid}`;
+  writeFileSync(
+    join(project, 'project.godot'),
+    [
+      '; Engine configuration file.',
+      'config_version=5',
+      '',
+      '[application]',
+      `config/name="${name}"`,
+      '',
+      '[debug]',
+      'file_logging/enable_file_logging=true',
+      '',
+    ].join('\n'),
+  );
+  writeFileSync(
+    join(project, 'bench.gd'),
+    [
+      'extends SceneTree',
+      '',
+      'var _rows: int = 0',
+      '',
+      '',
+      'func _init() -> void:',
+      '\tvar ticker := Timer.new()',
+      '\tticker.wait_time = 0.25',
+      '\tticker.autostart = true',
+      '\troot.add_child(ticker)',
+      '\tticker.timeout.connect(_row)',
+      '',
+      '',
+      'func _row() -> void:',
+      '\t_rows += 1',
+      '\tprint("row %04d %s" % [_rows, "settling".repeat(6)])',
+      '\tif _rows >= 120:',
+      '\t\tquit(0)',
+      '',
+    ].join('\n'),
+  );
+
+  const bench = spawn(godotPath, ['--headless', '--path', project, '--script', join(project, 'bench.gd')], {
+    stdio: 'ignore',
+    env: userDataIn(home),
+  });
+  const moved = ['APPDATA', 'XDG_DATA_HOME'];
+  const saved = new Map(moved.map((name) => [name, process.env[name]]));
+  // Put back, rather than set back: assigning undefined to a variable stores the word "undefined",
+  // and a relative XDG_DATA_HOME is one the engine warns about on stderr in every later operation,
+  // which is how this leaked out of the case that set it and failed a different one.
+  const restore = (): void => {
+    for (const [name, value] of saved) {
+      if (value === undefined) {
+        delete process.env[name];
+      } else {
+        process.env[name] = value;
+      }
+    }
+  };
+  try {
+    let log: string | null = null;
+    const ready = Date.now() + 60_000;
+    while (log === null && Date.now() < ready) {
+      await delay(500);
+      log = benchLog(home);
+    }
+    assert.ok(log, 'the bench should have started writing a log to the moved user directory');
+    while (!readFileSync(log, 'utf8').includes('row 0004') && Date.now() < ready) {
+      await delay(500);
+    }
+    const before = readFileSync(log, 'utf8');
+    assert.match(before, /row 0004/, `the bench should be logging rows: ${before.slice(0, 200)}`);
+
+    // The operation the way the server runs it, pointed at the same project and reading the same
+    // moved user directory, which is what makes the two engines want one file.
+    process.env['APPDATA'] = home;
+    process.env['XDG_DATA_HOME'] = home;
+    const answered = await runThroughTheServersOwnPath(
+      { godotPath, script: resolve('src/godot/operations/godot_operations.gd'), debug: false },
+      'get_project_setting',
+      { settingPath: 'debug/gdscript/warnings/unsafe_call_argument' },
+      project,
+    );
+    assert.ok(answered.ok, `the operation should still answer: ${answered.ok ? '' : answered.message}`);
+
+    // Time for the bench to write past wherever a truncation would have left the end.
+    const rows = (text: string): number => (text.match(/row \d{4}/g) ?? []).length;
+    const grown = Date.now() + 30_000;
+    while (rows(readFileSync(log, 'utf8')) <= rows(before) && Date.now() < grown) {
+      await delay(500);
+    }
+
+    const after = readFileSync(log);
+    assert.ok(
+      rows(after.toString('latin1')) > rows(before),
+      'the bench should have gone on logging, or this proves nothing',
+    );
+    assert.equal(after.indexOf(0), -1, 'a log written over at a stale offset is zero-filled to reach it');
+    assert.ok(
+      after.toString('latin1').startsWith(before.slice(0, 200)),
+      'and the rows written before the operation should still be at the front of it',
+    );
+    assert.ok(
+      !after.toString('latin1').includes('get_project_setting'),
+      "the operation's own log should not be in the project's",
+    );
+    assert.deepEqual(
+      readdirSync(join(log, '..')),
+      ['godot.log'],
+      'and nothing should have been rotated aside',
+    );
+  } finally {
+    restore();
+    bench.kill();
+    await delay(500);
+    rmSync(project, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+
+  // Checked here rather than left to whichever later case the engine happens to warn in. This
+  // leaked once, and what reported it was an operation two cases further on writing a warning
+  // about a relative path to stderr, which named neither the variable's owner nor this case.
+  for (const [name, value] of saved) {
+    assert.equal(process.env[name], value, `${name} should be back as it was, unset included`);
+  }
+}
+
 /**
  * An operation that cannot answer has to say so rather than print a payload.
  *
@@ -910,7 +1082,7 @@ function testInstalledLayout(godotPath: string, projectDir: string): void {
   );
 }
 
-function main(): void {
+async function main(): Promise<void> {
   const godotPath = resolveGodotPath();
   if (!godotPath) {
     // A skip is fine on a machine with no engine and never fine where the job exists to run
@@ -971,6 +1143,7 @@ function main(): void {
     testDependencyWalk(godotPath, projectDir);
     testOperations(godotPath, projectDir);
     testAGdignoreStopsTheWalk(godotPath, projectDir);
+    await testAnOperationLeavesARunningLogAlone(godotPath);
     testRefusals(godotPath, projectDir);
     testInstalledLayout(godotPath, projectDir);
   } finally {
@@ -980,4 +1153,4 @@ function main(): void {
   console.log('engine gdscript tests passed');
 }
 
-main();
+await main();
