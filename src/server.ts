@@ -20,7 +20,6 @@ import {
   readdirSync,
   readFileSync,
   readSync,
-  realpathSync,
   rmSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -45,7 +44,7 @@ import { forAnswer, GameLog, type LogEntry } from './game-log.js';
 import { type GodotBridge, getDefaultBridge, mayYetConnect } from './godot-bridge.js';
 import { GodotLocator } from './godot-path.js';
 import { type HeadlessOutcome, runOperation } from './headless.js';
-import { HEADLESS_OPERATIONS } from './headless-operations.js';
+import { EDITOR_READS, HEADLESS_OPERATIONS } from './headless-operations.js';
 import { defectReport, feedbackNotice } from './issues.js';
 import { orphansPrinted, parseJUnit, type TestReport, whyNoReport } from './junit.js';
 import {
@@ -58,7 +57,7 @@ import {
   userDataIn,
 } from './launch.js';
 import { DEFAULT_LSP_PORT, GodotLSPClient, handleLSPTool } from './lsp_client.js';
-import { resolveWithinProject } from './paths.js';
+import { isSameDirectory, realPathOr, resolveWithinProject } from './paths.js';
 import { freePort, portFromEnvOrNull } from './ports.js';
 import { cpuSecondsOf } from './process-time.js';
 import { projectStructure, searchProject } from './project-scan.js';
@@ -113,6 +112,7 @@ import {
   argumentsOf,
   buildToolDefinitions,
   opTakes,
+  type ProjectInfoSection,
   TOOL_SPECS,
   type ToolSpec,
   toolSpec,
@@ -340,6 +340,50 @@ function wrongTypes(spec: ToolSpec, args: OperationParams): string[] {
 }
 
 /**
+ * Which values are not one of the ones their schema lists, named by where they sit.
+ *
+ * A wrong type is at least visibly wrong. A value outside the listed set is the quieter fault: the
+ * argument is spelled right and holds a string, so it survives every check above and then reaches
+ * code that does not recognise it and takes the default. `direction: "reversed"` answers with what
+ * the resource depends on, which is the opposite question, and nothing in the answer says so.
+ *
+ * Only strings, and only against a set the schema actually lists, because that is where a typo
+ * costs something a caller cannot see. The walk follows the schema rather than the value, so a set
+ * listed on an element of a list or on a field of an object is checked exactly as a top-level one
+ * is, and a schema that lists nothing asks nothing.
+ */
+function unlistedValues(schema: unknown, value: unknown, path: string): string[] {
+  if (typeof schema !== 'object' || schema === null) {
+    return [];
+  }
+  const fields = schema as Readonly<Record<string, unknown>>;
+  const listed = fields['enum'];
+  if (Array.isArray(listed) && typeof value === 'string') {
+    return listed.includes(value)
+      ? []
+      : [`${path} as one of ${listed.join(', ')}, not ${JSON.stringify(value)}`];
+  }
+  if (Array.isArray(value)) {
+    return value.flatMap((element, index) => unlistedValues(fields['items'], element, `${path}[${index}]`));
+  }
+  const properties = fields['properties'];
+  if (isPlainObject(properties) && isPlainObject(value)) {
+    return Object.entries(value).flatMap(([field, held]) =>
+      Object.hasOwn(properties, field) ? unlistedValues(properties[field], held, `${path}.${field}`) : [],
+    );
+  }
+  return [];
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function outsideTheirLists(spec: ToolSpec, args: OperationParams): string[] {
+  return Object.entries(args).flatMap(([name, value]) => unlistedValues(spec.parameters[name], value, name));
+}
+
+/**
  * How often to ask again for a bridge port somebody else is holding.
  *
  * Two seconds: the wait is nearly always a server on its way out, which takes a moment, and the
@@ -420,10 +464,16 @@ const DEBUG_STATE_CALLS: Readonly<Record<string, string>> = dictionary({
   variables: 'dap_get_variables',
 });
 
-/** The sections project_info can add, each a headless operation, with what it is asked. */
-const PROJECT_INFO_SECTIONS: Readonly<
-  Record<string, { operation: string; params: (args: OperationParams, detailed: boolean) => OperationParams }>
-> = dictionary({
+type Section = { operation: string; params: (args: OperationParams, detailed: boolean) => OperationParams };
+
+/**
+ * The sections project_info can add, each a headless operation, with what it is asked.
+ *
+ * `satisfies` against the list the schema offers is what makes the two agree: a section fetchable
+ * here and not offered there is unreachable, and one offered there and missing here is refused
+ * after the caller read that it existed.
+ */
+const PROJECT_INFO_SECTIONS: Readonly<Record<string, Section>> = dictionary<Section>({
   autoloads: { operation: 'list_autoloads', params: () => ({}) },
   plugins: { operation: 'list_plugins', params: () => ({}) },
   export_presets: { operation: 'list_export_presets', params: () => ({}) },
@@ -433,29 +483,7 @@ const PROJECT_INFO_SECTIONS: Readonly<
     operation: 'validate_project',
     params: (args, detailed) => ({ preset: readString(args, 'preset') ?? '', includeSuggestions: detailed }),
   },
-});
-
-/** The path with every symlink on it resolved, or the path itself when there is nothing there. */
-function realPathOr(path: string): string {
-  try {
-    return realpathSync.native(path);
-  } catch {
-    return path;
-  }
-}
-
-/**
- * Whether two paths name the same directory, symlinks, drive letters and trailing slashes aside.
- *
- * The editor announces where it is open as the engine globalises it, which is not spelled the way
- * a caller spells the same directory: a trailing slash on one side, a different case on the drive
- * letter on Windows, a symlinked temporary directory on macOS.
- */
-function samePath(one: string, other: string): boolean {
-  const settled = (path: string): string =>
-    realPathOr(path).replaceAll('\\', '/').replace(/\/+$/, '').toLowerCase();
-  return settled(one) === settled(other);
-}
+} satisfies Record<ProjectInfoSection, Section>);
 
 /** Where gdUnit4 lives, which is where a backtrace stops being about the game. */
 const RUNNER_DIRECTORY = 'addons/gdUnit4/';
@@ -1064,7 +1092,7 @@ class GodotServer {
       };
     }
 
-    const wrong = wrongTypes(spec, args);
+    const wrong = [...wrongTypes(spec, args), ...outsideTheirLists(spec, args)];
     if (wrong.length > 0) {
       return { ok: false, response: this.createErrorResponse(`${spec.name} takes ${wrong.join('; ')}.`) };
     }
@@ -1137,7 +1165,34 @@ class GodotServer {
   private async dispatch(tool: string, op: string, args: OperationParams): Promise<ToolResponse> {
     const headless = HEADLESS_OPERATIONS[tool]?.[op];
     if (headless !== undefined) {
-      const answered = await this.headless(headless, args);
+      // Asked of the editor instead, when the caller said so. The two are not the same reading and
+      // that is the point of saying: disk is what the file holds and what a check running without
+      // anybody's window open can reproduce, the editor is what it has been told, unsaved changes
+      // and all. Refused rather than quietly answered from disk when there is no editor, because a
+      // caller who asked for the editor's answer and silently got the file's would have no way to
+      // know, which is the ambiguity the argument exists to remove.
+      const { from: asked, ...answerable } = args;
+      if (asked === 'editor') {
+        const editorSide = EDITOR_READS[tool]?.[op];
+        if (editorSide === undefined) {
+          return this.createErrorResponse(`${tool} ${op} cannot be read from the editor, only from disk.`, [
+            'Leave from unset, or pass from: "disk"',
+          ]);
+        }
+        if (!this.godotBridge.isConnected()) {
+          return this.createErrorResponse(
+            `${tool} ${op} was asked of the editor, and no editor has reached this server.`,
+            [
+              'editor_status says whether the bridge is up and whether an editor may yet connect',
+              'Open the project with editor_launch, or pass from: "disk" to read the file instead',
+            ],
+          );
+        }
+        const { op: _dropped, ...asks } = answerable;
+        const contained = this.containProjectFiles(asks);
+        return contained.ok ? await this.handleViaBridge(editorSide, contained.value) : contained.response;
+      }
+      const answered = await this.headless(headless, answerable);
       // The one answer that reads most like a clean bill of health and is not: "added: []" means
       // the file on disk was already right, which is exactly the state an editor goes blind in.
       return headless === 'refresh_class_cache' && this.godotBridge.isConnected()
@@ -3053,7 +3108,7 @@ class GodotServer {
     // A note from a version that did not record the project. It cannot be shown to be this
     // server's, and the reason to keep reading it is the same reason it is not killed by pid
     // alone: the cost of being wrong lands on somebody else.
-    return project !== '' && samePath(mine, project);
+    return project !== '' && isSameDirectory(mine, project);
   }
 
   /**
@@ -3375,7 +3430,7 @@ class GodotServer {
     // be missing from it. Comparing them names the whole project as unseen, which is a wrong
     // answer said loudly, and the failure this exists to end was a wrong answer said quietly.
     const open = this.godotBridge.getStatus().projectPath;
-    if (open === undefined || !samePath(open, projectPath)) {
+    if (open === undefined || !isSameDirectory(open, projectPath)) {
       return {
         unseen: [],
         unchecked: `the connected editor is open on ${open ?? 'a project it did not name'}, not this one`,
@@ -3407,6 +3462,22 @@ class GodotServer {
           'Open the project in the editor with editor_launch, or by hand',
           'Enable the addon under Project > Project Settings > Plugins',
           'editor_status says whether the bridge is up and what it is listening on',
+        ],
+      );
+    }
+    // A server serves one editor, and that editor answers about the project it has open whatever
+    // path the call names: it has no other project to look in. So a call naming a different one
+    // was answered about the editor's, under the caller's own project name, and nothing in the
+    // answer said which project it described. The bridge already turns away an editor from
+    // elsewhere; this is the same rule read from the other end.
+    const open = this.godotBridge.getStatus().projectPath;
+    const meant = readNonEmptyString(args, 'projectPath');
+    if (open !== undefined && open !== '' && meant !== undefined && !isSameDirectory(open, meant)) {
+      return this.createErrorResponse(
+        `This call names ${meant}, and the editor on this bridge has ${open} open.`,
+        [
+          "editor_status names the project this server's editor is showing",
+          'One server serves one editor: start a second server for the other project',
         ],
       );
     }
