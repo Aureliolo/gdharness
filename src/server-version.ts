@@ -39,3 +39,27 @@ export function addonMismatch(addonVersion: string | undefined, serverVersion: s
   }
   return `${both} Restart it with editor_launch restart to pick the new one up.`;
 }
+
+/**
+ * An answer from the editor, marked when the addon that produced it is not this server's.
+ *
+ * `editor_status` has reported `addonIsStale` all along and every other answer out of the editor
+ * said nothing, so a caller who never asks about versions is served by whatever code the editor
+ * loaded at startup, confidently and with no sign of it. A downstream project has a recorded
+ * incident of exactly that: four errors from a stale addon that were not errors, and vanished on
+ * restart. The same project reported an editor three releases behind its server today.
+ *
+ * Only when the two differ, so a project whose halves agree sees nothing added, and only onto an
+ * object, because an answer that is a list or a number is not one to grow a key on.
+ */
+export function markIfStale(
+  answer: unknown,
+  addonVersion: string | undefined,
+  serverVersion: string,
+): unknown {
+  const staleNote = addonMismatch(addonVersion, serverVersion);
+  if (staleNote === undefined || typeof answer !== 'object' || answer === null || Array.isArray(answer)) {
+    return answer;
+  }
+  return { ...(answer as Record<string, unknown>), addonIsStale: true, staleNote };
+}
