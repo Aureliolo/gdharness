@@ -1609,6 +1609,28 @@ async function testRuntime({ call, refusal, attempt, project, lspPort, dapPort }
   });
   assert.match(unfittable, /cannot be converted|takes int/, `a bad argument is refused: ${unfittable}`);
 
+  // And the conversions a caller actually relies on still go through, which is the half a
+  // whitelist gets wrong. A downstream project reads and pokes its run through `get_indexed` and
+  // `set_indexed` with a string path, dozens of calls a session: the parameter is a NodePath and
+  // the argument is a String, so a rule that only accepted an exact type match would have taken
+  // their whole workflow away in the name of protecting it.
+  const indexed = await call('runtime_invoke', {
+    ...game,
+    op: 'call',
+    nodePath: '/root/Main',
+    method: 'get_indexed',
+    args: ['doubled'],
+  });
+  assert.equal(get(indexed, 'result'), 8, 'a string where a NodePath is wanted is still a NodePath');
+  const numeric = await call('runtime_invoke', {
+    ...game,
+    op: 'call',
+    nodePath: '/root/Main',
+    method: 'stow',
+    args: [3.0],
+  });
+  assert.equal(get(numeric, 'result'), 3, 'and a float where an int is wanted is still a number');
+
   // A whole click, judged by what the game did about it: the button raises a counter, and the
   // counter is read back through a second tool. The tool's own answer is asserted too, because
   // "what was under the pointer" is the part that says the click landed where it was aimed.
