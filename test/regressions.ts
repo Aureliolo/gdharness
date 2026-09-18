@@ -5082,10 +5082,11 @@ function testEveryFileArgumentIsContained(): void {
  * that way: they come from the language server of the same editor, so they went unmarked, and a
  * caller was left to make a separate status call first to find out whether to believe them.
  *
- * A project reported four confident errors naming lines that were not in the file, all four gone
- * after a restart. Every other stale answer is wrong about something a caller can check for
- * themselves; this is the one tool whose whole job is being right about a file, so it is where
- * being quietly wrong costs most.
+ * The fault is that silence, rather than any claim that a behind editor answers wrongly. A project
+ * recorded diagnostics naming lines that were not in the file, gone after a restart, and on their
+ * own re-reading a class_name the editor's database had not caught up with explains it without
+ * staleness being involved. What held either way is that two answers were believed before anybody
+ * asked for status, and it cost nothing only because another tool disagreed loudly.
  *
  * Read out of the source because the behaviour needs an editor running an addon older than this
  * server, which is a state a fixture cannot honestly arrange. What `markIfStale` does with an
