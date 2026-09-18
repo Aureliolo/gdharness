@@ -107,7 +107,7 @@ func _init(p_log: Log) -> void:
 func add_input_action(params: Dictionary) -> Dictionary:
 	var action_name: String = str(params.get("action_name", ""))
 	var events: Array = params.get("events", [])
-	var deadzone: float = Read.as_float(params.get("deadzone", 0.5))
+	var deadzone: float = Read.as_float(params.get("deadzone", 0.5), 0.5)
 
 	_log.info("Adding input action: " + action_name)
 	_log.debug("Events: " + JSON.stringify(events))
@@ -210,7 +210,8 @@ func build_input_action(deadzone: float, events: Array) -> Dictionary:
 			"InputEventMouseButton":
 				var mouse: InputEventMouseButton = InputEventMouseButton.new()
 				mouse.button_index = (
-					Read.as_int(event.get("button_index", MOUSE_BUTTON_LEFT)) as MouseButton
+					Read.as_int(event.get("button_index", MOUSE_BUTTON_LEFT), MOUSE_BUTTON_LEFT)
+					as MouseButton
 				)
 				built.append(mouse)
 
@@ -222,7 +223,7 @@ func build_input_action(deadzone: float, events: Array) -> Dictionary:
 			"InputEventJoypadMotion":
 				var motion: InputEventJoypadMotion = InputEventJoypadMotion.new()
 				motion.axis = Read.as_int(event.get("axis", 0)) as JoyAxis
-				motion.axis_value = Read.as_float(event.get("axis_value", 1.0))
+				motion.axis_value = Read.as_float(event.get("axis_value", 1.0), 1.0)
 				built.append(motion)
 
 			_:

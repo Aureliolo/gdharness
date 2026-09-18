@@ -86,7 +86,7 @@ func set_project_setting(params: Dictionary) -> Dictionary:
 func _wanted_type(setting_path: String, current: Variant) -> int:
 	for info: Dictionary in ProjectSettings.get_property_list():
 		if str(info.get("name", "")) == setting_path:
-			return Read.as_int(info.get("type", TYPE_NIL))
+			return Read.as_int(info.get("type", TYPE_NIL), TYPE_NIL)
 	return typeof(current)
 
 
@@ -102,7 +102,7 @@ func _converts_faithfully(value: Variant, to: int) -> bool:
 func add_autoload(params: Dictionary) -> Dictionary:
 	var name: String = str(params.get("name", ""))
 	var path: String = str(params.get("path", ""))
-	var enabled: bool = Read.as_bool(params.get("enabled", true))
+	var enabled: bool = Read.as_bool(params.get("enabled", true), true)
 
 	if not path.begins_with("res://"):
 		path = "res://" + path

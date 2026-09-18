@@ -88,7 +88,7 @@ func deserialize_value(value: Variant) -> Variant:
 				Read.as_float(fields.get("r", 0)),
 				Read.as_float(fields.get("g", 0)),
 				Read.as_float(fields.get("b", 0)),
-				Read.as_float(fields.get("a", 1))
+				Read.as_float(fields.get("a", 1), 1.0)
 			)
 		"Rect2":
 			return _rect_from(fields)

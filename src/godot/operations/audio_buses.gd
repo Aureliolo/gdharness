@@ -44,7 +44,7 @@ func set_audio_bus_effect(params: Dictionary) -> Dictionary:
 	var bus_idx: int = Read.as_int(params.get("bus_index", 0))
 	var effect_idx: int = Read.as_int(params.get("effect_index", 0))
 	var effect_type: String = str(params.get("effect_type", ""))
-	var enabled: bool = Read.as_bool(params.get("enabled", true))
+	var enabled: bool = Read.as_bool(params.get("enabled", true), true)
 	if bus_idx < 0 or bus_idx >= AudioServer.bus_count:
 		return _log.failure("No bus at index " + str(bus_idx))
 
