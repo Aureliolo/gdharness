@@ -141,8 +141,8 @@ interface BridgeStatus {
   openedByAServer?: boolean | undefined;
   pendingRequests: number;
   queuedResources: number;
-  /** Epoch milliseconds, from when an editor already up could first have reached this bridge. */
-  listeningSince?: number | undefined;
+  /** When an editor already up could first have reached this bridge, absent until it listens. */
+  listeningSince?: Date | undefined;
 }
 
 /**
@@ -162,8 +162,8 @@ export const CONNECT_WINDOW_MS = 35_000;
  * having: the bridge has been open long enough that an editor would have reached it, so there is
  * no editor rather than one not reached yet.
  */
-export function mayYetConnect(listeningSince: number | undefined, now: number = Date.now()): boolean {
-  return listeningSince === undefined || now - listeningSince < CONNECT_WINDOW_MS;
+export function mayYetConnect(listeningSince: Date | undefined, now: number = Date.now()): boolean {
+  return listeningSince === undefined || now - listeningSince.getTime() < CONNECT_WINDOW_MS;
 }
 
 export class GodotBridge extends EventEmitter {
@@ -173,7 +173,7 @@ export class GodotBridge extends EventEmitter {
    * The addon dials in on its own and backs off between attempts, so "nothing has connected" means
    * two different things depending on how long that has been true. Null until the port is taken.
    */
-  private listeningSince: number | null = null;
+  private listeningSince: Date | null = null;
   private httpServer: http.Server | null = null;
   private godotWss: WebSocketServer | null = null;
   private socket: WebSocket | null = null;
@@ -277,7 +277,7 @@ export class GodotBridge extends EventEmitter {
 
       server.once('listening', () => {
         settled = true;
-        this.listeningSince = Date.now();
+        this.listeningSince = new Date();
         this.httpServer = server;
         this.godotWss = godotWss;
         const bound = server.address();
