@@ -487,6 +487,15 @@ answered and dropped. `test/engine-gdscript.ts` asks the engine for its own list
 than keeping one, turns all of them up, empties `directory_rules` so the addons are held to it too,
 and runs an operation from outside the project the way the server does.
 
+Not everything under `debug/gdscript/warnings/` is a warning level, which is the part worth knowing
+before writing anything that sets them. On 4.7.2 there are 52 settings there and 49 take a level:
+`enable` and `renamed_in_godot_4_hint` are booleans and `directory_rules` is a dictionary of path to
+level. A loop that reads the prefix and writes 2 to each writes a level over a boolean, and nothing
+looks wrong afterwards because 2 is as true as true is. So the levels are picked out by the type the
+engine registers rather than by a list of the three exceptions, which would go stale the way the
+list of warnings did. `project_settings get` takes a `prefix` and answers with the type of each,
+which is the call to make before deciding what a family holds.
+
 Beyond that log, one of these boots leaves the project alone. A `--script` run performs no
 filesystem scan and no import, so it writes nothing under `.godot`: a project that has only ever
 been scripted still has an empty one, and a settled project's class cache, uid cache and extension
