@@ -38,7 +38,7 @@ import { isWithinRoot, resolveWithinProject } from '../src/paths.js';
 import { freePort } from '../src/ports.js';
 import { projectStructure, searchProject } from '../src/project-scan.js';
 import { parseProjectGodot } from '../src/resources.js';
-import { stillTheRecordedRun } from '../src/run-record.js';
+import { couldStillBeTheRecordedRun, judgeRun, runningAs, stillTheRecordedRun } from '../src/run-record.js';
 import {
   announcedSince,
   chooseRuntime,
@@ -3380,19 +3380,58 @@ async function testAPidIsNotAnIdentity(): Promise<void> {
   try {
     assert.equal(stillTheRecordedRun(record), true, 'the process the record describes is the one running');
     assert.equal(
+      couldStillBeTheRecordedRun(record),
+      true,
+      'and it is one to go on calling running, which is the weaker question',
+    );
+    assert.equal(
       stillTheRecordedRun({ ...record, command: join('nowhere', 'godot.exe') }),
       false,
       'a pid running something else is not this run, however alive it is',
     );
-    assert.equal(
-      stillTheRecordedRun({ ...record, projectPath: join(tmpdir(), 'another-project') }),
-      false,
-      'nor is the same engine on another project, which shares this record directory',
-    );
+    // Only where the whole command line can be read. A Windows process this server cannot open
+    // is named by tasklist and no further, and CI has runners where the interpreter that reads a
+    // command line does not answer at all: asserting the project is discriminated there is
+    // asserting something the platform cannot do, which is how this failed on a docs-only change.
+    if (runningAs(pid)?.kind === 'commandLine') {
+      assert.equal(
+        stillTheRecordedRun({ ...record, projectPath: join(tmpdir(), 'another-project') }),
+        false,
+        'nor is the same engine on another project, which shares this record directory',
+      );
+    }
     assert.equal(
       stillTheRecordedRun({ ...record, pid: 999_999_999 }),
       false,
       'and a pid nobody holds is nothing to signal',
+    );
+
+    // Every answer the operating system can give, judged apart from asking it, because which of
+    // them a machine gives is the machine's business and all three have to be right. The image
+    // case is the one that was wrong: it confirmed a record naming a project against an answer
+    // carrying none, so a stop on a Windows box whose command lines this server cannot read would
+    // have signalled another project's engine of the same build.
+    const answers = { image: { kind: 'image', text: basename(process.execPath) } } as const;
+    const elsewhere = { ...record, projectPath: join(tmpdir(), 'another-project') };
+    assert.equal(
+      judgeRun(elsewhere, answers.image, 'confirmed'),
+      false,
+      'an executable name is not a confirmation of which project it was started for',
+    );
+    assert.equal(
+      judgeRun(elsewhere, answers.image, 'possible'),
+      true,
+      'and picking a run back up asks the weaker question, so a bench stays running',
+    );
+    assert.equal(
+      judgeRun({ ...record, projectPath: '' }, answers.image, 'confirmed'),
+      true,
+      'a record naming no project has only the executable to be judged on, either way',
+    );
+    assert.equal(
+      judgeRun(elsewhere, null, 'possible'),
+      false,
+      'and an operating system that will not answer is never a yes',
     );
   } finally {
     held.kill();
@@ -3895,6 +3934,19 @@ async function testGdUnitRunner(): Promise<void> {
         assert.match(missing, /gdUnit4 is not installed/, missing);
 
         cpSync(gdunit, join(projectDir, 'addons', 'gdUnit4'), { recursive: true });
+
+        // A report from another run of this project, which is what a second project_test is.
+        // Numbered above anything this run will write, because the reading takes the highest it
+        // finds: while the directory was one path per project, this was read as this run's own
+        // answer and then deleted along with the rest. The counts below are the other half of
+        // the check, since reading this one instead would make them 99.
+        const elsewhere = join(projectDir, '.godot', 'gdharness-reports', 'report_999');
+        mkdirSync(elsewhere, { recursive: true });
+        writeFileSync(
+          join(elsewhere, 'results.xml'),
+          '<testsuites tests="99" failures="99" errors="0" skipped="0">\n<testsuite name="not_ours" tests="99" failures="99" errors="0" skipped="0"/>\n</testsuites>\n',
+        );
+
         const run: unknown = JSON.parse(
           await call('project_test', { projectPath: projectDir }, ENGINE_CALL_TIMEOUT_MS * 3),
         );
@@ -3909,6 +3961,11 @@ async function testGdUnitRunner(): Promise<void> {
           },
           { tests: 7, failures: 3, errors: 0, skipped: 1 },
         );
+        assert.ok(
+          existsSync(join(elsewhere, 'results.xml')),
+          "and should leave the other run's report where it found it",
+        );
+
         // By name rather than by position: two suites fail here, and which of them gdUnit4 runs
         // first is not something this fixture is about.
         const failed = asArray(get(run, 'failed')).find(
@@ -3953,10 +4010,13 @@ async function testGdUnitRunner(): Promise<void> {
           asArray(get(run, 'classes', 'added')).includes('GdUnitTestCIRunner'),
           'the runner was made resolvable by the class list rebuild',
         );
-        assert.equal(
-          existsSync(join(projectDir, '.godot', 'gdharness-reports')),
-          false,
-          'the report is cleaned up',
+        // This run's report is cleaned up and the other run's is still there. Asserted as the
+        // whole listing, because the way this read before was that the shared directory had gone
+        // altogether, which was true only because a run took every other run's reports with it.
+        assert.deepEqual(
+          readdirSync(join(projectDir, '.godot', 'gdharness-reports')),
+          ['report_999'],
+          'the report this run wrote is cleaned up, and nothing else is',
         );
 
         const only: unknown = JSON.parse(
