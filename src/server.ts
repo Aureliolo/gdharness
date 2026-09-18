@@ -66,6 +66,7 @@ import {
   couldStillBeTheRecordedRun,
   openTranscript,
   readRunRecord,
+  recordRunEnded,
   stillTheRecordedRun,
   sweepTranscripts,
   writeRunRecord,
@@ -2809,6 +2810,11 @@ class GodotServer {
       this.logDebug(`Godot process exited with code ${code ?? 'none'}`);
       log.finish();
       started.exitCode = code ?? -1;
+      // Into the note as well as into this process, because this process is the one the harness
+      // replaces without warning: an exit seen and not written down is an exit nobody can read.
+      if (started.pid !== null) {
+        recordRunEnded(started.pid, started.exitCode);
+      }
     });
     child.on('error', (err: Error) => {
       console.error('Failed to start Godot process:', err);
@@ -2955,10 +2961,11 @@ class GodotServer {
     // for the run would report a finished bench as running and offer its number to be killed.
     if (!alive(record.pid) || !couldStillBeTheRecordedRun(record)) {
       adopted.log.finish();
-      // Not a real exit code: nobody was waiting on the process, so what it exited with is not
-      // recorded anywhere. Said as unknown rather than guessed at.
-      adopted.exitCode = null;
-      adopted.endedUnwatched = true;
+      // The code the server that started it wrote down, when there was one to write. Without it
+      // nobody was waiting on the process and what it exited with is nowhere, which is said as
+      // unknown rather than guessed at.
+      adopted.exitCode = record.exitCode ?? null;
+      adopted.endedUnwatched = record.exitCode === undefined;
     }
     this.activeProcess = adopted;
     return adopted;
