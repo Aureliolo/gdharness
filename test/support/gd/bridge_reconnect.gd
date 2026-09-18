@@ -48,7 +48,8 @@ func _initialize() -> void:
 	_write_marker(WAS)
 	_client = BridgeClient.new()
 	root.add_child(_client)
-	_client.connected.connect(_on_connected)
+	if _client.connected.connect(_on_connected) != OK:
+		_fail("the fixture could not listen for the client connecting")
 	_client.connect_to_server("ws://127.0.0.1:%d/godot" % _port)
 	_started = Time.get_ticks_msec()
 
@@ -147,8 +148,10 @@ func _write_marker(version: String) -> void:
 	if file == null:
 		_fail("the fixture could not write the version marker")
 		return
-	file.store_string("%s\n" % version)
+	var wrote: bool = file.store_string("%s\n" % version)
 	file.close()
+	if not wrote:
+		_fail("the fixture could not write the version marker")
 
 
 func _fail(message: String) -> void:
@@ -164,7 +167,9 @@ func _finish(code: int) -> void:
 	if _client != null:
 		_client.disconnect_from_server()
 	_server.stop()
-	DirAccess.remove_absolute(ProjectSettings.globalize_path(MARKER))
+	# Not checked: the marker is gone either way by the time this runs, and a fixture that tore
+	# itself down twice is not a failure to report.
+	var _removed: Error = DirAccess.remove_absolute(ProjectSettings.globalize_path(MARKER))
 	if not failures.is_empty():
 		printerr("\n".join(failures))
 		quit(1)

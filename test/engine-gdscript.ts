@@ -67,6 +67,70 @@ function shippedScripts(): string[] {
 }
 
 /**
+ * Every GDScript warning this engine has, asked of the engine rather than written down here.
+ *
+ * A list kept by hand is a list that goes stale. This one was missing eight of them,
+ * `unsafe_call_argument` among them, so a project that turned that warning on lost every headless
+ * operation at once while the gate calling itself the strictest project Godot can be configured as
+ * went on passing. What is asked for is whatever this engine has, so a warning added by a future
+ * Godot arrives here without anybody noticing it had to.
+ *
+ * Asking also survives the set being rearranged between versions: 4.7.2 has no `exclude_addons`
+ * among these at all, and covers addons through `directory_rules` instead.
+ */
+function everyWarning(godotPath: string): string[] {
+  const dir = mkdtempSync(join(tmpdir(), 'gdharness-warnings-'));
+  try {
+    writeFileSync(
+      join(dir, 'project.godot'),
+      [
+        '; Engine configuration file.',
+        'config_version=5',
+        '',
+        '[application]',
+        'config/name="Warnings"',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(dir, 'warnings.gd'),
+      [
+        'extends SceneTree',
+        '',
+        '',
+        'func _init() -> void:',
+        '\tvar names: Array[String] = []',
+        '\tfor property: Dictionary in ProjectSettings.get_property_list():',
+        '\t\tvar setting: String = str(property.get("name", ""))',
+        '\t\tif setting.begins_with("debug/gdscript/warnings/"):',
+        '\t\t\tnames.append(setting.get_slice("/", 3))',
+        '\tnames.sort()',
+        '\tprint("WARNINGS:" + ",".join(names))',
+        '\tquit(0)',
+        '',
+      ].join('\n'),
+    );
+    const run = runScript(godotPath, dir, join(dir, 'warnings.gd'));
+    const said = [run.stdout, run.stderr].join('\n');
+    const line = run.stdout.split('\n').find((text) => text.startsWith('WARNINGS:')) ?? '';
+    // Two that sit among the warnings and take no level: whether warnings are on at all, which
+    // they are by default, and `directory_rules`, a dictionary of directory to level that the
+    // callers here set for themselves. Writing a level over that dictionary would quietly break
+    // the rule rather than clear it.
+    const names = line
+      .slice('WARNINGS:'.length)
+      .split(',')
+      .filter((name) => name !== '' && name !== 'enable' && name !== 'directory_rules');
+    // A query that answered with nothing would build the laxest project rather than the strictest,
+    // and every fixture after it would pass for the wrong reason.
+    assert.ok(names.length > 40, `the engine should have named its warnings: ${said}`);
+    return names;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/**
  * A project holding the shipped GDScript exactly where the bundle puts it, so the fixtures
  * load the same paths the addons and the operations script use in the field.
  *
@@ -75,15 +139,15 @@ function shippedScripts(): string[] {
  * reachable that way. The addons are copied whole for the same reason, plugin.cfg included,
  * which is also what lets the plugin operations be driven against real ones.
  *
- * The warning settings make every GDScript warning a parse error, in the addons as well,
- * which the engine otherwise leaves out of its warnings. That is the strictest project Godot
- * can be configured as, and a project configured that way parses the shipped scripts under
- * it: the operations script from wherever the package is installed, the addons from its own
- * addons/. Every script the fixtures load is parsed under those settings, so a script that
- * regresses to `var x = ...`, `var x := ...`, a method called on a Variant or a static
- * function called on an instance stops loading here rather than in somebody's project.
+ * The warning settings make every GDScript warning a parse error, in the addons as well, which
+ * the engine otherwise exempts. That is the strictest project Godot can be configured as, and a
+ * project configured that way parses the shipped scripts under it: the operations script from
+ * wherever the package is installed, the addons from its own addons/. Every script the fixtures
+ * load is parsed under those settings, so a script that regresses to `var x = ...`, `var x := ...`,
+ * a method called on a Variant or a static function called on an instance stops loading here
+ * rather than in somebody's project.
  */
-function createProject(): string {
+function createProject(godotPath: string): string {
   const dir = mkdtempSync(join(tmpdir(), 'gdharness-engine-'));
 
   cpSync('src/godot/addons', join(dir, 'addons'), { recursive: true });
@@ -99,61 +163,17 @@ function createProject(): string {
       'config/name="GdharnessEngineFixture"',
       '',
       '[debug]',
-      'gdscript/warnings/exclude_addons=false',
-      ...EVERY_WARNING.map((warning) => `gdscript/warnings/${warning}=2`),
+      // Godot exempts res://addons from warnings by default, which would leave the shipped addons
+      // unchecked here. Emptied rather than lowered: a project is free to do the same, and an
+      // addon that only compiles where nobody is looking is an addon that breaks in the field.
+      'gdscript/warnings/directory_rules={}',
+      ...everyWarning(godotPath).map((warning) => `gdscript/warnings/${warning}=2`),
       '',
     ].join('\n'),
   );
 
   return dir;
 }
-
-/** Every warning GDScript has in 4.7, each raised to an error in the fixture project. */
-const EVERY_WARNING = [
-  'unassigned_variable',
-  'unassigned_variable_op_assign',
-  'unused_variable',
-  'unused_local_constant',
-  'unused_private_class_variable',
-  'unused_parameter',
-  'unused_signal',
-  'shadowed_variable',
-  'shadowed_variable_base_class',
-  'shadowed_global_identifier',
-  'unreachable_code',
-  'unreachable_pattern',
-  'standalone_expression',
-  'standalone_ternary',
-  'incompatible_ternary',
-  'untyped_declaration',
-  'inferred_declaration',
-  'unsafe_property_access',
-  'unsafe_method_access',
-  'unsafe_cast',
-  'unsafe_void_return',
-  'static_called_on_instance',
-  'missing_tool',
-  'redundant_static_unload',
-  'redundant_await',
-  'missing_await',
-  'assert_always_true',
-  'assert_always_false',
-  'integer_division',
-  'narrowing_conversion',
-  'int_as_enum_without_cast',
-  'int_as_enum_without_match',
-  'enum_variable_without_default',
-  'empty_file',
-  'deprecated_keyword',
-  'confusable_identifier',
-  'confusable_local_declaration',
-  'confusable_local_usage',
-  'confusable_capture_reassignment',
-  'confusable_temporary_modification',
-  'property_used_as_function',
-  'constant_used_as_function',
-  'function_used_as_property',
-];
 
 function runScript(
   godotPath: string,
@@ -184,6 +204,9 @@ function assertNoEngineErrors(label: string, output: string): void {
 function runFixture(godotPath: string, projectDir: string, name: string): unknown {
   const scriptPath = join(projectDir, `${name}.gd`);
   cpSync(join('test', 'support', 'gd', `${name}.gd`), scriptPath);
+  // A fixture is copied to the project root on its own, so anything it preloads by a bare name has
+  // to arrive beside it rather than stay behind in test/support/gd.
+  cpSync(join('test', 'support', 'gd', 'checked.gd'), join(projectDir, 'checked.gd'));
 
   const run = runScript(godotPath, projectDir, scriptPath);
   const output = `${run.stdout}\n${run.stderr}`;
@@ -1082,6 +1105,47 @@ function testInstalledLayout(godotPath: string, projectDir: string): void {
   );
 }
 
+/**
+ * The operations run under the target project's warning levels, all of them, with nothing to hide
+ * behind.
+ *
+ * `--path` puts the operations script under the project's settings even though the file lives in
+ * the server's package, and `exclude_addons` cannot cover it: that only reaches `res://addons/`,
+ * and this script is not in the project at all. So one project setting `unsafe_call_argument` or
+ * `return_value_discarded` to error takes every headless operation with it, which is what happened.
+ * The project here holds every warning this engine has at error level and contains nothing else, so
+ * what compiles is the shipped operations directory and only that.
+ */
+function testTheOperationsSurviveEveryWarning(godotPath: string): void {
+  const dir = mkdtempSync(join(tmpdir(), 'gdharness-strict-'));
+  try {
+    writeFileSync(
+      join(dir, 'project.godot'),
+      [
+        '; Engine configuration file.',
+        'config_version=5',
+        '',
+        '[application]',
+        'config/name="Strictest"',
+        '',
+        '[debug]',
+        ...everyWarning(godotPath).map((warning) => `gdscript/warnings/${warning}=2`),
+        '',
+      ].join('\n'),
+    );
+
+    const installed = resolve('src/godot/operations/godot_operations.gd');
+    const payload = runOperation(godotPath, dir, 'query_class_info', { class_name: 'Node' }, installed);
+    assert.equal(get(payload, 'class_name'), 'Node');
+    assert.ok(
+      asNumber(get(payload, 'methods_count')) > 0,
+      'the operation should have answered, not just compiled',
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 async function main(): Promise<void> {
   const godotPath = resolveGodotPath();
   if (!godotPath) {
@@ -1102,7 +1166,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  const projectDir = createProject();
+  const projectDir = createProject(godotPath);
   try {
     testTypedGate(godotPath, projectDir);
     runFixture(godotPath, projectDir, 'scene_parse');
@@ -1146,6 +1210,7 @@ async function main(): Promise<void> {
     await testAnOperationLeavesARunningLogAlone(godotPath);
     testRefusals(godotPath, projectDir);
     testInstalledLayout(godotPath, projectDir);
+    testTheOperationsSurviveEveryWarning(godotPath);
   } finally {
     rmSync(projectDir, { recursive: true, force: true });
   }

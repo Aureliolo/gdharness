@@ -10,6 +10,8 @@ extends SceneTree
 ## assumed.
 
 const InputCommands = preload("res://addons/gdharness_runtime/runtime_input.gd")
+const Checked = preload("checked.gd")
+const Read = preload("res://addons/gdharness_runtime/reading.gd")
 const Values = preload("res://addons/gdharness_runtime/runtime_values.gd")
 
 
@@ -130,7 +132,7 @@ func _check_keys(input: InputCommands) -> void:
 	# And the shape a caller gets by saying nothing: the key goes down and comes back up, so the
 	# action it is bound to is not left held for the rest of the session.
 	var whole: Dictionary = await input.inject_key({"keycode": "C"})
-	if not bool(whole.get("whole", false)):
+	if not Read.as_bool(whole.get("whole", false)):
 		_fail("a key with no `pressed` should be the whole press: %s" % JSON.stringify(whole))
 	if _pressed("fixture_physical"):
 		_fail("the whole press should leave the action released")
@@ -205,7 +207,7 @@ func _check_typing(input: InputCommands) -> void:
 	# and parsed itself straight back to 2.1.
 	if str(typed.get("holds", "")) != "Ash & Marek, 12!":
 		_fail("typing should say what the field holds: %s" % JSON.stringify(typed))
-	if bool(typed.get("replaced", true)):
+	if Read.as_bool(typed.get("replaced", true), true):
 		_fail("and should not claim to have replaced anything: %s" % JSON.stringify(typed))
 
 	# Filling a field in, which is what a caller means nearly every time and could not be asked
@@ -213,7 +215,7 @@ func _check_typing(input: InputCommands) -> void:
 	var over: Dictionary = input.inject_text({"text": "8", "replace": true})
 	if field.text != "8":
 		_fail("replace should write over what the field said: %s" % field.text)
-	if not bool(over.get("replaced", false)) or str(over.get("holds", "")) != "8":
+	if not Read.as_bool(over.get("replaced", false)) or str(over.get("holds", "")) != "8":
 		_fail("and should say so: %s" % JSON.stringify(over))
 
 	var appended: Dictionary = input.inject_text({"text": "9"})
@@ -228,7 +230,7 @@ func _check_typing(input: InputCommands) -> void:
 	var cleared: Dictionary = input.inject_text({"text": "", "replace": true})
 	if field.text != "":
 		_fail("replace with nothing should empty the field: %s" % field.text)
-	if not bool(cleared.get("replaced", false)) or str(cleared.get("holds", "x")) != "":
+	if not Read.as_bool(cleared.get("replaced", false)) or str(cleared.get("holds", "x")) != "":
 		_fail("and should say so: %s" % JSON.stringify(cleared))
 
 	var empty: Dictionary = input.inject_text({})
@@ -253,8 +255,13 @@ func _check_what_the_keys_typed() -> void:
 	# Enter is a key rather than a character, so the field takes it as submission and keeps its
 	# text rather than gaining a line break.
 	var submitted: Array[String] = []
-	_field.text_submitted.connect(func(said: String) -> void: submitted.append(said))
-	_typing.inject_text({"text": "\n"})
+	Checked.done(
+		_field.text_submitted.connect(func(said: String) -> void: submitted.append(said)) as Error,
+		"listening for the field being submitted"
+	)
+	var newline: Dictionary = _typing.inject_text({"text": "\n"})
+	if newline.get("type") == "error":
+		_fail("typing a newline was refused: %s" % JSON.stringify(newline))
 	if submitted != ["kK"]:
 		_fail("a newline should submit the field rather than land in it: %s" % str(submitted))
 	if _field.text != "kK":
@@ -296,7 +303,7 @@ func _check_actions(input: InputCommands) -> void:
 
 	var whole: Dictionary = await input.inject_action({"action": "fixture_physical"})
 
-	if not bool(whole.get("whole", false)):
+	if not Read.as_bool(whole.get("whole", false)):
 		_fail("an action with no `pressed` should be the whole press: %s" % JSON.stringify(whole))
 	if _pressed("fixture_physical"):
 		_fail("the whole press should leave the action released")

@@ -232,6 +232,10 @@ function testSceneToolsVectorRegression(): void {
       'src/godot/addons/gdharness_editor/tools/scene_tools.gd',
       join(projectDir, 'addons', 'gdharness_editor', 'tools', 'scene_tools.gd'),
     );
+    cpSync(
+      'src/godot/addons/gdharness_editor/reading.gd',
+      join(projectDir, 'addons', 'gdharness_editor', 'reading.gd'),
+    );
 
     writeFileSync(
       join(projectDir, 'project.godot'),

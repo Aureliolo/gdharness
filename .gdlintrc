@@ -25,3 +25,10 @@ max-returns: 12
 
 # Matches Biome's lineWidth for TypeScript, so both languages wrap at the same column.
 max-line-length: 110
+
+# gdlint's own pattern with a leading underscore allowed. The engine and the linter disagreed
+# here: a call whose answer is genuinely not wanted still cannot drop it, because a project can
+# hold return_value_discarded at error level, and the parser's own advice for the local that
+# catches it is "prefix it with an underscore". gdlint then refused the name the parser asked
+# for. Only the prefix is admitted; the rest of snake_case still holds.
+function-variable-name: '^_?[a-z][a-z0-9]*(_[a-z0-9]+)*$'

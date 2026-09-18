@@ -5,6 +5,8 @@ extends SceneTree
 ## here, with the answers checked against what was built. Nothing is in the tree until the
 ## main loop starts, so the checks run on the first frame rather than in _init.
 
+const Checked = preload("checked.gd")
+const Read = preload("res://addons/gdharness_runtime/reading.gd")
 const Runtime = preload("res://addons/gdharness_runtime/runtime_autoload.gd")
 const HERO_SCRIPT: String = "res://query_hero.gd"
 
@@ -54,7 +56,7 @@ var directory: String
 
 func _init() -> void:
 	var file: FileAccess = FileAccess.open(HERO_SCRIPT, FileAccess.WRITE)
-	file.store_string(HERO_SOURCE)
+	Checked.worked(file.store_string(HERO_SOURCE), "writing the hero script")
 	file.close()
 
 	# Announced somewhere private, so the fixture does not look like a game to a server running
@@ -63,14 +65,15 @@ func _init() -> void:
 	OS.set_environment("GDHARNESS_RUNTIME_DIR", directory)
 	node = Runtime.new()
 	root.add_child(node)
-	process_frame.connect(_run, CONNECT_ONE_SHOT)
+	Checked.done(process_frame.connect(_run, CONNECT_ONE_SHOT) as Error, "waiting for the next frame")
 
 
 func _run() -> void:
 	await _check()
 	node._cleanup()
-	DirAccess.remove_absolute(directory)
-	DirAccess.remove_absolute(ProjectSettings.globalize_path(HERO_SCRIPT))
+	# Not checked: both are gone either way by the time the fixture tears itself down.
+	var _took_directory: Error = DirAccess.remove_absolute(directory)
+	var _took_script: Error = DirAccess.remove_absolute(ProjectSettings.globalize_path(HERO_SCRIPT))
 
 	if failures.is_empty():
 		print(JSON.stringify({"ok": true}))
@@ -129,7 +132,7 @@ func _check_reading_the_screen(panel: Panel) -> void:
 	await process_frame
 
 	var said: Dictionary = await node._execute_command("read_text", {"root": "/root/Panel"})
-	var lines: Array = Array(said.get("lines", []))
+	var lines: Array = said.get("lines", [])
 	if lines != ["Your guild", "Sign", "4", "Everything"]:
 		_fail("the screen should read as what is drawn on it, in order: %s" % str(said))
 	if said.get("count") != 4 or said.get("truncated") != false or said.get("omitted") != 0:
@@ -138,7 +141,8 @@ func _check_reading_the_screen(panel: Panel) -> void:
 	# The first few lines rather than all of them, which is how the top of a screen is read
 	# without the room under it. It was named in the schema, taken by the call and thrown away.
 	var few: Dictionary = await node._execute_command("read_text", {"root": "/root/Panel", "limit": 2})
-	if Array(few.get("lines", [])) != ["Your guild", "Sign"]:
+	var first_lines: Array = few.get("lines", [])
+	if first_lines != ["Your guild", "Sign"]:
 		_fail("a limit should be the first lines and no more: %s" % str(few))
 	# How many were left behind rather than that some were: a screen cut two lines short and one
 	# cut two hundred short read the same, and the dialog somebody was looking for was under the
@@ -155,7 +159,8 @@ func _check_reading_the_screen(panel: Panel) -> void:
 	var everything: Dictionary = await node._execute_command(
 		"read_text", {"root": "/root/Panel", "include_hidden": true}
 	)
-	if not Array(everything.get("lines", [])).has("Nothing posted"):
+	var every_line: Array = everything.get("lines", [])
+	if not every_line.has("Nothing posted"):
 		_fail("and hidden text should be there for the asking: %s" % str(everything))
 
 	var nowhere: Dictionary = await node._execute_command("read_text", {"root": "/root/Nowhere"})
@@ -264,10 +269,10 @@ func _check_hidden_nodes_can_be_left_out() -> void:
 		"find_nodes", {"class": "Label", "root": "/root/Shelf", "include_hidden": false, "property": "text"}
 	)
 	var rows: Array = with_text.get("nodes", [])
-	var values: PackedStringArray = []
+	var values: Array[String] = []
 	for row: Dictionary in rows:
 		values.append(str(row.get("value", "")))
-	if values != PackedStringArray(["scouted twice"]):
+	if values != ["scouted twice"]:
 		_fail("the property is still read off what is left: %s" % str(with_text))
 
 	shelf.queue_free()
@@ -392,10 +397,10 @@ func _check_reading_into_a_list() -> void:
 		"get_property", {"path": "/root/Level/Hero", "property": "roster"}
 	)
 	var people: Array = whole.get("value", [])
-	var says: PackedStringArray = []
+	var says: Array[String] = []
 	for one: Dictionary in people:
 		says.append(str(one.get("says", "")))
-	if says != PackedStringArray(["Person(Ada)", "Person(Cass)"]):
+	if says != ["Person(Ada)", "Person(Cass)"]:
 		_fail("a list of objects is rendered so its elements can be told apart: %s" % str(whole))
 
 	var absent: Dictionary = await node._execute_command(
@@ -417,7 +422,7 @@ func _check_calling_through_a_path() -> void:
 	var before: Dictionary = await node._execute_command(
 		"get_property", {"path": "/root/Level/Hero", "property": "held:inner:depth"}
 	)
-	var was: int = int(before.get("value", 0))
+	var was: int = Read.as_int(before.get("value", 0))
 
 	var called: Dictionary = await node._execute_command(
 		"call_method", {"path": "/root/Level/Hero", "method": "held:inner:deepen", "args": [3]}
@@ -460,7 +465,9 @@ func _check_a_node_path_that_reaches_past_a_node() -> void:
 		{"command": "get_tree", "params": {"root": "/root/Level:held"}},
 	]
 	for one: Dictionary in asked:
-		var answer: Dictionary = await node._execute_command(one["command"], one["params"])
+		var command: String = str(one["command"])
+		var params: Dictionary = one["params"]
+		var answer: Dictionary = await node._execute_command(command, params)
 		var said: String = str(answer.get("message", ""))
 		if answer.get("type") != "error" or not said.contains("colons reach past one"):
 			_fail("%s reads a node path as a node: %s" % [one["command"], str(answer)])

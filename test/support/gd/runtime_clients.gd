@@ -9,6 +9,7 @@ extends SceneTree
 ## This file is itself the case the runtime refuses to serve: it is a `-s` run, so everything below
 ## holds only because it asks for one, which is the other half of what is checked here.
 
+const Checked = preload("checked.gd")
 const Runtime = preload("res://addons/gdharness_runtime/runtime_autoload.gd")
 const DEADLINE_MSEC: int = 5000
 
@@ -40,7 +41,8 @@ func _init() -> void:
 	busy._cleanup()
 	busy.free()
 
-	DirAccess.remove_absolute(directory)
+	# Not checked: the directory is gone either way by the time this runs.
+	var _removed: Error = DirAccess.remove_absolute(directory)
 
 	if failures.is_empty():
 		print(JSON.stringify({"ok": true, "temp_dir": OS.get_temp_dir()}))
@@ -60,7 +62,7 @@ func _pump(node: Runtime, client: StreamPeerTCP, done: Callable) -> bool:
 	var deadline: int = Time.get_ticks_msec() + DEADLINE_MSEC
 	while Time.get_ticks_msec() < deadline:
 		node._process(0.0)
-		client.poll()
+		Checked.done(client.poll(), "polling the client")
 		if done.call():
 			return true
 		OS.delay_msec(10)
@@ -142,7 +144,7 @@ func _check_a_client_that_stopped_reading(node: Runtime) -> void:
 	var asked: PackedByteArray = (
 		(JSON.stringify({"id": 1, "command": "ping", "params": {}}) + "\n").to_utf8_buffer()
 	)
-	talker.put_data(asked)
+	Checked.done(talker.put_data(asked), "asking over the socket")
 
 	# The welcome, then the pong. The first client never reads a byte of its four megabytes.
 	var answered: Callable = func() -> bool:
@@ -169,7 +171,7 @@ func _check_a_client_that_stopped_reading(node: Runtime) -> void:
 		return
 	if node._outgoing.has(peer):
 		_fail("the bytes owed to a client that left should go with it")
-	talker.put_data(asked)
+	Checked.done(talker.put_data(asked), "asking over the socket")
 	var answered_again: Callable = func() -> bool:
 		_drain_second(talker)
 		return second_lines.size() >= 3
@@ -255,18 +257,18 @@ func _check(node: Runtime, directory: String) -> void:
 		+ JSON.stringify({"command": "ping", "params": {}})
 		+ "\n"
 	)
-	client.put_data(batch.to_utf8_buffer())
+	Checked.done(client.put_data(batch.to_utf8_buffer()), "sending the batch")
 	var split: PackedByteArray = (
 		(JSON.stringify({"id": 9, "command": "ping", "params": {}}) + "\n").to_utf8_buffer()
 	)
-	client.put_data(split.slice(0, 10))
+	Checked.done(client.put_data(split.slice(0, 10)), "sending the first half")
 	var three_answered: Callable = func() -> bool:
 		_drain(client)
 		return lines.size() >= 4
 	if not _pump(node, client, three_answered):
 		_fail("the batch was not answered: %s" % str(lines))
 		return
-	client.put_data(split.slice(10))
+	Checked.done(client.put_data(split.slice(10)), "sending the second half")
 	var fourth_answered: Callable = func() -> bool:
 		_drain(client)
 		return lines.size() >= 5

@@ -1,5 +1,6 @@
 extends RefCounted
 
+const Patterns = preload("patterns.gd")
 const Log = preload("logger.gd")
 
 var _log: Log
@@ -278,9 +279,7 @@ func _parse_param(param_text: String) -> Dictionary:
 
 func _extract_dependencies(line: String) -> Array[String]:
 	var deps: Array[String] = []
-	var regex: RegEx = RegEx.new()
-
-	regex.compile("(?:preload|load)\\s*\\(\\s*[\"']([^\"']+)[\"']\\s*\\)")
+	var regex: RegEx = Patterns.compiled("(?:preload|load)\\s*\\(\\s*[\"']([^\"']+)[\"']\\s*\\)")
 
 	for m: RegExMatch in regex.search_all(line):
 		deps.append(m.get_string(1))

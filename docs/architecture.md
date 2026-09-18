@@ -476,6 +476,17 @@ Which tools this covers is worth knowing, because `project_settings get` reads l
 config file and is not: it starts an engine so that a setting nobody wrote into `project.godot`
 still answers with the default the engine registers for it.
 
+`--path` also makes that project's GDScript warning levels the ones the operations script is
+compiled under, although the file lives in gdharness's own package and not in the project at all.
+Godot's escape hatch does not reach it: `debug/gdscript/warnings/directory_rules` exempts paths
+under `res://`, and this one is nowhere near. So a project that turns `unsafe_call_argument` or
+`return_value_discarded` up to error stops compiling gdharness, and loses every headless operation
+at once rather than the one it was using. The shipped GDScript is therefore written to survive
+every warning this engine has at error level: nothing untyped handed to a typed parameter, nothing
+answered and dropped. `test/engine-gdscript.ts` asks the engine for its own list of warnings rather
+than keeping one, turns all of them up, empties `directory_rules` so the addons are held to it too,
+and runs an operation from outside the project the way the server does.
+
 Beyond that log, one of these boots leaves the project alone. A `--script` run performs no
 filesystem scan and no import, so it writes nothing under `.godot`: a project that has only ever
 been scripted still has an empty one, and a settled project's class cache, uid cache and extension

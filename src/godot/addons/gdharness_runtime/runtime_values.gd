@@ -3,6 +3,8 @@ extends RefCounted
 ## What crosses the wire between the game and the server, in both directions: Godot values
 ## as JSON-safe dictionaries, and JSON back into the values a property or parameter wants.
 
+const Read = preload("reading.gd")
+
 # What each Godot type becomes on the wire, keyed on typeof() rather than written as a chain of
 # `is` tests whose order has to be trusted: Resource had to be tested before Object, or every
 # resource came back as a bare class name with its path dropped.
@@ -190,17 +192,30 @@ func deserialize(value: Variant) -> Variant:
 
 	match fields["_type"]:
 		"Vector2":
-			return Vector2(fields.get("x", 0), fields.get("y", 0))
+			return Vector2(Read.as_float(fields.get("x", 0)), Read.as_float(fields.get("y", 0)))
 		"Vector3":
-			return Vector3(fields.get("x", 0), fields.get("y", 0), fields.get("z", 0))
+			return Vector3(
+				Read.as_float(fields.get("x", 0)),
+				Read.as_float(fields.get("y", 0)),
+				Read.as_float(fields.get("z", 0))
+			)
 		"Vector2i":
-			return Vector2i(fields.get("x", 0), fields.get("y", 0))
+			return Vector2i(Read.as_int(fields.get("x", 0)), Read.as_int(fields.get("y", 0)))
 		"Vector3i":
-			return Vector3i(fields.get("x", 0), fields.get("y", 0), fields.get("z", 0))
+			return Vector3i(
+				Read.as_int(fields.get("x", 0)),
+				Read.as_int(fields.get("y", 0)),
+				Read.as_int(fields.get("z", 0))
+			)
 		"Color":
-			return Color(fields.get("r", 0), fields.get("g", 0), fields.get("b", 0), fields.get("a", 1))
+			return Color(
+				Read.as_float(fields.get("r", 0)),
+				Read.as_float(fields.get("g", 0)),
+				Read.as_float(fields.get("b", 0)),
+				Read.as_float(fields.get("a", 1), 1.0)
+			)
 		"NodePath":
-			return NodePath(fields.get("path", ""))
+			return NodePath(str(fields.get("path", "")))
 	return value
 
 
@@ -214,7 +229,7 @@ func parameter_type(object: Object, method: String, index: int) -> int:
 		if index < 0 or index >= params.size():
 			return TYPE_NIL
 		var parameter: Dictionary = params[index]
-		return int(parameter.get("type", TYPE_NIL))
+		return Read.as_int(parameter.get("type", TYPE_NIL), TYPE_NIL)
 	return TYPE_NIL
 
 
@@ -231,7 +246,8 @@ func fitted(value: Variant, type: int) -> Variant:
 		return rebuilt
 
 	if rebuilt is String and type != TYPE_STRING:
-		var parsed: Variant = JSON.parse_string(rebuilt)
+		var text: String = rebuilt
+		var parsed: Variant = JSON.parse_string(text)
 		if typeof(parsed) != TYPE_NIL and typeof(parsed) != TYPE_STRING:
 			rebuilt = parsed
 

@@ -9,6 +9,7 @@ const Values = preload("runtime_values.gd")
 ## query module rather than worked out again here, so the place this aims at and the place a rect
 ## reports are the same place by construction rather than by agreement.
 const Queries = preload("runtime_queries.gd")
+const Read = preload("reading.gd")
 
 ## The distance from a capital letter to its small one in Unicode. A keycode holds the capital.
 const TO_SMALL: int = 32
@@ -40,10 +41,10 @@ func _init(host: Node, values: Values) -> void:
 ##
 ## `pressed` is how a caller says otherwise: true holds it down, false lets go of one being held.
 func inject_action(params: Dictionary) -> Dictionary:
-	var action: String = String(params.get("action", ""))
-	var held: bool = bool(params.get("pressed", true))
+	var action: String = str(params.get("action", ""))
+	var held: bool = Read.as_bool(params.get("pressed", true), true)
 	var whole: bool = not params.has("pressed")
-	var strength: float = float(params.get("strength", 1.0))
+	var strength: float = Read.as_float(params.get("strength", 1.0), 1.0)
 
 	if action.is_empty():
 		return {"type": "error", "message": "Action name required"}
@@ -79,15 +80,15 @@ func _say_action(action: String, down: bool, strength: float) -> void:
 ## Presses one key, and lets go of it again unless asked to hold it. See [method inject_action].
 func inject_key(params: Dictionary) -> Dictionary:
 	var keycode_raw: Variant = params.get("keycode", 0)
-	var held: bool = bool(params.get("pressed", true))
+	var held: bool = Read.as_bool(params.get("pressed", true), true)
 	var whole: bool = not params.has("pressed")
-	var key_label: String = String(params.get("key_label", ""))
+	var key_label: String = str(params.get("key_label", ""))
 
 	if keycode_raw is String:
 		var named: String = keycode_raw
 		if not named.is_empty() and key_label.is_empty():
 			key_label = named
-	var keycode: int = 0 if keycode_raw is String else int(keycode_raw)
+	var keycode: int = 0 if keycode_raw is String else Read.as_int(keycode_raw)
 
 	var event: InputEventKey = InputEventKey.new()
 	event.pressed = whole or held
@@ -109,9 +110,9 @@ func inject_key(params: Dictionary) -> Dictionary:
 	event.physical_keycode = event.keycode
 	event.key_label = event.keycode
 
-	event.shift_pressed = bool(params.get("shift", false))
-	event.ctrl_pressed = bool(params.get("ctrl", false))
-	event.alt_pressed = bool(params.get("alt", false))
+	event.shift_pressed = Read.as_bool(params.get("shift", false))
+	event.ctrl_pressed = Read.as_bool(params.get("ctrl", false))
+	event.alt_pressed = Read.as_bool(params.get("alt", false))
 
 	# The fourth thing a real event carries, and the only one a text field reads: LineEdit and
 	# TextEdit insert `unicode` and never consult the keycode, so an injected key could press any
@@ -161,8 +162,8 @@ func inject_key(params: Dictionary) -> Dictionary:
 ## 2.1, and the answer said four characters had gone in. What the field holds afterwards is read
 ## back now rather than echoed from the request, so a call that typed somewhere unhelpful says so.
 func inject_text(params: Dictionary) -> Dictionary:
-	var text: String = String(params.get("text", ""))
-	var over: bool = bool(params.get("replace", false))
+	var text: String = str(params.get("text", ""))
+	var over: bool = Read.as_bool(params.get("replace", false))
 	if text.is_empty() and not over:
 		return {"type": "error", "message": "text needs something to type, or replace to empty a field"}
 
@@ -305,7 +306,7 @@ func _glyph_of(keycode: Key, shifted: bool) -> int:
 ## Answers a Vector2, or the String that says what was wrong with it.
 func _read_point(params: Dictionary, x_key: String, y_key: String, pair_key: String) -> Variant:
 	if params.has(x_key) and params.has(y_key):
-		return Vector2(float(params[x_key]), float(params[y_key]))
+		return Vector2(Read.as_float(params[x_key]), Read.as_float(params[y_key]))
 	var raw: Variant = params.get(pair_key, Vector2.ZERO)
 	if raw is Vector2:
 		return raw
@@ -313,7 +314,7 @@ func _read_point(params: Dictionary, x_key: String, y_key: String, pair_key: Str
 		var pair: Array = raw
 		if pair.size() < 2:
 			return "%s array must contain [x, y]" % pair_key
-		return Vector2(float(pair[0]), float(pair[1]))
+		return Vector2(Read.as_float(pair[0]), Read.as_float(pair[1]))
 	return "%s must be Vector2 or [x, y]" % pair_key
 
 
@@ -325,8 +326,8 @@ func inject_mouse_click(params: Dictionary) -> Dictionary:
 	var button: int = _resolve_mouse_button(params.get("button", MOUSE_BUTTON_LEFT))
 	if button < 0:
 		return _no_such_button(params.get("button"))
-	var pressed: bool = bool(params.get("pressed", true))
-	var double: bool = bool(params.get("doubleClick", false))
+	var pressed: bool = Read.as_bool(params.get("pressed", true), true)
+	var double: bool = Read.as_bool(params.get("doubleClick", false))
 
 	Input.parse_input_event(_button(position, button, pressed, double))
 
@@ -445,7 +446,8 @@ func click(params: Dictionary) -> Dictionary:
 		return standing
 	var node: Node = standing["node"]
 	if node is Node3D:
-		return await _click_in_the_world(node_path, node, params)
+		var spatial: Node3D = node
+		return await _click_in_the_world(node_path, spatial, params)
 	if not node is Control:
 		return {
 			"type": "error",
@@ -495,7 +497,7 @@ func click(params: Dictionary) -> Dictionary:
 	var button: int = _resolve_mouse_button(params.get("button", MOUSE_BUTTON_LEFT))
 	if button < 0:
 		return _no_such_button(params.get("button"))
-	var double: bool = bool(params.get("double", false))
+	var double: bool = Read.as_bool(params.get("double", false))
 
 	# Pushed into the viewport rather than through Input: Input accumulates events and flushes
 	# them at the next frame, so the hovered control read below would be the one from before
@@ -672,7 +674,7 @@ static func _menu_of(node: Node) -> PopupMenu:
 ## Minus one when neither names one that is there.
 static func _wanted_item(menu: PopupMenu, params: Dictionary) -> int:
 	if params.has("index"):
-		var asked: int = int(params.get("index", -1))
+		var asked: int = Read.as_int(params.get("index", -1), -1)
 		return asked if asked >= 0 and asked < menu.get_item_count() else -1
 	var wanted: String = str(params.get("text", ""))
 	if wanted.is_empty():
@@ -687,8 +689,8 @@ static func _wanted_item(menu: PopupMenu, params: Dictionary) -> int:
 
 
 ## What the menu says, for a refusal that names the choices rather than the miss.
-static func _items_of(menu: PopupMenu) -> PackedStringArray:
-	var said: PackedStringArray = PackedStringArray()
+static func _items_of(menu: PopupMenu) -> Array[String]:
+	var said: Array[String] = []
 	for index: int in menu.get_item_count():
 		said.append("%d: %s" % [index, menu.get_item_text(index)])
 	return said
@@ -758,7 +760,7 @@ func _click_in_the_world(node_path: String, item: Node3D, params: Dictionary) ->
 	var button: int = _resolve_mouse_button(params.get("button", MOUSE_BUTTON_LEFT))
 	if button < 0:
 		return _no_such_button(params.get("button"))
-	var double: bool = bool(params.get("double", false))
+	var double: bool = Read.as_bool(params.get("double", false))
 
 	viewport.push_input(_motion(position, Vector2.ZERO))
 	# Read before the press, for the reason the Control click reads it: what the caller needs to
@@ -839,4 +841,4 @@ func _resolve_mouse_button(raw: Variant) -> int:
 				return MOUSE_BUTTON_WHEEL_DOWN
 			_:
 				return -1
-	return int(raw)
+	return Read.as_int(raw, -1)

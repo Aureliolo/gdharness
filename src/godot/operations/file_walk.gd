@@ -24,7 +24,8 @@ func find_files(path: String, extension: String) -> Array[String]:
 	var dir: DirAccess = DirAccess.open(path)
 
 	if dir:
-		dir.list_dir_begin()
+		if dir.list_dir_begin() != OK:
+			return files
 		var file_name: String = dir.get_next()
 
 		while file_name != "":
@@ -47,7 +48,8 @@ func find_files_with_extensions(path: String, extensions: Array) -> Array[String
 	var dir: DirAccess = DirAccess.open(path)
 
 	if dir:
-		dir.list_dir_begin()
+		if dir.list_dir_begin() != OK:
+			return files
 		var file_name: String = dir.get_next()
 
 		while file_name != "":
