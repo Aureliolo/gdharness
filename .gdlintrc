@@ -12,6 +12,12 @@ disable: []
 # dispatcher now and nothing fails this. What a tightening would have to answer for is
 # scene_tools.gd at 935, so the number to beat is that one rather than anything left over from the
 # dispatcher, and picking one under it without having read that file is how 600 happened.
+#
+# 935 is 731 lines of code and 204 of comment and blank, which is worth stating because the rule
+# counts file lines and that is only the right quantity while the two move together. A project whose
+# files carry a record that grows without the code growing has a cap that binds on the record, and
+# nothing says so for as long as everything stays under it. Measured across the three largest here:
+# 60 to 78 per cent code, so file lines are still close enough to mean something.
 max-file-lines: 1000
 
 # gdlint's default is 10, which is enough arguments to hide a missing struct.
