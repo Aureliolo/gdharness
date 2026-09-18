@@ -1474,6 +1474,15 @@ async function testRuntime({ call, refusal, attempt, project, lspPort, dapPort }
   const rect = await call('runtime_inspect', { ...game, op: 'rect', nodePath: '/root/Main/Panel' });
   assert.equal(get(rect, 'canvas', 'size', 'x'), 320, 'rect should measure the control it was given');
   assert.equal(get(rect, 'canvas', 'position', 'y'), 20, 'and place it where the game put it');
+  // How it is spelled, not only what it holds. A downstream project reads every click result and
+  // every rect off this path and keys on the tag, and nothing here said which tag it would be: the
+  // three serialisers that used to disagree could have been made to agree on the other spelling
+  // with every case in this file still green.
+  assert.equal(
+    asString(get(rect, 'canvas', 'position', '_type')),
+    'Vector2',
+    `a vector off a running game is tagged: ${text(rect)}`,
+  );
 
   // One property, read straight: the alternative is the whole tree with every property on it, or
   // calling `get` through runtime_invoke, and neither is a question about one value.
