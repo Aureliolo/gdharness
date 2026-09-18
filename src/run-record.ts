@@ -42,6 +42,14 @@ export interface RunRecord {
    * see `stillTheRecordedRun`, which is what decides whether anything may be signalled.
    */
   readonly command?: string;
+  /**
+   * What it exited with, when its server was still there to see it go.
+   *
+   * Absent for a run that outlived the server which started it, which is the case this whole
+   * record exists for. Present is the other one: the run ended, the server saw it, and then the
+   * harness replaced that server before anybody asked.
+   */
+  readonly exitCode?: number;
 }
 
 /** Where a run's note and its transcript are kept, beside the runtime's own announcements. */
@@ -85,6 +93,30 @@ export function writeRunRecord(record: RunRecord): void {
   writeFileSync(recordPath(), JSON.stringify(record, null, 2), 'utf8');
 }
 
+/**
+ * The exit code kept in the note, for a run that ended while its server was still there.
+ *
+ * A run outlives its server on purpose and the next one reads this note rather than the process,
+ * so without this a bench that had finished cleanly under a server since replaced came back as one
+ * whose exit code "was never collected". That is true of the reading and false of the run: it was
+ * collected, by the process that started it, and then thrown away when the harness reconnected.
+ *
+ * Only when the note is still this run's. These directories are shared by every server on the
+ * machine, and writing an exit code over somebody else's note would end their run on paper.
+ */
+export function recordRunEnded(pid: number, exitCode: number): void {
+  const path = recordPath();
+  const record = recordAt(path);
+  if (record === null || record.pid !== pid) {
+    return;
+  }
+  try {
+    writeFileSync(path, JSON.stringify({ ...record, exitCode }, null, 2), 'utf8');
+  } catch {
+    // Gone or unwritable, which is a state every reader of this note already handles.
+  }
+}
+
 /** The run another server left behind, or null when there is none to read. */
 export function readRunRecord(): RunRecord | null {
   for (const path of recordPaths()) {
@@ -121,6 +153,7 @@ function recordAt(path: string): RunRecord | null {
     projectPath: typeof fields['projectPath'] === 'string' ? fields['projectPath'] : '',
     arguments: Array.isArray(args) ? args.filter((value): value is string => typeof value === 'string') : [],
     ...(typeof fields['command'] === 'string' ? { command: fields['command'] } : {}),
+    ...(typeof fields['exitCode'] === 'number' ? { exitCode: fields['exitCode'] } : {}),
   };
 }
 
