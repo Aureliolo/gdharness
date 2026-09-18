@@ -9,6 +9,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -5494,6 +5495,82 @@ async function testTheEditorAnswersOnlyForItsOwnProject(): Promise<void> {
 }
 
 /**
+ * A config naming a version this server is not is said, rather than left to be worked out.
+ *
+ * Four versions surround a project and three of them were reported: the addon installed in it, the
+ * server answering, and the newest on npm. The fourth is the one the project's own `.mcp.json`
+ * names, which is what the client fetches the next time it spawns a server, and nothing looked at
+ * it. A downstream project moved a pin it kept elsewhere, ran its reconnect twice, and got the old
+ * server both times; two sessions went into working out which side was lying, and neither was.
+ *
+ * Silent while the two agree, because a notice that is always there is a notice nobody reads.
+ */
+async function testAConfigNamingAnotherVersionIsSaid(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-pinned-'));
+  try {
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    const named = (version: string): void => {
+      writeFileSync(
+        join(project, '.mcp.json'),
+        JSON.stringify({
+          mcpServers: { gdharness: { command: 'npx', args: ['-y', `gdharness@${version}`] } },
+        }),
+      );
+    };
+
+    named('0.0.1');
+    const stale = new ServerProcess({ env: { GDHARNESS_PROJECT: project } });
+    try {
+      await stale.initialize('regression-test');
+      const asked = await stale.request('tools/call', { name: 'editor_status', arguments: {} });
+      // In the status itself, for a caller who went looking, and in the notice, for one who did
+      // not: the whole point is that nobody thought to ask, so being asked cannot be the condition.
+      const reported = text(get(parseTextContent(asked), 'editor', 'configIs'));
+      assert.match(
+        reported,
+        /gdharness@0\.0\.1/,
+        `the status should name what the config asks for: ${reported}`,
+      );
+      assert.match(
+        reported,
+        new RegExp(SERVER_VERSION.replaceAll('.', '\\.')),
+        `beside the one that is answering: ${reported}`,
+      );
+      assert.match(reported, /reconnected/, `and what closes the gap: ${reported}`);
+      const said = textOf(asked) ?? '';
+      assert.match(said, /config_names_another_version/, `and the notice should carry it too: ${said}`);
+    } finally {
+      await stale.stop();
+    }
+
+    // The pairing: a config naming this very server says nothing at all. Without it the fixture is
+    // satisfied by a server that reports a disagreement whatever the file holds.
+    named(SERVER_VERSION);
+    const agreed = new ServerProcess({ env: { GDHARNESS_PROJECT: project } });
+    try {
+      await agreed.initialize('regression-test');
+      const settled = await agreed.request('tools/call', { name: 'editor_status', arguments: {} });
+      const quiet = textOf(settled) ?? '';
+      assert.equal(
+        get(parseTextContent(settled), 'editor', 'configIs'),
+        undefined,
+        `nothing to say when the two agree: ${quiet}`,
+      );
+      assert.doesNotMatch(quiet, /config_names_another_version/, `and no notice either: ${quiet}`);
+      assert.equal(
+        text(get(parseTextContent(settled), 'editor', 'serverVersion')),
+        SERVER_VERSION,
+        `and it is still the whole status answer: ${quiet}`,
+      );
+    } finally {
+      await agreed.stop();
+    }
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
  * A value outside the set its schema lists is refused rather than quietly replaced by the default.
  *
  * It is the quietest of the argument faults: the name is right and the type is right, so every
@@ -5576,6 +5653,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheCopiedHelperReadsTheSameEverywhere,
   testTheEditorIsOfferedWhereItCanAnswer,
   testAReadAskedOfTheEditorIsNotAnsweredFromDisk,
+  testAConfigNamingAnotherVersionIsSaid,
   testTheEditorAnswersOnlyForItsOwnProject,
   testAnUnlistedValueIsRefusedRatherThanDefaulted,
   testEveryFixtureIsCalled,
