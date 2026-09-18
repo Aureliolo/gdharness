@@ -3433,9 +3433,12 @@ async function testAFinishedRunCanStillBeRead(): Promise<void> {
         // one quit on its own, and the answer says so rather than leaving the two silences to be
         // told apart by guesswork: a run gdharness ended looks exactly like one that died.
         assert.equal(get(output, 'endedBy'), null, `nothing ended it: ${JSON.stringify(output)}`);
+        // A clean exit is not one of the two silences, so the note says that rather than leaving
+        // the question open: this scene printed its answer and quit, which is what exit code 0
+        // means and what reading it as an incident got wrong on every finish.
         assert.match(
           text(get(output, 'note')),
-          /Nothing here ended this run/,
+          /quit on its own, cleanly: exit code 0/,
           `and the note says so: ${JSON.stringify(output)}`,
         );
       },
