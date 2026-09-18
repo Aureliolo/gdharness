@@ -38,7 +38,15 @@ import { isWithinRoot, resolveWithinProject } from '../src/paths.js';
 import { freePort } from '../src/ports.js';
 import { projectStructure, searchProject } from '../src/project-scan.js';
 import { parseProjectGodot } from '../src/resources.js';
-import { couldStillBeTheRecordedRun, judgeRun, runningAs, stillTheRecordedRun } from '../src/run-record.js';
+import {
+  couldStillBeTheRecordedRun,
+  judgeRun,
+  readRunRecord,
+  recordRunEnded,
+  runningAs,
+  stillTheRecordedRun,
+  writeRunRecord,
+} from '../src/run-record.js';
 import {
   announcedSince,
   chooseRuntime,
@@ -943,7 +951,11 @@ async function testAnEditorNotReachedYetIsNotAnEditorThatIsGone(): Promise<void>
   );
 
   // And the answer carries it, which is the half that would otherwise be computed and dropped.
-  const server = new ServerProcess();
+  // On a bridge port of its own: the default one is held by whatever else this suite has running,
+  // and a server whose bridge never listened is the other case entirely, with nothing to time from.
+  const server = new ServerProcess({
+    env: { GDHARNESS_BRIDGE_PORT: String(await freePort(0)) },
+  });
   try {
     await server.initialize('regression-test');
     const payload = get(
@@ -3410,6 +3422,52 @@ function testOnlyOurOwnAutoloadIsRewritten(): void {
 }
 
 /**
+ * What a run ended with outlives the server that watched it end.
+ *
+ * A run is spawned detached so a reconnect cannot take it, and the next server reads the note on
+ * disk rather than the process. The exit was seen, though: the server that started it is the
+ * child's parent until it goes, and it learned the code and kept it in memory alone. So a bench
+ * that had finished cleanly under a server the harness then replaced came back reported as one
+ * whose exit code "was never collected", which is true of the reading and false of the run.
+ *
+ * The note is shared by every server on this machine, so the half that matters as much is the one
+ * where the pid is not ours: writing an ending into somebody else's note ends their bench on paper.
+ */
+function testAnExitCodeOutlivesTheServerThatSawIt(): void {
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-ending-'));
+  const had = process.env['GDHARNESS_RUNTIME_DIR'];
+  process.env['GDHARNESS_RUNTIME_DIR'] = runtimeDir;
+  try {
+    writeRunRecord({
+      pid: 4242,
+      transcript: join(runtimeDir, 'run.log'),
+      startedAt: Date.now(),
+      projectPath: join(tmpdir(), 'a-game'),
+      arguments: ['--headless'],
+      command: 'godot',
+    });
+    assert.equal(readRunRecord()?.exitCode, undefined, 'a run still going has no ending to report');
+
+    recordRunEnded(9999, 3);
+    assert.equal(readRunRecord()?.exitCode, undefined, "another run's ending is not written into this note");
+
+    recordRunEnded(4242, 3);
+    const after = readRunRecord();
+    assert.ok(after !== null, 'the note should still be there to read');
+    assert.equal(after.exitCode, 3, 'the code its own server saw is kept for whoever reads next');
+    assert.equal(after.pid, 4242, 'and the rest of the note is still there');
+    assert.equal(after.command, 'godot');
+  } finally {
+    if (had === undefined) {
+      delete process.env['GDHARNESS_RUNTIME_DIR'];
+    } else {
+      process.env['GDHARNESS_RUNTIME_DIR'] = had;
+    }
+    rmSync(runtimeDir, { recursive: true, force: true });
+  }
+}
+
+/**
  * A pid is not an identity, and the one thing here that kills asks for an identity.
  *
  * A run picked back up after a reconnect has a number and no handle, and the number was signalled
@@ -4957,6 +5015,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testParametersReachTheEngine,
   testAFinishedRunCanStillBeRead,
   testOnlyOurOwnAutoloadIsRewritten,
+  testAnExitCodeOutlivesTheServerThatSawIt,
   testAPidIsNotAnIdentity,
   testARunEndedUnwatchedIsStillReadable,
   testAForeignRunSurvivesAStart,
