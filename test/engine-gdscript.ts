@@ -964,7 +964,20 @@ async function testAnOperationLeavesARunningLogAlone(godotPath: string): Promise
     stdio: 'ignore',
     env: userDataIn(home),
   });
-  const saved = { app: process.env['APPDATA'], xdg: process.env['XDG_DATA_HOME'] };
+  const moved = ['APPDATA', 'XDG_DATA_HOME'];
+  const saved = new Map(moved.map((name) => [name, process.env[name]]));
+  // Put back, rather than set back: assigning undefined to a variable stores the word "undefined",
+  // and a relative XDG_DATA_HOME is one the engine warns about on stderr in every later operation,
+  // which is how this leaked out of the case that set it and failed a different one.
+  const restore = (): void => {
+    for (const [name, value] of saved) {
+      if (value === undefined) {
+        delete process.env[name];
+      } else {
+        process.env[name] = value;
+      }
+    }
+  };
   try {
     let log: string | null = null;
     const ready = Date.now() + 60_000;
@@ -1018,12 +1031,18 @@ async function testAnOperationLeavesARunningLogAlone(godotPath: string): Promise
       'and nothing should have been rotated aside',
     );
   } finally {
-    process.env['APPDATA'] = saved.app;
-    process.env['XDG_DATA_HOME'] = saved.xdg;
+    restore();
     bench.kill();
     await delay(500);
     rmSync(project, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });
+  }
+
+  // Checked here rather than left to whichever later case the engine happens to warn in. This
+  // leaked once, and what reported it was an operation two cases further on writing a warning
+  // about a relative path to stderr, which named neither the variable's owner nor this case.
+  for (const [name, value] of saved) {
+    assert.equal(process.env[name], value, `${name} should be back as it was, unset included`);
   }
 }
 
