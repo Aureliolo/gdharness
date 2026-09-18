@@ -49,6 +49,14 @@ right, not that the thing answering is. `editor_status` is what settles it: `add
 compares what the editor loaded against this server, and `projectIs` catches the other direction,
 a project upgraded while the server kept running, which nothing else reports at all.
 
+Every answer that came out of the editor carries `addonIsStale` and `staleNote` too, when the two
+halves differ. Only `editor_status` used to, so an editor several releases behind went on
+answering scene and resource questions out of the code it loaded at startup, confidently, and a
+caller who never asked about versions had nothing to go on. Measured in the field: four errors
+from a stale addon that were not errors and vanished on restart. Read the version from
+`serverVersion` rather than from the pin when it matters, because the pin describes the next
+server and the process answering is whatever the harness spawned at the last reconnect.
+
 The runner is named by its path rather than as `npx` or `bunx`. A harness spawns what the config
 names, through PATH, and a runner's name is not always on it: a Bun installed under a project
 ships a `bun` and no `bunx` beside it, so an entry saying `bunx` starts nothing. Writing a path

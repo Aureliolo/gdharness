@@ -44,7 +44,9 @@ that is running, and the project on disk. ${TOOL_SPECS.length} tools, named \`do
   running games. There is no ambient project.
 - \`editor_status\` says whether an editor is connected and whether its addon matches the server.
   \`addonIsStale\` means they differ, and \`staleNote\` says which half is behind: an editor that
-  needs restarting, or a server that needs reconnecting in your harness.
+  needs restarting, or a server that needs reconnecting in your harness. Every answer that came
+  from the editor carries the same two when they differ, so a stale addon cannot answer quietly:
+  believe a restart over a diagnostic that arrived with them.
 - Start the game with \`editor_run start\`, never by spawning an engine. The editor plays it, so
   its debugger holds it, which is what gives the \`debug_*\` tools something to talk to. Its answer
   says under \`runtime\` whether the game can be talked to yet; when it cannot, \`mayYetAnnounce\`

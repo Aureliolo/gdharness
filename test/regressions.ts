@@ -58,7 +58,7 @@ import {
 } from '../src/runtime-client.js';
 import { alive, HEADLESS_OPERATIONS, patienceForFrames, runIsUp, runtimeVerdict } from '../src/server.js';
 import type { GodotProcess } from '../src/server-types.js';
-import { addonMismatch } from '../src/server-version.js';
+import { addonMismatch, markIfStale } from '../src/server-version.js';
 import { autoloadIsOurs } from '../src/setup.js';
 import { opTakes, TOOL_SPECS } from '../src/tool-definitions.js';
 import { cacheFile, isNewer, UpdateCheck } from '../src/update-check.js';
@@ -912,6 +912,48 @@ function testProjectGodotResistsPrototypeKeys(): void {
     'yes',
     'a [constructor] section must survive the JSON the resource handler hands back',
   );
+}
+
+/**
+ * An answer out of the editor says when the addon that produced it is not this server's.
+ *
+ * `editor_status` has carried `addonIsStale` all along, and every other answer that came back
+ * through the bridge said nothing at all: a caller who never asks about versions is served by
+ * whatever code the editor loaded at startup, confidently, with no sign of it in the answer. A
+ * downstream project has a recorded incident of exactly that, four errors from a stale addon that
+ * were not errors and vanished on restart, and reported an editor three releases behind today.
+ *
+ * The half that has to hold as firmly is the quiet one: a project whose halves agree must see
+ * nothing added, or every answer gdharness gives grows a key that means nothing.
+ */
+function testAnAnswerFromAStaleAddonSaysSo(): void {
+  const answer = { nodes: ['Main'], count: 1 };
+
+  const agreed = markIfStale(answer, '9.9.9', '9.9.9');
+  assert.deepEqual(agreed, answer, 'halves that agree add nothing to the answer');
+  assert.equal(get(agreed, 'addonIsStale'), undefined, 'not even as false, which would read as news');
+
+  const behind = markIfStale(answer, '0.12.4', '0.12.16');
+  assert.equal(get(behind, 'count'), 1, "the editor's own answer is still all there");
+  assert.equal(get(behind, 'addonIsStale'), true, 'and it says which half is behind');
+  assert.match(
+    text(get(behind, 'staleNote')),
+    /0\.12\.4 addon while this server ships 0\.12\.16.*editor_launch restart/s,
+    'naming both versions and what fixes it',
+  );
+
+  // The other direction: a server behind its addon is told to reconnect rather than restart, and
+  // an addon too old to say which version it is still reads as not this one.
+  assert.match(
+    text(get(markIfStale(answer, '0.12.16', '0.12.4'), 'staleNote')),
+    /reconnect it in your harness/,
+  );
+  assert.equal(get(markIfStale(answer, undefined, '0.12.16'), 'addonIsStale'), true);
+
+  // An answer that is not an object has nowhere to put this, and inventing somewhere would change
+  // the shape of what the editor said.
+  assert.deepEqual(markIfStale([1, 2], '0.12.4', '0.12.16'), [1, 2], 'a list comes back a list');
+  assert.equal(markIfStale(7, '0.12.4', '0.12.16'), 7, 'and a number a number');
 }
 
 /**
@@ -5028,6 +5070,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testProjectGodotMultilineValues,
   testProjectGodotResistsPrototypeKeys,
 
+  testAnAnswerFromAStaleAddonSaysSo,
   testAnEditorNotReachedYetIsNotAnEditorThatIsGone,
   testEditorStatusPortConflict,
   testTheBridgeTakesThePortWhenItIsFreed,
