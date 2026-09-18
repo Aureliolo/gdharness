@@ -98,9 +98,12 @@ breakpoint on the line you want instead.
 \`scene_signal\` and \`resource_edit\` change it through the editor, so the files keep their
 formatting. \`script_diagnostics\` and \`script_info\` come from the editor's own language server.
 
-\`project_info\`, \`project_dependencies\`, \`project_import\`, \`project_test\` and
+\`project_info\`, \`project_dependencies\`, \`project_settings\`, \`project_import\`,
+\`project_export\`, \`project_test\`, \`script_edit\`, \`script_info structure\` and
 \`editor_classes\` need nothing open: they run a short headless engine and are gone before the
-answer is printed.
+answer is printed. \`project_settings get\` is on that list too, reading as it does like a look at
+a config file: it starts an engine so that a setting nobody wrote down still answers with the
+default the engine registers for it.
 
 Editing a file while a game is running does not change the running game. \`auto_reload\` is an
 editor plugin and reloads into the editor's own process; the game is a separate process holding
