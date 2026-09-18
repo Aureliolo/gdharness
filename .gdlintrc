@@ -7,10 +7,11 @@
 disable: []
 
 # gdlint's own default. It was 600 here for a while, which was a number picked rather than
-# measured: it failed two ordinary tool modules at 720 and 849 lines alongside the one file that
-# is genuinely the problem. godot_operations.gd is 4400 lines and fails this on purpose, because
-# splitting it is the rework and the linter should keep saying so rather than be tuned to accept
-# it. Tightening this again is worth doing once that file is no longer the reason it fires.
+# measured: it failed two ordinary tool modules at 720 and 849 lines alongside the 4400-line
+# godot_operations.gd, which was the only one that was genuinely a problem. That file is a 191-line
+# dispatcher now and nothing fails this. What a tightening would have to answer for is
+# scene_tools.gd at 935, so the number to beat is that one rather than anything left over from the
+# dispatcher, and picking one under it without having read that file is how 600 happened.
 max-file-lines: 1000
 
 # gdlint's default is 10, which is enough arguments to hide a missing struct.

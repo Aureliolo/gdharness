@@ -6,7 +6,7 @@ import { isAbsolute, relative, resolve, sep } from 'node:path';
  * Two kinds arrive, and they want opposite treatment. `projectPath` and `directory` name the
  * project or the search root this server was pointed at, so any absolute path is legitimate:
  * choosing it is the whole point of the argument, and there is no outer directory for it to sit
- * inside. Everything else (`filePath`, `resourcePath`, `scenePath`, `scriptPath`, `outputPath`,
+ * inside. Everything else (`resourcePath`, `scenePath`, `scriptPath`, `newPath`, `outputPath`,
  * a plugin's directory) is documented as a location inside that project, and is read as one: the
  * operations script prefixes `res://` and opens it, the export path is a destination the engine
  * writes to. A value that lands outside the project is one the caller has no claim on.
