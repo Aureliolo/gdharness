@@ -920,16 +920,24 @@ function testProjectGodotResistsPrototypeKeys(): void {
  * over half a minute to reach and no fixture should be waiting for it.
  */
 async function testAnEditorNotReachedYetIsNotAnEditorThatIsGone(): Promise<void> {
-  const started = 1_000_000;
-  assert.equal(mayYetConnect(undefined, started), true, 'a bridge on no port has had no chance yet');
-  assert.equal(mayYetConnect(started, started + 1_000), true, 'a second in, an editor is still coming');
+  const started = new Date(1_000_000);
   assert.equal(
-    mayYetConnect(started, started + CONNECT_WINDOW_MS - 1),
+    mayYetConnect(undefined, started.getTime()),
+    true,
+    'a bridge on no port has had no chance yet',
+  );
+  assert.equal(
+    mayYetConnect(started, started.getTime() + 1_000),
+    true,
+    'a second in, an editor is still coming',
+  );
+  assert.equal(
+    mayYetConnect(started, started.getTime() + CONNECT_WINDOW_MS - 1),
     true,
     'and up to the window, because the addon doubles its wait to thirty seconds',
   );
   assert.equal(
-    mayYetConnect(started, started + CONNECT_WINDOW_MS),
+    mayYetConnect(started, started.getTime() + CONNECT_WINDOW_MS),
     false,
     'past it, nothing having connected is an editor that is not there',
   );
@@ -947,6 +955,13 @@ async function testAnEditorNotReachedYetIsNotAnEditorThatIsGone(): Promise<void>
       get(payload, 'mayYetConnect'),
       true,
       `a bridge this new cannot say otherwise: ${text(payload)}`,
+    );
+    // Spelled the way connectedAt beside it is spelled. It reaches the answer either way, so the
+    // choice was between a timestamp and the epoch milliseconds it started life as.
+    assert.match(
+      text(get(payload, 'listeningSince')),
+      /^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/,
+      `and says when the bridge took the port: ${text(payload)}`,
     );
   } finally {
     await server.stop();
