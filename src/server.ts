@@ -369,7 +369,14 @@ const PATH_SOLUTIONS = [
  * project knows it by: both read `../outside.tscn` as a file to open and an absolute path as a
  * project file, so the boundary belongs on this side.
  */
-const PROJECT_FILE_ARGUMENTS = ['scenePath', 'scriptPath', 'resourcePath', 'newPath', 'path', 'script'];
+export const PROJECT_FILE_ARGUMENTS = [
+  'scenePath',
+  'scriptPath',
+  'resourcePath',
+  'newPath',
+  'path',
+  'script',
+];
 
 /**
  * The first value in `properties` that walks out of the project, if there is one.
