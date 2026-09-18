@@ -1730,8 +1730,15 @@ class GodotServer {
     }
 
     const debug = readBoolean(args, 'debug') ?? false;
+    // Away from the project's own user://logs/, for the reason the operations are: the engine
+    // renames that file when a process starts, so an export beside a running game rotated the
+    // game's log out from under it. What this run printed is read off its streams just below and
+    // answered with, so the file it writes is of no use to anybody either.
+    const exportLogs = mkdtempSync(join(tmpdir(), 'gdharness-export-'));
     const exportArgs = [
       '--headless',
+      '--log-file',
+      join(exportLogs, 'engine.log'),
       '--path',
       project.value.path,
       debug ? '--export-debug' : '--export-release',
@@ -1755,6 +1762,8 @@ class GodotServer {
       log.append('stdout', failed.stdout);
       log.append('stderr', failed.stderr);
       exitCode = typeof failed.code === 'number' ? failed.code : -1;
+    } finally {
+      rmSync(exportLogs, { recursive: true, force: true });
     }
     log.finish();
 
