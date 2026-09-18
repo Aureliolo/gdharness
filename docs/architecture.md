@@ -445,10 +445,21 @@ purpose.
 
 ## Headless operations
 
-One engine per call: `godot --headless --path <project> --script <operations.gd> <operation>
-@file:<params.json>`. Arguments are camelCase in the tool call and snake_case in the file the
-engine reads. The answer is the last JSON object printed on stdout. Anything on stderr comes back
-under `engine_messages`.
+One engine per call: `godot --headless --log-file <temp> --path <project> --script <operations.gd>
+<operation> @file:<params.json>`. Arguments are camelCase in the tool call and snake_case in the
+file the engine reads. The answer is the last JSON object printed on stdout. Anything on stderr
+comes back under `engine_messages`.
+
+`--log-file` keeps that engine out of the project's `user://logs/`. Godot renames `godot.log` when
+a process starts, so on a project with file logging on, one of these boots rotated a running
+bench's log out from under it, and the bench went on writing at the offset it still believed it
+was at: the operation's few hundred bytes, a zero-filled gap, then the bench's next row. These
+runs answer one question and exit, so their own log is of no use to anybody and goes beside the
+parameters instead.
+
+Which tools this covers is worth knowing, because `project_settings get` reads like a look at a
+config file and is not: it starts an engine so that a setting nobody wrote into `project.godot`
+still answers with the default the engine registers for it.
 
 Every walk over a project directory stops at the same three things, whether the engine is doing
 the walking or the server is reading the directory itself: a name spelled with a dot,

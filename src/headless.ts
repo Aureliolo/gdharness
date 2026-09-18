@@ -112,6 +112,14 @@ export async function runOperation(
   writeFileSync(paramsFile, JSON.stringify(snakeCased(params)), 'utf8');
   const args = [
     '--headless',
+    // Away from the project's own user://logs/godot.log, which a project with file logging on
+    // has a run writing to. The engine renames that file when a process starts, so a boot here
+    // rotated a running bench's log out from under it and the bench went on writing at the
+    // offset it still believed it was at: measured as the operation's few hundred bytes, a
+    // zero-filled gap, then the bench's next row. These runs answer one question and exit, so
+    // the log they write is of no use to anybody and goes where the parameters go.
+    '--log-file',
+    join(paramsDir, 'engine.log'),
     '--path',
     projectPath,
     '--script',
