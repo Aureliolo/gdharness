@@ -18,7 +18,7 @@ import { SERVER_VERSION } from './server-version.js';
 import { readString } from './tool-args.js';
 
 /** The addons the package ships, by directory name under addons/. */
-const ADDONS = ['gdharness_editor', 'gdharness_runtime', 'auto_reload'] as const;
+export const ADDONS = ['gdharness_editor', 'gdharness_runtime', 'auto_reload'] as const;
 
 /** The addons that are editor plugins and are enabled by setup. */
 export const EDITOR_PLUGINS = ['gdharness_editor', 'auto_reload'] as const;

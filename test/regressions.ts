@@ -66,7 +66,7 @@ import {
 } from '../src/server.js';
 import type { GodotProcess } from '../src/server-types.js';
 import { addonMismatch, markIfStale } from '../src/server-version.js';
-import { autoloadIsOurs } from '../src/setup.js';
+import { ADDONS, autoloadIsOurs, installAddons } from '../src/setup.js';
 import { opTakes, TOOL_SPECS } from '../src/tool-definitions.js';
 import { cacheFile, isNewer, UpdateCheck } from '../src/update-check.js';
 import { asArray, asNumber, get, text } from './support/json.js';
@@ -5047,6 +5047,56 @@ function testEveryFileArgumentIsContained(): void {
 }
 
 /**
+ * Every addon the package ships is one an install puts in the project.
+ *
+ * `installAddons` copies the directories `ADDONS` names, one at a time. A name in that list with no
+ * directory behind it already fails loudly, with "The package holds no X addon", so that direction
+ * is held. The other one is silent: a directory added under `src/godot/addons` and not added to the
+ * list is an addon that ships inside the package and is never installed by anything, and the only
+ * symptom is a tool that answers as though the addon were simply not there.
+ *
+ * What counts as an addon is the same test the install uses, rather than "every directory", so a
+ * directory of shared files added beside them does not read as one.
+ */
+function testEveryShippedAddonIsInstalled(): void {
+  const shipped = readdirSync('src/godot/addons', { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .filter(
+      (name) =>
+        existsSync(join('src/godot/addons', name, 'plugin.cfg')) ||
+        existsSync(join('src/godot/addons', name, 'runtime_autoload.gd')),
+    );
+  assert.ok(shipped.length >= 3, `only ${shipped.length} addons were found, so this proved little`);
+  for (const name of shipped) {
+    assert.ok(
+      (ADDONS as readonly string[]).includes(name),
+      `${name} ships in the package and no install puts it in a project: add it to ADDONS`,
+    );
+  }
+
+  // And the list is read by an install rather than only compared against, because a list that
+  // matches the directory and installs none of them satisfies everything above.
+  const projectDir = mkdtempSync(join(tmpdir(), 'gdharness-addons-'));
+  try {
+    const installed = installAddons(projectDir);
+    assert.deepEqual(
+      installed.map((addon) => addon.name).sort(),
+      [...ADDONS].sort(),
+      'an install should have put every addon in the list into the project',
+    );
+    for (const name of shipped) {
+      assert.ok(
+        existsSync(join(projectDir, 'addons', name)),
+        `${name} should be in the project after an install`,
+      );
+    }
+  } finally {
+    rmSync(projectDir, { recursive: true, force: true });
+  }
+}
+
+/**
  * Every script in an installed addon carries the `.uid` that fixes its identity.
  *
  * Godot 4.4 writes one beside each script and reads it back so a reference survives a rename.
@@ -5112,6 +5162,7 @@ function testEveryFixtureIsCalled(): void {
 
 const TESTS: (() => void | Promise<void>)[] = [
   testEveryFileArgumentIsContained,
+  testEveryShippedAddonIsInstalled,
   testEveryAddonScriptKeepsItsIdentity,
   testEveryFixtureIsCalled,
   testBothEndsAgreeAboutTheAnnouncement,
