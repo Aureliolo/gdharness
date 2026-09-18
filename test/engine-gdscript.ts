@@ -1039,7 +1039,7 @@ async function testAnOperationLeavesARunningLogAlone(godotPath: string): Promise
     const answered = await runThroughTheServersOwnPath(
       { godotPath, script: resolve('src/godot/operations/godot_operations.gd'), debug: false },
       'get_project_setting',
-      { settingPath: 'debug/gdscript/warnings/unsafe_call_argument' },
+      { setting: 'debug/gdscript/warnings/unsafe_call_argument' },
       project,
     );
     assert.ok(answered.ok, `the operation should still answer: ${answered.ok ? '' : answered.message}`);
@@ -1133,6 +1133,37 @@ function testInstalledLayout(godotPath: string, projectDir: string): void {
  * The project here holds every warning this engine has at error level and contains nothing else, so
  * what compiles is the shipped operations directory and only that.
  */
+/**
+ * A whole family of settings is answerable in one call, with the type the engine registers for each.
+ *
+ * Reading one setting by name cannot answer a question about a family, and the engine is the only
+ * thing that knows what a family contains, so the way round it was a script written to walk
+ * `get_property_list()` and an engine started to run it. The type is the half that matters: this
+ * suite's own gate wrote a level over `renamed_in_godot_4_hint`, which is a bool sitting among the
+ * warning levels, and nothing looked wrong because 2 is as true as true is.
+ */
+function testAFamilyOfSettingsAnswersWithItsTypes(godotPath: string, projectDir: string): void {
+  const payload = runOperation(godotPath, projectDir, 'get_project_setting', {
+    prefix: 'debug/gdscript/warnings/',
+  });
+  const settings = asArray(get(payload, 'settings'));
+  assert.ok(settings.length > 40, `the family should have been named: ${JSON.stringify(payload)}`);
+  assert.equal(asNumber(get(payload, 'count')), settings.length);
+
+  const byName = new Map(
+    settings.map((entry) => [asString(get(entry, 'setting')), asString(get(entry, 'type'))]),
+  );
+  assert.equal(byName.get('debug/gdscript/warnings/unsafe_call_argument'), 'int');
+  // The one this exists for: among fifty settings that take a level, it takes a bool.
+  assert.equal(byName.get('debug/gdscript/warnings/renamed_in_godot_4_hint'), 'bool');
+  assert.equal(byName.get('debug/gdscript/warnings/directory_rules'), 'Dictionary');
+
+  // And a prefix nothing matches is an empty answer rather than an error, because "no settings
+  // start with this" is a fact about the project rather than a fault in the call.
+  const none = runOperation(godotPath, projectDir, 'get_project_setting', { prefix: 'nothing/starts/here/' });
+  assert.equal(asNumber(get(none, 'count')), 0);
+}
+
 function testTheOperationsSurviveEveryWarning(godotPath: string): void {
   const dir = mkdtempSync(join(tmpdir(), 'gdharness-strict-'));
   try {
@@ -1227,6 +1258,7 @@ async function main(): Promise<void> {
     await testAnOperationLeavesARunningLogAlone(godotPath);
     testRefusals(godotPath, projectDir);
     testInstalledLayout(godotPath, projectDir);
+    testAFamilyOfSettingsAnswersWithItsTypes(godotPath, projectDir);
     testTheOperationsSurviveEveryWarning(godotPath);
   } finally {
     rmSync(projectDir, { recursive: true, force: true });
