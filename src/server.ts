@@ -88,7 +88,13 @@ import type {
   SpawnedGame,
   ToolResponse,
 } from './server-types.js';
-import { addonMismatch, DEBUG_MODE, GODOT_DEBUG_MODE_DEFAULT, SERVER_VERSION } from './server-version.js';
+import {
+  addonMismatch,
+  DEBUG_MODE,
+  GODOT_DEBUG_MODE_DEFAULT,
+  markIfStale,
+  SERVER_VERSION,
+} from './server-version.js';
 import { installedAddonVersion, RUNTIME_AUTOLOAD } from './setup.js';
 import {
   asParams,
@@ -3322,7 +3328,13 @@ class GodotServer {
       );
     }
     try {
-      return this.jsonTextResponse(await this.godotBridge.invokeTool(toolName, args));
+      return this.jsonTextResponse(
+        markIfStale(
+          await this.godotBridge.invokeTool(toolName, args),
+          this.godotBridge.getStatus().addonVersion,
+          SERVER_VERSION,
+        ),
+      );
     } catch (error) {
       return this.createErrorResponse(
         `The editor answered ${toolName} with an error: ${errorMessage(error)}`,
