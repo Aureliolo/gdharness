@@ -3135,9 +3135,17 @@ class GodotServer {
     // that matters to a caller: it draws nothing, answers no runtime call, and the timeouts that
     // follow read like a hung engine. Said here because this is where somebody asks what it did.
     const halt = run.throughEditor ? (this.dapClient?.whereItStopped() ?? null) : null;
+    // Asked for rather than always, because asking costs a subprocess and on Windows that is a
+    // PowerShell start: seconds under load, on every read, on the one platform where the answer is
+    // dearest. Put in the hot path it slowed every call enough to time others out, and the tests
+    // that ask Windows about a process were the ones that failed. A caller wanting to tell a wedged
+    // run from a slow one asks then, which is rarely and deliberately.
+    //
     // Only while it is going: a process that has exited has no processor time left to report, and
     // asking after a pid that is gone answers about whatever holds that number next.
-    const cpuSeconds = run.pid !== null && stillRunning(run) ? await cpuSecondsOf(run.pid) : undefined;
+    const wanted = readBoolean(args, 'cpu') ?? false;
+    const cpuSeconds =
+      wanted && run.pid !== null && stillRunning(run) ? await cpuSecondsOf(run.pid) : undefined;
     const notes: string[] = [];
     if (waitedMs !== undefined) {
       notes.push(
@@ -3205,11 +3213,11 @@ class GodotServer {
       // The file this run's output is written to, so watching a long one is reading a file meant
       // to be read rather than racing the engine for one that is not.
       transcript: run.transcript ?? undefined,
-      // How long it has been going, and how much of that it spent working. A run that is wedged
-      // and a run that is merely slow look the same from outside, and this is what separates
-      // them: elapsed climbing while processor time stands still is a game that has stopped
-      // doing anything. Asked of the operating system, so cpuSeconds is absent where it will not
-      // say rather than guessed at.
+      // How long it has been going, and, when asked for, how much of that it spent working. A run
+      // that is wedged and a run that is merely slow look the same from outside, and processor
+      // time is what separates them: elapsed climbing while it stands still is a game that has
+      // stopped doing anything. Absent unless `cpu` asked, and absent where the platform will not
+      // say, rather than guessed at.
       startedAt: new Date(run.startedAt).toISOString(),
       elapsedMs: Date.now() - run.startedAt,
       cpuSeconds,

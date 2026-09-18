@@ -3984,6 +3984,16 @@ async function testARunOutlivesItsServer(): Promise<void> {
       }
 
       assert.equal(get(output, 'running'), true, JSON.stringify(output));
+      // A live run is the only time processor time could be answered, so it is the only time an
+      // unasked read could go and get it. Answering it on every read costs a subprocess, and on
+      // Windows that is a PowerShell start: in this path it slowed each call enough to time others
+      // out, and what failed were the fixtures that ask Windows about a process, queueing behind
+      // the same mechanism. Asserted here rather than beside a run that has finished, where the
+      // field is absent whatever the default is and the check could never fail.
+      assert.ok(
+        !Object.hasOwn(output as Record<string, unknown>, 'cpuSeconds'),
+        `a read that did not ask for processor time does not go and get it: ${JSON.stringify(output)}`,
+      );
       const printed = asArray(get(output, 'entries')).map((entry) => text(get(entry, 'text')));
       assert.ok(
         printed.some((line) => /row \d+/.test(line)),
