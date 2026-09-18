@@ -2062,11 +2062,15 @@ class GodotServer {
       return severity === 1 || severity === 'error' || severity === 'ERROR';
     }).length;
     // Marked stale the way a bridge answer is, because this one is worth marking most. These come
-    // from the language server of an editor that has been running since before the addon it holds
-    // was replaced, and a project reported four confident errors naming lines that were not in the
-    // file, all four gone after a restart. Every other answer is wrong about something a caller can
-    // check; this is a tool whose whole job is being right about a file, so it says what it
-    // depended on rather than leaving that to a status call nobody makes first.
+    // from the language server of an editor that may have been running since before the addon it
+    // holds was replaced, and nothing in the answer said so: a caller had to make a status call
+    // first to know whether to believe it, which nobody does before an answer looks wrong.
+    //
+    // That is the fault, rather than any claim that a behind editor answers wrongly. A project
+    // recorded diagnostics naming lines that were not in the file, gone after a restart, and on
+    // their own re-reading a class_name the editor's database had not caught up with explains it
+    // without staleness being involved at all. Marked rather than refused for the same reason: a
+    // suspicion is not a fault, and refusing would take a working tool away on one.
     return this.jsonTextResponse(
       markIfStale(
         {
