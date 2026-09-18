@@ -60,7 +60,7 @@ import {
 } from '../src/runtime-client.js';
 import { alive, PROJECT_FILE_ARGUMENTS, patienceForFrames, runIsUp, runtimeVerdict } from '../src/server.js';
 import type { GodotProcess } from '../src/server-types.js';
-import { addonMismatch, markIfStale } from '../src/server-version.js';
+import { addonMismatch, markIfStale, SERVER_VERSION } from '../src/server-version.js';
 import { ADDONS, autoloadIsOurs, installAddons } from '../src/setup.js';
 import { readNonNegativeNumber, readPositiveNumber } from '../src/tool-args.js';
 import { opTakes, TOOL_SPECS } from '../src/tool-definitions.js';
@@ -5076,6 +5076,74 @@ function testEveryFileArgumentIsContained(): void {
 }
 
 /**
+ * A diagnostics answer says when it came from an editor older than this server.
+ *
+ * `addonIsStale` already rode on answers that come back over the bridge. Diagnostics do not come
+ * that way: they come from the language server of the same editor, so they went unmarked, and a
+ * caller was left to make a separate status call first to find out whether to believe them.
+ *
+ * A project reported four confident errors naming lines that were not in the file, all four gone
+ * after a restart. Every other stale answer is wrong about something a caller can check for
+ * themselves; this is the one tool whose whole job is being right about a file, so it is where
+ * being quietly wrong costs most.
+ *
+ * Read out of the source because the behaviour needs an editor running an addon older than this
+ * server, which is a state a fixture cannot honestly arrange. What `markIfStale` does with an
+ * answer once it is handed one is covered by testAnAnswerFromAStaleAddonSaysSo.
+ */
+function testDiagnosticsSayWhenTheEditorIsBehind(): void {
+  const source = readFileSync('src/server.ts', 'utf8');
+  const handler = source.slice(source.indexOf('private async handleScriptDiagnostics('));
+  const body = handler.slice(0, handler.indexOf('private async handleLSP('));
+  assert.ok(body.length > 0, 'the diagnostics handler should have been found, so this proved something');
+  assert.match(
+    body,
+    /markIfStale\(/,
+    'a diagnostics answer should say when the editor behind it is older than this server',
+  );
+  assert.match(body, /diagnostics,/, 'and should still be carrying the diagnostics it was asked for');
+}
+
+/**
+ * An argument this server has never heard of is refused with the op's own list and the version.
+ *
+ * "This tool has no such argument" and "the server you are talking to does not have it yet" are the
+ * same sentence, and a server left running through an upgrade says the second while sounding like
+ * the first. A caller who asked for an argument a newer gdharness has could not tell whether they
+ * had misspelled it, invented it, or were talking to a server from before it existed, and the
+ * answer only arrived when a later call happened to mention the version.
+ *
+ * The list is the op's, not the tool's: a caller who wrote `get` is asking what `get` takes, and
+ * being handed every argument the other ten ops accept between them answers a question nobody put.
+ */
+async function testAnUnknownArgumentSaysWhichServerSaysSo(): Promise<void> {
+  const server = new ServerProcess();
+  try {
+    await server.initialize('regression-test');
+    const response = await server.request('tools/call', {
+      name: 'project_settings',
+      arguments: { projectPath: '/p', op: 'get', setting: 'a/b', nosuchargument: 1 },
+    });
+    const said = text(get(parseTextContent(response), 'error') ?? JSON.stringify(response));
+    assert.match(said, /nosuchargument/, `the refusal names what was not taken: ${said}`);
+    assert.match(said, /project_settings get does not take/, `and names the op it was asked of: ${said}`);
+    assert.match(
+      said,
+      new RegExp(SERVER_VERSION.replaceAll('.', '\\.')),
+      `and which server says so: ${said}`,
+    );
+    // The list is what this op actually accepts, which is what makes it worth printing: an
+    // argument declaring no ops is read by all of them, so a long list here is the schema being
+    // loose rather than the refusal being careless. `prefix` is on it because `get` takes it, and
+    // `frames` is not because it belongs to a different tool entirely.
+    assert.match(said, /prefix/, `the list is what the op takes: ${said}`);
+    assert.doesNotMatch(said, /frames/, `and nothing from another tool: ${said}`);
+  } finally {
+    await server.stop();
+  }
+}
+
+/**
  * Processor time is read off whichever clock `ps` felt like printing.
  *
  * It prints `MM:SS` for a young process, `HH:MM:SS` once it has been going an hour, and
@@ -5258,6 +5326,8 @@ function testEveryFixtureIsCalled(): void {
 
 const TESTS: (() => void | Promise<void>)[] = [
   testEveryFileArgumentIsContained,
+  testDiagnosticsSayWhenTheEditorIsBehind,
+  testAnUnknownArgumentSaysWhichServerSaysSo,
   testProcessorTimeIsReadOffEveryClockFormat,
   testAWaitOfNothingIsAWaitOfNothing,
   testAnEntryWithNoDetailDoesNotCarryAnEmptyOne,
