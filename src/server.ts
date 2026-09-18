@@ -9,6 +9,7 @@
  */
 
 import { type ChildProcess, execFile, spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import {
   closeSync,
   existsSync,
@@ -62,6 +63,7 @@ import { projectStructure, searchProject } from './project-scan.js';
 import { parseProjectGodot, setupResourceHandlers } from './resources.js';
 import {
   clearRunRecord,
+  couldStillBeTheRecordedRun,
   openTranscript,
   readRunRecord,
   stillTheRecordedRun,
@@ -1810,7 +1812,13 @@ class GodotServer {
       return this.answer(classes);
     }
 
-    const reports = 'res://.godot/gdharness-reports';
+    // Under a name of this run's own. The directory is a path in the project rather than in this
+    // process, so a second run against the same project wrote its report_1 beside the first's,
+    // and the reading below takes the highest-numbered one it finds: whichever run finished first
+    // read the other's results as its own and then removed the lot, leaving the run still going
+    // with nothing to report. A project is allowed more than one thing happening to it at once.
+    const ours = `gdharness-reports/${randomUUID()}`;
+    const reports = `res://.godot/${ours}`;
     const ignored = readStringArray(args, 'ignore') ?? [];
     const asked = readString(contained.value, 'path') ?? 'res://test';
     const cmdArgs = [
@@ -1848,7 +1856,7 @@ class GodotServer {
       });
     });
 
-    const reportsDir = join(project.value.path, '.godot', 'gdharness-reports');
+    const reportsDir = join(project.value.path, '.godot', ...ours.split('/'));
     let report: TestReport | null = null;
     let reportProblem: string | null = null;
     try {
@@ -2930,7 +2938,7 @@ class GodotServer {
     // Alive, and still the run this record describes. The second half is asked once, here, where
     // a run is picked up: a pid that came back around belongs to something else, and taking it
     // for the run would report a finished bench as running and offer its number to be killed.
-    if (!alive(record.pid) || !stillTheRecordedRun(record)) {
+    if (!alive(record.pid) || !couldStillBeTheRecordedRun(record)) {
       adopted.log.finish();
       // Not a real exit code: nobody was waiting on the process, so what it exited with is not
       // recorded anywhere. Said as unknown rather than guessed at.
