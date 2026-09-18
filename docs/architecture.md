@@ -457,6 +457,13 @@ was at: the operation's few hundred bytes, a zero-filled gap, then the bench's n
 runs answer one question and exit, so their own log is of no use to anybody and goes beside the
 parameters instead.
 
+That holds for every short-lived engine gdharness starts to answer something: the operations, and
+`project_export`, which reads its own output off the process and reports it. The engines that do
+write where the project keeps its logs are the ones that are the point rather than a means, a game
+and an editor, and a run's log is the run's. `project_test` is neither: its whole `user://` moves
+to a directory of its own, so a suite that saves a game cannot write into the saves somebody
+plays.
+
 Which tools this covers is worth knowing, because `project_settings get` reads like a look at a
 config file and is not: it starts an engine so that a setting nobody wrote into `project.godot`
 still answers with the default the engine registers for it.
