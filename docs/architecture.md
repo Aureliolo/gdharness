@@ -461,6 +461,14 @@ Which tools this covers is worth knowing, because `project_settings get` reads l
 config file and is not: it starts an engine so that a setting nobody wrote into `project.godot`
 still answers with the default the engine registers for it.
 
+Beyond that log, one of these boots leaves the project alone. A `--script` run performs no
+filesystem scan and no import, so it writes nothing under `.godot`: a project that has only ever
+been scripted still has an empty one, and a settled project's class cache, uid cache and extension
+list come through a boot untouched. Measured across a settings read, a health walk, a class query
+and a validation. So a read-only call beside a running game is a call that leaves it alone, and
+the operations that do write there, `project_import refresh_classes` and `refresh_uids`, write
+because that is what they were asked to do.
+
 Every walk over a project directory stops at the same three things, whether the engine is doing
 the walking or the server is reading the directory itself: a name spelled with a dot,
 `node_modules`, and a directory holding a `.gdignore`. That is what the engine steps over, so
