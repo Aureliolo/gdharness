@@ -24,7 +24,7 @@ import { staleClassNames, unseenByEditor } from '../src/class-cache.js';
 import { GodotDAPClient } from '../src/dap_client.js';
 import { dictionary, emptyRecord } from '../src/dictionary.js';
 import { GameLog } from '../src/game-log.js';
-import { createBridge } from '../src/godot-bridge.js';
+import { CONNECT_WINDOW_MS, createBridge, mayYetConnect } from '../src/godot-bridge.js';
 import {
   editorArguments,
   envValue,
@@ -904,6 +904,53 @@ function testProjectGodotResistsPrototypeKeys(): void {
     'yes',
     'a [constructor] section must survive the JSON the resource handler hands back',
   );
+}
+
+/**
+ * A `connected: false` says whether it is final.
+ *
+ * The editor dials this server rather than the other way round, and backs off between tries up to
+ * thirty seconds, so for the first half-minute of a bridge's life "nothing has connected" and
+ * "there is no editor" are one answer to two questions. A downstream session read it as the second
+ * straight after an upgrade respawned its server, and went through the machine's process list to
+ * find the editor still up and its own answer wrong. `editor_run start` has said `mayYetAnnounce`
+ * about the runtime for exactly this reason; the editor's own connection had nothing.
+ *
+ * The decision is judged apart from a clock, because the half worth having is the one that takes
+ * over half a minute to reach and no fixture should be waiting for it.
+ */
+async function testAnEditorNotReachedYetIsNotAnEditorThatIsGone(): Promise<void> {
+  const started = 1_000_000;
+  assert.equal(mayYetConnect(undefined, started), true, 'a bridge on no port has had no chance yet');
+  assert.equal(mayYetConnect(started, started + 1_000), true, 'a second in, an editor is still coming');
+  assert.equal(
+    mayYetConnect(started, started + CONNECT_WINDOW_MS - 1),
+    true,
+    'and up to the window, because the addon doubles its wait to thirty seconds',
+  );
+  assert.equal(
+    mayYetConnect(started, started + CONNECT_WINDOW_MS),
+    false,
+    'past it, nothing having connected is an editor that is not there',
+  );
+
+  // And the answer carries it, which is the half that would otherwise be computed and dropped.
+  const server = new ServerProcess();
+  try {
+    await server.initialize('regression-test');
+    const payload = get(
+      parseTextContent(await server.request('tools/call', { name: 'editor_status', arguments: {} })),
+      'editor',
+    );
+    assert.equal(get(payload, 'connected'), false, 'no editor is running against this fixture');
+    assert.equal(
+      get(payload, 'mayYetConnect'),
+      true,
+      `a bridge this new cannot say otherwise: ${text(payload)}`,
+    );
+  } finally {
+    await server.stop();
+  }
 }
 
 async function testEditorStatusPortConflict(): Promise<void> {
@@ -4110,6 +4157,95 @@ async function testGdUnitRunner(): Promise<void> {
  * runtime on and off registers and removes the autoload, and doctor says so, then says what
  * is wrong once something is.
  */
+/**
+ * A project whose engine is only in its own configuration is still upgradable.
+ *
+ * A project that vendors Godot under its own root, verified and kept off PATH deliberately, has
+ * nowhere for the usual search to look: `.mcp.json`'s `env.GODOT_PATH` is the whole record of
+ * where the engine is, and gdharness is what wrote it there. `upgrade` read that file, quoted it
+ * back in its own output, refused for want of the value in it, and on the next attempt copied that
+ * value through to the new config untouched.
+ *
+ * Driven with the variable unset, because the fault is only reachable when the search fails: with
+ * `GODOT_PATH` in the environment every path here passes whether or not the config is ever read.
+ */
+function testAnUpgradeReadsTheEngineOutOfTheConfigItRewrites(): void {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('config engine path regression skipped (Godot not found)');
+    return;
+  }
+  const projectDir = mkdtempSync(join(tmpdir(), 'gdharness-vendored-'));
+  // Every variable the search reads, taken away, so the only place the engine is named is the
+  // file the command is about to rewrite.
+  const { GODOT_PATH: _path, GODOT: _godot, PATH: _search, Path: _windowsPath, ...blind } = process.env;
+  const cli = (...cliArgs: string[]): { status: number | null; output: string } => {
+    const run = spawnSync(process.execPath, ['build/cli.js', ...cliArgs], {
+      encoding: 'utf8',
+      timeout: 180000,
+      env: blind,
+    });
+    return { status: run.status, output: `${run.stdout}${run.stderr}` };
+  };
+  try {
+    writeFileSync(
+      join(projectDir, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Vendored"\n',
+    );
+    const mcp = join(projectDir, '.mcp.json');
+    writeFileSync(
+      mcp,
+      `${JSON.stringify(
+        {
+          mcpServers: {
+            gdharness: {
+              command: 'npx',
+              args: ['-y', 'gdharness@0.0.1'],
+              env: { GODOT_PATH: godotPath, GDHARNESS_PROJECT: projectDir },
+            },
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    // Installed, so upgrade has something to upgrade from, and written without the search too.
+    const first = cli('setup', projectDir, '--no-connect');
+    assert.equal(first.status, 0, `setup should find the engine in the config: ${first.output}`);
+
+    const upgraded = cli('upgrade', projectDir);
+    assert.equal(
+      upgraded.status,
+      0,
+      `upgrade should not refuse for a path it is holding: ${upgraded.output}`,
+    );
+    assert.match(upgraded.output, /replaced .*gdharness_editor/, upgraded.output);
+    // And the value it read is still the value it writes, which is what made the refusal absurd.
+    assert.equal(
+      text(get(JSON.parse(readFileSync(mcp, 'utf8')), 'mcpServers', 'gdharness', 'env', 'GODOT_PATH')),
+      godotPath,
+      'the engine path should come through the rewrite unchanged',
+    );
+
+    // A machine-wide config may have been written for another project, so its engine is not this
+    // project's to borrow: with the entry gone from the project's own file there is nothing left
+    // to read, and the refusal is the right answer again.
+    rmSync(mcp);
+    const refused = cli('classes', projectDir);
+    assert.notEqual(
+      refused.status,
+      0,
+      `with nothing recording the engine it should refuse: ${refused.output}`,
+    );
+    assert.match(refused.output, /No Godot executable found/, refused.output);
+  } finally {
+    rmSync(projectDir, { recursive: true, force: true });
+  }
+}
+
 function testCommandLineSetup(): void {
   const godotPath = resolveGodotPath();
   if (!godotPath) {
@@ -4811,12 +4947,14 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAForeignRunSurvivesAStart,
   testARunOutlivesItsServer,
   testGdUnitRunner,
+  testAnUpgradeReadsTheEngineOutOfTheConfigItRewrites,
   testCommandLineSetup,
   testTheWrittenConfigNamesAProgramThatStarts,
 
   testProjectGodotMultilineValues,
   testProjectGodotResistsPrototypeKeys,
 
+  testAnEditorNotReachedYetIsNotAnEditorThatIsGone,
   testEditorStatusPortConflict,
   testTheBridgeTakesThePortWhenItIsFreed,
   testAnEditorAServerOpenedIsStartedAgain,

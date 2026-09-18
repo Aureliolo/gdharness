@@ -761,7 +761,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'editor_status',
     description:
-      'Whether the editor addon is connected, which Godot answers, whether the editor is playing something, and whether a game with the runtime addon is reachable.',
+      'Whether the editor addon is connected, which Godot answers, whether the editor is playing something, and whether a game with the runtime addon is reachable. When connected is false, mayYetConnect says whether that is final: the editor dials this server rather than the other way round and backs off between tries, so for the first half-minute after a server starts, false means "not reached yet" as often as it means "no editor". True is worth waiting out; false is an editor that is not there.',
     parameters: {},
     requires: [],
   },

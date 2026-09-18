@@ -23,6 +23,7 @@ import {
   harnessNote,
   type Launch,
   launchFor,
+  recordedEnginePath,
   registered,
 } from './harnesses.js';
 import { type HeadlessEngine, type HeadlessOutcome, runOperation } from './headless.js';
@@ -71,8 +72,14 @@ function projectArgument(at: number): string {
   return projectPath;
 }
 
-async function engine(): Promise<HeadlessEngine> {
-  const godotPath = await new GodotLocator().find();
+/**
+ * [param projectPath] is a project already set up, whose own configuration names the engine it was
+ * set up with. Asked after the usual search, so a machine with Godot where Godot lives is not
+ * pinned to whatever it was set up with a year ago.
+ */
+async function engine(projectPath?: string): Promise<HeadlessEngine> {
+  const godotPath =
+    (await new GodotLocator().find()) ?? (projectPath === undefined ? null : recordedEnginePath(projectPath));
   if (godotPath === null) {
     throw new UsageError(`No Godot executable found. ${GodotLocator.ADVICE.join('. ')}.`);
   }
@@ -266,7 +273,7 @@ async function setup(): Promise<void> {
   // The runtime addon is per-project like everything else setup installs, so it is not something
   // to opt into: without it a third of the tools have nothing to talk to.
   const runtime = !args.includes('--no-runtime');
-  const godot = await engine();
+  const godot = await engine(projectPath);
 
   for (const addon of installAddons(projectPath)) {
     console.log(`${addon.replaced ? 'replaced' : 'installed'} ${addon.path}`);
@@ -329,7 +336,7 @@ async function setup(): Promise<void> {
  */
 async function uninstall(): Promise<void> {
   const projectPath = projectArgument(1);
-  const godot = await engine();
+  const godot = await engine(projectPath);
 
   const named = namedHarnesses();
   const from = named.length > 0 ? named : HARNESSES;
@@ -419,9 +426,11 @@ async function upgrade(): Promise<void> {
       `gdharness is not installed in ${projectPath}. Run  gdharness setup${where}  instead.`,
     );
   }
+  // After the engine is found, not before. A refusal under a line saying which version this is
+  // going to reads as a run that got partway and stopped, and this one changes nothing at all.
+  const godot = await engine(projectPath);
   console.log(installed === version ? `already ${version}; reinstalling` : `${installed} -> ${version}`);
 
-  const godot = await engine();
   for (const addon of installAddons(projectPath)) {
     console.log(`${addon.replaced ? 'replaced' : 'installed'} ${addon.path}`);
   }
@@ -509,7 +518,7 @@ async function runtime(): Promise<void> {
     throw new UsageError('gdharness runtime takes on or off, then the project directory.');
   }
   const projectPath = projectArgument(2);
-  const godot = await engine();
+  const godot = await engine(projectPath);
   // Turning it on when a project already brings it up its own way is a request that has been met,
   // so the entry is left where it is. Turning it off is always this tool's to do: the ask is that
   // nothing comes up, and a wrapper left registered would still bring something up.
@@ -547,7 +556,7 @@ async function runtime(): Promise<void> {
 
 async function classes(): Promise<void> {
   const projectPath = projectArgument(1);
-  const godot = await engine();
+  const godot = await engine(projectPath);
   const outcome = await runOperation(godot, 'refresh_class_cache', {}, projectPath);
   said(outcome, 'rebuilding the class list');
   if (outcome.ok) {

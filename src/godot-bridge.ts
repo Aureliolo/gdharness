@@ -141,9 +141,39 @@ interface BridgeStatus {
   openedByAServer?: boolean | undefined;
   pendingRequests: number;
   queuedResources: number;
+  /** Epoch milliseconds, from when an editor already up could first have reached this bridge. */
+  listeningSince?: number | undefined;
+}
+
+/**
+ * How long a bridge has to have been listening before nothing having connected means no editor.
+ *
+ * The addon dials in by itself and doubles its wait between tries up to thirty seconds, so an
+ * editor that was talking to the server this one replaced can be most of that away from noticing.
+ * Measured downstream at thirty seconds between an editor starting and the bridge taking it.
+ */
+export const CONNECT_WINDOW_MS = 35_000;
+
+/**
+ * Whether an editor that is up could still be on its way to a bridge nothing has connected to.
+ *
+ * True while the bridge is young enough that an editor has not had its chance yet, and while it is
+ * not listening at all, since nothing arrives at a port nobody holds. False is the answer worth
+ * having: the bridge has been open long enough that an editor would have reached it, so there is
+ * no editor rather than one not reached yet.
+ */
+export function mayYetConnect(listeningSince: number | undefined, now: number = Date.now()): boolean {
+  return listeningSince === undefined || now - listeningSince < CONNECT_WINDOW_MS;
 }
 
 export class GodotBridge extends EventEmitter {
+  /**
+   * When this bridge started listening, which is when an editor already up could first reach it.
+   *
+   * The addon dials in on its own and backs off between attempts, so "nothing has connected" means
+   * two different things depending on how long that has been true. Null until the port is taken.
+   */
+  private listeningSince: number | null = null;
   private httpServer: http.Server | null = null;
   private godotWss: WebSocketServer | null = null;
   private socket: WebSocket | null = null;
@@ -247,6 +277,7 @@ export class GodotBridge extends EventEmitter {
 
       server.once('listening', () => {
         settled = true;
+        this.listeningSince = Date.now();
         this.httpServer = server;
         this.godotWss = godotWss;
         const bound = server.address();
@@ -341,6 +372,7 @@ export class GodotBridge extends EventEmitter {
       openedByAServer: this.connectionInfo?.openedByAServer,
       pendingRequests: this.pendingRequests.size,
       queuedResources: this.resourceQueues.size,
+      listeningSince: this.listeningSince ?? undefined,
     };
   }
 
