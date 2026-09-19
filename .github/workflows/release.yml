@@ -426,9 +426,39 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          "${RUNNER_TEMP}/mcp-publisher" validate
-          "${RUNNER_TEMP}/mcp-publisher" login github-oidc
-          "${RUNNER_TEMP}/mcp-publisher" publish
+
+          # Retried only when the call never reached the registry. The archive download above
+          # already retries and these three did not, so a registry that was briefly unreachable
+          # failed a release whose npm publish had gone through: v0.13.13 stopped on
+          # `dial tcp ...: connect: connection refused` and the same job succeeded re-run minutes
+          # later. `publish` is not idempotent, so the test is deliberately about the connection
+          # rather than the exit status: anything the server actually answered, a rejected entry
+          # or a version already there, fails on the spot the way it should.
+          reached_the_registry() {
+            local output attempt=1 delay=5
+            while true; do
+              if output=$("$@" 2>&1); then
+                printf '%s\n' "${output}"
+                return 0
+              fi
+              printf '%s\n' "${output}" >&2
+              if ! grep -qiE 'dial tcp|connection (refused|reset)|no such host|i/o timeout|TLS handshake|server misbehaving' <<<"${output}"; then
+                return 1
+              fi
+              if (( attempt >= 4 )); then
+                echo "The registry was unreachable on every attempt." >&2
+                return 1
+              fi
+              echo "Attempt ${attempt} never reached the registry; retrying in ${delay}s." >&2
+              sleep "${delay}"
+              attempt=$(( attempt + 1 ))
+              delay=$(( delay * 2 ))
+            done
+          }
+
+          reached_the_registry "${RUNNER_TEMP}/mcp-publisher" validate
+          reached_the_registry "${RUNNER_TEMP}/mcp-publisher" login github-oidc
+          reached_the_registry "${RUNNER_TEMP}/mcp-publisher" publish
 
       # Read back what the registry serves rather than believe what the publish printed, which is
       # the rule every tool here is held to. A version that published but is not served reaches

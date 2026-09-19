@@ -116,7 +116,7 @@ jobs:
         run: bun run test:packaging
 
       - name: Audit production dependencies
-        run: bun audit --prod
+        run: bun scripts/audit-production.ts
 
       - name: Verify clean source and build release assets
         shell: bash

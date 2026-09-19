@@ -543,8 +543,17 @@ filesystem scan and no import, so it writes nothing under `.godot`: a project th
 been scripted still has an empty one, and a settled project's class cache, uid cache and extension
 list come through a boot untouched. Measured across a settings read, a health walk, a class query
 and a validation. So a read-only call beside a running game is a call that leaves it alone, and
-the operations that do write there, `project_import refresh_classes` and `refresh_uids`, write
-because that is what they were asked to do.
+`project_import refresh_classes` writes the class cache there because that is what it was asked to
+do.
+
+`project_import refresh_uids` is the exception to the paragraph above, because it is not a
+`--script` run: it is `--import`, the engine's own pass over the project, which is the only thing
+that mints a `.uid`. So it scans, it writes under `.godot`, and it writes a `.uid` beside each
+script and shader that had none. What it does not write is any file that already exists: the pass
+leaves every scene byte for byte as it was. That is worth stating rather than assuming, because the
+op previously loaded every scene and resaved it instead, and a headless resave rebuilds the header
+from what the engine could see, dropping `load_steps` and the scene's own `uid=` and so deleting
+the very references the op exists to keep resolvable.
 
 Every walk over a project directory stops at the same three things, whether the engine is doing
 the walking or the server is reading the directory itself: a name spelled with a dot,
