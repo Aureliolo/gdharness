@@ -3415,6 +3415,18 @@ class GodotServer {
     const cpuSeconds =
       wanted && run.pid !== null && stillRunning(run) ? await cpuSecondsOf(run.pid) : undefined;
     const notes: string[] = [];
+    // Asked for and not answerable, said rather than left out. This is the one reading that
+    // separates a bench doing work from a bench parked, and an absent field reads as "the answer
+    // is nothing" as easily as "the question could not be put": a caller watching for elapsed
+    // climbing while processor time stands still is watching for a number that never arrives.
+    // The wait in the same tool says when it cannot fully deliver, and this is the same property.
+    if (wanted && cpuSeconds === undefined && stillRunning(run)) {
+      notes.push(
+        run.pid === null
+          ? 'cpu was asked for and there is no process to ask: the editor is playing this run and holds it, so nothing here has its process id. editor_run start without a connected editor, or with args, starts the game here instead and that run answers cpuSeconds.'
+          : 'cpu was asked for and this platform would not say what the run has used.',
+      );
+    }
     if (waitedMs !== undefined) {
       notes.push(
         `The wait of ${waitedMs}ms ran out and the run is still going, so this is what it had printed by then rather than everything it will print. editor_run wait again to keep waiting.`,
