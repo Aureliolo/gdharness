@@ -2338,6 +2338,7 @@ class GodotServer {
     );
 
     const playing = await this.editorPlayingState();
+    await this.pickUpWhatTheEditorIsPlaying();
     return this.jsonTextResponse({
       editor: {
         ...this.getEditorStatusPayload(),
@@ -3075,6 +3076,57 @@ class GodotServer {
   }
 
   /**
+   * The run the connected editor is playing, picked back up after a reconnect.
+   *
+   * A reconnect leaves this server with no memory of anything, and the note on disk is written only
+   * by runs this server spawns, so an editor-played run leaves none. What was adopted instead was
+   * the last spawned run of the same project, and the answer then described that one: a different
+   * scene, its own pid, its own transcript, forty rows of its output, and every number in it
+   * plausible. A bench's output is a table somebody attributes to the change they just made, so
+   * reading another run's rows as your own is a confident wrong measurement with nothing in the
+   * payload to contradict it. Two fields did flip, `through` and `pid`, and they are exactly the
+   * two a caller reads past when the shape is what they asked for.
+   *
+   * So the editor is asked first. It is on the bridge, it is holding the run, and it answers what
+   * is playing right now, which beats a note about what was started once. Asked before every answer
+   * about a run rather than at connect time, because the editor may be given a game to play by
+   * somebody who is not this server at all.
+   *
+   * What it printed before the reconnect is gone: the adapter buffer went with the old server. The
+   * answer says so rather than presenting a short log as the whole run.
+   */
+  private async pickUpWhatTheEditorIsPlaying(): Promise<void> {
+    if (this.activeProcess !== null || !this.godotBridge.isConnected()) {
+      return;
+    }
+    const playing = await this.editorPlayingState();
+    if (playing?.playing !== true) {
+      return;
+    }
+    // Best effort: the console of an editor-played run comes over the adapter and nothing else, so
+    // a failure here costs the output rather than the answer, and the answer says which run it is
+    // about either way.
+    try {
+      await this.dap().connect();
+    } catch (error) {
+      this.logDebug(`Picked up an editor-played run without its adapter: ${errorMessage(error)}`);
+    }
+    this.activeProcess = {
+      process: null,
+      pid: null,
+      log: new GameLog(),
+      transcript: null,
+      readOffset: 0,
+      projectPath: this.godotBridge.getStatus().projectPath ?? null,
+      startedAt: Date.now(),
+      exitCode: null,
+      throughEditor: true,
+      brokeOn: null,
+      pickedUpPlaying: true,
+    };
+  }
+
+  /**
    * The run some earlier server started, picked back up.
    *
    * What was lost in a reconnect is recovered here: the record names the process and the file, so
@@ -3240,6 +3292,7 @@ class GodotServer {
    * which of the two happened so that "still going" is never read as "ended and printed nothing".
    */
   private async handleWaitForRun(args: OperationParams): Promise<ToolResponse> {
+    await this.pickUpWhatTheEditorIsPlaying();
     const run = this.currentRun();
     if (!run) {
       return this.createErrorResponse(this.nothingOfOursIsRunning());
@@ -3257,6 +3310,7 @@ class GodotServer {
   }
 
   private async handleGetDebugOutput(args: OperationParams, waitedMs?: number): Promise<ToolResponse> {
+    await this.pickUpWhatTheEditorIsPlaying();
     const run = this.currentRun();
     if (!run) {
       return this.createErrorResponse(this.nothingOfOursIsRunning());
@@ -3300,6 +3354,14 @@ class GodotServer {
     if (run.endedUnwatched === true) {
       notes.push(
         'This run outlived the server that started it and is over now, so its exit code was never collected. Everything it printed is below, read back from its transcript.',
+      );
+    }
+    // A run found already playing, rather than one this server started. The log begins where it was
+    // picked up, so what is below is not the run from its first line, and a caller who started a
+    // bench an hour ago must not read six lines as six lines printed.
+    if (run.pickedUpPlaying === true) {
+      notes.push(
+        'The editor was already playing this when this server reached it, so this is not the run from its start: what it printed before that went with the server that was listening then. It is the run the editor is holding now, which is the one the debug_* tools answer for.',
       );
     }
     // Which of the two silences this is. A run gdharness ended and a run that stopped being there
@@ -3374,6 +3436,10 @@ class GodotServer {
 
   /** editor_run stop: the game is ended and its verdict answered, errors and warnings kept. */
   private async handleStopProject(): Promise<ToolResponse> {
+    // Before anything is picked to end. A reconnect leaves the editor-played run unrecorded, and
+    // what would otherwise be adopted here is the last run this project spawned: a pid belonging
+    // to something nobody asked about, offered to be killed while the run the caller means goes on.
+    await this.pickUpWhatTheEditorIsPlaying();
     const stopped = this.currentRun();
     if (!stopped) {
       return this.createErrorResponse(this.nothingOfOursIsRunning());
