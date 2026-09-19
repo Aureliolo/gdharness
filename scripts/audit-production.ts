@@ -19,9 +19,14 @@ const ATTEMPTS = 4;
 /**
  * Whether this failure is the service rather than the dependencies.
  *
- * Matched on the transport, not on the absence of findings: a run that failed because the endpoint
- * answered 503 says so in one line and names no advisory, and treating "printed no advisories" as
- * the test would make every future change to bun's output read as an outage.
+ * Read off the transport rather than off the absence of findings, because a clean audit and an
+ * unreachable one both name no advisory, so "printed nothing" cannot tell them apart.
+ *
+ * The status code is only read as one on a line that also says `error`, which is narrower than it
+ * looks necessary and is not: a package at version 1.502.0 puts a bare `502` between two word
+ * boundaries, so a status matched anywhere in the output reads a genuine advisory as an outage and
+ * waits it out instead of failing the build. Getting that backwards is the cheap direction; getting
+ * the other one backwards ships a release having cleared nothing.
  */
 export function serviceDidNotAnswer(output: string): boolean {
   const status = /^.*\berror\b.*?[\s-]\b(?:408|429|5\d\d)\b.*$/im;
@@ -29,19 +34,32 @@ export function serviceDidNotAnswer(output: string): boolean {
   return status.test(output) || transport.test(output);
 }
 
-function auditOnce(): { ok: boolean; output: string } {
+type Attempt =
+  | { ran: true; ok: boolean; output: string }
+  /** The command itself never started, which is neither a finding nor an outage. */
+  | { ran: false; why: string };
+
+function auditOnce(): Attempt {
   const run = spawnSync('bun', ['audit', '--prod'], {
     encoding: 'utf8',
     shell: process.platform === 'win32',
   });
-  const output = `${run.stdout}${run.stderr}`;
-  return { ok: run.status === 0, output };
+  if (run.error !== undefined || run.status === null) {
+    return { ran: false, why: run.error?.message ?? `killed by ${run.signal ?? 'an unknown signal'}` };
+  }
+  return { ran: true, ok: run.status === 0, output: `${run.stdout}${run.stderr}` };
 }
 
 async function main(): Promise<void> {
   let delayMs = 5000;
   for (let attempt = 1; attempt <= ATTEMPTS; attempt += 1) {
-    const { ok, output } = auditOnce();
+    const tried = auditOnce();
+    if (!tried.ran) {
+      console.error(`The audit could not be run: ${tried.why}`);
+      process.exitCode = 1;
+      return;
+    }
+    const { ok, output } = tried;
     process.stdout.write(output);
     if (ok) {
       return;
