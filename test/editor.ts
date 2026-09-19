@@ -340,9 +340,10 @@ function createProject(): string {
     ['extends Node', '', '', 'func ring( -> int:', '\tpass', ''].join('\n'),
   );
 
-  // A global class the editor will have analysed before any fixture touches it, which is what the
-  // stale-analysis case needs: the fault is the language server holding the copy of a type it read
-  // at startup, so a type created later is a different case and not this one.
+  // A global class and a dependent of it, both present before the editor starts. The stale-analysis
+  // case needs the language server to have analysed both already: a dependent created later is
+  // analysed from scratch, sees the current type and reports nothing, which is a different case and
+  // the one an earlier probe measured by mistake.
   writeFileSync(
     join(dir, 'bell.gd'),
     [
@@ -355,6 +356,20 @@ function createProject(): string {
       'func toll() -> int:',
       '\ttolls += 1',
       '\treturn tolls',
+      '',
+    ].join('\n'),
+  );
+
+  writeFileSync(
+    join(dir, 'ringer.gd'),
+    [
+      'extends Node',
+      '',
+      'var bell: Bell = Bell.new()',
+      '',
+      '',
+      'func ring_once() -> int:',
+      '\treturn bell.toll()',
       '',
     ].join('\n'),
   );
@@ -1510,6 +1525,89 @@ async function testAClassWrittenUnderTheEditorNeedsARescan({ call, project }: Ed
   );
   assert.equal(get(after, 'typesTheEditorHasNotLoaded'), undefined, 'and the answer should stop naming it');
   assert.equal(get(after, 'clean'), true, JSON.stringify(after));
+
+  await testAMethodAddedToAnAnalysedTypeIsPickedUp({ call, project } as Editor);
+}
+
+/**
+ * A method added to a type the language server has already analysed is resolved without being told.
+ *
+ * The other half of #387, and the half that does *not* misbehave here. A project reported a method
+ * added to an existing `class_name` coming back missing at every caller until the editor restarted,
+ * with `editor_rescan` and `refresh_classes` both failing to clear it. That does not happen to an
+ * editor this suite starts, and the difference is worth holding onto rather than assuming: it says
+ * the fault needs something an editor seconds old does not have, so anyone hunting it needs a
+ * reproduction before a remedy.
+ *
+ * The dependent is in the project before the editor starts and is read once before the change, so
+ * the server has analysed it. An earlier probe wrote the dependent fresh, which had the server
+ * analysing it from scratch against the current type: clean for a reason that says nothing about
+ * the fault, and a case nobody reported.
+ *
+ * Asserted as what the editor does rather than as what it fails to do, so a Godot that starts
+ * holding the old copy fails this rather than quietly matching a "no complaint" expectation.
+ */
+async function testAMethodAddedToAnAnalysedTypeIsPickedUp({ call, project }: Editor): Promise<void> {
+  const read = async (): Promise<unknown> => {
+    await delay(2500);
+    return await call('script_diagnostics', { projectPath: project, scriptPath: 'res://ringer.gd' });
+  };
+
+  const analysed = await read();
+  assert.equal(
+    get(analysed, 'clean'),
+    true,
+    `the dependent starts clean and analysed: ${JSON.stringify(analysed)}`,
+  );
+
+  writeFileSync(
+    join(project, 'bell.gd'),
+    [
+      'class_name Bell',
+      'extends Node',
+      '',
+      'var tolls: int = 0',
+      '',
+      '',
+      'func toll() -> int:',
+      '\ttolls += 1',
+      '\treturn tolls',
+      '',
+      '',
+      'func silence() -> void:',
+      '\ttolls = 0',
+      '',
+    ].join('\n'),
+  );
+  writeFileSync(
+    join(project, 'ringer.gd'),
+    [
+      'extends Node',
+      '',
+      'var bell: Bell = Bell.new()',
+      '',
+      '',
+      'func ring_once() -> int:',
+      '\treturn bell.toll()',
+      '',
+      '',
+      'func hush() -> void:',
+      '\tbell.silence()',
+      '',
+    ].join('\n'),
+  );
+
+  const grown = await read();
+  assert.equal(
+    get(grown, 'clean'),
+    true,
+    `a call to the new method resolves with nothing asked of the editor: ${JSON.stringify(grown)}`,
+  );
+  assert.equal(
+    get(grown, 'contradictedByTheFile'),
+    undefined,
+    'and there is nothing for the contradiction check to name, because the editor kept up',
+  );
 }
 
 async function testLanguageServer({ call, attempt, project }: Editor): Promise<void> {
