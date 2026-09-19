@@ -62,6 +62,7 @@ import {
   runtimeDirectory,
   runtimesAnnounced,
 } from '../src/runtime-client.js';
+import { discardWith } from '../src/scratch.js';
 import { alive, PROJECT_FILE_ARGUMENTS, patienceForFrames, runIsUp, runtimeVerdict } from '../src/server.js';
 import type { GodotProcess } from '../src/server-types.js';
 import { addonMismatch, markIfStale, SERVER_VERSION } from '../src/server-version.js';
@@ -72,6 +73,7 @@ import { cacheFile, isNewer, UpdateCheck } from '../src/update-check.js';
 import { asArray, asNumber, get, text } from './support/json.js';
 import { isRecord, type JsonRpcMessage, parseTextContent, textOf } from './support/json-rpc.js';
 import { reservePort, ServerProcess } from './support/server.js';
+import { reportUnswept, sweep } from './support/sweep.js';
 
 async function withOccupiedBridgePort<T>(run: () => Promise<T>): Promise<T> {
   const blocker = createServer();
@@ -267,7 +269,7 @@ function testSceneToolsVectorRegression(): void {
     const output = `${run.stdout}\n${run.stderr}`;
     assert.match(output, /"ok"\s*:\s*true/, 'runner should report success JSON');
   } finally {
-    rmSync(projectDir, { recursive: true, force: true });
+    sweep(projectDir);
   }
 }
 
@@ -519,7 +521,7 @@ async function testDiagnosticsSurviveAnotherSpellingOfTheSamePath(): Promise<voi
       },
     );
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    sweep(root);
   }
 }
 
@@ -1149,7 +1151,7 @@ async function testAProjectUpgradedUnderTheServerIsSaid(): Promise<void> {
     assert.match(said ?? '', /reconnect/i, 'and say what replaces it');
   } finally {
     await server.stop();
-    rmSync(project, { recursive: true, force: true });
+    sweep(project);
   }
 }
 
@@ -1200,7 +1202,7 @@ async function testASupersededServerStandsDown(): Promise<void> {
   } finally {
     await first.stop();
     await second?.stop();
-    rmSync(project, { recursive: true, force: true });
+    sweep(project);
   }
 }
 
@@ -1491,7 +1493,7 @@ async function testAServerOnlyAnswersAboutItsOwnGame(): Promise<void> {
     assert.match(said, /Elsewhere/, 'and the refusal names the game that is running');
   } finally {
     await server.stop();
-    rmSync(root, { recursive: true, force: true });
+    sweep(root);
   }
 }
 
@@ -2071,7 +2073,7 @@ async function testToolsRefusePathsOutsideTheProject(): Promise<void> {
       { GODOT_PATH: process.execPath },
     );
   } finally {
-    rmSync(sandbox, { recursive: true, force: true });
+    sweep(sandbox);
   }
 }
 
@@ -2151,7 +2153,7 @@ function testStaleClassesAreReadFromDisk(): void {
     writeFileSync(cache, entry('Hero', 'res://scripts/hero.gd'));
     assert.deepEqual(staleClassNames(sandbox), ['Squire'], 'and a declaration written since is too');
   } finally {
-    rmSync(sandbox, { recursive: true, force: true });
+    sweep(sandbox);
   }
 }
 
@@ -2198,7 +2200,7 @@ function testTheProjectWalksAgreeAboutWhatIsInIt(): void {
     assert.equal(found.summary.files_searched, 1, 'and should not have opened the other two');
     assert.equal(projectStructure(sandbox).scripts, 1, 'the count should agree with the search');
   } finally {
-    rmSync(sandbox, { recursive: true, force: true });
+    sweep(sandbox);
   }
 }
 
@@ -2294,7 +2296,7 @@ function testClassesAnEditorIsNotHolding(): void {
     assert.equal(cachedClasses(join(sandbox, 'nowhere')), null, 'a project with no cache has no list');
     assert.equal(cacheWrittenAt(join(sandbox, 'nowhere')), null, 'and no time it was written');
   } finally {
-    rmSync(sandbox, { recursive: true, force: true });
+    sweep(sandbox);
   }
 }
 
@@ -2388,7 +2390,7 @@ function testProjectDefaultsToTheWorkingDirectory(): void {
     // the two apart is the point, because only one of them means "you are in the wrong place".
     assert.equal(nowhere.status, 2, 'as a usage error rather than a project with problems');
   } finally {
-    rmSync(sandbox, { recursive: true, force: true });
+    sweep(sandbox);
   }
 }
 
@@ -2466,10 +2468,10 @@ function testAnAutoloadGitWillNotCarry(): void {
         assert.deepEqual(troubles(elsewhere), [], 'no repository is no verdict');
       }
     } finally {
-      rmSync(elsewhere, { recursive: true, force: true });
+      sweep(elsewhere);
     }
   } finally {
-    rmSync(project, { recursive: true, force: true });
+    sweep(project);
   }
 }
 
@@ -2622,7 +2624,7 @@ function testAGameIsFoundWhereverItAnnounced(): void {
       'a game announced once is one game however many directories are searched',
     );
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    sweep(root);
   }
 }
 
@@ -2674,7 +2676,7 @@ function testAGameTooNewToTalkToIsStillAGame(): void {
     runtimesAnnounced([directory]);
     assert.ok(!existsSync(dead), 'an announcement nobody is behind is still deleted');
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    sweep(root);
   }
 }
 
@@ -2804,7 +2806,7 @@ async function testATestServerWritesWhereNoRealRunIs(): Promise<void> {
     assert.equal(after, before, 'while the directory every gdharness shares is left as it was');
   } finally {
     await server.stop();
-    rmSync(project, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+    sweep(project);
   }
 }
 
@@ -2859,8 +2861,8 @@ async function testAStartStopsWaitingForAGameThatIsOver(): Promise<void> {
       { GODOT_PATH: process.execPath, GDHARNESS_RUNTIME_DIR: runtimeDir },
     );
   } finally {
-    rmSync(project, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
-    rmSync(runtimeDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+    sweep(project);
+    sweep(runtimeDir);
   }
 }
 
@@ -2928,7 +2930,7 @@ async function testAStartWaitsForTheGameToAnnounceItself(): Promise<void> {
     assert.equal(held, null, 'a game that has stopped is not waited for');
     assert.ok(Date.now() - gaveUp < 1_000, 'and the wait ends at once rather than at the budget');
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    sweep(root);
   }
 }
 
@@ -3035,7 +3037,7 @@ function testAStaleUpdateAnswerIsNotHandedOut(): void {
     stale.refresh();
     assert.equal(stale.notice(), null, 'and it is withheld once a refresh for it is in flight');
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    sweep(home);
   }
 }
 
@@ -3099,7 +3101,7 @@ async function testUpdateNoticeRidesOnAnAnswer(): Promise<void> {
       assert.doesNotMatch(second, /update_available/, 'and it should not repeat the notice');
     }, environment);
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    sweep(home);
   }
 }
 
@@ -3141,7 +3143,7 @@ async function testUpdateCheckHasAnOffSwitch(): Promise<void> {
       );
     }, environment);
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    sweep(home);
   }
 }
 
@@ -3429,7 +3431,7 @@ async function testParametersReachTheEngine(): Promise<void> {
       { GODOT_PATH: godotPath },
     );
   } finally {
-    rmSync(projectDir, { recursive: true, force: true });
+    sweep(projectDir);
   }
 }
 
@@ -3548,7 +3550,7 @@ async function testAFinishedRunCanStillBeRead(): Promise<void> {
       { GODOT_PATH: godotPath },
     );
   } finally {
-    rmSync(projectDir, { recursive: true, force: true });
+    sweep(projectDir);
   }
 }
 
@@ -3676,8 +3678,54 @@ async function testARestartSaysWhatTheEditorDropped(): Promise<void> {
     editor?.terminate();
     second?.terminate();
     await server.stop();
-    rmSync(project, { recursive: true, force: true });
+    sweep(project);
   }
+}
+
+/**
+ * A cleanup that cannot finish still finishes everything else, and still lets the call speak.
+ *
+ * The server makes a scratch directory per headless operation, export and test run, hands it to an
+ * engine, reads it back and removes it in a `finally`. On Windows that removal genuinely fails: the
+ * engine keeps a handle on the directory after it is killed and lets go on its own schedule, so the
+ * remove answers EBUSY. Thrown from a `finally`, that errno becomes the answer, so a test run that
+ * finished and had its report parsed is returned to the caller as an error about a directory, with
+ * the report dropped on the way out. It also abandons every path queued behind it, which is how the
+ * run that swept its reports directory leaked the user data directory on the next line. The fixtures
+ * in this file share the same sweep and had leaked on six separate days before anyone looked.
+ *
+ * Asserted with a remove that refuses rather than a locked handle, which has no portable spelling:
+ * the part under test is that one refusal decides nothing about the paths either side of it. Hence
+ * the attempted list, and not merely the absence of a throw. A sweep that quietly skipped everything
+ * would satisfy "did not throw" perfectly, and would be exactly the wrong fix.
+ */
+function testACleanupThatCannotFinishStillFinishes(): void {
+  const attempted: string[] = [];
+  const left = discardWith(
+    (path) => {
+      attempted.push(path);
+      if (path === 'locked') {
+        throw new Error('EBUSY: resource busy or locked');
+      }
+    },
+    ['first', null, 'locked', undefined, 'last'],
+  );
+
+  assert.deepEqual(
+    attempted,
+    ['first', 'locked', 'last'],
+    'the path after the failing one is swept, and a path that was never made is not attempted',
+  );
+  assert.deepEqual(
+    left.map(({ path }) => path),
+    ['locked'],
+    'the one that survived is the one named',
+  );
+  assert.match(
+    left[0]?.reason ?? '',
+    /EBUSY/,
+    'and it carries why, because "a directory is still there" alone says nothing about what to fix',
+  );
 }
 
 /**
@@ -3906,8 +3954,8 @@ async function testTheEditorsRunIsTheOneAnsweredFor(): Promise<void> {
   } finally {
     editor?.terminate();
     await server.stop();
-    rmSync(project, { recursive: true, force: true });
-    rmSync(runtimeDir, { recursive: true, force: true });
+    sweep(project);
+    sweep(runtimeDir);
   }
 }
 
@@ -3953,7 +4001,7 @@ function testAnExitCodeOutlivesTheServerThatSawIt(): void {
     } else {
       process.env['GDHARNESS_RUNTIME_DIR'] = had;
     }
-    rmSync(runtimeDir, { recursive: true, force: true });
+    sweep(runtimeDir);
   }
 }
 
@@ -4201,7 +4249,7 @@ async function testARunEndedUnwatchedIsStillReadable(): Promise<void> {
       { GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: join(runtimeDir, 'elsewhere') },
     );
   } finally {
-    rmSync(runtimeDir, { recursive: true, force: true });
+    sweep(runtimeDir);
   }
 }
 
@@ -4324,7 +4372,7 @@ async function benchThroughAStart(
     return { answer, keptPrinting: printed() > afterwards, exitCode: bench.exitCode };
   } finally {
     bench.kill('SIGKILL');
-    rmSync(runtimeDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+    sweep(runtimeDir);
   }
 }
 
@@ -4469,12 +4517,7 @@ async function testARunOutlivesItsServer(): Promise<void> {
         // Nothing left to clean up.
       }
     }
-    // Retried, because Windows holds the project directory open for as long as the engine has a
-    // handle on anything in it and a killed process releases those on its own schedule: the first
-    // removal after a kill answers EBUSY and the test fails in its own cleanup.
-    const swept = { recursive: true, force: true, maxRetries: 20, retryDelay: 250 };
-    rmSync(projectDir, swept);
-    rmSync(runtimeDir, swept);
+    sweep(projectDir, runtimeDir);
   }
 }
 
@@ -4735,7 +4778,7 @@ async function testGdUnitRunner(): Promise<void> {
       { GODOT_PATH: godotPath },
     );
   } finally {
-    rmSync(projectDir, { recursive: true, force: true });
+    sweep(projectDir);
   }
 }
 
@@ -4829,7 +4872,7 @@ function testAnUpgradeReadsTheEngineOutOfTheConfigItRewrites(): void {
     );
     assert.match(refused.output, /No Godot executable found/, refused.output);
   } finally {
-    rmSync(projectDir, { recursive: true, force: true });
+    sweep(projectDir);
   }
 }
 
@@ -4903,7 +4946,7 @@ function testCommandLineSetup(): void {
       assert.equal(withoutRuntime.status, 0, `setup --no-runtime:\n${withoutRuntime.stdout}`);
       assert.doesNotMatch(readFileSync(join(bare, 'project.godot'), 'utf8'), /GdharnessRuntime/);
     } finally {
-      rmSync(bare, { recursive: true, force: true });
+      sweep(bare);
     }
 
     // An upgrade puts the same things back in the same places. It once wrote the skill into every
@@ -5071,7 +5114,7 @@ function testCommandLineSetup(): void {
     assert.match(again.stdout, /Nothing of gdharness was in this project/, 'and says so plainly');
     assert.doesNotMatch(again.stdout, /autoload removed/, 'rather than reporting work it did not do');
   } finally {
-    rmSync(projectDir, { recursive: true, force: true });
+    sweep(projectDir);
   }
 }
 
@@ -5154,7 +5197,7 @@ function testTheWrittenConfigNamesAProgramThatStarts(): void {
       `and the engine it carries should exist, got ${godotForTheServer}`,
     );
   } finally {
-    rmSync(projectDir, { recursive: true, force: true });
+    sweep(projectDir);
   }
 }
 
@@ -5700,7 +5743,7 @@ function testEveryShippedAddonIsInstalled(): void {
       );
     }
   } finally {
-    rmSync(projectDir, { recursive: true, force: true });
+    sweep(projectDir);
   }
 }
 
@@ -5993,7 +6036,7 @@ async function testAConfigNamingAnotherVersionIsSaid(): Promise<void> {
       await agreed.stop();
     }
   } finally {
-    rmSync(project, { recursive: true, force: true });
+    sweep(project);
   }
 }
 
@@ -6118,7 +6161,7 @@ async function testAScanThatHasNotStartedIsNotFinished(): Promise<void> {
   } finally {
     editor?.terminate();
     await server.stop();
-    rmSync(project, { recursive: true, force: true });
+    sweep(project);
   }
 }
 
@@ -6239,7 +6282,7 @@ async function testARepairThatCouldNotRunIsNotReported(): Promise<void> {
   } finally {
     editor?.terminate();
     await server.stop();
-    rmSync(project, { recursive: true, force: true });
+    sweep(project);
   }
 }
 
@@ -6331,7 +6374,7 @@ async function testAShortenedCacheIsRebuilt(): Promise<void> {
   } finally {
     editor?.terminate();
     await server.stop();
-    rmSync(project, { recursive: true, force: true });
+    sweep(project);
   }
 }
 
@@ -6398,6 +6441,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAShortenedCacheIsRebuilt,
   testTheEditorsRunIsTheOneAnsweredFor,
   testASettingTheEditorDroppedIsNamed,
+  testACleanupThatCannotFinishStillFinishes,
   testWhoIsHoldingAPortIsAskable,
   testARestartSaysWhatTheEditorDropped,
   testProjectDefaultsToTheWorkingDirectory,
@@ -6494,6 +6538,8 @@ async function main(): Promise<void> {
       console.error(`\n${test.name} failed\n${error instanceof Error ? error.stack : String(error)}\n`);
     }
   }
+
+  reportUnswept();
 
   if (failed.length > 0) {
     console.error(`${failed.length} of ${chosen.length} regressions failed:`);

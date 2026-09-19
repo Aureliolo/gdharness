@@ -7,11 +7,12 @@
  */
 
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { extract } from '../scripts/install-godot.js';
+import { sweep } from './support/sweep.js';
 import { buildZip, DEFLATED } from './support/zip.js';
 
 /** Extracts into a throwaway directory and hands it to the caller to look at. */
@@ -22,7 +23,7 @@ function intoTemp(zip: Buffer, inspect: (dir: string, run: () => void) => void):
       extract(zip, dir);
     });
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    sweep(dir);
   }
 }
 

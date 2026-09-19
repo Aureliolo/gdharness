@@ -7,11 +7,12 @@
  * tried is a fact about the function rather than about this machine.
  */
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { godotCandidates, scanDirectoryForGodotBinaries } from '../src/detection.js';
+import { sweep } from './support/sweep.js';
 
 function testIgnoresEmptyAndMissingDirectories() {
   assert.deepEqual(scanDirectoryForGodotBinaries('', 'linux'), [], 'empty directory returns no candidates');
@@ -42,7 +43,7 @@ function testDetectsVersionedWindowsBinaries() {
     );
     assert.ok(!result.some((p) => p.includes('notepad.exe')), 'should not include non-Godot executables');
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    sweep(dir);
   }
 }
 
@@ -62,7 +63,7 @@ function testDetectsVersionedLinuxBinaries() {
     );
     assert.ok(!result.some((p) => p.includes('unrelated_tool')), 'should not include non-godot files');
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    sweep(dir);
   }
 }
 
@@ -82,7 +83,7 @@ function testNewestFirstOrdering() {
       `newest binary should be returned first, got: ${result[0]}`,
     );
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    sweep(dir);
   }
 }
 
@@ -96,7 +97,7 @@ function testIgnoresDirectoriesMatchingPattern() {
     assert.equal(result.length, 1, 'should only return files, not directories');
     assert.ok(result[0]?.includes('Godot_v4.4.1-stable_win64.exe'));
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    sweep(dir);
   }
 }
 
@@ -156,7 +157,7 @@ function testDownloadsAreTriedAfterTheConventionalPaths() {
       assert.ok(shaped.includes(hosts[other].named), `${other} lists its home install: ${shaped.join(', ')}`);
     }
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    sweep(home);
   }
 }
 

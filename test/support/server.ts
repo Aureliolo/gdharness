@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
 import { type ChildProcess, spawn } from 'node:child_process';
-import { mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { mkdtempSync, readdirSync, statSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { type JsonRpcMessage, parseJsonLines } from './json-rpc.js';
+import { sweep } from './sweep.js';
 
 /** A runtime directory nothing else on this machine is using. */
 function runtimeDirForTest(): string {
@@ -99,7 +100,6 @@ export class ServerProcess {
   private readonly abandoned = new Set<(reason: Error) => void>();
   private buffered = '';
 
-  /** The runtime directory this server was given, kept so it can be taken away again. */
   /** The runtime directory this server was given, or null when the fixture named its own. */
   readonly runtimeDir: string | null;
 
@@ -215,9 +215,7 @@ export class ServerProcess {
       // `exited` is a getter over the child, so it can have turned true during the wait.
       if (this.child.exitCode === null && this.child.signalCode === null) this.child.kill('SIGKILL');
     } finally {
-      if (this.runtimeDir !== null) {
-        rmSync(this.runtimeDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
-      }
+      sweep(this.runtimeDir);
     }
   }
 
