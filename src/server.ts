@@ -37,8 +37,11 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { announceBridge, announcementPath, readAnnouncement, withdrawBridge } from './bridge-announce.js';
 import {
+  type Contradicted,
   cachedClasses,
   cacheWrittenAt,
+  contradictedDiagnostics,
+  missingMemberIn,
   staleClassNames,
   type UnseenClass,
   unseenByEditor,
@@ -2237,6 +2240,7 @@ class GodotServer {
     // their own re-reading a class_name the editor's database had not caught up with explains it
     // without staleness being involved at all. Marked rather than refused for the same reason: a
     // suspicion is not a fault, and refusing would take a working tool away on one.
+    const contradicted = this.contradictedByTheFile(diagnostics, args);
     return this.jsonTextResponse(
       markIfStale(
         {
@@ -2245,11 +2249,66 @@ class GodotServer {
           errors,
           warnings: diagnostics.length - errors,
           diagnostics,
+          ...(contradicted.length === 0
+            ? {}
+            : {
+                contradictedByTheFile: contradicted,
+                staleAnalysis: `The editor is reporting against an older copy of ${contradicted.length === 1 ? 'a type' : 'some types'} named above. Each member listed is declared in the file the class cache points at, so those diagnostics are wrong however the code is written. editor_launch restart clears it; editor_rescan and project_import refresh_classes do not, because neither reaches the analysed types the language server built at startup.`,
+              }),
         },
         this.godotBridge.getStatus().addonVersion,
         SERVER_VERSION,
       ),
     );
+  }
+
+  /**
+   * Diagnostics the file on disk contradicts, which is the editor's analysed type rather than the
+   * code.
+   *
+   * Adding a method to an existing `class_name` leaves the language server handing dependents the
+   * type it analysed at startup, so every caller is told the method "is not present on the inferred
+   * type" while `script_info symbols` lists it from that same server a moment later. Nothing in the
+   * answer said so, and the report reads exactly like a real one: the only way past it is to decide
+   * the tool is wrong, and having decided that once a caller decides it faster the next time, which
+   * is the cost worth avoiding rather than the ten minutes.
+   *
+   * Checked by the reading that settles it, which is the file the class cache points at. Only a
+   * member found there is reported: not finding one says nothing, since it may be inherited or the
+   * diagnostic may be right, and a guess either way would be another answer that cannot be checked.
+   * The engine is not asked and nothing is re-analysed, so this costs a file read per named type.
+   */
+  private contradictedByTheFile(diagnostics: unknown[], args: OperationParams): Contradicted[] {
+    const messages = diagnostics
+      .map((entry) => asParams(entry)['message'])
+      .filter((message): message is string => typeof message === 'string');
+    // Before the project is resolved and the cache is read, because a clean script is the ordinary
+    // answer and this tool is called in a loop over a whole directory. Nothing below can find
+    // anything when no message is of the one shape that can be checked.
+    if (!messages.some((message) => missingMemberIn(message) !== null)) {
+      return [];
+    }
+    const project = this.project(args);
+    if (!project.ok) {
+      return [];
+    }
+    const classes = cachedClasses(project.value.path);
+    if (classes === null) {
+      return [];
+    }
+    return contradictedDiagnostics(messages, classes, (resourcePath) => {
+      const contained = resolveWithinProject(project.value.path, resourcePath);
+      if (!contained.ok || !existsSync(contained.absolutePath)) {
+        return null;
+      }
+      try {
+        return readFileSync(contained.absolutePath, 'utf8');
+      } catch {
+        // A script the cache names and the disk will not hand over is not a contradiction of
+        // anything, and the diagnostics beside it are still worth answering with.
+        return null;
+      }
+    });
   }
 
   private async handleLSP(
