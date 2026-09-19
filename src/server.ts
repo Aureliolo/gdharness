@@ -3634,11 +3634,21 @@ class GodotServer {
     return this.jsonTextResponse({
       stopped: true,
       through: stopped.throughEditor ? 'editor' : 'gdharness',
+      // What was ended, named. One run is one process, and a game that started others is not one
+      // of them: a bench fanning out to thirty-one workers with OS.create_process had the process
+      // that prints ended and thirty left grinding, which went on writing their slice files until
+      // the next run of the same bench read their lines as its own and reported 107.9% of runs
+      // won. A stop that says which process it ended is one a caller can compare against what they
+      // know their game started; one that says "stopped" is not.
+      endedPid: stopped.pid,
       exitedBeforeStop: stopped.exitCode !== null,
       exitCode: stopped.exitCode,
       errors: stopped.log.count('error'),
       warnings: stopped.log.count('warning'),
       clean: stopped.log.count('error') === 0,
+      note: stopped.throughEditor
+        ? "The editor was asked to stop the scene it is playing. Anything that game started for itself, with OS.create_process or otherwise, is not the editor's to stop and is still running."
+        : 'The process named under endedPid was ended. Anything that game started for itself, with OS.create_process or otherwise, is a separate process and is still running.',
       entries: forAnswer(
         stopped.log.select({ severity: 'warning', sinceLastCall: false, limit: 200 }).entries,
       ),

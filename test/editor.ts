@@ -2411,8 +2411,19 @@ async function testAPlayedRunsConsoleArrivesOnItsOwn({ call, project }: Editor):
   );
 
   // Left with nothing playing, because this case runs before the debugger ones now and those ask
-  // what a stack answers with no game running.
-  await call('editor_run', { op: 'stop' });
+  // what a stack answers with no game running. And the answer says what it ended, which for a run
+  // the editor plays is the scene and nothing that scene started for itself: a bench downstream
+  // fanned out to thirty-one workers with OS.create_process, had the one process that prints
+  // ended, and the thirty left grinding wrote their slices into the next run of the same bench,
+  // which then reported 107.9% of runs won.
+  const ended = await call('editor_run', { op: 'stop' });
+  assert.equal(get(ended, 'stopped'), true, `the run should stop: ${text(ended)}`);
+  assert.equal(get(ended, 'endedPid'), null, `an editor-played run has no pid here: ${text(ended)}`);
+  assert.match(
+    text(get(ended, 'note')),
+    /is not the editor's to stop and is still running/,
+    `and what a stop does not reach is said: ${text(ended)}`,
+  );
 }
 
 async function testAnErrorTheGameBrokeOnIsReported({ call, attempt, project }: Editor): Promise<void> {
