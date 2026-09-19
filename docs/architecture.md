@@ -500,6 +500,24 @@ fails rather than being skipped. What JSON does carry exactly is left alone, whi
 list is still `["res://addons/x/plugin.cfg"]` rather than a wrapper around one; `type_convert`
 restores the exact packed type wherever the receiver knows which one it wanted.
 
+The other direction, a value arriving to be written, is `property_values.gd` on the editor side. It
+reads the serialiser's tags, so every shape a read answers with is a shape a write accepts, and adds
+the part only a property knows: the type wanted, so a dictionary shaped like a vector, or a bare pair
+of numbers, is read as one. `scene_node set`, `resource_edit` and `scene_animation` all go through
+it, which they did not before: they knew eighteen types, seven and three respectively, and a
+`Quaternion` keyframe or a `Rect2` written to a resource was stored as the dictionary it arrived as.
+
+It also decides whether the write happens at all. `Object.set` converts rather than refuses, and the
+conversion is silent and lossy: a word written to an `int` property is stored as `0`, to a `bool` as
+`true`, to a `Vector2` as `(0, 0)`, and a packed array takes whatever is in the list, so a polygon
+written as anything but points becomes that many zero vectors. The file is then saved holding a value
+nobody asked for while the answer reports the change as made, which leaves nothing to read afterwards
+that says otherwise. A value that cannot become the declared type is refused naming both types, a
+packed array is asked the same question of each element and names the index, and a property the
+object does not declare is refused rather than ignored. The running game asks the same question of an
+argument before `callv` and of a value before a wait compares it, through `acceptable` beside the
+serialiser, so the two sides cannot answer it differently.
+
 `--path` also makes that project's GDScript warning levels the ones the operations script is
 compiled under, although the file lives in gdharness's own package and not in the project at all.
 Godot's escape hatch does not reach it: `debug/gdscript/warnings/directory_rules` exempts paths

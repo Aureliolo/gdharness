@@ -3,6 +3,7 @@ extends Node
 
 ## Resource files, shaders, tilesets and themes, written through the open editor.
 
+const PropertyValues = preload("../property_values.gd")
 const Read = preload("../reading.gd")
 
 # Shader templates. Written as real multi-line source rather than escaped one-liners so that
@@ -48,6 +49,7 @@ void fragment() {
 """
 
 var _editor_plugin: EditorPlugin = null
+var _properties: PropertyValues = PropertyValues.new()
 
 
 func set_editor_plugin(plugin: EditorPlugin) -> void:
@@ -70,57 +72,9 @@ func _refresh_filesystem() -> void:
 		EditorInterface.get_resource_filesystem().scan()
 
 
-func _parse_value(value: Variant) -> Variant:
-	if typeof(value) == TYPE_DICTIONARY:
-		var fields: Dictionary = value
-		if fields.has("type") or fields.has("_type"):
-			var t: Variant = fields.get("type", fields.get("_type", ""))
-			match t:
-				"Vector2":
-					return Vector2(Read.as_float(fields.get("x", 0)), Read.as_float(fields.get("y", 0)))
-				"Vector3":
-					return Vector3(
-						Read.as_float(fields.get("x", 0)),
-						Read.as_float(fields.get("y", 0)),
-						Read.as_float(fields.get("z", 0))
-					)
-				"Color":
-					return Color(
-						Read.as_float(fields.get("r", 1), 1.0),
-						Read.as_float(fields.get("g", 1), 1.0),
-						Read.as_float(fields.get("b", 1), 1.0),
-						Read.as_float(fields.get("a", 1), 1.0)
-					)
-				"Vector2i":
-					return Vector2i(Read.as_int(fields.get("x", 0)), Read.as_int(fields.get("y", 0)))
-				"Vector3i":
-					return Vector3i(
-						Read.as_int(fields.get("x", 0)),
-						Read.as_int(fields.get("y", 0)),
-						Read.as_int(fields.get("z", 0))
-					)
-				"Rect2":
-					return Rect2(
-						Read.as_float(fields.get("x", 0)),
-						Read.as_float(fields.get("y", 0)),
-						Read.as_float(fields.get("width", 0)),
-						Read.as_float(fields.get("height", 0))
-					)
-				"NodePath":
-					return NodePath(str(fields.get("path", "")))
-	if typeof(value) == TYPE_ARRAY:
-		var result: Array = []
-		for item: Variant in value:
-			result.append(_parse_value(item))
-		return result
-	return value
-
-
-func _set_resource_properties(resource: Resource, properties: Variant) -> void:
-	var props: Dictionary = _parse_properties_dict(properties)
-	for key: Variant in props:
-		var named: String = str(key)
-		resource.set(named, _parse_value(props[key]))
+## Set each property, answering with what went wrong or "" when nothing did.
+func _set_resource_properties(resource: Resource, properties: Variant) -> String:
+	return _properties.write_all(resource, _parse_properties_dict(properties))
 
 
 func _parse_properties_dict(raw: Variant) -> Dictionary:
@@ -175,7 +129,9 @@ func create_resource(args: Dictionary) -> Dictionary:
 			resource.set_script(script_obj)
 
 	if args.has("properties"):
-		_set_resource_properties(resource, args.get("properties"))
+		var refused: String = _set_resource_properties(resource, args.get("properties"))
+		if not refused.is_empty():
+			return {"ok": false, "error": refused}
 
 	var save_result: Error = ResourceSaver.save(resource, res_path)
 	if save_result != OK:
@@ -194,7 +150,9 @@ func modify_resource(args: Dictionary) -> Dictionary:
 	if resource == null:
 		return {"ok": false, "error": "Resource not found", "resourcePath": res_path}
 
-	_set_resource_properties(resource, args.get("properties", ""))
+	var refused: String = _set_resource_properties(resource, args.get("properties", ""))
+	if not refused.is_empty():
+		return {"ok": false, "error": refused}
 	var save_result: Error = ResourceSaver.save(resource, res_path)
 	if save_result != OK:
 		return {"ok": false, "error": "Failed to save resource", "code": save_result}
