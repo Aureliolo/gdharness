@@ -26,6 +26,7 @@ import { announcementPath, BRIDGE_ANNOUNCE_PROTOCOL, readAnnouncement } from '..
 import {
   cachedClasses,
   cacheWrittenAt,
+  classesNamedIn,
   contradictedDiagnostics,
   declaresMember,
   heldButGone,
@@ -3813,6 +3814,57 @@ function testADiagnosticTheFileContradictsIsNamed(): void {
 }
 
 /**
+ * What a stale type depends on, which is the lever rather than a detail.
+ *
+ * Measured against a real editor by the project that reproduces the fault: a held copy of a type is
+ * refreshed when one of its own dependencies changes, and not when it changes itself. With a
+ * dependent stuck on a new method through four rescans, adding a method to a third class the stale
+ * type holds cleared it on the next rescan. So the useful thing to hand a caller is the list of
+ * files worth touching, and nothing in the engine will say what they are.
+ *
+ * Read by name against the class list rather than by parsing GDScript. A name in a comment or a
+ * string can match, which costs one wasted touch on a file that was already fine; missing one costs
+ * a restart, so the loose direction is the cheap one and is chosen deliberately.
+ */
+function testWhatAStaleTypeDependsOnIsNamed(): void {
+  const known = new Map([
+    ['Clapper', 'res://clapper.gd'],
+    ['Rope', 'res://rope.gd'],
+    ['Bell', 'res://bell.gd'],
+  ]);
+  const bell = [
+    'class_name Bell',
+    'extends Node',
+    '',
+    'var clapper: Clapper = Clapper.new()',
+    'var rope := Rope.new()',
+    '',
+    '',
+    'func toll() -> int:',
+    '\treturn clapper.weight()',
+    '',
+  ].join('\n');
+
+  assert.deepEqual(
+    classesNamedIn(bell, known),
+    ['Bell', 'Clapper', 'Rope'],
+    'every global class the file names, including its own, which the caller filters',
+  );
+  assert.deepEqual(
+    classesNamedIn('extends Node\n\nvar n: int = 0\n', known),
+    [],
+    'a script naming no global class has no lever, which is the case that must not invent one',
+  );
+  // Node, RefCounted and the rest are engine types and not in the project's list, so they are not
+  // offered as something to touch. Only a file somebody could edit is worth naming.
+  assert.deepEqual(
+    classesNamedIn('extends Node\n\nvar timer: Timer = Timer.new()\n', known),
+    [],
+    'an engine type is not a file in this project and is not a lever',
+  );
+}
+
+/**
  * A class the editor still holds after its script is gone, which is the dangerous direction.
  *
  * Deleting a script with a `class_name` and rebuilding rewrites the cache without it and reports it
@@ -6837,6 +6889,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testADiagnosticTheFileContradictsIsNamed,
   testAClassTheEditorHasNotLoadedIsToldApartFromOneTheCacheLacks,
   testAClassTheEditorHoldsAfterItsScriptIsGoneIsNamed,
+  testWhatAStaleTypeDependsOnIsNamed,
   testAnAuditThatCouldNotAskIsNotAnAuditThatPassed,
   testRefreshingUidsMakesTheSidecarAndWritesNoScene,
   testWhoIsHoldingAPortIsAskable,
