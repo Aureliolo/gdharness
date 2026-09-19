@@ -21,7 +21,6 @@ import {
   readdirSync,
   readFileSync,
   readSync,
-  rmSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, normalize } from 'node:path';
@@ -93,6 +92,7 @@ import {
   runtimeRequest,
   runtimesAnnounced,
 } from './runtime-client.js';
+import { discard } from './scratch.js';
 import type {
   GodotProcess,
   MCPToolDefinition,
@@ -1891,7 +1891,7 @@ class GodotServer {
       log.append('stderr', failed.stderr);
       exitCode = typeof failed.code === 'number' ? failed.code : -1;
     } finally {
-      rmSync(exportLogs, { recursive: true, force: true });
+      discard(exportLogs);
     }
     log.finish();
 
@@ -2009,8 +2009,7 @@ class GodotServer {
     } catch (error) {
       reportProblem = errorMessage(error);
     } finally {
-      rmSync(reportsDir, { recursive: true, force: true });
-      rmSync(userData, { recursive: true, force: true });
+      discard(reportsDir, userData);
     }
 
     const engineEntries = run.log
@@ -3968,9 +3967,7 @@ class GodotServer {
         ],
       };
     } finally {
-      if (screenshotDir) {
-        rmSync(screenshotDir, { recursive: true, force: true });
-      }
+      discard(screenshotDir);
     }
   }
 

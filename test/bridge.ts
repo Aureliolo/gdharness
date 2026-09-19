@@ -23,6 +23,7 @@ import {
   textOf,
 } from './support/json-rpc.js';
 import { reservePort, ServerProcess } from './support/server.js';
+import { sweep } from './support/sweep.js';
 
 const BRIDGE_HOST = process.env['GDHARNESS_BRIDGE_HOST'] ?? '127.0.0.1';
 const GODOT_PATH = resolveGodotPath(process.env['GODOT_PATH']);
@@ -777,8 +778,8 @@ async function main(): Promise<void> {
     console.log('bridge integration tests passed');
   } finally {
     await server.stop();
-    rmSync(projectPath, { recursive: true, force: true });
-    rmSync(runtimeDir, { recursive: true, force: true });
+    sweep(projectPath);
+    sweep(runtimeDir);
   }
 }
 
