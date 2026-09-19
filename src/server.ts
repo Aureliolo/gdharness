@@ -2323,7 +2323,7 @@ class GodotServer {
     const notes: string[] = [];
     if (contradicted.length > 0) {
       notes.push(
-        `The editor is reporting against an older copy of ${contradicted.length === 1 ? 'a type' : 'some types'} named under contradictedByTheFile. Each member listed is declared in the file the class cache points at, so those diagnostics are wrong however the code is written. Try editor_rescan first: it costs about half a second and cleared this in one of five measured attempts. If it does not, changing anything the named type itself depends on and rescanning again has cleared it every time that was tried. editor_launch restart is the only remedy that has always worked. project_import refresh_classes does not, and answers added: [] while this is happening.`,
+        `The editor is reporting against an older copy of ${contradicted.length === 1 ? 'a type' : 'some types'} named under contradictedByTheFile. Each member listed is declared in the file the class cache points at, so those diagnostics are wrong however the code is written. Try editor_rescan first: it costs about half a second and cleared this in one of five measured attempts. If it does not, changing anything the named type itself depends on and rescanning again cleared it on the one occasion that has been tried. editor_launch restart is the only remedy that has always worked, and is the one to reach for when the count above is not good enough odds. project_import refresh_classes does not, and answers added: [] while this is happening.`,
       );
     }
     const uncached = unloaded.filter((type) => !type.inTheClassCache);
