@@ -3683,6 +3683,86 @@ async function testARestartSaysWhatTheEditorDropped(): Promise<void> {
 }
 
 /**
+ * Refreshing UIDs makes the missing sidecar and writes no scene.
+ *
+ * The op used to load every scene and resave it. Outside the editor that round trip rebuilds the
+ * header from what the engine could see, so `load_steps` went, and so did the scene's own `uid=`:
+ * an op whose entire purpose is keeping UID references resolvable was deleting the UID that other
+ * resources point at, in every scene in the project, on a call that named no scene at all. A project
+ * with 47 scenes got a 31-file diff to revert. It also reported `scripts_resaved: 1` for a script
+ * whose sidecar it had not made, because `ResourceSaver.save` on a script answers OK headlessly and
+ * writes nothing, and the count was taken from the return rather than from the disk.
+ *
+ * Both halves are asserted together on purpose, and the scene is compared byte for byte rather than
+ * by `load_steps` alone, because the uid line was the half nobody noticed. The made sidecar is the
+ * positive that keeps the untouched scene meaningful: an op that had stopped running at all would
+ * leave every scene alone just as well.
+ */
+async function testRefreshingUidsMakesTheSidecarAndWritesNoScene(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('refresh_uids regression skipped (Godot not found)');
+    return;
+  }
+
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-uids-'));
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Uids"\n',
+    );
+    writeFileSync(join(project, 'hero.gd'), 'extends Node2D\n\n\nfunc _ready() -> void:\n\tpass\n');
+    // A header carrying both of the things the resave used to throw away.
+    const scene =
+      '[gd_scene load_steps=2 format=3 uid="uid://b3gdharnessuids"]\n\n' +
+      '[ext_resource type="Script" path="res://hero.gd" id="1_hero"]\n\n' +
+      '[node name="Main" type="Node2D"]\n' +
+      'script = ExtResource("1_hero")\n';
+    writeFileSync(join(project, 'main.tscn'), scene);
+
+    // Nothing here has been imported, which is the state a script added since the last import is
+    // in: the engine has never walked it, so nothing has minted its sidecar.
+    mkdirSync(join(project, 'tests'), { recursive: true });
+    writeFileSync(join(project, 'tests', 'late.gd'), 'extends Node\n\n\nfunc _ready() -> void:\n\tpass\n');
+    const sidecar = join(project, 'tests', 'late.gd.uid');
+    assert.equal(existsSync(sidecar), false, 'the fixture starts with the sidecar genuinely absent');
+
+    const server = new ServerProcess({ env: { GODOT_PATH: godotPath } });
+    try {
+      await server.initialize('regression-test');
+      const answered: unknown = parseTextContent(
+        await server.request(
+          'tools/call',
+          { name: 'project_import', arguments: { projectPath: project, op: 'refresh_uids' } },
+          ENGINE_CALL_TIMEOUT_MS,
+        ),
+      );
+
+      assert.deepEqual(
+        asArray(get(answered, 'uidsCreated')),
+        ['hero.gd', 'tests/late.gd'],
+        `the sidecars the op made are the ones that were missing: ${JSON.stringify(answered)}`,
+      );
+      assert.ok(existsSync(sidecar), 'and it is on disk, which is where the caller will look for it');
+      assert.deepEqual(asArray(get(answered, 'stillWithoutUid')), [], JSON.stringify(answered));
+
+      assert.equal(
+        readFileSync(join(project, 'main.tscn'), 'utf8'),
+        scene,
+        'no scene is rewritten, header and uid included',
+      );
+    } finally {
+      await server.stop();
+    }
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
  * A cleanup that cannot finish still finishes everything else, and still lets the call speak.
  *
  * The server makes a scratch directory per headless operation, export and test run, hands it to an
@@ -6442,6 +6522,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheEditorsRunIsTheOneAnsweredFor,
   testASettingTheEditorDroppedIsNamed,
   testACleanupThatCannotFinishStillFinishes,
+  testRefreshingUidsMakesTheSidecarAndWritesNoScene,
   testWhoIsHoldingAPortIsAskable,
   testARestartSaysWhatTheEditorDropped,
   testProjectDefaultsToTheWorkingDirectory,

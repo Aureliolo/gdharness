@@ -100,6 +100,51 @@ function reason(stdout: string, stderr: string): string {
   return stdout.trim().split(/\r?\n/).at(-1) ?? 'no output at all';
 }
 
+/**
+ * The engine's own import pass over a project, which is what mints a missing `.uid`.
+ *
+ * Not an operation: there is no script and no answer to parse, only the exit status and whatever
+ * the engine complained about. It is here rather than in the server because it is the same engine
+ * boot as every other headless call, and wants the same log-file treatment: the project's own
+ * `user://logs/godot.log` is rotated on start, so a boot that used it would rotate a running
+ * bench's log out from under it.
+ */
+export async function runImport(
+  godotPath: string,
+  projectPath: string,
+): Promise<
+  { ok: true; messages: readonly LogEntry[] } | { ok: false; message: string; messages: readonly LogEntry[] }
+> {
+  const logDir = mkdtempSync(join(tmpdir(), 'gdharness-import-'));
+  try {
+    const { stderr } = await run(godotPath, [
+      '--headless',
+      '--log-file',
+      join(logDir, 'engine.log'),
+      '--path',
+      projectPath,
+      '--import',
+    ]);
+    return { ok: true, messages: problems(stderr) };
+  } catch (error) {
+    if (error instanceof Error && 'stdout' in error && 'stderr' in error) {
+      const failed = error as Error & { stdout: string; stderr: string; code?: number | string };
+      return {
+        ok: false,
+        message: `the import pass failed (exit ${failed.code ?? 'unknown'}): ${reason(failed.stdout, failed.stderr)}`,
+        messages: problems(failed.stderr),
+      };
+    }
+    return {
+      ok: false,
+      message: `the import pass could not be run: ${error instanceof Error ? error.message : String(error)}`,
+      messages: [],
+    };
+  } finally {
+    discard(logDir);
+  }
+}
+
 export async function runOperation(
   engine: HeadlessEngine,
   operation: string,
