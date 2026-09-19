@@ -176,11 +176,11 @@ type IniValue = string | number | boolean | null;
  * there to keep "set to this on purpose" and "not set" apart, and the engine then picks a level
  * nobody chose, with nothing anywhere saying the line went.
  */
-export function settingKeys(content: string): Set<string> {
-  const named = new Set<string>();
+export function settingKeys(content: string): Map<string, IniValue> {
+  const named = new Map<string, IniValue>();
   for (const [section, entries] of Object.entries(parseProjectGodot(content))) {
-    for (const key of Object.keys(entries)) {
-      named.add(`${section}/${key}`);
+    for (const [key, value] of Object.entries(entries)) {
+      named.set(`${section}/${key}`, value);
     }
   }
   return named;

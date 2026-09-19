@@ -2435,14 +2435,14 @@ class GodotServer {
    * was asked for: what matters is which addon the editor is holding now.
    */
   /** What project.godot names right now, or nothing when there is no project or no file. */
-  private settingKeysOf(projectPath: string | undefined): Set<string> {
+  private settingKeysOf(projectPath: string | undefined): Map<string, unknown> {
     if (projectPath === undefined) {
-      return new Set();
+      return new Map();
     }
     try {
       return settingKeys(readFileSync(join(projectPath, 'project.godot'), 'utf8'));
     } catch {
-      return new Set();
+      return new Map();
     }
   }
 
@@ -2493,7 +2493,12 @@ class GodotServer {
 
     const now = this.godotBridge.getStatus();
     const after = this.settingKeysOf(before.projectPath);
-    const dropped = [...settingsBefore].filter((key) => !after.has(key));
+    // With the value each one had, because naming the key alone leaves the caller to go and find
+    // what it was set to in a file that no longer has the line. Downstream this has fired on three
+    // consecutive restarts of the same project, so it is not a curiosity to read once: it is the
+    // only thing keeping that setting alive, and what it is worth depends on how few steps there
+    // are between reading it and putting the value back.
+    const dropped = [...settingsBefore].filter(([key]) => !after.has(key));
     return this.jsonTextResponse({
       restarted: true,
       editorPid: now.editorPid,
@@ -2501,10 +2506,10 @@ class GodotServer {
       serverVersion: SERVER_VERSION,
       addonIsStale: now.addonVersion !== SERVER_VERSION,
       staleNote: addonMismatch(now.addonVersion, SERVER_VERSION),
-      settingsDropped: dropped.length > 0 ? dropped : undefined,
+      settingsDropped: dropped.length > 0 ? dropped.map(([setting, was]) => ({ setting, was })) : undefined,
       settingsNote:
         dropped.length > 0
-          ? 'The editor saved project.godot on its way out and these keys are no longer in it. Godot writes only what differs from its own defaults, so a key named deliberately at its default value is redundant to the editor and is dropped on save. If any of them were pinned on purpose, to keep "set to this on purpose" and "not set" apart, put them back: nothing else will say they have gone until something depends on one.'
+          ? `The editor saved project.godot on its way out and these keys are no longer in it, with the value each one held. Godot writes only what differs from its own defaults, so a key named deliberately at its default value is redundant to the editor and is dropped on save; it will be dropped again on the next restart. If any of them were pinned on purpose, to keep "set to this on purpose" and "not set" apart, project_settings set puts one back: ${dropped.map(([setting, was]) => `setting "${setting}" value ${JSON.stringify(was)}`).join(', ')}. Nothing else will say they have gone until something depends on one.`
           : undefined,
       tookMs: Date.now() - began,
     });
