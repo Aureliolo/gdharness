@@ -251,6 +251,60 @@ export function runningAs(pid: number): { kind: 'image' | 'commandLine'; text: s
 }
 
 /**
+ * The process listening on [param port] of the loopback address, or null when the platform will
+ * not say.
+ *
+ * Here because identity is what this file is about. Godot's debug adapter has one default port and
+ * every editor on a machine takes it, and the addon reports the port its editor's *settings* name
+ * rather than the one it managed to bind: two editors opened by hand both answer 6006, one of them
+ * holds it, and nothing in the answer distinguishes them. A server that connects on that number is
+ * talking to whichever editor got there first, and the console it reads back belongs to that
+ * project. Measured here, not imagined: a fixture in this repository connected to a real editor
+ * belonging to another project on this machine and read its game's output.
+ *
+ * Null is "the operating system would not say", which is not the same as "it is not this editor's"
+ * and must not be treated as one. Every caller here already has that distinction: not knowing is
+ * never grounds to refuse.
+ */
+export function listeningPid(port: number): number | null {
+  try {
+    if (process.platform === 'win32') {
+      const said = execFileSync(
+        'powershell',
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          `(Get-NetTCPConnection -State Listen -LocalPort ${port} -ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess`,
+        ],
+        { encoding: 'utf8', timeout: 15_000 },
+      ).trim();
+      return /^\d+$/.test(said) ? Number(said) : null;
+    }
+    // `lsof` is on macOS by default and usual on Linux; `ss` is the modern Linux answer and is not
+    // on macOS. Both are asked rather than one picked by platform, because what decides is which is
+    // installed. A process owned by another user hides its pid from both, which is the null case.
+    for (const [command, args, pattern] of [
+      ['lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t'], /^(\d+)/],
+      ['ss', ['-ltnpH', `sport = :${port}`], /pid=(\d+)/],
+    ] as const) {
+      try {
+        const said = execFileSync(command, [...args], { encoding: 'utf8', timeout: 15_000 }).trim();
+        const found = pattern.exec(said);
+        if (found?.[1] !== undefined) {
+          return Number(found[1]);
+        }
+      } catch {
+        // Not installed, or nothing listening. The next one is asked either way.
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * The whole command line of a Windows process, or null when Windows will not give it.
  *
  * Windows keeps a command line out of reach of anything but a query, so this is the one platform
