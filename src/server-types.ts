@@ -52,6 +52,15 @@ export interface GodotProcess {
   /** True when the editor was asked to play it, so stopping it is the editor's job too. */
   throughEditor: boolean;
   /**
+   * True for an editor-played run this server found already going rather than started.
+   *
+   * A reconnect takes the adapter buffer with the old server, so what the run printed before that
+   * is nowhere: the log here begins where this server picked it up. Said in the answer, because a
+   * short log reads as a quiet run, and a caller who started a bench an hour ago and is handed six
+   * lines has no way to tell "it has printed six lines" from "six lines is what I can see".
+   */
+  pickedUpPlaying?: boolean;
+  /**
    * Why this server ended the run, or null when it did not.
    *
    * A run that vanished and a run this tool killed look the same from outside: the process is
