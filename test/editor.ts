@@ -340,6 +340,25 @@ function createProject(): string {
     ['extends Node', '', '', 'func ring( -> int:', '\tpass', ''].join('\n'),
   );
 
+  // A global class the editor will have analysed before any fixture touches it, which is what the
+  // stale-analysis case needs: the fault is the language server holding the copy of a type it read
+  // at startup, so a type created later is a different case and not this one.
+  writeFileSync(
+    join(dir, 'bell.gd'),
+    [
+      'class_name Bell',
+      'extends Node',
+      '',
+      'var tolls: int = 0',
+      '',
+      '',
+      'func toll() -> int:',
+      '\ttolls += 1',
+      '\treturn tolls',
+      '',
+    ].join('\n'),
+  );
+
   writeFileSync(join(dir, 'main.gd'), MAIN_GD.join('\n'));
   writeFileSync(
     join(dir, 'main.tscn'),
@@ -1410,6 +1429,89 @@ async function testASettingReadFromTheEditor({ call, refusal, project }: Editor)
  * that has quietly stopped answering returns nothing for every file, which reads exactly like a
  * clean project, so the case that matters is the one where something is wrong.
  */
+/**
+ * A class written under a running editor is unresolved until something tells the editor, and
+ * `editor_rescan` is what tells it.
+ *
+ * Two projects hit this and neither could say which side was wrong: a declaration, the cache on
+ * disk and a headless compile all agreeing a file was fine, against diagnostics reporting errors on
+ * it. The answer now names the class under `typesTheEditorHasNotLoaded`, and this is what holds that
+ * answer to the editor rather than to a reading of how the editor ought to behave.
+ *
+ * The idle waits are the load-bearing half and are not padding. The remedy takes time and so does
+ * doing nothing, so a rescan that appears to clear this is indistinguishable from an editor that
+ * would have caught up on its own a moment later. Without the control the case would pass with the
+ * rescan removed, and the sentence the tool prints would be a guess.
+ */
+async function testAClassWrittenUnderTheEditorNeedsARescan({ call, project }: Editor): Promise<void> {
+  writeFileSync(
+    join(project, 'chime.gd'),
+    ['class_name Chime', 'extends Node', '', '', 'func strike() -> void:', '\tpass', ''].join('\n'),
+  );
+  writeFileSync(
+    join(project, 'striker.gd'),
+    [
+      'extends Node',
+      '',
+      'var chime: Chime = Chime.new()',
+      '',
+      '',
+      'func go() -> void:',
+      '\tchime.strike()',
+      '',
+    ].join('\n'),
+  );
+
+  const rebuilt = await call('project_import', { projectPath: project, op: 'refresh_classes' });
+  assert.deepEqual(get(rebuilt, 'added'), ['Chime'], `the cache should gain it: ${JSON.stringify(rebuilt)}`);
+
+  const readStriker = async (): Promise<unknown> => {
+    // The language server publishes on its own schedule, so an answer taken the instant after a
+    // write says more about the timing than about the analysis.
+    await delay(2500);
+    return await call('script_diagnostics', { projectPath: project, scriptPath: 'res://striker.gd' });
+  };
+  const namesChime = (answered: unknown): boolean =>
+    asArray(get(answered, 'diagnostics'))
+      .map((entry) => asString(get(entry, 'message'), 'message'))
+      .some((message) => message.includes('Chime'));
+
+  const before = await readStriker();
+  assert.ok(
+    namesChime(before),
+    `the editor should not resolve a class written under it: ${JSON.stringify(before)}`,
+  );
+  assert.deepEqual(
+    get(before, 'typesTheEditorHasNotLoaded'),
+    [{ type: 'Chime', declaredIn: 'res://chime.gd', inTheClassCache: true }],
+    `and the answer should name it, with the cache answer that picks the remedy: ${JSON.stringify(before)}`,
+  );
+  assert.match(
+    asString(get(before, 'staleAnalysis'), 'staleAnalysis'),
+    /editor_rescan/,
+    'and should send the caller to the cheap remedy rather than to a restart',
+  );
+
+  // Twice, because one wait of the same length as the remedy's proves nothing about which of them
+  // did the work.
+  for (const attemptNumber of [1, 2]) {
+    assert.ok(
+      namesChime(await readStriker()),
+      `waiting alone should not clear it (attempt ${attemptNumber}), or the rescan below is being credited with time passing`,
+    );
+  }
+
+  await call('editor_rescan', { projectPath: project });
+  const after = await readStriker();
+  assert.equal(
+    namesChime(after),
+    false,
+    `editor_rescan should make the editor resolve it, with no restart: ${JSON.stringify(after)}`,
+  );
+  assert.equal(get(after, 'typesTheEditorHasNotLoaded'), undefined, 'and the answer should stop naming it');
+  assert.equal(get(after, 'clean'), true, JSON.stringify(after));
+}
+
 async function testLanguageServer({ call, attempt, project }: Editor): Promise<void> {
   const sound = { projectPath: project, scriptPath: 'res://sound.gd' };
 
@@ -2567,6 +2669,7 @@ async function main(): Promise<void> {
     await testTheClassCheckKnowsWhichProjectItIsAbout(editor);
     await testASettingReadFromTheEditor(editor);
     await testLanguageServer(editor);
+    await testAClassWrittenUnderTheEditorNeedsARescan(editor);
     // Before anything speaks to the debug adapter. Reading a stack, taking a step or asking
     // debug_state for output all open a session on it, and a session opened once stays open for
     // the life of this server, so every case after one of those runs against an adapter that is
