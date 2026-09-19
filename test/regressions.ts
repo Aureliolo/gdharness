@@ -3577,6 +3577,104 @@ function testOnlyOurOwnAutoloadIsRewritten(): void {
 }
 
 /**
+ * The restart reports the settings its editor dropped, end to end.
+ *
+ * The diff itself is asserted beside this, over two readings of a file. What that cannot reach is
+ * whether the answer carries it, and the tier that drives a real editor cannot reach it either: an
+ * editor with no window refuses to restart, because the engine hands back none of the arguments it
+ * consumed, and the tier's editor is headless. That refusal is the addon's, so a fixture editor
+ * that answers `restart_editor` goes straight past it and through the whole handler.
+ *
+ * A restart is modelled the way one happens: the editor answers, goes, and a newer connection
+ * arrives. `project.godot` loses a line in between, which is what Godot does to a key named at its
+ * own default value.
+ */
+async function testARestartSaysWhatTheEditorDropped(): Promise<void> {
+  const port = await reservePort();
+  const server = new ServerProcess({ env: { GDHARNESS_BRIDGE_PORT: String(port) } });
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-restarting-'));
+  let editor: WebSocket | null = null;
+  let second: WebSocket | null = null;
+  try {
+    const settings = join(project, 'project.godot');
+    writeFileSync(
+      settings,
+      'config_version=5\n\n[debug]\n\ngdscript/warnings/return_value_discarded=0\ngdscript/warnings/unsafe_call_argument=2\n',
+    );
+
+    await server.initialize('regression-test');
+    const greet = async (socket: WebSocket): Promise<void> => {
+      await new Promise<void>((resolve, reject) => {
+        socket.once('open', () => {
+          resolve();
+        });
+        socket.once('error', reject);
+      });
+      socket.on('message', (raw: Buffer) => {
+        const message: unknown = JSON.parse(String(raw));
+        if (!isRecord(message) || message['type'] !== 'tool_invoke') {
+          return;
+        }
+        socket.send(
+          JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result: { ok: true } }),
+        );
+      });
+      socket.send(
+        JSON.stringify({
+          type: 'godot_ready',
+          project_path: project,
+          addon_version: SERVER_VERSION,
+          editor_pid: process.pid,
+        }),
+      );
+    };
+
+    editor = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+    await greet(editor);
+    let knows = false;
+    for (let waited = 0; waited < 10_000 && !knows; waited += 100) {
+      await delay(100);
+      const status = await server.request('tools/call', { name: 'editor_status', arguments: {} });
+      knows = text(get(parseTextContent(status), 'editor', 'projectPath')) === project;
+    }
+    assert.ok(knows, 'the fixture editor should have reached the server, or this proves nothing');
+
+    // The restart itself: the file loses the key that was at its default, the editor goes, and a
+    // newer connection takes its place. Sequenced off the call rather than raced against it.
+    const restarting = server.request(
+      'tools/call',
+      { name: 'editor_launch', arguments: { op: 'restart' } },
+      60_000,
+    );
+    await delay(500);
+    writeFileSync(settings, 'config_version=5\n\n[debug]\n\ngdscript/warnings/unsafe_call_argument=2\n');
+    editor.close();
+    await delay(1100);
+    second = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+    await greet(second);
+
+    const answer = parseTextContent(await restarting);
+    const said = JSON.stringify(answer);
+    assert.equal(get(answer, 'restarted'), true, said);
+    assert.deepEqual(
+      asArray(get(answer, 'settingsDropped') ?? []).map(String),
+      ['debug/gdscript/warnings/return_value_discarded'],
+      `the key the save took out is named: ${said}`,
+    );
+    assert.match(
+      text(get(answer, 'settingsNote')),
+      /writes only what differs from its own defaults/,
+      `with the mechanism, since the key going is not the editor misbehaving: ${said}`,
+    );
+  } finally {
+    editor?.terminate();
+    second?.terminate();
+    await server.stop();
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
  * Who is listening on a port, which is what says a debug adapter is the connected editor's.
  *
  * Godot gives every editor the same debug adapter port by default, and the addon reports the port
@@ -6295,6 +6393,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheEditorsRunIsTheOneAnsweredFor,
   testASettingTheEditorDroppedIsNamed,
   testWhoIsHoldingAPortIsAskable,
+  testARestartSaysWhatTheEditorDropped,
   testProjectDefaultsToTheWorkingDirectory,
   testAnAutoloadGitWillNotCarry,
   testVersionOrdering,
