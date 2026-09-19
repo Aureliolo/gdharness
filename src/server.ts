@@ -11,6 +11,7 @@
 import { type ChildProcess, execFile, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import {
+  appendFileSync,
   closeSync,
   existsSync,
   fstatSync,
@@ -21,6 +22,7 @@ import {
   readFileSync,
   readSync,
   rmSync,
+  statSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, normalize } from 'node:path';
@@ -73,10 +75,12 @@ import {
   clearRunRecord,
   couldStillBeTheRecordedRun,
   openTranscript,
+  readEditorRunNote,
   readRunRecord,
   recordRunEnded,
   stillTheRecordedRun,
   sweepTranscripts,
+  writeEditorRunNote,
   writeRunRecord,
 } from './run-record.js';
 import {
@@ -2807,19 +2811,28 @@ class GodotServer {
       return answer;
     }
 
+    // A file of its own for a run the editor plays. Its console comes over the adapter and used to
+    // live only in the buffer of the server holding it, so a reconnect took the whole run's output
+    // with it and the answer could explain the loss but not undo it. Written here as it is drained,
+    // the run survives its server the way a spawned one does.
+    const startedAt = Date.now();
+    const transcript = openTranscript(startedAt);
+    closeSync(transcript.fd);
     const played: GodotProcess = {
       process: null,
       pid: null,
       log,
-      transcript: null,
+      transcript: transcript.path,
       readOffset: 0,
       projectPath,
-      startedAt: Date.now(),
+      startedAt,
       exitCode: null,
       throughEditor: true,
       brokeOn: null,
     };
     this.activeProcess = played;
+    writeEditorRunNote({ projectPath, transcript: transcript.path, startedAt });
+    sweepTranscripts();
 
     return this.jsonTextResponse({
       started: true,
@@ -2853,8 +2866,24 @@ class GodotServer {
     }
     // Drained before the connection is judged, because the buffer outlives the socket: a close
     // that arrived between two calls still has the lines that came before it.
+    const heard: string[] = [];
     for (const line of this.dapClient.getOutput(true)) {
-      game.log.append('stdout', line.endsWith('\n') ? line : `${line}\n`);
+      const ended = line.endsWith('\n') ? line : `${line}\n`;
+      game.log.append('stdout', ended);
+      heard.push(ended);
+    }
+    // And into the file, so the run outlives this server. Written after the log rather than
+    // instead of it: a failure here costs the recovery, not the answer in hand.
+    if (heard.length > 0 && game.transcript !== null) {
+      try {
+        appendFileSync(game.transcript, heard.join(''));
+        // Moved to where the file now ends rather than by what was written, so the transcript read
+        // never re-reads a line the adapter already put in the log. Taken from the file itself
+        // because that is the number the read compares against.
+        game.readOffset = statSync(game.transcript).size;
+      } catch (error) {
+        this.logDebug(`Could not write an editor-played run's transcript: ${errorMessage(error)}`);
+      }
     }
     // An adapter that has gone is the only source an editor-played run has, and losing it is
     // silent from here: getOutput answers nothing, which is the same nothing a run between prints
@@ -3140,19 +3169,30 @@ class GodotServer {
     } catch (error) {
       this.logDebug(`Picked up an editor-played run without its adapter: ${errorMessage(error)}`);
     }
-    this.activeProcess = {
+    // The file the server that started this play was writing, when it left one. Only when it names
+    // this editor's project: these directories are shared by every server on the machine, and a
+    // note from another project's run would put its output under this one's heading, which is the
+    // fault this whole method exists to end.
+    const project = this.godotBridge.getStatus().projectPath ?? null;
+    const left = readEditorRunNote();
+    const note =
+      left !== null && project !== null && isSameDirectory(left.projectPath, project) ? left : null;
+    const picked: GodotProcess = {
       process: null,
       pid: null,
       log: new GameLog(),
-      transcript: null,
+      // The file the answer reads back from, which every path that reports on a run drains before
+      // it answers. What is picked up here is where to read, not the reading.
+      transcript: note?.transcript ?? null,
       readOffset: 0,
-      projectPath: this.godotBridge.getStatus().projectPath ?? null,
-      startedAt: Date.now(),
+      projectPath: project,
+      startedAt: note?.startedAt ?? Date.now(),
       exitCode: null,
       throughEditor: true,
       brokeOn: null,
       pickedUpPlaying: true,
     };
+    this.activeProcess = picked;
   }
 
   /**
@@ -3390,7 +3430,9 @@ class GodotServer {
     // bench an hour ago must not read six lines as six lines printed.
     if (run.pickedUpPlaying === true) {
       notes.push(
-        'The editor was already playing this when this server reached it, so this is not the run from its start: what it printed before that went with the server that was listening then. It is the run the editor is holding now, which is the one the debug_* tools answer for.',
+        run.transcript === null
+          ? 'The editor was already playing this when this server reached it, and the server that started it left no transcript, so this is not the run from its start: what it printed before that is only in the editor. It is the run the editor is holding now, which is the one the debug_* tools answer for.'
+          : 'The editor was already playing this when this server reached it, and what it printed before that has been read back from its transcript. It is the run the editor is holding now, which is the one the debug_* tools answer for.',
       );
     }
     if (run.consoleLost === true) {
