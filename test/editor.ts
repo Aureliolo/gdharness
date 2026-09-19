@@ -2312,6 +2312,12 @@ async function testTheGameIsHandedItsOwnArguments({ call, attempt, project }: Ed
  * because a runner is slower than a desk, and a generous one: what it is guarding against is tens
  * of seconds, and what it would catch is the console going back to arriving only when something
  * else pokes the adapter.
+ *
+ * **This case has to run before anything opens a session on the adapter**, which a stack read, a
+ * step or `debug_state output` all do as a side effect, and which stays open for the life of the
+ * server. Run after one of those it passes whatever the server does, which is how it passed twice
+ * while the report it was supposed to answer was right: the console really did not arrive, and the
+ * transcript named for it really was empty, for a caller who only ever asked `editor_output`.
  */
 async function testAPlayedRunsConsoleArrivesOnItsOwn({ call, project }: Editor): Promise<void> {
   await call('editor_run', { projectPath: project });
@@ -2403,6 +2409,10 @@ async function testAPlayedRunsConsoleArrivesOnItsOwn({ call, project }: Editor):
     /cpu was asked for and there is no process to ask/,
     `and that is said rather than left as an absence: ${text(asked)}`,
   );
+
+  // Left with nothing playing, because this case runs before the debugger ones now and those ask
+  // what a stack answers with no game running.
+  await call('editor_run', { op: 'stop' });
 }
 
 async function testAnErrorTheGameBrokeOnIsReported({ call, attempt, project }: Editor): Promise<void> {
@@ -2546,12 +2556,18 @@ async function main(): Promise<void> {
     await testTheClassCheckKnowsWhichProjectItIsAbout(editor);
     await testASettingReadFromTheEditor(editor);
     await testLanguageServer(editor);
+    // Before anything speaks to the debug adapter. Reading a stack, taking a step or asking
+    // debug_state for output all open a session on it, and a session opened once stays open for
+    // the life of this server, so every case after one of those runs against an adapter that is
+    // already attached. That is not the state a caller who only ever asks editor_output is in,
+    // and running this case after them is how a suite passed twice against a report that was
+    // right. The position is load-bearing; the docstring says so too.
+    await testAPlayedRunsConsoleArrivesOnItsOwn(editor);
     await testDebugging(editor);
     await testRuntime(editor);
     await testAnEditDoesNotReachTheRunningGame(editor);
     await testTheDebuggerGetsAPortOfItsOwn(editor);
     await testTheGameIsHandedItsOwnArguments(editor);
-    await testAPlayedRunsConsoleArrivesOnItsOwn(editor);
     await testAnErrorTheGameBrokeOnIsReported(editor);
     await testEditorRestart(editor);
   });
