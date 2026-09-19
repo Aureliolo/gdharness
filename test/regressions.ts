@@ -22,7 +22,7 @@ import { WebSocket } from 'ws';
 import { pullRequestNumbers, shipsToUsers } from '../scripts/release-notes.js';
 import { sharedCopies } from '../scripts/sync-shared-gd.js';
 import { announcementPath, BRIDGE_ANNOUNCE_PROTOCOL, readAnnouncement } from '../src/bridge-announce.js';
-import { staleClassNames, unseenByEditor } from '../src/class-cache.js';
+import { cachedClasses, cacheWrittenAt, staleClassNames, unseenByEditor } from '../src/class-cache.js';
 import { GodotDAPClient } from '../src/dap_client.js';
 import { dictionary, emptyRecord } from '../src/dictionary.js';
 import { forAnswer, GameLog } from '../src/game-log.js';
@@ -2246,6 +2246,29 @@ function testClassesAnEditorIsNotHolding(): void {
       'a declaration the engine itself skips is not one the editor is missing',
     );
     assert.deepEqual(staleClassNames(sandbox), [], 'and it is not missing from the cache either');
+
+    // What a rescan has to compare to know it has taken something away. The editor writes this
+    // file from the list it holds, so a shorter list writes a shorter file, and the only record
+    // that the longer one existed is the reading taken before the scan.
+    const cache = join(sandbox, '.godot', 'global_script_class_cache.cfg');
+    const before = cachedClasses(sandbox);
+    assert.deepEqual(
+      [...(before?.keys() ?? [])],
+      ['Hero', 'Squire'],
+      'the cache reader should name what the file holds, in the order it holds it',
+    );
+    const wasWritten = cacheWrittenAt(sandbox);
+    assert.ok(typeof wasWritten === 'number' && wasWritten > 0, 'and say when it was written');
+
+    writeFileSync(cache, 'list=[{\n"class": &"Hero",\n"path": "res://scripts/hero.gd"\n}]\n');
+    const after = cachedClasses(sandbox);
+    assert.deepEqual(
+      [...(before?.keys() ?? [])].filter((name) => !after?.has(name)),
+      ['Squire'],
+      'and a class that was there before and is not now is the one to name',
+    );
+    assert.equal(cachedClasses(join(sandbox, 'nowhere')), null, 'a project with no cache has no list');
+    assert.equal(cacheWrittenAt(join(sandbox, 'nowhere')), null, 'and no time it was written');
   } finally {
     rmSync(sandbox, { recursive: true, force: true });
   }
@@ -5615,6 +5638,87 @@ async function testAnUnlistedValueIsRefusedRatherThanDefaulted(): Promise<void> 
 }
 
 /**
+ * A scan that has been asked for and has not started is not a scan that has finished.
+ *
+ * `EditorFileSystem.scan()` queues rather than runs, so for the first frames after asking, both
+ * flags the engine offers are false and a poll reads the scan as over. Downstream: a rescan of a
+ * 376-class project answered `ok: true` 296ms in, and the editor then wrote its own stale class
+ * list over the cache that had just been corrected; the loss surfaced an hour later in a separate
+ * engine as an unknown identifier in a file nobody had touched. Measured here for comparison, a
+ * headless editor of 400 scripts takes 1619ms and says so honestly, which is why the fault needs
+ * an editor slow enough to be answering something else and cannot be reproduced by waiting.
+ *
+ * So the editor says `pending` and this is the half that reads it. A fixture editor holds the scan
+ * un-started for three polls with every flag the engine has reading false, which is exactly the
+ * state that used to answer "finished".
+ */
+async function testAScanThatHasNotStartedIsNotFinished(): Promise<void> {
+  const port = await reservePort();
+  const server = new ServerProcess({ env: { GDHARNESS_BRIDGE_PORT: String(port) } });
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-scanning-'));
+  let editor: WebSocket | null = null;
+  try {
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    await server.initialize('regression-test');
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+    editor = socket;
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', () => {
+        resolve();
+      });
+      socket.once('error', reject);
+    });
+
+    let polls = 0;
+    socket.on('message', (raw: Buffer) => {
+      const message: unknown = JSON.parse(String(raw));
+      if (!isRecord(message) || message['type'] !== 'tool_invoke') {
+        return;
+      }
+      const tool = String(message['tool']);
+      if (tool === 'rescan_filesystem') {
+        polls += 1;
+      }
+      // Three polls of "asked for, not started", then finished. Every flag the engine itself
+      // offers reads false throughout, which is what made this indistinguishable from over.
+      const result =
+        tool === 'rescan_filesystem'
+          ? { ok: true, scanning: false, importing: false, pending: polls <= 4 }
+          : { ok: true, classes: [] };
+      socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result }));
+    });
+    socket.send(
+      JSON.stringify({ type: 'godot_ready', project_path: project, addon_version: SERVER_VERSION }),
+    );
+
+    let knows = false;
+    for (let waited = 0; waited < 10_000 && !knows; waited += 100) {
+      await delay(100);
+      const status = await server.request('tools/call', { name: 'editor_status', arguments: {} });
+      knows = text(get(parseTextContent(status), 'editor', 'projectPath')) === project;
+    }
+    assert.ok(knows, 'the fixture editor should have reached the server, or this proves nothing');
+
+    const scanned = await server.request('tools/call', {
+      name: 'editor_rescan',
+      arguments: { projectPath: project },
+    });
+    const answer = parseTextContent(scanned);
+    assert.equal(get(answer, 'ok'), true, `the scan settles once it has run: ${textOf(scanned)}`);
+    assert.equal(get(answer, 'stillWorking'), false, `and is not left hanging: ${textOf(scanned)}`);
+    assert.ok(
+      asNumber(get(answer, 'waitedMs')) >= 300,
+      `it waited for the scan it asked for: ${asNumber(get(answer, 'waitedMs'))}ms over ${polls} polls`,
+    );
+    assert.ok(polls >= 4, `which takes more than one look: ${polls} polls`);
+  } finally {
+    editor?.terminate();
+    await server.stop();
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
  * Every fixture in this file is in the list below.
  *
  * The list is written by hand, so a fixture can be added and left out of it, and nothing says so:
@@ -5672,6 +5776,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testStaleClassesAreReadFromDisk,
   testTheProjectWalksAgreeAboutWhatIsInIt,
   testClassesAnEditorIsNotHolding,
+  testAScanThatHasNotStartedIsNotFinished,
   testProjectDefaultsToTheWorkingDirectory,
   testAnAutoloadGitWillNotCarry,
   testVersionOrdering,
