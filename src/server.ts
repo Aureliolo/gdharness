@@ -73,6 +73,7 @@ import { parseProjectGodot, settingKeys, setupResourceHandlers } from './resourc
 import {
   clearRunRecord,
   couldStillBeTheRecordedRun,
+  listeningPid,
   openTranscript,
   readEditorRunNote,
   readRunRecord,
@@ -2219,6 +2220,36 @@ class GodotServer {
     return handleDAPTool(this.dap(), toolName, args);
   }
 
+  /**
+   * Why the debug adapter on the port this editor named is not this editor's, or null.
+   *
+   * Godot has one default debug adapter port and every editor on a machine would take it, so the
+   * addon reporting the port its editor's settings name is not the same as that editor having
+   * bound it: two editors opened by hand both answer 6006, one of them holds it, and the answer
+   * does not say which. A server connecting on that number then reads a console belonging to
+   * another project, which is the wrong answer said with every field well-formed. It happened
+   * here, to a fixture in this repository, against a real editor of another project on this
+   * machine.
+   *
+   * Null where the operating system will not say who is listening, and null where the editor did
+   * not say its own process id. Not knowing whose it is has never been grounds to refuse anywhere
+   * else in this server and is not grounds here: the cost of refusing a working setup is a caller
+   * who cannot run their game at all.
+   */
+  private adapterBelongsElsewhere(): string | null {
+    const status = this.godotBridge.getStatus();
+    const ours = status.editorPid;
+    if (ours === undefined) {
+      return null;
+    }
+    const port = this.editorServes('dapPort', 'GDHARNESS_DAP_PORT', DEFAULT_DAP_PORT);
+    const holder = listeningPid(port);
+    if (holder === null || holder === ours) {
+      return null;
+    }
+    return `The debug adapter on port ${port} belongs to process ${holder}, and the editor on this server's bridge is process ${ours}. Godot gives every editor the same debug adapter port by default, so the one this editor names in its settings is not necessarily the one it holds. Playing the game now would put another editor's console and another project's debugger under this project's name.`;
+  }
+
   /** The one debug adapter client, which the debug tools and an editor-played game share. */
   private dap(): GodotDAPClient {
     const port = this.editorServes('dapPort', 'GDHARNESS_DAP_PORT', DEFAULT_DAP_PORT);
@@ -2860,6 +2891,15 @@ class GodotServer {
           'GDHARNESS_DAP_PORT points this server at another one',
         ],
       );
+    }
+
+    const stranger = this.adapterBelongsElsewhere();
+    if (stranger !== null) {
+      return this.createErrorResponse(stranger, [
+        'editor_status names the editor on the bridge and the port it says it serves',
+        'GDHARNESS_DAP_PORT points this server at the right one',
+        'Closing the other editor, or moving its debug adapter port in its editor settings, frees this one',
+      ]);
     }
 
     const answer = await this.handleViaBridge(
