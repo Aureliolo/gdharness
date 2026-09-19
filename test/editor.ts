@@ -1706,6 +1706,34 @@ async function testRuntime({ call, refusal, attempt, project, lspPort, dapPort }
   });
   assert.match(written, /cannot become one/, `a word where a count goes is refused: ${written}`);
 
+  // And on a wait, where the same conversion landed worst of all: the word became 0.0, 0.0 equalled
+  // the property already, and the wait answered met: true with the real value beside it, in zero
+  // milliseconds, about a state nobody asked about. A refused call is read; a met is acted on.
+  const impossible = await refusal('runtime_wait', {
+    ...game,
+    op: 'until',
+    nodePath: '/root/Main',
+    property: 'ticks',
+    value: 'not a count',
+    timeoutMs: 1500,
+  });
+  assert.match(impossible, /cannot become one/, `a wait that could never be met is refused: ${impossible}`);
+
+  // A property the node has not got, refused rather than waited on. Waiting answered "not met"
+  // after the whole timeout, which is what a game that never got there answers too, while the
+  // property read refuses the same typo in one call. Two tools disagreeing about a typo is the
+  // fault; that the wait was the slow one about it is how it stayed unnoticed.
+  const mistyped = await refusal('runtime_wait', {
+    ...game,
+    op: 'until',
+    nodePath: '/root/Main',
+    property: 'tikcs',
+    value: 1,
+    timeoutMs: 1500,
+  });
+  assert.match(mistyped, /tikcs/, `the name nobody has is named: ${mistyped}`);
+  assert.match(mistyped, /no property|has no/, `and said to be missing: ${mistyped}`);
+
   // And the conversions a caller actually relies on still go through, which is the half a
   // whitelist gets wrong. A downstream project reads and pokes its run through `get_indexed` and
   // `set_indexed` with a string path, dozens of calls a session: the parameter is a NodePath and
