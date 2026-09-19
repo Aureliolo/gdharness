@@ -37,6 +37,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { announceBridge, announcementPath, readAnnouncement, withdrawBridge } from './bridge-announce.js';
 import { staleClassNames, type UnseenClass, unseenByEditor } from './class-cache.js';
+import { configDisagrees } from './config-pin.js';
 import { DEFAULT_DAP_PORT, GodotDAPClient, handleDAPTool, type StoppedAt } from './dap_client.js';
 import { dictionary, emptyRecord } from './dictionary.js';
 import { errorMessage, Refusal } from './errors.js';
@@ -992,6 +993,25 @@ class GodotServer {
       });
     }
 
+    // Also before the one about npm, and for the same reason: a config naming a version this
+    // server is not is a fact about this project, and it is the reason an upgrade somebody
+    // believes they took has not arrived. It says nothing at all while the two agree.
+    const disagreement = this.configDisagreement();
+    if (disagreement !== null) {
+      this.noticedUpdate = true;
+      this.callsSinceNotice = 0;
+      return this.saying(answer, {
+        config_names_another_version: {
+          server_is: SERVER_VERSION,
+          said: disagreement,
+          what_to_do:
+            'Tell the user which version their config names and which one is answering, and that ' +
+            'the two will not meet until .mcp.json is right and the MCP server is reconnected. Do ' +
+            'not edit their config without asking: which of the two they meant is theirs to say.',
+        },
+      });
+    }
+
     const notice = this.updates.notice();
     if (notice === null) {
       return answer;
@@ -1030,6 +1050,11 @@ class GodotServer {
     }
     const installed = installedAddonVersion(this.ownProject);
     return installed === null || installed === SERVER_VERSION ? null : installed;
+  }
+
+  /** What the project's own MCP config asks for, when it is not what is answering. */
+  private configDisagreement(): string | null {
+    return this.ownProject === null ? null : configDisagrees(this.ownProject, SERVER_VERSION);
   }
 
   /**
@@ -2224,6 +2249,9 @@ class GodotServer {
       // this catches the other way round, a project upgraded while this server kept running, and
       // nothing reported that at all: the answer was that everything was fine.
       projectIs: this.projectHasMovedOn() ?? undefined,
+      // And the fourth, which is the one nobody was looking at: the version the config names is
+      // what the client fetches next time, and it is not moved by moving a pin kept elsewhere.
+      configIs: this.configDisagreement() ?? undefined,
       note: isPortConflict
         ? 'Bridge port is already in use. Another gdharness instance owns the editor bridge, so this server cannot reach the editor. Usually the server this one replaced, still on its way out.'
         : undefined,
