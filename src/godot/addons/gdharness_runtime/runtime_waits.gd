@@ -106,6 +106,14 @@ func wait_until(params: Dictionary) -> Dictionary:
 
 	var node: Node = standing["node"]
 
+	# A property the node has not got, refused here rather than waited on. Waiting answered "not
+	# met" after the whole timeout, which is what a game that never reached the state answers too,
+	# so a mistyped name and a condition that did not happen read the same. The property read
+	# refuses that typo in one call, and two tools disagreeing about it is the fault.
+	var missing: String = Queries.nothing_under(node, property, node_path)
+	if not missing.is_empty():
+		return {"type": "error", "message": missing}
+
 	var current: Variant = node.get(property)
 	var wanted: Variant = _values.fitted(params["value"], typeof(current))
 	# Refused before anything is evaluated, because the evaluation is what does the damage: an
@@ -120,6 +128,22 @@ func wait_until(params: Dictionary) -> Dictionary:
 				(
 					"%s.%s holds %s and the value to wait for is %s. Those cannot be compared, and"
 					+ " waiting on it would stop the game rather than answer about it."
+				)
+				% [node_path, property, type_string(typeof(current)), type_string(typeof(wanted))]
+			)
+		}
+	# And a value that cannot become what the property holds, which lands worse than the halt: a
+	# word where a number goes became 0.0, 0.0 already equalled the property, and the wait answered
+	# met the instant it started, about a state nobody asked about, with the real value beside it.
+	# A refusal is read and a met is acted on.
+	if not Values.acceptable(wanted, typeof(current)):
+		return {
+			"type": "error",
+			"message":
+			(
+				(
+					"%s.%s holds %s and the value to wait for is %s, which cannot become one:"
+					+ " waiting on it would answer about a state nobody asked for."
 				)
 				% [node_path, property, type_string(typeof(current)), type_string(typeof(wanted))]
 			)
