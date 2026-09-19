@@ -1714,6 +1714,33 @@ async function testAnArgumentMeantForAnotherOpIsRefused(): Promise<void> {
       'while the argument start does read reaches the project check',
     );
 
+    // One rule across the editor_* family, and it is not "all or none": an op takes projectPath
+    // where it is being told which project, and does not where it is about the editor or the run
+    // already in hand. Getting that boundary wrong cost a downstream session two calls, one in
+    // each direction, so the boundary itself is asserted rather than left to whoever edits next.
+    for (const [tool, op] of [
+      ['editor_run', 'stop'],
+      ['editor_run', 'wait'],
+      ['editor_launch', 'restart'],
+    ]) {
+      assert.match(
+        await call(String(tool), { op, projectPath: '/p' }),
+        new RegExp(`${tool} ${op} does not take projectPath`),
+        `${tool} ${op} is about what is already connected, so it should refuse being told the project`,
+      );
+    }
+    for (const [tool, op] of [
+      ['editor_run', 'start'],
+      ['editor_run', 'check'],
+      ['editor_launch', 'open'],
+    ]) {
+      assert.match(
+        await call(String(tool), { op }),
+        new RegExp(`${tool} ${op} needs projectPath`),
+        `${tool} ${op} is being told which project, so it should ask for one`,
+      );
+    }
+
     // The other half, or this passes against a server that refuses every op-specific argument.
     // Accepted means reaching the runtime and finding nothing there, which is one sentence; the
     // absence of "does not take" is every sentence in the program except one.
@@ -4017,7 +4044,9 @@ async function testARunEndedUnwatchedIsStillReadable(): Promise<void> {
         );
         assert.match(said, /this server serves .*elsewhere/, `naming what it does serve: ${said}`);
         // Ending it is the half that matters: this is the call that used to kill it.
-        const refused = await call('editor_run', { projectPath: join(runtimeDir, 'elsewhere'), op: 'stop' });
+        // Without a projectPath, because stop is about the run this server is holding and the
+        // refusal comes from whose the recorded run is, not from what the caller said it was.
+        const refused = await call('editor_run', { op: 'stop' });
         assert.match(refused, /not this server's to answer for or to end/, refused);
       },
       { GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: join(runtimeDir, 'elsewhere') },
@@ -4276,9 +4305,7 @@ async function testARunOutlivesItsServer(): Promise<void> {
         `what it printed while no server was reading is there too:\n${JSON.stringify(output, null, 2)}`,
       );
 
-      const stopped: unknown = JSON.parse(
-        await call('editor_run', { projectPath: projectDir, op: 'stop' }, ENGINE_CALL_TIMEOUT_MS),
-      );
+      const stopped: unknown = JSON.parse(await call('editor_run', { op: 'stop' }, ENGINE_CALL_TIMEOUT_MS));
       assert.equal(get(stopped, 'stopped'), true, JSON.stringify(stopped));
     }, env);
 

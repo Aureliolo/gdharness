@@ -2090,7 +2090,7 @@ async function testRuntime({ call, refusal, attempt, project, lspPort, dapPort }
     'and which scene it has running',
   );
 
-  await call('editor_run', { projectPath: project, op: 'stop' });
+  await call('editor_run', { op: 'stop' });
 }
 
 /**
@@ -2109,7 +2109,7 @@ async function testRuntime({ call, refusal, attempt, project, lspPort, dapPort }
  * again, because a write that never reached disk would leave the game unchanged too.
  */
 async function testAnEditDoesNotReachTheRunningGame({ call, attempt, project }: Editor): Promise<void> {
-  await attempt('editor_run', { projectPath: project, op: 'stop' });
+  await attempt('editor_run', { op: 'stop' });
   const game = { projectPath: project };
   const source = join(project, 'main.gd');
   const before = readFileSync(source, 'utf8');
@@ -2149,7 +2149,7 @@ async function testAnEditDoesNotReachTheRunningGame({ call, attempt, project }: 
     // The same call against a process started since, with nothing changed but which process is
     // answering. Without this the case passes just as well against a runtime that had stopped
     // reading the method at all, and 8 would be the sound of nothing happening.
-    await call('editor_run', { projectPath: project, op: 'stop' });
+    await call('editor_run', { op: 'stop' });
     await call('editor_run', { projectPath: project });
     assert.equal(
       get(await call('runtime_invoke', asked), 'result'),
@@ -2158,7 +2158,7 @@ async function testAnEditDoesNotReachTheRunningGame({ call, attempt, project }: 
     );
   } finally {
     writeFileSync(source, before);
-    await attempt('editor_run', { projectPath: project, op: 'stop' });
+    await attempt('editor_run', { op: 'stop' });
   }
 }
 
@@ -2178,7 +2178,7 @@ async function testAnEditDoesNotReachTheRunningGame({ call, attempt, project }: 
 async function testTheDebuggerGetsAPortOfItsOwn({ call, attempt, project }: Editor): Promise<void> {
   // Attempted rather than called: what came before may have left a game running or may not, and
   // a stop with nothing to stop is refused.
-  await attempt('editor_run', { projectPath: project, op: 'stop' });
+  await attempt('editor_run', { op: 'stop' });
 
   try {
     const took = asNumber(get(await call('editor_run', { projectPath: project }), 'debugPort'), 'debugPort');
@@ -2199,7 +2199,7 @@ async function testTheDebuggerGetsAPortOfItsOwn({ call, attempt, project }: Edit
     }
     assert.match(said, /the game said 4/, `the console should reach the editor: ${said}`);
   } finally {
-    await attempt('editor_run', { projectPath: project, op: 'stop' });
+    await attempt('editor_run', { op: 'stop' });
   }
 }
 
@@ -2221,7 +2221,7 @@ async function testTheDebuggerGetsAPortOfItsOwn({ call, attempt, project }: Edit
  * arguments say headless too, so what moves this run is still the arguments and nothing else.
  */
 async function testTheGameIsHandedItsOwnArguments({ call, attempt, project }: Editor): Promise<void> {
-  await attempt('editor_run', { projectPath: project, op: 'stop' });
+  await attempt('editor_run', { op: 'stop' });
 
   try {
     const run = await call('editor_run', {
@@ -2283,7 +2283,7 @@ async function testTheGameIsHandedItsOwnArguments({ call, attempt, project }: Ed
       `arguments that are not strings should be refused: ${refused.text}`,
     );
   } finally {
-    await attempt('editor_run', { projectPath: project, op: 'stop' });
+    await attempt('editor_run', { op: 'stop' });
   }
 }
 
@@ -2471,7 +2471,7 @@ async function testAnErrorTheGameBrokeOnIsReported({ call, attempt, project }: E
     'and one error stays one error however often the console is read',
   );
 
-  await call('editor_run', { projectPath: project, op: 'stop' });
+  await call('editor_run', { op: 'stop' });
 }
 
 /**
@@ -2506,7 +2506,7 @@ async function testEditorRestart({ call, refusal, project }: Editor): Promise<vo
   // instead of the editor that was there. That happened on a real desktop, which is why this
   // case asserts the refusal rather than skipping.
   assert.match(
-    await refusal('editor_launch', { projectPath: project, op: 'restart' }),
+    await refusal('editor_launch', { op: 'restart' }),
     /headless/,
     'a headless editor should refuse to restart, and say why',
   );
