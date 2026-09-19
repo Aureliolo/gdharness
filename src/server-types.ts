@@ -61,6 +61,15 @@ export interface GodotProcess {
    */
   pickedUpPlaying?: boolean;
   /**
+   * True once the debug adapter that carries an editor-played run's console has gone.
+   *
+   * That adapter is the only source such a run has, and its loss is silent: nothing arrives, which
+   * is exactly what a run between prints looks like. A run reported clean with no entries is then
+   * two different things, one of which is a game printing steadily into a console nobody is
+   * holding, so the one that happened is written down rather than left to the reader.
+   */
+  consoleLost?: boolean;
+  /**
    * Why this server ended the run, or null when it did not.
    *
    * A run that vanished and a run this tool killed look the same from outside: the process is
