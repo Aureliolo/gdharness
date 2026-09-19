@@ -41,6 +41,19 @@ clean, threw at run time, and failed the fixture on a missing field three assert
 the one under test. Typecheck before you believe a disarm, and check the message names the assertion
 you disarmed.
 
+Shorten as well as empty. A check whose reading comes back empty usually fails loudly, and the same
+check reading one entry fewer usually does not: it looks at one thing less and passes. So a floor of
+25 on a table of 31 is an anchor against a pattern that stopped matching altogether and no guard at
+all against one that quietly stopped matching six of them, which is the case that leaves a command
+nothing sends unnoticed. Set the floor to what the file holds today rather than to a comfortable
+minimum, so that removing an entry means lowering it in the same change and somebody confirms the
+removal was meant. Disarm it by reading one fewer, not none: dropping to seven trips a floor of 25
+as well, and proves nothing about it.
+
+The same holds for a check that loops over the list it is checking. Dropping an entry drops the
+assertion with it, so the case passes having tested less, and a check that enumerates what it covers
+says nothing about what it does not.
+
 Some disarms cannot be performed at all, and that is a finding rather than an obstacle. Deleting a
 line can leave a parameter unused, a branch unreachable or an import dangling, and the gates refuse
 it before a single case runs. Reach for a smaller break that the compiler accepts, and write down
