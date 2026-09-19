@@ -52,6 +52,11 @@ function headlessSection(): string[] {
     'Everything else needs the editor (`editor_*`, `debug_*`, `scene_*`, `resource_*`) or a running',
     'game (`runtime_*`).',
     '',
+    'One of these can be pointed the other way: `project_settings get` takes `from: "editor"` to ask',
+    'the open editor instead of the file, which is a different reading and costs no engine start. A',
+    'gate leaves it alone, because there is no editor on a build machine and the call is refused',
+    'rather than answered from the file.',
+    '',
   ];
 }
 

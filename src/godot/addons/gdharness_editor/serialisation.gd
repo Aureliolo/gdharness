@@ -1,0 +1,195 @@
+extends RefCounted
+
+const Read = preload("reading.gd")
+
+# What each Godot type becomes on the wire, as one table you can read rather than an order you
+# have to trust. Keyed on typeof() rather than written as a chain of `is` tests, because the
+# order mattered: Resource had to be tested before Object or every resource came back as a bare
+# class name with its path dropped, and nothing but a comment said so.
+#
+# Method names rather than Callables: a table of Callables bound to this object is a reference
+# cycle that nothing breaks, so the object outlives the run and the engine reports its script as
+# a resource still in use at exit, on the same stderr the server reads failures off.
+#
+# A copy of the one beside the operations rather than a preload of it, because an addon is
+# installed as a directory and has to hold everything it uses. It is a copy of that one in
+# particular because a caller can ask the same question of the editor or of the file and compare
+# the two answers: a Vector2 spelled one way here and another way there would read as the editor
+# and the file disagreeing about a value they agree about.
+const SERIALISERS: Dictionary = {
+	TYPE_NIL: "_serialize_nil",
+	TYPE_VECTOR2: "_serialize_vector2",
+	TYPE_VECTOR3: "_serialize_vector3",
+	TYPE_VECTOR2I: "_serialize_vector2i",
+	TYPE_VECTOR3I: "_serialize_vector3i",
+	TYPE_COLOR: "_serialize_color",
+	TYPE_NODE_PATH: "_serialize_node_path",
+	TYPE_ARRAY: "_serialize_array",
+	TYPE_RECT2: "_serialize_rect2",
+	TYPE_TRANSFORM2D: "_serialize_transform2d",
+	TYPE_TRANSFORM3D: "_serialize_transform3d",
+	TYPE_DICTIONARY: "_serialize_dictionary",
+	TYPE_OBJECT: "_serialize_object",
+}
+
+
+# Converts a Godot value into something JSON can carry. A type with no entry in the table
+# passes through as itself, which is what the JSON-native ones want.
+#
+# A property that holds no object is Object-typed and null rather than nil, which is most of what
+# a node's property list is, and an object that has been freed is the same shape again. Both are
+# refused here rather than inside _serialize_object, because a freed one never reaches it: the
+# call itself fails on the argument, with "previously freed is not a subclass of the expected
+# argument class", and a guard behind that is a guard that never runs.
+func serialize_value(value: Variant) -> Variant:
+	if typeof(value) == TYPE_OBJECT and not is_instance_valid(value):
+		return null
+	var serialiser: String = SERIALISERS.get(typeof(value), "")
+	return call(serialiser, value) if not serialiser.is_empty() else value
+
+
+# Rebuilds a Godot value from the shape serialize_value gave it.
+func deserialize_value(value: Variant) -> Variant:
+	if value == null:
+		return null
+	if value is Array:
+		var items: Array = value
+		var rebuilt: Array = []
+		for item: Variant in items:
+			rebuilt.append(deserialize_value(item))
+		return rebuilt
+	if not value is Dictionary:
+		return value
+
+	var fields: Dictionary = value
+	if not fields.has("_type"):
+		var rebuilt: Dictionary = {}
+		for key: Variant in fields:
+			rebuilt[key] = deserialize_value(fields[key])
+		return rebuilt
+
+	# Each component read as the type the constructor wants before it is handed over. These come
+	# out of JSON as Variant, and a project holding `unsafe_call_argument` at error level refuses
+	# to compile a script that gives a Variant to a typed parameter: the operations are compiled
+	# under the target project's warning levels, so one such project lost every headless call.
+	match fields["_type"]:
+		"Vector2":
+			return Vector2(Read.as_float(fields.get("x", 0)), Read.as_float(fields.get("y", 0)))
+		"Vector3":
+			return Vector3(
+				Read.as_float(fields.get("x", 0)),
+				Read.as_float(fields.get("y", 0)),
+				Read.as_float(fields.get("z", 0))
+			)
+		"Vector2i":
+			return Vector2i(Read.as_int(fields.get("x", 0)), Read.as_int(fields.get("y", 0)))
+		"Vector3i":
+			return Vector3i(
+				Read.as_int(fields.get("x", 0)),
+				Read.as_int(fields.get("y", 0)),
+				Read.as_int(fields.get("z", 0))
+			)
+		"Color":
+			return Color(
+				Read.as_float(fields.get("r", 0)),
+				Read.as_float(fields.get("g", 0)),
+				Read.as_float(fields.get("b", 0)),
+				Read.as_float(fields.get("a", 1), 1.0)
+			)
+		"Rect2":
+			return _rect_from(fields)
+		"NodePath":
+			return NodePath(str(fields.get("path", "")))
+	return fields
+
+
+## A Rect2 out of its two tagged corners, or the fields back when they do not describe one.
+##
+## Its own function because the components have to be read as Vector2 before the constructor is
+## given them, and a branch that can also answer with the fields would push the match above past
+## the return count this project holds itself to.
+func _rect_from(fields: Dictionary) -> Variant:
+	var position: Variant = deserialize_value(fields.get("position", {}))
+	var size: Variant = deserialize_value(fields.get("size", {}))
+	if not (position is Vector2 and size is Vector2):
+		return fields
+	var at: Vector2 = position
+	var extent: Vector2 = size
+	return Rect2(at, extent)
+
+
+func _serialize_nil(_value: Variant) -> Variant:
+	return null
+
+
+func _serialize_vector2(value: Vector2) -> Dictionary:
+	return {"x": value.x, "y": value.y, "_type": "Vector2"}
+
+
+func _serialize_vector3(value: Vector3) -> Dictionary:
+	return {"x": value.x, "y": value.y, "z": value.z, "_type": "Vector3"}
+
+
+func _serialize_vector2i(value: Vector2i) -> Dictionary:
+	return {"x": value.x, "y": value.y, "_type": "Vector2i"}
+
+
+func _serialize_vector3i(value: Vector3i) -> Dictionary:
+	return {"x": value.x, "y": value.y, "z": value.z, "_type": "Vector3i"}
+
+
+func _serialize_color(value: Color) -> Dictionary:
+	return {"r": value.r, "g": value.g, "b": value.b, "a": value.a, "_type": "Color"}
+
+
+func _serialize_node_path(value: NodePath) -> Dictionary:
+	return {"path": str(value), "_type": "NodePath"}
+
+
+func _serialize_array(value: Array) -> Array:
+	return value.map(serialize_value)
+
+
+func _serialize_rect2(value: Rect2) -> Dictionary:
+	return {
+		"position": serialize_value(value.position), "size": serialize_value(value.size), "_type": "Rect2"
+	}
+
+
+func _serialize_transform2d(value: Transform2D) -> Dictionary:
+	return {
+		"origin": serialize_value(value.origin),
+		"x": serialize_value(value.x),
+		"y": serialize_value(value.y),
+		"_type": "Transform2D"
+	}
+
+
+func _serialize_transform3d(value: Transform3D) -> Dictionary:
+	return {
+		"origin": serialize_value(value.origin),
+		"basis":
+		{
+			"x": serialize_value(value.basis.x),
+			"y": serialize_value(value.basis.y),
+			"z": serialize_value(value.basis.z)
+		},
+		"_type": "Transform3D"
+	}
+
+
+func _serialize_dictionary(value: Dictionary) -> Dictionary:
+	var serialised: Dictionary = {}
+	for key: Variant in value:
+		serialised[str(key)] = serialize_value(value[key])
+	return serialised
+
+
+# A pathless Resource says so rather than inventing an empty path for the caller to load.
+func _serialize_object(value: Object) -> Variant:
+	if not value is Resource:
+		return {"_type": "Object", "class": value.get_class()}
+	var resource: Resource = value
+	if resource.resource_path.is_empty():
+		return {"_type": "Resource", "class": resource.get_class()}
+	return {"path": resource.resource_path, "_type": "Resource", "class": resource.get_class()}
