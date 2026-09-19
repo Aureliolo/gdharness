@@ -1066,6 +1066,61 @@ async function testAScanWritesTheCacheFromTheEditor({ call, project }: Editor): 
 }
 
 /**
+ * A rescan does not undo the rebuild that told the caller to run it.
+ *
+ * The sequence is the one `refresh_classes` prints as its own advice, run exactly as printed.
+ * Downstream: the rebuild wrote a correct cache and named `Offer` as a class the editor was not
+ * holding; the rescan it recommended then wrote the editor's own list over that file, dropped
+ * `Offer`, and answered `ok: true`. The damage surfaced in a separate headless engine an hour
+ * later as `Identifier "Offer" not declared in the current scope`, exit 105, which reads as a
+ * broken test rather than as a clobbered cache. Twenty minutes and one misread failure.
+ *
+ * What is asked is the thing a caller following that advice is entitled to: after the rescan, the
+ * class is still in the file. Whether the editor picked it up or the rescan was refused is the
+ * engine's business and the answer's; losing it silently is not an option either way.
+ */
+async function testARescanKeepsWhatTheRebuildWrote({ call, project }: Editor): Promise<void> {
+  const cache = join(project, '.godot', 'global_script_class_cache.cfg');
+  // Enough files that the editor's scan takes real time. Reported from a project of 376 classes,
+  // where the scan reported itself finished 296ms in and the cache was written after that; a
+  // project of three files finishes inside the first poll and never shows the gap.
+  const crowd = join(project, 'crowd');
+  mkdirSync(crowd, { recursive: true });
+  for (let index = 0; index < 400; index += 1) {
+    writeFileSync(join(crowd, `filler_${index}.gd`), `class_name Filler${index}\nextends RefCounted\n`);
+  }
+  writeFileSync(join(project, 'offered.gd'), 'class_name OfferedClass\nextends RefCounted\n');
+
+  // A headless engine records the file first, which is the state the editor's own scan goes past:
+  // change-detecting, and the file already looks imported. That is what made the class invisible
+  // to the editor downstream while being correct everywhere on disk.
+  const rebuilt = await call('project_import', { projectPath: project, op: 'refresh_classes' });
+  assert.ok(
+    readFileSync(cache, 'utf8').includes('OfferedClass'),
+    `the rebuild should have written it: ${text(rebuilt)}`,
+  );
+
+  // The state the report describes, reproduced rather than assumed: the file is on disk, the cache
+  // has it, and the editor's own list does not. Without this the case below is a rescan of a
+  // project where nothing was ever at risk, which passes for the wrong reason.
+  const blind = asArray(get(rebuilt, 'unseenByEditor') ?? []).map((one) => asString(get(one, 'className')));
+  assert.ok(
+    blind.includes('OfferedClass'),
+    `the editor should be blind to the new class, or this proves nothing: ${blind.length} unseen`,
+  );
+
+  const scanned = await call('editor_rescan', { projectPath: project });
+  const lost = asArray(get(scanned, 'cacheLost') ?? []).map((one) => asString(one));
+  const after = readFileSync(cache, 'utf8');
+  const missing = ['OfferedClass', 'Filler0', 'Filler399'].filter((name) => !after.includes(name));
+  // The two halves of what was reported: the loss itself, and the clean answer beside it. Either
+  // one alone is survivable; together they send the caller to look at the engine that failed next.
+  assert.deepEqual(missing, [], `the rescan must not drop what the rebuild wrote: lost ${lost.length}`);
+  assert.deepEqual(lost, [], `and nothing should have been lost to report: ${lost.slice(0, 5).join(', ')}`);
+  assert.equal(get(scanned, 'ok'), true, 'so the scan reports itself clean');
+}
+
+/**
  * Asked about a project this editor is not open on, the answer is "not checked", never "clean".
  *
  * The editor holds the classes of the project it opened, so comparing them against another
@@ -2101,6 +2156,7 @@ async function main(): Promise<void> {
     await testEditorRescan(editor);
     await testAClassTheEditorCannotSee(editor);
     await testAScanWritesTheCacheFromTheEditor(editor);
+    await testARescanKeepsWhatTheRebuildWrote(editor);
     await testTheClassCheckKnowsWhichProjectItIsAbout(editor);
     await testASettingReadFromTheEditor(editor);
     await testLanguageServer(editor);

@@ -10,7 +10,7 @@
  * Read from files, never from an engine, because this is asked before every run.
  */
 
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
 /**
@@ -57,6 +57,23 @@ export function cachedClasses(projectPath: string): Map<string, string> | null {
     listed.set(entry[1] ?? '', entry[2] ?? '');
   }
   return listed;
+}
+
+/**
+ * When the cache was last written, or null when there is none.
+ *
+ * The editor rewrites the file at the end of a scan, from the list it is holding rather than from
+ * the file, and that write lands after the scan reports itself finished. So "has it been written
+ * since I looked" is the only way to know whether the answer about to be given is about the file
+ * that will still be there a moment later.
+ */
+export function cacheWrittenAt(projectPath: string): number | null {
+  const cache = join(projectPath, '.godot', 'global_script_class_cache.cfg');
+  try {
+    return statSync(cache).mtimeMs;
+  } catch {
+    return null;
+  }
 }
 
 /** The declarations a given cache records at a different path, or does not record at all. */
