@@ -108,8 +108,31 @@ func wait_until(params: Dictionary) -> Dictionary:
 
 	var current: Variant = node.get(property)
 	var wanted: Variant = _values.fitted(params["value"], typeof(current))
+	# Refused before anything is evaluated, because the evaluation is what does the damage: an
+	# object compared against anything else is a hard error in GDScript, raised inside the game,
+	# which holds it at a debugger break. Both types are named because the caller cannot see either
+	# from where they are standing.
+	if not Values.comparable(current, wanted):
+		return {
+			"type": "error",
+			"message":
+			(
+				(
+					"%s.%s holds %s and the value to wait for is %s. Those cannot be compared, and"
+					+ " waiting on it would stop the game rather than answer about it."
+				)
+				% [node_path, property, type_string(typeof(current)), type_string(typeof(wanted))]
+			)
+		}
+
 	var started: int = Time.get_ticks_msec()
-	while current != wanted and Time.get_ticks_msec() - started < timeout_ms:
+	# The type is checked every time round, not only at the top: a property that holds an object a
+	# frame later is the same error arriving late.
+	while (
+		Values.comparable(current, wanted)
+		and current != wanted
+		and Time.get_ticks_msec() - started < timeout_ms
+	):
 		await _host.get_tree().process_frame
 		if not is_instance_valid(node):
 			return {"type": "error", "message": "%s was freed while waiting" % node_path}
@@ -119,7 +142,7 @@ func wait_until(params: Dictionary) -> Dictionary:
 		"type": "condition",
 		"path": node_path,
 		"property": property,
-		"met": current == wanted,
+		"met": Values.comparable(current, wanted) and current == wanted,
 		"value": _values.serialize(current),
 		"elapsed_ms": Time.get_ticks_msec() - started,
 	}
