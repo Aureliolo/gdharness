@@ -2793,6 +2793,13 @@ class GodotServer {
     const log = new GameLog();
     try {
       await this.dap().connect();
+      // Whatever the adapter is still holding belongs to the play before this one. Its buffer
+      // survives the run that filled it, and the first drain after a new play took the lot: a
+      // finished bench's ten-row table arrived at indices 0 to 29 of the new run's answer, under
+      // the new run's startedAt, with the engine's banner in the middle as the only boundary. A
+      // scene that cannot print a bench table was reported as having printed one. Dropped before
+      // the editor is asked to play, so nothing of the new run's own is thrown away with it.
+      this.dapClient?.getOutput(true);
     } catch (error) {
       return this.createErrorResponse(
         `The editor is connected but its debug adapter is not: ${errorMessage(error)}`,
