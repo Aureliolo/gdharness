@@ -41,6 +41,7 @@ import {
   cachedClasses,
   cacheWrittenAt,
   contradictedDiagnostics,
+  missingMemberIn,
   staleClassNames,
   type UnseenClass,
   unseenByEditor,
@@ -2278,6 +2279,15 @@ class GodotServer {
    * The engine is not asked and nothing is re-analysed, so this costs a file read per named type.
    */
   private contradictedByTheFile(diagnostics: unknown[], args: OperationParams): Contradicted[] {
+    const messages = diagnostics
+      .map((entry) => asParams(entry)['message'])
+      .filter((message): message is string => typeof message === 'string');
+    // Before the project is resolved and the cache is read, because a clean script is the ordinary
+    // answer and this tool is called in a loop over a whole directory. Nothing below can find
+    // anything when no message is of the one shape that can be checked.
+    if (!messages.some((message) => missingMemberIn(message) !== null)) {
+      return [];
+    }
     const project = this.project(args);
     if (!project.ok) {
       return [];
@@ -2286,9 +2296,6 @@ class GodotServer {
     if (classes === null) {
       return [];
     }
-    const messages = diagnostics
-      .map((entry) => asParams(entry)['message'])
-      .filter((message): message is string => typeof message === 'string');
     return contradictedDiagnostics(messages, classes, (resourcePath) => {
       const contained = resolveWithinProject(project.value.path, resourcePath);
       if (!contained.ok || !existsSync(contained.absolutePath)) {
