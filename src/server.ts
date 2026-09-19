@@ -2335,7 +2335,7 @@ class GodotServer {
     const stale = unloaded.filter((type) => type.inTheClassCache);
     if (stale.length > 0) {
       notes.push(
-        `${stale.map((type) => type.type).join(', ')} ${stale.length === 1 ? 'is' : 'are'} in the class cache and still unresolved here, which is the editor's loaded list being behind rather than anything on disk. A game launched now reads the cache and resolves ${stale.length === 1 ? 'it' : 'them'}, so the run and the diagnostics disagree. editor_launch restart clears it.`,
+        `${stale.map((type) => type.type).join(', ')} ${stale.length === 1 ? 'is' : 'are'} in the class cache and still unresolved here, which is the editor's loaded list being behind rather than anything on disk. A game launched now reads the cache and resolves ${stale.length === 1 ? 'it' : 'them'}, so the run and the diagnostics disagree. editor_rescan clears it, measured against a real editor with waiting the same length ruled out; editor_launch restart also does, and costs more.`,
       );
     }
 
@@ -3943,7 +3943,7 @@ class GodotServer {
       classesUnchecked: checked.unchecked,
       note:
         checked.unseen.length > 0
-          ? 'The cache on disk is right now, and the editor holding this project is still not resolving these: rewriting the file does not reach the list it already loaded. Change the declaring script and editor_rescan, or restart the editor with editor_launch restart.'
+          ? 'The cache on disk is right now, and the editor holding this project is still not resolving these: rewriting the file does not reach the list it already loaded. editor_rescan does, on its own and with no change to the declaring script; editor_launch restart also does, and costs more.'
           : undefined,
     });
   }
