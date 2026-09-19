@@ -1130,7 +1130,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['until'],
         description:
-          'until: wait for these words to appear anywhere under nodePath instead of for a property, which is how a panel that rebuilds its labels is waited on at all: the labels are named afresh each redraw and the panel is what stays put. Case-insensitive, part of a line, hidden nodes included.',
+          'until: wait for these words to appear anywhere under nodePath instead of for a property, which is how a panel that rebuilds its labels is waited on at all: the labels are named afresh each redraw and the panel is what stays put. Case-insensitive, part of a line, hidden nodes included. Instead of, not as well as: a call carrying this and a property is refused, because they ask about different things and answering one of them silently is how a caller watches a screen believing they are watching a property.',
       },
       timeoutMs: {
         type: 'number',

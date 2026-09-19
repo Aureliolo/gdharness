@@ -97,6 +97,23 @@ func wait_until(params: Dictionary) -> Dictionary:
 	var standing: Dictionary = Values.node_at(_host.get_tree().root, node_path)
 	if standing.has("message"):
 		return standing
+	# Two different questions, not two ways of asking one: says looks for words anywhere under the
+	# path, a property compares one value on one node. Taking says and dropping the other left a
+	# caller watching a screen while believing they were watching a property, and the answer says
+	# which of them it is about only if you already know that says wins.
+	if not says.is_empty() and (not property.is_empty() or params.has("value")):
+		var other: String = property if not property.is_empty() else "value"
+		return {
+			"type": "error",
+			"message":
+			(
+				(
+					'A wait takes says or a property, not both: this one has says "%s" and %s as well.'
+					+ " Ask for one of them."
+				)
+				% [says, other]
+			)
+		}
 	if not says.is_empty():
 		return await _wait_until_said(node_path, says, timeout_ms)
 	if property.is_empty():
