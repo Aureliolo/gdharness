@@ -24,6 +24,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -2351,6 +2352,30 @@ async function testAPlayedRunsConsoleArrivesOnItsOwn({ call, project }: Editor):
     0,
     `and the run before it should not be:\n${lines.join('\n')}`,
   );
+
+  // The transcript has to grow while nobody is asking, because the use it exists for is arming a
+  // watch on the path. Written on drain it advanced only when polled: measured downstream, a live
+  // run's file sat at 411 bytes through a minute and moved the instant an editor_output was made,
+  // which makes the watcher do the thing the watch replaces and leaves a stalled tail looking
+  // exactly like a run that has died. So the file is read twice here with no call in between.
+  const running = await call('editor_output', {});
+  const path = text(get(running, 'transcript'));
+  assert.ok(path.length > 0, `an editor-played run should name its transcript: ${text(running)}`);
+  const atFirst = statSync(path).size;
+  await call('runtime_invoke', {
+    projectPath: project,
+    op: 'call',
+    nodePath: '/root/Main',
+    method: 'announce',
+  });
+  const grown = Date.now() + 15_000;
+  let after = atFirst;
+  while (after === atFirst && Date.now() < grown) {
+    await delay(250);
+    after = statSync(path).size;
+  }
+  assert.ok(after > atFirst, `the file should grow with the run, not with the polling: ${atFirst}`);
+  assert.match(readFileSync(path, 'utf8'), /the first run said its piece/, 'and hold what was printed');
 
   // The reading that separates a bench doing work from a bench parked, asked of a run whose
   // process this server does not hold. An absent field reads as "nothing used" as readily as "the

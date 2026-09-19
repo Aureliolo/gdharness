@@ -91,6 +91,8 @@ export class GodotDAPClient {
   private pendingRequests: Map<number, PendingRequest>;
   private reader = new FrameReader();
   private outputBuffer: string[] = [];
+  /** Called with each console line as the adapter delivers it, for a reader that cannot poll. */
+  private onOutput: ((line: string) => void) | null = null;
   private maxOutputLines = 1000;
   private initialized = false;
   private attached = false;
@@ -312,6 +314,20 @@ export class GodotDAPClient {
       if (outputText.length > 0) {
         const lines = outputText.split(/\r?\n/).filter((line: string) => line.length > 0);
         this.outputBuffer.push(...lines);
+        // Handed on as it arrives, as well as buffered for whoever polls. The buffer is pulled,
+        // so anything built on it only advances when somebody asks, and a file written that way
+        // cannot be tailed: measured downstream, an editor-played run's transcript sat at 411
+        // bytes for a minute of a live run and grew the instant a poll was made. A watch on a file
+        // that only moves when polled makes the watcher do the thing the watch replaces.
+        if (this.onOutput !== null) {
+          for (const line of lines) {
+            try {
+              this.onOutput(line);
+            } catch {
+              // A sink that throws is the caller's problem and must not cost the buffer its line.
+            }
+          }
+        }
       }
 
       if (this.outputBuffer.length > this.maxOutputLines) {
@@ -379,6 +395,17 @@ export class GodotDAPClient {
     await this.sendRequest('attach', {});
     await this.sendRequest('configurationDone', {});
     this.attached = true;
+  }
+
+  /**
+   * Where each console line goes as it arrives, on top of the buffer.
+   *
+   * Set once and left, because it reads the caller's own current state: a second play or a run
+   * picked up after a reconnect is a different destination, and a sink that has to be re-pointed
+   * is one that will be left pointing at the run before.
+   */
+  setOutputSink(sink: (line: string) => void): void {
+    this.onOutput = sink;
   }
 
   getOutput(clear = false): string[] {
