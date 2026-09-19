@@ -864,6 +864,26 @@ async function testSceneAnimation({ call, project }: Editor): Promise<void> {
   const withMethod = fileText(project, 'fixture.tscn');
   assert.match(withMethod, /tracks\/1\/type = "method"/, 'the track type should be in the scene');
   assert.match(withMethod, /"method": &"queue_redraw"/, 'with the method it calls');
+
+  // An argument of a type this tool did not use to know. It handled three tags of its own and
+  // stored everything else as the dictionary it arrived as, so a Quaternion was saved as one.
+  await call('scene_animation', {
+    ...scene,
+    op: 'add_track',
+    playerNodePath: 'Anim',
+    animationName: 'fade',
+    track: {
+      type: 'method',
+      nodePath: '.',
+      method: 'set_quaternion',
+      keyframes: [{ time: 0, args: [{ _type: 'Quaternion', x: 0, y: 0, z: 0, w: 1 }] }],
+    },
+  });
+  assert.match(
+    fileText(project, 'fixture.tscn'),
+    /Quaternion\(0, 0, 0, 1\)/,
+    'a tagged value should reach the scene as the value, not as its dictionary',
+  );
 }
 
 /** Resources written to disk: a .tres, a shader, and a theme edited in place. */
@@ -872,6 +892,51 @@ async function testResources({ call, refusal, project }: Editor): Promise<void> 
   await call('resource_edit', { ...label, op: 'create', resourceType: 'LabelSettings' });
   await call('resource_edit', { ...label, op: 'modify', properties: { font_size: 24 } });
   assert.match(fileText(project, 'label.tres'), /font_size = 24/, 'the property should be in the file');
+
+  // The same guard the scene write has, because this writes to a file just as readily: a word
+  // where a number goes was stored as 0 and saved, and a property name nothing has was ignored
+  // and reported as written.
+  assert.match(
+    await refusal('resource_edit', { ...label, op: 'modify', properties: { font_size: 'big' } }),
+    /font_size is int and the value given is String, which cannot become one/,
+    'a value the property cannot hold should be refused',
+  );
+  assert.match(
+    await refusal('resource_edit', { ...label, op: 'modify', properties: { nonesuch: 1 } }),
+    /has no property nonesuch/,
+    'and a property the resource has not should be refused rather than ignored',
+  );
+  assert.match(
+    fileText(project, 'label.tres'),
+    /font_size = 24/,
+    'and the file should still say what it said before either of them',
+  );
+
+  // And what it now reads that it could not: a packed array written by hand as pairs, which the
+  // seven tags this tool knew did not cover at all.
+  const hull = { projectPath: project, resourcePath: 'res://hull.tres' };
+  await call('resource_edit', {
+    ...hull,
+    op: 'create',
+    resourceType: 'ConvexPolygonShape2D',
+    properties: {
+      points: [
+        [0, 0],
+        [8, 0],
+        [8, 8],
+      ],
+    },
+  });
+  assert.match(
+    fileText(project, 'hull.tres'),
+    /points = PackedVector2Array\(0, 0, 8, 0, 8, 8\)/,
+    'the pairs should be saved as the points they name',
+  );
+  assert.match(
+    await refusal('resource_edit', { ...hull, op: 'modify', properties: { points: [[0, 0], 'corner'] } }),
+    /item 1 of the list given is String, not Vector2/,
+    'and an element that is not a point should be refused, naming which one',
+  );
 
   await call('resource_edit', {
     projectPath: project,

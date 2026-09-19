@@ -103,6 +103,31 @@ for (const requiredFile of [
   assert.ok(packedFiles.has(requiredFile), `release archive should include ${requiredFile}`);
 }
 
+// Every addon script, read off the source tree rather than listed here. An addon is installed as
+// a directory and its scripts preload each other by name, so one left out of the archive is a
+// parse error in the editor of whoever installed it, and a list written here would be the same
+// list going stale: it is the file added beside the others that goes missing, and that is exactly
+// the one no hand-written list has in it.
+const addonScripts: string[] = [];
+const walkAddons = async (directory: string): Promise<void> => {
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const here = path.join(directory, entry.name);
+    if (entry.isDirectory()) {
+      await walkAddons(here);
+    } else if (entry.name.endsWith('.gd')) {
+      addonScripts.push(path.relative(path.join(root, 'src', 'godot'), here).replaceAll('\\', '/'));
+    }
+  }
+};
+await walkAddons(path.join(root, 'src', 'godot', 'addons'));
+assert.ok(addonScripts.length >= 14, `only ${addonScripts.length} addon scripts were found to check`);
+for (const script of addonScripts) {
+  assert.ok(
+    packedFiles.has(`package/build/godot/${script}`),
+    `release archive should include the addon script ${script}`,
+  );
+}
+
 // A module added to the source directory and left out of the list above would otherwise be
 // packed and never checked, which is the half of this that a list alone cannot hold.
 const packedOperations = archiveEntries
