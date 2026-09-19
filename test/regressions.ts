@@ -3548,6 +3548,110 @@ function testOnlyOurOwnAutoloadIsRewritten(): void {
 }
 
 /**
+ * The run the editor is playing is the run that gets answered for, not the last one on disk.
+ *
+ * A reconnect leaves a server with no memory of anything. The note on disk is written by runs this
+ * server spawns, so an editor-played run leaves none, and what was picked up instead was the last
+ * spawned run of the same project. Downstream, a session started one bench through the editor, the
+ * server was replaced, and `editor_output` handed back forty rows of a different bench: its scene,
+ * its pid, its transcript, `through` flipped from `editor` to `gdharness`, and every number in it
+ * well-formed. Their run was alive throughout, thirty workers at a core each. A bench's output is a
+ * table somebody attributes to the change they just made, so another run's rows read as your own
+ * are a confident wrong measurement with nothing in the payload to argue with.
+ *
+ * So the editor is asked before the note is read: it is on the bridge and it is holding the run.
+ * What is asserted is the whole of the fault, that no field of the other run appears, and beside it
+ * that the answer is about the right one and says its log does not start at the beginning.
+ */
+async function testTheEditorsRunIsTheOneAnsweredFor(): Promise<void> {
+  const port = await reservePort();
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-played-runs-'));
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-played-'));
+  const server = new ServerProcess({
+    env: { GDHARNESS_BRIDGE_PORT: String(port), GDHARNESS_RUNTIME_DIR: runtimeDir },
+  });
+  let editor: WebSocket | null = null;
+  try {
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    // The note the other run left: same project, so it passes every test of whose it is, which is
+    // what made it the one adopted. Its own pid and its own transcript, with output in it.
+    const transcript = join(runtimeDir, 'other-run.log');
+    writeFileSync(transcript, 'ostinato weld bench\nrow 1 of the wrong table\n');
+    // Written where the server under test will look for it, which is the whole point of the case:
+    // a note somewhere else is a note nothing adopts, and the disarm then shows "no game running"
+    // rather than the other run's table.
+    const had = process.env['GDHARNESS_RUNTIME_DIR'];
+    process.env['GDHARNESS_RUNTIME_DIR'] = runtimeDir;
+    try {
+      writeRunRecord({
+        pid: process.pid,
+        transcript,
+        startedAt: Date.now() - 60_000,
+        projectPath: project,
+        arguments: ['--headless'],
+        command: process.execPath,
+      });
+    } finally {
+      if (had === undefined) {
+        delete process.env['GDHARNESS_RUNTIME_DIR'];
+      } else {
+        process.env['GDHARNESS_RUNTIME_DIR'] = had;
+      }
+    }
+
+    await server.initialize('regression-test');
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+    editor = socket;
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', () => {
+        resolve();
+      });
+      socket.once('error', reject);
+    });
+
+    socket.on('message', (raw: Buffer) => {
+      const message: unknown = JSON.parse(String(raw));
+      if (!isRecord(message) || message['type'] !== 'tool_invoke') {
+        return;
+      }
+      const tool = String(message['tool']);
+      const result =
+        tool === 'playing_status'
+          ? { ok: true, playing: true, scenePath: 'res://tests/bench_shortlist.tscn', debugPort: 6007 }
+          : { ok: true };
+      socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result }));
+    });
+    socket.send(
+      JSON.stringify({ type: 'godot_ready', project_path: project, addon_version: SERVER_VERSION }),
+    );
+
+    let knows = false;
+    for (let waited = 0; waited < 10_000 && !knows; waited += 100) {
+      await delay(100);
+      const status = await server.request('tools/call', { name: 'editor_status', arguments: {} });
+      knows = text(get(parseTextContent(status), 'editor', 'projectPath')) === project;
+    }
+    assert.ok(knows, 'the fixture editor should have reached the server, or this proves nothing');
+
+    const output = await server.request('tools/call', { name: 'editor_output', arguments: {} });
+    const said = textOf(output) ?? JSON.stringify(output);
+    const answer = parseTextContent(output);
+    assert.equal(get(answer, 'through'), 'editor', `the run answered for is the editor's: ${said}`);
+    assert.equal(get(answer, 'pid'), null, `with no pid from the other run: ${said}`);
+    assert.equal(get(answer, 'transcript'), undefined, `and no transcript from it: ${said}`);
+    assert.doesNotMatch(said, /wrong table/, `nor a line of its output: ${said}`);
+    // And the run it is about is described honestly: picked up rather than started here, so the
+    // log below it begins where this server did.
+    assert.match(text(get(answer, 'note')), /already playing this when this server reached it/, said);
+  } finally {
+    editor?.terminate();
+    await server.stop();
+    rmSync(project, { recursive: true, force: true });
+    rmSync(runtimeDir, { recursive: true, force: true });
+  }
+}
+
+/**
  * What a run ended with outlives the server that watched it end.
  *
  * A run is spawned detached so a reconnect cannot take it, and the next server reads the note on
@@ -6032,6 +6136,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAScanThatHasNotStartedIsNotFinished,
   testARepairThatCouldNotRunIsNotReported,
   testAShortenedCacheIsRebuilt,
+  testTheEditorsRunIsTheOneAnsweredFor,
   testProjectDefaultsToTheWorkingDirectory,
   testAnAutoloadGitWillNotCarry,
   testVersionOrdering,
