@@ -70,7 +70,7 @@ import { isSameDirectory, realPathOr, resolveWithinProject } from './paths.js';
 import { freePort, portFromEnvOrNull } from './ports.js';
 import { cpuSecondsOf } from './process-time.js';
 import { projectStructure, searchProject } from './project-scan.js';
-import { parseProjectGodot, setupResourceHandlers } from './resources.js';
+import { parseProjectGodot, settingKeys, setupResourceHandlers } from './resources.js';
 import {
   clearRunRecord,
   couldStillBeTheRecordedRun,
@@ -2374,6 +2374,18 @@ class GodotServer {
    * like the old version. The answer is the version that reconnected rather than the one that
    * was asked for: what matters is which addon the editor is holding now.
    */
+  /** What project.godot names right now, or nothing when there is no project or no file. */
+  private settingKeysOf(projectPath: string | undefined): Set<string> {
+    if (projectPath === undefined) {
+      return new Set();
+    }
+    try {
+      return settingKeys(readFileSync(join(projectPath, 'project.godot'), 'utf8'));
+    } catch {
+      return new Set();
+    }
+  }
+
   private async handleRestartEditor(): Promise<ToolResponse> {
     const before = this.godotBridge.getStatus();
     if (!before.connected) {
@@ -2383,9 +2395,13 @@ class GodotServer {
       ]);
     }
 
-    // An editor a server opened is started again rather than restarting itself, because only the
-    // side that wrote its arguments can write them a second time. One opened by hand is on the
-    // ports its own settings name and comes back on them, so Godot's restart is right for it.
+    // What project.godot says before the editor is asked to go, because saving it on the way out
+    // is not a copy: Godot writes only what differs from its own defaults, so a key named on
+    // purpose at its default value is redundant to the editor and is dropped. A project that pins
+    // one there is doing it to keep "off by decision" and "absent" apart, and losing it silently
+    // hands the choice back to the engine. Measured downstream: one restart took
+    // `gdscript/warnings/return_value_discarded=0` out and changed nothing else.
+    const settingsBefore = this.settingKeysOf(before.projectPath);
     const mine = before.openedByAServer === true && before.projectPath !== undefined;
     const asked = mine
       ? await this.startItAgain(before.projectPath ?? '', before.editorPid)
@@ -2416,6 +2432,8 @@ class GodotServer {
     }
 
     const now = this.godotBridge.getStatus();
+    const after = this.settingKeysOf(before.projectPath);
+    const dropped = [...settingsBefore].filter((key) => !after.has(key));
     return this.jsonTextResponse({
       restarted: true,
       editorPid: now.editorPid,
@@ -2423,6 +2441,11 @@ class GodotServer {
       serverVersion: SERVER_VERSION,
       addonIsStale: now.addonVersion !== SERVER_VERSION,
       staleNote: addonMismatch(now.addonVersion, SERVER_VERSION),
+      settingsDropped: dropped.length > 0 ? dropped : undefined,
+      settingsNote:
+        dropped.length > 0
+          ? 'The editor saved project.godot on its way out and these keys are no longer in it. Godot writes only what differs from its own defaults, so a key named deliberately at its default value is redundant to the editor and is dropped on save. If any of them were pinned on purpose, to keep "set to this on purpose" and "not set" apart, put them back: nothing else will say they have gone until something depends on one.'
+          : undefined,
       tookMs: Date.now() - began,
     });
   }

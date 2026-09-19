@@ -41,7 +41,7 @@ import { isWithinRoot, resolveWithinProject } from '../src/paths.js';
 import { freePort } from '../src/ports.js';
 import { secondsFromClock } from '../src/process-time.js';
 import { projectStructure, searchProject } from '../src/project-scan.js';
-import { parseProjectGodot } from '../src/resources.js';
+import { parseProjectGodot, settingKeys } from '../src/resources.js';
 import {
   couldStillBeTheRecordedRun,
   judgeRun,
@@ -3549,6 +3549,56 @@ function testOnlyOurOwnAutoloadIsRewritten(): void {
 }
 
 /**
+ * A setting the editor dropped on its way out is one the answer names.
+ *
+ * Godot writes only what differs from its own defaults, so a key a project names deliberately at
+ * its default value is redundant to the editor and is stripped the next time it saves. A project
+ * names one there to keep "off by decision" and "not set" apart, and losing it hands the choice
+ * back to the engine. Downstream, one `editor_launch restart` took
+ * `gdscript/warnings/return_value_discarded=0` out of project.godot and changed nothing else; their
+ * own gate caught it, which is not something this tool can rely on.
+ *
+ * The comparison rather than the restart, because an editor with no window refuses to restart at
+ * all: the engine hands back none of the arguments it consumed, so the tier's headless editor is
+ * the one case that cannot drive this end to end. What can go wrong here is the reading of the
+ * file, so that is what is asked.
+ */
+function testASettingTheEditorDroppedIsNamed(): void {
+  const named = [
+    'config_version=5',
+    '',
+    '[debug]',
+    '',
+    'gdscript/warnings/return_value_discarded=0',
+    'gdscript/warnings/unsafe_call_argument=2',
+  ].join('\n');
+  const saved = ['config_version=5', '', '[debug]', '', 'gdscript/warnings/unsafe_call_argument=2'].join(
+    '\n',
+  );
+
+  const before = settingKeys(named);
+  const after = settingKeys(saved);
+  assert.deepEqual(
+    [...before].filter((key) => !after.has(key)),
+    ['debug/gdscript/warnings/return_value_discarded'],
+    'the key that went is named, with the section it was in',
+  );
+  assert.ok(before.has('root/config_version'), 'a key outside any section is read as one too');
+  assert.deepEqual(
+    [...after].filter((key) => !before.has(key)),
+    [],
+    'and a save that only drops things adds nothing',
+  );
+  // The same file twice is the ordinary case and must name nothing, or every restart would report
+  // a loss and the field would stop being read.
+  assert.deepEqual(
+    [...before].filter((key) => !settingKeys(named).has(key)),
+    [],
+    'a file that did not change reports no loss',
+  );
+}
+
+/**
  * The run the editor is playing is the run that gets answered for, not the last one on disk.
  *
  * A reconnect leaves a server with no memory of anything. The note on disk is written by runs this
@@ -6171,6 +6221,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARepairThatCouldNotRunIsNotReported,
   testAShortenedCacheIsRebuilt,
   testTheEditorsRunIsTheOneAnsweredFor,
+  testASettingTheEditorDroppedIsNamed,
   testProjectDefaultsToTheWorkingDirectory,
   testAnAutoloadGitWillNotCarry,
   testVersionOrdering,

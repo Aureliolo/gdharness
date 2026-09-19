@@ -167,6 +167,25 @@ function isValueComplete(value: string): boolean {
 
 type IniValue = string | number | boolean | null;
 
+/**
+ * Every `section/key` a project.godot names, for comparing one reading of it against another.
+ *
+ * Keys and not values, because what is being looked for is a line that has gone. Godot writes only
+ * what differs from its own defaults, so a key a project names deliberately *at* its default value
+ * is redundant to the editor and is dropped the next time the editor saves. A project names one
+ * there to keep "set to this on purpose" and "not set" apart, and the engine then picks a level
+ * nobody chose, with nothing anywhere saying the line went.
+ */
+export function settingKeys(content: string): Set<string> {
+  const named = new Set<string>();
+  for (const [section, entries] of Object.entries(parseProjectGodot(content))) {
+    for (const key of Object.keys(entries)) {
+      named.add(`${section}/${key}`);
+    }
+  }
+  return named;
+}
+
 export function parseProjectGodot(content: string): Record<string, Record<string, IniValue>> {
   const result: Record<string, Record<string, IniValue>> = emptyRecord();
   // Held rather than looked up again per key, so the section a value lands in is the one the
