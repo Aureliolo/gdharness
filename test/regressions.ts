@@ -19,10 +19,19 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 import { WebSocket } from 'ws';
+import { serviceDidNotAnswer } from '../scripts/audit-production.js';
 import { pullRequestNumbers, shipsToUsers } from '../scripts/release-notes.js';
 import { sharedCopies } from '../scripts/sync-shared-gd.js';
 import { announcementPath, BRIDGE_ANNOUNCE_PROTOCOL, readAnnouncement } from '../src/bridge-announce.js';
-import { cachedClasses, cacheWrittenAt, staleClassNames, unseenByEditor } from '../src/class-cache.js';
+import {
+  cachedClasses,
+  cacheWrittenAt,
+  contradictedDiagnostics,
+  declaresMember,
+  missingMemberIn,
+  staleClassNames,
+  unseenByEditor,
+} from '../src/class-cache.js';
 import { GodotDAPClient } from '../src/dap_client.js';
 import { dictionary, emptyRecord } from '../src/dictionary.js';
 import { forAnswer, GameLog } from '../src/game-log.js';
@@ -3683,6 +3692,173 @@ async function testARestartSaysWhatTheEditorDropped(): Promise<void> {
 }
 
 /**
+ * A diagnostic the file contradicts is read out of the message and checked, rather than passed on.
+ *
+ * Adding a method to an existing `class_name` leaves the language server handing dependents the
+ * type it analysed at startup, so every caller is told the method is not present on the inferred
+ * type while `script_info symbols` lists it from that same server at the same moment. Three files
+ * reported it, against a method that compiles, and the answer said nothing to separate it from a
+ * real finding. What makes that expensive is not the wrong answer: it is that getting past it means
+ * deciding the tool is wrong, and that decision is cheaper the second time.
+ *
+ * Both halves are asserted because the reporting is only worth having if it is right in both
+ * directions. Naming a genuine finding as contradicted is worse than silence, so the method that is
+ * absent has to come back absent from the same reading that finds the one that is present.
+ */
+function testADiagnosticTheFileContradictsIsNamed(): void {
+  const present = missingMemberIn(
+    'The method "is_finished()" is not present on the inferred type "Game" (but may be present on a subtype).',
+  );
+  assert.deepEqual(
+    present,
+    { kind: 'method', member: 'is_finished', type: 'Game' },
+    'the member and the type are what the check needs, and they are only in the text',
+  );
+  assert.deepEqual(missingMemberIn('The property "score" is not present on the inferred type "Game".'), {
+    kind: 'property',
+    member: 'score',
+    type: 'Game',
+  });
+  // Every other diagnostic goes through untouched, including the one that names a method and is
+  // about something else entirely.
+  assert.equal(missingMemberIn('The identifier "foo" is not declared in the current scope.'), null);
+  assert.equal(missingMemberIn('Function "is_finished()" has no return value.'), null);
+
+  const game = [
+    'class_name Game',
+    'extends Node',
+    '',
+    'const ROUNDS := 3',
+    'var score := 0',
+    '',
+    '',
+    'static func make() -> Game:',
+    '\treturn Game.new()',
+    '',
+    '',
+    'func is_finished() -> bool:',
+    '\treturn score >= ROUNDS',
+    '',
+    '',
+    'func _unfinished_helper() -> void:',
+    '\tpass',
+  ].join('\n');
+
+  assert.equal(declaresMember(game, present), true, 'the method is there, so the diagnostic is wrong');
+  assert.equal(declaresMember(game, { kind: 'method', member: 'make', type: 'Game' }), true, 'static too');
+  assert.equal(declaresMember(game, { kind: 'property', member: 'score', type: 'Game' }), true, 'var too');
+  assert.equal(declaresMember(game, { kind: 'property', member: 'ROUNDS', type: 'Game' }), true, 'const too');
+
+  // The direction that must not be got wrong: a member the file does not declare stays unclaimed,
+  // because calling a real finding stale is worse than saying nothing about it.
+  assert.equal(
+    declaresMember(game, { kind: 'method', member: 'is_started', type: 'Game' }),
+    false,
+    'a method that is genuinely absent is not reported as contradicted by the file',
+  );
+  // And a name that merely occurs in the file is not a declaration of it. `is_finished` appears in
+  // the call inside the body above; `ROUNDS` appears there too.
+  assert.equal(
+    declaresMember('func other() -> void:\n\tis_finished()\n', present),
+    false,
+    'a call to the method in a body is not a declaration of it',
+  );
+  assert.equal(
+    declaresMember(game, { kind: 'method', member: 'new', type: 'Game' }),
+    false,
+    'Game.new() in a body is a call, not a declaration',
+  );
+
+  // The whole decision, which is otherwise only reachable through a running editor: the cache
+  // lookup, the one read per script however many diagnostics name it, and the three ways a message
+  // is passed over rather than claimed.
+  const classes = new Map([
+    ['Game', 'res://scripts/game.gd'],
+    ['Unreadable', 'res://scripts/gone.gd'],
+  ]);
+  const asked: string[] = [];
+  const sourceOf = (path: string): string | null => {
+    asked.push(path);
+    return path === 'res://scripts/game.gd' ? game : null;
+  };
+  const contradicted = contradictedDiagnostics(
+    [
+      'The method "is_finished()" is not present on the inferred type "Game" (but may be present on a subtype).',
+      'The property "score" is not present on the inferred type "Game".',
+      'The method "is_started()" is not present on the inferred type "Game".',
+      'The method "anything()" is not present on the inferred type "Unreadable".',
+      'The method "whatever()" is not present on the inferred type "NotInTheCache".',
+      'The identifier "foo" is not declared in the current scope.',
+    ],
+    classes,
+    sourceOf,
+  );
+
+  assert.deepEqual(
+    contradicted,
+    [
+      { kind: 'method', member: 'is_finished', type: 'Game', declaredIn: 'res://scripts/game.gd' },
+      { kind: 'property', member: 'score', type: 'Game', declaredIn: 'res://scripts/game.gd' },
+    ],
+    'only the two the file disproves, each naming the script that disproves it',
+  );
+  assert.deepEqual(
+    asked,
+    ['res://scripts/game.gd', 'res://scripts/gone.gd'],
+    'each script is read once however many diagnostics name it, and one outside the cache is not looked for',
+  );
+}
+
+/**
+ * An audit that could not reach the advisories is not an audit that passed.
+ *
+ * `bun audit` exits 1 for two unrelated things: a dependency with a known vulnerability, and
+ * registry.npmjs.org not answering. The workflows ran it bare, so a 503 read as a failed audit and
+ * stopped a build, on the same afternoon a different third-party outage stopped a release. Retrying
+ * the outage is the fix, and it is the retry that has to be got right rather than the command:
+ * classify a real finding as an outage and the build retries three times and then fails, which is
+ * merely slow, but classify an outage as clean and a release ships having cleared nothing.
+ *
+ * So both directions are asserted with the real output of each, and the finding is the one that
+ * matters. Matching on the transport rather than on "printed no advisories" is what keeps them
+ * apart: a clean audit and an unreachable one both name no advisory.
+ */
+function testAnAuditThatCouldNotAskIsNotAnAuditThatPassed(): void {
+  assert.equal(
+    serviceDidNotAnswer('error: POST https://registry.npmjs.org/-/npm/v1/security/advisories/bulk - 503'),
+    true,
+    'the 503 that stopped a build is an outage',
+  );
+  for (const transport of [
+    'error: POST https://registry.npmjs.org/-/npm/v1/security/advisories/bulk - 429',
+    'error: connect ECONNREFUSED 104.16.0.35:443',
+    'error: fetch failed',
+    'error: socket hang up',
+  ]) {
+    assert.equal(serviceDidNotAnswer(transport), true, `${transport} is the service, not the tree`);
+  }
+
+  // A real finding, which must never be retried and never be taken for an outage. The version is
+  // the trap, and it caught this classifier rather than being invented for the fixture: a package
+  // at 1.502.0 puts a bare 502 between two word boundaries, so a status code matched anywhere in
+  // the output reads a genuine advisory as an outage and waits it out instead of failing.
+  const finding = [
+    'bun audit v1.4.2 (744846f84)',
+    '',
+    'some-package  1.502.0',
+    'Severity: high - Prototype Pollution in some-package',
+    'https://github.com/advisories/GHSA-p6mc-m468-83gg',
+    '',
+    '1 vulnerability (1 high)',
+  ].join('\n');
+  assert.equal(
+    serviceDidNotAnswer(finding),
+    false,
+    'a reported vulnerability is the audit working, and retrying it would be waiting out a real finding',
+  );
+}
+
+/**
  * Refreshing UIDs makes the missing sidecar and writes no scene.
  *
  * The op used to load every scene and resave it. Outside the editor that round trip rebuilds the
@@ -6522,6 +6698,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheEditorsRunIsTheOneAnsweredFor,
   testASettingTheEditorDroppedIsNamed,
   testACleanupThatCannotFinishStillFinishes,
+  testADiagnosticTheFileContradictsIsNamed,
+  testAnAuditThatCouldNotAskIsNotAnAuditThatPassed,
   testRefreshingUidsMakesTheSidecarAndWritesNoScene,
   testWhoIsHoldingAPortIsAskable,
   testARestartSaysWhatTheEditorDropped,
