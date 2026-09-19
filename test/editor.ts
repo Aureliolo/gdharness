@@ -382,6 +382,12 @@ function createProject(): string {
  * Nothing outside the fixture's own temporary directory can match.
  */
 function endEnginesUnder(project: string): void {
+  // Every process, matched on its command line alone. Filtering by `Name='godot.exe'` first meant
+  // this found nothing at all wherever the engine is not called that, which is every machine using
+  // the pinned build: it is `Godot_v4.7.2-stable_win64.exe` on Windows. Nineteen fixture projects
+  // and eleven engines were left running on this machine before anybody looked. The path is the
+  // discriminator anyway, and it is a temporary directory this fixture made, so nothing else can
+  // match it; a name filter can only subtract from that.
   const listing =
     process.platform === 'win32'
       ? spawnSync(
@@ -389,11 +395,21 @@ function endEnginesUnder(project: string): void {
           [
             '-NoProfile',
             '-Command',
-            'Get-CimInstance Win32_Process -Filter "Name=\'godot.exe\'" | ForEach-Object { "$($_.ProcessId) $($_.CommandLine)" }',
+            'Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId) $($_.CommandLine)" }',
           ],
           { encoding: 'utf8', timeout: 30_000 },
         )
       : spawnSync('ps', ['-eo', 'pid=,args='], { encoding: 'utf8', timeout: 30_000 });
+
+  // A listing that did not happen is the failure this had for months, and it looks exactly like a
+  // machine with nothing to clean up. Said out loud, because the cost of it lands on the next run
+  // and on whoever is using the machine, not on this one.
+  if (listing.status !== 0 || listing.stdout.trim() === '') {
+    console.warn(
+      `could not list processes to clean up engines under ${project}: ${listing.status ?? listing.error?.message ?? 'no output'}`,
+    );
+    return;
+  }
 
   const wanted = project.replaceAll('\\', '/').toLowerCase();
   for (const line of listing.stdout.split('\n')) {
