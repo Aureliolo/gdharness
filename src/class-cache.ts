@@ -162,6 +162,28 @@ export function unloadedTypes(
   return found;
 }
 
+/**
+ * The global classes a script names, which are the types its own analysed copy is built from.
+ *
+ * What this is for: the editor's held copy of a type is refreshed when one of the things it depends
+ * on changes, and not when it changes itself. So a caller looking at a stale type needs to know what
+ * that type depends on, and the answer is in the file rather than anywhere the engine will say.
+ *
+ * Read by name against the class list rather than by parsing GDScript, because a name that is a
+ * declared global class is the only kind worth reporting and everything else in the file is noise.
+ * A word inside a string or a comment can match, which costs a caller one wasted touch on a file
+ * that was already fine; missing one costs them a restart.
+ */
+export function classesNamedIn(source: string, known: ReadonlyMap<string, string>): string[] {
+  const named = new Set<string>();
+  for (const [word] of source.matchAll(/\b[A-Z][A-Za-z0-9_]*\b/g)) {
+    if (known.has(word)) {
+      named.add(word);
+    }
+  }
+  return [...named].sort();
+}
+
 /** A diagnostic the file on disk disproves, and the script that disproves it. */
 export interface Contradicted extends MissingMember {
   readonly declaredIn: string;

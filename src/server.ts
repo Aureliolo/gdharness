@@ -39,6 +39,7 @@ import { announceBridge, announcementPath, readAnnouncement, withdrawBridge } fr
 import {
   cachedClasses,
   cacheWrittenAt,
+  classesNamedIn,
   contradictedDiagnostics,
   declaredClasses,
   heldButGone,
@@ -2323,8 +2324,24 @@ class GodotServer {
 
     const notes: string[] = [];
     if (contradicted.length > 0) {
+      // What the stale types are built from, which is the lever rather than a detail: a held copy
+      // is refreshed when one of its own dependencies changes and not when it changes itself, so
+      // the useful thing to hand a caller is the list of files worth touching. Named from the
+      // declaring scripts already read above, so this costs nothing further.
+      const dependsOn = new Set<string>();
+      for (const one of contradicted) {
+        const source = cached === null ? null : this.sourceOfClass(projectPath, one.declaredIn);
+        if (source === null || cached === null) {
+          continue;
+        }
+        for (const name of classesNamedIn(source, cached)) {
+          if (name !== one.type) {
+            dependsOn.add(name);
+          }
+        }
+      }
       notes.push(
-        `The editor is reporting against an older copy of ${contradicted.length === 1 ? 'a type' : 'some types'} named under contradictedByTheFile. Each member listed is declared in the file the class cache points at, so those diagnostics are wrong however the code is written. Try editor_rescan first: it costs about half a second and cleared this in one of five measured attempts. If it does not, changing anything the named type itself depends on and rescanning again cleared it on the one occasion that has been tried. editor_launch restart is the only remedy that has always worked, and is the one to reach for when the count above is not good enough odds. project_import refresh_classes does not, and answers added: [] while this is happening.`,
+        `The editor is reporting against an older copy of ${contradicted.length === 1 ? 'a type' : 'some types'} named under contradictedByTheFile. Each member listed is declared in the file the class cache points at, so those diagnostics are wrong however the code is written. Try editor_rescan first: it costs about half a second and cleared this in one of five measured attempts. If it does not, the lever is that a held type is refreshed when something it depends on changes rather than when it changes itself${dependsOn.size === 0 ? ', though the named types depend on no other global class, which leaves only the restart' : `, so change ${[...dependsOn].sort().join(', ')} and rescan again`}. editor_launch restart is the only remedy that has always worked, and is the one to reach for when the count above is not good enough odds. project_import refresh_classes does not, and answers added: [] while this is happening.`,
       );
     }
     const uncached = unloaded.filter((type) => !type.inTheClassCache);
@@ -2345,6 +2362,19 @@ class GodotServer {
       ...(unloaded.length === 0 ? {} : { typesTheEditorHasNotLoaded: unloaded }),
       ...(notes.length === 0 ? {} : { staleAnalysis: notes.join(' ') }),
     };
+  }
+
+  /** A declaring script's text, or null when the path will not open. */
+  private sourceOfClass(projectPath: string, resourcePath: string): string | null {
+    const contained = resolveWithinProject(projectPath, resourcePath);
+    if (!contained.ok || !existsSync(contained.absolutePath)) {
+      return null;
+    }
+    try {
+      return readFileSync(contained.absolutePath, 'utf8');
+    } catch {
+      return null;
+    }
   }
 
   private async handleLSP(

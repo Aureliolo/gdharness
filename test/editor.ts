@@ -69,6 +69,12 @@ const MAIN_GD = [
   '',
   'signal ticked(at: int)',
   '',
+  // Reached from the script the editor loads with the main scene, which is what makes the editor
+  // hold an analysed copy of Ringer and, through it, of Bell. A class that is only declared and
+  // only in the cache is parsed fresh on every request, and a copy that is never held can never
+  // go stale.
+  'var ringer: Ringer = Ringer.new()',
+  '',
   '## Changed only by the game, so waiting on it is waiting on something real.',
   'var ticks: int = 0',
   '## Changed only from outside, so a case can set it and read it back without racing.',
@@ -634,6 +640,11 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
       String(lspPort),
       '--dap-port',
       String(dapPort),
+      // The scene the editor opens, which is how a real one is started and is what decides which
+      // scripts it loads and holds. Without it the editor opens nothing, reaches no script, and
+      // parses every file fresh on each request: a state in which a stale analysed type cannot
+      // exist, so a whole class of fault is unreproducible here and was for a day.
+      'res://main.tscn',
     ],
     {
       env: {
