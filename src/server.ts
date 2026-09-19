@@ -41,6 +41,7 @@ import {
   cacheWrittenAt,
   contradictedDiagnostics,
   declaredClasses,
+  heldButGone,
   missingMemberIn,
   staleClassNames,
   type UnseenClass,
@@ -3934,17 +3935,27 @@ class GodotServer {
       return answered;
     }
     const checked = await this.classesTheEditorCannotSee(args);
-    if (checked.unseen.length === 0 && checked.unchecked === undefined) {
+    const stillHeld = checked.stillHeld ?? [];
+    if (checked.unseen.length === 0 && stillHeld.length === 0 && checked.unchecked === undefined) {
       return answered;
+    }
+    const notes: string[] = [];
+    if (checked.unseen.length > 0) {
+      notes.push(
+        'The cache on disk is right now, and the editor holding this project is still not resolving these: rewriting the file does not reach the list it already loaded. editor_rescan does, on its own and with no change to the declaring script; editor_launch restart also does, and costs more.',
+      );
+    }
+    if (stillHeld.length > 0) {
+      notes.push(
+        `The editor is still holding ${stillHeld.join(', ')}, which this project no longer declares, and it will write that list back over the cache this call just corrected. The entry returns pointing at a script that is gone, and the next engine to walk get_global_class_list() dies on "File not found". A rescan does not clear this one: it picks up a class that has appeared and does not drop one that has gone. editor_launch restart does.`,
+      );
     }
     return this.jsonTextResponse({
       ...asParams(JSON.parse(first.text)),
       unseenByEditor: checked.unseen.length > 0 ? checked.unseen : undefined,
+      stillHeldByEditor: stillHeld.length > 0 ? stillHeld : undefined,
       classesUnchecked: checked.unchecked,
-      note:
-        checked.unseen.length > 0
-          ? 'The cache on disk is right now, and the editor holding this project is still not resolving these: rewriting the file does not reach the list it already loaded. editor_rescan does, on its own and with no change to the declaring script; editor_launch restart also does, and costs more.'
-          : undefined,
+      note: notes.length > 0 ? notes.join(' ') : undefined,
     });
   }
 
@@ -3961,7 +3972,7 @@ class GodotServer {
    */
   private async classesTheEditorCannotSee(
     args: OperationParams,
-  ): Promise<{ unseen: UnseenClass[]; unchecked?: string }> {
+  ): Promise<{ unseen: UnseenClass[]; stillHeld?: string[]; unchecked?: string }> {
     const projectPath = typeof args['projectPath'] === 'string' ? args['projectPath'] : '';
     if (projectPath === '') {
       return { unseen: [], unchecked: 'no projectPath, so there was nothing to read the cache from' };
@@ -3991,7 +4002,8 @@ class GodotServer {
     if (!Array.isArray(held['classes'])) {
       return { unseen: [], unchecked: 'the editor answered without a class list in it' };
     }
-    return { unseen: unseenByEditor(projectPath, held['classes'].map(String)) };
+    const holds = held['classes'].map(String);
+    return { unseen: unseenByEditor(projectPath, holds), stillHeld: heldButGone(projectPath, holds) };
   }
 
   private async handleViaBridge(toolName: string, args: OperationParams): Promise<ToolResponse> {

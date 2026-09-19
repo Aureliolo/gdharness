@@ -239,6 +239,26 @@ export interface UnseenClass {
 }
 
 /**
+ * The classes a running editor is still holding that the project no longer declares.
+ *
+ * The other direction from {@link unseenByEditor} and the more damaging one. Deleting a script with
+ * a `class_name` and running the rebuild rewrites the cache without it and reports it `removed`,
+ * which is true of the file for as long as the editor leaves it alone. The editor has not noticed
+ * and writes its own list back over the cache, so the entry returns pointing at a script that is
+ * gone, and the next engine to walk `get_global_class_list()` dies on "File not found" in a project
+ * nobody has touched since. A rescan does not help: it picks up a class that has appeared and does
+ * not drop one that has gone.
+ *
+ * Named from the editor's list against the declarations rather than against the cache, because the
+ * cache is the file the editor is about to overwrite and is the one thing here that cannot be
+ * trusted to say what happens next.
+ */
+export function heldButGone(projectPath: string, editorHolds: readonly string[]): string[] {
+  const declared = declaredClasses(projectPath);
+  return editorHolds.filter((name) => !declared.has(name)).sort();
+}
+
+/**
  * The classes on disk a running editor cannot resolve, whatever the cache says.
  *
  * Every other check here compares one file on disk with another, so the state that costs people

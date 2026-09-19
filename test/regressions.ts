@@ -28,6 +28,7 @@ import {
   cacheWrittenAt,
   contradictedDiagnostics,
   declaresMember,
+  heldButGone,
   missingMemberIn,
   staleClassNames,
   unknownTypeIn,
@@ -3812,6 +3813,53 @@ function testADiagnosticTheFileContradictsIsNamed(): void {
 }
 
 /**
+ * A class the editor still holds after its script is gone, which is the dangerous direction.
+ *
+ * Deleting a script with a `class_name` and rebuilding rewrites the cache without it and reports it
+ * `removed`, which is true of the file for exactly as long as the editor leaves it alone. The editor
+ * has not noticed, writes its own list back over the cache, and the entry returns pointing at a
+ * script that is gone: the next engine to walk `get_global_class_list()` dies on "File not found" in
+ * a project nobody has touched since. That is a red suite on a change that could not have caused it.
+ *
+ * A rescan does not clear this one. It picks up a class that has appeared and does not drop one that
+ * has gone, so the two directions of the same fault need different answers and only one was given.
+ *
+ * Both directions are asserted here because each is the other's control: a project where both are
+ * empty would satisfy a one-sided test of whichever happened to be empty.
+ */
+function testAClassTheEditorHoldsAfterItsScriptIsGoneIsNamed(): void {
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-held-'));
+  try {
+    writeFileSync(join(project, 'kept.gd'), 'class_name Kept\nextends Node\n');
+    writeFileSync(join(project, 'plain.gd'), 'extends Node\n');
+
+    assert.deepEqual(
+      heldButGone(project, ['Kept', 'Gone']),
+      ['Gone'],
+      'the one with no declaration left is the one the editor will write back over the cache',
+    );
+    assert.deepEqual(
+      heldButGone(project, ['Kept']),
+      [],
+      'and an editor holding exactly what is declared has nothing to report',
+    );
+    assert.deepEqual(
+      heldButGone(project, ['Gone', 'AlsoGone', 'Kept']),
+      ['AlsoGone', 'Gone'],
+      'several are named, sorted, so the note reads the same whatever order the editor listed them',
+    );
+
+    assert.deepEqual(
+      unseenByEditor(project, ['Gone']).map((one) => one.className),
+      ['Kept'],
+      'the editor missing a declared class is still the other answer, and still separate from this one',
+    );
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
  * A class the editor cannot resolve is separated from one the cache has not got, because the
  * remedies differ.
  *
@@ -6788,6 +6836,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testACleanupThatCannotFinishStillFinishes,
   testADiagnosticTheFileContradictsIsNamed,
   testAClassTheEditorHasNotLoadedIsToldApartFromOneTheCacheLacks,
+  testAClassTheEditorHoldsAfterItsScriptIsGoneIsNamed,
   testAnAuditThatCouldNotAskIsNotAnAuditThatPassed,
   testRefreshingUidsMakesTheSidecarAndWritesNoScene,
   testWhoIsHoldingAPortIsAskable,
