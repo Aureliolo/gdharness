@@ -65,7 +65,7 @@ import type { GodotProcess } from '../src/server-types.js';
 import { addonMismatch, markIfStale, SERVER_VERSION } from '../src/server-version.js';
 import { ADDONS, autoloadIsOurs, installAddons } from '../src/setup.js';
 import { readNonNegativeNumber, readPositiveNumber } from '../src/tool-args.js';
-import { opTakes, TOOL_SPECS } from '../src/tool-definitions.js';
+import { opTakes, TOOL_SPECS, toolSpec } from '../src/tool-definitions.js';
 import { cacheFile, isNewer, UpdateCheck } from '../src/update-check.js';
 import { asArray, asNumber, get, text } from './support/json.js';
 import { isRecord, type JsonRpcMessage, parseTextContent, textOf } from './support/json-rpc.js';
@@ -2915,6 +2915,39 @@ async function testAStartWaitsForTheGameToAnnounceItself(): Promise<void> {
  * a project mid-session writes the new addon while the harness carries on spawning the server it
  * already started, so the editor holds the newer half and restarting it widens the gap.
  */
+/**
+ * Everywhere that names the cure for an editor gone blind to a class names both halves of it.
+ *
+ * The cure is a change to the declaring script and then a rescan, and neither half works alone:
+ * measured downstream, a real change to the declaring script with no rescan after it left every
+ * affected file reporting the same errors, and the rescan then cleared all of them. The tool
+ * description said "a change to the declaring script, or editor_launch restart" and stopped there,
+ * while the two answers that say the same thing had it right. So a session followed the tool it was
+ * holding, got a silent no-op, and read it as the documented cure not working.
+ *
+ * One cure written down in three places is three chances to drop half of it, which is what
+ * happened. This is the check that the three agree, rather than a fourth place saying they should.
+ */
+function testTheCureIsWrittenWhole(): void {
+  const said = [
+    toolSpec('editor_rescan')?.description ?? '',
+    ...readFileSync('src/server.ts', 'utf8')
+      .split('\n')
+      .filter((line) => line.includes('the declaring script')),
+  ];
+  assert.equal(said.length, 3, `all three places should be found, not ${said.length}`);
+
+  for (const sentence of said) {
+    assert.match(sentence, /declaring script/, `it names the script to change: ${sentence.slice(0, 80)}`);
+    assert.match(sentence, /rescan/, `and the rescan that has to follow it: ${sentence.slice(0, 80)}`);
+    assert.match(
+      sentence,
+      /editor_launch restart/,
+      `and the other way out, for a caller who cannot change the script: ${sentence.slice(0, 80)}`,
+    );
+  }
+}
+
 function testTheStaleHalfIsNamedCorrectly(): void {
   assert.equal(addonMismatch('0.5.0', '0.5.0'), undefined, 'agreeing versions say nothing');
 
@@ -5781,6 +5814,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnAutoloadGitWillNotCarry,
   testVersionOrdering,
   testChangelogReach,
+  testTheCureIsWrittenWhole,
   testTheStaleHalfIsNamedCorrectly,
   testAGameIsFoundWhereverItAnnounced,
   testAGameTooNewToTalkToIsStillAGame,
