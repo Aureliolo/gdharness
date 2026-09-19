@@ -71,9 +71,9 @@ ship a tool that lies. The surface is worth less than the answers being right, a
 trade this project does not make. Only a rename or a removal is breaking.
 `.github/CONTRIBUTING.md` states this publicly, so keep the two in step.
 
-**Never raise the major version without asking Aurelio first.** `major` on the "Prepare release"
-workflow, and `1.0.0` above all, is his call alone: ask, and wait for the answer before touching
-it. This holds however obviously ready the project looks.
+**Never raise the major version without asking first.** `major` on the "Prepare release" workflow,
+and `1.0.0` above all, is the owner's call alone: ask them directly, and wait for the answer before
+touching it. This holds however obviously ready the project looks.
 
 Cut releases through the button rather than by hand: run the "Prepare release" workflow with the
 bump, merge the pull request it opens, and `release-tag.yml` tags whatever version lands on
