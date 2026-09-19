@@ -1182,10 +1182,14 @@ class GodotServer {
     if (op !== null) {
       const elsewhere = Object.keys(args).filter((key) => key !== 'op' && !opTakes(spec, op, key));
       if (elsewhere.length > 0) {
+        // An op that takes nothing said "takes: ." and left the caller deciding whether that was
+        // the whole list or a sentence that had lost its end. The same fix the tool-level refusal
+        // already had, which is where this wording came from.
+        const takes = argumentsOf(spec, op);
         return {
           ok: false,
           response: this.createErrorResponse(
-            `${spec.name} ${op} does not take ${elsewhere.join(', ')}. ${op} takes: ${argumentsOf(spec, op).join(', ')}.`,
+            `${spec.name} ${op} does not take ${elsewhere.join(', ')}. ${takes.length === 0 ? `${op} takes no arguments.` : `${op} takes: ${takes.join(', ')}.`}`,
           ),
         };
       }

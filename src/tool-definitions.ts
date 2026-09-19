@@ -711,7 +711,9 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'editor_launch',
     description:
       'Opens the Godot editor on a project, in a window on this machine, or restarts the one already connected. An editor goes on serving the addon it read at startup, so restart is what puts a gdharness upgrade into effect; it saves open scenes on the way out and answers with the version that came back. Only an editor with a window can be restarted, because the engine hands back none of the arguments it was started with. editor_status says which editor is connected and whether it is holding an old addon. A restart saves project.godot on the way out, and Godot writes only what differs from its own defaults, so a key named deliberately at its default value is dropped: settingsDropped names any that went, because nothing else will say so until something depends on one.',
-    parameters: { projectPath: PROJECT_PATH },
+    // open alone: a restart is of the editor already connected, which names its own project, and
+    // an argument that is accepted and then ignored is one a caller can be wrong about for ever.
+    parameters: { projectPath: { ...PROJECT_PATH, ops: ['open'] } },
     requires: [],
     operations: {
       open: { summary: 'open the editor on a project', requires: ['projectPath'] },
@@ -724,7 +726,12 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     description:
       "The run: starting the project, stopping it, or booting it once to see whether it comes up clean. start keeps it running and collecting output until it quits or is stopped, windowed where there is a display and headless where there is not, unless headless says otherwise; only runtime_capture needs the window. A run that quits on its own is kept, so a scene that prints an answer and quits is start, then editor_output until running is false. What runs is a scene: a SceneTree script is not an entry point here, so put the script on the root of a scene of its own and name that in scene. args hands the game its own flags, the ones it reads with OS.get_cmdline_user_args(), and a run carrying any is started by this server rather than by the editor. check boots it headless for a few frames, waits for it to quit, and answers with the verdict: whether it came up, and every error and warning it printed on the way. A start waits for the game to become something the runtime_* tools can talk to and says which it is under runtime: listening with the port it took, or why not, so the first call after a start does not have to be made twice. When it is not listening, mayYetAnnounce says whether that is final: false is a runtime that is not coming, true is a game still on its way up, which editor_status will see and runtimeWaitMs waits longer for. A start this server made also answers with transcript, the file both the run's streams are written to, so a watch on it can be armed off the start rather than off a second call.",
     parameters: {
-      projectPath: PROJECT_PATH,
+      // start and check alone, because they are the two that need telling which project. The
+      // others are about the run already going, which this server is holding and can name for
+      // itself: asking a caller to repeat it is asking for something that cannot disagree and
+      // must therefore be right, and taking it while ignoring it is the silent default this
+      // schema exists to refuse.
+      projectPath: { ...PROJECT_PATH, ops: ['start', 'check'] },
       scene: {
         type: 'string',
         ops: ['start', 'check'],
@@ -756,11 +763,17 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
           'check: how long to give the boot before it is called hung. Default 60000. wait: how long to wait for the run to end before answering anyway. Default 600000.',
       },
     },
-    requires: ['projectPath'],
+    requires: [],
     operations: {
-      start: { summary: 'run the project until it quits or is stopped', requires: [] },
+      start: {
+        summary: 'run the project until it quits or is stopped',
+        requires: ['projectPath'],
+      },
       stop: { summary: 'end the run and answer with what it printed last', requires: [] },
-      check: { summary: 'boot headless, quit after a few frames, and report the verdict', requires: [] },
+      check: {
+        summary: 'boot headless, quit after a few frames, and report the verdict',
+        requires: ['projectPath'],
+      },
       wait: { summary: 'wait for the run to end, then answer as editor_output does', requires: [] },
     },
     defaultOperation: 'start',
