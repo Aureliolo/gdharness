@@ -1664,6 +1664,48 @@ async function testRuntime({ call, refusal, attempt, project, lspPort, dapPort }
   });
   assert.match(unfittable, /cannot be converted|takes int/, `a bad argument is refused: ${unfittable}`);
 
+  // A word where a number goes. Downstream found this one: `get_child(["not an index"])` came back
+  // with child 0, as a Label, with no refusal and no note, because the conversion answered 0 for a
+  // string that reads as no number at all and the check then saw a well-typed int. The gate was in
+  // the wrong place, and a plausible wrong answer is worse than the halt it replaced: the halt is
+  // visible. Nothing that cannot become a number may arrive as one.
+  const worded = await refusal('runtime_invoke', {
+    ...game,
+    op: 'call',
+    nodePath: '/root/Main',
+    method: 'get_child',
+    args: ['not an index'],
+  });
+  assert.match(worded, /cannot be converted/, `a word where an index goes is refused: ${worded}`);
+  assert.match(worded, /String/, `naming what arrived: ${worded}`);
+
+  // And the number written as text still works, because that is a value somebody meant.
+  assert.equal(
+    get(
+      await call('runtime_invoke', {
+        ...game,
+        op: 'call',
+        nodePath: '/root/Main',
+        method: 'stow',
+        args: ['7'],
+      }),
+      'result',
+    ),
+    7,
+    'a number written as text is still a number',
+  );
+
+  // The same rule on the way in to a property: what cannot become what the property holds is
+  // refused rather than written, because the engine picks zero and the answer reports it as new.
+  const written = await refusal('runtime_invoke', {
+    ...game,
+    op: 'set',
+    nodePath: '/root/Main',
+    property: 'ticks',
+    value: 'not a count',
+  });
+  assert.match(written, /cannot become one/, `a word where a count goes is refused: ${written}`);
+
   // And the conversions a caller actually relies on still go through, which is the half a
   // whitelist gets wrong. A downstream project reads and pokes its run through `get_indexed` and
   // `set_indexed` with a string path, dozens of calls a session: the parameter is a NodePath and
