@@ -94,6 +94,64 @@ export function writeRunRecord(record: RunRecord): void {
 }
 
 /**
+ * Where an editor-played run's console is being written, for whichever server asks next.
+ *
+ * Its own note rather than a field on the one above, because the two carry different authority. A
+ * `RunRecord` names a process: it is what says a run is still going and what a stop is aimed at,
+ * and a wrong one ends a stranger's bench. This names a file and nothing else. The run it belongs
+ * to is held by the editor, which is on the bridge and answers whether it is still playing, so
+ * there is no pid here to be believed and none to act on.
+ *
+ * Overwritten by each play and left behind afterwards, the way a transcript is. A note for a run
+ * that is over is read by nobody: the editor has to say it is playing before this is opened at all.
+ */
+export interface EditorRunNote {
+  readonly projectPath: string;
+  readonly transcript: string;
+  readonly startedAt: number;
+}
+
+function editorNotePath(): string {
+  return join(runsDirectory(), 'editor-run.json');
+}
+
+export function writeEditorRunNote(note: EditorRunNote): void {
+  mkdirSync(runsDirectory(), { recursive: true });
+  writeFileSync(editorNotePath(), JSON.stringify(note, null, 2), 'utf8');
+}
+
+/** The editor-played run another server left a file for, or null when there is none to read. */
+export function readEditorRunNote(): EditorRunNote | null {
+  for (const directory of runtimeDirectories()) {
+    const note = editorNoteAt(join(directory, 'runs', 'editor-run.json'));
+    if (note !== null) {
+      return note;
+    }
+  }
+  return null;
+}
+
+function editorNoteAt(path: string): EditorRunNote | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, 'utf8'));
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== 'object') {
+    return null;
+  }
+  const fields = parsed as Record<string, unknown>;
+  const projectPath = fields['projectPath'];
+  const transcript = fields['transcript'];
+  const startedAt = fields['startedAt'];
+  if (typeof projectPath !== 'string' || typeof transcript !== 'string' || typeof startedAt !== 'number') {
+    return null;
+  }
+  return { projectPath, transcript, startedAt };
+}
+
+/**
  * The exit code kept in the note, for a run that ended while its server was still there.
  *
  * A run outlives its server on purpose and the next one reads this note rather than the process,
