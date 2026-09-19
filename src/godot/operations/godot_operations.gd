@@ -108,8 +108,6 @@ func _run(operation: String, params: Dictionary) -> Dictionary:
 		# Resource files
 		"get_uid":
 			payload = ResourceFiles.new(_log).get_uid(params)
-		"resave_resources":
-			payload = ResourceFiles.new(_log).resave_resources(params)
 		"refresh_class_cache":
 			payload = ClassCache.new(_log).refresh_class_cache(params)
 

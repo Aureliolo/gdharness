@@ -390,7 +390,11 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         requires: [],
       },
       uid: { summary: 'the UID of one file', requires: ['resourcePath'] },
-      refresh_uids: { summary: 'resave every resource so UID references are current', requires: [] },
+      refresh_uids: {
+        summary:
+          'import the project so every script and shader has its .uid sidecar, and name under uidsCreated the ones this made and under stillWithoutUid the ones the engine would not import: it writes no scene and no script, so a project whose sidecars are all present is left untouched',
+        requires: [],
+      },
       refresh_classes: {
         summary:
           'rewrite .godot/global_script_class_cache.cfg from the class_name declarations on disk, and name under unseenByEditor any class the editor open on this project still cannot resolve: rewriting the file does not reach the list a running editor loaded, so "added: []" means the file was already right rather than that nothing is wrong',
