@@ -31,6 +31,22 @@ the debug adapter as a side effect, and a session stays open for the life of the
 ran first decided what the timing case measured. Fix the setup and disarm again. Only a disarm that
 fails has told you anything about the check.
 
+A disarm that fails is only evidence when it fails on the assertion you aimed at. Read the failure
+rather than the exit code: a disarm that fails somewhere else never reached the broken line either,
+and it is the same empty result as one that passed, wearing the colour you were hoping for. The way
+this happens here is that the disarm does not build. `bun run build` bundles without typechecking,
+so a disarm that does not compile leaves the previous bundle in place and the suite runs against the
+code you were trying to break: an edit calling `writeFileSync` where it was not imported built
+clean, threw at run time, and failed the fixture on a missing field three assertions earlier than
+the one under test. Typecheck before you believe a disarm, and check the message names the assertion
+you disarmed.
+
+Some disarms cannot be performed at all, and that is a finding rather than an obstacle. Deleting a
+line can leave a parameter unused, a branch unreachable or an import dangling, and the gates refuse
+it before a single case runs. Reach for a smaller break that the compiler accepts, and write down
+that the line is held by the gates as well as by the test, because that is one more thing keeping it
+honest and it will not be obvious to the next reader.
+
 Disarming a containment guard is the one disarm that can escape while it is disarmed. Give the
 disarmed run somewhere harmless to escape to before running it.
 
