@@ -704,6 +704,75 @@ async function testValuesSurviveBeingRead({ call, project }: Editor): Promise<vo
 }
 
 /**
+ * A value the property cannot hold is refused, and the scene keeps what it had.
+ *
+ * Object.set converts rather than refuses, and every conversion it makes here is silent and wrong:
+ * a word written to an int is stored as 0, to a bool as true, to a Vector2 as (0, 0), and a polygon
+ * written as a list of anything but points becomes that many zero vectors. The node then holds a
+ * value nobody asked for, the scene is saved with it, and the answer says the change was made. The
+ * write that works is asserted beside each refusal, because a tool that had stopped writing
+ * anything at all would satisfy the refusals exactly as well.
+ */
+async function testAValueTheSceneCannotHoldIsRefused({ call, refusal, project }: Editor): Promise<void> {
+  const scene = { projectPath: project, scenePath: SCENE };
+  await call('scene_node', { ...scene, op: 'add', nodeType: 'Polygon2D', nodeName: 'Guarded' });
+
+  const set = (properties: Record<string, unknown>) => ({
+    ...scene,
+    op: 'set',
+    nodePath: 'Guarded',
+    properties,
+  });
+
+  assert.match(
+    await refusal('scene_node', set({ z_index: 'on' })),
+    /z_index is int and the value given is String, which cannot become one/,
+    'a word where a number goes should be refused rather than stored as 0',
+  );
+  assert.match(
+    await refusal('scene_node', set({ visible: 'nope' })),
+    /visible is bool and the value given is String, which cannot become one/,
+    'and where a bool goes, rather than stored as true',
+  );
+  assert.match(
+    await refusal('scene_node', set({ position: 'somewhere' })),
+    /position is Vector2 and the value given is String, which cannot become one/,
+    'and where a vector goes, rather than stored as the origin',
+  );
+
+  // A list is a list whatever is in it, so the packed array is asked about its elements too.
+  assert.match(
+    await refusal('scene_node', set({ polygon: [{ x: 1, y: 2 }, { x: 3 }] })),
+    /item 1 of the list given is Dictionary, not Vector2/,
+    'an element that is not a point should be refused, naming which one',
+  );
+
+  // And what the guard lets through: a number for a number, and points written the short way,
+  // which is the form a caller writes by hand and the one that used to land as zeroes.
+  await call(
+    'scene_node',
+    set({
+      z_index: 3,
+      polygon: [
+        [10, 20],
+        [30, 40],
+      ],
+    }),
+  );
+  const read = await call('scene_node', { ...scene, op: 'get', nodePath: 'Guarded' });
+  assert.equal(
+    asNumber(get(read, 'properties', 'z_index')),
+    3,
+    `the number should be written: ${text(read)}`,
+  );
+  const held = asArray(get(read, 'properties', 'polygon') ?? []);
+  assert.equal(asNumber(get(held[0], 'x')), 10, `and the pairs read back as points: ${text(read)}`);
+  assert.equal(asNumber(get(held[1], 'y')), 40, `both of them: ${text(read)}`);
+
+  await call('scene_node', { ...scene, op: 'delete', nodePath: 'Guarded' });
+}
+
+/**
  * Connecting and disconnecting a signal, asserted against the scene file.
  *
  * The file rather than the answer, because the answer was right while the file was not: a
@@ -2219,6 +2288,7 @@ async function main(): Promise<void> {
     // One editor for all of them, in order: each case builds on the scene the last one left.
     await testSceneNodes(editor);
     await testValuesSurviveBeingRead(editor);
+    await testAValueTheSceneCannotHoldIsRefused(editor);
     await testSceneSignals(editor);
     await testSceneAnimation(editor);
     await testResources(editor);

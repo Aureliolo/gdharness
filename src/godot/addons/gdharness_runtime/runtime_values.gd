@@ -11,27 +11,6 @@ extends RefCounted
 const Read = preload("reading.gd")
 const Serialisation = preload("serialisation.gd")
 
-# What the engine carries from one to another without complaint, which is what an argument may
-# arrive as. Numbers include bool because the engine counts it as one, and the three text types
-# are one string wearing three hats.
-const NUMBERS: Array[int] = [TYPE_BOOL, TYPE_INT, TYPE_FLOAT]
-const TEXTS: Array[int] = [TYPE_STRING, TYPE_STRING_NAME, TYPE_NODE_PATH]
-
-# The types that cross as a plain JSON list and have to be built back into themselves. A list is
-# what a caller can write by hand and what the serialiser answers with, and the parameter or
-# property being written is the only thing that knows which of these it wanted.
-const LIST_TYPES: Array[int] = [
-	TYPE_PACKED_INT32_ARRAY,
-	TYPE_PACKED_INT64_ARRAY,
-	TYPE_PACKED_FLOAT32_ARRAY,
-	TYPE_PACKED_FLOAT64_ARRAY,
-	TYPE_PACKED_STRING_ARRAY,
-	TYPE_PACKED_VECTOR2_ARRAY,
-	TYPE_PACKED_VECTOR3_ARRAY,
-	TYPE_PACKED_VECTOR4_ARRAY,
-	TYPE_PACKED_COLOR_ARRAY,
-]
-
 var _shared: Serialisation = Serialisation.new()
 
 
@@ -77,49 +56,13 @@ static func node_at(root: Node, path: String) -> Dictionary:
 
 
 ## Whether two values can be compared without the comparison itself failing.
-##
-## GDScript's `==` is not total. An Object against a String is a hard error rather than false, and
-## an error raised inside the game is not a wrong answer: it stops the game. A caller who asked
-## `runtime_wait until` for the wrong kind of value got their game held at a debugger break, every
-## later call answering "did not respond within 10000ms, it may be stuck in a long frame", and
-## nothing anywhere naming the argument that did it. A wrong argument costs a refusal, never the
-## session's game.
-##
-## Only an object is special. Every other pair the engine answers, false where they differ, and
-## refusing those would refuse calls that work: an int against a float is the same number to a
-## caller waiting for 1 on a property holding 1.0.
 static func comparable(one: Variant, other: Variant) -> bool:
-	var left: int = typeof(one)
-	var right: int = typeof(other)
-	if left != TYPE_OBJECT and right != TYPE_OBJECT:
-		return true
-	# An object compares with another object and with null. Anything else is the error above.
-	return (left == TYPE_OBJECT or left == TYPE_NIL) and (right == TYPE_OBJECT or right == TYPE_NIL)
+	return Serialisation.comparable(one, other)
 
 
 ## Whether a value can be handed to a parameter declared as [param type] without the call failing.
-##
-## The same reason as [method comparable]: `callv` raises inside the game when an argument cannot
-## be converted, and an error raised in a game somebody is playing holds it at a debugger break.
-##
-## A list of what is accepted rather than of what is refused, which is the way round that errs
-## safely. The engine's own conversion table is not readable from GDScript, so either list is a
-## guess at it; guessing narrow costs a caller a refusal naming both types, and guessing wide costs
-## them the session. A refusal is the cheaper mistake, and it is the one they can act on.
 static func acceptable(value: Variant, type: int) -> bool:
-	if type == TYPE_NIL:
-		return true
-	var given: int = typeof(value)
-	if given == type:
-		return true
-	# null is a value for anything that holds an object, and for nothing else.
-	if given == TYPE_NIL:
-		return type == TYPE_OBJECT
-	if NUMBERS.has(given) and NUMBERS.has(type):
-		return true
-	if TEXTS.has(given) and TEXTS.has(type):
-		return true
-	return given == TYPE_ARRAY and LIST_TYPES.has(type)
+	return Serialisation.acceptable(value, type)
 
 
 ## The declared type of one parameter of a method, or TYPE_NIL when the method or the parameter
@@ -136,35 +79,6 @@ func parameter_type(object: Object, method: String, index: int) -> int:
 	return TYPE_NIL
 
 
-## A value from the wire fitted to the type a property or parameter declares. Arguments arrive
-## as strings often enough, and callv refuses a "2.0" where a float is wanted, so a string that
-## reads as the wanted scalar is read as one.
-##
-## The conversion is also what restores a packed array's exact type. Those cross as the plain JSON
-## lists they fit into, so what comes back from the wire is an Array, and the parameter is what says
-## it was a PackedStringArray.
+## A value from the wire fitted to the type a property or parameter declares.
 func fitted(value: Variant, type: int) -> Variant:
-	var rebuilt: Variant = deserialize(value)
-	if type == TYPE_NIL or typeof(rebuilt) == type:
-		return rebuilt
-
-	if rebuilt is Array and LIST_TYPES.has(type):
-		return type_convert(rebuilt, type)
-
-	var simple: Array[int] = [TYPE_BOOL, TYPE_INT, TYPE_FLOAT, TYPE_STRING]
-	if not simple.has(type) or not simple.has(typeof(rebuilt)):
-		return rebuilt
-
-	if rebuilt is String and type != TYPE_STRING:
-		var text: String = rebuilt
-		var parsed: Variant = JSON.parse_string(text)
-		# A string that does not read as the type wanted is handed back as the string it is, so
-		# whoever asked can refuse it. type_convert answers 0 for "not an index" and true for any
-		# text at all, and a caller who sent a word got back a number they never sent: get_child
-		# answered about child 0 with no refusal and no note, which is a halt traded for a plausible
-		# wrong answer, and the wrong answer is the worse of the two.
-		if typeof(parsed) == TYPE_NIL or typeof(parsed) == TYPE_STRING:
-			return rebuilt
-		rebuilt = parsed
-
-	return type_convert(rebuilt, type)
+	return _shared.fitted(value, type)
