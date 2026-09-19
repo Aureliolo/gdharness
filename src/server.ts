@@ -36,7 +36,13 @@ import {
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
 import { announceBridge, announcementPath, readAnnouncement, withdrawBridge } from './bridge-announce.js';
-import { staleClassNames, type UnseenClass, unseenByEditor } from './class-cache.js';
+import {
+  cachedClasses,
+  cacheWrittenAt,
+  staleClassNames,
+  type UnseenClass,
+  unseenByEditor,
+} from './class-cache.js';
 import { configDisagrees } from './config-pin.js';
 import { DEFAULT_DAP_PORT, GodotDAPClient, handleDAPTool, type StoppedAt } from './dap_client.js';
 import { dictionary, emptyRecord } from './dictionary.js';
@@ -404,6 +410,26 @@ const BRIDGE_RETRY_MS = 2_000;
  * unreferenced timer.
  */
 const SUCCESSOR_CHECK_MS = 10_000;
+
+/**
+ * How long to wait for the editor's own class-cache write after it reports a scan finished.
+ *
+ * The write is deferred past the scan, so the file read the instant the editor goes idle is the
+ * one about to be replaced. Two seconds because it is a single small file written on the editor's
+ * next idle frame, and because this wait only happens where the write can lose something: an
+ * editor holding every class the cache holds writes the same file back.
+ */
+const CACHE_WRITE_MS = 2_000;
+
+/**
+ * How long a scan may take to start before the answer stops waiting on it.
+ *
+ * `EditorFileSystem.scan()` queues rather than runs, and the editor takes it up on a later frame,
+ * so for the first of those frames both of the flags it offers are false and a poll reads the
+ * scan as over. Two seconds is far past the frame or two a free editor needs and past what a busy
+ * one needs, and it is the horizon on a flag rather than on the scan itself.
+ */
+const SCAN_START_MS = 2_000;
 
 /** What to tell a caller whose file, scene, script or resource path landed outside the project. */
 /**
@@ -3374,6 +3400,16 @@ class GodotServer {
   private async handleRescanFilesystem(args: OperationParams): Promise<ToolResponse> {
     const timeoutMs = readPositiveNumber(args, 'timeoutMs') ?? 30000;
     const started = Date.now();
+    const projectPath = typeof args['projectPath'] === 'string' ? args['projectPath'] : '';
+
+    // What the cache holds before the editor is asked to scan, because the editor writes that file
+    // at the end of a scan from the list it is holding rather than from the file. An editor blind
+    // to a class writes a cache without it, over the correct one, and the loss surfaces in the next
+    // engine to read it as an unknown identifier in a file nobody touched.
+    const before = projectPath === '' ? null : cachedClasses(projectPath);
+    const writtenBefore = projectPath === '' ? null : cacheWrittenAt(projectPath);
+    const blind = projectPath === '' ? { unseen: [] } : await this.classesTheEditorCannotSee(args);
+    const atRisk = before === null ? [] : blind.unseen.filter((one) => before.has(one.className));
 
     const first = await this.handleViaBridge('rescan_filesystem', args);
     if (first.isError) {
@@ -3386,22 +3422,50 @@ class GodotServer {
       const status = asParams(
         await this.godotBridge.invokeTool('rescan_filesystem', { ...args, statusOnly: true }),
       );
-      busy = Boolean(status['scanning']) || Boolean(status['importing']);
+      // `pending` is a scan that has been asked for and has not started. Without it, the first
+      // poll after asking reads two false flags off an editor that has not begun and calls the
+      // scan finished, which is how a rescan of 376 classes answered in 296ms and the editor
+      // then wrote its own stale class list over a cache that had just been corrected.
+      //
+      // Believed only for as long as a scan takes to start. The addon clears it on the editor's
+      // own finished-scan signal, and a scan that both started and finished between two polls
+      // would leave it set if that signal ever failed to arrive: waiting the whole budget on a
+      // flag is a worse answer than the one this fixes, so the flag has a horizon and the engine's
+      // own two have the rest.
+      const pending = Boolean(status['pending']) && Date.now() - started < SCAN_START_MS;
+      busy = Boolean(status['scanning']) || Boolean(status['importing']) || pending;
     }
+
+    // The write lands after the scan says it has finished, so reading the file the moment the
+    // editor goes idle reads the one that is about to be replaced. Waited for only where it can
+    // cost something: an editor holding every class the cache holds writes the same file back.
+    if (!busy && atRisk.length > 0) {
+      const until = Date.now() + CACHE_WRITE_MS;
+      while (Date.now() < until && cacheWrittenAt(projectPath) === writtenBefore) {
+        await new Promise((settle) => setTimeout(settle, 100));
+      }
+    }
+
+    const after = projectPath === '' || busy ? null : cachedClasses(projectPath);
+    const lost =
+      before === null || after === null ? [] : [...before.keys()].filter((name) => !after.has(name));
 
     const checked = busy ? { unseen: [] } : await this.classesTheEditorCannotSee(args);
     const unseen = checked.unseen;
     return this.jsonTextResponse({
-      ok: !busy && unseen.length === 0 && checked.unchecked === undefined,
+      ok: !busy && unseen.length === 0 && lost.length === 0 && checked.unchecked === undefined,
       stillWorking: busy,
       waitedMs: Date.now() - started,
       unseenByEditor: unseen.length > 0 ? unseen : undefined,
+      cacheLost: lost.length > 0 ? lost : undefined,
       classesUnchecked: checked.unchecked,
       note: busy
         ? 'The editor was still scanning or importing when the wait ran out, so new files may not be visible yet.'
-        : unseen.length > 0
-          ? 'The scan finished and these classes are still not in the list the editor resolves against, so every use of them reads as an unknown identifier. Its walk skips a file another engine has already imported. Change the declaring script and rescan, or restart the editor with editor_launch restart.'
-          : undefined,
+        : lost.length > 0
+          ? 'The scan wrote the class cache from the list this editor is holding, and that list is shorter than the file was: these classes were in it before the scan and are not now. Every engine that reads the cache next, including a test run, will report them as unknown identifiers in files nobody touched. Run project_import refresh_classes to put them back, and do not rescan again until the editor has been restarted with editor_launch restart, because it will write the same short list over it.'
+          : unseen.length > 0
+            ? 'The scan finished and these classes are still not in the list the editor resolves against, so every use of them reads as an unknown identifier. Its walk skips a file another engine has already imported. Change the declaring script and rescan, or restart the editor with editor_launch restart.'
+            : undefined,
     });
   }
 
