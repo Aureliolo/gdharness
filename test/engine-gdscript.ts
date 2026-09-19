@@ -25,6 +25,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { runOperation as runThroughTheServersOwnPath } from '../src/headless.js';
 import { userDataIn } from '../src/launch.js';
 import { asArray, asNumber, asString, get, lastJsonLine } from './support/json.js';
+import { sweep } from './support/sweep.js';
 
 const tried: string[] = [];
 
@@ -143,7 +144,7 @@ function everyWarning(godotPath: string): string[] {
     }
     return names;
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    sweep(dir);
   }
 }
 
@@ -256,7 +257,7 @@ function testTypedGate(godotPath: string, projectDir: string): void {
   mkdirSync(probeDir, { recursive: true });
   writeFileSync(join(probeDir, 'untyped.gd'), 'extends Node\n\nvar loose = 1\n');
   const refused = runScript(godotPath, projectDir, join(projectDir, 'typed.gd'));
-  rmSync(probeDir, { recursive: true, force: true });
+  sweep(probeDir);
 
   assert.notEqual(refused.status, 0, 'an untyped declaration in an addon should fail the gate');
   assert.match(
@@ -1074,8 +1075,8 @@ async function testAnOperationLeavesARunningLogAlone(godotPath: string): Promise
     restore();
     bench.kill();
     await delay(500);
-    rmSync(project, { recursive: true, force: true });
-    rmSync(home, { recursive: true, force: true });
+    sweep(project);
+    sweep(home);
   }
 
   // Checked here rather than left to whichever later case the engine happens to warn in. This
@@ -1190,7 +1191,7 @@ function testTheOperationsSurviveEveryWarning(godotPath: string): void {
       'the operation should have answered, not just compiled',
     );
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    sweep(dir);
   }
 }
 
@@ -1261,7 +1262,7 @@ async function main(): Promise<void> {
     testAFamilyOfSettingsAnswersWithItsTypes(godotPath, projectDir);
     testTheOperationsSurviveEveryWarning(godotPath);
   } finally {
-    rmSync(projectDir, { recursive: true, force: true });
+    sweep(projectDir);
   }
 
   console.log('engine gdscript tests passed');

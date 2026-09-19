@@ -8,12 +8,13 @@
  */
 
 import { execFile } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { emptyRecord } from './dictionary.js';
 import { GameLog, type LogEntry } from './game-log.js';
+import { discard } from './scratch.js';
 import type { OperationParams } from './server-types.js';
 
 // execFile, not exec: no shell means no quoting, and no quoting means no way to escape out of
@@ -148,7 +149,7 @@ export async function runOperation(
       messages: [],
     };
   } finally {
-    rmSync(paramsDir, { recursive: true, force: true });
+    discard(paramsDir);
   }
 
   // A run that exited cleanly but printed no answer is an engine that never reached the

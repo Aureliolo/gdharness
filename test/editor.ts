@@ -23,7 +23,6 @@ import {
   mkdtempSync,
   readFileSync,
   realpathSync,
-  rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
@@ -36,6 +35,7 @@ import { RUNTIME_AUTOLOAD } from '../src/setup.js';
 import { asArray, asNumber, asObject, asString, get, text } from './support/json.js';
 import { parseTextContent, textOf } from './support/json-rpc.js';
 import { reservePort, ServerProcess } from './support/server.js';
+import { sweep } from './support/sweep.js';
 
 /** Long enough for a cold editor to finish its first filesystem scan on a slow runner. */
 const CONNECT_TIMEOUT_MS = 120_000;
@@ -448,7 +448,7 @@ async function exited(child: ChildProcess): Promise<void> {
 async function removeWhenFree(directory: string): Promise<string | null> {
   for (let attempt = 0; attempt < 40; attempt += 1) {
     try {
-      rmSync(directory, { recursive: true, force: true });
+      sweep(directory);
       return null;
     } catch (error) {
       await delay(250);
@@ -1326,7 +1326,7 @@ async function testTheClassCheckKnowsWhichProjectItIsAbout({ call, project }: Ed
     );
     assert.notEqual(project, elsewhere, 'the two projects have to be two projects');
   } finally {
-    rmSync(elsewhere, { recursive: true, force: true });
+    sweep(elsewhere);
   }
 }
 

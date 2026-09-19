@@ -8,7 +8,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import process from 'node:process';
@@ -29,6 +29,7 @@ import {
   SERVER_KEY,
 } from '../src/harnesses.js';
 import { currentRunner, type Runner, spawnFor } from '../src/runner.js';
+import { sweep } from './support/sweep.js';
 
 const LAUNCH = launchFor('9.9.9', '/opt/godot/godot', '/home/you/game', 'npx');
 
@@ -149,7 +150,7 @@ function testAConfigIsWrittenWhereTheHarnessLooks(): void {
       const servers = config[harness.container] as Record<string, unknown>;
       assert.ok(servers[SERVER_KEY], `${harness.id} holds gdharness under ${harness.container}`);
     } finally {
-      rmSync(root, { recursive: true, force: true });
+      sweep(root);
     }
   }
 }
@@ -182,7 +183,7 @@ function testHarnessesSharingAFileAreWrittenOnce(): void {
       'every harness is in exactly one group',
     );
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    sweep(root);
   }
 }
 
@@ -226,7 +227,7 @@ function testNothingAlreadyInTheFileIsLost(): void {
     assert.deepEqual(config['somethingElse'], { kept: true }, 'a key we know nothing about survives');
     assert.ok(servers[SERVER_KEY], 'and gdharness is there too');
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    sweep(root);
   }
 }
 
@@ -243,7 +244,7 @@ function testWritingTwiceReplacesRatherThanDuplicates(): void {
     assert.deepEqual(servers[SERVER_KEY]?.['args'], ['-y', 'gdharness@9.9.10'], 'the new version won');
     assert.equal(Object.keys(servers).length, 1, 'and there is still one gdharness');
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    sweep(root);
   }
 }
 
@@ -289,7 +290,7 @@ function testAnUpgradeKeepsWhatWasPinnedByHand(): void {
     assert.equal(env['GODOT_PATH'], '/opt/godot/other', 'and the engine path is written over');
     assert.equal(env['GDHARNESS_PROJECT'], root, 'and so is the project');
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    sweep(root);
   }
 }
 
@@ -326,7 +327,7 @@ function testAnInstallSaysWhatItLaunchedInsteadOf(): void {
     // And a write that moved nothing says nothing, so the line means what it says when it appears.
     assert.equal(connect(harness, root, LAUNCH).wasLaunchedBy, undefined, 'nothing moved, nothing said');
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    sweep(root);
   }
 }
 
@@ -364,7 +365,7 @@ function testAConfigThatDoesNotParseIsLeftAlone(): void {
     assert.throws(() => connect(harness, root, LAUNCH), /not valid JSON/, 'it refuses rather than writes');
     assert.equal(readFileSync(path, 'utf8'), damaged, 'and the file is exactly as it was');
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    sweep(root);
   }
 }
 
@@ -427,7 +428,7 @@ function testDetectionNeverReachesOutOfTheProject(): void {
       true,
     );
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    sweep(root);
   }
 }
 
@@ -496,7 +497,7 @@ function testEveryCandidateCarriesWhyItIsOffered(): void {
       );
     }
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    sweep(root);
   }
 }
 
@@ -525,7 +526,7 @@ function testAHarnessIsDetectedByItsOwnDirectory(): void {
     mkdirSync(dirname(configPath(harness, root)), { recursive: true });
     assert.ok(detect(root).includes(harness), 'its directory is enough');
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    sweep(root);
   }
 }
 
@@ -543,7 +544,7 @@ function testAHarnessWeCannotWriteIsNeverWrittenTo(): void {
       assert.ok(shown.includes('/opt/godot/godot'), `${harness.id} carries this machine's engine path`);
       assert.ok(!existsSync(written.path), `${harness.id} left its config alone`);
     } finally {
-      rmSync(root, { recursive: true, force: true });
+      sweep(root);
     }
   }
 }
@@ -584,7 +585,7 @@ function testATomlConfigIsWrittenAndCarriesTheGodotPath(): void {
     assert.match(left, /^# mine$/m, 'theirs is not');
     assert.match(left, /^\[tools]$/m);
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    sweep(root);
   }
 }
 
@@ -616,7 +617,7 @@ function testAYamlConfigKeepsItsComments(): void {
     assert.match(left, /# theirs, do not touch/, 'their comment is not');
     assert.match(left, /^\s+other:$/m, 'nor their server');
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    sweep(root);
   }
 }
 
@@ -639,7 +640,7 @@ function testAConfigWeCannotEditIsDescribedRatherThanTouched(): void {
     assert.equal(disconnect(local, root).action, 'manual');
     assert.equal(readFileSync(path, 'utf8'), theirs, 'removal leaves it alone too');
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    sweep(root);
   }
 }
 
@@ -672,7 +673,7 @@ function testRemovingTakesOnlyOurEntry(): void {
     assert.deepEqual(config['somethingElse'], { kept: true }, 'and so does a key we know nothing about');
     assert.equal(SERVER_KEY in servers, false, 'ours is gone');
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    sweep(root);
   }
 }
 
@@ -689,7 +690,7 @@ function testAFileThatHeldOnlyUsIsDeleted(): void {
     assert.equal(removal.action, 'deleted');
     assert.equal(existsSync(written.path), false, 'the file goes with the entry');
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    sweep(root);
   }
 }
 
@@ -715,7 +716,7 @@ function testThereIsNothingToReportWhenWeWereNeverThere(): void {
     assert.equal(disconnect(harness, root).action, 'absent', 'and one we could never have written to');
     assert.equal(readFileSync(path, 'utf8'), '{ not json at all', 'which is left exactly as it was');
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    sweep(root);
   }
 }
 

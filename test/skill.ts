@@ -8,7 +8,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { HARNESSES, harnessById } from '../src/harnesses.js';
@@ -21,6 +21,7 @@ import {
   writeSkill,
 } from '../src/skill.js';
 import { TOOL_SPECS } from '../src/tool-definitions.js';
+import { sweep } from './support/sweep.js';
 
 function project(): string {
   return mkdtempSync(join(tmpdir(), 'gdharness-skill-'));
@@ -126,7 +127,7 @@ function testItLandsWhereTheChosenHarnessesLook(): void {
       join(root, cursor.skills.dir, SKILL_NAME),
     ]);
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    sweep(root);
   }
 }
 
@@ -160,7 +161,7 @@ function testRewritingLeavesNothingStaleBehind(): void {
       'and the version it records is the new one',
     );
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    sweep(root);
   }
 }
 
@@ -191,7 +192,7 @@ function testRemovingTakesOurDirectoriesAndNobodyElses(): void {
 
     assert.deepEqual(removeSkill(directories, root), [], 'removing twice reports nothing the second time');
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    sweep(root);
   }
 }
 
@@ -209,7 +210,7 @@ function testAnotherSkillBesideOursSurvives(): void {
     assert.equal(existsSync(theirs), true, 'their skill is untouched');
     assert.equal(existsSync(join(root, SHARED_SKILLS)), true, 'and the directory holding it stays');
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    sweep(root);
   }
 }
 

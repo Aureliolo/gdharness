@@ -9,7 +9,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 
@@ -21,6 +21,7 @@ import { GameLog } from '../src/game-log.js';
 import { MalformedReportError, parseJUnit } from '../src/junit.js';
 import { isWithinRoot, resolveWithinProject } from '../src/paths.js';
 import { parseProjectGodot } from '../src/resources.js';
+import { sweep } from './support/sweep.js';
 import { buildZip, DEFLATED, STORED, type ZipEntrySpec } from './support/zip.js';
 
 const WINDOWS = process.platform === 'win32';
@@ -507,7 +508,7 @@ function inTemp(body: (dir: string) => void): void {
   try {
     body(dir);
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    sweep(dir);
   }
 }
 
