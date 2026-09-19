@@ -6,6 +6,17 @@ extends Node
 const Read = preload("../reading.gd")
 const Serialisation = preload("../serialisation.gd")
 
+# What each packed array holds, for the four whose elements are not types JSON has. A polygon is
+# written as a list of pairs, and only the property knows that each pair is a Vector2 rather than a
+# list of two numbers: without being told, every element was read as itself and the engine turned
+# the lot into zeroes on the way into the property.
+const PACKED_ELEMENTS: Dictionary = {
+	TYPE_PACKED_VECTOR2_ARRAY: TYPE_VECTOR2,
+	TYPE_PACKED_VECTOR3_ARRAY: TYPE_VECTOR3,
+	TYPE_PACKED_VECTOR4_ARRAY: TYPE_VECTOR4,
+	TYPE_PACKED_COLOR_ARRAY: TYPE_COLOR,
+}
+
 var _editor_plugin: EditorPlugin = null
 var _values: Serialisation = Serialisation.new()
 
@@ -15,6 +26,10 @@ var _values: Serialisation = Serialisation.new()
 var _scans_finished: int = 0
 var _scans_finished_at_request: int = 0
 var _scan_pending: bool = false
+
+## Why the value being parsed cannot be written, when the parse is what found out. Set while a
+## resource is built out of a tagged dictionary and read by the write that asked for it.
+var _refused: String = ""
 
 
 func set_editor_plugin(plugin: EditorPlugin) -> void:
@@ -119,7 +134,10 @@ func _parse_value(value: Variant, expected_type: int = TYPE_NIL) -> Variant:
 	if value is Array:
 		var items: Array = value
 		return _parse_array(items, expected_type)
-	return value
+	# The same fitting the running game does, so "2.5" written to a float property here and there
+	# mean the same thing. It leaves a value it cannot fit alone rather than casting it, which is
+	# what lets the write be refused instead of landing as whatever the cast produced.
+	return _values.fitted(value, expected_type)
 
 
 ## A dictionary carrying its own type name, as the serialiser writes it.
@@ -165,7 +183,13 @@ func _parse_new_resource(type_tag: String, value: Dictionary) -> Array:
 		var property: String = str(key)
 		if property == "_type" or property == "type":
 			continue
-		built.set(property, _parse_value(value[key], typeof(built.get(property))))
+		var wanted: int = typeof(built.get(property))
+		var fitted: Variant = _parse_value(value[key], wanted)
+		var refusal: String = _cannot_hold(built.get_class(), property, fitted, wanted)
+		if not refusal.is_empty():
+			_refused = refusal
+			return [true, null]
+		built.set(property, fitted)
 	return [true, built]
 
 
@@ -187,6 +211,14 @@ func _parse_shaped_dictionary(value: Dictionary, expected_type: int) -> Variant:
 		TYPE_VECTOR3I:
 			if value.has("x") and value.has("y") and value.has("z"):
 				return Vector3i(Read.as_int(value["x"]), Read.as_int(value["y"]), Read.as_int(value["z"]))
+		TYPE_VECTOR4:
+			if value.has("x") and value.has("y") and value.has("z") and value.has("w"):
+				return Vector4(
+					Read.as_float(value["x"]),
+					Read.as_float(value["y"]),
+					Read.as_float(value["z"]),
+					Read.as_float(value["w"])
+				)
 		TYPE_COLOR:
 			if value.has("r") and value.has("g") and value.has("b"):
 				return Color(
@@ -211,6 +243,10 @@ func _parse_shaped_dictionary(value: Dictionary, expected_type: int) -> Variant:
 
 ## An array, either positional for a vector the property declares, or a list to parse per item.
 func _parse_array(value: Array, expected_type: int) -> Variant:
+	if PACKED_ELEMENTS.has(expected_type):
+		var element: int = PACKED_ELEMENTS[expected_type]
+		return value.map(func(item: Variant) -> Variant: return _parse_value(item, element))
+
 	match expected_type:
 		TYPE_VECTOR2:
 			if value.size() >= 2:
@@ -224,6 +260,22 @@ func _parse_array(value: Array, expected_type: int) -> Variant:
 		TYPE_VECTOR3I:
 			if value.size() >= 3:
 				return Vector3i(Read.as_int(value[0]), Read.as_int(value[1]), Read.as_int(value[2]))
+		TYPE_VECTOR4:
+			if value.size() >= 4:
+				return Vector4(
+					Read.as_float(value[0]),
+					Read.as_float(value[1]),
+					Read.as_float(value[2]),
+					Read.as_float(value[3])
+				)
+		TYPE_COLOR:
+			if value.size() >= 3:
+				return Color(
+					Read.as_float(value[0]),
+					Read.as_float(value[1]),
+					Read.as_float(value[2]),
+					Read.as_float(value[3]) if value.size() >= 4 else 1.0
+				)
 	return value.map(func(item: Variant) -> Variant: return _parse_value(item))
 
 
@@ -264,7 +316,46 @@ func _set_node_properties(node: Node, properties: Dictionary) -> String:
 			node.set(property, load(path))
 			continue
 
-		node.set(property, _parse_value(raw, expected_type))
+		_refused = ""
+		var fitted: Variant = _parse_value(raw, expected_type)
+		# A resource built on the way in refuses through _refused, because it is built inside the
+		# parse and there is nowhere in a parsed value to put the reason it is wrong.
+		if not _refused.is_empty():
+			return _refused
+		var refusal: String = _cannot_hold(node.get_class(), property, fitted, expected_type)
+		if not refusal.is_empty():
+			return refusal
+		node.set(property, fitted)
+	return ""
+
+
+## Why [param property] cannot be given [param value], or "" when it can.
+##
+## Object.set converts rather than refuses, and the conversion is silent and lossy: a word written
+## to an int property is stored as 0, to a bool as true, to a Vector2 as (0, 0). The scene is then
+## saved holding a value nobody asked for and the tool reports the change as made, which is worse
+## than refusing and worse than failing, because there is nothing anywhere to read afterwards that
+## says the value is not the one that was sent.
+func _cannot_hold(holder: String, property: String, value: Variant, expected_type: int) -> String:
+	var held: String = type_string(expected_type)
+	var cost: String = " Setting it would save a different value than the one asked for."
+	if not Serialisation.acceptable(value, expected_type):
+		var shape: String = "%s.%s is %s and the value given is %s, which cannot become one."
+		return shape % [holder, property, held, type_string(typeof(value))] + cost
+
+	# And the same question of each element, because a list is accepted for a packed array whatever
+	# is in it: a polygon written as [{"x": 1}] passes the check above and lands as one zero vector.
+	var element: int = Read.as_int(PACKED_ELEMENTS.get(expected_type, TYPE_NIL), TYPE_NIL)
+	if element == TYPE_NIL or not value is Array:
+		return ""
+	var items: Array = value
+	for index: int in items.size():
+		if not Serialisation.acceptable(items[index], element):
+			var shape: String = "%s.%s is %s and item %d of the list given is %s, not %s."
+			var named: Array = [
+				holder, property, held, index, type_string(typeof(items[index])), type_string(element)
+			]
+			return shape % named + cost
 	return ""
 
 
