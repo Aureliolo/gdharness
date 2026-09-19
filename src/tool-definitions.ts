@@ -710,7 +710,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'editor_launch',
     description:
-      'Opens the Godot editor on a project, in a window on this machine, or restarts the one already connected. An editor goes on serving the addon it read at startup, so restart is what puts a gdharness upgrade into effect; it saves open scenes on the way out and answers with the version that came back. Only an editor with a window can be restarted, because the engine hands back none of the arguments it was started with. editor_status says which editor is connected and whether it is holding an old addon.',
+      'Opens the Godot editor on a project, in a window on this machine, or restarts the one already connected. An editor goes on serving the addon it read at startup, so restart is what puts a gdharness upgrade into effect; it saves open scenes on the way out and answers with the version that came back. Only an editor with a window can be restarted, because the engine hands back none of the arguments it was started with. editor_status says which editor is connected and whether it is holding an old addon. A restart saves project.godot on the way out, and Godot writes only what differs from its own defaults, so a key named deliberately at its default value is dropped: settingsDropped names any that went, because nothing else will say so until something depends on one.',
     parameters: { projectPath: PROJECT_PATH },
     requires: [],
     operations: {
