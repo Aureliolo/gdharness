@@ -67,6 +67,45 @@ export function projectStructure(projectPath: string): ProjectStructure {
   return structure;
 }
 
+/** The extensions Godot mints a `.uid` sidecar for. */
+const CARRIES_A_UID = new Set(['gd', 'shader', 'gdshader']);
+
+/**
+ * The scripts and shaders with no `.uid` beside them, project-relative and sorted.
+ *
+ * A file added since the last import has no sidecar, and nothing about the file itself says so:
+ * the engine mints one when it walks the project, and until then every reference to that script by
+ * UID has nothing to resolve. Counting them is a question about the directory, so it is answered
+ * here rather than by booting an engine to look.
+ */
+export function scriptsWithoutUid(projectPath: string): string[] {
+  const found: string[] = [];
+  const visit = (directory: string, prefix: string): void => {
+    if (steppedOver(directory)) {
+      return;
+    }
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      if (skipped(entry.name)) {
+        continue;
+      }
+      const spelled = prefix === '' ? entry.name : `${prefix}/${entry.name}`;
+      if (entry.isDirectory()) {
+        visit(join(directory, entry.name), spelled);
+        continue;
+      }
+      if (!entry.isFile()) {
+        continue;
+      }
+      const extension = entry.name.split('.').pop()?.toLowerCase() ?? '';
+      if (CARRIES_A_UID.has(extension) && !existsSync(join(directory, `${entry.name}.uid`))) {
+        found.push(spelled);
+      }
+    }
+  };
+  visit(projectPath, '');
+  return found.sort();
+}
+
 export interface SearchOptions {
   readonly query: string;
   readonly fileTypes: readonly string[];

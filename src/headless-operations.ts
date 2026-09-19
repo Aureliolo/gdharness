@@ -29,7 +29,6 @@ export const HEADLESS_OPERATIONS: Readonly<Record<string, Readonly<Record<string
     set_options: 'set_import_options',
     reimport: 'reimport_resource',
     uid: 'get_uid',
-    refresh_uids: 'resave_resources',
     refresh_classes: 'refresh_class_cache',
   }),
   project_export: dictionary({ list: 'list_export_presets' }),
@@ -40,6 +39,19 @@ export const HEADLESS_OPERATIONS: Readonly<Record<string, Readonly<Record<string
     info: 'query_class_info',
     inheritance: 'inspect_inheritance',
   }),
+});
+
+/**
+ * Ops that are a headless engine boot with no operations script: the engine's own passes.
+ *
+ * Kept apart from the table above because that one maps an op to a command the operations script
+ * answers, and a guard holds it to that on both sides. These have no such command and never could:
+ * minting a `.uid` is something only the engine's import does, so an op that promises one has to be
+ * that boot rather than a script asking the engine nicely. Still headless, so the reference lists
+ * them with the rest.
+ */
+export const ENGINE_PASSES: Readonly<Record<string, Readonly<Record<string, string>>>> = dictionary({
+  project_import: dictionary({ refresh_uids: 'import' }),
 });
 
 /**
