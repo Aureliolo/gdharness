@@ -19,6 +19,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 import { WebSocket } from 'ws';
 import { pullRequestNumbers, shipsToUsers } from '../scripts/release-notes.js';
+import { sharedCopies } from '../scripts/sync-shared-gd.js';
 import { announcementPath, BRIDGE_ANNOUNCE_PROTOCOL, readAnnouncement } from '../src/bridge-announce.js';
 import { staleClassNames, unseenByEditor } from '../src/class-cache.js';
 import { GodotDAPClient } from '../src/dap_client.js';
@@ -235,10 +236,12 @@ function testSceneToolsVectorRegression(): void {
       'src/godot/addons/gdharness_editor/tools/scene_tools.gd',
       join(projectDir, 'addons', 'gdharness_editor', 'tools', 'scene_tools.gd'),
     );
-    cpSync(
-      'src/godot/addons/gdharness_editor/reading.gd',
-      join(projectDir, 'addons', 'gdharness_editor', 'reading.gd'),
-    );
+    for (const shared of ['reading.gd', 'serialisation.gd']) {
+      cpSync(
+        join('src', 'godot', 'addons', 'gdharness_editor', shared),
+        join(projectDir, 'addons', 'gdharness_editor', shared),
+      );
+    }
 
     writeFileSync(
       join(projectDir, 'project.godot'),
@@ -5311,43 +5314,32 @@ function testEveryAddonScriptKeepsItsIdentity(): void {
 }
 
 /**
- * Each copied helper answers the same everywhere it was copied to.
+ * Each shared helper is byte for byte the original it was copied from.
  *
- * `reading.gd` lives three times and `serialisation.gd` twice, once beside the operations and once
- * inside each addon that uses it, because an addon is installed as a directory and cannot preload
- * out of one. Copies of one conversion with nothing holding them together is how an argument comes
- * back as a number in the editor and as zero in an exported game, and the call that exposes it is
- * the one that went to the copy nobody edited. The serialiser matters twice over, because the same
- * setting can be asked of the editor or of the file and the two answers compared: spelled one way
- * here and another there, they would read as a disagreement about a value they agree about.
+ * `reading.gd` and `serialisation.gd` each live beside the operations and again inside both addons,
+ * because an addon is installed as a directory and cannot preload out of one. Copies of one
+ * conversion with nothing holding them together is how an argument comes back as a number in the
+ * editor and as zero in an exported game, and the call that exposes it is the one that went to the
+ * copy nobody edited. The serialiser matters twice over, because the same setting can be asked of
+ * the editor or of the file and the two answers compared: spelled one way here and another there,
+ * they would read as a disagreement about a value the two sides agree about.
  *
- * The comments differ by design, each saying where that copy sits; the code may not.
+ * `bun run sync:gd` writes the copies, so what this asks is that somebody ran it.
  */
 function testTheCopiedHelperReadsTheSameEverywhere(): void {
-  const copied: Readonly<Record<string, readonly string[]>> = {
-    'src/godot/operations/reading.gd': [
-      'src/godot/addons/gdharness_editor/reading.gd',
-      'src/godot/addons/gdharness_runtime/reading.gd',
-    ],
-    'src/godot/operations/serialisation.gd': ['src/godot/addons/gdharness_editor/serialisation.gd'],
-  };
-  const code = (path: string): string =>
-    readFileSync(path, 'utf8')
-      .split(/\r?\n/)
-      .filter((line) => line.trim() !== '' && !line.trim().startsWith('#'))
-      .join('\n');
+  const copies = sharedCopies();
+  assert.ok(copies.length >= 4, `only ${copies.length} copies were listed, so this proved little`);
 
-  for (const [original, copies] of Object.entries(copied)) {
-    const wanted = code(original);
-    assert.ok(copies.length > 0, `${original} is listed here with nothing copied from it`);
+  for (const { original, copy } of copies) {
+    const wanted = readFileSync(original, 'utf8');
     assert.match(wanted, /^(?:static )?func /m, `${original} should hold the code this compares`);
-    assert.ok(
-      wanted.split('\n').length >= 30,
-      `${original} came back as ${wanted.split('\n').length} lines of code`,
+    assert.ok(wanted.split('\n').length >= 30, `${original} is ${wanted.split('\n').length} lines`);
+    assert.equal(
+      readFileSync(copy, 'utf8'),
+      wanted,
+      `${copy} has drifted from ${original}: run bun run sync:gd`,
     );
-    for (const copy of copies) {
-      assert.equal(code(copy), wanted, `${copy} has drifted from ${original}`);
-    }
+    assert.ok(existsSync(`${copy}.uid`), `${copy} ships without the .uid that names it`);
   }
 }
 

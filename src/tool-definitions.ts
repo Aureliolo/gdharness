@@ -108,7 +108,7 @@ const NODE_PATH: JsonSchema = {
 const PROPERTIES: JsonSchema = {
   type: 'object',
   description:
-    'Properties to set, keyed by Godot property name. Vectors, colours and the like may be written as {"x": 1, "y": 2} or tagged {"_type": "Vector2", "x": 1, "y": 2}.',
+    'Properties to set, keyed by Godot property name. Vectors, colours and the like may be written as {"x": 1, "y": 2} or tagged {"_type": "Vector2", "x": 1, "y": 2}, which is the form a read answers with, so a value read off one node can be written straight to another.',
   additionalProperties: true,
 };
 const XY: JsonSchema = {

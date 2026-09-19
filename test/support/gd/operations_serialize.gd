@@ -6,13 +6,19 @@ extends SceneTree
 
 const Serialisation = preload("res://operations/serialisation.gd")
 
+## The types that are described rather than rebuilt, because nothing can send one back.
+const DESCRIBED: Array[int] = [TYPE_OBJECT, TYPE_RID, TYPE_CALLABLE, TYPE_SIGNAL]
+
 var failures: Array[String] = []
 var values: Serialisation = Serialisation.new()
+var samples: Dictionary = {}
 
 
 func _init() -> void:
+	samples = _samples()
 	_check_serialize()
 	_check_deserialize()
+	_check_every_type()
 
 	if failures.is_empty():
 		print(JSON.stringify({"ok": true}))
@@ -160,3 +166,108 @@ func _check_deserialize() -> void:
 	var unknown: Dictionary = {"_type": "Nonesuch", "x": 1}
 	if values.deserialize_value(unknown) != unknown:
 		_fail("unknown tag: %s" % str(values.deserialize_value(unknown)))
+
+
+## Every type the engine has, carried through JSON and back.
+##
+## JSON does not refuse a value it cannot carry: it writes the value's own text and moves on, so a
+## type nobody added to the table came back as a string that reads like an answer and cannot be
+## read back. A Polygon2D's points were "[(1.0, 2.0), (3.0, 4.0)]" and a Quaternion "(0, 0, 0, 1)".
+##
+## The engine's own type count is what is walked, rather than a list kept here, because a list kept
+## here is the mistake this exists to catch. A type with no sample below fails rather than being
+## skipped, so an engine that grows one says so.
+func _check_every_type() -> void:
+	for kind: int in range(TYPE_MAX):
+		if DESCRIBED.has(kind):
+			_check_described(kind)
+			continue
+
+		if not samples.has(kind):
+			_fail("%s has no sample, so nothing says whether it survives JSON" % type_string(kind))
+			continue
+		var original: Variant = samples[kind]
+
+		var carried: Variant = JSON.parse_string(JSON.stringify({"v": values.serialize_value(original)}))
+		var held: Dictionary = carried
+		var rebuilt: Variant = type_convert(values.deserialize_value(held["v"]), kind)
+		if var_to_str(rebuilt) != var_to_str(original):
+			_fail(
+				(
+					"%s did not survive JSON: sent %s, wire %s, back %s"
+					% [
+						type_string(kind),
+						var_to_str(original),
+						JSON.stringify(held["v"]),
+						var_to_str(rebuilt)
+					]
+				)
+			)
+
+
+## The types that describe rather than rebuild: an object, a bound method, a signal and a resource
+## id are all things a caller can be told about and none of them can be sent back. What is asked of
+## these is that the answer is a tagged description rather than the engine's own text for them.
+func _check_described(kind: int) -> void:
+	if not samples.has(kind):
+		_fail("%s has no sample" % type_string(kind))
+		return
+	var original: Variant = samples[kind]
+	var serialised: Variant = values.serialize_value(original)
+	if not serialised is Dictionary:
+		_fail("%s flattened to %s" % [type_string(kind), JSON.stringify(serialised)])
+		return
+	var described: Dictionary = serialised
+	if str(described.get("_type", "")).is_empty():
+		_fail("%s came back untagged: %s" % [type_string(kind), JSON.stringify(described)])
+
+
+## A value of each type, chosen so that a serialiser answering with a default would be caught: a
+## Vector2 that came back as the zero vector is indistinguishable from one that was never read.
+##
+## One table rather than a branch per type, because a branch per type is forty exits out of one
+## function and the linter is right about that.
+func _samples() -> Dictionary:
+	return {
+		TYPE_NIL: null,
+		TYPE_BOOL: true,
+		TYPE_INT: 42,
+		TYPE_FLOAT: 1.5,
+		TYPE_STRING: "text",
+		TYPE_VECTOR2: Vector2(1.5, -2.5),
+		TYPE_VECTOR2I: Vector2i(3, -4),
+		TYPE_RECT2: Rect2(1, 2, 3, 4),
+		TYPE_RECT2I: Rect2i(5, 6, 7, 8),
+		TYPE_VECTOR3: Vector3(1, 2, 3),
+		TYPE_VECTOR3I: Vector3i(4, 5, 6),
+		TYPE_TRANSFORM2D: Transform2D(Vector2(1, 2), Vector2(3, 4), Vector2(5, 6)),
+		TYPE_VECTOR4: Vector4(1, 2, 3, 4),
+		TYPE_VECTOR4I: Vector4i(5, 6, 7, 8),
+		TYPE_PLANE: Plane(Vector3(0, 1, 0), 3.5),
+		TYPE_QUATERNION: Quaternion(0.1, 0.2, 0.3, 0.9),
+		TYPE_AABB: AABB(Vector3(1, 2, 3), Vector3(4, 5, 6)),
+		TYPE_BASIS: Basis(Vector3(1, 2, 3), Vector3(4, 5, 6), Vector3(7, 8, 9)),
+		TYPE_TRANSFORM3D:
+		Transform3D(Basis(Vector3(1, 2, 3), Vector3(4, 5, 6), Vector3(7, 8, 9)), Vector3(9, 8, 7)),
+		TYPE_PROJECTION:
+		Projection(Vector4(1, 2, 3, 4), Vector4(5, 6, 7, 8), Vector4(9, 1, 2, 3), Vector4(4, 5, 6, 7)),
+		TYPE_COLOR: Color(0.25, 0.5, 0.75, 0.5),
+		TYPE_STRING_NAME: &"walk",
+		TYPE_NODE_PATH: NodePath("Root/Child"),
+		TYPE_DICTIONARY: {"where": Vector2(1, 2)},
+		TYPE_ARRAY: [Vector2(1, 2), "plain"],
+		TYPE_PACKED_BYTE_ARRAY: PackedByteArray([1, 2, 250]),
+		TYPE_PACKED_INT32_ARRAY: PackedInt32Array([1, -2]),
+		TYPE_PACKED_INT64_ARRAY: PackedInt64Array([3, -4]),
+		TYPE_PACKED_FLOAT32_ARRAY: PackedFloat32Array([1.5, -2.5]),
+		TYPE_PACKED_FLOAT64_ARRAY: PackedFloat64Array([3.5, -4.5]),
+		TYPE_PACKED_STRING_ARRAY: PackedStringArray(["a", "b"]),
+		TYPE_PACKED_VECTOR2_ARRAY: PackedVector2Array([Vector2(1, 2), Vector2(3, 4)]),
+		TYPE_PACKED_VECTOR3_ARRAY: PackedVector3Array([Vector3(1, 2, 3)]),
+		TYPE_PACKED_COLOR_ARRAY: PackedColorArray([Color(1, 0, 0, 1)]),
+		TYPE_PACKED_VECTOR4_ARRAY: PackedVector4Array([Vector4(1, 2, 3, 4)]),
+		TYPE_OBJECT: RefCounted.new(),
+		TYPE_RID: RID(),
+		TYPE_CALLABLE: Callable(self, "_samples"),
+		TYPE_SIGNAL: Signal(self, "process_frame"),
+	}
