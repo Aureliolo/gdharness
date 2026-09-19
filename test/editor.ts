@@ -747,6 +747,16 @@ async function testAValueTheSceneCannotHoldIsRefused({ call, refusal, project }:
     'an element that is not a point should be refused, naming which one',
   );
 
+  // The file, not the tool. Every assertion above reads a refusal the tool handed back, and a
+  // refusal that refused and saved anyway satisfies all of them: the caller is told no while the
+  // scene on disk is the one they were told they had not written. A downstream project reached
+  // for `git status` after the same refusal for the same reason, and the file is the only place
+  // that question can be asked.
+  const untouched = fileText(project, 'fixture.tscn');
+  assert.doesNotMatch(untouched, /z_index = 0/, `no int was stored for the word: ${untouched}`);
+  assert.doesNotMatch(untouched, /polygon = PackedVector2Array\(0, 0/, 'and no zero vectors were');
+  assert.match(untouched, /\[node name="Guarded" type="Polygon2D"/, 'while the node itself is there');
+
   // And what the guard lets through: a number for a number, and points written the short way,
   // which is the form a caller writes by hand and the one that used to land as zeroes.
   await call(

@@ -2851,8 +2851,18 @@ class GodotServer {
     if (!game.throughEditor || !this.dapClient) {
       return;
     }
+    // Drained before the connection is judged, because the buffer outlives the socket: a close
+    // that arrived between two calls still has the lines that came before it.
     for (const line of this.dapClient.getOutput(true)) {
       game.log.append('stdout', line.endsWith('\n') ? line : `${line}\n`);
+    }
+    // An adapter that has gone is the only source an editor-played run has, and losing it is
+    // silent from here: getOutput answers nothing, which is the same nothing a run between prints
+    // gives. So a long run went on being reported clean with no entries and nothing saying the
+    // console had stopped arriving, while the game's own log had every line. Silence that could
+    // mean two things is recorded as the one it is.
+    if (!this.dapClient.isConnected()) {
+      game.consoleLost = true;
     }
     this.recordWhatItBrokeOn(game);
   }
@@ -3096,7 +3106,26 @@ class GodotServer {
    * answer says so rather than presenting a short log as the whole run.
    */
   private async pickUpWhatTheEditorIsPlaying(): Promise<void> {
-    if (this.activeProcess !== null || !this.godotBridge.isConnected()) {
+    if (!this.godotBridge.isConnected()) {
+      return;
+    }
+    const going = this.activeProcess;
+    if (going !== null) {
+      // An editor-played run whose adapter has gone, with the editor still playing it. Reconnected
+      // here rather than left silent: the gap is already recorded and cannot be filled, and the
+      // alternative to trying is a run that prints for another hour into nothing.
+      if (going.throughEditor && going.consoleLost === true && (await this.editorPlayingState())?.playing) {
+        try {
+          await this.dap().connect();
+          // The flag stays set. It says the log has a hole in it, which reconnecting does not
+          // fill: whatever was printed while nobody was holding the console is gone for good, and
+          // a caller reading the lines either side of this marker would otherwise read them as
+          // consecutive.
+          going.log.append('stdout', '[gdharness] the debug adapter was reconnected here\n');
+        } catch (error) {
+          this.logDebug(`Could not reconnect the adapter for a playing run: ${errorMessage(error)}`);
+        }
+      }
       return;
     }
     const playing = await this.editorPlayingState();
@@ -3364,6 +3393,12 @@ class GodotServer {
         'The editor was already playing this when this server reached it, so this is not the run from its start: what it printed before that went with the server that was listening then. It is the run the editor is holding now, which is the one the debug_* tools answer for.',
       );
     }
+    if (run.consoleLost === true) {
+      const back = this.dapClient?.isConnected() === true;
+      notes.push(
+        `The debug adapter this run's console arrives over went away while the run was going, so what is below has a hole in it and the counts are of what was heard rather than of what was printed. ${back ? 'It is connected again, and the line marking where is in the log.' : 'It is still gone, so nothing further will arrive here.'} The project's own user://logs/godot.log has the rest, and "no entries" here means "not heard" rather than a quiet run.`,
+      );
+    }
     // Which of the two silences this is. A run gdharness ended and a run that stopped being there
     // print the same nothing and answer with the same exit code, and the difference is the whole
     // question when a bench dies mid-measurement: one of them is this tool's doing and is on the
@@ -3405,7 +3440,13 @@ class GodotServer {
       pid: run.pid,
       errors: run.log.count('error'),
       warnings: run.log.count('warning'),
-      clean: run.log.count('error') === 0,
+      // Undefined rather than true once the console has gone, because clean is a claim about the
+      // run and this is a count of what was heard. A verdict read off a source that stopped
+      // arriving is the wrong answer said confidently, and clean is the field a gate reads.
+      clean: run.consoleLost === true ? undefined : run.log.count('error') === 0,
+      // Said as its own field as well as in the note, so a caller checking one value has one to
+      // check: absent means the console was arriving throughout.
+      consoleLost: run.consoleLost === true ? true : undefined,
       heldAt: halt,
       // Which of the two ways of not running this is, since they call for different things. A
       // run that ended while nothing was watching printed everything below and then stopped
