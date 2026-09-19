@@ -5759,6 +5759,109 @@ async function testAScanThatHasNotStartedIsNotFinished(): Promise<void> {
 }
 
 /**
+ * A scan that could only shorten the class cache is refused rather than run.
+ *
+ * The editor writes the cache at the end of a scan from the list it is holding, not from the files.
+ * So an editor blind to a class the cache holds writes a cache without it, over the correct one,
+ * and the loss surfaces in the next engine to read it as an unknown identifier in a file nobody
+ * touched. Downstream, an editor that had been short of the file since it started lost six classes
+ * to one rescan and needed a `project_import refresh_classes` to get them back.
+ *
+ * Reporting that afterwards was the first half. The outcome is knowable before the scan: the
+ * editor's own list is readable, the cache is readable, and a class in one and not the other is a
+ * class the scan will drop. Scanning cannot help, because the walk that skips it is the fault, so
+ * there is nothing to do with the knowledge but refuse.
+ *
+ * Both halves are asserted here. That no scan was asked for is the finding, and a scan that does
+ * run sits beside it, because a server that had stopped asking for scans at all would satisfy the
+ * first on its own.
+ */
+async function testAScanThatCouldOnlyLoseClassesIsRefused(): Promise<void> {
+  const port = await reservePort();
+  const server = new ServerProcess({ env: { GDHARNESS_BRIDGE_PORT: String(port) } });
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-shortening-'));
+  let editor: WebSocket | null = null;
+  try {
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    mkdirSync(join(project, '.godot'), { recursive: true });
+    writeFileSync(join(project, 'hero.gd'), 'class_name Hero\nextends Node\n');
+    writeFileSync(join(project, 'squire.gd'), 'class_name Squire\nextends Node\n');
+    writeFileSync(
+      join(project, '.godot', 'global_script_class_cache.cfg'),
+      'list=[{\n"class": &"Hero",\n"path": "res://hero.gd"\n}, {\n"class": &"Squire",\n"path": "res://squire.gd"\n}]\n',
+    );
+
+    await server.initialize('regression-test');
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+    editor = socket;
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', () => {
+        resolve();
+      });
+      socket.once('error', reject);
+    });
+
+    let scans = 0;
+    // The editor is holding one of the two classes the cache holds, which is the state that
+    // costs the other one. Told to hold both, the same editor is one a scan is safe on.
+    let holds = ['Hero'];
+    socket.on('message', (raw: Buffer) => {
+      const message: unknown = JSON.parse(String(raw));
+      if (!isRecord(message) || message['type'] !== 'tool_invoke') {
+        return;
+      }
+      const tool = String(message['tool']);
+      const args = isRecord(message['args']) ? message['args'] : {};
+      // The polls that follow a scan carry statusOnly and start nothing, so counting them would
+      // say a scan happened when what happened was a look at one.
+      if (tool === 'rescan_filesystem' && args['statusOnly'] !== true) {
+        scans += 1;
+      }
+      const result =
+        tool === 'rescan_filesystem'
+          ? { ok: true, scanning: false, importing: false, pending: false }
+          : { ok: true, classes: holds };
+      socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result }));
+    });
+    socket.send(
+      JSON.stringify({ type: 'godot_ready', project_path: project, addon_version: SERVER_VERSION }),
+    );
+
+    let knows = false;
+    for (let waited = 0; waited < 10_000 && !knows; waited += 100) {
+      await delay(100);
+      const status = await server.request('tools/call', { name: 'editor_status', arguments: {} });
+      knows = text(get(parseTextContent(status), 'editor', 'projectPath')) === project;
+    }
+    assert.ok(knows, 'the fixture editor should have reached the server, or this proves nothing');
+
+    const refused = await server.request('tools/call', {
+      name: 'editor_rescan',
+      arguments: { projectPath: project },
+    });
+    const said = textOf(refused) ?? JSON.stringify(refused);
+    assert.match(said, /Squire/, `the class it would drop is named: ${said}`);
+    assert.match(said, /editor_launch restart/, `with the one thing that gets it back: ${said}`);
+    assert.equal(scans, 0, `and no scan was asked for: ${said}`);
+
+    // The same call on an editor holding both, which is what says the refusal is about the state
+    // rather than about this server having stopped scanning.
+    holds = ['Hero', 'Squire'];
+    const scanned = await server.request('tools/call', {
+      name: 'editor_rescan',
+      arguments: { projectPath: project },
+    });
+    const answer = parseTextContent(scanned);
+    assert.equal(get(answer, 'ok'), true, `the scan runs when it can only help: ${textOf(scanned)}`);
+    assert.equal(scans, 1, `and it was asked for exactly once: ${textOf(scanned)}`);
+  } finally {
+    editor?.terminate();
+    await server.stop();
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
  * Every fixture in this file is in the list below.
  *
  * The list is written by hand, so a fixture can be added and left out of it, and nothing says so:
@@ -5817,6 +5920,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheProjectWalksAgreeAboutWhatIsInIt,
   testClassesAnEditorIsNotHolding,
   testAScanThatHasNotStartedIsNotFinished,
+  testAScanThatCouldOnlyLoseClassesIsRefused,
   testProjectDefaultsToTheWorkingDirectory,
   testAnAutoloadGitWillNotCarry,
   testVersionOrdering,

@@ -3413,8 +3413,25 @@ class GodotServer {
     // engine to read it as an unknown identifier in a file nobody touched.
     const before = projectPath === '' ? null : cachedClasses(projectPath);
     const writtenBefore = projectPath === '' ? null : cacheWrittenAt(projectPath);
-    const blind = projectPath === '' ? { unseen: [] } : await this.classesTheEditorCannotSee(args);
+    const blind = await this.classesTheEditorCannotSee(args);
     const atRisk = before === null ? [] : blind.unseen.filter((one) => before.has(one.className));
+
+    // Refused rather than scanned, because the outcome is already known: the editor writes the
+    // cache from the list it is holding, these classes are in the cache and not in that list, so
+    // the scan can only write a shorter file. Reporting the loss afterwards costs the caller a
+    // recovery call and leaves every engine that read the cache in between wrong about the
+    // project. The editor does not pick them up by scanning, which is the whole of the fault: its
+    // walk skips a file another engine has already imported, so only a restart reloads the list.
+    if (atRisk.length > 0) {
+      const names = atRisk.map((one) => one.className).sort();
+      return this.createErrorResponse(
+        `This editor is not holding ${names.length === 1 ? 'a class' : `${names.length} classes`} the class cache holds: ${names.join(', ')}. A scan writes the cache from the list the editor is holding, so it would drop ${names.length === 1 ? 'it' : 'them'} and every engine reading the cache next, a test run included, would report ${names.length === 1 ? 'it' : 'them'} as an unknown identifier in a file nobody touched.`,
+        [
+          'editor_launch restart reloads the list, and a rescan after that keeps them',
+          'project_import refresh_classes writes the cache from the files, which is what a run needs, and does not need the editor',
+        ],
+      );
+    }
 
     const first = await this.handleViaBridge('rescan_filesystem', args);
     if (first.isError) {
@@ -3442,9 +3459,12 @@ class GodotServer {
     }
 
     // The write lands after the scan says it has finished, so reading the file the moment the
-    // editor goes idle reads the one that is about to be replaced. Waited for only where it can
-    // cost something: an editor holding every class the cache holds writes the same file back.
-    if (!busy && atRisk.length > 0) {
+    // editor goes idle reads the one that is about to be replaced. Waited for only when the
+    // editor would not say what it is holding, because that is the only way past the refusal
+    // above: an editor that answered holds every class the cache holds, so whatever it writes
+    // keeps all of them and reading the old file or the new one gives the same list either way.
+    // Unanswered, there is no such guarantee and the file has to be read after the write.
+    if (!busy && projectPath !== '' && blind.unchecked !== undefined) {
       const until = Date.now() + CACHE_WRITE_MS;
       while (Date.now() < until && cacheWrittenAt(projectPath) === writtenBefore) {
         await new Promise((settle) => setTimeout(settle, 100));
