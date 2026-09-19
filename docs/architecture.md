@@ -476,6 +476,16 @@ Which tools this covers is worth knowing, because `project_settings get` reads l
 config file and is not: it starts an engine so that a setting nobody wrote into `project.godot`
 still answers with the default the engine registers for it.
 
+That engine is the file's reading, and an open editor holds a different one: what it has been told,
+including changes nobody has saved. `project_settings get` takes `from` to choose between them.
+`disk` is the default and is the only reading a push gate can use, because it needs no editor and
+any machine reproduces it. `editor` costs no engine start and answers what the editor is holding,
+and asking for it with no editor connected is refused rather than answered from the file, because
+an answer that silently changed its source is one the caller cannot tell from the one they asked
+for. Both readings run their values through the same serialiser, so a `Vector2` comes back spelled
+the same either way and a caller can compare the two. Only reads take the argument: a write goes
+to the file whichever way it is phrased, so there is nothing to choose between.
+
 `--path` also makes that project's GDScript warning levels the ones the operations script is
 compiled under, although the file lives in gdharness's own package and not in the project at all.
 Godot's escape hatch does not reach it: `debug/gdscript/warnings/directory_rules` exempts paths

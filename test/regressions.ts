@@ -25,7 +25,7 @@ import { GodotDAPClient } from '../src/dap_client.js';
 import { dictionary, emptyRecord } from '../src/dictionary.js';
 import { forAnswer, GameLog } from '../src/game-log.js';
 import { CONNECT_WINDOW_MS, createBridge, mayYetConnect } from '../src/godot-bridge.js';
-import { HEADLESS_OPERATIONS } from '../src/headless-operations.js';
+import { EDITOR_READS, HEADLESS_OPERATIONS } from '../src/headless-operations.js';
 import {
   editorArguments,
   envValue,
@@ -1626,8 +1626,15 @@ async function testToolAndOpLookupsCannotReachThePrototype(): Promise<void> {
       const unknownOp = await call('scene_node', { projectPath: '/p', scenePath: 'a.tscn', op: name });
       assert.match(unknownOp, /has no op/, `${name} must not resolve to an op`);
 
+      // Named as a section rather than merely refused, because every one of these is refused by
+      // something: what this asks is that it was turned away for not being a section, with the
+      // sections there are listed beside it, rather than reaching the table and finding a function.
       const unknownSection = await call('project_info', { projectPath: process.cwd(), include: [name] });
-      assert.match(unknownSection, /cannot include/, `${name} must not resolve to a section`);
+      assert.match(
+        unknownSection,
+        /autoloads, plugins, export_presets, audio_buses, health, validation/,
+        `${name} must not resolve to a section`,
+      );
     }
   });
 }
@@ -4809,7 +4816,12 @@ function testEveryDispatchedNameExistsOnBothSides(): void {
     'editor commands',
     25,
   );
-  const bridged = namesSent(/(?:[Bb]ridge|invokeTool)\(\s*'([a-z_]+)'/g, 'editor commands', 25);
+  // Most are sent by name at the call; the ones a caller reaches with `from: "editor"` are sent
+  // out of a table, so the table is where they are read from rather than the source around it.
+  const bridged = new Set([
+    ...namesSent(/(?:[Bb]ridge|invokeTool)\(\s*'([a-z_]+)'/g, 'editor commands', 25),
+    ...Object.values(EDITOR_READS).flatMap((ops) => Object.values(ops)),
+  ]);
   for (const command of bridged) {
     assert.ok(addon.has(command), `the server sends ${command}, which the editor addon has not`);
   }
@@ -5299,6 +5311,241 @@ function testEveryAddonScriptKeepsItsIdentity(): void {
 }
 
 /**
+ * Each copied helper answers the same everywhere it was copied to.
+ *
+ * `reading.gd` lives three times and `serialisation.gd` twice, once beside the operations and once
+ * inside each addon that uses it, because an addon is installed as a directory and cannot preload
+ * out of one. Copies of one conversion with nothing holding them together is how an argument comes
+ * back as a number in the editor and as zero in an exported game, and the call that exposes it is
+ * the one that went to the copy nobody edited. The serialiser matters twice over, because the same
+ * setting can be asked of the editor or of the file and the two answers compared: spelled one way
+ * here and another there, they would read as a disagreement about a value they agree about.
+ *
+ * The comments differ by design, each saying where that copy sits; the code may not.
+ */
+function testTheCopiedHelperReadsTheSameEverywhere(): void {
+  const copied: Readonly<Record<string, readonly string[]>> = {
+    'src/godot/operations/reading.gd': [
+      'src/godot/addons/gdharness_editor/reading.gd',
+      'src/godot/addons/gdharness_runtime/reading.gd',
+    ],
+    'src/godot/operations/serialisation.gd': ['src/godot/addons/gdharness_editor/serialisation.gd'],
+  };
+  const code = (path: string): string =>
+    readFileSync(path, 'utf8')
+      .split(/\r?\n/)
+      .filter((line) => line.trim() !== '' && !line.trim().startsWith('#'))
+      .join('\n');
+
+  for (const [original, copies] of Object.entries(copied)) {
+    const wanted = code(original);
+    assert.ok(copies.length > 0, `${original} is listed here with nothing copied from it`);
+    assert.match(wanted, /^(?:static )?func /m, `${original} should hold the code this compares`);
+    assert.ok(
+      wanted.split('\n').length >= 30,
+      `${original} came back as ${wanted.split('\n').length} lines of code`,
+    );
+    for (const copy of copies) {
+      assert.equal(code(copy), wanted, `${copy} has drifted from ${original}`);
+    }
+  }
+}
+
+/**
+ * `from` is offered exactly where there is an editor to ask.
+ *
+ * The schema says which ops take the argument and `EDITOR_READS` says which ops the editor can
+ * answer, and they are written in different files. Offered where there is no editor side, a caller
+ * reads the schema, asks for the editor and is refused by something they had every reason to think
+ * would work; missing where there is one, the editor's answer is unreachable and the entry is dead.
+ */
+function testTheEditorIsOfferedWhereItCanAnswer(): void {
+  const offered = new Set<string>();
+  for (const spec of TOOL_SPECS) {
+    if (spec.parameters['from'] === undefined) {
+      continue;
+    }
+    for (const op of Object.keys(spec.operations ?? {})) {
+      if (opTakes(spec, op, 'from')) {
+        offered.add(`${spec.name} ${op}`);
+      }
+    }
+  }
+  const answerable = new Set(
+    Object.entries(EDITOR_READS).flatMap(([tool, ops]) => Object.keys(ops).map((op) => `${tool} ${op}`)),
+  );
+  assert.ok(answerable.size >= 1, 'no op has an editor side, so this compared two empty sets');
+  assert.deepEqual([...offered].sort(), [...answerable].sort());
+}
+
+/**
+ * A read asked of the editor is refused rather than answered from disk.
+ *
+ * The two are not the same reading, which is the whole reason for saying which one you want: disk
+ * is what the file holds, the editor is what it has been told, unsaved changes and all. Answering
+ * from disk when no editor is there would be the file's answer wearing the editor's name, and the
+ * caller would have nothing to tell them apart by.
+ */
+async function testAReadAskedOfTheEditorIsNotAnsweredFromDisk(): Promise<void> {
+  const server = new ServerProcess();
+  try {
+    await server.initialize('regression-test');
+    const asked = await server.request('tools/call', {
+      name: 'project_settings',
+      arguments: { projectPath: '/p', op: 'get', setting: 'application/config/name', from: 'editor' },
+    });
+    const refused = textOf(asked) ?? JSON.stringify(asked);
+    assert.match(refused, /no editor has reached this server/, `it says why it cannot: ${refused}`);
+    assert.match(refused, /from: "disk"/, `and what to pass to read the file instead: ${refused}`);
+
+    // Beside it, the same question with nothing said about where: it goes to disk, gets as far as
+    // the project and stops there. Without this the fixture is satisfied by a server that refuses
+    // everything, which is what a broken one does.
+    const unasked = await server.request('tools/call', {
+      name: 'project_settings',
+      arguments: { projectPath: '/p', op: 'get', setting: 'application/config/name' },
+    });
+    const went = textOf(unasked) ?? JSON.stringify(unasked);
+    assert.match(went, /Not a Godot project: \/p/, `the default reading is disk: ${went}`);
+  } finally {
+    await server.stop();
+  }
+}
+
+/**
+ * The editor answers for the project it has open, and a call naming another one is told so.
+ *
+ * An editor has one project open and no way to look in a second, so it answers about its own
+ * whatever path the call names. A server with no project of its own takes whichever editor reaches
+ * it, which is every server configured by port alone, and from then on a call naming another
+ * project was served from the open one: the caller read their own project's name back in an answer
+ * describing somebody else's scenes. The bridge already turns away an editor from elsewhere on the
+ * way in; this is the same rule read from the caller's end.
+ */
+async function testTheEditorAnswersOnlyForItsOwnProject(): Promise<void> {
+  const port = await reservePort();
+  const server = new ServerProcess({ env: { GDHARNESS_BRIDGE_PORT: String(port) } });
+  const open = join(tmpdir(), 'gdharness-editor-has-this');
+  const elsewhere = join(tmpdir(), 'gdharness-editor-has-not');
+  let editor: WebSocket | null = null;
+  try {
+    await server.initialize('regression-test');
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+    editor = socket;
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', () => {
+        resolve();
+      });
+      socket.once('error', reject);
+    });
+
+    const asked: string[] = [];
+    socket.on('message', (raw: Buffer) => {
+      const message: unknown = JSON.parse(String(raw));
+      if (!isRecord(message) || message['type'] !== 'tool_invoke') {
+        return;
+      }
+      asked.push(String(message['tool']));
+      socket.send(
+        JSON.stringify({
+          type: 'tool_result',
+          id: message['id'],
+          success: true,
+          result: { ok: true, nodes: [], answered_by: 'the fixture editor' },
+        }),
+      );
+    });
+    socket.send(JSON.stringify({ type: 'godot_ready', project_path: open, addon_version: SERVER_VERSION }));
+
+    let knows = false;
+    for (let waited = 0; waited < 10_000 && !knows; waited += 100) {
+      await delay(100);
+      const status = await server.request('tools/call', { name: 'editor_status', arguments: {} });
+      knows = text(get(parseTextContent(status), 'editor', 'projectPath')) === open;
+    }
+    assert.ok(knows, 'the fixture editor should have told the server its project, or this proves nothing');
+
+    const other = await server.request('tools/call', {
+      name: 'scene_tree',
+      arguments: { projectPath: elsewhere, scenePath: 'res://main.tscn' },
+    });
+    const refused = textOf(other) ?? JSON.stringify(other);
+    assert.match(refused, /the editor on this bridge has/, `the refusal names the open project: ${refused}`);
+    assert.match(refused, /gdharness-editor-has-not/, `and the one that was asked for: ${refused}`);
+    assert.equal(
+      asked.includes('list_scene_nodes'),
+      false,
+      'and the editor was never asked about a project it cannot see',
+    );
+
+    // Beside it, the project the editor does have: the same call reaches the editor and comes back
+    // with the editor's own answer. Without this the fixture is satisfied by a bridge that refuses
+    // everything, which is what a broken one does.
+    const its = await server.request('tools/call', {
+      name: 'scene_tree',
+      arguments: { projectPath: open, scenePath: 'res://main.tscn' },
+    });
+    assert.equal(
+      text(get(parseTextContent(its), 'answered_by')),
+      'the fixture editor',
+      `the editor's own project is served: ${textOf(its) ?? JSON.stringify(its)}`,
+    );
+    assert.deepEqual(
+      asked.filter((one) => one === 'list_scene_nodes'),
+      ['list_scene_nodes'],
+      'and the call reached the editor exactly once',
+    );
+  } finally {
+    editor?.terminate();
+    await server.stop();
+  }
+}
+
+/**
+ * A value outside the set its schema lists is refused rather than quietly replaced by the default.
+ *
+ * It is the quietest of the argument faults: the name is right and the type is right, so every
+ * check before this one passes it, and then the code reads a word it does not know and takes the
+ * default. `direction: "reversed"` answered with what the resource depends on, which is the
+ * opposite question, and the answer said `"direction": ""` in a field nobody reads.
+ */
+async function testAnUnlistedValueIsRefusedRatherThanDefaulted(): Promise<void> {
+  const server = new ServerProcess();
+  try {
+    await server.initialize('regression-test');
+    const misspelled = await server.request('tools/call', {
+      name: 'project_dependencies',
+      arguments: { projectPath: '/p', resourcePath: 'res://a.tscn', direction: 'reversed' },
+    });
+    const refused = textOf(misspelled) ?? JSON.stringify(misspelled);
+    assert.match(refused, /direction as one of forward, reverse/, `the refusal lists the set: ${refused}`);
+    assert.match(refused, /not "reversed"/, `and quotes what arrived: ${refused}`);
+
+    // The spelling the schema does list is not refused at all: it reaches the project and stops
+    // where every call with a project that is not there stops.
+    const spelled = await server.request('tools/call', {
+      name: 'project_dependencies',
+      arguments: { projectPath: '/p', resourcePath: 'res://a.tscn', direction: 'reverse' },
+    });
+    const reached = textOf(spelled) ?? JSON.stringify(spelled);
+    assert.match(reached, /Not a Godot project: \/p/, `a listed value is not refused: ${reached}`);
+
+    // A set listed on the elements of a list is checked per element and named by where it sits. One
+    // good section beside one typo is the call that would otherwise answer with the good one and
+    // never mention that the other was thrown away.
+    const sections = await server.request('tools/call', {
+      name: 'project_info',
+      arguments: { projectPath: '/p', include: ['plugins', 'plugin'] },
+    });
+    const named = textOf(sections) ?? JSON.stringify(sections);
+    assert.match(named, /include\[1\] as one of/, `the stray element is named by position: ${named}`);
+    assert.doesNotMatch(named, /include\[0\]/, `and the good one is not: ${named}`);
+  } finally {
+    await server.stop();
+  }
+}
+
+/**
  * Every fixture in this file is in the list below.
  *
  * The list is written by hand, so a fixture can be added and left out of it, and nothing says so:
@@ -5334,6 +5581,11 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEntryWithNoDetailDoesNotCarryAnEmptyOne,
   testEveryShippedAddonIsInstalled,
   testEveryAddonScriptKeepsItsIdentity,
+  testTheCopiedHelperReadsTheSameEverywhere,
+  testTheEditorIsOfferedWhereItCanAnswer,
+  testAReadAskedOfTheEditorIsNotAnsweredFromDisk,
+  testTheEditorAnswersOnlyForItsOwnProject,
+  testAnUnlistedValueIsRefusedRatherThanDefaulted,
   testEveryFixtureIsCalled,
   testBothEndsAgreeAboutTheAnnouncement,
   testASupersededServerStandsDown,

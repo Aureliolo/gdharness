@@ -1037,6 +1037,79 @@ async function testTheClassCheckKnowsWhichProjectItIsAbout({ call, project }: Ed
 }
 
 /**
+ * A setting read from the editor rather than from the file, and the two disagreeing on purpose.
+ *
+ * `from: "editor"` exists because the two readings are not the same: the file is what a check with
+ * nobody's window open can reproduce, and the editor is what it has been told. Asserting only that
+ * the editor answers would be satisfied by a server that quietly read the file and called it the
+ * editor's, which is exactly the ambiguity the argument was added to remove, so the file is changed
+ * underneath the editor first and then both are asked. Whether an editor ever picks a change up on
+ * its own is the engine's business; what is asserted is that the two answers come from two places,
+ * and the editor's is the one it was holding.
+ */
+async function testASettingReadFromTheEditor({ call, refusal, project }: Editor): Promise<void> {
+  const named = 'application/config/description';
+  const written = 'what only the file says';
+
+  const before = await call('project_settings', {
+    projectPath: project,
+    op: 'get',
+    setting: named,
+    from: 'editor',
+  });
+  assert.equal(get(before, 'exists'), true, `the editor should hold the setting: ${text(before)}`);
+  assert.equal(asString(get(before, 'value')), '', `and it opened with nothing in it: ${text(before)}`);
+
+  // Headless, so the file changes and the open editor is never told.
+  await call('project_settings', { projectPath: project, op: 'set', setting: named, value: written });
+  assert.match(
+    readFileSync(join(project, 'project.godot'), 'utf8'),
+    new RegExp(written),
+    'the write should have reached the file',
+  );
+
+  const fromDisk = await call('project_settings', { projectPath: project, op: 'get', setting: named });
+  assert.equal(asString(get(fromDisk, 'value')), written, `disk reads the file: ${text(fromDisk)}`);
+
+  const fromEditor = await call('project_settings', {
+    projectPath: project,
+    op: 'get',
+    setting: named,
+    from: 'editor',
+  });
+  assert.equal(
+    asString(get(fromEditor, 'value')),
+    '',
+    `the editor answers with what it is holding: ${text(fromEditor)}`,
+  );
+
+  // The prefix form comes back with the type of each, which is the half a name hides: a family of
+  // levels can hold a bool, and a level written over it looks like it worked.
+  const family = await call('project_settings', {
+    projectPath: project,
+    op: 'get',
+    prefix: 'debug/gdscript/warnings/',
+    from: 'editor',
+  });
+  const settings = asArray(get(family, 'settings') ?? []);
+  assert.ok(settings.length > 40, `the editor should list the whole family: ${settings.length}`);
+  const kinds = new Set(settings.map((one) => asString(get(one, 'type'))));
+  assert.ok(kinds.has('int'), `the levels are ints: ${[...kinds].join(', ')}`);
+  assert.ok(kinds.has('bool'), `and enable is not: ${[...kinds].join(', ')}`);
+
+  // An op with no editor to ask is refused rather than answered from the file under the editor's
+  // name, which is the whole of what the argument promises.
+  const refused = await refusal('project_settings', {
+    projectPath: project,
+    op: 'set',
+    setting: named,
+    value: 'x',
+    from: 'editor',
+  });
+  assert.match(refused, /does not take from/, `a write has no editor reading to choose: ${refused}`);
+}
+
+/**
  * The language server tools, which answer from the editor's own server rather than from the addon.
  *
  * Both scripts are driven, the one that parses and the one that does not. A diagnostics tool
@@ -1902,6 +1975,7 @@ async function main(): Promise<void> {
     await testAClassTheEditorCannotSee(editor);
     await testAScanWritesTheCacheFromTheEditor(editor);
     await testTheClassCheckKnowsWhichProjectItIsAbout(editor);
+    await testASettingReadFromTheEditor(editor);
     await testLanguageServer(editor);
     await testDebugging(editor);
     await testRuntime(editor);

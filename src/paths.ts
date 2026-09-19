@@ -1,3 +1,4 @@
+import { realpathSync } from 'node:fs';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 
 /**
@@ -46,6 +47,15 @@ export type Containment =
     }
   | { readonly ok: false; readonly reason: string };
 
+/** The path with every symlink on it resolved, or the path itself when there is nothing there. */
+export function realPathOr(path: string): string {
+  try {
+    return realpathSync.native(path);
+  } catch {
+    return path;
+  }
+}
+
 /**
  * Whether two paths name the same directory.
  *
@@ -55,11 +65,16 @@ export type Containment =
  * between two spellings of one directory. `relative` settles every one of them and answers the
  * empty string when there is no step between them.
  *
+ * Symlinks are resolved first, unlike everywhere else in this file, because both sides name a
+ * directory that exists: a macOS temporary directory is reached as `/var/folders` and reported by
+ * the engine as `/private/var/folders`, and the two are one directory. A path with nothing there
+ * is compared as written, which is the old arithmetic and the right answer for it.
+ *
  * Containment is the wrong question here. A project inside another project is a different project,
  * and this is asked where the answer decides whether two sides belong together.
  */
 export function isSameDirectory(onePath: string, otherPath: string): boolean {
-  return relative(resolve(onePath), resolve(otherPath)) === '';
+  return relative(realPathOr(resolve(onePath)), realPathOr(resolve(otherPath))) === '';
 }
 
 /** Whether `candidatePath` is `rootPath` or sits underneath it. */
