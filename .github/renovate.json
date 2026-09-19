@@ -8,6 +8,8 @@
   ],
   "timezone": "Europe/Zurich",
   "schedule": ["before 6am on monday"],
+  "description": "The dependency dashboard is off. It is an issue that never closes, so it sits on the tracker looking like work nobody is doing, and this project reads an open issue as something still to finish. It carried nothing the weekly pull request does not: the raises arrive on schedule either way, and `bun outdated` answers the same question on demand.",
+  "dependencyDashboard": false,
   "rangeStrategy": "pin",
   "separateMajorMinor": false,
   "commitMessageAction": "Raise",
