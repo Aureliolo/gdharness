@@ -18,6 +18,19 @@ of the real runtime directory was checked by watching that directory not grow, w
 had stopped starting servers satisfies exactly as well. Assert the record it did write, then that
 it wrote it nowhere else.
 
+A disarm that still passes is a statement about the setup before it is one about the check. The
+fixture reached the assertion without walking the line that was broken, so the reading to reject
+first is that the assertion is too weak: strengthening it only buys a fixture that fails for a
+second reason it also never reaches. Ask instead which step stood between the setup and the broken
+line. Two ways it happens here. The setup tidies away the state the fault needs, so the answer is
+the same either way: a decoy run record written to the wrong runtime directory left the disarmed
+server with nothing to pick up, so it said "No game is running" and the pass proved only that the
+directory was empty. Or the setup hands over the state the deciding line would have computed, so
+the line is never walked: three fixtures ahead of the console timing one each opened a session on
+the debug adapter as a side effect, and a session stays open for the life of the server, so what
+ran first decided what the timing case measured. Fix the setup and disarm again. Only a disarm that
+fails has told you anything about the check.
+
 Disarming a containment guard is the one disarm that can escape while it is disarmed. Give the
 disarmed run somewhere harmless to escape to before running it.
 
