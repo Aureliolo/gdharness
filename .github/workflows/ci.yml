@@ -22,7 +22,7 @@ jobs:
   # Formatting is mechanical and always enforceable, so it gates from day one.
   format:
     name: format
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
 
     steps:
@@ -44,7 +44,7 @@ jobs:
   # TypeScript in front of it.
   gdscript:
     name: gdscript
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
 
     steps:
@@ -107,7 +107,7 @@ jobs:
   # it is installed the way gdtoolkit is above.
   yaml:
     name: yaml
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
 
     steps:
@@ -158,7 +158,7 @@ jobs:
         include:
           - platform: linux
             # renovate: datasource=github-runners depName=ubuntu
-            runner: ubuntu-26.04
+            runner: ubuntu-24.04
           - platform: windows
             # renovate: datasource=github-runners depName=windows
             runner: windows-2025
@@ -229,7 +229,7 @@ jobs:
   # lights rather than one.
   lint:
     name: lint
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
 
     steps:
@@ -259,7 +259,7 @@ jobs:
 
   build-and-test:
     name: build-and-test
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
 
     steps:
