@@ -50,8 +50,8 @@ import { errorMessage, Refusal } from './errors.js';
 import { forAnswer, GameLog, type LogEntry } from './game-log.js';
 import { type GodotBridge, getDefaultBridge, mayYetConnect } from './godot-bridge.js';
 import { GodotLocator } from './godot-path.js';
-import { type HeadlessOutcome, runOperation } from './headless.js';
-import { EDITOR_READS, HEADLESS_OPERATIONS } from './headless-operations.js';
+import { type HeadlessOutcome, runImport, runOperation } from './headless.js';
+import { EDITOR_READS, ENGINE_PASSES, HEADLESS_OPERATIONS } from './headless-operations.js';
 import { defectReport, feedbackNotice } from './issues.js';
 import { orphansPrinted, parseJUnit, type TestReport, whyNoReport } from './junit.js';
 import {
@@ -67,7 +67,7 @@ import { DEFAULT_LSP_PORT, GodotLSPClient, handleLSPTool } from './lsp_client.js
 import { isSameDirectory, realPathOr, resolveWithinProject } from './paths.js';
 import { freePort, portFromEnvOrNull } from './ports.js';
 import { cpuSecondsOf } from './process-time.js';
-import { projectStructure, searchProject } from './project-scan.js';
+import { projectStructure, scriptsWithoutUid, searchProject } from './project-scan.js';
 import { parseProjectGodot, settingKeys, setupResourceHandlers } from './resources.js';
 import {
   clearRunRecord,
@@ -1222,6 +1222,9 @@ class GodotServer {
    * `op` is empty for a tool that has none.
    */
   private async dispatch(tool: string, op: string, args: OperationParams): Promise<ToolResponse> {
+    if (ENGINE_PASSES[tool]?.[op] !== undefined) {
+      return await this.handleRefreshUids(args);
+    }
     const headless = HEADLESS_OPERATIONS[tool]?.[op];
     if (headless !== undefined) {
       // Asked of the editor instead, when the caller said so. The two are not the same reading and
@@ -1703,6 +1706,56 @@ class GodotServer {
     }
     const { op: _op, projectPath: _projectPath, ...params } = contained.value;
     return this.answer(await this.operation(operation, params, project.value.path));
+  }
+
+  /**
+   * Gives every script and shader a current UID, by running the engine's own import pass.
+   *
+   * This used to load every scene and resave it, which is the one thing it must not do. Outside the
+   * editor that round trip writes a header the engine rebuilt from what it could see, so `load_steps`
+   * went and, worse, so did the scene's own `uid=`: an op whose whole purpose is keeping UID
+   * references resolvable was deleting the UID that other resources point at, in every scene in the
+   * project, on a call that named none of them. It reported `scripts_resaved` for those saves too,
+   * while `ResourceSaver.save` on a script answers OK headlessly and writes no sidecar at all, so
+   * the count said a UID had been made whenever none had.
+   *
+   * The import pass is what mints a `.uid`, and it leaves scenes byte for byte as they were. What is
+   * reported is read off the directory either side of it rather than counted as the engine goes,
+   * because the sidecar being there afterwards is the only thing a caller actually wanted to know.
+   */
+  private async handleRefreshUids(args: OperationParams): Promise<ToolResponse> {
+    const project = this.project(args);
+    if (!project.ok) {
+      return project.response;
+    }
+    const engine = await this.engine();
+    if (!engine.ok) {
+      return this.createErrorResponse('No Godot executable found.');
+    }
+    const projectPath = project.value.path;
+
+    const before = scriptsWithoutUid(projectPath);
+    const imported = await runImport(engine.value, projectPath);
+    if (!imported.ok) {
+      return this.answer(imported);
+    }
+    const after = scriptsWithoutUid(projectPath);
+    const given = before.filter((script) => !after.includes(script));
+
+    return this.answer({
+      ok: true,
+      messages: imported.messages,
+      payload: {
+        uidsCreated: given,
+        stillWithoutUid: after,
+        // Said rather than implied: the op resaved every scene for as long as it existed, so a
+        // caller who knows it by its diff needs telling that the diff is the bug and is gone.
+        note:
+          after.length > 0
+            ? `${after.length} still have no .uid, which is the engine declining to import them rather than this op skipping them. No scene was written.`
+            : 'No scene was written: this reads the project and imports it, and does not resave anything.',
+      },
+    });
   }
 
   private async operation(

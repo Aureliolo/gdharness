@@ -777,18 +777,19 @@ function testOperations(godotPath: string, projectDir: string): void {
   assert.equal(get(known, 'classes', 'FixtureHero', 'path'), 'res://made/hero.gd');
   assert.equal(get(known, 'classes', 'Stale'), undefined, 'the stale entry is gone');
 
-  // The resave walks the project and writes every scene and script back.
-  assert.equal(get(operation('get_uid', { resource_path: 'made/hero.gd' }), 'exists'), false);
-  const resaved = operation('resave_resources', {});
-  assert.ok(asNumber(get(resaved, 'scenes_saved')) > 0, 'the fixture scene should be resaved');
-  assert.equal(get(resaved, 'scenes_with_errors'), 0);
-  assert.ok(asNumber(get(resaved, 'scripts_resaved')) > 0, 'the scripts in the project should be resaved');
-  // Measured on 4.7.2: outside the editor ResourceSaver answers OK and writes no .uid
-  // sidecar, so a script that had none still has none. The count above is resaves, not UIDs.
-  assert.equal(
-    get(operation('get_uid', { resource_path: 'made/hero.gd' }), 'exists'),
-    false,
-    'a headless resave cannot mint a UID, and saying it did would be the lie to catch',
+  // A script the engine has never imported has no .uid beside it, and the answer says which of the
+  // two it is rather than returning an empty string for both. This used to sit next to a call to
+  // resave_resources, which walked the project writing every scene and script back: the assertion
+  // here recorded that the resave minted no UID, while the assertion above it took that same
+  // operation's `scripts_resaved` count as correct. Both were true about the engine and the pair
+  // was still wrong, because nothing asked what a caller reads `scripts_resaved: 1` as meaning.
+  const absent = operation('get_uid', { resource_path: 'made/hero.gd' });
+  assert.equal(get(absent, 'exists'), false);
+  assert.equal(get(absent, 'file'), 'res://made/hero.gd');
+  assert.match(
+    String(get(absent, 'message')),
+    /refresh_uids/,
+    'and it names the op that makes one, since that is the next thing the caller wants',
   );
 
   // Plugins: the shipped addons are installed and none is enabled until one is asked for.

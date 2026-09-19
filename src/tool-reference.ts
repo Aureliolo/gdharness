@@ -5,7 +5,7 @@
  * so neither can describe a tool the server does not have or miss one it does.
  */
 
-import { HEADLESS_OPERATIONS } from './headless-operations.js';
+import { ENGINE_PASSES, HEADLESS_OPERATIONS } from './headless-operations.js';
 import { argumentsOf, TOOL_SPECS } from './tool-definitions.js';
 
 /** What a schema's `type` is called in prose, for the one argument or two that take either. */
@@ -31,9 +31,13 @@ export function namedType(declared: unknown): string {
  * or a new one that is, cannot leave this paragraph quietly wrong.
  */
 function headlessSection(): string[] {
-  const byTool = Object.entries(HEADLESS_OPERATIONS)
-    .map(([tool, ops]) => `\`${tool}\` (${Object.keys(ops).join(', ')})`)
-    .sort();
+  const everyOp = new Map<string, string[]>();
+  for (const table of [HEADLESS_OPERATIONS, ENGINE_PASSES]) {
+    for (const [tool, ops] of Object.entries(table)) {
+      everyOp.set(tool, [...(everyOp.get(tool) ?? []), ...Object.keys(ops)]);
+    }
+  }
+  const byTool = [...everyOp].map(([tool, ops]) => `\`${tool}\` (${ops.join(', ')})`).sort();
   return [
     '## What a gate can call',
     '',
