@@ -45,6 +45,7 @@ import { parseProjectGodot, settingKeys } from '../src/resources.js';
 import {
   couldStillBeTheRecordedRun,
   judgeRun,
+  listeningPid,
   readRunRecord,
   recordRunEnded,
   runningAs,
@@ -3576,6 +3577,50 @@ function testOnlyOurOwnAutoloadIsRewritten(): void {
 }
 
 /**
+ * Who is listening on a port, which is what says a debug adapter is the connected editor's.
+ *
+ * Godot gives every editor the same debug adapter port by default, and the addon reports the port
+ * its editor's settings name rather than the one it managed to bind. Two editors opened by hand
+ * both answer 6006, one of them holds it, and nothing in the answer says which. A server that
+ * connects on that number reads a console belonging to another project, with every field of the
+ * reply well-formed. That is not a worry: a fixture in this file did it, to a real editor of
+ * another project on this machine, and read its game's output.
+ *
+ * What is asserted here is the reading itself, because the refusal built on it is only as good as
+ * this is, and because the answer that matters most is the one meaning "I cannot tell". Not knowing
+ * who holds a port has to stay distinct from knowing it is somebody else: the first is no grounds
+ * to refuse anything and the second is.
+ */
+async function testWhoIsHoldingAPortIsAskable(): Promise<void> {
+  const port = await reservePort();
+  assert.equal(listeningPid(port), null, 'a port nobody is listening on has no holder to name');
+
+  const held = createServer();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      held.once('error', reject);
+      held.listen(port, '127.0.0.1', () => {
+        resolve();
+      });
+    });
+    const holder = listeningPid(port);
+    // Null is allowed: a platform that will not say is a case this has to have, and reading it as
+    // "somebody else" would refuse every working setup on that platform.
+    if (holder !== null) {
+      assert.equal(holder, process.pid, 'and the holder of one this process took is this process');
+    } else {
+      console.log('port holder regression: this platform would not say who is listening');
+    }
+  } finally {
+    await new Promise<void>((resolve) => {
+      held.close(() => {
+        resolve();
+      });
+    });
+  }
+}
+
+/**
  * A setting the editor dropped on its way out is one the answer names.
  *
  * Godot writes only what differs from its own defaults, so a key a project names deliberately at
@@ -6249,6 +6294,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAShortenedCacheIsRebuilt,
   testTheEditorsRunIsTheOneAnsweredFor,
   testASettingTheEditorDroppedIsNamed,
+  testWhoIsHoldingAPortIsAskable,
   testProjectDefaultsToTheWorkingDirectory,
   testAnAutoloadGitWillNotCarry,
   testVersionOrdering,
