@@ -769,7 +769,11 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         summary: 'run the project until it quits or is stopped',
         requires: ['projectPath'],
       },
-      stop: { summary: 'end the run and answer with what it printed last', requires: [] },
+      stop: {
+        summary:
+          'end the run and answer with what it printed last, naming the process ended under endedPid: a game that started processes of its own keeps them',
+        requires: [],
+      },
       check: {
         summary: 'boot headless, quit after a few frames, and report the verdict',
         requires: ['projectPath'],

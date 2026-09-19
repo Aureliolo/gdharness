@@ -3656,10 +3656,16 @@ async function testARestartSaysWhatTheEditorDropped(): Promise<void> {
     const answer = parseTextContent(await restarting);
     const said = JSON.stringify(answer);
     assert.equal(get(answer, 'restarted'), true, said);
-    assert.deepEqual(
-      asArray(get(answer, 'settingsDropped') ?? []).map(String),
-      ['debug/gdscript/warnings/return_value_discarded'],
-      `the key the save took out is named: ${said}`,
+    const gone = asArray(get(answer, 'settingsDropped') ?? []);
+    assert.equal(gone.length, 1, `the key the save took out is named: ${said}`);
+    assert.equal(get(gone[0], 'setting'), 'debug/gdscript/warnings/return_value_discarded', said);
+    // The value with it, because the line it was on is not in the file any more: a caller told only
+    // the name has to go and find what it held somewhere that no longer holds it.
+    assert.equal(get(gone[0], 'was'), 0, `with the value it held: ${said}`);
+    assert.match(
+      text(get(answer, 'settingsNote')),
+      /project_settings set puts one back/,
+      `and the call that puts it back: ${said}`,
     );
     assert.match(
       text(get(answer, 'settingsNote')),
@@ -3749,20 +3755,20 @@ function testASettingTheEditorDroppedIsNamed(): void {
   const before = settingKeys(named);
   const after = settingKeys(saved);
   assert.deepEqual(
-    [...before].filter((key) => !after.has(key)),
-    ['debug/gdscript/warnings/return_value_discarded'],
-    'the key that went is named, with the section it was in',
+    [...before].filter(([key]) => !after.has(key)),
+    [['debug/gdscript/warnings/return_value_discarded', 0]],
+    'the key that went is named, with the section it was in and the value it held',
   );
   assert.ok(before.has('root/config_version'), 'a key outside any section is read as one too');
   assert.deepEqual(
-    [...after].filter((key) => !before.has(key)),
+    [...after].filter(([key]) => !before.has(key)),
     [],
     'and a save that only drops things adds nothing',
   );
   // The same file twice is the ordinary case and must name nothing, or every restart would report
   // a loss and the field would stop being read.
   assert.deepEqual(
-    [...before].filter((key) => !settingKeys(named).has(key)),
+    [...before].filter(([key]) => !settingKeys(named).has(key)),
     [],
     'a file that did not change reports no loss',
   );
