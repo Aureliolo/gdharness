@@ -4,8 +4,10 @@ extends Node
 ## Scenes and their nodes, edited in the open editor and read back from what it holds.
 
 const Read = preload("../reading.gd")
+const Serialisation = preload("../serialisation.gd")
 
 var _editor_plugin: EditorPlugin = null
+var _values: Serialisation = Serialisation.new()
 
 
 func set_editor_plugin(plugin: EditorPlugin) -> void:
@@ -110,66 +112,23 @@ func _parse_value(value: Variant, expected_type: int = TYPE_NIL) -> Variant:
 ## that names a type but lacks the keys to build it is left unhandled on purpose, so the caller
 ## can still read it against the type the property declares.
 func _parse_tagged_dictionary(value: Dictionary) -> Array:
-	var type_tag: String = ""
-	if value.has("type"):
-		type_tag = str(value["type"])
-	elif value.has("_type"):
-		type_tag = str(value["_type"])
+	var type_tag: String = str(value.get("_type", value.get("type", "")))
+	if type_tag == "Resource":
+		var resource_path: String = str(value.get("path", ""))
+		return [true, null if resource_path.is_empty() else load(resource_path)]
 
-	match type_tag:
-		"Vector2":
-			return [true, Vector2(Read.as_float(value.get("x", 0)), Read.as_float(value.get("y", 0)))]
-		"Vector3":
-			return [
-				true,
-				Vector3(
-					Read.as_float(value.get("x", 0)),
-					Read.as_float(value.get("y", 0)),
-					Read.as_float(value.get("z", 0))
-				)
-			]
-		"Color":
-			return [
-				true,
-				Color(
-					Read.as_float(value.get("r", 1), 1.0),
-					Read.as_float(value.get("g", 1), 1.0),
-					Read.as_float(value.get("b", 1), 1.0),
-					Read.as_float(value.get("a", 1), 1.0)
-				)
-			]
-		"Vector2i":
-			return [true, Vector2i(Read.as_int(value.get("x", 0)), Read.as_int(value.get("y", 0)))]
-		"Vector3i":
-			return [
-				true,
-				Vector3i(
-					Read.as_int(value.get("x", 0)),
-					Read.as_int(value.get("y", 0)),
-					Read.as_int(value.get("z", 0))
-				)
-			]
-		"Rect2":
-			return [
-				true,
-				Rect2(
-					Read.as_float(value.get("x", 0)),
-					Read.as_float(value.get("y", 0)),
-					Read.as_float(value.get("width", 0)),
-					Read.as_float(value.get("height", 0))
-				)
-			]
-		"Transform2D":
-			return _parse_transform2d(value)
-		"Transform3D":
-			return _parse_transform3d(value)
-		"NodePath":
-			return [true, NodePath(str(value.get("path", "")))]
-		"Resource":
-			var resource_path: String = str(value.get("path", ""))
-			return [true, null if resource_path.is_empty() else load(resource_path)]
-		_:
-			return _parse_new_resource(type_tag, value)
+	# The shared builder is the same one the answer was written by, so every shape it writes comes
+	# back as itself. `type` as the tag is read as `_type`: it is what this tool answered with
+	# before the serialisers were made one, and a caller who kept an answer can still send it.
+	var tagged: Dictionary = value
+	if not value.has("_type") and not type_tag.is_empty():
+		tagged = value.duplicate()
+		tagged["_type"] = type_tag
+	var rebuilt: Variant = _values.deserialize_value(tagged)
+	if not rebuilt is Dictionary:
+		return [true, rebuilt]
+
+	return _parse_new_resource(type_tag, value)
 
 
 ## A tag naming a Resource class builds a fresh one, its other keys set as properties, so a
@@ -191,47 +150,6 @@ func _parse_new_resource(type_tag: String, value: Dictionary) -> Array:
 			continue
 		built.set(property, _parse_value(value[key], typeof(built.get(property))))
 	return [true, built]
-
-
-func _parse_transform2d(value: Dictionary) -> Array:
-	if not (value.has("x") and value.has("y") and value.has("origin")):
-		return [false, null]
-
-	var basis_x: Dictionary = value["x"]
-	var basis_y: Dictionary = value["y"]
-	var origin: Dictionary = value["origin"]
-	return [
-		true,
-		Transform2D(
-			Vector2(Read.as_float(basis_x.get("x", 1), 1.0), Read.as_float(basis_x.get("y", 0))),
-			Vector2(Read.as_float(basis_y.get("x", 0)), Read.as_float(basis_y.get("y", 1), 1.0)),
-			Vector2(Read.as_float(origin.get("x", 0)), Read.as_float(origin.get("y", 0)))
-		)
-	]
-
-
-func _parse_transform3d(value: Dictionary) -> Array:
-	if not (value.has("basis") and value.has("origin")):
-		return [false, null]
-
-	var b: Dictionary = value["basis"]
-	var o: Dictionary = value["origin"]
-	var x: Dictionary = b.get("x", {})
-	var y: Dictionary = b.get("y", {})
-	var z: Dictionary = b.get("z", {})
-	var basis: Basis = Basis(
-		Vector3(
-			Read.as_float(x.get("x", 1), 1.0), Read.as_float(x.get("y", 0)), Read.as_float(x.get("z", 0))
-		),
-		Vector3(
-			Read.as_float(y.get("x", 0)), Read.as_float(y.get("y", 1), 1.0), Read.as_float(y.get("z", 0))
-		),
-		Vector3(Read.as_float(z.get("x", 0)), Read.as_float(z.get("y", 0)), Read.as_float(z.get("z", 1), 1.0))
-	)
-	var origin: Vector3 = Vector3(
-		Read.as_float(o.get("x", 0)), Read.as_float(o.get("y", 0)), Read.as_float(o.get("z", 0))
-	)
-	return [true, Transform3D(basis, origin)]
 
 
 ## A dictionary with no tag, read against the type the property declares. Falls back to the
@@ -297,54 +215,6 @@ func _get_property_type(node: Node, prop_name: String) -> int:
 		if str(prop.get("name", "")) == prop_name:
 			return Read.as_int(prop.get("type", TYPE_NIL), TYPE_NIL)
 	return TYPE_NIL
-
-
-func _serialize_value(value: Variant) -> Variant:
-	match typeof(value):
-		TYPE_VECTOR2:
-			return {"type": "Vector2", "x": value.x, "y": value.y}
-		TYPE_VECTOR3:
-			return {"type": "Vector3", "x": value.x, "y": value.y, "z": value.z}
-		TYPE_COLOR:
-			return {"type": "Color", "r": value.r, "g": value.g, "b": value.b, "a": value.a}
-		TYPE_VECTOR2I:
-			return {"type": "Vector2i", "x": value.x, "y": value.y}
-		TYPE_VECTOR3I:
-			return {"type": "Vector3i", "x": value.x, "y": value.y, "z": value.z}
-		TYPE_RECT2:
-			return {
-				"type": "Rect2",
-				"x": value.position.x,
-				"y": value.position.y,
-				"width": value.size.x,
-				"height": value.size.y
-			}
-		TYPE_NODE_PATH:
-			return {"type": "NodePath", "path": str(value)}
-		TYPE_TRANSFORM2D:
-			return {
-				"type": "Transform2D",
-				"x": {"x": value.x.x, "y": value.x.y},
-				"y": {"x": value.y.x, "y": value.y.y},
-				"origin": {"x": value.origin.x, "y": value.origin.y}
-			}
-		TYPE_TRANSFORM3D:
-			return {
-				"type": "Transform3D",
-				"basis":
-				{
-					"x": {"x": value.basis.x.x, "y": value.basis.x.y, "z": value.basis.x.z},
-					"y": {"x": value.basis.y.x, "y": value.basis.y.y, "z": value.basis.y.z},
-					"z": {"x": value.basis.z.x, "y": value.basis.z.y, "z": value.basis.z.z}
-				},
-				"origin": {"x": value.origin.x, "y": value.origin.y, "z": value.origin.z}
-			}
-		TYPE_OBJECT:
-			if value and value is Resource and value.resource_path:
-				return {"type": "Resource", "path": value.resource_path}
-			return null
-		_:
-			return value
 
 
 ## Set each property, answering with what went wrong or "" when nothing did.
@@ -431,7 +301,7 @@ func _build_node_tree(
 			var pn: String = str(p.get("name", ""))
 			if pn.is_empty():
 				continue
-			props[pn] = _serialize_value(node.get(pn))
+			props[pn] = _values.serialize_value(node.get(pn))
 		data["properties"] = props
 
 	if depth >= 0 and current_depth >= depth:
@@ -732,7 +602,7 @@ func get_node_properties(args: Dictionary) -> Dictionary:
 			var default_val: Variant = defaults.get(prop_name)
 			if current_val == default_val:
 				continue
-		props[prop_name] = _serialize_value(current_val)
+		props[prop_name] = _values.serialize_value(current_val)
 
 	if defaults:
 		defaults.queue_free()

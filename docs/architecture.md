@@ -486,6 +486,20 @@ for. Both readings run their values through the same serialiser, so a `Vector2` 
 the same either way and a caller can compare the two. Only reads take the argument: a write goes
 to the file whichever way it is phrased, so there is nothing to choose between.
 
+That serialiser is one file, copied into each addon by `bun run sync:gd` because an addon is
+installed as a directory and cannot preload out of one, and a fixture refuses a copy that has
+drifted. It used to be three, and the three disagreed: the same `Vector2` came back tagged `_type`
+from a headless read and `type` from the editor, and a `Rect2` came back as two corners from one
+and four numbers from the other. What is tagged is what JSON cannot carry. JSON does not refuse
+such a value, it writes the value's own text and moves on, so a `Polygon2D`'s points came back as
+the string `"[(1.0, 2.0), (3.0, 4.0)]"`, a `Quaternion` as `"(0, 0, 0, 1)"`, and each read like an
+answer while being unreadable back. Twenty-four of the engine's thirty-nine types were flattened
+that way and thirteen were handled, so the fixture walks the engine's own type list rather than a
+list kept here: every type is carried out through JSON and built back, and a type with no case
+fails rather than being skipped. What JSON does carry exactly is left alone, which is why a plugin
+list is still `["res://addons/x/plugin.cfg"]` rather than a wrapper around one; `type_convert`
+restores the exact packed type wherever the receiver knows which one it wanted.
+
 `--path` also makes that project's GDScript warning levels the ones the operations script is
 compiled under, although the file lives in gdharness's own package and not in the project at all.
 Godot's escape hatch does not reach it: `debug/gdscript/warnings/directory_rules` exempts paths
