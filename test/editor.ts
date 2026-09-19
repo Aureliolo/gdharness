@@ -1560,6 +1560,16 @@ async function testAMethodAddedToAnAnalysedTypeIsPickedUp({ call, project }: Edi
     `the dependent starts clean and analysed: ${JSON.stringify(analysed)}`,
   );
 
+  // The declaring file is opened through the language server too, so that this case cannot pass
+  // merely because the server had never looked at it. Godot resolves a dependency from disk rather
+  // than from the copy it holds open, which was measured here by doing exactly this: the held copy
+  // stayed at the old content and the new method resolved anyway.
+  const declaring = await call('script_diagnostics', {
+    projectPath: project,
+    scriptPath: 'res://bell.gd',
+  });
+  assert.equal(get(declaring, 'clean'), true, JSON.stringify(declaring));
+
   writeFileSync(
     join(project, 'bell.gd'),
     [
