@@ -78,7 +78,7 @@
     "marked": "18.0.13",
     "oxlint": "1.83.0",
     "oxlint-tsgolint": "7.0.2001",
-    "prettier": "3.9.7",
+    "prettier": "3.9.8",
     "typescript": "7.0.2"
   },
   "license": "MIT",
