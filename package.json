@@ -1,6 +1,6 @@
 {
   "name": "gdharness",
-  "version": "0.13.12",
+  "version": "0.13.13",
   "packageManager": "bun@1.4.2",
   "mcpName": "io.github.Aureliolo/gdharness",
   "description": "A harness for driving a Godot 4 project from an agent: editor addons, a runtime bridge into the running game, an MCP server in front of them, and a CLI that installs and diagnoses the Godot side.",
