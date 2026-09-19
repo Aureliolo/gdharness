@@ -567,6 +567,16 @@ static func _can_hold(value: Variant) -> bool:
 ## is a list and an in-tray is a map, and a path that could not step into either stopped at the
 ## first one. An index reads the way a property does, and a negative one counts from the end the
 ## way GDScript's own does, so reading the last of something does not mean asking how many first.
+## What is wrong with reading [param named] off [param holder], or "" when nothing is.
+##
+## Public because a wait asks the same question before it starts waiting, and used to answer it by
+## waiting: a property nobody has spends the whole timeout and comes back "not met", which reads
+## exactly like a game that never reached the state. The read refuses a mistyped name in one call
+## and says so, and the two tools disagreeing about one typo is worth more than the duplication.
+static func nothing_under(holder: Variant, named: String, called: String) -> String:
+	return "" if _can_read(holder, named) else _nothing_there(holder, named, called)
+
+
 static func _can_read(holder: Variant, named: String) -> bool:
 	if holder is Array:
 		var items: Array = holder
