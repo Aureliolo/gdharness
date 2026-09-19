@@ -28,6 +28,7 @@
     "lint:types": "oxlint --type-aware --deny-warnings src test scripts",
     "lint:dead": "KNIP_DISABLE_RAW_TRANSFER=1 knip",
     "lint:prose": "markdownlint-cli2",
+    "sync:gd": "bun scripts/sync-shared-gd.ts",
     "lint:gd": "gdlint src/godot test/support/gd",
     "format:gd": "gdformat --line-length=110 src/godot test/support/gd",
     "format:gd:check": "gdformat --check --line-length=110 src/godot test/support/gd",
