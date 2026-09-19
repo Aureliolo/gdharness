@@ -4,8 +4,9 @@
  * A tool that does several related things takes an `op`. Which arguments each op needs is
  * written once, in `operations`, and read twice: rendered into the description the client
  * sees, and enforced before dispatch, so the two cannot drift. Every schema refuses arguments
- * it does not name, and an unknown op is refused with the valid set spelled out, because a
- * silent default is how a wrong call reads as a working one.
+ * it does not name, an unknown op is refused with the valid set spelled out, and so is a value
+ * outside the set its parameter lists, because a silent default is how a wrong call reads as a
+ * working one.
  */
 
 import { dictionary } from './dictionary.js';
@@ -48,6 +49,25 @@ export interface ToolSpec {
   /** The op assumed when none is given; absent means op is required. */
   readonly defaultOperation?: string;
 }
+
+/**
+ * The extra sections `project_info` can be asked for.
+ *
+ * Here rather than beside the table that fetches them because the schema and the table are in
+ * different files and both have to hold the same list: written twice, a section added to one and
+ * not the other is either offered and refused or fetchable and undiscoverable. The server's table
+ * is keyed by this, so the compiler is what keeps them level.
+ */
+const PROJECT_INFO_SECTIONS = [
+  'autoloads',
+  'plugins',
+  'export_presets',
+  'audio_buses',
+  'health',
+  'validation',
+] as const;
+
+export type ProjectInfoSection = (typeof PROJECT_INFO_SECTIONS)[number];
 
 /** Whether [op] reads [name] on [spec]. A parameter that names no ops is read by all of them. */
 export function opTakes(spec: ToolSpec, op: string, name: string): boolean {
@@ -222,10 +242,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       projectPath: PROJECT_PATH,
       include: {
         type: 'array',
-        items: {
-          type: 'string',
-          enum: ['autoloads', 'plugins', 'export_presets', 'audio_buses', 'health', 'validation'],
-        },
+        items: { type: 'string', enum: PROJECT_INFO_SECTIONS },
         description:
           'Extra sections: registered autoloads, addons and whether each is enabled, export presets, the audio bus layout, a health report, or export validation.',
       },
@@ -245,6 +262,13 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     parameters: {
       projectPath: PROJECT_PATH,
       setting: { type: 'string', description: 'Setting path, such as "display/window/size/viewport_width".' },
+      from: {
+        type: 'string',
+        enum: ['disk', 'editor'],
+        ops: ['get'],
+        description:
+          'get: where to read. Default disk, which starts a short-lived engine and reads project.godot, needs no editor and is what an automatic check can reproduce. editor asks the open editor instead, which costs no engine and answers what the editor holds, including changes nobody has saved. Asking for editor with none connected is refused rather than answered from disk, so an answer never means the other one quietly.',
+      },
       prefix: {
         type: 'string',
         ops: ['get'],

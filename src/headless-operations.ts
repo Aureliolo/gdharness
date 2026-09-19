@@ -41,3 +41,18 @@ export const HEADLESS_OPERATIONS: Readonly<Record<string, Readonly<Record<string
     inheritance: 'inspect_inheritance',
   }),
 });
+
+/**
+ * The same reads answered by the open editor instead, for a caller that asked for `from: "editor"`.
+ *
+ * Reads only, and only the ones an editor can answer as well as a file can. A write goes to the
+ * file whichever way it is phrased, so there is nothing to choose between. An op with no entry here
+ * is refused rather than quietly answered from disk, because a caller who asked the editor and got
+ * the file would have no way to tell which one they were reading.
+ *
+ * The name on the right is the addon's command, which is the same name the engine operation has:
+ * one question, asked of whichever of the two is holding the answer the caller wants.
+ */
+export const EDITOR_READS: Readonly<Record<string, Readonly<Record<string, string>>>> = dictionary({
+  project_settings: dictionary({ get: 'get_project_setting' }),
+});
