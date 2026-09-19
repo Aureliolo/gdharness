@@ -19,6 +19,7 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 import { WebSocket } from 'ws';
+import { serviceDidNotAnswer } from '../scripts/audit-production.js';
 import { pullRequestNumbers, shipsToUsers } from '../scripts/release-notes.js';
 import { sharedCopies } from '../scripts/sync-shared-gd.js';
 import { announcementPath, BRIDGE_ANNOUNCE_PROTOCOL, readAnnouncement } from '../src/bridge-announce.js';
@@ -3683,6 +3684,55 @@ async function testARestartSaysWhatTheEditorDropped(): Promise<void> {
 }
 
 /**
+ * An audit that could not reach the advisories is not an audit that passed.
+ *
+ * `bun audit` exits 1 for two unrelated things: a dependency with a known vulnerability, and
+ * registry.npmjs.org not answering. The workflows ran it bare, so a 503 read as a failed audit and
+ * stopped a build, on the same afternoon a different third-party outage stopped a release. Retrying
+ * the outage is the fix, and it is the retry that has to be got right rather than the command:
+ * classify a real finding as an outage and the build retries three times and then fails, which is
+ * merely slow, but classify an outage as clean and a release ships having cleared nothing.
+ *
+ * So both directions are asserted with the real output of each, and the finding is the one that
+ * matters. Matching on the transport rather than on "printed no advisories" is what keeps them
+ * apart: a clean audit and an unreachable one both name no advisory.
+ */
+function testAnAuditThatCouldNotAskIsNotAnAuditThatPassed(): void {
+  assert.equal(
+    serviceDidNotAnswer('error: POST https://registry.npmjs.org/-/npm/v1/security/advisories/bulk - 503'),
+    true,
+    'the 503 that stopped a build is an outage',
+  );
+  for (const transport of [
+    'error: POST https://registry.npmjs.org/-/npm/v1/security/advisories/bulk - 429',
+    'error: connect ECONNREFUSED 104.16.0.35:443',
+    'error: fetch failed',
+    'error: socket hang up',
+  ]) {
+    assert.equal(serviceDidNotAnswer(transport), true, `${transport} is the service, not the tree`);
+  }
+
+  // A real finding, which must never be retried and never be taken for an outage. The version is
+  // the trap, and it caught this classifier rather than being invented for the fixture: a package
+  // at 1.502.0 puts a bare 502 between two word boundaries, so a status code matched anywhere in
+  // the output reads a genuine advisory as an outage and waits it out instead of failing.
+  const finding = [
+    'bun audit v1.4.2 (744846f84)',
+    '',
+    'some-package  1.502.0',
+    'Severity: high - Prototype Pollution in some-package',
+    'https://github.com/advisories/GHSA-p6mc-m468-83gg',
+    '',
+    '1 vulnerability (1 high)',
+  ].join('\n');
+  assert.equal(
+    serviceDidNotAnswer(finding),
+    false,
+    'a reported vulnerability is the audit working, and retrying it would be waiting out a real finding',
+  );
+}
+
+/**
  * Refreshing UIDs makes the missing sidecar and writes no scene.
  *
  * The op used to load every scene and resave it. Outside the editor that round trip rebuilds the
@@ -6522,6 +6572,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheEditorsRunIsTheOneAnsweredFor,
   testASettingTheEditorDroppedIsNamed,
   testACleanupThatCannotFinishStillFinishes,
+  testAnAuditThatCouldNotAskIsNotAnAuditThatPassed,
   testRefreshingUidsMakesTheSidecarAndWritesNoScene,
   testWhoIsHoldingAPortIsAskable,
   testARestartSaysWhatTheEditorDropped,
