@@ -2275,6 +2275,51 @@ async function testTheGameIsHandedItsOwnArguments({ call, attempt, project }: Ed
  *
  * Its own game, because it ends with one that cannot run.
  */
+/**
+ * How long an editor-played run takes to reach `editor_output` when nothing else asks for it.
+ *
+ * The other cases here read the console after something has spoken to the debug adapter: a stack,
+ * a step, a `debug_state output`. A session that only ever calls `editor_output` speaks to it
+ * through nothing, and that is the case a downstream project measured at tens of seconds before the
+ * first line arrived, against the engine's own log holding it already. They read that as output
+ * never arriving and filed it as loss; on a current version it is latency, and the difference is
+ * only visible if somebody waits.
+ *
+ * So the number is what is asserted, not the eventual arrival. A budget rather than a measurement
+ * because a runner is slower than a desk, and a generous one: what it is guarding against is tens
+ * of seconds, and what it would catch is the console going back to arriving only when something
+ * else pokes the adapter.
+ */
+async function testAPlayedRunsConsoleArrivesOnItsOwn({ call, project }: Editor): Promise<void> {
+  await call('editor_run', { projectPath: project });
+
+  const started = Date.now();
+  const until = started + GAME_STOP_TIMEOUT_MS;
+  let said = '';
+  while (!said.includes('the game said 4') && Date.now() < until) {
+    const output = await call('editor_output', {});
+    said = asArray(get(output, 'entries'), 'entries')
+      .map((entry) => text(get(entry, 'text')))
+      .join('\n');
+    if (!said.includes('the game said 4')) await delay(500);
+  }
+  const waited = Date.now() - started;
+  assert.match(said, /the game said 4/, `the console should reach editor_output: ${said}`);
+  console.log(`  an editor-played run's first line reached editor_output in ${waited}ms`);
+  assert.ok(waited < 15_000, `and without a wait nobody would sit through: ${waited}ms`);
+
+  // The reading that separates a bench doing work from a bench parked, asked of a run whose
+  // process this server does not hold. An absent field reads as "nothing used" as readily as "the
+  // question could not be put", and the two send a watcher to opposite conclusions.
+  const asked = await call('editor_output', { cpu: true });
+  assert.equal(get(asked, 'cpuSeconds'), undefined, `there is no process to ask: ${text(asked)}`);
+  assert.match(
+    text(get(asked, 'note')),
+    /cpu was asked for and there is no process to ask/,
+    `and that is said rather than left as an absence: ${text(asked)}`,
+  );
+}
+
 async function testAnErrorTheGameBrokeOnIsReported({ call, attempt, project }: Editor): Promise<void> {
   const game = { projectPath: project };
   await call('editor_run', { projectPath: project });
@@ -2421,6 +2466,7 @@ async function main(): Promise<void> {
     await testAnEditDoesNotReachTheRunningGame(editor);
     await testTheDebuggerGetsAPortOfItsOwn(editor);
     await testTheGameIsHandedItsOwnArguments(editor);
+    await testAPlayedRunsConsoleArrivesOnItsOwn(editor);
     await testAnErrorTheGameBrokeOnIsReported(editor);
     await testEditorRestart(editor);
   });
