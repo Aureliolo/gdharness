@@ -49,6 +49,7 @@ import {
   recordRunEnded,
   runningAs,
   stillTheRecordedRun,
+  writeEditorRunNote,
   writeRunRecord,
 } from '../src/run-record.js';
 import {
@@ -3580,6 +3581,13 @@ async function testTheEditorsRunIsTheOneAnsweredFor(): Promise<void> {
     // what made it the one adopted. Its own pid and its own transcript, with output in it.
     const transcript = join(runtimeDir, 'other-run.log');
     writeFileSync(transcript, 'ostinato weld bench\nrow 1 of the wrong table\n');
+    // What the editor-played run had printed before the server was replaced, in the file the
+    // server that started it was writing. Recovering this is the difference between explaining
+    // the loss and not losing it.
+    const played = join(runtimeDir, 'runs', 'run-1.log');
+    mkdirSync(join(runtimeDir, 'runs'), { recursive: true });
+    writeFileSync(played, 'ostinato weld shortlist bench\n[slices] 31 of 31 workers started\n');
+
     // Written where the server under test will look for it, which is the whole point of the case:
     // a note somewhere else is a note nothing adopts, and the disarm then shows "no game running"
     // rather than the other run's table.
@@ -3594,6 +3602,7 @@ async function testTheEditorsRunIsTheOneAnsweredFor(): Promise<void> {
         arguments: ['--headless'],
         command: process.execPath,
       });
+      writeEditorRunNote({ projectPath: project, transcript: played, startedAt: Date.now() - 60_000 });
     } finally {
       if (had === undefined) {
         delete process.env['GDHARNESS_RUNTIME_DIR'];
@@ -3651,11 +3660,14 @@ async function testTheEditorsRunIsTheOneAnsweredFor(): Promise<void> {
     const answer = parseTextContent(output);
     assert.equal(get(answer, 'through'), 'editor', `the run answered for is the editor's: ${said}`);
     assert.equal(get(answer, 'pid'), null, `with no pid from the other run: ${said}`);
-    assert.equal(get(answer, 'transcript'), undefined, `and no transcript from it: ${said}`);
+    assert.equal(get(answer, 'transcript'), played, `the transcript is its own, not the other's: ${said}`);
     assert.doesNotMatch(said, /wrong table/, `nor a line of its output: ${said}`);
-    // And the run it is about is described honestly: picked up rather than started here, so the
-    // log below it begins where this server did.
+    // And the run it is about is the one whose output comes back: an editor-played run writes a
+    // transcript of its own, so a reconnect reads back what it printed rather than starting the
+    // log again from where the new server arrived.
     assert.match(text(get(answer, 'note')), /already playing this when this server reached it/, said);
+    assert.match(said, /31 of 31 workers started/, `its own earlier output is read back: ${said}`);
+    assert.match(text(get(answer, 'note')), /read back from its transcript/, said);
 
     // The console of an editor-played run arrives over the debug adapter and nothing else, and
     // there is no adapter on the port this fixture editor names. That is the other half of the
