@@ -33,6 +33,12 @@
       "description": "engines.bun is the floor a contributor's machine has to clear, not a pin, and it moves only when the code starts needing something newer.",
       "matchDepTypes": ["engines"],
       "enabled": false
+    },
+    {
+      "description": "A runner image this datasource knows about is not the same as a label GitHub will schedule a job on: ubuntu-26.04 was offered while the available labels stopped at ubuntu-24.04, so the raise failed actionlint on every workflow in the repository. Moving to a new LTS is a decision to make once the label exists, not one to take again every week. Minor raises still flow and actionlint stays the backstop.",
+      "matchDatasources": ["github-runners"],
+      "matchUpdateTypes": ["major"],
+      "enabled": false
     }
   ],
   "customManagers": [
