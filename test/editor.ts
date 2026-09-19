@@ -1868,6 +1868,32 @@ async function testRuntime({ call, refusal, attempt, project, lspPort, dapPort }
   assert.match(mistyped, /tikcs/, `the name nobody has is named: ${mistyped}`);
   assert.match(mistyped, /no property|has no/, `and said to be missing: ${mistyped}`);
 
+  // Both at once, refused rather than answered about one of them. says and a property are two
+  // different questions: one looks for words anywhere under the path, the other compares one
+  // value on one node. says used to win and the property went unmentioned, so a caller watching
+  // a screen believed they were watching a property and the answer read the same either way.
+  const both = await refusal('runtime_wait', {
+    ...game,
+    op: 'until',
+    nodePath: '/root/Main',
+    property: 'ticks',
+    value: 1,
+    says: 'Go',
+    timeoutMs: 1500,
+  });
+  assert.match(both, /says or a property, not both/, `both at once is refused: ${both}`);
+  assert.match(both, /ticks/, `naming the one that was going to be dropped: ${both}`);
+
+  // And says on its own still answers, which is what says the refusal is about the pair.
+  const said = await call('runtime_wait', {
+    ...game,
+    op: 'until',
+    nodePath: '/root/Main',
+    says: 'Go',
+    timeoutMs: 1500,
+  });
+  assert.equal(get(said, 'met'), true, `the button's own text is on the screen: ${text(said)}`);
+
   // And the conversions a caller actually relies on still go through, which is the half a
   // whitelist gets wrong. A downstream project reads and pokes its run through `get_indexed` and
   // `set_indexed` with a string path, dozens of calls a session: the parameter is a NodePath and
