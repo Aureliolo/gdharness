@@ -231,18 +231,13 @@ function testSceneToolsVectorRegression(): void {
 
   const projectDir = mkdtempSync(join(tmpdir(), 'gopeak-regression-'));
   try {
-    mkdirSync(join(projectDir, 'addons', 'gdharness_editor', 'tools'), { recursive: true });
     mkdirSync(join(projectDir, 'scenes'), { recursive: true });
-    cpSync(
-      'src/godot/addons/gdharness_editor/tools/scene_tools.gd',
-      join(projectDir, 'addons', 'gdharness_editor', 'tools', 'scene_tools.gd'),
-    );
-    for (const shared of ['reading.gd', 'serialisation.gd']) {
-      cpSync(
-        join('src', 'godot', 'addons', 'gdharness_editor', shared),
-        join(projectDir, 'addons', 'gdharness_editor', shared),
-      );
-    }
+    // The whole addon rather than the tools file and a list of what it preloads. The list was
+    // written by hand, so a helper added beside the others is one the fixture does not copy, and
+    // what it fails on is a preload of a file that is not there rather than anything it tests.
+    cpSync('src/godot/addons/gdharness_editor', join(projectDir, 'addons', 'gdharness_editor'), {
+      recursive: true,
+    });
 
     writeFileSync(
       join(projectDir, 'project.godot'),
