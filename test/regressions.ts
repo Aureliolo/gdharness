@@ -3565,6 +3565,9 @@ function testOnlyOurOwnAutoloadIsRewritten(): void {
  */
 async function testTheEditorsRunIsTheOneAnsweredFor(): Promise<void> {
   const port = await reservePort();
+  // Reserved and then left alone, so nothing is listening on it: the adapter this run's console
+  // would arrive over is the thing the second half of this case is about not being there.
+  const adapter = await reservePort();
   const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-played-runs-'));
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-played-'));
   const server = new ServerProcess({
@@ -3617,12 +3620,22 @@ async function testTheEditorsRunIsTheOneAnsweredFor(): Promise<void> {
       const tool = String(message['tool']);
       const result =
         tool === 'playing_status'
-          ? { ok: true, playing: true, scenePath: 'res://tests/bench_shortlist.tscn', debugPort: 6007 }
+          ? { ok: true, playing: true, scenePath: 'res://tests/bench_shortlist.tscn', debugPort: adapter }
           : { ok: true };
       socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result }));
     });
+    // A port of its own rather than the default. Godot's default debug adapter port is one every
+    // editor on the machine would take, so a case that leaves it unnamed connects to whichever
+    // editor happens to be open and reads its console as this run's: this fixture passed on a
+    // machine with a leftover editor and failed on one without, which is the wrong way round for
+    // a case about a console that is not arriving.
     socket.send(
-      JSON.stringify({ type: 'godot_ready', project_path: project, addon_version: SERVER_VERSION }),
+      JSON.stringify({
+        type: 'godot_ready',
+        project_path: project,
+        addon_version: SERVER_VERSION,
+        dap_port: adapter,
+      }),
     );
 
     let knows = false;
@@ -3643,6 +3656,15 @@ async function testTheEditorsRunIsTheOneAnsweredFor(): Promise<void> {
     // And the run it is about is described honestly: picked up rather than started here, so the
     // log below it begins where this server did.
     assert.match(text(get(answer, 'note')), /already playing this when this server reached it/, said);
+
+    // The console of an editor-played run arrives over the debug adapter and nothing else, and
+    // there is no adapter on the port this fixture editor names. That is the other half of the
+    // same report: a run printing steadily was answered `clean: true`, `omitted: 0`, no entries,
+    // for minutes at a time, which is what a quiet run looks like too. An unreachable console is
+    // said rather than counted as silence.
+    assert.equal(get(answer, 'consoleLost'), true, `the console is named as not arriving: ${said}`);
+    assert.equal(get(answer, 'clean'), undefined, `so there is no verdict to read off it: ${said}`);
+    assert.match(text(get(answer, 'note')), /hole in it/, `and the log is said to have a gap: ${said}`);
   } finally {
     editor?.terminate();
     await server.stop();
