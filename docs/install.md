@@ -56,9 +56,9 @@ npx -y gdharness@{{version}} setup --no-connect
 
 ## What it writes, and where
 
-**Nothing outside the project directory without a flag or a typed yes.** {{home-count}} of the
-{{harness-count}} have no project-level config at all, and for those a yes writes the machine-wide
-file, because that is their limitation rather than a choice we can make better.
+**Nothing outside the project directory without a flag or a typed yes.** {{home-count}} of
+the {{harness-count}} have no project-level config at all, and for those a yes writes the
+machine-wide file, because that is their limitation rather than a choice we can make better.
 
 ```text
 Claude Code, Copilot CLI, Qoder, Command Code: written /home/you/game/.mcp.json
