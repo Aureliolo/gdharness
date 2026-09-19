@@ -158,7 +158,13 @@ func fitted(value: Variant, type: int) -> Variant:
 	if rebuilt is String and type != TYPE_STRING:
 		var text: String = rebuilt
 		var parsed: Variant = JSON.parse_string(text)
-		if typeof(parsed) != TYPE_NIL and typeof(parsed) != TYPE_STRING:
-			rebuilt = parsed
+		# A string that does not read as the type wanted is handed back as the string it is, so
+		# whoever asked can refuse it. type_convert answers 0 for "not an index" and true for any
+		# text at all, and a caller who sent a word got back a number they never sent: get_child
+		# answered about child 0 with no refusal and no note, which is a halt traded for a plausible
+		# wrong answer, and the wrong answer is the worse of the two.
+		if typeof(parsed) == TYPE_NIL or typeof(parsed) == TYPE_STRING:
+			return rebuilt
+		rebuilt = parsed
 
 	return type_convert(rebuilt, type)
