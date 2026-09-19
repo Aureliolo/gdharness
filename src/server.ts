@@ -2703,6 +2703,11 @@ class GodotServer {
       through: 'gdharness',
       pid: started.process.pid ?? null,
       arguments: cmdArgs,
+      // Named here rather than only by editor_output, because a caller who wants to watch the
+      // file had to make a second call to learn it and a reconstructed name is worse than no
+      // name: a tail on a path that does not exist reports nothing, which is exactly what a run
+      // that has not printed yet looks like.
+      transcript: started.transcript,
       refreshedClasses: refreshed.value,
       // Which run this start ended, when it ended one, so a bench that stopped is answered for
       // here rather than looked for in the engine.

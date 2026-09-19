@@ -3508,6 +3508,18 @@ async function testAFinishedRunCanStillBeRead(): Promise<void> {
           /quit on its own, cleanly: exit code 0/,
           `and the note says so: ${JSON.stringify(output)}`,
         );
+
+        // The start names the file it is writing, so a watch can be armed off the start. Learning
+        // it from a second call is where a name gets reconstructed from the clock instead, and a
+        // tail on a path that does not exist reports nothing, which reads exactly like a run that
+        // has not printed yet. Both calls naming the same file is the part that matters: two
+        // answers about where the output is would be the same guess wearing a different hat.
+        const named = text(get(started, 'transcript'));
+        assert.equal(named, text(get(output, 'transcript')), JSON.stringify(started));
+        assert.ok(
+          readFileSync(named, 'utf8').includes('the answer is 42'),
+          `and the file it named holds what the run printed: ${named}`,
+        );
       },
       { GODOT_PATH: godotPath },
     );
