@@ -20,7 +20,7 @@ import { join } from 'node:path';
  * inside is imported and no declaration in there is ever a global class. Counting them makes a
  * correct project look like one whose editor has gone blind, every time it is asked.
  */
-function declaredClasses(projectPath: string): Map<string, string> {
+export function declaredClasses(projectPath: string): Map<string, string> {
   const declared = new Map<string, string>();
   const visit = (directory: string, prefix: string): void => {
     if (existsSync(join(directory, '.gdignore'))) {
@@ -102,6 +102,64 @@ export function declaresMember(source: string, missing: MissingMember): boolean 
       ? new RegExp(String.raw`^\s*(?:static\s+)?func\s+${name}\s*\(`, 'm')
       : new RegExp(String.raw`^\s*(?:static\s+)?(?:@export\s+)?(?:var|const)\s+${name}\b`, 'm');
   return declaration.test(source);
+}
+
+/**
+ * The type name a diagnostic says it cannot resolve, or null for any other diagnostic.
+ *
+ * A separate shape from the member one and worth its own reading, because a caller sees it for the
+ * same underlying reason and there is nothing in the text to connect them: a class the editor has
+ * not loaded is reported as a base class it cannot find, or as an identifier that is not declared,
+ * neither of which mentions an inferred type.
+ *
+ * "Not declared in the current scope" is the loose one, since it is also what an ordinary typo
+ * produces. It is safe to read here only because nothing is claimed from the message alone: a global
+ * `class_name` is in scope everywhere, so the name matching one declared on disk is what makes the
+ * diagnostic wrong, whatever else the identifier might have been.
+ */
+export function unknownTypeIn(message: string): string | null {
+  const found =
+    /(?:Could not find (?:base class|type)|Cannot find class|Identifier) "?([A-Za-z_][A-Za-z0-9_]*)"?(?: not declared| in the current scope|\b)/.exec(
+      message,
+    );
+  return found?.[1] ?? null;
+}
+
+/** A class the project declares that a diagnostic says cannot be resolved, and where to look. */
+export interface UnloadedType {
+  readonly type: string;
+  readonly declaredIn: string;
+  /** Whether the cache a launched game reads already lists it, which decides the remedy. */
+  readonly inTheClassCache: boolean;
+}
+
+/**
+ * The types a diagnostic could not resolve that the project declares anyway.
+ *
+ * Which of the two lists has it is the whole of the answer, because they have different remedies and
+ * a caller told only "it is declared" has to work out which. The class cache is what a launched game
+ * reads: a class listed there and unresolved by the editor is the editor's loaded list being behind,
+ * which only a restart clears. A class declared on disk and missing from the cache is the cache
+ * being behind, which `refresh_classes` rewrites. That difference is visible from two file reads and
+ * is invisible from the diagnostic.
+ */
+export function unloadedTypes(
+  messages: readonly string[],
+  declared: ReadonlyMap<string, string>,
+  cached: ReadonlyMap<string, string> | null,
+): UnloadedType[] {
+  const seen = new Set<string>();
+  const found: UnloadedType[] = [];
+  for (const message of messages) {
+    const type = unknownTypeIn(message);
+    const declaredIn = type === null ? undefined : declared.get(type);
+    if (type === null || declaredIn === undefined || seen.has(type)) {
+      continue;
+    }
+    seen.add(type);
+    found.push({ type, declaredIn, inTheClassCache: cached?.has(type) === true });
+  }
+  return found;
 }
 
 /** A diagnostic the file on disk disproves, and the script that disproves it. */

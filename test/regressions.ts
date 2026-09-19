@@ -30,6 +30,8 @@ import {
   declaresMember,
   missingMemberIn,
   staleClassNames,
+  unknownTypeIn,
+  unloadedTypes,
   unseenByEditor,
 } from '../src/class-cache.js';
 import { GodotDAPClient } from '../src/dap_client.js';
@@ -3810,6 +3812,82 @@ function testADiagnosticTheFileContradictsIsNamed(): void {
 }
 
 /**
+ * A class the editor cannot resolve is separated from one the cache has not got, because the
+ * remedies differ.
+ *
+ * The same staleness reaches a caller in a second shape that mentions no inferred type at all: two
+ * brand new `class_name`s came back as "Could not find base class" and "not declared in the current
+ * scope", so the check that reads an inferred type out of a message finds nothing in them. Whether
+ * the project declares the class is what makes those diagnostics wrong, and whether the class cache
+ * lists it is what decides the answer: a launched game reads that cache, which is why the game ran
+ * and resolved both classes while the editor's diagnostics denied they existed.
+ *
+ * Asserted as the two groups rather than one list, since telling a caller only "it is declared"
+ * leaves them to work out which of `refresh_classes` and a restart they need, which is the ten
+ * minutes this is meant to remove.
+ */
+function testAClassTheEditorHasNotLoadedIsToldApartFromOneTheCacheLacks(): void {
+  for (const message of [
+    'Could not find base class "EndingLine".',
+    'Identifier "EndingLines" not declared in the current scope.',
+    'Could not find type "Game" in the current scope.',
+    'Cannot find class "Game"',
+  ]) {
+    assert.ok(unknownTypeIn(message) !== null, `${message} names a type this can check`);
+  }
+  assert.equal(unknownTypeIn('Could not find base class "EndingLine".'), 'EndingLine');
+  assert.equal(unknownTypeIn('Identifier "EndingLines" not declared in the current scope.'), 'EndingLines');
+  assert.equal(
+    unknownTypeIn('The method "is_finished()" is not present on the inferred type "Game".'),
+    null,
+    'the member shape is the other check, and reading it here would answer it twice',
+  );
+
+  const declared = new Map([
+    ['EndingLine', 'res://scripts/ending_line.gd'],
+    ['EndingLines', 'res://scripts/ending_lines.gd'],
+    ['Settled', 'res://scripts/settled.gd'],
+  ]);
+  const cached = new Map([['Settled', 'res://scripts/settled.gd']]);
+
+  const found = unloadedTypes(
+    [
+      'Could not find base class "EndingLine".',
+      'Identifier "EndingLines" not declared in the current scope.',
+      'Identifier "EndingLines" not declared in the current scope.',
+      'Could not find base class "Settled".',
+      'Identifier "some_local" not declared in the current scope.',
+    ],
+    declared,
+    cached,
+  );
+
+  assert.deepEqual(
+    found,
+    [
+      { type: 'EndingLine', declaredIn: 'res://scripts/ending_line.gd', inTheClassCache: false },
+      { type: 'EndingLines', declaredIn: 'res://scripts/ending_lines.gd', inTheClassCache: false },
+      { type: 'Settled', declaredIn: 'res://scripts/settled.gd', inTheClassCache: true },
+    ],
+    'each declared class once, with the cache answer that picks the remedy',
+  );
+
+  // The direction that must not be got wrong. An identifier the project does not declare is an
+  // ordinary undeclared name, and claiming it is a loading problem would send a caller to restart
+  // the editor over their own typo.
+  assert.equal(
+    found.some((type) => type.type === 'some_local'),
+    false,
+    'a name the project declares nowhere is left alone',
+  );
+  assert.deepEqual(
+    unloadedTypes(['Could not find base class "EndingLine".'], new Map(), null),
+    [],
+    'and a project that declares nothing yields nothing rather than everything',
+  );
+}
+
+/**
  * An audit that could not reach the advisories is not an audit that passed.
  *
  * `bun audit` exits 1 for two unrelated things: a dependency with a known vulnerability, and
@@ -6699,6 +6777,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASettingTheEditorDroppedIsNamed,
   testACleanupThatCannotFinishStillFinishes,
   testADiagnosticTheFileContradictsIsNamed,
+  testAClassTheEditorHasNotLoadedIsToldApartFromOneTheCacheLacks,
   testAnAuditThatCouldNotAskIsNotAnAuditThatPassed,
   testRefreshingUidsMakesTheSidecarAndWritesNoScene,
   testWhoIsHoldingAPortIsAskable,
