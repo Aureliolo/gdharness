@@ -22,7 +22,7 @@ jobs:
   build_test:
     name: build_test
     if: github.repository == 'Aureliolo/gdharness'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
       contents: read # Reads the tagged source it builds, and the releases and commit range.
@@ -204,7 +204,7 @@ jobs:
     name: sbom
     if: github.repository == 'Aureliolo/gdharness'
     needs: build_test
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
       contents: read # Reads the lockfile at the tag.
@@ -314,7 +314,7 @@ jobs:
     name: attest
     if: github.repository == 'Aureliolo/gdharness'
     needs: [build_test, sbom]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     permissions:
       id-token: write # Sigstore signs against this token.

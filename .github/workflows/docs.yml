@@ -22,7 +22,7 @@ jobs:
   # nothing links to, so a new document cannot land unreachable.
   site:
     name: site
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
 
     steps:
@@ -50,7 +50,7 @@ jobs:
     name: deploy
     if: github.event_name == 'push'
     needs: site
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
 
     # Only this job can publish, and only through the OIDC token Pages mints for it: nothing

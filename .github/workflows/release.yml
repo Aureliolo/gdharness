@@ -42,7 +42,7 @@ jobs:
     name: publish
     if: github.repository == 'Aureliolo/gdharness'
     needs: build
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
       contents: write # Creates the release and uploads the assets onto it.
@@ -162,7 +162,7 @@ jobs:
     name: npm
     if: github.repository == 'Aureliolo/gdharness'
     needs: [build, publish]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     permissions:
       id-token: write # npm's trusted publishing takes this instead of a token, and signs provenance with it.
@@ -283,7 +283,7 @@ jobs:
         include:
           - platform: linux
             # renovate: datasource=github-runners depName=ubuntu
-            runner: ubuntu-24.04
+            runner: ubuntu-26.04
           - platform: windows
             # renovate: datasource=github-runners depName=windows
             runner: windows-2025
@@ -385,7 +385,7 @@ jobs:
     name: MCP registry
     if: github.repository == 'Aureliolo/gdharness'
     needs: [build, publish, npm]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
       contents: read # Reads server.json at the tag, which is the thing being published.

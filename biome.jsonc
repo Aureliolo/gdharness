@@ -1,5 +1,5 @@
 {
-  "$schema": "https://biomejs.dev/schemas/2.5.13/schema.json",
+  "$schema": "https://biomejs.dev/schemas/2.5.14/schema.json",
   "files": {
     // .claude holds tool-managed git worktrees, each a full copy of the repository with its own
     // configuration, and Biome refuses to run when it finds a second root.
