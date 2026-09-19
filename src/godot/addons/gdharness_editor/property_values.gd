@@ -157,11 +157,6 @@ func property_type(target: Object, property: String) -> int:
 	return TYPE_NIL
 
 
-## Why the last [method parse] cannot be written, when the parse itself found out.
-func refusal() -> String:
-	return _refused
-
-
 ## A dictionary carrying its own type name, as the serialiser writes it.
 ##
 ## Answers [handled, value] rather than just the value, because a handled tag may legitimately
@@ -201,12 +196,14 @@ func _parse_new_resource(type_tag: String, value: Dictionary) -> Array:
 		return [false, null]
 
 	var built: Resource = ClassDB.instantiate(type_tag)
-	var wanted: Dictionary = value.duplicate()
-	wanted.erase("_type")
-	wanted.erase("type")
-	var refusal: String = write_all(built, wanted)
-	if not refusal.is_empty():
-		_refused = refusal
+	var wanted: Dictionary = {}
+	for key: Variant in value:
+		var property: String = str(key)
+		if property != "_type" and property != "type":
+			wanted[property] = value[key]
+	var refused: String = write_all(built, wanted)
+	if not refused.is_empty():
+		_refused = refused
 		return [true, null]
 	return [true, built]
 
