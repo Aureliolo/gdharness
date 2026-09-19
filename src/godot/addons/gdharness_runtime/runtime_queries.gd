@@ -734,9 +734,24 @@ func call_method(params: Dictionary) -> Dictionary:
 	if not holder.has_method(named):
 		return {"type": "error", "message": "%s has no method %s" % [reached["called"], named]}
 
+	# Checked before the call rather than left to it. `callv` raises inside the game when an
+	# argument cannot be converted, and an error raised in a game somebody is playing holds it at a
+	# debugger break: every later call then reports a game that is not responding, which points
+	# nowhere near the argument. A wrong argument costs a refusal, never the session's game.
 	var deserialized_args: Array = []
 	for index: int in args.size():
-		deserialized_args.append(_values.fitted(args[index], _values.parameter_type(holder, named, index)))
+		var wants: int = _values.parameter_type(holder, named, index)
+		var given: Variant = _values.fitted(args[index], wants)
+		if not Values.acceptable(given, wants):
+			return {
+				"type": "error",
+				"message":
+				(
+					"%s.%s takes %s as argument %d and was given %s, which cannot be converted."
+					% [reached["called"], named, type_string(wants), index + 1, type_string(typeof(given))]
+				)
+			}
+		deserialized_args.append(given)
 
 	var result: Variant = holder.callv(named, deserialized_args)
 

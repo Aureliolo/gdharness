@@ -82,6 +82,9 @@ const MAIN_GD = [
   'var keyed: int = 0',
   '## Set from _ready through a call, so there is a frame to step into and back out of.',
   'var doubled: int = 0',
+  '## A property holding a node rather than a number, which is what a wait for the wrong kind of',
+  '## value has to be refused against: comparing one with a string is a hard error in GDScript.',
+  'var held: Node = null',
   '',
   '',
   'func _ready() -> void:',
@@ -95,6 +98,7 @@ const MAIN_GD = [
   '\tticker.autostart = true',
   '\tadd_child(ticker)',
   '\tticker.timeout.connect(_tick)',
+  '\theld = ticker',
   '',
   '\tvar late: Timer = Timer.new()',
   '\tlate.name = "Late"',
@@ -1566,6 +1570,66 @@ async function testRuntime({ call, refusal, attempt, project, lspPort, dapPort }
   });
   assert.equal(get(until, 'met'), true, 'waiting for a property should answer when it reads that');
   assert.equal(get(until, 'value'), 42, 'and with what it read');
+
+  // A wrong argument costs a refusal, never the game. Waiting on a property that holds a node for
+  // a value that is a string compared an Object against a String, which GDScript raises rather
+  // than answering, inside the game: it was held at a debugger break, every later call answered
+  // "did not respond within 10000ms, it may be stuck in a long frame", and nothing named the
+  // argument that did it. Downstream lost a session to it. Both types are in the refusal because
+  // the caller can see neither from where they stand.
+  const mismatched = await refusal('runtime_wait', {
+    ...game,
+    op: 'until',
+    nodePath: '/root/Main',
+    property: 'held',
+    value: 'a timer is not a string',
+    timeoutMs: 2000,
+  });
+  assert.match(mismatched, /cannot be compared/, `it says why it will not: ${mismatched}`);
+  assert.match(mismatched, /Object/, `naming what the property holds: ${mismatched}`);
+  assert.match(mismatched, /String/, `and what it was given: ${mismatched}`);
+
+  // And the game is still running, which is the whole point of refusing. Frames rather than a
+  // property read: a game held at a debugger break answers nothing at all, and a game that is
+  // merely alive still has to be advancing for anything after this to mean anything.
+  assert.equal(
+    get(await call('runtime_wait', { ...game, op: 'frames', frames: 2 }), 'frames'),
+    2,
+    'the game should still be drawing frames after a refused wait',
+  );
+
+  // The same rule one function along: an argument that cannot be converted is refused rather than
+  // handed to callv, which raises inside the game exactly as the comparison did.
+  const unfittable = await refusal('runtime_invoke', {
+    ...game,
+    op: 'call',
+    nodePath: '/root/Main',
+    method: 'stow',
+    args: [{ _type: 'Object', class: 'RefCounted' }],
+  });
+  assert.match(unfittable, /cannot be converted|takes int/, `a bad argument is refused: ${unfittable}`);
+
+  // And the conversions a caller actually relies on still go through, which is the half a
+  // whitelist gets wrong. A downstream project reads and pokes its run through `get_indexed` and
+  // `set_indexed` with a string path, dozens of calls a session: the parameter is a NodePath and
+  // the argument is a String, so a rule that only accepted an exact type match would have taken
+  // their whole workflow away in the name of protecting it.
+  const indexed = await call('runtime_invoke', {
+    ...game,
+    op: 'call',
+    nodePath: '/root/Main',
+    method: 'get_indexed',
+    args: ['doubled'],
+  });
+  assert.equal(get(indexed, 'result'), 8, 'a string where a NodePath is wanted is still a NodePath');
+  const numeric = await call('runtime_invoke', {
+    ...game,
+    op: 'call',
+    nodePath: '/root/Main',
+    method: 'stow',
+    args: [3.0],
+  });
+  assert.equal(get(numeric, 'result'), 3, 'and a float where an int is wanted is still a number');
 
   // A whole click, judged by what the game did about it: the button raises a counter, and the
   // counter is read back through a second tool. The tool's own answer is asserted too, because
