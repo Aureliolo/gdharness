@@ -3424,8 +3424,13 @@ class GodotServer {
     // walk skips a file another engine has already imported, so only a restart reloads the list.
     if (atRisk.length > 0) {
       const names = atRisk.map((one) => one.className).sort();
+      // Named up to a point and counted after it. A project where this happens at all is one where
+      // it happens to most of the file, and four hundred class names is a refusal nobody reads.
+      const shown = names.slice(0, 10).join(', ');
+      const listed = names.length > 10 ? `${shown} and ${names.length - 10} more` : shown;
+      const them = names.length === 1 ? 'it' : 'them';
       return this.createErrorResponse(
-        `This editor is not holding ${names.length === 1 ? 'a class' : `${names.length} classes`} the class cache holds: ${names.join(', ')}. A scan writes the cache from the list the editor is holding, so it would drop ${names.length === 1 ? 'it' : 'them'} and every engine reading the cache next, a test run included, would report ${names.length === 1 ? 'it' : 'them'} as an unknown identifier in a file nobody touched.`,
+        `This editor is not holding ${names.length === 1 ? 'a class' : `${names.length} classes`} the class cache holds: ${listed}. A scan writes the cache from the list the editor is holding, so it would drop ${them} and every engine reading the cache next, a test run included, would report ${them} as an unknown identifier in a file nobody touched.`,
         [
           'editor_launch restart reloads the list, and a rescan after that keeps them',
           'project_import refresh_classes writes the cache from the files, which is what a run needs, and does not need the editor',

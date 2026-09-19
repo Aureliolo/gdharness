@@ -1213,7 +1213,7 @@ async function testAScanWritesTheCacheFromTheEditor({ call, project }: Editor): 
  * class is still in the file. Whether the editor picked it up or the rescan was refused is the
  * engine's business and the answer's; losing it silently is not an option either way.
  */
-async function testARescanKeepsWhatTheRebuildWrote({ call, project }: Editor): Promise<void> {
+async function testARescanKeepsWhatTheRebuildWrote({ call, refusal, project }: Editor): Promise<void> {
   const cache = join(project, '.godot', 'global_script_class_cache.cfg');
   // Enough files that the editor's scan takes real time. Reported from a project of 376 classes,
   // where the scan reported itself finished 296ms in and the cache was written after that; a
@@ -1243,15 +1243,20 @@ async function testARescanKeepsWhatTheRebuildWrote({ call, project }: Editor): P
     `the editor should be blind to the new class, or this proves nothing: ${blind.length} unseen`,
   );
 
-  const scanned = await call('editor_rescan', { projectPath: project });
-  const lost = asArray(get(scanned, 'cacheLost') ?? []).map((one) => asString(one));
+  // Refused, because the state the rebuild has just reported is the state where a scan can only
+  // write a shorter file. Which of the two it is matters less than what the caller is entitled to
+  // either way, asserted below: the class is still in the cache when the call comes back.
+  const refused = await refusal('editor_rescan', { projectPath: project });
+  assert.match(refused, /not holding \d+ classes the class cache holds/, `it says what it found: ${refused}`);
+  assert.match(refused, /Filler/, `naming them: ${refused}`);
+  // Named up to a point and counted after it, since a project in this state has it for most of the
+  // file and four hundred class names is a refusal nobody reads.
+  assert.match(refused, /and \d+ more/, `and counting the rest rather than listing them: ${refused}`);
+  assert.match(refused, /editor_launch restart/, `with the one thing that gets them back: ${refused}`);
+
   const after = readFileSync(cache, 'utf8');
   const missing = ['OfferedClass', 'Filler0', 'Filler399'].filter((name) => !after.includes(name));
-  // The two halves of what was reported: the loss itself, and the clean answer beside it. Either
-  // one alone is survivable; together they send the caller to look at the engine that failed next.
-  assert.deepEqual(missing, [], `the rescan must not drop what the rebuild wrote: lost ${lost.length}`);
-  assert.deepEqual(lost, [], `and nothing should have been lost to report: ${lost.slice(0, 5).join(', ')}`);
-  assert.equal(get(scanned, 'ok'), true, 'so the scan reports itself clean');
+  assert.deepEqual(missing, [], 'and the cache still holds everything the rebuild wrote');
 }
 
 /**
