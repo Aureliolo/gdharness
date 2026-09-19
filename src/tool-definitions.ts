@@ -654,7 +654,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'script_diagnostics',
     description:
-      "Errors and warnings for a script from the editor's language server, and whether the script is clean. Needs the editor running.",
+      "Errors and warnings for a script from the editor's language server, and whether the script is clean. Needs the editor running. Any diagnostic saying a member is not present on an inferred type is checked against the file the class cache points at, and one the file contradicts is named under contradictedByTheFile with staleAnalysis saying what to do: the language server hands dependents the type it analysed at startup, so a method added to an existing class_name is reported missing at every caller until the editor restarts.",
     parameters: {
       projectPath: PROJECT_PATH,
       scriptPath: SCRIPT_PATH,
