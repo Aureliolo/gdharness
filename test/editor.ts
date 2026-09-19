@@ -583,7 +583,7 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
     godotPath,
     [
       '--editor',
-      '--headless',
+      ...(process.env['GDHARNESS_WINDOWED_EDITOR'] === '1' ? [] : ['--headless']),
       '--path',
       project,
       '--lsp-port',
@@ -2761,40 +2761,55 @@ async function main(): Promise<void> {
     return;
   }
 
+  // Named so that one can be run on its own while it is being written, the way the regressions
+  // take an argument. The order is the contract and a filter does not reorder them: it drops the
+  // ones not asked for, which is not the same thing as them not having run. Several build on the
+  // scene the last one left, and the console case has to come before anything opens a session on
+  // the debug adapter, so a filtered run is for working on a case rather than for believing one.
+  const CASES: [string, (editor: Editor) => Promise<void>][] = [
+    ['testSceneNodes', testSceneNodes],
+    ['testValuesSurviveBeingRead', testValuesSurviveBeingRead],
+    ['testAValueTheSceneCannotHoldIsRefused', testAValueTheSceneCannotHoldIsRefused],
+    ['testSceneSignals', testSceneSignals],
+    ['testSceneAnimation', testSceneAnimation],
+    ['testResources', testResources],
+    ['testResourcesOnNodes', testResourcesOnNodes],
+    ['testEditorRescan', testEditorRescan],
+    ['testAClassTheEditorCannotSee', testAClassTheEditorCannotSee],
+    ['testAScanWritesTheCacheFromTheEditor', testAScanWritesTheCacheFromTheEditor],
+    ['testARescanKeepsWhatTheRebuildWrote', testARescanKeepsWhatTheRebuildWrote],
+    ['testTheClassCheckKnowsWhichProjectItIsAbout', testTheClassCheckKnowsWhichProjectItIsAbout],
+    ['testASettingReadFromTheEditor', testASettingReadFromTheEditor],
+    ['testLanguageServer', testLanguageServer],
+    ['testAClassWrittenUnderTheEditorNeedsARescan', testAClassWrittenUnderTheEditorNeedsARescan],
+    ['testAPlayedRunsConsoleArrivesOnItsOwn', testAPlayedRunsConsoleArrivesOnItsOwn],
+    ['testDebugging', testDebugging],
+    ['testRuntime', testRuntime],
+    ['testAnEditDoesNotReachTheRunningGame', testAnEditDoesNotReachTheRunningGame],
+    ['testTheDebuggerGetsAPortOfItsOwn', testTheDebuggerGetsAPortOfItsOwn],
+    ['testTheGameIsHandedItsOwnArguments', testTheGameIsHandedItsOwnArguments],
+    ['testAnErrorTheGameBrokeOnIsReported', testAnErrorTheGameBrokeOnIsReported],
+    ['testEditorRestart', testEditorRestart],
+  ];
+  const wanted = process.argv.slice(2).map((argument) => argument.toLowerCase());
+  const chosen =
+    wanted.length === 0
+      ? CASES
+      : CASES.filter(([name]) => wanted.some((word) => name.toLowerCase().includes(word)));
+  if (chosen.length === 0) {
+    throw new Error(`No editor case is named ${process.argv.slice(2).join(' ')}.`);
+  }
+  if (chosen.length !== CASES.length) {
+    console.log(`running ${chosen.length} of ${CASES.length} editor cases, out of their usual company`);
+  }
+
   await withEditor(godotPath, async (editor) => {
-    // One editor for all of them, in order: each case builds on the scene the last one left.
-    await testSceneNodes(editor);
-    await testValuesSurviveBeingRead(editor);
-    await testAValueTheSceneCannotHoldIsRefused(editor);
-    await testSceneSignals(editor);
-    await testSceneAnimation(editor);
-    await testResources(editor);
-    await testResourcesOnNodes(editor);
-    await testEditorRescan(editor);
-    await testAClassTheEditorCannotSee(editor);
-    await testAScanWritesTheCacheFromTheEditor(editor);
-    await testARescanKeepsWhatTheRebuildWrote(editor);
-    await testTheClassCheckKnowsWhichProjectItIsAbout(editor);
-    await testASettingReadFromTheEditor(editor);
-    await testLanguageServer(editor);
-    await testAClassWrittenUnderTheEditorNeedsARescan(editor);
-    // Before anything speaks to the debug adapter. Reading a stack, taking a step or asking
-    // debug_state for output all open a session on it, and a session opened once stays open for
-    // the life of this server, so every case after one of those runs against an adapter that is
-    // already attached. That is not the state a caller who only ever asks editor_output is in,
-    // and running this case after them is how a suite passed twice against a report that was
-    // right. The position is load-bearing; the docstring says so too.
-    await testAPlayedRunsConsoleArrivesOnItsOwn(editor);
-    await testDebugging(editor);
-    await testRuntime(editor);
-    await testAnEditDoesNotReachTheRunningGame(editor);
-    await testTheDebuggerGetsAPortOfItsOwn(editor);
-    await testTheGameIsHandedItsOwnArguments(editor);
-    await testAnErrorTheGameBrokeOnIsReported(editor);
-    await testEditorRestart(editor);
+    for (const [, run] of chosen) {
+      await run(editor);
+    }
   });
 
-  console.log('editor tests passed');
+  console.log(`editor tests passed (${chosen.length})`);
 }
 
 await main();
