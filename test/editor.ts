@@ -156,6 +156,12 @@ const MAIN_GD = [
   '\treturn stash',
   '',
   '',
+  '## Printed on demand, so a case can put a line in the console after the last time anything read',
+  '## it. What the adapter is still holding when the next play starts is the whole question.',
+  'func announce() -> void:',
+  '\tprint("the first run said its piece")',
+  '',
+  '',
   'func peek_clicks() -> int:',
   '\treturn clicks',
   '',
@@ -2307,6 +2313,44 @@ async function testAPlayedRunsConsoleArrivesOnItsOwn({ call, project }: Editor):
   assert.match(said, /the game said 4/, `the console should reach editor_output: ${said}`);
   console.log(`  an editor-played run's first line reached editor_output in ${waited}ms`);
   assert.ok(waited < 15_000, `and without a wait nobody would sit through: ${waited}ms`);
+
+  // A line printed after the last time anything read the console, which is the state the fault
+  // needs: what the adapter is still holding when the next play starts. A bench prints its results
+  // table at the end of its run, which is exactly after the last poll somebody made of it.
+  await call('runtime_invoke', {
+    projectPath: project,
+    op: 'call',
+    nodePath: '/root/Main',
+    method: 'announce',
+  });
+  await delay(1000);
+
+  // The second play. The adapter's buffer outlives the run that filled it, so the first drain
+  // after a new play took everything still in it: a finished bench's results table arrived at the
+  // top of the next run's output, under the next run's startedAt, indexed continuously with it,
+  // and the only boundary was an engine banner in the middle of the list. A scene that cannot
+  // print a bench table was reported as having printed one.
+  // Played straight over the top rather than stopped first, because stop drains the console on its
+  // way out and the fault is about what nobody drained. A bench that finishes on its own leaves
+  // the same state, and that is the ordinary way one ends.
+  await call('editor_run', { projectPath: project });
+  const second = Date.now() + GAME_STOP_TIMEOUT_MS;
+  let lines: string[] = [];
+  while (!lines.some((line) => line.includes('the game said 4')) && Date.now() < second) {
+    lines = asArray(get(await call('editor_output', {}), 'entries'), 'entries').map((entry) =>
+      text(get(entry, 'text')),
+    );
+    if (!lines.some((line) => line.includes('the game said 4'))) await delay(500);
+  }
+  assert.ok(
+    lines.some((line) => line.includes('the game said 4')),
+    `the second run's own console should be there: ${lines.join('\n')}`,
+  );
+  assert.equal(
+    lines.filter((line) => line.includes('the first run said its piece')).length,
+    0,
+    `and the run before it should not be:\n${lines.join('\n')}`,
+  );
 
   // The reading that separates a bench doing work from a bench parked, asked of a run whose
   // process this server does not hold. An absent field reads as "nothing used" as readily as "the
