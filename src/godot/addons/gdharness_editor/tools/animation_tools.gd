@@ -3,9 +3,11 @@ extends Node
 
 ## Animations and animation trees, edited in the open editor.
 
+const PropertyValues = preload("../property_values.gd")
 const Read = preload("../reading.gd")
 
 var _editor_plugin: EditorPlugin = null
+var _properties: PropertyValues = PropertyValues.new()
 
 
 func set_editor_plugin(plugin: EditorPlugin) -> void:
@@ -70,33 +72,14 @@ func _find_node(root: Node, path: String) -> Node:
 	return root.get_node_or_null(path)
 
 
+## A keyframe value or a method argument, read as whatever it says it is.
+##
+## No type to read it against, unlike a property write: what a track animates is named by a path
+## that has still to be resolved against a scene this tool does not hold. So the tags are what
+## decide, which is why they have to be all of them. Three were handled here, and a Quaternion,
+## a Rect2 or a Transform2D keyframe was stored as the dictionary it arrived as.
 func _parse_value(value: Variant) -> Variant:
-	if typeof(value) == TYPE_DICTIONARY:
-		var fields: Dictionary = value
-		if fields.has("type") or fields.has("_type"):
-			var t: Variant = fields.get("type", fields.get("_type", ""))
-			match t:
-				"Vector2":
-					return Vector2(Read.as_float(fields.get("x", 0)), Read.as_float(fields.get("y", 0)))
-				"Vector3":
-					return Vector3(
-						Read.as_float(fields.get("x", 0)),
-						Read.as_float(fields.get("y", 0)),
-						Read.as_float(fields.get("z", 0))
-					)
-				"Color":
-					return Color(
-						Read.as_float(fields.get("r", 1), 1.0),
-						Read.as_float(fields.get("g", 1), 1.0),
-						Read.as_float(fields.get("b", 1), 1.0),
-						Read.as_float(fields.get("a", 1), 1.0)
-					)
-	if typeof(value) == TYPE_ARRAY:
-		var result: Array = []
-		for item: Variant in value:
-			result.append(_parse_value(item))
-		return result
-	return value
+	return _properties.parse(value)
 
 
 func _parse_json_maybe(value: Variant) -> Variant:
