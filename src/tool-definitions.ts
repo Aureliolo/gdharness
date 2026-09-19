@@ -654,7 +654,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'script_diagnostics',
     description:
-      "Errors and warnings for a script from the editor's language server, and whether the script is clean. Needs the editor running. Any diagnostic saying a member is not present on an inferred type is checked against the file the class cache points at, and one the file contradicts is named under contradictedByTheFile with staleAnalysis saying what to do: the language server hands dependents the type it analysed at startup, so a method added to an existing class_name is reported missing at every caller until the editor restarts.",
+      "Errors and warnings for a script from the editor's language server, and whether the script is clean. Needs the editor running. Diagnostics are checked against the project's own files, and the two that the files disprove are named rather than passed on: a member the class cache's file declares comes back under contradictedByTheFile, and a class this project declares that the diagnostic could not resolve comes back under typesTheEditorHasNotLoaded, with inTheClassCache saying whether a launched game would resolve it. staleAnalysis then says which remedy applies, because they differ: a stale analysed type needs editor_launch restart, while a class missing from the cache needs project_import refresh_classes.",
     parameters: {
       projectPath: PROJECT_PATH,
       scriptPath: SCRIPT_PATH,
