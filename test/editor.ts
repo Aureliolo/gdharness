@@ -345,16 +345,48 @@ function createProject(): string {
   // analysed from scratch, sees the current type and reports nothing, which is a different case and
   // the one an earlier probe measured by mistake.
   writeFileSync(
+    join(dir, 'clapper.gd'),
+    ['class_name Clapper', 'extends Node', '', '', 'func weight() -> int:', '\treturn 1', ''].join('\n'),
+  );
+
+  // A project the size of the one that reproduces the stale-member fault, for finding out whether
+  // the size is the variable. The editor resolves its global classes once at startup, so they have
+  // to exist before it is spawned to count for anything.
+  const crowd = Number(process.env['GDHARNESS_EXTRA_CLASSES'] ?? '0');
+  if (crowd > 0) {
+    mkdirSync(join(dir, 'crowd'), { recursive: true });
+    for (let index = 0; index < crowd; index += 1) {
+      writeFileSync(
+        join(dir, 'crowd', `filler_${index}.gd`),
+        [
+          `class_name Filler${index}`,
+          'extends Node',
+          '',
+          '',
+          'func value() -> int:',
+          `\treturn ${index}`,
+          '',
+        ].join('\n'),
+      );
+    }
+  }
+
+  writeFileSync(
     join(dir, 'bell.gd'),
     [
       'class_name Bell',
       'extends Node',
       '',
+      // Held as another global class rather than as a plain int, because the reported fault is on a
+      // type that has a class_name dependency of its own and the remedy found for it was changing
+      // that dependency. A type depending on nothing is a different graph and may be a different
+      // case, which is the thing this fixture exists to find out.
+      'var clapper: Clapper = Clapper.new()',
       'var tolls: int = 0',
       '',
       '',
       'func toll() -> int:',
-      '\ttolls += 1',
+      '\ttolls += clapper.weight()',
       '\treturn tolls',
       '',
     ].join('\n'),
@@ -363,6 +395,10 @@ function createProject(): string {
   writeFileSync(
     join(dir, 'ringer.gd'),
     [
+      // A global class itself, because the dependent in the report is one and a plain script is a
+      // different entry in the editor's list: the global classes are resolved at startup and a
+      // script that is only a file is not in that list at all.
+      'class_name Ringer',
       'extends Node',
       '',
       'var bell: Bell = Bell.new()',
@@ -378,12 +414,20 @@ function createProject(): string {
   writeFileSync(
     join(dir, 'main.tscn'),
     [
-      '[gd_scene load_steps=2 format=3]',
+      '[gd_scene load_steps=3 format=3]',
       '',
       '[ext_resource type="Script" path="res://main.gd" id="1_main"]',
+      // The dependent hangs in the main scene, because the script in the report is one the editor
+      // has instantiated rather than one that only sits on disk. A GDScript with live instances is
+      // reloaded differently from one nothing has ever made, and the main scene is the one an
+      // editor opens for itself.
+      '[ext_resource type="Script" path="res://ringer.gd" id="2_ringer"]',
       '',
       '[node name="Main" type="Node"]',
       'script = ExtResource("1_main")',
+      '',
+      '[node name="Ringer" type="Node" parent="."]',
+      'script = ExtResource("2_ringer")',
       '',
     ].join('\n'),
   );
@@ -1525,8 +1569,6 @@ async function testAClassWrittenUnderTheEditorNeedsARescan({ call, project }: Ed
   );
   assert.equal(get(after, 'typesTheEditorHasNotLoaded'), undefined, 'and the answer should stop naming it');
   assert.equal(get(after, 'clean'), true, JSON.stringify(after));
-
-  await testAMethodAddedToAnAnalysedTypeIsPickedUp({ call, project } as Editor);
 }
 
 /**
@@ -1576,11 +1618,12 @@ async function testAMethodAddedToAnAnalysedTypeIsPickedUp({ call, project }: Edi
       'class_name Bell',
       'extends Node',
       '',
+      'var clapper: Clapper = Clapper.new()',
       'var tolls: int = 0',
       '',
       '',
       'func toll() -> int:',
-      '\ttolls += 1',
+      '\ttolls += clapper.weight()',
       '\treturn tolls',
       '',
       '',
@@ -1592,6 +1635,7 @@ async function testAMethodAddedToAnAnalysedTypeIsPickedUp({ call, project }: Edi
   writeFileSync(
     join(project, 'ringer.gd'),
     [
+      'class_name Ringer',
       'extends Node',
       '',
       'var bell: Bell = Bell.new()',
@@ -2782,6 +2826,7 @@ async function main(): Promise<void> {
     ['testASettingReadFromTheEditor', testASettingReadFromTheEditor],
     ['testLanguageServer', testLanguageServer],
     ['testAClassWrittenUnderTheEditorNeedsARescan', testAClassWrittenUnderTheEditorNeedsARescan],
+    ['testAMethodAddedToAnAnalysedTypeIsPickedUp', testAMethodAddedToAnAnalysedTypeIsPickedUp],
     ['testAPlayedRunsConsoleArrivesOnItsOwn', testAPlayedRunsConsoleArrivesOnItsOwn],
     ['testDebugging', testDebugging],
     ['testRuntime', testRuntime],
