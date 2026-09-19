@@ -5550,7 +5550,17 @@ function namesIn(path: string, pattern: RegExp, what: string, least: number): Se
   const found = new Set([...readFileSync(path, 'utf8').matchAll(pattern)].map(captured));
   // The reader is a regex over source, so it can come back empty for a table that was merely
   // reformatted, and an empty set agrees with everything. A floor is what makes it speak up.
-  assert.ok(found.size >= least, `only ${found.size} of the ${what} were read from ${path}`);
+  //
+  // [param least] is what the file holds today, not a loose minimum, because a floor well under
+  // the real count catches an emptied reading and not a shortened one. The sets read here drive
+  // the checks that find a command nothing sends, so a reader quietly returning six fewer entries
+  // stops looking for six of them and still passes. Adding an operation does not trip this;
+  // removing one deliberately means lowering the number here in the same change, which is the
+  // point at which somebody confirms the removal was meant.
+  assert.ok(
+    found.size >= least,
+    `only ${found.size} of the ${what} were read from ${path}, which should hold at least ${least}: either the pattern no longer matches how they are written, or one was removed and this floor needs lowering with it`,
+  );
   return found;
 }
 
@@ -5596,7 +5606,7 @@ function testEveryDispatchedNameExistsOnBothSides(): void {
     'src/godot/operations/godot_operations.gd',
     /^\t\t"([a-z_]+)":$/gm,
     'engine operations',
-    30,
+    31,
   );
   for (const [tool, operations] of Object.entries(HEADLESS_OPERATIONS)) {
     for (const [op, operation] of Object.entries(operations)) {
@@ -5622,7 +5632,7 @@ function testEveryDispatchedNameExistsOnBothSides(): void {
     'src/godot/addons/gdharness_editor/tool_executor.gd',
     /^\t\t"([a-z_]+)": \[/gm,
     'editor commands',
-    25,
+    31,
   );
   // Most are sent by name at the call; the ones a caller reaches with `from: "editor"` are sent
   // out of a table, so the table is where they are read from rather than the source around it.
@@ -5641,7 +5651,7 @@ function testEveryDispatchedNameExistsOnBothSides(): void {
     'src/godot/addons/gdharness_runtime/runtime_autoload.gd',
     /^\t\t"([a-z_]+)": (?:_ping|_[a-z]+\.[a-z_]+),$/gm,
     'runtime commands',
-    15,
+    21,
   );
   const asked = namesSent(
     /(?:handleRuntimeCommand|runtimeRequest)\([^,]*,?\s*'([a-z_]+)'/g,
