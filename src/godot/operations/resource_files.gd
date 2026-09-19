@@ -39,5 +39,3 @@ func get_uid(params: Dictionary) -> Dictionary:
 	return {
 		"file": file_path, "absolute_path": absolute_path, "uid": uid_content.strip_edges(), "exists": true
 	}
-
-
