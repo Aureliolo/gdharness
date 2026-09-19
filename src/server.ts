@@ -37,13 +37,15 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { announceBridge, announcementPath, readAnnouncement, withdrawBridge } from './bridge-announce.js';
 import {
-  type Contradicted,
   cachedClasses,
   cacheWrittenAt,
   contradictedDiagnostics,
+  declaredClasses,
   missingMemberIn,
   staleClassNames,
   type UnseenClass,
+  unknownTypeIn,
+  unloadedTypes,
   unseenByEditor,
 } from './class-cache.js';
 import { configDisagrees } from './config-pin.js';
@@ -2240,7 +2242,7 @@ class GodotServer {
     // their own re-reading a class_name the editor's database had not caught up with explains it
     // without staleness being involved at all. Marked rather than refused for the same reason: a
     // suspicion is not a fault, and refusing would take a working tool away on one.
-    const contradicted = this.contradictedByTheFile(diagnostics, args);
+    const disagrees = this.whereTheFileDisagrees(diagnostics, args);
     return this.jsonTextResponse(
       markIfStale(
         {
@@ -2249,12 +2251,7 @@ class GodotServer {
           errors,
           warnings: diagnostics.length - errors,
           diagnostics,
-          ...(contradicted.length === 0
-            ? {}
-            : {
-                contradictedByTheFile: contradicted,
-                staleAnalysis: `The editor is reporting against an older copy of ${contradicted.length === 1 ? 'a type' : 'some types'} named above. Each member listed is declared in the file the class cache points at, so those diagnostics are wrong however the code is written. editor_launch restart clears it; editor_rescan and project_import refresh_classes do not, because neither reaches the analysed types the language server built at startup.`,
-              }),
+          ...disagrees,
         },
         this.godotBridge.getStatus().addonVersion,
         SERVER_VERSION,
@@ -2263,52 +2260,90 @@ class GodotServer {
   }
 
   /**
-   * Diagnostics the file on disk contradicts, which is the editor's analysed type rather than the
-   * code.
+   * What the project's own files disagree with in a set of diagnostics, and what clears it.
    *
-   * Adding a method to an existing `class_name` leaves the language server handing dependents the
-   * type it analysed at startup, so every caller is told the method "is not present on the inferred
-   * type" while `script_info symbols` lists it from that same server a moment later. Nothing in the
-   * answer said so, and the report reads exactly like a real one: the only way past it is to decide
-   * the tool is wrong, and having decided that once a caller decides it faster the next time, which
-   * is the cost worth avoiding rather than the ten minutes.
+   * Two shapes, because a caller meets both for the same underlying reason and the text connects
+   * them not at all. A method added to an existing `class_name` comes back as "is not present on the
+   * inferred type" at every caller, while `script_info symbols` lists it from that same language
+   * server a moment later. A class the editor has never loaded comes back as a base class it cannot
+   * find or an identifier not declared, and mentions no type at all. Both read exactly like real
+   * findings, and the only way past either is to decide the tool is wrong, which is a decision that
+   * gets cheaper every time it is made.
    *
-   * Checked by the reading that settles it, which is the file the class cache points at. Only a
-   * member found there is reported: not finding one says nothing, since it may be inherited or the
-   * diagnostic may be right, and a guess either way would be another answer that cannot be checked.
-   * The engine is not asked and nothing is re-analysed, so this costs a file read per named type.
+   * The remedies differ, which is why they are answered separately rather than as one list. An
+   * analysed type that has gone stale is only cleared by restarting the editor. A class missing from
+   * the cache is what `refresh_classes` rewrites, and a class in the cache that the editor still
+   * cannot see is the editor's loaded list being behind. A launched game reads that cache, so these
+   * are also the states where the game runs and the diagnostics deny it.
+   *
+   * Nothing is claimed that the files do not show. A member not found says nothing, since it may be
+   * inherited or the diagnostic may simply be right, and calling a real finding stale is the
+   * expensive direction. No engine is asked and nothing is re-analysed.
    */
-  private contradictedByTheFile(diagnostics: unknown[], args: OperationParams): Contradicted[] {
+  private whereTheFileDisagrees(diagnostics: unknown[], args: OperationParams): OperationParams {
     const messages = diagnostics
       .map((entry) => asParams(entry)['message'])
       .filter((message): message is string => typeof message === 'string');
-    // Before the project is resolved and the cache is read, because a clean script is the ordinary
-    // answer and this tool is called in a loop over a whole directory. Nothing below can find
-    // anything when no message is of the one shape that can be checked.
-    if (!messages.some((message) => missingMemberIn(message) !== null)) {
-      return [];
+    // Before the project is resolved and anything is read, because a clean script is the ordinary
+    // answer and this tool is called in a loop over a directory. Nothing below can find anything
+    // when no message is of a shape that can be checked at all.
+    const worthChecking = messages.some(
+      (message) => missingMemberIn(message) !== null || unknownTypeIn(message) !== null,
+    );
+    const project = worthChecking ? this.project(args) : null;
+    if (project === null || !project.ok) {
+      return {};
     }
-    const project = this.project(args);
-    if (!project.ok) {
-      return [];
+    const projectPath = project.value.path;
+    const cached = cachedClasses(projectPath);
+
+    const contradicted =
+      cached === null
+        ? []
+        : contradictedDiagnostics(messages, cached, (resourcePath) => {
+            const contained = resolveWithinProject(projectPath, resourcePath);
+            if (!contained.ok || !existsSync(contained.absolutePath)) {
+              return null;
+            }
+            try {
+              return readFileSync(contained.absolutePath, 'utf8');
+            } catch {
+              // A script the cache names and the disk will not hand over contradicts nothing, and
+              // the diagnostics beside it are still worth answering with.
+              return null;
+            }
+          });
+
+    // The walk of the project is the expensive half, so it happens only for a message that could
+    // name a class at all rather than on every call that reached this far.
+    const unloaded = messages.some((message) => unknownTypeIn(message) !== null)
+      ? unloadedTypes(messages, declaredClasses(projectPath), cached)
+      : [];
+
+    const notes: string[] = [];
+    if (contradicted.length > 0) {
+      notes.push(
+        `The editor is reporting against an older copy of ${contradicted.length === 1 ? 'a type' : 'some types'} named under contradictedByTheFile. Each member listed is declared in the file the class cache points at, so those diagnostics are wrong however the code is written. editor_launch restart clears it; editor_rescan and project_import refresh_classes do not, because neither reaches the analysed types the language server built at startup.`,
+      );
     }
-    const classes = cachedClasses(project.value.path);
-    if (classes === null) {
-      return [];
+    const uncached = unloaded.filter((type) => !type.inTheClassCache);
+    if (uncached.length > 0) {
+      notes.push(
+        `${uncached.map((type) => type.type).join(', ')} ${uncached.length === 1 ? 'is declared' : 'are declared'} in this project and missing from .godot/global_script_class_cache.cfg, so a game launched now would not resolve ${uncached.length === 1 ? 'it' : 'them'} either. project_import refresh_classes rewrites the cache from the declarations on disk.`,
+      );
     }
-    return contradictedDiagnostics(messages, classes, (resourcePath) => {
-      const contained = resolveWithinProject(project.value.path, resourcePath);
-      if (!contained.ok || !existsSync(contained.absolutePath)) {
-        return null;
-      }
-      try {
-        return readFileSync(contained.absolutePath, 'utf8');
-      } catch {
-        // A script the cache names and the disk will not hand over is not a contradiction of
-        // anything, and the diagnostics beside it are still worth answering with.
-        return null;
-      }
-    });
+    const stale = unloaded.filter((type) => type.inTheClassCache);
+    if (stale.length > 0) {
+      notes.push(
+        `${stale.map((type) => type.type).join(', ')} ${stale.length === 1 ? 'is' : 'are'} in the class cache and still unresolved here, which is the editor's loaded list being behind rather than anything on disk. A game launched now reads the cache and resolves ${stale.length === 1 ? 'it' : 'them'}, so the run and the diagnostics disagree. editor_launch restart clears it.`,
+      );
+    }
+
+    return {
+      ...(contradicted.length === 0 ? {} : { contradictedByTheFile: contradicted }),
+      ...(unloaded.length === 0 ? {} : { typesTheEditorHasNotLoaded: unloaded }),
+      ...(notes.length === 0 ? {} : { staleAnalysis: notes.join(' ') }),
+    };
   }
 
   private async handleLSP(
