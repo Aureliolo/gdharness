@@ -91,6 +91,20 @@ assert.equal(
   HARNESSES.length,
   'the README harness count should match the harness table',
 );
+// The row above these says what a reader has to install before any of it works, and it is the one
+// claim on that table nothing was holding: the counts are checked against what the server answers,
+// while the versions were prose agreeing with `engines` by memory. A minimum raised in package.json
+// and not here leaves the table telling somebody the runtime they have is enough.
+assert.equal(
+  `>=${claimed(/Node (\d+) or newer/, 'the Node version it needs')}.0.0`,
+  pkg.engines.node,
+  'the README Node version should be the one package.json will refuse an install under',
+);
+assert.equal(
+  `>=${claimed(/Runs under Bun ([\d.]+)/, 'the Bun version it runs under')}.0`,
+  pkg.engines.bun,
+  'the README Bun version should be the one package.json names',
+);
 assert.match(
   serverManifest.description,
   /godot/i,
