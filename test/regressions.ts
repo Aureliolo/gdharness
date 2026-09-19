@@ -5759,6 +5759,219 @@ async function testAScanThatHasNotStartedIsNotFinished(): Promise<void> {
 }
 
 /**
+ * A repair that could not run is not reported as one.
+ *
+ * The editor writes the class cache at the end of a scan from the list it is holding, not from the
+ * files, so an editor blind to a class the cache holds writes a cache without it over the correct
+ * one. Downstream, an editor that had been short of the file since it started lost six classes to
+ * one rescan. The answer now rebuilds the cache from the files rather than telling the caller to,
+ * and names what came back under `cacheRestored`.
+ *
+ * The rebuild is a headless engine, so it is a thing that can fail: no engine on the machine, a
+ * project it will not open, a script that no longer declares the class. Claiming the repair anyway
+ * would be the same fault this whole area keeps producing, an answer accurate enough to be believed
+ * and not accurate enough to be right, and worse than the loss because a caller who reads
+ * `cacheRestored` stops looking. This server has no engine, so the rebuild cannot run, and what is
+ * asserted is that the loss is named, the repair is not claimed, and `ok` is false.
+ *
+ * A scan that loses nothing sits beside it, because a server that had stopped scanning at all would
+ * satisfy the first half on its own.
+ */
+async function testARepairThatCouldNotRunIsNotReported(): Promise<void> {
+  const port = await reservePort();
+  const server = new ServerProcess({
+    // Named rather than left to the machine: with an engine on PATH the rebuild would run and the
+    // case would be asserting the opposite of what it says, on some machines only.
+    env: { GDHARNESS_BRIDGE_PORT: String(port), GODOT_PATH: join(tmpdir(), 'gdharness-no-such-godot') },
+  });
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-shortening-'));
+  let editor: WebSocket | null = null;
+  try {
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    mkdirSync(join(project, '.godot'), { recursive: true });
+    writeFileSync(join(project, 'hero.gd'), 'class_name Hero\nextends Node\n');
+    writeFileSync(join(project, 'squire.gd'), 'class_name Squire\nextends Node\n');
+    writeFileSync(
+      join(project, '.godot', 'global_script_class_cache.cfg'),
+      'list=[{\n"class": &"Hero",\n"path": "res://hero.gd"\n}, {\n"class": &"Squire",\n"path": "res://squire.gd"\n}]\n',
+    );
+
+    await server.initialize('regression-test');
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+    editor = socket;
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', () => {
+        resolve();
+      });
+      socket.once('error', reject);
+    });
+
+    const cache = join(project, '.godot', 'global_script_class_cache.cfg');
+    let scans = 0;
+    // The editor is holding one of the two classes the cache holds, which is the state that costs
+    // the other one. Told to hold both, the same editor is one a scan takes nothing from.
+    let holds = ['Hero'];
+    socket.on('message', (raw: Buffer) => {
+      const message: unknown = JSON.parse(String(raw));
+      if (!isRecord(message) || message['type'] !== 'tool_invoke') {
+        return;
+      }
+      const tool = String(message['tool']);
+      const args = isRecord(message['args']) ? message['args'] : {};
+      // The polls that follow a scan carry statusOnly and start nothing, so counting them would
+      // say a scan happened when what happened was a look at one. The scan itself writes the cache
+      // from the list this editor is holding, which is the whole of what the real one does to it.
+      if (tool === 'rescan_filesystem' && args['statusOnly'] !== true) {
+        scans += 1;
+        const entries = holds.map((name) => `{\n"class": &"${name}",\n"path": "res://${name}.gd"\n}`);
+        writeFileSync(cache, `list=[${entries.join(', ')}]\n`);
+      }
+      const result =
+        tool === 'rescan_filesystem'
+          ? { ok: true, scanning: false, importing: false, pending: false }
+          : { ok: true, classes: holds };
+      socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result }));
+    });
+    socket.send(
+      JSON.stringify({ type: 'godot_ready', project_path: project, addon_version: SERVER_VERSION }),
+    );
+
+    let knows = false;
+    for (let waited = 0; waited < 10_000 && !knows; waited += 100) {
+      await delay(100);
+      const status = await server.request('tools/call', { name: 'editor_status', arguments: {} });
+      knows = text(get(parseTextContent(status), 'editor', 'projectPath')) === project;
+    }
+    assert.ok(knows, 'the fixture editor should have reached the server, or this proves nothing');
+
+    const shortened = await server.request('tools/call', {
+      name: 'editor_rescan',
+      arguments: { projectPath: project },
+    });
+    const said = textOf(shortened) ?? JSON.stringify(shortened);
+    const lost = parseTextContent(shortened);
+    assert.deepEqual(asArray(get(lost, 'cacheLost') ?? []).map(String), ['Squire'], said);
+    assert.equal(get(lost, 'cacheRestored'), undefined, `with no repair claimed: ${said}`);
+    assert.equal(get(lost, 'ok'), false, `and the call is not a success: ${said}`);
+    assert.match(text(get(lost, 'note')), /editor_launch restart/, `saying what to do: ${said}`);
+    assert.equal(scans, 1, `the scan itself did happen: ${said}`);
+
+    // An editor holding everything the cache holds writes the same list back, so there is nothing
+    // to lose and nothing to repair. Without this, a server that had stopped scanning would satisfy
+    // every assertion above.
+    holds = ['Hero', 'Squire'];
+    writeFileSync(
+      cache,
+      'list=[{\n"class": &"Hero",\n"path": "res://hero.gd"\n}, {\n"class": &"Squire",\n"path": "res://squire.gd"\n}]\n',
+    );
+    const kept = await server.request('tools/call', {
+      name: 'editor_rescan',
+      arguments: { projectPath: project },
+    });
+    const answer = parseTextContent(kept);
+    assert.equal(get(answer, 'ok'), true, `a scan that takes nothing is clean: ${textOf(kept)}`);
+    assert.equal(get(answer, 'cacheLost'), undefined, `with nothing lost: ${textOf(kept)}`);
+    assert.equal(scans, 2, `and it was asked for again: ${textOf(kept)}`);
+  } finally {
+    editor?.terminate();
+    await server.stop();
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A scan that shortened the class cache has it rebuilt from the files.
+ *
+ * The other half of the case above, and the one that needs a real engine, because the rebuild is a
+ * headless engine reading the scripts. Here rather than in the editor tier because the editor tier
+ * cannot ask for the loss: whether a running editor has taken a newly written file in before
+ * anybody tells it to scan is not the same on every platform, so on one of them the scan keeps
+ * everything and the repair never runs. A fixture editor holding a short list produces the loss on
+ * every platform, every time, which is what a repair has to be asserted against.
+ */
+async function testAShortenedCacheIsRebuilt(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('cache rebuild regression skipped (Godot not found)');
+    return;
+  }
+
+  const port = await reservePort();
+  const server = new ServerProcess({ env: { GDHARNESS_BRIDGE_PORT: String(port), GODOT_PATH: godotPath } });
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-rebuilt-'));
+  let editor: WebSocket | null = null;
+  try {
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    mkdirSync(join(project, '.godot'), { recursive: true });
+    writeFileSync(join(project, 'hero.gd'), 'class_name Hero\nextends Node\n');
+    writeFileSync(join(project, 'squire.gd'), 'class_name Squire\nextends Node\n');
+    const cache = join(project, '.godot', 'global_script_class_cache.cfg');
+    writeFileSync(
+      cache,
+      'list=[{\n"class": &"Hero",\n"path": "res://hero.gd"\n}, {\n"class": &"Squire",\n"path": "res://squire.gd"\n}]\n',
+    );
+
+    await server.initialize('regression-test');
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+    editor = socket;
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', () => {
+        resolve();
+      });
+      socket.once('error', reject);
+    });
+
+    socket.on('message', (raw: Buffer) => {
+      const message: unknown = JSON.parse(String(raw));
+      if (!isRecord(message) || message['type'] !== 'tool_invoke') {
+        return;
+      }
+      const tool = String(message['tool']);
+      const args = isRecord(message['args']) ? message['args'] : {};
+      if (tool === 'rescan_filesystem' && args['statusOnly'] !== true) {
+        writeFileSync(cache, 'list=[{\n"class": &"Hero",\n"path": "res://hero.gd"\n}]\n');
+      }
+      const result =
+        tool === 'rescan_filesystem'
+          ? { ok: true, scanning: false, importing: false, pending: false }
+          : { ok: true, classes: ['Hero'] };
+      socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result }));
+    });
+    socket.send(
+      JSON.stringify({ type: 'godot_ready', project_path: project, addon_version: SERVER_VERSION }),
+    );
+
+    let knows = false;
+    for (let waited = 0; waited < 10_000 && !knows; waited += 100) {
+      await delay(100);
+      const status = await server.request('tools/call', { name: 'editor_status', arguments: {} });
+      knows = text(get(parseTextContent(status), 'editor', 'projectPath')) === project;
+    }
+    assert.ok(knows, 'the fixture editor should have reached the server, or this proves nothing');
+
+    const scanned = await server.request('tools/call', {
+      name: 'editor_rescan',
+      arguments: { projectPath: project },
+    });
+    const answer = parseTextContent(scanned);
+    const said = textOf(scanned) ?? JSON.stringify(scanned);
+    assert.deepEqual(asArray(get(answer, 'cacheLost') ?? []).map(String), ['Squire'], said);
+    assert.deepEqual(asArray(get(answer, 'cacheRestored') ?? []).map(String), ['Squire'], said);
+    // The file itself, because the answer saying it was put back is the claim under test.
+    assert.ok(readFileSync(cache, 'utf8').includes('Squire'), `and the file holds it again: ${said}`);
+    // Still not ok, because the editor is holding the short list and the next scan drops it again.
+    assert.match(text(get(answer, 'note')), /editor_launch restart/, said);
+  } finally {
+    editor?.terminate();
+    await server.stop();
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
  * Every fixture in this file is in the list below.
  *
  * The list is written by hand, so a fixture can be added and left out of it, and nothing says so:
@@ -5817,6 +6030,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheProjectWalksAgreeAboutWhatIsInIt,
   testClassesAnEditorIsNotHolding,
   testAScanThatHasNotStartedIsNotFinished,
+  testARepairThatCouldNotRunIsNotReported,
+  testAShortenedCacheIsRebuilt,
   testProjectDefaultsToTheWorkingDirectory,
   testAnAutoloadGitWillNotCarry,
   testVersionOrdering,

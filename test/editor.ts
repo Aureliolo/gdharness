@@ -1244,14 +1244,29 @@ async function testARescanKeepsWhatTheRebuildWrote({ call, project }: Editor): P
   );
 
   const scanned = await call('editor_rescan', { projectPath: project });
-  const lost = asArray(get(scanned, 'cacheLost') ?? []).map((one) => asString(one));
   const after = readFileSync(cache, 'utf8');
   const missing = ['OfferedClass', 'Filler0', 'Filler399'].filter((name) => !after.includes(name));
-  // The two halves of what was reported: the loss itself, and the clean answer beside it. Either
-  // one alone is survivable; together they send the caller to look at the engine that failed next.
-  assert.deepEqual(missing, [], `the rescan must not drop what the rebuild wrote: lost ${lost.length}`);
-  assert.deepEqual(lost, [], `and nothing should have been lost to report: ${lost.slice(0, 5).join(', ')}`);
-  assert.equal(get(scanned, 'ok'), true, 'so the scan reports itself clean');
+  // What the caller following that advice is entitled to, whichever way the scan went: the class
+  // is in the file when the call comes back. Whether the editor picked it up or the cache had to
+  // be rebuilt around it is the engine's business, and the answer says which.
+  assert.deepEqual(missing, [], `the rescan must not leave the file short: ${text(scanned)}`);
+
+  // And the answer is not allowed to be quiet about having done it. A rescan that dropped classes
+  // has an editor still holding the short list, so the next one drops them again.
+  const lost = asArray(get(scanned, 'cacheLost') ?? []).map((one) => asString(one));
+  if (lost.length > 0) {
+    const restored = asArray(get(scanned, 'cacheRestored') ?? []).map((one) => asString(one));
+    assert.deepEqual(
+      lost.filter((name) => !restored.includes(name)),
+      [],
+      `everything it lost should be named as put back: ${text(scanned)}`,
+    );
+    assert.match(
+      asString(get(scanned, 'note')),
+      /editor_launch restart/,
+      `and the editor still holding the short list should be said: ${text(scanned)}`,
+    );
+  }
 }
 
 /**
