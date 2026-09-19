@@ -22,7 +22,6 @@ import {
   readFileSync,
   readSync,
   rmSync,
-  statSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, normalize } from 'node:path';
@@ -2224,8 +2223,34 @@ class GodotServer {
       // there is nothing on the other end of it to say goodbye to.
       this.dapClient = null;
     }
-    this.dapClient ??= new GodotDAPClient(port);
+    if (this.dapClient === null) {
+      this.dapClient = new GodotDAPClient(port);
+      // Written where it lands rather than where it is polled. The sink reads the run in hand each
+      // time it fires, so a second play and a run picked up after a reconnect both write to their
+      // own file without anything having to remember to re-point it.
+      this.dapClient.setOutputSink((line) => {
+        this.writeToTranscript(line);
+      });
+    }
     return this.dapClient;
+  }
+
+  /**
+   * Appends one console line to the editor-played run's own file, if there is one to write to.
+   *
+   * Failures are swallowed rather than raised: this runs on a socket event with no caller to
+   * answer, and the buffer still has the line for whoever polls next.
+   */
+  private writeToTranscript(line: string): void {
+    const run = this.activeProcess;
+    if (run?.throughEditor !== true || run.transcript === null) {
+      return;
+    }
+    try {
+      appendFileSync(run.transcript, line.endsWith('\n') ? line : `${line}\n`);
+    } catch (error) {
+      this.logDebug(`Could not write an editor-played run's transcript: ${errorMessage(error)}`);
+    }
   }
 
   /**
@@ -2894,25 +2919,14 @@ class GodotServer {
     if (!game.throughEditor || !this.dapClient) {
       return;
     }
-    // Drained before the connection is judged, because the buffer outlives the socket: a close
-    // that arrived between two calls still has the lines that came before it.
-    const heard: string[] = [];
-    for (const line of this.dapClient.getOutput(true)) {
-      const ended = line.endsWith('\n') ? line : `${line}\n`;
-      game.log.append('stdout', ended);
-      heard.push(ended);
-    }
-    // And into the file, so the run outlives this server. Written after the log rather than
-    // instead of it: a failure here costs the recovery, not the answer in hand.
-    if (heard.length > 0 && game.transcript !== null) {
-      try {
-        appendFileSync(game.transcript, heard.join(''));
-        // Moved to where the file now ends rather than by what was written, so the transcript read
-        // never re-reads a line the adapter already put in the log. Taken from the file itself
-        // because that is the number the read compares against.
-        game.readOffset = statSync(game.transcript).size;
-      } catch (error) {
-        this.logDebug(`Could not write an editor-played run's transcript: ${errorMessage(error)}`);
+    // With a file, the lines are already in it: the adapter writes them there as they arrive, and
+    // the log is filled from the file by the transcript read, which is the same path a run this
+    // server spawned takes from its pipe. Draining the buffer here as well would put every line in
+    // twice. Without a file, the buffer is the only copy and this is the only thing that empties
+    // it, which is a run picked up after a reconnect whose first server left no note.
+    if (game.transcript === null) {
+      for (const line of this.dapClient.getOutput(true)) {
+        game.log.append('stdout', line.endsWith('\n') ? line : `${line}\n`);
       }
     }
     // An adapter that has gone is the only source an editor-played run has, and losing it is
