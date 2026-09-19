@@ -685,7 +685,21 @@ func set_property(params: Dictionary) -> Dictionary:
 	if not _can_read(holder, named):
 		return {"type": "error", "message": _nothing_there(holder, named, str(reached["called"]))}
 	var old_value: Variant = _read(holder, named)
-	_write(holder, named, _values.fitted(value, typeof(old_value)))
+	# The same rule the call path holds: a value that cannot become what the property holds is
+	# refused rather than written. Writing it means the engine picks something, and what it picks
+	# for a word where a number goes is zero, which the answer then reports as the new value.
+	var wanted: int = typeof(old_value)
+	var given: Variant = _values.fitted(value, wanted)
+	if not Values.acceptable(given, wanted):
+		return {
+			"type": "error",
+			"message":
+			(
+				"%s.%s holds %s and the value given is %s, which cannot become one."
+				% [reached["called"], named, type_string(wanted), type_string(typeof(given))]
+			)
+		}
+	_write(holder, named, given)
 
 	return {
 		"type": "property_set",
