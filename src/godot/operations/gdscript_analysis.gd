@@ -481,8 +481,10 @@ func _up_to(text: String, needle: String) -> String:
 # The line with any trailing comment taken off, quote-aware so a `#` inside a string stays.
 #
 # The only one of these scanners that does not count brackets, on purpose: a `#` starts a comment
-# at any depth, so `[1, # two]` is a list with a comment in it. Harmonising this with the others
-# would stop a comment inside brackets being seen as one.
+# wherever it is, and there is no depth at which it does not. Giving this one the depth its
+# neighbours have puts the comment into the value of `var table := {  # keyed by name`, because the
+# brace opens before the `#` and closes on a later line. Held by a case, since the argument for the
+# difference is not visible from the code and reads like an oversight beside its neighbours.
 func _without_comment(line: String) -> String:
 	var quote: String = ""
 	for i: int in range(line.length()):
@@ -502,10 +504,6 @@ func _without_comment(line: String) -> String:
 #
 # `rfind(")")` took the last one on the line, which is the right answer until something after the
 # signature has a bracket in it: a trailing comment, or a string in a default value.
-#
-# Counts parentheses only, where the others count `[` and `{` as well. That is not an oversight:
-# this is looking for the partner of one `(`, and a `[` between them changes nothing about which
-# `)` closes it.
 func _closing_paren(text: String, from: int) -> int:
 	var depth: int = 0
 	var quote: String = ""
@@ -518,9 +516,9 @@ func _closing_paren(text: String, from: int) -> int:
 		if ch == '"' or ch == "'":
 			quote = ch
 			continue
-		if ch == "(":
+		if ch == "(" or ch == "[" or ch == "{":
 			depth += 1
-		elif ch == ")":
+		elif ch == ")" or ch == "]" or ch == "}":
 			depth -= 1
 			if depth == 0:
 				return i

@@ -5260,7 +5260,24 @@ async function testAStructureReadDescribesTheScriptItRead(): Promise<void> {
     // A wrapped enum, the other half of the same fault: 23 of them in the pinned gdUnit4.
     writeFileSync(
       join(project, 'wrapped.gd'),
-      ['extends RefCounted', '', 'enum Mode {', '\tFAST,', '\tSLOW,', '}', ''].join('\n'),
+      [
+        'extends RefCounted',
+        '',
+        'enum Mode {',
+        '\tFAST,',
+        '\tSLOW,',
+        '}',
+        '',
+        // The brace opens before the comment and closes on a later line, which is the only shape
+        // that separates the comment stripper from its neighbours: it counts no brackets, because
+        // a `#` starts a comment wherever it is. Give it the depth the others have and the comment
+        // lands inside the value.
+        'var table := {  # keyed by name',
+        '\t"a": 1,',
+        '\t"b": 2,',
+        '}',
+        '',
+      ].join('\n'),
     );
     // A file mid-edit, which is the state an agent is most likely to ask about. Joining lines until
     // the brackets balance made this worse before it was bounded to declarations: an unclosed
@@ -5456,6 +5473,11 @@ async function testAStructureReadDescribesTheScriptItRead(): Promise<void> {
         // The line is where the declaration starts, not where its closing brace is.
         [['Mode', ['FAST', 'SLOW'], 3]],
         `a wrapped enum has the members it declares: ${JSON.stringify(wrapped)}`,
+      );
+      assert.deepEqual(
+        asArray(get(wrapped, 'variables')).map((each) => [get(each, 'name'), get(each, 'default_value')]),
+        [['table', '{ "a": 1, "b": 2, }']],
+        `and a comment beside an opening brace is not part of the value: ${JSON.stringify(wrapped)}`,
       );
 
       const halfWritten = await call('script_info', {
