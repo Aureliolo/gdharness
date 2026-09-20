@@ -3,8 +3,8 @@
  * fell through every modelled failure carries, and the invitation to name a missing tool.
  *
  * Both are read by an agent that will act on them, so what is asserted here is the part that
- * decides what it does next: that the retry is called pointless, that the decision is handed to
- * the user, and that the link it would be handed is one a browser can open.
+ * decides what it does next: what it is told about trying again, that the decision to file is
+ * handed to the user, and that the link it would be handed is one a browser can open.
  */
 
 import assert from 'node:assert/strict';
@@ -12,7 +12,13 @@ import { join } from 'node:path';
 import process from 'node:process';
 import pkg from '../package.json' with { type: 'json' };
 import { Refusal } from '../src/errors.js';
-import { defectReport, defectSignature, ENHANCEMENT_URL, feedbackNotice } from '../src/issues.js';
+import {
+  DefectsSeen,
+  defectReport,
+  defectSignature,
+  ENHANCEMENT_URL,
+  feedbackNotice,
+} from '../src/issues.js';
 import { portFromEnv } from '../src/ports.js';
 
 const report = defectReport('editor_scene op=open', new TypeError('Cannot read properties of undefined'));
@@ -24,12 +30,64 @@ assert.match(report, /Cannot read properties of undefined/, 'the report should c
 assert.match(report, new RegExp(`gdharness ${pkg.version.replaceAll('.', '\\.')}`), 'and the version');
 assert.match(report, new RegExp(process.platform), 'and the platform it happened on');
 
-// The two sentences that decide what the agent does with it. Without the first it retries a call
-// that cannot succeed; without the second it files on somebody's behalf without asking.
-assert.match(report, /sending it again will not\nchange it/, 'the report should stop the retry loop');
+// The two sentences that decide what the agent does with it. Without the first it either loops on
+// a call that cannot succeed or walks away from one that would have worked on the next attempt;
+// without the second it files on somebody's behalf without asking.
+assert.match(report, /Send the call once more before anything else/, 'a first sighting is worth a retry');
 assert.match(report, /Do not open an issue on your own initiative/, 'and hand the decision over');
 assert.match(report, /ask whether you may report it/, 'by asking the user first');
 assert.match(report, /no way to open an issue yourself/, 'with the case where it cannot file at all');
+
+// What the report says about trying again is taken off how many times it has already been said,
+// because the two states behind an unmodelled failure need opposite advice and nothing in the
+// error tells them apart. The report used to open with "sending it again will not change it" for
+// both, which is right for a state and wrong for a lock the editor held for a moment: Windows
+// against a live editor produces those, and the advice sent an agent to interrupt somebody over a
+// fault that had already cleared.
+//
+// Both branches are asserted for what they offer, not for the absence of the other, so a fifth
+// wording that says nothing about retrying fails here rather than passing twice.
+const twice = defectReport('editor_scene op=open', new Error('EBUSY: locked'), { seenBefore: 1 });
+assert.match(twice, /sending the call again will not change it/, 'a repeat says the retry is spent');
+assert.match(twice, /this exact failure once in this session already/, 'and counts what it has seen');
+assert.doesNotMatch(twice, /Send the call once more/, 'and does not also offer the retry');
+assert.match(
+  defectReport('editor_scene op=open', new Error('EBUSY: locked'), { seenBefore: 4 }),
+  /this exact failure 4 times in this session already/,
+  'and counts more than one as a number rather than as "once"',
+);
+
+// The counting itself, which is what the server actually calls. A report that reads correctly from
+// a number handed to it says nothing about where that number comes from, and the catch-all it comes
+// from only runs when something is already wrong.
+const seen = new DefectsSeen();
+assert.equal(seen.before('editor_scene op=open', 'EBUSY: locked'), 0, 'the first sighting is the first');
+assert.equal(seen.before('editor_scene op=open', 'EBUSY: locked'), 1, 'and the second knows about it');
+assert.equal(seen.before('editor_scene op=open', 'EBUSY: locked'), 2, 'and it goes on counting');
+assert.equal(
+  seen.before('editor_scene op=open', 'the bridge answered with no payload'),
+  0,
+  'a different failure in the same tool starts again',
+);
+assert.equal(
+  seen.before('editor_script op=create', 'EBUSY: locked'),
+  0,
+  'and so does the same message from a different call, since the signature names both',
+);
+assert.equal(
+  new DefectsSeen().before('editor_scene op=open', 'EBUSY: locked'),
+  0,
+  'and a fresh server has seen nothing, which is what makes this per session',
+);
+
+// The engine's version is a field the template asks for, and the server knows it whenever anything
+// has asked the engine this session. Left unpassed it said "not known" on every report ever sent.
+assert.match(
+  defectReport('editor_scene op=open', new Error('EBUSY: locked'), { godotVersion: '4.7.2.stable' }),
+  /Godot +4\.7\.2\.stable/,
+  'a known engine version reaches the report',
+);
+assert.match(report, /Godot +not known at the point this failed/, 'and an unknown one says so');
 
 // The one report nobody would think to send: the message itself being wrong. A failure this
 // program anticipates arriving dressed as one it does not is the misclassification that keeps

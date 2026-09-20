@@ -3,10 +3,12 @@
  *
  * Two occasions, and they are not the same. A defect is a failure nobody modelled: every other
  * failure here is a refusal that names what to do instead, so a call that fell through to this
- * one did nothing wrong and repeating it changes nothing. One that turns out to have been the
- * project's or the environment's doing after all is still worth hearing about, because it means a
- * failure this program knows about arrived dressed as one it does not. A gap is the other
- * occasion: a tool that should exist and does not, which only whoever drives the harness sees.
+ * one did nothing wrong. Whether repeating it changes anything is a separate question and not one
+ * this can answer from the call, since a rare event reaches the same line as a settled state. One
+ * that turns out to have been the project's or the environment's doing after all is still worth
+ * hearing about, because it means a failure this program knows about arrived dressed as one it does
+ * not. A gap is the other occasion: a tool that should exist and does not, which only whoever
+ * drives the harness sees.
  *
  * Nothing is sent from here. Both produce text and a link, and an issue is opened by a person
  * who has read what it would contain, or not at all: a machine reporting on somebody's project
@@ -120,13 +122,56 @@ function filledTemplate(where: string, message: string, godotVersion?: string): 
 }
 
 /**
+ * How many times each unmodelled failure has already been answered with.
+ *
+ * What separates a lock that had cleared by the next call from a state that will answer the same
+ * way for ever is whether it comes back, and only something that outlives one call can see both
+ * attempts. Keyed by signature, which is the same eight characters the report prints under
+ * `Signature`, so "this exact failure" means the line the reader is looking at rather than a
+ * sameness they have to take on trust.
+ */
+export class DefectsSeen {
+  private readonly counts = new Map<string, number>();
+
+  /** How many times this failure has already been reported, counting this one in for next time. */
+  before(where: string, message: string): number {
+    const signature = defectSignature(where, message);
+    const seen = this.counts.get(signature) ?? 0;
+    this.counts.set(signature, seen + 1);
+    return seen;
+  }
+}
+
+/** What the caller knows about a defect that the report itself cannot work out. */
+export interface DefectContext {
+  /** The engine's version, when whatever failed had already learned it. */
+  readonly godotVersion?: string | undefined;
+  /**
+   * How many times this process has already answered with this same signature.
+   *
+   * Zero is the first time, which is the only state where a retry is worth a turn.
+   */
+  readonly seenBefore?: number | undefined;
+}
+
+/**
  * The whole of what a failed call says about itself.
  *
- * Written for whoever reads it next, which is usually an agent: it says the retry is pointless
- * before it says anything else, because the alternative is three wasted turns of the same call.
- * Then it hands over the decision, which is not the agent's to take.
+ * Written for whoever reads it next, which is usually an agent, so what it says about trying again
+ * decides three turns either way. It used to say a retry would change nothing, reasoning that every
+ * failure this program models is a refusal and so anything reaching here was a state rather than an
+ * event. That holds for the failures nobody modelled *because* they cannot happen twice differently,
+ * and not for the ones nobody modelled because they are rare: a file the editor had open, a socket
+ * that dropped mid-call. Windows against a live editor produces the first kind routinely, and an
+ * agent told the retry was pointless went and interrupted somebody over a lock that had already
+ * cleared.
+ *
+ * So the advice is taken off something known rather than assumed. The same failure twice in one
+ * process is a state and says so; the first time is an event until it is not, and one retry settles
+ * which. The paragraph after it hands over the decision, which is not the agent's to take.
  */
-export function defectReport(where: string, error: unknown, godotVersion?: string): string {
+export function defectReport(where: string, error: unknown, context: DefectContext = {}): string {
+  const { godotVersion, seenBefore = 0 } = context;
   const message = errorMessage(error);
   const title = `Defect ${defectSignature(where, message)}: ${where}`;
   const url =
@@ -135,9 +180,21 @@ export function defectReport(where: string, error: unknown, godotVersion?: strin
   const width = Math.max(...facts(where, message, godotVersion).map(([label]) => (label ?? '').length));
 
   return [
-    'gdharness failed in a way it does not model. This is a defect in gdharness rather than',
-    'anything about the call: the arguments did not cause it, and sending it again will not',
-    'change it.',
+    'gdharness failed in a way it does not model. Whatever went wrong underneath, it reached you',
+    'as a crash rather than as a refusal naming what would have worked, and that much is a defect',
+    'in gdharness however the rest of it turns out.',
+    '',
+    ...(seenBefore === 0
+      ? [
+          'Send the call once more before anything else. Some of what reaches this line is a file',
+          'another process had open, or a connection that dropped, and those are gone by the next',
+          'attempt. If the same Signature comes back, it is not one of those, and repeating it',
+          'further only spends turns.',
+        ]
+      : [
+          `You have had this exact failure ${seenBefore === 1 ? 'once' : `${seenBefore} times`} in this session already, so it is a`,
+          'state rather than a passing one, and sending the call again will not change it.',
+        ]),
     '',
     ...facts(where, message, godotVersion).map(
       ([label, value]) => `  ${(label ?? '').padEnd(width)}  ${value ?? ''}`,

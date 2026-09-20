@@ -66,7 +66,7 @@ import {
 import { GodotLocator } from './godot-path.js';
 import { type HeadlessOutcome, runImport, runOperation } from './headless.js';
 import { EDITOR_READS, ENGINE_PASSES, HEADLESS_OPERATIONS } from './headless-operations.js';
-import { defectReport, feedbackNotice } from './issues.js';
+import { DefectsSeen, defectReport, feedbackNotice } from './issues.js';
 import { orphansPrinted, parseJUnit, type TestReport, whyNoReport } from './junit.js';
 import {
   type EditorPorts,
@@ -671,6 +671,16 @@ class GodotServer {
   private noticedUpdate = false;
   private callsSinceNotice = 0;
   private callsSinceFeedback = 0;
+  private readonly defectsSeen = new DefectsSeen();
+  /**
+   * The engine's version, from the last time anything here asked it.
+   *
+   * Kept because a defect report has a field for it and was filling it in with "not known at the
+   * point this failed" every time: nothing passed it, and asking on the failure path would start a
+   * subprocess at the worst possible moment. Whatever was learned earlier in the session is the
+   * right answer for a report about that session.
+   */
+  private lastGodotVersion: string | null = null;
   private lspClient: GodotLSPClient | null = null;
   private dapClient: GodotDAPClient | null = null;
   private bridgeStartupError: string | null = null;
@@ -1059,7 +1069,19 @@ class GodotServer {
       }
       const where = op === '' ? tool : `${tool} op=${op}`;
       console.error(`[SERVER] Unmodelled failure in ${where}:`, error);
-      return { content: [{ type: 'text', text: defectReport(where, error) }], isError: true };
+      const seenBefore = this.defectsSeen.before(where, errorMessage(error));
+      return {
+        content: [
+          {
+            type: 'text',
+            text: defectReport(where, error, {
+              seenBefore,
+              godotVersion: this.lastGodotVersion ?? undefined,
+            }),
+          },
+        ],
+        isError: true,
+      };
     }
   }
 
@@ -2268,7 +2290,8 @@ class GodotServer {
   private async godotVersion(godotPath: string): Promise<string | null> {
     try {
       const { stdout } = await run(godotPath, ['--version'], { timeout: 10000 });
-      return stdout.trim();
+      this.lastGodotVersion = stdout.trim();
+      return this.lastGodotVersion;
     } catch (error) {
       this.logDebug(`Godot did not answer --version: ${errorMessage(error)}`);
       return null;
