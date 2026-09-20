@@ -5113,6 +5113,18 @@ async function testARunEndedUnwatchedIsStillReadable(): Promise<void> {
         // refusal comes from whose the recorded run is, not from what the caller said it was.
         const refused = await call('editor_run', { op: 'stop' });
         assert.match(refused, /not this server's to answer for or to end/, refused);
+        // The third situation, which this answered as either of the other two. A game the editor
+        // is playing is reached by asking the editor, so with none connected a run that is alive
+        // on screen is invisible here. Ordinary rather than exotic now that a played game outlives
+        // a reconnect: the addon takes up to half a minute to dial back in, and during that window
+        // a caller is told nothing is running about a game they are watching. Reported downstream
+        // by a session that killed its own game by pid rather than tell the two apart.
+        assert.match(refused, /No editor is connected/, `the reason it cannot see one: ${refused}`);
+        assert.match(
+          refused,
+          /editor_status says whether one is on its way/,
+          `and what to read to know when it can: ${refused}`,
+        );
       },
       { GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: join(runtimeDir, 'elsewhere') },
     );

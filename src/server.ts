@@ -3625,18 +3625,30 @@ class GodotServer {
    * sentence that is true about this server and false about the machine.
    */
   private nothingOfOursIsRunning(): string {
+    const status = this.godotBridge.getStatus();
+    // The third situation, and the one this used to answer as either of the others. A game the
+    // editor is playing is reached by asking the editor, so while no editor is connected there is
+    // nothing to ask and a run that is alive on screen is invisible here. That window is ordinary:
+    // a reconnect replaces this process and the addon takes up to half a minute to dial back in,
+    // and a played game now outlives that, so being told "no game is running" about one somebody
+    // is watching is a thing that happens rather than a thing that might. Said first, because it
+    // is the only one of the three a caller can act on by waiting.
+    const noEditor = !status.connected
+      ? ' No editor is connected, so a game the editor is playing cannot be seen from here at all:' +
+        ' editor_status says whether one is on its way, and a run of yours that is still up is' +
+        ' reachable again once it is.'
+      : '';
     const record = readRunRecord();
     if (record === null) {
-      return 'No game is running. Start one with editor_run.';
+      return `No game is running.${noEditor} Start one with editor_run.`;
     }
-    const status = this.godotBridge.getStatus();
     const mine = this.ownProject ?? (status.connected ? (status.projectPath ?? null) : null);
     const whose = record.projectPath === '' ? 'a project it does not name' : record.projectPath;
     const ours =
       mine === null
         ? 'this server was started without GDHARNESS_PROJECT and has no editor connected, so it cannot say whose that run is'
         : `this server serves ${mine}`;
-    return `No game of this server's is running. A run started from ${whose} is recorded on this machine, and ${ours}, so it is not this server's to answer for or to end. Start one with editor_run.`;
+    return `No game of this server's is running.${noEditor} A run started from ${whose} is recorded on this machine, and ${ours}, so it is not this server's to answer for or to end. Start one with editor_run.`;
   }
 
   private couldBeOurs(project: string): boolean {

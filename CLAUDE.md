@@ -71,6 +71,35 @@ with a clean diagnostic read after it. Taking both in the same window, between t
 remedy, is what turned it into evidence, and it came out as claimed. Neither trial was wrong. Both
 were read as answering a question neither could reach.
 
+A claim about a change you have just made is the least checked claim there is. It arrives with the
+reasoning that produced it, which is the strongest case anybody will assemble for it, and the reader
+it is told to has less to check it against than you do. The debug adapter disconnect in this
+server's shutdown was ending an editor-played game on every reconnect, and the first fix for it,
+`terminateDebuggee: false`, was reasoned from the protocol, was correct about what gdharness means,
+and was told to the project that reported the loss as the answer. Godot's adapter ignores the field.
+The fixture that was written next failed on the fix, and skipping the request entirely is what saved
+the game. Nothing but running it would have said so: the reasoning was clean and the conclusion was
+false, which is the combination that gets shipped. Run the thing and read what came out, especially
+when the change is yours and the argument for it is good.
+
+A fix changes which states the rest of the code meets, and can promote a rare wrong answer into a
+common one. Nothing in the fixed code says so, because the fix is correct and the thing that got
+worse is somewhere else. The shutdown used to end a game the editor was playing, so after a
+reconnect "no game is running" was usually true and a refusal that could not see a played game was
+a rare confusion. With the game surviving, the addon still takes half a minute to dial back in, so
+there is now routinely a live game on screen that the new server cannot see, and the same refusal
+fires every time. The bug was fixed and a wrong answer beside it went from uncommon to ordinary. So
+after a fix, ask which answers elsewhere were true only because the fault was there, and reach for
+the ones that were right by luck rather than by construction.
+
+A fix can also create the state its own test needs, which means the case that catches what it left
+behind was unwritable until it landed. A replacement server meeting a live editor-played run is
+code that existed and had never run against a real editor, because while the shutdown killed those
+runs on a reconnect there was never one to meet. Surviving is not the same as being usable, and the
+half of the fixture that reads the run through a replacement could not have been written the day
+before. So a fix that makes something survive is the moment to ask what now happens to it, and to
+expect the answer to be in a path nothing has exercised.
+
 A disarm that fails is only evidence when it fails on the assertion you aimed at. Read the failure
 rather than the exit code: a disarm that fails somewhere else never reached the broken line either,
 and it is the same empty result as one that passed, wearing the colour you were hoping for. The way
