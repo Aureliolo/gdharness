@@ -127,6 +127,15 @@ const WRITTEN_COUNTS: readonly [string, RegExp, number][] = [
     /read by all but (\w+) harnesses/,
     HARNESSES.filter((harness) => harness.skills !== undefined && !harness.skills.shared).length,
   ],
+  // The same number again, one line below, about the copy those harnesses read instead. Two
+  // sentences saying one count is the arrangement where a change corrects the held one and leaves
+  // the other stating what used to be true, which is worse than an unheld number on its own: the
+  // file now disagrees with itself and the check is satisfied.
+  [
+    'docs/architecture.md',
+    /a copy for each of the (\w+) that do not/,
+    HARNESSES.filter((harness) => harness.skills !== undefined && !harness.skills.shared).length,
+  ],
 ];
 const NUMBER_WORDS = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine'];
 for (const [file, pattern, actual] of WRITTEN_COUNTS) {

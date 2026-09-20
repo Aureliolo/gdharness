@@ -59,6 +59,28 @@ hard-coding it would drift. So when a branch depends on a version mismatch, a fa
 other disagreement, put the system into that state deliberately and look at what comes out. Waiting
 to meet it in normal use does not work, because normal use is the case that avoids it.
 
+Reaching that state once is not the same as holding it, and what holds it is taking the disagreeing
+thing as an argument. A fixture for the port reservation asked the real kernel for forty ports and
+found them all different. It passed, and it passed again with the deduplication removed, because
+this machine's kernel did not happen to repeat a port: forty different numbers is a reading with no
+other side to it. Rewritten to supply the pool, the way `judgeRun` is given the operating system's
+answer, the disarm fails on the assertion it aims at. A case that waits to meet a disagreement is
+green on every host that does not produce one, which is the same green as no case at all.
+
+The other half of that is a case coupled to something incidental, which fails when the thing it
+checks gets better. A check elsewhere split a document on a marker that only appeared while a notice
+was printed above it; the notice stopped being needed, the marker went, and the case failed as
+though the thing had regressed. Those are one fault from two sides: the case was never about the
+kernel repeating, and it was never about the notice. Name the thing being checked in terms that
+survive it improving, and take everything else as an argument.
+
+A number stated twice is worse than a number stated once, if only one of them is held. Correcting it
+fixes the checked sentence and leaves the other saying what used to be true, so the file disagrees
+with itself while the check reports clean. `docs/architecture.md` says how many harnesses read their
+own skills directory, then says the same count again one line down about the copies written for
+them; only the first was in the table. When a count is worth holding, hold every statement of it, or
+the unheld one is licensed by the held one standing beside it.
+
 A disarm that still passes is a statement about the setup before it is one about the check. The
 fixture reached the assertion without walking the line that was broken, so the reading to reject
 first is that the assertion is too weak: strengthening it only buys a fixture that fails for a
