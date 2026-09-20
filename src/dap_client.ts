@@ -104,6 +104,8 @@ export class GodotDAPClient {
    * whether nothing is running, the game is running freely, or the stack is genuinely empty.
    */
   private halt: StoppedAt | null = null;
+  /** Whether `halt` is an answer or a default. See [holdIsKnown]. */
+  private holdKnown = false;
   private breakpoints = new Map<string, Set<number>>();
 
   constructor(port = portFromEnv('GDHARNESS_DAP_PORT', DEFAULT_DAP_PORT), host = '127.0.0.1') {
@@ -349,6 +351,7 @@ export class GodotDAPClient {
         description: said(body, 'description'),
         text: said(body, 'text'),
       };
+      this.holdKnown = true;
       return;
     }
 
@@ -397,6 +400,65 @@ export class GodotDAPClient {
     await this.sendRequest('attach', {});
     await this.sendRequest('configurationDone', {});
     this.attached = true;
+    await this.learnWhetherHeld();
+  }
+
+  /**
+   * Whether the game was already held when this session attached, asked rather than waited for.
+   *
+   * `halt` is set by the `stopped` event and the event goes to whichever client is connected when
+   * the game halts. A session opened afterwards never receives it, so it is asked for here through
+   * the stack, and what the adapter answers depends on who else is attached. Measured against a
+   * real editor: while the client that was told is still attached, a second session gets the frames
+   * and learns the halt. Once that client has gone, which is what a harness reconnect does to a
+   * server, the adapter answers a thread and no frames, and the game is still sitting at its
+   * breakpoint: a runtime call to it accepts the connection and never answers. So no frames is not
+   * "running". It is "this session cannot tell", and the answer is left unknown rather than set to
+   * null, for the caller that can ask the runtime.
+   */
+  private async learnWhetherHeld(): Promise<void> {
+    this.holdKnown = false;
+    try {
+      const threads = await this.sendRequest('threads');
+      const listed = threads['threads'];
+      const first = Array.isArray(listed) ? (listed[0] as DAPArrayItem | undefined)?.['id'] : undefined;
+      if (typeof first !== 'number') {
+        return;
+      }
+      this.lastThreadId = first;
+      const response = await this.sendRequest('stackTrace', { threadId: first, startFrame: 0, levels: 1 });
+      const frames = response['stackFrames'];
+      if (Array.isArray(frames) && frames.length > 0) {
+        this.halt = {
+          reason: 'attached',
+          description:
+            'held when this session attached; the stop that held it was reported to an earlier one',
+          text: '',
+        };
+        this.holdKnown = true;
+      }
+    } catch {
+      // The adapter declining to answer is a game with nothing to say about where it stopped, and
+      // an attach that succeeded is not undone by a question it could not answer.
+    }
+  }
+
+  /**
+   * Whether this session can say if the game is held.
+   *
+   * True once it has been told by a `stopped` event, has let the game go itself, or found frames on
+   * attach. False for a session that attached after a stop the adapter will not repeat to it, and
+   * for one that has not attached at all: for those, `whereItStopped()` answering null is not an
+   * answer.
+   */
+  holdIsKnown(): boolean {
+    return this.attached && this.holdKnown;
+  }
+
+  /** What a caller that asked elsewhere found out: the game answered, so it is running. */
+  learnedRunning(): void {
+    this.halt = null;
+    this.holdKnown = true;
   }
 
   /**
@@ -464,7 +526,10 @@ export class GodotDAPClient {
     await this.attach();
     const resolvedThreadId = await this.resolveThreadId(threadId);
     await this.sendRequest('continue', { threadId: resolvedThreadId });
+    // Let go by this session, which is the one way a session knows the game runs without being
+    // told: it asked for exactly that.
     this.halt = null;
+    this.holdKnown = true;
   }
 
   async stepOver(threadId?: number): Promise<void> {

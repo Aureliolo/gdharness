@@ -183,6 +183,13 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const EDITOR_RESTART_TIMEOUT_MS = 90_000;
 
 /**
+ * How long a game gets to answer a ping before it is taken for held. A running game answers in
+ * milliseconds and a held one never does, so this is the wait for the second answer and it is paid
+ * only by a session that could not learn the state from the adapter.
+ */
+const HOLD_PING_MS = 2_000;
+
+/**
  * The frame rate a wait counts at, which is deliberately lower than any game draws.
  *
  * Only a bound on patience: the answer comes when the frames have passed, whatever rate they
@@ -1572,7 +1579,7 @@ class GodotServer {
         if (tool === 'debug_state' && op === 'output') {
           return await this.handleDAP('dap_get_output', args);
         }
-        const held = await this.debuggedGame();
+        const held = await this.debuggedGame(tool === 'debug_control' ? 'move' : 'read');
         if (!held.ok) {
           return held.response;
         }
@@ -1642,8 +1649,13 @@ class GodotServer {
    * Every one of these used to answer with an empty stack, and an empty stack reads the same
    * whether nothing is running, the game this server spawned has no debugger behind it, or the
    * game is running freely and was never going to have a frame to show.
+   *
+   * [param intent] separates reading the game from moving it, for the one state where they part:
+   * a game held at a stop this session was not told about. Its stack cannot be read from here,
+   * and letting it go or stepping it is exactly what can be done, and what the next stop this
+   * session is told about comes from.
    */
-  private async debuggedGame(): Promise<Checked<GodotProcess>> {
+  private async debuggedGame(intent: 'read' | 'move'): Promise<Checked<GodotProcess>> {
     const game = this.activeProcess;
     // A finished run is kept so its output can still be read, and a readable log is not a debug
     // session. Said apart from "nothing is running", because the two are answered by different
@@ -1698,6 +1710,27 @@ class GodotServer {
       };
     }
     if (!this.dap().isStopped()) {
+      // Not held as far as this session knows, and whether it knows is the question: a session
+      // that attached after the stop is shown no stack by the adapter, so the runtime is asked
+      // before "running" is said about a game that may be sitting at a breakpoint.
+      const hold = await this.holdOf(game);
+      if (hold.heldAt !== null) {
+        if (intent === 'move') {
+          return { ok: true, value: game };
+        }
+        return {
+          ok: false,
+          response: this.createErrorResponse(
+            hold.heldAt === undefined
+              ? `Whether the game is held cannot be told from here, so there is no stack to read. ${hold.heldNote ?? ''}`
+              : `The game is held, and this server cannot read its stack: ${hold.heldAt.description}.`,
+            [
+              'debug_control continue lets a held game go, and the next stop is one this session is told about',
+              'editor_output says what it printed on the way to where it is',
+            ],
+          ),
+        };
+      }
       return {
         ok: false,
         response: this.createErrorResponse(
@@ -3809,9 +3842,12 @@ class GodotServer {
     }
     // Best effort: the console of an editor-played run comes over the adapter and nothing else, so
     // a failure here costs the output rather than the answer, and the answer says which run it is
-    // about either way.
+    // about either way. A session and not only a socket, because whether the run is held at a
+    // breakpoint is learned by the session asking, and a picked-up run is exactly the one whose
+    // stop was reported to a server that is gone: with a socket alone, editor_output said running
+    // about a game sitting on a breakpoint until something else happened to attach.
     try {
-      await this.dap().connect();
+      await this.dap().attach();
     } catch (error) {
       this.logDebug(`Picked up an editor-played run without its adapter: ${errorMessage(error)}`);
     }
@@ -4171,7 +4207,7 @@ class GodotServer {
     // A game held at a breakpoint is running in the sense the process is alive and in no sense
     // that matters to a caller: it draws nothing, answers no runtime call, and the timeouts that
     // follow read like a hung engine. Said here because this is where somebody asks what it did.
-    const halt = run.throughEditor ? (this.dapClient?.whereItStopped() ?? null) : null;
+    const hold = await this.holdOf(run);
     // Asked for rather than always, because asking costs a subprocess and on Windows that is a
     // PowerShell start: seconds under load, on every read, on the one platform where the answer is
     // dearest. Put in the hot path it slowed every call enough to time others out, and the tests
@@ -4270,7 +4306,11 @@ class GodotServer {
       // Said as its own field as well as in the note, so a caller checking one value has one to
       // check: absent means the console was arriving throughout.
       consoleLost: run.consoleLost === true ? true : undefined,
-      heldAt: halt,
+      // Three answers and not two. Null is a game this session knows is running; an object is one
+      // it knows is held, whether the adapter said so or the runtime did; and absent with
+      // heldUnknown beside it is a session that attached after a stop, asked, and could not find
+      // out, which is the state a replacement server is in until the game answers something.
+      ...hold,
       // Which of the two ways of not running this is, since they call for different things. A
       // run that ended while nothing was watching printed everything below and then stopped
       // being there, and no exit code was collected because nobody was waiting on it.
@@ -4611,6 +4651,70 @@ class GodotServer {
   private runtimeTimeoutMs(): number {
     const override = Number.parseInt(envValue('GDHARNESS_RUNTIME_TIMEOUT_MS') ?? '', 10);
     return Number.isInteger(override) && override > 0 ? override : 10000;
+  }
+
+  /**
+   * Whether an editor-played run is held at a breakpoint, from the session when it knows and from
+   * the runtime when it does not.
+   *
+   * The debug session knows once it has been told by a `stopped` event, let the game go itself, or
+   * found frames on attach. A session that attached after the stop is none of those: measured on a
+   * real editor, the adapter answers such a session a thread and no frames while the game sits at
+   * its breakpoint, and that is the session every replacement server has after a reconnect. Reading
+   * its null as "running" is how a game that draws nothing and answers nothing was reported running,
+   * and how `debug_state stack` refused with "running, not stopped" about a game that was stopped.
+   *
+   * The runtime can still tell. A game with the addon accepts a connection and answers a ping in
+   * milliseconds while it runs, and accepts the connection and never answers while it is held,
+   * which `editor_status` already reports per game. So when the session cannot say, the runtime is
+   * asked once with a short wait, and its answer is recorded on the session so the next read does
+   * not ask again. A game without the addon leaves the question open, and the answer says so
+   * rather than guessing.
+   */
+  private async holdOf(
+    run: GodotProcess,
+  ): Promise<{ heldAt: StoppedAt | null | undefined; heldUnknown?: true; heldNote?: string }> {
+    if (!run.throughEditor) {
+      return { heldAt: null };
+    }
+    const session = this.dapClient;
+    if (session?.holdIsKnown()) {
+      return { heldAt: session.whereItStopped() };
+    }
+    // The run's own announcement when it has been tied to one, else the one game announced for
+    // this project: a run picked up after a reconnect has not been tied to its announcement, and
+    // the project is the one fact the pick-up and the announcement share.
+    const announced = runtimesAnnounced().running;
+    const ofProject = this.allAnnouncedForOurProject(announced);
+    const endpoint =
+      run.announcedPid !== undefined
+        ? announced.find((one) => one.pid === run.announcedPid)
+        : ofProject.length === 1
+          ? ofProject[0]
+          : undefined;
+    if (endpoint === undefined) {
+      return {
+        heldAt: undefined,
+        heldUnknown: true,
+        heldNote:
+          'Whether this run is held at a breakpoint cannot be told from here: this server attached to the debugger after any stop, the adapter reports a stop only to the session that was attached when it happened, and the run has announced no runtime to ask instead. A game that draws nothing and answers nothing is held; debug_control continue lets a held game go.',
+      };
+    }
+    const reply = await runtimeRequest(endpoint, 'ping', {}, HOLD_PING_MS);
+    if (reply.ok) {
+      session?.learnedRunning();
+      return { heldAt: null };
+    }
+    if (reply.reason === 'busy') {
+      return {
+        heldAt: {
+          reason: 'unanswered',
+          description: `the game accepted a runtime connection and did not answer a ping within ${HOLD_PING_MS}ms, which is what a game held at a breakpoint does, and what one stuck in a long frame does. This server attached to the debugger after the stop, so the adapter will not show it the stack; debug_control continue lets a held game go`,
+          text: '',
+        },
+      };
+    }
+    return { heldAt: undefined, heldUnknown: true, heldNote: reply.message };
   }
 
   /**
