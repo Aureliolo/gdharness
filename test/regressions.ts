@@ -6695,6 +6695,15 @@ function testTheEditorHoldingAProjectIsNotARunOfIt(): void {
     true,
     'while the run itself is still one to pick back up',
   );
+  // The short run, which is the case a generous window is blind to and the one a busy machine
+  // produces. A number cannot be handed out again until the first process has gone, so the gap a
+  // recycle leaves is the run's whole length: a five-second run whose number is taken ten seconds
+  // later clears any window measured in minutes. A gate elsewhere runs sixteen engines at once.
+  assert.equal(
+    judgeRun(record, { ...asked(worker), startedAt: record.startedAt + 30_000 }, 'confirmed'),
+    false,
+    'a worker that took the number half a minute in is not a five-second run, so nothing may be signalled at it',
+  );
   // A platform that will not say when a process started is left with the checks it had.
   assert.equal(
     judgeRun(record, asked(worker), 'confirmed'),
@@ -6954,6 +6963,12 @@ async function benchThroughAStart(
   );
   const benchPid = bench.pid;
   assert.ok(benchPid !== undefined, 'the fixture needs a live process to stand in for the bench');
+  // When the bench actually started, rather than a round number in the past. A record is written by
+  // the call that spawned the engine, so the two are the same moment, and a note claiming a run
+  // began a minute before its own process describes a state that cannot occur. The identity check
+  // reads exactly that gap to tell a run from a number that came round to something else, so a
+  // fixture backdating it is asking to be disowned for a reason it is not about.
+  const startedAt = Date.now();
 
   try {
     writeFileSync(
@@ -6962,7 +6977,7 @@ async function benchThroughAStart(
         pid: benchPid,
         command: process.execPath,
         transcript: join(runtimeDir, 'recorded-run.log'),
-        startedAt: Date.now() - 60_000,
+        startedAt,
         projectPath: recorded,
         arguments: ['--headless', '--path', recorded],
       }),
