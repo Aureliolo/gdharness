@@ -13,6 +13,7 @@
 import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import type { Harness } from './harnesses.js';
+import { BIND_ADDRESS_SETTING, PORT_SETTING, SCRIPT_RUNS_SETTING } from './setup.js';
 import { projectPathSentence, TOOL_SPECS } from './tool-definitions.js';
 import { renderToolsMarkdown } from './tool-reference.js';
 
@@ -85,8 +86,18 @@ that is running, and the project on disk. ${TOOL_SPECS.length} tools, named \`do
 These need the runtime autoload, which \`gdharness setup\` registers. \`runtime_capture\` needs a
 window and refuses headless rather than handing back the last frame anything drew.
 
-A headless game answers; a \`godot -s\` script run does not. It has no game in it, so the autoload
-stays quiet there rather than announcing a test tier as the project.
+The autoload reads these settings and no others. \`${BIND_ADDRESS_SETTING}\`
+is \`127.0.0.1\` and should stay there: the command set includes \`call_method\`, \`set_property\`
+and input injection, none of it authenticated, and Godot's own \`listen()\` defaults to every
+interface rather than to loopback, so this is named on purpose rather than left out.
+\`${PORT_SETTING}\` is 0, meaning the operating system picks one and the game announces it, which is
+what the server reads; fix it only for a client that cannot read the announcement.
+
+A headless game answers; a \`godot -s\` script run does not, by default. It has no game in it, so the
+autoload stays quiet there rather than announcing a test tier as the project: a gate starting sixteen
+engines would otherwise announce sixteen games that are not games. Set \`${SCRIPT_RUNS_SETTING}\`
+true in \`project.godot\` to serve one anyway, which is for driving a \`-s\` script on purpose. Read
+that setting rather than assuming the quiet: it is a default and not a property of script runs.
 
 The autoload reaches an export. \`gdharness runtime off\` in the project before shipping.
 
