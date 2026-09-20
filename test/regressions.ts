@@ -4942,7 +4942,13 @@ async function testAnAnnotatedDeclarationIsStillADeclaration(): Promise<void> {
 }
 
 /**
- * A structure read asked for what a script inherits answers with it.
+ * A structure read describes the script it read, in every shape a declaration comes in.
+ *
+ * One engine and one project for all of it, because the boot is the slow part and each of these is
+ * a different reading of the same call. What it holds, in the order the assertions come: what a
+ * script inherits when asked for it, which functions the engine actually calls, a rest parameter's
+ * name, a parameter list that ends where the signature does rather than at the first comma or the
+ * first line break, and a trailing comment that does not become part of a value.
  *
  * `includeInherited` was described in the schema and read by nothing: the op maps to
  * `get_script_info`, which took `script_path` and no other parameter, so the two answers were byte
@@ -4956,7 +4962,7 @@ async function testAnAnnotatedDeclarationIsStillADeclaration(): Promise<void> {
  * findings from one that merely concatenates: `shared` is declared twice and must appear twice,
  * once as the leaf's own and once as the base's.
  */
-async function testAStructureReadCanCarryWhatTheScriptInherits(): Promise<void> {
+async function testAStructureReadDescribesTheScriptItRead(): Promise<void> {
   const godotPath = resolveGodotPath();
   if (!godotPath) {
     if (process.env['GDHARNESS_REQUIRE_GODOT']) {
@@ -8192,7 +8198,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheSkillWritesNoEscapedBackticks,
   testAnAuditThatCouldNotAskIsNotAnAuditThatPassed,
   testAnAnnotatedDeclarationIsStillADeclaration,
-  testAStructureReadCanCarryWhatTheScriptInherits,
+  testAStructureReadDescribesTheScriptItRead,
   testRefreshingUidsMakesTheSidecarAndWritesNoScene,
   testWhoIsHoldingAPortIsAskable,
   testWhatTheEditorSavedAwayIsReportedTheSameWay,
