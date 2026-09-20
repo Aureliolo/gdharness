@@ -626,11 +626,13 @@ type FramedPeerHandler = (message: Record<string, unknown>, socket: Socket) => v
 async function withFramedPeer<T>(
   onMessage: FramedPeerHandler,
   handler: (port: number) => Promise<T>,
+  onConnect: (socket: Socket) => void = () => {},
 ): Promise<T> {
   const sockets = new Set<Socket>();
 
   const server = createServer((socket) => {
     sockets.add(socket);
+    onConnect(socket);
     let buffer = Buffer.alloc(0);
 
     socket.on('data', (chunk: Buffer) => {
@@ -931,6 +933,114 @@ async function testLettingGoOfTheAdapterSendsItNothing(): Promise<void> {
     commands.filter((command) => command === 'disconnect'),
     [],
     `letting go should tell the adapter nothing: ${commands.join(', ')}`,
+  );
+}
+
+/**
+ * A stop is known to the connection it was sent on, attached or not, and the reason it was sent
+ * with is the one an attach afterwards keeps.
+ *
+ * The adapter sends `stopped` to every client connected when the game halts, and a server that has
+ * played a scene through the editor is connected and nothing more: it attaches on its first stack
+ * read. Counting the event only on an attached session sent every such server to the runtime for an
+ * answer it had already been given, and the runtime's answer for a held game is "unanswered", which
+ * is what the editor tier then read in place of "exception" on all three platforms. The attach that
+ * follows has to keep what the connection was told, because asking the adapter again is answered
+ * frames, and frames learned by asking say "attached" and not why. A connection opened after the
+ * stop has to ask, since the adapter repeats nothing, and what a connection knew ends with it.
+ *
+ * The editor tier holds the same three states against a real adapter; this holds each line of the
+ * client on its own, with the adapter's answers under the fixture's control.
+ */
+async function testAStopIsKnownToTheConnectionItWasSentTo(): Promise<void> {
+  const commands: string[] = [];
+  let frames: unknown[] = [{ id: 0, name: 'main', line: 7 }];
+  const respond: FramedPeerHandler = (message, socket) => {
+    const command = String(message['command']);
+    commands.push(command);
+    const body =
+      command === 'threads'
+        ? { threads: [{ id: 1, name: 'main' }] }
+        : command === 'stackTrace'
+          ? { stackFrames: frames, totalFrames: frames.length }
+          : {};
+    socket.write(
+      frameJsonRpc({
+        seq: commands.length + 100,
+        type: 'response',
+        request_seq: message['seq'],
+        command,
+        success: true,
+        body,
+      }),
+    );
+  };
+  const stopped = frameJsonRpc({
+    seq: 1,
+    type: 'event',
+    event: 'stopped',
+    body: { reason: 'exception', description: 'Division by zero', text: '', threadId: 1 },
+  });
+  // Only the first connection is there when the game stops; the ones after it arrive late.
+  let connections = 0;
+  const tellTheFirst = (socket: Socket): void => {
+    if (connections++ === 0) {
+      socket.write(stopped);
+    }
+  };
+
+  await withFramedPeer(
+    respond,
+    async (port) => {
+      const told = new GodotDAPClient(port, '127.0.0.1');
+      await told.connect();
+      const patience = Date.now() + 2000;
+      while (!told.holdIsKnown() && Date.now() < patience) {
+        await delay(20);
+      }
+      assert.ok(told.holdIsKnown(), 'a stop sent to a connection that never attached is known to it');
+      assert.equal(told.whereItStopped()?.reason, 'exception', 'with the reason it was sent with');
+
+      await told.attach();
+      assert.ok(commands.includes('attach'), `the session attached: ${commands.join(', ')}`);
+      assert.equal(
+        told.whereItStopped()?.reason,
+        'exception',
+        'and attaching kept what the connection was told rather than asking for what it could see',
+      );
+      assert.ok(
+        !commands.includes('stackTrace'),
+        `a connection that was told has nothing to ask: ${commands.join(', ')}`,
+      );
+      told.learnedRunning();
+      assert.equal(
+        told.whereItStopped()?.reason,
+        'exception',
+        'a ping answered before the stop arrived does not overrule the stop',
+      );
+      await told.abandon();
+      assert.equal(told.holdIsKnown(), false, 'what a connection knew ends with the connection');
+
+      // Opened after the stop, while the holder is still there: asks, and is answered frames.
+      const late = new GodotDAPClient(port, '127.0.0.1');
+      await late.attach();
+      assert.ok(commands.includes('stackTrace'), `a connection opened late asks: ${commands.join(', ')}`);
+      assert.ok(late.holdIsKnown(), 'and frames are an answer');
+      assert.equal(late.whereItStopped()?.reason, 'attached', 'which says how it came to know');
+      await late.abandon();
+
+      // Opened after the holder has gone: a thread and no frames, which is not an answer either way.
+      frames = [];
+      const later = new GodotDAPClient(port, '127.0.0.1');
+      await later.attach();
+      assert.equal(later.holdIsKnown(), false, 'no frames for a late connection is not "running"');
+      assert.equal(later.whereItStopped(), null, 'and nothing is claimed about where it stopped');
+      later.learnedRunning();
+      assert.ok(later.holdIsKnown(), 'the runtime answering is what settles it');
+      assert.equal(later.whereItStopped(), null, 'as running');
+      await later.abandon();
+    },
+    tellTheFirst,
   );
 }
 
@@ -10099,6 +10209,7 @@ const TESTS: (() => void | Promise<void>)[] = [
 
   testProjectGodotMultilineValues,
   testLettingGoOfTheAdapterSendsItNothing,
+  testAStopIsKnownToTheConnectionItWasSentTo,
   testProjectGodotResistsPrototypeKeys,
 
   testAnAnswerFromAStaleAddonSaysSo,
