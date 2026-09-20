@@ -178,6 +178,69 @@ export function discoverRuntimes(directories: readonly string[] = runtimeDirecto
   return runtimesAnnounced(directories).running;
 }
 
+/** A game that announced itself and whose process was gone by the time anything looked. */
+interface WentAway {
+  readonly pid: number;
+  readonly project: string;
+  /** When the sweep noticed, which is an upper bound on when the game went rather than the moment. */
+  readonly noticedAt: number;
+}
+
+/**
+ * The games this server has watched go, newest first.
+ *
+ * Held in memory rather than on disk because the file is the thing being removed, and because what
+ * it is for is the next sentence this server says: a refusal a minute later that can tell a game
+ * that crashed from a project that never had the addon. A server that restarts has nothing to add
+ * and says the ordinary thing, which is honest.
+ *
+ * Bounded both ways. Older than the window is not evidence about a call happening now, and a machine
+ * running a fan-out would otherwise accumulate one of these per worker for as long as the process
+ * lives.
+ */
+const GONE_WINDOW_MS = 120_000;
+const GONE_KEPT = 32;
+const gone: WentAway[] = [];
+
+function wentAway(file: string, pid: number): void {
+  // Read before the file goes, because the project is what decides whose game this was and
+  // afterwards there is nowhere to get it.
+  //
+  // Nothing is kept for an announcement that cannot be read. "A game was here" without a project is
+  // a fact that can only be reported to somebody it may not belong to, and these directories are
+  // shared by every server on the machine: a crash in one project told to another is the right
+  // shape about the wrong game, which is the mistake that once had a suite ending somebody else's
+  // bench six times in fifty minutes.
+  let project = '';
+  try {
+    const fields = asParams(JSON.parse(readFileSync(file, 'utf8')));
+    project = readString(readParams(fields, 'project') ?? {}, 'path') ?? '';
+  } catch {
+    return;
+  }
+  if (project === '') {
+    return;
+  }
+  gone.unshift({ pid, project, noticedAt: Date.now() });
+  gone.length = Math.min(gone.length, GONE_KEPT);
+}
+
+/**
+ * The games seen to go within the window, for the caller deciding what a refusal should say.
+ *
+ * Only this project's, and only when the caller says which project it is asking about. Without one
+ * there is nothing to compare against, and answering anyway is how a shared directory turns into a
+ * report about a stranger's game.
+ */
+function announcedAndGone(projectPath?: string): WentAway[] {
+  if (projectPath === undefined) {
+    return [];
+  }
+  const since = Date.now() - GONE_WINDOW_MS;
+  const wanted = resolve(projectPath);
+  return gone.filter((one) => one.noticedAt >= since && resolve(one.project) === wanted);
+}
+
 function announcedIn(directory: string): Announced[] {
   if (!existsSync(directory)) {
     return [];
@@ -190,8 +253,17 @@ function announcedIn(directory: string): Announced[] {
     }
     const file = join(directory, entry);
     const pid = Number.parseInt(match[1] ?? '', 10);
-    const announced: Announced = processAlive(pid) ? parseAnnouncement(file, pid) : { kind: 'rubbish' };
+    const alive = processAlive(pid);
+    const announced: Announced = alive ? parseAnnouncement(file, pid) : { kind: 'rubbish' };
     if (announced.kind === 'rubbish') {
+      // A game that announced and whose process has since gone, remembered before the file naming
+      // it is removed. The sweep is what destroys the evidence: afterwards a refusal can only say
+      // nothing is running, which is the same sentence a project with no addon gets and a project
+      // nobody started gets. The one that matters is the game that was there and died, and it is
+      // the only one of the three the caller has to act on.
+      if (!alive) {
+        wentAway(file, pid);
+      }
       try {
         unlinkSync(file);
       } catch {
@@ -289,6 +361,22 @@ export function chooseRuntime(
   if (endpoints.length === 0) {
     if (unspoken.length > 0) {
       return { problem: tooNew(unspoken) };
+    }
+    // A game that was here and went is a different answer from one that never started, and the
+    // caller can only act on the first: the game crashed or was ended, and its output is worth
+    // reading. Without this both are the same sentence, which is what a downstream run hit on a
+    // game that announced on a port and died seconds later.
+    const went = announcedAndGone(projectPath);
+    const first = went[0];
+    if (first !== undefined) {
+      const ago = Math.max(1, Math.round((Date.now() - first.noticedAt) / 1000));
+      return {
+        problem:
+          `A game with the runtime addon announced itself and its process is gone: pid ${first.pid}` +
+          `${first.project === '' ? '' : ` for ${first.project}`}, noticed ${ago}s ago.` +
+          ' It quit or was ended rather than never starting, so editor_output has what it printed' +
+          ' on the way, including whatever it broke on. Start another with editor_run once you have read it.',
+      };
     }
     return {
       problem:
