@@ -370,10 +370,15 @@ export function chooseRuntime(
     const first = went[0];
     if (first !== undefined) {
       const ago = Math.max(1, Math.round((Date.now() - first.noticedAt) / 1000));
+      // The most recent is the one whose output is worth reading, and the rest are counted so that
+      // a game which has crashed three times this minute is not reported as one that crashed once.
+      const others = went.length - 1;
+      const earlier =
+        others === 0 ? '' : ` ${others} earlier ${others === 1 ? 'one' : 'ones'} went the same way.`;
       return {
         problem:
           `A game with the runtime addon announced itself and its process is gone: pid ${first.pid}` +
-          `${first.project === '' ? '' : ` for ${first.project}`}, noticed ${ago}s ago.` +
+          `${first.project === '' ? '' : ` for ${first.project}`}, noticed ${ago}s ago.${earlier}` +
           ' It quit or was ended rather than never starting, so editor_output has what it printed' +
           ' on the way, including whatever it broke on. Start another with editor_run once you have read it.',
       };
