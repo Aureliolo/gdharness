@@ -5909,6 +5909,97 @@ function testASettingTheEditorDroppedIsNamed(): void {
  * What is asserted is the whole of the fault, that no field of the other run appears, and beside it
  * that the answer is about the right one and says its log does not start at the beginning.
  */
+/**
+ * An editor running an addon from another version is still asked what it is playing.
+ *
+ * The server used to require the addon's version to equal its own before asking `playing_status`,
+ * which is a reasonable guard on an answer whose shape might have moved and the wrong one for this
+ * answer: it is a bool and two optional fields, the reader tolerates either being absent, and an
+ * addon too old to know the call at all throws and is handled. What the guard bought was nothing.
+ *
+ * What it cost was that `playingInEditor` was null for the whole time an addon was behind, so a game
+ * the editor was playing could not be picked up, and a server that had not started that game itself
+ * then answered `No game is running` about one on screen. That window is the ordinary one: upgrading
+ * moves the pin, and the editor keeps the old addon until somebody restarts it.
+ *
+ * Measured before the fix, one editor and one server against the same engine, changing only the
+ * addon: 0.13.30 answered `playingInEditor: null` and 0.13.32 answered the scene it was playing.
+ * Here the addon reports an older version in its greeting and answers the call normally, which is
+ * the state the guard keyed on rather than an old addon's behaviour, because the guard read the
+ * number and nothing else.
+ */
+async function testAnEditorOnAnotherVersionIsStillAskedWhatItIsPlaying(): Promise<void> {
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-stale-addon-'));
+  const port = await reservePort();
+  let editor: WebSocket | null = null;
+  const server = new ServerProcess({ env: { GDHARNESS_BRIDGE_PORT: String(port) } });
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Stale"\n',
+    );
+    await server.initialize('regression-test');
+
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+    editor = socket;
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', () => {
+        resolve();
+      });
+      socket.once('error', reject);
+    });
+    socket.on('message', (raw: Buffer) => {
+      const message: unknown = JSON.parse(String(raw));
+      if (!isRecord(message) || message['type'] !== 'tool_invoke') {
+        return;
+      }
+      const result =
+        String(message['tool']) === 'playing_status'
+          ? { ok: true, playing: true, scenePath: 'res://duel.tscn', debugPort: 63_073 }
+          : { ok: true };
+      socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result }));
+    });
+    // A version that is not this server's, which is the whole condition. The addon answers the call
+    // perfectly well; the server was deciding not to ask on the strength of this string.
+    socket.send(
+      JSON.stringify({
+        type: 'godot_ready',
+        project_path: project,
+        addon_version: '0.0.1-behind',
+        dap_port: 63_073,
+      }),
+    );
+
+    let knows = false;
+    for (let waited = 0; waited < 10_000 && !knows; waited += 100) {
+      await delay(100);
+      const status = await server.request('tools/call', { name: 'editor_status', arguments: {} });
+      knows = text(get(parseTextContent(status), 'editor', 'projectPath')) === project;
+    }
+    assert.ok(knows, 'the fake editor should have been greeted');
+
+    const status = parseTextContent(
+      await server.request('tools/call', { name: 'editor_status', arguments: {} }),
+    );
+    // The staleness is still reported, because the caller should still be told to restart: what
+    // changed is that being stale no longer costs them the answer as well as the warning.
+    assert.equal(
+      get(status, 'editor', 'addonIsStale'),
+      true,
+      `still called stale: ${JSON.stringify(status)}`,
+    );
+    assert.deepEqual(
+      [get(status, 'game', 'playingInEditor', 'playing'), get(status, 'game', 'playingInEditor', 'scene')],
+      [true, 'res://duel.tscn'],
+      `and the scene it is playing is read off it anyway: ${JSON.stringify(status)}`,
+    );
+  } finally {
+    editor?.close();
+    await server.stop();
+    sweep(project);
+  }
+}
+
 async function testTheEditorsRunIsTheOneAnsweredFor(): Promise<void> {
   const port = await reservePort();
   // Reserved and then left alone, so nothing is listening on it: the adapter this run's console
@@ -8543,6 +8634,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARepairThatCouldNotRunIsNotReported,
   testAShortenedCacheIsRebuilt,
   testTheEditorsRunIsTheOneAnsweredFor,
+  testAnEditorOnAnotherVersionIsStillAskedWhatItIsPlaying,
   testASettingTheEditorDroppedIsNamed,
   testACleanupThatCannotFinishStillFinishes,
   testADiagnosticTheFileContradictsIsNamed,
