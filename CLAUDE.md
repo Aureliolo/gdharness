@@ -270,6 +270,15 @@ run and read the log. And a thing that is set and then consumed by a play, a run
 thing to set once and use twice before believing the description, because the first use is the one
 the description was written from.
 
+Those removals were the engine clearing every breakpoint in the editor whenever a debug session
+opened, which one editor setting turns off, and the fix that wrote the setting from the addon
+passed its own read-back and changed nothing: the adapter reads the setting again on a
+notification the settings dialog sends after Apply and `set_setting` does not send, so the value
+was stored and the running adapter went on clearing. A value written into a live system is stored
+by one part and read by another, and the write's success says only that the first part has it.
+Hold the effect, not the value: the fixture that caught it opened a second session and read what
+the adapter sent it, and the read-back of the setting would have passed forever.
+
 A claim about a change you have just made is the least checked claim there is. It arrives with the
 reasoning that produced it, which is the strongest case anybody will assemble for it, and the reader
 it is told to has less to check it against than you do. The debug adapter disconnect in this
