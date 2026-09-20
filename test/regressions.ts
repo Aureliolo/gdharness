@@ -7658,7 +7658,11 @@ async function testARuntimeCallToAHeldGameIsRefusedAtOnce(): Promise<void> {
   await withAHeldGame(
     { toldOnConnect: stopped },
     async ({ server, gamePid, project, connectionsToTheGame }) => {
-      // Picked up first, which is what ties the run to its announcement and hands the session to it.
+      // Picked up during the greeting, which tied the run to its announcement and handed the session
+      // to it, so this status call is one the session already knows the answer to: the game is
+      // listed as held with the reason, and its socket is not connected to for a ping it cannot
+      // answer.
+      const beforeStatus = connectionsToTheGame();
       const status = parseTextContent(
         await server.request('tools/call', { name: 'editor_status', arguments: {} }, 60_000),
       );
@@ -7666,6 +7670,22 @@ async function testARuntimeCallToAHeldGameIsRefusedAtOnce(): Promise<void> {
         get(status, 'game', 'heldAt', 'reason'),
         'exception',
         `the session was told, with the reason: ${JSON.stringify(status)}`,
+      );
+      const listed = asArray(get(status, 'game', 'runtimes'), 'runtimes');
+      assert.equal(
+        get(listed[0], 'reachable'),
+        false,
+        `the game is listed as unreachable: ${JSON.stringify(listed)}`,
+      );
+      assert.match(
+        text(get(listed[0], 'problem')),
+        /held by the editor's debugger, on an error: Division by zero/,
+        `and the reason is the one the session was told: ${JSON.stringify(listed)}`,
+      );
+      assert.equal(
+        connectionsToTheGame(),
+        beforeStatus,
+        'without the status call having connected to the game to find out',
       );
 
       const beforeAsking = connectionsToTheGame();
