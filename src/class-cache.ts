@@ -225,6 +225,72 @@ export function contradictedDiagnostics(
 }
 
 /**
+ * What to tell a caller whose diagnostics the files contradict.
+ *
+ * A function rather than a sentence built where it is returned, because the note is the whole of
+ * what a caller does next and the only way to hold it otherwise is to read the server's source and
+ * match on it. That check passes on any sentence containing the words it looks for.
+ *
+ * It leads with the scan because that is what has cleared this, in two projects. Neither of them is
+ * this one: the diagnostic has never gone stale in this project's own bench, so every figure here is
+ * somebody else's reading and is attributed rather than claimed. Each is stated on its own rather
+ * than added together, since one clearing in five attempts and two clearings in two attempts combine
+ * into a ratio only if both benches are the same bench, which is the thing in question. A number
+ * that arrives inside a correction is the one least likely to get checked again, and all three of
+ * these were wrong in a draft of this sentence: the count, the attribution, and what the
+ * milliseconds timed.
+ *
+ * The milliseconds are the scan's own `waitedMs`, which is how long the call took to return and not
+ * a time to clear: the diagnostic was re-read in a separate call each time, and nobody timed the
+ * gap. Written as the scan returning rather than the fault clearing, because a reader takes a
+ * duration beside a cure as the duration of the cure.
+ *
+ * The
+ * reload is named after it rather than ahead of it: a built copy has been seen stale here while
+ * these diagnostics read clean, so the copy the editor built and whatever the analyser resolves
+ * against are not known to be the same thing, and a caller reading one should not be told it is
+ * reading the other.
+ *
+ * The no-lever branch says why it is empty rather than only that it is. A type that depends on
+ * nothing is where this fault is easiest to produce, because an edit anywhere near a type that
+ * depends on something cures it before anyone notices, so the fallback is missing in exactly the
+ * case that reaches it. Measured from outside: a first attempt to reproduce this read clean because
+ * a dependency of the declaring script had been edited in the same window, and moving the
+ * declaration to a type that depends on nothing staled it immediately.
+ */
+export function staleAnalysisNote(
+  contradicted: readonly Contradicted[],
+  dependsOn: readonly string[],
+): string {
+  const declaring = [...new Set(contradicted.map((one) => one.declaredIn))].sort();
+  const lever =
+    dependsOn.length === 0
+      ? ', and the named types depend on no other global class, so that lever is not available here. ' +
+        'That is the common case rather than the awkward one: an edit near a type that depends on ' +
+        'something refreshes it before the fault is noticed, which is why a type with no ' +
+        'dependencies is where this turns up'
+      : `, so changing ${[...dependsOn].sort().join(', ')} and rescanning is worth a try`;
+  return (
+    `The editor is reporting against an older copy of ${contradicted.length === 1 ? 'a type' : 'some types'} ` +
+    'named under contradictedByTheFile. Each member listed is declared in the file the class cache ' +
+    'points at, so those diagnostics are wrong however the code is written. Run editor_rescan first: ' +
+    'it costs about half a second, it cleared this in one of five attempts in the project that ' +
+    'reported it, and it cleared both reproductions measured in a second project, the scan itself ' +
+    'returning in 243ms and 275ms. ' +
+    'The fault behind it is that a script the editor has loaded keeps the copy it built, and nothing ' +
+    `rebuilds that copy when the file changes; editor_rescan with reloadScript set to ${declaring.join(', ')} ` +
+    `recompiles ${declaring.length === 1 ? 'that copy' : 'those copies'} from the file into the same ` +
+    'object and answers with the members it has afterwards under reloadedMethods. Read that and the ' +
+    'next diagnostics as two readings rather than one: a built copy has been seen stale here while ' +
+    'the diagnostics on it read clean, so the reload is worth doing and is not known to be what ' +
+    'clears these. The other lever measured is that a held type is refreshed when something it ' +
+    `depends on changes rather than when it changes itself${lever}. editor_launch restart has always ` +
+    'worked and costs a window. project_import refresh_classes does not, and answers added: [] while ' +
+    'this is happening.'
+  );
+}
+
+/**
  * When the cache was last written, or null when there is none.
  *
  * The editor rewrites the file at the end of a scan, from the list it is holding rather than from

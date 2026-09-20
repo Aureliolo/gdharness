@@ -850,7 +850,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       reloadScript: {
         type: 'string',
         description:
-          'A script to recompile in the editor after the scan, for the fault a scan cannot reach: a script the editor has loaded keeps the copy it built, and that copy is refreshed when one of its dependencies changes rather than when it changes itself, so a method added to a loaded class reads as missing at every caller. This recompiles into the same object, so the holders that kept the stale copy alive see the new one. The methods it has afterwards come back under reloadedMethods, because a reload that compiled nothing and answered OK is the failure worth catching.',
+          'A script to recompile in the editor after the scan, for the half a scan does not reach: a script the editor has loaded keeps the copy it built, that copy is refreshed when one of its dependencies changes rather than when it changes itself, and a scan leaves it alone. Measured here, a built copy comes back without a method added to it while script_diagnostics on the same script reads clean in the same window, so the copy the editor built and whatever the analyser resolves types against are not known to be one thing: reload for the copy, and read the diagnostics as a separate answer rather than as this one confirmed. This recompiles into the same object, so the holders that kept the stale copy alive see the new one. The methods it has afterwards come back under reloadedMethods, because a reload that compiled nothing and answered OK is the failure worth catching.',
       },
     },
     requires: ['projectPath'],

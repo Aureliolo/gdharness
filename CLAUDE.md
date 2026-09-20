@@ -29,11 +29,15 @@ nobody looked, which says where the next one is: wherever a case asserts a readi
 thing the reading was evidence for. The rewrite holds what does not depend on which remedy wins,
 that nothing sends a caller to edit source that is already correct.
 
-Check the value with whatever surrounds it when the surroundings are the thing being produced. A
-case comparing generated tool names against the schemas passed on two renderings of the same
-sentence, one of which escaped every backtick, because the names matched in both and the markup sits
-between the names. Reading a value out of rendered text and comparing it reads straight through the
-rendering, so it is a check on the generator's list and not on its output; assert the rendered form.
+Check the output, not the ingredients. Three cases here read the inputs to a thing and reported
+nothing wrong with what the thing produced, and all three looked exhaustive. A case comparing
+generated tool names against the schemas passed on two renderings of one sentence, one of which
+escaped every backtick, because the names matched in both and the markup sits between the names. A
+case reading `src/server.ts` for the sentences offering a remedy could not see the one that matters
+at all, because it is assembled from parts and no line of the file contains it, so it reported
+nothing wrong about a note that said nothing. Nothing in either check's own text says it is reading
+the wrong artefact, which is why moving the thing is what finds them: render it, call it, and assert
+what comes back.
 
 A disarm that still passes is a statement about the setup before it is one about the check. The
 fixture reached the assertion without walking the line that was broken, so the reading to reject
