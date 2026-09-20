@@ -2872,6 +2872,77 @@ function testAGameIsFoundWhereverItAnnounced(): void {
  * nobody was playing anything, which is the one answer that is certainly false, and the deletion
  * took the game away from the newer server about to replace it as well.
  */
+/**
+ * A game that announced and went is not a project that never had one.
+ *
+ * Those are the same sentence today, and only one of them is something a caller can act on: the
+ * game was there, it quit or was ended, and what it printed on the way is worth reading. A run
+ * downstream announced on a port and its process was gone seconds later, and all the answer said
+ * was that no game with the runtime addon is running, which is also what a project with no addon
+ * installed is told.
+ *
+ * The sweep is what destroys the evidence. An announcement whose process has gone is deleted on the
+ * way past, correctly, and after that nothing anywhere knows a game was ever there. So the going is
+ * remembered as it happens rather than reconstructed, and the refusal reads that.
+ *
+ * A dead pid is the whole setup: no engine, and nothing that could still be running when the
+ * assertions are made.
+ */
+function testAGameThatAnnouncedAndWentIsSaidSo(): void {
+  const root = mkdtempSync(join(tmpdir(), 'gdharness-went-'));
+  try {
+    const directory = join(root, 'gdharness');
+    mkdirSync(directory, { recursive: true });
+    // A process that has certainly ended: spawned to exit at once and waited for right here, so the
+    // number names nothing by the time the sweep reads it.
+    const ended: SpawnSyncReturns<string> = spawnSync(process.execPath, ['--eval', ''], {
+      encoding: 'utf8',
+    });
+    assert.ok(ended.pid > 0, 'the fixture needs a process that has been and gone');
+    const announcement = join(directory, `runtime-${ended.pid}.json`);
+    writeFileSync(
+      announcement,
+      JSON.stringify({
+        protocol: RUNTIME_PROTOCOL,
+        pid: ended.pid,
+        port: 51_777,
+        address: '127.0.0.1',
+        project: { name: 'Went', path: root },
+      }),
+      'utf8',
+    );
+
+    const announced = runtimesAnnounced([directory]);
+    // The instrument: the sweep ran and did its job. Without this the refusal below could be the
+    // one for an announcement nobody ever wrote.
+    assert.deepEqual(announced.running, [], 'a game whose process is gone is not one to talk to');
+    assert.equal(existsSync(announcement), false, 'and its announcement is swept');
+
+    const choice = chooseRuntime(announced.running, root, announced.unspoken);
+    assert.ok('problem' in choice, 'the call still fails, because there is nothing to talk to');
+    const problem = 'problem' in choice ? choice.problem : '';
+    assert.match(
+      problem,
+      new RegExp(`announced itself and its process is gone: pid ${ended.pid}`),
+      `the game that went is named: ${problem}`,
+    );
+    assert.match(problem, /quit or was ended rather than never starting/, `and told apart: ${problem}`);
+    assert.match(problem, /editor_output/, `with where its output is: ${problem}`);
+
+    // The other project's game is not this project's answer. These directories are shared, and a
+    // refusal about somebody else's crash would be the right shape about the wrong game.
+    const elsewhere = chooseRuntime([], join(root, 'another'), []);
+    const other = 'problem' in elsewhere ? elsewhere.problem : '';
+    assert.match(
+      other,
+      /No game with the runtime addon is running/,
+      `a project this game did not belong to gets the ordinary answer: ${other}`,
+    );
+  } finally {
+    sweep(root);
+  }
+}
+
 function testAGameTooNewToTalkToIsStillAGame(): void {
   const root = mkdtempSync(join(tmpdir(), 'gdharness-unspoken-'));
   try {
@@ -9363,6 +9434,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheStaleHalfIsNamedCorrectly,
   testAGameIsFoundWhereverItAnnounced,
   testAGameTooNewToTalkToIsStillAGame,
+  testAGameThatAnnouncedAndWentIsSaidSo,
   testANotYetRuntimeIsNotTheSameAsNoRuntime,
   testARefusalDoesNotDenyTheRuntimeItCanSee,
   testAStartSaysWhatItLeftRunning,
