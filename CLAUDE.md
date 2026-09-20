@@ -71,6 +71,17 @@ with a clean diagnostic read after it. Taking both in the same window, between t
 remedy, is what turned it into evidence, and it came out as claimed. Neither trial was wrong. Both
 were read as answering a question neither could reach.
 
+A claim about a change you have just made is the least checked claim there is. It arrives with the
+reasoning that produced it, which is the strongest case anybody will assemble for it, and the reader
+it is told to has less to check it against than you do. The debug adapter disconnect in this
+server's shutdown was ending an editor-played game on every reconnect, and the first fix for it,
+`terminateDebuggee: false`, was reasoned from the protocol, was correct about what gdharness means,
+and was told to the project that reported the loss as the answer. Godot's adapter ignores the field.
+The fixture that was written next failed on the fix, and skipping the request entirely is what saved
+the game. Nothing but running it would have said so: the reasoning was clean and the conclusion was
+false, which is the combination that gets shipped. Run the thing and read what came out, especially
+when the change is yours and the argument for it is good.
+
 A disarm that fails is only evidence when it fails on the assertion you aimed at. Read the failure
 rather than the exit code: a disarm that fails somewhere else never reached the broken line either,
 and it is the same empty result as one that passed, wearing the colour you were hoping for. The way
