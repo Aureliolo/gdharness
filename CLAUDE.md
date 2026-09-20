@@ -47,18 +47,17 @@ code shows nothing: it is the same join either way and the singular and plural d
 argument that can be plural, a list that can be empty, a second entry in one answer: render the case
 nothing has hit and read it. The branches a reproduction covers are the ones already right.
 
-The sharpest case of that is an arm that renders only when something is wrong, because a green run is
-where it is never seen. Every fixture passing, every reading of the code and every session that went
-well leave it exactly as unchecked, so "the suite is green" is the state it lives in rather than
-evidence about it. The refusal for a game announcing a protocol this server cannot read is the one
-here: the sweep it consults drops those announcements, so it fell through to advice that ends the run
-it was denying, while twenty lines away a function written for that state said in its own doc that
-"no game is running" is the answer that is certainly false here. The sentence existed and nothing
-called it, and reading the sweep shows something that looks complete. What found it was making the
-two halves disagree for an unrelated reason, bumping a protocol constant to see whether a fixture
-forging it would drift. So for an arm conditioned on a disagreement, a version gap, a fault, a
-timeout, put the thing into that state on purpose rather than waiting to meet it: the arms a good run
-exercises are not the ones worth rendering.
+Code that only runs when something is wrong is never exercised by a run that goes well. A passing
+suite, a careful reading and a successful session all leave it equally unchecked, so "everything is
+green" says nothing about it either way. The case here was the refusal for a game announcing a
+protocol this server cannot read. The sweep that refusal consults drops those announcements, so it
+fell through to advice that would end the very run it was denying. A function twenty lines away had
+been written for that exact state and says in its own doc that "no game is running" is certainly
+false there, but nothing called it, and the sweep reads as complete. It was found by making the two
+halves disagree for an unrelated reason: bumping a protocol constant to check whether a fixture
+hard-coding it would drift. So when a branch depends on a version mismatch, a fault, a timeout or any
+other disagreement, put the system into that state deliberately and look at what comes out. Waiting
+to meet it in normal use does not work, because normal use is the case that avoids it.
 
 A disarm that still passes is a statement about the setup before it is one about the check. The
 fixture reached the assertion without walking the line that was broken, so the reading to reject
