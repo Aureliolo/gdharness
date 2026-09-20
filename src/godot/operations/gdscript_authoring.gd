@@ -2,6 +2,7 @@ extends RefCounted
 
 const Read = preload("reading.gd")
 const Log = preload("logger.gd")
+const Patterns = preload("patterns.gd")
 
 var _log: Log
 
@@ -242,6 +243,10 @@ func _add_function(lines: Array[String], mod: Dictionary) -> int:
 		func_lines.append("\t" + bl)
 
 	var insert_line: int = _function_insertion_point(lines, position)
+	# A separator on the far side too when something follows, since `after_ready` and `after_init`
+	# put the new function immediately above an existing one and left the two declarations touching.
+	if insert_line < lines.size():
+		func_lines.append("")
 
 	for i: int in range(func_lines.size() - 1, -1, -1):
 		if lines.insert(insert_line, func_lines[i]) != OK:
@@ -256,7 +261,13 @@ func _variable_insertion_point(lines: Array[String]) -> int:
 	var before_func: int = lines.size()
 
 	for i: int in range(lines.size()):
-		var line: String = lines[i].strip_edges()
+		# Annotations off first. `@abstract class_name X` is one line in Godot 4.5 and later, and
+		# unstripped it matches nothing here, so the header is only found when some other line
+		# carries it. A script whose whole header is that one line leaves `after_header` at 0 and
+		# takes the new line above the `class_name`, where it does not parse; one that declares
+		# `extends` first takes it between the two, which does not parse either. Stripping also
+		# turns `@export var x` into `var x`, which is why the annotation names are gone below.
+		var line: String = Patterns.without_annotations(lines[i])
 		if line.begins_with("extends ") or line.begins_with("class_name "):
 			after_header = i + 1
 		elif line.begins_with("signal "):
@@ -266,8 +277,7 @@ func _variable_insertion_point(lines: Array[String]) -> int:
 			break
 
 	for i: int in range(after_header, before_func):
-		var line: String = lines[i].strip_edges()
-		if line.begins_with("var ") or line.begins_with("@export") or line.begins_with("@onready"):
+		if Patterns.without_annotations(lines[i]).begins_with("var "):
 			after_header = i + 1
 
 	return after_header
@@ -277,17 +287,14 @@ func _signal_insertion_point(lines: Array[String]) -> int:
 	var after_header: int = 0
 
 	for i: int in range(lines.size()):
-		var line: String = lines[i].strip_edges()
+		# As above: the annotations come off before the line is read, so an abstract class has a
+		# header to find and `@export var x` reads as the var it is.
+		var line: String = Patterns.without_annotations(lines[i])
 		if line.begins_with("extends ") or line.begins_with("class_name "):
 			after_header = i + 1
 		elif line.begins_with("signal "):
 			after_header = i + 1
-		elif (
-			line.begins_with("var ")
-			or line.begins_with("@export")
-			or line.begins_with("@onready")
-			or line.begins_with("func ")
-		):
+		elif line.begins_with("var ") or line.begins_with("func "):
 			break
 
 	return after_header
@@ -308,7 +315,11 @@ func _function_insertion_point(lines: Array[String], position: String) -> int:
 func _line_after_function(lines: Array[String], prefix: String) -> int:
 	var inside: bool = false
 	for i: int in range(lines.size()):
-		var line: String = lines[i].strip_edges()
+		# As above: an annotated `func` is still a `func`, and reading the raw line missed both
+		# ends of this. An annotated `_ready` was never found, so `after_ready` placed the new
+		# function at the end of the file, and an annotated function after `_ready` was not the
+		# boundary it is, so the new one went in after whichever later function was plain.
+		var line: String = Patterns.without_annotations(lines[i])
 		if line.begins_with(prefix):
 			inside = true
 		elif inside and (line.begins_with("func ") or line.begins_with("static func ")):

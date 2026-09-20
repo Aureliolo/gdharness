@@ -60,6 +60,16 @@ the debug adapter as a side effect, and a session stays open for the life of the
 ran first decided what the timing case measured. Fix the setup and disarm again. Only a disarm that
 fails has told you anything about the check.
 
+The third way is the input, and it arrives looking like diligence. A report names the case somebody
+hit, which is not always the case that breaks, so a fixture built from the reproduction tests the
+shape that survived. The `@abstract` report came with a script declaring `class_name` behind an
+annotation and `extends` on the line below, the file-writing path was fixed, the fixture was written
+around that exact script, and the disarm passed: two header lines means the second is found whether
+or not the annotations come off, and it sets the insertion point on its own, so the first is never
+read. What breaks is the neighbour, a script whose whole header is the annotated line, which nobody
+reported because nobody had edited one. Take the report for the fault and then ask which other
+shapes reach the same line, and write the one where the line has nothing else to fall back on.
+
 The same question comes one step earlier for a measurement. Before asking what a reading means, ask
 which result would have contradicted it, because a trial that could not have come out the other way
 has told you nothing however careful it looked. Two lists both holding the new method is a reading
