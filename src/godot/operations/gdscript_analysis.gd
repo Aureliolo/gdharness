@@ -387,7 +387,14 @@ func _parse_param(param_text: String) -> Dictionary:
 	else:
 		name = param_text
 
-	return {"name": name, "type": type_hint, "default": default_value}
+	# `...rest: Array` is a rest parameter, and the dots are the syntax rather than part of what it
+	# is called: answering `...rest` as the name gives a caller building a call site a name it
+	# cannot use. gdUnit4 alone declares 56 of these.
+	var is_rest: bool = name.begins_with("...")
+	if is_rest:
+		name = name.substr(3).strip_edges()
+
+	return {"name": name, "type": type_hint, "default": default_value, "is_rest": is_rest}
 
 
 func _extract_dependencies(line: String) -> Array[String]:

@@ -5045,6 +5045,11 @@ async function testAStructureReadCanCarryWhatTheScriptInherits(): Promise<void> 
         'func visible_helper() -> void:',
         '\tpass',
         '',
+        '',
+        // A rest parameter, where the dots are syntax rather than part of the name.
+        'func collect(first: int, ...rest: Array) -> void:',
+        '\tprint(first, rest)',
+        '',
       ].join('\n'),
     );
 
@@ -5140,8 +5145,18 @@ async function testAStructureReadCanCarryWhatTheScriptInherits(): Promise<void> 
           // Private by convention, which is what the old reading mistook for virtual.
           ['_compute_damage', false],
           ['visible_helper', false],
+          ['collect', false],
         ],
         `only what the engine calls is virtual: ${JSON.stringify(engineCalls)}`,
+      );
+      assert.deepEqual(
+        get(asArray(get(engineCalls, 'functions'))[4], 'params'),
+        [
+          { name: 'first', type: 'int', default: '', is_rest: false },
+          // The dots are the syntax, so a caller building a call site gets a name it can use.
+          { name: 'rest', type: 'Array', default: '', is_rest: true },
+        ],
+        `a rest parameter is named without its dots and says it is one: ${JSON.stringify(engineCalls)}`,
       );
 
       // A native base declares nothing in a file, so the walk has nothing to do and says so with an
