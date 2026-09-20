@@ -16,6 +16,11 @@ extends RefCounted
 # Kept, because the readers below call these per line of every script in a project and a fresh
 # compile each time is the whole cost of the scan. The patterns are literals in this repository, so
 # the set is bounded by the source rather than by anything a caller passes.
+#
+# Held by `test/support/gd/patterns_cache.gd`, with `is_same` rather than `==`: two RegEx built from
+# one pattern match the same text and compare equal on everything else, so identity is the only
+# question that separates a cache from a recompile. Without that case, taking the cache away would
+# have broken no answer anywhere and failed nothing, which is the argued-and-unheld shape.
 static var _compiled: Dictionary = {}
 
 

@@ -2513,6 +2513,137 @@ function testProjectDefaultsToTheWorkingDirectory(): void {
  *
  * Engine-free, like the doctor test above it: this is git and project.godot and nothing else.
  */
+/**
+ * Every GDScript in the tree is somewhere the GDScript gates look, and every place they look holds
+ * some.
+ *
+ * `gdlint` and `gdformat --check` both exit 0 when handed a directory with no GDScript in it, and
+ * `gdformat` says "0 files would be left unchanged" while doing it, which reads like a pass. So the
+ * paths in `package.json` are a list nothing holds against the tree: move a directory, add one, or
+ * mistype one, and the gate goes on reporting success over less than it did, or over nothing.
+ *
+ * Reported by a downstream project that asked every gate it has what it says about a directory
+ * holding nothing of its language. `ruff`, `ty`, `gdlint`, `gdformat` and `markdownlint-cli2` all
+ * answered 0.
+ *
+ * Both directions, because each alone is satisfied by a mistake in the other. A script outside
+ * every named path is one nothing checks. A named path with nothing under it is a gate checking
+ * nothing and saying so in the language of success, and it is also the positive here: a walk that
+ * had stopped finding files would satisfy the first assertion perfectly.
+ *
+ * The three commands are held level too. They are written out separately, and a directory added to
+ * the linter and not to the formatter is a directory only half of them reads.
+ */
+function testEveryGdscriptIsUnderTheGatesAndEveryGateHasSome(): void {
+  const manifest: unknown = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8'));
+  // Everything after the tool that is not a flag. Reading only the words with a slash in them
+  // looked equivalent and is not: it cannot see a directory at the top level, which is the one a
+  // mistyped or moved path is most likely to be, and the disarm that adds one passed because of it.
+  const pathsIn = (script: string): string[] => {
+    const line = get(manifest, 'scripts', script);
+    assert.equal(typeof line, 'string', `package.json should define the ${script} script`);
+    return String(line)
+      .split(/\s+/)
+      .slice(1)
+      .filter((word) => word !== '' && !word.startsWith('-'));
+  };
+
+  const gated = pathsIn('lint:gd');
+  assert.ok(
+    gated.length > 0,
+    `lint:gd should name the directories it checks: ${String(get(manifest, 'scripts', 'lint:gd'))}`,
+  );
+  for (const other of ['format:gd', 'format:gd:check']) {
+    assert.deepEqual(
+      pathsIn(other),
+      gated,
+      `${other} reads the same directories as lint:gd, or one of them is only half checked`,
+    );
+  }
+
+  const found: string[] = [];
+  const walk = (directory: string, prefix: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      if (entry.name.startsWith('.') || entry.name === 'node_modules' || entry.name === 'build') {
+        continue;
+      }
+      const here = `${prefix}${entry.name}`;
+      if (entry.isDirectory()) {
+        walk(join(directory, entry.name), `${here}/`);
+      } else if (entry.name.endsWith('.gd')) {
+        found.push(here);
+      }
+    }
+  };
+  walk(process.cwd(), '');
+
+  const outside = found.filter((path) => !gated.some((where) => path.startsWith(`${where}/`)));
+  assert.deepEqual(outside, [], `every .gd belongs to a directory the gates name, and these do not`);
+
+  for (const where of gated) {
+    const under = found.filter((path) => path.startsWith(`${where}/`));
+    assert.ok(
+      under.length > 0,
+      `${where} is named by the gates and holds no .gd, so both tools pass over nothing there`,
+    );
+  }
+}
+
+/**
+ * The bumps the release button offers are the bumps both documents describe.
+ *
+ * `CLAUDE.md` tells the owner how to choose a bump and says `.github/CONTRIBUTING.md` states the
+ * same thing publicly, so keep the two in step. That instruction was stated and held by nothing,
+ * which is its own shape: a project can write a rule into its working agreement, act on it, and
+ * still have no case that fails when the two drift.
+ *
+ * What is held here is the part that has an artefact behind it. The three documents that have to
+ * agree are two prose files and one `type: choice` in a workflow, and the choice is the one a
+ * person actually clicks: a bump offered by the button and described in neither file is one nobody
+ * can decide correctly, and a bump described in one file only is the drift the instruction is about.
+ *
+ * What is not held, and deliberately: which level each kind of change belongs to. The two files say
+ * that in different words on purpose, one addressing the owner and one the public, so `removal` in
+ * one is `taken away` in the other. A check pairing phrase to phrase would be a copy of both texts
+ * that rots when either is reworded, which is the fault it would be pretending to catch.
+ */
+function testTheReleaseButtonOffersWhatBothDocumentsDescribe(): void {
+  const workflow = readFileSync(join(process.cwd(), '.github', 'workflows', 'release-prepare.yml'), 'utf8');
+  const choices = workflow
+    .slice(workflow.indexOf('bump:'))
+    .split('options:')[1]
+    ?.split(/\n\s*\n|\njobs:/)[0];
+  assert.ok(choices !== undefined, 'the prepare workflow should offer a bump as a list of options');
+  const offered = [...choices.matchAll(/^\s*-\s*(\w+)\s*$/gm)].map((found) => found[1]);
+  assert.deepEqual(
+    offered,
+    ['patch', 'minor', 'major'],
+    `the button offers these three, and both documents are held against them: ${choices}`,
+  );
+
+  // The section rather than the file. `major` appears in CONTRIBUTING's Renovate paragraph as
+  // well, so a whole-file search passes on a Versions section that has lost it, which is a check
+  // reading the right document and the wrong part of it.
+  const sections: [string, string][] = [
+    ['CLAUDE.md', '## Releasing'],
+    [join('.github', 'CONTRIBUTING.md'), '## Versions'],
+  ];
+  for (const [file, heading] of sections) {
+    const text = readFileSync(join(process.cwd(), file), 'utf8');
+    const start = text.indexOf(heading);
+    assert.ok(start >= 0, `${file} should still have its ${heading} section`);
+    const after = text.slice(start + heading.length);
+    const ends = after.indexOf('\n## ');
+    const section = (ends < 0 ? after : after.slice(0, ends)).toLowerCase();
+    for (const bump of offered) {
+      assert.ok(
+        section.includes(String(bump)),
+        `${file}'s ${heading} should say what ${String(bump)} means, since the button offers it`,
+      );
+    }
+  }
+}
+
 function testAnAutoloadGitWillNotCarry(): void {
   const project = mkdtempSync(join(tmpdir(), 'gdharness-ignored-'));
   const git = (...gitArgs: string[]): SpawnSyncReturns<string> =>
@@ -4721,7 +4852,24 @@ async function testAnAnnotatedDeclarationIsStillADeclaration(): Promise<void> {
     // A use of the class, so the reverse walk has something to classify. The annotation shares the
     // line with the `extends` here rather than with a declaration, which is the same fault one step
     // on: unstripped it is not an `extends` line, so the use is labelled with the catch-all.
-    writeFileSync(join(project, 'user.gd'), '@tool extends Shape\n\n\nfunc use() -> void:\n\tpass\n');
+    //
+    // The two comments name the class as well, and they are not uses. A project that documents
+    // itself names its collaborators in `##` links, so the better documented it is the further
+    // `total` drifts from the answer to "does anything still use this".
+    writeFileSync(
+      join(project, 'user.gd'),
+      [
+        '@tool extends Shape',
+        '',
+        '## Built on [Shape], which is where every figure comes from.',
+        '# A plain comment naming Shape, which is prose rather than a use.',
+        '',
+        '',
+        'func use() -> void:',
+        '\tpass',
+        '',
+      ].join('\n'),
+    );
     // For `after_ready`, which has to find one annotated function and stop at the next. Reading
     // the raw line missed both ends: an annotated `_ready` was never found, so the answer went to
     // the end of the file, and an annotated function after it was not the boundary it is.
@@ -4863,8 +5011,18 @@ async function testAnAnnotatedDeclarationIsStillADeclaration(): Promise<void> {
       // see where the missing one went.
       assert.deepEqual(
         get(used, 'summary', 'by_kind'),
-        { extends: 2 },
-        `both uses extend it behind an annotation, by name and by path: ${JSON.stringify(used)}`,
+        { extends: 2, doc: 1, comment: 1 },
+        `both uses extend it behind an annotation, and neither mention is one: ${JSON.stringify(used)}`,
+      );
+      assert.equal(
+        get(used, 'summary', 'in_code'),
+        2,
+        `and the count that answers whether anything uses it leaves the prose out: ${JSON.stringify(used)}`,
+      );
+      assert.equal(
+        get(used, 'summary', 'total'),
+        4,
+        `while total still counts everything found, so neither number has to be derived: ${JSON.stringify(used)}`,
       );
 
       const written = await call('script_edit', {
@@ -5097,12 +5255,39 @@ async function testAStructureReadDescribesTheScriptItRead(): Promise<void> {
         ') -> bool:',
         '\treturn first > 0 and second != ""',
         '',
+        '',
+        // Every one of them at once: an annotation on the first line of a declaration that wraps,
+        // a comma inside a typed collection, and a rest parameter, in a signature whose return
+        // type is on the closing line. Each has a case of its own above and none of those carries
+        // a second, which is the gap a suite of single-feature cases leaves by construction.
+        '@abstract func later(',
+        '\tonly: Dictionary[String, int],',
+        '\t...rest: Array,',
+        ') -> void',
+        '',
       ].join('\n'),
     );
     // A wrapped enum, the other half of the same fault: 23 of them in the pinned gdUnit4.
     writeFileSync(
       join(project, 'wrapped.gd'),
-      ['extends RefCounted', '', 'enum Mode {', '\tFAST,', '\tSLOW,', '}', ''].join('\n'),
+      [
+        'extends RefCounted',
+        '',
+        'enum Mode {',
+        '\tFAST,',
+        '\tSLOW,',
+        '}',
+        '',
+        // The brace opens before the comment and closes on a later line, which is the only shape
+        // that separates the comment stripper from its neighbours: it counts no brackets, because
+        // a `#` starts a comment wherever it is. Give it the depth the others have and the comment
+        // lands inside the value.
+        'var table := {  # keyed by name',
+        '\t"a": 1,',
+        '\t"b": 2,',
+        '}',
+        '',
+      ].join('\n'),
     );
     // A file mid-edit, which is the state an agent is most likely to ask about. Joining lines until
     // the brackets balance made this worse before it was bounded to declarations: an unclosed
@@ -5280,8 +5465,34 @@ async function testAStructureReadDescribesTheScriptItRead(): Promise<void> {
               ['second', 'String', '"x"'],
             ],
           ],
+          [
+            'later',
+            'void',
+            [
+              ['only', 'Dictionary[String, int]', ''],
+              ['rest', 'Array', ''],
+            ],
+          ],
         ],
         `every parameter list ends where the signature does: ${JSON.stringify(bracketed)}`,
+      );
+      // The annotation is on the first line of a declaration that runs to the fourth, so whether it
+      // is seen at all depends on the joining happening before the annotations are read.
+      const combined = asArray(get(bracketed, 'functions')).at(-1);
+      assert.equal(
+        get(combined, 'name'),
+        'later',
+        `the combined declaration is the last one: ${JSON.stringify(bracketed)}`,
+      );
+      assert.equal(
+        get(combined, 'is_abstract'),
+        true,
+        `an annotation on a wrapped declaration is still read: ${JSON.stringify(bracketed)}`,
+      );
+      assert.equal(
+        get(asArray(get(combined, 'params'))[1], 'is_rest'),
+        true,
+        `and so is a rest parameter three lines below it: ${JSON.stringify(bracketed)}`,
       );
 
       const wrapped = await call('script_info', {
@@ -5298,6 +5509,11 @@ async function testAStructureReadDescribesTheScriptItRead(): Promise<void> {
         // The line is where the declaration starts, not where its closing brace is.
         [['Mode', ['FAST', 'SLOW'], 3]],
         `a wrapped enum has the members it declares: ${JSON.stringify(wrapped)}`,
+      );
+      assert.deepEqual(
+        asArray(get(wrapped, 'variables')).map((each) => [get(each, 'name'), get(each, 'default_value')]),
+        [['table', '{ "a": 1, "b": 2, }']],
+        `and a comment beside an opening brace is not part of the value: ${JSON.stringify(wrapped)}`,
       );
 
       const halfWritten = await call('script_info', {
@@ -8243,6 +8459,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARestartSaysWhatTheEditorDropped,
   testProjectDefaultsToTheWorkingDirectory,
   testAnAutoloadGitWillNotCarry,
+  testEveryGdscriptIsUnderTheGatesAndEveryGateHasSome,
+  testTheReleaseButtonOffersWhatBothDocumentsDescribe,
   testVersionOrdering,
   testChangelogReach,
   testTheCureIsWrittenWhole,
