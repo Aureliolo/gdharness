@@ -2699,7 +2699,14 @@ class GodotServer {
       game: {
         // The record too, or "is something running" answers no about a run this server did not
         // start, which after a reconnect is every run.
-        processActive: stillRunning(this.currentRun()),
+        //
+        // Judged the same way `editor_output` judges `running`, and with the editor's answer that
+        // this call has already gone and got. A run the editor plays has no handle and no pid here,
+        // so `stillRunning` alone can only say yes for as long as the record lasts: a game that
+        // quit went on being reported as active, in the same answer that carried the editor saying
+        // it was playing nothing. Two fields about one question, one of them asking and one of them
+        // remembering.
+        processActive: runIsUp(this.currentRun(), playing === null ? null : playing.playing),
         playingInEditor: playing,
         runtimeConnected: games.some((game) => game.reachable),
         runtimes: games,
@@ -3089,6 +3096,10 @@ class GodotServer {
     // Taken before anything starts, so the game waited for below is one nobody had seen: a game
     // that has just been ended can still be dying with its announcement on disk.
     const alreadyPlaying = new Set(discoverRuntimes().map((endpoint) => endpoint.pid));
+    // Games of this project that were here before the start and that ending the previous run did
+    // not take with it. Read now rather than afterwards, because the game about to start announces
+    // itself too and would otherwise be reported as something it left behind.
+    const wereHereFirst = this.everyRuntimeOfOurs();
 
     // The editor when it is there: a game it plays is a game its debugger is holding, and that
     // session is the only thing the debug tools can reach. A game started here as its own
@@ -3148,9 +3159,26 @@ class GodotServer {
       ended === null
         ? ''
         : ` The run that was going, pid ${ended}, was ended to start this one; its output is no longer what editor_output answers about.`;
+    // A game of this project that was already running and that this server cannot read. It is not
+    // in `ended`, because ending a run goes through the sweep that drops these, so the start left
+    // it running and said nothing: two games, one of them unmentioned and unreachable. Said on the
+    // answer that caused it rather than only in the refusal a later call would have given.
+    // Readable or not. A game announced for this project that this server did not start is one a
+    // spawned start does not replace, whether the reason it cannot be reached is a protocol gap or
+    // simply that nothing here holds it: the refusals for those two states both said a start would
+    // end it, and a start measured against each left it running.
+    const stranded = wereHereFirst.filter((one) => one.pid !== ended && alive(one.pid));
+    const named = stranded
+      .map((one) => (one.protocol === null ? `pid ${one.pid}` : `pid ${one.pid} on protocol ${one.protocol}`))
+      .join(', ');
+    const alsoRunning =
+      stranded.length === 0
+        ? ''
+        : ` A game of this project was already running and still is: ${named}. Starting this one did not end it and nothing here can, because this server did not start it. End it yourself, or bring the halves to one version where a protocol is named.`;
     return this.jsonTextResponse({
       started: true,
       through: 'gdharness',
+      alsoRunning: stranded.length === 0 ? undefined : stranded.map((one) => one.pid),
       pid: started.process.pid ?? null,
       arguments: cmdArgs,
       // Named here rather than only by editor_output, because a caller who wants to watch the
@@ -3168,7 +3196,7 @@ class GodotServer {
         runtimeWaitMs,
         given.value.length > 0,
       ),
-      message: `Use editor_output for what it prints and editor_run stop to end it.${spawnedInstead}${endedForThis}`,
+      message: `Use editor_output for what it prints and editor_run stop to end it.${spawnedInstead}${endedForThis}${alsoRunning}`,
     });
   }
 
@@ -3737,20 +3765,24 @@ class GodotServer {
         ' editor_status says whether one is on its way, and a run of yours that is still up is' +
         ' reachable again once it is.'
       : '';
-    // A game this server did not start, that the editor is playing, and that has announced its
-    // runtime: neither of the two sources above can see it, and the runtime directory can. Asked
-    // before anything else is said, because the sentence this used to reach for tells the caller to
-    // start a game, `editor_run start` replaces the one playing rather than adding to it, and the
-    // advice therefore ended the run it had just denied. Measured downstream: one process playing
-    // before, one after, the old pid gone.
+    // A game this server did not start that has announced its runtime: neither of the two sources
+    // above can see it, and the runtime directory can. Asked before anything else is said, because
+    // the sentence this used to reach for tells the caller to start a game.
+    //
+    // What a start then does depends on who is holding the game, and this branch is reached when
+    // nothing here is: a run the editor is playing would have been picked up above. So the start is
+    // spawned, and a spawned start is a second process. Measured, with a runtime announced for this
+    // project and no editor: `started: true` with a new pid, the announced game still running, and
+    // nothing ended. The reading that a start replaces the game that is playing came from a game
+    // the editor was playing, which is the one case this branch cannot be about.
     const live = this.aRuntimeOfOursIsAnswering();
     if (live !== null) {
       return (
         `A game is running for ${live.project.path} and has announced its runtime on port ${live.port}, pid ${live.pid},` +
         ' but this server did not start it and cannot reach it through the editor, so editor_run and' +
         ' editor_output have nothing to answer about. The runtime_* tools reach it now.' +
-        ' Do not start another: editor_run start replaces the game that is playing rather than' +
-        ' adding one, so it would end this one.' +
+        ' A run started here is a separate process rather than a replacement, so starting one leaves' +
+        ' this game running as well.' +
         (this.godotBridge.getStatus().connected
           ? ''
           : ' editor_status says whether an editor is on its way, and editor_run can end it once one is.')
@@ -3764,7 +3796,13 @@ class GodotServer {
     // announces something this server will not read.
     //
     // Without offering the runtime_* tools, because this server cannot reach it either. What it can
-    // say is that the game is there, which half is behind, and that starting another would end it.
+    // say is that the game is there and which half is behind.
+    //
+    // Not that starting another would end it, which is what the branch above says about a game the
+    // editor is playing and is false here. A start this server spawns is a separate process:
+    // measured, with a game announcing a protocol ahead of the server, and `editor_run start`
+    // answered `started: true` with a new pid while the announced game went on running, unmentioned
+    // and unreachable. The two branches look alike and the game underneath them is not the same one.
     const unreadable = this.aRuntimeOfOursIsTooFarOff();
     if (unreadable !== null) {
       const behind =
@@ -3775,8 +3813,8 @@ class GodotServer {
         `A game is running for ${unreadable.project.path}, pid ${unreadable.pid}, announced in protocol` +
         ` ${unreadable.protocol}, which this server does not speak: it speaks ${RUNTIME_PROTOCOL}, so ${behind}.` +
         ' Until then neither editor_run nor the runtime_* tools can reach it.' +
-        ' Do not start another: editor_run start replaces the game that is playing rather than' +
-        ' adding one, so it would end this one.'
+        ' A run started here is a separate process rather than a replacement, so starting one leaves' +
+        ' this game running as well.'
       );
     }
     const record = readRunRecord();
@@ -3818,14 +3856,36 @@ class GodotServer {
 
   /** Whichever of the announced games is this server's own project, out of any of the lists. */
   private announcedForOurProject<T extends { project: { path: string } }>(announced: readonly T[]): T | null {
+    return this.allAnnouncedForOurProject(announced)[0] ?? null;
+  }
+
+  private allAnnouncedForOurProject<T extends { project: { path: string } }>(announced: readonly T[]): T[] {
     const status = this.godotBridge.getStatus();
     const mine = this.ownProject ?? (status.connected ? (status.projectPath ?? null) : null);
     if (mine === null) {
-      return null;
+      return [];
     }
-    return (
-      announced.find((one) => one.project.path !== '' && isSameDirectory(mine, one.project.path)) ?? null
-    );
+    return announced.filter((one) => one.project.path !== '' && isSameDirectory(mine, one.project.path));
+  }
+
+  /**
+   * Every game announced for this project, whether or not this server speaks its protocol.
+   *
+   * Both lists, because what makes a game something a start leaves behind is that it is running and
+   * not this server's, and being readable has nothing to do with it.
+   */
+  private everyRuntimeOfOurs(): { pid: number; protocol: number | null }[] {
+    const announced = runtimesAnnounced();
+    return [
+      ...this.allAnnouncedForOurProject(announced.running).map((one) => ({
+        pid: one.pid,
+        protocol: null,
+      })),
+      ...this.allAnnouncedForOurProject(announced.unspoken).map((one) => ({
+        pid: one.pid,
+        protocol: one.protocol,
+      })),
+    ];
   }
 
   private couldBeOurs(project: string): boolean {
