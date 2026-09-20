@@ -4636,6 +4636,156 @@ function testAnAuditThatCouldNotAskIsNotAnAuditThatPassed(): void {
  * positive that keeps the untouched scene meaningful: an op that had stopped running at all would
  * leave every scene alone just as well.
  */
+/**
+ * An annotation sharing the line with a declaration does not hide it, on any of the paths.
+ *
+ * `@abstract class_name X` is one line in Godot 4.5 and later, and `@tool` and `@icon("...")` sit
+ * there too. Five readers here matched `class_name` at the start of a line and saw none of them.
+ * The reported half cost a project 23 classes named as declared nowhere, with the answer telling
+ * the caller to restart the editor to drop them. The half nobody had hit is worse and is why this
+ * runs an engine: the insertion points that place a new `var` or `signal` found the header only
+ * where some other line carried it, so a script whose whole header is the annotated declaration
+ * took the new line above the `class_name`, where it does not parse.
+ *
+ * Driven through the engine rather than asserted against the parser, because what is being claimed
+ * is that the file Godot is handed afterwards is one Godot accepts.
+ */
+async function testAnAnnotatedDeclarationIsStillADeclaration(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('annotated declaration regression skipped (Godot not found)');
+    return;
+  }
+
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-annotated-'));
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Annotated"\n',
+    );
+    writeFileSync(
+      join(project, 'shape.gd'),
+      '@abstract class_name Shape\nextends RefCounted\n\n\nfunc area() -> float:\n\treturn 0.0\n',
+    );
+    // A script whose whole header is the annotated declaration. `shape.gd` cannot show where an
+    // insertion lands, because its `extends` line is found with or without the annotations off and
+    // fixes the insertion point at 2 either way. Here there is nothing else to find, so a reader
+    // that cannot see through `@abstract` puts the new line at 0, above the declaration.
+    writeFileSync(
+      join(project, 'marker.gd'),
+      '@abstract class_name Marker\n\n\nfunc mark() -> void:\n\tpass\n',
+    );
+    // The base on the declaration line, which GDScript also allows. `Node2D` rather than a
+    // `RefCounted` descendant, because `RefCounted` is what the reader falls back to when it finds
+    // no `extends` at all, and a fixture using it cannot tell a reading from a default.
+    writeFileSync(
+      join(project, 'blade.gd'),
+      '@abstract class_name Blade extends Node2D\n\n\nfunc swing() -> void:\n\tpass\n',
+    );
+
+    const server = new ServerProcess({ env: { GODOT_PATH: godotPath } });
+    try {
+      await server.initialize('regression-test');
+      const call = async (name: string, args: Record<string, unknown>): Promise<unknown> =>
+        parseTextContent(
+          await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS),
+        );
+
+      const read = await call('script_info', {
+        projectPath: project,
+        op: 'structure',
+        scriptPath: 'res://shape.gd',
+      });
+      assert.equal(
+        get(read, 'class_name'),
+        'Shape',
+        `the declared class is found behind its annotation: ${JSON.stringify(read)}`,
+      );
+
+      const oneLine = await call('script_info', {
+        projectPath: project,
+        op: 'structure',
+        scriptPath: 'res://blade.gd',
+      });
+      assert.equal(
+        get(oneLine, 'class_name'),
+        'Blade',
+        `the name stops where the name stops: ${JSON.stringify(oneLine)}`,
+      );
+      assert.equal(
+        get(oneLine, 'extends'),
+        'Node2D',
+        `and the base on the same line is the base: ${JSON.stringify(oneLine)}`,
+      );
+
+      // The reverse walk reads the declaration itself, to find the uses that name the class rather
+      // than the path, so it has its own answer to what a declaration looks like.
+      const used = await call('project_dependencies', {
+        projectPath: project,
+        direction: 'reverse',
+        resourcePath: 'res://shape.gd',
+      });
+      assert.equal(
+        get(used, 'class_name'),
+        'Shape',
+        `the reverse walk knows what the script declares: ${JSON.stringify(used)}`,
+      );
+
+      const written = await call('script_edit', {
+        projectPath: project,
+        op: 'modify',
+        scriptPath: 'res://marker.gd',
+        modifications: [
+          { type: 'add_variable', name: 'sides', varType: 'int', defaultValue: '3' },
+          { type: 'add_signal', name: 'marked' },
+        ],
+      });
+      // Read back rather than trusted. An answer that did not say `ok: false` is not an answer
+      // that wrote anything, which is how a first version of this case passed the call and then
+      // found the file untouched: the arguments were wrong and nothing said so loudly enough.
+      assert.equal(get(written, 'success'), true, `both should be added: ${JSON.stringify(written)}`);
+
+      // Where they landed, which is the whole point: above the class_name is a file that does not
+      // parse, and the answer would say it wrote a variable either way. The signal has its own
+      // insertion point in the engine, with its own reading of the header.
+      const after = readFileSync(join(project, 'marker.gd'), 'utf8').split('\n');
+      const declaration = after.findIndex((line) => line.includes('class_name Marker'));
+      const variable = after.findIndex((line) => line.includes('sides'));
+      const declared = after.findIndex((line) => line.includes('signal marked'));
+      assert.ok(declaration >= 0, `the declaration should still be there: ${after.join('\\n')}`);
+      assert.ok(variable > declaration, `the variable below it, not above: ${after.join('\\n')}`);
+      assert.ok(declared > declaration, `and the signal below it too: ${after.join('\\n')}`);
+
+      // And Godot agrees it is a script, which is the claim those line numbers stand for.
+      const reread = await call('script_info', {
+        projectPath: project,
+        op: 'structure',
+        scriptPath: 'res://marker.gd',
+      });
+      assert.equal(
+        get(reread, 'class_name'),
+        'Marker',
+        `still readable afterwards: ${JSON.stringify(reread)}`,
+      );
+      assert.ok(
+        asArray(get(reread, 'variables') ?? []).length >= 1,
+        `and the variable is in it: ${JSON.stringify(reread)}`,
+      );
+      assert.ok(
+        asArray(get(reread, 'signals') ?? []).length >= 1,
+        `and the signal is in it: ${JSON.stringify(reread)}`,
+      );
+    } finally {
+      await server.stop();
+    }
+  } finally {
+    sweep(project);
+  }
+}
+
 async function testRefreshingUidsMakesTheSidecarAndWritesNoScene(): Promise<void> {
   const godotPath = resolveGodotPath();
   if (!godotPath) {
@@ -7503,6 +7653,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheSkillNamesTheSettingThatServesAScriptRun,
   testTheSkillWritesNoEscapedBackticks,
   testAnAuditThatCouldNotAskIsNotAnAuditThatPassed,
+  testAnAnnotatedDeclarationIsStillADeclaration,
   testRefreshingUidsMakesTheSidecarAndWritesNoScene,
   testWhoIsHoldingAPortIsAskable,
   testWhatTheEditorSavedAwayIsReportedTheSameWay,

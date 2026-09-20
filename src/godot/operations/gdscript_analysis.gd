@@ -57,10 +57,19 @@ func get_gdscript_info(params: Dictionary) -> Dictionary:
 		if in_multiline_string:
 			continue
 
-		if stripped.begins_with("class_name "):
-			declared_class_name = stripped.substr(11).strip_edges()
-		elif stripped.begins_with("extends "):
-			extends_name = stripped.substr(8).strip_edges()
+		# Annotations may share the line: `@abstract class_name X` is one line in Godot 4.5 and
+		# later, and this reported no declared class for every one of them.
+		var header: String = Patterns.without_annotations(stripped)
+		var declaration: RegExMatch = Patterns.declared_class(header)
+		if declaration != null:
+			declared_class_name = declaration.get_string(1)
+			# `class_name X extends Y` is also one line, and taking the rest of it as the name
+			# reported `Blade extends Node2D` as the class while `extends` kept its default of
+			# `RefCounted`: the name unusable and the base flatly wrong.
+			if not declaration.get_string(2).is_empty():
+				extends_name = declaration.get_string(2)
+		elif header.begins_with("extends "):
+			extends_name = header.substr(8).strip_edges()
 		elif stripped.begins_with("signal "):
 			signals.append(_parse_signal(stripped, i + 1))
 		elif stripped.begins_with("const "):
