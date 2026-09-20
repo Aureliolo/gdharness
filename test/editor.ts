@@ -30,6 +30,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
+import { alive } from '../src/server.js';
 import { SERVER_VERSION } from '../src/server-version.js';
 import { RUNTIME_AUTOLOAD } from '../src/setup.js';
 import { asArray, asNumber, asObject, asString, get, text } from './support/json.js';
@@ -233,6 +234,14 @@ interface Editor {
   /** What this editor was opened on, which is what it should be reporting it serves. */
   lspPort: number;
   dapPort: number;
+  /**
+   * The server process itself, for the one case that has to end it while the editor plays on.
+   *
+   * A reconnect is this process being replaced, and what a played game is attached to is on the
+   * other side of it. Nothing else here should reach for this: a case that ends the server ends
+   * the session every case after it shares.
+   */
+  server: ServerProcess;
 }
 
 /** True when the binary at this path answers --version, which is the only test that counts. */
@@ -681,7 +690,7 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
     }
     assert.ok(connected, `the editor never reached the bridge:\n${engineOutput.join('')}`);
 
-    await body({ call, refusal, attempt, project, godotPath, lspPort, dapPort });
+    await body({ call, refusal, attempt, project, godotPath, lspPort, dapPort, server });
   } catch (failure) {
     // What the engine said on its way to failing, which is the half of the evidence a tool
     // answer does not carry: a fixture that reports only its own assertion sends whoever reads
@@ -1709,6 +1718,62 @@ async function testAMethodAddedToAnAnalysedTypeIsPickedUp({ call, project }: Edi
     undefined,
     'and there is nothing for the contradiction check to name, because the editor kept up',
   );
+}
+
+/**
+ * A game the editor is playing survives the server being replaced under it.
+ *
+ * The case that used to stand for this, `testARunOutlivesItsServer` in the regression tier, starts
+ * its run with no editor connected, so the server spawns the game itself and there is no debug
+ * adapter session anywhere. An editor-played run is the other shape: the editor spawns it, the
+ * editor's debugger holds it, and gdharness attaches to that debugger. Replacing the server is then
+ * replacing one end of the connection the game is held by, which the other case never touches.
+ *
+ * This was written because a downstream project lost an editor-played run inside the window a
+ * reconnect landed in, with no evidence inside the window either way, and said plainly that the
+ * safety measurement on record did not cover that shape. It did not.
+ *
+ * The session opens by itself here: an editor-played game and the debug tools share one adapter
+ * client, so playing the scene is what puts a session on the other end of the shutdown. Nothing in
+ * this case has to ask for one, which is also why the fault it guards needs no unusual setup.
+ *
+ * It takes its own editor and server rather than the ones every other case shares, because ending
+ * the server ends the session the rest of them are using. It runs after that pair is down rather
+ * than inside it, since two editors at once on a machine already holding one per project is where
+ * the spawns begin to fail, and a case that cannot start says nothing about what it guards.
+ */
+async function testAPlayedRunOutlivesTheServerUnderIt(godotPath: string): Promise<void> {
+  await withEditor(godotPath, async (own) => {
+    const started = await own.call('editor_run', { projectPath: own.project, op: 'start', headless: true });
+    assert.equal(get(started, 'started'), true, `the editor should have played the scene: ${text(started)}`);
+    // The whole difference between this case and the one in the regression tier. A run the server
+    // spawned would answer `gdharness` here, have no debug adapter session behind it, and prove
+    // nothing about the shape that went missing.
+    assert.equal(get(started, 'through'), 'editor', `the editor should be the one playing: ${text(started)}`);
+    const pid = asNumber(get(started, 'runtime', 'pid'), 'the played run needs a process of its own');
+    assert.ok(pid > 0 && alive(pid), `the run should be up before anything is replaced: ${text(started)}`);
+
+    // A reconnect as a harness performs one: stdin ends and the server shuts down through the same
+    // path a SIGINT takes. Not a kill, which runs no shutdown at all and so never reaches the
+    // disconnect this case is about, and would leave the fixture green while every real reconnect
+    // took somebody's game with it.
+    own.server.child.stdin?.end();
+    await exited(own.server.child);
+    assert.ok(own.server.exited, 'the server should be gone, or nothing below is a test of anything');
+
+    // Long enough for a termination asked for on the way out to have happened. A game killed by
+    // the disconnect dies with the request rather than later, so this is slack rather than a race.
+    await delay(2500);
+    assert.ok(
+      alive(pid),
+      'a game the editor is playing must outlive the server that was talking to its debugger',
+    );
+
+    // The positive halves are above rather than below: the run answered `started` with a process
+    // of its own and that process was alive before anything was replaced, so a pid that was never
+    // a game cannot reach the assertion. What cannot be asked afterwards is the server, which is
+    // the point of the case; the engine itself is what `endEnginesUnder` takes away on the way out.
+  });
 }
 
 async function testLanguageServer({ call, attempt, project }: Editor): Promise<void> {
@@ -2883,25 +2948,43 @@ async function main(): Promise<void> {
     ['testAnErrorTheGameBrokeOnIsReported', testAnErrorTheGameBrokeOnIsReported],
     ['testEditorRestart', testEditorRestart],
   ];
+
+  // Cases that bring up their own editor and server, because they end one. Kept out of the shared
+  // pair rather than nested inside it: nesting runs two editors at once, and on a machine already
+  // holding one per project that is where the spawns start failing.
+  const OWN_PAIR: [string, (godotPath: string) => Promise<void>][] = [
+    ['testAPlayedRunOutlivesTheServerUnderIt', testAPlayedRunOutlivesTheServerUnderIt],
+  ];
   const wanted = process.argv.slice(2).map((argument) => argument.toLowerCase());
-  const chosen =
+  const picked = <T>(from: [string, T][]): [string, T][] =>
     wanted.length === 0
-      ? CASES
-      : CASES.filter(([name]) => wanted.some((word) => name.toLowerCase().includes(word)));
-  if (chosen.length === 0) {
+      ? from
+      : from.filter(([name]) => wanted.some((word) => name.toLowerCase().includes(word)));
+  const chosen = picked(CASES);
+  const alone = picked(OWN_PAIR);
+  if (chosen.length === 0 && alone.length === 0) {
     throw new Error(`No editor case is named ${process.argv.slice(2).join(' ')}.`);
   }
-  if (chosen.length !== CASES.length) {
-    console.log(`running ${chosen.length} of ${CASES.length} editor cases, out of their usual company`);
+  const total = CASES.length + OWN_PAIR.length;
+  if (chosen.length + alone.length !== total) {
+    console.log(
+      `running ${chosen.length + alone.length} of ${total} editor cases, out of their usual company`,
+    );
   }
 
-  await withEditor(godotPath, async (editor) => {
-    for (const [, run] of chosen) {
-      await run(editor);
-    }
-  });
+  if (chosen.length > 0) {
+    await withEditor(godotPath, async (editor) => {
+      for (const [, run] of chosen) {
+        await run(editor);
+      }
+    });
+  }
+  // After the shared pair has been taken down, so only one editor is up at a time.
+  for (const [, run] of alone) {
+    await run(godotPath);
+  }
 
-  console.log(`editor tests passed (${chosen.length})`);
+  console.log(`editor tests passed (${chosen.length + alone.length})`);
 }
 
 await main();
