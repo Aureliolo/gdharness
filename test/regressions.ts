@@ -3067,8 +3067,19 @@ function testTheStaleNoteNamesTheCallThatRebuildsTheCopy(): void {
     [],
   );
   assert.match(pair, /some types/, 'more than one type reads as more than one');
-  assert.match(pair, /res:\/\/bell\.gd, res:\/\/rope\.gd/, 'each declaring script once, in order');
   assert.match(pair, /those copies/, 'and the plural carries through the sentence');
+  // reloadScript takes one script. A list of them behind it is a call that gets refused, which is
+  // worse than saying nothing: the note is read at the moment a caller has already been misled once.
+  assert.match(
+    pair,
+    /reloadScript takes one script, so a call each for res:\/\/bell\.gd and res:\/\/rope\.gd/,
+    'two declaring scripts are two calls, said as two calls',
+  );
+  assert.equal(
+    toolSpec('editor_rescan')?.parameters['reloadScript']?.['type'],
+    'string',
+    'and that is what the argument is, so the sentence above is checkable rather than a habit',
+  );
 }
 
 function testTheStaleHalfIsNamedCorrectly(): void {

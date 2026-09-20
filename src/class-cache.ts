@@ -278,8 +278,11 @@ export function staleAnalysisNote(
     'reported it, and it cleared both reproductions measured in a second project, the scan itself ' +
     'returning in 243ms and 275ms. ' +
     'The fault behind it is that a script the editor has loaded keeps the copy it built, and nothing ' +
-    `rebuilds that copy when the file changes; editor_rescan with reloadScript set to ${declaring.join(', ')} ` +
-    `recompiles ${declaring.length === 1 ? 'that copy' : 'those copies'} from the file into the same ` +
+    `rebuilds that copy when the file changes; ${
+      declaring.length === 1
+        ? `editor_rescan with reloadScript set to ${declaring[0]} recompiles that copy`
+        : `reloadScript takes one script, so a call each for ${declaring.join(' and ')} recompiles those copies`
+    } from the file into the same ` +
     'object and answers with the members it has afterwards under reloadedMethods. Read that and the ' +
     'next diagnostics as two readings rather than one: a built copy has been seen stale here while ' +
     'the diagnostics on it read clean, so the reload is worth doing and is not known to be what ' +
