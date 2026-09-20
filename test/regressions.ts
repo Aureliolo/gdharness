@@ -3080,6 +3080,18 @@ function testTheStaleNoteNamesTheCallThatRebuildsTheCopy(): void {
     'string',
     'and that is what the argument is, so the sentence above is checkable rather than a habit',
   );
+
+  // Two members missing from one class: two entries, one stale type, one script. This is the shape
+  // the second project reproduced first, and every plural in the note has to count what it is about
+  // rather than how many diagnostics arrived.
+  const twoMembers = staleAnalysisNote([bell, { ...bell, member: 'toll' }], []);
+  assert.match(twoMembers, /an older copy of a type/, 'one class is one type however many members');
+  assert.match(twoMembers, /reloadScript set to res:\/\/bell\.gd recompiles that copy/, 'and one call');
+
+  // Nothing contradicted has nothing to say. The server only builds this when something is, so the
+  // empty answer is unreachable from there and reachable from anywhere else that calls the function.
+  assert.equal(staleAnalysisNote([], []), '', 'an empty list gets no sentence rather than a hollow one');
+  assert.equal(staleAnalysisNote([], ['Rope']), '', 'and a lever with nothing to apply it to is still none');
 }
 
 function testTheStaleHalfIsNamedCorrectly(): void {
