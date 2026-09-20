@@ -4086,6 +4086,86 @@ function testTheCureIsWrittenWhole(): void {
 }
 
 /**
+ * Every place that chooses a remedy for a class the editor cannot see leads with the scan, and every
+ * place that describes what the scan does to the cache says it is rebuilt.
+ *
+ * `testTheCureIsWrittenWhole` holds one claim, that nothing sends a caller to edit correct source,
+ * and the ostinato session found two neighbours it cannot see by construction because each is a
+ * different claim. The skill said the scan drops an unresolved class out of the cache and *the next
+ * fresh engine, CI run or clone starts from the narrower one*, while the rescan description beside
+ * it says the loss is named under `cacheLost`, the cache is rebuilt, and nothing inherits the short
+ * file: the skill described the fault the tool fixes as the tool's behaviour, and a session reading
+ * it would refuse a scan the reference says to make. And `script_diagnostics` ended by saying a
+ * stale type *needs* `editor_launch restart` and a missing class *needs* `project_import
+ * refresh_classes`, while the notes a caller receives lead with `editor_rescan` for both; the
+ * description is what a session reads before any call, so it booted a headless engine beside a
+ * running bench for the state the note was rewritten to keep it from.
+ *
+ * Held as claims rather than sentences. Which remedy is first is read off where each remedy's name
+ * first appears, so a rewording that keeps the order passes and one that moves the restart or the
+ * headless pass ahead of the scan fails, whatever words it uses. The rescan's own description is
+ * left out of the ordering, since it names itself as "this call" rather than by its tool name, and
+ * is held by its own sentence in the case above. The cache claim is held on the skill's *Editing*
+ * section, as the field the answer carries and as an absence beside it.
+ */
+function testEveryRemedyLeadsWithTheScan(): void {
+  const remedies = ['editor_rescan', 'editor_launch restart', 'project_import refresh_classes'] as const;
+  const skill = skillFiles('0.0.0-test').get('SKILL.md') ?? '';
+  const editing = skill.slice(skill.indexOf('## Editing'), skill.indexOf('## Refusals are useful'));
+  assert.ok(editing.length > 200, 'the Editing section is found and holds its paragraphs');
+
+  const choosing: { where: string; text: string }[] = [
+    { where: 'script_diagnostics description', text: toolSpec('script_diagnostics')?.description ?? '' },
+    {
+      where: 'staleAnalysisNote',
+      text: staleAnalysisNote(
+        [{ kind: 'method', member: 'silence', type: 'Bell', declaredIn: 'res://bell.gd' }],
+        [],
+      ),
+    },
+    { where: 'uncachedClassNote', text: uncachedClassNote(['Bell']) },
+    // Backticks off and whitespace folded, because the rendered skill wraps `editor_launch restart`
+    // across a line and a name split at a line break is the same name.
+    { where: 'SKILL.md Editing', text: editing.replaceAll('`', '').replaceAll(/\s+/g, ' ') },
+  ];
+  for (const { where, text } of choosing) {
+    const named = remedies
+      .map((remedy) => ({ remedy, at: text.indexOf(remedy) }))
+      .filter(({ at }) => at >= 0)
+      .sort((one, other) => one.at - other.at);
+    assert.ok(named.length >= 2, `${where} chooses between remedies, naming ${named.length}`);
+    assert.equal(
+      named[0]?.remedy,
+      'editor_rescan',
+      `${where} should lead with the scan, not ${named[0]?.remedy}: ${text.slice(Math.max(0, (named[0]?.at ?? 0) - 80), (named[0]?.at ?? 0) + 60)}`,
+    );
+  }
+
+  // What the scan does to the cache, as the skill tells it. The field is the positive; the absence
+  // beside it is the retracted claim, matched as a claim about who inherits what rather than as the
+  // sentence that carried it.
+  assert.match(editing, /cacheRestored/, 'the Editing section names the field that says the cache came back');
+  // Every sentence about a fresh engine, CI run or clone and the short cache has to be the negated
+  // claim. The affirmative and the negation share every word but one, so the check reads the
+  // sentence for the negation rather than looking for the words the two have in common.
+  const folded = editing.replaceAll(/\s+/g, ' ');
+  const aboutInheriting = folded
+    .split(/(?<=\.)\s/)
+    .filter(
+      (sentence) => /(?:engine|CI run|clone)/.test(sentence) && /(?:starts? from|inherits?)/.test(sentence),
+    );
+  assert.ok(aboutInheriting.length >= 1, 'the Editing section still says who inherits the cache');
+  for (const sentence of aboutInheriting) {
+    const verb = /(?:starts? from|inherits?)/.exec(sentence)?.index ?? 0;
+    assert.match(
+      sentence.slice(0, verb),
+      /\b(?:no|nothing|neither)\b/,
+      `a sentence about who inherits the cache should say nobody does, not: ${sentence}`,
+    );
+  }
+}
+
+/**
  * The note a caller reads when the editor is reporting against an older copy names the call that
  * rebuilds it, and names the script to point it at.
  *
@@ -9987,6 +10067,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testVersionOrdering,
   testChangelogReach,
   testTheCureIsWrittenWhole,
+  testEveryRemedyLeadsWithTheScan,
   testTheStaleNoteNamesTheCallThatRebuildsTheCopy,
   testTheUncachedNoteSaysWhichRemedyStartsAnEngine,
   testARestartWaitsForTheEditorToSayWhoItIs,
