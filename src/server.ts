@@ -225,6 +225,27 @@ function projectSpelling(projectPath: string, absolutePath: string): string {
 }
 
 /**
+ * Why a game is sitting still, as a clause: the adapter's reason, and its own words for an error.
+ *
+ * Godot reports `breakpoint`, `step` and `exception`; `attached` is this side's word for a hold
+ * found by asking rather than told. Anything else is passed through as the adapter said it.
+ */
+function describeHalt(halt: StoppedAt): string {
+  switch (halt.reason) {
+    case 'breakpoint':
+      return 'at a breakpoint';
+    case 'step':
+      return 'after a step';
+    case 'exception':
+      return halt.text === '' ? 'on an error' : `on an error: ${halt.text}`;
+    case 'attached':
+      return 'held when this session attached';
+    default:
+      return `stopped with reason "${halt.reason}"`;
+  }
+}
+
+/**
  * Whether a run is still going.
  *
  * Three states rather than two: going, finished with a code somebody collected, and found already
@@ -4778,6 +4799,28 @@ class GodotServer {
    * not ask again. A game without the addon leaves the question open, and the answer says so
    * rather than guessing.
    */
+  /**
+   * Where the game at [endpoint] is held, when it is the run this server reports on and the
+   * session has been told, else null.
+   *
+   * The session speaks for the run the editor is playing for this server and for no other game
+   * on the machine, so a game announced by another project, or a run this server spawned, is
+   * never read off it. And only knowledge counts: a session that has not been told answers null
+   * here whether the game is held or not, and the caller goes on to ask the game itself.
+   */
+  private knownHoldOn(endpoint: RuntimeEndpoint): StoppedAt | null {
+    const run = this.activeProcess;
+    const session = this.dapClient;
+    if (run === null || !run.throughEditor || !stillRunning(run) || session === null) {
+      return null;
+    }
+    const its = run.announcedPid ?? this.theOneAnnouncedForOurProject()?.pid;
+    if (its !== endpoint.pid || !session.holdIsKnown()) {
+      return null;
+    }
+    return session.whereItStopped();
+  }
+
   private async holdOf(
     run: GodotProcess,
   ): Promise<{ heldAt: StoppedAt | null | undefined; heldUnknown?: true; heldNote?: string }> {
@@ -4850,6 +4893,22 @@ class GodotServer {
     );
     if ('problem' in choice) {
       return this.createErrorResponse(choice.problem);
+    }
+
+    // A game the session knows is held answers nothing, and what a caller got for asking was the
+    // whole runtime timeout, ten seconds, and then a guess that it may be paused at a breakpoint.
+    // The session was told, so it says so at once and says what lets the game go. Knowledge and
+    // not a default: a session opened after the stop has not been told and asks nothing here.
+    const held = this.knownHoldOn(choice.endpoint);
+    if (held !== null) {
+      return this.createErrorResponse(
+        `The game (pid ${choice.endpoint.pid}) is held by the editor's debugger, ${describeHalt(held)}, and answers no runtime call while it is.`,
+        [
+          'debug_control continue lets it go, after which this call answers',
+          'debug_state stack reads where it is held, and debug_state scopes what it is holding there',
+          'editor_output says heldAt for the run, and editor_run stop ends it',
+        ],
+      );
     }
 
     const expectsScreenshot = command === 'capture_screenshot' || command === 'capture_viewport';
