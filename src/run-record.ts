@@ -430,12 +430,17 @@ export interface RunningAs {
 /**
  * How far after a record's own start a process may have begun and still be that run.
  *
- * Wide enough to absorb the gap between a server writing the note and the engine being there to be
- * asked about, and the second-resolution the platforms answer with. Narrow against the case it is
- * for: a number handed out again has to wait for the first process to exit, so the gap is the run's
- * whole length.
+ * The record is written from the same call that spawned the engine, so the two differ by the spawn
+ * itself. What this has to absorb is that latency on a loaded machine and the second-resolution the
+ * platforms answer a start time with, and nothing else.
+ *
+ * Wide is the dangerous direction, which is not obvious: a recycled number has to wait for the first
+ * process to exit, so the gap it leaves is the run's whole length, and a wide window is blind to
+ * every run shorter than it. A gate elsewhere runs sixteen engines at once, and a five-second run
+ * whose number is taken ten seconds later would have passed a window measured in minutes. The case
+ * this is for is short runs on a busy machine, which is the one it would have missed.
  */
-const SAME_RUN_WINDOW_MS = 90_000;
+const SAME_RUN_WINDOW_MS = 10_000;
 
 /**
  * The comparison itself, apart from asking the operating system, so that every answer the
