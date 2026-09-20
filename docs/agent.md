@@ -111,7 +111,8 @@ browser lookup. If no check ran, say so rather than calling it verified.
 
 - Use `editor_run start` / `editor_output` / `editor_run stop`. The editor plays the game, so its
   debugger holds it, which is what the `debug_*` tools answer for.
-- Set breakpoints before running. They are waiting when it starts.
+- Set breakpoints before running. They are waiting when it starts, and for every start after it
+  until `debug_breakpoint remove`, including through a reconnect: the start answer lists them.
 - A start says under `runtime` whether the game is something the `runtime_*` tools can talk to yet.
   When it is not, read `mayYetAnnounce` before giving up: false is a runtime that is not coming,
   true is a game still on its way up, and `runtimeWaitMs` waits longer on a project that boots slowly.
