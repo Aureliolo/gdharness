@@ -57,7 +57,12 @@ import { DEFAULT_DAP_PORT, GodotDAPClient, handleDAPTool, type StoppedAt } from 
 import { dictionary, emptyRecord } from './dictionary.js';
 import { errorMessage, Refusal } from './errors.js';
 import { forAnswer, GameLog, type LogEntry } from './game-log.js';
-import { anEditorIsStillComing, type GodotBridge, getDefaultBridge } from './godot-bridge.js';
+import {
+  anEditorIsStillComing,
+  type GodotBridge,
+  getDefaultBridge,
+  theEditorHasComeBack,
+} from './godot-bridge.js';
 import { GodotLocator } from './godot-path.js';
 import { type HeadlessOutcome, runImport, runOperation } from './headless.js';
 import { EDITOR_READS, ENGINE_PASSES, HEADLESS_OPERATIONS } from './headless-operations.js';
@@ -239,6 +244,12 @@ interface AfterWaiting {
   readonly budgetMs: number;
   readonly heldAt: StoppedAt | null;
   readonly running: boolean;
+  /**
+   * Whether this run was given arguments of its own, which the note names as a reason it might be
+   * late. A caller who asks for six years of simulation before the first frame is drawn has bought
+   * the delay and has no way to see that from here: the same project announces promptly without it.
+   */
+  readonly withArgs: boolean;
 }
 
 /**
@@ -275,7 +286,7 @@ export function runtimeVerdict(
     listening: false,
     mayYetAnnounce: after.running,
     note: after.running
-      ? `nothing announced itself within ${after.budgetMs}ms and the game is still running, so it may announce a moment from now: editor_status says whether it has, and editor_run start takes runtimeWaitMs to wait longer than this`
+      ? `nothing announced itself within ${after.budgetMs}ms and the game is still running, so it may announce a moment from now: editor_status says whether it has, and editor_run start takes runtimeWaitMs to wait longer than this${after.withArgs ? ', which a run carrying its own arguments may well need, since whatever they ask the game to do before its first frame is inside this wait' : ''}`
       : `nothing announced itself within ${after.budgetMs}ms and the game is no longer running, so nothing is going to: editor_output has what it printed on the way down`,
     heldAt: null,
   };
@@ -2698,10 +2709,10 @@ class GodotServer {
     // exactly like one that came straight back.
     const startedAt = before.connectedAt?.getTime() ?? 0;
     const began = Date.now();
-    const back = await this.waitForBridge(() => {
-      const status = this.godotBridge.getStatus();
-      return status.connected && (status.connectedAt?.getTime() ?? 0) > startedAt;
-    }, began + EDITOR_RESTART_TIMEOUT_MS);
+    const back = await this.waitForBridge(
+      () => theEditorHasComeBack(this.godotBridge.getStatus(), startedAt),
+      began + EDITOR_RESTART_TIMEOUT_MS,
+    );
 
     if (!back) {
       return this.createErrorResponse(
@@ -3072,7 +3083,12 @@ class GodotServer {
       // Which run this start ended, when it ended one, so a bench that stopped is answered for
       // here rather than looked for in the engine.
       endedPreviousRun: ended ?? undefined,
-      runtime: await this.runtimeUp(project.value.path, alreadyPlaying, runtimeWaitMs),
+      runtime: await this.runtimeUp(
+        project.value.path,
+        alreadyPlaying,
+        runtimeWaitMs,
+        given.value.length > 0,
+      ),
       message: `Use editor_output for what it prints and editor_run stop to end it.${spawnedInstead}${endedForThis}`,
     });
   }
@@ -3107,9 +3123,10 @@ class GodotServer {
     projectPath: string,
     before: ReadonlySet<number>,
     budgetMs: number,
+    withArgs: boolean,
   ): Promise<Record<string, unknown>> {
     if (!existsSync(join(projectPath, RUNTIME_AUTOLOAD.path))) {
-      return runtimeVerdict(null, { addon: false, budgetMs, heldAt: null, running: false });
+      return runtimeVerdict(null, { addon: false, budgetMs, heldAt: null, running: false, withArgs });
     }
     const endpoint = await announcedSince(projectPath, before, {
       budgetMs,
@@ -3126,6 +3143,7 @@ class GodotServer {
       budgetMs,
       heldAt: this.dapClient?.whereItStopped() ?? null,
       running: await this.gameIsUp(),
+      withArgs,
     });
   }
 
@@ -3214,7 +3232,9 @@ class GodotServer {
       // line option for and the addon moves itself off when another editor is holding it.
       debugPort: readNumber(asParams(JSON.parse(answer.content[0]?.text ?? '{}')), 'debugPort'),
       endedPreviousRun: ended ?? undefined,
-      runtime: await this.runtimeUp(projectPath, alreadyPlaying, runtimeWaitMs),
+      // No arguments, by construction: a run carrying any is started by this server rather than
+      // played by the editor, so the editor path cannot be the one that bought itself a long boot.
+      runtime: await this.runtimeUp(projectPath, alreadyPlaying, runtimeWaitMs, false),
       message:
         'The editor is playing it, so its debugger holds it: the debug_* tools can reach it, ' +
         'editor_output reads its console through the debug adapter, and editor_run stop ends it.' +

@@ -14,6 +14,20 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
 /**
+ * What a `class_name` line looks like, including the annotations that may share it.
+ *
+ * `@abstract class_name X` is one line in Godot 4.5 and later, and `@tool` and `@icon("...")` sit
+ * there too. Anchoring on `class_name` alone read every one of those as not a declaration: a
+ * project with gdUnit4 in it had 23 abstract classes reported as declared nowhere, and the answer
+ * told the caller to restart the editor to drop them. They were all on disk.
+ *
+ * The same shape as the engine-side scanner in `operations/class_cache.gd`, which strips
+ * annotations before looking, and which is why the cache itself was never short of them: the
+ * reading that writes the file was right and the reading that reports on it was not.
+ */
+const DECLARATION = /^(?:@[a-z_]+(?:\([^)\n]*\))?\s+)*class_name\s+([A-Za-z_][A-Za-z0-9_]*)/m;
+
+/**
  * Every `class_name` declared under the project, with the script that declares it.
  *
  * A directory holding a `.gdignore` is stepped over, because the engine steps over it: nothing
@@ -34,7 +48,7 @@ export function declaredClasses(projectPath: string): Map<string, string> {
       if (entry.isDirectory()) {
         visit(path, `${prefix}${entry.name}/`);
       } else if (entry.isFile() && entry.name.endsWith('.gd')) {
-        const found = /^class_name\s+([A-Za-z_][A-Za-z0-9_]*)/m.exec(readFileSync(path, 'utf8'));
+        const found = DECLARATION.exec(readFileSync(path, 'utf8'));
         if (found?.[1]) {
           declared.set(found[1], `res://${prefix}${entry.name}`);
         }
@@ -416,7 +430,16 @@ export function unseenByEditor(projectPath: string, editorHolds: readonly string
   // The declarations rather than the cache, because a class the cache has lost is one the editor
   // is most likely to have lost too, and reading the cache first is what kept those out of this
   // answer: the one file that is wrong decided what could be reported as wrong.
-  return [...declaredClasses(projectPath)]
-    .filter(([name]) => !held.has(name))
-    .map(([className, path]) => ({ className, path }));
+  return (
+    [...declaredClasses(projectPath)]
+      .filter(([name]) => !held.has(name))
+      .map(([className, path]) => ({ className, path }))
+      // Sorted, as `heldButGone` beside it already is and for the same reason: this is a list a
+      // caller reads in an answer, and the order it came out of a directory walk is the order the
+      // filenames happened to be in. Renaming a file would otherwise reorder a note that is about
+      // classes and says nothing about files.
+      // The same comparison `heldButGone` uses rather than a locale-aware one, so two lists of class
+      // names in the same answer cannot be ordered by two different rules.
+      .sort((one, other) => (one.className < other.className ? -1 : one.className > other.className ? 1 : 0))
+  );
 }

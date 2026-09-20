@@ -15,8 +15,14 @@ export const SERVER_VERSION = (() => {
   }
 })();
 
-/** What an editor serving no version at all is called, since every addon before 0.4.0 is one. */
-const UNVERSIONED = 'addon from before versions were reported';
+/**
+ * What an editor serving no version at all is called, since every addon before 0.4.0 is one.
+ *
+ * A whole noun phrase rather than a version-shaped fragment, because the sentence it goes into
+ * supplied the noun itself and the two met as "the addon from before versions were reported addon".
+ * The versioned case now brings its own noun for the same reason.
+ */
+const UNVERSIONED = 'an addon from before versions were reported';
 
 /**
  * What to do about an editor and a server shipping different addons, or undefined when they agree.
@@ -32,8 +38,8 @@ export function addonMismatch(addonVersion: string | undefined, serverVersion: s
     return undefined;
   }
   const reported = addonVersion ?? '';
-  const editor = reported === '' ? UNVERSIONED : reported;
-  const both = `The editor is running the ${editor} addon while this server ships ${serverVersion}.`;
+  const editor = reported === '' ? UNVERSIONED : `the ${reported} addon`;
+  const both = `The editor is running ${editor} while this server ships ${serverVersion}.`;
   if (reported !== '' && isNewer(reported, serverVersion)) {
     return `${both} This server is the older half: reconnect it in your harness so it spawns ${reported}.`;
   }

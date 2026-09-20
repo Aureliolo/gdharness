@@ -47,6 +47,7 @@ import {
   CONNECT_WINDOW_MS,
   createBridge,
   mayYetConnect,
+  theEditorHasComeBack,
 } from '../src/godot-bridge.js';
 import { EDITOR_READS, HEADLESS_OPERATIONS } from '../src/headless-operations.js';
 import {
@@ -87,7 +88,7 @@ import { discardWith } from '../src/scratch.js';
 import { alive, PROJECT_FILE_ARGUMENTS, patienceForFrames, runIsUp, runtimeVerdict } from '../src/server.js';
 import type { GodotProcess } from '../src/server-types.js';
 import { addonMismatch, markIfStale, SERVER_VERSION } from '../src/server-version.js';
-import { ADDONS, autoloadIsOurs, installAddons } from '../src/setup.js';
+import { ADDONS, autoloadIsOurs, installAddons, SCRIPT_RUNS_SETTING } from '../src/setup.js';
 import { skillFiles } from '../src/skill.js';
 import { readNonNegativeNumber, readPositiveNumber } from '../src/tool-args.js';
 import {
@@ -2824,20 +2825,59 @@ function testANotYetRuntimeIsNotTheSameAsNoRuntime(): void {
       project: { name: 'F', path: '/p' },
       file: 'runtime-4242.json',
     },
-    { addon: true, budgetMs: 5_000, heldAt: null, running: true },
+    { addon: true, budgetMs: 5_000, heldAt: null, running: true, withArgs: false },
   );
   assert.deepEqual(listening, { listening: true, pid: 4242, port: 51_300 }, 'a runtime that answered');
 
-  const none = runtimeVerdict(null, { addon: false, budgetMs: 5_000, heldAt: null, running: true });
+  const none = runtimeVerdict(null, {
+    addon: false,
+    budgetMs: 5_000,
+    heldAt: null,
+    running: true,
+    withArgs: false,
+  });
   assert.equal(none['listening'], false);
   assert.equal(none['mayYetAnnounce'], false, 'a project with no addon is never going to announce');
 
-  const booting = runtimeVerdict(null, { addon: true, budgetMs: 5_000, heldAt: null, running: true });
+  const booting = runtimeVerdict(null, {
+    addon: true,
+    budgetMs: 5_000,
+    heldAt: null,
+    running: true,
+    withArgs: false,
+  });
   assert.equal(booting['listening'], false);
   assert.equal(booting['mayYetAnnounce'], true, 'a game still running may still announce');
   assert.match(String(booting['note']), /runtimeWaitMs/, 'and the answer names the way to wait longer');
 
-  const over = runtimeVerdict(null, { addon: true, budgetMs: 5_000, heldAt: null, running: false });
+  // The reason the wait ran out is often the caller's own arguments, and from where they sit that
+  // is invisible: the same project answers straight away without them. Reported from a run given
+  // `--days=600`, which simulates six years before it draws anything.
+  const carrying = runtimeVerdict(null, {
+    addon: true,
+    budgetMs: 5_000,
+    heldAt: null,
+    running: true,
+    withArgs: true,
+  });
+  assert.match(
+    String(carrying['note']),
+    /arguments/,
+    'a run given arguments of its own is told they are inside the wait',
+  );
+  assert.doesNotMatch(
+    String(booting['note']),
+    /arguments/,
+    'and a run given none is not told about arguments it did not pass',
+  );
+
+  const over = runtimeVerdict(null, {
+    addon: true,
+    budgetMs: 5_000,
+    heldAt: null,
+    running: false,
+    withArgs: false,
+  });
   assert.equal(over['listening'], false);
   assert.equal(over['mayYetAnnounce'], false, 'a game that has ended is not going to announce');
   assert.match(String(over['note']), /editor_output/, 'and the answer says where its output went');
@@ -2849,6 +2889,7 @@ function testANotYetRuntimeIsNotTheSameAsNoRuntime(): void {
     budgetMs: 5_000,
     heldAt: { reason: 'breakpoint', description: 'Paused on breakpoint', text: 'res://main.gd:12' },
     running: true,
+    withArgs: false,
   });
   assert.equal(held['mayYetAnnounce'], true, 'a held game announces once it is let go');
   assert.match(String(held['note']), /debug_control continue/, 'and the answer says what lets it go');
@@ -3212,6 +3253,54 @@ function testTheUncachedNoteSaysWhichRemedyStartsAnEngine(): void {
   assert.equal(uncachedClassNote([]), '', 'nothing missing from the cache gets no sentence');
 }
 
+/**
+ * A restart waits for the editor to say who it is, not merely to connect.
+ *
+ * The socket connects first and the addon's version, the editor's pid and its ports arrive a moment
+ * later with `godot_ready`. Waiting only for the connection read that gap as the restart being
+ * done: the answer came back with no version and no pid, `addonIsStale` compared undefined against
+ * the shipped version and said true, and the note told the caller to restart a healthy editor
+ * again. Reported downstream on a restart onto the current addon, and it cost them nothing only
+ * because they call `editor_status` after a restart out of a habit an earlier issue gave them.
+ *
+ * Held here rather than in the editor tier because that tier cannot reach it: its editor is
+ * headless, a headless editor refuses to restart, and the refusal is what that case asserts.
+ */
+function testARestartWaitsForTheEditorToSayWhoItIs(): void {
+  const startedAt = 1_000_000;
+  const newer = new Date(startedAt + 5_000);
+  const older = new Date(startedAt - 5_000);
+
+  assert.equal(
+    theEditorHasComeBack({ connected: false, connectedAt: newer, addonVersion: '0.9.0' }, startedAt),
+    false,
+    'nothing connected is not an editor that has come back',
+  );
+  assert.equal(
+    theEditorHasComeBack({ connected: true, connectedAt: older, addonVersion: '0.9.0' }, startedAt),
+    false,
+    'and the connection that was already there is the one being replaced',
+  );
+  // The branch nothing produced before: connected, newer, and not yet a word out of it.
+  assert.equal(
+    theEditorHasComeBack({ connected: true, connectedAt: newer, addonVersion: undefined }, startedAt),
+    false,
+    'a socket that has connected and said nothing yet is not an answer',
+  );
+  assert.equal(
+    theEditorHasComeBack({ connected: true, connectedAt: newer, addonVersion: '0.9.0' }, startedAt),
+    true,
+    'and one that has reported its version is',
+  );
+  // The empty string is an addon too old to report one, recorded when godot_ready lands. Waiting
+  // for a non-empty version would hang on exactly the editors the staleness note exists for.
+  assert.equal(
+    theEditorHasComeBack({ connected: true, connectedAt: newer, addonVersion: '' }, startedAt),
+    true,
+    'so is one too old to have a version to report',
+  );
+}
+
 function testTheStaleHalfIsNamedCorrectly(): void {
   assert.equal(addonMismatch('0.5.0', '0.5.0'), undefined, 'agreeing versions say nothing');
 
@@ -3228,6 +3317,28 @@ function testTheStaleHalfIsNamedCorrectly(): void {
   assert.match(unversioned, /before versions were reported/, 'a pre-0.4.0 addon is named as one');
   assert.match(unversioned, /editor_launch restart/, 'and it is the old half by definition');
   assert.equal(addonMismatch(undefined, '0.5.0'), unversioned, 'so is a bridge reporting nothing');
+
+  // Read as the sentences they are, because each half was written to fit a template that also
+  // supplied a noun: the unversioned name ended in "addon" and so did the template, and the two
+  // met as "the addon from before versions were reported addon". Both branches rendered fine to a
+  // check reading them for the version they name, which is what every case above does.
+  // Each of these names the addon once. The unversioned name was a phrase ending in "addon" put
+  // into a template that supplied "addon" itself, and the two met as "the addon from before
+  // versions were reported addon while this server ships 0.5.0". The words are not adjacent, so a
+  // doubled-word check reads it as clean, which is what a first attempt at this asserted and what
+  // a disarm then passed. Counting the noun is the thing that bites.
+  for (const [what, said] of [
+    ['a version', behind],
+    ['no version', unversioned],
+    ['a newer version', ahead],
+  ] as const) {
+    assert.equal(
+      said.match(/\baddon\b/g)?.length,
+      1,
+      `the note for ${what} should name the addon once: ${said}`,
+    );
+    assert.match(said, /^The editor is running (an|the) \S/, `and should read as a sentence: ${said}`);
+  }
 }
 
 /**
@@ -4222,6 +4333,69 @@ function testTheReferencePrintsEveryShapeOfType(): void {
 }
 
 /**
+ * The skill says a script run can be served, and names the setting the addon actually reads.
+ *
+ * It said a `godot -s` script run does not answer, full stop. That is the default and not the rule:
+ * the autoload stands down in a script run unless `serve_script_runs` is set, which is there for
+ * somebody driving a `-s` script on purpose. The setting was in `docs/` and in neither the skill nor
+ * any tool description, so the one sentence an agent reads before its first call was the half that
+ * is wrong, and a downstream project had copied it into its own documentation as unconditional.
+ * That is the half a consumer builds a guard on.
+ *
+ * Held against the addon's own constant rather than spelled twice. A rename in the GDScript would
+ * otherwise leave the skill naming a setting nothing reads, which is worse than not naming one:
+ * a caller sets it, nothing happens, and the sentence says it should have.
+ */
+function testTheSkillNamesEverySettingTheAddonsRead(): void {
+  const read = new Set<string>();
+  const walk = (directory: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        walk(path);
+      } else if (entry.name.endsWith('.gd')) {
+        for (const found of readFileSync(path, 'utf8').matchAll(/"(gdharness\/[a-z_/]+)"/g)) {
+          read.add(found[1] ?? '');
+        }
+      }
+    }
+  };
+  walk('src/godot/addons');
+
+  // The list comes from the addons rather than from here, so a setting added there is covered by
+  // this the day it lands and nobody has to remember. Two were read and written down nowhere a
+  // caller looks, one of them the bind address, which is the only one with a security answer.
+  assert.ok(read.size >= 3, `the addons should read the settings they document: ${[...read].join(', ')}`);
+  const skill = skillFiles('0.0.0').get('SKILL.md') ?? '';
+  const unsaid = [...read].filter((setting) => !skill.includes(setting)).sort();
+  assert.deepEqual(unsaid, [], 'every setting the addons read should be named in the skill');
+
+  // The bind address with its reason rather than only its name. A caller who reads that it exists
+  // and not why it is loopback is one who moves it to reach a game on another machine.
+  assert.match(skill, /none of it authenticated/, 'and the bind address should say what it guards');
+}
+
+function testTheSkillNamesTheSettingThatServesAScriptRun(): void {
+  const addon = readFileSync('src/godot/addons/gdharness_runtime/runtime_autoload.gd', 'utf8');
+  const declared = /SCRIPT_RUNS_SETTING\s*:\s*String\s*=\s*"([^"]+)"/.exec(addon)?.[1];
+  assert.ok(declared, 'the addon should declare the setting it reads');
+  assert.equal(SCRIPT_RUNS_SETTING, declared, 'and the skill should name that one rather than a copy');
+  // The addon reads it where it decides, not merely declares it. A constant nothing consults would
+  // satisfy the line above while the sentence describes a setting with no effect.
+  assert.match(
+    addon,
+    /_script_run\(\)\s*and\s*not\s*Read\.as_bool\(ProjectSettings\.get_setting\(SCRIPT_RUNS_SETTING/,
+    'and the script-run refusal should be the thing that consults it',
+  );
+
+  const skill = skillFiles('0.0.0').get('SKILL.md') ?? '';
+  const sentence = skill.split('\n\n').find((block) => block.includes('`godot -s` script run'));
+  assert.ok(sentence, 'the skill should still say what a script run does');
+  assert.match(sentence, /by default/, 'as a default rather than as a property of script runs');
+  assert.ok(sentence.includes(SCRIPT_RUNS_SETTING), `and name the setting that changes it: ${sentence}`);
+}
+
+/**
  * Nothing the skill writes escapes a backtick.
  *
  * A generated name went into `SKILL.md` as `\`debug_control\``, rendering the backslashes rather
@@ -4318,7 +4492,23 @@ function testAClassTheEditorHoldsAfterItsScriptIsGoneIsNamed(): void {
   try {
     writeFileSync(join(project, 'kept.gd'), 'class_name Kept\nextends Node\n');
     writeFileSync(join(project, 'plain.gd'), 'extends Node\n');
+    // Annotations share the line with what they annotate. `@abstract class_name X` is one line in
+    // Godot 4.5 and later, and a scanner anchored on `class_name` alone reads it as no declaration
+    // at all: a project with gdUnit4 in it had 23 abstract classes reported as declared nowhere,
+    // with the answer telling the caller to restart the editor to drop them, and every one was on
+    // disk. The engine-side scanner strips annotations first, which is why the cache itself was
+    // never short of them and only the report was wrong.
+    writeFileSync(join(project, 'assert.gd'), '@abstract class_name GdUnitAssert\nextends RefCounted\n');
+    writeFileSync(join(project, 'stage.gd'), '@tool @abstract class_name IGdUnitExecutionStage\n');
+    writeFileSync(join(project, 'iconed.gd'), '@icon("res://icon.svg") class_name Iconed\nextends Node\n');
+    writeFileSync(join(project, 'own_line.gd'), '@abstract\nclass_name OnItsOwnLine\nextends Node\n');
 
+    const annotated = ['GdUnitAssert', 'IGdUnitExecutionStage', 'Iconed', 'OnItsOwnLine'];
+    assert.deepEqual(
+      heldButGone(project, ['Kept', ...annotated]),
+      [],
+      'an annotated declaration is a declaration, and none of these is gone',
+    );
     assert.deepEqual(
       heldButGone(project, ['Kept', 'Gone']),
       ['Gone'],
@@ -4337,7 +4527,7 @@ function testAClassTheEditorHoldsAfterItsScriptIsGoneIsNamed(): void {
 
     assert.deepEqual(
       unseenByEditor(project, ['Gone']).map((one) => one.className),
-      ['Kept'],
+      ['GdUnitAssert', 'IGdUnitExecutionStage', 'Iconed', 'Kept', 'OnItsOwnLine'],
       'the editor missing a declared class is still the other answer, and still separate from this one',
     );
   } finally {
@@ -4486,6 +4676,271 @@ function testAnAuditThatCouldNotAskIsNotAnAuditThatPassed(): void {
  * positive that keeps the untouched scene meaningful: an op that had stopped running at all would
  * leave every scene alone just as well.
  */
+/**
+ * An annotation sharing the line with a declaration does not hide it, on any of the paths.
+ *
+ * `@abstract class_name X` is one line in Godot 4.5 and later, and `@tool` and `@icon("...")` sit
+ * there too. Five readers here matched `class_name` at the start of a line and saw none of them.
+ * The reported half cost a project 23 classes named as declared nowhere, with the answer telling
+ * the caller to restart the editor to drop them. The half nobody had hit is worse and is why this
+ * runs an engine: the insertion points that place a new `var` or `signal` found the header only
+ * where some other line carried it, so a script whose whole header is the annotated declaration
+ * took the new line above the `class_name`, where it does not parse.
+ *
+ * Driven through the engine rather than asserted against the parser, because what is being claimed
+ * is that the file Godot is handed afterwards is one Godot accepts.
+ */
+async function testAnAnnotatedDeclarationIsStillADeclaration(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('annotated declaration regression skipped (Godot not found)');
+    return;
+  }
+
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-annotated-'));
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Annotated"\n',
+    );
+    writeFileSync(
+      join(project, 'shape.gd'),
+      '@abstract class_name Shape\nextends RefCounted\n\n\nfunc area() -> float:\n\treturn 0.0\n',
+    );
+    // A script whose whole header is the annotated declaration. `shape.gd` cannot show where an
+    // insertion lands, because its `extends` line is found with or without the annotations off and
+    // fixes the insertion point at 2 either way. Here there is nothing else to find, so a reader
+    // that cannot see through `@abstract` puts the new line at 0, above the declaration.
+    writeFileSync(
+      join(project, 'marker.gd'),
+      '@abstract class_name Marker\n\n\nfunc mark() -> void:\n\tpass\n',
+    );
+    // A use of the class, so the reverse walk has something to classify. The annotation shares the
+    // line with the `extends` here rather than with a declaration, which is the same fault one step
+    // on: unstripped it is not an `extends` line, so the use is labelled with the catch-all.
+    writeFileSync(join(project, 'user.gd'), '@tool extends Shape\n\n\nfunc use() -> void:\n\tpass\n');
+    // For `after_ready`, which has to find one annotated function and stop at the next. Reading
+    // the raw line missed both ends: an annotated `_ready` was never found, so the answer went to
+    // the end of the file, and an annotated function after it was not the boundary it is.
+    writeFileSync(
+      join(project, 'place.gd'),
+      [
+        'extends Node',
+        '',
+        '',
+        '@warning_ignore("unused_parameter") func _ready() -> void:',
+        '\tpass',
+        '',
+        '',
+        '@abstract func later() -> void',
+        '',
+        '',
+        'func last() -> void:',
+        '\tpass',
+        '',
+      ].join('\n'),
+    );
+    // The same use written as a path, which is classified by a different line reading the same way.
+    writeFileSync(
+      join(project, 'by_path.gd'),
+      '@tool extends "res://shape.gd"\n\n\nfunc use() -> void:\n\tpass\n',
+    );
+    // The base on the declaration line, which GDScript also allows. `Node2D` rather than a
+    // `RefCounted` descendant, because `RefCounted` is what the reader falls back to when it finds
+    // no `extends` at all, and a fixture using it cannot tell a reading from a default.
+    // Every other thing an annotation can sit in front of, in one script. A declaration is only
+    // the shape that was reported: `@abstract func` and `@warning_ignore(...) func` are the same
+    // fault on the branch nobody named, and gdUnit4 alone declares 248 methods that way.
+    writeFileSync(
+      join(project, 'blade.gd'),
+      [
+        '@abstract class_name Blade extends Node2D',
+        '',
+        '@warning_ignore("unused_signal") signal hit(power: int)',
+        '',
+        '@export_range(0, 10) var ratio: float = 1.0',
+        '@onready var body: Node = self',
+        '',
+        '',
+        '@abstract func swing() -> void',
+        '',
+        '',
+        '@warning_ignore("unused_parameter") func parry(other: Node) -> bool:',
+        '\treturn true',
+        '',
+      ].join('\n'),
+    );
+
+    const server = new ServerProcess({ env: { GODOT_PATH: godotPath } });
+    try {
+      await server.initialize('regression-test');
+      const call = async (name: string, args: Record<string, unknown>): Promise<unknown> =>
+        parseTextContent(
+          await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS),
+        );
+
+      const read = await call('script_info', {
+        projectPath: project,
+        op: 'structure',
+        scriptPath: 'res://shape.gd',
+      });
+      assert.equal(
+        get(read, 'class_name'),
+        'Shape',
+        `the declared class is found behind its annotation: ${JSON.stringify(read)}`,
+      );
+
+      const oneLine = await call('script_info', {
+        projectPath: project,
+        op: 'structure',
+        scriptPath: 'res://blade.gd',
+      });
+      assert.equal(
+        get(oneLine, 'class_name'),
+        'Blade',
+        `the name stops where the name stops: ${JSON.stringify(oneLine)}`,
+      );
+      assert.equal(
+        get(oneLine, 'extends'),
+        'Node2D',
+        `and the base on the same line is the base: ${JSON.stringify(oneLine)}`,
+      );
+      // The whole list rather than a search through it: a reader that drops one declaration drops
+      // it silently, and a check that looks for the ones it expects cannot see what went missing.
+      assert.deepEqual(
+        asArray(get(oneLine, 'functions')).map((each) => get(each, 'name')),
+        ['swing', 'parry'],
+        `both annotated functions are functions: ${JSON.stringify(oneLine)}`,
+      );
+      assert.equal(
+        get(asArray(get(oneLine, 'functions'))[0], 'is_abstract'),
+        true,
+        `and the abstract one says so, since it has no body to read: ${JSON.stringify(oneLine)}`,
+      );
+      assert.equal(
+        get(asArray(get(oneLine, 'functions'))[1], 'is_abstract'),
+        false,
+        `while the one behind another annotation does not: ${JSON.stringify(oneLine)}`,
+      );
+      assert.deepEqual(
+        asArray(get(oneLine, 'signals')).map((each) => get(each, 'name')),
+        ['hit'],
+        `the annotated signal is a signal: ${JSON.stringify(oneLine)}`,
+      );
+      assert.deepEqual(
+        asArray(get(oneLine, 'variables')).map((each) => [
+          get(each, 'name'),
+          get(each, 'is_export'),
+          get(each, 'export_hint'),
+          get(each, 'is_onready'),
+        ]),
+        [
+          // The hint whole: splitting an annotation on whitespace cut this one at the space
+          // inside its parentheses and answered `range(0,`.
+          ['ratio', true, 'range(0, 10)', false],
+          ['body', false, '', true],
+        ],
+        `and the annotations on a variable are the answer about it: ${JSON.stringify(oneLine)}`,
+      );
+
+      // The reverse walk reads the declaration itself, to find the uses that name the class rather
+      // than the path, so it has its own answer to what a declaration looks like.
+      const used = await call('project_dependencies', {
+        projectPath: project,
+        direction: 'reverse',
+        resourcePath: 'res://shape.gd',
+      });
+      assert.equal(
+        get(used, 'class_name'),
+        'Shape',
+        `the reverse walk knows what the script declares: ${JSON.stringify(used)}`,
+      );
+      // The whole tally rather than one entry of it: a use that goes to the catch-all is only
+      // wrong because it is not counted as the extends it is, and a count of the one kind cannot
+      // see where the missing one went.
+      assert.deepEqual(
+        get(used, 'summary', 'by_kind'),
+        { extends: 2 },
+        `both uses extend it behind an annotation, by name and by path: ${JSON.stringify(used)}`,
+      );
+
+      const written = await call('script_edit', {
+        projectPath: project,
+        op: 'modify',
+        scriptPath: 'res://marker.gd',
+        modifications: [
+          { type: 'add_variable', name: 'sides', varType: 'int', defaultValue: '3' },
+          { type: 'add_signal', name: 'marked' },
+        ],
+      });
+      // Read back rather than trusted. An answer that did not say `ok: false` is not an answer
+      // that wrote anything, which is how a first version of this case passed the call and then
+      // found the file untouched: the arguments were wrong and nothing said so loudly enough.
+      assert.equal(get(written, 'success'), true, `both should be added: ${JSON.stringify(written)}`);
+
+      // Where they landed, which is the whole point: above the class_name is a file that does not
+      // parse, and the answer would say it wrote a variable either way. The signal has its own
+      // insertion point in the engine, with its own reading of the header.
+      const after = readFileSync(join(project, 'marker.gd'), 'utf8').split('\n');
+      const declaration = after.findIndex((line) => line.includes('class_name Marker'));
+      const variable = after.findIndex((line) => line.includes('sides'));
+      const declared = after.findIndex((line) => line.includes('signal marked'));
+      assert.ok(declaration >= 0, `the declaration should still be there: ${after.join('\\n')}`);
+      assert.ok(variable > declaration, `the variable below it, not above: ${after.join('\\n')}`);
+      assert.ok(declared > declaration, `and the signal below it too: ${after.join('\\n')}`);
+
+      const placed = await call('script_edit', {
+        projectPath: project,
+        op: 'modify',
+        scriptPath: 'res://place.gd',
+        modifications: [{ type: 'add_function', name: 'placed', body: 'pass', position: 'after_ready' }],
+      });
+      assert.equal(get(placed, 'success'), true, `the function should be added: ${JSON.stringify(placed)}`);
+      const laidOut = readFileSync(join(project, 'place.gd'), 'utf8').split('\n');
+      const ready = laidOut.findIndex((line) => line.includes('func _ready'));
+      const abstract = laidOut.findIndex((line) => line.includes('func later'));
+      const added = laidOut.findIndex((line) => line.includes('func placed'));
+      assert.ok(
+        added > ready && added < abstract,
+        `after_ready means between the two, not at the end: ${laidOut.join('\\n')}`,
+      );
+      assert.equal(laidOut[added - 1], '', `with a blank line above it: ${laidOut.join('\\n')}`);
+      assert.equal(
+        laidOut[abstract - 1],
+        '',
+        `and one below, rather than two declarations touching: ${laidOut.join('\\n')}`,
+      );
+
+      // And Godot agrees it is a script, which is the claim those line numbers stand for.
+      const reread = await call('script_info', {
+        projectPath: project,
+        op: 'structure',
+        scriptPath: 'res://marker.gd',
+      });
+      assert.equal(
+        get(reread, 'class_name'),
+        'Marker',
+        `still readable afterwards: ${JSON.stringify(reread)}`,
+      );
+      assert.ok(
+        asArray(get(reread, 'variables') ?? []).length >= 1,
+        `and the variable is in it: ${JSON.stringify(reread)}`,
+      );
+      assert.ok(
+        asArray(get(reread, 'signals') ?? []).length >= 1,
+        `and the signal is in it: ${JSON.stringify(reread)}`,
+      );
+    } finally {
+      await server.stop();
+    }
+  } finally {
+    sweep(project);
+  }
+}
+
 async function testRefreshingUidsMakesTheSidecarAndWritesNoScene(): Promise<void> {
   const godotPath = resolveGodotPath();
   if (!godotPath) {
@@ -7349,8 +7804,11 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheProjectPathSentenceNamesEveryToolThatTakesNone,
   testEveryArgumentInTheReferenceIsDescribed,
   testTheReferencePrintsEveryShapeOfType,
+  testTheSkillNamesEverySettingTheAddonsRead,
+  testTheSkillNamesTheSettingThatServesAScriptRun,
   testTheSkillWritesNoEscapedBackticks,
   testAnAuditThatCouldNotAskIsNotAnAuditThatPassed,
+  testAnAnnotatedDeclarationIsStillADeclaration,
   testRefreshingUidsMakesTheSidecarAndWritesNoScene,
   testWhoIsHoldingAPortIsAskable,
   testWhatTheEditorSavedAwayIsReportedTheSameWay,
@@ -7362,6 +7820,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheCureIsWrittenWhole,
   testTheStaleNoteNamesTheCallThatRebuildsTheCopy,
   testTheUncachedNoteSaysWhichRemedyStartsAnEngine,
+  testARestartWaitsForTheEditorToSayWhoItIs,
   testTheStaleHalfIsNamedCorrectly,
   testAGameIsFoundWhereverItAnnounced,
   testAGameTooNewToTalkToIsStillAGame,

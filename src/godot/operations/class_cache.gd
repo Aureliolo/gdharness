@@ -130,9 +130,6 @@ func _header_of(path: String) -> Dictionary:
 	if not file:
 		return header
 	var annotation: RegEx = Patterns.compiled('^@([a-z_]+)(?:\\(\\s*(?:"([^"]*)")?[^)]*\\))?\\s*')
-	var class_line: RegEx = Patterns.compiled(
-		"^class_name\\s+([A-Za-z_][A-Za-z0-9_]*)(?:\\s+extends\\s+(\\S+))?"
-	)
 	var extends_line: RegEx = Patterns.compiled("^extends\\s+(\\S+)")
 	while not file.eof_reached():
 		var rest: String = file.get_line().strip_edges()
@@ -151,7 +148,7 @@ func _header_of(path: String) -> Dictionary:
 		if rest.is_empty() or rest.begins_with("#"):
 			continue
 		if rest.begins_with("class_name"):
-			var declared: RegExMatch = class_line.search(rest)
+			var declared: RegExMatch = Patterns.declared_class(rest)
 			if declared != null:
 				header["class_name"] = declared.get_string(1)
 				if not declared.get_string(2).is_empty():
