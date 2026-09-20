@@ -8186,6 +8186,9 @@ async function testEveryReservedPortIsItsOwn(): Promise<void> {
  */
 const TOOL_NAME_MENTIONS = 427;
 
+/** The same, for phrases naming a tool and one of its multi-word ops. */
+const TOOL_OP_MENTIONS = 18;
+
 /**
  * Every tool this server names in something it says is a tool it has.
  *
@@ -8266,12 +8269,38 @@ function testEveryToolNamedInProseIsATool(): void {
     }
   }
 
+  // An op named after its tool, which is how these sentences tell a caller what to do: the words
+  // are next to each other because the call is `editor_run stop`. Only the ones carrying an
+  // underscore, because a one-word op is the same shape as the next English word and `editor_status
+  // says` would read as an op called `says`. That leaves `start` and `stop` unheld here and it is
+  // the honest half to take: the multi-word ops are the ones nobody can check by eye.
+  const opsOf = new Map(TOOL_SPECS.map((spec) => [spec.name, new Set(Object.keys(spec.operations ?? {}))]));
+  const called = new RegExp(`\\b(${[...names].join('|')})\\s+([a-z][a-z0-9]*_[a-z0-9_]*)\\b`, 'g');
+  let ops = 0;
+  for (const [where, text] of sources) {
+    for (const found of text.matchAll(called)) {
+      const [, tool, op] = found;
+      const known = opsOf.get(tool ?? '');
+      if (known === undefined || known.size === 0 || names.has(`${op}`)) {
+        continue;
+      }
+      ops += 1;
+      if (!known.has(op ?? '')) {
+        wrong.push(`${where} says ${tool} ${op}, which is not an op of ${tool}`);
+      }
+    }
+  }
+
   // The instrument first. A pattern that had stopped matching reports every prose file clean, and
   // this check is otherwise an assertion that nothing was found, which a broken regex satisfies
   // perfectly. The floor is what the tree holds today rather than a comfortable minimum, so
   // dropping a mention below it has to be confirmed in the same change.
   assert.ok(seen >= TOOL_NAME_MENTIONS, `only ${seen} tool names were read; the pattern is not matching`);
-  assert.deepEqual(wrong, [], `every tool named in prose should exist:\n${wrong.join('\n')}`);
+  assert.ok(
+    ops >= TOOL_OP_MENTIONS,
+    `only ${ops} tool-and-op phrases were read; the pattern is not matching`,
+  );
+  assert.deepEqual(wrong, [], `every tool and op named in prose should exist:\n${wrong.join('\n')}`);
 }
 
 /**
