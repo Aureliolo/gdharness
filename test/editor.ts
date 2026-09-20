@@ -1952,6 +1952,15 @@ async function testAHeldGameIsStillHeldForTheReplacement(godotPath: string): Pro
         `and the stack refusal says held and why it cannot be read, not running: ${textOf(stack)}`,
       );
 
+      // A bystander, connected and nothing more, the way the server that played the scene is
+      // connected before its first stack read. It is told when the game is let go by somebody
+      // else, which is what the editor's own debugger or another client does, and what it knows
+      // afterwards is that the game runs: without the event, a session told of the stop went on
+      // answering held about a game that was running.
+      const bystander = new GodotDAPClient(own.dapPort);
+      await bystander.connect();
+      assert.equal(bystander.holdIsKnown(), false, 'a bare connection opened now has been told nothing');
+
       // Let go through the replacement. That it then ticks is what says the game was held rather
       // than wedged, and that this session can act on a hold it was never told about.
       const released = await replacement.request(
@@ -1966,6 +1975,13 @@ async function testAHeldGameIsStillHeldForTheReplacement(godotPath: string): Pro
       );
       const afterwards = await answered('editor_output', {});
       assert.equal(get(afterwards, 'heldAt'), null, `and the session now knows it runs: ${text(afterwards)}`);
+      const toldToo = Date.now() + 5000;
+      while (!bystander.holdIsKnown() && Date.now() < toldToo) {
+        await delay(50);
+      }
+      assert.ok(bystander.holdIsKnown(), 'a continue by another client is reported to every connection');
+      assert.equal(bystander.isStopped(), false, 'as a game that runs');
+      await bystander.abandon();
       // Polled, because a game let go a moment ago has not ticked yet, and how soon it does is not
       // a number this fixture can know.
       const patience = Date.now() + GAME_STOP_TIMEOUT_MS;
