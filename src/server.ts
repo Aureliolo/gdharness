@@ -2792,11 +2792,14 @@ class GodotServer {
     const located = await this.locator.find();
 
     // Every announced game is pinged, so a game that announced and then hung is reported as
-    // such rather than counted as reachable on the strength of its announcement.
+    // such rather than counted as reachable on the strength of its announcement. With the short
+    // wait, not the runtime timeout: a game held at a breakpoint accepts the connection and never
+    // answers, and a status call that waited the full ten seconds on it was the first call an
+    // agent makes taking longest exactly when the answer was already decided.
     const announced = runtimesAnnounced();
-    const games = await Promise.all(
+    const pinged = Promise.all(
       announced.running.map(async (endpoint) => {
-        const reply = await runtimeRequest(endpoint, 'ping', {}, this.runtimeTimeoutMs());
+        const reply = await runtimeRequest(endpoint, 'ping', {}, HOLD_PING_MS);
         return {
           pid: endpoint.pid,
           port: endpoint.port,
@@ -2806,9 +2809,16 @@ class GodotServer {
         };
       }),
     );
-
-    const playing = await this.editorPlayingState();
-    await this.pickUpWhatTheEditorIsPlaying();
+    // Whether the run is held, said here as well as by editor_output: the list above names a held
+    // game as unreachable with a problem that says it may be paused, and the session can often say
+    // rather than guess. Alongside the pings, since the one wait a held game costs is paid once.
+    const asked = (async () => {
+      const playing = await this.editorPlayingState();
+      await this.pickUpWhatTheEditorIsPlaying();
+      const current = this.currentRun();
+      return { playing, hold: current === null ? {} : await this.holdOf(current) };
+    })();
+    const [games, { playing, hold }] = await Promise.all([pinged, asked]);
     return this.jsonTextResponse({
       editor: {
         ...this.getEditorStatusPayload(),
@@ -2836,6 +2846,9 @@ class GodotServer {
         // remembering.
         processActive: runIsUp(this.currentRun(), playing === null ? null : playing.playing),
         playingInEditor: playing,
+        // The same three answers editor_output gives, for the same run: absent when there is no
+        // run to ask about.
+        ...hold,
         runtimeConnected: games.some((game) => game.reachable),
         runtimes: games,
         // Games announcing a protocol this server was not built to read. Apart from the list above
@@ -3874,7 +3887,26 @@ class GodotServer {
       brokeOn: null,
       pickedUpPlaying: true,
     };
+    // The one game announced for this project, when there is one, so the run is asked of the
+    // operating system the way the run that started it was. Without it a picked-up run has no
+    // number at all, and `running` stayed true after the game had quit for as long as the record
+    // lasted, beside a status call taking the editor's word that nothing was playing.
+    const announced = this.theOneAnnouncedForOurProject();
+    if (announced !== undefined) {
+      picked.announcedPid = announced.pid;
+    }
     this.activeProcess = picked;
+  }
+
+  /**
+   * The game announced for this project when exactly one is, else undefined.
+   *
+   * One and not the first of several: a bench opens many workers from one project, and a run tied
+   * to the wrong worker is reported over the moment that worker finishes.
+   */
+  private theOneAnnouncedForOurProject(): RuntimeEndpoint | undefined {
+    const ofProject = this.allAnnouncedForOurProject(runtimesAnnounced().running);
+    return ofProject.length === 1 ? ofProject[0] : undefined;
   }
 
   /**
@@ -4674,7 +4706,11 @@ class GodotServer {
   private async holdOf(
     run: GodotProcess,
   ): Promise<{ heldAt: StoppedAt | null | undefined; heldUnknown?: true; heldNote?: string }> {
-    if (!run.throughEditor) {
+    // A run that is over is held nowhere. Asked of the process before the session, because a
+    // session that never learned the hold has only the announcement to ask, and a game that has
+    // quit has none: the answer was "cannot be told from here, a game that answers nothing is
+    // held", about a run whose exit the same answer was reporting.
+    if (!run.throughEditor || !stillRunning(run)) {
       return { heldAt: null };
     }
     const session = this.dapClient;
@@ -4682,16 +4718,12 @@ class GodotServer {
       return { heldAt: session.whereItStopped() };
     }
     // The run's own announcement when it has been tied to one, else the one game announced for
-    // this project: a run picked up after a reconnect has not been tied to its announcement, and
-    // the project is the one fact the pick-up and the announcement share.
-    const announced = runtimesAnnounced().running;
-    const ofProject = this.allAnnouncedForOurProject(announced);
+    // this project: a run picked up before its game announced has no number yet, and the project
+    // is the one fact the pick-up and the announcement share.
     const endpoint =
       run.announcedPid !== undefined
-        ? announced.find((one) => one.pid === run.announcedPid)
-        : ofProject.length === 1
-          ? ofProject[0]
-          : undefined;
+        ? runtimesAnnounced().running.find((one) => one.pid === run.announcedPid)
+        : this.theOneAnnouncedForOurProject();
     if (endpoint === undefined) {
       return {
         heldAt: undefined,
