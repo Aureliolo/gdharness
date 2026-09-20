@@ -3617,35 +3617,77 @@ async function testAStartWaitsForTheGameToAnnounceItself(): Promise<void> {
  * sentence survived being corrected everywhere else: it defended it in three files. A test that
  * encodes a claim keeps the claim alive after the evidence for it is gone, which is worse than
  * having no test, because it takes a deliberate act to overrule.
+ *
+ * Then it missed a fourth place for a release, and the way it missed it is the second half of the
+ * lesson. It gathered lines of source containing `editor_launch restart` and matched each line for
+ * the claim. The skill's *Editing* paragraph said "Change the declaring script, or restart the
+ * editor": not that phrase, so never gathered, and split across two source lines at "Change the",
+ * so a line could not have held it anyway. A downstream session read it in the installed SKILL.md,
+ * which is where every session reads it first. The check was reading ingredients, and the file a
+ * caller receives is assembled from them in a shape no line of source has.
+ *
+ * So the skill and the tool reference are rendered here, whole, the way `setup` writes them, and
+ * the claim is matched across whitespace rather than within a line. The source lines are still
+ * read for the answers built at run time, which no rendering reaches without an editor.
  */
 function testTheCureIsWrittenWhole(): void {
   const rescan = toolSpec('editor_rescan')?.description ?? '';
   assert.match(rescan, /The cure is this call on its own/, 'the tool that is the cure says so');
   assert.match(rescan, /editor_launch restart/, 'and names the restart for when it is not enough');
 
+  // What a caller receives, as it is written: every file of the installed skill, whole.
+  const installed = [...skillFiles('0.0.0-test').entries()].map(([path, text]) => ({ where: path, text }));
+  assert.ok(
+    installed.some(({ where }) => where === 'SKILL.md') &&
+      installed.some(({ where }) => where.endsWith('tools.md')),
+    'the skill renders both of its files',
+  );
+  // The paragraph that carried the fourth wrong sentence, held as a positive so the sweep below is
+  // known to be reading the paragraph rather than a skill that stopped mentioning the fault.
+  const skill = installed.find(({ where }) => where === 'SKILL.md')?.text ?? '';
+  assert.match(skill, /Could not find type/, 'the skill still explains the fault');
+  assert.match(
+    skill,
+    /needs no change to the declaring script/,
+    'and its Editing paragraph names the cure the rescan description names',
+  );
+
   // Every place that offers a remedy, whichever fault it is about. The claim being held is not
   // about any one of them: it is that none of them sends a caller to edit source that is already
   // correct, which is what all three used to do and what a check like this used to require.
   const offered = [
-    rescan,
+    { where: 'editor_rescan description', text: rescan },
     // Rendered rather than read out of the file it is built in, because it is built in parts and a
     // line of source holds no whole sentence. Reading lines would pass it over in silence.
-    staleAnalysisNote([{ kind: 'method', member: 'silence', type: 'Bell', declaredIn: 'res://bell.gd' }], []),
+    {
+      where: 'staleAnalysisNote',
+      text: staleAnalysisNote(
+        [{ kind: 'method', member: 'silence', type: 'Bell', declaredIn: 'res://bell.gd' }],
+        [],
+      ),
+    },
+    ...installed,
     ...readdirSync('src')
       .filter((name) => name.endsWith('.ts'))
       .flatMap((name) =>
         readFileSync(join('src', name), 'utf8')
           .split('\n')
-          .filter((line) => line.includes('editor_launch restart')),
+          .filter((line) => line.includes('editor_launch restart'))
+          .map((line) => ({ where: name, text: line })),
       ),
   ];
-  assert.ok(offered.length >= 15, `the places offering a remedy should be found, not ${offered.length}`);
+  assert.ok(offered.length >= 17, `the places offering a remedy should be found, not ${offered.length}`);
 
-  for (const sentence of offered) {
-    assert.doesNotMatch(
-      sentence,
-      /[Cc]hange the declaring script(,| and| )/,
-      `nothing should still tell a caller to edit correct source: ${sentence.slice(0, 140)}`,
+  // Across whitespace, because a rendered file wraps where the source did not and a sentence that
+  // breaks at "the" is the same sentence. Change, edit and touch, because the claim is about what
+  // the caller is told to do to the file and not about one verb for it.
+  for (const { where, text } of offered) {
+    const found =
+      /\b(?:[Cc]hang(?:e|ing)|[Ee]dit(?:ing)?|[Tt]ouch(?:ing)?)\s+the\s+declaring\s+script\b/.exec(text);
+    assert.equal(
+      found,
+      null,
+      `${where} should not tell a caller to edit correct source: ${text.slice(Math.max(0, (found?.index ?? 0) - 60), (found?.index ?? 0) + 80)}`,
     );
   }
 }
