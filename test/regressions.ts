@@ -92,7 +92,7 @@ import {
   toolSpec,
   toolsWithoutProjectPath,
 } from '../src/tool-definitions.js';
-import { renderToolsMarkdown } from '../src/tool-reference.js';
+import { namedType, renderToolsMarkdown } from '../src/tool-reference.js';
 import { cacheFile, isNewer, UpdateCheck } from '../src/update-check.js';
 import { asArray, asNumber, get, text } from './support/json.js';
 import { isRecord, type JsonRpcMessage, parseTextContent, textOf } from './support/json-rpc.js';
@@ -4061,6 +4061,37 @@ function testEveryArgumentInTheReferenceIsDescribed(): void {
 }
 
 /**
+ * Every arm of the type the reference prints, including the one two arguments reach.
+ *
+ * `namedType` has three: a plain type, a union written as a list, and a fallback for an argument
+ * that declares no type at all because it takes any JSON value. 190 arguments reach the first, three
+ * reach the third, and two reach the second. Two of a hundred and ninety-five is the arm that reads
+ * as covered because the others plainly are, and losing it would print `(any)` where the schema says
+ * `string or number`, which is a reference entry that is wrong rather than missing.
+ *
+ * The two are named rather than counted. A count would also have to move when a third union is
+ * added, and what wants confirming is a union going away, not one arriving.
+ */
+function testTheReferencePrintsEveryShapeOfType(): void {
+  assert.equal(namedType('string'), 'string', 'a plain type is itself');
+  assert.equal(namedType(['string', 'number']), 'string or number', 'a union reads as one');
+  assert.equal(namedType(undefined), 'any', 'and an argument with no declared type takes any value');
+  assert.equal(namedType({ oneOf: [] }), 'any', 'as does a shape this does not read');
+  assert.equal(namedType(['string', 7]), 'any', 'a list that is not all names is not a union');
+
+  const markdown = renderToolsMarkdown();
+  for (const name of ['keycode', 'button']) {
+    const line = markdown.split('\n').find((entry) => entry.startsWith(`- \`${name}\` `));
+    assert.ok(line, `${name} should be in the reference`);
+    assert.match(line, /\(string or number\)/, `${name} should print both types it takes: ${line}`);
+  }
+  // The positive for the fallback, so that an arm printing `any` for everything would be caught by
+  // the lines above rather than satisfying this one too.
+  const anyLines = markdown.split('\n').filter((line) => line.includes('` (any):'));
+  assert.equal(anyLines.length, 3, `three arguments take any value: ${anyLines.join(' | ')}`);
+}
+
+/**
  * Nothing the skill writes escapes a backtick.
  *
  * A generated name went into `SKILL.md` as `\`debug_control\``, rendering the backslashes rather
@@ -7175,6 +7206,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testWhatAStaleTypeDependsOnIsNamed,
   testTheProjectPathSentenceNamesEveryToolThatTakesNone,
   testEveryArgumentInTheReferenceIsDescribed,
+  testTheReferencePrintsEveryShapeOfType,
   testTheSkillWritesNoEscapedBackticks,
   testAnAuditThatCouldNotAskIsNotAnAuditThatPassed,
   testRefreshingUidsMakesTheSidecarAndWritesNoScene,
