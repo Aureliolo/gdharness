@@ -3908,15 +3908,16 @@ class GodotServer {
     // this settles what it has already built from one of them, and building from a file the scan
     // has not read yet would be recompiling the old source.
     const reloading = readNonEmptyString(args, 'reloadScript');
-    let reloaded: { methods?: string[]; problem?: string } = {};
+    let reloaded: { methods?: string[]; heldBefore?: string[]; problem?: string } = {};
     if (reloading !== undefined) {
       try {
         const answer = asParams(
           await this.godotBridge.invokeTool('reload_script', { ...args, scriptPath: reloading }),
         );
         const methods = readArray(answer, 'methods');
+        const before = readArray(answer, 'heldBefore');
         reloaded = methods
-          ? { methods: methods.map(String) }
+          ? { methods: methods.map(String), ...(before ? { heldBefore: before.map(String) } : {}) }
           : { problem: `the editor would not say what ${reloading} has after reloading it` };
       } catch (error) {
         reloaded = { problem: `${reloading} could not be reloaded: ${errorMessage(error)}` };
@@ -3930,6 +3931,10 @@ class GodotServer {
       ok: !busy && unseen.length === 0 && stillGone.length === 0 && checked.unchecked === undefined,
       stillWorking: busy,
       waitedMs: Date.now() - started,
+      // Both readings, because they answer different questions. What the copy held before says
+      // whether this editor had the fault at all, which is the thing a caller cannot otherwise
+      // find out; what it holds after says whether the call mended it.
+      heldBeforeReload: reloaded.heldBefore,
       reloadedMethods: reloaded.methods,
       reloadProblem: reloaded.problem,
       unseenByEditor: unseen.length > 0 ? unseen : undefined,
