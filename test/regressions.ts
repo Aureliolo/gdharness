@@ -7466,8 +7466,20 @@ async function testAnEditorThatClearsBreakpointsIsSaidSo(): Promise<void> {
     await server.initialize('regression-test');
     const status = async (): Promise<unknown> =>
       parseTextContent(await server.request('tools/call', { name: 'editor_status', arguments: {} }));
+    // Each greeting waits for the last editor to be gone from the server's point of view before
+    // the next dials in, and then for a greeting that is its own: the bridge takes a moment to
+    // notice a socket closing, and a status read in that moment answers about the editor before.
+    let greetedAt = '';
     const greet = async (saying: Record<string, unknown>): Promise<unknown> => {
-      editor.socket?.close();
+      if (editor.socket !== null) {
+        editor.socket.close();
+        let gone = false;
+        for (let waited = 0; waited < 10_000 && !gone; waited += 100) {
+          await delay(100);
+          gone = get(await status(), 'editor', 'connected') === false;
+        }
+        assert.ok(gone, 'the previous fixture editor should have been seen leaving');
+      }
       const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
       editor.socket = socket;
       await new Promise<void>((resolve, reject) => {
@@ -7496,11 +7508,15 @@ async function testAnEditorThatClearsBreakpointsIsSaidSo(): Promise<void> {
       for (let waited = 0; waited < 10_000; waited += 100) {
         await delay(100);
         seen = await status();
-        if (get(seen, 'editor', 'connected') === true) {
+        if (
+          get(seen, 'editor', 'connected') === true &&
+          text(get(seen, 'editor', 'connectedAt')) !== greetedAt
+        ) {
           break;
         }
       }
       assert.equal(get(seen, 'editor', 'connected'), true, 'the fixture editor should be greeted');
+      greetedAt = text(get(seen, 'editor', 'connectedAt'));
       return seen;
     };
 
