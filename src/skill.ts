@@ -140,8 +140,10 @@ its own, which is the measured cure and needs no change to the declaring script;
 restart\` also does it and costs a window.
 
 The scan writes \`.godot/global_script_class_cache.cfg\` from the list the editor is holding, so
-a class it cannot resolve is dropped out of that file too, and the next fresh engine, CI run or
-clone starts from the narrower one. That is the same class \`unseenByEditor\` names.
+a class it cannot resolve would go out of that file with it. The answer names that loss under
+\`cacheLost\` and rebuilds the cache from the declarations on disk, naming what came back under
+\`cacheRestored\`, so no fresh engine, CI run or clone inherits the short file. That is the same
+class \`unseenByEditor\` names, and the loss is not a reason to refuse the scan.
 
 A diagnostic about a member rather than a type, \`Static function "x()" not found in base "Y"\`
 about something the engine compiles, is a different thing and is no longer stale here: each ask
