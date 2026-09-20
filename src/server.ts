@@ -3148,9 +3148,19 @@ class GodotServer {
       ended === null
         ? ''
         : ` The run that was going, pid ${ended}, was ended to start this one; its output is no longer what editor_output answers about.`;
+    // A game of this project that was already running and that this server cannot read. It is not
+    // in `ended`, because ending a run goes through the sweep that drops these, so the start left
+    // it running and said nothing: two games, one of them unmentioned and unreachable. Said on the
+    // answer that caused it rather than only in the refusal a later call would have given.
+    const stranded = this.aRuntimeOfOursIsTooFarOff();
+    const alsoRunning =
+      stranded === null
+        ? ''
+        : ` A game of this project was already running, pid ${stranded.pid}, announcing protocol ${stranded.protocol} where this server speaks ${RUNTIME_PROTOCOL}. Starting this one did not end it and nothing here can: end pid ${stranded.pid} yourself, or bring the two halves to the same version.`;
     return this.jsonTextResponse({
       started: true,
       through: 'gdharness',
+      alsoRunning: stranded === null ? undefined : stranded.pid,
       pid: started.process.pid ?? null,
       arguments: cmdArgs,
       // Named here rather than only by editor_output, because a caller who wants to watch the
@@ -3168,7 +3178,7 @@ class GodotServer {
         runtimeWaitMs,
         given.value.length > 0,
       ),
-      message: `Use editor_output for what it prints and editor_run stop to end it.${spawnedInstead}${endedForThis}`,
+      message: `Use editor_output for what it prints and editor_run stop to end it.${spawnedInstead}${endedForThis}${alsoRunning}`,
     });
   }
 
@@ -3764,7 +3774,13 @@ class GodotServer {
     // announces something this server will not read.
     //
     // Without offering the runtime_* tools, because this server cannot reach it either. What it can
-    // say is that the game is there, which half is behind, and that starting another would end it.
+    // say is that the game is there and which half is behind.
+    //
+    // Not that starting another would end it, which is what the branch above says about a game the
+    // editor is playing and is false here. A start this server spawns is a separate process:
+    // measured, with a game announcing a protocol ahead of the server, and `editor_run start`
+    // answered `started: true` with a new pid while the announced game went on running, unmentioned
+    // and unreachable. The two branches look alike and the game underneath them is not the same one.
     const unreadable = this.aRuntimeOfOursIsTooFarOff();
     if (unreadable !== null) {
       const behind =
@@ -3775,8 +3791,8 @@ class GodotServer {
         `A game is running for ${unreadable.project.path}, pid ${unreadable.pid}, announced in protocol` +
         ` ${unreadable.protocol}, which this server does not speak: it speaks ${RUNTIME_PROTOCOL}, so ${behind}.` +
         ' Until then neither editor_run nor the runtime_* tools can reach it.' +
-        ' Do not start another: editor_run start replaces the game that is playing rather than' +
-        ' adding one, so it would end this one.'
+        ' A run started here is a separate process rather than a replacement, so starting one leaves' +
+        ' this game running with nothing able to answer about it or end it.'
       );
     }
     const record = readRunRecord();

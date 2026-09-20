@@ -3027,6 +3027,85 @@ function testANotYetRuntimeIsNotTheSameAsNoRuntime(): void {
 }
 
 /**
+ * A start says what it left running, when it left something running.
+ *
+ * The refusal for a game this server cannot read is one call too late to help here: by the time it
+ * is given, the caller has already started a second game. Measured before this: `editor_run start`
+ * answered `started: true` with a new pid while the announced game went on running, with nothing in
+ * the answer naming it, so the project had two games and the server could speak for one.
+ *
+ * The engine is this process, as the neighbouring bench fixture does it. What is under test is what
+ * the answer says, and a start that reaches the answer has gone through every decision above it;
+ * needing a real engine would put this in the tier that only CI runs.
+ */
+async function testAStartSaysWhatItLeftRunning(): Promise<void> {
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-stranded-'));
+  const project = join(runtimeDir, 'mine');
+  const announcements = join(runtimeDir, 'gdharness');
+  mkdirSync(announcements, { recursive: true });
+  mkdirSync(project, { recursive: true });
+  writeFileSync(
+    join(project, 'project.godot'),
+    '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Mine"\n' +
+      'run/main_scene="res://main.tscn"\n',
+  );
+  writeFileSync(join(project, 'main.gd'), 'extends Node\n');
+  writeFileSync(
+    join(project, 'main.tscn'),
+    '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+      '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+  );
+  // This process's pid, so the announcement is of something genuinely alive: a dead one is swept by
+  // the reader and the start would then have nothing to report, passing for the wrong reason.
+  writeFileSync(
+    join(announcements, `runtime-${process.pid}.json`),
+    JSON.stringify({
+      protocol: RUNTIME_PROTOCOL + 1,
+      pid: process.pid,
+      port: 51_993,
+      address: '127.0.0.1',
+      project: { name: 'Mine', path: project },
+    }),
+    'utf8',
+  );
+
+  try {
+    let answer = '';
+    await withStdioServer(
+      async (call) => {
+        answer = await call('editor_run', { op: 'start', projectPath: project, headless: true });
+      },
+      {
+        GDHARNESS_RUNTIME_DIR: announcements,
+        GDHARNESS_PROJECT: project,
+        GODOT_PATH: process.execPath,
+      },
+    );
+
+    // The positive first: the start went through, so the assertions below are about an answer that
+    // was built rather than about a refusal that never reached them.
+    assert.match(answer, /"started":\s*true/, `the start should have gone through: ${answer}`);
+    assert.match(
+      answer,
+      new RegExp(`"alsoRunning":\\s*${process.pid}`),
+      `and should name the game it left running: ${answer}`,
+    );
+    assert.match(
+      answer,
+      /Starting this one did not end it/,
+      `and say that starting did not end it: ${answer}`,
+    );
+    assert.match(
+      answer,
+      new RegExp(`end pid ${process.pid} yourself`),
+      `and what the caller can do about it: ${answer}`,
+    );
+  } finally {
+    sweep(runtimeDir);
+  }
+}
+
+/**
  * A test server writes its run where no real run is, and is shown to have written one.
  *
  * The isolation this asserts was added after a suite run on a developer's machine ended another
@@ -3168,7 +3247,20 @@ async function testARefusalDoesNotDenyTheRuntimeItCanSee(): Promise<void> {
         protocol > RUNTIME_PROTOCOL ? /this server is the older half/ : /the addon is the older half/,
         `and which half is behind: ${far}`,
       );
-      assert.match(far, /replaces the game that is playing/, `and what a start would cost: ${far}`);
+      // What a start actually does here, which is not what the branch above this one says. That one
+      // is about a game the editor is playing, where a start replaces it. This game is announced
+      // and unreadable, a run started here is a separate process, and the measurement was
+      // `started: true` with a new pid while the announced game went on running.
+      assert.match(
+        far,
+        /separate process rather than a replacement/,
+        `and what a start would leave behind: ${far}`,
+      );
+      assert.doesNotMatch(
+        far,
+        /replaces the game that is playing/,
+        `not the sentence for a game the editor is playing: ${far}`,
+      );
       assert.doesNotMatch(
         far,
         /Start one with editor_run/,
@@ -8966,6 +9058,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAGameTooNewToTalkToIsStillAGame,
   testANotYetRuntimeIsNotTheSameAsNoRuntime,
   testARefusalDoesNotDenyTheRuntimeItCanSee,
+  testAStartSaysWhatItLeftRunning,
   testATestServerWritesWhereNoRealRunIs,
   testAStartStopsWaitingForAGameThatIsOver,
   testAStartWaitsForTheGameToAnnounceItself,
