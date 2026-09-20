@@ -47,6 +47,18 @@ code shows nothing: it is the same join either way and the singular and plural d
 argument that can be plural, a list that can be empty, a second entry in one answer: render the case
 nothing has hit and read it. The branches a reproduction covers are the ones already right.
 
+Code that only runs when something is wrong is never exercised by a run that goes well. A passing
+suite, a careful reading and a successful session all leave it equally unchecked, so "everything is
+green" says nothing about it either way. The case here was the refusal for a game announcing a
+protocol this server cannot read. The sweep that refusal consults drops those announcements, so it
+fell through to advice that would end the very run it was denying. A function twenty lines away had
+been written for that exact state and says in its own doc that "no game is running" is certainly
+false there, but nothing called it, and the sweep reads as complete. It was found by making the two
+halves disagree for an unrelated reason: bumping a protocol constant to check whether a fixture
+hard-coding it would drift. So when a branch depends on a version mismatch, a fault, a timeout or any
+other disagreement, put the system into that state deliberately and look at what comes out. Waiting
+to meet it in normal use does not work, because normal use is the case that avoids it.
+
 A disarm that still passes is a statement about the setup before it is one about the check. The
 fixture reached the assertion without walking the line that was broken, so the reading to reject
 first is that the assertion is too weak: strengthening it only buys a fixture that fails for a
@@ -81,18 +93,17 @@ read. What breaks is the neighbour, a script whose whole header is the annotated
 reported because nobody had edited one. Take the report for the fault and then ask which other
 shapes reach the same line, and write the one where the line has nothing else to fall back on.
 
-A guard written against strangers has not been asked about the neighbour. The check standing between
-a recycled pid and `process.kill` compared the engine's basename and the project path, and every case
-it held was something unrelated: another project, another binary, a number nobody holds. Each differs
-from the run in one of the properties compared, so each is a stranger, and the suite read as
-exhaustive because there was no fourth stranger left to write. What it could not answer differs in
-none of them. The editor holding that project is the same binary pointed at the same directory, so it
-confirmed, and the caller acting on a confirmation is the one that kills. It is also the likeliest
-process to be holding that number, because ending the game is what frees it and opening the editor is
-what happens next. So for a check that decides identity by a list of properties, the case to write is
-not the one furthest from the record but the nearest thing that is not it: ask what else on this
-machine satisfies every property on the list, and the answer is usually standing next to the thing
-being identified rather than out among the strangers.
+A check that decides identity by comparing a list of properties needs a test for the closest thing
+that is not the target, not just for things that are obviously different. The check standing between
+a recycled pid and `process.kill` compared the engine's basename and the project path. Every case
+written for it was something unrelated: another project, another binary, a pid nobody holds. Each of
+those differs in one of the compared properties, so the set looked exhaustive once there was nothing
+unrelated left to add. The case that broke it differs in none of them. The editor for that project is
+the same binary started with the same `--path`, so the check confirmed it, and the caller that acts
+on a confirmation is the one that kills. It is also the process most likely to be holding the reused
+pid, because ending the game frees the number and opening an editor is what happens next. So ask what
+else on this machine satisfies every property on the list. The answer is usually right next to the
+thing being identified.
 
 The fourth way is a second guard covering the one you broke, and the wrong conclusion it invites is
 that the line you disarmed was doing nothing. Two fixes landed together on where a parameter list
