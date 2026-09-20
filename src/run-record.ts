@@ -222,11 +222,18 @@ function recordAt(path: string): RunRecord | null {
  * Null is the operating system declining to answer, which is not the same as nothing running
  * there and must never be read as one.
  */
-export function runningAs(pid: number): { kind: 'image' | 'commandLine'; text: string } | null {
+export function runningAs(pid: number): RunningAs | null {
   if (process.platform === 'win32') {
-    const line = windowsCommandLine(pid);
-    if (line !== null) {
-      return { kind: 'commandLine', text: line };
+    const answer = windowsCommandLine(pid);
+    if (answer !== null) {
+      // The creation time is the first line and the command line is the rest, because the query
+      // that reads one reads the other for free and this runs before every signal.
+      const [, ...rest] = answer.split('\n');
+      const line = rest.join('\n').trim();
+      const began = startedAt(pid, answer);
+      if (line !== '') {
+        return { kind: 'commandLine', text: line, ...(began === null ? {} : { startedAt: began }) };
+      }
     }
     // An empty answer from the query above is not "nothing is there": a process owned by another
     // user, or one this server cannot open, keeps its command line and hands back nothing at all.
@@ -236,15 +243,17 @@ export function runningAs(pid: number): { kind: 'image' | 'commandLine'; text: s
     return image === null ? null : { kind: 'image', text: image };
   }
   try {
+    const began = startedAt(pid, null);
+    const when = began === null ? {} : { startedAt: began };
     if (process.platform === 'linux') {
       const raw = readFileSync(`/proc/${pid}/cmdline`, 'utf8').replaceAll('\0', ' ').trim();
-      return raw === '' ? null : { kind: 'commandLine', text: raw };
+      return raw === '' ? null : { kind: 'commandLine', text: raw, ...when };
     }
     const args = execFileSync('ps', ['-p', String(pid), '-o', 'args='], {
       encoding: 'utf8',
       timeout: 15_000,
     }).trim();
-    return args === '' ? null : { kind: 'commandLine', text: args };
+    return args === '' ? null : { kind: 'commandLine', text: args, ...when };
   } catch {
     return null;
   }
@@ -319,11 +328,39 @@ function windowsCommandLine(pid: number): string | null {
         '-NoProfile',
         '-NonInteractive',
         '-Command',
-        `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`,
+        `$p = Get-CimInstance Win32_Process -Filter "ProcessId=${pid}"; if ($p) { $p.CreationDate.ToUniversalTime().ToString("o"); $p.CommandLine }`,
       ],
       { encoding: 'utf8', timeout: 15_000, windowsHide: true },
     ).trim();
     return answer === '' ? null : answer;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * When the process under [param pid] started, as milliseconds, or null where the platform will not
+ * say.
+ *
+ * This is the one thing about a process that a recycled number cannot carry over. Everything else a
+ * record holds is a property of the engine and the project, and a machine running a fan-out has
+ * dozens of processes sharing all of them; what it does not have is a second process that started
+ * when this run did.
+ */
+function startedAt(pid: number, windowsAnswer: string | null): number | null {
+  if (process.platform === 'win32') {
+    // The first line of the answer above, asked in the same call: a second interpreter launch costs
+    // half a second on a path that runs before every signal.
+    const when = Date.parse(windowsAnswer?.split('\n')[0]?.trim() ?? '');
+    return Number.isNaN(when) ? null : when;
+  }
+  try {
+    const said = execFileSync('ps', ['-p', String(pid), '-o', 'lstart='], {
+      encoding: 'utf8',
+      timeout: 15_000,
+    }).trim();
+    const when = Date.parse(said);
+    return said === '' || Number.isNaN(when) ? null : when;
   } catch {
     return null;
   }
@@ -382,6 +419,24 @@ export function couldStillBeTheRecordedRun(record: RunRecord): boolean {
  */
 const AN_EDITOR = /(?:^|\s)(?:-e|--editor)(?:\s|$)/;
 
+/** What the operating system will say about a process, and how much of it. */
+export interface RunningAs {
+  readonly kind: 'image' | 'commandLine';
+  readonly text: string;
+  /** Milliseconds, where the platform will give it. Absent is not zero and not now. */
+  readonly startedAt?: number;
+}
+
+/**
+ * How far after a record's own start a process may have begun and still be that run.
+ *
+ * Wide enough to absorb the gap between a server writing the note and the engine being there to be
+ * asked about, and the second-resolution the platforms answer with. Narrow against the case it is
+ * for: a number handed out again has to wait for the first process to exit, so the gap is the run's
+ * whole length.
+ */
+const SAME_RUN_WINDOW_MS = 90_000;
+
 /**
  * The comparison itself, apart from asking the operating system, so that every answer the
  * operating system can give is a case that can be written down rather than a platform to be on.
@@ -392,10 +447,29 @@ const AN_EDITOR = /(?:^|\s)(?:-e|--editor)(?:\s|$)/;
  */
 export function judgeRun(
   record: RunRecord,
-  running: { kind: 'image' | 'commandLine'; text: string } | null,
+  running: RunningAs | null,
   needed: 'confirmed' | 'possible',
 ): boolean {
   if (running === null) {
+    return false;
+  }
+  // When the process started, which is the one thing a recycled number cannot carry over. Every
+  // other property a record holds belongs to the engine and the project, and a machine running a
+  // fan-out has dozens of processes sharing all of them: one report here describes a bench opening
+  // 31 worker engines, same executable, same `--path`, no `-e`, any of which the checks below would
+  // confirm. What none of them has is a start at the moment this run started.
+  //
+  // Only one direction. A process that began after the record did cannot be the run the record
+  // describes, because the run was already going. One that reads as starting slightly earlier is a
+  // clock or a resolution artefact rather than evidence, so it is left to the comparisons below.
+  //
+  // Asked of the caller that kills. Picking a run back up on a weaker answer costs a wrong reading;
+  // signalling on one costs somebody else's process.
+  if (
+    needed === 'confirmed' &&
+    running.startedAt !== undefined &&
+    running.startedAt - record.startedAt > SAME_RUN_WINDOW_MS
+  ) {
     return false;
   }
   const engine = record.command === undefined ? null : basename(record.command);

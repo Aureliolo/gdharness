@@ -91,6 +91,7 @@ import {
   readEditorRunNote,
   readRunRecord,
   recordRunEnded,
+  runningAs,
   stillTheRecordedRun,
   sweepTranscripts,
   writeEditorRunNote,
@@ -3440,6 +3441,18 @@ class GodotServer {
       );
       return;
     }
+    // What was signalled, in the run's own log, with the command line the operating system gave for
+    // it. A kill by number is the one act here that cannot be taken back, and three runs elsewhere
+    // have died with nothing in them to read: a line naming the process this server ended, and what
+    // that process said it was, turns "it just stopped" into something somebody can check against
+    // the record it was made from.
+    const signalled = runningAs(running.pid);
+    running.log.record(
+      'info',
+      `gdharness is ending pid ${running.pid}, which the operating system describes as ${
+        signalled === null ? 'nothing it will name' : `${signalled.kind}: ${signalled.text}`
+      }.`,
+    );
     try {
       process.kill(running.pid);
     } catch {

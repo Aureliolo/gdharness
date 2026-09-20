@@ -6504,6 +6504,17 @@ async function testAPidIsNotAnIdentity(): Promise<void> {
       `this platform never answered about pid ${pid}, so nothing below is askable`,
     );
 
+    // And answered when it started, which is the part of the identity a recycled number cannot
+    // carry. Asserted here rather than left to the judging cases, because those hand the start time
+    // in and would pass unchanged on a platform that never produces one: the guard would be quietly
+    // Windows-only and every other machine would go on signalling a worker engine. A platform that
+    // genuinely cannot say is a thing to find out about rather than to degrade into silently.
+    const began = runningAs(pid)?.startedAt;
+    assert.ok(
+      began !== undefined && Date.now() - began >= 0 && Date.now() - began < 120_000,
+      `this platform should say when pid ${pid} started; it said ${String(began)}`,
+    );
+
     assert.equal(stillTheRecordedRun(record), true, 'the process the record describes is the one running');
     assert.equal(
       couldStillBeTheRecordedRun(record),
@@ -6621,6 +6632,39 @@ function testTheEditorHoldingAProjectIsNotARunOfIt(): void {
       `nor is it a run to be picked back up and reported as the game (${flag})`,
     );
   }
+
+  // A worker engine of the same project, which is what a recycled number lands on here more often
+  // than an editor. A fan-out opens dozens of them with `OS.create_process`: same executable, same
+  // `--path`, no `-e`, so every check above confirms one. What none of them has is a start at the
+  // moment this run started, and a number cannot be handed out again until the process holding it
+  // has gone, so the gap is at least the length of the run.
+  const worker = `${engine} --headless --log-file user://slices/slice-7.log --path ${project} res://bench.tscn`;
+  assert.equal(
+    judgeRun(record, { ...asked(worker), startedAt: record.startedAt + 600_000 }, 'confirmed'),
+    false,
+    'a worker engine that started ten minutes into this run is not this run, so nothing may be signalled at it',
+  );
+  // The same process, asked about as the run it is. Without this the assertion above is satisfied by
+  // a check that refuses everything once a start time is offered, which would stop every stop
+  // working rather than stop the wrong one.
+  assert.equal(
+    judgeRun(record, { ...asked(worker), startedAt: record.startedAt + 200 }, 'confirmed'),
+    true,
+    'and a process that started when this run did is still the run, whatever else it carries',
+  );
+  // Picking a run back up is the weaker question and is not what kills, so a start time it cannot
+  // explain leaves that answer alone: reporting a live bench as finished is its own wrong answer.
+  assert.equal(
+    judgeRun(record, { ...asked(worker), startedAt: record.startedAt + 600_000 }, 'possible'),
+    true,
+    'the weaker question is unchanged, because acting on it does not end anything',
+  );
+  // A platform that will not say when a process started is left with the checks it had.
+  assert.equal(
+    judgeRun(record, asked(worker), 'confirmed'),
+    true,
+    'and a platform that gives no start time is no worse off than before it was asked',
+  );
 
   // The flag as a whole word. A project whose own directory spells one is still a project, and
   // reading it as the editor would refuse to end a run that is genuinely there.
