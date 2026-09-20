@@ -1,6 +1,7 @@
 extends RefCounted
 
 const Patterns = preload("patterns.gd")
+const Read = preload("reading.gd")
 const Log = preload("logger.gd")
 
 var _log: Log
@@ -92,7 +93,11 @@ func get_gdscript_info(params: Dictionary) -> Dictionary:
 				if dep not in dependencies:
 					dependencies.append(dep)
 
-	return {
+	# After the loop, because it needs the base the loop reads, and a file that declared one after
+	# its first function would otherwise be judged against the default.
+	_mark_virtuals(functions, extends_name)
+
+	var answer: Dictionary = {
 		"path": script_path,
 		"full_path": full_script_path,
 		"class_name": declared_class_name,
@@ -106,6 +111,98 @@ func get_gdscript_info(params: Dictionary) -> Dictionary:
 		"dependencies": dependencies,
 		"line_count": lines.size()
 	}
+	if Read.as_bool(params.get("include_inherited", false)):
+		_add_inherited(answer, [full_script_path])
+	return answer
+
+
+# Which of these functions the engine will call, asked of the engine.
+#
+# `is_virtual` was `name.begins_with("_")`, which is the convention for a private method and not
+# what the field says: it reported `_compute_damage` as something the engine calls, on every script
+# with a private helper in it. The virtuals are the ones the native ancestor declares with
+# `METHOD_FLAG_VIRTUAL`, which is a question `ClassDB` answers exactly, and `class_has_method` does
+# not: it says false for `_ready` on `Node`, so the method list is what has to be walked.
+func _mark_virtuals(functions: Array[Dictionary], extends_name: String) -> void:
+	var native: String = _native_ancestor(extends_name)
+	var virtuals: Dictionary = {}
+	if not native.is_empty():
+		for m: Dictionary in ClassDB.class_get_method_list(native, false):
+			var flags: int = Read.as_int(m.get("flags", 0))
+			if flags & METHOD_FLAG_VIRTUAL:
+				virtuals[str(m.get("name", ""))] = true
+	for one: Dictionary in functions:
+		one["is_virtual"] = virtuals.has(str(one.get("name", "")))
+
+
+# The native class at the top of this script's chain, or empty when the chain does not reach one.
+#
+# A base named by a script is followed; a base that is neither a script nor a class the engine knows
+# leaves nothing to ask, and then no function is called virtual rather than every underscore being
+# guessed at.
+func _native_ancestor(base: String) -> String:
+	var seen: Array[String] = []
+	var current: String = base
+	while true:
+		var path: String = _script_named(current)
+		if path.is_empty():
+			break
+		if path in seen:
+			return ""
+		seen.append(path)
+		var above: Dictionary = get_gdscript_info({"script_path": path})
+		if above.is_empty():
+			return ""
+		current = str(above.get("extends", ""))
+	return current if ClassDB.class_exists(current) else ""
+
+
+# The members this script's ancestors declare, appended to the lists they belong in.
+#
+# Only the script ancestors: `extends` naming a native class is ClassDB's question and
+# `editor_classes info` answers it with the whole hierarchy. A base is reachable either as a quoted
+# `res://` path or as a `class_name` in the project's class list, and a script whose base is neither
+# has no ancestor to read, which the answer says by leaving `inherits_from` short rather than by
+# refusing. Each entry carries `inherited_from`, so a caller can tell a member the script declares
+# from one it is given; a name a script overrides appears twice, at both lines, on purpose.
+func _add_inherited(answer: Dictionary, seen: Array[String]) -> void:
+	var inherits_from: Array[String] = []
+	var base: String = str(answer.get("extends", ""))
+	while true:
+		var base_path: String = _script_named(base)
+		if base_path.is_empty() or base_path in seen:
+			break
+		seen.append(base_path)
+		var above: Dictionary = get_gdscript_info({"script_path": base_path})
+		# A read that failed answers with an empty dictionary rather than with a flag, so that is
+		# what is asked. `_script_named` has already checked the file is there, which leaves only
+		# an open that fails, and the chain stops without recording a file nothing was read from.
+		if above.is_empty():
+			break
+		inherits_from.append(base_path)
+		for list_name: String in ["signals", "variables", "functions", "constants", "enums"]:
+			var mine: Array[Dictionary] = answer[list_name]
+			var theirs: Array[Dictionary] = above[list_name]
+			for member: Dictionary in theirs:
+				var carried: Dictionary = member.duplicate()
+				carried["inherited_from"] = base_path
+				mine.append(carried)
+		base = str(above.get("extends", ""))
+	answer["inherits_from"] = inherits_from
+
+
+# The file a base names, whether it named a path or a class, or empty for a native class.
+func _script_named(base: String) -> String:
+	if base.is_empty():
+		return ""
+	if base.begins_with('"') and base.ends_with('"'):
+		var quoted: String = base.substr(1, base.length() - 2)
+		return quoted if FileAccess.file_exists(quoted) else ""
+	for entry: Dictionary in ProjectSettings.get_global_class_list():
+		if str(entry.get("class", "")) == base:
+			var path: String = str(entry.get("path", ""))
+			return path if FileAccess.file_exists(path) else ""
+	return ""
 
 
 func _parse_signal(line: String, line_num: int) -> Dictionary:
@@ -257,7 +354,8 @@ func _parse_function(line: String, line_num: int, annotated: String = "") -> Dic
 		"name": name,
 		"params": params,
 		"return_type": return_type,
-		"is_virtual": name.begins_with("_"),
+		# Filled in after the whole file is read, once the base is known; see `_mark_virtuals`.
+		"is_virtual": false,
 		"is_static": is_static,
 		# Said rather than left to be inferred: an abstract method has no body, so a caller that
 		# saw only the declaration would otherwise take it for one whose body it failed to read.
@@ -289,7 +387,14 @@ func _parse_param(param_text: String) -> Dictionary:
 	else:
 		name = param_text
 
-	return {"name": name, "type": type_hint, "default": default_value}
+	# `...rest: Array` is a rest parameter, and the dots are the syntax rather than part of what it
+	# is called: answering `...rest` as the name gives a caller building a call site a name it
+	# cannot use. gdUnit4 alone declares 56 of these.
+	var is_rest: bool = name.begins_with("...")
+	if is_rest:
+		name = name.substr(3).strip_edges()
+
+	return {"name": name, "type": type_hint, "default": default_value, "is_rest": is_rest}
 
 
 func _extract_dependencies(line: String) -> Array[String]:
