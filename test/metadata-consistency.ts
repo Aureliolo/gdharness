@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import process from 'node:process';
 import pkg from '../package.json' with { type: 'json' };
 import serverManifest from '../server.json' with { type: 'json' };
@@ -105,6 +105,41 @@ assert.equal(
   pkg.engines.bun,
   'the README Bun version should be the one package.json names',
 );
+/**
+ * The same, for the counts the documentation writes out in words.
+ *
+ * The README's are checked above because they are the ones somebody reads first, and these are the
+ * rest of the numbers in this repository that a file on disk can settle. A word is as typed-once as
+ * a digit: `three addons` was written when there were three and says nothing when there is a fourth.
+ *
+ * Only the counts something here can compute. A count of the bullets under it, or of anything
+ * outside this repository, has nothing to hold it to and is better written as its list than guarded
+ * by a check that has to be told the answer.
+ */
+const WRITTEN_COUNTS: readonly [string, RegExp, number][] = [
+  [
+    'docs/install.md',
+    /The (\w+) addons land in/,
+    readdirSync(new URL('../src/godot/addons', import.meta.url)).length,
+  ],
+  [
+    'docs/architecture.md',
+    /read by all but (\w+) harnesses/,
+    HARNESSES.filter((harness) => harness.skills !== undefined && !harness.skills.shared).length,
+  ],
+];
+const NUMBER_WORDS = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine'];
+for (const [file, pattern, actual] of WRITTEN_COUNTS) {
+  const text = readFileSync(new URL(`../${file}`, import.meta.url), 'utf8');
+  const found = pattern.exec(text);
+  assert.ok(found?.[1], `${file} should still make the claim ${pattern.source} is about`);
+  assert.equal(
+    found[1],
+    NUMBER_WORDS[actual] ?? String(actual),
+    `${file} states a count the repository no longer has`,
+  );
+}
+
 assert.match(
   serverManifest.description,
   /godot/i,
