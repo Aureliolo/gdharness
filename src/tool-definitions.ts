@@ -832,6 +832,11 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     parameters: {
       projectPath: PROJECT_PATH,
       timeoutMs: { type: 'number', description: 'How long to wait for the scan. Default 30000.' },
+      reloadScript: {
+        type: 'string',
+        description:
+          'A script to recompile in the editor after the scan, for the fault a scan cannot reach: a script the editor has loaded keeps the copy it built, and that copy is refreshed when one of its dependencies changes rather than when it changes itself, so a method added to a loaded class reads as missing at every caller. This recompiles into the same object, so the holders that kept the stale copy alive see the new one. The methods it has afterwards come back under reloadedMethods, because a reload that compiled nothing and answered OK is the failure worth catching.',
+      },
     },
     requires: ['projectPath'],
   },
