@@ -3105,6 +3105,17 @@ async function testAnErrorTheGameBrokeOnIsReported({ call, attempt, project }: E
     `and editor_status says the same about the same run: ${text(status)}`,
   );
 
+  // A runtime call to a game the session knows is held is refused at once, with why it is held
+  // and what lets it go. It used to wait the whole runtime timeout on a game that answers nothing
+  // and then guess that it might be paused, when the session had been told the moment it broke.
+  const asked = Date.now();
+  const refused = await attempt('runtime_inspect', { ...game, op: 'tree', nodePath: '/root' });
+  const waited = Date.now() - asked;
+  assert.equal(refused.ok, false, `a runtime call to a held game is refused: ${refused.text}`);
+  assert.match(refused.text, /held by the editor's debugger, on an error: .*null/i, refused.text);
+  assert.match(refused.text, /debug_control continue lets it go/, refused.text);
+  assert.ok(waited < 5000, `and refused at once rather than after the runtime timeout: ${waited}ms`);
+
   // Asked twice on purpose: every ask drains the adapter, which goes on reporting the same stop
   // for as long as the game sits at it, so one error must not become one more error per call.
   const counted = asNumber(get(output, 'errors'));
