@@ -79,6 +79,7 @@ that is running, and the project on disk. ${TOOL_SPECS.length} tools, named \`do
 | What a property reads right now, on a node whose path you already hold | \`runtime_inspect\` \`property\`, \`runtime_invoke\` |
 | What a property on an object a node holds reads | the same two, with colons: \`_game:clock:speed\` |
 | Press a button | \`runtime_input click\`, which says what was under the pointer |
+| Press the next thing after a click that changed screen | \`runtime_wait until\` with \`says\` and a word the new screen shows, then the click. A click sent straight after a screen change lands on a control the new screen is about to free, answers \`landed: true\`, and does nothing; a frame count is a number nobody can pick correctly across a cold start and a warm one, and waiting for the words answered in about 130ms where twenty frames had not been enough |
 | Fill in a field | \`runtime_input click\` on it, then \`runtime_input text\` with \`replace\`; a submitted field has to be clicked again |
 | Click somebody standing in a 3D room | \`runtime_input click\` on the Node3D, which aims at what it draws |
 | Pick something out of a dropdown | \`runtime_input choose\` on it, by what the item says |
