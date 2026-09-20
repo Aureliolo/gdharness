@@ -80,6 +80,21 @@ export function argumentsOf(spec: ToolSpec, op: string): string[] {
   return Object.keys(spec.parameters).filter((name) => opTakes(spec, op, name));
 }
 
+/**
+ * The tools that take no `projectPath`, read off the schemas rather than remembered.
+ *
+ * Both the skill and the tool reference open by saying which calls need one, and both said it in
+ * prose that named the `runtime_*` and `debug_*` families and nothing else. `editor_status` takes no
+ * arguments at all and `editor_output` takes its own, and an argument a tool does not declare is
+ * refused rather than ignored, so a session following that sentence failed on what is often its
+ * first call. Generated here so the sentence cannot go on being true of a surface that moved.
+ */
+export function toolsWithoutProjectPath(): string[] {
+  return TOOL_SPECS.filter((spec) => !Object.hasOwn(spec.parameters, 'projectPath'))
+    .map((spec) => spec.name)
+    .sort();
+}
+
 const PROJECT_PATH: JsonSchema = {
   type: 'string',
   description: 'Absolute path to the project directory, the one holding project.godot.',
@@ -828,7 +843,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'editor_rescan',
     description:
-      'Makes the running editor scan the project filesystem, so files written outside it are picked up. The scan is a change-detecting walk rather than an unconditional reparse, so a file another engine has already imported reads as settled and the walk does not look inside it: its class_name then stays out of the list the editor resolves against, however many times you scan. Any class in that state is named under unseenByEditor, which is what no check on disk can see, since the declaration and the cache are both correct there and only the editor disagrees. The cure measured downstream is a change to the declaring script, saved, and then a rescan: the change on its own left every affected file reporting the same errors, and the rescan after it cleared them. Whether a rescan alone would have done it there is not known, because the rescans in that report may have answered before the scan ran, which is the timing this tool no longer has. editor_launch restart also does it, and project_import refresh_classes does not: it rewrites the cache and does not touch what the editor is holding. A scan writes .godot/global_script_class_cache.cfg from the list the editor is holding, so a class the editor cannot resolve goes out of that file with it. That is not a reason to refuse the scan, because on a class the editor has merely not walked yet the scan is the cure; what the answer does instead is name the loss under cacheLost and rebuild the cache from the files, naming what came back under cacheRestored, so no fresh engine, CI run or clone inherits the short file. An editor that lost classes is still holding the short list, so the note says to restart it before scanning again. Needs the editor connected.',
+      'Makes the running editor scan the project filesystem, so files written outside it are picked up. The scan is a change-detecting walk rather than an unconditional reparse, so a file another engine has already imported reads as settled and the walk does not look inside it: its class_name then stays out of the list the editor resolves against, however many times you scan. Any class in that state is named under unseenByEditor, which is what no check on disk can see, since the declaration and the cache are both correct there and only the editor disagrees. The cure is this call on its own, with no change to the declaring script: measured against a real editor on three platforms, with idle waits of the same length ruled out so the scan is credited rather than the time it takes, and reproduced in a second project against its own reproduction in 203ms. editor_launch restart also does it and costs a window, and project_import refresh_classes does not: it rewrites the cache and does not touch what the editor is holding. A scan writes .godot/global_script_class_cache.cfg from the list the editor is holding, so a class the editor cannot resolve goes out of that file with it. That is not a reason to refuse the scan, because on a class the editor has merely not walked yet the scan is the cure; what the answer does instead is name the loss under cacheLost and rebuild the cache from the files, naming what came back under cacheRestored, so no fresh engine, CI run or clone inherits the short file. An editor that lost classes is still holding the short list, so the note says to restart it before scanning again. Needs the editor connected.',
     parameters: {
       projectPath: PROJECT_PATH,
       timeoutMs: { type: 'number', description: 'How long to wait for the scan. Default 30000.' },

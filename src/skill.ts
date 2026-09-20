@@ -13,7 +13,7 @@
 import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import type { Harness } from './harnesses.js';
-import { TOOL_SPECS } from './tool-definitions.js';
+import { TOOL_SPECS, toolsWithoutProjectPath } from './tool-definitions.js';
 import { renderToolsMarkdown } from './tool-reference.js';
 
 /** The skill's name, which is also its directory. The format requires them to match. */
@@ -40,8 +40,11 @@ that is running, and the project on disk. ${TOOL_SPECS.length} tools, named \`do
 
 ## Start here
 
-- Every call takes \`projectPath\`, except \`runtime_*\` and \`debug_*\`, where it picks between
-  running games. There is no ambient project.
+- Every call takes \`projectPath\` except ${toolsWithoutProjectPath()
+    .map((name: string) => `\\\`${name}\\\``)
+    .join(', ')}, which take none. The \`runtime_*\` and \`debug_*\` ones pick between running
+  games instead; the others answer about the editor this server is connected to. There is no
+  ambient project, and an argument a tool does not declare is refused rather than ignored.
 - \`editor_status\` says whether an editor is connected and whether its addon matches the server.
   \`addonIsStale\` means they differ, and \`staleNote\` says which half is behind: an editor that
   needs restarting, or a server that needs reconnecting in your harness. Every answer that came
