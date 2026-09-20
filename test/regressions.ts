@@ -1271,8 +1271,11 @@ async function testBreakpointsAreSentAgainBeforeAPlay(): Promise<void> {
  * outside the project, or by a hand editing the file, is not one a play is told to stop on.
  */
 function testTheBreakpointNoteIsTheProjects(): void {
-  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-breakpoints-'));
-  const elsewhere = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-elsewhere-'));
+  // Spelt the way the adapter spells them, with every symlink and short name resolved, which on a
+  // Windows runner turns RUNNER~1 into the account's name: the note compares against that spelling
+  // and hands it back, and a fixture comparing against the other one is testing its own temp dir.
+  const project = realpathSync.native(mkdtempSync(join(tmpdir(), 'gdharness-breakpoints-')));
+  const elsewhere = realpathSync.native(mkdtempSync(join(tmpdir(), 'gdharness-elsewhere-')));
   try {
     writeBreakpointNote(project, [
       { scriptPath: join(project, 'scripts', 'main.gd'), lines: [30, 12] },

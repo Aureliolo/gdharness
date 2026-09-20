@@ -37,7 +37,9 @@ export function writeBreakpointNote(projectPath: string, held: readonly HeldBrea
   // every /var/folders project is really under /private/var/folders, and a file compared against
   // the unresolved root reads as outside it.
   const root = realPathOr(projectPath);
-  const inside = held.filter((one) => one.lines.length > 0 && withinProject(root, one.scriptPath));
+  const inside = held
+    .map((one) => ({ scriptPath: realPathOr(one.scriptPath), lines: one.lines }))
+    .filter((one) => one.lines.length > 0 && withinProject(root, one.scriptPath));
   try {
     if (inside.length === 0) {
       rmSync(path, { force: true });
