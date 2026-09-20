@@ -87,7 +87,7 @@ import { discardWith } from '../src/scratch.js';
 import { alive, PROJECT_FILE_ARGUMENTS, patienceForFrames, runIsUp, runtimeVerdict } from '../src/server.js';
 import type { GodotProcess } from '../src/server-types.js';
 import { addonMismatch, markIfStale, SERVER_VERSION } from '../src/server-version.js';
-import { ADDONS, autoloadIsOurs, installAddons } from '../src/setup.js';
+import { ADDONS, autoloadIsOurs, installAddons, SCRIPT_RUNS_SETTING } from '../src/setup.js';
 import { skillFiles } from '../src/skill.js';
 import { readNonNegativeNumber, readPositiveNumber } from '../src/tool-args.js';
 import {
@@ -4222,6 +4222,40 @@ function testTheReferencePrintsEveryShapeOfType(): void {
 }
 
 /**
+ * The skill says a script run can be served, and names the setting the addon actually reads.
+ *
+ * It said a `godot -s` script run does not answer, full stop. That is the default and not the rule:
+ * the autoload stands down in a script run unless `serve_script_runs` is set, which is there for
+ * somebody driving a `-s` script on purpose. The setting was in `docs/` and in neither the skill nor
+ * any tool description, so the one sentence an agent reads before its first call was the half that
+ * is wrong, and a downstream project had copied it into its own documentation as unconditional.
+ * That is the half a consumer builds a guard on.
+ *
+ * Held against the addon's own constant rather than spelled twice. A rename in the GDScript would
+ * otherwise leave the skill naming a setting nothing reads, which is worse than not naming one:
+ * a caller sets it, nothing happens, and the sentence says it should have.
+ */
+function testTheSkillNamesTheSettingThatServesAScriptRun(): void {
+  const addon = readFileSync('src/godot/addons/gdharness_runtime/runtime_autoload.gd', 'utf8');
+  const declared = /SCRIPT_RUNS_SETTING\s*:\s*String\s*=\s*"([^"]+)"/.exec(addon)?.[1];
+  assert.ok(declared, 'the addon should declare the setting it reads');
+  assert.equal(SCRIPT_RUNS_SETTING, declared, 'and the skill should name that one rather than a copy');
+  // The addon reads it where it decides, not merely declares it. A constant nothing consults would
+  // satisfy the line above while the sentence describes a setting with no effect.
+  assert.match(
+    addon,
+    /_script_run\(\)\s*and\s*not\s*Read\.as_bool\(ProjectSettings\.get_setting\(SCRIPT_RUNS_SETTING/,
+    'and the script-run refusal should be the thing that consults it',
+  );
+
+  const skill = skillFiles('0.0.0').get('SKILL.md') ?? '';
+  const sentence = skill.split('\n\n').find((block) => block.includes('`godot -s` script run'));
+  assert.ok(sentence, 'the skill should still say what a script run does');
+  assert.match(sentence, /by default/, 'as a default rather than as a property of script runs');
+  assert.ok(sentence.includes(SCRIPT_RUNS_SETTING), `and name the setting that changes it: ${sentence}`);
+}
+
+/**
  * Nothing the skill writes escapes a backtick.
  *
  * A generated name went into `SKILL.md` as `\`debug_control\``, rendering the backslashes rather
@@ -7349,6 +7383,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheProjectPathSentenceNamesEveryToolThatTakesNone,
   testEveryArgumentInTheReferenceIsDescribed,
   testTheReferencePrintsEveryShapeOfType,
+  testTheSkillNamesTheSettingThatServesAScriptRun,
   testTheSkillWritesNoEscapedBackticks,
   testAnAuditThatCouldNotAskIsNotAnAuditThatPassed,
   testRefreshingUidsMakesTheSidecarAndWritesNoScene,

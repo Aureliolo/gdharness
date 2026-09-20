@@ -29,6 +29,17 @@ export const RUNTIME_AUTOLOAD = {
   path: 'addons/gdharness_runtime/runtime_autoload.gd',
 } as const;
 
+/**
+ * The setting that makes the runtime serve a `godot -s` script run, which it does not by default.
+ *
+ * Named here because the skill has to say it. The skill said a script run does not answer, full
+ * stop, which is the default rather than the rule, and a downstream project had copied it into its
+ * own documentation as unconditional: it is the half a consumer builds a guard on. Held against the
+ * addon's own constant by a case, so a rename there cannot leave this sentence naming a setting
+ * nothing reads.
+ */
+export const SCRIPT_RUNS_SETTING = 'gdharness/runtime/serve_script_runs';
+
 /** Written into each installed addon, so doctor can tell an old copy from the shipped one. */
 const VERSION_MARKER = '.gdharness-version';
 
