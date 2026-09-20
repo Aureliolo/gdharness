@@ -1571,8 +1571,8 @@ async function testAnEditorAServerOpenedIsStartedAgain(): Promise<void> {
       if (opened) {
         assert.match(
           textOf(await restart) ?? '',
-          /No Godot executable found/,
-          'an editor a server opened is started again, so it is the engine that stops it',
+          /GODOT_PATH is set to .*gdharness-no-such-engine, which does not exist/,
+          'an editor a server opened is started again, so it is the engine that stops it, and the refusal names the path this fixture set',
         );
         assert.equal(asked.includes('restart_editor'), false, 'and it is never asked to restart itself');
         continue;
@@ -2779,6 +2779,71 @@ function testTheReleaseButtonOffersWhatBothDocumentsDescribe(): void {
   }
 }
 
+/**
+ * A GODOT_PATH that names something broken is refused as that, naming the path and what is wrong.
+ *
+ * The locator answered null for two states: nothing set and nothing found, and a variable set to
+ * something that does not answer. Both became "No Godot executable found. Set GODOT_PATH", which
+ * told somebody who had set it to set it, and never named what they had set or why it was refused.
+ * The two states also call for opposite next steps, since the first is a machine without an engine
+ * and the second is one line in a config.
+ *
+ * Both broken shapes, because they fail in different places: a path that is not there never
+ * reaches the engine, and a file that is there and is not an engine fails inside `--version`, and a
+ * fixture holding only the first would pass a locator that had gone back to null for the second.
+ * The nothing-set answer is held beside them as the positive, from the same server shape.
+ */
+async function testAnEngineThatDoesNotAnswerIsNamed(): Promise<void> {
+  const missing = join(tmpdir(), 'gdharness-no-such-engine');
+  const notAnEngine = join(process.cwd(), 'package.json');
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-no-engine-'));
+  writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+
+  for (const [label, path, reason] of [
+    ['a path that is not there', missing, /does not exist/],
+    ['a file that is not an engine', notAnEngine, /does not answer --version/],
+  ] as const) {
+    const server = new ServerProcess({ env: { GODOT_PATH: path } });
+    try {
+      await server.initialize('regression-test');
+      const status = parseTextContent(
+        await server.request('tools/call', { name: 'editor_status', arguments: {} }),
+      );
+      assert.equal(get(status, 'godot', 'path'), null, `${label}: no engine is reported`);
+      const problem = text(get(status, 'godot', 'problem'));
+      assert.match(problem, /GODOT_PATH is set to/, `${label}: and why is said in editor_status: ${problem}`);
+      assert.ok(problem.includes(path), `${label}: naming the path that was set: ${problem}`);
+      assert.match(problem, reason, `${label}: and what is wrong with it: ${problem}`);
+
+      const refused =
+        textOf(
+          await server.request('tools/call', {
+            name: 'project_import',
+            arguments: { projectPath: project, op: 'refresh_classes' },
+          }),
+        ) ?? '';
+      assert.match(
+        refused,
+        /GODOT_PATH is set to/,
+        `${label}: a tool that needs the engine says the same: ${refused}`,
+      );
+      assert.match(
+        refused,
+        /Point GODOT_PATH at a Godot 4 executable/,
+        `${label}: and what to do: ${refused}`,
+      );
+      assert.doesNotMatch(
+        refused,
+        /No Godot executable found/,
+        `${label}: rather than the answer for nothing set`,
+      );
+    } finally {
+      await server.stop();
+    }
+  }
+  sweep(project);
+}
+
 function testAnAutoloadGitWillNotCarry(): void {
   const project = mkdtempSync(join(tmpdir(), 'gdharness-ignored-'));
   const git = (...gitArgs: string[]): SpawnSyncReturns<string> =>
@@ -3229,6 +3294,31 @@ function testAGameThatAnnouncedAndWentIsSaidSo(): void {
     );
     assert.match(problem, /quit or was ended rather than never starting/, `and told apart: ${problem}`);
     assert.match(problem, /editor_output/, `with where its output is: ${problem}`);
+    assert.doesNotMatch(problem, /earlier/, `one gone game is reported as one: ${problem}`);
+
+    // A second and a third that went the same way are counted, so a game crashing three times in a
+    // minute is not answered as one crash. The most recent is still the one named, because its
+    // output is the one worth reading, and the count is what says the others happened.
+    const again: SpawnSyncReturns<string> = spawnSync(process.execPath, ['--eval', ''], { encoding: 'utf8' });
+    const third: SpawnSyncReturns<string> = spawnSync(process.execPath, ['--eval', ''], { encoding: 'utf8' });
+    for (const pid of [again.pid, third.pid]) {
+      writeFileSync(
+        join(directory, `runtime-${pid}.json`),
+        JSON.stringify({
+          protocol: RUNTIME_PROTOCOL,
+          pid,
+          port: 51_777,
+          address: '127.0.0.1',
+          project: { name: 'Went', path: root },
+        }),
+        'utf8',
+      );
+      runtimesAnnounced([directory]);
+    }
+    const repeated = chooseRuntime([], root, []);
+    const thrice = 'problem' in repeated ? repeated.problem : '';
+    assert.match(thrice, new RegExp(`gone: pid ${third.pid}`), `the most recent is the one named: ${thrice}`);
+    assert.match(thrice, /2 earlier ones went the same way/, `and the others are counted: ${thrice}`);
 
     // The other project's game is not this project's answer. These directories are shared, and a
     // refusal about somebody else's crash would be the right shape about the wrong game.
@@ -4050,7 +4140,13 @@ function testTheStaleNoteNamesTheCallThatRebuildsTheCopy(): void {
   // edit the file the diagnostics are already wrong about is the retracted cure, and the one thing
   // every one of these sentences has to keep out. See testTheCureIsWrittenWhole.
   const withLever = staleAnalysisNote([bell], ['Rope', 'Clapper']);
-  assert.match(withLever, /changing Clapper, Rope and rescanning/, 'named in order, so the note is stable');
+  // "or" between the levers and "then" before the scan, because "changing Clapper, Rope and
+  // rescanning" read as three things to do, the last of them a file called rescanning.
+  assert.match(
+    withLever,
+    /changing Clapper or Rope and then rescanning/,
+    'named in order, so the note is stable, and as alternatives followed by the scan',
+  );
   assert.doesNotMatch(withLever, /depend on no other global class/, 'and the no-lever half is gone');
 
   const pair = staleAnalysisNote(
@@ -9883,6 +9979,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testWhatTheEditorSavedAwayIsReportedTheSameWay,
   testARestartSaysWhatTheEditorDropped,
   testProjectDefaultsToTheWorkingDirectory,
+  testAnEngineThatDoesNotAnswerIsNamed,
   testAnAutoloadGitWillNotCarry,
   testAnAutoloadNamingAFileThatIsNotThere,
   testEveryGdscriptIsUnderTheGatesAndEveryGateHasSome,

@@ -766,13 +766,13 @@ class GodotServer {
   // -------------------------------------------------------------------------------------------
 
   async run(): Promise<void> {
-    const godotPath = await this.locator.find();
-    if (godotPath === null) {
+    const located = await this.locator.find();
+    if (!located.ok) {
       console.error(
-        '[SERVER] No Godot found. Set GODOT_PATH; until then every tool that runs the engine will say so.',
+        `[SERVER] ${GodotLocator.refusal(located).message} Until that is fixed every tool that runs the engine will say so.`,
       );
     } else {
-      console.error(`[SERVER] Using Godot at: ${godotPath}`);
+      console.error(`[SERVER] Using Godot at: ${located.path}`);
     }
 
     const transport = new StdioServerTransport();
@@ -1592,14 +1592,12 @@ class GodotServer {
 
   /** The engine, or the refusal to send when there is none. */
   private async engine(): Promise<Checked<string>> {
-    const godotPath = await this.locator.find();
-    if (godotPath === null) {
-      return {
-        ok: false,
-        response: this.createErrorResponse('No Godot executable found.', GodotLocator.ADVICE),
-      };
+    const located = await this.locator.find();
+    if (!located.ok) {
+      const refusal = GodotLocator.refusal(located);
+      return { ok: false, response: this.createErrorResponse(refusal.message, [...refusal.advice]) };
     }
-    return { ok: true, value: godotPath };
+    return { ok: true, value: located.path };
   }
 
   /** The project the call names, checked to be one. */
@@ -1827,7 +1825,7 @@ class GodotServer {
     }
     const engine = await this.engine();
     if (!engine.ok) {
-      return this.createErrorResponse('No Godot executable found.');
+      return engine.response;
     }
     const projectPath = project.value.path;
 
@@ -1862,7 +1860,14 @@ class GodotServer {
   ): Promise<HeadlessOutcome> {
     const engine = await this.engine();
     if (!engine.ok) {
-      return { ok: false, message: 'No Godot executable found.', messages: [] };
+      // The refusal as built, with its reason and advice, rather than a sentence of its own: this
+      // and the uid refresh both used to answer "No Godot executable found" over a GODOT_PATH that
+      // was set, throwing away the one answer that named the path.
+      return {
+        ok: false,
+        message: engine.response.content.map((block) => block.text).join(' '),
+        messages: [],
+      };
     }
     this.logDebug(`Running ${operation} in ${projectPath}: ${JSON.stringify(params)}`);
     return await runOperation(
@@ -2751,7 +2756,7 @@ class GodotServer {
 
   /** editor_status: the three things an agent asks before doing anything else, in one answer. */
   private async handleEditorStatus(): Promise<ToolResponse> {
-    const godotPath = await this.locator.find();
+    const located = await this.locator.find();
 
     // Every announced game is pinged, so a game that announced and then hung is reported as
     // such rather than counted as reachable on the strength of its announcement.
@@ -2780,8 +2785,11 @@ class GodotServer {
         debugPort: playing?.debugPort ?? this.godotBridge.getStatus().debugPort,
       },
       godot: {
-        path: godotPath,
-        version: godotPath === null ? null : await this.godotVersion(godotPath),
+        path: located.ok ? located.path : null,
+        version: located.ok ? await this.godotVersion(located.path) : null,
+        // Why there is none, when GODOT_PATH names something: a null path beside a null version
+        // reads as a machine with no engine, and a variable pointing at the wrong file is not that.
+        problem: located.ok ? undefined : GodotLocator.refusal(located).message,
       },
       game: {
         // The record too, or "is something running" answers no about a run this server did not
