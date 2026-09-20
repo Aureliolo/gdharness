@@ -355,3 +355,11 @@ Read that requirement from the rulesets rather than from branch protection. `gh 
 repos/.../branches/main/protection` answers 404 here, which reads as "nothing is enforced" and is
 wrong: the rules live in `gh api repos/.../rulesets`, and `strict` on the required checks is the
 line that makes this matter.
+
+Read a commit's subject back after writing it. Twelve of the nineteen commits between v0.13.36 and
+v0.13.37 have the subject `@`, because the message was written as a PowerShell here-string,
+`-m @'...'@`, through a POSIX shell, where `@'` is a literal `@` and a quote. Every one of those
+commits succeeded, and the fault was found downstream by somebody reading `git log` to see what an
+upgrade brought. The repository squashes with the pull request's title and body now, so a branch
+subject cannot reach `main` again, but the branch commits are what a reviewer reads:
+`-m "Subject" -m "Body"`, or a heredoc, and then `git log -1 --format=%s`.
