@@ -4942,7 +4942,13 @@ async function testAnAnnotatedDeclarationIsStillADeclaration(): Promise<void> {
 }
 
 /**
- * A structure read asked for what a script inherits answers with it.
+ * A structure read describes the script it read, in every shape a declaration comes in.
+ *
+ * One engine and one project for all of it, because the boot is the slow part and each of these is
+ * a different reading of the same call. What it holds, in the order the assertions come: what a
+ * script inherits when asked for it, which functions the engine actually calls, a rest parameter's
+ * name, a parameter list that ends where the signature does rather than at the first comma or the
+ * first line break, and a trailing comment that does not become part of a value.
  *
  * `includeInherited` was described in the schema and read by nothing: the op maps to
  * `get_script_info`, which took `script_path` and no other parameter, so the two answers were byte
@@ -4956,7 +4962,7 @@ async function testAnAnnotatedDeclarationIsStillADeclaration(): Promise<void> {
  * findings from one that merely concatenates: `shared` is declared twice and must appear twice,
  * once as the leaf's own and once as the base's.
  */
-async function testAStructureReadCanCarryWhatTheScriptInherits(): Promise<void> {
+async function testAStructureReadDescribesTheScriptItRead(): Promise<void> {
   const godotPath = resolveGodotPath();
   if (!godotPath) {
     if (process.env['GDHARNESS_REQUIRE_GODOT']) {
@@ -5049,6 +5055,72 @@ async function testAStructureReadCanCarryWhatTheScriptInherits(): Promise<void> 
         // A rest parameter, where the dots are syntax rather than part of the name.
         'func collect(first: int, ...rest: Array) -> void:',
         '\tprint(first, rest)',
+        '',
+      ].join('\n'),
+    );
+    // Commas that are not separators, and a bracket that is not the end of the signature. Each of
+    // these is ordinary Godot and each one used to add parameters the function does not have.
+    writeFileSync(
+      join(project, 'defaults.gd'),
+      [
+        'extends RefCounted',
+        '',
+        'signal changed(d: Dictionary[String, int])',
+        '',
+        'const LABEL: String = "hash # inside"  # and a real comment',
+        '',
+        'var held: int = 5  # a trailing note',
+        '',
+        '',
+        'func place(at: Vector2 = Vector2(1, 2), tint: Color = Color(1, 0, 0, 1), name: String = "a,b") -> void:',
+        '\tprint(at, tint, name)',
+        '',
+        '',
+        // A body on the declaration's own line, carrying a bracket and a colon of its own. The
+        // trailing-comment version of this cannot separate the two fixes, because taking the
+        // comment off first leaves the last bracket on the line where it belongs.
+        'func noted(a: int) -> void: print(a, ")")',
+        '',
+        '',
+        // A comma inside a typed collection, which is not a separator either. Reported from a game
+        // project where 13 single-line signatures carry one and the pinned gdUnit4 has a single
+        // instance, so the addon barely exercises this and an ordinary project has them everywhere.
+        'func from_dict(saved: Dictionary, roster: Dictionary[String, int]) -> bool:',
+        '\treturn saved.size() + roster.size() > 0',
+        '',
+        '',
+        // Wrapped, which `gdformat` does to anything past the line length. Read one line at a time
+        // this answered with no parameters and no return type, both of them on lines it never saw.
+        'func spread(',
+        '\tfirst: int,',
+        '\tsecond: String = "x",',
+        ') -> bool:',
+        '\treturn first > 0 and second != ""',
+        '',
+      ].join('\n'),
+    );
+    // A wrapped enum, the other half of the same fault: 23 of them in the pinned gdUnit4.
+    writeFileSync(
+      join(project, 'wrapped.gd'),
+      ['extends RefCounted', '', 'enum Mode {', '\tFAST,', '\tSLOW,', '}', ''].join('\n'),
+    );
+    // A file mid-edit, which is the state an agent is most likely to ask about. Joining lines until
+    // the brackets balance made this worse before it was bounded to declarations: an unclosed
+    // `print(` in a body ran to the end of the file and took `after` with it.
+    writeFileSync(
+      join(project, 'broken.gd'),
+      [
+        'extends RefCounted',
+        '',
+        'var kept: int = 1',
+        '',
+        '',
+        'func half_written() -> void:',
+        '\tprint(',
+        '',
+        '',
+        'func after() -> void:',
+        '\tpass',
         '',
       ].join('\n'),
     );
@@ -5157,6 +5229,114 @@ async function testAStructureReadCanCarryWhatTheScriptInherits(): Promise<void> 
           { name: 'rest', type: 'Array', default: '', is_rest: true },
         ],
         `a rest parameter is named without its dots and says it is one: ${JSON.stringify(engineCalls)}`,
+      );
+
+      // A comma inside a default value is the same character as the one between parameters, and
+      // splitting on every comma invented one parameter per comma it should not have seen. The
+      // whole table, because the fault adds entries rather than losing them: an assertion naming
+      // the three that should be there passes on an answer that also carries five that should not.
+      const bracketed = await call('script_info', {
+        projectPath: project,
+        op: 'structure',
+        scriptPath: 'res://defaults.gd',
+      });
+      assert.deepEqual(
+        asArray(get(bracketed, 'functions')).map((each) => [
+          get(each, 'name'),
+          get(each, 'return_type'),
+          asArray(get(each, 'params')).map((p) => [get(p, 'name'), get(p, 'type'), get(p, 'default')]),
+        ]),
+        [
+          [
+            'place',
+            'void',
+            [
+              ['at', 'Vector2', 'Vector2(1, 2)'],
+              ['tint', 'Color', 'Color(1, 0, 0, 1)'],
+              // The comma here is inside the string, so it separates nothing.
+              ['name', 'String', '"a,b"'],
+            ],
+          ],
+          // The last bracket on this line belongs to the body, not to the signature, and the last
+          // colon does too: read to the end of the line this answered with a parameter typed
+          // `int) -> void`, a second one named `")"`, and no return type at all.
+          ['noted', 'void', [['a', 'int', '']]],
+          [
+            'from_dict',
+            'bool',
+            [
+              ['saved', 'Dictionary', ''],
+              // The comma is inside the type's own brackets, so it separates nothing. Split on it,
+              // this answered with a third parameter named `int]` and a truncated second type.
+              ['roster', 'Dictionary[String, int]', ''],
+            ],
+          ],
+          [
+            // Wrapped across four lines, and the `-> bool` is on the last of them.
+            'spread',
+            'bool',
+            [
+              ['first', 'int', ''],
+              ['second', 'String', '"x"'],
+            ],
+          ],
+        ],
+        `every parameter list ends where the signature does: ${JSON.stringify(bracketed)}`,
+      );
+
+      const wrapped = await call('script_info', {
+        projectPath: project,
+        op: 'structure',
+        scriptPath: 'res://wrapped.gd',
+      });
+      assert.deepEqual(
+        asArray(get(wrapped, 'enums')).map((each) => [
+          get(each, 'name'),
+          get(each, 'values'),
+          get(each, 'line'),
+        ]),
+        // The line is where the declaration starts, not where its closing brace is.
+        [['Mode', ['FAST', 'SLOW'], 3]],
+        `a wrapped enum has the members it declares: ${JSON.stringify(wrapped)}`,
+      );
+
+      const halfWritten = await call('script_info', {
+        projectPath: project,
+        op: 'structure',
+        scriptPath: 'res://broken.gd',
+      });
+      assert.deepEqual(
+        asArray(get(halfWritten, 'functions')).map((each) => get(each, 'name')),
+        // Both of them: the one holding the unclosed bracket and the one below it. The second is
+        // the whole point, since joining to the end of the file leaves the first exactly as it is.
+        ['half_written', 'after'],
+        `an unclosed bracket in a body costs nothing below it: ${JSON.stringify(halfWritten)}`,
+      );
+      assert.deepEqual(
+        asArray(get(halfWritten, 'variables')).map((each) => get(each, 'name')),
+        ['kept'],
+        `and the variable above it is still read: ${JSON.stringify(halfWritten)}`,
+      );
+      assert.deepEqual(
+        asArray(get(bracketed, 'signals')).map((each) => [
+          get(each, 'name'),
+          asArray(get(each, 'params')).map((p) => [get(p, 'name'), get(p, 'type')]),
+        ]),
+        // A signal's parameters are written like a function's, and the comma inside the type is
+        // not a separator either.
+        [['changed', [['d', 'Dictionary[String, int]']]]],
+        `and a signal's list is read the same way: ${JSON.stringify(bracketed)}`,
+      );
+      assert.deepEqual(
+        asArray(get(bracketed, 'variables')).map((each) => [get(each, 'name'), get(each, 'default_value')]),
+        [['held', '5']],
+        `a trailing comment is not part of a default: ${JSON.stringify(bracketed)}`,
+      );
+      assert.deepEqual(
+        asArray(get(bracketed, 'constants')).map((each) => [get(each, 'name'), get(each, 'value')]),
+        // The `#` inside the string is not a comment, and the one after it is.
+        [['LABEL', '"hash # inside"']],
+        `nor of a constant, and a hash inside a string is not a comment: ${JSON.stringify(bracketed)}`,
       );
 
       // A native base declares nothing in a file, so the walk has nothing to do and says so with an
@@ -8056,7 +8236,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheSkillWritesNoEscapedBackticks,
   testAnAuditThatCouldNotAskIsNotAnAuditThatPassed,
   testAnAnnotatedDeclarationIsStillADeclaration,
-  testAStructureReadCanCarryWhatTheScriptInherits,
+  testAStructureReadDescribesTheScriptItRead,
   testRefreshingUidsMakesTheSidecarAndWritesNoScene,
   testWhoIsHoldingAPortIsAskable,
   testWhatTheEditorSavedAwayIsReportedTheSameWay,
