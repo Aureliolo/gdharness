@@ -218,20 +218,29 @@ function reportSkipped(candidate: Candidate): void {
   );
 }
 
+/**
+ * What one harness's config took.
+ *
+ * `byHand` and a `written` that replaced nothing are not the same answer, however alike they look
+ * from the caller: one leaves a config naming this version on disk and the other leaves the file
+ * exactly as it was, with the work still to do.
+ */
+type Connection = { readonly kind: 'byHand' } | { readonly kind: 'written'; readonly from: string | null };
+
 /** Writes one harness's config, says what it did, and hands back the launch line it replaced. */
-function reportConnection(group: Group, launch: Launch, projectPath: string): string | undefined {
+function reportConnection(group: Group, launch: Launch, projectPath: string): Connection {
   const who = group.harnesses.map((harness) => harness.name).join(', ');
   const written = connect(group.writer, projectPath, launch);
   if (written.action === 'command') {
     console.log(`${who}: run  ${(written.command ?? []).join(' ')}`);
-    return undefined;
+    return { kind: 'byHand' };
   }
   if (written.action === 'snippet') {
     console.log(`${who}: put this in ${written.path}`);
     for (const line of (written.snippet ?? '').split('\n')) {
       console.log(`  ${line}`);
     }
-    return undefined;
+    return { kind: 'byHand' };
   }
   console.log(`${who}: ${written.action} ${written.path}`);
   if (written.wasLaunchedBy !== undefined) {
@@ -245,7 +254,7 @@ function reportConnection(group: Group, launch: Launch, projectPath: string): st
       console.log(`  ${harness.name}: ${harness.manual}`);
     }
   }
-  return written.wasLaunchedBy;
+  return { kind: 'written', from: written.wasLaunchedBy ?? null };
 }
 
 /**
@@ -451,14 +460,18 @@ async function upgrade(): Promise<void> {
   const launch = launchFor(version, godot.godotPath, projectPath);
   const already = HARNESSES.filter((harness) => registered(harness, projectPath));
   const moved: string[] = [];
+  let written = 0;
+  let byHand = 0;
   for (const group of groupByFile(already, projectPath)) {
-    const was = reportConnection(group, launch, projectPath);
-    if (was !== undefined && !moved.includes(was)) {
-      moved.push(was);
+    const took = reportConnection(group, launch, projectPath);
+    if (took.kind === 'byHand') {
+      byHand += 1;
+      continue;
     }
-  }
-  if (already.length === 0) {
-    console.log('no harness config names gdharness, so none was re-pinned');
+    written += 1;
+    if (took.from !== null && !moved.includes(took.from)) {
+      moved.push(took.from);
+    }
   }
   // The same rule setup uses, not the one uninstall uses. everySkillDirectory names every place a
   // copy could be, which is what you want when removing them and is how an upgrade came to create
@@ -472,7 +485,7 @@ async function upgrade(): Promise<void> {
     '  1. The open editor is still running the addons it loaded at startup. Restart it with the\n' +
       '     editor_launch restart tool, which closes and reopens the window.',
   );
-  console.log(harnessNote(moved, [launch.command, ...launch.args].join(' ')));
+  console.log(harnessNote({ moved, written, byHand }, [launch.command, ...launch.args].join(' ')));
 }
 
 function doctorReport(projectPath: string): void {

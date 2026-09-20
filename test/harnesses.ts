@@ -341,16 +341,72 @@ function testAnInstallSaysWhatItLaunchedInsteadOf(): void {
  * which is exactly why a wrong number there could sit for good.
  */
 function testTheUpgradeNoteNamesTheConfigRatherThanTheAddons(): void {
-  const moved = harnessNote(['node ../gdharness/build/index.js'], 'npx -y gdharness@9.9.10');
+  const moved = harnessNote(
+    { moved: ['node ../gdharness/build/index.js'], written: 1, byHand: 0 },
+    'npx -y gdharness@9.9.10',
+  );
   assert.match(moved, /node \.\.\/gdharness\/build\/index\.js/, 'it names what the config held');
   assert.match(moved, /npx -y gdharness@9\.9\.10/, 'and what it holds now');
 
   // Nothing moved, so there is nothing it can honestly name: the server the harness is running is
   // whichever one it spawned, and an upgrade cannot see into another process.
-  const still = harnessNote([], 'npx -y gdharness@9.9.10');
+  const still = harnessNote({ moved: [], written: 1, byHand: 0 }, 'npx -y gdharness@9.9.10');
   assert.match(still, /already named this version/, 'it says the config was already there');
   assert.doesNotMatch(still, /9\.9\.10 *\n? *when/, 'and claims nothing about what is running');
   assert.match(still, /Reconnect the MCP server/, 'and still says what to do');
+}
+
+/**
+ * The three ways nothing moved, each with its own answer.
+ *
+ * An empty list of replaced launch lines used to be one sentence, and it was the sentence for the
+ * one state of the three that has a config in it: "your harness config already named this version".
+ * A project where nothing names gdharness got that under a line saying no config was re-pinned, and
+ * a project whose harness prints a command got it with the command still unrun. Both were then sent
+ * to reconnect, which reads the same config and comes back on the same server, so the one step the
+ * note exists to ask for was the step that could not work.
+ *
+ * Asserted on what each answer offers rather than on the absence of the wrong one, so a fifth state
+ * arriving as an empty string would fail here instead of passing three times.
+ */
+function testTheUpgradeNoteSeparatesTheThreeWaysNothingMoved(): void {
+  const now = 'npx -y gdharness@9.9.10';
+
+  const written = harnessNote({ moved: [], written: 2, byHand: 0 }, now);
+  assert.match(written, /already named this version/, 'a config that held this line says so');
+  assert.match(written, /Reconnect the MCP server/, 'and a reconnect is what picks it up');
+
+  const byHand = harnessNote({ moved: [], written: 0, byHand: 1 }, now);
+  assert.match(byHand, /Run what is printed above/, 'a harness this cannot write asks for the command');
+  assert.doesNotMatch(byHand, /already named this version/, 'and claims no config holds this line');
+
+  const none = harnessNote({ moved: [], written: 0, byHand: 0 }, now);
+  assert.match(none, /No harness config here names gdharness/, 'nothing found says nothing was found');
+  assert.match(none, /gdharness setup/, 'and offers the command that writes one');
+  assert.match(
+    none,
+    new RegExp(now.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+    'and names the line to point at',
+  );
+
+  // The three differ from each other, not merely from the wrong sentence: a refactor collapsing two
+  // of them back together would pass every match above on its own.
+  assert.equal(new Set([written, byHand, none]).size, 3, 'the three states give three answers');
+
+  // A project can hold a config this writes and a harness it cannot, and the config's answer is the
+  // true one for the reconnect while the command above still has to be run.
+  const both = harnessNote({ moved: ['node build/index.js'], written: 1, byHand: 2 }, now);
+  assert.match(both, /node build\/index\.js/, 'the config that moved is still named');
+  assert.match(
+    both,
+    /2 harnesses above were handed a command/,
+    'and the ones it could not write are counted',
+  );
+  assert.match(
+    harnessNote({ moved: [], written: 1, byHand: 1 }, now),
+    /One harness above was handed a command/,
+    'one of them reads as one',
+  );
 }
 
 function testAConfigThatDoesNotParseIsLeftAlone(): void {
@@ -734,6 +790,7 @@ const TESTS = [
   testAnUpgradeKeepsWhatWasPinnedByHand,
   testAnInstallSaysWhatItLaunchedInsteadOf,
   testTheUpgradeNoteNamesTheConfigRatherThanTheAddons,
+  testTheUpgradeNoteSeparatesTheThreeWaysNothingMoved,
   testAConfigThatDoesNotParseIsLeftAlone,
   testDetectionNeverReachesOutOfTheProject,
   testEveryCandidateCarriesWhyItIsOffered,
