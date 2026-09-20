@@ -3658,6 +3658,25 @@ class GodotServer {
         ' editor_status says whether one is on its way, and a run of yours that is still up is' +
         ' reachable again once it is.'
       : '';
+    // A game this server did not start, that the editor is playing, and that has announced its
+    // runtime: neither of the two sources above can see it, and the runtime directory can. Asked
+    // before anything else is said, because the sentence this used to reach for tells the caller to
+    // start a game, `editor_run start` replaces the one playing rather than adding to it, and the
+    // advice therefore ended the run it had just denied. Measured downstream: one process playing
+    // before, one after, the old pid gone.
+    const live = this.aRuntimeOfOursIsAnswering();
+    if (live !== null) {
+      return (
+        `A game is running for ${live.project.path} and has announced its runtime on port ${live.port}, pid ${live.pid},` +
+        ' but this server did not start it and cannot reach it through the editor, so editor_run and' +
+        ' editor_output have nothing to answer about. The runtime_* tools reach it now.' +
+        ' Do not start another: editor_run start replaces the game that is playing rather than' +
+        ' adding one, so it would end this one.' +
+        (this.godotBridge.getStatus().connected
+          ? ''
+          : ' editor_status says whether an editor is on its way, and editor_run can end it once one is.')
+      );
+    }
     const record = readRunRecord();
     if (record === null) {
       return `No game is running.${noEditor} Start one with editor_run.`;
@@ -3669,6 +3688,27 @@ class GodotServer {
         ? 'this server was started without GDHARNESS_PROJECT and has no editor connected, so it cannot say whose that run is'
         : `this server serves ${mine}`;
     return `No game of this server's is running.${noEditor} A run started from ${whose} is recorded on this machine, and ${ours}, so it is not this server's to answer for or to end. Start one with editor_run.`;
+  }
+
+  /**
+   * An announced runtime for the project this server serves, or null.
+   *
+   * Only for this project, and only when this server can say which project that is. The containment
+   * this sits beside exists because a server that adopts whatever it finds in a shared runtime
+   * directory killed another project's bench six times in fifty minutes, so widening it to any
+   * announcement would undo that: this reports rather than acts, and still declines to speak for a
+   * run it cannot show is its own.
+   */
+  private aRuntimeOfOursIsAnswering(): RuntimeEndpoint | null {
+    const status = this.godotBridge.getStatus();
+    const mine = this.ownProject ?? (status.connected ? (status.projectPath ?? null) : null);
+    if (mine === null) {
+      return null;
+    }
+    return (
+      discoverRuntimes().find((one) => one.project.path !== '' && isSameDirectory(mine, one.project.path)) ??
+      null
+    );
   }
 
   private couldBeOurs(project: string): boolean {
