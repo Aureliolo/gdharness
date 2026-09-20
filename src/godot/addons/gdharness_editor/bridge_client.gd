@@ -364,7 +364,12 @@ func _keep_breakpoints_through_sessions() -> void:
 	# editor was restarted. Sent from the editor's root, which is where the dialog sends it from.
 	var editor_root: Node = get_tree().root.get_child(0)
 	editor_root.propagate_notification(EditorSettings.NOTIFICATION_EDITOR_SETTINGS_CHANGED)
-	print("[gdharness] turned on %s, so a debug session opening keeps the editor's breakpoints" % SYNC_BREAKPOINTS_SETTING)
+	print(
+		(
+			"[gdharness] turned on %s, so a debug session opening keeps the editor's breakpoints"
+			% SYNC_BREAKPOINTS_SETTING
+		)
+	)
 
 
 ## Whether the editor shares its breakpoints with a session as it opens. See the setting.
