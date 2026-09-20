@@ -213,6 +213,18 @@ with a clean diagnostic read after it. Taking both in the same window, between t
 remedy, is what turned it into evidence, and it came out as claimed. Neither trial was wrong. Both
 were read as answering a question neither could reach.
 
+A cached reading carries the time it was taken, and that time is usually what decides whether to
+take another one, so a wrong reading suppresses the check that would have corrected it. Nothing
+about the state looks broken: the file parses, the value is a real version, and the code declining
+to ask is doing exactly what it was written to do. It gets worse when the cache is shared, because
+then the question is about this process and the answer was given by a different one. The update
+check here stood for four hours in one file per user, so a server starting at 19:00 read 0.13.34
+taken at 17:07, found it no newer than the version it was running, said nothing, and asked nobody,
+while 0.13.35 and 0.13.36 sat on npm. So for anything held with a timestamp, ask how long the window
+is against how often the thing behind it changes, and ask separately whether a process that has just
+started should inherit the decision not to look. A fixture keeping its own copy of that window stops
+testing the boundary the moment the window moves, and goes on passing.
+
 A claim about a change you have just made is the least checked claim there is. It arrives with the
 reasoning that produced it, which is the strongest case anybody will assemble for it, and the reader
 it is told to has less to check it against than you do. The debug adapter disconnect in this
