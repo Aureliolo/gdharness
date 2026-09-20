@@ -220,6 +220,14 @@ function stillRunning(run: GodotProcess | null): boolean {
   if (!run.throughEditor && run.process === null && run.pid !== null) {
     return alive(run.pid);
   }
+  // A played run that announced itself, asked of the operating system. The editor is the usual
+  // source for these and it is not always there and not always current: it went on reporting a game
+  // whose process had been ended from outside. A process that is gone is gone whoever believes
+  // otherwise, and this only ever turns a yes into a no: a number that has come round to something
+  // else reads as alive, which is what the line below answers anyway.
+  if (run.announcedPid !== undefined && !alive(run.announcedPid)) {
+    return false;
+  }
   return true;
 }
 
@@ -236,6 +244,12 @@ function stillRunning(run: GodotProcess | null): boolean {
 export function runIsUp(run: GodotProcess | null, editorSays: boolean | null): boolean {
   if (run?.throughEditor !== true) {
     return stillRunning(run);
+  }
+  // A process that is gone settles it before the editor is taken at its word. Godot went on
+  // reporting a game it was playing whose process had been ended from outside, for fifteen seconds
+  // and an empty runtime list, which is the editor being stale rather than wrong to consult.
+  if (run.announcedPid !== undefined && !alive(run.announcedPid)) {
+    return false;
   }
   return editorSays ?? stillRunning(run);
 }
@@ -3246,6 +3260,14 @@ class GodotServer {
       // and then quit is still found.
       giveUp: () => this.dapClient?.isStopped() === true || !stillRunning(this.currentRun()),
     });
+    // Kept on the run, for a run the editor is playing. That is the one kind with no handle and no
+    // pid of its own, so its liveness is the editor's word and nothing else; this is a number the
+    // game gave for itself, and it is what the announcement was waited for. Only when it is this
+    // run's: `announcedSince` excludes everything that was already announced before the start.
+    const going = this.currentRun();
+    if (endpoint !== null && going?.throughEditor === true && going.announcedPid === undefined) {
+      going.announcedPid = endpoint.pid;
+    }
     return runtimeVerdict(endpoint, {
       addon: true,
       budgetMs,

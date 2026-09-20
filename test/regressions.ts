@@ -2941,6 +2941,34 @@ function testANotYetRuntimeIsNotTheSameAsNoRuntime(): void {
   assert.equal(runIsUp(played, false), false, 'the editor saying it is not playing settles it');
   assert.equal(runIsUp(played, true), true, 'and so does the editor saying it is');
   assert.equal(runIsUp(played, null), true, 'an editor that will not say leaves the record');
+
+  // The number the game gave for itself, which a played run has whenever it carries the runtime
+  // addon. It is the only thing here that can contradict the editor, and the editor needs
+  // contradicting: downstream it went on reporting a game it was playing for fifteen seconds after
+  // that process had been ended from outside, with an empty runtime list in the same answer.
+  const announced = { ...played, announcedPid: 999_999_999 };
+  assert.equal(
+    runIsUp(announced, true),
+    false,
+    'a game whose own process is gone is over, whatever the editor still believes',
+  );
+  assert.equal(
+    runIsUp(announced, null),
+    false,
+    'and an editor that will not say is not the last word either, once the game has announced',
+  );
+  // The other side, so this is not a check that simply answers false once the field is set: the
+  // process asked about here is this one, which is certainly alive.
+  assert.equal(
+    runIsUp({ ...played, announcedPid: process.pid }, null),
+    true,
+    'a game whose process is still there stays up when nothing else can say',
+  );
+  assert.equal(
+    runIsUp({ ...played, announcedPid: process.pid }, false),
+    false,
+    'and the editor saying it has stopped playing still settles it',
+  );
   assert.equal(
     runIsUp({ ...played, throughEditor: false, pid: 999_999_999 }, true),
     false,
