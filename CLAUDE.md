@@ -256,6 +256,20 @@ fixture about the field. So when a fix gates on a property named in a measuremen
 measurement separated that property from its neighbours, or whether every trial happened to have
 both. A word that every trial satisfied is a word the trials did not test.
 
+A comment saying a source never sends something is a claim about the source, and the code under it
+is shaped by the claim: the handler for the event is not there, so the event goes by unread however
+often it arrives. The one beside the adapter's event handler said Godot sends no `continued`. It
+sends one to every connection whenever the game is let go, so a session told of a stop went on
+answering held about a game somebody else had resumed. The same log showed `breakpoint` events with
+`reason: "removed"` that nothing had asked for, which is how a breakpoint set through the adapter
+turned out to hold for one play and not the next. Neither was in the code, and reading the code
+could not have found them: the code reads what it expects. Both came from writing every event the
+other side sent during one ordinary fixture run to a file and reading the file. So when a source is
+described in a comment as silent, or as saying exactly what the code reads, log what it says for a
+run and read the log. And a thing that is set and then consumed by a play, a run or a request is a
+thing to set once and use twice before believing the description, because the first use is the one
+the description was written from.
+
 A claim about a change you have just made is the least checked claim there is. It arrives with the
 reasoning that produced it, which is the strongest case anybody will assemble for it, and the reader
 it is told to has less to check it against than you do. The debug adapter disconnect in this
