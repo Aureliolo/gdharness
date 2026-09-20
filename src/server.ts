@@ -3948,7 +3948,7 @@ class GodotServer {
           : lost.length > 0
             ? 'The scan wrote the class cache from the list this editor is holding, which is shorter than the file was, so the cache was rebuilt from the files and these classes are back in it. Nothing was lost, but this editor is still holding the short list: do not rescan again until it has been restarted with editor_launch restart, because it will write the same list over the file each time.'
             : unseen.length > 0
-              ? 'The scan finished and these classes are still not in the list the editor resolves against, so every use of them reads as an unknown identifier. Its walk skips a file another engine has already imported. Change the declaring script and rescan, or restart the editor with editor_launch restart.'
+              ? 'The scan finished and these classes are still not in the list the editor resolves against, so every use of them reads as an unknown identifier. Its walk skips a file another engine has already imported. Rescan again on its own, which is the measured cure and needs no change to the declaring script, or restart the editor with editor_launch restart.'
               : undefined,
     });
   }
