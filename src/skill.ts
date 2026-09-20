@@ -57,8 +57,13 @@ that is running, and the project on disk. ${TOOL_SPECS.length} tools, named \`do
   with their backtraces, and a \`clean\` verdict, so a run that printed an error is one call away
   from being known. For a long run it also names a transcript file: read that for output and this
   answer for state. Never decide a run has ended by watching the file stop growing, or a process
-  list, or a timeout. \`running\` is asked of the operating system and \`endedBy\` says whether
-  gdharness ended it; a bench between prints looks exactly like a bench that died to everything else.
+  list, or a timeout; a bench between prints looks exactly like a bench that died to everything else.
+  \`endedBy\` says whether gdharness ended it, and \`running\` is asked of the operating system
+  whenever there is a process to ask about: every run started through \`editor_run\`, and every
+  editor-played run whose game announced its runtime. An editor-played run in a project with no
+  runtime addon announces nothing, so there is no process id and \`running\` is the editor's answer,
+  which can lag by seconds after the game has gone. \`editor_status\` names the game under
+  \`runtimes\`, which does not depend on the editor answering.
 - One server, one editor. A second project is a second harness session with its own server, and
   that works: each editor is opened on its own language server and debug adapter ports, and says
   where it serves. Two editors on one project is the thing to refuse.
