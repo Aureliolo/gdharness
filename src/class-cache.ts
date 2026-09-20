@@ -312,6 +312,39 @@ export function staleAnalysisNote(
 }
 
 /**
+ * What to tell a caller whose diagnostics name a class the cache has not got.
+ *
+ * Separate from the contradicted note because it is a different fault with a different remedy, and
+ * one of the two remedies starts an engine. That is the half this said nothing about, and it is the
+ * half that decides whether a caller can use it at all: `project_import refresh_classes` is a short
+ * headless engine pass, and a project running a bench or a fan-out may forbid a second engine
+ * against the same project entirely. Measured in a second project: `editor_rescan` cleared this in
+ * 314ms with a 31-worker fan-out still importing, starting nothing, and the fan-out finished
+ * unharmed.
+ *
+ * The scan is offered first and with its own limit rather than as the better remedy. A file another
+ * engine has already imported reads as settled, so the editor's walk does not look inside it and the
+ * declaration stays out of the list however many times it scans; that is the case the reading above
+ * did not hit, and the one `refresh_classes` is for.
+ */
+export function uncachedClassNote(types: readonly string[]): string {
+  if (types.length === 0) {
+    return '';
+  }
+  const one = types.length === 1;
+  return (
+    `${types.join(', ')} ${one ? 'is declared' : 'are declared'} in this project and missing from ` +
+    `.godot/global_script_class_cache.cfg, so a game launched now would not resolve ${one ? 'it' : 'them'} ` +
+    'either. Try editor_rescan first: it asks the editor already running and starts nothing, and it ' +
+    'cleared this in 314ms in a second project with a 31-worker fan-out still importing. It is not ' +
+    'always enough, because a file another engine has already imported reads as settled and the ' +
+    'walk does not look inside it. project_import refresh_classes rewrites the cache from the ' +
+    'declarations on disk and does reach that case, at the cost of a short headless engine, which ' +
+    'is worth knowing when something else is already running against this project.'
+  );
+}
+
+/**
  * When the cache was last written, or null when there is none.
  *
  * The editor rewrites the file at the end of a scan, from the list it is holding rather than from

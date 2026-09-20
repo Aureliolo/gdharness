@@ -46,6 +46,7 @@ import {
   missingMemberIn,
   staleAnalysisNote,
   staleClassNames,
+  uncachedClassNote,
   type UnseenClass,
   unknownTypeIn,
   unloadedTypes,
@@ -2345,9 +2346,7 @@ class GodotServer {
     }
     const uncached = unloaded.filter((type) => !type.inTheClassCache);
     if (uncached.length > 0) {
-      notes.push(
-        `${uncached.map((type) => type.type).join(', ')} ${uncached.length === 1 ? 'is declared' : 'are declared'} in this project and missing from .godot/global_script_class_cache.cfg, so a game launched now would not resolve ${uncached.length === 1 ? 'it' : 'them'} either. project_import refresh_classes rewrites the cache from the declarations on disk.`,
-      );
+      notes.push(uncachedClassNote(uncached.map((type) => type.type)));
     }
     const stale = unloaded.filter((type) => type.inTheClassCache);
     if (stale.length > 0) {
