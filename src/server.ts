@@ -2852,6 +2852,14 @@ class GodotServer {
     // Waited for rather than assumed. The editor saves on its way out, so it is not gone the moment
     // it answers, and starting the replacement while it still holds its ports is how the new one
     // comes up on neither of them.
+    //
+    // The number rather than the handle, which is the opposite of what `mayYetConnect` asks and is
+    // deliberate. Both readings are unsound under pid reuse and they fail in opposite directions:
+    // the number says an editor that has gone is still going, and waits out the timeout before
+    // opening a replacement that then works, while a handle belonging to an earlier editor of ours
+    // says gone about the editor actually on the bridge, and opens the replacement while that one
+    // still holds the ports, which is the thing this wait exists to prevent. A deadline covers the
+    // first and nothing covers the second.
     await this.waitForBridge(() => !alive(editorPid), Date.now() + EDITOR_RESTART_TIMEOUT_MS);
 
     const opened = await this.openAnEditor(engine.value, projectPath, ports);
