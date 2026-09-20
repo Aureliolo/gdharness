@@ -3080,6 +3080,14 @@ async function testAnErrorTheGameBrokeOnIsReported({ call, attempt, project }: E
   // Where it is held, so a caller whose runtime calls are timing out is told why rather than
   // left to guess between a hung engine, a long frame and this.
   assert.equal(get(output, 'heldAt', 'reason'), 'exception', 'and the console says it is held');
+  // The status call too, which is the one an agent makes first: it listed this game as unreachable
+  // with a guess about breakpoints beside it, while the session it was answering from knew.
+  const status = await call('editor_status', {});
+  assert.equal(
+    get(status, 'game', 'heldAt', 'reason'),
+    'exception',
+    `and editor_status says the same about the same run: ${text(status)}`,
+  );
 
   // Asked twice on purpose: every ask drains the adapter, which goes on reporting the same stop
   // for as long as the game sits at it, so one error must not become one more error per call.

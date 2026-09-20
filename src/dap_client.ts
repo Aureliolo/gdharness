@@ -434,6 +434,13 @@ export class GodotDAPClient {
       }
       this.lastThreadId = first;
       const response = await this.sendRequest('stackTrace', { threadId: first, startFrame: 0, levels: 1 });
+      // Told while asking: a game that reaches its breakpoint between the question and the answer
+      // puts frames in the answer and its reason in an event, and the event is the one with the
+      // reason. Measured on macOS, where the attach for a first stack read and the stop at a
+      // breakpoint in _ready land close enough together to cross.
+      if (this.holdKnown) {
+        return;
+      }
       const frames = response['stackFrames'];
       if (Array.isArray(frames) && frames.length > 0) {
         this.halt = {

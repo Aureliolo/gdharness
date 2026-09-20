@@ -1045,6 +1045,60 @@ async function testAStopIsKnownToTheConnectionItWasSentTo(): Promise<void> {
 }
 
 /**
+ * A stop reported while the attach was asking about it is the answer, not the frames.
+ *
+ * The attach asks for the stack when the connection has been told nothing, and a game that reaches
+ * its breakpoint between the question and the answer puts frames in the answer and its reason in an
+ * event that lands in the same window. Frames learned by asking say "attached" and not why, so
+ * taking them over the event replaced `breakpoint` with `attached` on the session that had been
+ * told. Measured on macOS in the editor tier, where the first stack read after a play and the stop
+ * at a breakpoint in `_ready` land close enough together to cross; the adapter here crosses them on
+ * purpose, with the event written just ahead of the frames.
+ */
+async function testAStopThatLandsWhileAttachAsksIsTheAnswer(): Promise<void> {
+  const stopped = frameJsonRpc({
+    seq: 1,
+    type: 'event',
+    event: 'stopped',
+    body: { reason: 'breakpoint', description: 'Breakpoint', threadId: 1 },
+  });
+  const respond: FramedPeerHandler = (message, socket) => {
+    const command = String(message['command']);
+    if (command === 'stackTrace') {
+      socket.write(stopped);
+    }
+    const body =
+      command === 'threads'
+        ? { threads: [{ id: 1, name: 'main' }] }
+        : command === 'stackTrace'
+          ? { stackFrames: [{ id: 0, name: '_ready', line: 7 }], totalFrames: 1 }
+          : {};
+    socket.write(
+      frameJsonRpc({
+        seq: Number(message['seq']) + 100,
+        type: 'response',
+        request_seq: message['seq'],
+        command,
+        success: true,
+        body,
+      }),
+    );
+  };
+
+  await withFramedPeer(respond, async (port) => {
+    const session = new GodotDAPClient(port, '127.0.0.1');
+    await session.attach();
+    assert.ok(session.holdIsKnown(), 'the session knows the game is held, or the rest is moot');
+    assert.equal(
+      session.whereItStopped()?.reason,
+      'breakpoint',
+      'and knows it from the event, which names the reason, rather than from the frames it asked for',
+    );
+    await session.abandon();
+  });
+}
+
+/**
  * Section names and keys come out of project.godot, which is a file the project supplies. On
  * an ordinary object `result['constructor']` is the Object function and `result['__proto__']`
  * is Object.prototype, so a parser that indexes its result with those names writes the file's
@@ -7279,6 +7333,176 @@ async function testTheEditorsRunIsTheOneAnsweredFor(): Promise<void> {
 }
 
 /**
+ * A status call meeting a held game says held and does not wait the runtime timeout to say it,
+ * and a picked-up run whose game has quit is over rather than held or running.
+ *
+ * `editor_status` pings every announced game, and a game held at a breakpoint accepts the
+ * connection and never answers, so the first call an agent makes waited the whole runtime timeout,
+ * ten seconds by default, on each held game before listing it as unreachable with "may be paused
+ * at a breakpoint", while the session reporting on that run could have said so. Now the ping waits
+ * as long as the hold check does, and the run's `heldAt` is answered here as it is by editor_output.
+ *
+ * The second half is the run after its game has gone. A run picked up after a reconnect had no
+ * process number of any kind, so `running` stayed true for as long as the record lasted, and a
+ * session that had never learned the hold went to the announcement for it, found the announcement
+ * swept with the process, and answered that the run could not be told from held, about a run whose
+ * exit the same answer reported. The pick-up ties the run to the one game announced for its project,
+ * and a run that is over is held nowhere before anybody is asked.
+ *
+ * The game is a socket that accepts and says nothing, the process behind its announcement is a
+ * child this fixture can end, and the adapter answers a late session a thread and no frames, which
+ * is what a real one answers a replacement. The runtime timeout is set long so that the wait this
+ * is about is unmistakable from the wait it replaced.
+ */
+async function testAStatusCallIsNotHeldByAHeldGame(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-held-status-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-held-status-rt-'));
+  const port = await reservePort();
+  const answerNothing: FramedPeerHandler = (message, socket) => {
+    const command = String(message['command']);
+    const body =
+      command === 'threads'
+        ? { threads: [{ id: 1, name: 'main' }] }
+        : command === 'stackTrace'
+          ? { stackFrames: [], totalFrames: 0 }
+          : {};
+    socket.write(
+      frameJsonRpc({
+        seq: Number(message['seq']) + 1000,
+        type: 'response',
+        request_seq: message['seq'],
+        command,
+        success: true,
+        body,
+      }),
+    );
+  };
+  const held = createServer(() => {
+    // Accepted and never answered, which is what a game sitting at a breakpoint does.
+  });
+  await new Promise<void>((ready) => held.listen(0, '127.0.0.1', ready));
+  const game = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  const gamePid = game.pid;
+  assert.ok(typeof gamePid === 'number' && alive(gamePid), 'the fixture needs a live process to announce');
+  const server = new ServerProcess({
+    env: {
+      GDHARNESS_BRIDGE_PORT: String(port),
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+      GDHARNESS_RUNTIME_TIMEOUT_MS: '30000',
+    },
+  });
+  const editor: { socket: WebSocket | null } = { socket: null };
+  try {
+    await withFramedPeer(answerNothing, async (adapter) => {
+      writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+      writeFileSync(
+        join(runtimeDir, `runtime-${gamePid}.json`),
+        JSON.stringify({
+          protocol: RUNTIME_PROTOCOL,
+          pid: gamePid,
+          port: portOf(held),
+          address: '127.0.0.1',
+          project: { name: 'Held', path: project },
+        }),
+        'utf8',
+      );
+      await server.initialize('regression-test');
+      const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+      editor.socket = socket;
+      await new Promise<void>((resolve, reject) => {
+        socket.once('open', () => {
+          resolve();
+        });
+        socket.once('error', reject);
+      });
+      socket.on('message', (raw: Buffer) => {
+        const message: unknown = JSON.parse(String(raw));
+        if (!isRecord(message) || message['type'] !== 'tool_invoke') {
+          return;
+        }
+        const result =
+          String(message['tool']) === 'playing_status'
+            ? { ok: true, playing: true, scenePath: 'res://held.tscn', debugPort: adapter }
+            : { ok: true };
+        socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result }));
+      });
+      socket.send(
+        JSON.stringify({
+          type: 'godot_ready',
+          project_path: project,
+          addon_version: SERVER_VERSION,
+          dap_port: adapter,
+        }),
+      );
+      const status = async (): Promise<unknown> =>
+        parseTextContent(
+          await server.request('tools/call', { name: 'editor_status', arguments: {} }, 60_000),
+        );
+      let greeted = false;
+      for (let waited = 0; waited < 10_000 && !greeted; waited += 100) {
+        await delay(100);
+        greeted = text(get(await status(), 'editor', 'projectPath')) === project;
+      }
+      assert.ok(greeted, 'the fake editor should have been greeted, or nothing below is reached');
+
+      const began = Date.now();
+      const found = await status();
+      const took = Date.now() - began;
+      const said = JSON.stringify(found);
+      assert.equal(get(found, 'game', 'playingInEditor', 'playing'), true, `the run is playing: ${said}`);
+      assert.equal(get(found, 'game', 'processActive'), true, `and its process is there: ${said}`);
+      const listed = asArray(get(found, 'game', 'runtimes'), 'runtimes');
+      assert.equal(get(listed[0], 'pid'), gamePid, `the game is listed under runtimes: ${said}`);
+      assert.equal(get(listed[0], 'reachable'), false, `as unreachable, since it answers nothing: ${said}`);
+      assert.match(text(get(listed[0], 'problem')), /did not answer/, `for the reason it is: ${said}`);
+      assert.equal(
+        get(found, 'game', 'heldAt', 'reason'),
+        'unanswered',
+        `and the run is said to be held, from the game not answering: ${said}`,
+      );
+      assert.ok(
+        took < 15_000,
+        `a held game does not cost the status call the runtime timeout: ${took}ms with the timeout at 30000`,
+      );
+
+      // Before the game goes: running, by the process the pick-up tied it to.
+      const output = async (): Promise<unknown> =>
+        parseTextContent(
+          await server.request('tools/call', { name: 'editor_output', arguments: {} }, 60_000),
+        );
+      const going = await output();
+      assert.equal(
+        get(going, 'running'),
+        true,
+        `the picked-up run is running while its process is: ${JSON.stringify(going)}`,
+      );
+      assert.equal(get(going, 'heldAt', 'reason'), 'unanswered', `and held: ${JSON.stringify(going)}`);
+
+      game.kill();
+      await new Promise<void>((gone) => {
+        game.once('exit', () => {
+          gone();
+        });
+      });
+      const over = await output();
+      const ended = JSON.stringify(over);
+      assert.equal(get(over, 'running'), false, `a run whose process has gone is over: ${ended}`);
+      assert.equal(get(over, 'heldAt'), null, `and held nowhere: ${ended}`);
+      assert.equal(get(over, 'heldUnknown'), undefined, `with nothing left open about it: ${ended}`);
+    });
+  } finally {
+    editor.socket?.terminate();
+    await server.stop();
+    if (game.exitCode === null) {
+      game.kill();
+    }
+    held.close();
+    sweep(project);
+    sweep(runtimeDir);
+  }
+}
+
+/**
  * What a run ended with outlives the server that watched it end.
  *
  * A run is spawned detached so a reconnect cannot take it, and the next server reads the note on
@@ -10147,6 +10371,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARepairThatCouldNotRunIsNotReported,
   testAShortenedCacheIsRebuilt,
   testTheEditorsRunIsTheOneAnsweredFor,
+  testAStatusCallIsNotHeldByAHeldGame,
   testAnEditorOnAnotherVersionIsStillAskedWhatItIsPlaying,
   testAGameTheEditorHasStoppedPlayingIsNotStillActive,
   testASettingTheEditorDroppedIsNamed,
@@ -10210,6 +10435,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testProjectGodotMultilineValues,
   testLettingGoOfTheAdapterSendsItNothing,
   testAStopIsKnownToTheConnectionItWasSentTo,
+  testAStopThatLandsWhileAttachAsksIsTheAnswer,
   testProjectGodotResistsPrototypeKeys,
 
   testAnAnswerFromAStaleAddonSaysSo,
