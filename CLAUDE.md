@@ -225,6 +225,16 @@ is against how often the thing behind it changes, and ask separately whether a p
 started should inherit the decision not to look. A fixture keeping its own copy of that window stops
 testing the boundary the moment the window moves, and goes on passing.
 
+An act that is two steps by one process, where the process can be replaced between them, leaves the
+world in a state only that process knew how to read. The restart here quits the editor and then
+starts it again, and a harness reconnect ends the server in the gap; the successor found nothing
+connected and answered, correctly for what it could see, that an editor might still dial in. Nothing
+was coming. The tell is a successor answering from its own age or its own defaults where the thing it
+would need to know was in the memory of a process that is gone. So when the second step is what
+makes the first one safe, write the intent down somewhere the next process reads before taking the
+first step, and have whatever completes the act, or makes it moot, take the note down. The user's
+reconnect is the usual replacement, and it arrives for the same reason the act was started.
+
 A claim about a change you have just made is the least checked claim there is. It arrives with the
 reasoning that produced it, which is the strongest case anybody will assemble for it, and the reader
 it is told to has less to check it against than you do. The debug adapter disconnect in this
