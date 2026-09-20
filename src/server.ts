@@ -101,10 +101,12 @@ import {
   announcedSince,
   chooseRuntime,
   discoverRuntimes,
+  RUNTIME_PROTOCOL,
   type RuntimeEndpoint,
   runtimeDirectory,
   runtimeRequest,
   runtimesAnnounced,
+  type UnspokenRuntime,
 } from './runtime-client.js';
 import { discard } from './scratch.js';
 import type {
@@ -2666,8 +2668,9 @@ class GodotServer {
 
     // Every announced game is pinged, so a game that announced and then hung is reported as
     // such rather than counted as reachable on the strength of its announcement.
+    const announced = runtimesAnnounced();
     const games = await Promise.all(
-      discoverRuntimes().map(async (endpoint) => {
+      announced.running.map(async (endpoint) => {
         const reply = await runtimeRequest(endpoint, 'ping', {}, this.runtimeTimeoutMs());
         return {
           pid: endpoint.pid,
@@ -2700,6 +2703,19 @@ class GodotServer {
         playingInEditor: playing,
         runtimeConnected: games.some((game) => game.reachable),
         runtimes: games,
+        // Games announcing a protocol this server was not built to read. Apart from the list above
+        // rather than folded into it, because nothing here can reach them and calling them runtimes
+        // would offer tools that cannot work. Reported at all because the alternative is `runtimes:
+        // []` during an upgrade window, which says nothing is running about a game that is, and the
+        // runtime_* tools already name these: the call an agent makes before anything else should
+        // not be the one that cannot see them.
+        unreadable: announced.unspoken.map((game) => ({
+          pid: game.pid,
+          project: game.project,
+          protocol: game.protocol,
+          serverSpeaks: RUNTIME_PROTOCOL,
+          behind: game.protocol > RUNTIME_PROTOCOL ? 'server' : 'addon',
+        })),
       },
     });
   }
@@ -2852,6 +2868,14 @@ class GodotServer {
     // Waited for rather than assumed. The editor saves on its way out, so it is not gone the moment
     // it answers, and starting the replacement while it still holds its ports is how the new one
     // comes up on neither of them.
+    //
+    // The number rather than the handle, which is the opposite of what `mayYetConnect` asks and is
+    // deliberate. Both readings are unsound under pid reuse and they fail in opposite directions:
+    // the number says an editor that has gone is still going, and waits out the timeout before
+    // opening a replacement that then works, while a handle belonging to an earlier editor of ours
+    // says gone about the editor actually on the bridge, and opens the replacement while that one
+    // still holds the ports, which is the thing this wait exists to prevent. A deadline covers the
+    // first and nothing covers the second.
     await this.waitForBridge(() => !alive(editorPid), Date.now() + EDITOR_RESTART_TIMEOUT_MS);
 
     const opened = await this.openAnEditor(engine.value, projectPath, ports);
@@ -3732,6 +3756,29 @@ class GodotServer {
           : ' editor_status says whether an editor is on its way, and editor_run can end it once one is.')
       );
     }
+    // The same game, announced in a protocol this server cannot speak. The sweep above drops those,
+    // so nothing here could see it and the sentence below would tell the caller to start one, which
+    // replaces the game that is playing. The window is ordinary rather than exotic: installing moves
+    // the addon on disk the moment a pin moves, while a server already spawned stays the version it
+    // was, so every upgrade has a stretch where the two halves disagree and a game started in it
+    // announces something this server will not read.
+    //
+    // Without offering the runtime_* tools, because this server cannot reach it either. What it can
+    // say is that the game is there, which half is behind, and that starting another would end it.
+    const unreadable = this.aRuntimeOfOursIsTooFarOff();
+    if (unreadable !== null) {
+      const behind =
+        unreadable.protocol > RUNTIME_PROTOCOL
+          ? 'this server is the older half: reconnect it so it spawns the installed version'
+          : 'the addon is the older half: reinstall it and restart the game';
+      return (
+        `A game is running for ${unreadable.project.path}, pid ${unreadable.pid}, announced in protocol` +
+        ` ${unreadable.protocol}, which this server does not speak: it speaks ${RUNTIME_PROTOCOL}, so ${behind}.` +
+        ' Until then neither editor_run nor the runtime_* tools can reach it.' +
+        ' Do not start another: editor_run start replaces the game that is playing rather than' +
+        ' adding one, so it would end this one.'
+      );
+    }
     const record = readRunRecord();
     if (record === null) {
       return `No game is running.${noEditor} Start one with editor_run.`;
@@ -3755,14 +3802,29 @@ class GodotServer {
    * run it cannot show is its own.
    */
   private aRuntimeOfOursIsAnswering(): RuntimeEndpoint | null {
+    return this.announcedForOurProject(discoverRuntimes());
+  }
+
+  /**
+   * An announced runtime for this project that this server was not built to read.
+   *
+   * Kept apart from the one above because what can be said about it is different: there is a game
+   * and no way to reach it, so the answer names it and which half is behind rather than offering
+   * tools that would not work.
+   */
+  private aRuntimeOfOursIsTooFarOff(): UnspokenRuntime | null {
+    return this.announcedForOurProject(runtimesAnnounced().unspoken);
+  }
+
+  /** Whichever of the announced games is this server's own project, out of any of the lists. */
+  private announcedForOurProject<T extends { project: { path: string } }>(announced: readonly T[]): T | null {
     const status = this.godotBridge.getStatus();
     const mine = this.ownProject ?? (status.connected ? (status.projectPath ?? null) : null);
     if (mine === null) {
       return null;
     }
     return (
-      discoverRuntimes().find((one) => one.project.path !== '' && isSameDirectory(mine, one.project.path)) ??
-      null
+      announced.find((one) => one.project.path !== '' && isSameDirectory(mine, one.project.path)) ?? null
     );
   }
 
