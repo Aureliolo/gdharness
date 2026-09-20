@@ -34,6 +34,7 @@ import {
   missingMemberIn,
   staleAnalysisNote,
   staleClassNames,
+  uncachedClassNote,
   unknownTypeIn,
   unloadedTypes,
   unseenByEditor,
@@ -3040,10 +3041,14 @@ function testTheStaleNoteNamesTheCallThatRebuildsTheCopy(): void {
   assert.match(alone, /reloadedMethods/, 'and the reading that says the rebuild happened');
   assert.match(alone, /editor_launch restart/, 'with the restart kept as the one that always worked');
   assert.match(alone, /depend on no other global class/, 'and no lever invented where there is none');
-  // The reload is offered without being credited with the clearing. A built copy has been seen
-  // stale while the diagnostics on it read clean, so a note that said the reload fixes these would
-  // be claiming the two caches are one, which is the thing not known.
-  assert.match(alone, /is not known to be what clears these/, 'the reload is offered, not credited');
+  // The reload is offered without being credited with the clearing, and the note now says why
+  // rather than hedging: testAMethodAddedToAnAnalysedTypeIsPickedUp in the editor tier takes both
+  // readings in one window and finds the analyser resolving a call to a newly added method while
+  // the built copy of that script has not got it. One stale and one current at the same moment is
+  // two objects. This assertion held "is not known to be what clears these" until that reading
+  // existed, and changing it took measuring the thing rather than rewording the sentence.
+  assert.match(alone, /the analyser resolved a call to a newly added method/, 'the divergence is stated');
+  assert.match(alone, /is not what clears these; the scan is/, 'and the reload is not credited with it');
   assert.match(
     alone,
     /where this turns up/,
@@ -3098,6 +3103,35 @@ function testTheStaleNoteNamesTheCallThatRebuildsTheCopy(): void {
   // empty answer is unreachable from there and reachable from anywhere else that calls the function.
   assert.equal(staleAnalysisNote([], []), '', 'an empty list gets no sentence rather than a hollow one');
   assert.equal(staleAnalysisNote([], ['Rope']), '', 'and a lever with nothing to apply it to is still none');
+}
+
+/**
+ * The note for a class the cache has not got says which remedy starts an engine.
+ *
+ * It named `project_import refresh_classes` alone, which is correct and is a headless engine pass.
+ * A project running a bench or a fan-out may forbid a second engine against the same project, so in
+ * the one situation where this fault is most likely the note pointed at the remedy that cannot be
+ * used and said nothing about the one that can. Measured in a second project: `editor_rescan`
+ * cleared it in 314ms with 31 workers still importing, and the fan-out finished unharmed.
+ *
+ * The scan is offered with its own limit rather than as the better answer, because a file another
+ * engine has already imported reads as settled and the walk skips it. Availability and correctness
+ * are different questions and the note now answers both.
+ */
+function testTheUncachedNoteSaysWhichRemedyStartsAnEngine(): void {
+  const note = uncachedClassNote(['ProbeStale']);
+  assert.match(note, /Try editor_rescan first/, 'the remedy that starts nothing comes first');
+  assert.match(note, /starts nothing/, 'and says so, because that is what decides whether it can be used');
+  assert.match(note, /not always enough/, 'with the limit that makes the other one necessary');
+  assert.match(note, /a short headless engine/, 'and the other one named as the engine it is');
+  assert.match(note, /project_import refresh_classes/, 'which is still the remedy that reaches that case');
+  assert.match(note, /is declared/, 'one class reads as one');
+
+  const two = uncachedClassNote(['ProbeStale', 'Outcome']);
+  assert.match(two, /ProbeStale, Outcome are declared/, 'and two read as two, in the order given');
+  assert.match(two, /resolve them/, 'with the pronoun carried through');
+
+  assert.equal(uncachedClassNote([]), '', 'nothing missing from the cache gets no sentence');
 }
 
 function testTheStaleHalfIsNamedCorrectly(): void {
@@ -7152,6 +7186,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testChangelogReach,
   testTheCureIsWrittenWhole,
   testTheStaleNoteNamesTheCallThatRebuildsTheCopy,
+  testTheUncachedNoteSaysWhichRemedyStartsAnEngine,
   testTheStaleHalfIsNamedCorrectly,
   testAGameIsFoundWhereverItAnnounced,
   testAGameTooNewToTalkToIsStillAGame,

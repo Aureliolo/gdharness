@@ -1662,22 +1662,30 @@ async function testAMethodAddedToAnAnalysedTypeIsPickedUp({ call, project }: Edi
     ].join('\n'),
   );
 
-  // The remedy for the fault this case stands against, checked for doing what it says rather than
-  // for curing anything: the fault does not reproduce here, so what can be held is that a reload
-  // recompiles the editor's built copy and that the new member is in it afterwards. A reload that
-  // answered OK and compiled nothing would pass an assertion about the reload succeeding, and is
-  // exactly the failure worth catching, so the members are the evidence.
+  // Both readings in the same window, which is the whole point of this case and was missing from
+  // it: the analyser's answer taken between the change and any remedy, and the built copy taken in
+  // the next call. Without the first one, a clean diagnostic read after the reload says only that
+  // the reload worked, and pairing it with a stale built copy from before is two readings from
+  // different moments reported as one divergence.
+  const analyserFirst = await read();
   const reloaded = await call('editor_rescan', { projectPath: project, reloadScript: 'res://bell.gd' });
   assert.equal(get(reloaded, 'reloadProblem'), undefined, JSON.stringify(reloaded));
   const names = (field: string): string[] =>
     asArray(get(reloaded, field)).map((entry) => asString(entry, 'method'));
 
-  // The fault itself, which this is the only reading that shows: the copy the editor built before
-  // the file changed does not have the method that was added to it. The language server answers
-  // from disk and reads clean, which is why this went a day without being reproducible here.
+  // The divergence, held as the one reading it is. The analyser resolved a call to the new method
+  // with nothing asked of the editor, and in the next call the copy the editor built has not got
+  // that method, so the built copy and whatever the analyser resolves types against are two things
+  // rather than one. Asserted together because either alone says nothing: a clean analyser is the
+  // ordinary case, and a stale built copy read after a remedy is a reading from another moment.
+  assert.equal(
+    get(analyserFirst, 'clean'),
+    true,
+    `the analyser should resolve the new method before any remedy: ${JSON.stringify(analyserFirst)}`,
+  );
   assert.ok(
     !names('heldBeforeReload').includes('silence'),
-    `the built copy should still be the one from before the change: ${names('heldBeforeReload').join(', ')}`,
+    `while the built copy has not got it: ${names('heldBeforeReload').join(', ')}`,
   );
   assert.ok(
     names('heldBeforeReload').includes('toll'),
