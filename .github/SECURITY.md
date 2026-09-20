@@ -49,7 +49,7 @@ sha256sum --check gdharness-<version>.tgz.sha256
 ## OpenSSF Scorecard
 
 The [published score](https://scorecard.dev/viewer/?uri=github.com/Aureliolo/gdharness) has
-three checks that cannot reach 10 while gdharness has one maintainer. They stay low on
+checks that cannot reach 10 while gdharness has one maintainer. They stay low on
 purpose rather than being satisfied by an account that approves without reading:
 
 - **Code-Review** counts changesets approved by someone other than their author.
