@@ -93,6 +93,10 @@ func get_gdscript_info(params: Dictionary) -> Dictionary:
 				if dep not in dependencies:
 					dependencies.append(dep)
 
+	# After the loop, because it needs the base the loop reads, and a file that declared one after
+	# its first function would otherwise be judged against the default.
+	_mark_virtuals(functions, extends_name)
+
 	var answer: Dictionary = {
 		"path": script_path,
 		"full_path": full_script_path,
@@ -110,6 +114,47 @@ func get_gdscript_info(params: Dictionary) -> Dictionary:
 	if Read.as_bool(params.get("include_inherited", false)):
 		_add_inherited(answer, [full_script_path])
 	return answer
+
+
+# Which of these functions the engine will call, asked of the engine.
+#
+# `is_virtual` was `name.begins_with("_")`, which is the convention for a private method and not
+# what the field says: it reported `_compute_damage` as something the engine calls, on every script
+# with a private helper in it. The virtuals are the ones the native ancestor declares with
+# `METHOD_FLAG_VIRTUAL`, which is a question `ClassDB` answers exactly, and `class_has_method` does
+# not: it says false for `_ready` on `Node`, so the method list is what has to be walked.
+func _mark_virtuals(functions: Array[Dictionary], extends_name: String) -> void:
+	var native: String = _native_ancestor(extends_name)
+	var virtuals: Dictionary = {}
+	if not native.is_empty():
+		for m: Dictionary in ClassDB.class_get_method_list(native, false):
+			var flags: int = Read.as_int(m.get("flags", 0))
+			if flags & METHOD_FLAG_VIRTUAL:
+				virtuals[str(m.get("name", ""))] = true
+	for one: Dictionary in functions:
+		one["is_virtual"] = virtuals.has(str(one.get("name", "")))
+
+
+# The native class at the top of this script's chain, or empty when the chain does not reach one.
+#
+# A base named by a script is followed; a base that is neither a script nor a class the engine knows
+# leaves nothing to ask, and then no function is called virtual rather than every underscore being
+# guessed at.
+func _native_ancestor(base: String) -> String:
+	var seen: Array[String] = []
+	var current: String = base
+	while true:
+		var path: String = _script_named(current)
+		if path.is_empty():
+			break
+		if path in seen:
+			return ""
+		seen.append(path)
+		var above: Dictionary = get_gdscript_info({"script_path": path})
+		if above.is_empty():
+			return ""
+		current = str(above.get("extends", ""))
+	return current if ClassDB.class_exists(current) else ""
 
 
 # The members this script's ancestors declare, appended to the lists they belong in.
@@ -309,7 +354,8 @@ func _parse_function(line: String, line_num: int, annotated: String = "") -> Dic
 		"name": name,
 		"params": params,
 		"return_type": return_type,
-		"is_virtual": name.begins_with("_"),
+		# Filled in after the whole file is read, once the base is known; see `_mark_virtuals`.
+		"is_virtual": false,
 		"is_static": is_static,
 		# Said rather than left to be inferred: an abstract method has no body, so a caller that
 		# saw only the declaration would otherwise take it for one whose body it failed to read.

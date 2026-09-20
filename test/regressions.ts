@@ -5021,6 +5021,32 @@ async function testAStructureReadCanCarryWhatTheScriptInherits(): Promise<void> 
         '',
       ].join('\n'),
     );
+    // For `is_virtual`, which said "starts with an underscore" and so reported every private
+    // helper as something the engine calls. `_draw` is on `Node2D` rather than on `Node`, so a
+    // lookup that stopped at the wrong ancestor would find `_ready` and miss it.
+    writeFileSync(
+      join(project, 'virtuals.gd'),
+      [
+        'extends Node2D',
+        '',
+        '',
+        'func _ready() -> void:',
+        '\tpass',
+        '',
+        '',
+        'func _draw() -> void:',
+        '\tpass',
+        '',
+        '',
+        'func _compute_damage() -> int:',
+        '\treturn 1',
+        '',
+        '',
+        'func visible_helper() -> void:',
+        '\tpass',
+        '',
+      ].join('\n'),
+    );
 
     const server = new ServerProcess({ env: { GODOT_PATH: godotPath } });
     try {
@@ -5095,6 +5121,27 @@ async function testAStructureReadCanCarryWhatTheScriptInherits(): Promise<void> 
         named(all, 'constants'),
         [['BASE_MAX', 'res://base.gd']],
         `and the constants: ${JSON.stringify(all)}`,
+      );
+
+      // Asked of the engine rather than guessed from the name. The whole table, because the claim
+      // is about which functions are virtual and which are not, and reading only the two that are
+      // passes on an answer that calls everything virtual.
+      const engineCalls = await call('script_info', {
+        projectPath: project,
+        op: 'structure',
+        scriptPath: 'res://virtuals.gd',
+      });
+      assert.deepEqual(
+        asArray(get(engineCalls, 'functions')).map((each) => [get(each, 'name'), get(each, 'is_virtual')]),
+        [
+          ['_ready', true],
+          // On `Node2D`, not on `Node`, so the whole chain to the native class has to be walked.
+          ['_draw', true],
+          // Private by convention, which is what the old reading mistook for virtual.
+          ['_compute_damage', false],
+          ['visible_helper', false],
+        ],
+        `only what the engine calls is virtual: ${JSON.stringify(engineCalls)}`,
       );
 
       // A native base declares nothing in a file, so the walk has nothing to do and says so with an
