@@ -92,6 +92,14 @@ fires every time. The bug was fixed and a wrong answer beside it went from uncom
 after a fix, ask which answers elsewhere were true only because the fault was there, and reach for
 the ones that were right by luck rather than by construction.
 
+A fix can also create the state its own test needs, which means the case that catches what it left
+behind was unwritable until it landed. A replacement server meeting a live editor-played run is
+code that existed and had never run against a real editor, because while the shutdown killed those
+runs on a reconnect there was never one to meet. Surviving is not the same as being usable, and the
+half of the fixture that reads the run through a replacement could not have been written the day
+before. So a fix that makes something survive is the moment to ask what now happens to it, and to
+expect the answer to be in a path nothing has exercised.
+
 A disarm that fails is only evidence when it fails on the assertion you aimed at. Read the failure
 rather than the exit code: a disarm that fails somewhere else never reached the broken line either,
 and it is the same empty result as one that passed, wearing the colour you were hoping for. The way
