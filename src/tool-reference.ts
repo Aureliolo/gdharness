@@ -106,8 +106,10 @@ export function renderToolsMarkdown(): string {
       lines.push('Arguments:', '');
       for (const [name, schema] of parameters) {
         const type = namedType(schema['type']);
-        const note = typeof schema['description'] === 'string' ? ` ${schema['description']}` : '';
-        lines.push(`- \`${name}\` (${type}):${note}`);
+        // The colon goes with the description rather than with the name. Ten arguments had none and
+        // rendered as a line ending in a colon, in the page and in the skill an agent reads.
+        const note = typeof schema['description'] === 'string' ? `: ${schema['description']}` : '';
+        lines.push(`- \`${name}\` (${type})${note}`);
       }
       lines.push('');
     }
