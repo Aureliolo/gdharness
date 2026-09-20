@@ -2589,6 +2589,61 @@ function testEveryGdscriptIsUnderTheGatesAndEveryGateHasSome(): void {
   }
 }
 
+/**
+ * The bumps the release button offers are the bumps both documents describe.
+ *
+ * `CLAUDE.md` tells the owner how to choose a bump and says `.github/CONTRIBUTING.md` states the
+ * same thing publicly, so keep the two in step. That instruction was stated and held by nothing,
+ * which is its own shape: a project can write a rule into its working agreement, act on it, and
+ * still have no case that fails when the two drift.
+ *
+ * What is held here is the part that has an artefact behind it. The three documents that have to
+ * agree are two prose files and one `type: choice` in a workflow, and the choice is the one a
+ * person actually clicks: a bump offered by the button and described in neither file is one nobody
+ * can decide correctly, and a bump described in one file only is the drift the instruction is about.
+ *
+ * What is not held, and deliberately: which level each kind of change belongs to. The two files say
+ * that in different words on purpose, one addressing the owner and one the public, so `removal` in
+ * one is `taken away` in the other. A check pairing phrase to phrase would be a copy of both texts
+ * that rots when either is reworded, which is the fault it would be pretending to catch.
+ */
+function testTheReleaseButtonOffersWhatBothDocumentsDescribe(): void {
+  const workflow = readFileSync(join(process.cwd(), '.github', 'workflows', 'release-prepare.yml'), 'utf8');
+  const choices = workflow
+    .slice(workflow.indexOf('bump:'))
+    .split('options:')[1]
+    ?.split(/\n\s*\n|\njobs:/)[0];
+  assert.ok(choices !== undefined, 'the prepare workflow should offer a bump as a list of options');
+  const offered = [...choices.matchAll(/^\s*-\s*(\w+)\s*$/gm)].map((found) => found[1]);
+  assert.deepEqual(
+    offered,
+    ['patch', 'minor', 'major'],
+    `the button offers these three, and both documents are held against them: ${choices}`,
+  );
+
+  // The section rather than the file. `major` appears in CONTRIBUTING's Renovate paragraph as
+  // well, so a whole-file search passes on a Versions section that has lost it, which is a check
+  // reading the right document and the wrong part of it.
+  const sections: [string, string][] = [
+    ['CLAUDE.md', '## Releasing'],
+    [join('.github', 'CONTRIBUTING.md'), '## Versions'],
+  ];
+  for (const [file, heading] of sections) {
+    const text = readFileSync(join(process.cwd(), file), 'utf8');
+    const start = text.indexOf(heading);
+    assert.ok(start >= 0, `${file} should still have its ${heading} section`);
+    const after = text.slice(start + heading.length);
+    const ends = after.indexOf('\n## ');
+    const section = (ends < 0 ? after : after.slice(0, ends)).toLowerCase();
+    for (const bump of offered) {
+      assert.ok(
+        section.includes(String(bump)),
+        `${file}'s ${heading} should say what ${String(bump)} means, since the button offers it`,
+      );
+    }
+  }
+}
+
 function testAnAutoloadGitWillNotCarry(): void {
   const project = mkdtempSync(join(tmpdir(), 'gdharness-ignored-'));
   const git = (...gitArgs: string[]): SpawnSyncReturns<string> =>
@@ -8347,6 +8402,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testProjectDefaultsToTheWorkingDirectory,
   testAnAutoloadGitWillNotCarry,
   testEveryGdscriptIsUnderTheGatesAndEveryGateHasSome,
+  testTheReleaseButtonOffersWhatBothDocumentsDescribe,
   testVersionOrdering,
   testChangelogReach,
   testTheCureIsWrittenWhole,
