@@ -463,13 +463,16 @@ export function judgeRun(
   // describes, because the run was already going. One that reads as starting slightly earlier is a
   // clock or a resolution artefact rather than evidence, so it is left to the comparisons below.
   //
-  // Asked of the caller that kills. Picking a run back up on a weaker answer costs a wrong reading;
-  // signalling on one costs somebody else's process.
-  if (
-    needed === 'confirmed' &&
-    running.startedAt !== undefined &&
-    running.startedAt - record.startedAt > SAME_RUN_WINDOW_MS
-  ) {
+  // Asked of both callers, unlike everything below. The weaker question is weaker because an image
+  // name is not enough to tell two engines apart, not because picking a run back up deserves less
+  // care: this is not a guess that leans one way, it is a process that cannot be the one recorded.
+  // Left out of it, a worker holding a recycled number is adopted and reported as the run still
+  // going, which is the answer this project is asked to trust above every other.
+  //
+  // The cost is a clock stepped backwards by more than the window between the note being written
+  // and the process being asked about, which would read a live run as finished. Remote against an
+  // adjustment of that size, and the alternative is a stale yes on every fan-out.
+  if (running.startedAt !== undefined && running.startedAt - record.startedAt > SAME_RUN_WINDOW_MS) {
     return false;
   }
   const engine = record.command === undefined ? null : basename(record.command);

@@ -6652,12 +6652,20 @@ function testTheEditorHoldingAProjectIsNotARunOfIt(): void {
     true,
     'and a process that started when this run did is still the run, whatever else it carries',
   );
-  // Picking a run back up is the weaker question and is not what kills, so a start time it cannot
-  // explain leaves that answer alone: reporting a live bench as finished is its own wrong answer.
+  // And the weaker question too, which is the one exception to that question being weaker. It is
+  // weaker because an image name cannot tell two engines apart, not because picking a run back up
+  // deserves less care, and this is not a guess that leans one way: a process that began after the
+  // record cannot be the run it describes. Left out, a worker holding a recycled number is adopted
+  // and reported as the run still going.
   assert.equal(
     judgeRun(record, { ...asked(worker), startedAt: record.startedAt + 600_000 }, 'possible'),
+    false,
+    'nor is it a run to be picked back up and reported as still going',
+  );
+  assert.equal(
+    judgeRun(record, { ...asked(worker), startedAt: record.startedAt + 200 }, 'possible'),
     true,
-    'the weaker question is unchanged, because acting on it does not end anything',
+    'while the run itself is still one to pick back up',
   );
   // A platform that will not say when a process started is left with the checks it had.
   assert.equal(
