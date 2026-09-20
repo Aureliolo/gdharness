@@ -841,7 +841,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       sinceLastCall: {
         type: 'boolean',
-        description: 'Only entries printed since the previous editor_output. Default false.',
+        description:
+          'Only entries this has not already answered with at this severity. Default false. Measured per severity floor and not across them, so polling for errors leaves the rest of the output for a later read rather than consuming it, and a read with contains is a search over the whole run and consumes nothing.',
       },
       cpu: {
         type: 'boolean',
