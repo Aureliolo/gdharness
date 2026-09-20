@@ -246,10 +246,15 @@ export function contradictedDiagnostics(
  * duration beside a cure as the duration of the cure.
  *
  * The
- * reload is named after it rather than ahead of it: a built copy has been seen stale here while
- * these diagnostics read clean, so the copy the editor built and whatever the analyser resolves
- * against are not known to be the same thing, and a caller reading one should not be told it is
- * reading the other.
+ * reload is named after it rather than ahead of it, because they fix different things. Measured in
+ * one window on one editor: the analyser resolved a call to a newly added method, reading clean,
+ * and the next call found the editor's built copy of that same script without the method in it. One
+ * stale and one current at the same moment is two objects, so the reload cannot be what clears a
+ * diagnostic and a caller reading one must not be told it is reading the other.
+ *
+ * That pairing is the whole of the evidence and it had to be taken as one reading. Before, the
+ * clean diagnostic came from after the reload and the stale copy from before it, which is two
+ * moments reported as a divergence, and the sentence claiming it was shipped for three releases.
  *
  * The no-lever branch says why it is empty rather than only that it is. A type that depends on
  * nothing is where this fault is easiest to produce, because an edit anywhere near a type that
@@ -296,9 +301,10 @@ export function staleAnalysisNote(
         : `reloadScript takes one script, so a call each for ${declaring.join(' and ')} recompiles those copies`
     } from the file into the same ` +
     'object and answers with the members it has afterwards under reloadedMethods. Read that and the ' +
-    'next diagnostics as two readings rather than one: a built copy has been seen stale here while ' +
-    'the diagnostics on it read clean, so the reload is worth doing and is not known to be what ' +
-    'clears these. The other lever measured is that a held type is refreshed when something it ' +
+    'next diagnostics as two readings, because they are of two things: measured in one window on ' +
+    'one editor, the analyser resolved a call to a newly added method while the built copy of that ' +
+    'same script did not have it. So the reload is worth doing and is not what clears these; the ' +
+    'scan is. The other lever measured is that a held type is refreshed when something it ' +
     `depends on changes rather than when it changes itself${lever}. editor_launch restart has always ` +
     'worked and costs a window. project_import refresh_classes does not, and answers added: [] while ' +
     'this is happening.'

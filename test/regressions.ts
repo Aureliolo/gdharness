@@ -3040,10 +3040,14 @@ function testTheStaleNoteNamesTheCallThatRebuildsTheCopy(): void {
   assert.match(alone, /reloadedMethods/, 'and the reading that says the rebuild happened');
   assert.match(alone, /editor_launch restart/, 'with the restart kept as the one that always worked');
   assert.match(alone, /depend on no other global class/, 'and no lever invented where there is none');
-  // The reload is offered without being credited with the clearing. A built copy has been seen
-  // stale while the diagnostics on it read clean, so a note that said the reload fixes these would
-  // be claiming the two caches are one, which is the thing not known.
-  assert.match(alone, /is not known to be what clears these/, 'the reload is offered, not credited');
+  // The reload is offered without being credited with the clearing, and the note now says why
+  // rather than hedging: testAMethodAddedToAnAnalysedTypeIsPickedUp in the editor tier takes both
+  // readings in one window and finds the analyser resolving a call to a newly added method while
+  // the built copy of that script has not got it. One stale and one current at the same moment is
+  // two objects. This assertion held "is not known to be what clears these" until that reading
+  // existed, and changing it took measuring the thing rather than rewording the sentence.
+  assert.match(alone, /the analyser resolved a call to a newly added method/, 'the divergence is stated');
+  assert.match(alone, /is not what clears these; the scan is/, 'and the reload is not credited with it');
   assert.match(
     alone,
     /where this turns up/,
