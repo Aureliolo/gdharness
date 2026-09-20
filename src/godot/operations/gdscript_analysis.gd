@@ -128,10 +128,13 @@ func _add_inherited(answer: Dictionary, seen: Array[String]) -> void:
 		if base_path.is_empty() or base_path in seen:
 			break
 		seen.append(base_path)
-		inherits_from.append(base_path)
 		var above: Dictionary = get_gdscript_info({"script_path": base_path})
-		if not above.get("success", true):
+		# A read that failed answers with an empty dictionary rather than with a flag, so that is
+		# what is asked. `_script_named` has already checked the file is there, which leaves only
+		# an open that fails, and the chain stops without recording a file nothing was read from.
+		if above.is_empty():
 			break
+		inherits_from.append(base_path)
 		for list_name: String in ["signals", "variables", "functions", "constants", "enums"]:
 			var mine: Array[Dictionary] = answer[list_name]
 			var theirs: Array[Dictionary] = above[list_name]
