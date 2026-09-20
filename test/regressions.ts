@@ -8184,7 +8184,7 @@ async function testEveryReservedPortIsItsOwn(): Promise<void> {
  * Set to what is there rather than to a round number, so removing mentions means lowering this in
  * the same change and somebody confirms the removal was meant.
  */
-const TOOL_NAME_MENTIONS = 449;
+const TOOL_NAME_MENTIONS = 520;
 
 /** The same, for phrases naming a tool and one of its multi-word ops. */
 const TOOL_OP_MENTIONS = 18;
@@ -8272,9 +8272,19 @@ function testEveryToolNamedInProseIsATool(): void {
   // The addon's GDScript is here for the same reason: it tells a caller which tool to use too.
   walk('src');
   walk('docs');
-  sources.push(['README.md', readFileSync('README.md', 'utf8')]);
+  walk('.github');
+  for (const entry of readdirSync('.', { withFileTypes: true })) {
+    if (entry.isFile() && entry.name.endsWith('.md')) {
+      sources.push([entry.name, readFileSync(entry.name, 'utf8')]);
+    }
+  }
   sources.push(['the tool reference', renderToolsMarkdown()]);
-  sources.push(['the skill', skillFiles('0.0.0').get('SKILL.md') ?? '']);
+  // Every file the skill installs, not the one that is usually the whole of it. The reference beside
+  // it is generated and is what a rename rewrites, so leaving it out reads a skill that cannot drift
+  // and calls the pair checked.
+  for (const [name, text] of skillFiles('0.0.0')) {
+    sources.push([`the skill: ${name}`, text]);
+  }
 
   let seen = 0;
   const wrong: string[] = [];
