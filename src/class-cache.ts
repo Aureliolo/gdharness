@@ -303,7 +303,7 @@ export function staleAnalysisNote(
         'That is the common case rather than the awkward one: an edit near a type that depends on ' +
         'something refreshes it before the fault is noticed, which is why a type with no ' +
         'dependencies is where this turns up'
-      : `, so changing ${[...dependsOn].sort().join(', ')} and rescanning is worth a try`;
+      : `, so changing ${[...dependsOn].sort().join(' or ')} and then rescanning is worth a try`;
   return (
     `The editor is reporting against an older copy of ${types.size === 1 ? 'a type' : 'some types'} ` +
     'named under contradictedByTheFile. Each member listed is declared in the file the class cache ' +
