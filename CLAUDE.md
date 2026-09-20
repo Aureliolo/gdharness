@@ -149,6 +149,29 @@ pid, because ending the game frees the number and opening an editor is what happ
 else on this machine satisfies every property on the list. The answer is usually right next to the
 thing being identified.
 
+Having found one such neighbour, do not stop: the answer to that question is a set. The editor was
+the near thing visible from here, and the fix for it separated an editor from a game. What it did not
+reach was reported from a project whose bench opens thirty-one worker engines at once, each with the
+same executable, the same `--path` and no editor flag, on a machine recycling pids for twenty minutes.
+Every one of them passed. The reason the first fix felt sufficient is worth naming, because it will
+feel sufficient again: it was built from the case somebody had hit, and the neighbours nobody has hit
+yet are the same distance away.
+
+When every property being compared is shared across a family, no combination of them will separate
+one member from another, and adding more of the same kind reads as progress. The record here carries
+the engine, the project and the arguments, and a worker of that project matches all three: its
+command line is a superset, so requiring each recorded argument to appear in it confirms the worker
+too. What was needed was a property of a different kind, one no sibling can share, and the process's
+start time is it: a number cannot be handed out again until the process holding it has gone. So when
+a discriminator keeps failing, stop refining it and ask which property the impostors cannot have.
+
+And a property the platform has to supply is a dependency to assert rather than assume, whenever its
+absence is silent. The start time is read three different ways on three platforms and every case that
+judges it hands it in, so all of them would have passed on a platform that never produced one, and
+the guard would have been quietly Windows-only while every other machine went on signalling workers.
+A case asks a real process for its start time and requires an answer. A platform that cannot give one
+is a thing to find out about, not to degrade into.
+
 The fourth way is a second guard covering the one you broke, and the wrong conclusion it invites is
 that the line you disarmed was doing nothing. Two fixes landed together on where a parameter list
 ends: the trailing comment comes off the whole line before anything reads it, and the closing
