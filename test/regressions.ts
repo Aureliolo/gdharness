@@ -84,7 +84,13 @@ import { addonMismatch, markIfStale, SERVER_VERSION } from '../src/server-versio
 import { ADDONS, autoloadIsOurs, installAddons } from '../src/setup.js';
 import { skillFiles } from '../src/skill.js';
 import { readNonNegativeNumber, readPositiveNumber } from '../src/tool-args.js';
-import { opTakes, TOOL_SPECS, toolSpec, toolsWithoutProjectPath } from '../src/tool-definitions.js';
+import {
+  opTakes,
+  projectPathSentence,
+  TOOL_SPECS,
+  toolSpec,
+  toolsWithoutProjectPath,
+} from '../src/tool-definitions.js';
 import { renderToolsMarkdown } from '../src/tool-reference.js';
 import { cacheFile, isNewer, UpdateCheck } from '../src/update-check.js';
 import { asArray, asNumber, get, text } from './support/json.js';
@@ -3067,8 +3073,31 @@ function testTheStaleNoteNamesTheCallThatRebuildsTheCopy(): void {
     [],
   );
   assert.match(pair, /some types/, 'more than one type reads as more than one');
-  assert.match(pair, /res:\/\/bell\.gd, res:\/\/rope\.gd/, 'each declaring script once, in order');
   assert.match(pair, /those copies/, 'and the plural carries through the sentence');
+  // reloadScript takes one script. A list of them behind it is a call that gets refused, which is
+  // worse than saying nothing: the note is read at the moment a caller has already been misled once.
+  assert.match(
+    pair,
+    /reloadScript takes one script, so a call each for res:\/\/bell\.gd and res:\/\/rope\.gd/,
+    'two declaring scripts are two calls, said as two calls',
+  );
+  assert.equal(
+    toolSpec('editor_rescan')?.parameters['reloadScript']?.['type'],
+    'string',
+    'and that is what the argument is, so the sentence above is checkable rather than a habit',
+  );
+
+  // Two members missing from one class: two entries, one stale type, one script. This is the shape
+  // the second project reproduced first, and every plural in the note has to count what it is about
+  // rather than how many diagnostics arrived.
+  const twoMembers = staleAnalysisNote([bell, { ...bell, member: 'toll' }], []);
+  assert.match(twoMembers, /an older copy of a type/, 'one class is one type however many members');
+  assert.match(twoMembers, /reloadScript set to res:\/\/bell\.gd recompiles that copy/, 'and one call');
+
+  // Nothing contradicted has nothing to say. The server only builds this when something is, so the
+  // empty answer is unreachable from there and reachable from anywhere else that calls the function.
+  assert.equal(staleAnalysisNote([], []), '', 'an empty list gets no sentence rather than a hollow one');
+  assert.equal(staleAnalysisNote([], ['Rope']), '', 'and a lever with nothing to apply it to is still none');
 }
 
 function testTheStaleHalfIsNamedCorrectly(): void {
@@ -3929,21 +3958,37 @@ function testTheProjectPathSentenceNamesEveryToolThatTakesNone(): void {
     );
   }
 
+  const shared = projectPathSentence();
   for (const [what, text] of [
     ['the tool reference', renderToolsMarkdown()],
     ['the skill', skillFiles('0.0.0').get('SKILL.md') ?? ''],
   ] as const) {
     const sentence = text.split('\n').find((line) => line.includes('Every call takes'));
     assert.ok(sentence, `${what} should still open by saying which calls need a projectPath`);
+    // The clause verbatim, not the names in it. Two renderings building the same sentence is the
+    // arrangement that let one of them escape every backtick while the other did not, and a check
+    // reading the names out of each reads through exactly the part that differed.
+    assert.ok(sentence.includes(shared), `${what} should carry the generated clause unaltered: ${sentence}`);
     for (const name of without) {
-      // The name and its markup together. Checking the name alone reads through whatever surrounds
-      // it, so the two renderings can disagree about how they say the same names and both pass.
       assert.ok(
         sentence.includes(`\`${name}\``),
         `${what} should name ${name} as a code span among the calls that take none: ${sentence}`,
       );
     }
   }
+  assert.match(shared, /which take none$/, 'four of them read as plural');
+  // The branches the surface does not currently produce. At none the list-joining version said
+  // "except , which take none", which would ship in the skill every agent reads.
+  assert.equal(
+    projectPathSentence([]),
+    'Every call takes `projectPath`',
+    'with nothing to except, the sentence is the rule on its own',
+  );
+  assert.match(
+    projectPathSentence(['editor_status']),
+    /except `editor_status`, which takes none$/,
+    'and one of them reads as one',
+  );
 }
 
 /**

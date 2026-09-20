@@ -39,6 +39,14 @@ nothing wrong about a note that said nothing. Nothing in either check's own text
 the wrong artefact, which is why moving the thing is what finds them: render it, call it, and assert
 what comes back.
 
+The trigger for that is a branch of the output no reproduction produces, because the rule above does
+not fire on its own. The note telling a caller which script to reload was written, reviewed, gated
+and tagged saying to pass two paths comma-separated to an argument that takes one string, and it was
+found by rendering the two-type case for no reason except that the value can be plural. Reading the
+code shows nothing: it is the same join either way and the singular and plural differ by a word. An
+argument that can be plural, a list that can be empty, a second entry in one answer: render the case
+nothing has hit and read it. The branches a reproduction covers are the ones already right.
+
 A disarm that still passes is a statement about the setup before it is one about the check. The
 fixture reached the assertion without walking the line that was broken, so the reading to reject
 first is that the assertion is too weak: strengthening it only buys a fixture that fails for a
