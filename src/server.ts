@@ -44,6 +44,7 @@ import {
   declaredClasses,
   heldButGone,
   missingMemberIn,
+  staleAnalysisNote,
   staleClassNames,
   type UnseenClass,
   unknownTypeIn,
@@ -2340,9 +2341,7 @@ class GodotServer {
           }
         }
       }
-      notes.push(
-        `The editor is reporting against an older copy of ${contradicted.length === 1 ? 'a type' : 'some types'} named under contradictedByTheFile. Each member listed is declared in the file the class cache points at, so those diagnostics are wrong however the code is written. Try editor_rescan first: it costs about half a second and cleared this in one of five measured attempts. If it does not, the lever is that a held type is refreshed when something it depends on changes rather than when it changes itself${dependsOn.size === 0 ? ', though the named types depend on no other global class, which leaves only the restart' : `, so change ${[...dependsOn].sort().join(', ')} and rescan again`}. editor_launch restart is the only remedy that has always worked, and is the one to reach for when the count above is not good enough odds. project_import refresh_classes does not, and answers added: [] while this is happening.`,
-      );
+      notes.push(staleAnalysisNote(contradicted, [...dependsOn]));
     }
     const uncached = unloaded.filter((type) => !type.inTheClassCache);
     if (uncached.length > 0) {

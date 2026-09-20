@@ -24,6 +24,7 @@ import { pullRequestNumbers, shipsToUsers } from '../scripts/release-notes.js';
 import { sharedCopies } from '../scripts/sync-shared-gd.js';
 import { announcementPath, BRIDGE_ANNOUNCE_PROTOCOL, readAnnouncement } from '../src/bridge-announce.js';
 import {
+  type Contradicted,
   cachedClasses,
   cacheWrittenAt,
   classesNamedIn,
@@ -31,6 +32,7 @@ import {
   declaresMember,
   heldButGone,
   missingMemberIn,
+  staleAnalysisNote,
   staleClassNames,
   unknownTypeIn,
   unloadedTypes,
@@ -2984,11 +2986,18 @@ function testTheCureIsWrittenWhole(): void {
   // correct, which is what all three used to do and what a check like this used to require.
   const offered = [
     rescan,
-    ...readFileSync('src/server.ts', 'utf8')
-      .split('\n')
-      .filter((line) => line.includes('editor_launch restart')),
+    // Rendered rather than read out of the file it is built in, because it is built in parts and a
+    // line of source holds no whole sentence. Reading lines would pass it over in silence.
+    staleAnalysisNote([{ kind: 'method', member: 'silence', type: 'Bell', declaredIn: 'res://bell.gd' }], []),
+    ...readdirSync('src')
+      .filter((name) => name.endsWith('.ts'))
+      .flatMap((name) =>
+        readFileSync(join('src', name), 'utf8')
+          .split('\n')
+          .filter((line) => line.includes('editor_launch restart')),
+      ),
   ];
-  assert.ok(offered.length >= 4, `the places offering a remedy should be found, not ${offered.length}`);
+  assert.ok(offered.length >= 15, `the places offering a remedy should be found, not ${offered.length}`);
 
   for (const sentence of offered) {
     assert.doesNotMatch(
@@ -2997,6 +3006,69 @@ function testTheCureIsWrittenWhole(): void {
       `nothing should still tell a caller to edit correct source: ${sentence.slice(0, 140)}`,
     );
   }
+}
+
+/**
+ * The note a caller reads when the editor is reporting against an older copy names the call that
+ * rebuilds it, and names the script to point it at.
+ *
+ * This is the answer that arrives at the moment the fault fires, and for three releases it offered a
+ * scan that works one time in five, a dependency to go and touch, and a restart, while the call
+ * built for exactly this went unmentioned. A remedy nothing reaches is not shipped.
+ *
+ * Held over the rendered note rather than over the source that builds it: the sentence is assembled
+ * from parts, so no line of the file contains it and a check reading lines would report nothing
+ * wrong about a note that said nothing at all.
+ */
+function testTheStaleNoteNamesTheCallThatRebuildsTheCopy(): void {
+  const bell: Contradicted = {
+    kind: 'method',
+    member: 'silence',
+    type: 'Bell',
+    declaredIn: 'res://bell.gd',
+  };
+  const alone = staleAnalysisNote([bell], []);
+  assert.match(alone, /Run editor_rescan first/, 'the remedy that has cleared this comes first');
+  assert.match(alone, /reloadScript/, 'the note should name the argument that rebuilds the built copy');
+  assert.match(alone, /res:\/\/bell\.gd/, 'and the script to point it at, which only the caller can know');
+  assert.match(alone, /reloadedMethods/, 'and the reading that says the rebuild happened');
+  assert.match(alone, /editor_launch restart/, 'with the restart kept as the one that always worked');
+  assert.match(alone, /depend on no other global class/, 'and no lever invented where there is none');
+  // The reload is offered without being credited with the clearing. A built copy has been seen
+  // stale while the diagnostics on it read clean, so a note that said the reload fixes these would
+  // be claiming the two caches are one, which is the thing not known.
+  assert.match(alone, /is not known to be what clears these/, 'the reload is offered, not credited');
+  assert.match(
+    alone,
+    /where this turns up/,
+    'and the empty lever says why it is empty, since a leaf type is where the fault is easiest to make',
+  );
+  // Two measurements from two projects, each said on its own. Adding them into one ratio would
+  // assert that the benches are the same bench, which is what the two readings above leave open.
+  // Neither reading is this project's: the diagnostic has never gone stale in this bench. Both are
+  // attributed, because a figure written without a source reads as the writer's own.
+  assert.match(alone, /in the project that reported it/, 'the reporting project keeps its own count');
+  assert.match(alone, /both reproductions measured in a second project/, 'and the other keeps its own');
+  assert.doesNotMatch(alone, /measured here/, 'and this project claims neither');
+  // The milliseconds are the scan's own waitedMs. A duration written beside a cure is read as the
+  // duration of the cure, and nobody timed the gap between the scan returning and the re-read, so
+  // the figures are held to the phrasing that says what they timed rather than to their absence.
+  assert.match(alone, /the scan itself returning in 243ms and 275ms/, 'the timing says what it timed');
+
+  // The lever is a dependency of the stale type, never the stale type itself: sending a caller to
+  // edit the file the diagnostics are already wrong about is the retracted cure, and the one thing
+  // every one of these sentences has to keep out. See testTheCureIsWrittenWhole.
+  const withLever = staleAnalysisNote([bell], ['Rope', 'Clapper']);
+  assert.match(withLever, /changing Clapper, Rope and rescanning/, 'named in order, so the note is stable');
+  assert.doesNotMatch(withLever, /depend on no other global class/, 'and the no-lever half is gone');
+
+  const pair = staleAnalysisNote(
+    [bell, { ...bell, member: 'toll' }, { ...bell, type: 'Rope', declaredIn: 'res://rope.gd' }],
+    [],
+  );
+  assert.match(pair, /some types/, 'more than one type reads as more than one');
+  assert.match(pair, /res:\/\/bell\.gd, res:\/\/rope\.gd/, 'each declaring script once, in order');
+  assert.match(pair, /those copies/, 'and the plural carries through the sentence');
 }
 
 function testTheStaleHalfIsNamedCorrectly(): void {
@@ -6988,6 +7060,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testVersionOrdering,
   testChangelogReach,
   testTheCureIsWrittenWhole,
+  testTheStaleNoteNamesTheCallThatRebuildsTheCopy,
   testTheStaleHalfIsNamedCorrectly,
   testAGameIsFoundWhereverItAnnounced,
   testAGameTooNewToTalkToIsStillAGame,
