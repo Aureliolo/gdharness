@@ -3154,6 +3154,31 @@ function testAGameThatAnnouncedAndWentIsSaidSo(): void {
     );
     assert.match(problem, /quit or was ended rather than never starting/, `and told apart: ${problem}`);
     assert.match(problem, /editor_output/, `with where its output is: ${problem}`);
+    assert.doesNotMatch(problem, /earlier/, `one gone game is reported as one: ${problem}`);
+
+    // A second and a third that went the same way are counted, so a game crashing three times in a
+    // minute is not answered as one crash. The most recent is still the one named, because its
+    // output is the one worth reading, and the count is what says the others happened.
+    const again: SpawnSyncReturns<string> = spawnSync(process.execPath, ['--eval', ''], { encoding: 'utf8' });
+    const third: SpawnSyncReturns<string> = spawnSync(process.execPath, ['--eval', ''], { encoding: 'utf8' });
+    for (const pid of [again.pid, third.pid]) {
+      writeFileSync(
+        join(directory, `runtime-${pid}.json`),
+        JSON.stringify({
+          protocol: RUNTIME_PROTOCOL,
+          pid,
+          port: 51_777,
+          address: '127.0.0.1',
+          project: { name: 'Went', path: root },
+        }),
+        'utf8',
+      );
+      runtimesAnnounced([directory]);
+    }
+    const repeated = chooseRuntime([], root, []);
+    const thrice = 'problem' in repeated ? repeated.problem : '';
+    assert.match(thrice, new RegExp(`gone: pid ${third.pid}`), `the most recent is the one named: ${thrice}`);
+    assert.match(thrice, /2 earlier ones went the same way/, `and the others are counted: ${thrice}`);
 
     // The other project's game is not this project's answer. These directories are shared, and a
     // refusal about somebody else's crash would be the right shape about the wrong game.
