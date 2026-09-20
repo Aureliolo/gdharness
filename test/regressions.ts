@@ -2813,6 +2813,59 @@ function testATestRunKeepsOutOfThePlayersSaves(): void {
 }
 
 /**
+ * The engine, handed that environment, puts `user://` where it was told to.
+ *
+ * The fixture above checks the variables are set and says nothing about whether the engine reads
+ * them, and the comment on `userDataIn` said macOS reads neither, so that a tier there writes into
+ * the player's saves with nothing telling the caller. That is a claim about the engine made from
+ * memory of its source, and the engine tier runs on all three platforms, so it is asked instead:
+ * a script prints `OS.get_user_data_dir()` under the moved environment and the answer has to sit
+ * under the directory it was moved to. Held for every platform, because the platform on which the
+ * claim was wrong either way is the reading this exists to take.
+ */
+function testTheEngineWritesItsSavesWhereItWasTold(): void {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('user directory regression skipped (Godot not found)');
+    return;
+  }
+
+  const projectDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-user-dir-'));
+  const home = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-user-home-'));
+  try {
+    writeFileSync(
+      join(projectDir, 'project.godot'),
+      'config_version=5\n\n[application]\nconfig/name="UserDirRegression"\n',
+    );
+    writeFileSync(
+      join(projectDir, 'probe.gd'),
+      'extends SceneTree\n\n\nfunc _init() -> void:\n\tprint("USER_DATA_DIR=" + OS.get_user_data_dir())\n\tquit()\n',
+    );
+    const run = spawnSync(godotPath, ['--headless', '--path', projectDir, '--script', 'res://probe.gd'], {
+      encoding: 'utf8',
+      env: userDataIn(home),
+      timeout: ENGINE_CALL_TIMEOUT_MS,
+    });
+    const printed = /USER_DATA_DIR=(.+)/.exec(run.stdout)?.[1]?.trim();
+    assert.ok(printed, `the probe should print where user:// is:\n${run.stdout}\n${run.stderr}`);
+    // Compared as spellings rather than resolved, because the engine may not have created the
+    // directory yet. `home` is already the real path, and separators and case are the two things
+    // Windows spells differently from what it was handed.
+    const spelled = (path: string): string => path.replaceAll('\\', '/').toLowerCase();
+    assert.ok(
+      spelled(printed).startsWith(spelled(home)),
+      `${process.platform}: user:// should be under the directory it was moved to, ${home}, not ${printed}`,
+    );
+  } finally {
+    sweep(projectDir);
+    sweep(home);
+  }
+}
+
+/**
  * A game is found wherever it announced itself, not only where this server would have.
  *
  * The two sides derive the path the same way and do not share an environment, which is the whole
@@ -9549,6 +9602,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStartStopsWaitingForAGameThatIsOver,
   testAStartWaitsForTheGameToAnnounceItself,
   testATestRunKeepsOutOfThePlayersSaves,
+  testTheEngineWritesItsSavesWhereItWasTold,
   testParametersReachTheEngine,
   testAFinishedRunCanStillBeRead,
   testOnlyOurOwnAutoloadIsRewritten,
