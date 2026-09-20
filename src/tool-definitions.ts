@@ -95,6 +95,29 @@ export function toolsWithoutProjectPath(): string[] {
     .sort();
 }
 
+/**
+ * The opening clause both renderings share, built once so they cannot say it differently.
+ *
+ * They already did: one escaped every backtick in the generated names and the other did not, and the
+ * case holding both of them compared the names, which is what the markup sits between. Two callers
+ * building the same sentence is the arrangement that allows it.
+ *
+ * The count decides the grammar, including at none, which nothing produces today and which a tool
+ * gaining a `projectPath` would: "except , which take none" is what the list-joining version says
+ * there, and it would ship in the skill every agent reads. The list is an argument so a case can
+ * read those branches out of this function rather than out of a copy of it, since a copy is wrong
+ * in the same way as the original or in a different one, and neither tells you anything.
+ */
+export function projectPathSentence(without: readonly string[] = toolsWithoutProjectPath()): string {
+  if (without.length === 0) {
+    return 'Every call takes `projectPath`';
+  }
+  const named = without.map((name) => `\`${name}\``).join(', ');
+  return `Every call takes \`projectPath\` except ${named}, which ${
+    without.length === 1 ? 'takes' : 'take'
+  } none`;
+}
+
 const PROJECT_PATH: JsonSchema = {
   type: 'string',
   description: 'Absolute path to the project directory, the one holding project.godot.',
