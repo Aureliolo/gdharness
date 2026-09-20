@@ -2838,7 +2838,7 @@ function testAGameIsFoundWhereverItAnnounced(): void {
     writeFileSync(
       join(elsewhere, `runtime-${process.pid}.json`),
       JSON.stringify({
-        protocol: 2,
+        protocol: RUNTIME_PROTOCOL,
         pid: process.pid,
         port: 51_234,
         address: '127.0.0.1',
@@ -3074,7 +3074,7 @@ async function testARefusalDoesNotDenyTheRuntimeItCanSee(): Promise<void> {
     writeFileSync(
       join(announcements, `runtime-${process.pid}.json`),
       JSON.stringify({
-        protocol: 2,
+        protocol: RUNTIME_PROTOCOL,
         pid: process.pid,
         port: 51_987,
         address: '127.0.0.1',
@@ -3113,7 +3113,7 @@ async function testARefusalDoesNotDenyTheRuntimeItCanSee(): Promise<void> {
       writeFileSync(
         join(announcements, `runtime-${process.pid}.json`),
         JSON.stringify({
-          protocol: 2,
+          protocol: RUNTIME_PROTOCOL,
           pid: process.pid,
           port: 51_988,
           address: '127.0.0.1',
@@ -3136,6 +3136,44 @@ async function testARefusalDoesNotDenyTheRuntimeItCanSee(): Promise<void> {
       );
     } finally {
       sweep(neighbour);
+    }
+
+    // The same game, announcing a protocol this server was not built to read, which is what an
+    // upgrade window looks like from here: installing moves the addon on disk when the pin moves
+    // and a server already spawned stays the version it was. The sweep that finds games to talk to
+    // drops these, so the refusal could not see it and reached for the sentence that ends it.
+    //
+    // Found by bumping the protocol under the fixture above rather than by reading anything: the
+    // arm only renders when the two halves disagree, and nothing that agrees will produce it.
+    for (const protocol of [RUNTIME_PROTOCOL + 1, RUNTIME_PROTOCOL - 1]) {
+      writeFileSync(
+        join(announcements, `runtime-${process.pid}.json`),
+        JSON.stringify({
+          protocol,
+          pid: process.pid,
+          port: 51_989,
+          address: '127.0.0.1',
+          project: { name: 'Adopted', path: project },
+        }),
+        'utf8',
+      );
+      const far = String(
+        textOf(await server.request('tools/call', { name: 'editor_run', arguments: { op: 'stop' } })),
+      );
+      assert.match(far, /A game is running/, `a game too far off to read is still running: ${far}`);
+      assert.match(far, new RegExp(String(process.pid)), `and is named by its pid: ${far}`);
+      assert.match(far, new RegExp(`protocol ${protocol}`), `with the protocol it speaks: ${far}`);
+      assert.match(
+        far,
+        protocol > RUNTIME_PROTOCOL ? /this server is the older half/ : /the addon is the older half/,
+        `and which half is behind: ${far}`,
+      );
+      assert.match(far, /replaces the game that is playing/, `and what a start would cost: ${far}`);
+      assert.doesNotMatch(
+        far,
+        /Start one with editor_run/,
+        `the advice that would end it is gone here too: ${far}`,
+      );
     }
   } finally {
     await server.stop();
