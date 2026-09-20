@@ -47,6 +47,19 @@ code shows nothing: it is the same join either way and the singular and plural d
 argument that can be plural, a list that can be empty, a second entry in one answer: render the case
 nothing has hit and read it. The branches a reproduction covers are the ones already right.
 
+The sharpest case of that is an arm that renders only when something is wrong, because a green run is
+where it is never seen. Every fixture passing, every reading of the code and every session that went
+well leave it exactly as unchecked, so "the suite is green" is the state it lives in rather than
+evidence about it. The refusal for a game announcing a protocol this server cannot read is the one
+here: the sweep it consults drops those announcements, so it fell through to advice that ends the run
+it was denying, while twenty lines away a function written for that state said in its own doc that
+"no game is running" is the answer that is certainly false here. The sentence existed and nothing
+called it, and reading the sweep shows something that looks complete. What found it was making the
+two halves disagree for an unrelated reason, bumping a protocol constant to see whether a fixture
+forging it would drift. So for an arm conditioned on a disagreement, a version gap, a fault, a
+timeout, put the thing into that state on purpose rather than waiting to meet it: the arms a good run
+exercises are not the ones worth rendering.
+
 A disarm that still passes is a statement about the setup before it is one about the check. The
 fixture reached the assertion without walking the line that was broken, so the reading to reject
 first is that the assertion is too weak: strengthening it only buys a fixture that fails for a
