@@ -3904,6 +3904,25 @@ class GodotServer {
     // rather than the editor, so a class genuinely deleted stays deleted.
     const restored = lost.length > 0 ? await this.rebuildCacheAfterLoss(projectPath, lost) : [];
 
+    // After the scan rather than before it. The scan settles what the editor knows about the files;
+    // this settles what it has already built from one of them, and building from a file the scan
+    // has not read yet would be recompiling the old source.
+    const reloading = readNonEmptyString(args, 'reloadScript');
+    let reloaded: { methods?: string[]; problem?: string } = {};
+    if (reloading !== undefined) {
+      try {
+        const answer = asParams(
+          await this.godotBridge.invokeTool('reload_script', { ...args, scriptPath: reloading }),
+        );
+        const methods = readArray(answer, 'methods');
+        reloaded = methods
+          ? { methods: methods.map(String) }
+          : { problem: `the editor would not say what ${reloading} has after reloading it` };
+      } catch (error) {
+        reloaded = { problem: `${reloading} could not be reloaded: ${errorMessage(error)}` };
+      }
+    }
+
     const checked = busy ? { unseen: [] } : await this.classesTheEditorCannotSee(args);
     const unseen = checked.unseen;
     const stillGone = lost.filter((name) => !restored.includes(name));
@@ -3911,6 +3930,8 @@ class GodotServer {
       ok: !busy && unseen.length === 0 && stillGone.length === 0 && checked.unchecked === undefined,
       stillWorking: busy,
       waitedMs: Date.now() - started,
+      reloadedMethods: reloaded.methods,
+      reloadProblem: reloaded.problem,
       unseenByEditor: unseen.length > 0 ? unseen : undefined,
       cacheLost: lost.length > 0 ? lost : undefined,
       cacheRestored: restored.length > 0 ? restored : undefined,
