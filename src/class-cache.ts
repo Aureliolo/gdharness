@@ -257,11 +257,23 @@ export function contradictedDiagnostics(
  * case that reaches it. Measured from outside: a first attempt to reproduce this read clean because
  * a dependency of the declaring script had been edited in the same window, and moving the
  * declaration to a type that depends on nothing staled it immediately.
+ *
+ * Every plural here counts what it is about rather than how many diagnostics arrived. Two members
+ * missing from one class is two entries and one stale type and one script to reload, and saying
+ * "some types" to somebody looking at one is the same wrongness as the diagnostic they are already
+ * holding. An empty list has nothing to say and says nothing, rather than a confident sentence with
+ * no scripts in it.
  */
 export function staleAnalysisNote(
   contradicted: readonly Contradicted[],
   dependsOn: readonly string[],
 ): string {
+  if (contradicted.length === 0) {
+    return '';
+  }
+  // Counted by type and by script rather than by diagnostic. Two members missing from one class is
+  // two entries here and one stale type, which is the shape the second project reproduced first.
+  const types = new Set(contradicted.map((one) => one.type));
   const declaring = [...new Set(contradicted.map((one) => one.declaredIn))].sort();
   const lever =
     dependsOn.length === 0
@@ -271,15 +283,18 @@ export function staleAnalysisNote(
         'dependencies is where this turns up'
       : `, so changing ${[...dependsOn].sort().join(', ')} and rescanning is worth a try`;
   return (
-    `The editor is reporting against an older copy of ${contradicted.length === 1 ? 'a type' : 'some types'} ` +
+    `The editor is reporting against an older copy of ${types.size === 1 ? 'a type' : 'some types'} ` +
     'named under contradictedByTheFile. Each member listed is declared in the file the class cache ' +
     'points at, so those diagnostics are wrong however the code is written. Run editor_rescan first: ' +
     'it costs about half a second, it cleared this in one of five attempts in the project that ' +
     'reported it, and it cleared both reproductions measured in a second project, the scan itself ' +
     'returning in 243ms and 275ms. ' +
     'The fault behind it is that a script the editor has loaded keeps the copy it built, and nothing ' +
-    `rebuilds that copy when the file changes; editor_rescan with reloadScript set to ${declaring.join(', ')} ` +
-    `recompiles ${declaring.length === 1 ? 'that copy' : 'those copies'} from the file into the same ` +
+    `rebuilds that copy when the file changes; ${
+      declaring.length === 1
+        ? `editor_rescan with reloadScript set to ${declaring[0]} recompiles that copy`
+        : `reloadScript takes one script, so a call each for ${declaring.join(' and ')} recompiles those copies`
+    } from the file into the same ` +
     'object and answers with the members it has afterwards under reloadedMethods. Read that and the ' +
     'next diagnostics as two readings rather than one: a built copy has been seen stale here while ' +
     'the diagnostics on it read clean, so the reload is worth doing and is not known to be what ' +
