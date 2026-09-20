@@ -135,7 +135,17 @@ function everyWarning(godotPath: string): string[] {
       .filter((name) => name !== '');
     // A query that answered with nothing would build the laxest project rather than the strictest,
     // and every fixture after it would pass for the wrong reason.
-    assert.ok(names.length > 40, `the engine should have named its warnings: ${said}`);
+    //
+    // The count the pinned engine holds rather than a comfortable minimum below it. The floor was
+    // 40 against a real 49, which is an anchor against the query breaking altogether and no guard
+    // at all against it quietly returning eight fewer, and eight fewer is a project built laxer
+    // than the one this gate is named for. `scripts/install-godot.ts` pins 4.7.2-stable here and
+    // in CI, so this moving means the engine moved: raise it in the same change as the pin and
+    // read what arrived, because a warning the engine added is one nothing has been compiled under.
+    assert.ok(
+      names.length >= 49,
+      `the engine should have named every warning it takes a level for: ${names.length}\n${said}`,
+    );
     // And the two this gate was built for are named, because a count alone still passes while the
     // filtering above quietly drops them, which is the gate going quiet about the one thing it
     // exists to catch.
