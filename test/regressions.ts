@@ -4435,6 +4435,37 @@ function testWhatTheEditorSavedAwayIsReportedTheSameWay(): void {
     {},
     'and a project that named nothing cannot have lost anything',
   );
+
+  // The third answer, which used to be the second. A file that could not be read arrived here as a
+  // map naming nothing, and a comparison against nothing finds nothing missing, so the caller was
+  // told their settings survived a save on the strength of a reading that never happened. That is
+  // the worst place for it: this report is the only thing that ever names a key Godot drops, and its
+  // own sentence says nothing else will say it has gone until something depends on one.
+  for (const [what, gap] of [
+    ['before', settingsDroppedReport(null, after)],
+    ['after', settingsDroppedReport(before, null)],
+  ] as const) {
+    assert.equal(
+      gap.settingsDropped,
+      undefined,
+      `nothing is claimed to have gone when the ${what} reading failed`,
+    );
+    assert.match(
+      text(gap.settingsNote),
+      /could not be read/,
+      `and the answer says the comparison did not happen: ${text(gap.settingsNote)}`,
+    );
+    assert.match(
+      text(gap.settingsNote),
+      new RegExp(`could not be read ${what} this`),
+      `naming which end could not be read, since that is what a caller would go and look at`,
+    );
+    assert.doesNotMatch(
+      text(gap.settingsNote),
+      /project_settings set puts one back/,
+      'and does not offer the remedy for a key it cannot name',
+    );
+  }
 }
 
 async function testARestartSaysWhatTheEditorDropped(): Promise<void> {
