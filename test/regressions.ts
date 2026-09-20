@@ -8184,7 +8184,7 @@ async function testEveryReservedPortIsItsOwn(): Promise<void> {
  * Set to what is there rather than to a round number, so removing mentions means lowering this in
  * the same change and somebody confirms the removal was meant.
  */
-const TOOL_NAME_MENTIONS = 427;
+const TOOL_NAME_MENTIONS = 449;
 
 /** The same, for phrases naming a tool and one of its multi-word ops. */
 const TOOL_OP_MENTIONS = 18;
@@ -8216,9 +8216,32 @@ function testEveryToolNamedInProseIsATool(): void {
     'project_path',
     'scene_path',
     'resource_path',
-    'runtime_autoload',
+    'script_path',
+    'script_class',
+    'project_file',
+    'project_name',
+    'project_config',
+    'project_diagnostics',
+    'resource_files',
+    'scene_tools',
+    'resource_tools',
+    'editor_pid',
+    'debug_port',
+    'debug_adapter',
     'editor_plugins',
   ]);
+  // The addon's own modules, taken from the files rather than written down, because a module added
+  // tomorrow is named in a string the day it lands and a list would not know about it.
+  const modules = (directory: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      if (entry.isDirectory()) {
+        modules(join(directory, entry.name));
+      } else if (entry.name.endsWith('.gd')) {
+        notTools.add(entry.name.slice(0, -3));
+      }
+    }
+  };
+  modules(join('src', 'godot'));
   // The wildcard a sentence uses to mean a whole family, which is a real thing to say and not a
   // tool: `runtime_*` reaches it. Judged as the family so a family that goes away is still caught.
   const wildcard = new RegExp(`\\b(${families.join('|')})_\\*`, 'g');
@@ -8234,30 +8257,39 @@ function testEveryToolNamedInProseIsATool(): void {
       const path = join(directory, entry.name);
       if (entry.isDirectory()) {
         walk(path);
-      } else if (entry.name.endsWith('.ts')) {
+      } else if (entry.name.endsWith('.ts') || entry.name.endsWith('.gd')) {
         sources.push([
           path,
           [...readFileSync(path, 'utf8').matchAll(quoted)].map((one) => one[0]).join('\n'),
         ]);
+      } else if (entry.name.endsWith('.md')) {
+        sources.push([path, readFileSync(path, 'utf8')]);
       }
     }
   };
+  // Walked rather than listed. A rule counted over a named set is a rule the next file escapes by
+  // being somewhere nobody listed, and the three documents this used to name were three of five.
+  // The addon's GDScript is here for the same reason: it tells a caller which tool to use too.
   walk('src');
+  walk('docs');
+  sources.push(['README.md', readFileSync('README.md', 'utf8')]);
   sources.push(['the tool reference', renderToolsMarkdown()]);
   sources.push(['the skill', skillFiles('0.0.0').get('SKILL.md') ?? '']);
-  for (const doc of ['README.md', join('docs', 'agent.md'), join('docs', 'architecture.md')]) {
-    sources.push([doc, readFileSync(doc, 'utf8')]);
-  }
 
   let seen = 0;
   const wrong: string[] = [];
   for (const [where, text] of sources) {
     for (const found of text.matchAll(shaped)) {
-      if (notTools.has(found[0])) {
+      // A real tool first, whatever else shares its spelling. Two modules here are named after the
+      // tool they implement, so vocabulary taken from the filenames covers `runtime_capture` and
+      // `runtime_input` as well, and skipping on that would stop checking two of the tools this is
+      // for. Being vocabulary somewhere is not grounds to stop reading it as a tool.
+      const tool = names.has(found[0]);
+      if (!tool && notTools.has(found[0])) {
         continue;
       }
       seen += 1;
-      if (!names.has(found[0])) {
+      if (!tool) {
         wrong.push(`${where} names ${found[0]}, which is not a tool`);
       }
     }
