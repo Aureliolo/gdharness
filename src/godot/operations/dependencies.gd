@@ -145,7 +145,8 @@ func find_resource_usages(params: Dictionary) -> Dictionary:
 			if by_path.search(line) != null:
 				kind = _path_reference_kind(line)
 			elif by_class != null and by_class.search(line) != null:
-				kind = "extends" if line.strip_edges().begins_with("extends ") else "class_name"
+				var bare: String = Patterns.without_annotations(line)
+				kind = "extends" if bare.begins_with("extends ") else "class_name"
 			if kind.is_empty():
 				continue
 			references.append({"line": i + 1, "kind": kind, "text": line.strip_edges()})
@@ -191,7 +192,7 @@ func _declared_class_name(path: String) -> String:
 
 # How a line that names the resource by path uses it.
 func _path_reference_kind(line: String) -> String:
-	var trimmed: String = line.strip_edges()
+	var trimmed: String = Patterns.without_annotations(line)
 	if trimmed.begins_with("extends "):
 		return "extends"
 	if trimmed.begins_with("[ext_resource"):

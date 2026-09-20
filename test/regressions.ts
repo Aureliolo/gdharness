@@ -4718,6 +4718,15 @@ async function testAnAnnotatedDeclarationIsStillADeclaration(): Promise<void> {
       join(project, 'marker.gd'),
       '@abstract class_name Marker\n\n\nfunc mark() -> void:\n\tpass\n',
     );
+    // A use of the class, so the reverse walk has something to classify. The annotation shares the
+    // line with the `extends` here rather than with a declaration, which is the same fault one step
+    // on: unstripped it is not an `extends` line, so the use is labelled with the catch-all.
+    writeFileSync(join(project, 'user.gd'), '@tool extends Shape\n\n\nfunc use() -> void:\n\tpass\n');
+    // The same use written as a path, which is classified by a different line reading the same way.
+    writeFileSync(
+      join(project, 'by_path.gd'),
+      '@tool extends "res://shape.gd"\n\n\nfunc use() -> void:\n\tpass\n',
+    );
     // The base on the declaration line, which GDScript also allows. `Node2D` rather than a
     // `RefCounted` descendant, because `RefCounted` is what the reader falls back to when it finds
     // no `extends` at all, and a fixture using it cannot tell a reading from a default.
@@ -4772,6 +4781,14 @@ async function testAnAnnotatedDeclarationIsStillADeclaration(): Promise<void> {
         get(used, 'class_name'),
         'Shape',
         `the reverse walk knows what the script declares: ${JSON.stringify(used)}`,
+      );
+      // The whole tally rather than one entry of it: a use that goes to the catch-all is only
+      // wrong because it is not counted as the extends it is, and a count of the one kind cannot
+      // see where the missing one went.
+      assert.deepEqual(
+        get(used, 'summary', 'by_kind'),
+        { extends: 2 },
+        `both uses extend it behind an annotation, by name and by path: ${JSON.stringify(used)}`,
       );
 
       const written = await call('script_edit', {
