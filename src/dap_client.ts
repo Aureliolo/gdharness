@@ -359,8 +359,17 @@ export class GodotDAPClient {
       return;
     }
 
-    // Godot's adapter sends no `continued`, so the only other thing that clears this is the
-    // request that resumed the game.
+    // Sent to every connection when the game is let go, whoever let it go: measured on 4.7.2
+    // with a second client sending `continue` while the session that had been told of the stop
+    // looked on, and the editor's own debugger resumes the game through the same path. Without
+    // this that session went on answering held about a game that was running, since the one other
+    // thing that cleared it was its own `continue` request.
+    if (eventName === 'continued') {
+      this.halt = null;
+      this.holdKnown = true;
+      return;
+    }
+
     if (eventName === 'terminated' || eventName === 'exited') {
       this.attached = false;
       this.halt = null;
