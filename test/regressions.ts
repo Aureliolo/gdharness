@@ -4797,7 +4797,24 @@ async function testAnAnnotatedDeclarationIsStillADeclaration(): Promise<void> {
     // A use of the class, so the reverse walk has something to classify. The annotation shares the
     // line with the `extends` here rather than with a declaration, which is the same fault one step
     // on: unstripped it is not an `extends` line, so the use is labelled with the catch-all.
-    writeFileSync(join(project, 'user.gd'), '@tool extends Shape\n\n\nfunc use() -> void:\n\tpass\n');
+    //
+    // The two comments name the class as well, and they are not uses. A project that documents
+    // itself names its collaborators in `##` links, so the better documented it is the further
+    // `total` drifts from the answer to "does anything still use this".
+    writeFileSync(
+      join(project, 'user.gd'),
+      [
+        '@tool extends Shape',
+        '',
+        '## Built on [Shape], which is where every figure comes from.',
+        '# A plain comment naming Shape, which is prose rather than a use.',
+        '',
+        '',
+        'func use() -> void:',
+        '\tpass',
+        '',
+      ].join('\n'),
+    );
     // For `after_ready`, which has to find one annotated function and stop at the next. Reading
     // the raw line missed both ends: an annotated `_ready` was never found, so the answer went to
     // the end of the file, and an annotated function after it was not the boundary it is.
@@ -4939,8 +4956,18 @@ async function testAnAnnotatedDeclarationIsStillADeclaration(): Promise<void> {
       // see where the missing one went.
       assert.deepEqual(
         get(used, 'summary', 'by_kind'),
-        { extends: 2 },
-        `both uses extend it behind an annotation, by name and by path: ${JSON.stringify(used)}`,
+        { extends: 2, doc: 1, comment: 1 },
+        `both uses extend it behind an annotation, and neither mention is one: ${JSON.stringify(used)}`,
+      );
+      assert.equal(
+        get(used, 'summary', 'in_code'),
+        2,
+        `and the count that answers whether anything uses it leaves the prose out: ${JSON.stringify(used)}`,
+      );
+      assert.equal(
+        get(used, 'summary', 'total'),
+        4,
+        `while total still counts everything found, so neither number has to be derived: ${JSON.stringify(used)}`,
       );
 
       const written = await call('script_edit', {
