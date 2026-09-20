@@ -219,7 +219,16 @@ export interface ProjectReport {
    * first: the addon's own script, coming up unguarded, next to the guard. Recognised by the path
    * rather than the name, because the name is the part a project chooses freely.
    */
-  readonly runtimeLoaderAutoload: { readonly name: string; readonly path: string } | null;
+  readonly runtimeLoaderAutoload: {
+    readonly name: string;
+    readonly path: string;
+    /**
+     * Whether the file the entry names is on disk. A loader recognised by its filename can be
+     * recognised without the file, and a project whose loader has gone boots with a missing script
+     * while `project.godot` still says the runtime comes up through it.
+     */
+    readonly exists: boolean;
+  } | null;
   /** class_name declarations on disk that the class cache does not list, or lists elsewhere. */
   readonly staleClasses: readonly string[];
   readonly classCacheExists: boolean;
@@ -243,23 +252,25 @@ export interface ProjectReport {
 function loaderAmong(
   projectPath: string,
   named: ReadonlyMap<string, string>,
-): { name: string; path: string } | null {
-  let byName: { name: string; path: string } | null = null;
+): { name: string; path: string; exists: boolean } | null {
+  let byName: { name: string; path: string; exists: boolean } | null = null;
   for (const [entry, path] of named) {
     if (entry === RUNTIME_AUTOLOAD.name || path === RUNTIME_AUTOLOAD.path) {
       continue;
     }
-    let source = '';
+    let source: string | null = null;
     try {
       source = readFileSync(join(projectPath, path), 'utf8');
     } catch {
-      // A script the entry names and the project does not have. Nothing to read it out of, and
-      // doctor says elsewhere that the entry points at nothing.
+      // A script the entry names and the project does not have. Only the filename can identify it
+      // from here, and the answer carries that the file is gone so that doctor can say so.
     }
-    if (source.includes(RUNTIME_AUTOLOAD.path)) {
-      return { name: entry, path };
+    if (source?.includes(RUNTIME_AUTOLOAD.path)) {
+      return { name: entry, path, exists: true };
     }
-    byName ??= path.toLowerCase().includes('gdharness') ? { name: entry, path } : null;
+    byName ??= path.toLowerCase().includes('gdharness')
+      ? { name: entry, path, exists: source !== null }
+      : null;
   }
   return byName;
 }
@@ -362,10 +373,23 @@ export function inspectProject(projectPath: string): ProjectReport {
   // other than what the reader takes it for.
   const runtimeAutoload = runtimeAutoloadPath !== null || runtimeLoaderAutoload !== null;
   const tracked = trackedByGit(projectPath, [...named.values()]);
+  const addonMissing = (path: string): boolean =>
+    addons.some((addon) => !addon.installed && path.startsWith(`addons/${addon.name}/`));
   for (const [name, path] of named) {
-    // A file that is not here at all is a different sentence, and for our own addon doctor has
-    // already said it above.
-    if (tracked !== null && !tracked.has(path) && existsSync(join(projectPath, path))) {
+    // A file that is not here at all is the fault this whole section is about, already happened
+    // rather than waiting for a clone. Said for every entry, because a loader the project wrote is
+    // as absent from a fresh checkout as our addon is, and the entry naming it is the one line
+    // nothing else here reads. Our own addon's is the exception, since the line above has already
+    // said the addon is not installed and a second sentence about the same absence is noise.
+    if (!existsSync(join(projectPath, path))) {
+      if (!addonMissing(path)) {
+        problems.push(
+          `the ${name} autoload names res://${path}, which is not in this project, so it boots with a missing script; restore that file, or point the autoload at one that is here`,
+        );
+      }
+      continue;
+    }
+    if (tracked !== null && !tracked.has(path)) {
       problems.push(
         `the ${name} autoload names res://${path}, which git does not carry, so a clone boots with a missing script; commit that file, or point the autoload at one the project tracks`,
       );
