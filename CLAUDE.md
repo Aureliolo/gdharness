@@ -60,6 +60,17 @@ the debug adapter as a side effect, and a session stays open for the life of the
 ran first decided what the timing case measured. Fix the setup and disarm again. Only a disarm that
 fails has told you anything about the check.
 
+The same question comes one step earlier for a measurement. Before asking what a reading means, ask
+which result would have contradicted it, because a trial that could not have come out the other way
+has told you nothing however careful it looked. Two lists both holding the new method is a reading
+with no other side to it and cannot separate one cache from two, since two fresh caches and one
+fresh cache look identical. What separates them is a moment where one is stale and the other is not,
+and it has to be one moment: the note here said for three releases that a built copy had been seen
+stale while the diagnostics on it read clean, and that was a stale copy read before a reload paired
+with a clean diagnostic read after it. Taking both in the same window, between the change and any
+remedy, is what turned it into evidence, and it came out as claimed. Neither trial was wrong. Both
+were read as answering a question neither could reach.
+
 A disarm that fails is only evidence when it fails on the assertion you aimed at. Read the failure
 rather than the exit code: a disarm that fails somewhere else never reached the broken line either,
 and it is the same empty result as one that passed, wearing the colour you were hoping for. The way
