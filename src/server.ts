@@ -4308,7 +4308,7 @@ class GodotServer {
       consoleLost: run.consoleLost === true ? true : undefined,
       // Three answers and not two. Null is a game this session knows is running; an object is one
       // it knows is held, whether the adapter said so or the runtime did; and absent with
-      // heldUnknown beside it is a session that attached after a stop, asked, and could not find
+      // heldUnknown beside it is a session that connected after a stop, asked, and could not find
       // out, which is the state a replacement server is in until the game answers something.
       ...hold,
       // Which of the two ways of not running this is, since they call for different things. A
@@ -4658,7 +4658,7 @@ class GodotServer {
    * the runtime when it does not.
    *
    * The debug session knows once it has been told by a `stopped` event, let the game go itself, or
-   * found frames on attach. A session that attached after the stop is none of those: measured on a
+   * found frames on attach. A session that connected after the stop is none of those: measured on a
    * real editor, the adapter answers such a session a thread and no frames while the game sits at
    * its breakpoint, and that is the session every replacement server has after a reconnect. Reading
    * its null as "running" is how a game that draws nothing and answers nothing was reported running,
@@ -4697,19 +4697,19 @@ class GodotServer {
         heldAt: undefined,
         heldUnknown: true,
         heldNote:
-          'Whether this run is held at a breakpoint cannot be told from here: this server attached to the debugger after any stop, the adapter reports a stop only to the session that was attached when it happened, and the run has announced no runtime to ask instead. A game that draws nothing and answers nothing is held; debug_control continue lets a held game go.',
+          'Whether this run is held at a breakpoint cannot be told from here: this server connected to the debugger after any stop, the adapter reports a stop only to the sessions connected when it happened, and the run has announced no runtime to ask instead. A game that draws nothing and answers nothing is held; debug_control continue lets a held game go.',
       };
     }
     const reply = await runtimeRequest(endpoint, 'ping', {}, HOLD_PING_MS);
     if (reply.ok) {
       session?.learnedRunning();
-      return { heldAt: null };
+      return { heldAt: session?.whereItStopped() ?? null };
     }
     if (reply.reason === 'busy') {
       return {
         heldAt: {
           reason: 'unanswered',
-          description: `the game accepted a runtime connection and did not answer a ping within ${HOLD_PING_MS}ms, which is what a game held at a breakpoint does, and what one stuck in a long frame does. This server attached to the debugger after the stop, so the adapter will not show it the stack; debug_control continue lets a held game go`,
+          description: `the game accepted a runtime connection and did not answer a ping within ${HOLD_PING_MS}ms, which is what a game held at a breakpoint does, and what one stuck in a long frame does. This server connected to the debugger after the stop, so the adapter will not show it the stack; debug_control continue lets a held game go`,
           text: '',
         },
       };

@@ -1856,22 +1856,24 @@ async function testAPlayedRunOutlivesTheServerUnderIt(godotPath: string): Promis
 }
 
 /**
- * A session attaching to a game already held learns that it is held, and a client leaving releases
- * the game it was holding.
+ * A game held at a breakpoint stays held for the server that replaces the one it was reported to,
+ * and that server finds out, says so, and can let it go.
  *
  * `halt` was learned from the adapter's `stopped` event and from nothing else, so a session that
- * attached after the halt never learned it: the event had gone to whichever client was there. This
- * was written to show a replacement server after a reconnect reporting a held game as running, and
- * the measurement said otherwise, twice. A fresh session attaching *while* the first server holds
- * the game gets the frames, so the attach now asks and the session knows. A fresh session attaching
- * *after* the first server has gone gets none, because Godot releases the game when the client that
- * held it disconnects: after a reconnect the game is running and `heldAt: null` was the true answer.
+ * connected after the halt never learned it: the event had gone to whichever clients were there.
+ * Measured against a real editor, in three states. The server that was connected when the game
+ * stopped is told, attached or not, and the reason it is told names the stop. A fresh session
+ * attaching *while* that server holds the game is answered the frames, so its attach asks and it
+ * knows. A fresh session attaching *after* that server has gone is answered a thread and no frames
+ * while the game is still sitting at its breakpoint, which is the state every replacement server is
+ * in after a reconnect, and the game itself is what says held: it accepts a runtime connection and
+ * never answers a ping.
  *
- * So the case holds both readings as the pair they are, since either alone fits the other story:
- * frames from a second session while held is the instrument working, and no frames once the holder
- * has gone is the release, and the game answering a runtime call afterwards is what says released
- * rather than forgotten. The release is what a caller is told in the tool descriptions, and an
- * engine that starts keeping the game held fails here and moves that sentence.
+ * So the three are held together, since any one alone fits another story: the first server's
+ * reason is the event arriving on a socket that never attached; frames for a second session while
+ * held is the instrument working; the replacement reading held from the runtime, refusing the stack
+ * for the right reason, and the game ticking once let go, is what separates held from wedged and
+ * from forgotten.
  */
 async function testAHeldGameIsStillHeldForTheReplacement(godotPath: string): Promise<void> {
   await withEditor(godotPath, async (own) => {
@@ -1882,11 +1884,13 @@ async function testAHeldGameIsStillHeldForTheReplacement(godotPath: string): Pro
     const pid = asNumber(get(run, 'runtime', 'pid'), 'the played run needs a process of its own');
     await stackWithin(own.attempt, 'the game should stop at the breakpoint', (stack) => stack.length > 0);
 
-    // The server that saw the event says so. Without this the null below could be the field having
-    // gone quiet for everyone.
+    // The server that was sent the event says so, with the reason the event carried. Its session
+    // attached only just now, for the stack read above, and an attach that asked the adapter again
+    // would answer "attached" here in place of what it was told.
     const before = await own.call('editor_output', {});
-    assert.ok(
-      get(before, 'heldAt') !== null && get(before, 'heldAt') !== undefined,
+    assert.equal(
+      get(before, 'heldAt', 'reason'),
+      'breakpoint',
       `held, seen by the first server: ${text(before)}`,
     );
 

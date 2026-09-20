@@ -166,11 +166,7 @@ export class GodotDAPClient {
         });
 
         socket.on('close', () => {
-          this.connected = false;
-          this.initialized = false;
-          this.attached = false;
-          this.halt = null;
-          this.socket = null;
+          this.forgetConnection();
           this.failPendingRequests(new Error('DAP connection closed'));
         });
 
@@ -202,10 +198,7 @@ export class GodotDAPClient {
    */
   async abandon(): Promise<void> {
     if (!this.socket) {
-      this.connected = false;
-      this.initialized = false;
-      this.attached = false;
-      this.halt = null;
+      this.forgetConnection();
       return;
     }
 
@@ -228,11 +221,22 @@ export class GodotDAPClient {
       }, 500);
     });
 
+    this.forgetConnection();
+  }
+
+  /**
+   * What a closed connection leaves behind: nothing.
+   *
+   * The adapter tells a connection what happens while it is open and repeats none of it to the
+   * next one, so a stop heard here is not one the connection that replaces this one has heard.
+   */
+  private forgetConnection(): void {
     this.socket = null;
     this.connected = false;
     this.initialized = false;
     this.attached = false;
     this.halt = null;
+    this.holdKnown = false;
   }
 
   private async ensureConnected(): Promise<void> {
@@ -400,14 +404,18 @@ export class GodotDAPClient {
     await this.sendRequest('attach', {});
     await this.sendRequest('configurationDone', {});
     this.attached = true;
-    await this.learnWhetherHeld();
+    // A connection open when the game stopped was told, attached or not, and what it was told
+    // names the stop: asking would replace an exception with "held when this session attached".
+    if (!this.holdKnown) {
+      await this.learnWhetherHeld();
+    }
   }
 
   /**
    * Whether the game was already held when this session attached, asked rather than waited for.
    *
-   * `halt` is set by the `stopped` event and the event goes to whichever client is connected when
-   * the game halts. A session opened afterwards never receives it, so it is asked for here through
+   * `halt` is set by the `stopped` event and the event goes to every client connected when the
+   * game halts. A session opened afterwards never receives it, so it is asked for here through
    * the stack, and what the adapter answers depends on who else is attached. Measured against a
    * real editor: while the client that was told is still attached, a second session gets the frames
    * and learns the halt. Once that client has gone, which is what a harness reconnect does to a
@@ -417,7 +425,6 @@ export class GodotDAPClient {
    * null, for the caller that can ask the runtime.
    */
   private async learnWhetherHeld(): Promise<void> {
-    this.holdKnown = false;
     try {
       const threads = await this.sendRequest('threads');
       const listed = threads['threads'];
@@ -446,17 +453,27 @@ export class GodotDAPClient {
   /**
    * Whether this session can say if the game is held.
    *
-   * True once it has been told by a `stopped` event, has let the game go itself, or found frames on
-   * attach. False for a session that attached after a stop the adapter will not repeat to it, and
-   * for one that has not attached at all: for those, `whereItStopped()` answering null is not an
+   * True once this connection has been told by a `stopped` event, has let the game go itself, or
+   * found frames on attach. Being told needs the connection open at the time and nothing more: a
+   * server that plays a scene through the editor hears the stop on a socket it never attached, and
+   * the stop it hears is the one with the reason in it. False for a connection opened after a stop
+   * the adapter will not repeat to it: for that one, `whereItStopped()` answering null is not an
    * answer.
    */
   holdIsKnown(): boolean {
-    return this.attached && this.holdKnown;
+    return this.holdKnown;
   }
 
-  /** What a caller that asked elsewhere found out: the game answered, so it is running. */
+  /**
+   * What a caller that asked elsewhere found out: the game answered, so it is running.
+   *
+   * Unless the adapter has spoken since the question was put. The ping is awaited, the socket
+   * delivers meanwhile, and a stop reported while the answer was in flight is newer than it.
+   */
   learnedRunning(): void {
+    if (this.holdKnown) {
+      return;
+    }
     this.halt = null;
     this.holdKnown = true;
   }
@@ -686,11 +703,7 @@ export class GodotDAPClient {
    */
   private failOversizedStream(detail: string): void {
     const socket = this.socket;
-    this.socket = null;
-    this.connected = false;
-    this.initialized = false;
-    this.attached = false;
-    this.halt = null;
+    this.forgetConnection();
     this.reader = new FrameReader();
     socket?.destroy();
 
