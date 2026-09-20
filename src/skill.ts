@@ -74,8 +74,9 @@ that is running, and the project on disk. ${TOOL_SPECS.length} tools, named \`do
 | --- | --- |
 | What a screen says | \`runtime_inspect text\`, which reads what is drawn and leaves out what is hidden. Read \`omitted\`: a long list above a dialog pushes it past the limit, and what comes back then is the top of the screen rather than the screen |
 | Find a control by the word on it | \`runtime_inspect find\` with \`says\`, rather than listing a screen and reading each one |
+| What a control is showing | \`runtime_inspect find\` with \`property\` as well: the value comes back on each match in the same answer, so the game cannot tick between finding the node and reading it. A \`find\` followed by a \`property\` read of the path it answered is two calls with a frame between them, and a panel that rebuilds itself answers the second with "Node not found" |
 | Where a control is, and whether it is visible | \`runtime_inspect\` \`find\`, \`rect\` |
-| What a property reads right now | \`runtime_inspect\` \`property\`, \`runtime_invoke\` |
+| What a property reads right now, on a node whose path you already hold | \`runtime_inspect\` \`property\`, \`runtime_invoke\` |
 | What a property on an object a node holds reads | the same two, with colons: \`_game:clock:speed\` |
 | Press a button | \`runtime_input click\`, which says what was under the pointer |
 | Fill in a field | \`runtime_input click\` on it, then \`runtime_input text\` with \`replace\`; a submitted field has to be clicked again |
