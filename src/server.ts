@@ -75,6 +75,8 @@ import {
   OPENED_BY_A_SERVER,
   resolveHeadless,
   runArguments,
+  SAVES_NOT_MOVED_NOTE,
+  savesStayPut,
   userDataIn,
 } from './launch.js';
 import { DEFAULT_LSP_PORT, GodotLSPClient, handleLSPTool } from './lsp_client.js';
@@ -2182,6 +2184,10 @@ class GodotServer {
     const verdict = hung
       ? `hung: killed after ${timeoutMs} ms`
       : (nothingRan ?? verdicts[exitCode ?? -1] ?? `exit ${exitCode ?? 'unknown'}`);
+    // Said on every answer from a run whose saves could not be moved, whichever way it ended: a
+    // tier that failed still wrote wherever it wrote, and the run that found nothing to do is the
+    // one exception, since it never started a game.
+    const savesNote = savesStayPut() && nothingRan === null ? SAVES_NOT_MOVED_NOTE : undefined;
 
     if (report === null) {
       const note =
@@ -2202,6 +2208,7 @@ class GodotServer {
                 hung,
                 arguments: cmdArgs,
                 entries: forAnswer(printed.slice(0, 60)),
+                savesNote,
               },
               null,
               2,
@@ -2259,6 +2266,7 @@ class GodotServer {
       warnings: warnings.length > 0 ? warnings : undefined,
       orphans: orphans.total > 0 ? orphans.total : undefined,
       notRun: notRun > 0 ? notRun : undefined,
+      savesNote,
       // The word on its own was the whole answer, and it named neither what was warned nor where.
       note:
         verdict.startsWith('warnings') && warnings.length === 0
