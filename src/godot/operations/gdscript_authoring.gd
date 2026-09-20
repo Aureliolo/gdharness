@@ -243,6 +243,10 @@ func _add_function(lines: Array[String], mod: Dictionary) -> int:
 		func_lines.append("\t" + bl)
 
 	var insert_line: int = _function_insertion_point(lines, position)
+	# A separator on the far side too when something follows, since `after_ready` and `after_init`
+	# put the new function immediately above an existing one and left the two declarations touching.
+	if insert_line < lines.size():
+		func_lines.append("")
 
 	for i: int in range(func_lines.size() - 1, -1, -1):
 		if lines.insert(insert_line, func_lines[i]) != OK:
@@ -311,7 +315,11 @@ func _function_insertion_point(lines: Array[String], position: String) -> int:
 func _line_after_function(lines: Array[String], prefix: String) -> int:
 	var inside: bool = false
 	for i: int in range(lines.size()):
-		var line: String = lines[i].strip_edges()
+		# As above: an annotated `func` is still a `func`, and reading the raw line missed both
+		# ends of this. An annotated `_ready` was never found, so `after_ready` placed the new
+		# function at the end of the file, and an annotated function after `_ready` was not the
+		# boundary it is, so the new one went in after whichever later function was plain.
+		var line: String = Patterns.without_annotations(lines[i])
 		if line.begins_with(prefix):
 			inside = true
 		elif inside and (line.begins_with("func ") or line.begins_with("static func ")):

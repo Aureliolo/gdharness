@@ -4722,6 +4722,27 @@ async function testAnAnnotatedDeclarationIsStillADeclaration(): Promise<void> {
     // line with the `extends` here rather than with a declaration, which is the same fault one step
     // on: unstripped it is not an `extends` line, so the use is labelled with the catch-all.
     writeFileSync(join(project, 'user.gd'), '@tool extends Shape\n\n\nfunc use() -> void:\n\tpass\n');
+    // For `after_ready`, which has to find one annotated function and stop at the next. Reading
+    // the raw line missed both ends: an annotated `_ready` was never found, so the answer went to
+    // the end of the file, and an annotated function after it was not the boundary it is.
+    writeFileSync(
+      join(project, 'place.gd'),
+      [
+        'extends Node',
+        '',
+        '',
+        '@warning_ignore("unused_parameter") func _ready() -> void:',
+        '\tpass',
+        '',
+        '',
+        '@abstract func later() -> void',
+        '',
+        '',
+        'func last() -> void:',
+        '\tpass',
+        '',
+      ].join('\n'),
+    );
     // The same use written as a path, which is classified by a different line reading the same way.
     writeFileSync(
       join(project, 'by_path.gd'),
@@ -4870,6 +4891,28 @@ async function testAnAnnotatedDeclarationIsStillADeclaration(): Promise<void> {
       assert.ok(declaration >= 0, `the declaration should still be there: ${after.join('\\n')}`);
       assert.ok(variable > declaration, `the variable below it, not above: ${after.join('\\n')}`);
       assert.ok(declared > declaration, `and the signal below it too: ${after.join('\\n')}`);
+
+      const placed = await call('script_edit', {
+        projectPath: project,
+        op: 'modify',
+        scriptPath: 'res://place.gd',
+        modifications: [{ type: 'add_function', name: 'placed', body: 'pass', position: 'after_ready' }],
+      });
+      assert.equal(get(placed, 'success'), true, `the function should be added: ${JSON.stringify(placed)}`);
+      const laidOut = readFileSync(join(project, 'place.gd'), 'utf8').split('\n');
+      const ready = laidOut.findIndex((line) => line.includes('func _ready'));
+      const abstract = laidOut.findIndex((line) => line.includes('func later'));
+      const added = laidOut.findIndex((line) => line.includes('func placed'));
+      assert.ok(
+        added > ready && added < abstract,
+        `after_ready means between the two, not at the end: ${laidOut.join('\\n')}`,
+      );
+      assert.equal(laidOut[added - 1], '', `with a blank line above it: ${laidOut.join('\\n')}`);
+      assert.equal(
+        laidOut[abstract - 1],
+        '',
+        `and one below, rather than two declarations touching: ${laidOut.join('\\n')}`,
+      );
 
       // And Godot agrees it is a script, which is the claim those line numbers stand for.
       const reread = await call('script_info', {
