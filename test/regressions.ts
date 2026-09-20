@@ -6003,6 +6003,16 @@ function testEveryDispatchedNameExistsOnBothSides(): void {
   const NAMED_THEMSELVES = new Set(['click', 'choose']);
   const input = TOOL_SPECS.find((spec) => spec.name === 'runtime_input');
   assert.ok(input, 'runtime_input should be a tool');
+  // The exemption held against the thing it exempts, so it cannot outlive it. Subtracting a name
+  // that is no longer an op removes nothing and says nothing, which is the quiet way for a list
+  // like this to stop meaning anything: the op it was written for is gone and the entry survives.
+  for (const op of NAMED_THEMSELVES) {
+    assert.ok(
+      Object.hasOwn(input.operations ?? {}, op),
+      `${op} is exempted from the injected commands and is not an op of runtime_input`,
+    );
+    assert.ok(asked.has(op), `${op} is exempted because it sends a command of its own, and nothing sends it`);
+  }
   const injected = new Set(
     Object.keys(input.operations ?? {})
       .filter((op) => !NAMED_THEMSELVES.has(op))
