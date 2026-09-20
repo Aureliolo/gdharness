@@ -1669,12 +1669,26 @@ async function testAMethodAddedToAnAnalysedTypeIsPickedUp({ call, project }: Edi
   // exactly the failure worth catching, so the members are the evidence.
   const reloaded = await call('editor_rescan', { projectPath: project, reloadScript: 'res://bell.gd' });
   assert.equal(get(reloaded, 'reloadProblem'), undefined, JSON.stringify(reloaded));
-  const members = asArray(get(reloaded, 'reloadedMethods')).map((entry) => asString(entry, 'method'));
+  const names = (field: string): string[] =>
+    asArray(get(reloaded, field)).map((entry) => asString(entry, 'method'));
+
+  // The fault itself, which this is the only reading that shows: the copy the editor built before
+  // the file changed does not have the method that was added to it. The language server answers
+  // from disk and reads clean, which is why this went a day without being reproducible here.
   assert.ok(
-    members.includes('silence'),
-    `the recompiled copy should have the method added since it was built: ${members.join(', ')}`,
+    !names('heldBeforeReload').includes('silence'),
+    `the built copy should still be the one from before the change: ${names('heldBeforeReload').join(', ')}`,
   );
-  assert.ok(members.includes('toll'), 'and should still have the one it was built with');
+  assert.ok(
+    names('heldBeforeReload').includes('toll'),
+    'and should be a real copy of that script rather than an empty answer',
+  );
+
+  assert.ok(
+    names('reloadedMethods').includes('silence'),
+    `the recompiled copy should have the method added since it was built: ${names('reloadedMethods').join(', ')}`,
+  );
+  assert.ok(names('reloadedMethods').includes('toll'), 'and should still have the one it was built with');
 
   const grown = await read();
   assert.equal(
