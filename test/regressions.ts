@@ -3039,6 +3039,111 @@ function testANotYetRuntimeIsNotTheSameAsNoRuntime(): void {
  * naming the run it started, which is the instrument reporting that it fired, and that record must
  * be in the directory this server was given rather than the shared one.
  */
+/**
+ * A refusal about a run this server cannot reach does not deny the runtime it can see.
+ *
+ * Reported from a project whose editor was playing a scene while its addon was a version behind the
+ * server: the editor did not report `playingInEditor`, so both `editor_run stop` and `editor_output`
+ * answered `No game is running. Start one with editor_run.`, in the same session where
+ * `editor_status` listed that game's runtime as reachable and every `runtime_*` tool drove it.
+ *
+ * The advice is the part that had to change whatever puts a server in that state. `editor_run start`
+ * replaces the game that is playing rather than adding one, measured downstream as one process
+ * before and one after with the old pid gone, so a caller following the sentence ends the run it
+ * has just been told is not there. A refusal that is merely unhelpful is a different thing from one
+ * that hands out a destructive instruction.
+ *
+ * The runtime here is forged rather than played, because what is under test is what the server says
+ * when it cannot see a game that has announced itself, and an engine is not needed to be unable to
+ * see something. The pid is this process, so the announcement is of something genuinely alive: a
+ * dead pid is swept by the reader and would leave this asserting the ordinary refusal by accident.
+ */
+async function testARefusalDoesNotDenyTheRuntimeItCanSee(): Promise<void> {
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-adopted-'));
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-adopted-rt-'));
+  const announcements = join(runtimeDir, 'gdharness');
+  mkdirSync(announcements, { recursive: true });
+  const server = new ServerProcess({
+    env: { GDHARNESS_PROJECT: project, GDHARNESS_RUNTIME_DIR: announcements },
+  });
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Adopted"\n',
+    );
+    writeFileSync(
+      join(announcements, `runtime-${process.pid}.json`),
+      JSON.stringify({
+        protocol: 2,
+        pid: process.pid,
+        port: 51_987,
+        address: '127.0.0.1',
+        project: { name: 'Adopted', path: project },
+      }),
+      'utf8',
+    );
+
+    await server.initialize('regression-test');
+    const refused = textOf(
+      await server.request('tools/call', {
+        name: 'editor_run',
+        arguments: { op: 'stop' },
+      }),
+    );
+    assert.ok(refused !== null, 'the refusal should say something');
+    const said = refused;
+
+    // What it must say: the game is there, which tools reach it, and that starting would end it.
+    assert.match(said, /A game is running/, `the runtime it can see is not denied: ${said}`);
+    assert.match(said, new RegExp(String(process.pid)), `and is named by its pid: ${said}`);
+    assert.match(said, /runtime_\*/, `with the tools that do reach it: ${said}`);
+    assert.match(said, /replaces the game that is playing/, `and what a start would cost: ${said}`);
+
+    // And what it must not: the advice that ends the run. Paired with the four above rather than
+    // standing alone, since a refusal that failed to render at all would satisfy this perfectly.
+    assert.doesNotMatch(said, /Start one with editor_run/, `the advice that would end it is gone: ${said}`);
+
+    // The other half, and the one that matters more: a runtime for somebody else's project is not
+    // this server's to report on either. The containment this sits beside exists because a server
+    // that adopted whatever it found in a shared runtime directory ended another project's bench
+    // six times in fifty minutes, so a change widening what a server speaks for has to be shown not
+    // to have widened that. Same directory, different project.
+    const neighbour = mkdtempSync(join(tmpdir(), 'gdharness-neighbour-'));
+    try {
+      writeFileSync(
+        join(announcements, `runtime-${process.pid}.json`),
+        JSON.stringify({
+          protocol: 2,
+          pid: process.pid,
+          port: 51_988,
+          address: '127.0.0.1',
+          project: { name: 'Neighbour', path: neighbour },
+        }),
+        'utf8',
+      );
+      const aboutTheirs = String(
+        textOf(await server.request('tools/call', { name: 'editor_run', arguments: { op: 'stop' } })),
+      );
+      assert.match(
+        aboutTheirs,
+        /No game is running/,
+        `a run of another project's is not one this server reports: ${aboutTheirs}`,
+      );
+      assert.doesNotMatch(
+        aboutTheirs,
+        new RegExp(neighbour.replaceAll('\\', '\\\\')),
+        `and it is not named in the refusal either: ${aboutTheirs}`,
+      );
+    } finally {
+      sweep(neighbour);
+    }
+  } finally {
+    await server.stop();
+    sweep(project);
+    sweep(runtimeDir);
+  }
+}
+
 async function testATestServerWritesWhereNoRealRunIs(): Promise<void> {
   const project = mkdtempSync(join(tmpdir(), 'gdharness-isolation-'));
   const shared = join(runtimeDirectory(withoutRuntimeDir(process.env)), 'runs', 'run.json');
@@ -8471,6 +8576,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAGameIsFoundWhereverItAnnounced,
   testAGameTooNewToTalkToIsStillAGame,
   testANotYetRuntimeIsNotTheSameAsNoRuntime,
+  testARefusalDoesNotDenyTheRuntimeItCanSee,
   testATestServerWritesWhereNoRealRunIs,
   testAStartStopsWaitingForAGameThatIsOver,
   testAStartWaitsForTheGameToAnnounceItself,
