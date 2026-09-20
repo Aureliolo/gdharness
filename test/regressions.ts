@@ -5075,7 +5075,28 @@ async function testAStructureReadCanCarryWhatTheScriptInherits(): Promise<void> 
         // comment off first leaves the last bracket on the line where it belongs.
         'func noted(a: int) -> void: print(a, ")")',
         '',
+        '',
+        // A comma inside a typed collection, which is not a separator either. Reported from a game
+        // project where 13 single-line signatures carry one and the pinned gdUnit4 has a single
+        // instance, so the addon barely exercises this and an ordinary project has them everywhere.
+        'func from_dict(saved: Dictionary, roster: Dictionary[String, int]) -> bool:',
+        '\treturn saved.size() + roster.size() > 0',
+        '',
+        '',
+        // Wrapped, which `gdformat` does to anything past the line length. Read one line at a time
+        // this answered with no parameters and no return type, both of them on lines it never saw.
+        'func spread(',
+        '\tfirst: int,',
+        '\tsecond: String = "x",',
+        ') -> bool:',
+        '\treturn first > 0 and second != ""',
+        '',
       ].join('\n'),
+    );
+    // A wrapped enum, the other half of the same fault: 23 of them in the pinned gdUnit4.
+    writeFileSync(
+      join(project, 'wrapped.gd'),
+      ['extends RefCounted', '', 'enum Mode {', '\tFAST,', '\tSLOW,', '}', ''].join('\n'),
     );
 
     const server = new ServerProcess({ env: { GODOT_PATH: godotPath } });
@@ -5214,8 +5235,43 @@ async function testAStructureReadCanCarryWhatTheScriptInherits(): Promise<void> 
           // colon does too: read to the end of the line this answered with a parameter typed
           // `int) -> void`, a second one named `")"`, and no return type at all.
           ['noted', 'void', [['a', 'int', '']]],
+          [
+            'from_dict',
+            'bool',
+            [
+              ['saved', 'Dictionary', ''],
+              // The comma is inside the type's own brackets, so it separates nothing. Split on it,
+              // this answered with a third parameter named `int]` and a truncated second type.
+              ['roster', 'Dictionary[String, int]', ''],
+            ],
+          ],
+          [
+            // Wrapped across four lines, and the `-> bool` is on the last of them.
+            'spread',
+            'bool',
+            [
+              ['first', 'int', ''],
+              ['second', 'String', '"x"'],
+            ],
+          ],
         ],
         `every parameter list ends where the signature does: ${JSON.stringify(bracketed)}`,
+      );
+
+      const wrapped = await call('script_info', {
+        projectPath: project,
+        op: 'structure',
+        scriptPath: 'res://wrapped.gd',
+      });
+      assert.deepEqual(
+        asArray(get(wrapped, 'enums')).map((each) => [
+          get(each, 'name'),
+          get(each, 'values'),
+          get(each, 'line'),
+        ]),
+        // The line is where the declaration starts, not where its closing brace is.
+        [['Mode', ['FAST', 'SLOW'], 3]],
+        `a wrapped enum has the members it declares: ${JSON.stringify(wrapped)}`,
       );
       assert.deepEqual(
         asArray(get(bracketed, 'signals')).map((each) => [

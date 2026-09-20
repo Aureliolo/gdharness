@@ -45,7 +45,9 @@ func get_gdscript_info(params: Dictionary) -> Dictionary:
 
 	var in_multiline_string: bool = false
 
-	for i: int in range(lines.size()):
+	var i: int = -1
+	while i + 1 < lines.size():
+		i += 1
 		# The comment off first, so nothing downstream has to know about them. It was reaching the
 		# answer: a `var x: int = 5  # note` carried `5  # note` as its default, and correcting the
 		# end of a parameter list put the comment into the return type, where `rfind(")")` had been
@@ -61,6 +63,16 @@ func get_gdscript_info(params: Dictionary) -> Dictionary:
 
 		if in_multiline_string:
 			continue
+
+		var at: int = i
+		# A declaration wrapped across lines is one declaration, and reading the first line alone
+		# answered with the half that was not wrapped away: `values: []` for every `enum X {` on its
+		# own line and `params: []` with no return type for every `func x(`. `gdformat` wraps
+		# anything past the line length, so that is what a formatted project looks like: 23 and 19
+		# of them in gdUnit4 v6.2.1, and four in this addon.
+		while _bracket_depth(stripped) > 0 and i + 1 < lines.size():
+			i += 1
+			stripped = (stripped + " " + _without_comment(lines[i])).strip_edges()
 
 		# Annotations may share the line with anything they annotate, so every branch below decides
 		# on the line with them off. `@abstract class_name X` was reported as no declared class,
@@ -78,17 +90,19 @@ func get_gdscript_info(params: Dictionary) -> Dictionary:
 		elif header.begins_with("extends "):
 			extends_name = header.substr(8).strip_edges()
 		elif header.begins_with("signal "):
-			signals.append(_parse_signal(header, i + 1))
+			# `at`, not `i`: a wrapped declaration starts where it starts, and `i` is now sitting on
+			# the line that closed it.
+			signals.append(_parse_signal(header, at + 1))
 		elif header.begins_with("const "):
-			constants.append(_parse_constant(header, i + 1))
+			constants.append(_parse_constant(header, at + 1))
 		elif header.begins_with("enum "):
-			enums.append(_parse_enum(header, i + 1))
+			enums.append(_parse_enum(header, at + 1))
 		elif header.begins_with("var "):
 			# The whole line here, not the header: which annotations a variable carries is the
 			# answer rather than noise in front of it, and `@export_range(0, 1)` is the hint.
-			variables.append(_parse_variable(stripped, i + 1))
+			variables.append(_parse_variable(stripped, at + 1))
 		elif header.begins_with("func ") or header.begins_with("static func "):
-			functions.append(_parse_function(header, i + 1, stripped))
+			functions.append(_parse_function(header, at + 1, stripped))
 		elif header.begins_with("class "):
 			inner_classes.append(header.substr(6).split(":")[0].split(" ")[0].strip_edges())
 
@@ -408,6 +422,25 @@ func _arguments_in(text: String) -> Array[String]:
 	if not current.strip_edges().is_empty():
 		pieces.append(current.strip_edges())
 	return pieces
+
+
+# How much this line opens that it does not close, ignoring brackets inside strings.
+func _bracket_depth(text: String) -> int:
+	var depth: int = 0
+	var quote: String = ""
+	for i: int in range(text.length()):
+		var ch: String = text[i]
+		if not quote.is_empty():
+			if ch == quote and text[i - 1] != "\\":
+				quote = ""
+			continue
+		if ch == '"' or ch == "'":
+			quote = ch
+		elif ch == "(" or ch == "[" or ch == "{":
+			depth += 1
+		elif ch == ")" or ch == "]" or ch == "}":
+			depth -= 1
+	return depth
 
 
 # The text up to the first [needle] outside every bracket and every string, or all of it.
