@@ -1569,8 +1569,8 @@ async function testAnEditorAServerOpenedIsStartedAgain(): Promise<void> {
       if (opened) {
         assert.match(
           textOf(await restart) ?? '',
-          /No Godot executable found/,
-          'an editor a server opened is started again, so it is the engine that stops it',
+          /GODOT_PATH is set to .*gdharness-no-such-engine, which does not exist/,
+          'an editor a server opened is started again, so it is the engine that stops it, and the refusal names the path this fixture set',
         );
         assert.equal(asked.includes('restart_editor'), false, 'and it is never asked to restart itself');
         continue;
@@ -2775,6 +2775,71 @@ function testTheReleaseButtonOffersWhatBothDocumentsDescribe(): void {
       );
     }
   }
+}
+
+/**
+ * A GODOT_PATH that names something broken is refused as that, naming the path and what is wrong.
+ *
+ * The locator answered null for two states: nothing set and nothing found, and a variable set to
+ * something that does not answer. Both became "No Godot executable found. Set GODOT_PATH", which
+ * told somebody who had set it to set it, and never named what they had set or why it was refused.
+ * The two states also call for opposite next steps, since the first is a machine without an engine
+ * and the second is one line in a config.
+ *
+ * Both broken shapes, because they fail in different places: a path that is not there never
+ * reaches the engine, and a file that is there and is not an engine fails inside `--version`, and a
+ * fixture holding only the first would pass a locator that had gone back to null for the second.
+ * The nothing-set answer is held beside them as the positive, from the same server shape.
+ */
+async function testAnEngineThatDoesNotAnswerIsNamed(): Promise<void> {
+  const missing = join(tmpdir(), 'gdharness-no-such-engine');
+  const notAnEngine = join(process.cwd(), 'package.json');
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-no-engine-'));
+  writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+
+  for (const [label, path, reason] of [
+    ['a path that is not there', missing, /does not exist/],
+    ['a file that is not an engine', notAnEngine, /does not answer --version/],
+  ] as const) {
+    const server = new ServerProcess({ env: { GODOT_PATH: path } });
+    try {
+      await server.initialize('regression-test');
+      const status = parseTextContent(
+        await server.request('tools/call', { name: 'editor_status', arguments: {} }),
+      );
+      assert.equal(get(status, 'godot', 'path'), null, `${label}: no engine is reported`);
+      const problem = text(get(status, 'godot', 'problem'));
+      assert.match(problem, /GODOT_PATH is set to/, `${label}: and why is said in editor_status: ${problem}`);
+      assert.ok(problem.includes(path), `${label}: naming the path that was set: ${problem}`);
+      assert.match(problem, reason, `${label}: and what is wrong with it: ${problem}`);
+
+      const refused =
+        textOf(
+          await server.request('tools/call', {
+            name: 'project_import',
+            arguments: { projectPath: project, op: 'refresh_classes' },
+          }),
+        ) ?? '';
+      assert.match(
+        refused,
+        /GODOT_PATH is set to/,
+        `${label}: a tool that needs the engine says the same: ${refused}`,
+      );
+      assert.match(
+        refused,
+        /Point GODOT_PATH at a Godot 4 executable/,
+        `${label}: and what to do: ${refused}`,
+      );
+      assert.doesNotMatch(
+        refused,
+        /No Godot executable found/,
+        `${label}: rather than the answer for nothing set`,
+      );
+    } finally {
+      await server.stop();
+    }
+  }
+  sweep(project);
 }
 
 function testAnAutoloadGitWillNotCarry(): void {
@@ -9831,6 +9896,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testWhatTheEditorSavedAwayIsReportedTheSameWay,
   testARestartSaysWhatTheEditorDropped,
   testProjectDefaultsToTheWorkingDirectory,
+  testAnEngineThatDoesNotAnswerIsNamed,
   testAnAutoloadGitWillNotCarry,
   testAnAutoloadNamingAFileThatIsNotThere,
   testEveryGdscriptIsUnderTheGatesAndEveryGateHasSome,
