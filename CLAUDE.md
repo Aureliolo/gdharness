@@ -165,6 +165,20 @@ too. What was needed was a property of a different kind, one no sibling can shar
 start time is it: a number cannot be handed out again until the process holding it has gone. So when
 a discriminator keeps failing, stop refining it and ask which property the impostors cannot have.
 
+That argument check is a disarm that passes, one level up: it agrees with the worker by
+construction, so it could not have come out the other way, and it would have been written, reviewed
+and believed. The same question works on a check as on a fixture. Before trusting one, ask what it
+would take for it to fail on the thing it is meant to catch, and if the answer is nothing, it is
+measuring its own shape rather than the world.
+
+A note that reports on the thing it is part of has to be written after that thing is done. A line
+saying what a kill was about to do sat before the signal, so for every run already over by the time
+it was signalled, which is the ordinary way a run ends, it announced an act that did not happen. The
+same shape elsewhere reported a size before adding the paragraph doing the reporting. Neither is
+visible in the code, because the code is correct about the moment it runs at; both are visible in the
+output. So when something describes its own work, read the output and ask whether the work had
+happened yet.
+
 And a property the platform has to supply is a dependency to assert rather than assume, whenever its
 absence is silent. The start time is read three different ways on three platforms and every case that
 judges it hands it in, so all of them would have passed on a platform that never produced one, and
