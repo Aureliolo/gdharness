@@ -42,7 +42,12 @@ import {
 import { GodotDAPClient } from '../src/dap_client.js';
 import { dictionary, emptyRecord } from '../src/dictionary.js';
 import { forAnswer, GameLog } from '../src/game-log.js';
-import { CONNECT_WINDOW_MS, createBridge, mayYetConnect } from '../src/godot-bridge.js';
+import {
+  anEditorIsStillComing,
+  CONNECT_WINDOW_MS,
+  createBridge,
+  mayYetConnect,
+} from '../src/godot-bridge.js';
 import { EDITOR_READS, HEADLESS_OPERATIONS } from '../src/headless-operations.js';
 import {
   editorArguments,
@@ -57,7 +62,7 @@ import { isWithinRoot, resolveWithinProject } from '../src/paths.js';
 import { freePort } from '../src/ports.js';
 import { secondsFromClock } from '../src/process-time.js';
 import { projectStructure, searchProject } from '../src/project-scan.js';
-import { parseProjectGodot, settingKeys } from '../src/resources.js';
+import { parseProjectGodot, settingKeys, settingsDroppedReport } from '../src/resources.js';
 import {
   couldStillBeTheRecordedRun,
   judgeRun,
@@ -92,7 +97,7 @@ import {
   toolSpec,
   toolsWithoutProjectPath,
 } from '../src/tool-definitions.js';
-import { renderToolsMarkdown } from '../src/tool-reference.js';
+import { namedType, renderToolsMarkdown } from '../src/tool-reference.js';
 import { cacheFile, isNewer, UpdateCheck } from '../src/update-check.js';
 import { asArray, asNumber, get, text } from './support/json.js';
 import { isRecord, type JsonRpcMessage, parseTextContent, textOf } from './support/json-rpc.js';
@@ -835,7 +840,7 @@ async function testDapFramesBodiesByBytes(): Promise<void> {
       [outputLine],
       'an event following a multi-byte response must still be found, or the stream has desynchronised',
     );
-    await client.disconnect();
+    await client.abandon();
   });
 }
 
@@ -867,6 +872,56 @@ async function testFramingCeilingFailsLoudly(): Promise<void> {
       'a DAP adapter announcing more than the ceiling should fail the request, naming the size',
     );
   });
+}
+
+/**
+ * Letting go of the debug adapter sends it nothing.
+ *
+ * Godot stops the game it is playing when this session sends the protocol's `disconnect`, and it
+ * does so with `terminateDebuggee: false` on the request: the standard way of asking to be let go
+ * without taking the debuggee with you is not one this adapter honours. This runs in the server's
+ * own shutdown, which a harness performs on every reconnect, so saying goodbye politely was ending
+ * an editor-played game every time somebody reconnected.
+ *
+ * Measured against a real editor by `testAPlayedRunOutlivesTheServerUnderIt` in the editor tier,
+ * which is where the claim lives. This case holds the shape of it cheaply: the request is not sent
+ * at all, and the transport closes anyway.
+ *
+ * The existing run-outlives-server case never reached this. It starts its run with no editor
+ * connected, so the server spawns the game itself and there is no adapter session to say goodbye
+ * to. Server-spawned and editor-played are two shapes and it covers one.
+ */
+async function testLettingGoOfTheAdapterSendsItNothing(): Promise<void> {
+  const requests: Record<string, unknown>[] = [];
+  const respond: FramedPeerHandler = (message, socket) => {
+    requests.push(message);
+    socket.write(
+      frameJsonRpc({
+        seq: requests.length + 100,
+        type: 'response',
+        request_seq: message['seq'],
+        command: message['command'],
+        success: true,
+        body: {},
+      }),
+    );
+  };
+
+  await withFramedPeer(respond, async (port) => {
+    const client = new GodotDAPClient(port, '127.0.0.1');
+    await client.initialize();
+    await client.abandon();
+  });
+
+  const commands = requests.map((request) => request['command']);
+  // The positive first: a session that never opened would send no disconnect either, and would
+  // satisfy the absence below exactly as well as one that opened and then kept quiet.
+  assert.ok(commands.includes('initialize'), `the session should have opened: ${commands.join(', ')}`);
+  assert.deepEqual(
+    commands.filter((command) => command === 'disconnect'),
+    [],
+    `letting go should tell the adapter nothing: ${commands.join(', ')}`,
+  );
 }
 
 /**
@@ -1024,6 +1079,29 @@ async function testAnEditorNotReachedYetIsNotAnEditorThatIsGone(): Promise<void>
     mayYetConnect(started, started.getTime() + CONNECT_WINDOW_MS),
     false,
     'past it, nothing having connected is an editor that is not there',
+  );
+
+  // An editor this server started is the other reason the answer can be true, and it is the one the
+  // window cannot express. The window runs from the bridge taking its port, so a launch on a server
+  // that has been up longer than the window read as final the moment it returned: measured
+  // downstream at nine minutes of "an editor that is not there" about an editor that server had
+  // just started, because an editor imports the project before it loads any plugin.
+  const longAfter = started.getTime() + CONNECT_WINDOW_MS * 20;
+  assert.equal(
+    anEditorIsStillComing(started, true, longAfter),
+    true,
+    'a launched editor still alive is coming, however long the import takes',
+  );
+  assert.equal(
+    anEditorIsStillComing(started, false, longAfter),
+    false,
+    'and with nothing launched and the window closed, the answer is still final',
+  );
+  // Either reason alone is enough, so a window that is still open does not depend on a launch.
+  assert.equal(
+    anEditorIsStillComing(started, false, started.getTime() + 1_000),
+    true,
+    'inside the window it answers as the window does, with nothing launched',
   );
 
   // And the answer carries it, which is the half that would otherwise be computed and dropped.
@@ -3054,17 +3132,17 @@ function testTheStaleNoteNamesTheCallThatRebuildsTheCopy(): void {
     /where this turns up/,
     'and the empty lever says why it is empty, since a leaf type is where the fault is easiest to make',
   );
-  // Two measurements from two projects, each said on its own. Adding them into one ratio would
-  // assert that the benches are the same bench, which is what the two readings above leave open.
-  // Neither reading is this project's: the diagnostic has never gone stale in this bench. Both are
-  // attributed, because a figure written without a source reads as the writer's own.
-  assert.match(alone, /in the project that reported it/, 'the reporting project keeps its own count');
-  assert.match(alone, /both reproductions measured in a second project/, 'and the other keeps its own');
-  assert.doesNotMatch(alone, /measured here/, 'and this project claims neither');
+  // Every figure quoted is of the tool as it is now. One clearing in five attempts was taken
+  // against a version where the rescan answered before the scan had started, so it measures that
+  // timing rather than a scan, and beside the current readings it argued the opposite of what the
+  // current readings say. The project that took those five is the one that noticed.
+  assert.match(alone, /since the scan timing was fixed/, 'the readings are of the tool as it is now');
+  assert.doesNotMatch(alone, /one of five/, 'and the count of the old timing is not quoted as the new');
+  assert.doesNotMatch(alone, /measured here/, 'nor is anybody else’s reading claimed as this bench’s');
   // The milliseconds are the scan's own waitedMs. A duration written beside a cure is read as the
   // duration of the cure, and nobody timed the gap between the scan returning and the re-read, so
   // the figures are held to the phrasing that says what they timed rather than to their absence.
-  assert.match(alone, /the scan itself returning in 243ms and 275ms/, 'the timing says what it timed');
+  assert.match(alone, /the scan returning in 243ms and 275ms/, 'the timing says what it timed');
 
   // The lever is a dependency of the stale type, never the stale type itself: sending a caller to
   // edit the file the diagnostics are already wrong about is the retracted cure, and the one thing
@@ -3751,6 +3829,58 @@ function testOnlyOurOwnAutoloadIsRewritten(): void {
  * arrives. `project.godot` loses a line in between, which is what Godot does to a key named at its
  * own default value.
  */
+/**
+ * An open and a restart say the same thing about what the editor saved away.
+ *
+ * Only the restart did. Godot drops a key sitting at its own default whenever it saves, which it
+ * does on an open just as much as on the way out, and `editor_launch open` answered with `launched`,
+ * a pid and two ports and nothing else. Reported downstream as a sixth strip of the same key and the
+ * first from an open.
+ *
+ * The comparison is one function for both now. What differs is when each call can make it: a
+ * restart waits for the editor to come back and says so in its own answer, while an open returns as
+ * soon as the process exists and the save happens during the import, so `editor_status` makes the
+ * reading once there is an editor to have done the saving.
+ */
+function testWhatTheEditorSavedAwayIsReportedTheSameWay(): void {
+  const before = new Map<string, unknown>([
+    ['debug/gdscript/warnings/return_value_discarded', 0],
+    ['debug/gdscript/warnings/unsafe_call_argument', 2],
+    ['application/config/name', 'Kept'],
+  ]);
+  const after = new Map<string, unknown>([
+    ['debug/gdscript/warnings/unsafe_call_argument', 2],
+    ['application/config/name', 'Kept'],
+  ]);
+
+  const said = settingsDroppedReport(before, after);
+  assert.deepEqual(
+    said.settingsDropped,
+    [{ setting: 'debug/gdscript/warnings/return_value_discarded', was: 0 }],
+    'the key that went is named, with the value it held',
+  );
+  assert.match(text(said.settingsNote), /project_settings set puts one back/, 'and the call to undo it');
+  assert.match(
+    text(said.settingsNote),
+    /writes only what differs from its own defaults/,
+    'with the mechanism, since the key going is not the editor misbehaving',
+  );
+  assert.match(
+    text(said.settingsNote),
+    /value 0/,
+    'and the value inside the sentence, not only in the list beside it',
+  );
+
+  // Nothing dropped says nothing, rather than an empty list a caller has to test for. The positive
+  // above is what shows this is the same function answering and not one that never reports.
+  assert.deepEqual(settingsDroppedReport(after, after), {}, 'a save that took nothing says nothing');
+  assert.deepEqual(
+    settingsDroppedReport(new Map(), after),
+    {},
+    'and a project that named nothing cannot have lost anything',
+  );
+}
+
 async function testARestartSaysWhatTheEditorDropped(): Promise<void> {
   const port = await reservePort();
   const server = new ServerProcess({ env: { GDHARNESS_BRIDGE_PORT: String(port) } });
@@ -4058,6 +4188,37 @@ function testEveryArgumentInTheReferenceIsDescribed(): void {
     described.length > 100,
     `the reference should be full of described arguments: ${described.length}`,
   );
+}
+
+/**
+ * Every arm of the type the reference prints, including the one two arguments reach.
+ *
+ * `namedType` has three: a plain type, a union written as a list, and a fallback for an argument
+ * that declares no type at all because it takes any JSON value. 190 arguments reach the first, three
+ * reach the third, and two reach the second. Two of a hundred and ninety-five is the arm that reads
+ * as covered because the others plainly are, and losing it would print `(any)` where the schema says
+ * `string or number`, which is a reference entry that is wrong rather than missing.
+ *
+ * The two are named rather than counted. A count would also have to move when a third union is
+ * added, and what wants confirming is a union going away, not one arriving.
+ */
+function testTheReferencePrintsEveryShapeOfType(): void {
+  assert.equal(namedType('string'), 'string', 'a plain type is itself');
+  assert.equal(namedType(['string', 'number']), 'string or number', 'a union reads as one');
+  assert.equal(namedType(undefined), 'any', 'and an argument with no declared type takes any value');
+  assert.equal(namedType({ oneOf: [] }), 'any', 'as does a shape this does not read');
+  assert.equal(namedType(['string', 7]), 'any', 'a list that is not all names is not a union');
+
+  const markdown = renderToolsMarkdown();
+  for (const name of ['keycode', 'button']) {
+    const line = markdown.split('\n').find((entry) => entry.startsWith(`- \`${name}\` `));
+    assert.ok(line, `${name} should be in the reference`);
+    assert.match(line, /\(string or number\)/, `${name} should print both types it takes: ${line}`);
+  }
+  // The positive for the fallback, so that an arm printing `any` for everything would be caught by
+  // the lines above rather than satisfying this one too.
+  const anyLines = markdown.split('\n').filter((line) => line.includes('` (any):'));
+  assert.equal(anyLines.length, 3, `three arguments take any value: ${anyLines.join(' | ')}`);
 }
 
 /**
@@ -7175,10 +7336,12 @@ const TESTS: (() => void | Promise<void>)[] = [
   testWhatAStaleTypeDependsOnIsNamed,
   testTheProjectPathSentenceNamesEveryToolThatTakesNone,
   testEveryArgumentInTheReferenceIsDescribed,
+  testTheReferencePrintsEveryShapeOfType,
   testTheSkillWritesNoEscapedBackticks,
   testAnAuditThatCouldNotAskIsNotAnAuditThatPassed,
   testRefreshingUidsMakesTheSidecarAndWritesNoScene,
   testWhoIsHoldingAPortIsAskable,
+  testWhatTheEditorSavedAwayIsReportedTheSameWay,
   testARestartSaysWhatTheEditorDropped,
   testProjectDefaultsToTheWorkingDirectory,
   testAnAutoloadGitWillNotCarry,
@@ -7209,6 +7372,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheWrittenConfigNamesAProgramThatStarts,
 
   testProjectGodotMultilineValues,
+  testLettingGoOfTheAdapterSendsItNothing,
   testProjectGodotResistsPrototypeKeys,
 
   testAnAnswerFromAStaleAddonSaysSo,
