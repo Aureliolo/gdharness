@@ -502,13 +502,14 @@ function doctorReport(projectPath: string): void {
     // Which entry brings it up, rather than whether ours exists. "not registered" about a runtime
     // that was answering queries is what sent a project looking, and naming the file is the half
     // that can be checked from their end: they can open it and see.
+    const loader = report.runtimeLoaderAutoload;
     console.log(
       `runtime autoload: ${
-        report.runtimeLoaderAutoload === null
+        loader === null
           ? report.runtimeAutoload
             ? 'registered'
             : 'not registered'
-          : `registered through res://${report.runtimeLoaderAutoload.path}, as ${report.runtimeLoaderAutoload.name}`
+          : `registered through res://${loader.path}, as ${loader.name}${loader.exists ? '' : ', and that file is not in this project'}`
       }`,
     );
     console.log(

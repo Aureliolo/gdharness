@@ -88,7 +88,13 @@ import { discardWith } from '../src/scratch.js';
 import { alive, PROJECT_FILE_ARGUMENTS, patienceForFrames, runIsUp, runtimeVerdict } from '../src/server.js';
 import type { GodotProcess } from '../src/server-types.js';
 import { addonMismatch, markIfStale, SERVER_VERSION } from '../src/server-version.js';
-import { ADDONS, autoloadIsOurs, installAddons, SCRIPT_RUNS_SETTING } from '../src/setup.js';
+import {
+  ADDONS,
+  autoloadIsOurs,
+  installAddons,
+  RUNTIME_AUTOLOAD,
+  SCRIPT_RUNS_SETTING,
+} from '../src/setup.js';
 import { skillFiles } from '../src/skill.js';
 import { readNonNegativeNumber, readPositiveNumber } from '../src/tool-args.js';
 import {
@@ -2691,19 +2697,112 @@ function testAnAutoloadGitWillNotCarry(): void {
     assert.match(forced[0] ?? '', /NeverAdded/);
 
     // Outside a repository there is no answer, and a missing answer is not a clean bill: doctor
-    // says nothing rather than reporting every autoload as lost.
+    // says nothing rather than reporting every autoload as lost. Every file the entries name is
+    // put on disk first, because a file that is not there is reported whether or not there is a
+    // repository, and this case is about git having no answer rather than about absent files.
     const elsewhere = mkdtempSync(join(tmpdir(), 'gdharness-nogit-'));
     try {
       const outside = spawnSync('git', ['rev-parse', '--git-dir'], { cwd: elsewhere, encoding: 'utf8' });
       if (outside.status !== 0) {
         cpSync(join(project, 'project.godot'), join(elsewhere, 'project.godot'));
+        mkdirSync(join(elsewhere, 'addons', 'thing'), { recursive: true });
         mkdirSync(join(elsewhere, 'scripts'), { recursive: true });
+        writeFileSync(join(elsewhere, 'addons', 'thing', 'autoload.gd'), 'extends Node\n');
+        writeFileSync(join(elsewhere, 'scripts', 'forgotten.gd'), 'extends Node\n');
         writeFileSync(join(elsewhere, 'scripts', 'loader.gd'), 'extends Node\n');
         assert.deepEqual(troubles(elsewhere), [], 'no repository is no verdict');
       }
     } finally {
       sweep(elsewhere);
     }
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * An autoload naming a file that is not there is reported, and the loader line says so too.
+ *
+ * The section of doctor about autoloads exists because a clone boots with a missing script, and it
+ * was silent about the project in front of it doing exactly that. A loader recognised by its
+ * filename is recognised whether or not the file is on disk, so a project whose loader had gone
+ * read `runtime autoload: registered through res://tools/gdharness_loader.gd`, with no problem
+ * line and exit 0, while the comment beside the swallowed read error said doctor reported it
+ * elsewhere. Nothing did.
+ *
+ * Our own addon's script is the one exception, because the addon line has already said the addon
+ * is not installed and a second sentence about the same absence is noise. Asserted as an absence
+ * beside the positives, so it cannot pass by the whole check having gone quiet.
+ */
+function testAnAutoloadNamingAFileThatIsNotThere(): void {
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-gone-'));
+  const doctor = (...more: string[]): SpawnSyncReturns<string> =>
+    spawnSync(process.execPath, [join(process.cwd(), 'build', 'cli.js'), 'doctor', ...more], {
+      encoding: 'utf8',
+      cwd: project,
+      timeout: 60000,
+    });
+  try {
+    mkdirSync(join(project, '.godot'), { recursive: true });
+    writeFileSync(join(project, '.godot', 'global_script_class_cache.cfg'), 'list=Array[Dictionary]([])\n');
+    writeFileSync(
+      join(project, 'project.godot'),
+      'config_version=5\n\n[autoload]\n\n' +
+        'GdharnessLoader="*res://tools/gdharness_loader.gd"\n' +
+        'Gone="*res://tools/not_here.gd"\n' +
+        `${RUNTIME_AUTOLOAD.name}="*res://${RUNTIME_AUTOLOAD.path}"\n`,
+    );
+
+    const json = doctor('--json');
+    assert.equal(json.status, 1, `a project that boots with a missing script is not clean: ${json.stdout}`);
+    const report: unknown = JSON.parse(json.stdout);
+    const said = asArray(get(report, 'problems')).map(text);
+    assert.match(
+      said.join('\n'),
+      /GdharnessLoader autoload names res:\/\/tools\/gdharness_loader\.gd, which is not in this project/,
+      'the loader that is gone is named',
+    );
+    assert.match(
+      said.join('\n'),
+      /Gone autoload names res:\/\/tools\/not_here\.gd, which is not in this project/,
+      'and so is any other entry naming nothing',
+    );
+    assert.equal(
+      said.filter((problem) => problem.includes(RUNTIME_AUTOLOAD.path)).length,
+      0,
+      `our own script is covered by the addon line and not said twice: ${said.join(' | ')}`,
+    );
+    assert.equal(
+      said.filter((problem) => problem.includes('is not installed')).length,
+      3,
+      'which is the line that covers it',
+    );
+    const loader = get(report, 'runtimeLoaderAutoload');
+    assert.equal(get(loader, 'exists'), false, 'and the loader entry says its file is not there');
+
+    const plain = doctor();
+    assert.match(
+      plain.stdout,
+      /runtime autoload: registered through res:\/\/tools\/gdharness_loader\.gd, as GdharnessLoader, and that file is not in this project/,
+      'the status line says so as well, rather than naming a file as though it could be opened',
+    );
+
+    // The positive: put the loader back and the loader line is clean, so the sentence above is
+    // this check and not the whole command going quiet.
+    mkdirSync(join(project, 'tools'), { recursive: true });
+    writeFileSync(join(project, 'tools', 'gdharness_loader.gd'), 'extends Node\n');
+    const restored: unknown = JSON.parse(doctor('--json').stdout);
+    assert.equal(get(get(restored, 'runtimeLoaderAutoload'), 'exists'), true, 'restored, the file is there');
+    assert.doesNotMatch(
+      asArray(get(restored, 'problems')).map(text).join('\n'),
+      /gdharness_loader\.gd, which is not in this project/,
+      'and is no longer reported as missing',
+    );
+    assert.match(
+      asArray(get(restored, 'problems')).map(text).join('\n'),
+      /Gone autoload names res:\/\/tools\/not_here\.gd, which is not in this project/,
+      'while the one still missing still is',
+    );
   } finally {
     sweep(project);
   }
@@ -9423,6 +9522,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARestartSaysWhatTheEditorDropped,
   testProjectDefaultsToTheWorkingDirectory,
   testAnAutoloadGitWillNotCarry,
+  testAnAutoloadNamingAFileThatIsNotThere,
   testEveryGdscriptIsUnderTheGatesAndEveryGateHasSome,
   testTheReleaseButtonOffersWhatBothDocumentsDescribe,
   testVersionOrdering,
