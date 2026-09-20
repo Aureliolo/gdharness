@@ -4235,6 +4235,35 @@ function testTheReferencePrintsEveryShapeOfType(): void {
  * otherwise leave the skill naming a setting nothing reads, which is worse than not naming one:
  * a caller sets it, nothing happens, and the sentence says it should have.
  */
+function testTheSkillNamesEverySettingTheAddonsRead(): void {
+  const read = new Set<string>();
+  const walk = (directory: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        walk(path);
+      } else if (entry.name.endsWith('.gd')) {
+        for (const found of readFileSync(path, 'utf8').matchAll(/"(gdharness\/[a-z_/]+)"/g)) {
+          read.add(found[1] ?? '');
+        }
+      }
+    }
+  };
+  walk('src/godot/addons');
+
+  // The list comes from the addons rather than from here, so a setting added there is covered by
+  // this the day it lands and nobody has to remember. Two were read and written down nowhere a
+  // caller looks, one of them the bind address, which is the only one with a security answer.
+  assert.ok(read.size >= 3, `the addons should read the settings they document: ${[...read].join(', ')}`);
+  const skill = skillFiles('0.0.0').get('SKILL.md') ?? '';
+  const unsaid = [...read].filter((setting) => !skill.includes(setting)).sort();
+  assert.deepEqual(unsaid, [], 'every setting the addons read should be named in the skill');
+
+  // The bind address with its reason rather than only its name. A caller who reads that it exists
+  // and not why it is loopback is one who moves it to reach a game on another machine.
+  assert.match(skill, /none of it authenticated/, 'and the bind address should say what it guards');
+}
+
 function testTheSkillNamesTheSettingThatServesAScriptRun(): void {
   const addon = readFileSync('src/godot/addons/gdharness_runtime/runtime_autoload.gd', 'utf8');
   const declared = /SCRIPT_RUNS_SETTING\s*:\s*String\s*=\s*"([^"]+)"/.exec(addon)?.[1];
@@ -7383,6 +7412,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheProjectPathSentenceNamesEveryToolThatTakesNone,
   testEveryArgumentInTheReferenceIsDescribed,
   testTheReferencePrintsEveryShapeOfType,
+  testTheSkillNamesEverySettingTheAddonsRead,
   testTheSkillNamesTheSettingThatServesAScriptRun,
   testTheSkillWritesNoEscapedBackticks,
   testAnAuditThatCouldNotAskIsNotAnAuditThatPassed,

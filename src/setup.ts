@@ -40,6 +40,19 @@ export const RUNTIME_AUTOLOAD = {
  */
 export const SCRIPT_RUNS_SETTING = 'gdharness/runtime/serve_script_runs';
 
+/**
+ * Where the runtime listens, which is the one setting with a security answer.
+ *
+ * The command set is unauthenticated, and Godot's `listen()` defaults to every interface rather
+ * than to loopback, so the addon names this rather than leaving it. It was read by the addon and
+ * written down nowhere a caller looks, which is the same gap as the script-run sentence one step
+ * further along: a caller who never learns a setting exists cannot get it wrong, until they do.
+ */
+export const BIND_ADDRESS_SETTING = 'gdharness/runtime/bind_address';
+
+/** The port the runtime binds, 0 meaning the operating system picks and the game announces it. */
+export const PORT_SETTING = 'gdharness/runtime/port';
+
 /** Written into each installed addon, so doctor can tell an old copy from the shipped one. */
 const VERSION_MARKER = '.gdharness-version';
 
