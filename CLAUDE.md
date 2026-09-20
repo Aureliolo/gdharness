@@ -81,6 +81,19 @@ read. What breaks is the neighbour, a script whose whole header is the annotated
 reported because nobody had edited one. Take the report for the fault and then ask which other
 shapes reach the same line, and write the one where the line has nothing else to fall back on.
 
+A guard written against strangers has not been asked about the neighbour. The check standing between
+a recycled pid and `process.kill` compared the engine's basename and the project path, and every case
+it held was something unrelated: another project, another binary, a number nobody holds. Each differs
+from the run in one of the properties compared, so each is a stranger, and the suite read as
+exhaustive because there was no fourth stranger left to write. What it could not answer differs in
+none of them. The editor holding that project is the same binary pointed at the same directory, so it
+confirmed, and the caller acting on a confirmation is the one that kills. It is also the likeliest
+process to be holding that number, because ending the game is what frees it and opening the editor is
+what happens next. So for a check that decides identity by a list of properties, the case to write is
+not the one furthest from the record but the nearest thing that is not it: ask what else on this
+machine satisfies every property on the list, and the answer is usually standing next to the thing
+being identified rather than out among the strangers.
+
 The fourth way is a second guard covering the one you broke, and the wrong conclusion it invites is
 that the line you disarmed was doing nothing. Two fixes landed together on where a parameter list
 ends: the trailing comment comes off the whole line before anything reads it, and the closing
