@@ -23,7 +23,7 @@ import {
   readSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join, normalize } from 'node:path';
+import { basename, dirname, join, normalize, relative } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -35,6 +35,7 @@ import {
   ListToolsRequestSchema,
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
+import { readBreakpointNote, writeBreakpointNote } from './breakpoint-note.js';
 import { announceBridge, announcementPath, readAnnouncement, withdrawBridge } from './bridge-announce.js';
 import {
   cachedClasses,
@@ -53,7 +54,13 @@ import {
   unseenByEditor,
 } from './class-cache.js';
 import { configDisagrees } from './config-pin.js';
-import { DEFAULT_DAP_PORT, GodotDAPClient, handleDAPTool, type StoppedAt } from './dap_client.js';
+import {
+  DEFAULT_DAP_PORT,
+  GodotDAPClient,
+  type HeldBreakpoint,
+  handleDAPTool,
+  type StoppedAt,
+} from './dap_client.js';
 import { dictionary, emptyRecord } from './dictionary.js';
 import { errorMessage, Refusal } from './errors.js';
 import { forAnswer, GameLog, type LogEntry } from './game-log.js';
@@ -207,11 +214,16 @@ export function patienceForFrames(frames: number, atLeast: number): number {
 }
 
 /**
- * Whether a process is still running, which is asked of two things this server is waiting on: a
- * server that may have replaced it, and an editor that was asked to go.
+ * A file under the project as the project spells it, which is how a caller names it.
  *
- * Undefined reads as gone, because a caller that has no process to name has nothing to wait for.
+ * Both sides resolved, since the adapter's spelling has every symlink followed and the project's
+ * as the bridge reports it may not: on macOS every /var/folders project is really under
+ * /private/var/folders, and the unresolved root would put its own files outside it.
  */
+function projectSpelling(projectPath: string, absolutePath: string): string {
+  return `res://${relative(realPathOr(projectPath), realPathOr(absolutePath)).replaceAll('\\', '/')}`;
+}
+
 /**
  * Whether a run is still going.
  *
@@ -319,6 +331,12 @@ export function runtimeVerdict(
   };
 }
 
+/**
+ * Whether a process is still running, which is asked of two things this server is waiting on: a
+ * server that may have replaced it, and an editor that was asked to go.
+ *
+ * Undefined reads as gone, because a caller that has no process to name has nothing to wait for.
+ */
 export function alive(pid: number | undefined | null): boolean {
   if (pid === undefined || pid === null) {
     return false;
@@ -693,6 +711,8 @@ class GodotServer {
   private lastGodotVersion: string | null = null;
   private lspClient: GodotLSPClient | null = null;
   private dapClient: GodotDAPClient | null = null;
+  /** Which client has taken on the project's breakpoint note. See [dapHoldingBreakpointsOf]. */
+  private breakpointsSeededOn: GodotDAPClient | null = null;
   private bridgeStartupError: string | null = null;
   private bridgeRetry: NodeJS.Timeout | null = null;
   private successorWatch: NodeJS.Timeout | null = null;
@@ -1567,9 +1587,22 @@ class GodotServer {
         // Resolved, because the adapter refuses a path that does not start with the project as
         // it holds it, and a symlink on the way makes two spellings of the same file: on macOS
         // every /var/folders path is really /private/var/folders.
-        return await this.handleDAP(op === 'set' ? 'dap_set_breakpoint' : 'dap_remove_breakpoint', {
+        const session = this.dapHoldingBreakpointsOf(project.value.path);
+        const answered = await this.handleDAP(op === 'set' ? 'dap_set_breakpoint' : 'dap_remove_breakpoint', {
           ...args,
           scriptPath: realPathOr(located.absolutePath),
+        });
+        if (answered.isError === true) {
+          return answered;
+        }
+        // Written after the adapter has taken it, so the note never claims a line the editor
+        // refused, and beside the adapter's answer so the caller sees the whole set it now holds.
+        const held = session.breakpointsHeld();
+        writeBreakpointNote(project.value.path, held);
+        return this.jsonTextResponse({
+          ...asParams(JSON.parse(answered.content[0]?.text ?? '{}')),
+          held: this.breakpointsAsProjectSpells(project.value.path, held),
+          note: 'The editor keeps a breakpoint set this way for one play. Every breakpoint held here is sent again before each play editor_run starts, and kept in the project for the server after a reconnect.',
         });
       }
       case 'debug_control':
@@ -2521,10 +2554,7 @@ class GodotServer {
     return handleLSPTool(this.lspClient, toolName, args);
   }
 
-  private async handleDAP(
-    toolName: string,
-    args: unknown,
-  ): Promise<{ content: { type: string; text: string }[] }> {
+  private async handleDAP(toolName: string, args: unknown): Promise<ToolResponse> {
     return handleDAPTool(this.dap(), toolName, args);
   }
 
@@ -2606,6 +2636,33 @@ class GodotServer {
       });
     }
     return this.dapClient;
+  }
+
+  /**
+   * The adapter client, holding the breakpoints noted in [projectPath] as well as its own.
+   *
+   * Seeded once per client. What an earlier server set is taken on before this one's first
+   * breakpoint call and before its first play, and a client replaced because its editor moved is
+   * seeded again, since the set it held went with it.
+   */
+  private dapHoldingBreakpointsOf(projectPath: string): GodotDAPClient {
+    const client = this.dap();
+    if (this.breakpointsSeededOn !== client) {
+      client.holdBreakpoints(readBreakpointNote(projectPath));
+      this.breakpointsSeededOn = client;
+    }
+    return client;
+  }
+
+  /** The held set as the project spells its files, which is how the caller named them. */
+  private breakpointsAsProjectSpells(
+    projectPath: string,
+    held: readonly HeldBreakpoint[],
+  ): { scriptPath: string; lines: readonly number[] }[] {
+    return held.map((one) => ({
+      scriptPath: projectSpelling(projectPath, one.scriptPath),
+      lines: one.lines,
+    }));
   }
 
   /**
@@ -3486,6 +3543,10 @@ class GodotServer {
       ]);
     }
 
+    // Every breakpoint held, sent again: the editor keeps one set through the adapter for a
+    // single play, measured, so the second play through a breakpoint ran straight past it.
+    const breakpoints = await this.dapHoldingBreakpointsOf(projectPath).reapplyBreakpoints();
+
     const answer = await this.handleViaBridge(
       'play_scene',
       scene === null ? {} : { scenePath: `res://${scene}` },
@@ -3526,6 +3587,20 @@ class GodotServer {
       // line option for and the addon moves itself off when another editor is holding it.
       debugPort: readNumber(asParams(JSON.parse(answer.content[0]?.text ?? '{}')), 'debugPort'),
       endedPreviousRun: ended ?? undefined,
+      // What the game was told to stop on before it started, so a play that runs through a line
+      // the caller asked for is checked against this rather than against memory. Absent when
+      // nothing is held, and the refusals only when there were any.
+      breakpoints:
+        breakpoints.applied.length === 0
+          ? undefined
+          : this.breakpointsAsProjectSpells(projectPath, breakpoints.applied),
+      breakpointsRefused:
+        breakpoints.refused.length === 0
+          ? undefined
+          : breakpoints.refused.map((one) => ({
+              scriptPath: projectSpelling(projectPath, one.scriptPath),
+              reason: one.reason,
+            })),
       // No arguments, by construction: a run carrying any is started by this server rather than
       // played by the editor, so the editor path cannot be the one that bought itself a long boot.
       runtime: await this.runtimeUp(projectPath, alreadyPlaying, runtimeWaitMs, false),
