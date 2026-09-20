@@ -1221,6 +1221,17 @@ async function main(): Promise<void> {
     testTypedGate(godotPath, projectDir);
     runFixture(godotPath, projectDir, 'scene_parse');
     runFixture(godotPath, projectDir, 'operations_serialize');
+    // Identity rather than equality, and both directions: the pattern cache was argued for in the
+    // source and held by nothing, so taking it away would have broken no answer and failed no case.
+    const cached = runFixture(godotPath, projectDir, 'patterns_cache');
+    for (const claim of [
+      'same_pattern_is_one_object',
+      'different_patterns_are_not',
+      'it_still_matches',
+      'it_still_refuses',
+    ]) {
+      assert.equal(get(cached, claim), true, `${claim}: ${JSON.stringify(cached)}`);
+    }
     runFixture(godotPath, projectDir, 'runtime_serialize');
     runFixture(godotPath, projectDir, 'runtime_input');
     runFixture(godotPath, projectDir, 'runtime_query');
