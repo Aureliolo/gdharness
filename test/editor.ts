@@ -242,6 +242,14 @@ interface Editor {
    * the session every case after it shares.
    */
   server: ServerProcess;
+  /**
+   * What that server was given, for the one case that has to start a replacement for it.
+   *
+   * A reconnect is a new process on the same ports and the same runtime directory, so a case
+   * testing what survives one needs to be able to build the same server again rather than a
+   * different one that happens to run.
+   */
+  serverEnv: Record<string, string>;
 }
 
 /** True when the binary at this path answers --version, which is the only test that counts. */
@@ -604,15 +612,14 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
     GDHARNESS_RUNTIME_DIR: join(home, 'runtime'),
   };
 
-  const server = new ServerProcess({
-    env: {
-      ...own,
-      GDHARNESS_BRIDGE_PORT: String(bridgePort),
-      GDHARNESS_LSP_PORT: String(lspPort),
-      GDHARNESS_DAP_PORT: String(dapPort),
-      GODOT_PATH: godotPath,
-    },
-  });
+  const serverEnv: Record<string, string> = {
+    ...own,
+    GDHARNESS_BRIDGE_PORT: String(bridgePort),
+    GDHARNESS_LSP_PORT: String(lspPort),
+    GDHARNESS_DAP_PORT: String(dapPort),
+    GODOT_PATH: godotPath,
+  };
+  const server = new ServerProcess({ env: serverEnv });
 
   const invoke = async (name: string, args: Record<string, unknown>) =>
     await server.request('tools/call', { name, arguments: args }, TOOL_TIMEOUT_MS);
@@ -690,7 +697,7 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
     }
     assert.ok(connected, `the editor never reached the bridge:\n${engineOutput.join('')}`);
 
-    await body({ call, refusal, attempt, project, godotPath, lspPort, dapPort, server });
+    await body({ call, refusal, attempt, project, godotPath, lspPort, dapPort, server, serverEnv });
   } catch (failure) {
     // What the engine said on its way to failing, which is the half of the evidence a tool
     // answer does not carry: a fixture that reports only its own assertion sends whoever reads
@@ -1769,10 +1776,59 @@ async function testAPlayedRunOutlivesTheServerUnderIt(godotPath: string): Promis
       'a game the editor is playing must outlive the server that was talking to its debugger',
     );
 
-    // The positive halves are above rather than below: the run answered `started` with a process
-    // of its own and that process was alive before anything was replaced, so a pid that was never
-    // a game cannot reach the assertion. What cannot be asked afterwards is the server, which is
-    // the point of the case; the engine itself is what `endEnginesUnder` takes away on the way out.
+    // Surviving is not the same as being usable, and the second half only became reachable when
+    // the first started working: while the shutdown ended the game, no replacement server ever met
+    // a played run to pick up. A game nobody can stop except by pid is most of the fault still
+    // there, so the replacement is brought up and asked.
+    const replacement = new ServerProcess({ env: own.serverEnv });
+    try {
+      await replacement.initialize('played-run-fixture');
+      const answered = async (name: string, args: Record<string, unknown>): Promise<unknown> =>
+        parseTextContent(await replacement.request('tools/call', { name, arguments: args }, TOOL_TIMEOUT_MS));
+
+      // The editor has to dial back in before a played run can be seen at all, which is the window
+      // the refusal now names. Waited out here rather than asserted around: what is under test is
+      // what the server can do once the editor is there.
+      const until = Date.now() + CONNECT_TIMEOUT_MS;
+      let back = false;
+      while (!back && Date.now() < until) {
+        back = get(await answered('editor_status', {}), 'editor', 'connected') === true;
+        if (!back) await delay(500);
+      }
+      assert.ok(back, 'the editor should reach the replacement server, or the rest proves nothing');
+
+      // Asked of editor_status rather than editor_run check, which is a boot probe that starts an
+      // engine of its own and answers about the project rather than about this run.
+      const found = await answered('editor_status', {});
+      assert.equal(
+        get(found, 'game', 'playingInEditor', 'playing'),
+        true,
+        `the replacement should see the run the editor is still playing: ${text(found)}`,
+      );
+      assert.equal(
+        get(found, 'game', 'processActive'),
+        true,
+        `and that it is a process rather than a record: ${text(found)}`,
+      );
+      const stopResponse = await replacement.request(
+        'tools/call',
+        // No projectPath: stop is about the run this server is holding, not about a project named
+        // by the caller, and an argument the op does not take is refused rather than ignored.
+        { name: 'editor_run', arguments: { op: 'stop' } },
+        TOOL_TIMEOUT_MS,
+      );
+      const ended = parseTextContent(stopResponse);
+      assert.equal(
+        get(ended, 'stopped'),
+        true,
+        `and be able to end it, rather than: ${textOf(stopResponse) ?? text(ended)}`,
+      );
+      assert.equal(get(ended, 'through'), 'editor', `through the editor that owns it: ${text(ended)}`);
+      await delay(1500);
+      assert.ok(!alive(pid), 'after which the game is actually gone, rather than reported gone');
+    } finally {
+      await replacement.stop();
+    }
   });
 }
 
