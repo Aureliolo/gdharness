@@ -85,6 +85,7 @@ import { freePort, portFromEnvOrNull } from './ports.js';
 import { cpuSecondsOf } from './process-time.js';
 import { projectStructure, scriptsWithoutUid, searchProject } from './project-scan.js';
 import { parseProjectGodot, settingKeys, settingsDroppedReport, setupResourceHandlers } from './resources.js';
+import { noteRestartBegun, type RestartNote, restartOwed, restartSettled } from './restart-note.js';
 import {
   clearRunRecord,
   couldStillBeTheRecordedRun,
@@ -2609,6 +2610,27 @@ class GodotServer {
   // editor
   // -------------------------------------------------------------------------------------------
 
+  /**
+   * A restart another server began on this project and was ended before finishing, or null.
+   *
+   * Only while nothing is connected: an editor being there settles the debt whoever opened it, and
+   * the note is taken down here so it is not reported again by the next server after this one.
+   */
+  private restartLeftUnfinished(connected: boolean): RestartNote | null {
+    if (this.ownProject === null) {
+      return null;
+    }
+    const owed = restartOwed(this.ownProject);
+    if (owed === null) {
+      return null;
+    }
+    if (connected) {
+      restartSettled(this.ownProject);
+      return null;
+    }
+    return owed;
+  }
+
   private getEditorStatusPayload() {
     const status = this.godotBridge.getStatus();
     const isPortConflict = this.bridgeStartupError?.includes('EADDRINUSE') ?? false;
@@ -2616,6 +2638,7 @@ class GodotServer {
     // replaces the files under a running editor without changing what it is serving, and the
     // only other sign of that is a tool answering as the old version did.
     const stale = status.connected && status.addonVersion !== SERVER_VERSION;
+    const unfinished = this.restartLeftUnfinished(status.connected);
     return {
       ...status,
       serverVersion: SERVER_VERSION,
@@ -2626,7 +2649,25 @@ class GodotServer {
       // connected" and "there is no editor" are the same answer to two different questions. A
       // downstream session read the first as the second straight after an upgrade respawned the
       // server, and went looking through the machine's processes to find the editor still up.
-      mayYetConnect: status.connected ? undefined : this.anEditorIsStillComing(status.listeningSince),
+      //
+      // Except when a restart was left half done, which is the one state where this server has
+      // positive evidence about the editor it would otherwise be waiting for: it was asked to quit,
+      // and the launch that would have replaced it never ran. Nothing is coming, and a young server
+      // answering from its own age sent a caller into a wait that could not end.
+      mayYetConnect: status.connected
+        ? undefined
+        : unfinished !== null
+          ? false
+          : this.anEditorIsStillComing(status.listeningSince),
+      restartInterrupted:
+        unfinished === null
+          ? undefined
+          : {
+              quitEditorPid: unfinished.editorPid,
+              quitAt: unfinished.quitAt,
+              byServerPid: unfinished.byPid,
+              note: "A restart begun by a previous gdharness server asked this project's editor to quit, and that server was ended before it could start the editor again, so nothing is coming. editor_launch open starts one, and clears this.",
+            },
       // Which of the two reasons the line above is true, when it is the launch. A caller told only
       // "yes" cannot tell a window that will close in seconds from an import that will take
       // minutes, and the pid is the thing they can watch.
@@ -2926,8 +2967,20 @@ class GodotServer {
       dap: this.editorServes('dapPort', 'GDHARNESS_DAP_PORT', DEFAULT_DAP_PORT),
     };
 
+    // Written before the quit is sent, because the gap between the two acts is where this server
+    // can be ended: a caller restarts the editor to take an upgrade, and the user reconnects the
+    // harness for the same upgrade in the same minute. The successor then finds nothing connected
+    // and no reason to think anything is owed, unless it is told.
+    noteRestartBegun({
+      projectPath,
+      editorPid: editorPid ?? null,
+      ports,
+      quitAt: new Date().toISOString(),
+      byPid: process.pid,
+    });
     const asked = await this.handleViaBridge('quit_editor', {});
     if (asked.isError === true) {
+      restartSettled(projectPath);
       return asked;
     }
     // Waited for rather than assumed. The editor saves on its way out, so it is not gone the moment
@@ -2944,6 +2997,10 @@ class GodotServer {
     await this.waitForBridge(() => !alive(editorPid), Date.now() + EDITOR_RESTART_TIMEOUT_MS);
 
     const opened = await this.openAnEditor(engine.value, projectPath, ports);
+    // Settled either way: a launch that failed is answered to the caller who asked, which is not
+    // an interruption, and leaving the note would have the next server explain a failure this one
+    // already explained.
+    restartSettled(projectPath);
     if (opened.error !== null) {
       return this.createErrorResponse(
         `The editor was asked to go and could not be started again: ${opened.error}`,
@@ -2997,10 +3054,14 @@ class GodotServer {
     // returns as soon as the process exists, minutes before the save, so what it can do is
     // remember and let editor_status say it once the editor is actually there.
     const before = this.settingKeysOf(project.value.path);
+    // Read before the launch settles it, so the answer can say this open finished something
+    // rather than started something.
+    const unfinished = restartOwed(project.value.path);
     const opened = await this.openAnEditor(engine.value, project.value.path, ports);
     if (opened.error !== null) {
       return this.createErrorResponse(`Could not start the editor: ${opened.error}`);
     }
+    restartSettled(project.value.path);
     this.launchedFrom = { projectPath: project.value.path, before };
     return this.jsonTextResponse({
       launched: true,
@@ -3008,6 +3069,10 @@ class GodotServer {
       projectPath: project.value.path,
       lspPort: ports.lsp,
       dapPort: ports.dap,
+      finishesRestart:
+        unfinished === null
+          ? undefined
+          : `This is the launch half of a restart begun at ${unfinished.quitAt} by server pid ${unfinished.byPid}, which quit editor pid ${unfinished.editorPid ?? 'unknown'} and was ended before it could start one.`,
       settingsNote:
         before === null
           ? 'project.godot could not be read before this editor was opened, so nothing here will be able to say what the import saved away. Opening a project rewrites the file and drops any key sitting at its own default.'
