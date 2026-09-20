@@ -198,9 +198,23 @@ export function settingKeys(content: string): Map<string, IniValue> {
  * it was set to in a file that no longer has the line.
  */
 export function settingsDroppedReport(
-  before: ReadonlyMap<string, unknown>,
-  after: ReadonlyMap<string, unknown>,
+  before: ReadonlyMap<string, unknown> | null,
+  after: ReadonlyMap<string, unknown> | null,
 ): { settingsDropped?: { setting: string; was: unknown }[]; settingsNote?: string } {
+  // Three answers, not two: keys went, no keys went, and nobody could look. The third used to read
+  // as the second, because a file that could not be read arrived as a map naming nothing and a
+  // comparison against nothing finds nothing missing. That told a caller their settings had survived
+  // a save on the strength of a reading that never happened, and this report is the only thing that
+  // would ever have named what went.
+  if (before === null || after === null) {
+    return {
+      settingsNote:
+        `project.godot could not be read ${before === null ? 'before' : 'after'} this, so nothing can` +
+        ' be said about what the editor saved away. Opening a project rewrites the file and drops any' +
+        ' key sitting at its own default, and this is the only thing that would have named them.' +
+        ' Read the file yourself if a setting was pinned at a default on purpose.',
+    };
+  }
   const dropped = [...before].filter(([key]) => !after.has(key));
   if (dropped.length === 0) {
     return {};

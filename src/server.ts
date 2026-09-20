@@ -698,7 +698,7 @@ class GodotServer {
    * during the import, minutes later. So the reading is kept here and `editor_status` makes it once
    * there is an editor to have done the saving, after which there is nothing left to compare.
    */
-  private launchedFrom: { projectPath: string; before: Map<string, unknown> } | null = null;
+  private launchedFrom: { projectPath: string; before: Map<string, unknown> | null } | null = null;
 
   /**
    * The project this server was set up for, from the config `setup` wrote, or null.
@@ -2750,15 +2750,24 @@ class GodotServer {
    * like the old version. The answer is the version that reconnected rather than the one that
    * was asked for: what matters is which addon the editor is holding now.
    */
-  /** What project.godot names right now, or nothing when there is no project or no file. */
-  private settingKeysOf(projectPath: string | undefined): Map<string, unknown> {
+  /**
+   * What project.godot names right now, or null when it could not be read.
+   *
+   * Null rather than an empty map, because the two are opposite answers to the question this feeds.
+   * An empty map says the file was read and names nothing, and a comparison against it reports that
+   * nothing was dropped. A file that could not be read supports no such conclusion, and returning
+   * the same value for both is how "nothing was lost" gets said about a reading that never happened.
+   * What that costs is the one thing this report exists for: a key pinned at its own default is
+   * dropped on save, and nothing else will ever say it has gone.
+   */
+  private settingKeysOf(projectPath: string | undefined): Map<string, unknown> | null {
     if (projectPath === undefined) {
-      return new Map();
+      return null;
     }
     try {
       return settingKeys(readFileSync(join(projectPath, 'project.godot'), 'utf8'));
     } catch {
-      return new Map();
+      return null;
     }
   }
 
@@ -2854,7 +2863,10 @@ class GodotServer {
     return this.whatTheEditorDropped(watched.before, this.settingKeysOf(watched.projectPath));
   }
 
-  private whatTheEditorDropped(before: Map<string, unknown>, after: Map<string, unknown>): OperationParams {
+  private whatTheEditorDropped(
+    before: Map<string, unknown> | null,
+    after: Map<string, unknown> | null,
+  ): OperationParams {
     return settingsDroppedReport(before, after);
   }
 
@@ -2966,9 +2978,11 @@ class GodotServer {
       lspPort: ports.lsp,
       dapPort: ports.dap,
       settingsNote:
-        before.size === 0
-          ? undefined
-          : 'Opening a project imports it and saves project.godot, and Godot drops any key sitting at its own default. editor_status names anything lost under settingsDropped once this editor has connected.',
+        before === null
+          ? 'project.godot could not be read before this editor was opened, so nothing here will be able to say what the import saved away. Opening a project rewrites the file and drops any key sitting at its own default.'
+          : before.size === 0
+            ? undefined
+            : 'Opening a project imports it and saves project.godot, and Godot drops any key sitting at its own default. editor_status names anything lost under settingsDropped once this editor has connected.',
     });
   }
 
