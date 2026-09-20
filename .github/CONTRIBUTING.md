@@ -16,6 +16,10 @@
   reaches the tool boundary as a throw is a defect, and answers as one. Never dress an
   unmodelled failure as a refusal: the caller then spends its turns rephrasing a call that was
   right, and the bug is never heard about.
+- **A refusal says what the thing is, not only that the call was wrong.** "`editor_run check` is
+  a boot probe" ends the attempt; "invalid op" makes the next attempt the same attempt. Name the
+  version that decided too, where one did: it is what separates a call that is wrong from a call
+  that is merely too new for the server answering it.
 - **Answers are sized.** Anything that can return a lot takes a detail level and defaults to
   the smallest useful one. Anything unbounded paginates.
 
