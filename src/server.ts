@@ -446,6 +446,17 @@ const SUCCESSOR_CHECK_MS = 10_000;
 const CACHE_WRITE_MS = 2_000;
 
 /**
+ * How long `editor_status` waits for an editor to say what it is playing.
+ *
+ * Short because it is a status call over a local socket answered from a field the editor already
+ * holds, and because the alternative is what the version check used to hide: an editor that does
+ * not serve this tool leaves the request outstanding for the whole tool timeout and the status call
+ * waits behind it. A second is many times longer than an answer takes and far less than a caller
+ * would wait to be told nothing.
+ */
+const PLAYING_STATUS_MS = 1_000;
+
+/**
  * How long a scan may take to start before the answer stops waiting on it.
  *
  * `EditorFileSystem.scan()` queues rather than runs, and the editor takes it up on a later frame,
@@ -2599,11 +2610,30 @@ class GodotServer {
     debugPort: number | undefined;
   } | null> {
     const status = this.godotBridge.getStatus();
-    if (!status.connected || status.addonVersion !== SERVER_VERSION) {
+    // Asked of any connected editor, including one running an addon from another version. It used
+    // to require the versions to match, and what that cost was that `playingInEditor` was null for
+    // the whole time an addon was behind, so a game the editor was playing could not be picked up
+    // and a server that had not started that game itself said "No game is running" about one on
+    // screen. Measured: one editor, one server, the same engine, the 0.13.30 addon answering null
+    // and the current one answering the scene it is playing.
+    //
+    // What the version check was buying, which was not nothing and is why the wait below exists: an
+    // editor that does not answer this call at all leaves the request outstanding for the whole
+    // tool timeout, and `editor_status` waits on it. Two fixtures with a greeting editor that
+    // serves no tools went from answering at once to timing out at twenty seconds. So the question
+    // is asked of everybody and the answer is waited for briefly: this is a status call on a local
+    // socket, and an editor that has not replied in a moment is one with nothing to say here.
+    if (!status.connected) {
       return null;
     }
     try {
-      const answer = await this.godotBridge.invokeTool('playing_status', {});
+      const answer = await Promise.race([
+        this.godotBridge.invokeTool('playing_status', {}),
+        delay(PLAYING_STATUS_MS).then(() => null),
+      ]);
+      if (answer === null) {
+        return null;
+      }
       return {
         playing: readBoolean(asParams(answer), 'playing') ?? false,
         scene: readString(asParams(answer), 'scenePath') ?? '',
