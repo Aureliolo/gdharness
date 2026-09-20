@@ -188,21 +188,23 @@ export class GodotDAPClient {
     });
   }
 
-  async disconnect(): Promise<void> {
+  /**
+   * Lets go of the adapter without telling it to, which is what a shutdown wants.
+   *
+   * Godot stops the game it is playing when this session sends `disconnect`, and it does so with
+   * `terminateDebuggee: false` on the request, so the protocol's way of asking to be let go without
+   * taking the debuggee with you is not one this adapter honours. Measured: an editor-played run
+   * dies on the server's own shutdown, which a harness performs on every reconnect, and survives
+   * when the request is not sent. Closing the transport is all this side needs, and the process is
+   * about to exit and close it anyway.
+   */
+  async abandon(): Promise<void> {
     if (!this.socket) {
       this.connected = false;
       this.initialized = false;
       this.attached = false;
       this.halt = null;
       return;
-    }
-
-    if (this.connected) {
-      try {
-        await this.sendRequest('disconnect', { restart: false });
-      } catch {
-        // The adapter may already be gone; the socket close below is what matters.
-      }
     }
 
     await new Promise<void>((resolve) => {

@@ -186,6 +186,31 @@ export function settingKeys(content: string): Map<string, IniValue> {
   return named;
 }
 
+/**
+ * What an editor saved away between two readings of project.godot, as the fields that say so.
+ *
+ * One home for the comparison and the sentence, because the same thing happens on a restart and on
+ * an open and only the restart's answer said anything about it. Godot does the stripping either
+ * way; the two calls differ in when they can notice, which is not a reason to differ in what they
+ * say. Downstream this has fired on six openings of one project, five of which named the same key.
+ *
+ * With the value each key held, because naming the key alone leaves the caller to go and find what
+ * it was set to in a file that no longer has the line.
+ */
+export function settingsDroppedReport(
+  before: ReadonlyMap<string, unknown>,
+  after: ReadonlyMap<string, unknown>,
+): { settingsDropped?: { setting: string; was: unknown }[]; settingsNote?: string } {
+  const dropped = [...before].filter(([key]) => !after.has(key));
+  if (dropped.length === 0) {
+    return {};
+  }
+  return {
+    settingsDropped: dropped.map(([setting, was]) => ({ setting, was })),
+    settingsNote: `The editor saved project.godot and these keys are no longer in it, with the value each one held. Godot writes only what differs from its own defaults, so a key named deliberately at its default value is redundant to the editor and is dropped on save; it will be dropped again the next time one opens. If any of them were pinned on purpose, to keep "set to this on purpose" and "not set" apart, project_settings set puts one back: ${dropped.map(([setting, was]) => `setting "${setting}" value ${JSON.stringify(was)}`).join(', ')}. Nothing else will say they have gone until something depends on one.`,
+  };
+}
+
 export function parseProjectGodot(content: string): Record<string, Record<string, IniValue>> {
   const result: Record<string, Record<string, IniValue>> = emptyRecord();
   // Held rather than looked up again per key, so the section a value lands in is the one the
