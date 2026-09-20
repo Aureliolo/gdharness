@@ -3676,7 +3676,9 @@ function testTheCureIsWrittenWhole(): void {
           .map((line) => ({ where: name, text: line })),
       ),
   ];
-  assert.ok(offered.length >= 17, `the places offering a remedy should be found, not ${offered.length}`);
+  // What the tree holds today and not a comfortable minimum, so one place going quiet lowers this
+  // in the same change and somebody confirms it was meant.
+  assert.equal(offered.length, 19, `the places offering a remedy should all be found, not ${offered.length}`);
 
   // Across whitespace, because a rendered file wraps where the source did not and a sentence that
   // breaks at "the" is the same sentence. Change, edit and touch, because the claim is about what
