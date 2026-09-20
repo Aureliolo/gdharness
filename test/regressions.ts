@@ -3992,6 +3992,41 @@ function testTheProjectPathSentenceNamesEveryToolThatTakesNone(): void {
 }
 
 /**
+ * Every argument in the reference says what it is for.
+ *
+ * Ten did not, and the renderer put the colon after the name rather than in front of the
+ * description, so each came out as a line ending in a colon: `signalName` (string): and nothing
+ * after it, in the published page and in the skill an agent reads before its first call. An
+ * argument with no description is a gap whichever way it renders, and the reference is generated,
+ * so the only place to close it is the schema.
+ *
+ * Both halves are held. The count is not a floor because it is zero, which is the one count that
+ * does not need raising when something is added.
+ */
+function testEveryArgumentInTheReferenceIsDescribed(): void {
+  const undescribed: string[] = [];
+  for (const tool of TOOL_SPECS) {
+    for (const [name, schema] of Object.entries(tool.parameters)) {
+      if (typeof schema['description'] !== 'string' || schema['description'].trim() === '') {
+        undescribed.push(`${tool.name}.${name}`);
+      }
+    }
+  }
+  assert.deepEqual(undescribed, [], 'every argument should say what it is for');
+
+  const markdown = renderToolsMarkdown();
+  const dangling = markdown.split('\n').filter((line) => /^- `[^`]+` \([^)]+\):\s*$/.test(line));
+  assert.deepEqual(dangling, [], 'and no argument line should end on a colon with nothing after it');
+  // The positive: the list is rendered at all, and rendered with the descriptions attached rather
+  // than merely without empty ones. A reference with no argument lines passes both checks above.
+  const described = markdown.split('\n').filter((line) => /^- `[^`]+` \([^)]+\): \S/.test(line));
+  assert.ok(
+    described.length > 100,
+    `the reference should be full of described arguments: ${described.length}`,
+  );
+}
+
+/**
  * Nothing the skill writes escapes a backtick.
  *
  * A generated name went into `SKILL.md` as `\`debug_control\``, rendering the backslashes rather
@@ -7095,6 +7130,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAClassTheEditorHoldsAfterItsScriptIsGoneIsNamed,
   testWhatAStaleTypeDependsOnIsNamed,
   testTheProjectPathSentenceNamesEveryToolThatTakesNone,
+  testEveryArgumentInTheReferenceIsDescribed,
   testTheSkillWritesNoEscapedBackticks,
   testAnAuditThatCouldNotAskIsNotAnAuditThatPassed,
   testRefreshingUidsMakesTheSidecarAndWritesNoScene,
