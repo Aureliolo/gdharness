@@ -104,6 +104,8 @@ export class GodotDAPClient {
    * whether nothing is running, the game is running freely, or the stack is genuinely empty.
    */
   private halt: StoppedAt | null = null;
+  /** Whether `halt` is an answer or a default. See [holdIsKnown]. */
+  private holdKnown = false;
   private breakpoints = new Map<string, Set<number>>();
 
   constructor(port = portFromEnv('GDHARNESS_DAP_PORT', DEFAULT_DAP_PORT), host = '127.0.0.1') {
@@ -164,11 +166,7 @@ export class GodotDAPClient {
         });
 
         socket.on('close', () => {
-          this.connected = false;
-          this.initialized = false;
-          this.attached = false;
-          this.halt = null;
-          this.socket = null;
+          this.forgetConnection();
           this.failPendingRequests(new Error('DAP connection closed'));
         });
 
@@ -200,10 +198,7 @@ export class GodotDAPClient {
    */
   async abandon(): Promise<void> {
     if (!this.socket) {
-      this.connected = false;
-      this.initialized = false;
-      this.attached = false;
-      this.halt = null;
+      this.forgetConnection();
       return;
     }
 
@@ -226,11 +221,22 @@ export class GodotDAPClient {
       }, 500);
     });
 
+    this.forgetConnection();
+  }
+
+  /**
+   * What a closed connection leaves behind: nothing.
+   *
+   * The adapter tells a connection what happens while it is open and repeats none of it to the
+   * next one, so a stop heard here is not one the connection that replaces this one has heard.
+   */
+  private forgetConnection(): void {
     this.socket = null;
     this.connected = false;
     this.initialized = false;
     this.attached = false;
     this.halt = null;
+    this.holdKnown = false;
   }
 
   private async ensureConnected(): Promise<void> {
@@ -349,6 +355,7 @@ export class GodotDAPClient {
         description: said(body, 'description'),
         text: said(body, 'text'),
       };
+      this.holdKnown = true;
       return;
     }
 
@@ -397,6 +404,78 @@ export class GodotDAPClient {
     await this.sendRequest('attach', {});
     await this.sendRequest('configurationDone', {});
     this.attached = true;
+    // A connection open when the game stopped was told, attached or not, and what it was told
+    // names the stop: asking would replace an exception with "held when this session attached".
+    if (!this.holdKnown) {
+      await this.learnWhetherHeld();
+    }
+  }
+
+  /**
+   * Whether the game was already held when this session attached, asked rather than waited for.
+   *
+   * `halt` is set by the `stopped` event and the event goes to every client connected when the
+   * game halts. A session opened afterwards never receives it, so it is asked for here through
+   * the stack, and what the adapter answers depends on who else is attached. Measured against a
+   * real editor: while the client that was told is still attached, a second session gets the frames
+   * and learns the halt. Once that client has gone, which is what a harness reconnect does to a
+   * server, the adapter answers a thread and no frames, and the game is still sitting at its
+   * breakpoint: a runtime call to it accepts the connection and never answers. So no frames is not
+   * "running". It is "this session cannot tell", and the answer is left unknown rather than set to
+   * null, for the caller that can ask the runtime.
+   */
+  private async learnWhetherHeld(): Promise<void> {
+    try {
+      const threads = await this.sendRequest('threads');
+      const listed = threads['threads'];
+      const first = Array.isArray(listed) ? (listed[0] as DAPArrayItem | undefined)?.['id'] : undefined;
+      if (typeof first !== 'number') {
+        return;
+      }
+      this.lastThreadId = first;
+      const response = await this.sendRequest('stackTrace', { threadId: first, startFrame: 0, levels: 1 });
+      const frames = response['stackFrames'];
+      if (Array.isArray(frames) && frames.length > 0) {
+        this.halt = {
+          reason: 'attached',
+          description:
+            'held when this session attached; the stop that held it was reported to an earlier one',
+          text: '',
+        };
+        this.holdKnown = true;
+      }
+    } catch {
+      // The adapter declining to answer is a game with nothing to say about where it stopped, and
+      // an attach that succeeded is not undone by a question it could not answer.
+    }
+  }
+
+  /**
+   * Whether this session can say if the game is held.
+   *
+   * True once this connection has been told by a `stopped` event, has let the game go itself, or
+   * found frames on attach. Being told needs the connection open at the time and nothing more: a
+   * server that plays a scene through the editor hears the stop on a socket it never attached, and
+   * the stop it hears is the one with the reason in it. False for a connection opened after a stop
+   * the adapter will not repeat to it: for that one, `whereItStopped()` answering null is not an
+   * answer.
+   */
+  holdIsKnown(): boolean {
+    return this.holdKnown;
+  }
+
+  /**
+   * What a caller that asked elsewhere found out: the game answered, so it is running.
+   *
+   * Unless the adapter has spoken since the question was put. The ping is awaited, the socket
+   * delivers meanwhile, and a stop reported while the answer was in flight is newer than it.
+   */
+  learnedRunning(): void {
+    if (this.holdKnown) {
+      return;
+    }
+    this.halt = null;
+    this.holdKnown = true;
   }
 
   /**
@@ -464,7 +543,10 @@ export class GodotDAPClient {
     await this.attach();
     const resolvedThreadId = await this.resolveThreadId(threadId);
     await this.sendRequest('continue', { threadId: resolvedThreadId });
+    // Let go by this session, which is the one way a session knows the game runs without being
+    // told: it asked for exactly that.
     this.halt = null;
+    this.holdKnown = true;
   }
 
   async stepOver(threadId?: number): Promise<void> {
@@ -621,11 +703,7 @@ export class GodotDAPClient {
    */
   private failOversizedStream(detail: string): void {
     const socket = this.socket;
-    this.socket = null;
-    this.connected = false;
-    this.initialized = false;
-    this.attached = false;
-    this.halt = null;
+    this.forgetConnection();
     this.reader = new FrameReader();
     socket?.destroy();
 
