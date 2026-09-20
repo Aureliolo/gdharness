@@ -231,11 +231,14 @@ export function contradictedDiagnostics(
  * what a caller does next and the only way to hold it otherwise is to read the server's source and
  * match on it. That check passes on any sentence containing the words it looks for.
  *
- * It leads with the scan because that is what has cleared this, in two projects. Each measurement is
- * stated on its own rather than added together: one clearing in five attempts here and two clearings
- * in two attempts elsewhere combine into a ratio only if both benches are the same bench, which is
- * the thing in question. A number that arrives inside a correction is the one least likely to get
- * checked again, and both of these were wrong in the first draft of this sentence.
+ * It leads with the scan because that is what has cleared this, in two projects. Neither of them is
+ * this one: the diagnostic has never gone stale in this project's own bench, so every figure here is
+ * somebody else's reading and is attributed rather than claimed. Each is stated on its own rather
+ * than added together, since one clearing in five attempts and two clearings in two attempts combine
+ * into a ratio only if both benches are the same bench, which is the thing in question. A number
+ * that arrives inside a correction is the one least likely to get checked again, and all three of
+ * these were wrong in a draft of this sentence: the count, the attribution, and what the
+ * milliseconds timed.
  *
  * The milliseconds are the scan's own `waitedMs`, which is how long the call took to return and not
  * a time to clear: the diagnostic was re-read in a separate call each time, and nobody timed the
@@ -271,9 +274,9 @@ export function staleAnalysisNote(
     `The editor is reporting against an older copy of ${contradicted.length === 1 ? 'a type' : 'some types'} ` +
     'named under contradictedByTheFile. Each member listed is declared in the file the class cache ' +
     'points at, so those diagnostics are wrong however the code is written. Run editor_rescan first: ' +
-    'it costs about half a second, it cleared this in one of five attempts measured here, and it ' +
-    'cleared both reproductions measured in a second project, the scan itself returning in 243ms ' +
-    'and 275ms. ' +
+    'it costs about half a second, it cleared this in one of five attempts in the project that ' +
+    'reported it, and it cleared both reproductions measured in a second project, the scan itself ' +
+    'returning in 243ms and 275ms. ' +
     'The fault behind it is that a script the editor has loaded keeps the copy it built, and nothing ' +
     `rebuilds that copy when the file changes; editor_rescan with reloadScript set to ${declaring.join(', ')} ` +
     `recompiles ${declaring.length === 1 ? 'that copy' : 'those copies'} from the file into the same ` +

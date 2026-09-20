@@ -3045,8 +3045,11 @@ function testTheStaleNoteNamesTheCallThatRebuildsTheCopy(): void {
   );
   // Two measurements from two projects, each said on its own. Adding them into one ratio would
   // assert that the benches are the same bench, which is what the two readings above leave open.
-  assert.match(alone, /one of five attempts measured here/, 'the count from this project, as its own');
-  assert.match(alone, /both reproductions measured in a second project/, 'and the other, as its own');
+  // Neither reading is this project's: the diagnostic has never gone stale in this bench. Both are
+  // attributed, because a figure written without a source reads as the writer's own.
+  assert.match(alone, /in the project that reported it/, 'the reporting project keeps its own count');
+  assert.match(alone, /both reproductions measured in a second project/, 'and the other keeps its own');
+  assert.doesNotMatch(alone, /measured here/, 'and this project claims neither');
   // The milliseconds are the scan's own waitedMs. A duration written beside a cure is read as the
   // duration of the cure, and nobody timed the gap between the scan returning and the re-read, so
   // the figures are held to the phrasing that says what they timed rather than to their absence.
