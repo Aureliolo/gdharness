@@ -56,6 +56,8 @@ import {
   OPENED_BY_A_SERVER,
   resolveHeadless,
   runArguments,
+  SAVES_NOT_MOVED_NOTE,
+  savesStayPut,
   userDataIn,
 } from '../src/launch.js';
 import { GodotLSPClient } from '../src/lsp_client.js';
@@ -3101,6 +3103,79 @@ function testATestRunKeepsOutOfThePlayersSaves(): void {
     ['APPDATA'],
     'and a machine spelling it another way is left holding one of it rather than two',
   );
+}
+
+/**
+ * The engine, handed that environment, puts `user://` where it was told to.
+ *
+ * The fixture above checks the variables are set and says nothing about whether the engine reads
+ * them, and the comment on `userDataIn` said macOS reads neither, so that a tier there writes into
+ * the player's saves with nothing telling the caller. That is a claim about the engine made from
+ * memory of its source, and the engine tier runs on all three platforms, so it is asked instead:
+ * a script prints `OS.get_user_data_dir()` under the moved environment and the answer has to sit
+ * under the directory it was moved to.
+ *
+ * It was first held for every platform, because the platform on which the comment was wrong either
+ * way was the reading this existed to take. macOS answered `/Users/runner/Library/Application
+ * Support/Godot/app_userdata/...` on Godot 4.7.2 with the variable set, so the comment was right and
+ * the memory of the engine's source that was going to correct it was wrong. Now the expectation is
+ * read off `savesStayPut`, which is the same function the test answer's note reads, so an engine
+ * that starts honouring the variable fails here and the change that makes it pass is the change
+ * that stops the note.
+ */
+function testTheEngineWritesItsSavesWhereItWasTold(): void {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('user directory regression skipped (Godot not found)');
+    return;
+  }
+
+  const projectDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-user-dir-'));
+  const home = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-user-home-'));
+  try {
+    writeFileSync(
+      join(projectDir, 'project.godot'),
+      'config_version=5\n\n[application]\nconfig/name="UserDirRegression"\n',
+    );
+    writeFileSync(
+      join(projectDir, 'probe.gd'),
+      'extends SceneTree\n\n\nfunc _init() -> void:\n\tprint("USER_DATA_DIR=" + OS.get_user_data_dir())\n\tquit()\n',
+    );
+    const run = spawnSync(godotPath, ['--headless', '--path', projectDir, '--script', 'res://probe.gd'], {
+      encoding: 'utf8',
+      env: userDataIn(home),
+      timeout: ENGINE_CALL_TIMEOUT_MS,
+    });
+    const printed = /USER_DATA_DIR=(.+)/.exec(run.stdout)?.[1]?.trim();
+    assert.ok(printed, `the probe should print where user:// is:\n${run.stdout}\n${run.stderr}`);
+    // Compared as spellings rather than resolved, because the engine may not have created the
+    // directory yet. `home` is already the real path, and separators and case are the two things
+    // Windows spells differently from what it was handed.
+    const spelled = (path: string): string => path.replaceAll('\\', '/').toLowerCase();
+    const moved = spelled(printed).startsWith(spelled(home));
+    if (savesStayPut()) {
+      assert.equal(
+        moved,
+        false,
+        `${process.platform}: the engine has started honouring the moved environment, ${printed}; savesStayPut and the note it drives should say so`,
+      );
+      assert.ok(
+        spelled(printed).includes('/library/application support/'),
+        `${process.platform}: and it wrote where the player keeps theirs, not ${printed}`,
+      );
+    } else {
+      assert.ok(
+        moved,
+        `${process.platform}: user:// should be under the directory it was moved to, ${home}, not ${printed}`,
+      );
+    }
+  } finally {
+    sweep(projectDir);
+    sweep(home);
+  }
 }
 
 /**
@@ -7848,6 +7923,14 @@ async function testGdUnitRunner(): Promise<void> {
           existsSync(join(elsewhere, 'results.xml')),
           "and should leave the other run's report where it found it",
         );
+        // Whether the run's saves were moved is said on the platform where they were not, and
+        // left unsaid where they were: both halves from the same function the engine probe holds
+        // its expectation against, so the three cannot disagree.
+        assert.equal(
+          get(run, 'savesNote'),
+          savesStayPut() ? SAVES_NOT_MOVED_NOTE : undefined,
+          `${process.platform}: the answer says whether its saves were moved: ${text(get(run, 'savesNote'))}`,
+        );
 
         // By name rather than by position: two suites fail here, and which of them gdUnit4 runs
         // first is not something this fixture is about.
@@ -9918,6 +10001,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStartStopsWaitingForAGameThatIsOver,
   testAStartWaitsForTheGameToAnnounceItself,
   testATestRunKeepsOutOfThePlayersSaves,
+  testTheEngineWritesItsSavesWhereItWasTold,
   testParametersReachTheEngine,
   testAFinishedRunCanStillBeRead,
   testOnlyOurOwnAutoloadIsRewritten,
