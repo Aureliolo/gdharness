@@ -1623,7 +1623,11 @@ class GodotServer {
         return this.jsonTextResponse({
           ...asParams(JSON.parse(answered.content[0]?.text ?? '{}')),
           held: this.breakpointsAsProjectSpells(project.value.path, held),
+          // The editor's own, as it reported them to this session, so a caller reading the whole
+          // set sees the lines the user set by hand as well as the ones set here.
+          setInEditor: this.breakpointsAsProjectSpells(project.value.path, session.breakpointsInEditor()),
           note: 'The editor keeps a breakpoint set this way for one play. Every breakpoint held here is sent again before each play editor_run starts, and kept in the project for the server after a reconnect.',
+          ...this.breakpointsAtRisk(),
         });
       }
       case 'debug_control':
@@ -2656,6 +2660,15 @@ class GodotServer {
       this.dapClient.setOutputSink((line) => {
         this.writeToTranscript(line);
       });
+      // The note follows the held set when it changes without a call: a breakpoint of this
+      // server's clicked off in the editor's gutter, or a file the adapter would not take back
+      // before a play. Without this the next server put back what the user had just removed.
+      this.dapClient.setBreakpointsSink((held) => {
+        const project = this.godotBridge.getStatus().projectPath ?? this.ownProject;
+        if (project !== null) {
+          writeBreakpointNote(project, held);
+        }
+      });
     }
     return this.dapClient;
   }
@@ -2674,6 +2687,28 @@ class GodotServer {
       this.breakpointsSeededOn = client;
     }
     return client;
+  }
+
+  /**
+   * What a caller should know when the editor is one that clears its breakpoints as a session
+   * opens, or when the addon is too old to say. Empty when the editor keeps them.
+   *
+   * Godot's adapter answers `initialize` by clearing every breakpoint in the script editor unless
+   * `network/debug_adapter/sync_breakpoints` is on. The addon turns it on as it loads, so an editor
+   * reporting it off is holding an older addon than the one on disk, and the remedy is a restart
+   * rather than a setting; an addon that reports nothing is older still.
+   */
+  private breakpointsAtRisk(): { breakpointsAtRisk?: string } {
+    const status = this.godotBridge.getStatus();
+    if (!status.connected || status.syncsBreakpoints === true) {
+      return {};
+    }
+    return {
+      breakpointsAtRisk:
+        status.syncsBreakpoints === false
+          ? 'This editor clears every breakpoint in its script editor whenever a debug session opens on its adapter, which this server does for its first breakpoint or stack read: network/debug_adapter/sync_breakpoints is off. The installed addon turns it on as it loads, so the editor is running an older one; editor_launch restart puts the installed addon in, or turn the setting on in Editor Settings > Network > Debug Adapter.'
+          : 'Whether this editor keeps its breakpoints when a debug session opens cannot be told: the addon it is running predates the report. Godot clears them unless network/debug_adapter/sync_breakpoints is on, which the installed addon turns on as it loads; editor_launch restart puts the installed addon in.',
+    };
   }
 
   /** The held set as the project spells its files, which is how the caller named them. */
@@ -2795,6 +2830,7 @@ class GodotServer {
       ...(status.connected ? this.whatTheLaunchedEditorDropped() : {}),
       startupError: this.bridgeStartupError,
       staleNote: stale ? addonMismatch(status.addonVersion, SERVER_VERSION) : undefined,
+      ...this.breakpointsAtRisk(),
       retryingBridge: this.bridgeRetry === null ? undefined : true,
       // Where the editor was told to look, when this server knows which project to tell. Worth
       // reporting because it is the difference between an editor that cannot find this server

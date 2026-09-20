@@ -31,6 +31,11 @@ const ELSEWHERE_CLOSE_CODE: int = 4001
 const LSP_SETTING: String = "network/language_server/remote_port"
 const DAP_SETTING: String = "network/debug_adapter/remote_port"
 const DEBUGGER_SETTING: String = "network/debug/remote_port"
+## Whether the editor shares its breakpoints with a debug adapter session as it opens, or clears
+## them. Off by default in Godot, and off means every breakpoint in the editor is removed the
+## moment any session sends `initialize`, which a server does for its first breakpoint or its
+## first stack read. Turned on by [method _keep_breakpoints_through_sessions] when this loads.
+const SYNC_BREAKPOINTS_SETTING: String = "network/debug_adapter/sync_breakpoints"
 ## What a server that opened this editor put in the environment, matching the ports it named on
 ## the command line. Kept in step with `editorArguments` in src/launch.ts.
 const LSP_ASKED: String = "GDHARNESS_LSP_PORT"
@@ -87,6 +92,7 @@ var _connecting_for: float = 0.0
 func _ready() -> void:
 	_project_path = ProjectSettings.globalize_path("res://")
 	version_at_load = _loaded_version()
+	_keep_breakpoints_through_sessions()
 
 	_reconnect_timer = Timer.new()
 	_reconnect_timer.one_shot = true
@@ -281,6 +287,9 @@ func _handle_connect() -> void:
 			"lsp_port": _serves(LSP_ASKED, LSP_SETTING),
 			"dap_port": _serves(DAP_ASKED, DAP_SETTING),
 			"debug_port": _serving(DEBUGGER_SETTING),
+			# Whether a session opening on the adapter is told this editor's breakpoints or takes
+			# them away, so a server can say which before it sets one.
+			"syncs_breakpoints": _syncs_breakpoints(),
 			# Whether a server started this editor, which is the only kind that can be started again
 			# as itself: the engine hands back none of the arguments it was given, so the arguments
 			# have to come from whoever wrote them. See `restart_editor` in play_tools.gd.
@@ -327,6 +336,50 @@ static func _asked_for(variable: String) -> int:
 		return 0
 	var port: int = int(said)
 	return port if port >= 1 and port <= 65535 else 0
+
+
+## Turns breakpoint syncing on, so a debug session opening does not clear the editor's breakpoints.
+##
+## With the setting off, Godot's adapter answers `initialize` by clearing every breakpoint in the
+## script editor, open and cached, and telling every session so; with it on, it tells the new
+## session what is set and clears nothing. A server opens a session for its first breakpoint or
+## its first stack read, so off meant a harness session took the user's breakpoints away on its
+## first debug call, silently. The adapter reads the setting again the moment it changes, so this
+## holds for the editor that is running and not only the next one.
+##
+## An editor setting rather than a project one, the way the debugger port this addon moves is,
+## and left alone when it already reads true or does not exist.
+func _keep_breakpoints_through_sessions() -> void:
+	if not Engine.is_editor_hint():
+		return
+	var settings: EditorSettings = EditorInterface.get_editor_settings()
+	if settings == null or not settings.has_setting(SYNC_BREAKPOINTS_SETTING):
+		return
+	if Read.as_bool(settings.get_setting(SYNC_BREAKPOINTS_SETTING)):
+		return
+	settings.set_setting(SYNC_BREAKPOINTS_SETTING, true)
+	# Stored is not the same as noticed. The adapter reads this setting again on the editor-wide
+	# settings notification, which the settings dialog sends after Apply and set_setting does not
+	# send at all, so without this the running adapter went on clearing breakpoints until the
+	# editor was restarted. Sent from the editor's root, which is where the dialog sends it from.
+	var editor_root: Node = get_tree().root.get_child(0)
+	editor_root.propagate_notification(EditorSettings.NOTIFICATION_EDITOR_SETTINGS_CHANGED)
+	print(
+		(
+			"[gdharness] turned on %s, so a debug session opening keeps the editor's breakpoints"
+			% SYNC_BREAKPOINTS_SETTING
+		)
+	)
+
+
+## Whether the editor shares its breakpoints with a session as it opens. See the setting.
+func _syncs_breakpoints() -> bool:
+	if not Engine.is_editor_hint():
+		return false
+	var settings: EditorSettings = EditorInterface.get_editor_settings()
+	if settings == null or not settings.has_setting(SYNC_BREAKPOINTS_SETTING):
+		return false
+	return Read.as_bool(settings.get_setting(SYNC_BREAKPOINTS_SETTING))
 
 
 ## What the settings say this editor serves on, or 0 when there is nothing to ask.

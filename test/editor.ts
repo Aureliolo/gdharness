@@ -3190,11 +3190,43 @@ async function ticksWithin(attempt: Editor['attempt'], project: string, what: st
  * play it starts and says so in the start answer. The set is also kept in the project for the
  * server after a reconnect, which the held-game case in the own-pair set holds.
  */
-async function testABreakpointHoldsForEveryPlay({ call, attempt, project }: Editor): Promise<void> {
+async function testABreakpointHoldsForEveryPlay({ call, attempt, project, dapPort }: Editor): Promise<void> {
   const main = { projectPath: project, scriptPath: 'res://main.gd' };
   const one = [{ scriptPath: 'res://main.gd', lines: [BREAK_LINE] }];
   const set = await call('debug_breakpoint', { ...main, op: 'set', line: BREAK_LINE });
   assert.deepEqual(get(set, 'held'), one, `the set answer lists what is held: ${text(set)}`);
+
+  // Godot clears every breakpoint in the editor when a session opens on its adapter unless the
+  // editor syncs them, and it does not by default. The addon turned that on as it loaded, this
+  // editor says so, and a session opening now is told the breakpoint set above rather than
+  // taking it away: what an onlooker is told is the measurement, since a clearing editor sends
+  // it "removed" for the same line.
+  const status = await call('editor_status', {});
+  assert.equal(
+    get(status, 'editor', 'syncsBreakpoints'),
+    true,
+    `the editor keeps its breakpoints: ${text(status)}`,
+  );
+  assert.equal(
+    get(status, 'editor', 'breakpointsAtRisk'),
+    undefined,
+    `so nothing is said against it: ${text(status)}`,
+  );
+  const onlooker = new GodotDAPClient(dapPort);
+  await onlooker.initialize();
+  const toldOf = (): boolean =>
+    onlooker
+      .breakpointsInEditor()
+      .some((file) => file.scriptPath.endsWith('main.gd') && file.lines.includes(BREAK_LINE));
+  const patience = Date.now() + 5000;
+  while (!toldOf() && Date.now() < patience) {
+    await delay(50);
+  }
+  assert.ok(
+    toldOf(),
+    `a session opening is told the breakpoint rather than clearing it: ${JSON.stringify(onlooker.breakpointsInEditor())}`,
+  );
+  await onlooker.abandon();
 
   const first = await call('editor_run', { projectPath: project, headless: true });
   assert.deepEqual(

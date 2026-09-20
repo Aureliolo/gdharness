@@ -1229,7 +1229,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'debug_breakpoint',
     description:
-      "Sets or removes a breakpoint through the editor's debug adapter. Needs the editor, not a running game: set them first, then editor_run, and the game stops where you asked. The editor keeps a breakpoint set this way for one play, so every breakpoint this server holds is sent again before each play editor_run starts, and the start answer lists them under breakpoints. The set is also kept in the project, for the server that comes after a reconnect: a breakpoint stays until it is removed here, whichever server set it. Every answer lists the whole set under held.",
+      "Sets or removes a breakpoint through the editor's debug adapter. Needs the editor, not a running game: set them first, then editor_run, and the game stops where you asked. The editor keeps a breakpoint set this way for one play, so every breakpoint this server holds is sent again before each play editor_run starts, and the start answer lists them under breakpoints. The set is also kept in the project, for the server that comes after a reconnect: a breakpoint stays until it is removed here, whichever server set it. Every answer lists the whole set under held, and the breakpoints the user set in the editor's own gutter under setInEditor; setting one here never takes those away, and removing a line here clears it whoever set it. Godot clears every breakpoint in the editor when a debug session opens unless network/debug_adapter/sync_breakpoints is on, which the addon turns on as it loads; an editor running an older addon is said so under breakpointsAtRisk, here and in editor_status.",
     parameters: {
       projectPath: PROJECT_PATH,
       scriptPath: SCRIPT_PATH,
