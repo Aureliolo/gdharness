@@ -4730,9 +4730,27 @@ async function testAnAnnotatedDeclarationIsStillADeclaration(): Promise<void> {
     // The base on the declaration line, which GDScript also allows. `Node2D` rather than a
     // `RefCounted` descendant, because `RefCounted` is what the reader falls back to when it finds
     // no `extends` at all, and a fixture using it cannot tell a reading from a default.
+    // Every other thing an annotation can sit in front of, in one script. A declaration is only
+    // the shape that was reported: `@abstract func` and `@warning_ignore(...) func` are the same
+    // fault on the branch nobody named, and gdUnit4 alone declares 248 methods that way.
     writeFileSync(
       join(project, 'blade.gd'),
-      '@abstract class_name Blade extends Node2D\n\n\nfunc swing() -> void:\n\tpass\n',
+      [
+        '@abstract class_name Blade extends Node2D',
+        '',
+        '@warning_ignore("unused_signal") signal hit(power: int)',
+        '',
+        '@export_range(0, 10) var ratio: float = 1.0',
+        '@onready var body: Node = self',
+        '',
+        '',
+        '@abstract func swing() -> void',
+        '',
+        '',
+        '@warning_ignore("unused_parameter") func parry(other: Node) -> bool:',
+        '\treturn true',
+        '',
+      ].join('\n'),
     );
 
     const server = new ServerProcess({ env: { GODOT_PATH: godotPath } });
@@ -4768,6 +4786,43 @@ async function testAnAnnotatedDeclarationIsStillADeclaration(): Promise<void> {
         get(oneLine, 'extends'),
         'Node2D',
         `and the base on the same line is the base: ${JSON.stringify(oneLine)}`,
+      );
+      // The whole list rather than a search through it: a reader that drops one declaration drops
+      // it silently, and a check that looks for the ones it expects cannot see what went missing.
+      assert.deepEqual(
+        asArray(get(oneLine, 'functions')).map((each) => get(each, 'name')),
+        ['swing', 'parry'],
+        `both annotated functions are functions: ${JSON.stringify(oneLine)}`,
+      );
+      assert.equal(
+        get(asArray(get(oneLine, 'functions'))[0], 'is_abstract'),
+        true,
+        `and the abstract one says so, since it has no body to read: ${JSON.stringify(oneLine)}`,
+      );
+      assert.equal(
+        get(asArray(get(oneLine, 'functions'))[1], 'is_abstract'),
+        false,
+        `while the one behind another annotation does not: ${JSON.stringify(oneLine)}`,
+      );
+      assert.deepEqual(
+        asArray(get(oneLine, 'signals')).map((each) => get(each, 'name')),
+        ['hit'],
+        `the annotated signal is a signal: ${JSON.stringify(oneLine)}`,
+      );
+      assert.deepEqual(
+        asArray(get(oneLine, 'variables')).map((each) => [
+          get(each, 'name'),
+          get(each, 'is_export'),
+          get(each, 'export_hint'),
+          get(each, 'is_onready'),
+        ]),
+        [
+          // The hint whole: splitting an annotation on whitespace cut this one at the space
+          // inside its parentheses and answered `range(0,`.
+          ['ratio', true, 'range(0, 10)', false],
+          ['body', false, '', true],
+        ],
+        `and the annotations on a variable are the answer about it: ${JSON.stringify(oneLine)}`,
       );
 
       // The reverse walk reads the declaration itself, to find the uses that name the class rather

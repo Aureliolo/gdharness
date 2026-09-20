@@ -57,8 +57,10 @@ func get_gdscript_info(params: Dictionary) -> Dictionary:
 		if in_multiline_string:
 			continue
 
-		# Annotations may share the line: `@abstract class_name X` is one line in Godot 4.5 and
-		# later, and this reported no declared class for every one of them.
+		# Annotations may share the line with anything they annotate, so every branch below decides
+		# on the line with them off. `@abstract class_name X` was reported as no declared class,
+		# and `@abstract func x()` and `@warning_ignore("...") func x()` as no function at all:
+		# gdUnit4 alone declares 248 methods that way and this answered with none of them.
 		var header: String = Patterns.without_annotations(stripped)
 		var declaration: RegExMatch = Patterns.declared_class(header)
 		if declaration != null:
@@ -70,22 +72,20 @@ func get_gdscript_info(params: Dictionary) -> Dictionary:
 				extends_name = declaration.get_string(2)
 		elif header.begins_with("extends "):
 			extends_name = header.substr(8).strip_edges()
-		elif stripped.begins_with("signal "):
-			signals.append(_parse_signal(stripped, i + 1))
-		elif stripped.begins_with("const "):
-			constants.append(_parse_constant(stripped, i + 1))
-		elif stripped.begins_with("enum "):
-			enums.append(_parse_enum(stripped, i + 1))
-		elif (
-			stripped.begins_with("var ")
-			or stripped.begins_with("@export")
-			or stripped.begins_with("@onready")
-		):
+		elif header.begins_with("signal "):
+			signals.append(_parse_signal(header, i + 1))
+		elif header.begins_with("const "):
+			constants.append(_parse_constant(header, i + 1))
+		elif header.begins_with("enum "):
+			enums.append(_parse_enum(header, i + 1))
+		elif header.begins_with("var "):
+			# The whole line here, not the header: which annotations a variable carries is the
+			# answer rather than noise in front of it, and `@export_range(0, 1)` is the hint.
 			variables.append(_parse_variable(stripped, i + 1))
-		elif stripped.begins_with("func ") or stripped.begins_with("static func "):
-			functions.append(_parse_function(stripped, i + 1))
-		elif stripped.begins_with("class "):
-			inner_classes.append(stripped.substr(6).split(":")[0].split(" ")[0].strip_edges())
+		elif header.begins_with("func ") or header.begins_with("static func "):
+			functions.append(_parse_function(header, i + 1, stripped))
+		elif header.begins_with("class "):
+			inner_classes.append(header.substr(6).split(":")[0].split(" ")[0].strip_edges())
 
 		if "preload(" in stripped or "load(" in stripped:
 			for dep: String in _extract_dependencies(stripped):
@@ -172,17 +172,20 @@ func _parse_enum(line: String, line_num: int) -> Dictionary:
 
 
 func _parse_variable(line: String, line_num: int) -> Dictionary:
-	var is_export: bool = line.begins_with("@export")
-	var is_onready: bool = "@onready" in line
+	var is_export: bool = false
+	var is_onready: bool = false
 	var export_hint: String = ""
 
-	if is_export:
-		var export_match: int = line.find("@export")
-		var hint_end: int = line.find("var ")
-		if hint_end > export_match:
-			var hint_part: String = line.substr(export_match + 7, hint_end - export_match - 7).strip_edges()
-			if hint_part.begins_with("_"):
-				export_hint = hint_part.substr(1).split(" ")[0]
+	# From the annotations themselves rather than from where they sit. `@onready @export var x` put
+	# the export second and so read as not exported, and a hint with a space in it was cut at it.
+	for one: String in Patterns.annotations_on(line):
+		if one.begins_with("export"):
+			is_export = true
+			var after: String = one.substr(6)
+			if after.begins_with("_"):
+				export_hint = after.substr(1)
+		elif one == "onready":
+			is_onready = true
 
 	var var_pos: int = line.find("var ")
 	if var_pos == -1:
@@ -222,7 +225,7 @@ func _parse_variable(line: String, line_num: int) -> Dictionary:
 	}
 
 
-func _parse_function(line: String, line_num: int) -> Dictionary:
+func _parse_function(line: String, line_num: int, annotated: String = "") -> Dictionary:
 	var is_static: bool = line.begins_with("static ")
 	var func_text: String = line
 
@@ -256,6 +259,9 @@ func _parse_function(line: String, line_num: int) -> Dictionary:
 		"return_type": return_type,
 		"is_virtual": name.begins_with("_"),
 		"is_static": is_static,
+		# Said rather than left to be inferred: an abstract method has no body, so a caller that
+		# saw only the declaration would otherwise take it for one whose body it failed to read.
+		"is_abstract": "abstract" in Patterns.annotations_on(annotated),
 		"line": line_num
 	}
 

@@ -39,6 +39,26 @@ static func declared_class(line: String) -> RegExMatch:
 	return compiled("^class_name\\s+([A-Za-z_][A-Za-z0-9_]*)(?:\\s+extends\\s+(\\S+))?").search(line)
 
 
+# The annotations at the front of a line, in order, written as they are without the leading `@`.
+#
+# For anything that has to answer about the annotations rather than see past them. Splitting one on
+# whitespace loses half of it, since `@export_range(0, 10)` has a space inside the parentheses and
+# was reported as the hint `range(0,`.
+# An `Array[String]` rather than a `PackedStringArray`, because the packed one's `append` answers
+# with a bool and a project holding `return_value_discarded` at error will not compile a script that
+# throws it away, which is the whole reason `compiled` exists a few lines up.
+static func annotations_on(line: String) -> Array[String]:
+	var annotation: RegEx = compiled('^@([a-z_]+)(\\(\\s*(?:"[^"]*")?[^)]*\\))?\\s*')
+	var found: Array[String] = []
+	var rest: String = line.strip_edges()
+	var matched: RegExMatch = annotation.search(rest)
+	while matched != null:
+		found.append(matched.get_string(1) + matched.get_string(2))
+		rest = rest.substr(matched.get_end()).strip_edges()
+		matched = annotation.search(rest)
+	return found
+
+
 # A line with its leading annotations taken off, for anything reading a script's header.
 #
 # Annotations may share a line with what they annotate: `@abstract class_name X` is one line in
