@@ -3831,10 +3831,11 @@ class GodotServer {
     }
     // The same game, announced in a protocol this server cannot speak. The sweep above drops those,
     // so nothing here could see it and the sentence below would tell the caller to start one, which
-    // replaces the game that is playing. The window is ordinary rather than exotic: installing moves
-    // the addon on disk the moment a pin moves, while a server already spawned stays the version it
-    // was, so every upgrade has a stretch where the two halves disagree and a game started in it
-    // announces something this server will not read.
+    // replaces the game that is playing. The state is an upgrade that moves the runtime protocol:
+    // installing replaces the addon on disk the moment a pin moves, while a server already spawned
+    // stays the version it was, so a game started in between announces something this server will
+    // not read. Only that kind of upgrade, which is the minority. Measured downstream across
+    // 0.13.31 to 0.13.35, where the protocol did not move and the game stayed reachable throughout.
     //
     // Without offering the runtime_* tools, because this server cannot reach it either. What it can
     // say is that the game is there and which half is behind.
@@ -4134,7 +4135,7 @@ class GodotServer {
     // direction of the truth.
     if (run.transcript !== null && selected.omitted > 0) {
       notes.push(
-        `Everything this run has printed is in ${run.transcript}, uncapped and still being written. Read it for output, not for whether the run is alive: running above is asked of the operating system, and a transcript that stops growing is a run between prints.`,
+        `Everything this run has printed is in ${run.transcript}, uncapped and still being written. Read it for output, not for whether the run is alive: a transcript that stops growing is a run between prints. running above is asked of the operating system while there is a process to ask about, and for an editor-played run that announced no runtime it is the editor's answer instead, which can lag after the game has gone.`,
       );
     }
     return this.jsonTextResponse({

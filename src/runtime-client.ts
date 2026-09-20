@@ -132,9 +132,10 @@ function parseAnnouncement(file: string, pid: number): Announced {
   // A protocol this server does not speak is a running game, not rubbish, and the difference
   // decides whether its announcement survives. Deleting it takes the game away from the newer
   // server that is about to replace this one as well: `setup.py` upgrades the addon on disk the
-  // moment a pin moves while the server a session already spawned stays as it was, so every
-  // upgrade has a window where the game is ahead of the server. Kept and named instead, so the
-  // answer is which half is behind rather than that nobody is playing anything.
+  // moment a pin moves while the server a session already spawned stays as it was, so an upgrade
+  // that moves this number leaves the game ahead of the server until the reconnect. Only one that
+  // moves it, which is the minority of them. Kept and named instead, so the answer is which half is
+  // behind rather than that nobody is playing anything.
   if (protocol !== RUNTIME_PROTOCOL) {
     return { kind: 'unspoken', unspoken: { pid, protocol: protocol ?? 0, project: named } };
   }
