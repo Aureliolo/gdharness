@@ -979,33 +979,70 @@ export interface Written {
   readonly wasLaunchedBy?: string;
 }
 
+/** What an upgrade managed to do to the harness configs it found. */
+export interface Repinned {
+  /** The launch lines it replaced, one per config that held something else. */
+  readonly moved: readonly string[];
+  /** How many configs it wrote, whether or not the line inside them changed. */
+  readonly written: number;
+  /** How many harnesses were handed back a command or a snippet, because this cannot write them. */
+  readonly byHand: number;
+}
+
 /**
  * The second thing an upgrade cannot do for you, said off what the config actually held.
  *
- * Off [param moved], the launch lines this install replaced, rather than off the addon version that
- * was there before, and that is the whole of what was wrong with it. The two agree only while a
- * gdharness install is the thing that wrote the config: a command somebody set by hand, a local
- * build most of all, makes the addon version a number about the addons and not about the server the
- * harness spawned. Reported from a project running gdharness out of a working tree, where the note
- * named a version that appeared nowhere in its config.
+ * Off [param repinned].moved, the launch lines this install replaced, rather than off the addon
+ * version that was there before, and that is the whole of what was wrong with it. The two agree only
+ * while a gdharness install is the thing that wrote the config: a command somebody set by hand, a
+ * local build most of all, makes the addon version a number about the addons and not about the
+ * server the harness spawned. Reported from a project running gdharness out of a working tree, where
+ * the note named a version that appeared nowhere in its config.
  *
  * Nothing moved means there is nothing it can honestly name, so it says less rather than guessing:
  * what a harness is running is whichever server it spawned when the session started, and no process
  * can see into another one. The instruction is the same either way, which is exactly why a wrong
  * number here could have sat for good.
+ *
+ * An empty `moved` is three states and not one, and only the middle one has a config in it that
+ * names this version: a config was rewritten and already held this exact line, or nothing was
+ * written because the harnesses found here print a command instead, or nothing here names gdharness
+ * at all. Telling the last two that their config already named this version contradicts the lines
+ * printed above it and sends a caller to reconnect something that would come back on the same
+ * server, since there is no config for the reconnect to read.
  */
-export function harnessNote(moved: readonly string[], now: string): string {
-  if (moved.length === 0) {
+export function harnessNote(repinned: Repinned, now: string): string {
+  // Carried into the first two answers rather than branching again: a project can hold a config this
+  // writes and a harness it cannot, and the config's own answer is still the true one.
+  const alsoByHand =
+    repinned.byHand === 0
+      ? ''
+      : `\n     ${repinned.byHand === 1 ? 'One harness above was' : `${repinned.byHand} harnesses above were`} handed a command to run instead; run it too.`;
+  if (repinned.moved.length > 0) {
+    return (
+      `  2. Your harness is still running the server it spawned from ${repinned.moved.join(', ')}.\n` +
+      `     Its config names ${now} now.\n` +
+      `     Reconnect the MCP server, or restart the harness.${alsoByHand}`
+    );
+  }
+  if (repinned.written > 0) {
     return (
       '  2. Your harness config already named this version, but the server it is running is\n' +
       '     whichever one it spawned when the session started, which this cannot see from here.\n' +
-      '     Reconnect the MCP server, or restart the harness.'
+      `     Reconnect the MCP server, or restart the harness.${alsoByHand}`
+    );
+  }
+  if (repinned.byHand > 0) {
+    return (
+      '  2. None of the harness configs found here can be written for you, so nothing was\n' +
+      `     re-pinned and a reconnect on its own would come back on the same server.\n` +
+      '     Run what is printed above, then reconnect the MCP server or restart the harness.'
     );
   }
   return (
-    `  2. Your harness is still running the server it spawned from ${moved.join(', ')}.\n` +
-    `     Its config names ${now} now.\n` +
-    '     Reconnect the MCP server, or restart the harness.'
+    '  2. No harness config here names gdharness, so nothing was re-pinned and there is no\n' +
+    '     config for a reconnect to read. Run  gdharness setup  to write one, or point your\n' +
+    `     harness at  ${now}  yourself, then restart it.`
   );
 }
 
