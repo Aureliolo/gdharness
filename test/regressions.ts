@@ -105,7 +105,7 @@ import {
   toolsWithoutProjectPath,
 } from '../src/tool-definitions.js';
 import { namedType, renderToolsMarkdown } from '../src/tool-reference.js';
-import { cacheFile, isNewer, UpdateCheck } from '../src/update-check.js';
+import { CACHE_MS, cacheFile, isNewer, registryFor, UpdateCheck } from '../src/update-check.js';
 import { asArray, asNumber, get, text } from './support/json.js';
 import { isRecord, type JsonRpcMessage, parseTextContent, textOf } from './support/json-rpc.js';
 import { reservePort, ServerProcess } from './support/server.js';
@@ -3968,7 +3968,8 @@ function testTheStaleHalfIsNamedCorrectly(): void {
  *
  * Asserted without the network in either direction: `refresh()` sets `checking` before it awaits
  * anything, so both readings below are taken in the same tick and do not depend on the registry
- * answering, or existing.
+ * answering, or existing. The registry stands in as a request that never settles, which holds the
+ * checker in the one state this is about for as long as the assertions take.
  */
 function testAStaleUpdateAnswerIsNotHandedOut(): void {
   const home = mkdtempSync(join(tmpdir(), 'gdharness-stale-notice-'));
@@ -3981,18 +3982,21 @@ function testAStaleUpdateAnswerIsNotHandedOut(): void {
   const seed = (checkedAt: number): void => {
     writeFileSync(cacheFile(environment), JSON.stringify({ checkedAt, latest: '99.9.9' }), 'utf8');
   };
-  const window = 4 * 60 * 60 * 1000;
+  // The window itself rather than a second copy of it, so that shortening one does not leave this
+  // fixture seeding a timestamp on the other side of a boundary it no longer describes.
+  const window = CACHE_MS;
+  const pending = (): Promise<string | null> => new Promise<string | null>(() => {});
 
   try {
     // The witness first: an answer inside the window is reported, so the silence below is this
     // guard and not the notice having stopped working altogether.
     seed(Date.now());
-    const fresh = new UpdateCheck('0.1.0', environment);
+    const fresh = new UpdateCheck('0.1.0', environment, pending);
     fresh.refresh();
     assert.equal(fresh.notice()?.latest, '99.9.9', 'an answer still inside the window is reported');
 
     seed(Date.now() - window - 60_000);
-    const stale = new UpdateCheck('0.1.0', environment);
+    const stale = new UpdateCheck('0.1.0', environment, pending);
     assert.equal(
       stale.notice()?.latest,
       '99.9.9',
@@ -4006,11 +4010,113 @@ function testAStaleUpdateAnswerIsNotHandedOut(): void {
 }
 
 /**
+ * A server that has just started asks the registry, whatever answer the machine already holds.
+ *
+ * The cache is one file per user, not per session, so whichever process asked first decides what
+ * every server started afterwards believes for the rest of the window. Measured on this machine
+ * while the window was four hours: the file named 0.13.34, taken 102 minutes earlier, and 0.13.35
+ * and 0.13.36 shipped under it. A session running 0.13.34 was told nothing, because the answer in
+ * hand was not newer than the version it was running, and a reconnect, which is the one moment
+ * somebody is deliberately finding out whether they are current, started a server that read the
+ * same file and asked nobody.
+ *
+ * The registry is counted rather than reached. Whether a check was started is the whole of what
+ * this is about, and a server that asked and one that quoted somebody else's answer are the same
+ * object from outside.
+ */
+async function testAFreshServerAsksRatherThanInheritingAnAnswer(): Promise<void> {
+  const home = mkdtempSync(join(tmpdir(), 'gdharness-fresh-ask-'));
+  const environment = {
+    HOME: home,
+    LOCALAPPDATA: home,
+    XDG_CACHE_HOME: home,
+    GDHARNESS_NO_UPDATE_CHECK: '',
+  };
+
+  try {
+    // Written now, so nothing about it is stale and the old rule would have declined to ask.
+    writeFileSync(
+      cacheFile(environment),
+      JSON.stringify({ checkedAt: Date.now(), latest: '0.13.34' }),
+      'utf8',
+    );
+
+    let asks = 0;
+    const registry = (): Promise<string | null> => {
+      asks += 1;
+      return Promise.resolve('0.13.36');
+    };
+    const check = new UpdateCheck('0.13.34', environment, registry);
+
+    assert.equal(check.notice(), null, 'the inherited answer is not newer, so there is nothing to say');
+    check.refresh();
+    assert.equal(asks, 1, 'and the server asks anyway, because it has just started');
+
+    // Settled, so what the registry said is taken up rather than merely requested.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(check.notice()?.latest, '0.13.36', 'the release published since is what it reports');
+
+    check.refresh();
+    assert.equal(asks, 1, 'and a second call inside the window asks nothing further');
+  } finally {
+    sweep(home);
+  }
+}
+
+/**
+ * The window an answer stands for is short enough that a release is worth publishing at all.
+ *
+ * This is the only automatic path by which a running session learns a newer gdharness exists, and
+ * the project publishes several times in a day. Every hour on this number is an hour in which a
+ * downstream session goes on working against a version that has been superseded, having been told
+ * nothing, and the fix is already on npm. Raising it means saying so here in the same change.
+ */
+function testTheUpdateWindowTracksHowOftenThisShips(): void {
+  assert.ok(
+    CACHE_MS <= 15 * 60 * 1000,
+    `an answer stands for ${Math.round(CACHE_MS / 60_000)} minutes, which is longer than the gap ` +
+      'between releases here; a session would miss most of them',
+  );
+  // And not so short that a working session is asking on most of its tool calls.
+  assert.ok(CACHE_MS >= 60 * 1000, 'but not so short that it asks on every other call');
+}
+
+/**
+ * The registry is npm, or somewhere else over https, and never anything but those.
+ *
+ * Naming a mirror is the operator's own file rather than anything a tool call can reach, but the
+ * value still arrives as a string and the property worth keeping is that this module talks over
+ * https or not at all. A mistyped one falls back rather than stopping the server, because refusing
+ * to start over a misspelt mirror is worse than asking npm.
+ */
+function testTheRegistryIsHttpsOrNpm(): void {
+  const npm = 'https://registry.npmjs.org/gdharness/latest';
+  assert.equal(registryFor({}), npm, 'nothing named is npm');
+  assert.equal(registryFor({ GDHARNESS_REGISTRY: '' }), npm, 'and so is an empty one');
+  assert.equal(
+    registryFor({ GDHARNESS_REGISTRY: 'https://npm.inside.example/' }),
+    'https://npm.inside.example/gdharness/latest',
+    'an https mirror is asked instead, for the same document',
+  );
+  for (const wrong of ['http://npm.inside.example', 'file:///etc/passwd', 'npm.inside.example', '::']) {
+    assert.equal(registryFor({ GDHARNESS_REGISTRY: wrong }), npm, `${wrong} falls back to npm`);
+  }
+}
+
+/**
  * The update notice reaches the agent, once, and says what to do about it.
  *
  * Driven off a seeded cache rather than the registry: the point is the answer a tool carries, and
- * a fixture that needs the network to make that assertion is one that fails on a train. A fresh
- * timestamp is also what stops the server making a request during the test.
+ * a fixture that needs the network to make that assertion is one that fails on a train. The server
+ * is pointed at a port nothing listens on, because a server that has just started asks whatever the
+ * cache holds, and npm answering first would replace the seeded version with the real one and leave
+ * nothing to report. So this also holds for a check that failed: an answer already in hand is still
+ * worth saying, and offline and behind is the state where it is worth saying most.
+ *
+ * The dead port on its own proves nothing about whether the variable was read, since npm being slow
+ * looks the same from here; that is why this failed on one platform of three and passed on the other
+ * two. What the variable maps to is asserted in `testTheRegistryIsHttpsOrNpm`, and that the
+ * environment reaches a spawned server's checker at all is what the off-switch fixture below shows.
  */
 async function testUpdateNoticeRidesOnAnAnswer(): Promise<void> {
   const home = mkdtempSync(join(tmpdir(), 'gdharness-update-home-'));
@@ -4021,6 +4127,7 @@ async function testUpdateNoticeRidesOnAnAnswer(): Promise<void> {
     LOCALAPPDATA: home,
     XDG_CACHE_HOME: home,
     GDHARNESS_NO_UPDATE_CHECK: '',
+    GDHARNESS_REGISTRY: 'https://127.0.0.1:1',
   };
   try {
     writeFileSync(
@@ -9590,6 +9697,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testUpdateNoticeRidesOnAnAnswer,
   testUpdateCheckHasAnOffSwitch,
   testAStaleUpdateAnswerIsNotHandedOut,
+  testAFreshServerAsksRatherThanInheritingAnAnswer,
+  testTheUpdateWindowTracksHowOftenThisShips,
+  testTheRegistryIsHttpsOrNpm,
 ];
 
 /**
