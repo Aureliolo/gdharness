@@ -70,6 +70,19 @@ export interface GodotProcess {
    */
   consoleLost?: boolean;
   /**
+   * The process the game announced itself as, for a run the editor is playing.
+   *
+   * Such a run has no handle and no `pid`, so whether it is still up can only be asked of the
+   * editor, and the editor is not always there to ask and is not always right: it went on saying it
+   * was playing a game whose process had been ended from outside. A game carrying the runtime addon
+   * announces its own process id, and that number can be asked of the operating system.
+   *
+   * Only ever used to find a run over. A number that has come round to something else reads as
+   * alive, which is the answer the record gives anyway, so this can correct a wrong yes and never
+   * invents one.
+   */
+  announcedPid?: number;
+  /**
    * Why this server ended the run, or null when it did not.
    *
    * A run that vanished and a run this tool killed look the same from outside: the process is
