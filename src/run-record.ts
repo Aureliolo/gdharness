@@ -377,6 +377,12 @@ export function couldStillBeTheRecordedRun(record: RunRecord): boolean {
 }
 
 /**
+ * The editor, as its own command line says so. Godot takes both spellings and a game is given
+ * neither.
+ */
+const AN_EDITOR = /(?:^|\s)(?:-e|--editor)(?:\s|$)/;
+
+/**
  * The comparison itself, apart from asking the operating system, so that every answer the
  * operating system can give is a case that can be written down rather than a platform to be on.
  *
@@ -396,6 +402,17 @@ export function judgeRun(
   const said = process.platform === 'win32' ? running.text.toLowerCase() : running.text;
   const wanted = engine === null || process.platform !== 'win32' ? engine : engine.toLowerCase();
   if (wanted !== null && !said.includes(wanted)) {
+    return false;
+  }
+  // An editor is not a run, and nothing else here separates the two: the editor holding a project
+  // and a game of that project are the same binary pointed at the same directory, which is all
+  // that is compared below. The pid that came round again is routinely an editor's, because a
+  // restart frees the game's number and opens an editor seconds later, and confirming it hands
+  // `process.kill` the editor, which then goes with no crash log and nothing in its output.
+  //
+  // Only where the flags can be read. An image name cannot show them, and that answer is already
+  // too weak to kill on.
+  if (running.kind === 'commandLine' && AN_EDITOR.test(said)) {
     return false;
   }
   if (record.projectPath === '') {

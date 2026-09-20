@@ -2838,7 +2838,7 @@ function testAGameIsFoundWhereverItAnnounced(): void {
     writeFileSync(
       join(elsewhere, `runtime-${process.pid}.json`),
       JSON.stringify({
-        protocol: 2,
+        protocol: RUNTIME_PROTOCOL,
         pid: process.pid,
         port: 51_234,
         address: '127.0.0.1',
@@ -3074,7 +3074,7 @@ async function testARefusalDoesNotDenyTheRuntimeItCanSee(): Promise<void> {
     writeFileSync(
       join(announcements, `runtime-${process.pid}.json`),
       JSON.stringify({
-        protocol: 2,
+        protocol: RUNTIME_PROTOCOL,
         pid: process.pid,
         port: 51_987,
         address: '127.0.0.1',
@@ -3113,7 +3113,7 @@ async function testARefusalDoesNotDenyTheRuntimeItCanSee(): Promise<void> {
       writeFileSync(
         join(announcements, `runtime-${process.pid}.json`),
         JSON.stringify({
-          protocol: 2,
+          protocol: RUNTIME_PROTOCOL,
           pid: process.pid,
           port: 51_988,
           address: '127.0.0.1',
@@ -3136,6 +3136,65 @@ async function testARefusalDoesNotDenyTheRuntimeItCanSee(): Promise<void> {
       );
     } finally {
       sweep(neighbour);
+    }
+
+    // The same game, announcing a protocol this server was not built to read, which is what an
+    // upgrade window looks like from here: installing moves the addon on disk when the pin moves
+    // and a server already spawned stays the version it was. The sweep that finds games to talk to
+    // drops these, so the refusal could not see it and reached for the sentence that ends it.
+    //
+    // Found by bumping the protocol under the fixture above rather than by reading anything: the
+    // arm only renders when the two halves disagree, and nothing that agrees will produce it.
+    for (const protocol of [RUNTIME_PROTOCOL + 1, RUNTIME_PROTOCOL - 1]) {
+      writeFileSync(
+        join(announcements, `runtime-${process.pid}.json`),
+        JSON.stringify({
+          protocol,
+          pid: process.pid,
+          port: 51_989,
+          address: '127.0.0.1',
+          project: { name: 'Adopted', path: project },
+        }),
+        'utf8',
+      );
+      const far = String(
+        textOf(await server.request('tools/call', { name: 'editor_run', arguments: { op: 'stop' } })),
+      );
+      assert.match(far, /A game is running/, `a game too far off to read is still running: ${far}`);
+      assert.match(far, new RegExp(String(process.pid)), `and is named by its pid: ${far}`);
+      assert.match(far, new RegExp(`protocol ${protocol}`), `with the protocol it speaks: ${far}`);
+      assert.match(
+        far,
+        protocol > RUNTIME_PROTOCOL ? /this server is the older half/ : /the addon is the older half/,
+        `and which half is behind: ${far}`,
+      );
+      assert.match(far, /replaces the game that is playing/, `and what a start would cost: ${far}`);
+      assert.doesNotMatch(
+        far,
+        /Start one with editor_run/,
+        `the advice that would end it is gone here too: ${far}`,
+      );
+
+      // And the call an agent makes before any other says the same thing. Asserted from the answer
+      // rather than from the sweep behind it: the two disagreed, `runtime_*` naming the game and
+      // `editor_status` reporting an empty list of runtimes about the same moment, and reading
+      // either one alone shows something that looks complete.
+      const status = parseTextContent(
+        await server.request('tools/call', { name: 'editor_status', arguments: {} }),
+      );
+      const unreadable = asArray(get(status, 'game', 'unreadable'));
+      assert.equal(unreadable.length, 1, `the game it cannot read is reported: ${JSON.stringify(status)}`);
+      assert.equal(asNumber(get(unreadable[0], 'pid')), process.pid, 'by its pid');
+      assert.equal(asNumber(get(unreadable[0], 'protocol')), protocol, 'with the protocol it speaks');
+      assert.equal(
+        text(get(unreadable[0], 'behind')),
+        protocol > RUNTIME_PROTOCOL ? 'server' : 'addon',
+        'and which half is behind',
+      );
+      // Beside it rather than instead of it: a game this server cannot speak to is not a runtime it
+      // can reach, and folding the two together would offer tools that do not work.
+      assert.deepEqual(get(status, 'game', 'runtimes'), [], 'and is not counted among the ones it can reach');
+      assert.equal(get(status, 'game', 'runtimeConnected'), false, 'nor reported as connected');
     }
   } finally {
     await server.stop();
@@ -6184,7 +6243,10 @@ async function testAPidIsNotAnIdentity(): Promise<void> {
   const marker = join(tmpdir(), `gdharness-identity-${process.pid}`);
   // Something that stays up and carries a word of ours on its command line, which is what a real
   // run has: the engine's path and the project it was pointed at.
-  const held = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 120_000)', marker], {
+  //
+  // The long spelling of the eval flag, because `-e` is how the engine this stands in for is told
+  // to come up as an editor, and a stand-in wearing it is judged one.
+  const held = spawn(process.execPath, ['--eval', 'setTimeout(() => {}, 120_000)', marker], {
     stdio: 'ignore',
   });
   const pid = held.pid ?? 0;
@@ -6275,6 +6337,73 @@ async function testAPidIsNotAnIdentity(): Promise<void> {
   // The dead pid, asked after the process is gone rather than about a number that was never
   // anything: this is the state a stale record is actually in.
   assert.equal(stillTheRecordedRun(record), false, 'a run that has ended is not still the run');
+}
+
+/**
+ * The editor holding a project is not a run of that project, however exactly the record fits it.
+ *
+ * The identity check compares the engine and the project, and an editor of that project carries
+ * both: same binary, same `--path`. So a record whose pid has come round to an editor is confirmed
+ * against it, and the caller that acts on a confirmation is the one that kills. The number gets
+ * there by the ordinary route rather than a rare one, because a restart ends the game and opens an
+ * editor seconds later, which is when a just-freed pid is handed out again. What it looks like
+ * downstream is an editor going with no crash log and nothing in its own output, which is the
+ * shape one was reported in.
+ *
+ * Judged against written-down command lines rather than a spawned editor: the discrimination is
+ * between two strings the operating system can give, and a fixture that needed a real editor to be
+ * running could only ever be skipped on the machines that lack one.
+ */
+function testTheEditorHoldingAProjectIsNotARunOfIt(): void {
+  const project = join(tmpdir(), 'gdharness-editor-vs-run');
+  const engine = join(tmpdir(), 'engines', 'Godot_v4.5-stable_win64.exe');
+  const record = {
+    pid: 4242,
+    transcript: join(tmpdir(), 'none.log'),
+    startedAt: Date.now(),
+    projectPath: project,
+    arguments: ['--path', project],
+    command: engine,
+  };
+  const asked = (text: string): { kind: 'commandLine'; text: string } => ({ kind: 'commandLine', text });
+
+  // The positive first, and from the same record: an instrument that had stopped judging anything
+  // would report every refusal below just as well.
+  assert.equal(
+    judgeRun(record, asked(`${engine} --path ${project} res://main.tscn`), 'confirmed'),
+    true,
+    'a game of this project under this record is the run, which is what makes the refusals below mean anything',
+  );
+
+  for (const flag of ['-e', '--editor']) {
+    assert.equal(
+      judgeRun(
+        record,
+        asked(`${engine} ${flag} --path ${project} --lsp-port 6005 --dap-port 6006`),
+        'confirmed',
+      ),
+      false,
+      `an editor of the same project (${flag}) is not the run, so nothing may be signalled at its pid`,
+    );
+    assert.equal(
+      judgeRun(record, asked(`${engine} ${flag} --path ${project}`), 'possible'),
+      false,
+      `nor is it a run to be picked back up and reported as the game (${flag})`,
+    );
+  }
+
+  // The flag as a whole word. A project whose own directory spells one is still a project, and
+  // reading it as the editor would refuse to end a run that is genuinely there.
+  const named = join(tmpdir(), 'gdharness--editor-demo');
+  assert.equal(
+    judgeRun(
+      { ...record, projectPath: named, arguments: ['--path', named] },
+      asked(`${engine} --path ${named} res://main.tscn`),
+      'confirmed',
+    ),
+    true,
+    'a project named for the flag is not an editor, and its game is still endable',
+  );
 }
 
 /**
@@ -6503,7 +6632,10 @@ async function benchThroughAStart(
   const bench = spawn(
     process.execPath,
     [
-      '-e',
+      // The long spelling of the eval flag: `-e` is how the engine this stands in for is told to
+      // come up as an editor, and an editor is disowned by the identity check for a reason this
+      // fixture is not about.
+      '--eval',
       "const {appendFileSync}=require('node:fs');" +
         `setInterval(() => appendFileSync(${JSON.stringify(ticks)}, 'tick\\n'), 25);`,
       recorded,
@@ -8678,6 +8810,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testOnlyOurOwnAutoloadIsRewritten,
   testAnExitCodeOutlivesTheServerThatSawIt,
   testAPidIsNotAnIdentity,
+  testTheEditorHoldingAProjectIsNotARunOfIt,
   testARunEndedUnwatchedIsStillReadable,
   testAForeignRunSurvivesAStart,
   testARunOutlivesItsServer,
