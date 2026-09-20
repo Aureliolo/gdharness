@@ -22,6 +22,7 @@ import { WebSocket } from 'ws';
 import { serviceDidNotAnswer } from '../scripts/audit-production.js';
 import { pullRequestNumbers, shipsToUsers } from '../scripts/release-notes.js';
 import { sharedCopies } from '../scripts/sync-shared-gd.js';
+import { breakpointNotePath, readBreakpointNote, writeBreakpointNote } from '../src/breakpoint-note.js';
 import { announcementPath, BRIDGE_ANNOUNCE_PROTOCOL, readAnnouncement } from '../src/bridge-announce.js';
 import {
   type Contradicted,
@@ -1165,6 +1166,159 @@ async function testAContinueByAnotherClientIsKnownHere(): Promise<void> {
       socket.write(stopped);
     },
   );
+}
+
+/**
+ * Every breakpoint held is sent again before a play, whoever set it, and a file the adapter will
+ * not take back is reported rather than allowed to stop the play.
+ *
+ * Measured on 4.7.2: a breakpoint set through the adapter stops the play after it and not the one
+ * after that, and sending it again before the play is what makes the second play stop. Held by the
+ * editor tier against a real adapter; this holds what the client sends, and the two things the
+ * real one cannot show on demand. Breakpoints taken on from a note are sent nowhere until a play
+ * asks for them, since a server that has just started has no play to send them for, and a file
+ * the adapter refuses is dropped from the set with its reason in the answer, because a script the
+ * project no longer has is no reason to keep the play from starting.
+ */
+async function testBreakpointsAreSentAgainBeforeAPlay(): Promise<void> {
+  const sent: { path: string; lines: number[] }[] = [];
+  const respond: FramedPeerHandler = (message, socket) => {
+    const command = String(message['command']);
+    const arguments_ = isRecord(message['arguments']) ? message['arguments'] : {};
+    const source = isRecord(arguments_['source']) ? arguments_['source'] : {};
+    const path = text(source['path']);
+    if (command === 'setBreakpoints') {
+      sent.push({
+        path,
+        lines: asArray(arguments_['breakpoints']).map((one) => Number(get(one, 'line'))),
+      });
+    }
+    const refused = command === 'setBreakpoints' && path.endsWith('gone.gd');
+    socket.write(
+      frameJsonRpc({
+        seq: Number(message['seq']) + 100,
+        type: 'response',
+        request_seq: message['seq'],
+        command,
+        success: !refused,
+        ...(refused ? { message: 'Unable to find file at: gone.gd' } : { body: { breakpoints: [] } }),
+      }),
+    );
+  };
+
+  await withFramedPeer(respond, async (port) => {
+    const session = new GodotDAPClient(port, '127.0.0.1');
+    await session.setBreakpoint('/game/main.gd', 12);
+    await session.setBreakpoint('/game/main.gd', 30);
+    await session.setBreakpoint('/game/other.gd', 4);
+    // Taken on from a note, as a successor does: nothing is sent for it yet.
+    session.holdBreakpoints([{ scriptPath: '/game/gone.gd', lines: [9] }]);
+    const before = sent.length;
+    assert.deepEqual(
+      session.breakpointsHeld(),
+      [
+        { scriptPath: '/game/main.gd', lines: [12, 30] },
+        { scriptPath: '/game/other.gd', lines: [4] },
+        { scriptPath: '/game/gone.gd', lines: [9] },
+      ],
+      'the set holds what was set here and what was taken on',
+    );
+    assert.equal(sent.length, before, 'and taking a note on sends nothing until a play asks');
+
+    const again = await session.reapplyBreakpoints();
+    assert.deepEqual(
+      sent.slice(before),
+      [
+        { path: '/game/main.gd', lines: [12, 30] },
+        { path: '/game/other.gd', lines: [4] },
+        { path: '/game/gone.gd', lines: [9] },
+      ],
+      `a play sends every file's whole list again: ${JSON.stringify(sent)}`,
+    );
+    assert.deepEqual(
+      again.applied,
+      [
+        { scriptPath: '/game/main.gd', lines: [12, 30] },
+        { scriptPath: '/game/other.gd', lines: [4] },
+      ],
+      'and answers with what the adapter took',
+    );
+    assert.deepEqual(
+      again.refused.map((one) => one.scriptPath),
+      ['/game/gone.gd'],
+      `and names what it would not: ${JSON.stringify(again.refused)}`,
+    );
+    assert.match(text(again.refused[0]?.reason), /Unable to find file/, "with the adapter's own words");
+    assert.deepEqual(
+      session.breakpointsHeld().map((one) => one.scriptPath),
+      ['/game/main.gd', '/game/other.gd'],
+      'a file the adapter refused is not sent again before the next play',
+    );
+
+    // A line the adapter refuses is not held either: the set is what the editor has taken.
+    const held = session.breakpointsHeld().length;
+    await assert.rejects(() => session.setBreakpoint('/game/gone.gd', 2), /Unable to find file/);
+    assert.equal(session.breakpointsHeld().length, held, 'a refused set leaves the set as it was');
+    await session.abandon();
+  });
+}
+
+/**
+ * The breakpoint note round-trips through the project and refuses what is not the project's.
+ *
+ * Kept relative so the note is the project's rather than this machine's, read back resolved the
+ * way the adapter wants it, taken down when nothing is held, and a script written into it from
+ * outside the project, or by a hand editing the file, is not one a play is told to stop on.
+ */
+function testTheBreakpointNoteIsTheProjects(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-breakpoints-'));
+  const elsewhere = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-elsewhere-'));
+  try {
+    writeBreakpointNote(project, [
+      { scriptPath: join(project, 'scripts', 'main.gd'), lines: [30, 12] },
+      { scriptPath: join(elsewhere, 'theirs.gd'), lines: [1] },
+      { scriptPath: join(project, 'empty.gd'), lines: [] },
+    ]);
+    const written = JSON.parse(readFileSync(breakpointNotePath(project), 'utf8')) as unknown;
+    assert.deepEqual(
+      get(written, 'breakpoints'),
+      [{ script: 'scripts/main.gd', lines: [30, 12] }],
+      "the note holds the project's own files, relative and forward-slashed, and nothing outside",
+    );
+    assert.deepEqual(
+      readBreakpointNote(project),
+      [{ scriptPath: join(project, 'scripts', 'main.gd'), lines: [30, 12] }],
+      'and reads back spelt for the adapter',
+    );
+
+    // Hand-written, or written by something else: a path that leaves the project is dropped, and
+    // so is a line that is not one.
+    writeFileSync(
+      breakpointNotePath(project),
+      JSON.stringify({
+        breakpoints: [
+          { script: '../theirs.gd', lines: [1] },
+          { script: '/abs/theirs.gd', lines: [1] },
+          { script: 'main.gd', lines: [0, -1, 'seven', 7] },
+          { script: 'none.gd', lines: [] },
+        ],
+      }),
+    );
+    assert.deepEqual(
+      readBreakpointNote(project),
+      [{ scriptPath: join(project, 'main.gd'), lines: [7] }],
+      'only lines inside the project, on positive whole lines, are taken on',
+    );
+    writeFileSync(breakpointNotePath(project), 'not json');
+    assert.deepEqual(readBreakpointNote(project), [], 'a note that cannot be read holds nothing');
+
+    writeBreakpointNote(project, []);
+    assert.equal(existsSync(breakpointNotePath(project)), false, 'nothing held takes the note down');
+    assert.deepEqual(readBreakpointNote(project), [], 'and a missing note holds nothing');
+  } finally {
+    sweep(project);
+    sweep(elsewhere);
+  }
 }
 
 /**
@@ -10506,6 +10660,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStopIsKnownToTheConnectionItWasSentTo,
   testAStopThatLandsWhileAttachAsksIsTheAnswer,
   testAContinueByAnotherClientIsKnownHere,
+  testBreakpointsAreSentAgainBeforeAPlay,
+  testTheBreakpointNoteIsTheProjects,
   testProjectGodotResistsPrototypeKeys,
 
   testAnAnswerFromAStaleAddonSaysSo,

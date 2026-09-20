@@ -63,6 +63,18 @@ export interface StoppedAt {
   readonly text: string;
 }
 
+/** The breakpoints on one file, as this side spells the file: the path the adapter takes. */
+export interface HeldBreakpoint {
+  readonly scriptPath: string;
+  readonly lines: readonly number[];
+}
+
+/** A file whose breakpoints the adapter would not take back, and what it said. */
+export interface RefusedBreakpoint {
+  readonly scriptPath: string;
+  readonly reason: string;
+}
+
 /** One string off a DAP body, or empty for a field the adapter left out. */
 function said(body: DAPBody | undefined, field: string): string {
   const value = body?.[field];
@@ -521,38 +533,89 @@ export class GodotDAPClient {
    * one on a game already past it.
    */
   async setBreakpoint(filePath: string, line: number): Promise<DAPBody> {
-    await this.ensureConnected();
-    await this.initialize();
-
-    const fileBreakpoints = this.breakpoints.get(filePath) ?? new Set<number>();
-    fileBreakpoints.add(line);
-    this.breakpoints.set(filePath, fileBreakpoints);
-
-    const lines = Array.from(fileBreakpoints).sort((a, b) => a - b);
-    return await this.sendRequest('setBreakpoints', {
-      source: { path: filePath },
-      breakpoints: lines.map((breakpointLine) => ({ line: breakpointLine })),
-    });
+    const wanted = new Set(this.breakpoints.get(filePath) ?? []);
+    wanted.add(line);
+    return await this.sendBreakpoints(filePath, wanted);
   }
 
   async removeBreakpoint(filePath: string, line: number): Promise<DAPBody> {
+    const wanted = new Set(this.breakpoints.get(filePath) ?? []);
+    wanted.delete(line);
+    return await this.sendBreakpoints(filePath, wanted);
+  }
+
+  /**
+   * The file's whole list, which is what the adapter takes: a line left out is a line removed.
+   *
+   * Held only once the adapter has taken it, so a line it refused is not one this session goes on
+   * sending before every play.
+   */
+  private async sendBreakpoints(filePath: string, lines: ReadonlySet<number>): Promise<DAPBody> {
     await this.ensureConnected();
     await this.initialize();
-
-    const fileBreakpoints = this.breakpoints.get(filePath) ?? new Set<number>();
-    fileBreakpoints.delete(line);
-
-    if (fileBreakpoints.size === 0) {
+    const sorted = Array.from(lines).sort((a, b) => a - b);
+    const answer = await this.sendRequest('setBreakpoints', {
+      source: { path: filePath },
+      breakpoints: sorted.map((breakpointLine) => ({ line: breakpointLine })),
+    });
+    if (lines.size === 0) {
       this.breakpoints.delete(filePath);
     } else {
-      this.breakpoints.set(filePath, fileBreakpoints);
+      this.breakpoints.set(filePath, new Set(lines));
     }
+    return answer;
+  }
 
-    const remaining = Array.from(fileBreakpoints).sort((a, b) => a - b);
-    return await this.sendRequest('setBreakpoints', {
-      source: { path: filePath },
-      breakpoints: remaining.map((breakpointLine) => ({ line: breakpointLine })),
-    });
+  /**
+   * Sends every breakpoint this session holds again, for the play about to start.
+   *
+   * Measured on 4.7.2: a breakpoint set through the adapter stops the next play and not the one
+   * after it. The same session that set it, continued past it and stopped the game played again
+   * and ran straight through, and setting it again before the play is what made the second play
+   * stop. So the editor is given the whole set before each play this server starts, and the
+   * answer says what was sent and what the adapter would not take, since a file the project no
+   * longer has is no reason to keep the play from starting.
+   */
+  async reapplyBreakpoints(): Promise<{ applied: HeldBreakpoint[]; refused: RefusedBreakpoint[] }> {
+    const applied: HeldBreakpoint[] = [];
+    const refused: RefusedBreakpoint[] = [];
+    for (const [filePath, lines] of Array.from(this.breakpoints)) {
+      try {
+        await this.sendBreakpoints(filePath, lines);
+        applied.push({ scriptPath: filePath, lines: Array.from(lines).sort((a, b) => a - b) });
+      } catch (error) {
+        this.breakpoints.delete(filePath);
+        refused.push({
+          scriptPath: filePath,
+          reason: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    return { applied, refused };
+  }
+
+  /** What this session holds, file by file, in the order the files were first named. */
+  breakpointsHeld(): HeldBreakpoint[] {
+    return Array.from(this.breakpoints, ([scriptPath, lines]) => ({
+      scriptPath,
+      lines: Array.from(lines).sort((a, b) => a - b),
+    }));
+  }
+
+  /**
+   * Takes on breakpoints another server set, without sending them: they are sent before the next
+   * play, and a server that has just started has no play to send them for yet.
+   */
+  holdBreakpoints(held: readonly HeldBreakpoint[]): void {
+    for (const { scriptPath, lines } of held) {
+      const fileBreakpoints = this.breakpoints.get(scriptPath) ?? new Set<number>();
+      for (const line of lines) {
+        fileBreakpoints.add(line);
+      }
+      if (fileBreakpoints.size > 0) {
+        this.breakpoints.set(scriptPath, fileBreakpoints);
+      }
+    }
   }
 
   async continue(threadId?: number): Promise<void> {
