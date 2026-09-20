@@ -80,8 +80,10 @@ import { alive, PROJECT_FILE_ARGUMENTS, patienceForFrames, runIsUp, runtimeVerdi
 import type { GodotProcess } from '../src/server-types.js';
 import { addonMismatch, markIfStale, SERVER_VERSION } from '../src/server-version.js';
 import { ADDONS, autoloadIsOurs, installAddons } from '../src/setup.js';
+import { skillFiles } from '../src/skill.js';
 import { readNonNegativeNumber, readPositiveNumber } from '../src/tool-args.js';
-import { opTakes, TOOL_SPECS, toolSpec } from '../src/tool-definitions.js';
+import { opTakes, TOOL_SPECS, toolSpec, toolsWithoutProjectPath } from '../src/tool-definitions.js';
+import { renderToolsMarkdown } from '../src/tool-reference.js';
 import { cacheFile, isNewer, UpdateCheck } from '../src/update-check.js';
 import { asArray, asNumber, get, text } from './support/json.js';
 import { isRecord, type JsonRpcMessage, parseTextContent, textOf } from './support/json-rpc.js';
@@ -2955,34 +2957,44 @@ async function testAStartWaitsForTheGameToAnnounceItself(): Promise<void> {
  * already started, so the editor holds the newer half and restarting it widens the gap.
  */
 /**
- * Everywhere that names the cure for an editor gone blind to a class names both halves of it.
+ * Everywhere that names the cure for an editor gone blind to a class names the cheap one first.
  *
- * The cure is a change to the declaring script and then a rescan, and neither half works alone:
- * measured downstream, a real change to the declaring script with no rescan after it left every
- * affected file reporting the same errors, and the rescan then cleared all of them. The tool
- * description said "a change to the declaring script, or editor_launch restart" and stopped there,
- * while the two answers that say the same thing had it right. So a session followed the tool it was
- * holding, got a silent no-op, and read it as the documented cure not working.
+ * The cure is `editor_rescan` on its own. A restart also works and costs somebody their window, so
+ * both are named and the order matters.
  *
- * One cure written down in three places is three chances to drop half of it, which is what
- * happened. This is the check that the three agree, rather than a fourth place saying they should.
+ * This check used to enforce the opposite, and that is the part worth keeping. It required all three
+ * places to say "change the declaring script, then rescan", because that was what one downstream
+ * report had measured. The report was retracted: its rescans had answered before the scan started,
+ * which is a timing this tool no longer has. Meanwhile a fixture here asserted the rescan alone is
+ * the cure and failed when the rescan was removed, on three platforms, and a second project
+ * reproduced that against its own case in 203ms.
+ *
+ * So the suite held one answer while the suite held the other, and this check is why the wrong
+ * sentence survived being corrected everywhere else: it defended it in three files. A test that
+ * encodes a claim keeps the claim alive after the evidence for it is gone, which is worse than
+ * having no test, because it takes a deliberate act to overrule.
  */
 function testTheCureIsWrittenWhole(): void {
-  const said = [
-    toolSpec('editor_rescan')?.description ?? '',
+  const rescan = toolSpec('editor_rescan')?.description ?? '';
+  assert.match(rescan, /The cure is this call on its own/, 'the tool that is the cure says so');
+  assert.match(rescan, /editor_launch restart/, 'and names the restart for when it is not enough');
+
+  // Every place that offers a remedy, whichever fault it is about. The claim being held is not
+  // about any one of them: it is that none of them sends a caller to edit source that is already
+  // correct, which is what all three used to do and what a check like this used to require.
+  const offered = [
+    rescan,
     ...readFileSync('src/server.ts', 'utf8')
       .split('\n')
-      .filter((line) => line.includes('the declaring script')),
+      .filter((line) => line.includes('editor_launch restart')),
   ];
-  assert.equal(said.length, 3, `all three places should be found, not ${said.length}`);
+  assert.ok(offered.length >= 4, `the places offering a remedy should be found, not ${offered.length}`);
 
-  for (const sentence of said) {
-    assert.match(sentence, /declaring script/, `it names the script to change: ${sentence.slice(0, 80)}`);
-    assert.match(sentence, /rescan/, `and the rescan that has to follow it: ${sentence.slice(0, 80)}`);
-    assert.match(
+  for (const sentence of offered) {
+    assert.doesNotMatch(
       sentence,
-      /editor_launch restart/,
-      `and the other way out, for a caller who cannot change the script: ${sentence.slice(0, 80)}`,
+      /[Cc]hange the declaring script(,| and| )/,
+      `nothing should still tell a caller to edit correct source: ${sentence.slice(0, 140)}`,
     );
   }
 }
@@ -3811,6 +3823,53 @@ function testADiagnosticTheFileContradictsIsNamed(): void {
     ['res://scripts/game.gd', 'res://scripts/gone.gd'],
     'each script is read once however many diagnostics name it, and one outside the cache is not looked for',
   );
+}
+
+/**
+ * The sentence about which calls need a projectPath is generated, and names every tool that does
+ * not take one.
+ *
+ * Both the skill and the tool reference open with it, and both said it in prose naming the
+ * `runtime_*` and `debug_*` families. `editor_status` takes no arguments at all and `editor_output`
+ * takes its own, and an argument a tool does not declare is refused rather than ignored, so a
+ * session following that sentence failed on what is often its first call.
+ *
+ * Held against the schemas rather than reread by eye, because the sentence was true when written
+ * and stopped being true when a tool was added. Rewriting it by hand would buy the same sentence
+ * wrong again on the next one.
+ */
+function testTheProjectPathSentenceNamesEveryToolThatTakesNone(): void {
+  const without = toolsWithoutProjectPath();
+  assert.ok(
+    without.includes('editor_status') && without.includes('editor_output'),
+    `the two that started this should be in the list: ${without.join(', ')}`,
+  );
+  assert.ok(without.length >= 4, `and so should the debug_* pair: ${without.join(', ')}`);
+  // Every one of them genuinely refuses the argument, which is what makes the sentence matter. A
+  // tool that merely ignored it would leave the old wording harmless.
+  for (const name of without) {
+    const spec = toolSpec(name);
+    assert.ok(spec, `${name} should be a tool`);
+    assert.equal(
+      Object.hasOwn(spec.parameters, 'projectPath'),
+      false,
+      `${name} is listed as taking no projectPath and declares one`,
+    );
+  }
+
+  for (const [what, text] of [
+    ['the tool reference', renderToolsMarkdown()],
+    ['the skill', skillFiles('0.0.0').get('SKILL.md') ?? ''],
+  ] as const) {
+    const sentence = text.split('\n').find((line) => line.includes('Every call takes'));
+    assert.ok(sentence, `${what} should still open by saying which calls need a projectPath`);
+    for (const name of without) {
+      assert.ok(
+        sentence.includes(name),
+        `${what} should name ${name} among the calls that take none: ${sentence}`,
+      );
+    }
+  }
 }
 
 /**
@@ -6890,6 +6949,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAClassTheEditorHasNotLoadedIsToldApartFromOneTheCacheLacks,
   testAClassTheEditorHoldsAfterItsScriptIsGoneIsNamed,
   testWhatAStaleTypeDependsOnIsNamed,
+  testTheProjectPathSentenceNamesEveryToolThatTakesNone,
   testAnAuditThatCouldNotAskIsNotAnAuditThatPassed,
   testRefreshingUidsMakesTheSidecarAndWritesNoScene,
   testWhoIsHoldingAPortIsAskable,
