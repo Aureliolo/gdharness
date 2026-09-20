@@ -155,9 +155,10 @@ autoload rather than an editor plugin, so an export instantiates it. See
 
 ## Updating
 
-The server asks the npm registry once every four hours, in the background, while it is being used,
-and tells your agent when there is a newer release. One request to one host, carrying nothing about
-you or the project. `GDHARNESS_NO_UPDATE_CHECK=1` in the server's environment stops it.
+The server asks the npm registry every ten minutes, in the background, while it is being used, and
+once when it starts, and tells your agent when there is a newer release. One request to one host,
+carrying nothing about you or the project. `GDHARNESS_NO_UPDATE_CHECK=1` in the server's environment
+stops it, and `GDHARNESS_REGISTRY=https://your.mirror` asks somewhere else instead, https only.
 
 ```bash
 npx -y gdharness@<new> upgrade
