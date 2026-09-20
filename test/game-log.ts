@@ -93,16 +93,17 @@ function testSelectionAnswersByEntry(): void {
     'the floor is inclusive of everything above it',
   );
 
-  // Every call moves the cursor, so "since the last call" is what arrived after the last answer,
-  // whatever that call asked for.
+  // The two reads above asked for errors and for warnings, so neither offered the info lines and
+  // neither has consumed them: "since the last call" is measured per floor.
   log.append('stdout', 'later\n');
   const since = log.select({ severity: 'info', sinceLastCall: true, limit: 10 });
   assert.deepEqual(
     since.entries.map((entry) => entry.text),
-    ['later'],
+    ['booting', 'slow', 'bad', 'still going', 'later'],
+    'an info read still has what the error and warning reads never reported',
   );
   const nothingNew = log.select({ severity: 'info', sinceLastCall: true, limit: 10 });
-  assert.deepEqual(nothingNew.entries, []);
+  assert.deepEqual(nothingNew.entries, [], 'and the read that did offer them moves its own mark');
 
   // The detail is searched as well as the headline.
   const byDetail = log.select({ severity: 'info', sinceLastCall: false, contains: 'x.gd', limit: 10 });
@@ -120,6 +121,55 @@ function testSelectionAnswersByEntry(): void {
   assert.equal(tail.omitted, 3);
 }
 
+/**
+ * A read consumes what it reported and nothing else.
+ *
+ * `sinceLastCall` used to be measured from one mark that every call walked to the end, so a filter
+ * decided what a later call could see. A session polling for errors while a bench ran, and then
+ * asking what the run had printed, was answered with nothing: the polls had walked the mark over
+ * hundreds of lines none of them reported. Empty is the answer a caller reaches for that read to
+ * find a parked run, and it could not tell a silent run from output it had never been shown.
+ */
+function testAFilteredReadDoesNotConsumeWhatItDidNotReport(): void {
+  const log = new GameLog();
+  log.append('stdout', 'one\n');
+  log.append('stderr', 'ERROR: bad\n');
+  log.append('stdout', 'two\n');
+
+  // A search, which answers about the whole run rather than about a window.
+  const found = log.select({ severity: 'info', sinceLastCall: false, contains: 'bad', limit: 10 });
+  assert.deepEqual(
+    found.entries.map((entry) => entry.text),
+    ['bad'],
+    'the search finds its line',
+  );
+  assert.deepEqual(
+    log.select({ severity: 'info', sinceLastCall: true, limit: 10 }).entries.map((entry) => entry.text),
+    ['one', 'bad', 'two'],
+    'and costs the caller nothing: a search moves no mark at all',
+  );
+
+  // The mark for a floor does move, or nothing here would be a window.
+  log.append('stdout', 'three\n');
+  log.append('stderr', 'ERROR: worse\n');
+  assert.deepEqual(
+    log.select({ severity: 'error', sinceLastCall: true, limit: 10 }).entries.map((entry) => entry.text),
+    ['worse'],
+    'an error read answers with the errors since the last error read',
+  );
+  assert.deepEqual(
+    log.select({ severity: 'error', sinceLastCall: true, limit: 10 }).entries,
+    [],
+    'and has consumed them by answering',
+  );
+  assert.deepEqual(
+    log.select({ severity: 'info', sinceLastCall: true, limit: 10 }).entries.map((entry) => entry.text),
+    ['three', 'worse'],
+    'while the info read still has the line no error read would have shown',
+  );
+}
+
+testAFilteredReadDoesNotConsumeWhatItDidNotReport();
 testHeadlinesKeepTheirDetail();
 testChunksAndLineEndingsDoNotMatter();
 testSelectionAnswersByEntry();

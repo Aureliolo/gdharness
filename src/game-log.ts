@@ -64,6 +64,18 @@ type Stream = 'stdout' | 'stderr' | 'transcript';
 const STREAMS: readonly Stream[] = ['stdout', 'stderr', 'transcript'];
 
 /**
+ * What a read at each floor admits, which is also what it has offered the caller.
+ *
+ * The two are the same set and are written once, because a floor that admits an entry without
+ * marking it seen shows it twice, and one that marks an entry it did not admit loses it.
+ */
+const ADMITTED: Record<Severity, ReadonlySet<Severity>> = {
+  error: new Set(['error']),
+  warning: new Set(['error', 'warning']),
+  info: new Set(['error', 'warning', 'info']),
+};
+
+/**
  * The entries as an answer carries them, with an empty `detail` left out rather than sent.
  *
  * Nearly every line the engine prints has no indented detail under it, so `"detail":[]` rode on
@@ -94,7 +106,16 @@ export class GameLog {
   };
   private readonly partial: Record<Stream, string> = { stdout: '', stderr: '', transcript: '' };
   private lastHeadline: { index: number; detail: string[] } | null = null;
-  private cursor = 0;
+  /**
+   * How far a caller has been shown, one mark per severity floor.
+   *
+   * One mark for all three read as though a filtered call had shown everything. A session polling
+   * for errors while a bench runs, and then asking what the run printed, was told nothing had been
+   * printed since: the error polls had walked the single mark to the end over hundreds of lines
+   * none of them reported. Empty then means "silent run" and "you were never shown it" at once, and
+   * a parked bench is what a caller reaches for that answer to find.
+   */
+  private readonly seen: Record<Severity, number> = { error: 0, warning: 0, info: 0 };
 
   append(source: Stream, chunk: Buffer | string): void {
     const decoded = typeof chunk === 'string' ? chunk : this.decoders[source].write(chunk);
@@ -170,6 +191,13 @@ export class GameLog {
   /**
    * Entries at or above a severity, optionally only those since the last time this was asked
    * and only those mentioning a phrase, and at most `limit` of the newest.
+   *
+   * "Since the last time this was asked" is per severity floor, because a read has offered the
+   * caller everything at or above its own floor and nothing below it. So an error poll moves the
+   * error mark and leaves the info one where it was, and the read after it still has the lines the
+   * poll never reported. A `contains` search moves no mark at all: it answers about the whole run
+   * rather than about a window, and consuming the lines it did not match would make a search cost
+   * the caller the output it was searching.
    */
   select(options: {
     severity: Severity;
@@ -177,16 +205,14 @@ export class GameLog {
     contains?: string | undefined;
     limit: number;
   }): { entries: LogEntry[]; omitted: number } {
-    const floor = options.sinceLastCall ? this.cursor : 0;
-    this.cursor = this.entries.length;
-    const wanted = new Set<Severity>(
-      options.severity === 'error'
-        ? ['error']
-        : options.severity === 'warning'
-          ? ['error', 'warning']
-          : ['error', 'warning', 'info'],
-    );
+    const floor = options.sinceLastCall ? this.seen[options.severity] : 0;
+    const wanted = ADMITTED[options.severity];
     const needle = options.contains?.toLowerCase();
+    if (needle === undefined) {
+      for (const severity of wanted) {
+        this.seen[severity] = this.entries.length;
+      }
+    }
     const matching = this.entries.slice(floor).filter((entry) => {
       if (!wanted.has(entry.severity)) {
         return false;
