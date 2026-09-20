@@ -99,7 +99,7 @@ import {
   toolsWithoutProjectPath,
 } from '../src/tool-definitions.js';
 import { namedType, renderToolsMarkdown } from '../src/tool-reference.js';
-import { CACHE_MS, cacheFile, isNewer, UpdateCheck } from '../src/update-check.js';
+import { CACHE_MS, cacheFile, isNewer, registryFor, UpdateCheck } from '../src/update-check.js';
 import { asArray, asNumber, get, text } from './support/json.js';
 import { isRecord, type JsonRpcMessage, parseTextContent, textOf } from './support/json-rpc.js';
 import { reservePort, ServerProcess } from './support/server.js';
@@ -3983,11 +3983,41 @@ function testTheUpdateWindowTracksHowOftenThisShips(): void {
 }
 
 /**
+ * The registry is npm, or somewhere else over https, and never anything but those.
+ *
+ * Naming a mirror is the operator's own file rather than anything a tool call can reach, but the
+ * value still arrives as a string and the property worth keeping is that this module talks over
+ * https or not at all. A mistyped one falls back rather than stopping the server, because refusing
+ * to start over a misspelt mirror is worse than asking npm.
+ */
+function testTheRegistryIsHttpsOrNpm(): void {
+  const npm = 'https://registry.npmjs.org/gdharness/latest';
+  assert.equal(registryFor({}), npm, 'nothing named is npm');
+  assert.equal(registryFor({ GDHARNESS_REGISTRY: '' }), npm, 'and so is an empty one');
+  assert.equal(
+    registryFor({ GDHARNESS_REGISTRY: 'https://npm.inside.example/' }),
+    'https://npm.inside.example/gdharness/latest',
+    'an https mirror is asked instead, for the same document',
+  );
+  for (const wrong of ['http://npm.inside.example', 'file:///etc/passwd', 'npm.inside.example', '::']) {
+    assert.equal(registryFor({ GDHARNESS_REGISTRY: wrong }), npm, `${wrong} falls back to npm`);
+  }
+}
+
+/**
  * The update notice reaches the agent, once, and says what to do about it.
  *
  * Driven off a seeded cache rather than the registry: the point is the answer a tool carries, and
- * a fixture that needs the network to make that assertion is one that fails on a train. A fresh
- * timestamp is also what stops the server making a request during the test.
+ * a fixture that needs the network to make that assertion is one that fails on a train. The server
+ * is pointed at a port nothing listens on, because a server that has just started asks whatever the
+ * cache holds, and npm answering first would replace the seeded version with the real one and leave
+ * nothing to report. So this also holds for a check that failed: an answer already in hand is still
+ * worth saying, and offline and behind is the state where it is worth saying most.
+ *
+ * The dead port on its own proves nothing about whether the variable was read, since npm being slow
+ * looks the same from here; that is why this failed on one platform of three and passed on the other
+ * two. What the variable maps to is asserted in `testTheRegistryIsHttpsOrNpm`, and that the
+ * environment reaches a spawned server's checker at all is what the off-switch fixture below shows.
  */
 async function testUpdateNoticeRidesOnAnAnswer(): Promise<void> {
   const home = mkdtempSync(join(tmpdir(), 'gdharness-update-home-'));
@@ -3998,6 +4028,7 @@ async function testUpdateNoticeRidesOnAnAnswer(): Promise<void> {
     LOCALAPPDATA: home,
     XDG_CACHE_HOME: home,
     GDHARNESS_NO_UPDATE_CHECK: '',
+    GDHARNESS_REGISTRY: 'https://127.0.0.1:1',
   };
   try {
     writeFileSync(
@@ -9568,6 +9599,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStaleUpdateAnswerIsNotHandedOut,
   testAFreshServerAsksRatherThanInheritingAnAnswer,
   testTheUpdateWindowTracksHowOftenThisShips,
+  testTheRegistryIsHttpsOrNpm,
 ];
 
 /**

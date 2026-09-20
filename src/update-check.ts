@@ -12,8 +12,33 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { currentRunner, runLine } from './runner.js';
 
-/** Only this host, only https, and nothing built from anything a caller supplies. */
-const REGISTRY = 'https://registry.npmjs.org/gdharness/latest';
+/** Only https, and nothing built from anything a caller supplies. */
+const REGISTRY_ROOT = 'https://registry.npmjs.org';
+
+/** The one document this reads, wherever the registry is. */
+function packageUrl(root: string): string {
+  return `${root.replace(/\/+$/, '')}/gdharness/latest`;
+}
+
+/**
+ * Where to ask, which is npm unless whoever launched this server named somewhere else.
+ *
+ * Still https and still not built from anything a caller supplies: this is read from the
+ * environment, which is the harness config its owner wrote, and a tool call cannot reach it. A
+ * value that is not an https URL is ignored rather than refused, because a server that will not
+ * start over a mistyped mirror is worse than one that asks npm.
+ */
+export function registryFor(environment: Environment): string {
+  const named = environment['GDHARNESS_REGISTRY'] ?? '';
+  if (named === '') {
+    return packageUrl(REGISTRY_ROOT);
+  }
+  try {
+    return new URL(named).protocol === 'https:' ? packageUrl(named) : packageUrl(REGISTRY_ROOT);
+  } catch {
+    return packageUrl(REGISTRY_ROOT);
+  }
+}
 
 /** Where a release's notes are, which is what an agent should read before recommending one. */
 const RELEASES = 'https://github.com/Aureliolo/gdharness/releases/tag';
@@ -147,8 +172,8 @@ export function isNewer(candidate: string, current: string): boolean {
 }
 
 /** The published version, or null when the registry did not answer with one this can trust. */
-async function fetchLatest(): Promise<string | null> {
-  const response = await fetch(REGISTRY, {
+async function fetchLatest(registry: string): Promise<string | null> {
+  const response = await fetch(registry, {
     // The abbreviated document, which is what a client that only wants a version should ask for.
     headers: { accept: 'application/vnd.npm.install-v1+json, application/json' },
     redirect: 'error',
@@ -208,7 +233,7 @@ export class UpdateCheck {
   constructor(
     current: string,
     environment: Environment = process.env,
-    ask: () => Promise<string | null> = fetchLatest,
+    ask: () => Promise<string | null> = () => fetchLatest(registryFor(environment)),
   ) {
     this.current = current;
     this.enabled = (environment['GDHARNESS_NO_UPDATE_CHECK'] ?? '') === '';
