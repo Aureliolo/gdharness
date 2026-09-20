@@ -1747,8 +1747,9 @@ class GodotServer {
         ),
       };
     }
-    // Godot's adapter sends no stopped event until a session has been opened on it, so asking
-    // whether the game is stopped before this has run would answer "no" forever.
+    // A session, because the stack and the scopes are answered to one and a stop is not. The stop
+    // reaches any connection open when it happens, attached or not, so a server that played the
+    // scene already knows; what it cannot do without attaching is read where.
     try {
       await this.dap().attach();
     } catch (error) {
@@ -2877,7 +2878,16 @@ class GodotServer {
     const announced = runtimesAnnounced();
     const pinged = Promise.all(
       announced.running.map(async (endpoint) => {
-        const reply = await runtimeRequest(endpoint, 'ping', {}, HOLD_PING_MS);
+        // Not asked when the session was told: a game it knows is held is listed as held, with
+        // what lets it go, rather than pinged for the wait and listed as possibly paused.
+        const held = this.knownHoldOn(endpoint);
+        const reply =
+          held === null
+            ? await runtimeRequest(endpoint, 'ping', {}, HOLD_PING_MS)
+            : {
+                ok: false as const,
+                message: `The game is held by the editor's debugger, ${describeHalt(held)}, and answers no runtime call while it is. debug_control continue lets it go.`,
+              };
         return {
           pid: endpoint.pid,
           port: endpoint.port,
