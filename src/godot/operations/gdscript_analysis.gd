@@ -479,6 +479,10 @@ func _up_to(text: String, needle: String) -> String:
 
 
 # The line with any trailing comment taken off, quote-aware so a `#` inside a string stays.
+#
+# The only one of these scanners that does not count brackets, on purpose: a `#` starts a comment
+# at any depth, so `[1, # two]` is a list with a comment in it. Harmonising this with the others
+# would stop a comment inside brackets being seen as one.
 func _without_comment(line: String) -> String:
 	var quote: String = ""
 	for i: int in range(line.length()):
@@ -498,6 +502,10 @@ func _without_comment(line: String) -> String:
 #
 # `rfind(")")` took the last one on the line, which is the right answer until something after the
 # signature has a bracket in it: a trailing comment, or a string in a default value.
+#
+# Counts parentheses only, where the others count `[` and `{` as well. That is not an oversight:
+# this is looking for the partner of one `(`, and a `[` between them changes nothing about which
+# `)` closes it.
 func _closing_paren(text: String, from: int) -> int:
 	var depth: int = 0
 	var quote: String = ""
