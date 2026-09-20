@@ -60,6 +60,17 @@ the debug adapter as a side effect, and a session stays open for the life of the
 ran first decided what the timing case measured. Fix the setup and disarm again. Only a disarm that
 fails has told you anything about the check.
 
+There is one shape where the assertion is the answer, and it is not weakness. The assertion can ask
+about the wrong property of the right object, so it cannot separate the broken version from the
+working one however far either is broken. A check for a doubled word in a sentence was written as a
+search for the same word twice in a row, and the fault was `the addon from before versions were
+reported addon`, where the two are nineteen words apart: the assertion asked about adjacency and the
+fault was about count, and the disarm passed on a sentence carrying the very fault it was written
+for. Strengthening that costs nothing and fixes nothing, because the question is wrong rather than
+quiet. Before reaching for the setup, read the assertion once and ask which property of the answer
+it is actually reading, and whether the broken version and the working one differ in that property
+at all.
+
 The third way is the input, and it arrives looking like diligence. A report names the case somebody
 hit, which is not always the case that breaks, so a fixture built from the reproduction tests the
 shape that survived. The `@abstract` report came with a script declaring `class_name` behind an
@@ -69,6 +80,22 @@ or not the annotations come off, and it sets the insertion point on its own, so 
 read. What breaks is the neighbour, a script whose whole header is the annotated line, which nobody
 reported because nobody had edited one. Take the report for the fault and then ask which other
 shapes reach the same line, and write the one where the line has nothing else to fall back on.
+
+The fourth way is a second guard covering the one you broke, and the wrong conclusion it invites is
+that the line you disarmed was doing nothing. Two fixes landed together on where a parameter list
+ends: the trailing comment comes off the whole line before anything reads it, and the closing
+bracket is found by counting depth rather than by taking the last one on the line. Against
+`func noted(a: int) -> void:  # a comment with a bracket )` those overlap exactly, because removing
+the comment puts the last bracket back where it belongs, so disarming the depth count passed and the
+reading on offer was that it could be deleted. It cannot: `func noted(a: int) -> void: print(a, ")")`
+is legal, the bracket is in a body rather than in a comment, and no amount of comment stripping moves
+it. Disarm one line at a time, and when one passes, look for the input only the disarmed line
+handles before concluding it handles nothing. Breaking two together can only tell you that at least
+one of them mattered, which is the thing you already believed.
+
+The same care applies to saying which case catches what. A sentence naming the case that holds a
+line reads exactly like a finding and is usually a guess: checking it costs one more disarm, and the
+guard often turns out to stand on cases you had not credited.
 
 The same question comes one step earlier for a measurement. Before asking what a reading means, ask
 which result would have contradicted it, because a trial that could not have come out the other way

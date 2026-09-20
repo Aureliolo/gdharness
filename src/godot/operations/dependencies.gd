@@ -128,6 +128,7 @@ func find_resource_usages(params: Dictionary) -> Dictionary:
 	var usages: Array[Dictionary] = []
 	var by_kind: Dictionary = {}
 	var total: int = 0
+	var in_code: int = 0
 
 	for file_path: String in all_files:
 		if file_path == resource_path:
@@ -141,16 +142,32 @@ func find_resource_usages(params: Dictionary) -> Dictionary:
 		var references: Array[Dictionary] = []
 		for i: int in range(lines.size()):
 			var line: String = lines[i]
-			var kind: String = ""
-			if by_path.search(line) != null:
-				kind = _path_reference_kind(line)
-			elif by_class != null and by_class.search(line) != null:
-				var bare: String = Patterns.without_annotations(line)
-				kind = "extends" if bare.begins_with("extends ") else "class_name"
-			if kind.is_empty():
+			var by_its_path: bool = by_path.search(line) != null
+			var by_its_name: bool = not by_its_path and by_class != null and by_class.search(line) != null
+			if not by_its_path and not by_its_name:
 				continue
-			references.append({"line": i + 1, "kind": kind, "text": line.strip_edges()})
+			var trimmed: String = line.strip_edges()
+			var kind: String = ""
+			# A mention in a comment is not a use, and both were answered as one. The question a
+			# reverse walk is asked is whether anything still uses a class, and a project that
+			# documents itself names its collaborators in `##` links: four references to one class,
+			# three of them prose, all counted as code. The more carefully a project is documented
+			# the worse that ratio gets. `##` and `#` are kept apart because renaming the class
+			# breaks Godot's generated documentation and leaves the prose merely stale.
+			if trimmed.begins_with("##"):
+				kind = "doc"
+			elif trimmed.begins_with("#"):
+				kind = "comment"
+			elif by_its_path:
+				kind = _path_reference_kind(line)
+			else:
+				kind = (
+					"extends" if Patterns.without_annotations(line).begins_with("extends ") else "class_name"
+				)
+			references.append({"line": i + 1, "kind": kind, "text": trimmed})
 			by_kind[kind] = Read.as_int(by_kind.get(kind, 0)) + 1
+			if kind != "doc" and kind != "comment":
+				in_code += 1
 
 		if not references.is_empty():
 			usages.append({"file": file_path, "references": references})
@@ -168,6 +185,9 @@ func find_resource_usages(params: Dictionary) -> Dictionary:
 			"files_searched": all_files.size(),
 			"files_with_usages": usages.size(),
 			"total": total,
+			# The arithmetic done here rather than left to the caller, because the caller who most
+			# needs it is the one asking whether a class is dead, and that caller reads one number.
+			"in_code": in_code,
 			"by_kind": by_kind,
 		},
 	}

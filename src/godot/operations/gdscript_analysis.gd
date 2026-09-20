@@ -80,6 +80,10 @@ func get_gdscript_info(params: Dictionary) -> Dictionary:
 		# Only a declaration, because an unbalanced line anywhere else is a file mid-edit and
 		# joining from one swallows the rest of it: a body holding `print(` with nothing closing it
 		# took every declaration below it, which is the state an agent is most likely to ask about.
+		# `header` rather than `stripped`: an annotation in front pushes the keyword off the start
+		# of the line, so asking the raw line whether it can wrap says no to every annotated
+		# declaration that does. Held by the combined case, which nothing else in the fixture
+		# reaches: the single-feature cases each carry one of these and never a second.
 		if _can_wrap(header):
 			while _bracket_depth(stripped) > 0 and i + 1 < lines.size():
 				i += 1
@@ -479,6 +483,12 @@ func _up_to(text: String, needle: String) -> String:
 
 
 # The line with any trailing comment taken off, quote-aware so a `#` inside a string stays.
+#
+# The only one of these scanners that does not count brackets, on purpose: a `#` starts a comment
+# wherever it is, and there is no depth at which it does not. Giving this one the depth its
+# neighbours have puts the comment into the value of `var table := {  # keyed by name`, because the
+# brace opens before the `#` and closes on a later line. Held by a case, since the argument for the
+# difference is not visible from the code and reads like an oversight beside its neighbours.
 func _without_comment(line: String) -> String:
 	var quote: String = ""
 	for i: int in range(line.length()):
@@ -510,9 +520,9 @@ func _closing_paren(text: String, from: int) -> int:
 		if ch == '"' or ch == "'":
 			quote = ch
 			continue
-		if ch == "(":
+		if ch == "(" or ch == "[" or ch == "{":
 			depth += 1
-		elif ch == ")":
+		elif ch == ")" or ch == "]" or ch == "}":
 			depth -= 1
 			if depth == 0:
 				return i
