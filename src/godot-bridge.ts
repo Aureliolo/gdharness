@@ -64,6 +64,8 @@ interface GodotReadyMessage {
   lsp_port?: number;
   dap_port?: number;
   debug_port?: number;
+  /** Whether a debug session opening is told the editor's breakpoints, or takes them away. */
+  syncs_breakpoints?: boolean;
   /** Whether a gdharness server started this editor, which decides who may start it again. */
   opened_by_a_server?: boolean;
 }
@@ -124,6 +126,14 @@ interface GodotConnectionInfo {
    * server leaves to restart itself, which is what every editor did before this was asked.
    */
   openedByAServer?: boolean | undefined;
+  /**
+   * Whether the editor keeps its breakpoints when a debug session opens.
+   *
+   * Godot clears every breakpoint in the script editor on a session's `initialize` unless
+   * `network/debug_adapter/sync_breakpoints` is on; the addon turns it on as it loads and reports
+   * it here. Undefined for an addon too old to say, which is one that never turned it on.
+   */
+  syncsBreakpoints?: boolean | undefined;
 }
 
 interface BridgeStatus {
@@ -139,6 +149,7 @@ interface BridgeStatus {
   dapPort?: number | undefined;
   debugPort?: number | undefined;
   openedByAServer?: boolean | undefined;
+  syncsBreakpoints?: boolean | undefined;
   pendingRequests: number;
   queuedResources: number;
   /** When an editor already up could first have reached this bridge, absent until it listens. */
@@ -414,6 +425,7 @@ export class GodotBridge extends EventEmitter {
       dapPort: this.connectionInfo?.dapPort,
       debugPort: this.connectionInfo?.debugPort,
       openedByAServer: this.connectionInfo?.openedByAServer,
+      syncsBreakpoints: this.connectionInfo?.syncsBreakpoints,
       pendingRequests: this.pendingRequests.size,
       queuedResources: this.resourceQueues.size,
       listeningSince: this.listeningSince ?? undefined,
@@ -587,6 +599,10 @@ export class GodotBridge extends EventEmitter {
           this.connectionInfo.dapPort = servedPort(message.dap_port);
           this.connectionInfo.debugPort = servedPort(message.debug_port);
           this.connectionInfo.openedByAServer = message.opened_by_a_server === true;
+          // Left undefined rather than read as false for an addon that does not say, since the
+          // two call for different advice: one is an editor to restart, the other a setting.
+          this.connectionInfo.syncsBreakpoints =
+            typeof message.syncs_breakpoints === 'boolean' ? message.syncs_breakpoints : undefined;
           this.log('info', `Godot ready: ${message.project_path}`);
           this.emitBridgeEvent('godot_connected', { projectPath: message.project_path });
         }
