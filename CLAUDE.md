@@ -82,6 +82,16 @@ the game. Nothing but running it would have said so: the reasoning was clean and
 false, which is the combination that gets shipped. Run the thing and read what came out, especially
 when the change is yours and the argument for it is good.
 
+A fix changes which states the rest of the code meets, and can promote a rare wrong answer into a
+common one. Nothing in the fixed code says so, because the fix is correct and the thing that got
+worse is somewhere else. The shutdown used to end a game the editor was playing, so after a
+reconnect "no game is running" was usually true and a refusal that could not see a played game was
+a rare confusion. With the game surviving, the addon still takes half a minute to dial back in, so
+there is now routinely a live game on screen that the new server cannot see, and the same refusal
+fires every time. The bug was fixed and a wrong answer beside it went from uncommon to ordinary. So
+after a fix, ask which answers elsewhere were true only because the fault was there, and reach for
+the ones that were right by luck rather than by construction.
+
 A disarm that fails is only evidence when it fails on the assertion you aimed at. Read the failure
 rather than the exit code: a disarm that fails somewhere else never reached the broken line either,
 and it is the same empty result as one that passed, wearing the colour you were hoping for. The way
