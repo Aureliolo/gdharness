@@ -80,6 +80,10 @@ func get_gdscript_info(params: Dictionary) -> Dictionary:
 		# Only a declaration, because an unbalanced line anywhere else is a file mid-edit and
 		# joining from one swallows the rest of it: a body holding `print(` with nothing closing it
 		# took every declaration below it, which is the state an agent is most likely to ask about.
+		# `header` rather than `stripped`: an annotation in front pushes the keyword off the start
+		# of the line, so asking the raw line whether it can wrap says no to every annotated
+		# declaration that does. Held by the combined case, which nothing else in the fixture
+		# reaches: the single-feature cases each carry one of these and never a second.
 		if _can_wrap(header):
 			while _bracket_depth(stripped) > 0 and i + 1 < lines.size():
 				i += 1

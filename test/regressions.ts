@@ -5255,6 +5255,16 @@ async function testAStructureReadDescribesTheScriptItRead(): Promise<void> {
         ') -> bool:',
         '\treturn first > 0 and second != ""',
         '',
+        '',
+        // Every one of them at once: an annotation on the first line of a declaration that wraps,
+        // a comma inside a typed collection, and a rest parameter, in a signature whose return
+        // type is on the closing line. Each has a case of its own above and none of those carries
+        // a second, which is the gap a suite of single-feature cases leaves by construction.
+        '@abstract func later(',
+        '\tonly: Dictionary[String, int],',
+        '\t...rest: Array,',
+        ') -> void',
+        '',
       ].join('\n'),
     );
     // A wrapped enum, the other half of the same fault: 23 of them in the pinned gdUnit4.
@@ -5455,8 +5465,34 @@ async function testAStructureReadDescribesTheScriptItRead(): Promise<void> {
               ['second', 'String', '"x"'],
             ],
           ],
+          [
+            'later',
+            'void',
+            [
+              ['only', 'Dictionary[String, int]', ''],
+              ['rest', 'Array', ''],
+            ],
+          ],
         ],
         `every parameter list ends where the signature does: ${JSON.stringify(bracketed)}`,
+      );
+      // The annotation is on the first line of a declaration that runs to the fourth, so whether it
+      // is seen at all depends on the joining happening before the annotations are read.
+      const combined = asArray(get(bracketed, 'functions')).at(-1);
+      assert.equal(
+        get(combined, 'name'),
+        'later',
+        `the combined declaration is the last one: ${JSON.stringify(bracketed)}`,
+      );
+      assert.equal(
+        get(combined, 'is_abstract'),
+        true,
+        `an annotation on a wrapped declaration is still read: ${JSON.stringify(bracketed)}`,
+      );
+      assert.equal(
+        get(asArray(get(combined, 'params'))[1], 'is_rest'),
+        true,
+        `and so is a rest parameter three lines below it: ${JSON.stringify(bracketed)}`,
       );
 
       const wrapped = await call('script_info', {
