@@ -291,6 +291,17 @@ that one still gets Godot's own restart.
 The debugger is the third, and Godot takes no option for it, so the addon asks the operating system
 for one before every play. `editor_run` answers with the port it got.
 
+**One editor setting is written, once, and it is not a port.** Godot's debug adapter answers a
+session's `initialize` by clearing every breakpoint in the script editor, open scripts and closed
+ones alike, unless `network/debug_adapter/sync_breakpoints` is on, and it is off by default. A
+server opens a session for its first breakpoint or its first stack read, so a harness session took
+the user's breakpoints away on its first debug call. The addon turns the setting on as it loads,
+which the adapter picks up without a restart, and reports it in its greeting: `editor_status` and
+`debug_breakpoint` say `breakpointsAtRisk` about an editor running an addon that did not. With it
+on, a session opening is told the editor's breakpoints instead, and `debug_breakpoint` sends a
+file's whole list as the union of what it holds and what the editor has, so setting a line never
+clears the ones set by hand.
+
 Two projects, two harness sessions, two servers and two editors therefore work at once. A server
 `setup` wrote answers about its own project's game rather than whichever one it finds announced,
 so `runtime_*` needs no `projectPath` on a machine running two. One server still serves one

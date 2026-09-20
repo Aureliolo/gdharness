@@ -118,7 +118,19 @@ export class GodotDAPClient {
   private halt: StoppedAt | null = null;
   /** Whether `halt` is an answer or a default. See [holdIsKnown]. */
   private holdKnown = false;
+  /** The breakpoints set through this side, by file: sent again before every play and kept. */
   private breakpoints = new Map<string, Set<number>>();
+  /**
+   * Every breakpoint the editor has told this connection about, by file, including the ones above.
+   *
+   * The adapter takes a file's whole list and removes what is not in it, so a list carrying only
+   * this side's lines takes the editor's own breakpoints in that file away. With breakpoint
+   * syncing on the editor names them all as a session opens, and every toggle after that, so what
+   * is sent is the union. Learned per connection: the next one is told again.
+   */
+  private inEditor = new Map<string, Set<number>>();
+  /** Told whenever the set this side holds changes without a call: see [setBreakpointsSink]. */
+  private onBreakpointsChanged: ((held: HeldBreakpoint[]) => void) | null = null;
 
   constructor(port = portFromEnv('GDHARNESS_DAP_PORT', DEFAULT_DAP_PORT), host = '127.0.0.1') {
     this.port = port;
@@ -249,6 +261,7 @@ export class GodotDAPClient {
     this.attached = false;
     this.halt = null;
     this.holdKnown = false;
+    this.inEditor.clear();
   }
 
   private async ensureConnected(): Promise<void> {
@@ -379,6 +392,38 @@ export class GodotDAPClient {
     if (eventName === 'continued') {
       this.halt = null;
       this.holdKnown = true;
+      return;
+    }
+
+    // A breakpoint toggled anywhere, by anybody: the editor's gutter, another client, or this
+    // side's own request echoed back. With syncing on, a session opening is told the whole set
+    // this way. What is removed by somebody else is not held here either, since the alternative
+    // is putting a breakpoint back that the user just clicked off.
+    if (eventName === 'breakpoint') {
+      const body = event.body;
+      const breakpoint = body?.['breakpoint'];
+      const source =
+        typeof breakpoint === 'object' && breakpoint !== null ? (breakpoint as DAPBody)['source'] : undefined;
+      const path = typeof source === 'object' && source !== null ? (source as DAPBody)['path'] : undefined;
+      const line =
+        typeof breakpoint === 'object' && breakpoint !== null ? (breakpoint as DAPBody)['line'] : undefined;
+      if (typeof path !== 'string' || typeof line !== 'number') {
+        return;
+      }
+      if (said(body, 'reason') === 'removed') {
+        this.inEditor.get(path)?.delete(line);
+        const held = this.breakpoints.get(path);
+        if (held?.delete(line) === true) {
+          if (held.size === 0) {
+            this.breakpoints.delete(path);
+          }
+          this.onBreakpointsChanged?.(this.breakpointsHeld());
+        }
+        return;
+      }
+      const known = this.inEditor.get(path) ?? new Set<number>();
+      known.add(line);
+      this.inEditor.set(path, known);
       return;
     }
 
@@ -538,32 +583,76 @@ export class GodotDAPClient {
     return await this.sendBreakpoints(filePath, wanted);
   }
 
+  /**
+   * The line comes off whoever set it: the editor's own breakpoint on that line goes too, since
+   * a caller asking for a line to be clear is asking about the line and not about provenance.
+   */
   async removeBreakpoint(filePath: string, line: number): Promise<DAPBody> {
     const wanted = new Set(this.breakpoints.get(filePath) ?? []);
     wanted.delete(line);
-    return await this.sendBreakpoints(filePath, wanted);
+    return await this.sendBreakpoints(filePath, wanted, line);
   }
 
   /**
    * The file's whole list, which is what the adapter takes: a line left out is a line removed.
    *
-   * Held only once the adapter has taken it, so a line it refused is not one this session goes on
-   * sending before every play.
+   * The list is this side's lines and the editor's own in that file, less the one being taken
+   * off, so setting a breakpoint does not take away the ones the user set by hand. Held only once
+   * the adapter has taken it, so a line it refused is not one this session goes on sending before
+   * every play.
    */
-  private async sendBreakpoints(filePath: string, lines: ReadonlySet<number>): Promise<DAPBody> {
+  private async sendBreakpoints(
+    filePath: string,
+    mine: ReadonlySet<number>,
+    clearing?: number,
+  ): Promise<DAPBody> {
     await this.ensureConnected();
     await this.initialize();
+    const lines = new Set([...mine, ...(this.inEditor.get(filePath) ?? [])]);
+    if (clearing !== undefined) {
+      lines.delete(clearing);
+    }
     const sorted = Array.from(lines).sort((a, b) => a - b);
     const answer = await this.sendRequest('setBreakpoints', {
       source: { path: filePath },
       breakpoints: sorted.map((breakpointLine) => ({ line: breakpointLine })),
     });
-    if (lines.size === 0) {
+    if (mine.size === 0) {
       this.breakpoints.delete(filePath);
     } else {
-      this.breakpoints.set(filePath, new Set(lines));
+      this.breakpoints.set(filePath, new Set(mine));
+    }
+    // What the editor now has in this file, as sent; the adapter echoes each toggle back as an
+    // event as well, and a read between the answer and the echo should not say otherwise.
+    if (lines.size === 0) {
+      this.inEditor.delete(filePath);
+    } else {
+      this.inEditor.set(filePath, lines);
     }
     return answer;
+  }
+
+  /**
+   * Where changes to the held set that no call made are reported: a breakpoint of this side's
+   * clicked off in the editor, or a file the adapter would not take back before a play.
+   */
+  setBreakpointsSink(sink: (held: HeldBreakpoint[]) => void): void {
+    this.onBreakpointsChanged = sink;
+  }
+
+  /** The breakpoints the editor has told this connection of that this side did not set. */
+  breakpointsInEditor(): HeldBreakpoint[] {
+    const theirs: HeldBreakpoint[] = [];
+    for (const [scriptPath, lines] of this.inEditor) {
+      const mine = this.breakpoints.get(scriptPath);
+      const rest = Array.from(lines)
+        .filter((line) => !mine?.has(line))
+        .sort((a, b) => a - b);
+      if (rest.length > 0) {
+        theirs.push({ scriptPath, lines: rest });
+      }
+    }
+    return theirs;
   }
 
   /**
@@ -590,6 +679,9 @@ export class GodotDAPClient {
           reason: error instanceof Error ? error.message : String(error),
         });
       }
+    }
+    if (refused.length > 0) {
+      this.onBreakpointsChanged?.(this.breakpointsHeld());
     }
     return { applied, refused };
   }
