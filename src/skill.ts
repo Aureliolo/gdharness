@@ -134,8 +134,9 @@ its own copy. So a long run is not a reason to stop editing, and the new code ar
 A wall of "Could not find type" on the project's own classes means the editor is not holding
 them. \`editor_rescan\` asks it to scan and names any class it still cannot resolve under
 \`unseenByEditor\`: its walk skips a file a headless engine has already imported, so the
-declaration and the cache can both be right while the editor stays blind to it. Change the
-declaring script, or restart the editor.
+declaration and the cache can both be right while the editor stays blind to it. Rescan again on
+its own, which is the measured cure and needs no change to the declaring script; \`editor_launch
+restart\` also does it and costs a window.
 
 The scan writes \`.godot/global_script_class_cache.cfg\` from the list the editor is holding, so
 a class it cannot resolve is dropped out of that file too, and the next fresh engine, CI run or
