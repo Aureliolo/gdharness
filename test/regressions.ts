@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
-import { type SpawnSyncReturns, spawn, spawnSync } from 'node:child_process';
+import { type ChildProcess, type SpawnSyncReturns, spawn, spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import {
   cpSync,
@@ -22,6 +22,7 @@ import { WebSocket } from 'ws';
 import { serviceDidNotAnswer } from '../scripts/audit-production.js';
 import { pullRequestNumbers, shipsToUsers } from '../scripts/release-notes.js';
 import { sharedCopies } from '../scripts/sync-shared-gd.js';
+import { breakpointNotePath, readBreakpointNote, writeBreakpointNote } from '../src/breakpoint-note.js';
 import { announcementPath, BRIDGE_ANNOUNCE_PROTOCOL, readAnnouncement } from '../src/bridge-announce.js';
 import {
   type Contradicted,
@@ -1165,6 +1166,162 @@ async function testAContinueByAnotherClientIsKnownHere(): Promise<void> {
       socket.write(stopped);
     },
   );
+}
+
+/**
+ * Every breakpoint held is sent again before a play, whoever set it, and a file the adapter will
+ * not take back is reported rather than allowed to stop the play.
+ *
+ * Measured on 4.7.2: a breakpoint set through the adapter stops the play after it and not the one
+ * after that, and sending it again before the play is what makes the second play stop. Held by the
+ * editor tier against a real adapter; this holds what the client sends, and the two things the
+ * real one cannot show on demand. Breakpoints taken on from a note are sent nowhere until a play
+ * asks for them, since a server that has just started has no play to send them for, and a file
+ * the adapter refuses is dropped from the set with its reason in the answer, because a script the
+ * project no longer has is no reason to keep the play from starting.
+ */
+async function testBreakpointsAreSentAgainBeforeAPlay(): Promise<void> {
+  const sent: { path: string; lines: number[] }[] = [];
+  const respond: FramedPeerHandler = (message, socket) => {
+    const command = String(message['command']);
+    const arguments_ = isRecord(message['arguments']) ? message['arguments'] : {};
+    const source = isRecord(arguments_['source']) ? arguments_['source'] : {};
+    const path = text(source['path']);
+    if (command === 'setBreakpoints') {
+      sent.push({
+        path,
+        lines: asArray(arguments_['breakpoints']).map((one) => Number(get(one, 'line'))),
+      });
+    }
+    const refused = command === 'setBreakpoints' && path.endsWith('gone.gd');
+    socket.write(
+      frameJsonRpc({
+        seq: Number(message['seq']) + 100,
+        type: 'response',
+        request_seq: message['seq'],
+        command,
+        success: !refused,
+        ...(refused ? { message: 'Unable to find file at: gone.gd' } : { body: { breakpoints: [] } }),
+      }),
+    );
+  };
+
+  await withFramedPeer(respond, async (port) => {
+    const session = new GodotDAPClient(port, '127.0.0.1');
+    await session.setBreakpoint('/game/main.gd', 12);
+    await session.setBreakpoint('/game/main.gd', 30);
+    await session.setBreakpoint('/game/other.gd', 4);
+    // Taken on from a note, as a successor does: nothing is sent for it yet.
+    session.holdBreakpoints([{ scriptPath: '/game/gone.gd', lines: [9] }]);
+    const before = sent.length;
+    assert.deepEqual(
+      session.breakpointsHeld(),
+      [
+        { scriptPath: '/game/main.gd', lines: [12, 30] },
+        { scriptPath: '/game/other.gd', lines: [4] },
+        { scriptPath: '/game/gone.gd', lines: [9] },
+      ],
+      'the set holds what was set here and what was taken on',
+    );
+    assert.equal(sent.length, before, 'and taking a note on sends nothing until a play asks');
+
+    const again = await session.reapplyBreakpoints();
+    assert.deepEqual(
+      sent.slice(before),
+      [
+        { path: '/game/main.gd', lines: [12, 30] },
+        { path: '/game/other.gd', lines: [4] },
+        { path: '/game/gone.gd', lines: [9] },
+      ],
+      `a play sends every file's whole list again: ${JSON.stringify(sent)}`,
+    );
+    assert.deepEqual(
+      again.applied,
+      [
+        { scriptPath: '/game/main.gd', lines: [12, 30] },
+        { scriptPath: '/game/other.gd', lines: [4] },
+      ],
+      'and answers with what the adapter took',
+    );
+    assert.deepEqual(
+      again.refused.map((one) => one.scriptPath),
+      ['/game/gone.gd'],
+      `and names what it would not: ${JSON.stringify(again.refused)}`,
+    );
+    assert.match(text(again.refused[0]?.reason), /Unable to find file/, "with the adapter's own words");
+    assert.deepEqual(
+      session.breakpointsHeld().map((one) => one.scriptPath),
+      ['/game/main.gd', '/game/other.gd'],
+      'a file the adapter refused is not sent again before the next play',
+    );
+
+    // A line the adapter refuses is not held either: the set is what the editor has taken.
+    const held = session.breakpointsHeld().length;
+    await assert.rejects(() => session.setBreakpoint('/game/gone.gd', 2), /Unable to find file/);
+    assert.equal(session.breakpointsHeld().length, held, 'a refused set leaves the set as it was');
+    await session.abandon();
+  });
+}
+
+/**
+ * The breakpoint note round-trips through the project and refuses what is not the project's.
+ *
+ * Kept relative so the note is the project's rather than this machine's, read back resolved the
+ * way the adapter wants it, taken down when nothing is held, and a script written into it from
+ * outside the project, or by a hand editing the file, is not one a play is told to stop on.
+ */
+function testTheBreakpointNoteIsTheProjects(): void {
+  // Spelt the way the adapter spells them, with every symlink and short name resolved, which on a
+  // Windows runner turns RUNNER~1 into the account's name: the note compares against that spelling
+  // and hands it back, and a fixture comparing against the other one is testing its own temp dir.
+  const project = realpathSync.native(mkdtempSync(join(tmpdir(), 'gdharness-breakpoints-')));
+  const elsewhere = realpathSync.native(mkdtempSync(join(tmpdir(), 'gdharness-elsewhere-')));
+  try {
+    writeBreakpointNote(project, [
+      { scriptPath: join(project, 'scripts', 'main.gd'), lines: [30, 12] },
+      { scriptPath: join(elsewhere, 'theirs.gd'), lines: [1] },
+      { scriptPath: join(project, 'empty.gd'), lines: [] },
+    ]);
+    const written = JSON.parse(readFileSync(breakpointNotePath(project), 'utf8')) as unknown;
+    assert.deepEqual(
+      get(written, 'breakpoints'),
+      [{ script: 'scripts/main.gd', lines: [30, 12] }],
+      "the note holds the project's own files, relative and forward-slashed, and nothing outside",
+    );
+    assert.deepEqual(
+      readBreakpointNote(project),
+      [{ scriptPath: join(project, 'scripts', 'main.gd'), lines: [30, 12] }],
+      'and reads back spelt for the adapter',
+    );
+
+    // Hand-written, or written by something else: a path that leaves the project is dropped, and
+    // so is a line that is not one.
+    writeFileSync(
+      breakpointNotePath(project),
+      JSON.stringify({
+        breakpoints: [
+          { script: '../theirs.gd', lines: [1] },
+          { script: '/abs/theirs.gd', lines: [1] },
+          { script: 'main.gd', lines: [0, -1, 'seven', 7] },
+          { script: 'none.gd', lines: [] },
+        ],
+      }),
+    );
+    assert.deepEqual(
+      readBreakpointNote(project),
+      [{ scriptPath: join(project, 'main.gd'), lines: [7] }],
+      'only lines inside the project, on positive whole lines, are taken on',
+    );
+    writeFileSync(breakpointNotePath(project), 'not json');
+    assert.deepEqual(readBreakpointNote(project), [], 'a note that cannot be read holds nothing');
+
+    writeBreakpointNote(project, []);
+    assert.equal(existsSync(breakpointNotePath(project)), false, 'nothing held takes the note down');
+    assert.deepEqual(readBreakpointNote(project), [], 'and a missing note holds nothing');
+  } finally {
+    sweep(project);
+    sweep(elsewhere);
+  }
 }
 
 /**
@@ -7424,8 +7581,152 @@ async function testTheEditorsRunIsTheOneAnsweredFor(): Promise<void> {
  * is about is unmistakable from the wait it replaced.
  */
 async function testAStatusCallIsNotHeldByAHeldGame(): Promise<void> {
-  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-held-status-'));
-  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-held-status-rt-'));
+  await withAHeldGame({ toldOnConnect: null }, async ({ server, game, gamePid }) => {
+    const status = async (): Promise<unknown> =>
+      parseTextContent(await server.request('tools/call', { name: 'editor_status', arguments: {} }, 60_000));
+    const began = Date.now();
+    const found = await status();
+    const took = Date.now() - began;
+    const said = JSON.stringify(found);
+    assert.equal(get(found, 'game', 'playingInEditor', 'playing'), true, `the run is playing: ${said}`);
+    assert.equal(get(found, 'game', 'processActive'), true, `and its process is there: ${said}`);
+    const listed = asArray(get(found, 'game', 'runtimes'), 'runtimes');
+    assert.equal(get(listed[0], 'pid'), gamePid, `the game is listed under runtimes: ${said}`);
+    assert.equal(get(listed[0], 'reachable'), false, `as unreachable, since it answers nothing: ${said}`);
+    assert.match(text(get(listed[0], 'problem')), /did not answer/, `for the reason it is: ${said}`);
+    assert.equal(
+      get(found, 'game', 'heldAt', 'reason'),
+      'unanswered',
+      `and the run is said to be held, from the game not answering: ${said}`,
+    );
+    assert.ok(
+      took < 15_000,
+      `a held game does not cost the status call the runtime timeout: ${took}ms with the timeout at 30000`,
+    );
+
+    // Before the game goes: running, by the process the pick-up tied it to.
+    const output = async (): Promise<unknown> =>
+      parseTextContent(await server.request('tools/call', { name: 'editor_output', arguments: {} }, 60_000));
+    const going = await output();
+    assert.equal(
+      get(going, 'running'),
+      true,
+      `the picked-up run is running while its process is: ${JSON.stringify(going)}`,
+    );
+    assert.equal(get(going, 'heldAt', 'reason'), 'unanswered', `and held: ${JSON.stringify(going)}`);
+
+    game.kill();
+    await new Promise<void>((gone) => {
+      game.once('exit', () => {
+        gone();
+      });
+    });
+    const over = await output();
+    const ended = JSON.stringify(over);
+    assert.equal(get(over, 'running'), false, `a run whose process has gone is over: ${ended}`);
+    assert.equal(get(over, 'heldAt'), null, `and held nowhere: ${ended}`);
+    assert.equal(get(over, 'heldUnknown'), undefined, `with nothing left open about it: ${ended}`);
+  });
+}
+
+/**
+ * A runtime call to a game the session knows is held is refused at once, with why and what lets
+ * it go, rather than waited out and guessed about.
+ *
+ * A held game accepts the connection and answers nothing, so every runtime tool waited the whole
+ * runtime timeout on it and then said it may be paused at a breakpoint, when the session had been
+ * told the moment the game stopped and had the engine's own words for why. Held here with the
+ * adapter telling the server's connection of the stop as it opens, the way a real one tells the
+ * server that played the scene; the editor tier holds the same refusal against a real engine.
+ *
+ * Knowledge and not a default: the status fixture above is the same stage without the event, and
+ * there a runtime call goes to the game, since a session that has not been told has no business
+ * refusing on its behalf.
+ */
+async function testARuntimeCallToAHeldGameIsRefusedAtOnce(): Promise<void> {
+  const stopped = frameJsonRpc({
+    seq: 1,
+    type: 'event',
+    event: 'stopped',
+    body: {
+      reason: 'exception',
+      description: 'Exception',
+      text: 'Division by zero in operator /.',
+      threadId: 1,
+    },
+  });
+  await withAHeldGame(
+    { toldOnConnect: stopped },
+    async ({ server, gamePid, project, connectionsToTheGame }) => {
+      // Picked up first, which is what ties the run to its announcement and hands the session to it.
+      const status = parseTextContent(
+        await server.request('tools/call', { name: 'editor_status', arguments: {} }, 60_000),
+      );
+      assert.equal(
+        get(status, 'game', 'heldAt', 'reason'),
+        'exception',
+        `the session was told, with the reason: ${JSON.stringify(status)}`,
+      );
+
+      const beforeAsking = connectionsToTheGame();
+      const began = Date.now();
+      const refused = await server.request(
+        'tools/call',
+        { name: 'runtime_inspect', arguments: { projectPath: project, op: 'tree', nodePath: '/root' } },
+        60_000,
+      );
+      const took = Date.now() - began;
+      const said = textOf(refused) ?? JSON.stringify(refused);
+      assert.equal(
+        get(refused, 'result', 'isError'),
+        true,
+        `a runtime call to a held game is refused: ${said}`,
+      );
+      assert.match(said, new RegExp(`pid ${gamePid}\\) is held by the editor's debugger`), said);
+      assert.match(
+        said,
+        /on an error: Division by zero in operator \/\./,
+        `with the engine's own words: ${said}`,
+      );
+      assert.match(said, /debug_control continue lets it go/, `and what lets it go: ${said}`);
+      assert.ok(
+        took < 5000,
+        `refused at once rather than after the runtime timeout: ${took}ms with the timeout at 30000`,
+      );
+      assert.equal(
+        connectionsToTheGame(),
+        beforeAsking,
+        'and the game was not asked, since what it would have answered was already known',
+      );
+    },
+  );
+}
+
+/** What the held-game stage hands a fixture. */
+interface HeldGameStage {
+  readonly server: ServerProcess;
+  readonly game: ChildProcess;
+  readonly gamePid: number;
+  readonly project: string;
+  /** How many times anything has connected to the game's socket, for saying whether it was asked. */
+  readonly connectionsToTheGame: () => number;
+}
+
+/**
+ * A server with a fake editor playing a game that is held: the game is a socket that accepts and
+ * says nothing, the process behind its announcement is a child the fixture can end, and the
+ * adapter answers a late session a thread and no frames, which is what a real one answers a
+ * replacement. `toldOnConnect` is what the adapter writes to each connection as it opens, for a
+ * fixture whose server has to have been told of a stop the way the server that played the scene
+ * is. The runtime timeout is set long so that a wait this stage is about is unmistakable from the
+ * wait it replaced. The body runs once the editor has been greeted.
+ */
+async function withAHeldGame(
+  options: { toldOnConnect: Buffer | null },
+  body: (stage: HeldGameStage) => Promise<void>,
+): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-held-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-held-rt-'));
   const port = await reservePort();
   const answerNothing: FramedPeerHandler = (message, socket) => {
     const command = String(message['command']);
@@ -7446,8 +7747,10 @@ async function testAStatusCallIsNotHeldByAHeldGame(): Promise<void> {
       }),
     );
   };
+  let connections = 0;
   const held = createServer(() => {
     // Accepted and never answered, which is what a game sitting at a breakpoint does.
+    connections += 1;
   });
   await new Promise<void>((ready) => held.listen(0, '127.0.0.1', ready));
   const game = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
@@ -7462,103 +7765,66 @@ async function testAStatusCallIsNotHeldByAHeldGame(): Promise<void> {
   });
   const editor: { socket: WebSocket | null } = { socket: null };
   try {
-    await withFramedPeer(answerNothing, async (adapter) => {
-      writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
-      writeFileSync(
-        join(runtimeDir, `runtime-${gamePid}.json`),
-        JSON.stringify({
-          protocol: RUNTIME_PROTOCOL,
-          pid: gamePid,
-          port: portOf(held),
-          address: '127.0.0.1',
-          project: { name: 'Held', path: project },
-        }),
-        'utf8',
-      );
-      await server.initialize('regression-test');
-      const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
-      editor.socket = socket;
-      await new Promise<void>((resolve, reject) => {
-        socket.once('open', () => {
-          resolve();
+    await withFramedPeer(
+      answerNothing,
+      async (adapter) => {
+        writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+        writeFileSync(
+          join(runtimeDir, `runtime-${gamePid}.json`),
+          JSON.stringify({
+            protocol: RUNTIME_PROTOCOL,
+            pid: gamePid,
+            port: portOf(held),
+            address: '127.0.0.1',
+            project: { name: 'Held', path: project },
+          }),
+          'utf8',
+        );
+        await server.initialize('regression-test');
+        const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+        editor.socket = socket;
+        await new Promise<void>((resolve, reject) => {
+          socket.once('open', () => {
+            resolve();
+          });
+          socket.once('error', reject);
         });
-        socket.once('error', reject);
-      });
-      socket.on('message', (raw: Buffer) => {
-        const message: unknown = JSON.parse(String(raw));
-        if (!isRecord(message) || message['type'] !== 'tool_invoke') {
-          return;
+        socket.on('message', (raw: Buffer) => {
+          const message: unknown = JSON.parse(String(raw));
+          if (!isRecord(message) || message['type'] !== 'tool_invoke') {
+            return;
+          }
+          const result =
+            String(message['tool']) === 'playing_status'
+              ? { ok: true, playing: true, scenePath: 'res://held.tscn', debugPort: adapter }
+              : { ok: true };
+          socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result }));
+        });
+        socket.send(
+          JSON.stringify({
+            type: 'godot_ready',
+            project_path: project,
+            addon_version: SERVER_VERSION,
+            dap_port: adapter,
+          }),
+        );
+        let greeted = false;
+        for (let waited = 0; waited < 10_000 && !greeted; waited += 100) {
+          await delay(100);
+          const seen = parseTextContent(
+            await server.request('tools/call', { name: 'editor_status', arguments: {} }, 60_000),
+          );
+          greeted = text(get(seen, 'editor', 'projectPath')) === project;
         }
-        const result =
-          String(message['tool']) === 'playing_status'
-            ? { ok: true, playing: true, scenePath: 'res://held.tscn', debugPort: adapter }
-            : { ok: true };
-        socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result }));
-      });
-      socket.send(
-        JSON.stringify({
-          type: 'godot_ready',
-          project_path: project,
-          addon_version: SERVER_VERSION,
-          dap_port: adapter,
-        }),
-      );
-      const status = async (): Promise<unknown> =>
-        parseTextContent(
-          await server.request('tools/call', { name: 'editor_status', arguments: {} }, 60_000),
-        );
-      let greeted = false;
-      for (let waited = 0; waited < 10_000 && !greeted; waited += 100) {
-        await delay(100);
-        greeted = text(get(await status(), 'editor', 'projectPath')) === project;
-      }
-      assert.ok(greeted, 'the fake editor should have been greeted, or nothing below is reached');
-
-      const began = Date.now();
-      const found = await status();
-      const took = Date.now() - began;
-      const said = JSON.stringify(found);
-      assert.equal(get(found, 'game', 'playingInEditor', 'playing'), true, `the run is playing: ${said}`);
-      assert.equal(get(found, 'game', 'processActive'), true, `and its process is there: ${said}`);
-      const listed = asArray(get(found, 'game', 'runtimes'), 'runtimes');
-      assert.equal(get(listed[0], 'pid'), gamePid, `the game is listed under runtimes: ${said}`);
-      assert.equal(get(listed[0], 'reachable'), false, `as unreachable, since it answers nothing: ${said}`);
-      assert.match(text(get(listed[0], 'problem')), /did not answer/, `for the reason it is: ${said}`);
-      assert.equal(
-        get(found, 'game', 'heldAt', 'reason'),
-        'unanswered',
-        `and the run is said to be held, from the game not answering: ${said}`,
-      );
-      assert.ok(
-        took < 15_000,
-        `a held game does not cost the status call the runtime timeout: ${took}ms with the timeout at 30000`,
-      );
-
-      // Before the game goes: running, by the process the pick-up tied it to.
-      const output = async (): Promise<unknown> =>
-        parseTextContent(
-          await server.request('tools/call', { name: 'editor_output', arguments: {} }, 60_000),
-        );
-      const going = await output();
-      assert.equal(
-        get(going, 'running'),
-        true,
-        `the picked-up run is running while its process is: ${JSON.stringify(going)}`,
-      );
-      assert.equal(get(going, 'heldAt', 'reason'), 'unanswered', `and held: ${JSON.stringify(going)}`);
-
-      game.kill();
-      await new Promise<void>((gone) => {
-        game.once('exit', () => {
-          gone();
-        });
-      });
-      const over = await output();
-      const ended = JSON.stringify(over);
-      assert.equal(get(over, 'running'), false, `a run whose process has gone is over: ${ended}`);
-      assert.equal(get(over, 'heldAt'), null, `and held nowhere: ${ended}`);
-      assert.equal(get(over, 'heldUnknown'), undefined, `with nothing left open about it: ${ended}`);
-    });
+        assert.ok(greeted, 'the fake editor should have been greeted, or nothing below is reached');
+        await body({ server, game, gamePid, project, connectionsToTheGame: () => connections });
+      },
+      (socket) => {
+        if (options.toldOnConnect !== null) {
+          socket.write(options.toldOnConnect);
+        }
+      },
+    );
   } finally {
     editor.socket?.terminate();
     await server.stop();
@@ -10441,6 +10707,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAShortenedCacheIsRebuilt,
   testTheEditorsRunIsTheOneAnsweredFor,
   testAStatusCallIsNotHeldByAHeldGame,
+  testARuntimeCallToAHeldGameIsRefusedAtOnce,
   testAnEditorOnAnotherVersionIsStillAskedWhatItIsPlaying,
   testAGameTheEditorHasStoppedPlayingIsNotStillActive,
   testASettingTheEditorDroppedIsNamed,
@@ -10506,6 +10773,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStopIsKnownToTheConnectionItWasSentTo,
   testAStopThatLandsWhileAttachAsksIsTheAnswer,
   testAContinueByAnotherClientIsKnownHere,
+  testBreakpointsAreSentAgainBeforeAPlay,
+  testTheBreakpointNoteIsTheProjects,
   testProjectGodotResistsPrototypeKeys,
 
   testAnAnswerFromAStaleAddonSaysSo,

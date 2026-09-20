@@ -2018,6 +2018,37 @@ async function testAHeldGameIsStillHeldForTheReplacement(godotPath: string): Pro
       assert.equal(get(ended, 'stopped'), true, `the replacement should be able to end it: ${text(ended)}`);
       await delay(1500);
       assert.ok(!alive(pid), 'after which the game is gone');
+
+      // The breakpoint the first server set is the replacement's to send as well: the editor
+      // keeps one for a single play, the first server is gone with what it held, and a play
+      // through the replacement used to run straight past the line. The note in the project is
+      // what carries it, and the start answer says it was sent.
+      const one = [{ scriptPath: 'res://main.gd', lines: [BREAK_LINE] }];
+      const replayed = await answered('editor_run', {
+        projectPath: own.project,
+        op: 'start',
+        headless: true,
+      });
+      assert.deepEqual(
+        get(replayed, 'breakpoints'),
+        one,
+        `a play through the replacement sends the breakpoint the first server set: ${text(replayed)}`,
+      );
+      const stopsAgain = Date.now() + GAME_STOP_TIMEOUT_MS;
+      let reason: unknown = null;
+      while (reason !== 'breakpoint' && Date.now() < stopsAgain) {
+        reason = get(await answered('editor_output', {}), 'heldAt', 'reason');
+        if (reason !== 'breakpoint') await delay(500);
+      }
+      assert.equal(reason, 'breakpoint', 'and the game stops on it, for a server that never set it');
+      const cleared = await answered('debug_breakpoint', {
+        projectPath: own.project,
+        scriptPath: 'res://main.gd',
+        op: 'remove',
+        line: BREAK_LINE,
+      });
+      assert.deepEqual(get(cleared, 'held'), [], `the replacement can take it off again: ${text(cleared)}`);
+      await answered('editor_run', { op: 'stop' });
     } finally {
       await replacement.stop();
     }
@@ -3105,6 +3136,17 @@ async function testAnErrorTheGameBrokeOnIsReported({ call, attempt, project }: E
     `and editor_status says the same about the same run: ${text(status)}`,
   );
 
+  // A runtime call to a game the session knows is held is refused at once, with why it is held
+  // and what lets it go. It used to wait the whole runtime timeout on a game that answers nothing
+  // and then guess that it might be paused, when the session had been told the moment it broke.
+  const asked = Date.now();
+  const refused = await attempt('runtime_inspect', { ...game, op: 'tree', nodePath: '/root' });
+  const waited = Date.now() - asked;
+  assert.equal(refused.ok, false, `a runtime call to a held game is refused: ${refused.text}`);
+  assert.match(refused.text, /held by the editor's debugger, on an error: .*null/i, refused.text);
+  assert.match(refused.text, /debug_control continue lets it go/, refused.text);
+  assert.ok(waited < 5000, `and refused at once rather than after the runtime timeout: ${waited}ms`);
+
   // Asked twice on purpose: every ask drains the adapter, which goes on reporting the same stop
   // for as long as the game sits at it, so one error must not become one more error per call.
   const counted = asNumber(get(output, 'errors'));
@@ -3114,6 +3156,71 @@ async function testAnErrorTheGameBrokeOnIsReported({ call, attempt, project }: E
     'and one error stays one error however often the console is read',
   );
 
+  await call('editor_run', { op: 'stop' });
+}
+
+/** Whether the game is ticking, asked until it is: a game sitting on a line in _ready never does. */
+async function ticksWithin(attempt: Editor['attempt'], project: string, what: string): Promise<void> {
+  const deadline = Date.now() + GAME_STOP_TIMEOUT_MS;
+  let ticked = 0;
+  let said = '';
+  while (ticked === 0 && Date.now() < deadline) {
+    const asked = await attempt('runtime_inspect', {
+      projectPath: project,
+      op: 'property',
+      nodePath: '/root/Main',
+      property: 'ticks',
+    });
+    said = asked.text;
+    const value = asked.ok ? get(JSON.parse(asked.text), 'value') : 0;
+    ticked = typeof value === 'number' ? value : 0;
+    if (ticked === 0) await delay(500);
+  }
+  assert.ok(ticked > 0, `${what}: ${said}`);
+}
+
+/**
+ * A breakpoint holds for every play started here, not only the next one.
+ *
+ * Measured on 4.7.2: a breakpoint set through the adapter stopped the play after it and not the
+ * one after that. The same session set it, continued past it, stopped the game and played again,
+ * and the game ran straight through the line; setting it again before the play is what made the
+ * second play stop. Nothing said any of this: the set answer was the same both times and the
+ * second play answered like the first. So the server sends every breakpoint it holds before each
+ * play it starts and says so in the start answer. The set is also kept in the project for the
+ * server after a reconnect, which the held-game case in the own-pair set holds.
+ */
+async function testABreakpointHoldsForEveryPlay({ call, attempt, project }: Editor): Promise<void> {
+  const main = { projectPath: project, scriptPath: 'res://main.gd' };
+  const one = [{ scriptPath: 'res://main.gd', lines: [BREAK_LINE] }];
+  const set = await call('debug_breakpoint', { ...main, op: 'set', line: BREAK_LINE });
+  assert.deepEqual(get(set, 'held'), one, `the set answer lists what is held: ${text(set)}`);
+
+  const first = await call('editor_run', { projectPath: project, headless: true });
+  assert.deepEqual(
+    get(first, 'breakpoints'),
+    one,
+    `the start says what the game was told to stop on: ${text(first)}`,
+  );
+  await stackWithin(attempt, 'the first play stops at the breakpoint', (stack) => stack.length > 0);
+  await call('debug_control', { op: 'continue' });
+  await call('editor_run', { op: 'stop' });
+
+  // The play after, which used to run straight through.
+  const second = await call('editor_run', { projectPath: project, headless: true });
+  assert.deepEqual(get(second, 'breakpoints'), one, `the second start says the same: ${text(second)}`);
+  await stackWithin(attempt, 'the second play stops at the same breakpoint', (stack) => stack.length > 0);
+  await call('debug_control', { op: 'continue' });
+
+  const removed = await call('debug_breakpoint', { ...main, op: 'remove', line: BREAK_LINE });
+  assert.deepEqual(get(removed, 'held'), [], `removing it empties the set: ${text(removed)}`);
+  await call('editor_run', { op: 'stop' });
+
+  // With nothing held, a play is told nothing and runs: it ticks, which a game sitting on the line
+  // in _ready cannot, so this is the positive beside the absent field.
+  const third = await call('editor_run', { projectPath: project, headless: true });
+  assert.equal(get(third, 'breakpoints'), undefined, `a play with nothing held says nothing: ${text(third)}`);
+  await ticksWithin(attempt, project, 'and runs through the line the breakpoint was on');
   await call('editor_run', { op: 'stop' });
 }
 
@@ -3202,6 +3309,7 @@ async function main(): Promise<void> {
     ['testTheDebuggerGetsAPortOfItsOwn', testTheDebuggerGetsAPortOfItsOwn],
     ['testTheGameIsHandedItsOwnArguments', testTheGameIsHandedItsOwnArguments],
     ['testAnErrorTheGameBrokeOnIsReported', testAnErrorTheGameBrokeOnIsReported],
+    ['testABreakpointHoldsForEveryPlay', testABreakpointHoldsForEveryPlay],
     ['testEditorRestart', testEditorRestart],
   ];
 
