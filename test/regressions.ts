@@ -835,7 +835,7 @@ async function testDapFramesBodiesByBytes(): Promise<void> {
       [outputLine],
       'an event following a multi-byte response must still be found, or the stream has desynchronised',
     );
-    await client.disconnect();
+    await client.abandon();
   });
 }
 
@@ -870,23 +870,23 @@ async function testFramingCeilingFailsLoudly(): Promise<void> {
 }
 
 /**
- * Disconnecting the debug adapter says it is not ending the game.
+ * Letting go of the debug adapter sends it nothing.
  *
- * This request runs in the server's own shutdown, and a harness performs one on every reconnect,
- * while the thing at the other end is a game somebody is watching on screen. The protocol leaves
- * `terminateDebuggee` to the adapter when the field is absent, so leaving it out made whether that
- * game survives a reconnect a property of the editor's implementation rather than of this request.
+ * Godot stops the game it is playing when this session sends the protocol's `disconnect`, and it
+ * does so with `terminateDebuggee: false` on the request: the standard way of asking to be let go
+ * without taking the debuggee with you is not one this adapter honours. This runs in the server's
+ * own shutdown, which a harness performs on every reconnect, so saying goodbye politely was ending
+ * an editor-played game every time somebody reconnected.
  *
- * gdharness attaches and never launches, so ending the game is never what a disconnect here means,
- * and the field now says so. Held because a downstream project lost an editor-played run inside the
- * window a server replacement landed in, with no evidence inside the window either way: this is the
- * mechanism that could do it rather than the one that did, and the fix is the same either way.
+ * Measured against a real editor by `testAPlayedRunOutlivesTheServerUnderIt` in the editor tier,
+ * which is where the claim lives. This case holds the shape of it cheaply: the request is not sent
+ * at all, and the transport closes anyway.
  *
- * The existing run-outlives-server case does not reach this. It starts its run with no editor
- * connected, so the server spawns the game itself and there is no debug adapter session to
- * disconnect. Server-spawned and editor-played are two shapes and it covers one.
+ * The existing run-outlives-server case never reached this. It starts its run with no editor
+ * connected, so the server spawns the game itself and there is no adapter session to say goodbye
+ * to. Server-spawned and editor-played are two shapes and it covers one.
  */
-async function testDisconnectingTheAdapterLeavesTheGameRunning(): Promise<void> {
+async function testLettingGoOfTheAdapterSendsItNothing(): Promise<void> {
   const requests: Record<string, unknown>[] = [];
   const respond: FramedPeerHandler = (message, socket) => {
     requests.push(message);
@@ -905,17 +905,17 @@ async function testDisconnectingTheAdapterLeavesTheGameRunning(): Promise<void> 
   await withFramedPeer(respond, async (port) => {
     const client = new GodotDAPClient(port, '127.0.0.1');
     await client.initialize();
-    await client.disconnect();
+    await client.abandon();
   });
 
   const commands = requests.map((request) => request['command']);
+  // The positive first: a session that never opened would send no disconnect either, and would
+  // satisfy the absence below exactly as well as one that opened and then kept quiet.
   assert.ok(commands.includes('initialize'), `the session should have opened: ${commands.join(', ')}`);
-  const sent = requests.find((request) => request['command'] === 'disconnect');
-  assert.ok(sent, `a disconnect should have been sent: ${commands.join(', ')}`);
   assert.deepEqual(
-    sent['arguments'],
-    { restart: false, terminateDebuggee: false },
-    'and it should say it is neither restarting nor ending the game, rather than leaving either out',
+    commands.filter((command) => command === 'disconnect'),
+    [],
+    `letting go should tell the adapter nothing: ${commands.join(', ')}`,
   );
 }
 
@@ -7291,7 +7291,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheWrittenConfigNamesAProgramThatStarts,
 
   testProjectGodotMultilineValues,
-  testDisconnectingTheAdapterLeavesTheGameRunning,
+  testLettingGoOfTheAdapterSendsItNothing,
   testProjectGodotResistsPrototypeKeys,
 
   testAnAnswerFromAStaleAddonSaysSo,

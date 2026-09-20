@@ -881,9 +881,12 @@ class GodotServer {
     }
     if (this.dapClient) {
       try {
-        await this.dapClient.disconnect();
+        // Abandoned rather than disconnected. Godot stops the game it is playing when this session
+        // sends the protocol's disconnect, `terminateDebuggee: false` and all, so saying goodbye
+        // here ended an editor-played run on every reconnect a harness performed.
+        await this.dapClient.abandon();
       } catch (error) {
-        this.logDebug(`DAP client did not disconnect cleanly: ${errorMessage(error)}`);
+        this.logDebug(`DAP client did not let go cleanly: ${errorMessage(error)}`);
       }
       this.dapClient = null;
     }
