@@ -235,6 +235,17 @@ makes the first one safe, write the intent down somewhere the next process reads
 first step, and have whatever completes the act, or makes it moot, take the note down. The user's
 reconnect is the usual replacement, and it arrives for the same reason the act was started.
 
+The same replacement loses what was *observed* as well as what was intended, and the source may not
+say it again. A stop is reported by the editor's debug adapter to the session attached when it
+happened; a session attached afterwards is answered a thread and no frames, and the game is still
+sitting at its breakpoint. Reading "no frames" as "running" was the fault, and it was found by
+being wrong twice in a row: the first fixture asserted the replacement would see the stack, the
+second asserted the game had been released, and a runtime call timing out with "accepted the
+connection but did not answer" said neither. So when a state is learned from an event, ask what a
+process that missed the event is told when it asks, and if the answer is nothing, that is a third
+state rather than the default, and some other instrument has to separate it from the default. Here
+the runtime was that instrument, and `editor_status` was already using it about the same game.
+
 A claim about a change you have just made is the least checked claim there is. It arrives with the
 reasoning that produced it, which is the strongest case anybody will assemble for it, and the reader
 it is told to has less to check it against than you do. The debug adapter disconnect in this
