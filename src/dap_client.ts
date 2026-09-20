@@ -199,7 +199,13 @@ export class GodotDAPClient {
 
     if (this.connected) {
       try {
-        await this.sendRequest('disconnect', { restart: false });
+        // terminateDebuggee is said rather than left out. This runs in the server's own shutdown,
+        // which a harness performs on every reconnect, and the game at the other end is one a
+        // person is watching. The protocol leaves the default to the adapter when the field is
+        // absent, so omitting it makes whether somebody's game survives a reconnect a property of
+        // the editor's implementation rather than of this request. gdharness attaches and never
+        // launches, so ending the game is never what a disconnect here means.
+        await this.sendRequest('disconnect', { restart: false, terminateDebuggee: false });
       } catch {
         // The adapter may already be gone; the socket close below is what matters.
       }

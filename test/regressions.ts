@@ -870,6 +870,56 @@ async function testFramingCeilingFailsLoudly(): Promise<void> {
 }
 
 /**
+ * Disconnecting the debug adapter says it is not ending the game.
+ *
+ * This request runs in the server's own shutdown, and a harness performs one on every reconnect,
+ * while the thing at the other end is a game somebody is watching on screen. The protocol leaves
+ * `terminateDebuggee` to the adapter when the field is absent, so leaving it out made whether that
+ * game survives a reconnect a property of the editor's implementation rather than of this request.
+ *
+ * gdharness attaches and never launches, so ending the game is never what a disconnect here means,
+ * and the field now says so. Held because a downstream project lost an editor-played run inside the
+ * window a server replacement landed in, with no evidence inside the window either way: this is the
+ * mechanism that could do it rather than the one that did, and the fix is the same either way.
+ *
+ * The existing run-outlives-server case does not reach this. It starts its run with no editor
+ * connected, so the server spawns the game itself and there is no debug adapter session to
+ * disconnect. Server-spawned and editor-played are two shapes and it covers one.
+ */
+async function testDisconnectingTheAdapterLeavesTheGameRunning(): Promise<void> {
+  const requests: Record<string, unknown>[] = [];
+  const respond: FramedPeerHandler = (message, socket) => {
+    requests.push(message);
+    socket.write(
+      frameJsonRpc({
+        seq: requests.length + 100,
+        type: 'response',
+        request_seq: message['seq'],
+        command: message['command'],
+        success: true,
+        body: {},
+      }),
+    );
+  };
+
+  await withFramedPeer(respond, async (port) => {
+    const client = new GodotDAPClient(port, '127.0.0.1');
+    await client.initialize();
+    await client.disconnect();
+  });
+
+  const commands = requests.map((request) => request['command']);
+  assert.ok(commands.includes('initialize'), `the session should have opened: ${commands.join(', ')}`);
+  const sent = requests.find((request) => request['command'] === 'disconnect');
+  assert.ok(sent, `a disconnect should have been sent: ${commands.join(', ')}`);
+  assert.deepEqual(
+    sent['arguments'],
+    { restart: false, terminateDebuggee: false },
+    'and it should say it is neither restarting nor ending the game, rather than leaving either out',
+  );
+}
+
+/**
  * Section names and keys come out of project.godot, which is a file the project supplies. On
  * an ordinary object `result['constructor']` is the Object function and `result['__proto__']`
  * is Object.prototype, so a parser that indexes its result with those names writes the file's
@@ -3054,17 +3104,17 @@ function testTheStaleNoteNamesTheCallThatRebuildsTheCopy(): void {
     /where this turns up/,
     'and the empty lever says why it is empty, since a leaf type is where the fault is easiest to make',
   );
-  // Two measurements from two projects, each said on its own. Adding them into one ratio would
-  // assert that the benches are the same bench, which is what the two readings above leave open.
-  // Neither reading is this project's: the diagnostic has never gone stale in this bench. Both are
-  // attributed, because a figure written without a source reads as the writer's own.
-  assert.match(alone, /in the project that reported it/, 'the reporting project keeps its own count');
-  assert.match(alone, /both reproductions measured in a second project/, 'and the other keeps its own');
-  assert.doesNotMatch(alone, /measured here/, 'and this project claims neither');
+  // Every figure quoted is of the tool as it is now. One clearing in five attempts was taken
+  // against a version where the rescan answered before the scan had started, so it measures that
+  // timing rather than a scan, and beside the current readings it argued the opposite of what the
+  // current readings say. The project that took those five is the one that noticed.
+  assert.match(alone, /since the scan timing was fixed/, 'the readings are of the tool as it is now');
+  assert.doesNotMatch(alone, /one of five/, 'and the count of the old timing is not quoted as the new');
+  assert.doesNotMatch(alone, /measured here/, 'nor is anybody else’s reading claimed as this bench’s');
   // The milliseconds are the scan's own waitedMs. A duration written beside a cure is read as the
   // duration of the cure, and nobody timed the gap between the scan returning and the re-read, so
   // the figures are held to the phrasing that says what they timed rather than to their absence.
-  assert.match(alone, /the scan itself returning in 243ms and 275ms/, 'the timing says what it timed');
+  assert.match(alone, /the scan returning in 243ms and 275ms/, 'the timing says what it timed');
 
   // The lever is a dependency of the stale type, never the stale type itself: sending a caller to
   // edit the file the diagnostics are already wrong about is the retracted cure, and the one thing
@@ -7241,6 +7291,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheWrittenConfigNamesAProgramThatStarts,
 
   testProjectGodotMultilineValues,
+  testDisconnectingTheAdapterLeavesTheGameRunning,
   testProjectGodotResistsPrototypeKeys,
 
   testAnAnswerFromAStaleAddonSaysSo,
