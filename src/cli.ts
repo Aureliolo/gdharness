@@ -78,12 +78,20 @@ function projectArgument(at: number): string {
  * pinned to whatever it was set up with a year ago.
  */
 async function engine(projectPath?: string): Promise<HeadlessEngine> {
-  const godotPath =
-    (await new GodotLocator().find()) ?? (projectPath === undefined ? null : recordedEnginePath(projectPath));
-  if (godotPath === null) {
-    throw new UsageError(`No Godot executable found. ${GodotLocator.ADVICE.join('. ')}.`);
+  const located = await new GodotLocator().find();
+  if (located.ok) {
+    return { godotPath: located.path, script: shippedOperationsScript(), debug: GODOT_DEBUG_MODE_DEFAULT };
   }
-  return { godotPath, script: shippedOperationsScript(), debug: GODOT_DEBUG_MODE_DEFAULT };
+  // The recorded engine is for a machine where nothing is set and nothing is where it usually is.
+  // A GODOT_PATH that names something broken is not that: falling back past it would run some
+  // other engine in silence under a variable somebody set on purpose.
+  const recorded =
+    located.named === null && projectPath !== undefined ? recordedEnginePath(projectPath) : null;
+  if (recorded === null) {
+    const refusal = GodotLocator.refusal(located);
+    throw new UsageError(`${refusal.message} ${refusal.advice.join('. ')}.`);
+  }
+  return { godotPath: recorded, script: shippedOperationsScript(), debug: GODOT_DEBUG_MODE_DEFAULT };
 }
 
 /** The outcome as a line for a person, and a throw when the engine refused. */
