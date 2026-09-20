@@ -3447,17 +3447,23 @@ class GodotServer {
     // that process said it was, turns "it just stopped" into something somebody can check against
     // the record it was made from.
     const signalled = runningAs(running.pid);
-    running.log.record(
-      'info',
-      `gdharness is ending pid ${running.pid}, which the operating system describes as ${
-        signalled === null ? 'nothing it will name' : `${signalled.kind}: ${signalled.text}`
-      }.`,
-    );
+    const described = signalled === null ? 'nothing it would name' : `${signalled.kind}: ${signalled.text}`;
+    let landed = true;
     try {
       process.kill(running.pid);
     } catch {
       // Ended between being read and being stopped, which is the state this asks for.
+      landed = false;
     }
+    // Written after the attempt rather than before it, so the line says what happened rather than
+    // what was about to. A note that announces an act it has not performed is wrong for every run
+    // that was already over by the time it was signalled, which is the ordinary way a run ends.
+    running.log.record(
+      'info',
+      landed
+        ? `gdharness ended pid ${running.pid}, which the operating system described as ${described}.`
+        : `gdharness signalled pid ${running.pid} and it was already gone; the operating system had described it as ${described}.`,
+    );
   }
 
   /**
