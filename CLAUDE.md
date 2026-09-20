@@ -277,8 +277,8 @@ that should not. Wide was the dangerous direction here and it had been written d
 
 Changing a case to fit the code is the thing not to do, with one exception, and it is worth being
 able to tell them apart because the exception looks exactly like the fault. A case asserting a state
-that cannot occur is not evidence of anything, so removing it removes nothing. A fixture here wrote a
-record claiming its run began a minute before the process it had just spawned, and the record is
+that cannot occur is not evidence of anything, so removing it removes nothing. A fixture here wrote
+a record claiming its run began a minute before the process it had just spawned, and the record is
 written by the call that spawns, so the two are the same moment. The narrower window above is what
 made it fail. The test was corrected and its assertions left alone. Say in the change that a case was
 altered and why the state was unreachable, because that sentence is the whole difference between this
