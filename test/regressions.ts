@@ -64,6 +64,7 @@ import { freePort } from '../src/ports.js';
 import { secondsFromClock } from '../src/process-time.js';
 import { projectStructure, searchProject } from '../src/project-scan.js';
 import { parseProjectGodot, settingKeys, settingsDroppedReport } from '../src/resources.js';
+import { noteRestartBegun, restartNotePath, restartOwed, restartSettled } from '../src/restart-note.js';
 import {
   couldStillBeTheRecordedRun,
   judgeRun,
@@ -1260,6 +1261,132 @@ async function testAProjectUpgradedUnderTheServerIsSaid(): Promise<void> {
     assert.match(said ?? '', /reconnect/i, 'and say what replaces it');
   } finally {
     await server.stop();
+    sweep(project);
+  }
+}
+
+/**
+ * A restart another server began and could not finish is said, and settled by an editor arriving.
+ *
+ * A restart of an editor this server opened is a quit, a wait and a launch, and the server can be
+ * ended between the first and the last: a caller restarts the editor to take an upgrade while the
+ * user reconnects the harness for the same upgrade. The quit lands, the launch never runs, and the
+ * successor is a young server with nothing connected, so it answered `mayYetConnect: true` from its
+ * own age. A process listing showed nothing for the project at all. Reported downstream with the
+ * pids.
+ *
+ * Both readings are taken from the same shape of server, seconds old, differing only in whether the
+ * note is there: without it the young server's `true` is the right answer and is asserted as such,
+ * so the `false` below is the note and not the window having closed.
+ */
+async function testARestartLeftHalfDoneIsSaid(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-half-restart-'));
+  const port = await reservePort();
+  let editor: WebSocket | null = null;
+  const server = new ServerProcess({
+    env: { GDHARNESS_PROJECT: project, GDHARNESS_BRIDGE_PORT: String(port) },
+  });
+  const uninformed = new ServerProcess({ env: { GDHARNESS_PROJECT: project } });
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="HalfRestart"\n',
+    );
+    // What the predecessor wrote before asking its editor to quit.
+    noteRestartBegun({
+      projectPath: project,
+      editorPid: 27040,
+      ports: { lsp: 6005, dap: 6006 },
+      quitAt: '2026-09-20T19:39:30.000Z',
+      byPid: 4242,
+    });
+    assert.deepEqual(restartOwed(project)?.editorPid, 27040, 'the note reads back');
+
+    await server.initialize('regression-test');
+    const status = parseTextContent(
+      await server.request('tools/call', { name: 'editor_status', arguments: {} }),
+    );
+    assert.equal(get(status, 'editor', 'connected'), false, 'nothing is connected');
+    assert.equal(
+      get(status, 'editor', 'mayYetConnect'),
+      false,
+      `a server that knows the launch never ran says nothing is coming: ${JSON.stringify(get(status, 'editor'))}`,
+    );
+    const interrupted = get(status, 'editor', 'restartInterrupted');
+    assert.equal(get(interrupted, 'quitEditorPid'), 27040, 'and names the editor that was quit');
+    assert.equal(get(interrupted, 'quitAt'), '2026-09-20T19:39:30.000Z', 'and when');
+    assert.equal(get(interrupted, 'byServerPid'), 4242, 'and which server began it');
+    assert.match(text(get(interrupted, 'note')), /editor_launch open/, 'and what finishes it');
+
+    // The contrast, from a server just as young with no note to read: its `true` is the window,
+    // and is the right answer there.
+    restartSettled(project);
+    await uninformed.initialize('regression-test');
+    const plain = parseTextContent(
+      await uninformed.request('tools/call', { name: 'editor_status', arguments: {} }),
+    );
+    assert.equal(
+      get(plain, 'editor', 'mayYetConnect'),
+      true,
+      'without the note a young server may yet be reached',
+    );
+    assert.equal(get(plain, 'editor', 'restartInterrupted'), undefined, 'and reports no restart');
+
+    // An editor arriving settles it, whoever opened it: the note is gone from disk, not merely
+    // unreported, so the server after this one does not report a debt that was paid.
+    noteRestartBegun({
+      projectPath: project,
+      editorPid: 27040,
+      ports: { lsp: 6005, dap: 6006 },
+      quitAt: '2026-09-20T19:39:30.000Z',
+      byPid: 4242,
+    });
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+    editor = socket;
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', () => {
+        resolve();
+      });
+      socket.once('error', reject);
+    });
+    socket.on('message', (raw: Buffer) => {
+      const message: unknown = JSON.parse(String(raw));
+      if (isRecord(message) && message['type'] === 'tool_invoke') {
+        socket.send(
+          JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result: { ok: true } }),
+        );
+      }
+    });
+    socket.send(
+      JSON.stringify({
+        type: 'godot_ready',
+        project_path: project,
+        addon_version: SERVER_VERSION,
+        dap_port: 6006,
+      }),
+    );
+    let connected = false;
+    for (let waited = 0; waited < 10_000 && !connected; waited += 100) {
+      await delay(100);
+      const now = parseTextContent(
+        await server.request('tools/call', { name: 'editor_status', arguments: {} }),
+      );
+      connected = get(now, 'editor', 'connected') === true;
+    }
+    assert.ok(connected, 'the fake editor should have been greeted');
+    const settled = parseTextContent(
+      await server.request('tools/call', { name: 'editor_status', arguments: {} }),
+    );
+    assert.equal(get(settled, 'editor', 'restartInterrupted'), undefined, 'an editor being there settles it');
+    assert.equal(
+      existsSync(restartNotePath(project)),
+      false,
+      'and the note is taken down, not just unreported',
+    );
+  } finally {
+    editor?.close();
+    await server.stop();
+    await uninformed.stop();
     sweep(project);
   }
 }
@@ -9632,6 +9759,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnUnlistedValueIsRefusedRatherThanDefaulted,
   testEveryFixtureIsCalled,
   testBothEndsAgreeAboutTheAnnouncement,
+  testARestartLeftHalfDoneIsSaid,
   testASupersededServerStandsDown,
   testAProjectUpgradedUnderTheServerIsSaid,
   testEveryDispatchedNameExistsOnBothSides,
