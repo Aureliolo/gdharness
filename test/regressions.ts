@@ -47,6 +47,7 @@ import {
   CONNECT_WINDOW_MS,
   createBridge,
   mayYetConnect,
+  theEditorHasComeBack,
 } from '../src/godot-bridge.js';
 import { EDITOR_READS, HEADLESS_OPERATIONS } from '../src/headless-operations.js';
 import {
@@ -3212,6 +3213,54 @@ function testTheUncachedNoteSaysWhichRemedyStartsAnEngine(): void {
   assert.equal(uncachedClassNote([]), '', 'nothing missing from the cache gets no sentence');
 }
 
+/**
+ * A restart waits for the editor to say who it is, not merely to connect.
+ *
+ * The socket connects first and the addon's version, the editor's pid and its ports arrive a moment
+ * later with `godot_ready`. Waiting only for the connection read that gap as the restart being
+ * done: the answer came back with no version and no pid, `addonIsStale` compared undefined against
+ * the shipped version and said true, and the note told the caller to restart a healthy editor
+ * again. Reported downstream on a restart onto the current addon, and it cost them nothing only
+ * because they call `editor_status` after a restart out of a habit an earlier issue gave them.
+ *
+ * Held here rather than in the editor tier because that tier cannot reach it: its editor is
+ * headless, a headless editor refuses to restart, and the refusal is what that case asserts.
+ */
+function testARestartWaitsForTheEditorToSayWhoItIs(): void {
+  const startedAt = 1_000_000;
+  const newer = new Date(startedAt + 5_000);
+  const older = new Date(startedAt - 5_000);
+
+  assert.equal(
+    theEditorHasComeBack({ connected: false, connectedAt: newer, addonVersion: '0.9.0' }, startedAt),
+    false,
+    'nothing connected is not an editor that has come back',
+  );
+  assert.equal(
+    theEditorHasComeBack({ connected: true, connectedAt: older, addonVersion: '0.9.0' }, startedAt),
+    false,
+    'and the connection that was already there is the one being replaced',
+  );
+  // The branch nothing produced before: connected, newer, and not yet a word out of it.
+  assert.equal(
+    theEditorHasComeBack({ connected: true, connectedAt: newer, addonVersion: undefined }, startedAt),
+    false,
+    'a socket that has connected and said nothing yet is not an answer',
+  );
+  assert.equal(
+    theEditorHasComeBack({ connected: true, connectedAt: newer, addonVersion: '0.9.0' }, startedAt),
+    true,
+    'and one that has reported its version is',
+  );
+  // The empty string is an addon too old to report one, recorded when godot_ready lands. Waiting
+  // for a non-empty version would hang on exactly the editors the staleness note exists for.
+  assert.equal(
+    theEditorHasComeBack({ connected: true, connectedAt: newer, addonVersion: '' }, startedAt),
+    true,
+    'so is one too old to have a version to report',
+  );
+}
+
 function testTheStaleHalfIsNamedCorrectly(): void {
   assert.equal(addonMismatch('0.5.0', '0.5.0'), undefined, 'agreeing versions say nothing');
 
@@ -3228,6 +3277,28 @@ function testTheStaleHalfIsNamedCorrectly(): void {
   assert.match(unversioned, /before versions were reported/, 'a pre-0.4.0 addon is named as one');
   assert.match(unversioned, /editor_launch restart/, 'and it is the old half by definition');
   assert.equal(addonMismatch(undefined, '0.5.0'), unversioned, 'so is a bridge reporting nothing');
+
+  // Read as the sentences they are, because each half was written to fit a template that also
+  // supplied a noun: the unversioned name ended in "addon" and so did the template, and the two
+  // met as "the addon from before versions were reported addon". Both branches rendered fine to a
+  // check reading them for the version they name, which is what every case above does.
+  // Each of these names the addon once. The unversioned name was a phrase ending in "addon" put
+  // into a template that supplied "addon" itself, and the two met as "the addon from before
+  // versions were reported addon while this server ships 0.5.0". The words are not adjacent, so a
+  // doubled-word check reads it as clean, which is what a first attempt at this asserted and what
+  // a disarm then passed. Counting the noun is the thing that bites.
+  for (const [what, said] of [
+    ['a version', behind],
+    ['no version', unversioned],
+    ['a newer version', ahead],
+  ] as const) {
+    assert.equal(
+      said.match(/\baddon\b/g)?.length,
+      1,
+      `the note for ${what} should name the addon once: ${said}`,
+    );
+    assert.match(said, /^The editor is running (an|the) \S/, `and should read as a sentence: ${said}`);
+  }
 }
 
 /**
@@ -7427,6 +7498,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheCureIsWrittenWhole,
   testTheStaleNoteNamesTheCallThatRebuildsTheCopy,
   testTheUncachedNoteSaysWhichRemedyStartsAnEngine,
+  testARestartWaitsForTheEditorToSayWhoItIs,
   testTheStaleHalfIsNamedCorrectly,
   testAGameIsFoundWhereverItAnnounced,
   testAGameTooNewToTalkToIsStillAGame,

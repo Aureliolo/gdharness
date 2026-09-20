@@ -57,7 +57,12 @@ import { DEFAULT_DAP_PORT, GodotDAPClient, handleDAPTool, type StoppedAt } from 
 import { dictionary, emptyRecord } from './dictionary.js';
 import { errorMessage, Refusal } from './errors.js';
 import { forAnswer, GameLog, type LogEntry } from './game-log.js';
-import { anEditorIsStillComing, type GodotBridge, getDefaultBridge } from './godot-bridge.js';
+import {
+  anEditorIsStillComing,
+  type GodotBridge,
+  getDefaultBridge,
+  theEditorHasComeBack,
+} from './godot-bridge.js';
 import { GodotLocator } from './godot-path.js';
 import { type HeadlessOutcome, runImport, runOperation } from './headless.js';
 import { EDITOR_READS, ENGINE_PASSES, HEADLESS_OPERATIONS } from './headless-operations.js';
@@ -2698,10 +2703,10 @@ class GodotServer {
     // exactly like one that came straight back.
     const startedAt = before.connectedAt?.getTime() ?? 0;
     const began = Date.now();
-    const back = await this.waitForBridge(() => {
-      const status = this.godotBridge.getStatus();
-      return status.connected && (status.connectedAt?.getTime() ?? 0) > startedAt;
-    }, began + EDITOR_RESTART_TIMEOUT_MS);
+    const back = await this.waitForBridge(
+      () => theEditorHasComeBack(this.godotBridge.getStatus(), startedAt),
+      began + EDITOR_RESTART_TIMEOUT_MS,
+    );
 
     if (!back) {
       return this.createErrorResponse(

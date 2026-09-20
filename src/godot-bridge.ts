@@ -179,6 +179,29 @@ export function mayYetConnect(listeningSince: Date | undefined, now: number = Da
  * Either reason is enough and a live launched process outlasts the window by design, since what it
  * reports is a process somebody can watch rather than a guess about timing.
  */
+/**
+ * Whether the editor a restart asked for has come back *and* said who it is.
+ *
+ * A connection is not an answer. The socket connects first and the addon's version, the editor's
+ * pid and its ports all arrive a moment later with `godot_ready`, so a wait that watched only for
+ * the connection read that gap as the restart being finished: the answer came back with no version
+ * and no pid, and `addonIsStale` compared undefined against the shipped version and said true. The
+ * note then told the caller to restart a healthy editor, which costs them the language server and
+ * the bridge for nothing. Reported downstream on a restart onto the current addon.
+ *
+ * An addon too old to report a version is recorded as the empty string when `godot_ready` lands, so
+ * waiting for the version to be *known* rather than non-empty terminates for those too. Waiting for
+ * a non-empty one would hang exactly on the editors the staleness note exists for.
+ */
+export function theEditorHasComeBack(
+  status: { connected: boolean; connectedAt?: Date | undefined; addonVersion?: string | undefined },
+  startedAt: number,
+): boolean {
+  return (
+    status.connected && (status.connectedAt?.getTime() ?? 0) > startedAt && status.addonVersion !== undefined
+  );
+}
+
 export function anEditorIsStillComing(
   listeningSince: Date | undefined,
   launchedEditorIsAlive: boolean,
