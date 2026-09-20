@@ -18,8 +18,21 @@ const REGISTRY = 'https://registry.npmjs.org/gdharness/latest';
 /** Where a release's notes are, which is what an agent should read before recommending one. */
 const RELEASES = 'https://github.com/Aureliolo/gdharness/releases/tag';
 
-/** How long an answer stands before it is worth asking again. */
-const CACHE_MS = 4 * 60 * 60 * 1000;
+/**
+ * How long an answer stands before it is worth asking again.
+ *
+ * Measured against how often this project actually publishes, which is several times in a day and
+ * on one day fourteen times. A window of hours means the only automatic path by which a session
+ * learns a release exists misses most of them: the cache is one file per user rather than per
+ * session, so whichever process asked first decides what every server started afterwards believes,
+ * and a reading taken 102 minutes ago naming 0.13.34 stood while 0.13.35 and 0.13.36 shipped under
+ * it. A session on 0.13.34 was told nothing at all, since the answer in hand was not newer than the
+ * version it was running.
+ *
+ * Ten minutes bounds that at six requests an hour for a user who is working, and none for one who
+ * is not: a check is started by a tool call and by nothing else.
+ */
+export const CACHE_MS = 10 * 60 * 1000;
 
 /** A registry that answers slowly is one this waits out rather than lets build up. */
 const REQUEST_TIMEOUT_MS = 10_000;
@@ -177,17 +190,30 @@ async function fetchLatest(): Promise<string | null> {
 export class UpdateCheck {
   private latest: string | null = null;
   private checking = false;
+  private asked = false;
   private checkedAt = 0;
   private retryAt = 0;
   private backoffMs = FIRST_RETRY_MS;
   private readonly enabled: boolean;
   private readonly current: string;
   private readonly cachePath: string;
+  private readonly ask: () => Promise<string | null>;
 
-  constructor(current: string, environment: Environment = process.env) {
+  /**
+   * [param ask] is the registry, taken as a parameter so that whether a check was started is
+   * something a caller can observe. Counting requests is the only way to tell a server that asked
+   * from one that read somebody else's answer and said nothing, and those two look identical from
+   * outside.
+   */
+  constructor(
+    current: string,
+    environment: Environment = process.env,
+    ask: () => Promise<string | null> = fetchLatest,
+  ) {
     this.current = current;
     this.enabled = (environment['GDHARNESS_NO_UPDATE_CHECK'] ?? '') === '';
     this.cachePath = cacheFile(environment);
+    this.ask = ask;
     // Off means off, not "ask nothing but go on repeating the last answer": a cache left behind
     // by a session before the switch was set would otherwise still be reported.
     const cached = this.enabled ? readCache(this.cachePath) : null;
@@ -202,13 +228,19 @@ export class UpdateCheck {
    *
    * Called from a tool call, which is what makes this "only while the server is being used":
    * a session left open overnight asks nothing until somebody calls a tool again.
+   *
+   * Once per process whatever the cache says, because the cache is shared between every server on
+   * the machine and a server starting is a reconnect, which is the moment somebody is most likely
+   * to be finding out whether they are current. Inheriting another process's reading and declining
+   * to ask is how a reconnect taken to pick up a release reports the version before it.
    */
   refresh(now = Date.now()): void {
-    if (!this.enabled || this.checking || now < this.retryAt || !this.stale(now)) {
+    if (!this.enabled || this.checking || now < this.retryAt || (this.asked && !this.stale(now))) {
       return;
     }
+    this.asked = true;
     this.checking = true;
-    void fetchLatest()
+    void this.ask()
       .then((version) => {
         if (version === null) {
           this.scheduleRetry(now);

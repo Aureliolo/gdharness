@@ -99,7 +99,7 @@ import {
   toolsWithoutProjectPath,
 } from '../src/tool-definitions.js';
 import { namedType, renderToolsMarkdown } from '../src/tool-reference.js';
-import { cacheFile, isNewer, UpdateCheck } from '../src/update-check.js';
+import { CACHE_MS, cacheFile, isNewer, UpdateCheck } from '../src/update-check.js';
 import { asArray, asNumber, get, text } from './support/json.js';
 import { isRecord, type JsonRpcMessage, parseTextContent, textOf } from './support/json-rpc.js';
 import { reservePort, ServerProcess } from './support/server.js';
@@ -3869,7 +3869,8 @@ function testTheStaleHalfIsNamedCorrectly(): void {
  *
  * Asserted without the network in either direction: `refresh()` sets `checking` before it awaits
  * anything, so both readings below are taken in the same tick and do not depend on the registry
- * answering, or existing.
+ * answering, or existing. The registry stands in as a request that never settles, which holds the
+ * checker in the one state this is about for as long as the assertions take.
  */
 function testAStaleUpdateAnswerIsNotHandedOut(): void {
   const home = mkdtempSync(join(tmpdir(), 'gdharness-stale-notice-'));
@@ -3882,18 +3883,21 @@ function testAStaleUpdateAnswerIsNotHandedOut(): void {
   const seed = (checkedAt: number): void => {
     writeFileSync(cacheFile(environment), JSON.stringify({ checkedAt, latest: '99.9.9' }), 'utf8');
   };
-  const window = 4 * 60 * 60 * 1000;
+  // The window itself rather than a second copy of it, so that shortening one does not leave this
+  // fixture seeding a timestamp on the other side of a boundary it no longer describes.
+  const window = CACHE_MS;
+  const pending = (): Promise<string | null> => new Promise<string | null>(() => {});
 
   try {
     // The witness first: an answer inside the window is reported, so the silence below is this
     // guard and not the notice having stopped working altogether.
     seed(Date.now());
-    const fresh = new UpdateCheck('0.1.0', environment);
+    const fresh = new UpdateCheck('0.1.0', environment, pending);
     fresh.refresh();
     assert.equal(fresh.notice()?.latest, '99.9.9', 'an answer still inside the window is reported');
 
     seed(Date.now() - window - 60_000);
-    const stale = new UpdateCheck('0.1.0', environment);
+    const stale = new UpdateCheck('0.1.0', environment, pending);
     assert.equal(
       stale.notice()?.latest,
       '99.9.9',
@@ -3904,6 +3908,78 @@ function testAStaleUpdateAnswerIsNotHandedOut(): void {
   } finally {
     sweep(home);
   }
+}
+
+/**
+ * A server that has just started asks the registry, whatever answer the machine already holds.
+ *
+ * The cache is one file per user, not per session, so whichever process asked first decides what
+ * every server started afterwards believes for the rest of the window. Measured on this machine
+ * while the window was four hours: the file named 0.13.34, taken 102 minutes earlier, and 0.13.35
+ * and 0.13.36 shipped under it. A session running 0.13.34 was told nothing, because the answer in
+ * hand was not newer than the version it was running, and a reconnect, which is the one moment
+ * somebody is deliberately finding out whether they are current, started a server that read the
+ * same file and asked nobody.
+ *
+ * The registry is counted rather than reached. Whether a check was started is the whole of what
+ * this is about, and a server that asked and one that quoted somebody else's answer are the same
+ * object from outside.
+ */
+async function testAFreshServerAsksRatherThanInheritingAnAnswer(): Promise<void> {
+  const home = mkdtempSync(join(tmpdir(), 'gdharness-fresh-ask-'));
+  const environment = {
+    HOME: home,
+    LOCALAPPDATA: home,
+    XDG_CACHE_HOME: home,
+    GDHARNESS_NO_UPDATE_CHECK: '',
+  };
+
+  try {
+    // Written now, so nothing about it is stale and the old rule would have declined to ask.
+    writeFileSync(
+      cacheFile(environment),
+      JSON.stringify({ checkedAt: Date.now(), latest: '0.13.34' }),
+      'utf8',
+    );
+
+    let asks = 0;
+    const registry = (): Promise<string | null> => {
+      asks += 1;
+      return Promise.resolve('0.13.36');
+    };
+    const check = new UpdateCheck('0.13.34', environment, registry);
+
+    assert.equal(check.notice(), null, 'the inherited answer is not newer, so there is nothing to say');
+    check.refresh();
+    assert.equal(asks, 1, 'and the server asks anyway, because it has just started');
+
+    // Settled, so what the registry said is taken up rather than merely requested.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(check.notice()?.latest, '0.13.36', 'the release published since is what it reports');
+
+    check.refresh();
+    assert.equal(asks, 1, 'and a second call inside the window asks nothing further');
+  } finally {
+    sweep(home);
+  }
+}
+
+/**
+ * The window an answer stands for is short enough that a release is worth publishing at all.
+ *
+ * This is the only automatic path by which a running session learns a newer gdharness exists, and
+ * the project publishes several times in a day. Every hour on this number is an hour in which a
+ * downstream session goes on working against a version that has been superseded, having been told
+ * nothing, and the fix is already on npm. Raising it means saying so here in the same change.
+ */
+function testTheUpdateWindowTracksHowOftenThisShips(): void {
+  assert.ok(
+    CACHE_MS <= 15 * 60 * 1000,
+    `an answer stands for ${Math.round(CACHE_MS / 60_000)} minutes, which is longer than the gap ` +
+      'between releases here; a session would miss most of them',
+  );
+  // And not so short that a working session is asking on most of its tool calls.
+  assert.ok(CACHE_MS >= 60 * 1000, 'but not so short that it asks on every other call');
 }
 
 /**
@@ -9490,6 +9566,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testUpdateNoticeRidesOnAnAnswer,
   testUpdateCheckHasAnOffSwitch,
   testAStaleUpdateAnswerIsNotHandedOut,
+  testAFreshServerAsksRatherThanInheritingAnAnswer,
+  testTheUpdateWindowTracksHowOftenThisShips,
 ];
 
 /**
