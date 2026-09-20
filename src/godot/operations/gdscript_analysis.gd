@@ -46,9 +46,13 @@ func get_gdscript_info(params: Dictionary) -> Dictionary:
 	var in_multiline_string: bool = false
 
 	for i: int in range(lines.size()):
-		var stripped: String = lines[i].strip_edges()
+		# The comment off first, so nothing downstream has to know about them. It was reaching the
+		# answer: a `var x: int = 5  # note` carried `5  # note` as its default, and correcting the
+		# end of a parameter list put the comment into the return type, where `rfind(")")` had been
+		# hiding it by stopping inside the comment instead.
+		var stripped: String = _without_comment(lines[i])
 
-		if stripped.is_empty() or stripped.begins_with("#"):
+		if stripped.is_empty():
 			continue
 
 		if '"""' in stripped or "'''" in stripped:
@@ -211,13 +215,15 @@ func _parse_signal(line: String, line_num: int) -> Dictionary:
 	var params: Array[Dictionary] = []
 
 	if "(" in signal_text:
-		var parts: PackedStringArray = signal_text.split("(")
-		signal_name = parts[0].strip_edges()
-		if parts.size() > 1:
-			var params_text: String = parts[1].replace(")", "").strip_edges()
-			if not params_text.is_empty():
-				for p: String in params_text.split(","):
-					params.append(_parse_param(p.strip_edges()))
+		var paren_start: int = signal_text.find("(")
+		signal_name = signal_text.substr(0, paren_start).strip_edges()
+		# Through the same reader as a function's, because a signal's parameters are written the
+		# same way: `signal changed(d: Dictionary[String, int])` has one, and splitting on every
+		# comma answered with two.
+		var paren_end: int = _closing_paren(signal_text, paren_start)
+		if paren_end > paren_start:
+			for p: String in _arguments_in(signal_text.substr(paren_start + 1, paren_end - paren_start - 1)):
+				params.append(_parse_param(p))
 	else:
 		signal_name = signal_text
 
@@ -339,16 +345,18 @@ func _parse_function(line: String, line_num: int, annotated: String = "") -> Dic
 		var paren_start: int = func_text.find("(")
 		name = func_text.substr(0, paren_start).strip_edges()
 
-		var paren_end: int = func_text.rfind(")")
+		var paren_end: int = _closing_paren(func_text, paren_start)
 		if paren_end > paren_start:
 			var params_text: String = func_text.substr(paren_start + 1, paren_end - paren_start - 1)
-			if not params_text.is_empty():
-				for p: String in params_text.split(","):
-					params.append(_parse_param(p.strip_edges()))
+			for p: String in _arguments_in(params_text):
+				params.append(_parse_param(p))
 
 		var after_paren: String = func_text.substr(paren_end + 1).strip_edges()
 		if after_paren.begins_with("->"):
-			return_type = after_paren.substr(2).replace(":", "").strip_edges()
+			# Cut at the colon that ends the signature rather than deleting every colon in the
+			# rest of the line: `func noted(a: int) -> void: print(a)` is one line, and the old
+			# reading answered with `void print(a)` as the return type.
+			return_type = _up_to(after_paren.substr(2), ":").strip_edges()
 
 	return {
 		"name": name,
@@ -362,6 +370,106 @@ func _parse_function(line: String, line_num: int, annotated: String = "") -> Dic
 		"is_abstract": "abstract" in Patterns.annotations_on(annotated),
 		"line": line_num
 	}
+
+
+# The commas that separate arguments are the ones outside every bracket and every string, and
+# `split(",")` could not tell them from the rest.
+#
+# `func place(at: Vector2 = Vector2(1, 2), name: String = "a,b")` has two parameters and was
+# answered with five, three of them invented and named after the pieces the split left behind:
+# `2)`, `b"`. Each real one also lost its default to the truncation, `Vector2(1`. A `Vector2` or
+# `Color` default is ordinary Godot, and a caller building a call from that signature writes
+# arguments that are not identifiers.
+func _arguments_in(text: String) -> Array[String]:
+	var pieces: Array[String] = []
+	var depth: int = 0
+	var quote: String = ""
+	var current: String = ""
+	for i: int in range(text.length()):
+		var ch: String = text[i]
+		if not quote.is_empty():
+			current += ch
+			if ch == quote and text[i - 1] != "\\":
+				quote = ""
+			continue
+		if ch == '"' or ch == "'":
+			quote = ch
+			current += ch
+			continue
+		if ch == "(" or ch == "[" or ch == "{":
+			depth += 1
+		elif ch == ")" or ch == "]" or ch == "}":
+			depth -= 1
+		elif ch == "," and depth == 0:
+			pieces.append(current.strip_edges())
+			current = ""
+			continue
+		current += ch
+	if not current.strip_edges().is_empty():
+		pieces.append(current.strip_edges())
+	return pieces
+
+
+# The text up to the first [needle] outside every bracket and every string, or all of it.
+func _up_to(text: String, needle: String) -> String:
+	var depth: int = 0
+	var quote: String = ""
+	for i: int in range(text.length()):
+		var ch: String = text[i]
+		if not quote.is_empty():
+			if ch == quote and text[i - 1] != "\\":
+				quote = ""
+			continue
+		if ch == '"' or ch == "'":
+			quote = ch
+		elif ch == "(" or ch == "[" or ch == "{":
+			depth += 1
+		elif ch == ")" or ch == "]" or ch == "}":
+			depth -= 1
+		elif ch == needle and depth == 0:
+			return text.substr(0, i)
+	return text
+
+
+# The line with any trailing comment taken off, quote-aware so a `#` inside a string stays.
+func _without_comment(line: String) -> String:
+	var quote: String = ""
+	for i: int in range(line.length()):
+		var ch: String = line[i]
+		if not quote.is_empty():
+			if ch == quote and line[i - 1] != "\\":
+				quote = ""
+			continue
+		if ch == "#":
+			return line.substr(0, i).strip_edges()
+		if ch == '"' or ch == "'":
+			quote = ch
+	return line.strip_edges()
+
+
+# Where the bracket opened at [from] closes, or -1 if it does not.
+#
+# `rfind(")")` took the last one on the line, which is the right answer until something after the
+# signature has a bracket in it: a trailing comment, or a string in a default value.
+func _closing_paren(text: String, from: int) -> int:
+	var depth: int = 0
+	var quote: String = ""
+	for i: int in range(from, text.length()):
+		var ch: String = text[i]
+		if not quote.is_empty():
+			if ch == quote and text[i - 1] != "\\":
+				quote = ""
+			continue
+		if ch == '"' or ch == "'":
+			quote = ch
+			continue
+		if ch == "(":
+			depth += 1
+		elif ch == ")":
+			depth -= 1
+			if depth == 0:
+				return i
+	return -1
 
 
 func _parse_param(param_text: String) -> Dictionary:

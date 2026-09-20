@@ -5052,6 +5052,31 @@ async function testAStructureReadCanCarryWhatTheScriptInherits(): Promise<void> 
         '',
       ].join('\n'),
     );
+    // Commas that are not separators, and a bracket that is not the end of the signature. Each of
+    // these is ordinary Godot and each one used to add parameters the function does not have.
+    writeFileSync(
+      join(project, 'defaults.gd'),
+      [
+        'extends RefCounted',
+        '',
+        'signal changed(d: Dictionary[String, int])',
+        '',
+        'const LABEL: String = "hash # inside"  # and a real comment',
+        '',
+        'var held: int = 5  # a trailing note',
+        '',
+        '',
+        'func place(at: Vector2 = Vector2(1, 2), tint: Color = Color(1, 0, 0, 1), name: String = "a,b") -> void:',
+        '\tprint(at, tint, name)',
+        '',
+        '',
+        // A body on the declaration's own line, carrying a bracket and a colon of its own. The
+        // trailing-comment version of this cannot separate the two fixes, because taking the
+        // comment off first leaves the last bracket on the line where it belongs.
+        'func noted(a: int) -> void: print(a, ")")',
+        '',
+      ].join('\n'),
+    );
 
     const server = new ServerProcess({ env: { GODOT_PATH: godotPath } });
     try {
@@ -5157,6 +5182,61 @@ async function testAStructureReadCanCarryWhatTheScriptInherits(): Promise<void> 
           { name: 'rest', type: 'Array', default: '', is_rest: true },
         ],
         `a rest parameter is named without its dots and says it is one: ${JSON.stringify(engineCalls)}`,
+      );
+
+      // A comma inside a default value is the same character as the one between parameters, and
+      // splitting on every comma invented one parameter per comma it should not have seen. The
+      // whole table, because the fault adds entries rather than losing them: an assertion naming
+      // the three that should be there passes on an answer that also carries five that should not.
+      const bracketed = await call('script_info', {
+        projectPath: project,
+        op: 'structure',
+        scriptPath: 'res://defaults.gd',
+      });
+      assert.deepEqual(
+        asArray(get(bracketed, 'functions')).map((each) => [
+          get(each, 'name'),
+          get(each, 'return_type'),
+          asArray(get(each, 'params')).map((p) => [get(p, 'name'), get(p, 'type'), get(p, 'default')]),
+        ]),
+        [
+          [
+            'place',
+            'void',
+            [
+              ['at', 'Vector2', 'Vector2(1, 2)'],
+              ['tint', 'Color', 'Color(1, 0, 0, 1)'],
+              // The comma here is inside the string, so it separates nothing.
+              ['name', 'String', '"a,b"'],
+            ],
+          ],
+          // The last bracket on this line belongs to the body, not to the signature, and the last
+          // colon does too: read to the end of the line this answered with a parameter typed
+          // `int) -> void`, a second one named `")"`, and no return type at all.
+          ['noted', 'void', [['a', 'int', '']]],
+        ],
+        `every parameter list ends where the signature does: ${JSON.stringify(bracketed)}`,
+      );
+      assert.deepEqual(
+        asArray(get(bracketed, 'signals')).map((each) => [
+          get(each, 'name'),
+          asArray(get(each, 'params')).map((p) => [get(p, 'name'), get(p, 'type')]),
+        ]),
+        // A signal's parameters are written like a function's, and the comma inside the type is
+        // not a separator either.
+        [['changed', [['d', 'Dictionary[String, int]']]]],
+        `and a signal's list is read the same way: ${JSON.stringify(bracketed)}`,
+      );
+      assert.deepEqual(
+        asArray(get(bracketed, 'variables')).map((each) => [get(each, 'name'), get(each, 'default_value')]),
+        [['held', '5']],
+        `a trailing comment is not part of a default: ${JSON.stringify(bracketed)}`,
+      );
+      assert.deepEqual(
+        asArray(get(bracketed, 'constants')).map((each) => [get(each, 'name'), get(each, 'value')]),
+        // The `#` inside the string is not a comment, and the one after it is.
+        [['LABEL', '"hash # inside"']],
+        `nor of a constant, and a hash inside a string is not a comment: ${JSON.stringify(bracketed)}`,
       );
 
       // A native base declares nothing in a file, so the walk has nothing to do and says so with an
