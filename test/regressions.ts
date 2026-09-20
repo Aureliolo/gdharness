@@ -613,6 +613,15 @@ function frameJsonRpc(message: unknown): Buffer {
   return Buffer.concat([Buffer.from(`Content-Length: ${body.length}\r\n\r\n`, 'ascii'), body]);
 }
 
+/** Whether [condition] comes true within [patienceMs], for a state that arrives over a socket. */
+async function cameTrue(condition: () => boolean, patienceMs = 2000): Promise<boolean> {
+  const deadline = Date.now() + patienceMs;
+  while (!condition() && Date.now() < deadline) {
+    await delay(20);
+  }
+  return condition();
+}
+
 /** Both protocols frame the same way; what the body is (JSON-RPC or DAP) is the handler's business. */
 type FramedPeerHandler = (message: Record<string, unknown>, socket: Socket) => void;
 
@@ -994,11 +1003,10 @@ async function testAStopIsKnownToTheConnectionItWasSentTo(): Promise<void> {
     async (port) => {
       const told = new GodotDAPClient(port, '127.0.0.1');
       await told.connect();
-      const patience = Date.now() + 2000;
-      while (!told.holdIsKnown() && Date.now() < patience) {
-        await delay(20);
-      }
-      assert.ok(told.holdIsKnown(), 'a stop sent to a connection that never attached is known to it');
+      assert.ok(
+        await cameTrue(() => told.holdIsKnown()),
+        'a stop sent to a connection that never attached is known to it',
+      );
       assert.equal(told.whereItStopped()?.reason, 'exception', 'with the reason it was sent with');
 
       await told.attach();
@@ -1096,6 +1104,67 @@ async function testAStopThatLandsWhileAttachAsksIsTheAnswer(): Promise<void> {
     );
     await session.abandon();
   });
+}
+
+/**
+ * A game let go by somebody else is known here to be running.
+ *
+ * The session cleared its hold on its own `continue` request and on nothing else, on the strength
+ * of a comment saying the adapter sends no `continued`. It does: measured on 4.7.2, a second client
+ * sending `continue` put a `continued` event on the connection of the session that had been told
+ * of the stop, and that session went on answering held about a game that was running, since the
+ * editor's own debugger and any other client resume the game without asking it. This holds the
+ * event's effect against a scripted adapter; the editor tier holds its arrival from a real one.
+ */
+async function testAContinueByAnotherClientIsKnownHere(): Promise<void> {
+  const respond: FramedPeerHandler = (message, socket) => {
+    socket.write(
+      frameJsonRpc({
+        seq: Number(message['seq']) + 100,
+        type: 'response',
+        request_seq: message['seq'],
+        command: message['command'],
+        success: true,
+        body: {},
+      }),
+    );
+  };
+  const stopped = frameJsonRpc({
+    seq: 1,
+    type: 'event',
+    event: 'stopped',
+    body: { reason: 'breakpoint', description: 'Breakpoint', threadId: 1 },
+  });
+  const continued = frameJsonRpc({ seq: 2, type: 'event', event: 'continued', body: { threadId: 1 } });
+  let peer: Socket | null = null;
+
+  await withFramedPeer(
+    respond,
+    async (port) => {
+      const told = new GodotDAPClient(port, '127.0.0.1');
+      await told.connect();
+      assert.ok(
+        await cameTrue(() => told.isStopped()),
+        'the stop reaches the session, or nothing below is a test',
+      );
+      assert.equal(told.whereItStopped()?.reason, 'breakpoint', 'and it knows why the game is held');
+
+      // Somebody else lets the game go. Nothing here asked for it.
+      assert.ok(peer !== null, 'the adapter holds the connection it will send the event on');
+      peer.write(continued);
+      assert.ok(
+        await cameTrue(() => !told.isStopped()),
+        'a continue by another client is a game this session knows is running',
+      );
+      assert.equal(told.whereItStopped(), null, 'so nothing is claimed about where it is held');
+      assert.ok(told.holdIsKnown(), 'and that is an answer rather than a default');
+      await told.abandon();
+    },
+    (socket) => {
+      peer = socket;
+      socket.write(stopped);
+    },
+  );
 }
 
 /**
@@ -10436,6 +10505,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testLettingGoOfTheAdapterSendsItNothing,
   testAStopIsKnownToTheConnectionItWasSentTo,
   testAStopThatLandsWhileAttachAsksIsTheAnswer,
+  testAContinueByAnotherClientIsKnownHere,
   testProjectGodotResistsPrototypeKeys,
 
   testAnAnswerFromAStaleAddonSaysSo,
