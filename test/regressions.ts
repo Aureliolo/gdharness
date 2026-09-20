@@ -3848,7 +3848,13 @@ function testTheStaleNoteNamesTheCallThatRebuildsTheCopy(): void {
   // edit the file the diagnostics are already wrong about is the retracted cure, and the one thing
   // every one of these sentences has to keep out. See testTheCureIsWrittenWhole.
   const withLever = staleAnalysisNote([bell], ['Rope', 'Clapper']);
-  assert.match(withLever, /changing Clapper, Rope and rescanning/, 'named in order, so the note is stable');
+  // "or" between the levers and "then" before the scan, because "changing Clapper, Rope and
+  // rescanning" read as three things to do, the last of them a file called rescanning.
+  assert.match(
+    withLever,
+    /changing Clapper or Rope and then rescanning/,
+    'named in order, so the note is stable, and as alternatives followed by the scan',
+  );
   assert.doesNotMatch(withLever, /depend on no other global class/, 'and the no-lever half is gone');
 
   const pair = staleAnalysisNote(
