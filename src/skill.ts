@@ -41,7 +41,7 @@ that is running, and the project on disk. ${TOOL_SPECS.length} tools, named \`do
 ## Start here
 
 - Every call takes \`projectPath\` except ${toolsWithoutProjectPath()
-    .map((name: string) => `\\\`${name}\\\``)
+    .map((name: string) => `\`${name}\``)
     .join(', ')}, which take none. The \`runtime_*\` and \`debug_*\` ones pick between running
   games instead; the others answer about the editor this server is connected to. There is no
   ambient project, and an argument a tool does not declare is refused rather than ignored.
