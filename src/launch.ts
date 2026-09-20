@@ -132,7 +132,10 @@ export const OPENED_BY_A_SERVER = 'GDHARNESS_OPENED_BY_A_SERVER';
  *
  * Windows reads `APPDATA` and Linux `XDG_DATA_HOME`. macOS reads neither: its user directory hangs
  * off `HOME`, and moving that moves far more than saves, so a run there still writes where it
- * always did.
+ * always did. That last sentence is measured, not remembered: a probe printing
+ * `OS.get_user_data_dir()` under this environment on Godot 4.7.2 answered
+ * `~/Library/Application Support/Godot/app_userdata/...` on macOS and the moved directory on the
+ * other two, and the fixture that took the reading holds it against {@link savesStayPut}.
  */
 export function userDataIn(home: string, variables: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const moved = ['APPDATA', 'XDG_DATA_HOME'];
@@ -150,3 +153,19 @@ export function userDataIn(home: string, variables: NodeJS.ProcessEnv = process.
   }
   return carried;
 }
+
+/**
+ * Whether a run given {@link userDataIn}'s environment still writes its saves where the player's are.
+ *
+ * One function for the answer and the fixture that measures it, so the note a caller reads and the
+ * expectation the engine tier holds cannot say different things: an engine that starts honouring
+ * the variable on macOS fails the fixture there, and the change that makes it pass is the change
+ * that stops saying this.
+ */
+export function savesStayPut(platform: NodeJS.Platform = process.platform): boolean {
+  return platform === 'darwin';
+}
+
+/** What a run is told when its saves could not be moved, which is the half nothing said. */
+export const SAVES_NOT_MOVED_NOTE =
+  'On macOS the engine reads user:// off HOME and ignores the variables that move it elsewhere, measured on Godot 4.7.2, so this run wrote its saves where the player keeps theirs. A suite that saves a game has written into the same folder as the copy being played, and one that tidies up after itself may have removed real saves.';
