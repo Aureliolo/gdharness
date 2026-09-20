@@ -60,6 +60,11 @@ func reload_script(args: Dictionary) -> Dictionary:
 	if script == null:
 		return {"ok": false, "error": path + " is not a GDScript"}
 
+	# What the copy had before anything touched it, which is the reading that shows the fault rather
+	# than the one that mends it. Without it a caller cannot tell a copy that was already current
+	# from one this call repaired, and those are different facts about their editor.
+	var held: Array[String] = _method_names(script)
+
 	# The source is read off disk and put back before reloading, which is the whole of the fix and
 	# is not obvious. `reload` recompiles from the object's own `source_code`, not from the file, so
 	# a script the editor loaded before the change recompiles the text it was holding and comes back
@@ -75,11 +80,15 @@ func reload_script(args: Dictionary) -> Dictionary:
 	if failed != OK:
 		return {"ok": false, "error": "Reloading " + path + " answered error " + str(failed)}
 
-	var methods: Array[String] = []
+	return {"ok": true, "script": path, "heldBefore": held, "methods": _method_names(script)}
+
+
+func _method_names(script: GDScript) -> Array[String]:
+	var names: Array[String] = []
 	for entry: Dictionary in script.get_script_method_list():
-		methods.append(str(entry.get("name", "")))
-	methods.sort()
-	return {"ok": true, "script": path, "methods": methods}
+		names.append(str(entry.get("name", "")))
+	names.sort()
+	return names
 
 
 func global_classes(_args: Dictionary) -> Dictionary:
