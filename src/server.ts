@@ -671,7 +671,7 @@ class GodotServer {
    * taken, which is the right reference for an editor that was already running and has to notice,
    * and no reference at all for one started afterwards.
    */
-  private launchedEditor: number | null = null;
+  private launchedEditor: ChildProcess | null = null;
 
   /**
    * What project.godot held when this server opened an editor on it, until that editor arrives.
@@ -2482,7 +2482,23 @@ class GodotServer {
    * is not there" about an editor the same server had just started.
    */
   private anEditorIsStillComing(listeningSince: Date | undefined): boolean {
-    return anEditorIsStillComing(listeningSince, this.launchedEditor !== null && alive(this.launchedEditor));
+    return anEditorIsStillComing(listeningSince, this.launchedEditorIsUp());
+  }
+
+  /**
+   * Whether the editor this server started is still running, asked of the process it started.
+   *
+   * `exitCode === null && signalCode === null` is this process's own record of a child it holds,
+   * which cannot be answered wrongly by the operating system reusing a number.
+   *
+   * No case disarms this, and that is worth saying rather than leaving for somebody to discover.
+   * The old reading asked `alive()` of a remembered pid, and for a process that has exited the two
+   * agree: both say no. They part only where the number has been handed to something else, which is
+   * not a state a fixture can bring about on demand. What holds it is that the question is asked of
+   * a handle this server owns rather than of a number anybody's process might be wearing.
+   */
+  private launchedEditorIsUp(): boolean {
+    return this.launchedEditor?.exitCode === null && this.launchedEditor.signalCode === null;
   }
 
   /** The one debug adapter client, which the debug tools and an editor-played game share. */
@@ -2567,9 +2583,7 @@ class GodotServer {
       // "yes" cannot tell a window that will close in seconds from an import that will take
       // minutes, and the pid is the thing they can watch.
       awaitingLaunchedEditor:
-        status.connected || this.launchedEditor === null || !alive(this.launchedEditor)
-          ? undefined
-          : this.launchedEditor,
+        status.connected || !this.launchedEditorIsUp() ? undefined : (this.launchedEditor?.pid ?? undefined),
       // What the editor this server opened saved away on its way in, said once. The restart says
       // this in its own answer; an open cannot, because it returns before the save happens.
       ...(status.connected ? this.whatTheLaunchedEditorDropped() : {}),
@@ -2959,7 +2973,18 @@ class GodotServer {
     // its port, which is the right reference for an editor that was already up and has to notice,
     // and no reference at all for one started afterwards: a launch on a server that has been up
     // longer than the window reads as final the moment it returns.
-    this.launchedEditor = editor.pid ?? null;
+    //
+    // The process rather than its number, because the number is only good while the process holds
+    // it. This was a bare pid asked `alive()`, set once and never cleared, so an editor that
+    // exited without connecting left the pid behind and any later process the operating system
+    // handed it to answered yes: the server would then report that an editor it started was still
+    // on its way, and name a pid belonging to something else. A downstream reading of
+    // `mayYetConnect: true` with a game running and `false` once the game stopped is consistent
+    // with exactly that, and the same reasoning already forbids ending a run by pid alone here.
+    // Only when it has a number, because a child with none never started, and a handle whose
+    // `exitCode` has not been set yet would otherwise report an editor on its way that does not
+    // exist. A spawn that failed outright has already returned above.
+    this.launchedEditor = editor.pid === undefined ? null : editor;
     return { pid: editor.pid ?? null, error: null };
   }
 
