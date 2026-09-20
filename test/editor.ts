@@ -1662,6 +1662,20 @@ async function testAMethodAddedToAnAnalysedTypeIsPickedUp({ call, project }: Edi
     ].join('\n'),
   );
 
+  // The remedy for the fault this case stands against, checked for doing what it says rather than
+  // for curing anything: the fault does not reproduce here, so what can be held is that a reload
+  // recompiles the editor's built copy and that the new member is in it afterwards. A reload that
+  // answered OK and compiled nothing would pass an assertion about the reload succeeding, and is
+  // exactly the failure worth catching, so the members are the evidence.
+  const reloaded = await call('editor_rescan', { projectPath: project, reloadScript: 'res://bell.gd' });
+  assert.equal(get(reloaded, 'reloadProblem'), undefined, JSON.stringify(reloaded));
+  const members = asArray(get(reloaded, 'reloadedMethods')).map((entry) => asString(entry, 'method'));
+  assert.ok(
+    members.includes('silence'),
+    `the recompiled copy should have the method added since it was built: ${members.join(', ')}`,
+  );
+  assert.ok(members.includes('toll'), 'and should still have the one it was built with');
+
   const grown = await read();
   assert.equal(
     get(grown, 'clean'),
