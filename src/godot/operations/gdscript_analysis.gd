@@ -64,21 +64,27 @@ func get_gdscript_info(params: Dictionary) -> Dictionary:
 		if in_multiline_string:
 			continue
 
-		var at: int = i
-		# A declaration wrapped across lines is one declaration, and reading the first line alone
-		# answered with the half that was not wrapped away: `values: []` for every `enum X {` on its
-		# own line and `params: []` with no return type for every `func x(`. `gdformat` wraps
-		# anything past the line length, so that is what a formatted project looks like: 23 and 19
-		# of them in gdUnit4 v6.2.1, and four in this addon.
-		while _bracket_depth(stripped) > 0 and i + 1 < lines.size():
-			i += 1
-			stripped = (stripped + " " + _without_comment(lines[i])).strip_edges()
-
 		# Annotations may share the line with anything they annotate, so every branch below decides
 		# on the line with them off. `@abstract class_name X` was reported as no declared class,
 		# and `@abstract func x()` and `@warning_ignore("...") func x()` as no function at all:
 		# gdUnit4 alone declares 248 methods that way and this answered with none of them.
 		var header: String = Patterns.without_annotations(stripped)
+
+		var at: int = i
+		# A declaration wrapped across lines is one declaration, and reading the first line alone
+		# answered with the half that was not wrapped away: `values: []` for every `enum X {` on its
+		# own line and `params: []` with no return type for every `func x(`. `gdformat` wraps
+		# anything past the line length, so that is what a formatted project looks like: 23 and 19
+		# of them in gdUnit4 v6.2.1, 55 in one game project, and four in this addon.
+		#
+		# Only a declaration, because an unbalanced line anywhere else is a file mid-edit and
+		# joining from one swallows the rest of it: a body holding `print(` with nothing closing it
+		# took every declaration below it, which is the state an agent is most likely to ask about.
+		if _can_wrap(header):
+			while _bracket_depth(stripped) > 0 and i + 1 < lines.size():
+				i += 1
+				stripped = (stripped + " " + _without_comment(lines[i])).strip_edges()
+			header = Patterns.without_annotations(stripped)
 		var declaration: RegExMatch = Patterns.declared_class(header)
 		if declaration != null:
 			declared_class_name = declaration.get_string(1)
@@ -422,6 +428,14 @@ func _arguments_in(text: String) -> Array[String]:
 	if not current.strip_edges().is_empty():
 		pieces.append(current.strip_edges())
 	return pieces
+
+
+# Whether this is a declaration whose brackets may carry on to the next line.
+func _can_wrap(header: String) -> bool:
+	for keyword: String in ["func ", "static func ", "enum ", "signal ", "var ", "const "]:
+		if header.begins_with(keyword):
+			return true
+	return false
 
 
 # How much this line opens that it does not close, ignoring brackets inside strings.

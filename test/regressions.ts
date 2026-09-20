@@ -5104,6 +5104,26 @@ async function testAStructureReadDescribesTheScriptItRead(): Promise<void> {
       join(project, 'wrapped.gd'),
       ['extends RefCounted', '', 'enum Mode {', '\tFAST,', '\tSLOW,', '}', ''].join('\n'),
     );
+    // A file mid-edit, which is the state an agent is most likely to ask about. Joining lines until
+    // the brackets balance made this worse before it was bounded to declarations: an unclosed
+    // `print(` in a body ran to the end of the file and took `after` with it.
+    writeFileSync(
+      join(project, 'broken.gd'),
+      [
+        'extends RefCounted',
+        '',
+        'var kept: int = 1',
+        '',
+        '',
+        'func half_written() -> void:',
+        '\tprint(',
+        '',
+        '',
+        'func after() -> void:',
+        '\tpass',
+        '',
+      ].join('\n'),
+    );
 
     const server = new ServerProcess({ env: { GODOT_PATH: godotPath } });
     try {
@@ -5278,6 +5298,24 @@ async function testAStructureReadDescribesTheScriptItRead(): Promise<void> {
         // The line is where the declaration starts, not where its closing brace is.
         [['Mode', ['FAST', 'SLOW'], 3]],
         `a wrapped enum has the members it declares: ${JSON.stringify(wrapped)}`,
+      );
+
+      const halfWritten = await call('script_info', {
+        projectPath: project,
+        op: 'structure',
+        scriptPath: 'res://broken.gd',
+      });
+      assert.deepEqual(
+        asArray(get(halfWritten, 'functions')).map((each) => get(each, 'name')),
+        // Both of them: the one holding the unclosed bracket and the one below it. The second is
+        // the whole point, since joining to the end of the file leaves the first exactly as it is.
+        ['half_written', 'after'],
+        `an unclosed bracket in a body costs nothing below it: ${JSON.stringify(halfWritten)}`,
+      );
+      assert.deepEqual(
+        asArray(get(halfWritten, 'variables')).map((each) => get(each, 'name')),
+        ['kept'],
+        `and the variable above it is still read: ${JSON.stringify(halfWritten)}`,
       );
       assert.deepEqual(
         asArray(get(bracketed, 'signals')).map((each) => [
