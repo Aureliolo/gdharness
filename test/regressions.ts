@@ -2513,6 +2513,82 @@ function testProjectDefaultsToTheWorkingDirectory(): void {
  *
  * Engine-free, like the doctor test above it: this is git and project.godot and nothing else.
  */
+/**
+ * Every GDScript in the tree is somewhere the GDScript gates look, and every place they look holds
+ * some.
+ *
+ * `gdlint` and `gdformat --check` both exit 0 when handed a directory with no GDScript in it, and
+ * `gdformat` says "0 files would be left unchanged" while doing it, which reads like a pass. So the
+ * paths in `package.json` are a list nothing holds against the tree: move a directory, add one, or
+ * mistype one, and the gate goes on reporting success over less than it did, or over nothing.
+ *
+ * Reported by a downstream project that asked every gate it has what it says about a directory
+ * holding nothing of its language. `ruff`, `ty`, `gdlint`, `gdformat` and `markdownlint-cli2` all
+ * answered 0.
+ *
+ * Both directions, because each alone is satisfied by a mistake in the other. A script outside
+ * every named path is one nothing checks. A named path with nothing under it is a gate checking
+ * nothing and saying so in the language of success, and it is also the positive here: a walk that
+ * had stopped finding files would satisfy the first assertion perfectly.
+ *
+ * The three commands are held level too. They are written out separately, and a directory added to
+ * the linter and not to the formatter is a directory only half of them reads.
+ */
+function testEveryGdscriptIsUnderTheGatesAndEveryGateHasSome(): void {
+  const manifest: unknown = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8'));
+  // Everything after the tool that is not a flag. Reading only the words with a slash in them
+  // looked equivalent and is not: it cannot see a directory at the top level, which is the one a
+  // mistyped or moved path is most likely to be, and the disarm that adds one passed because of it.
+  const pathsIn = (script: string): string[] => {
+    const line = get(manifest, 'scripts', script);
+    assert.equal(typeof line, 'string', `package.json should define the ${script} script`);
+    return String(line)
+      .split(/\s+/)
+      .slice(1)
+      .filter((word) => word !== '' && !word.startsWith('-'));
+  };
+
+  const gated = pathsIn('lint:gd');
+  assert.ok(
+    gated.length > 0,
+    `lint:gd should name the directories it checks: ${String(get(manifest, 'scripts', 'lint:gd'))}`,
+  );
+  for (const other of ['format:gd', 'format:gd:check']) {
+    assert.deepEqual(
+      pathsIn(other),
+      gated,
+      `${other} reads the same directories as lint:gd, or one of them is only half checked`,
+    );
+  }
+
+  const found: string[] = [];
+  const walk = (directory: string, prefix: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      if (entry.name.startsWith('.') || entry.name === 'node_modules' || entry.name === 'build') {
+        continue;
+      }
+      const here = `${prefix}${entry.name}`;
+      if (entry.isDirectory()) {
+        walk(join(directory, entry.name), `${here}/`);
+      } else if (entry.name.endsWith('.gd')) {
+        found.push(here);
+      }
+    }
+  };
+  walk(process.cwd(), '');
+
+  const outside = found.filter((path) => !gated.some((where) => path.startsWith(`${where}/`)));
+  assert.deepEqual(outside, [], `every .gd belongs to a directory the gates name, and these do not`);
+
+  for (const where of gated) {
+    const under = found.filter((path) => path.startsWith(`${where}/`));
+    assert.ok(
+      under.length > 0,
+      `${where} is named by the gates and holds no .gd, so both tools pass over nothing there`,
+    );
+  }
+}
+
 function testAnAutoloadGitWillNotCarry(): void {
   const project = mkdtempSync(join(tmpdir(), 'gdharness-ignored-'));
   const git = (...gitArgs: string[]): SpawnSyncReturns<string> =>
@@ -8243,6 +8319,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARestartSaysWhatTheEditorDropped,
   testProjectDefaultsToTheWorkingDirectory,
   testAnAutoloadGitWillNotCarry,
+  testEveryGdscriptIsUnderTheGatesAndEveryGateHasSome,
   testVersionOrdering,
   testChangelogReach,
   testTheCureIsWrittenWhole,
