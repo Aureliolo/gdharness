@@ -795,7 +795,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'number',
         ops: ['start'],
         description:
-          'start: how long to wait for the game to announce its runtime before answering. Default 5000. Worth raising for a project that takes longer than that to reach its first frame, which is what leaves runtime listening false on a game whose runtime arrives a moment later. 0 does not wait at all, which is the one to pass for a scene that announces nothing by construction, such as a bench that prints and quits.',
+          'start: how long to wait for the game to announce its runtime before answering. Default 5000. What it waits for is the first frame, so everything the game does before drawing one is inside it, including work the args just asked for: a flag that simulates six years of game time before anything is drawn makes the announcement that late, on a project that announces promptly without it. Raise it for such a run rather than reading runtime listening false as a fault. 0 does not wait at all, which is the one to pass for a scene that announces nothing by construction, such as a bench that prints and quits.',
       },
       frames: {
         type: 'number',

@@ -2825,20 +2825,59 @@ function testANotYetRuntimeIsNotTheSameAsNoRuntime(): void {
       project: { name: 'F', path: '/p' },
       file: 'runtime-4242.json',
     },
-    { addon: true, budgetMs: 5_000, heldAt: null, running: true },
+    { addon: true, budgetMs: 5_000, heldAt: null, running: true, withArgs: false },
   );
   assert.deepEqual(listening, { listening: true, pid: 4242, port: 51_300 }, 'a runtime that answered');
 
-  const none = runtimeVerdict(null, { addon: false, budgetMs: 5_000, heldAt: null, running: true });
+  const none = runtimeVerdict(null, {
+    addon: false,
+    budgetMs: 5_000,
+    heldAt: null,
+    running: true,
+    withArgs: false,
+  });
   assert.equal(none['listening'], false);
   assert.equal(none['mayYetAnnounce'], false, 'a project with no addon is never going to announce');
 
-  const booting = runtimeVerdict(null, { addon: true, budgetMs: 5_000, heldAt: null, running: true });
+  const booting = runtimeVerdict(null, {
+    addon: true,
+    budgetMs: 5_000,
+    heldAt: null,
+    running: true,
+    withArgs: false,
+  });
   assert.equal(booting['listening'], false);
   assert.equal(booting['mayYetAnnounce'], true, 'a game still running may still announce');
   assert.match(String(booting['note']), /runtimeWaitMs/, 'and the answer names the way to wait longer');
 
-  const over = runtimeVerdict(null, { addon: true, budgetMs: 5_000, heldAt: null, running: false });
+  // The reason the wait ran out is often the caller's own arguments, and from where they sit that
+  // is invisible: the same project answers straight away without them. Reported from a run given
+  // `--days=600`, which simulates six years before it draws anything.
+  const carrying = runtimeVerdict(null, {
+    addon: true,
+    budgetMs: 5_000,
+    heldAt: null,
+    running: true,
+    withArgs: true,
+  });
+  assert.match(
+    String(carrying['note']),
+    /arguments/,
+    'a run given arguments of its own is told they are inside the wait',
+  );
+  assert.doesNotMatch(
+    String(booting['note']),
+    /arguments/,
+    'and a run given none is not told about arguments it did not pass',
+  );
+
+  const over = runtimeVerdict(null, {
+    addon: true,
+    budgetMs: 5_000,
+    heldAt: null,
+    running: false,
+    withArgs: false,
+  });
   assert.equal(over['listening'], false);
   assert.equal(over['mayYetAnnounce'], false, 'a game that has ended is not going to announce');
   assert.match(String(over['note']), /editor_output/, 'and the answer says where its output went');
@@ -2850,6 +2889,7 @@ function testANotYetRuntimeIsNotTheSameAsNoRuntime(): void {
     budgetMs: 5_000,
     heldAt: { reason: 'breakpoint', description: 'Paused on breakpoint', text: 'res://main.gd:12' },
     running: true,
+    withArgs: false,
   });
   assert.equal(held['mayYetAnnounce'], true, 'a held game announces once it is let go');
   assert.match(String(held['note']), /debug_control continue/, 'and the answer says what lets it go');
