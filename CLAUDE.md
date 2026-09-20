@@ -81,6 +81,28 @@ own skills directory, then says the same count again one line down about the cop
 them; only the first was in the table. When a count is worth holding, hold every statement of it, or
 the unheld one is licensed by the held one standing beside it.
 
+The same goes for the set a check runs over. A check that names the files it reads is one the next
+file escapes by sitting somewhere nobody listed, and the escape is silent because the check is about
+the files it did read. The gate on tool names in prose named three documents when there were five,
+took one of the skill's two files, and did not read the addon's GDScript at all; the file it skipped
+in the skill was the generated reference, which is the half a rename actually rewrites. Walk the
+directory instead, so a file is covered by being a file.
+
+Deriving that set stops it going stale and does not stop it being wrong, and derivation is the more
+dangerous of the two because it looks after itself. The same gate took its vocabulary of words that
+are shaped like a tool and are not from the `.gd` filenames, rather than listing them, so a module
+added later would be known at once. Two of those modules are named after the tools they implement, so
+the derivation excused `runtime_capture` and `runtime_input` everywhere and the gate stopped checking
+two of the things it exists for while every assertion stayed green. A list that long invites somebody
+to read it; a one-line derivation invites nobody. Derive the set, then ask what the derivation
+subtracts from the thing being checked.
+
+What caught it was arithmetic rather than a failure: the mention count fell from 427 to 422 after a
+change that only added sources. A number that moves the wrong way is the instrument reporting on
+itself, and it is worth more than the assertions beside it, because an assertion can only speak about
+what the check still looks at. So when a count is kept for a floor, read it on every change and ask
+which direction it should have gone.
+
 A disarm that still passes is a statement about the setup before it is one about the check. The
 fixture reached the assertion without walking the line that was broken, so the reading to reject
 first is that the assertion is too weak: strengthening it only buys a fixture that fails for a
