@@ -166,6 +166,27 @@ export function mayYetConnect(listeningSince: Date | undefined, now: number = Da
   return listeningSince === undefined || now - listeningSince.getTime() < CONNECT_WINDOW_MS;
 }
 
+/**
+ * The same question, counting an editor this server started that has not dialled in yet.
+ *
+ * The window above is measured from the bridge taking its port, which is the right reference for an
+ * editor that was already running and has to notice, and no reference at all for one started
+ * afterwards: a launch on a server that has been up longer than the window reads as final the
+ * moment it returns. An editor imports the project before it loads any plugin, so on a large one
+ * the gap between launching and dialling in is minutes. Measured downstream at nine, over which
+ * this answered "an editor that is not there" about the editor the same server had just started.
+ *
+ * Either reason is enough and a live launched process outlasts the window by design, since what it
+ * reports is a process somebody can watch rather than a guess about timing.
+ */
+export function anEditorIsStillComing(
+  listeningSince: Date | undefined,
+  launchedEditorIsAlive: boolean,
+  now: number = Date.now(),
+): boolean {
+  return mayYetConnect(listeningSince, now) || launchedEditorIsAlive;
+}
+
 export class GodotBridge extends EventEmitter {
   /**
    * When this bridge started listening, which is when an editor already up could first reach it.

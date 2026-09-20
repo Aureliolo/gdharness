@@ -57,7 +57,7 @@ import { DEFAULT_DAP_PORT, GodotDAPClient, handleDAPTool, type StoppedAt } from 
 import { dictionary, emptyRecord } from './dictionary.js';
 import { errorMessage, Refusal } from './errors.js';
 import { forAnswer, GameLog, type LogEntry } from './game-log.js';
-import { type GodotBridge, getDefaultBridge, mayYetConnect } from './godot-bridge.js';
+import { anEditorIsStillComing, type GodotBridge, getDefaultBridge } from './godot-bridge.js';
 import { GodotLocator } from './godot-path.js';
 import { type HeadlessOutcome, runImport, runOperation } from './headless.js';
 import { EDITOR_READS, ENGINE_PASSES, HEADLESS_OPERATIONS } from './headless-operations.js';
@@ -77,7 +77,7 @@ import { isSameDirectory, realPathOr, resolveWithinProject } from './paths.js';
 import { freePort, portFromEnvOrNull } from './ports.js';
 import { cpuSecondsOf } from './process-time.js';
 import { projectStructure, scriptsWithoutUid, searchProject } from './project-scan.js';
-import { parseProjectGodot, settingKeys, setupResourceHandlers } from './resources.js';
+import { parseProjectGodot, settingKeys, settingsDroppedReport, setupResourceHandlers } from './resources.js';
 import {
   clearRunRecord,
   couldStillBeTheRecordedRun,
@@ -639,6 +639,27 @@ class GodotServer {
   private successorWatch: NodeJS.Timeout | null = null;
   private lastProjectPath: string | null = null;
   private shutdownInitiated = false;
+
+  /**
+   * The editor this server started that has not dialled in yet, by pid, or null.
+   *
+   * An editor imports a project before it loads a plugin, and on a large one that is minutes. While
+   * this process is alive and nothing has connected, the honest answer to "is an editor coming" is
+   * yes, whatever the bridge's own grace window says: the window is measured from the port being
+   * taken, which is the right reference for an editor that was already running and has to notice,
+   * and no reference at all for one started afterwards.
+   */
+  private launchedEditor: number | null = null;
+
+  /**
+   * What project.godot held when this server opened an editor on it, until that editor arrives.
+   *
+   * The restart reports what the editor saved away in its own answer, because it waits for the
+   * editor to come back. An open cannot: it returns when the process exists and the save happens
+   * during the import, minutes later. So the reading is kept here and `editor_status` makes it once
+   * there is an editor to have done the saving, after which there is nothing left to compare.
+   */
+  private launchedFrom: { projectPath: string; before: Map<string, unknown> } | null = null;
 
   /**
    * The project this server was set up for, from the config `setup` wrote, or null.
@@ -2428,6 +2449,20 @@ class GodotServer {
     return `The debug adapter on port ${port} belongs to process ${holder}, and the editor on this server's bridge is process ${ours}. Godot gives every editor the same debug adapter port by default, so the one this editor names in its settings is not necessarily the one it holds. Playing the game now would put another editor's console and another project's debugger under this project's name.`;
   }
 
+  /**
+   * Whether an editor could still reach this bridge, counting one this server started itself.
+   *
+   * Two reasons and either is enough. The bridge may be young, which covers an editor that was
+   * already running and has to notice the port. Or this server launched one and that process is
+   * still alive without having dialled in, which covers the import: an editor loads no plugin until
+   * the project is imported, and on a large project that is minutes rather than the half-minute the
+   * window allows. Measured downstream at nine minutes, over which the answer read "an editor that
+   * is not there" about an editor the same server had just started.
+   */
+  private anEditorIsStillComing(listeningSince: Date | undefined): boolean {
+    return anEditorIsStillComing(listeningSince, this.launchedEditor !== null && alive(this.launchedEditor));
+  }
+
   /** The one debug adapter client, which the debug tools and an editor-played game share. */
   private dap(): GodotDAPClient {
     const port = this.editorServes('dapPort', 'GDHARNESS_DAP_PORT', DEFAULT_DAP_PORT);
@@ -2505,7 +2540,17 @@ class GodotServer {
       // connected" and "there is no editor" are the same answer to two different questions. A
       // downstream session read the first as the second straight after an upgrade respawned the
       // server, and went looking through the machine's processes to find the editor still up.
-      mayYetConnect: status.connected ? undefined : mayYetConnect(status.listeningSince),
+      mayYetConnect: status.connected ? undefined : this.anEditorIsStillComing(status.listeningSince),
+      // Which of the two reasons the line above is true, when it is the launch. A caller told only
+      // "yes" cannot tell a window that will close in seconds from an import that will take
+      // minutes, and the pid is the thing they can watch.
+      awaitingLaunchedEditor:
+        status.connected || this.launchedEditor === null || !alive(this.launchedEditor)
+          ? undefined
+          : this.launchedEditor,
+      // What the editor this server opened saved away on its way in, said once. The restart says
+      // this in its own answer; an open cannot, because it returns before the save happens.
+      ...(status.connected ? this.whatTheLaunchedEditorDropped() : {}),
       startupError: this.bridgeStartupError,
       staleNote: stale ? addonMismatch(status.addonVersion, SERVER_VERSION) : undefined,
       retryingBridge: this.bridgeRetry === null ? undefined : true,
@@ -2676,7 +2721,6 @@ class GodotServer {
     // consecutive restarts of the same project, so it is not a curiosity to read once: it is the
     // only thing keeping that setting alive, and what it is worth depends on how few steps there
     // are between reading it and putting the value back.
-    const dropped = [...settingsBefore].filter(([key]) => !after.has(key));
     return this.jsonTextResponse({
       restarted: true,
       editorPid: now.editorPid,
@@ -2684,13 +2728,41 @@ class GodotServer {
       serverVersion: SERVER_VERSION,
       addonIsStale: now.addonVersion !== SERVER_VERSION,
       staleNote: addonMismatch(now.addonVersion, SERVER_VERSION),
-      settingsDropped: dropped.length > 0 ? dropped.map(([setting, was]) => ({ setting, was })) : undefined,
-      settingsNote:
-        dropped.length > 0
-          ? `The editor saved project.godot on its way out and these keys are no longer in it, with the value each one held. Godot writes only what differs from its own defaults, so a key named deliberately at its default value is redundant to the editor and is dropped on save; it will be dropped again on the next restart. If any of them were pinned on purpose, to keep "set to this on purpose" and "not set" apart, project_settings set puts one back: ${dropped.map(([setting, was]) => `setting "${setting}" value ${JSON.stringify(was)}`).join(', ')}. Nothing else will say they have gone until something depends on one.`
-          : undefined,
+      ...this.whatTheEditorDropped(settingsBefore, after),
       tookMs: Date.now() - began,
     });
+  }
+
+  /**
+   * The settings an editor saved away, as the fields that report them.
+   *
+   * One home for the comparison and the sentence, because the same thing happens on an `open` and
+   * the answer there said nothing at all about it. Godot does the stripping either way; the two
+   * calls differ only in when they can notice, so they should not differ in what they say.
+   *
+   * With the value each one held, because naming the key alone leaves the caller to go and find
+   * what it was set to in a file that no longer has the line. Downstream this has fired on six
+   * launches of the same project, so it is not a curiosity to read once: it is the only thing
+   * keeping that setting alive, and what it is worth depends on how few steps there are between
+   * reading it and putting the value back.
+   */
+  /**
+   * The same report for an editor this server opened, made once the editor is there.
+   *
+   * Cleared whether or not anything was dropped, because the question is answered either way and a
+   * reading kept past its answer would be compared against a file somebody has since edited.
+   */
+  private whatTheLaunchedEditorDropped(): OperationParams {
+    const watched = this.launchedFrom;
+    if (watched === null) {
+      return {};
+    }
+    this.launchedFrom = null;
+    return this.whatTheEditorDropped(watched.before, this.settingKeysOf(watched.projectPath));
+  }
+
+  private whatTheEditorDropped(before: Map<string, unknown>, after: Map<string, unknown>): OperationParams {
+    return settingsDroppedReport(before, after);
   }
 
   /**
@@ -2775,16 +2847,27 @@ class GodotServer {
     }
     this.logDebug(`Launching Godot editor for project: ${project.value.path}`);
     const ports = await this.portsForAnEditor();
+    // Read before the editor is started, for the same reason the restart reads it: opening a
+    // project imports it and saves project.godot, and Godot drops a key that is at its own default.
+    // A restart can say so in its own answer because it waits for the editor to come back. This
+    // returns as soon as the process exists, minutes before the save, so what it can do is
+    // remember and let editor_status say it once the editor is actually there.
+    const before = this.settingKeysOf(project.value.path);
     const opened = await this.openAnEditor(engine.value, project.value.path, ports);
     if (opened.error !== null) {
       return this.createErrorResponse(`Could not start the editor: ${opened.error}`);
     }
+    this.launchedFrom = { projectPath: project.value.path, before };
     return this.jsonTextResponse({
       launched: true,
       pid: opened.pid,
       projectPath: project.value.path,
       lspPort: ports.lsp,
       dapPort: ports.dap,
+      settingsNote:
+        before.size === 0
+          ? undefined
+          : 'Opening a project imports it and saves project.godot, and Godot drops any key sitting at its own default. editor_status names anything lost under settingsDropped once this editor has connected.',
     });
   }
 
@@ -2830,6 +2913,12 @@ class GodotServer {
       return { pid: null, error: started };
     }
     editor.unref();
+    // Remembered so that "nothing is coming" and "the editor this server just started is still
+    // importing" stop being the same answer. The grace window is measured from the bridge taking
+    // its port, which is the right reference for an editor that was already up and has to notice,
+    // and no reference at all for one started afterwards: a launch on a server that has been up
+    // longer than the window reads as final the moment it returns.
+    this.launchedEditor = editor.pid ?? null;
     return { pid: editor.pid ?? null, error: null };
   }
 

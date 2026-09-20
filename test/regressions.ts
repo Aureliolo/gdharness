@@ -42,7 +42,12 @@ import {
 import { GodotDAPClient } from '../src/dap_client.js';
 import { dictionary, emptyRecord } from '../src/dictionary.js';
 import { forAnswer, GameLog } from '../src/game-log.js';
-import { CONNECT_WINDOW_MS, createBridge, mayYetConnect } from '../src/godot-bridge.js';
+import {
+  anEditorIsStillComing,
+  CONNECT_WINDOW_MS,
+  createBridge,
+  mayYetConnect,
+} from '../src/godot-bridge.js';
 import { EDITOR_READS, HEADLESS_OPERATIONS } from '../src/headless-operations.js';
 import {
   editorArguments,
@@ -57,7 +62,7 @@ import { isWithinRoot, resolveWithinProject } from '../src/paths.js';
 import { freePort } from '../src/ports.js';
 import { secondsFromClock } from '../src/process-time.js';
 import { projectStructure, searchProject } from '../src/project-scan.js';
-import { parseProjectGodot, settingKeys } from '../src/resources.js';
+import { parseProjectGodot, settingKeys, settingsDroppedReport } from '../src/resources.js';
 import {
   couldStillBeTheRecordedRun,
   judgeRun,
@@ -1074,6 +1079,29 @@ async function testAnEditorNotReachedYetIsNotAnEditorThatIsGone(): Promise<void>
     mayYetConnect(started, started.getTime() + CONNECT_WINDOW_MS),
     false,
     'past it, nothing having connected is an editor that is not there',
+  );
+
+  // An editor this server started is the other reason the answer can be true, and it is the one the
+  // window cannot express. The window runs from the bridge taking its port, so a launch on a server
+  // that has been up longer than the window read as final the moment it returned: measured
+  // downstream at nine minutes of "an editor that is not there" about an editor that server had
+  // just started, because an editor imports the project before it loads any plugin.
+  const longAfter = started.getTime() + CONNECT_WINDOW_MS * 20;
+  assert.equal(
+    anEditorIsStillComing(started, true, longAfter),
+    true,
+    'a launched editor still alive is coming, however long the import takes',
+  );
+  assert.equal(
+    anEditorIsStillComing(started, false, longAfter),
+    false,
+    'and with nothing launched and the window closed, the answer is still final',
+  );
+  // Either reason alone is enough, so a window that is still open does not depend on a launch.
+  assert.equal(
+    anEditorIsStillComing(started, false, started.getTime() + 1_000),
+    true,
+    'inside the window it answers as the window does, with nothing launched',
   );
 
   // And the answer carries it, which is the half that would otherwise be computed and dropped.
@@ -3801,6 +3829,58 @@ function testOnlyOurOwnAutoloadIsRewritten(): void {
  * arrives. `project.godot` loses a line in between, which is what Godot does to a key named at its
  * own default value.
  */
+/**
+ * An open and a restart say the same thing about what the editor saved away.
+ *
+ * Only the restart did. Godot drops a key sitting at its own default whenever it saves, which it
+ * does on an open just as much as on the way out, and `editor_launch open` answered with `launched`,
+ * a pid and two ports and nothing else. Reported downstream as a sixth strip of the same key and the
+ * first from an open.
+ *
+ * The comparison is one function for both now. What differs is when each call can make it: a
+ * restart waits for the editor to come back and says so in its own answer, while an open returns as
+ * soon as the process exists and the save happens during the import, so `editor_status` makes the
+ * reading once there is an editor to have done the saving.
+ */
+function testWhatTheEditorSavedAwayIsReportedTheSameWay(): void {
+  const before = new Map<string, unknown>([
+    ['debug/gdscript/warnings/return_value_discarded', 0],
+    ['debug/gdscript/warnings/unsafe_call_argument', 2],
+    ['application/config/name', 'Kept'],
+  ]);
+  const after = new Map<string, unknown>([
+    ['debug/gdscript/warnings/unsafe_call_argument', 2],
+    ['application/config/name', 'Kept'],
+  ]);
+
+  const said = settingsDroppedReport(before, after);
+  assert.deepEqual(
+    said.settingsDropped,
+    [{ setting: 'debug/gdscript/warnings/return_value_discarded', was: 0 }],
+    'the key that went is named, with the value it held',
+  );
+  assert.match(text(said.settingsNote), /project_settings set puts one back/, 'and the call to undo it');
+  assert.match(
+    text(said.settingsNote),
+    /writes only what differs from its own defaults/,
+    'with the mechanism, since the key going is not the editor misbehaving',
+  );
+  assert.match(
+    text(said.settingsNote),
+    /value 0/,
+    'and the value inside the sentence, not only in the list beside it',
+  );
+
+  // Nothing dropped says nothing, rather than an empty list a caller has to test for. The positive
+  // above is what shows this is the same function answering and not one that never reports.
+  assert.deepEqual(settingsDroppedReport(after, after), {}, 'a save that took nothing says nothing');
+  assert.deepEqual(
+    settingsDroppedReport(new Map(), after),
+    {},
+    'and a project that named nothing cannot have lost anything',
+  );
+}
+
 async function testARestartSaysWhatTheEditorDropped(): Promise<void> {
   const port = await reservePort();
   const server = new ServerProcess({ env: { GDHARNESS_BRIDGE_PORT: String(port) } });
@@ -7261,6 +7341,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnAuditThatCouldNotAskIsNotAnAuditThatPassed,
   testRefreshingUidsMakesTheSidecarAndWritesNoScene,
   testWhoIsHoldingAPortIsAskable,
+  testWhatTheEditorSavedAwayIsReportedTheSameWay,
   testARestartSaysWhatTheEditorDropped,
   testProjectDefaultsToTheWorkingDirectory,
   testAnAutoloadGitWillNotCarry,
