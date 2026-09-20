@@ -1045,6 +1045,60 @@ async function testAStopIsKnownToTheConnectionItWasSentTo(): Promise<void> {
 }
 
 /**
+ * A stop reported while the attach was asking about it is the answer, not the frames.
+ *
+ * The attach asks for the stack when the connection has been told nothing, and a game that reaches
+ * its breakpoint between the question and the answer puts frames in the answer and its reason in an
+ * event that lands in the same window. Frames learned by asking say "attached" and not why, so
+ * taking them over the event replaced `breakpoint` with `attached` on the session that had been
+ * told. Measured on macOS in the editor tier, where the first stack read after a play and the stop
+ * at a breakpoint in `_ready` land close enough together to cross; the adapter here crosses them on
+ * purpose, with the event written just ahead of the frames.
+ */
+async function testAStopThatLandsWhileAttachAsksIsTheAnswer(): Promise<void> {
+  const stopped = frameJsonRpc({
+    seq: 1,
+    type: 'event',
+    event: 'stopped',
+    body: { reason: 'breakpoint', description: 'Breakpoint', threadId: 1 },
+  });
+  const respond: FramedPeerHandler = (message, socket) => {
+    const command = String(message['command']);
+    if (command === 'stackTrace') {
+      socket.write(stopped);
+    }
+    const body =
+      command === 'threads'
+        ? { threads: [{ id: 1, name: 'main' }] }
+        : command === 'stackTrace'
+          ? { stackFrames: [{ id: 0, name: '_ready', line: 7 }], totalFrames: 1 }
+          : {};
+    socket.write(
+      frameJsonRpc({
+        seq: Number(message['seq']) + 100,
+        type: 'response',
+        request_seq: message['seq'],
+        command,
+        success: true,
+        body,
+      }),
+    );
+  };
+
+  await withFramedPeer(respond, async (port) => {
+    const session = new GodotDAPClient(port, '127.0.0.1');
+    await session.attach();
+    assert.ok(session.holdIsKnown(), 'the session knows the game is held, or the rest is moot');
+    assert.equal(
+      session.whereItStopped()?.reason,
+      'breakpoint',
+      'and knows it from the event, which names the reason, rather than from the frames it asked for',
+    );
+    await session.abandon();
+  });
+}
+
+/**
  * Section names and keys come out of project.godot, which is a file the project supplies. On
  * an ordinary object `result['constructor']` is the Object function and `result['__proto__']`
  * is Object.prototype, so a parser that indexes its result with those names writes the file's
@@ -10381,6 +10435,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testProjectGodotMultilineValues,
   testLettingGoOfTheAdapterSendsItNothing,
   testAStopIsKnownToTheConnectionItWasSentTo,
+  testAStopThatLandsWhileAttachAsksIsTheAnswer,
   testProjectGodotResistsPrototypeKeys,
 
   testAnAnswerFromAStaleAddonSaysSo,
