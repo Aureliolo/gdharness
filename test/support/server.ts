@@ -14,9 +14,40 @@ function runtimeDirForTest(): string {
   return mkdtempSync(join(tmpdir(), 'gdharness-test-runtime-'));
 }
 
-/** A TCP port nothing is listening on right now. */
-export async function reservePort(): Promise<number> {
-  return await new Promise<number>((resolve, reject) => {
+/**
+ * Ports this process has already handed out, which the kernel is free to offer again.
+ *
+ * A reservation binds port zero, reads the number and closes, so the port is back in the pool
+ * before whoever asked for it has bound anything. Two calls in a row can therefore come back with
+ * the same number, and a fixture that asks for three gets a bridge, a language server and a debug
+ * adapter that are not necessarily three ports. The failure that follows is nowhere near here: the
+ * server binds the bridge, the editor comes up, and the check on who really holds the debug adapter
+ * port finds the harness's own server on it and refuses to play the game, naming two pids that are
+ * one apart because they were spawned in a row.
+ */
+const handedOut = new Set<number>();
+
+/**
+ * A TCP port nothing is listening on right now, and that this process has not already given away.
+ *
+ * [offer] is the kernel, apart from asking it, so that a pool which repeats itself is a case that
+ * can be written down rather than a machine to be lucky on. Waiting for a real repeat is not a
+ * check: it passes on a host that does not give one, which reads exactly like a reservation that
+ * never deduplicated at all.
+ */
+export async function reservePort(offer: () => Promise<number> = freePort): Promise<number> {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    const port = await offer();
+    if (!handedOut.has(port)) {
+      handedOut.add(port);
+      return port;
+    }
+  }
+  throw new Error('could not reserve a port the kernel had not already offered');
+}
+
+function freePort(): Promise<number> {
+  return new Promise<number>((resolve, reject) => {
     const server = createServer();
     server.unref();
     server.on('error', reject);

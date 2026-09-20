@@ -8141,6 +8141,140 @@ function testTheCopiedHelperReadsTheSameEverywhere(): void {
 }
 
 /**
+ * Two reservations are two ports.
+ *
+ * A reservation binds port zero, reads the number and closes it, so the number is back in the
+ * kernel's pool before the caller has bound anything and the next call can be handed it again. A
+ * fixture asking for a bridge, a language server and a debug adapter then gets two of something,
+ * and what fails is somewhere else entirely: the harness's own server binds the bridge, the editor
+ * comes up, and the check on who really holds the debug adapter port finds the server on it and
+ * refuses to play the game. That reached CI as an editor fixture failing over two pids one apart,
+ * which is what spawning a server and an editor in a row gives you.
+ *
+ * The repeating pool is written down rather than waited for. Asking the real kernel for forty ports
+ * and finding them all different is a trial with no other side to it: a host that does not repeat
+ * gives that reading whether or not anything deduplicates, which is the same answer as no guard at
+ * all. Numbers below the ephemeral range, so nothing a real reservation could return collides with
+ * them.
+ */
+async function testEveryReservedPortIsItsOwn(): Promise<void> {
+  const offers = [1100, 1100, 1101];
+  let asked = 0;
+  const repeating = (): Promise<number> => Promise.resolve(offers[Math.min(asked++, offers.length - 1)] ?? 0);
+
+  assert.equal(await reservePort(repeating), 1100, 'the first reservation takes what it is offered');
+  assert.equal(await reservePort(repeating), 1101, 'and the second is offered 1100 again and declines it');
+
+  // A pool with nothing else to give is an error rather than a duplicate, because handing the same
+  // number to two callers is the outcome this exists to prevent.
+  await assert.rejects(
+    async () => await reservePort(() => Promise.resolve(1101)),
+    /already offered/,
+    'a pool that only repeats should fail rather than hand out a duplicate',
+  );
+
+  // The real one still answers, so what is asserted above is not the only thing that runs.
+  const real = await reservePort();
+  assert.ok(real > 1024 && real < 65_536, `a real reservation should come back a port: ${real}`);
+}
+
+/**
+ * How many tool names the tree mentions today, as a floor under the reading below.
+ *
+ * Set to what is there rather than to a round number, so removing mentions means lowering this in
+ * the same change and somebody confirms the removal was meant.
+ */
+const TOOL_NAME_MENTIONS = 427;
+
+/**
+ * Every tool this server names in something it says is a tool it has.
+ *
+ * The refusals here are full of tool names, because a refusal that does not say what to call
+ * instead is half an answer. A rename or a removal leaves those sentences reading perfectly and
+ * pointing at nothing, and the caller who follows one is sent to make a call that will be refused
+ * for a second reason. Nothing else catches it: the schemas are checked against each other, the
+ * prose is checked against nobody, and a sentence is as fluent wrong as right.
+ *
+ * Read out of the string literals rather than out of whole lines, because the sentence that matters
+ * is often assembled from parts and no single line of the file contains it. The rendered surfaces
+ * are read as themselves, since that is what an agent is given.
+ *
+ * The families come from the schemas, so a tool in a new family is covered the day it lands rather
+ * than when somebody remembers this list.
+ */
+function testEveryToolNamedInProseIsATool(): void {
+  const names = new Set(TOOL_SPECS.map((spec) => spec.name));
+  const families = [...new Set(TOOL_SPECS.map((spec) => spec.name.split('_')[0]))];
+  // Words this project owns that are shaped like a tool and are not one: the fields the bridge
+  // sends the addon, the autoload the runtime installs, and a section of project.godot. Named one
+  // by one rather than matched by a pattern, so a new word of this shape has to be looked at once
+  // and called a tool or called vocabulary.
+  const notTools = new Set([
+    'project_path',
+    'scene_path',
+    'resource_path',
+    'runtime_autoload',
+    'editor_plugins',
+  ]);
+  // The wildcard a sentence uses to mean a whole family, which is a real thing to say and not a
+  // tool: `runtime_*` reaches it. Judged as the family so a family that goes away is still caught.
+  const wildcard = new RegExp(`\\b(${families.join('|')})_\\*`, 'g');
+  const shaped = new RegExp(`\\b(${families.join('|')})_[a-z][a-z0-9_]*\\b`, 'g');
+
+  // What the server says, not what it is written with. A bare read of the file also sees its own
+  // identifiers and the field names of the bridge protocol, which are the same shape as a tool and
+  // are nobody's instruction to make a call.
+  const quoted = /'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|`(?:[^`\\]|\\.)*`/g;
+  const sources: [string, string][] = [];
+  const walk = (directory: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        walk(path);
+      } else if (entry.name.endsWith('.ts')) {
+        sources.push([
+          path,
+          [...readFileSync(path, 'utf8').matchAll(quoted)].map((one) => one[0]).join('\n'),
+        ]);
+      }
+    }
+  };
+  walk('src');
+  sources.push(['the tool reference', renderToolsMarkdown()]);
+  sources.push(['the skill', skillFiles('0.0.0').get('SKILL.md') ?? '']);
+  for (const doc of ['README.md', join('docs', 'agent.md'), join('docs', 'architecture.md')]) {
+    sources.push([doc, readFileSync(doc, 'utf8')]);
+  }
+
+  let seen = 0;
+  const wrong: string[] = [];
+  for (const [where, text] of sources) {
+    for (const found of text.matchAll(shaped)) {
+      if (notTools.has(found[0])) {
+        continue;
+      }
+      seen += 1;
+      if (!names.has(found[0])) {
+        wrong.push(`${where} names ${found[0]}, which is not a tool`);
+      }
+    }
+    for (const found of text.matchAll(wildcard)) {
+      seen += 1;
+      if (!families.includes(found[1] ?? '')) {
+        wrong.push(`${where} names the family ${found[0]}, which has no tools`);
+      }
+    }
+  }
+
+  // The instrument first. A pattern that had stopped matching reports every prose file clean, and
+  // this check is otherwise an assertion that nothing was found, which a broken regex satisfies
+  // perfectly. The floor is what the tree holds today rather than a comfortable minimum, so
+  // dropping a mention below it has to be confirmed in the same change.
+  assert.ok(seen >= TOOL_NAME_MENTIONS, `only ${seen} tool names were read; the pattern is not matching`);
+  assert.deepEqual(wrong, [], `every tool named in prose should exist:\n${wrong.join('\n')}`);
+}
+
+/**
  * `from` is offered exactly where there is an editor to ask.
  *
  * The schema says which ops take the argument and `EDITOR_READS` says which ops the editor can
@@ -8741,6 +8875,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEveryShippedAddonIsInstalled,
   testEveryAddonScriptKeepsItsIdentity,
   testTheCopiedHelperReadsTheSameEverywhere,
+  testEveryReservedPortIsItsOwn,
+  testEveryToolNamedInProseIsATool,
   testTheEditorIsOfferedWhereItCanAnswer,
   testAReadAskedOfTheEditorIsNotAnsweredFromDisk,
   testAConfigNamingAnotherVersionIsSaid,
