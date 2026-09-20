@@ -265,6 +265,25 @@ The same holds for a check that loops over the list it is checking. Dropping an 
 assertion with it, so the case passes having tested less, and a check that enumerates what it covers
 says nothing about what it does not.
 
+A tolerance has a blind side, and it is not always the side that feels risky. The window deciding
+whether a process is the run a record describes was set to ninety seconds and written up as generous
+against clock skew, which reads as the careful choice. It is blind to every run shorter than ninety
+seconds: a number cannot be handed out again until the process holding it has gone, so the gap a
+recycled pid leaves is the run's whole length, and a five-second run whose number is taken ten
+seconds later clears the window entirely. The project that reported it runs thirty-one workers that
+start, do one arm and exit inside a single bench, which is short runs and dense recycling together.
+So for any tolerance, say what it is absorbing and size it to that, then ask what falls inside it
+that should not. Wide was the dangerous direction here and it had been written down as the safe one.
+
+Changing a case to fit the code is the thing not to do, with one exception, and it is worth being
+able to tell them apart because the exception looks exactly like the fault. A case asserting a state
+that cannot occur is not evidence of anything, so removing it removes nothing. A fixture here wrote
+a record claiming its run began a minute before the process it had just spawned, and the record is
+written by the call that spawns, so the two are the same moment. The narrower window above is what
+made it fail. The test was corrected and its assertions left alone. Say in the change that a case was
+altered and why the state was unreachable, because that sentence is the whole difference between this
+and quietly deleting the case that caught you.
+
 Some disarms cannot be performed at all, and that is a finding rather than an obstacle. Deleting a
 line can leave a parameter unused, a branch unreachable or an import dangling, and the gates refuse
 it before a single case runs. Reach for a smaller break that the compiler accepts, and write down
