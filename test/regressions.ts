@@ -3864,11 +3864,39 @@ function testTheProjectPathSentenceNamesEveryToolThatTakesNone(): void {
     const sentence = text.split('\n').find((line) => line.includes('Every call takes'));
     assert.ok(sentence, `${what} should still open by saying which calls need a projectPath`);
     for (const name of without) {
+      // The name and its markup together. Checking the name alone reads through whatever surrounds
+      // it, so the two renderings can disagree about how they say the same names and both pass.
       assert.ok(
-        sentence.includes(name),
-        `${what} should name ${name} among the calls that take none: ${sentence}`,
+        sentence.includes(`\`${name}\``),
+        `${what} should name ${name} as a code span among the calls that take none: ${sentence}`,
       );
     }
+  }
+}
+
+/**
+ * Nothing the skill writes escapes a backtick.
+ *
+ * A generated name went into `SKILL.md` as `\`debug_control\``, rendering the backslashes rather
+ * than a code span, while the same generated sentence in `references/tools.md` was clean. The cause
+ * is that a `${}` substitution is ordinary JavaScript and owes the template around it no escaping,
+ * so a nested template that escapes as if it did emits the backslash it meant to hide.
+ *
+ * Held over every file rather than that one line, and as an absence with nothing in it to list, so
+ * a substitution added later is covered without anybody remembering this.
+ */
+function testTheSkillWritesNoEscapedBackticks(): void {
+  const written = skillFiles('0.0.0');
+  assert.ok(written.size >= 2, `the skill should write the page and its reference: ${written.size}`);
+  for (const [name, contents] of written) {
+    const offending = contents.split('\n').filter((line) => line.includes('\\`'));
+    assert.deepEqual(offending, [], `${name} renders backslashes where it means code spans`);
+    // The positive half, on the line that broke rather than as a count: a pair of files with no
+    // backticks in them at all satisfies the absence above exactly as well as a pair that renders
+    // every one of them, and a count over the whole reference moves whenever a tool does.
+    const sentence = contents.split('\n').find((line) => line.includes('Every call takes'));
+    assert.ok(sentence, `${name} should carry the generated sentence`);
+    assert.match(sentence, /`projectPath`/, `${name} should render its code spans as code spans`);
   }
 }
 
@@ -6950,6 +6978,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAClassTheEditorHoldsAfterItsScriptIsGoneIsNamed,
   testWhatAStaleTypeDependsOnIsNamed,
   testTheProjectPathSentenceNamesEveryToolThatTakesNone,
+  testTheSkillWritesNoEscapedBackticks,
   testAnAuditThatCouldNotAskIsNotAnAuditThatPassed,
   testRefreshingUidsMakesTheSidecarAndWritesNoScene,
   testWhoIsHoldingAPortIsAskable,

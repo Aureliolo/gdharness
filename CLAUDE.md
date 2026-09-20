@@ -18,6 +18,23 @@ of the real runtime directory was checked by watching that directory not grow, w
 had stopped starting servers satisfies exactly as well. Assert the record it did write, then that
 it wrote it nowhere else.
 
+Assert the invariant, not the reading. A case that writes down what was measured, or what somebody
+concluded, keeps that conclusion in force after the evidence for it is gone, and overruling it takes
+a deliberate act where correcting a sentence would have taken none. A report that the cure for a
+stale type was a change to the declaring script went into three sentences and into a case requiring
+all three; when the project that made the report retracted it, correcting the sentences failed the
+suite and correcting the note beside them did not, so the note was corrected twice and the sentences
+stayed wrong through two releases. The wording survived because fixing it cost more, not because
+nobody looked, which says where the next one is: wherever a case asserts a reading rather than the
+thing the reading was evidence for. The rewrite holds what does not depend on which remedy wins,
+that nothing sends a caller to edit source that is already correct.
+
+Check the value with whatever surrounds it when the surroundings are the thing being produced. A
+case comparing generated tool names against the schemas passed on two renderings of the same
+sentence, one of which escaped every backtick, because the names matched in both and the markup sits
+between the names. Reading a value out of rendered text and comparing it reads straight through the
+rendering, so it is a check on the generator's list and not on its output; assert the rendered form.
+
 A disarm that still passes is a statement about the setup before it is one about the check. The
 fixture reached the assertion without walking the line that was broken, so the reading to reject
 first is that the assertion is too weak: strengthening it only buys a fixture that fails for a

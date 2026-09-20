@@ -4,6 +4,9 @@
 
 - **No fixture, no ship.** A tool is driven against a pinned Godot in CI before it exists in
   a release. A change that adds or alters a tool comes with the fixture that proves it.
+- **A fixture asserts the invariant, not the reading.** A case that writes down what somebody
+  measured keeps that conclusion in force after the evidence for it is gone, and correcting the
+  answer then fails the suite. Hold what stays true whichever reading wins.
 - **A tool fails rather than answers.** No success payload for an empty or partial result
   that could be a silent failure. An unknown argument or enum value is an error naming the
   valid set, never a silent default.
