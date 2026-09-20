@@ -4452,7 +4452,23 @@ function testAClassTheEditorHoldsAfterItsScriptIsGoneIsNamed(): void {
   try {
     writeFileSync(join(project, 'kept.gd'), 'class_name Kept\nextends Node\n');
     writeFileSync(join(project, 'plain.gd'), 'extends Node\n');
+    // Annotations share the line with what they annotate. `@abstract class_name X` is one line in
+    // Godot 4.5 and later, and a scanner anchored on `class_name` alone reads it as no declaration
+    // at all: a project with gdUnit4 in it had 23 abstract classes reported as declared nowhere,
+    // with the answer telling the caller to restart the editor to drop them, and every one was on
+    // disk. The engine-side scanner strips annotations first, which is why the cache itself was
+    // never short of them and only the report was wrong.
+    writeFileSync(join(project, 'assert.gd'), '@abstract class_name GdUnitAssert\nextends RefCounted\n');
+    writeFileSync(join(project, 'stage.gd'), '@tool @abstract class_name IGdUnitExecutionStage\n');
+    writeFileSync(join(project, 'iconed.gd'), '@icon("res://icon.svg") class_name Iconed\nextends Node\n');
+    writeFileSync(join(project, 'own_line.gd'), '@abstract\nclass_name OnItsOwnLine\nextends Node\n');
 
+    const annotated = ['GdUnitAssert', 'IGdUnitExecutionStage', 'Iconed', 'OnItsOwnLine'];
+    assert.deepEqual(
+      heldButGone(project, ['Kept', ...annotated]),
+      [],
+      'an annotated declaration is a declaration, and none of these is gone',
+    );
     assert.deepEqual(
       heldButGone(project, ['Kept', 'Gone']),
       ['Gone'],
@@ -4471,7 +4487,7 @@ function testAClassTheEditorHoldsAfterItsScriptIsGoneIsNamed(): void {
 
     assert.deepEqual(
       unseenByEditor(project, ['Gone']).map((one) => one.className),
-      ['Kept'],
+      ['GdUnitAssert', 'IGdUnitExecutionStage', 'Iconed', 'Kept', 'OnItsOwnLine'],
       'the editor missing a declared class is still the other answer, and still separate from this one',
     );
   } finally {
