@@ -6184,7 +6184,10 @@ async function testAPidIsNotAnIdentity(): Promise<void> {
   const marker = join(tmpdir(), `gdharness-identity-${process.pid}`);
   // Something that stays up and carries a word of ours on its command line, which is what a real
   // run has: the engine's path and the project it was pointed at.
-  const held = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 120_000)', marker], {
+  //
+  // The long spelling of the eval flag, because `-e` is how the engine this stands in for is told
+  // to come up as an editor, and a stand-in wearing it is judged one.
+  const held = spawn(process.execPath, ['--eval', 'setTimeout(() => {}, 120_000)', marker], {
     stdio: 'ignore',
   });
   const pid = held.pid ?? 0;
@@ -6275,6 +6278,73 @@ async function testAPidIsNotAnIdentity(): Promise<void> {
   // The dead pid, asked after the process is gone rather than about a number that was never
   // anything: this is the state a stale record is actually in.
   assert.equal(stillTheRecordedRun(record), false, 'a run that has ended is not still the run');
+}
+
+/**
+ * The editor holding a project is not a run of that project, however exactly the record fits it.
+ *
+ * The identity check compares the engine and the project, and an editor of that project carries
+ * both: same binary, same `--path`. So a record whose pid has come round to an editor is confirmed
+ * against it, and the caller that acts on a confirmation is the one that kills. The number gets
+ * there by the ordinary route rather than a rare one, because a restart ends the game and opens an
+ * editor seconds later, which is when a just-freed pid is handed out again. What it looks like
+ * downstream is an editor going with no crash log and nothing in its own output, which is the
+ * shape one was reported in.
+ *
+ * Judged against written-down command lines rather than a spawned editor: the discrimination is
+ * between two strings the operating system can give, and a fixture that needed a real editor to be
+ * running could only ever be skipped on the machines that lack one.
+ */
+function testTheEditorHoldingAProjectIsNotARunOfIt(): void {
+  const project = join(tmpdir(), 'gdharness-editor-vs-run');
+  const engine = join(tmpdir(), 'engines', 'Godot_v4.5-stable_win64.exe');
+  const record = {
+    pid: 4242,
+    transcript: join(tmpdir(), 'none.log'),
+    startedAt: Date.now(),
+    projectPath: project,
+    arguments: ['--path', project],
+    command: engine,
+  };
+  const asked = (text: string): { kind: 'commandLine'; text: string } => ({ kind: 'commandLine', text });
+
+  // The positive first, and from the same record: an instrument that had stopped judging anything
+  // would report every refusal below just as well.
+  assert.equal(
+    judgeRun(record, asked(`${engine} --path ${project} res://main.tscn`), 'confirmed'),
+    true,
+    'a game of this project under this record is the run, which is what makes the refusals below mean anything',
+  );
+
+  for (const flag of ['-e', '--editor']) {
+    assert.equal(
+      judgeRun(
+        record,
+        asked(`${engine} ${flag} --path ${project} --lsp-port 6005 --dap-port 6006`),
+        'confirmed',
+      ),
+      false,
+      `an editor of the same project (${flag}) is not the run, so nothing may be signalled at its pid`,
+    );
+    assert.equal(
+      judgeRun(record, asked(`${engine} ${flag} --path ${project}`), 'possible'),
+      false,
+      `nor is it a run to be picked back up and reported as the game (${flag})`,
+    );
+  }
+
+  // The flag as a whole word. A project whose own directory spells one is still a project, and
+  // reading it as the editor would refuse to end a run that is genuinely there.
+  const named = join(tmpdir(), 'gdharness--editor-demo');
+  assert.equal(
+    judgeRun(
+      { ...record, projectPath: named, arguments: ['--path', named] },
+      asked(`${engine} --path ${named} res://main.tscn`),
+      'confirmed',
+    ),
+    true,
+    'a project named for the flag is not an editor, and its game is still endable',
+  );
 }
 
 /**
@@ -6503,7 +6573,10 @@ async function benchThroughAStart(
   const bench = spawn(
     process.execPath,
     [
-      '-e',
+      // The long spelling of the eval flag: `-e` is how the engine this stands in for is told to
+      // come up as an editor, and an editor is disowned by the identity check for a reason this
+      // fixture is not about.
+      '--eval',
       "const {appendFileSync}=require('node:fs');" +
         `setInterval(() => appendFileSync(${JSON.stringify(ticks)}, 'tick\\n'), 25);`,
       recorded,
@@ -8678,6 +8751,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testOnlyOurOwnAutoloadIsRewritten,
   testAnExitCodeOutlivesTheServerThatSawIt,
   testAPidIsNotAnIdentity,
+  testTheEditorHoldingAProjectIsNotARunOfIt,
   testARunEndedUnwatchedIsStillReadable,
   testAForeignRunSurvivesAStart,
   testARunOutlivesItsServer,
