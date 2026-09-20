@@ -60,6 +60,17 @@ the debug adapter as a side effect, and a session stays open for the life of the
 ran first decided what the timing case measured. Fix the setup and disarm again. Only a disarm that
 fails has told you anything about the check.
 
+There is one shape where the assertion is the answer, and it is not weakness. The assertion can ask
+about the wrong property of the right object, so it cannot separate the broken version from the
+working one however far either is broken. A check for a doubled word in a sentence was written as a
+search for the same word twice in a row, and the fault was `the addon from before versions were
+reported addon`, where the two are nineteen words apart: the assertion asked about adjacency and the
+fault was about count, and the disarm passed on a sentence carrying the very fault it was written
+for. Strengthening that costs nothing and fixes nothing, because the question is wrong rather than
+quiet. Before reaching for the setup, read the assertion once and ask which property of the answer
+it is actually reading, and whether the broken version and the working one differ in that property
+at all.
+
 The third way is the input, and it arrives looking like diligence. A report names the case somebody
 hit, which is not always the case that breaks, so a fixture built from the reproduction tests the
 shape that survived. The `@abstract` report came with a script declaring `class_name` behind an
