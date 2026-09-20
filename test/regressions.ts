@@ -3043,6 +3043,14 @@ function testTheStaleNoteNamesTheCallThatRebuildsTheCopy(): void {
     /where this turns up/,
     'and the empty lever says why it is empty, since a leaf type is where the fault is easiest to make',
   );
+  // Two measurements from two projects, each said on its own. Adding them into one ratio would
+  // assert that the benches are the same bench, which is what the two readings above leave open.
+  assert.match(alone, /one of five attempts measured here/, 'the count from this project, as its own');
+  assert.match(alone, /both reproductions measured in a second project/, 'and the other, as its own');
+  // The milliseconds are the scan's own waitedMs. A duration written beside a cure is read as the
+  // duration of the cure, and nobody timed the gap between the scan returning and the re-read, so
+  // the figures are held to the phrasing that says what they timed rather than to their absence.
+  assert.match(alone, /the scan itself returning in 243ms and 275ms/, 'the timing says what it timed');
 
   // The lever is a dependency of the stale type, never the stale type itself: sending a caller to
   // edit the file the diagnostics are already wrong about is the retracted cure, and the one thing
