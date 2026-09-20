@@ -2668,8 +2668,9 @@ class GodotServer {
 
     // Every announced game is pinged, so a game that announced and then hung is reported as
     // such rather than counted as reachable on the strength of its announcement.
+    const announced = runtimesAnnounced();
     const games = await Promise.all(
-      discoverRuntimes().map(async (endpoint) => {
+      announced.running.map(async (endpoint) => {
         const reply = await runtimeRequest(endpoint, 'ping', {}, this.runtimeTimeoutMs());
         return {
           pid: endpoint.pid,
@@ -2702,6 +2703,19 @@ class GodotServer {
         playingInEditor: playing,
         runtimeConnected: games.some((game) => game.reachable),
         runtimes: games,
+        // Games announcing a protocol this server was not built to read. Apart from the list above
+        // rather than folded into it, because nothing here can reach them and calling them runtimes
+        // would offer tools that cannot work. Reported at all because the alternative is `runtimes:
+        // []` during an upgrade window, which says nothing is running about a game that is, and the
+        // runtime_* tools already name these: the call an agent makes before anything else should
+        // not be the one that cannot see them.
+        unreadable: announced.unspoken.map((game) => ({
+          pid: game.pid,
+          project: game.project,
+          protocol: game.protocol,
+          serverSpeaks: RUNTIME_PROTOCOL,
+          behind: game.protocol > RUNTIME_PROTOCOL ? 'server' : 'addon',
+        })),
       },
     });
   }

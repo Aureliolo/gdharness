@@ -3174,6 +3174,27 @@ async function testARefusalDoesNotDenyTheRuntimeItCanSee(): Promise<void> {
         /Start one with editor_run/,
         `the advice that would end it is gone here too: ${far}`,
       );
+
+      // And the call an agent makes before any other says the same thing. Asserted from the answer
+      // rather than from the sweep behind it: the two disagreed, `runtime_*` naming the game and
+      // `editor_status` reporting an empty list of runtimes about the same moment, and reading
+      // either one alone shows something that looks complete.
+      const status = parseTextContent(
+        await server.request('tools/call', { name: 'editor_status', arguments: {} }),
+      );
+      const unreadable = asArray(get(status, 'game', 'unreadable'));
+      assert.equal(unreadable.length, 1, `the game it cannot read is reported: ${JSON.stringify(status)}`);
+      assert.equal(asNumber(get(unreadable[0], 'pid')), process.pid, 'by its pid');
+      assert.equal(asNumber(get(unreadable[0], 'protocol')), protocol, 'with the protocol it speaks');
+      assert.equal(
+        text(get(unreadable[0], 'behind')),
+        protocol > RUNTIME_PROTOCOL ? 'server' : 'addon',
+        'and which half is behind',
+      );
+      // Beside it rather than instead of it: a game this server cannot speak to is not a runtime it
+      // can reach, and folding the two together would offer tools that do not work.
+      assert.deepEqual(get(status, 'game', 'runtimes'), [], 'and is not counted among the ones it can reach');
+      assert.equal(get(status, 'game', 'runtimeConnected'), false, 'nor reported as connected');
     }
   } finally {
     await server.stop();
