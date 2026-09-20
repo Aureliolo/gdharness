@@ -4941,6 +4941,191 @@ async function testAnAnnotatedDeclarationIsStillADeclaration(): Promise<void> {
   }
 }
 
+/**
+ * A structure read asked for what a script inherits answers with it.
+ *
+ * `includeInherited` was described in the schema and read by nothing: the op maps to
+ * `get_script_info`, which took `script_path` and no other parameter, so the two answers were byte
+ * for byte the same and a caller who set it believed they had the base's members. Found by reading
+ * the surface against what answers it rather than by a call that went wrong, which is what a
+ * parameter that fails silently leaves as the only way to find it.
+ *
+ * The lists are compared whole, with each member paired to the file it came from. A check that
+ * looks for the inherited names it expects passes on an answer that also carries names from
+ * somewhere else, and the name a leaf overrides is the case that separates a walk that tags its
+ * findings from one that merely concatenates: `shared` is declared twice and must appear twice,
+ * once as the leaf's own and once as the base's.
+ */
+async function testAStructureReadCanCarryWhatTheScriptInherits(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('inherited structure regression skipped (Godot not found)');
+    return;
+  }
+
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-inherited-'));
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Inherited"\n',
+    );
+    writeFileSync(
+      join(project, 'base.gd'),
+      [
+        'class_name ProbeBase',
+        'extends RefCounted',
+        '',
+        'signal base_fired',
+        '',
+        'const BASE_MAX: int = 3',
+        '',
+        'var base_held: int = 1',
+        '',
+        '',
+        'func base_method() -> void:',
+        '\tpass',
+        '',
+        '',
+        'func shared() -> String:',
+        '\treturn "base"',
+        '',
+      ].join('\n'),
+    );
+    // Two levels, so the walk has to keep going after the first base rather than stopping at it.
+    writeFileSync(
+      join(project, 'middle.gd'),
+      [
+        'class_name ProbeMiddle',
+        'extends ProbeBase',
+        '',
+        'var middle_held: float = 2.0',
+        '',
+        '',
+        'func middle_method() -> void:',
+        '\tpass',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(project, 'leaf.gd'),
+      [
+        'class_name ProbeLeaf',
+        'extends ProbeMiddle',
+        '',
+        '',
+        'func shared() -> String:',
+        '\treturn "leaf"',
+        '',
+      ].join('\n'),
+    );
+
+    const server = new ServerProcess({ env: { GODOT_PATH: godotPath } });
+    try {
+      await server.initialize('regression-test');
+      const call = async (name: string, args: Record<string, unknown>): Promise<unknown> =>
+        parseTextContent(
+          await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS),
+        );
+
+      // The chain is resolved through the project's class list, so it has to exist before the read.
+      const scanned = await call('project_import', { projectPath: project, op: 'refresh_classes' });
+      assert.equal(get(scanned, 'classes'), 3, `all three declare a class: ${JSON.stringify(scanned)}`);
+
+      const named = (answer: unknown, list: string): unknown[] =>
+        asArray(get(answer, list) ?? []).map((each) => [
+          get(each, 'name'),
+          get(each, 'inherited_from') ?? null,
+        ]);
+
+      const own = await call('script_info', {
+        projectPath: project,
+        op: 'structure',
+        scriptPath: 'res://leaf.gd',
+      });
+      assert.deepEqual(
+        named(own, 'functions'),
+        [['shared', null]],
+        `unasked, a script is its own members only: ${JSON.stringify(own)}`,
+      );
+      assert.equal(
+        get(own, 'inherits_from'),
+        undefined,
+        `and no chain was walked to report: ${JSON.stringify(own)}`,
+      );
+
+      const all = await call('script_info', {
+        projectPath: project,
+        op: 'structure',
+        scriptPath: 'res://leaf.gd',
+        includeInherited: true,
+      });
+      assert.deepEqual(
+        get(all, 'inherits_from'),
+        ['res://middle.gd', 'res://base.gd'],
+        `the chain is walked in order and named: ${JSON.stringify(all)}`,
+      );
+      assert.deepEqual(
+        named(all, 'functions'),
+        [
+          ['shared', null],
+          ['middle_method', 'res://middle.gd'],
+          ['base_method', 'res://base.gd'],
+          // Overridden, so declared at two lines and listed at both.
+          ['shared', 'res://base.gd'],
+        ],
+        `every function, each said to come from where it does: ${JSON.stringify(all)}`,
+      );
+      assert.deepEqual(
+        named(all, 'variables'),
+        [
+          ['middle_held', 'res://middle.gd'],
+          ['base_held', 'res://base.gd'],
+        ],
+        `and the variables: ${JSON.stringify(all)}`,
+      );
+      assert.deepEqual(
+        named(all, 'signals'),
+        [['base_fired', 'res://base.gd']],
+        `and the signals: ${JSON.stringify(all)}`,
+      );
+      assert.deepEqual(
+        named(all, 'constants'),
+        [['BASE_MAX', 'res://base.gd']],
+        `and the constants: ${JSON.stringify(all)}`,
+      );
+
+      // A native base declares nothing in a file, so the walk has nothing to do and says so with an
+      // empty chain rather than by refusing the call.
+      const atTheTop = await call('script_info', {
+        projectPath: project,
+        op: 'structure',
+        scriptPath: 'res://base.gd',
+        includeInherited: true,
+      });
+      assert.deepEqual(
+        get(atTheTop, 'inherits_from'),
+        [],
+        `a RefCounted base is not a script to read: ${JSON.stringify(atTheTop)}`,
+      );
+      assert.deepEqual(
+        named(atTheTop, 'functions'),
+        [
+          ['base_method', null],
+          ['shared', null],
+        ],
+        `and its own members are still all there: ${JSON.stringify(atTheTop)}`,
+      );
+    } finally {
+      await server.stop();
+    }
+  } finally {
+    sweep(project);
+  }
+}
+
 async function testRefreshingUidsMakesTheSidecarAndWritesNoScene(): Promise<void> {
   const godotPath = resolveGodotPath();
   if (!godotPath) {
@@ -7809,6 +7994,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheSkillWritesNoEscapedBackticks,
   testAnAuditThatCouldNotAskIsNotAnAuditThatPassed,
   testAnAnnotatedDeclarationIsStillADeclaration,
+  testAStructureReadCanCarryWhatTheScriptInherits,
   testRefreshingUidsMakesTheSidecarAndWritesNoScene,
   testWhoIsHoldingAPortIsAskable,
   testWhatTheEditorSavedAwayIsReportedTheSameWay,

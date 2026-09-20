@@ -1,6 +1,7 @@
 extends RefCounted
 
 const Patterns = preload("patterns.gd")
+const Read = preload("reading.gd")
 const Log = preload("logger.gd")
 
 var _log: Log
@@ -92,7 +93,7 @@ func get_gdscript_info(params: Dictionary) -> Dictionary:
 				if dep not in dependencies:
 					dependencies.append(dep)
 
-	return {
+	var answer: Dictionary = {
 		"path": script_path,
 		"full_path": full_script_path,
 		"class_name": declared_class_name,
@@ -106,6 +107,54 @@ func get_gdscript_info(params: Dictionary) -> Dictionary:
 		"dependencies": dependencies,
 		"line_count": lines.size()
 	}
+	if Read.as_bool(params.get("include_inherited", false)):
+		_add_inherited(answer, [full_script_path])
+	return answer
+
+
+# The members this script's ancestors declare, appended to the lists they belong in.
+#
+# Only the script ancestors: `extends` naming a native class is ClassDB's question and
+# `editor_classes info` answers it with the whole hierarchy. A base is reachable either as a quoted
+# `res://` path or as a `class_name` in the project's class list, and a script whose base is neither
+# has no ancestor to read, which the answer says by leaving `inherits_from` short rather than by
+# refusing. Each entry carries `inherited_from`, so a caller can tell a member the script declares
+# from one it is given; a name a script overrides appears twice, at both lines, on purpose.
+func _add_inherited(answer: Dictionary, seen: Array[String]) -> void:
+	var inherits_from: Array[String] = []
+	var base: String = str(answer.get("extends", ""))
+	while true:
+		var base_path: String = _script_named(base)
+		if base_path.is_empty() or base_path in seen:
+			break
+		seen.append(base_path)
+		inherits_from.append(base_path)
+		var above: Dictionary = get_gdscript_info({"script_path": base_path})
+		if not above.get("success", true):
+			break
+		for list_name: String in ["signals", "variables", "functions", "constants", "enums"]:
+			var mine: Array[Dictionary] = answer[list_name]
+			var theirs: Array[Dictionary] = above[list_name]
+			for member: Dictionary in theirs:
+				var carried: Dictionary = member.duplicate()
+				carried["inherited_from"] = base_path
+				mine.append(carried)
+		base = str(above.get("extends", ""))
+	answer["inherits_from"] = inherits_from
+
+
+# The file a base names, whether it named a path or a class, or empty for a native class.
+func _script_named(base: String) -> String:
+	if base.is_empty():
+		return ""
+	if base.begins_with('"') and base.ends_with('"'):
+		var quoted: String = base.substr(1, base.length() - 2)
+		return quoted if FileAccess.file_exists(quoted) else ""
+	for entry: Dictionary in ProjectSettings.get_global_class_list():
+		if str(entry.get("class", "")) == base:
+			var path: String = str(entry.get("path", ""))
+			return path if FileAccess.file_exists(path) else ""
+	return ""
 
 
 func _parse_signal(line: String, line_num: int) -> Dictionary:

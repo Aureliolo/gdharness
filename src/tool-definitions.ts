@@ -676,7 +676,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       scriptPath: SCRIPT_PATH,
       includeInherited: {
         type: 'boolean',
-        description: 'structure: include inherited members. Default false.',
+        description:
+          "structure: also list what the script inherits, walking extends through the project's other scripts. Each such member carries inherited_from, the file declaring it, and the answer gains inherits_from, the chain that was walked. A name the script overrides is listed at both its lines rather than once. A native base is not walked, since it declares nothing in a file: editor_classes info answers for those. Default false.",
       },
       line: { type: 'number', description: 'completion, hover: zero-based line.' },
       character: { type: 'number', description: 'completion, hover: zero-based column.' },
