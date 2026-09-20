@@ -3039,6 +3039,15 @@ function testANotYetRuntimeIsNotTheSameAsNoRuntime(): void {
  * needing a real engine would put this in the tier that only CI runs.
  */
 async function testAStartSaysWhatItLeftRunning(): Promise<void> {
+  // Both protocols, because the two refusals that made this claim are different branches and both
+  // were wrong the same way. A game this server cannot read and a game it can read but did not
+  // start are the same thing to a spawned start: neither is replaced.
+  for (const protocol of [RUNTIME_PROTOCOL, RUNTIME_PROTOCOL + 1]) {
+    await aStartLeaves(protocol);
+  }
+}
+
+async function aStartLeaves(protocol: number): Promise<void> {
   const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-stranded-'));
   const project = join(runtimeDir, 'mine');
   const announcements = join(runtimeDir, 'gdharness');
@@ -3060,7 +3069,7 @@ async function testAStartSaysWhatItLeftRunning(): Promise<void> {
   writeFileSync(
     join(announcements, `runtime-${process.pid}.json`),
     JSON.stringify({
-      protocol: RUNTIME_PROTOCOL + 1,
+      protocol,
       pid: process.pid,
       port: 51_993,
       address: '127.0.0.1',
@@ -3084,21 +3093,32 @@ async function testAStartSaysWhatItLeftRunning(): Promise<void> {
 
     // The positive first: the start went through, so the assertions below are about an answer that
     // was built rather than about a refusal that never reached them.
-    assert.match(answer, /"started":\s*true/, `the start should have gone through: ${answer}`);
     assert.match(
       answer,
-      new RegExp(`"alsoRunning":\\s*${process.pid}`),
-      `and should name the game it left running: ${answer}`,
+      /"started":\s*true/,
+      `the start should have gone through on protocol ${protocol}: ${answer}`,
+    );
+    assert.match(
+      answer,
+      new RegExp(`"alsoRunning":\\s*\\[\\s*${process.pid}`),
+      `and should name the game it left running on protocol ${protocol}: ${answer}`,
     );
     assert.match(
       answer,
       /Starting this one did not end it/,
-      `and say that starting did not end it: ${answer}`,
+      `and say that starting did not end it on protocol ${protocol}: ${answer}`,
     );
     assert.match(
       answer,
-      new RegExp(`end pid ${process.pid} yourself`),
-      `and what the caller can do about it: ${answer}`,
+      /End it yourself/,
+      `and what the caller can do about it on protocol ${protocol}: ${answer}`,
+    );
+    // The run it did start, named apart from the one it left, so an answer that reported the new
+    // game as something stranded would fail rather than read as a pass.
+    assert.doesNotMatch(
+      answer,
+      new RegExp(`"pid":\\s*${process.pid}\\b`),
+      `and not report this process as the run it started: ${answer}`,
     );
   } finally {
     sweep(runtimeDir);
@@ -3172,11 +3192,21 @@ async function testARefusalDoesNotDenyTheRuntimeItCanSee(): Promise<void> {
     assert.ok(refused !== null, 'the refusal should say something');
     const said = refused;
 
-    // What it must say: the game is there, which tools reach it, and that starting would end it.
+    // What it must say: the game is there, which tools reach it, and what a start would leave.
     assert.match(said, /A game is running/, `the runtime it can see is not denied: ${said}`);
     assert.match(said, new RegExp(String(process.pid)), `and is named by its pid: ${said}`);
     assert.match(said, /runtime_\*/, `with the tools that do reach it: ${said}`);
-    assert.match(said, /replaces the game that is playing/, `and what a start would cost: ${said}`);
+    // Not that a start would end it. This branch is reached only when nothing here is holding the
+    // game, so the start is spawned and a spawned start is a second process: measured, with a
+    // runtime announced for this project and no editor, `started: true` with a new pid and the
+    // announced game still running. The reading it used to carry came from a game the editor was
+    // playing, which is the one case this branch cannot be about.
+    assert.match(said, /leaves this game running as well/, `and what a start would leave: ${said}`);
+    assert.doesNotMatch(
+      said,
+      /replaces the game that is playing/,
+      `not the sentence for a game the editor is holding: ${said}`,
+    );
 
     // And what it must not: the advice that ends the run. Paired with the four above rather than
     // standing alone, since a refusal that failed to render at all would satisfy this perfectly.
@@ -6151,6 +6181,114 @@ async function testAnEditorOnAnotherVersionIsStillAskedWhatItIsPlaying(): Promis
   }
 }
 
+/**
+ * A game the editor has stopped playing stops being reported as active.
+ *
+ * A run the editor plays has no handle and no pid here, so the only thing that can say whether it
+ * is still up is the editor. `editor_output` asks it. `editor_status` asked it too, for
+ * `playingInEditor`, and then answered `processActive` from the record alone, which for a played
+ * run is true for as long as the record lasts. So one answer carried the editor saying it was
+ * playing nothing beside a field saying a game was active, and a bench that had quit went on
+ * reading as running for the caller polling for it to end.
+ *
+ * Reported downstream twice: a bench whose process was gone by a `Win32_Process` listing while the
+ * server said running, and a game ended from outside that went on reading as active with an empty
+ * `runtimes` beside it.
+ *
+ * The editor here is a socket rather than an engine, because what is under test is which source the
+ * answer is taken from, and a real editor can only be asked to stop playing by stopping.
+ */
+async function testAGameTheEditorHasStoppedPlayingIsNotStillActive(): Promise<void> {
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-played-gone-'));
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-played-gone-rt-'));
+  const port = await reservePort();
+  let editor: WebSocket | null = null;
+  let playing = true;
+  const server = new ServerProcess({
+    env: { GDHARNESS_BRIDGE_PORT: String(port), GDHARNESS_RUNTIME_DIR: runtimeDir },
+  });
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Played"\n',
+    );
+    await server.initialize('regression-test');
+
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+    editor = socket;
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', () => {
+        resolve();
+      });
+      socket.once('error', reject);
+    });
+    socket.on('message', (raw: Buffer) => {
+      const message: unknown = JSON.parse(String(raw));
+      if (!isRecord(message) || message['type'] !== 'tool_invoke') {
+        return;
+      }
+      const result =
+        String(message['tool']) === 'playing_status'
+          ? { ok: true, playing, scenePath: playing ? 'res://played.tscn' : '', debugPort: 63_411 }
+          : { ok: true };
+      socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result }));
+    });
+    socket.send(
+      JSON.stringify({
+        type: 'godot_ready',
+        project_path: project,
+        addon_version: SERVER_VERSION,
+        dap_port: 63_411,
+      }),
+    );
+
+    let greeted = false;
+    for (let waited = 0; waited < 10_000 && !greeted; waited += 100) {
+      await delay(100);
+      const seen = await server.request('tools/call', { name: 'editor_status', arguments: {} });
+      greeted = text(get(parseTextContent(seen), 'editor', 'projectPath')) === project;
+    }
+    assert.ok(greeted, 'the fake editor should have been greeted');
+
+    // The positive: while the editor says it is playing, the run is picked up and reported active.
+    // Without this the assertion below is satisfied by a server that never noticed a run at all.
+    const whilePlaying = parseTextContent(
+      await server.request('tools/call', { name: 'editor_status', arguments: {} }),
+    );
+    assert.equal(
+      get(whilePlaying, 'game', 'playingInEditor', 'playing'),
+      true,
+      `the editor should be playing something: ${JSON.stringify(whilePlaying)}`,
+    );
+    assert.equal(
+      get(whilePlaying, 'game', 'processActive'),
+      true,
+      `and that run should read as active: ${JSON.stringify(whilePlaying)}`,
+    );
+
+    // The game quits. Nothing else changes: the record is still there and still names the run.
+    playing = false;
+    const afterwards = parseTextContent(
+      await server.request('tools/call', { name: 'editor_status', arguments: {} }),
+    );
+    assert.equal(
+      get(afterwards, 'game', 'playingInEditor', 'playing'),
+      false,
+      `the editor should now say it is playing nothing: ${JSON.stringify(afterwards)}`,
+    );
+    assert.equal(
+      get(afterwards, 'game', 'processActive'),
+      false,
+      `and the run should not still be reported as active: ${JSON.stringify(afterwards)}`,
+    );
+  } finally {
+    editor?.close();
+    await server.stop();
+    sweep(project);
+    sweep(runtimeDir);
+  }
+}
+
 async function testTheEditorsRunIsTheOneAnsweredFor(): Promise<void> {
   const port = await reservePort();
   // Reserved and then left alone, so nothing is listening on it: the adapter this run's console
@@ -9066,6 +9204,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAShortenedCacheIsRebuilt,
   testTheEditorsRunIsTheOneAnsweredFor,
   testAnEditorOnAnotherVersionIsStillAskedWhatItIsPlaying,
+  testAGameTheEditorHasStoppedPlayingIsNotStillActive,
   testASettingTheEditorDroppedIsNamed,
   testACleanupThatCannotFinishStillFinishes,
   testADiagnosticTheFileContradictsIsNamed,
