@@ -235,49 +235,47 @@ makes the first one safe, write the intent down somewhere the next process reads
 first step, and have whatever completes the act, or makes it moot, take the note down. The user's
 reconnect is the usual replacement, and it arrives for the same reason the act was started.
 
-The same replacement loses what was _observed_ as well as what was intended, and the source may not
-say it again. A stop is reported by the editor's debug adapter to the sessions connected when it
-happened; a session connected afterwards is answered a thread and no frames, and the game is still
-sitting at its breakpoint. Reading "no frames" as "running" was the fault, and it was found by
-being wrong twice in a row: the first fixture asserted the replacement would see the stack, the
-second asserted the game had been released, and a runtime call timing out with "accepted the
-connection but did not answer" said neither. So when a state is learned from an event, ask what a
-process that missed the event is told when it asks, and if the answer is nothing, that is a third
-state rather than the default, and some other instrument has to separate it from the default. Here
-the runtime was that instrument, and `editor_status` was already using it about the same game.
+A replacement process also loses what the old one observed, and the source may not repeat it. The
+editor's debug adapter reports a stop to the sessions connected at the time. A session that
+connects afterwards and asks for the stack gets a thread and no frames, while the game is still
+sitting at its breakpoint. The code read "no frames" as "running". This was found by being wrong
+twice: the first fixture asserted the replacement would see the stack, the second asserted the
+game had been released, and a runtime call that timed out with "accepted the connection but did
+not answer" contradicted both. When a state is learned from an event, ask what a process that
+missed the event is told when it asks. If the answer is nothing, that is a third state, not the
+default, and something else has to tell it apart from the default. Here the runtime did that, and
+`editor_status` was already using it on the same game.
 
-The word in that finding was wrong for a day while the finding was right, and the fix built on the
-word. The measurement had been made with sessions that attached, so it was written up as "the
-session attached when it happened" and the fix counted the event only on an attached session. The
-property that mattered was being connected: a server that plays a scene through the editor is
-connected and never attaches until its first stack read, it is the ordinary case, and it was sent
-to the runtime for an answer it had already been given, on all three platforms, by the oldest
-fixture about the field. So when a fix gates on a property named in a measurement, ask whether the
-measurement separated that property from its neighbours, or whether every trial happened to have
-both. A word that every trial satisfied is a word the trials did not test.
+The finding above was right and one word in it was wrong, and the fix was built on the word. The
+measurement used sessions that had attached, so the write-up said "the session attached when it
+happened", and the fix counted the event only on an attached session. The property that mattered
+was being connected. A server that plays a scene through the editor is connected and does not
+attach until its first stack read, which is the ordinary case, so it was sent to the runtime for an
+answer it already had, on all three platforms, caught by the oldest fixture about the field. When a
+fix depends on a property named in a measurement, check whether the measurement distinguished
+that property from its neighbours, or whether every trial happened to have both.
 
-A comment saying a source never sends something is a claim about the source, and the code under it
-is shaped by the claim: the handler for the event is not there, so the event goes by unread however
-often it arrives. The one beside the adapter's event handler said Godot sends no `continued`. It
-sends one to every connection whenever the game is let go, so a session told of a stop went on
-answering held about a game somebody else had resumed. The same log showed `breakpoint` events with
-`reason: "removed"` that nothing had asked for, which is how a breakpoint set through the adapter
-turned out to hold for one play and not the next. Neither was in the code, and reading the code
-could not have found them: the code reads what it expects. Both came from writing every event the
-other side sent during one ordinary fixture run to a file and reading the file. So when a source is
-described in a comment as silent, or as saying exactly what the code reads, log what it says for a
-run and read the log. And a thing that is set and then consumed by a play, a run or a request is a
-thing to set once and use twice before believing the description, because the first use is the one
-the description was written from.
+A comment saying a source never sends something shapes the code under it: there is no handler for
+the event, so the event is ignored however often it arrives. The comment beside the adapter's event
+handler said Godot sends no `continued`. It sends one to every connection whenever the game is let
+go, so a session that had been told of a stop kept answering "held" about a game somebody else had
+resumed. The same log showed `breakpoint` events with `reason: "removed"` that nothing had asked
+for, which led to the finding that a breakpoint set through the adapter holds for one play only.
+Neither was visible in the code, because the code only reads what it expects. Both were found by
+writing every event the other side sent during one ordinary fixture run to a file and reading the
+file. So when a comment describes a source as silent, or as saying exactly what the code reads, log
+what it sends for one run and read the log. And when something is set and then consumed by a play,
+a run or a request, set it once and use it twice before trusting the description, because the first
+use is the one the description was written from.
 
 Those removals were the engine clearing every breakpoint in the editor whenever a debug session
-opened, which one editor setting turns off, and the fix that wrote the setting from the addon
-passed its own read-back and changed nothing: the adapter reads the setting again on a
+opens, which one editor setting turns off. The fix wrote the setting from the addon, the read-back
+of the setting passed, and nothing changed: the adapter reads the setting again only on a
 notification the settings dialog sends after Apply and `set_setting` does not send, so the value
-was stored and the running adapter went on clearing. A value written into a live system is stored
-by one part and read by another, and the write's success says only that the first part has it.
-Hold the effect, not the value: the fixture that caught it opened a second session and read what
-the adapter sent it, and the read-back of the setting would have passed forever.
+was stored and the running adapter kept clearing. A value written into a live system is stored by
+one part and read by another, and a successful write only says the first part has it. Test the
+effect, not the stored value. The fixture that caught this opened a second session and read what
+the adapter sent it; a read-back of the setting would have passed forever.
 
 A claim about a change you have just made is the least checked claim there is. It arrives with the
 reasoning that produced it, which is the strongest case anybody will assemble for it, and the reader
