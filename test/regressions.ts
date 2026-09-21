@@ -8715,9 +8715,11 @@ async function testAKeyDoesNotChooseFromAnOpenedMenu(): Promise<void> {
       ({ adapter, project, runtimeDir }) =>
         (tool) => {
           if (tool === 'play_scene') {
-            // What the engine says is kept, since a windowed engine that never announces on a
-            // machine that runs it headless every day is one whose reason is in its own output.
-            held.game = spawn(engine, ['--path', project], {
+            // The compatibility renderer, since the window is what this needs and not the
+            // renderer: Forward+ on a macOS runner's paravirtual Metal device spent twenty
+            // seconds compiling its pipelines before the scene ran, with nothing said but the
+            // device's name. What the engine says is kept for the next time it does not announce.
+            held.game = spawn(engine, ['--path', project, '--rendering-method', 'gl_compatibility'], {
               stdio: ['ignore', 'pipe', 'pipe'],
               env: {
                 ...process.env,
@@ -8758,12 +8760,14 @@ async function testAKeyDoesNotChooseFromAnOpenedMenu(): Promise<void> {
             'popup/item_1/text = "Two"\npopup/item_1/id = 1\n' +
             'popup/item_2/text = "Three"\npopup/item_2/id = 2\n',
         );
-        const started = await start(20_000);
+        const started = await start(60_000);
         assert.equal(
           get(started.answer, 'runtime', 'listening'),
           true,
           `${JSON.stringify(started.answer)}\nthe engine said:\n${said.join('')}`,
         );
+        // Printed so the wait above can be sized to what a windowed boot takes on each leg.
+        console.log(`opened menu: the windowed engine announced after ${started.waitedMs}ms`);
         const call = async (name: string, args: Record<string, unknown>): Promise<unknown> =>
           parseTextContent(
             await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS),
