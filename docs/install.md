@@ -13,7 +13,17 @@ under either.
 `setup` finds Godot itself, in the usual install locations. Set `GODOT_PATH` to the binary if
 yours is somewhere else, and it will write that path into the config it generates.
 
-## One command
+## Hand it to your agent
+
+```text hand this to an agent
+Install gdharness here by following https://aureliolo.github.io/gdharness/agent.md,
+then tell me what it asked you to recommend back to me.
+```
+
+The agent reads [agent.md](agent.md), runs the one command below, answers the questions it asks
+from what it finds in the project, and comes back with what it chose and why.
+
+## Or one command yourself
 
 ```bash from the project directory
 npx -y gdharness@{{version}} setup
