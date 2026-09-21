@@ -8720,7 +8720,11 @@ async function testAnInjectedMotionCarriesHowFarThePointerMoved(): Promise<void>
  * key op's description sends a caller to choose for this, and this is what holds the description
  * to what the engine does. A windowed run played through the fake editor, the shape downstream
  * has: a headless engine has no windows and a click there opens nothing, and a host with no
- * display cannot run one and says so.
+ * display cannot run one and says so. The compatibility renderer, since the window is what this
+ * needs and Forward+ on the macOS runner's paravirtual device spends the first twenty seconds
+ * compiling pipelines. The scene counts what the button and its menu did and logs their focus
+ * and visibility events by frame, which is what separated a menu the click never opened from
+ * one that opened and shut on its own; every assertion about the menu carries that account.
  */
 async function testAKeyDoesNotChooseFromAnOpenedMenu(): Promise<void> {
   const engine = resolveGodotPath();
@@ -8842,22 +8846,24 @@ async function testAKeyDoesNotChooseFromAnOpenedMenu(): Promise<void> {
           return `${counted.join(', ')}, window focused ${JSON.stringify(get(focused, 'result'))}, noted: ${noted}`;
         };
 
-        // The two halves of a click one at a time, read separately, since one leg reports the
-        // menu opened and closed again inside the click and this says which half shut it.
-        const rect = await call('runtime_inspect', { op: 'rect', nodePath: '/root/Main/Pick' });
-        const at = {
-          x: asNumber(get(rect, 'window', 'position', 'x')) + asNumber(get(rect, 'window', 'size', 'x')) / 2,
-          y: asNumber(get(rect, 'window', 'position', 'y')) + asNumber(get(rect, 'window', 'size', 'y')) / 2,
-        };
-        await call('runtime_input', { op: 'mouse_click', ...at, pressed: true });
-        await settle();
-        console.log(`opened menu: after a press alone, ${await account()}`);
-        await call('runtime_input', { op: 'mouse_click', ...at, pressed: false });
-        await settle();
-        console.log(`opened menu: after its release, ${await account()}`);
-        await call('runtime_input', { op: 'key', keycode: 'Escape' });
-        await settle();
-        console.log(`opened menu: after Escape, ${await account()}`);
+        // The window has to be the focused one before the menu is opened. The macOS runner
+        // focuses it a frame or two after the game announces, and an embedded popup closes when
+        // its window's focus moves: a menu opened on the frame before that focus arrived was
+        // read as closed, with the log showing focus_entered on the window, focus_exited on the
+        // menu and popup_hide on the same frame. A player's window is focused long before they
+        // click, so this is the fixture catching up with that, not the click.
+        const focused = async (): Promise<boolean> =>
+          get(
+            await call('runtime_invoke', { op: 'call', nodePath: '/root', method: 'has_focus' }),
+            'result',
+          ) === true;
+        const patience = Date.now() + 10_000;
+        let hasFocus = await focused();
+        while (!hasFocus && Date.now() < patience) {
+          await delay(100);
+          hasFocus = await focused();
+        }
+        assert.ok(hasFocus, `the window should be focused before anything is clicked: ${await account()}`);
 
         const clicked = await call('runtime_input', { op: 'click', nodePath: '/root/Main/Pick' });
         assert.equal(get(clicked, 'landed'), true, JSON.stringify(clicked));
