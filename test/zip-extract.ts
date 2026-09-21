@@ -11,7 +11,7 @@ import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { extract } from '../scripts/install-godot.js';
+import { download, extract } from '../scripts/install-godot.js';
 import { sweep } from './support/sweep.js';
 import { buildZip, DEFLATED } from './support/zip.js';
 
@@ -93,6 +93,49 @@ function testRejectsNonZip() {
   });
 }
 
+/**
+ * A download waits out a gateway timeout on the release host, with the waits growing.
+ *
+ * The host is handed in, the way the archive is above, so the case decides what it answers: a
+ * 504 to the first four attempts and the bytes on the fifth is the outage the Windows leg met,
+ * and it has to end in the bytes rather than a red build. The waits are recorded so the schedule
+ * is what is held, not only that it ended well; and a host that never recovers has to end in a
+ * throw naming what it kept answering, after the whole schedule and not before.
+ */
+async function testADownloadWaitsOutAGatewayTimeout(): Promise<void> {
+  const url = 'https://example.invalid/engine.zip';
+  const gateway = (answers: number[]) => {
+    let asked = 0;
+    return (target: string): Promise<Response> => {
+      assert.equal(target, url, 'every attempt asks for the same asset');
+      const status = answers[Math.min(asked, answers.length - 1)] ?? 200;
+      asked += 1;
+      return Promise.resolve(
+        status === 200
+          ? new Response('the engine', { status })
+          : new Response('', { status, statusText: 'Gateway Time-out' }),
+      );
+    };
+  };
+  const waited: number[] = [];
+  const recording = (ms: number): Promise<void> => {
+    waited.push(ms);
+    return Promise.resolve();
+  };
+
+  const got = await download(url, gateway([504, 504, 504, 504, 200]), recording);
+  assert.equal(got.toString('utf8'), 'the engine', 'the fifth attempt brought the bytes');
+  assert.deepEqual(waited, [2_000, 4_000, 8_000, 16_000], 'after four waits that doubled');
+
+  waited.length = 0;
+  await assert.rejects(
+    download(url, gateway([504]), recording),
+    /Could not download .* answered 504 Gateway Time-out/,
+    'a host that never recovers is reported with what it kept answering',
+  );
+  assert.deepEqual(waited, [2_000, 4_000, 8_000, 16_000, 32_000], 'after the whole schedule');
+}
+
 testRoundTrip();
 testRejectsTraversal();
 testRejectsZip64();
@@ -100,5 +143,6 @@ testRejectsMisplacedLocalHeader();
 testRejectsSizeMismatch();
 testRejectsUnknownCompression();
 testRejectsNonZip();
+await testADownloadWaitsOutAGatewayTimeout();
 
 console.log('zip extract tests passed');
