@@ -8777,10 +8777,23 @@ async function testAKeyDoesNotChooseFromAnOpenedMenu(): Promise<void> {
           return { ok: true };
         },
       async ({ server, project, start }) => {
+        // The scene counts what the button and its menu did, so a menu that reads as closed can
+        // be told apart from a click that never pressed the button and from a menu that opened
+        // and shut again on its own.
+        writeFileSync(
+          join(project, 'main.gd'),
+          'extends Control\n\nvar presses: int = 0\nvar openings: int = 0\nvar closings: int = 0\n\n\n' +
+            'func _ready() -> void:\n' +
+            '\tvar pick: OptionButton = $Pick\n' +
+            '\tpick.pressed.connect(func() -> void: presses += 1)\n' +
+            '\tpick.get_popup().about_to_popup.connect(func() -> void: openings += 1)\n' +
+            '\tpick.get_popup().popup_hide.connect(func() -> void: closings += 1)\n',
+        );
         writeFileSync(
           join(project, 'main.tscn'),
-          '[gd_scene format=3]\n\n[node name="Main" type="Control"]\nanchors_preset = 15\n' +
-            'anchor_right = 1.0\nanchor_bottom = 1.0\n\n' +
+          '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+            '[node name="Main" type="Control"]\nanchors_preset = 15\n' +
+            'anchor_right = 1.0\nanchor_bottom = 1.0\nscript = ExtResource("1")\n\n' +
             '[node name="Pick" type="OptionButton" parent="."]\noffset_left = 20.0\n' +
             'offset_top = 20.0\noffset_right = 200.0\noffset_bottom = 60.0\nselected = 0\n' +
             'item_count = 3\npopup/item_0/text = "One"\npopup/item_0/id = 0\n' +
@@ -8802,6 +8815,19 @@ async function testAKeyDoesNotChooseFromAnOpenedMenu(): Promise<void> {
         const property = async (nodePath: string, name: string): Promise<unknown> =>
           get(await call('runtime_inspect', { op: 'property', nodePath, property: name }), 'value');
         const settle = async (): Promise<unknown> => call('runtime_wait', { op: 'frames', frames: 3 });
+        const account = async (): Promise<string> => {
+          const counted = await Promise.all(
+            ['presses', 'openings', 'closings'].map(
+              async (name) => `${name} ${String(await property('/root/Main', name))}`,
+            ),
+          );
+          const focused = await call('runtime_invoke', {
+            op: 'call',
+            nodePath: '/root',
+            method: 'has_focus',
+          });
+          return `${counted.join(', ')}, window focused ${JSON.stringify(get(focused, 'result'))}`;
+        };
 
         const clicked = await call('runtime_input', { op: 'click', nodePath: '/root/Main/Pick' });
         assert.equal(get(clicked, 'landed'), true, JSON.stringify(clicked));
@@ -8811,14 +8837,24 @@ async function testAKeyDoesNotChooseFromAnOpenedMenu(): Promise<void> {
         );
         assert.equal(menus.length, 1, 'the button owns one menu');
         const menu = text(get(menus[0], 'path'));
-        assert.equal(await property(menu, 'visible'), true, 'the click opened the menu');
+        assert.equal(
+          await property(menu, 'visible'),
+          true,
+          `the click opened the menu: ${await account()}, click ${JSON.stringify(clicked)}`,
+        );
+        // Printed on a pass too, so a leg where it fails has a working leg's reading beside it.
+        console.log(`opened menu: after the click, ${await account()}`);
 
         await call('runtime_input', { op: 'key', keycode: 'Down' });
         await settle();
-        assert.equal(await property(menu, 'visible'), true, 'an arrow key leaves the menu open');
+        assert.equal(
+          await property(menu, 'visible'),
+          true,
+          `an arrow key leaves the menu open: ${await account()}`,
+        );
         await call('runtime_input', { op: 'key', keycode: 'Enter' });
         await settle();
-        assert.equal(await property(menu, 'visible'), false, 'Enter closes it');
+        assert.equal(await property(menu, 'visible'), false, `Enter closes it: ${await account()}`);
         assert.equal(await property('/root/Main/Pick', 'selected'), 0, 'having chosen nothing');
 
         const chosen = await call('runtime_input', { op: 'choose', nodePath: '/root/Main/Pick', index: 2 });
