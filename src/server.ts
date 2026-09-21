@@ -5215,7 +5215,8 @@ class GodotServer {
     const ofProject = announced.running.filter(
       (one) => wanted === undefined || isSameDirectory(one.project.path, wanted),
     );
-    const answeredBy = own !== undefined && ofProject.length > 1 ? { answeredBy: own } : {};
+    const chosenAmongSeveral = own !== undefined && ofProject.length > 1;
+    const answeredBy = chosenAmongSeveral ? { answeredBy: own } : {};
 
     // A game the session knows is held answers nothing, and what a caller got for asking was the
     // whole runtime timeout, ten seconds, and then a guess that it may be paused at a breakpoint.
@@ -5268,7 +5269,10 @@ class GodotServer {
       }`;
       return {
         content: [
-          { type: 'text', text: `Screenshot captured: ${dimensions}` },
+          {
+            type: 'text',
+            text: `Screenshot captured: ${dimensions}${chosenAmongSeveral ? ` from pid ${own}, the game this server holds` : ''}`,
+          },
           { type: 'image', data: readFileSync(screenshotPath).toString('base64'), mimeType: 'image/png' },
         ],
       };
