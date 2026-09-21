@@ -47,6 +47,8 @@ const TOOL_TIMEOUT_MS = 120_000;
 const LSP_READY_TIMEOUT_MS = 90_000;
 /** A game the editor plays is a second engine starting, on a runner that is already busy. */
 const GAME_STOP_TIMEOUT_MS = 90_000;
+/** How long a start waits for that game to announce its runtime, for the same reason. */
+const RUNTIME_BOOT_MS = 30_000;
 
 const SCENE = 'res://fixture.tscn';
 
@@ -229,6 +231,17 @@ interface Editor {
   refusal: (name: string, args: Record<string, unknown>) => Promise<string>;
   /** Calls a tool and answers with how it went, for waiting on something to come up. */
   attempt: (name: string, args: Record<string, unknown>) => Promise<{ ok: boolean; text: string }>;
+  /**
+   * Starts a run of the project and answers once its runtime is listening, failing if it is not.
+   *
+   * The tool's own wait for the announcement is five seconds, and a game a loaded runner is
+   * booting can take longer: the answer then says `mayYetAnnounce` and names `runtimeWaitMs`,
+   * exactly as designed, and a case that goes on to ask the game something is refused for a game
+   * that announces a moment later. Every case that talks to the game it started goes through
+   * this, so the budget is stated once and a case is about what it asks the game, not about the
+   * runner's speed.
+   */
+  play: (args?: Record<string, unknown>) => Promise<unknown>;
   project: string;
   /** The engine this editor is, for a case that needs a second one against the same project. */
   godotPath: string;
@@ -662,6 +675,23 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
     return { ok: get(response, 'result', 'isError') !== true, text: textOf(response) ?? '' };
   };
 
+  const play = async (args: Record<string, unknown> = {}): Promise<unknown> => {
+    const run = await call('editor_run', { projectPath: project, runtimeWaitMs: RUNTIME_BOOT_MS, ...args });
+    // What the game printed goes with a start that came back without a runtime, since the next
+    // question is always why it did not come up, and which of the two states it is: a runtime
+    // that is not coming is the promise broken, and one still on its way after this long is a
+    // machine slower than anything worth waiting for.
+    if (get(run, 'runtime', 'listening') !== true) {
+      const said = (await attempt('editor_output', {})).text;
+      const what =
+        get(run, 'runtime', 'mayYetAnnounce') === true
+          ? 'had still not announced itself'
+          : 'is not coming up at all';
+      assert.fail(`the game ${what}: ${JSON.stringify(run)}\n${said}`);
+    }
+    return run;
+  };
+
   const editor: ChildProcess = spawn(
     godotPath,
     [
@@ -714,7 +744,7 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
     }
     assert.ok(connected, `the editor never reached the bridge:\n${engineOutput.join('')}`);
 
-    await body({ call, refusal, attempt, project, godotPath, lspPort, dapPort, server, serverEnv });
+    await body({ call, refusal, attempt, play, project, godotPath, lspPort, dapPort, server, serverEnv });
   } catch (failure) {
     // What the engine said on its way to failing, which is the half of the evidence a tool
     // answer does not carry: a fixture that reports only its own assertion sends whoever reads
@@ -1768,7 +1798,7 @@ async function testAMethodAddedToAnAnalysedTypeIsPickedUp({ call, project }: Edi
  */
 async function testAPlayedRunOutlivesTheServerUnderIt(godotPath: string): Promise<void> {
   await withEditor(godotPath, async (own) => {
-    const started = await own.call('editor_run', { projectPath: own.project, op: 'start', headless: true });
+    const started = await own.play({ op: 'start', headless: true });
     assert.equal(get(started, 'started'), true, `the editor should have played the scene: ${text(started)}`);
     // The whole difference between this case and the one in the regression tier. A run the server
     // spawned would answer `gdharness` here, have no debug adapter session behind it, and prove
@@ -1879,7 +1909,7 @@ async function testAHeldGameIsStillHeldForTheReplacement(godotPath: string): Pro
   await withEditor(godotPath, async (own) => {
     const main = { projectPath: own.project, scriptPath: 'res://main.gd' };
     await own.call('debug_breakpoint', { ...main, op: 'set', line: BREAK_LINE });
-    const run = await own.call('editor_run', { projectPath: own.project, op: 'start', headless: true });
+    const run = await own.play({ op: 'start', headless: true });
     assert.equal(get(run, 'through'), 'editor', `the editor should be the one playing: ${text(run)}`);
     const pid = asNumber(get(run, 'runtime', 'pid'), 'the played run needs a process of its own');
     await stackWithin(own.attempt, 'the game should stop at the breakpoint', (stack) => stack.length > 0);
@@ -2151,7 +2181,7 @@ async function stackWithin(
  * always empty. Everything here is asserted off the session: the stop, the frame it stopped in,
  * and the line the game printed after being let go.
  */
-async function testDebugging({ call, refusal, attempt, project }: Editor): Promise<void> {
+async function testDebugging({ call, refusal, attempt, play, project }: Editor): Promise<void> {
   const main = { projectPath: project, scriptPath: 'res://main.gd' };
 
   // Nothing is running yet, and the whole trap this replaces was that every one of these
@@ -2170,17 +2200,10 @@ async function testDebugging({ call, refusal, attempt, project }: Editor): Promi
   // The print, so the frame the game stops in is _ready with the sum already worked out.
   await call('debug_breakpoint', { ...main, op: 'set', line: BREAK_LINE });
 
-  const run = await call('editor_run', { projectPath: project });
+  // The autoload announces itself before the main scene is ready, which is where this run's
+  // breakpoint is, so a game stopped there has already announced and the start says so.
+  const run = await play();
   assert.equal(get(run, 'through'), 'editor', 'the editor should be the one playing it');
-  // A start waits for the game to be something the runtime tools can talk to and says which it
-  // is. The autoload announces itself before the main scene is ready, which is where this run's
-  // breakpoint is, so a game stopped there has already announced.
-  const runtime = asObject(get(run, 'runtime'), 'runtime');
-  assert.equal(
-    runtime['listening'],
-    true,
-    `the start should wait for the runtime: ${JSON.stringify(runtime)}`,
-  );
 
   const frames = await stackWithin(
     attempt,
@@ -2753,14 +2776,14 @@ async function testRuntime({ call, refusal, attempt, project, lspPort, dapPort }
  * started with. The edit is proved to have landed where the tools look before the game is asked
  * again, because a write that never reached disk would leave the game unchanged too.
  */
-async function testAnEditDoesNotReachTheRunningGame({ call, attempt, project }: Editor): Promise<void> {
+async function testAnEditDoesNotReachTheRunningGame({ call, attempt, play, project }: Editor): Promise<void> {
   await attempt('editor_run', { op: 'stop' });
   const game = { projectPath: project };
   const source = join(project, 'main.gd');
   const before = readFileSync(source, 'utf8');
   const asked = { ...game, op: 'call', nodePath: '/root/Main', method: '_twice', args: [4] };
   try {
-    await call('editor_run', { projectPath: project });
+    await play();
     assert.equal(
       get(await call('runtime_invoke', asked), 'result'),
       8,
@@ -2795,7 +2818,7 @@ async function testAnEditDoesNotReachTheRunningGame({ call, attempt, project }: 
     // answering. Without this the case passes just as well against a runtime that had stopped
     // reading the method at all, and 8 would be the sound of nothing happening.
     await call('editor_run', { op: 'stop' });
-    await call('editor_run', { projectPath: project });
+    await play();
     assert.equal(
       get(await call('runtime_invoke', asked), 'result'),
       12,
@@ -2820,13 +2843,13 @@ async function testAnEditDoesNotReachTheRunningGame({ call, attempt, project }: 
  * never the shared default, and the console is the proof that the debugger really did attach to
  * the game on whatever it got: the console only travels that way.
  */
-async function testTheDebuggerGetsAPortOfItsOwn({ call, attempt, project }: Editor): Promise<void> {
+async function testTheDebuggerGetsAPortOfItsOwn({ call, attempt, play }: Editor): Promise<void> {
   // Attempted rather than called: what came before may have left a game running or may not, and
   // a stop with nothing to stop is refused.
   await attempt('editor_run', { op: 'stop' });
 
   try {
-    const took = asNumber(get(await call('editor_run', { projectPath: project }), 'debugPort'), 'debugPort');
+    const took = asNumber(get(await play(), 'debugPort'), 'debugPort');
     assert.notEqual(took, SHARED_DEBUGGER_PORT, 'the editor should not play on the shared default');
     assert.ok(took > 0 && took <= 65535, `and what it took should be a port: ${took}`);
     assert.equal(
@@ -2865,20 +2888,11 @@ async function testTheDebuggerGetsAPortOfItsOwn({ call, attempt, project }: Edit
  * headless here leaves the editor as the one that would have played it, because the project's run
  * arguments say headless too, so what moves this run is still the arguments and nothing else.
  */
-async function testTheGameIsHandedItsOwnArguments({ call, attempt, project }: Editor): Promise<void> {
+async function testTheGameIsHandedItsOwnArguments({ call, attempt, play, project }: Editor): Promise<void> {
   await attempt('editor_run', { op: 'stop' });
 
   try {
-    const run = await call('editor_run', {
-      projectPath: project,
-      headless: true,
-      args: ['--fixture-flag=7', '--quiet'],
-      // The default budget is five seconds and this fixture read it as a guarantee. A loaded
-      // runner went past it once, and the answer said so exactly as designed: `mayYetAnnounce`
-      // true, the game still running, and a note naming this argument as the way to wait longer.
-      // The tool was right and the assertion below was asking for more than the tool promises.
-      runtimeWaitMs: 30_000,
-    });
+    const run = await play({ headless: true, args: ['--fixture-flag=7', '--quiet'] });
     assert.equal(
       get(run, 'through'),
       'gdharness',
@@ -2889,19 +2903,6 @@ async function testTheGameIsHandedItsOwnArguments({ call, attempt, project }: Ed
       /debug_\*/,
       'and the answer should say the debug tools will not answer for it',
     );
-
-    // A start is supposed to wait for the game to be something the runtime tools can talk to, so
-    // a run that came back without one is that promise broken rather than a call made too early.
-    // What the game printed goes with it: the next question is always why it did not come up.
-    if (get(run, 'runtime', 'listening') !== true) {
-      const said = (await attempt('editor_output', {})).text;
-      // Which of the two states it is, because they are different faults and the answer already
-      // distinguishes them: a runtime that is not coming is the promise broken, and one still on
-      // its way after thirty seconds is a machine slower than anything worth waiting for.
-      const stillComing = get(run, 'runtime', 'mayYetAnnounce') === true;
-      const what = stillComing ? 'had still not announced itself' : 'is not coming up at all';
-      assert.fail(`the game with arguments ${what}: ${JSON.stringify(run)}\n${said}`);
-    }
 
     const given = await call('runtime_invoke', {
       projectPath: project,
@@ -2964,8 +2965,8 @@ async function testTheGameIsHandedItsOwnArguments({ call, attempt, project }: Ed
  * while the report it was supposed to answer was right: the console really did not arrive, and the
  * transcript named for it really was empty, for a caller who only ever asked `editor_output`.
  */
-async function testAPlayedRunsConsoleArrivesOnItsOwn({ call, project }: Editor): Promise<void> {
-  await call('editor_run', { projectPath: project });
+async function testAPlayedRunsConsoleArrivesOnItsOwn({ call, play, project }: Editor): Promise<void> {
+  await play();
 
   const started = Date.now();
   const until = started + GAME_STOP_TIMEOUT_MS;
@@ -3001,7 +3002,7 @@ async function testAPlayedRunsConsoleArrivesOnItsOwn({ call, project }: Editor):
   // Played straight over the top rather than stopped first, because stop drains the console on its
   // way out and the fault is about what nobody drained. A bench that finishes on its own leaves
   // the same state, and that is the ordinary way one ends.
-  await call('editor_run', { projectPath: project });
+  await play();
   const second = Date.now() + GAME_STOP_TIMEOUT_MS;
   let lines: string[] = [];
   while (!lines.some((line) => line.includes('the game said 4')) && Date.now() < second) {
@@ -3096,16 +3097,10 @@ async function testAPlayedRunsConsoleArrivesOnItsOwn({ call, project }: Editor):
   );
 }
 
-async function testAnErrorTheGameBrokeOnIsReported({ call, attempt, project }: Editor): Promise<void> {
+async function testAnErrorTheGameBrokeOnIsReported({ call, attempt, play, project }: Editor): Promise<void> {
   const game = { projectPath: project };
-  await call('editor_run', { projectPath: project });
-
-  const deadline = Date.now() + GAME_STOP_TIMEOUT_MS;
-  let reached = await attempt('runtime_inspect', { ...game, op: 'tree', nodePath: '/root' });
-  while (!reached.ok && Date.now() < deadline) {
-    await delay(500);
-    reached = await attempt('runtime_inspect', { ...game, op: 'tree', nodePath: '/root' });
-  }
+  await play();
+  const reached = await attempt('runtime_inspect', { ...game, op: 'tree', nodePath: '/root' });
   assert.ok(reached.ok, `the game should be answering before it is broken: ${reached.text}`);
 
   const clean = await call('editor_output', {});
@@ -3227,7 +3222,13 @@ async function ticksWithin(attempt: Editor['attempt'], project: string, what: st
  * play it starts and says so in the start answer. The set is also kept in the project for the
  * server after a reconnect, which the held-game case in the own-pair set holds.
  */
-async function testABreakpointHoldsForEveryPlay({ call, attempt, project, dapPort }: Editor): Promise<void> {
+async function testABreakpointHoldsForEveryPlay({
+  call,
+  attempt,
+  play,
+  project,
+  dapPort,
+}: Editor): Promise<void> {
   const main = { projectPath: project, scriptPath: 'res://main.gd' };
   const one = [{ scriptPath: 'res://main.gd', lines: [BREAK_LINE] }];
   const set = await call('debug_breakpoint', { ...main, op: 'set', line: BREAK_LINE });
@@ -3265,7 +3266,7 @@ async function testABreakpointHoldsForEveryPlay({ call, attempt, project, dapPor
   );
   await onlooker.abandon();
 
-  const first = await call('editor_run', { projectPath: project, headless: true });
+  const first = await play({ headless: true });
   assert.deepEqual(
     get(first, 'breakpoints'),
     one,
@@ -3276,7 +3277,7 @@ async function testABreakpointHoldsForEveryPlay({ call, attempt, project, dapPor
   await call('editor_run', { op: 'stop' });
 
   // The play after, which used to run straight through.
-  const second = await call('editor_run', { projectPath: project, headless: true });
+  const second = await play({ headless: true });
   assert.deepEqual(get(second, 'breakpoints'), one, `the second start says the same: ${text(second)}`);
   await stackWithin(attempt, 'the second play stops at the same breakpoint', (stack) => stack.length > 0);
   await call('debug_control', { op: 'continue' });
@@ -3287,7 +3288,7 @@ async function testABreakpointHoldsForEveryPlay({ call, attempt, project, dapPor
 
   // With nothing held, a play is told nothing and runs: it ticks, which a game sitting on the line
   // in _ready cannot, so this is the positive beside the absent field.
-  const third = await call('editor_run', { projectPath: project, headless: true });
+  const third = await play({ headless: true });
   assert.equal(get(third, 'breakpoints'), undefined, `a play with nothing held says nothing: ${text(third)}`);
   await ticksWithin(attempt, project, 'and runs through the line the breakpoint was on');
   await call('editor_run', { op: 'stop' });
