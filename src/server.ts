@@ -4542,7 +4542,7 @@ class GodotServer {
     this.drainEditorOutput(stopped);
     this.drainTranscript(stopped);
     // Read before the stop, since a game that goes on the stop is one that was running.
-    const wasRunning = stillRunning(stopped);
+    const wasRunning = await this.runStillGoing(stopped);
     this.logDebug('Stopping the running game');
     await this.endActiveGame('editor_run stop');
     return this.jsonTextResponse({

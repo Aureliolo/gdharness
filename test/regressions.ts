@@ -7678,6 +7678,40 @@ async function testAGameTheEditorHasStoppedPlayingIsNotStillActive(): Promise<vo
       true,
       `as a run that ended with nobody collecting its code: ${JSON.stringify(output)}`,
     );
+    const stop = async (): Promise<unknown> =>
+      parseTextContent(await server.request('tools/call', { name: 'editor_run', arguments: { op: 'stop' } }));
+    const afterReading = await stop();
+    assert.equal(
+      get(afterReading, 'exitedBeforeStop'),
+      true,
+      `and a stop finds it over: ${JSON.stringify(afterReading)}`,
+    );
+
+    // The editor plays again and the game goes again, and this time the stop is the first call
+    // after it went: nothing has read the run, so the stop has only the editor's word to go on,
+    // and it used to claim it had ended a game that had ended itself.
+    playing = true;
+    let pickedUp = false;
+    for (let waited = 0; waited < 10_000 && !pickedUp; waited += 100) {
+      await delay(100);
+      const seen = parseTextContent(
+        await server.request('tools/call', { name: 'editor_status', arguments: {} }),
+      );
+      pickedUp = get(seen, 'game', 'processActive') === true;
+    }
+    assert.ok(pickedUp, 'the second play should be picked up, or the stop below is about nothing');
+    playing = false;
+    const first = await stop();
+    assert.equal(
+      get(first, 'exitedBeforeStop'),
+      true,
+      `a stop as the first call after the editor says the game went takes the editor's word: ${JSON.stringify(first)}`,
+    );
+    assert.match(
+      text(get(first, 'note')),
+      /over before the stop, so nothing was ended here/,
+      JSON.stringify(first),
+    );
   } finally {
     editor?.close();
     await server.stop();
