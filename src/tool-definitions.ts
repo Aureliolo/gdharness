@@ -1182,12 +1182,13 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       relativeX: {
         type: 'number',
         ops: ['mouse_motion'],
-        description: 'mouse_motion: movement since the last event.',
+        description:
+          'mouse_motion: the movement the event carries. Left out, it is the distance from where the pointer last was, which is what a control that drags reads; give it to send a motion the position does not show.',
       },
       relativeY: {
         type: 'number',
         ops: ['mouse_motion'],
-        description: 'mouse_motion: movement since the last event.',
+        description: 'mouse_motion: as relativeX.',
       },
     },
     requires: [],
@@ -1203,14 +1204,22 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         requires: ['nodePath'],
       },
       action: { summary: 'press an action, or hold it', requires: ['action'] },
-      key: { summary: 'press a key, or hold it', requires: ['keycode'] },
+      key: {
+        summary:
+          'press a key, or hold it. Not for a menu a click has opened: an OptionButton or PopupMenu pops up as a window of its own, and a key sent to the game closes it without choosing, which choose does',
+        requires: ['keycode'],
+      },
       text: {
         summary:
           'type a string into the field being edited, a character at a time, and say what it landed in',
         requires: ['text'],
       },
       mouse_click: { summary: 'one mouse button event at a position', requires: ['x', 'y'] },
-      mouse_motion: { summary: 'move the mouse to a position', requires: ['x', 'y'] },
+      mouse_motion: {
+        summary:
+          'move the mouse to a position, carrying the distance from where it last was unless relativeX and relativeY say otherwise, so a control that drags moves under a run of these',
+        requires: ['x', 'y'],
+      },
     },
   },
   {

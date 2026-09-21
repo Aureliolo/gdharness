@@ -8585,6 +8585,106 @@ async function testASpawnedGameBesideAnEditorIsStillItsOwn(): Promise<void> {
 }
 
 /**
+ * An injected mouse motion carries the distance from where the pointer last was.
+ *
+ * A control that drags reads the event's `relative` rather than its position, and every motion
+ * sent through the bridge said it had moved by nothing, so a grip under a bridge drag stood still
+ * through the whole drag. The viewport remembers where the last motion put the pointer, so the
+ * difference from there is what a real move would carry; a relative the caller gives is kept. Read
+ * off a script in the game that records what the events said, since the answer's own `relative`
+ * only says what was sent.
+ */
+async function testAnInjectedMotionCarriesHowFarThePointerMoved(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('injected motion regression skipped (Godot not found)');
+    return;
+  }
+  await withAPlayingEditor(
+    ({ adapter }) =>
+      (tool) =>
+        tool === 'playing_status'
+          ? { ok: true, playing: false, scenePath: '', debugPort: adapter }
+          : { ok: true },
+    async ({ server, project }) => {
+      writeFileSync(
+        join(project, 'main.gd'),
+        'extends Node\n\nvar last_relative: Vector2 = Vector2.ZERO\nvar motions: int = 0\n\n\n' +
+          'func _input(event: InputEvent) -> void:\n' +
+          '\tif event is InputEventMouseMotion:\n' +
+          '\t\tvar motion: InputEventMouseMotion = event\n' +
+          '\t\tlast_relative = motion.relative\n' +
+          '\t\tmotions += 1\n',
+      );
+      writeFileSync(
+        join(project, 'main.tscn'),
+        '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+          '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+      );
+      const started = parseTextContent(
+        await server.request(
+          'tools/call',
+          {
+            name: 'editor_run',
+            arguments: { projectPath: project, op: 'start', headless: true, runtimeWaitMs: 20_000 },
+          },
+          ENGINE_CALL_TIMEOUT_MS,
+        ),
+      );
+      try {
+        assert.equal(get(started, 'runtime', 'listening'), true, JSON.stringify(started));
+        const call = async (name: string, args: Record<string, unknown>): Promise<unknown> =>
+          parseTextContent(
+            await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS),
+          );
+        const read = async (property: string): Promise<unknown> =>
+          get(await call('runtime_inspect', { op: 'property', nodePath: '/root/Main', property }), 'value');
+        const lastRelative = async (): Promise<[unknown, unknown]> => {
+          const value = await read('last_relative');
+          return [get(value, 'x'), get(value, 'y')];
+        };
+        // The pointer put somewhere first, so the second motion has a known place to move from.
+        await call('runtime_input', { op: 'mouse_motion', x: 10, y: 10 });
+        const moved = await call('runtime_input', { op: 'mouse_motion', x: 40, y: 30 });
+        assert.deepEqual(
+          get(moved, 'relative'),
+          [30, 20],
+          `the motion says how far the pointer moved: ${JSON.stringify(moved)}`,
+        );
+        await call('runtime_wait', { op: 'frames', frames: 2 });
+        assert.deepEqual(await lastRelative(), [30, 20], 'and the game read the same distance off the event');
+        assert.equal(await read('motions'), 2, 'from two motions');
+        // A relative the caller gives is what the event carries, whatever the position says.
+        const told = await call('runtime_input', {
+          op: 'mouse_motion',
+          x: 40,
+          y: 30,
+          relativeX: 5,
+          relativeY: -5,
+        });
+        assert.deepEqual(get(told, 'relative'), [5, -5], JSON.stringify(told));
+        await call('runtime_wait', { op: 'frames', frames: 2 });
+        assert.deepEqual(await lastRelative(), [5, -5], 'a given relative is kept');
+        // One axis given says the motion on it, and nothing on the other, rather than nothing at
+        // all: the pair fallback answers zero for a missing pair, which would swallow the axis.
+        const oneAxis = await call('runtime_input', { op: 'mouse_motion', x: 40, y: 30, relativeX: 7 });
+        assert.deepEqual(get(oneAxis, 'relative'), [7, 0], JSON.stringify(oneAxis));
+      } finally {
+        await server.request(
+          'tools/call',
+          { name: 'editor_run', arguments: { op: 'stop' } },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+      }
+    },
+    { realAddon: true, engine },
+  );
+}
+
+/**
  * A find by className reaches the nodes whose script extends that class, at any distance.
  *
  * `className Card` answered 0 over a tree of rows whose scripts extend Card two steps down,
@@ -13226,6 +13326,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheEditorsGameIsToldFromAnotherOfTheSameProject,
   testASpawnedGameBesideAnEditorIsStillItsOwn,
   testAFindByClassReachesWhatExtendsIt,
+  testAnInjectedMotionCarriesHowFarThePointerMoved,
   testAWrittenLineBreakMatchesATwoLineLabel,
   testAPlayedGamesReportsReachTheOutput,
   testARealBenchTakesItsWorkerWithIt,
