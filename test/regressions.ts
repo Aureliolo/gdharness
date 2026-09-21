@@ -8545,6 +8545,96 @@ async function testASpawnedGameBesideAnEditorIsStillItsOwn(): Promise<void> {
 }
 
 /**
+ * A line break written as a backslash and an n finds a label with the break in it.
+ *
+ * A button with two lines on it was asked for by `runtime_inspect find` with `says` carrying the
+ * break as the two characters, the way it is typed into a JSON string one escape short, and was
+ * answered as not there: 0 found, which reads as a control that is not on the screen. Nothing on a
+ * screen says a backslash and an n, so the two characters mean the break. The same words on a
+ * `runtime_wait until` are met rather than timed out. Under the engine, since the matching is the
+ * addon's.
+ */
+async function testAWrittenLineBreakMatchesATwoLineLabel(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('written line break regression skipped (Godot not found)');
+    return;
+  }
+  await withAPlayingEditor(
+    ({ adapter }) =>
+      (tool) =>
+        tool === 'playing_status'
+          ? { ok: true, playing: false, scenePath: '', debugPort: adapter }
+          : { ok: true },
+    async ({ server, project }) => {
+      writeFileSync(
+        join(project, 'main.tscn'),
+        '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n\n' +
+          '[node name="Ward" type="Button" parent="."]\ntext = "WARD\\nshields 3"\n',
+      );
+      const started = parseTextContent(
+        await server.request(
+          'tools/call',
+          {
+            name: 'editor_run',
+            arguments: { projectPath: project, op: 'start', headless: true, runtimeWaitMs: 20_000 },
+          },
+          ENGINE_CALL_TIMEOUT_MS,
+        ),
+      );
+      try {
+        assert.equal(get(started, 'runtime', 'listening'), true, JSON.stringify(started));
+        const call = async (name: string, args: Record<string, unknown>): Promise<unknown> =>
+          parseTextContent(
+            await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS),
+          );
+        // The two characters, which is what a caller writing the break one escape short sends.
+        const written = await call('runtime_inspect', { op: 'find', says: 'WARD\\nshields 3' });
+        assert.equal(
+          asArray(get(written, 'nodes'))
+            .map((node) => text(get(node, 'path')))
+            .join(','),
+          '/root/Main/Ward',
+          `the break written as two characters finds the two-line button: ${JSON.stringify(written)}`,
+        );
+        // And the break itself, which the two characters are read as.
+        const broken = await call('runtime_inspect', { op: 'find', says: 'WARD\nshields 3' });
+        assert.equal(
+          asArray(get(broken, 'nodes'))
+            .map((node) => text(get(node, 'path')))
+            .join(','),
+          '/root/Main/Ward',
+          `and so does the break itself: ${JSON.stringify(broken)}`,
+        );
+        const waited = await call('runtime_wait', {
+          op: 'until',
+          nodePath: '/root/Main',
+          says: 'ward\\nSHIELDS',
+          timeoutMs: 2_000,
+        });
+        assert.equal(get(waited, 'met'), true, `a wait on the same words is met: ${JSON.stringify(waited)}`);
+        const absent = await call('runtime_inspect', { op: 'find', says: 'WARD\\nshields 4' });
+        assert.deepEqual(
+          asArray(get(absent, 'nodes')),
+          [],
+          `words the button does not say are still not found: ${JSON.stringify(absent)}`,
+        );
+      } finally {
+        await server.request(
+          'tools/call',
+          { name: 'editor_run', arguments: { op: 'stop' } },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+      }
+    },
+    { realAddon: true, engine },
+  );
+}
+
+/**
  * What a game the editor plays reports reaches editor_output and the transcript.
  *
  * The editor's game prints to the editor's own stderr, which nobody reads, and the debug adapter
@@ -12992,6 +13082,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testALateAnnouncementIsTiedToThePlayedRun,
   testTheEditorsGameIsToldFromAnotherOfTheSameProject,
   testASpawnedGameBesideAnEditorIsStillItsOwn,
+  testAWrittenLineBreakMatchesATwoLineLabel,
   testAPlayedGamesReportsReachTheOutput,
   testARealBenchTakesItsWorkerWithIt,
   testAStopEndsTheProjectsUnannouncedWorkers,

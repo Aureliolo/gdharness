@@ -976,7 +976,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['find'],
         description:
-          'find: part of what the node has written on it, case-insensitively, which is how a button is reached by the word on it rather than by a generated path. Its own text, so a row is found by the label in it, and hidden nodes match. A bare word is a contains; write a glob and it is one, matched against the whole of what the node says, the same as namePattern.',
+          'find: part of what the node has written on it, case-insensitively, which is how a button is reached by the word on it rather than by a generated path. Its own text, so a row is found by the label in it, and hidden nodes match. A bare word is a contains; write a glob and it is one, matched against the whole of what the node says, the same as namePattern. A label with a line break is matched with the break in the words, and a backslash followed by n counts as one.',
       },
       limit: {
         type: 'number',
@@ -1216,7 +1216,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['until'],
         description:
-          'until: wait for these words to appear anywhere under nodePath instead of for a property, which is how a panel that rebuilds its labels is waited on at all: the labels are named afresh each redraw and the panel is what stays put. Case-insensitive, part of a line, hidden nodes included. Instead of, not as well as: a call carrying this and a property is refused, because they ask about different things and answering one of them silently is how a caller watches a screen believing they are watching a property.',
+          'until: wait for these words to appear anywhere under nodePath instead of for a property, which is how a panel that rebuilds its labels is waited on at all: the labels are named afresh each redraw and the panel is what stays put. Case-insensitive, part of a line, hidden nodes included; a label with a line break is matched with the break in the words, and a backslash followed by n counts as one. Instead of, not as well as: a call carrying this and a property is refused, because they ask about different things and answering one of them silently is how a caller watches a screen believing they are watching a property.',
       },
       timeoutMs: {
         type: 'number',
