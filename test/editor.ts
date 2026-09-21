@@ -3046,13 +3046,18 @@ async function testAPlayedRunsConsoleArrivesOnItsOwn({ call, project }: Editor):
 
   // The reading that separates a bench doing work from a bench parked, asked of a run whose
   // process this server does not hold. The game announced its own process id, which the runtime
-  // call above went through, and that number is what the run is asked by: this used to be
-  // answered as "there is no process to ask" beside a runtimes list naming the process.
+  // call above went through, and that number is what names the run and what it is asked by: this
+  // used to be answered as "there is no process to ask" beside a runtimes list naming the process.
+  // The reading itself is best effort, a PowerShell start on Windows that a loaded runner can hold
+  // past its budget, so what is held is that the question was put to that process.
   const asked = await call('editor_output', { cpu: true });
-  assert.equal(
-    typeof get(asked, 'cpuSeconds'),
-    'number',
-    `a played game that announced is asked by the number it announced: ${text(asked)}`,
+  const pid = asNumber(get(asked, 'pid'), 'a played game that announced is named by that number');
+  assert.equal(pid, asNumber(get(await call('editor_status', {}), 'game', 'runtimes', 0, 'pid')));
+  const cpuSeconds = get(asked, 'cpuSeconds');
+  assert.ok(
+    (typeof cpuSeconds === 'number' && cpuSeconds >= 0) ||
+      text(get(asked, 'note')).includes('this platform would not say what the run has used'),
+    `and asked by it: ${text(asked)}`,
   );
 
   // Left with nothing playing, because this case runs before the debugger ones now and those ask

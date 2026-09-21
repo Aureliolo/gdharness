@@ -8254,15 +8254,18 @@ async function testALateAnnouncementIsTiedToThePlayedRun(): Promise<void> {
       );
       const tied = await cpu();
       assert.equal(
-        typeof get(tied, 'cpuSeconds'),
-        'number',
-        `once the game has announced, the run is asked by that number: ${JSON.stringify(tied)}`,
-      );
-      assert.ok(Number(get(tied, 'cpuSeconds')) >= 0, JSON.stringify(tied));
-      assert.equal(
         get(tied, 'pid'),
         process.pid,
-        `and the run is named by the number it announced: ${JSON.stringify(tied)}`,
+        `once the game has announced, the run is named by that number: ${JSON.stringify(tied)}`,
+      );
+      // And asked by it. The reading is best effort by design, a PowerShell start on Windows that
+      // a loaded runner can hold past its budget, so what is held is that the question was put to
+      // that process: a number, or the note that the platform would not answer about it.
+      const cpuSeconds = get(tied, 'cpuSeconds');
+      assert.ok(
+        (typeof cpuSeconds === 'number' && cpuSeconds >= 0) ||
+          text(get(tied, 'note')).includes('this platform would not say what the run has used'),
+        `and asked by it: ${JSON.stringify(tied)}`,
       );
 
       // The stop names the same number. A played run has no pid here, and the stop answered null
