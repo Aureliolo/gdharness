@@ -404,15 +404,21 @@ output and `endedUnwatched`, because nothing collected an exit code for it and a
 reads as a run that finished its work. `editor_run stop` ends it by pid and takes the note away.
 One run is one process: what the game started for itself is not signalled and the answer says so,
 unless the stop is asked for `andChildren`, and then every process under the run's, to any depth,
-that is announced as a game of the project goes with it, listed before the run is ended because
-ending it is what makes them nobody's children on POSIX. To any depth because the process the run
-holds is not always the game: the Windows console build is a wrapper that starts the engine as its
-child, so the game announces a number the handle does not have and a worker it opens is the
-handle's grandchild. The run's own game is told from a worker by the same tree, as the announced
-process under the handle with no announced process between the two, and the same reading serves a
-runtime call and a processor-time reading when nothing else has tied the run to its game. A
-process under the run that is not announced as a game is left and named, since what it is cannot
-be told from here.
+that is a game of the project goes with it, listed before the run is ended because ending it is
+what makes them nobody's children on POSIX. A game of the project is one announced as such, or one
+whose command line is the project's engine run with `--path` on the project: a project that keeps
+the runtime out of its benches on purpose, so that thirty-one workers do not each bind a port, has
+workers that never announce, and the fan-out this argument was written for was the one it could
+not reach. The engine is the executable of the run's own process or of one between the child and
+it, since a worker is started with the game's own executable, and an editor is refused whatever
+its path says. To any depth because the process the run holds is not always the game: the Windows
+console build is a wrapper that starts the engine as its child, so the game announces a number the
+handle does not have and a worker it opens is the handle's grandchild. The run's own game is told
+from a worker by the same tree, as the announced process under the handle with no announced
+process between the two, or, where nothing announced, as the project's engine under the handle
+with no such engine between, and the same reading serves a runtime call and a processor-time
+reading when nothing else has tied the run to its game. A process under the run that is neither
+is left and named, since what it is cannot be told from here.
 
 A run that has ended also says who ended it. `endedBy` names the call when that was this server,
 and is null when it was not, which is an answer rather than the absence of one: a bench that
