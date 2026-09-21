@@ -402,6 +402,11 @@ So a server that finds no run of its own reads that note. A process still there 
 running, with everything printed while nobody was reading; one that is gone is answered with its
 output and `endedUnwatched`, because nothing collected an exit code for it and a guessed zero
 reads as a run that finished its work. `editor_run stop` ends it by pid and takes the note away.
+One run is one process: what the game started for itself is left running and the answer says so,
+unless the stop is asked for `andChildren`, and then the children of the run's process that are
+announced as games of the project go with it, listed before the run is ended because ending it is
+what makes them nobody's children on POSIX. A child that is not announced as a game is left and
+named, since what it is cannot be told from here.
 
 A run that has ended also says who ended it. `endedBy` names the call when that was this server,
 and is null when it was not, which is an answer rather than the absence of one: a bench that
