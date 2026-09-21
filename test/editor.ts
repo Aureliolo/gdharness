@@ -3045,14 +3045,14 @@ async function testAPlayedRunsConsoleArrivesOnItsOwn({ call, project }: Editor):
   assert.match(readFileSync(path, 'utf8'), /the first run said its piece/, 'and hold what was printed');
 
   // The reading that separates a bench doing work from a bench parked, asked of a run whose
-  // process this server does not hold. An absent field reads as "nothing used" as readily as "the
-  // question could not be put", and the two send a watcher to opposite conclusions.
+  // process this server does not hold. The game announced its own process id, which the runtime
+  // call above went through, and that number is what the run is asked by: this used to be
+  // answered as "there is no process to ask" beside a runtimes list naming the process.
   const asked = await call('editor_output', { cpu: true });
-  assert.equal(get(asked, 'cpuSeconds'), undefined, `there is no process to ask: ${text(asked)}`);
-  assert.match(
-    text(get(asked, 'note')),
-    /cpu was asked for and there is no process to ask/,
-    `and that is said rather than left as an absence: ${text(asked)}`,
+  assert.equal(
+    typeof get(asked, 'cpuSeconds'),
+    'number',
+    `a played game that announced is asked by the number it announced: ${text(asked)}`,
   );
 
   // Left with nothing playing, because this case runs before the debugger ones now and those ask

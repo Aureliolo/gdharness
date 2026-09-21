@@ -3458,7 +3458,7 @@ class GodotServer {
     const before = this.currentRun();
     if (before !== null && (await this.runStillGoing(before))) {
       this.logDebug('Ending the running game before starting another');
-      ended = { pid: before.pid ?? before.announcedPid ?? null };
+      ended = { pid: before.pid ?? this.announcedPidOf(before) ?? null };
       await this.endActiveGame(
         'editor_run start, which ends the run that was going before it starts another',
       );
@@ -3727,6 +3727,7 @@ class GodotServer {
       exitCode: null,
       throughEditor: true,
       brokeOn: null,
+      announcedBefore: alreadyPlaying,
     };
     this.activeProcess = played;
     writeEditorRunNote({ projectPath, transcript: transcript.path, startedAt });
@@ -4137,6 +4138,32 @@ class GodotServer {
   }
 
   /**
+   * The process the game of a played run announced itself as, tied to the run when it has not
+   * been yet.
+   *
+   * A game that announces inside the start's wait is tied there. One that announces after it, a
+   * project that boots for longer than the budget, was never tied at all: the run went on being
+   * judged from the editor's word alone and answered cpu with "nothing here has its process id"
+   * while the same call listed the game under runtimes. Tied here to the one game of this project
+   * the start did not see announced before it played, and for a picked-up run, which saw nothing,
+   * to the one game announced at all.
+   */
+  private announcedPidOf(run: GodotProcess): number | undefined {
+    if (!run.throughEditor || run.announcedPid !== undefined) {
+      return run.announcedPid;
+    }
+    const before = run.announcedBefore ?? new Set<number>();
+    const fresh = this.allAnnouncedForOurProject(runtimesAnnounced().running).filter(
+      (one) => !before.has(one.pid),
+    );
+    const theOne = fresh.length === 1 ? fresh[0] : undefined;
+    if (theOne !== undefined) {
+      run.announcedPid = theOne.pid;
+    }
+    return run.announcedPid;
+  }
+
+  /**
    * The run some earlier server started, picked back up.
    *
    * What was lost in a reconnect is recovered here: the record names the process and the file, so
@@ -4458,7 +4485,8 @@ class GodotServer {
     if (!run.throughEditor) {
       return stillRunning(run);
     }
-    if (run.announcedPid !== undefined && !alive(run.announcedPid)) {
+    const announced = this.announcedPidOf(run);
+    if (announced !== undefined && !alive(announced)) {
       return false;
     }
     return runIsUp(
@@ -4501,9 +4529,15 @@ class GodotServer {
     //
     // Only while it is going: a process that has exited has no processor time left to report, and
     // asking after a pid that is gone answers about whatever holds that number next.
+    //
+    // The number the game announced for itself serves for a run the editor plays: that run has no
+    // handle here, but a game with the runtime addon has said which process it is, and a bench
+    // played from the editor was being told nothing here had its process id while the same answer
+    // listed it under runtimes.
     const wanted = readBoolean(args, 'cpu') ?? false;
+    const processToAsk = run.pid ?? this.announcedPidOf(run) ?? null;
     const cpuSeconds =
-      wanted && run.pid !== null && stillRunning(run) ? await cpuSecondsOf(run.pid) : undefined;
+      wanted && processToAsk !== null && stillRunning(run) ? await cpuSecondsOf(processToAsk) : undefined;
     const notes: string[] = [];
     // Asked for and not answerable, said rather than left out. This is the one reading that
     // separates a bench doing work from a bench parked, and an absent field reads as "the answer
@@ -4512,8 +4546,8 @@ class GodotServer {
     // The wait in the same tool says when it cannot fully deliver, and this is the same property.
     if (wanted && cpuSeconds === undefined && stillRunning(run)) {
       notes.push(
-        run.pid === null
-          ? 'cpu was asked for and there is no process to ask: the editor is playing this run and holds it, so nothing here has its process id. editor_run start without a connected editor, or with args, starts the game here instead and that run answers cpuSeconds.'
+        processToAsk === null
+          ? 'cpu was asked for and there is no process to ask: the editor is playing this run and holds it, and the game announced no runtime, so nothing here has its process id. A game with the runtime addon announces one; editor_run start without a connected editor, or with args, starts the game here instead and that run answers cpuSeconds either way.'
           : 'cpu was asked for and this platform would not say what the run has used.',
       );
     }
@@ -4978,8 +5012,7 @@ class GodotServer {
     if (run === null || !run.throughEditor || !stillRunning(run) || session === null) {
       return null;
     }
-    const its = run.announcedPid ?? this.theOneAnnouncedForOurProject()?.pid;
-    if (its !== endpoint.pid || !session.holdIsKnown()) {
+    if (this.announcedPidOf(run) !== endpoint.pid || !session.holdIsKnown()) {
       return null;
     }
     return session.whereItStopped();
@@ -5004,13 +5037,12 @@ class GodotServer {
     if (session?.holdIsKnown()) {
       return { heldAt: session.whereItStopped() };
     }
-    // The run's own announcement when it has been tied to one, else the one game announced for
-    // this project: a run picked up before its game announced has no number yet, and the project
-    // is the one fact the pick-up and the announcement share.
+    // The run's own announcement, tied now when it was not before: a run picked up before its
+    // game announced has no number yet, and the project is the one fact the pick-up and the
+    // announcement share.
+    const its = this.announcedPidOf(run);
     const endpoint =
-      run.announcedPid !== undefined
-        ? runtimesAnnounced().running.find((one) => one.pid === run.announcedPid)
-        : this.theOneAnnouncedForOurProject();
+      its === undefined ? undefined : runtimesAnnounced().running.find((one) => one.pid === its);
     if (endpoint === undefined) {
       return {
         heldAt: undefined,

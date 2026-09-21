@@ -8181,6 +8181,87 @@ async function testTheAnnounceWaitIsNotHeldByASlowEditor(): Promise<void> {
   );
 }
 
+/**
+ * A game that announces after the start's wait is tied to its run when it does.
+ *
+ * A game announcing inside the wait is tied there, and that number is what a played run is asked
+ * of the operating system by: whether it is still there, and what it has used. One announcing
+ * after the wait, a project that boots for longer than the budget, was never tied at all, so the
+ * run went on being judged from the editor's word alone and `editor_output` answered cpu with
+ * "nothing here has its process id" while the same call listed the game under runtimes.
+ *
+ * The cpu reading is the observable: absent with the note while nothing has announced, which is
+ * the positive for the untied state, and a number once the announcement has landed. The process
+ * announced is this one, so the number is real.
+ */
+async function testALateAnnouncementIsTiedToThePlayedRun(): Promise<void> {
+  const announcesAfterMs = 600;
+  let announcement: string | null = null;
+  await withAPlayingEditor(
+    ({ adapter, project, runtimeDir }) =>
+      (tool) => {
+        if (tool === 'play_scene') {
+          announcement = join(runtimeDir, `runtime-${process.pid}.json`);
+          const file = announcement;
+          setTimeout(() => {
+            writeFileSync(
+              file,
+              JSON.stringify({
+                protocol: RUNTIME_PROTOCOL,
+                pid: process.pid,
+                port: 51_995,
+                address: '127.0.0.1',
+                project: { name: 'Played', path: project },
+              }),
+              'utf8',
+            );
+          }, announcesAfterMs);
+          return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
+        }
+        if (tool === 'playing_status') {
+          return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
+        }
+        return { ok: true };
+      },
+    async ({ server, start }) => {
+      const started = await start(200);
+      assert.equal(get(started.answer, 'through'), 'editor', JSON.stringify(started.answer));
+      assert.equal(
+        get(started.answer, 'runtime', 'mayYetAnnounce'),
+        true,
+        `the wait should have run out before the announcement: ${JSON.stringify(started.answer)}`,
+      );
+      const cpu = async (): Promise<unknown> =>
+        parseTextContent(
+          await server.request('tools/call', { name: 'editor_output', arguments: { cpu: true } }, 60_000),
+        );
+      const untied = await cpu();
+      assert.equal(
+        get(untied, 'cpuSeconds'),
+        undefined,
+        `nothing has announced yet: ${JSON.stringify(untied)}`,
+      );
+      assert.match(
+        text(get(untied, 'note')),
+        /the game announced no runtime, so nothing here has its process id/,
+        `and the answer says why: ${JSON.stringify(untied)}`,
+      );
+
+      assert.ok(
+        await cameTrue(() => announcement !== null && existsSync(announcement), 5_000),
+        'the announcement should have landed',
+      );
+      const tied = await cpu();
+      assert.equal(
+        typeof get(tied, 'cpuSeconds'),
+        'number',
+        `once the game has announced, the run is asked by that number: ${JSON.stringify(tied)}`,
+      );
+      assert.ok(Number(get(tied, 'cpuSeconds')) >= 0, JSON.stringify(tied));
+    },
+  );
+}
+
 async function testTheEditorsRunIsTheOneAnsweredFor(): Promise<void> {
   const port = await reservePort();
   // Reserved and then left alone, so nothing is listening on it: the adapter this run's console
@@ -11513,6 +11594,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAGameTheEditorHasStoppedPlayingIsNotStillActive,
   testAPlayedStartStopsWaitingForAGameThatIsOver,
   testTheAnnounceWaitIsNotHeldByASlowEditor,
+  testALateAnnouncementIsTiedToThePlayedRun,
   testASettingTheEditorDroppedIsNamed,
   testACleanupThatCannotFinishStillFinishes,
   testADiagnosticTheFileContradictsIsNamed,
