@@ -58,7 +58,9 @@ that is running, and the project on disk. ${TOOL_SPECS.length} tools, named \`do
   false is a runtime that is not coming and true is a game still on its way up.
 - Read \`editor_output\` after every run. It returns the engine's errors and warnings as entries
   with their backtraces, and a \`clean\` verdict, so a run that printed an error is one call away
-  from being known. For a long run it also names a transcript file: read that for output and this
+  from being known. For a run the editor plays, the errors come from the game through the runtime
+  addon, so a played game without the addon is judged on its prints alone and \`clean\` there says
+  less. For a long run it also names a transcript file: read that for output and this
   answer for state. Never decide a run has ended by watching the file stop growing, or a process
   list, or a timeout; a bench between prints looks exactly like a bench that died to everything else.
   \`endedBy\` says whether gdharness ended it, and \`running\` is asked of the operating system
