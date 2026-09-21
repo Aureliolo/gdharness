@@ -120,6 +120,7 @@ import {
   announcedSince,
   chooseRuntime,
   discoverRuntimes,
+  errorReportOf,
   RUNTIME_PROTOCOL,
   type RuntimeEndpoint,
   runtimeDirectory,
@@ -3928,7 +3929,11 @@ class GodotServer {
    * instead and nothing to drain.
    */
   private drainEditorOutput(game: GodotProcess): void {
-    if (!game.throughEditor || !this.dapClient) {
+    if (!game.throughEditor) {
+      return;
+    }
+    this.drainErrorReport(game);
+    if (!this.dapClient) {
       return;
     }
     // With a file, the lines are already in it: the adapter writes them there as they arrive, and
@@ -3953,6 +3958,56 @@ class GodotServer {
   }
 
   /**
+   * Moves what the game has reported into the run, for a run the editor plays.
+   *
+   * The game the editor plays prints to the editor's own stderr, and the debug adapter relays
+   * what the game prints and not what it reports: a `push_error` raised in one reached neither
+   * `editor_output` nor the transcript, and the run was answered clean while the game had just
+   * refused something out loud. The runtime addon takes the report where it is made, with a
+   * Logger in the game, and writes it beside the announcement in the lines the engine itself
+   * prints, so they are read here the way a run this server started is read from its transcript:
+   * into the transcript when the run has one, which the transcript read then picks up, and
+   * straight into the log when it has none. By offset, since the file is the game's and grows
+   * while nobody is reading.
+   */
+  private drainErrorReport(game: GodotProcess): void {
+    if (game.errorReport === undefined) {
+      const its = this.announcedPidOf(game);
+      const found = its === undefined ? null : errorReportOf(its);
+      if (found === null) {
+        return;
+      }
+      game.errorReport = found;
+      game.errorReportOffset = 0;
+    }
+    let handle: number;
+    try {
+      handle = openSync(game.errorReport, 'r');
+    } catch {
+      // Swept, or not there yet: the same answer as a game that has reported nothing.
+      return;
+    }
+    try {
+      const from = game.errorReportOffset ?? 0;
+      const size = fstatSync(handle).size;
+      if (size <= from) {
+        return;
+      }
+      const buffer = Buffer.alloc(size - from);
+      const read = readSync(handle, buffer, 0, buffer.length, from);
+      game.errorReportOffset = from + read;
+      const reported = buffer.subarray(0, read);
+      if (game.transcript !== null) {
+        appendFileSync(game.transcript, reported);
+      } else {
+        game.log.append('stderr', reported);
+      }
+    } finally {
+      closeSync(handle);
+    }
+  }
+
+  /**
    * The error the editor broke the game on, written into the log the way a printed one would be.
    *
    * Godot prints none of it. It halts the game and names the error in the `stopped` event alone,
@@ -3960,10 +4015,21 @@ class GodotServer {
    * script error counted zero errors and answered `clean`, while every runtime call against it
    * timed out with nothing anywhere saying why. Measured against a real editor, where a save
    * carrying one bad field broke the game on load and editor_output reported a clean run.
+   *
+   * Not when the game reports its own errors: the engine logs the error before it breaks on it,
+   * measured against a real editor with the report read and the halt seen in one answer, so a
+   * run with a report already has the error as an entry with its `at:` line and backtrace, and
+   * recording the halt as well counted one error twice. The halt still says where the game is
+   * held, under heldAt.
    */
   private recordWhatItBrokeOn(game: GodotProcess): void {
     const halt = this.dapClient?.whereItStopped() ?? null;
-    if (halt?.reason !== 'exception' || halt.text === '' || game.brokeOn === halt.text) {
+    if (
+      halt?.reason !== 'exception' ||
+      halt.text === '' ||
+      game.brokeOn === halt.text ||
+      game.errorReport !== undefined
+    ) {
       return;
     }
     game.brokeOn = halt.text;

@@ -3132,21 +3132,33 @@ async function testAnErrorTheGameBrokeOnIsReported({ call, attempt, project }: E
     false,
     `a game broken on an error is not a clean run: ${JSON.stringify(output)}`,
   );
-  assert.ok(asNumber(get(output, 'errors')) > 0, 'and the error is counted like a printed one');
+  // One error, one entry: the game reports it through the runtime addon before it breaks, with
+  // the engine's own line under it, and the halt the adapter announces is the same error rather
+  // than a second one.
+  assert.equal(
+    asNumber(get(output, 'errors')),
+    1,
+    `and the error is counted once: ${JSON.stringify(output)}`,
+  );
 
   const said = asArray(get(output, 'entries'), 'entries').filter(
     (entry) => text(get(entry, 'severity')) === 'error',
   );
-  assert.ok(said.length > 0, `the error should be an entry: ${JSON.stringify(output)}`);
+  assert.equal(said.length, 1, `the error should be one entry: ${JSON.stringify(output)}`);
   assert.equal(
     text(get(said[0], 'source')),
-    'debugger',
-    "marked as the debugger's, because the game printed none of it",
+    'transcript',
+    "the game's own report, read through the transcript",
   );
   assert.match(
     text(get(said[0], 'text')),
     /null/i,
     `carrying the engine's own words: ${JSON.stringify(said)}`,
+  );
+  assert.match(
+    asArray(get(said[0], 'detail')).map(text).join('\n'),
+    /at: break_on_purpose \(res:\/\/main\.gd:\d+\)/,
+    `and where it broke: ${JSON.stringify(said)}`,
   );
 
   // Where it is held, so a caller whose runtime calls are timing out is told why rather than

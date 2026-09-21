@@ -377,8 +377,20 @@ refusing to keep.
 lines are not lost. The game then belongs to the editor's debugger: `debug_*` speaks to that
 session and `editor_output` reads the console over it.
 
+The adapter relays what the game prints and not what it reports. A `push_error` raised in a game
+the editor plays goes to the editor's own stderr, which nobody reads, and to the editor's Errors
+tab, which the adapter does not forward, so `editor_output` answered `clean: true` about a game
+that had just refused something out loud. The runtime addon takes the report where it is made: a
+`Logger` in the game, registered for a game carrying the editor's mark, writes every error and
+warning the engine reports to `runtime-<pid>.log` beside the game's announcement, in the lines
+the engine itself prints, with the `at:` line and the backtrace. The server reads that file by
+offset into the played run's transcript, and the transcript into the log, so a reported error is
+an entry with its severity the way one printed by a spawned run is. The report outlives its game
+by an hour, since the last errors are read after the game has gone; the announcement does not.
+
 With no editor connected, the server spawns the game itself. It has no debug session, so `debug_*`
-will not answer for it, and its console is read from a file rather than over the adapter.
+will not answer for it, and its console is read from a file rather than over the adapter, stderr
+included, so nothing more is needed there and the game writes no report.
 
 **Editing a file while a game runs does not change that game.** `auto_reload` is an editor plugin:
 it polls the open scene and the scripts on that scene's node tree, and reloads them with

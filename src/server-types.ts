@@ -100,6 +100,15 @@ export interface GodotProcess {
    */
   gamePid?: number;
   /**
+   * The file the game's runtime addon writes the engine's error reports to, for a run the editor
+   * plays, and how far into it this server has read. The editor's game prints to the editor's
+   * stderr, which nobody reads, and the debug adapter relays what the game prints and not what it
+   * reports, so a `push_error` in a played game reached neither the log nor the transcript and
+   * the run was answered clean. Found beside the announcement once the run is tied to its game.
+   */
+  errorReport?: string;
+  errorReportOffset?: number;
+  /**
    * Why this server ended the run, or null when it did not.
    *
    * A run that vanished and a run this tool killed look the same from outside: the process is
