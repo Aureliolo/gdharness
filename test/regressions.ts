@@ -8709,18 +8709,27 @@ async function testAKeyDoesNotChooseFromAnOpenedMenu(): Promise<void> {
     return;
   }
   const held: { game: ChildProcess | null } = { game: null };
+  const said: string[] = [];
   try {
     await withAPlayingEditor(
       ({ adapter, project, runtimeDir }) =>
         (tool) => {
           if (tool === 'play_scene') {
+            // What the engine says is kept, since a windowed engine that never announces on a
+            // machine that runs it headless every day is one whose reason is in its own output.
             held.game = spawn(engine, ['--path', project], {
-              stdio: 'ignore',
+              stdio: ['ignore', 'pipe', 'pipe'],
               env: {
                 ...process.env,
                 GDHARNESS_RUNTIME_DIR: runtimeDir,
                 GDHARNESS_EDITOR_PID: String(FAKE_EDITOR_PID),
               },
+            });
+            held.game.stdout?.on('data', (chunk: Buffer) => {
+              said.push(String(chunk));
+            });
+            held.game.stderr?.on('data', (chunk: Buffer) => {
+              said.push(String(chunk));
             });
             return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
           }
@@ -8750,7 +8759,11 @@ async function testAKeyDoesNotChooseFromAnOpenedMenu(): Promise<void> {
             'popup/item_2/text = "Three"\npopup/item_2/id = 2\n',
         );
         const started = await start(20_000);
-        assert.equal(get(started.answer, 'runtime', 'listening'), true, JSON.stringify(started.answer));
+        assert.equal(
+          get(started.answer, 'runtime', 'listening'),
+          true,
+          `${JSON.stringify(started.answer)}\nthe engine said:\n${said.join('')}`,
+        );
         const call = async (name: string, args: Record<string, unknown>): Promise<unknown> =>
           parseTextContent(
             await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS),
