@@ -295,6 +295,18 @@ function stillRunning(run: GodotProcess | null): boolean {
 }
 
 /**
+ * How long after a play the editor is given to start reporting the game as playing.
+ *
+ * An editor plays a scene when it is ready to, and a restarted one is not ready until its scan is
+ * over: it answered the play with "not playing", went on saying so for a moment, and then the
+ * game came up. Read as the editor's word on a run, "not playing" said "the game is no longer
+ * running" about a game that had not yet begun. Until the editor has reported the run playing
+ * once, its "not playing" is the play still on its way, for this long: an editor that has not
+ * started a game within it is not going to, and its word stands from then on.
+ */
+export const PLAY_STARTS_WITHIN_MS = 30_000;
+
+/**
  * Whether a run is still up, taking the editor's word for the runs it is playing.
  *
  * A run this server spawned has a process to ask the operating system about. A run the editor
@@ -302,9 +314,10 @@ function stillRunning(run: GodotProcess | null): boolean {
  * and reading that as "still going" turns a game that died during boot into one that may yet
  * announce, which is the answer this was written to stop giving. The editor knows, and is already
  * asked this by `editor_status`. [param editorSays] is null when it will not say, and then the
- * record is what is left.
+ * record is what is left. [param now] is when the question is asked, for the play that has not
+ * started yet.
  */
-export function runIsUp(run: GodotProcess | null, editorSays: boolean | null): boolean {
+export function runIsUp(run: GodotProcess | null, editorSays: boolean | null, now = Date.now()): boolean {
   if (run?.throughEditor !== true) {
     return stillRunning(run);
   }
@@ -313,6 +326,9 @@ export function runIsUp(run: GodotProcess | null, editorSays: boolean | null): b
   // and an empty runtime list, which is the editor being stale rather than wrong to consult.
   if (run.announcedPid !== undefined && !alive(run.announcedPid)) {
     return false;
+  }
+  if (editorSays === false && run.seenPlaying !== true && now - run.startedAt < PLAY_STARTS_WITHIN_MS) {
+    return true;
   }
   return editorSays ?? stillRunning(run);
 }
@@ -469,6 +485,12 @@ interface AfterWaiting {
    * the delay and has no way to see that from here: the same project announces promptly without it.
    */
   readonly withArgs: boolean;
+  /**
+   * For a run the editor plays, whether the editor has yet said it is playing it. `running` is
+   * true either way while the play is within its grace, and the note says which it is: a game
+   * that is up and slow to announce, or one the editor has not started yet.
+   */
+  readonly playingSeen?: boolean;
 }
 
 /**
@@ -501,11 +523,15 @@ export function runtimeVerdict(
       heldAt: after.heldAt,
     };
   }
+  const state =
+    after.playingSeen === false
+      ? 'the editor has not yet reported the game as playing, which a restarted editor does not until its scan is over'
+      : 'the game is still running';
   return {
     listening: false,
     mayYetAnnounce: after.running,
     note: after.running
-      ? `nothing announced itself within ${after.budgetMs}ms and the game is still running, so it may announce a moment from now: editor_status says whether it has, and editor_run start takes runtimeWaitMs to wait longer than this${after.withArgs ? ', which a run carrying its own arguments may well need, since whatever they ask the game to do before its first frame is inside this wait' : ''}`
+      ? `nothing announced itself within ${after.budgetMs}ms and ${state}, so it may announce a moment from now: editor_status says whether it has, and editor_run start takes runtimeWaitMs to wait longer than this${after.withArgs ? ', which a run carrying its own arguments may well need, since whatever they ask the game to do before its first frame is inside this wait' : ''}`
       : `nothing announced itself within ${after.budgetMs}ms and the game is no longer running, so nothing is going to: editor_output has what it printed on the way down`,
     heldAt: null,
   };
@@ -3804,6 +3830,7 @@ class GodotServer {
       // asking the editor about a played one costs a round trip the answer would not use.
       running: endpoint !== null || (going !== null && (await this.runStillGoing(going))),
       withArgs,
+      ...(going?.throughEditor === true ? { playingSeen: going.seenPlaying === true } : {}),
     });
   }
 
@@ -3871,6 +3898,7 @@ class GodotServer {
     const startedAt = Date.now();
     const transcript = openTranscript(startedAt);
     closeSync(transcript.fd);
+    const playAnswer = asParams(JSON.parse(answer.content[0]?.text ?? '{}'));
     const played: GodotProcess = {
       process: null,
       pid: null,
@@ -3883,6 +3911,7 @@ class GodotServer {
       throughEditor: true,
       brokeOn: null,
       announcedBefore: alreadyPlaying,
+      seenPlaying: readBoolean(playAnswer, 'playing') === true,
     };
     this.activeProcess = played;
     writeEditorRunNote({ projectPath, transcript: transcript.path, startedAt });
@@ -3895,7 +3924,7 @@ class GodotServer {
       refreshedClasses,
       // Which port the editor's debugger took, since it is the one port Godot has no command
       // line option for and the addon moves itself off when another editor is holding it.
-      debugPort: readNumber(asParams(JSON.parse(answer.content[0]?.text ?? '{}')), 'debugPort'),
+      debugPort: readNumber(playAnswer, 'debugPort'),
       endedPreviousRun: endedPreviousRun(ended),
       // What the game was told to stop on before it started, so a play that runs through a line
       // the caller asked for is checked against this rather than against memory. Absent when
@@ -4914,10 +4943,11 @@ class GodotServer {
     if (announced !== undefined && editorSays === undefined) {
       return stillRunning(run);
     }
-    return runIsUp(
-      run,
-      editorSays === undefined ? ((await this.editorPlayingState())?.playing ?? null) : editorSays,
-    );
+    const said = editorSays === undefined ? ((await this.editorPlayingState())?.playing ?? null) : editorSays;
+    if (said === true) {
+      run.seenPlaying = true;
+    }
+    return runIsUp(run, said);
   }
 
   private async handleGetDebugOutput(args: OperationParams, waitedMs?: number): Promise<ToolResponse> {
