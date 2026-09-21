@@ -130,7 +130,7 @@ const RUNNING_PROJECT_PATH: JsonSchema = {
 const RUNNING_PID: JsonSchema = {
   type: 'number',
   description:
-    'Which game, when several are running from one project, such as a bench and its workers: its process id, as editor_status lists under runtimes. Not needed with one game per project.',
+    'Which game, when several are running from one project, such as a bench and its workers: its process id, as editor_status lists under runtimes. Without it the game this server started or plays is the one asked when it is among them, and the answer says so under answeredBy; with one game per project it is not needed at all.',
 };
 const SCENE_PATH: JsonSchema = {
   type: 'string',

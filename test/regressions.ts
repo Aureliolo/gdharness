@@ -8495,6 +8495,138 @@ async function testASpawnedGameBesideAnEditorIsStillItsOwn(): Promise<void> {
   );
 }
 
+/**
+ * A runtime call with no pid reaches the game this server holds when several are running.
+ *
+ * A bench fans out to workers from the same project, and every runtime call from the session that
+ * started the bench was refused with "pass pid" from the moment the first worker announced: the
+ * caller had started one game and was asked which of thirty-two it meant. The run this server
+ * started or plays is the one meant when nothing says otherwise, and the answer says so under
+ * `answeredBy` when it was a choice, so a worker's answer is never read as the bench's. A pid
+ * still picks a worker.
+ *
+ * Fake games answer the calls: a socket each, since what is measured is which one was asked.
+ */
+async function testARuntimeCallReachesThisServersOwnGame(): Promise<void> {
+  const processes: ChildProcess[] = [];
+  const sockets: Server[] = [];
+  const aGame = async (name: string): Promise<{ pid: number; port: number }> => {
+    const process_ = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+    processes.push(process_);
+    assert.ok(typeof process_.pid === 'number', 'the fixture needs live processes to announce');
+    const answering = createServer((socket) => {
+      socket.setEncoding('utf8');
+      socket.write(`${JSON.stringify({ type: 'welcome', protocol: RUNTIME_PROTOCOL })}\n`);
+      let buffered = '';
+      socket.on('data', (chunk: string) => {
+        buffered += chunk;
+        let newline = buffered.indexOf('\n');
+        while (newline !== -1) {
+          const line = buffered.slice(0, newline);
+          buffered = buffered.slice(newline + 1);
+          newline = buffered.indexOf('\n');
+          const asked = JSON.parse(line) as { id: number };
+          socket.write(`${JSON.stringify({ id: asked.id, type: 'tree', game: name })}\n`);
+        }
+      });
+      socket.on('error', () => {});
+    });
+    sockets.push(answering);
+    await new Promise<void>((ready) => answering.listen(0, '127.0.0.1', ready));
+    return { pid: process_.pid, port: portOf(answering) };
+  };
+  const announce = (runtimeDir: string, project: string, game: { pid: number; port: number }): void => {
+    writeFileSync(
+      join(runtimeDir, `runtime-${game.pid}.json`),
+      JSON.stringify({
+        protocol: RUNTIME_PROTOCOL,
+        pid: game.pid,
+        port: game.port,
+        address: '127.0.0.1',
+        project: { name: 'Played', path: project },
+        editor_pid: FAKE_EDITOR_PID,
+      }),
+      'utf8',
+    );
+  };
+  let bench: { pid: number; port: number } | null = null;
+  let worker: { pid: number; port: number } | null = null;
+  try {
+    await withAPlayingEditor(
+      ({ adapter, project, runtimeDir }) =>
+        async (tool) => {
+          if (tool === 'play_scene') {
+            // The bench announces inside the wait and is tied to the run; its worker, which it
+            // opened for itself and which inherited the same mark, announces a moment later.
+            bench = await aGame('bench');
+            worker = await aGame('worker');
+            const [ours, spawned] = [bench, worker];
+            setTimeout(() => {
+              announce(runtimeDir, project, ours);
+            }, 100);
+            setTimeout(() => {
+              announce(runtimeDir, project, spawned);
+            }, 400);
+            return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
+          }
+          if (tool === 'playing_status') {
+            return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
+          }
+          return { ok: true };
+        },
+      async ({ server, runtimeDir, start }) => {
+        const started = await start(3_000);
+        assert.ok(bench !== null && worker !== null, 'the play should have opened both games');
+        assert.equal(get(started.answer, 'runtime', 'pid'), bench.pid, JSON.stringify(started.answer));
+        assert.ok(
+          await cameTrue(
+            () => worker !== null && existsSync(join(runtimeDir, `runtime-${worker.pid}.json`)),
+            5_000,
+          ),
+          'the worker should have announced',
+        );
+
+        const inspect = async (extra: Record<string, unknown>): Promise<unknown> =>
+          parseTextContent(
+            await server.request(
+              'tools/call',
+              { name: 'runtime_inspect', arguments: { op: 'tree', nodePath: '/root', ...extra } },
+              60_000,
+            ),
+          );
+        const unnamed = await inspect({});
+        assert.equal(
+          get(unnamed, 'game'),
+          'bench',
+          `a call naming no pid reaches the game this server holds: ${JSON.stringify(unnamed)}`,
+        );
+        assert.equal(
+          get(unnamed, 'answeredBy'),
+          bench.pid,
+          `and says which game that was, since there were several: ${JSON.stringify(unnamed)}`,
+        );
+        const named = await inspect({ pid: worker.pid });
+        assert.equal(get(named, 'game'), 'worker', `a pid still picks the worker: ${JSON.stringify(named)}`);
+        assert.equal(
+          get(named, 'answeredBy'),
+          undefined,
+          `and a game the caller named is not reported as chosen for them: ${JSON.stringify(named)}`,
+        );
+      },
+      { realAddon: true },
+    );
+  } finally {
+    for (const answering of sockets) {
+      answering.close();
+    }
+    for (const process_ of processes) {
+      if (process_.exitCode === null) {
+        process_.kill();
+      }
+    }
+  }
+}
+
 async function testTheEditorsRunIsTheOneAnsweredFor(): Promise<void> {
   const port = await reservePort();
   // Reserved and then left alone, so nothing is listening on it: the adapter this run's console
@@ -11830,6 +11962,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testALateAnnouncementIsTiedToThePlayedRun,
   testTheEditorsGameIsToldFromAnotherOfTheSameProject,
   testASpawnedGameBesideAnEditorIsStillItsOwn,
+  testARuntimeCallReachesThisServersOwnGame,
   testASettingTheEditorDroppedIsNamed,
   testACleanupThatCannotFinishStillFinishes,
   testADiagnosticTheFileContradictsIsNamed,
