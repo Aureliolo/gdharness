@@ -2346,6 +2346,21 @@ type RawRequest = (method: string, params: unknown, timeoutMs?: number) => Promi
 const ENGINE_CALL_TIMEOUT_MS = 120_000;
 
 /**
+ * How long a windowed engine is given to announce on a runner with a display.
+ *
+ * The first windowed boot in a run is the slow one, and the runner decides how slow: on the macOS
+ * leg the second windowed boot of one run announced in 9750ms and the first had not announced in
+ * 60000ms, with the game still running when the wait gave up, twice in one evening. The
+ * compatibility renderer is already asked for. What the second boot has that the first has not is
+ * the shader cache the first one filled, since every project these fixtures play is named the
+ * same and so shares a user:// directory, and compiling the engine's built-in shaders on a runner
+ * with no GPU is the cost that lands on whichever fixture plays first. Not this project's to
+ * shorten. Measured rather than guessed: each fixture prints what its boot took, so this can be
+ * read against what the legs actually do.
+ */
+const WINDOWED_BOOT_MS = 150_000;
+
+/**
  * Runs the built server over stdio, initialised and ready for tools/call, and hands `call` and
  * `request` to the body. The transport is the point: these fixtures are about what a peer can
  * put on the wire, and reaching into the class directly would not carry a `__proto__` through
@@ -8307,13 +8322,15 @@ async function withAPlayingEditor(
       // otherwise, and a headless start is spawned rather than played, which is a different case.
       const start = async (runtimeWaitMs: number): Promise<{ answer: unknown; waitedMs: number }> => {
         const began = Date.now();
+        // The request outlives the wait it asks for, so a game that boots slowly is reported as
+        // one that has not announced rather than as a request that timed out.
         const response = await server.request(
           'tools/call',
           {
             name: 'editor_run',
             arguments: { projectPath: project, op: 'start', headless: false, runtimeWaitMs },
           },
-          30_000,
+          runtimeWaitMs + 30_000,
         );
         // A refusal is plain text, and a fixture reading fields off null learns nothing from it.
         const answered = parseTextContent(response) ?? { refused: textOf(response) };
@@ -8907,6 +8924,7 @@ async function testAnInjectedMotionCarriesHowFarThePointerMoved(): Promise<void>
         '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
           '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
       );
+      const began = Date.now();
       const started = parseTextContent(
         await server.request(
           'tools/call',
@@ -8919,14 +8937,15 @@ async function testAnInjectedMotionCarriesHowFarThePointerMoved(): Promise<void>
               // The compatibility renderer where there is a window, for the reason the opened
               // menu fixture asks for it: the window is what this needs, not the pipelines.
               ...(headless ? {} : { args: ['--rendering-method', 'gl_compatibility'] }),
-              runtimeWaitMs: 60_000,
+              runtimeWaitMs: headless ? 60_000 : WINDOWED_BOOT_MS,
             },
           },
-          ENGINE_CALL_TIMEOUT_MS,
+          WINDOWED_BOOT_MS + 30_000,
         ),
       );
       try {
         assert.equal(get(started, 'runtime', 'listening'), true, JSON.stringify(started));
+        console.log(`injected motion: the engine announced after ${Date.now() - began}ms`);
         const call = async (name: string, args: Record<string, unknown>): Promise<unknown> =>
           parseTextContent(
             await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS),
@@ -9118,7 +9137,7 @@ async function testAKeyDoesNotChooseFromAnOpenedMenu(): Promise<void> {
             'popup/item_1/text = "Two"\npopup/item_1/id = 1\n' +
             'popup/item_2/text = "Three"\npopup/item_2/id = 2\n',
         );
-        const started = await start(60_000);
+        const started = await start(WINDOWED_BOOT_MS);
         assert.equal(
           get(started.answer, 'runtime', 'listening'),
           true,
