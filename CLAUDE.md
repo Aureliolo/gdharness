@@ -186,6 +186,13 @@ the guard would have been quietly Windows-only while every other machine went on
 A case asks a real process for its start time and requires an answer. A platform that cannot give one
 is a thing to find out about, not to degrade into.
 
+That is for an absence that is silent. A reading the code takes best effort on purpose, and says so
+when it cannot, is different: processor time is a PowerShell start with a two second budget, and a
+loaded Windows runner holds it past that. A case requiring the number fails there for a reason that
+is not the fault it guards, and the first run of the cpu case on the Windows leg did exactly that.
+Hold that the question was put to the right process, which is the number or the note saying the
+platform would not answer about it, and hold which process by a field the platform has no part in.
+
 The fourth way is a second guard covering the one you broke, and the wrong conclusion it invites is
 that the line you disarmed was doing nothing. Two fixes landed together on where a parameter list
 ends: the trailing comment comes off the whole line before anything reads it, and the closing
