@@ -295,9 +295,8 @@ const PARTS = [
  */
 function renderHome(): string {
   const paste = [
-    'Install gdharness into this project by following',
-    'https://aureliolo.github.io/gdharness/agent.md, then tell me what it asked you to',
-    'recommend back to me.',
+    'Install gdharness here by following https://aureliolo.github.io/gdharness/agent.md,',
+    'then tell me what it asked you to recommend back to me.',
   ].join('\n');
 
   const cards = PARTS.map((part) =>
@@ -342,9 +341,8 @@ function renderHomeText(): string {
     '## Install',
     '',
     '```text hand this to an agent',
-    'Install gdharness into this project by following',
-    'https://aureliolo.github.io/gdharness/agent.md, then tell me what it asked you to',
-    'recommend back to me.',
+    'Install gdharness here by following https://aureliolo.github.io/gdharness/agent.md,',
+    'then tell me what it asked you to recommend back to me.',
     '```',
     '',
     'Or run it yourself. It is the same command every time; what changes is the file it writes.',

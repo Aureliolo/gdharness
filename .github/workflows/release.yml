@@ -111,13 +111,29 @@ jobs:
           printf '%s\n' \
             '## Install' \
             '' \
-            'Point your agent at <https://aureliolo.github.io/gdharness>, or do it yourself:' \
+            'Hand this to your agent:' \
+            '' \
+            '```text' \
+            'Install gdharness here by following https://aureliolo.github.io/gdharness/agent.md,' \
+            'then tell me what it asked you to recommend back to me.' \
+            '```' \
+            '' \
+            'Or do it yourself, from the project directory:' \
             '' \
             '```bash' \
             "npx -y gdharness@${VERSION} setup" \
             '```' \
             '' \
             '## Upgrade from an earlier version' \
+            '' \
+            'Hand this to your agent:' \
+            '' \
+            '```text' \
+            "Upgrade gdharness here to ${VERSION} following https://aureliolo.github.io/gdharness/agent.md," \
+            'then tell me when the editor and the server both answer with that version.' \
+            '```' \
+            '' \
+            'Or do it yourself:' \
             '' \
             '```bash' \
             "npx -y gdharness@${VERSION} upgrade" \
