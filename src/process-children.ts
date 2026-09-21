@@ -71,6 +71,8 @@ interface ListedProcess {
   readonly parent: number;
   /** The whole command line, or empty where the platform will not show it. */
   readonly command: string;
+  /** When it started, as milliseconds, where the platform lists that with the rest. */
+  readonly startedAt?: number;
 }
 
 /** Every process the operating system lists right now, by pid. */
@@ -87,15 +89,21 @@ export type ProcessTree = ReadonlyMap<number, ListedProcess>;
  */
 export async function processTree(): Promise<ProcessTree | undefined> {
   try {
-    const printed = process.platform === 'win32' ? await askWindows() : await askPosix();
-    return parseProcessTable(printed);
+    if (process.platform === 'win32') {
+      return parseProcessTable(await askWindows(), true);
+    }
+    return parseProcessTable(await askPosix());
   } catch {
     return undefined;
   }
 }
 
-/** [param printed] as `pid ppid command...` per line, into a tree. Lines that are not that are skipped. */
-export function parseProcessTable(printed: string): ProcessTree {
+/**
+ * [param printed] as `pid ppid command...` per line, into a tree, or as `pid ppid started
+ * command...` when [param started] says the third column is when each process began. Lines that
+ * are not that are skipped.
+ */
+export function parseProcessTable(printed: string, started = false): ProcessTree {
   const tree = new Map<number, ListedProcess>();
   for (const line of printed.split(/\r?\n/)) {
     const fields = /^\s*(\d+)\s+(\d+)(?:\s+(.*))?$/.exec(line);
@@ -104,18 +112,54 @@ export function parseProcessTable(printed: string): ProcessTree {
     }
     const pid = Number(fields[1]);
     const parent = Number(fields[2]);
-    if (pid > 0) {
-      tree.set(pid, { parent, command: (fields[3] ?? '').trim() });
+    const rest = (fields[3] ?? '').trim();
+    if (pid <= 0) {
+      continue;
     }
+    if (!started) {
+      tree.set(pid, { parent, command: rest });
+      continue;
+    }
+    const timed = /^(\d+)(?:\s+(.*))?$/.exec(rest);
+    if (timed === null) {
+      continue;
+    }
+    // Zero is a process the system would not date, which is judged as if no time were listed.
+    const began = Number(timed[1]);
+    tree.set(pid, { parent, command: (timed[2] ?? '').trim(), ...(began > 0 ? { startedAt: began } : {}) });
   }
   return tree;
+}
+
+/**
+ * Whether [param child]'s link to [param parent] in [param tree] is to the process that started
+ * it, rather than to a number that process left behind.
+ *
+ * Windows keeps a dead parent's number on its orphans, and hands the number out again: a bench
+ * started on a runner that had just run a suite was listed with four children it never opened,
+ * left there by whatever had held its number before, and a stop asked to end its workers named
+ * them as processes it could not account for. A child cannot have started before its parent, so a
+ * link to a parent that began later is to the number and not to the process. Only judged where
+ * the listing says when each began; POSIX hands an orphan to init the moment its parent goes, so
+ * its links are never stale and its listing carries no times.
+ */
+function linked(tree: ProcessTree, child: number, parent: number): boolean {
+  const from = tree.get(child);
+  const to = tree.get(parent);
+  if (from === undefined || from.parent !== parent) {
+    return false;
+  }
+  if (from.startedAt === undefined || to?.startedAt === undefined) {
+    return true;
+  }
+  return from.startedAt >= to.startedAt;
 }
 
 /** The processes whose parent is [param pid], as [param tree] has them. */
 function childrenIn(tree: ProcessTree, pid: number): number[] {
   const children: number[] = [];
-  for (const [child, listed] of tree) {
-    if (listed.parent === pid) {
+  for (const child of tree.keys()) {
+    if (linked(tree, child, pid)) {
       children.push(child);
     }
   }
@@ -159,13 +203,15 @@ export function descendantsIn(tree: ProcessTree, pid: number): number[] {
 export function ancestorsIn(tree: ProcessTree, pid: number, root: number): number[] {
   const chain: number[] = [];
   const seen = new Set<number>([pid]);
+  let child = pid;
   let parent = tree.get(pid)?.parent;
-  while (parent !== undefined && !seen.has(parent)) {
+  while (parent !== undefined && !seen.has(parent) && linked(tree, child, parent)) {
     chain.push(parent);
     if (parent === root) {
       break;
     }
     seen.add(parent);
+    child = parent;
     parent = tree.get(parent)?.parent;
   }
   return chain;
@@ -249,7 +295,9 @@ async function askWindows(): Promise<string> {
       '-NoProfile',
       '-NonInteractive',
       '-Command',
-      'Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId) $($_.ParentProcessId) $($_.CommandLine)" }',
+      // The start beside the parent link, because the link alone is not to be believed on
+      // Windows: see `linked`. Zero for the few processes the system will not date.
+      'Get-CimInstance Win32_Process | ForEach-Object { $began = 0; if ($_.CreationDate) { $began = ([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds() }; "$($_.ProcessId) $($_.ParentProcessId) $began $($_.CommandLine)" }',
     ],
     { timeout: ASK_TIMEOUT_MS, windowsHide: true, maxBuffer: 16 * 1024 * 1024 },
   );
