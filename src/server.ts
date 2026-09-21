@@ -4192,6 +4192,31 @@ class GodotServer {
   }
 
   /**
+   * The announced process of the run this server holds, when it is among [param running] and the
+   * run is of [param projectPath] when one is named: the game a runtime call means when it names
+   * none. A run that is over, or whose game is not announced, or of another project, is nobody's
+   * answer here, and the call is judged as it was without this.
+   */
+  private ownGameAmong(
+    running: readonly RuntimeEndpoint[],
+    projectPath: string | undefined,
+  ): number | undefined {
+    const run = this.currentRun();
+    if (run === null || !stillRunning(run)) {
+      return undefined;
+    }
+    if (
+      projectPath !== undefined &&
+      run.projectPath !== null &&
+      !isSameDirectory(run.projectPath, projectPath)
+    ) {
+      return undefined;
+    }
+    const its = run.throughEditor ? this.announcedPidOf(run, running) : run.pid;
+    return its !== null && its !== undefined && running.some((one) => one.pid === its) ? its : undefined;
+  }
+
+  /**
    * Whether an announced game could be one the connected editor played.
    *
    * A game that names an editor is the editor's when it names this one. A game that names none
@@ -5169,16 +5194,28 @@ class GodotServer {
     // projects open in two harness sessions are two games announced on the same machine, and
     // without this the second one to start is a game this server would talk to as readily as
     // its own, with nothing in the answer saying which it reached. A pid picks one game out of
-    // several running from one project, which is what a bench with workers is.
+    // several running from one project, which is what a bench with workers is, and with none
+    // given the game this server started or plays is the one meant when it is among them: a
+    // caller who started a bench and asks about it was refused with "pass pid" the moment the
+    // bench opened its first worker.
+    const wanted = typeof projectPath === 'string' ? projectPath : (this.ownProject ?? undefined);
+    const own = typeof pid === 'number' ? undefined : this.ownGameAmong(announced.running, wanted);
     const choice = chooseRuntime(
       announced.running,
-      typeof projectPath === 'string' ? projectPath : (this.ownProject ?? undefined),
+      wanted,
       announced.unspoken,
-      typeof pid === 'number' ? pid : undefined,
+      typeof pid === 'number' ? pid : own,
     );
     if ('problem' in choice) {
       return this.createErrorResponse(choice.problem);
     }
+    // Said when it was a choice: several games of the project are running and this one was
+    // taken for being the run this server holds, which a caller reading a worker's answer as the
+    // bench's would otherwise have no way to see.
+    const ofProject = announced.running.filter(
+      (one) => wanted === undefined || isSameDirectory(one.project.path, wanted),
+    );
+    const answeredBy = own !== undefined && ofProject.length > 1 ? { answeredBy: own } : {};
 
     // A game the session knows is held answers nothing, and what a caller got for asking was the
     // whole runtime timeout, ten seconds, and then a guess that it may be paused at a breakpoint.
@@ -5214,7 +5251,7 @@ class GodotServer {
 
       const { id: _id, ...payload } = reply.payload;
       if (!expectsScreenshot) {
-        return this.jsonTextResponse(payload);
+        return this.jsonTextResponse({ ...payload, ...answeredBy });
       }
 
       const returnedPath = readString(payload, 'path');

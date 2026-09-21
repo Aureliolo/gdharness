@@ -43,8 +43,10 @@ that is running, and the project on disk. ${TOOL_SPECS.length} tools, named \`do
 
 - ${projectPathSentence()}. The \`runtime_*\` and \`debug_*\` ones pick between running
   games instead, by \`projectPath\`, or by \`pid\` when several run from one project, as a bench
-  and its workers do; the others answer about the editor this server is connected to. There is no
-  ambient project, and an argument a tool does not declare is refused rather than ignored.
+  and its workers do: without \`pid\` the game this server started or plays is the one asked, and
+  the answer says so under \`answeredBy\`; the others answer about the editor this server is
+  connected to. There is no ambient project, and an argument a tool does not declare is refused
+  rather than ignored.
 - \`editor_status\` says whether an editor is connected and whether its addon matches the server.
   \`addonIsStale\` means they differ, and \`staleNote\` says which half is behind: an editor that
   needs restarting, or a server that needs reconnecting in your harness. Every answer that came
