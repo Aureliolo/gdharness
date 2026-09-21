@@ -8685,6 +8685,120 @@ async function testAnInjectedMotionCarriesHowFarThePointerMoved(): Promise<void>
 }
 
 /**
+ * A key sent to the game does not choose from a menu a click has opened; choose does.
+ *
+ * An OptionButton's menu opens as a window of its own, and an injected key is delivered to the
+ * game's main window, so it never reaches the menu: the item under the pointer stays where it
+ * was, and Enter, which presses the button that owns the menu, closes it without choosing. The
+ * key op's description sends a caller to choose for this, and this is what holds the description
+ * to what the engine does. A windowed run played through the fake editor, the shape downstream
+ * has: a headless engine has no windows and a click there opens nothing, and a host with no
+ * display cannot run one and says so.
+ */
+async function testAKeyDoesNotChooseFromAnOpenedMenu(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('opened menu regression skipped (Godot not found)');
+    return;
+  }
+  if (resolveHeadless(undefined, { platform: process.platform, variables: process.env })) {
+    console.log('opened menu regression skipped (no display for a windowed run)');
+    return;
+  }
+  const held: { game: ChildProcess | null } = { game: null };
+  try {
+    await withAPlayingEditor(
+      ({ adapter, project, runtimeDir }) =>
+        (tool) => {
+          if (tool === 'play_scene') {
+            held.game = spawn(engine, ['--path', project], {
+              stdio: 'ignore',
+              env: {
+                ...process.env,
+                GDHARNESS_RUNTIME_DIR: runtimeDir,
+                GDHARNESS_EDITOR_PID: String(FAKE_EDITOR_PID),
+              },
+            });
+            return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
+          }
+          if (tool === 'playing_status') {
+            return {
+              ok: true,
+              playing: held.game?.exitCode === null,
+              scenePath: 'res://main.tscn',
+              debugPort: adapter,
+            };
+          }
+          if (tool === 'stop_playing') {
+            held.game?.kill();
+            return { ok: true };
+          }
+          return { ok: true };
+        },
+      async ({ server, project, start }) => {
+        writeFileSync(
+          join(project, 'main.tscn'),
+          '[gd_scene format=3]\n\n[node name="Main" type="Control"]\nanchors_preset = 15\n' +
+            'anchor_right = 1.0\nanchor_bottom = 1.0\n\n' +
+            '[node name="Pick" type="OptionButton" parent="."]\noffset_left = 20.0\n' +
+            'offset_top = 20.0\noffset_right = 200.0\noffset_bottom = 60.0\nselected = 0\n' +
+            'item_count = 3\npopup/item_0/text = "One"\npopup/item_0/id = 0\n' +
+            'popup/item_1/text = "Two"\npopup/item_1/id = 1\n' +
+            'popup/item_2/text = "Three"\npopup/item_2/id = 2\n',
+        );
+        const started = await start(20_000);
+        assert.equal(get(started.answer, 'runtime', 'listening'), true, JSON.stringify(started.answer));
+        const call = async (name: string, args: Record<string, unknown>): Promise<unknown> =>
+          parseTextContent(
+            await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS),
+          );
+        const property = async (nodePath: string, name: string): Promise<unknown> =>
+          get(await call('runtime_inspect', { op: 'property', nodePath, property: name }), 'value');
+        const settle = async (): Promise<unknown> => call('runtime_wait', { op: 'frames', frames: 3 });
+
+        const clicked = await call('runtime_input', { op: 'click', nodePath: '/root/Main/Pick' });
+        assert.equal(get(clicked, 'landed'), true, JSON.stringify(clicked));
+        await settle();
+        const menus = asArray(
+          get(await call('runtime_inspect', { op: 'find', className: 'PopupMenu' }), 'nodes'),
+        );
+        assert.equal(menus.length, 1, 'the button owns one menu');
+        const menu = text(get(menus[0], 'path'));
+        assert.equal(await property(menu, 'visible'), true, 'the click opened the menu');
+
+        await call('runtime_input', { op: 'key', keycode: 'Down' });
+        await settle();
+        assert.equal(await property(menu, 'visible'), true, 'an arrow key leaves the menu open');
+        await call('runtime_input', { op: 'key', keycode: 'Enter' });
+        await settle();
+        assert.equal(await property(menu, 'visible'), false, 'Enter closes it');
+        assert.equal(await property('/root/Main/Pick', 'selected'), 0, 'having chosen nothing');
+
+        const chosen = await call('runtime_input', { op: 'choose', nodePath: '/root/Main/Pick', index: 2 });
+        assert.equal(get(chosen, 'type'), 'chosen', JSON.stringify(chosen));
+        await settle();
+        assert.equal(await property('/root/Main/Pick', 'selected'), 2, 'choose is what selects');
+        assert.equal(await property('/root/Main/Pick', 'text'), 'Three', 'and the button shows it');
+
+        await server.request(
+          'tools/call',
+          { name: 'editor_run', arguments: { op: 'stop' } },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+      },
+      { realAddon: true, engine },
+    );
+  } finally {
+    if (held.game?.exitCode === null) {
+      held.game.kill();
+    }
+  }
+}
+
+/**
  * A find by className reaches the nodes whose script extends that class, at any distance.
  *
  * `className Card` answered 0 over a tree of rows whose scripts extend Card two steps down,
@@ -13327,6 +13441,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASpawnedGameBesideAnEditorIsStillItsOwn,
   testAFindByClassReachesWhatExtendsIt,
   testAnInjectedMotionCarriesHowFarThePointerMoved,
+  testAKeyDoesNotChooseFromAnOpenedMenu,
   testAWrittenLineBreakMatchesATwoLineLabel,
   testAPlayedGamesReportsReachTheOutput,
   testARealBenchTakesItsWorkerWithIt,
