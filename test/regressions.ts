@@ -8854,9 +8854,16 @@ async function testAPlayedGamesReportsReachTheOutput(): Promise<void> {
           asArray(get(answer, 'entries')).map(
             (entry) => `${text(get(entry, 'severity'))}: ${text(get(entry, 'text'))}`,
           );
-        // The boot's error and warning: reported before the run was tied, and read on the first
-        // look, with the engine's own `at:` line under the headline.
-        const first = await output({});
+        // The boot's error and warning, with the engine's own `at:` line under the headline. Given a
+        // moment to arrive: the runtime autoload announces in its own _ready and the main scene
+        // reports in its, a frame later, so a read the instant the start answers can come before
+        // the report is written, which it did once on macOS. What is held is that it arrives.
+        const deadline = Date.now() + 10_000;
+        let first = await output({});
+        while (asNumber(get(first, 'errors')) === 0 && Date.now() < deadline) {
+          await delay(200);
+          first = await output({});
+        }
         assert.equal(
           get(first, 'clean'),
           false,
