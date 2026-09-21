@@ -94,6 +94,14 @@ export interface GodotProcess {
   announcedPid?: number;
   announcedBefore?: ReadonlySet<number>;
   /**
+   * For a run the editor plays, whether the editor has yet reported it as playing: in its answer
+   * to the play, or to a later question. Until it has, the editor saying "not playing" is a play
+   * still on its way rather than a game that has gone, and a start that took it for gone said "the
+   * game is no longer running" about a game that came up a moment later, on an editor that had
+   * just been restarted and played only once its scan was over.
+   */
+  seenPlaying?: boolean;
+  /**
    * The process doing the run's work when that is neither `pid` nor an announced one: the engine
    * under the Windows console wrapper, for a project whose game announces nothing. Found through
    * the process tree by its command line and kept, since the tree is a PowerShell start to read.

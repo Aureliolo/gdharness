@@ -100,7 +100,14 @@ import {
   runtimesAnnounced,
 } from '../src/runtime-client.js';
 import { discardWith } from '../src/scratch.js';
-import { alive, PROJECT_FILE_ARGUMENTS, patienceForFrames, runIsUp, runtimeVerdict } from '../src/server.js';
+import {
+  alive,
+  PLAY_STARTS_WITHIN_MS,
+  PROJECT_FILE_ARGUMENTS,
+  patienceForFrames,
+  runIsUp,
+  runtimeVerdict,
+} from '../src/server.js';
 import type { GodotProcess } from '../src/server-types.js';
 import { addonMismatch, markIfStale, SERVER_VERSION } from '../src/server-version.js';
 import {
@@ -4067,10 +4074,27 @@ function testANotYetRuntimeIsNotTheSameAsNoRuntime(): void {
     exitCode: null,
     throughEditor: true,
     brokeOn: null,
+    seenPlaying: true,
   };
   assert.equal(runIsUp(played, false), false, 'the editor saying it is not playing settles it');
   assert.equal(runIsUp(played, true), true, 'and so does the editor saying it is');
   assert.equal(runIsUp(played, null), true, 'an editor that will not say leaves the record');
+
+  // Only once the editor has reported the run playing. Before that, "not playing" is a play the
+  // editor has not started yet, which a restarted editor answers until its scan is over, and it
+  // is taken as the play still on its way for as long as a play can reasonably take to start.
+  const unstarted = { ...played, seenPlaying: false };
+  assert.equal(runIsUp(unstarted, false), true, 'a play the editor has not started yet is on its way');
+  assert.equal(
+    runIsUp(unstarted, false, played.startedAt + PLAY_STARTS_WITHIN_MS),
+    false,
+    'and an editor that has not started it within the grace is believed',
+  );
+  assert.equal(
+    runIsUp(unstarted, false, played.startedAt + PLAY_STARTS_WITHIN_MS - 1),
+    true,
+    'up to the last moment of it',
+  );
 
   // The number the game gave for itself, which a played run has whenever it carries the runtime
   // addon. It is the only thing here that can contradict the editor, and the editor needs
@@ -8289,6 +8313,69 @@ async function testTheAnnounceWaitIsNotHeldByASlowEditor(): Promise<void> {
       assert.ok(
         sincePlayMs < answersAfterMs,
         `and found before the editor's first answer arrived: ${sincePlayMs}ms after the play, against ${answersAfterMs}ms`,
+      );
+    },
+  );
+}
+
+/**
+ * A play the editor has not started yet is not a game that has gone.
+ *
+ * A restarted editor plays once its scan is over: it answered the play with "not playing", went
+ * on saying so for a moment, and then the game came up. Read as the editor's word on the run,
+ * that said "the game is no longer running" about a game that had not yet begun, and the answer
+ * was final where the truth was one more call away. Until the editor has reported the run playing
+ * once, its "not playing" is the play still on its way, and the start keeps waiting for the
+ * announcement. The editor here says "not playing" to the play and for 600 ms after, then plays,
+ * and the game announces from a live process; the start has to find it. The other side stays:
+ * the case beside this one, whose editor reported playing and then not, is still answered "gone"
+ * at once.
+ */
+async function testAPlayTheEditorHasNotStartedIsNotAGameThatHasGone(): Promise<void> {
+  const startsPlayingAfterMs = 600;
+  let playedAt = 0;
+  let statusAsked = 0;
+  await withAPlayingEditor(
+    ({ adapter, project, runtimeDir }) =>
+      (tool) => {
+        if (tool === 'play_scene') {
+          playedAt = Date.now();
+          setTimeout(() => {
+            writeFileSync(
+              join(runtimeDir, `runtime-${process.pid}.json`),
+              JSON.stringify({
+                protocol: RUNTIME_PROTOCOL,
+                pid: process.pid,
+                port: 51_993,
+                address: '127.0.0.1',
+                project: { name: 'Played', path: project },
+              }),
+              'utf8',
+            );
+          }, startsPlayingAfterMs + 200);
+          // The editor's answer to the play, as a restarted one gave it: not playing yet.
+          return { ok: true, playing: false, scenePath: '', debugPort: adapter };
+        }
+        if (tool === 'playing_status') {
+          statusAsked += 1;
+          const playing = playedAt > 0 && Date.now() - playedAt >= startsPlayingAfterMs;
+          return { ok: true, playing, scenePath: playing ? 'res://main.tscn' : '', debugPort: adapter };
+        }
+        return { ok: true };
+      },
+    async ({ start }) => {
+      const found = await start(10_000);
+      assert.equal(get(found.answer, 'through'), 'editor', JSON.stringify(found.answer));
+      assert.ok(statusAsked > 0, 'the editor should have been asked whether it was playing');
+      assert.equal(
+        get(found.answer, 'runtime', 'listening'),
+        true,
+        `the start waits through an editor that has not started playing yet: ${JSON.stringify(found.answer)}`,
+      );
+      assert.equal(get(found.answer, 'runtime', 'pid'), process.pid, JSON.stringify(found.answer));
+      assert.ok(
+        found.waitedMs >= startsPlayingAfterMs,
+        `and the announcement it found came after the editor began: ${found.waitedMs}ms`,
       );
     },
   );
@@ -13602,6 +13689,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAGameTheEditorHasStoppedPlayingIsNotStillActive,
   testAPlayedStartStopsWaitingForAGameThatIsOver,
   testTheAnnounceWaitIsNotHeldByASlowEditor,
+  testAPlayTheEditorHasNotStartedIsNotAGameThatHasGone,
   testALateAnnouncementIsTiedToThePlayedRun,
   testTheEditorsGameIsToldFromAnotherOfTheSameProject,
   testASpawnedGameBesideAnEditorIsStillItsOwn,
