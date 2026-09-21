@@ -64,7 +64,14 @@ import {
 import { GodotLSPClient } from '../src/lsp_client.js';
 import { isWithinRoot, resolveWithinProject } from '../src/paths.js';
 import { freePort } from '../src/ports.js';
-import { childrenOf } from '../src/process-children.js';
+import {
+  ancestorsIn,
+  childrenOf,
+  descendantsIn,
+  parseProcessTable,
+  processTree,
+  readCommandLine,
+} from '../src/process-children.js';
 import { secondsFromClock } from '../src/process-time.js';
 import { projectStructure, searchProject } from '../src/project-scan.js';
 import { parseProjectGodot, settingKeys, settingsDroppedReport } from '../src/resources.js';
@@ -8527,16 +8534,22 @@ async function testARealBenchTakesItsWorkerWithIt(): Promise<void> {
     console.log('real bench and worker regression skipped (Godot not found)');
     return;
   }
-  const consoleSibling = engine.replace(/(_console)?\.exe$/i, '_console.exe');
-  const engines =
-    process.platform === 'win32' && consoleSibling !== engine && existsSync(consoleSibling)
-      ? [engine, consoleSibling]
-      : [engine];
-  for (const each of engines) {
+  for (const each of engineShapes(engine)) {
     for (const tiedAtStart of [true, false]) {
       await aRealBenchTakesItsWorkerWithIt(each, tiedAtStart);
     }
   }
+}
+
+/**
+ * [param engine] and, on Windows, the console build beside it when there is one: a wrapper that
+ * starts the engine as its child, which the installer's archive carries next to the other build.
+ */
+function engineShapes(engine: string): string[] {
+  const consoleSibling = engine.replace(/(_console)?\.exe$/i, '_console.exe');
+  return process.platform === 'win32' && consoleSibling !== engine && existsSync(consoleSibling)
+    ? [engine, consoleSibling]
+    : [engine];
 }
 
 async function aRealBenchTakesItsWorkerWithIt(engine: string, tiedAtStart: boolean): Promise<void> {
@@ -8770,6 +8783,207 @@ async function aRealBenchTakesItsWorkerWithIt(engine: string, tiedAtStart: boole
 }
 
 /**
+ * A stop with andChildren ends the workers of a bench that announce nothing.
+ *
+ * A project that keeps the runtime out of its benches on purpose, so that thirty-one workers do
+ * not each bind a port, has workers that are never "announced as a game of this project", and
+ * `andChildren` ended none of them: thirty engines named under childrenLeft as things that could
+ * not be told apart, twice in a row, with the note saying so. They can be: each is the project's
+ * own engine run with `--path` on the project, which its command line says. Here the project has
+ * no runtime addon at all, the bench opens two workers and one process that is not an engine,
+ * and the stop ends the two, names what identified each, and leaves the third named.
+ *
+ * Under every shape of engine the machine has, since under the console wrapper the workers'
+ * executable is the engine's and not the handle's.
+ */
+async function testAStopEndsTheProjectsUnannouncedWorkers(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('unannounced workers regression skipped (Godot not found)');
+    return;
+  }
+  for (const each of engineShapes(engine)) {
+    await aStopEndsTheProjectsUnannouncedWorkers(each);
+  }
+}
+
+async function aStopEndsTheProjectsUnannouncedWorkers(engine: string): Promise<void> {
+  const shape = basename(engine);
+  await withAPlayingEditor(
+    ({ adapter }) =>
+      (tool) =>
+        tool === 'playing_status'
+          ? { ok: true, playing: false, scenePath: '', debugPort: adapter }
+          : { ok: true },
+    async ({ server, project }) => {
+      // No runtime addon anywhere in the project, so nothing here can announce and the start
+      // does not wait for it.
+      rmSync(join(project, 'addons'), { recursive: true, force: true });
+      // A third child that is not an engine, so that the answer has something to leave: this
+      // process's own executable running a script that sleeps, given the project's `--path` as an
+      // argument of its own, so that the path alone does not make it the project's engine. A
+      // script file rather than `-e`, since `-e` is also how an editor is asked for.
+      const bystander = process.execPath.replaceAll('\\', '/');
+      writeFileSync(join(project, 'bystander.js'), 'setInterval(() => {}, 1000);\n');
+      writeFileSync(
+        join(project, 'bench.gd'),
+        'extends Node\n\n\nfunc _ready() -> void:\n' +
+          '\tfor i: int in 2:\n' +
+          '\t\tvar worker := OS.create_process(\n' +
+          '\t\t\tOS.get_executable_path(),\n' +
+          '\t\t\t["--headless", "--path", ProjectSettings.globalize_path("res://"), "res://worker.tscn"]\n' +
+          '\t\t)\n' +
+          '\t\tprint("worker %d" % worker)\n' +
+          `\tvar other := OS.create_process("${bystander}", [ProjectSettings.globalize_path("res://bystander.js"), "--path", ProjectSettings.globalize_path("res://")])\n` +
+          '\tprint("other %d" % other)\n',
+      );
+      writeFileSync(
+        join(project, 'main.tscn'),
+        '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://bench.gd" id="1"]\n\n' +
+          '[node name="Bench" type="Node"]\nscript = ExtResource("1")\n',
+      );
+      writeFileSync(
+        join(project, 'worker.tscn'),
+        '[gd_scene format=3]\n\n[node name="Worker" type="Node"]\n',
+      );
+
+      const startResponse = await server.request(
+        'tools/call',
+        { name: 'editor_run', arguments: { projectPath: project, op: 'start', headless: true } },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+      const started = parseTextContent(startResponse) ?? { refused: textOf(startResponse) };
+      const workers: number[] = [];
+      let other = 0;
+      try {
+        assert.equal(
+          get(started, 'runtime', 'mayYetAnnounce'),
+          false,
+          `${shape}: ${JSON.stringify(started)}`,
+        );
+        const benchPid = asNumber(get(started, 'pid'), 'the spawned bench has a pid');
+        const printed = async (): Promise<string[]> =>
+          asArray(
+            get(
+              parseTextContent(
+                await server.request(
+                  'tools/call',
+                  { name: 'editor_output', arguments: {} },
+                  ENGINE_CALL_TIMEOUT_MS,
+                ),
+              ),
+              'entries',
+            ),
+          ).map((entry) => text(get(entry, 'text')).trim());
+        const deadline = Date.now() + 30_000;
+        let lines = await printed();
+        while (!lines.some((line) => /^other \d+$/.test(line)) && Date.now() < deadline) {
+          await delay(250);
+          lines = await printed();
+        }
+        assert.ok(
+          lines.some((line) => /^other \d+$/.test(line)),
+          `${shape}: the bench prints what it opened: ${JSON.stringify(lines)}`,
+        );
+        for (const line of lines) {
+          const worker = /^worker (\d+)$/.exec(line);
+          if (worker) workers.push(Number(worker[1]));
+          const bystanding = /^other (\d+)$/.exec(line);
+          if (bystanding) other = Number(bystanding[1]);
+        }
+        workers.sort((a, b) => a - b);
+        assert.equal(workers.length, 2, `${shape}: two workers: ${JSON.stringify(lines)}`);
+        assert.ok(other > 0 && workers.every((pid) => pid > 0), `${shape}: every pid is a number`);
+        assert.ok(
+          await cameTrue(() => workers.every(alive) && alive(other), 5_000),
+          `${shape}: all three are up before the stop`,
+        );
+        // Read while everything lives, to say afterwards what each process named was.
+        const table = await processTree();
+        assert.ok(table !== undefined, `${shape}: the platform lists its processes`);
+        const executableOf = (pid: number): string =>
+          readCommandLine(table.get(pid)?.command ?? '').executable;
+
+        const stopped = parseTextContent(
+          await server.request(
+            'tools/call',
+            { name: 'editor_run', arguments: { op: 'stop', andChildren: true } },
+            ENGINE_CALL_TIMEOUT_MS,
+          ),
+        );
+        assert.equal(get(stopped, 'endedPid'), benchPid, `${shape}: ${JSON.stringify(stopped)}`);
+        assert.deepEqual(
+          get(stopped, 'endedChildren'),
+          workers,
+          `${shape}: both workers are ended, announced or not: ${JSON.stringify(stopped)}`,
+        );
+        for (const worker of workers) {
+          assert.match(
+            text(get(stopped, 'identifiedBy', String(worker))),
+            /run with --path .*, this project's engine on this project/,
+            `${shape}: and what identified ${worker} is said: ${JSON.stringify(stopped)}`,
+          );
+        }
+        // Named among what is left, rather than the whole of it: on Windows a console process
+        // opened from a game brings a conhost of its own, which is a child of the run too.
+        const left = asArray(get(stopped, 'childrenLeft')).map((pid) => asNumber(pid));
+        assert.ok(
+          left.includes(other),
+          `${shape}: the process that is not an engine is left and named: ${JSON.stringify(stopped)}`,
+        );
+        assert.ok(
+          workers.every((pid) => !left.includes(pid)),
+          `${shape}: and no worker is: ${JSON.stringify(stopped)}`,
+        );
+        // Nor the run's own engine: under the console wrapper it sits under the handle, and it is
+        // not something the game started. Read off the table taken before the stop, since by now
+        // it is gone.
+        const enginesLeft = left.filter((pid) => /godot/i.test(executableOf(pid)));
+        assert.deepEqual(
+          enginesLeft,
+          [],
+          `${shape}: no engine is left unaccounted for: ${JSON.stringify(left.map((pid) => [pid, executableOf(pid)]))}`,
+        );
+        assert.match(
+          text(get(stopped, 'note')),
+          /2 processes the game had started for itself were ended with it.*2 this project's engine run with --path on it, by their command line/,
+        );
+        assert.match(text(get(stopped, 'note')), /it had started (was|were) left, named under childrenLeft/);
+        assert.ok(
+          await cameTrue(() => workers.every((pid) => !alive(pid)), 10_000),
+          `${shape}: and both worker processes are gone`,
+        );
+        // Under the console wrapper everything under it goes when it does, the bystander with the
+        // rest, so whether it is still there is the platform's doing and not this stop's: what
+        // the stop owes is that it was named and not signalled, which is held above.
+        if (!/_console\.exe$/i.test(engine)) {
+          assert.ok(alive(other), `${shape}: while the other child is still there`);
+        }
+      } finally {
+        for (const pid of [...workers, other]) {
+          if (pid > 0 && alive(pid)) {
+            try {
+              process.kill(pid);
+            } catch {
+              // Gone already.
+            }
+          }
+        }
+        await server.request(
+          'tools/call',
+          { name: 'editor_run', arguments: { op: 'stop' } },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+      }
+    },
+    { engine },
+  );
+}
+
+/**
  * A runtime call with no pid reaches the game this server holds when several are running.
  *
  * A bench fans out to workers from the same project, and every runtime call from the session that
@@ -8923,21 +9137,89 @@ async function testARuntimeCallReachesThisServersOwnGame(): Promise<void> {
 }
 
 /**
- * A stop asked to end what the game started ends the children announced as games of the project,
- * and only those.
+ * A command line is read the way the engine reads its own, on both platforms' spellings.
  *
- * A bench fans out to workers with OS.create_process, and a stop ended the bench and left the
- * workers grinding, as its note said; the session that hit it ended them by pid from a process
- * listing on the scene name, by hand, every time. Being a child of the run's process is the
- * property a stranger's bench cannot have, and being announced as a game of the project is what
- * says a child is a game at all: both are required before a number is signalled, so a child that
- * is not announced is left and named. The listing is taken before the run is ended, since ending
- * it reparents the children on POSIX and the question has no answer afterwards.
- *
- * The bench is a process of this fixture's that starts two children of its own, one announced as a
- * game and one not, and the editor stage ties the run to it. The positive is the other child still
- * there after the stop: a stop that ended every child would pass the first assertion as well.
+ * Windows quotes what has spaces in it and `ps` quotes nothing, so a project directory with a space
+ * in its name arrives as one word on the one and two on the other; `--path` may be last or
+ * followed by another flag or a scene; `-e` and `--editor` are both the editor; and the process
+ * table is `pid ppid command` with whatever leading space the platform pads with, a header or a
+ * blank line to be skipped, and a command that may be empty. Nothing under `andChildren` is right
+ * unless this is, and the engine tier would only show it on the platform it happened to run on.
  */
+function testACommandLineIsReadTheWayTheEngineReadsIt(): void {
+  const windows = readCommandLine(
+    '"C:\\Program Files\\Godot\\Godot_v4.7.2-stable_win64.exe" --headless --path "C:\\Users\\Me\\My Project" res://tests/bench.tscn',
+  );
+  assert.deepEqual(windows, {
+    executable: 'Godot_v4.7.2-stable_win64.exe',
+    projectPath: 'C:\\Users\\Me\\My Project',
+    editor: false,
+  });
+  const posix = readCommandLine('/opt/godot/Godot --headless --path /home/me/My Project res://bench.tscn');
+  assert.deepEqual(posix, { executable: 'Godot', projectPath: '/home/me/My Project', editor: false });
+  assert.deepEqual(readCommandLine('godot --path /p'), {
+    executable: 'godot',
+    projectPath: '/p',
+    editor: false,
+  });
+  assert.deepEqual(readCommandLine('godot --path /p --headless'), {
+    executable: 'godot',
+    projectPath: '/p',
+    editor: false,
+  });
+  assert.equal(readCommandLine('godot -e --path /p').editor, true);
+  assert.equal(readCommandLine('godot --editor --path /p').editor, true);
+  assert.equal(readCommandLine('godot --path /p -- --editor').editor, true);
+  assert.deepEqual(readCommandLine('node script.js'), {
+    executable: 'node',
+    projectPath: null,
+    editor: false,
+  });
+  assert.deepEqual(readCommandLine(''), { executable: '', projectPath: null, editor: false });
+  assert.equal(
+    readCommandLine('godot --path').projectPath,
+    null,
+    'a --path with nothing after it names nothing',
+  );
+
+  const table = parseProcessTable(
+    [
+      '  PID  PPID COMMAND',
+      '    1     0 /sbin/init',
+      '  200     1 "C:\\x\\a b.exe" --path C:\\p',
+      '  201   200',
+      '',
+      'junk line',
+    ].join('\n'),
+  );
+  assert.deepEqual(
+    [...table.entries()],
+    [
+      [1, { parent: 0, command: '/sbin/init' }],
+      [200, { parent: 1, command: '"C:\\x\\a b.exe" --path C:\\p' }],
+      [201, { parent: 200, command: '' }],
+    ],
+  );
+  // A tree of a wrapper, its engine, a worker and the worker's helper, beside a stranger.
+  const tree = parseProcessTable(
+    ['10 1 wrapper', '11 10 engine', '12 11 worker', '13 12 helper', '20 1 stranger'].join('\n'),
+  );
+  assert.deepEqual(descendantsIn(tree, 10), [11, 12, 13]);
+  assert.deepEqual(descendantsIn(tree, 12), [13]);
+  assert.deepEqual(descendantsIn(tree, 20), []);
+  assert.deepEqual(
+    ancestorsIn(tree, 13, 10),
+    [12, 11, 10],
+    'up to the root, nearest first, the root included',
+  );
+  assert.deepEqual(ancestorsIn(tree, 13, 12), [12]);
+  assert.deepEqual(
+    ancestorsIn(tree, 20, 10),
+    [1],
+    'a chain that never reaches the root ends where the tree does',
+  );
+}
+
 /**
  * A process's children are listed while it lives, and on POSIX not after: the reason a stop asked
  * to end them lists them before ending the run.
@@ -9023,6 +9305,25 @@ async function testChildrenAreListedWhileTheParentLives(): Promise<void> {
   }
 }
 
+/**
+ * A stop asked to end what the game started ends the children that are games of the project, and
+ * only those.
+ *
+ * A bench fans out to workers with OS.create_process, and a stop ended the bench and left the
+ * workers grinding, as its note said; the session that hit it ended them by pid from a process
+ * listing on the scene name, by hand, every time. Being under the run's process is the property a
+ * stranger's bench cannot have, and being a game of the project, announced as one or the
+ * project's engine run on it, is what says a child is a game at all: both are required before a
+ * number is signalled, so a child that is neither is left and named. The listing is taken before
+ * the run is ended, since ending it reparents the children on POSIX and the question has no
+ * answer afterwards.
+ *
+ * The bench is a process of this fixture's that starts two children of its own, one announced as a
+ * game and one not, and the editor stage ties the run to it. The positive is the other child still
+ * there after the stop: a stop that ended every child would pass the first assertion as well. The
+ * announced one goes as the run is ended, before the stop's own signal, and is named as ended all
+ * the same.
+ */
 async function testAStopCanEndWhatTheGameStarted(): Promise<void> {
   const held: { bench: ChildProcess | null } = { bench: null };
   let worker = 0;
@@ -12495,7 +12796,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheEditorsGameIsToldFromAnotherOfTheSameProject,
   testASpawnedGameBesideAnEditorIsStillItsOwn,
   testARealBenchTakesItsWorkerWithIt,
+  testAStopEndsTheProjectsUnannouncedWorkers,
   testARuntimeCallReachesThisServersOwnGame,
+  testACommandLineIsReadTheWayTheEngineReadsIt,
   testChildrenAreListedWhileTheParentLives,
   testAStopCanEndWhatTheGameStarted,
   testASettingTheEditorDroppedIsNamed,
