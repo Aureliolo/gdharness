@@ -1750,6 +1750,23 @@ class GodotServer {
         ),
       };
     }
+    // A run the editor plays keeps `exitCode` null for as long as the record lasts, so the refusal
+    // above never fires for one that has ended. The editor is asked instead: attaching to the
+    // adapter of a game that has gone answered "the editor is playing the game but its debug
+    // adapter did not answer", which is two things wrong about one game that was simply over.
+    const going = await this.runStillGoing(game);
+    if (!going) {
+      return {
+        ok: false,
+        response: this.createErrorResponse(
+          'The last run has already ended, so there is no debug session to answer for.',
+          [
+            'editor_output still reads what it printed, until the next run starts',
+            'editor_run start plays another, which the debugger can hold',
+          ],
+        ),
+      };
+    }
     if (!game.throughEditor) {
       return {
         ok: false,
@@ -1783,7 +1800,7 @@ class GodotServer {
       // Not held as far as this session knows, and whether it knows is the question: a session
       // that attached after the stop is shown no stack by the adapter, so the runtime is asked
       // before "running" is said about a game that may be sitting at a breakpoint.
-      const hold = await this.holdOf(game);
+      const hold = await this.holdOf(game, going);
       if (hold.heldAt !== null) {
         if (intent === 'move') {
           return { ok: true, value: game };
@@ -2951,9 +2968,21 @@ class GodotServer {
       const playing = await this.editorPlayingState();
       await this.pickUpWhatTheEditorIsPlaying();
       const current = this.currentRun();
-      return { playing, hold: current === null ? {} : await this.holdOf(current) };
+      // Judged the same way `editor_output` judges `running`, and with the editor's answer that
+      // this call has already gone and got. A run the editor plays has no handle and no pid here,
+      // so `stillRunning` alone can only say yes for as long as the record lasts: a game that
+      // quit went on being reported as active, in the same answer that carried the editor saying
+      // it was playing nothing. Two fields about one question, one of them asking and one of them
+      // remembering. The hold is judged from the same answer, so a run that is over is held
+      // nowhere in the same call that says it is over.
+      const active = current === null ? false : await this.runStillGoing(current, playing?.playing ?? null);
+      return {
+        playing,
+        active,
+        hold: current === null ? {} : await this.holdOf(current, active),
+      };
     })();
-    const [games, { playing, hold }] = await Promise.all([pinged, asked]);
+    const [games, { playing, active, hold }] = await Promise.all([pinged, asked]);
     return this.jsonTextResponse({
       editor: {
         ...this.getEditorStatusPayload(),
@@ -2972,14 +3001,7 @@ class GodotServer {
       game: {
         // The record too, or "is something running" answers no about a run this server did not
         // start, which after a reconnect is every run.
-        //
-        // Judged the same way `editor_output` judges `running`, and with the editor's answer that
-        // this call has already gone and got. A run the editor plays has no handle and no pid here,
-        // so `stillRunning` alone can only say yes for as long as the record lasts: a game that
-        // quit went on being reported as active, in the same answer that carried the editor saying
-        // it was playing nothing. Two fields about one question, one of them asking and one of them
-        // remembering.
-        processActive: runIsUp(this.currentRun(), playing === null ? null : playing.playing),
+        processActive: active,
         playingInEditor: playing,
         // The same three answers editor_output gives, for the same run: absent when there is no
         // run to ask about.
@@ -3514,14 +3536,6 @@ class GodotServer {
     });
   }
 
-  /** Whether the game is still up, asking the editor only about a game the editor is playing. */
-  private async gameIsUp(): Promise<boolean> {
-    const run = this.currentRun();
-    const editorSays =
-      run?.throughEditor === true ? ((await this.editorPlayingState())?.playing ?? null) : null;
-    return runIsUp(run, editorSays);
-  }
-
   /**
    * Waits for the game just started to be something the runtime tools can talk to, and says so.
    *
@@ -3549,6 +3563,10 @@ class GodotServer {
     if (!existsSync(join(projectPath, RUNTIME_AUTOLOAD.path))) {
       return runtimeVerdict(null, { addon: false, budgetMs, heldAt: null, running: false, withArgs });
     }
+    // The editor is asked about a run it is playing no more often than the wait loop asks it, so
+    // a look every fifty milliseconds does not become a request every fifty milliseconds.
+    let editorAskedAt = 0;
+    let editorSaysGoing = true;
     const endpoint = await announcedSince(projectPath, before, {
       budgetMs,
       // A game held at a breakpoint set before the run is not booting any more, and waiting out
@@ -3556,8 +3574,23 @@ class GodotServer {
       // anything to wait for once the process is over: a boot that fails on a parse error is
       // gone in half a second, and sitting out the rest of the budget delays the answer that
       // says so. The announcement is looked for before this is asked, so a game that announced
-      // and then quit is still found.
-      giveUp: () => this.dapClient?.isStopped() === true || !stillRunning(this.currentRun()),
+      // and then quit is still found. A run the editor plays has no process to ask, so the editor
+      // is asked instead: without that a played scene that died on boot was waited for the whole
+      // budget and then reported, correctly, as no longer running.
+      giveUp: async () => {
+        if (this.dapClient?.isStopped() === true) {
+          return true;
+        }
+        const run = this.currentRun();
+        if (run === null || !run.throughEditor) {
+          return !stillRunning(run);
+        }
+        if (Date.now() - editorAskedAt >= RUN_POLL_MS) {
+          editorAskedAt = Date.now();
+          editorSaysGoing = await this.runStillGoing(run);
+        }
+        return !editorSaysGoing;
+      },
     });
     // Kept on the run, for a run the editor is playing. That is the one kind with no handle and no
     // pid of its own, so its liveness is the editor's word and nothing else; this is a number the
@@ -3571,7 +3604,7 @@ class GodotServer {
       addon: true,
       budgetMs,
       heldAt: this.dapClient?.whereItStopped() ?? null,
-      running: await this.gameIsUp(),
+      running: going === null ? false : await this.runStillGoing(going),
       withArgs,
     });
   }
@@ -4369,19 +4402,28 @@ class GodotServer {
   }
 
   /**
-   * Whether a run is still going, asked of whoever can say.
+   * Whether a run is still going, asked of whoever can say: `runIsUp`, with the editor asked
+   * for its word when the operating system has not already settled it.
    *
    * The operating system, for every run with a process to ask about. The editor, for a run it is
-   * playing whose game announced no runtime: that run has no process number of any kind, so
-   * `stillRunning` alone can only say yes for as long as the record lasts, and editor_output said
-   * `running: true` about such a game for the rest of the session while its own note claimed the
-   * editor had been asked. editor_run wait sat out its whole budget on the same reading.
+   * playing: that run has no process number of its own, so `stillRunning` alone can only say yes
+   * for as long as the record lasts, and editor_output said `running: true` about such a game for
+   * the rest of the session while its own note claimed the editor had been asked. editor_run wait
+   * sat out its whole budget on the same reading. Every answer about whether a run is going comes
+   * through here, so no two fields of one answer disagree about it. [param editorSays] is the
+   * editor's word when the caller has just asked for it, null when the editor would not say.
    */
-  private async runStillGoing(run: GodotProcess): Promise<boolean> {
-    if (!run.throughEditor || run.announcedPid !== undefined) {
+  private async runStillGoing(run: GodotProcess, editorSays?: boolean | null): Promise<boolean> {
+    if (!run.throughEditor) {
       return stillRunning(run);
     }
-    return runIsUp(run, (await this.editorPlayingState())?.playing ?? null);
+    if (run.announcedPid !== undefined && !alive(run.announcedPid)) {
+      return false;
+    }
+    return runIsUp(
+      run,
+      editorSays === undefined ? ((await this.editorPlayingState())?.playing ?? null) : editorSays,
+    );
   }
 
   private async handleGetDebugOutput(args: OperationParams, waitedMs?: number): Promise<ToolResponse> {
@@ -4409,7 +4451,7 @@ class GodotServer {
     // A game held at a breakpoint is running in the sense the process is alive and in no sense
     // that matters to a caller: it draws nothing, answers no runtime call, and the timeouts that
     // follow read like a hung engine. Said here because this is where somebody asks what it did.
-    const hold = await this.holdOf(run);
+    const hold = await this.holdOf(run, going);
     // Asked for rather than always, because asking costs a subprocess and on Windows that is a
     // PowerShell start: seconds under load, on every read, on the one platform where the answer is
     // dearest. Put in the hot path it slowed every call enough to time others out, and the tests
@@ -4904,12 +4946,17 @@ class GodotServer {
 
   private async holdOf(
     run: GodotProcess,
+    going?: boolean,
   ): Promise<{ heldAt: StoppedAt | null | undefined; heldUnknown?: true; heldNote?: string }> {
     // A run that is over is held nowhere. Asked of the process before the session, because a
     // session that never learned the hold has only the announcement to ask, and a game that has
     // quit has none: the answer was "cannot be told from here, a game that answers nothing is
-    // held", about a run whose exit the same answer was reporting.
-    if (!run.throughEditor || !stillRunning(run)) {
+    // held", about a run whose exit the same answer was reporting. Whether it is over is asked
+    // the way `editor_output` asks it, of the editor for a run the editor plays, and a caller
+    // that has just asked hands the answer in rather than asking twice: the record alone says a
+    // played run is going for as long as it lasts, and editor_status carried that note beside
+    // its own `processActive: false`.
+    if (!run.throughEditor || !(going ?? (await this.runStillGoing(run)))) {
       return { heldAt: null };
     }
     const session = this.dapClient;

@@ -284,8 +284,11 @@ export const ANNOUNCE_BUDGET_MS = 5_000;
 export interface WaitingForRuntime {
   readonly budgetMs?: number;
   readonly directories?: readonly string[];
-  /** Answered on every look. True ends the wait: a game held at a breakpoint is not booting. */
-  readonly giveUp?: () => boolean;
+  /**
+   * Answered on every look. True ends the wait: a game held at a breakpoint is not booting.
+   * Asynchronous because for a game the editor plays the answer comes from the editor.
+   */
+  readonly giveUp?: () => boolean | Promise<boolean>;
 }
 
 /**
@@ -316,7 +319,7 @@ export async function announcedSince(
       return fresh;
     }
     const left = until - Date.now();
-    if (left <= 0 || waiting.giveUp?.() === true) {
+    if (left <= 0 || (await waiting.giveUp?.()) === true) {
       return null;
     }
     await delay(Math.min(LOOK_EVERY_MS, left));
