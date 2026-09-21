@@ -70,12 +70,18 @@ export interface GodotProcess {
    */
   consoleLost?: boolean;
   /**
-   * The process the game announced itself as, for a run the editor is playing.
+   * The process the game announced itself as.
    *
-   * Such a run has no handle and no `pid`, so whether it is still up can only be asked of the
-   * editor, and the editor is not always there to ask and is not always right: it went on saying it
-   * was playing a game whose process had been ended from outside. A game carrying the runtime addon
-   * announces its own process id, and that number can be asked of the operating system.
+   * For a run the editor is playing it is the only process the run has: there is no handle and no
+   * `pid`, so whether it is still up can otherwise only be asked of the editor, and the editor is
+   * not always there to ask and is not always right: it went on saying it was playing a game whose
+   * process had been ended from outside. A game carrying the runtime addon announces its own
+   * process id, and that number can be asked of the operating system.
+   *
+   * For a run started here it is usually `pid` and not always: the Windows console build is a
+   * wrapper that starts the engine as its child, so the game the handle stands for announces a
+   * number of its own, and that number is the one a runtime call, a cpu reading and a listing of
+   * what the game started all need.
    *
    * Used to find a run over, and to ask the operating system what the run has used. A number that
    * has come round to something else reads as alive, which is the answer the record gives anyway,
