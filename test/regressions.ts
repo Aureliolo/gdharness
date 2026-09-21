@@ -40,7 +40,7 @@ import {
   unloadedTypes,
   unseenByEditor,
 } from '../src/class-cache.js';
-import { GodotDAPClient, handleDAPTool, type HeldBreakpoint } from '../src/dap_client.js';
+import { GodotDAPClient, type HeldBreakpoint, handleDAPTool } from '../src/dap_client.js';
 import { dictionary, emptyRecord } from '../src/dictionary.js';
 import { forAnswer, GameLog } from '../src/game-log.js';
 import {
