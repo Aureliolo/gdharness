@@ -905,4 +905,7 @@ func _resolve_mouse_button(raw: Variant) -> int:
 				return MOUSE_BUTTON_WHEEL_DOWN
 			_:
 				return -1
-	return Read.as_int(raw, -1)
+	# The engine's buttons run from 1 to 9: 0 is MOUSE_BUTTON_NONE, which no event carries, and a
+	# number past the two extra buttons names nothing a mask bit can be made for.
+	var number: int = Read.as_int(raw, -1)
+	return number if number >= MOUSE_BUTTON_LEFT and number <= MOUSE_BUTTON_XBUTTON2 else -1

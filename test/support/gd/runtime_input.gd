@@ -200,6 +200,12 @@ func _check_mouse(input: InputCommands) -> void:
 	var unknown: Dictionary = input.inject_mouse_click({"x": 1, "y": 1, "button": "scroll_up"})
 	if unknown.get("type", "") != "error":
 		_fail("a button name that is not one should be refused: %s" % JSON.stringify(unknown))
+	# And a number that is not a button: 0 is MOUSE_BUTTON_NONE, which no event carries, and past
+	# the two extra buttons there is nothing to press.
+	for number: int in [0, 10, -3]:
+		var none: Dictionary = input.inject_mouse_click({"x": 1, "y": 1, "button": number})
+		if none.get("type", "") != "error":
+			_fail("button %d is not a button and should be refused: %s" % [number, JSON.stringify(none)])
 
 
 ## A wheel step is a press and a release together, the way a mouse sends one.
