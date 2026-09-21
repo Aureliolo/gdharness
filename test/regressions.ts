@@ -7888,7 +7888,33 @@ async function testAGameTheEditorHasStoppedPlayingIsNotStillActive(): Promise<vo
  * A socket for the editor and a scripted adapter, because what is under test is which source the
  * wait reads, and a real editor can only be made to play a game that dies by being given one.
  */
-async function testAPlayedStartStopsWaitingForAGameThatIsOver(): Promise<void> {
+/** What a fixture is handed by `withAPlayingEditor`. */
+interface PlayingEditorStage {
+  readonly server: ServerProcess;
+  readonly project: string;
+  readonly runtimeDir: string;
+  /** The port the scripted adapter serves, which the editor greeted the server with. */
+  readonly adapter: number;
+  /** One `editor_run start` through the editor, timed. */
+  readonly start: (runtimeWaitMs: number) => Promise<{ answer: unknown; waitedMs: number }>;
+}
+
+/** How a fake editor answers one tool call: the result, at once or after a wait. */
+type EditorToolAnswer = (tool: string) => Record<string, unknown> | Promise<Record<string, unknown>>;
+
+/**
+ * A server with a fake editor on its bridge and a scripted adapter that answers everything, for
+ * a project that could announce a runtime and never does.
+ *
+ * The editor is a socket, because what these fixtures measure is which source an answer is taken
+ * from and how long it waits, and a real editor can only be made to play a game that dies by being
+ * given one. [param answer] is the editor: it is handed each tool the server invokes and its
+ * result is sent back, so a fixture decides what the editor says it is playing, and when.
+ */
+async function withAPlayingEditor(
+  answer: (where: Pick<PlayingEditorStage, 'adapter' | 'project' | 'runtimeDir'>) => EditorToolAnswer,
+  body: (stage: PlayingEditorStage) => Promise<void>,
+): Promise<void> {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-played-over-'));
   const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-played-over-rt-'));
   const port = await reservePort();
@@ -7905,8 +7931,6 @@ async function testAPlayedStartStopsWaitingForAGameThatIsOver(): Promise<void> {
       }),
     );
   };
-  let playing = false;
-  let diesOnBoot = false;
   const server = new ServerProcess({
     env: {
       GDHARNESS_BRIDGE_PORT: String(port),
@@ -7937,24 +7961,15 @@ async function testAPlayedStartStopsWaitingForAGameThatIsOver(): Promise<void> {
         });
         socket.once('error', reject);
       });
+      const answers = answer({ adapter, project, runtimeDir });
       socket.on('message', (raw: Buffer) => {
         const message: unknown = JSON.parse(String(raw));
         if (!isRecord(message) || message['type'] !== 'tool_invoke') {
           return;
         }
-        const tool = String(message['tool']);
-        let result: Record<string, unknown> = { ok: true };
-        if (tool === 'play_scene') {
-          // Answered as the editor answers it, with the game just spawned. Whether that game is
-          // still there by the time anybody asks is the variable below.
-          playing = !diesOnBoot;
-          result = { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
-        } else if (tool === 'stop_playing') {
-          playing = false;
-        } else if (tool === 'playing_status') {
-          result = { ok: true, playing, scenePath: playing ? 'res://main.tscn' : '', debugPort: adapter };
-        }
-        socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result }));
+        void Promise.resolve(answers(String(message['tool']))).then((result) => {
+          socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result }));
+        });
       });
       socket.send(
         JSON.stringify({
@@ -7978,7 +7993,7 @@ async function testAPlayedStartStopsWaitingForAGameThatIsOver(): Promise<void> {
       // otherwise, and a headless start is spawned rather than played, which is a different case.
       const start = async (runtimeWaitMs: number): Promise<{ answer: unknown; waitedMs: number }> => {
         const began = Date.now();
-        const answer = parseTextContent(
+        const answered = parseTextContent(
           await server.request(
             'tools/call',
             {
@@ -7988,11 +8003,62 @@ async function testAPlayedStartStopsWaitingForAGameThatIsOver(): Promise<void> {
             30_000,
           ),
         );
-        return { answer, waitedMs: Date.now() - began };
+        return { answer: answered, waitedMs: Date.now() - began };
       };
+      await body({ server, project, runtimeDir, adapter, start });
+    });
+  } finally {
+    editor.socket?.terminate();
+    await server.stop();
+    sweep(project);
+    sweep(runtimeDir);
+  }
+}
 
+async function testAPlayedStartStopsWaitingForAGameThatIsOver(): Promise<void> {
+  let playing = false;
+  let diesOnBoot = false;
+  let stops = 0;
+  await withAPlayingEditor(
+    ({ adapter }) =>
+      (tool) => {
+        if (tool === 'play_scene') {
+          // Answered as the editor answers it, with the game just spawned. Whether that game is
+          // still there by the time anybody asks is the variable below.
+          playing = !diesOnBoot;
+          return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
+        }
+        if (tool === 'stop_playing') {
+          playing = false;
+          stops += 1;
+          return { ok: true };
+        }
+        if (tool === 'playing_status') {
+          return { ok: true, playing, scenePath: playing ? 'res://main.tscn' : '', debugPort: adapter };
+        }
+        return { ok: true };
+      },
+    async ({ server, start }) => {
+      // The editor is playing a game this server has never heard of, the way a replacement server
+      // after a reconnect finds one, and the start is the first call to notice. It ends that game
+      // to play its own and says so: a played run that announced no runtime has no number of any
+      // kind, and the answer used to say nothing about it, as though the caller's game had stopped
+      // on its own. The replacement's start said nothing either way, because it never asked the
+      // editor what was playing before deciding there was nothing to end.
+      playing = true;
       const going = await start(1_500);
       assert.equal(get(going.answer, 'through'), 'editor', JSON.stringify(going.answer));
+      assert.equal(stops, 1, 'the start should have had the editor stop the game it was playing');
+      assert.equal(
+        get(going.answer, 'endedPreviousRun'),
+        true,
+        `and should say a run with no number was ended: ${JSON.stringify(going.answer)}`,
+      );
+      assert.match(
+        text(get(going.answer, 'message')),
+        /The game the editor was playing was ended to start this one/,
+        JSON.stringify(going.answer),
+      );
       assert.equal(
         get(going.answer, 'runtime', 'mayYetAnnounce'),
         true,
@@ -8006,6 +8072,12 @@ async function testAPlayedStartStopsWaitingForAGameThatIsOver(): Promise<void> {
       diesOnBoot = true;
       const over = await start(10_000);
       assert.equal(get(over.answer, 'through'), 'editor', JSON.stringify(over.answer));
+      assert.equal(stops, 2, 'the start should have had the editor stop the game this server played');
+      assert.equal(
+        get(over.answer, 'endedPreviousRun'),
+        true,
+        `and should say so: ${JSON.stringify(over.answer)}`,
+      );
       assert.equal(
         get(over.answer, 'runtime', 'mayYetAnnounce'),
         false,
@@ -8029,13 +8101,84 @@ async function testAPlayedStartStopsWaitingForAGameThatIsOver(): Promise<void> {
         /The last run has already ended, so there is no debug session/,
         `a stack read on the run that died is refused as a run that is over: ${stack}`,
       );
-    });
-  } finally {
-    editor.socket?.terminate();
-    await server.stop();
-    sweep(project);
-    sweep(runtimeDir);
-  }
+      // A start after a game that died ends nothing, and says nothing about ending one: the
+      // record alone read as a run still going, so the editor was told to stop and the answer
+      // reported a run ended that had ended itself.
+      const afterOver = await start(1_500);
+      assert.equal(get(afterOver.answer, 'through'), 'editor', JSON.stringify(afterOver.answer));
+      assert.equal(stops, 2, 'a start after a game that died has nothing to have the editor stop');
+      assert.equal(
+        get(afterOver.answer, 'endedPreviousRun'),
+        undefined,
+        `and reports no run ended: ${JSON.stringify(afterOver.answer)}`,
+      );
+    },
+  );
+}
+
+/**
+ * The announce wait is not held up by an editor that is slow to say whether it is playing.
+ *
+ * The wait asks the editor about a played run so a game that died on boot is not waited for.
+ * Asked in line with the looks for the announcement, a question the editor holds for a second
+ * (an addon that does not serve it, an editor busy with something else) held the looks with it,
+ * and a runtime that announced inside that second was found only when the editor let go. The
+ * question is asked beside the looks, and the last answer is what each look reads.
+ *
+ * The editor here answers `playing_status` after 900 ms and the game announces 300 ms after the
+ * play; the start has to find it well before the editor's first answer arrives.
+ */
+async function testTheAnnounceWaitIsNotHeldByASlowEditor(): Promise<void> {
+  const answersAfterMs = 700;
+  const announcesAfterMs = 300;
+  // Measured from the play rather than from the call: the start asks the editor what it is playing
+  // before it plays anything, and that question is held for the same 700 ms.
+  let playedAt = 0;
+  await withAPlayingEditor(
+    ({ adapter, project, runtimeDir }) =>
+      async (tool) => {
+        if (tool === 'play_scene') {
+          playedAt = Date.now();
+          // The announcement lands a moment after the play, from a process that is alive: a dead
+          // one is swept by the reader and the start would have nothing to find.
+          setTimeout(() => {
+            writeFileSync(
+              join(runtimeDir, `runtime-${process.pid}.json`),
+              JSON.stringify({
+                protocol: RUNTIME_PROTOCOL,
+                pid: process.pid,
+                port: 51_994,
+                address: '127.0.0.1',
+                project: { name: 'Played', path: project },
+              }),
+              'utf8',
+            );
+          }, announcesAfterMs);
+          return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
+        }
+        if (tool === 'playing_status') {
+          await delay(answersAfterMs);
+          return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
+        }
+        return { ok: true };
+      },
+    async ({ start }) => {
+      const found = await start(10_000);
+      const sincePlayMs = Date.now() - playedAt;
+      assert.equal(get(found.answer, 'through'), 'editor', JSON.stringify(found.answer));
+      assert.ok(playedAt > 0, 'the editor should have been asked to play');
+      assert.equal(
+        get(found.answer, 'runtime', 'listening'),
+        true,
+        `the announcement should have been found: ${JSON.stringify(found.answer)}`,
+      );
+      assert.equal(get(found.answer, 'runtime', 'pid'), process.pid, JSON.stringify(found.answer));
+      assert.ok(
+        sincePlayMs < answersAfterMs,
+        `and found before the editor's first answer arrived: ${sincePlayMs}ms after the play, against ${answersAfterMs}ms`,
+      );
+    },
+  );
 }
 
 async function testTheEditorsRunIsTheOneAnsweredFor(): Promise<void> {
@@ -11369,6 +11512,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEditorOnAnotherVersionIsStillAskedWhatItIsPlaying,
   testAGameTheEditorHasStoppedPlayingIsNotStillActive,
   testAPlayedStartStopsWaitingForAGameThatIsOver,
+  testTheAnnounceWaitIsNotHeldByASlowEditor,
   testASettingTheEditorDroppedIsNamed,
   testACleanupThatCannotFinishStillFinishes,
   testADiagnosticTheFileContradictsIsNamed,
