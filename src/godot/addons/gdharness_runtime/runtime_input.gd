@@ -352,8 +352,15 @@ func inject_mouse_click(params: Dictionary) -> Dictionary:
 	# its drag from the press, which is where a real pointer would be.
 	var _moved: Vector2 = _arrive(position)
 	Input.parse_input_event(_button(position, button, pressed, double))
+	# A wheel step is a press and a release together, as a mouse sends one: there is no holding a
+	# wheel. A lone wheel press left the viewport's mouse focus on the control that took it, with
+	# the wheel's bit in the focus mask, and every click after it landed on that control rather
+	# than under the pointer, landing true and doing nothing, until a release was sent by hand.
+	var notch: bool = pressed and _mask_of(button) == 0
+	if notch:
+		Input.parse_input_event(_button(position, button, false, false))
 
-	return {
+	var answer: Dictionary = {
 		"type": "input_injected",
 		"input_type": "mouse_click",
 		"position": [position.x, position.y],
@@ -361,6 +368,9 @@ func inject_mouse_click(params: Dictionary) -> Dictionary:
 		"pressed": pressed,
 		"double": double
 	}
+	if notch:
+		answer["released"] = true
+	return answer
 
 
 ## Moves the pointer to a position, with the movement the event carries taken from where the
@@ -895,4 +905,7 @@ func _resolve_mouse_button(raw: Variant) -> int:
 				return MOUSE_BUTTON_WHEEL_DOWN
 			_:
 				return -1
-	return Read.as_int(raw, -1)
+	# The engine's buttons run from 1 to 9: 0 is MOUSE_BUTTON_NONE, which no event carries, and a
+	# number past the two extra buttons names nothing a mask bit can be made for.
+	var number: int = Read.as_int(raw, -1)
+	return number if number >= MOUSE_BUTTON_LEFT and number <= MOUSE_BUTTON_XBUTTON2 else -1
