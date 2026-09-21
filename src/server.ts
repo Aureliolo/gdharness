@@ -3105,11 +3105,20 @@ class GodotServer {
       return null;
     }
     try {
-      const answer = await Promise.race([
-        this.godotBridge.invokeTool('playing_status', {}),
-        delay(PLAYING_STATUS_MS).then(() => null),
-      ]);
+      const askedAt = Date.now();
+      const asked = this.godotBridge.invokeTool('playing_status', {});
+      const answer = await Promise.race([asked, delay(PLAYING_STATUS_MS).then(() => null)]);
       if (answer === null) {
+        // Logged with how late the answer was, when it comes, because a status the editor
+        // answers late reads exactly like one it never answered, and the two send a reader to
+        // different places: a start on the Windows leg sat nine seconds on a played game the
+        // editor had already said was over, and nothing in the log said which.
+        this.logDebug(`playing_status did not answer within ${PLAYING_STATUS_MS}ms`);
+        asked
+          .then(() => {
+            this.logDebug(`playing_status answered after ${Date.now() - askedAt}ms`);
+          })
+          .catch(() => {});
         return null;
       }
       return {
@@ -3776,6 +3785,11 @@ class GodotServer {
     let asking: Promise<void> | null = null;
     let editorAskedAt = 0;
     let editorSaysGoing = true;
+    let editorAsks = 0;
+    const waitBegan = Date.now();
+    // Read through a call rather than directly, since the variable is written from the closure
+    // below and the type checker reads it as never changing.
+    const lastSaid = (): string => (editorSaysGoing ? 'playing' : 'not playing');
     const endpoint = await announcedSince(projectPath, before, {
       budgetMs,
       // Not a game of this project that somebody else started: for a run the editor plays, one
@@ -3803,6 +3817,7 @@ class GodotServer {
         }
         if (asking === null && Date.now() - editorAskedAt >= RUN_POLL_MS) {
           editorAskedAt = Date.now();
+          editorAsks += 1;
           asking = this.runStillGoing(run)
             .then((going) => {
               editorSaysGoing = going;
@@ -3814,6 +3829,13 @@ class GodotServer {
         return !editorSaysGoing;
       },
     });
+    // How the wait ended, for the log a slow start is read back from: what it found, how long it
+    // took, and how often the editor was asked on the way.
+    this.logDebug(
+      `announce wait ended after ${Date.now() - waitBegan}ms: ${
+        endpoint === null ? 'nothing announced' : `pid ${endpoint.pid} announced`
+      }, editor asked ${editorAsks} times, last said ${lastSaid()}`,
+    );
     // Kept on the run: a number the game gave for itself, which is what the announcement was
     // waited for. For a run the editor plays it is the only process the run has, so its liveness
     // is the editor's word without it. For a run started here it is usually the handle's own
