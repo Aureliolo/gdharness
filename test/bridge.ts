@@ -414,6 +414,62 @@ async function main(): Promise<void> {
       const info = await payload('editor_classes', { projectPath, op: 'info', className: 'Node2D' });
       assert.equal(get(info, 'class_name'), 'Node2D');
       assert.ok(asArray(get(info, 'methods')).length > 0, 'editor_classes info returns methods');
+
+      // One member by name, wherever in the ancestry it is declared: the whole of Control ran to
+      // seventy thousand characters for a question about one property, and the answer to "does
+      // this engine have it" is the member and who declares it. A property Control declares, a
+      // method Node declares that Control inherits, an enum, and a name nothing declares, which is
+      // refused with the names that contain it.
+      const own = await payload('editor_classes', {
+        projectPath,
+        op: 'info',
+        className: 'Control',
+        member: 'focus_mode',
+      });
+      const ownFound = asArray(get(own, 'found'));
+      assert.equal(get(own, 'member'), 'focus_mode', JSON.stringify(own));
+      assert.ok(
+        ownFound.some((one) => get(one, 'kind') === 'property' && get(one, 'declared_in') === 'Control'),
+        `a property of the class itself, named as its own: ${JSON.stringify(own)}`,
+      );
+      const inherited = await payload('editor_classes', {
+        projectPath,
+        op: 'info',
+        className: 'Control',
+        member: 'add_child',
+      });
+      const inheritedFound = asArray(get(inherited, 'found'));
+      assert.ok(
+        inheritedFound.some((one) => get(one, 'kind') === 'method' && get(one, 'declared_in') === 'Node'),
+        `a method an ancestor declares is found and credited to it: ${JSON.stringify(inherited)}`,
+      );
+      const method = inheritedFound.find((one) => get(one, 'kind') === 'method');
+      assert.ok(
+        asArray(get(method, 'member', 'args')).length >= 1,
+        `with its signature: ${JSON.stringify(method)}`,
+      );
+      const anEnum = await payload('editor_classes', {
+        projectPath,
+        op: 'info',
+        className: 'Control',
+        member: 'FocusMode',
+      });
+      assert.ok(
+        asArray(get(anEnum, 'found')).some(
+          (one) => get(one, 'kind') === 'enum' && get(one, 'member', 'values', 'FOCUS_ALL') !== undefined,
+        ),
+        `an enum, with its values: ${JSON.stringify(anEnum)}`,
+      );
+      const nothing =
+        textOf(
+          await call('editor_classes', { projectPath, op: 'info', className: 'Control', member: 'focus' }),
+        ) ?? '';
+      assert.match(
+        nothing,
+        /declare no member named focus/,
+        `a name nothing declares is refused: ${nothing}`,
+      );
+      assert.match(nothing, /focus_mode/, `naming the members whose names contain it: ${nothing}`);
     } else if (process.env['GDHARNESS_REQUIRE_GODOT']) {
       throw new Error('GDHARNESS_REQUIRE_GODOT is set and no executable Godot was found.');
     }

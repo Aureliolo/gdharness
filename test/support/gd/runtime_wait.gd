@@ -582,3 +582,44 @@ func _check_until_something_says_it() -> void:
 	var unasked: Dictionary = await node._execute_command("wait_until", {"path": "/root/Panel"})
 	if unasked.get("type") != "error" or not str(unasked.get("message", "")).contains("says"):
 		_fail("waiting for nothing in particular says what to ask for: %s" % str(unasked))
+
+	await _check_words_on_a_hidden_node_are_not_yet_shown()
+
+
+## A wait for words is a wait for them to be shown. A button that exists hidden through a whole
+## animation carries its words the whole time, and a wait that counted it answered met in two
+## milliseconds while the sweep was still going, so every wait on that screen fell back to
+## counting frames. Hidden nodes count only when asked for.
+func _check_words_on_a_hidden_node_are_not_yet_shown() -> void:
+	var carry_on: Button = Button.new()
+	carry_on.name = "CarryOn"
+	carry_on.text = "Carry on"
+	carry_on.visible = false
+	button.get_parent().add_child(carry_on)
+
+	var not_yet: Dictionary = await node._execute_command(
+		"wait_until", {"path": "/root/Panel", "says": "carry on", "timeout_ms": 60}
+	)
+	if not_yet.get("met") != false or not_yet.get("include_hidden") != false:
+		_fail("words on a hidden button are not shown yet: %s" % str(not_yet))
+
+	var asked_for: Dictionary = await node._execute_command(
+		"wait_until", {"path": "/root/Panel", "says": "carry on", "include_hidden": true, "timeout_ms": 60}
+	)
+	if asked_for.get("met") != true or asked_for.get("include_hidden") != true:
+		_fail("and count when hidden ones are asked for: %s" % str(asked_for))
+
+	# Shown a moment into the wait, which is the thing being waited for.
+	var showing: Callable = func() -> void:
+		await process_frame
+		await process_frame
+		carry_on.visible = true
+	showing.call()
+	var shown: Dictionary = await node._execute_command(
+		"wait_until", {"path": "/root/Panel", "says": "carry on"}
+	)
+	if shown.get("met") != true or Read.as_int(shown.get("elapsed_ms", 0)) < 1:
+		_fail("the wait ends when the button is shown, and not before: %s" % str(shown))
+
+	carry_on.queue_free()
+	await process_frame
