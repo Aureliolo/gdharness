@@ -225,6 +225,17 @@ function projectSpelling(projectPath: string, absolutePath: string): string {
 }
 
 /**
+ * The two arguments that pick a game for a runtime command, carried as the caller gave them.
+ *
+ * Every runtime tool takes them and every op forwards them, so they are lifted off the call in
+ * one place rather than named at each of the thirteen sites, where one site forgetting `pid`
+ * would be a tool that refuses a bench's workers while the others answer.
+ */
+function whichGame(args: OperationParams): { projectPath: unknown; pid: unknown } {
+  return { projectPath: args['projectPath'], pid: args['pid'] };
+}
+
+/**
  * Why a game is sitting still, as a clause: the adapter's reason, and its own words for an error.
  *
  * Godot reports `breakpoint`, `step` and `exception`; `attached` is this side's word for a hold
@@ -1519,7 +1530,7 @@ class GodotServer {
         switch (op) {
           case 'tree':
             return await this.handleRuntimeCommand('get_tree', {
-              projectPath: args['projectPath'],
+              ...whichGame(args),
               root: readNonEmptyString(args, 'nodePath') ?? '/root',
               depth: readPositiveNumber(args, 'depth') ?? 3,
               include_properties: readBoolean(args, 'includeProperties') ?? false,
@@ -1528,25 +1539,25 @@ class GodotServer {
             return await this.handleFindRuntimeNodes(args);
           case 'text':
             return await this.handleRuntimeCommand('read_text', {
-              projectPath: args['projectPath'],
+              ...whichGame(args),
               root: readNonEmptyString(args, 'nodePath') ?? '/root',
               include_hidden: readBoolean(args, 'includeHidden') ?? false,
               limit: readPositiveNumber(args, 'limit') ?? 500,
             });
           case 'rect':
             return await this.handleRuntimeCommand('get_rect', {
-              projectPath: args['projectPath'],
+              ...whichGame(args),
               path: readNonEmptyString(args, 'nodePath') ?? '',
             });
           case 'property':
             return await this.handleRuntimeCommand('get_property', {
-              projectPath: args['projectPath'],
+              ...whichGame(args),
               path: readNonEmptyString(args, 'nodePath') ?? '',
               property: readNonEmptyString(args, 'property') ?? '',
             });
           default:
             return await this.handleRuntimeCommand('get_metrics', {
-              projectPath: args['projectPath'],
+              ...whichGame(args),
               metrics: readArray(args, 'metrics') ?? [],
             });
         }
@@ -1555,13 +1566,13 @@ class GodotServer {
         // on the game's side.
         return op === 'set'
           ? await this.handleRuntimeCommand('set_property', {
-              projectPath: args['projectPath'],
+              ...whichGame(args),
               path: readNonEmptyString(args, 'nodePath') ?? '',
               property: readString(args, 'property') ?? '',
               value: args['value'],
             })
           : await this.handleRuntimeCommand('call_method', {
-              projectPath: args['projectPath'],
+              ...whichGame(args),
               path: readNonEmptyString(args, 'nodePath') ?? '',
               method: readString(args, 'method') ?? '',
               args: readArray(args, 'args') ?? [],
@@ -1574,7 +1585,7 @@ class GodotServer {
       case 'runtime_input':
         if (op === 'click') {
           return await this.handleRuntimeCommand('click', {
-            projectPath: args['projectPath'],
+            ...whichGame(args),
             path: readNonEmptyString(args, 'nodePath') ?? '',
             button: readString(args, 'button') ?? 'left',
             double: readBoolean(args, 'doubleClick') ?? false,
@@ -1584,7 +1595,7 @@ class GodotServer {
           // `index` is passed on only when it was given, because the addon reads whether it is
           // there as which of the two ways the caller named the item.
           return await this.handleRuntimeCommand('choose', {
-            projectPath: args['projectPath'],
+            ...whichGame(args),
             path: readNonEmptyString(args, 'nodePath') ?? '',
             text: readString(args, 'text') ?? '',
             ...(args['index'] === undefined ? {} : { index: args['index'] }),
@@ -4950,16 +4961,18 @@ class GodotServer {
     args: unknown,
     timeoutMs: number = this.runtimeTimeoutMs(),
   ): Promise<ToolResponse> {
-    const { op: _op, projectPath, ...params } = asParams(args);
+    const { op: _op, projectPath, pid, ...params } = asParams(args);
     const announced = runtimesAnnounced();
     // A server set up for a project answers about that project's game and no other. Two
     // projects open in two harness sessions are two games announced on the same machine, and
     // without this the second one to start is a game this server would talk to as readily as
-    // its own, with nothing in the answer saying which it reached.
+    // its own, with nothing in the answer saying which it reached. A pid picks one game out of
+    // several running from one project, which is what a bench with workers is.
     const choice = chooseRuntime(
       announced.running,
       typeof projectPath === 'string' ? projectPath : (this.ownProject ?? undefined),
       announced.unspoken,
+      typeof pid === 'number' ? pid : undefined,
     );
     if ('problem' in choice) {
       return this.createErrorResponse(choice.problem);
@@ -5050,7 +5063,7 @@ class GodotServer {
     const includeHidden = readBoolean(args, 'includeHidden');
     return await this.handleRuntimeCommand('find_nodes', {
       ...filters,
-      projectPath: args['projectPath'],
+      ...whichGame(args),
       root: readNonEmptyString(args, 'nodePath') ?? '/root',
       limit: readPositiveNumber(args, 'limit') ?? 100,
       ...(property === undefined ? {} : { property }),
@@ -5076,11 +5089,7 @@ class GodotServer {
       // than off `timeoutMs`, which this op does not take: how long a run of frames is worth
       // waiting for is the count, and a second knob on it is one nobody could set correctly.
       const waited = patienceForFrames(frames, this.runtimeTimeoutMs());
-      return await this.handleRuntimeCommand(
-        'wait_frames',
-        { projectPath: args['projectPath'], frames },
-        waited,
-      );
+      return await this.handleRuntimeCommand('wait_frames', { ...whichGame(args), frames }, waited);
     }
 
     const timeoutMs = readPositiveNumber(args, 'timeoutMs') ?? 5000;
@@ -5090,7 +5099,7 @@ class GodotServer {
       ? await this.handleRuntimeCommand(
           'wait_signal',
           {
-            projectPath: args['projectPath'],
+            ...whichGame(args),
             path: nodePath,
             signal: readString(args, 'signal') ?? '',
             timeout_ms: timeoutMs,
@@ -5100,7 +5109,7 @@ class GodotServer {
       : await this.handleRuntimeCommand(
           'wait_until',
           {
-            projectPath: args['projectPath'],
+            ...whichGame(args),
             path: nodePath,
             property: readString(args, 'property') ?? '',
             value: args['value'],

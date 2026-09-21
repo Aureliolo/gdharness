@@ -84,6 +84,7 @@ import {
   chooseRuntime,
   discoverRuntimes,
   RUNTIME_PROTOCOL,
+  type RuntimeEndpoint,
   runtimeDirectories,
   runtimeDirectory,
   runtimesAnnounced,
@@ -2437,7 +2438,7 @@ async function testAnArgumentMeantForAnotherOpIsRefused(): Promise<void> {
     // And the refusal spells out what the op does take, which is what saves the second wrong call.
     assert.match(
       await call('runtime_inspect', { op: 'text', depth: 2 }),
-      /text takes: projectPath, nodePath, limit, includeHidden/,
+      /text takes: projectPath, pid, nodePath, limit, includeHidden/,
       'and should say what text takes instead',
     );
     // The run tools ask it of three ops that share a schema, where the wrong-op argument is the
@@ -3878,6 +3879,66 @@ function testAGameTooNewToTalkToIsStillAGame(): void {
   } finally {
     sweep(root);
   }
+}
+
+/**
+ * A process id picks one game out of several running from one project.
+ *
+ * A bench fans out to thirty-one workers from the same project, every one of them announcing, and
+ * a runtime call with the project path was refused with "stop all but one", which is not advice a
+ * bench can take. The pid on every runtime tool is what picks one, and the refusals name it. A pid
+ * nobody is running, or one running another project than the path names, is refused with what is
+ * running, since a number guessed from a stale listing must not reach a different game.
+ */
+function testAPidPicksOneOfSeveralGames(): void {
+  const project = join(tmpdir(), 'gdharness-bench');
+  const other = join(tmpdir(), 'gdharness-other');
+  const game = (pid: number, path: string): RuntimeEndpoint => ({
+    pid,
+    port: 50_000 + pid,
+    address: '127.0.0.1',
+    project: { name: basename(path), path },
+    file: join(path, `runtime-${pid}.json`),
+  });
+  const workers = [game(11, project), game(12, project), game(13, project)];
+  const all = [...workers, game(21, other)];
+
+  const several = chooseRuntime(all, project);
+  assert.ok('problem' in several, 'three games from one project is a question the path cannot settle');
+  assert.match(text(get(several, 'problem')), /Several games are running from .*Pass pid to choose one/);
+  const none = chooseRuntime(all);
+  assert.match(text(get(none, 'problem')), /Pass projectPath to choose one, or pid/);
+
+  const picked = chooseRuntime(all, project, [], 12);
+  assert.deepEqual(picked, { endpoint: workers[1] }, 'the pid picks the worker, with the path agreeing');
+  const alone = chooseRuntime(all, undefined, [], 13);
+  assert.deepEqual(alone, { endpoint: workers[2] }, 'and on its own');
+
+  const wrong = chooseRuntime(all, project, [], 21);
+  assert.match(
+    text(get(wrong, 'problem')),
+    /pid 21 is running .*gdharness-other, not .*gdharness-bench/,
+    `a pid from another project is refused rather than reached: ${JSON.stringify(wrong)}`,
+  );
+  const gone = chooseRuntime(all, project, [], 99);
+  assert.match(
+    text(get(gone, 'problem')),
+    /No running game has pid 99\. Running: pid 11/,
+    JSON.stringify(gone),
+  );
+  const nothing = chooseRuntime([], undefined, [], 99);
+  assert.match(text(get(nothing, 'problem')), /none with pid 99/, JSON.stringify(nothing));
+  const tooNewOne = chooseRuntime(
+    [],
+    undefined,
+    [{ pid: 7, protocol: RUNTIME_PROTOCOL + 1, project: { name: 'x', path: project } }],
+    7,
+  );
+  assert.match(
+    text(get(tooNewOne, 'problem')),
+    /protocol this server does not speak/,
+    JSON.stringify(tooNewOne),
+  );
 }
 
 /**
@@ -7864,7 +7925,7 @@ async function testTheEditorsRunIsTheOneAnsweredFor(): Promise<void> {
  * is about is unmistakable from the wait it replaced.
  */
 async function testAStatusCallIsNotHeldByAHeldGame(): Promise<void> {
-  await withAHeldGame({ toldOnConnect: null }, async ({ server, game, gamePid }) => {
+  await withAHeldGame({ toldOnConnect: null }, async ({ server, game, gamePid, project }) => {
     const status = async (): Promise<unknown> =>
       parseTextContent(await server.request('tools/call', { name: 'editor_status', arguments: {} }, 60_000));
     const began = Date.now();
@@ -7885,6 +7946,22 @@ async function testAStatusCallIsNotHeldByAHeldGame(): Promise<void> {
     assert.ok(
       took < 15_000,
       `a held game does not cost the status call the runtime timeout: ${took}ms with the timeout at 30000`,
+    );
+
+    // A pid nobody is running is refused with what is, before anything is sent: the number reaches
+    // the chooser through the tool, which is the half a unit fixture on the chooser cannot hold.
+    const nobody = await server.request(
+      'tools/call',
+      {
+        name: 'runtime_inspect',
+        arguments: { projectPath: project, pid: 999_999_999, op: 'tree', nodePath: '/root' },
+      },
+      60_000,
+    );
+    assert.match(
+      textOf(nobody) ?? JSON.stringify(nobody),
+      new RegExp(`No running game has pid 999999999\\. Running: pid ${gamePid}`),
+      `a pid that is nobody's is refused naming who is running: ${textOf(nobody)}`,
     );
 
     // Before the game goes: running, by the process the pick-up tied it to.
@@ -11069,6 +11146,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheStaleHalfIsNamedCorrectly,
   testAGameIsFoundWhereverItAnnounced,
   testAGameTooNewToTalkToIsStillAGame,
+  testAPidPicksOneOfSeveralGames,
   testAGameThatAnnouncedAndWentIsSaidSo,
   testANotYetRuntimeIsNotTheSameAsNoRuntime,
   testARefusalDoesNotDenyTheRuntimeItCanSee,

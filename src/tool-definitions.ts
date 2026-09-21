@@ -127,6 +127,11 @@ const RUNNING_PROJECT_PATH: JsonSchema = {
   description:
     'Which game, when more than one is running: the project directory it was started from. Not needed with one game.',
 };
+const RUNNING_PID: JsonSchema = {
+  type: 'number',
+  description:
+    'Which game, when several are running from one project, such as a bench and its workers: its process id, as editor_status lists under runtimes. Not needed with one game per project.',
+};
 const SCENE_PATH: JsonSchema = {
   type: 'string',
   description: 'Scene file inside the project, such as "scenes/main.tscn" or "res://scenes/main.tscn".',
@@ -929,6 +934,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       'Questions about the running game: what is written on the screen, the scene tree, the nodes matching a query, where one node is on screen, what one property reads, or the performance metrics. Needs the game running with the runtime addon.',
     parameters: {
       projectPath: RUNNING_PROJECT_PATH,
+      pid: RUNNING_PID,
       nodePath: {
         type: 'string',
         ops: ['tree', 'text', 'find', 'rect', 'property'],
@@ -1018,6 +1024,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       'Sets a property or calls a method on a node in the running game. Needs the game running with the runtime addon.',
     parameters: {
       projectPath: RUNNING_PROJECT_PATH,
+      pid: RUNNING_PID,
       nodePath: { type: 'string', description: 'Absolute node path, such as "/root/Main/Player".' },
       property: {
         type: 'string',
@@ -1060,6 +1067,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       'A picture of the running game: the whole screen or one viewport, as an image. Needs the game running with a window.',
     parameters: {
       projectPath: RUNNING_PROJECT_PATH,
+      pid: RUNNING_PID,
       viewportPath: {
         type: 'string',
         ops: ['viewport'],
@@ -1081,6 +1089,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       'Input to the running game: a whole click on a Control or a 3D node named by path, an item chosen out of a menu, typing into whatever has the focus, or a raw action, key, mouse button or mouse motion. All of it works headless, where the window is 64 by 64 and the GUI only takes what is inside it.',
     parameters: {
       projectPath: RUNNING_PROJECT_PATH,
+      pid: RUNNING_PID,
       nodePath: {
         type: 'string',
         ops: ['click', 'choose'],
@@ -1187,6 +1196,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       'Lets the running game get on with it and answers when something has happened: a number of frames, a signal, a property reaching a value, or words appearing on a screen. Needs the game running with the runtime addon.',
     parameters: {
       projectPath: RUNNING_PROJECT_PATH,
+      pid: RUNNING_PID,
       frames: {
         type: 'number',
         ops: ['frames'],
