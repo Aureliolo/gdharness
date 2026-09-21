@@ -16,9 +16,8 @@ yours is somewhere else, and it will write that path into the config it generate
 ## Hand it to your agent
 
 ```text hand this to an agent
-Install gdharness into this project by following
-https://aureliolo.github.io/gdharness/agent.md, then tell me what it asked you to
-recommend back to me.
+Install gdharness here by following https://aureliolo.github.io/gdharness/agent.md,
+then tell me what it asked you to recommend back to me.
 ```
 
 The agent reads [agent.md](agent.md), runs the one command below, answers the questions it asks
