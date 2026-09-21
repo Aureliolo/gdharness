@@ -378,6 +378,24 @@ export function cacheWrittenAt(projectPath: string): number | null {
   }
 }
 
+/**
+ * The classes a cache records at a path that is not on disk, by name.
+ *
+ * The one invariant a cache can be held to without asking anybody: every entry names a file. An
+ * entry that does not is a script that was renamed or deleted while an editor went on holding its
+ * class, written back by that editor's next scan, and the next engine to read it fails on
+ * `Could not parse global class "Pace" from "res://ui/pace.gd"` in whichever correct script shares
+ * the bare name.
+ */
+export function cachedAtMissingPaths(cached: Map<string, string>, projectPath: string): string[] {
+  return [...cached]
+    .filter(
+      ([, path]) => path.startsWith('res://') && !existsSync(join(projectPath, path.slice('res://'.length))),
+    )
+    .map(([name]) => name)
+    .sort();
+}
+
 /** The declarations a given cache records at a different path, or does not record at all. */
 export function staleAgainst(cached: Map<string, string>, projectPath: string): string[] {
   return [...declaredClasses(projectPath)]
