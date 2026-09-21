@@ -7904,7 +7904,8 @@ type EditorToolAnswer = (tool: string) => Record<string, unknown> | Promise<Reco
 
 /**
  * A server with a fake editor on its bridge and a scripted adapter that answers everything, for
- * a project that could announce a runtime and never does.
+ * a project with the runtime addon on disk, so a start waits for an announcement, and nothing
+ * running to make one unless the fixture writes it into `runtimeDir` itself.
  *
  * The editor is a socket, because what these fixtures measure is which source an answer is taken
  * from and how long it waits, and a real editor can only be made to play a game that dies by being

@@ -311,20 +311,29 @@ const writtenProject: fc.Arbitrary<WrittenProject> = fc
     let noiseAt = 0;
     const filler = (): string => noiseLines[noiseAt++ % noiseLines.length] ?? '';
 
+    // Defined rather than assigned, because `__proto__` is a key the pattern allows and assigning
+    // it on a plain object sets the prototype instead of a property: the parser keeps it as an own
+    // key, as it must, and the model silently had no such key to compare against.
     const write = (
       into: Record<string, IniValue>,
       pairs: readonly (readonly [string, WrittenValue])[],
     ): void => {
       for (const [key, { text, value }] of pairs) {
         lines.push(filler(), `${key}${equals}${text}`);
-        into[key] = value;
+        Object.defineProperty(into, key, { value, enumerable: true, writable: true, configurable: true });
       }
     };
 
     write(root, rootSettings);
     for (const [name, pairs] of sections) {
       const section: Record<string, IniValue> = {};
-      expected[name] = section;
+      // The same for a section named `__proto__`, which the pattern allows too.
+      Object.defineProperty(expected, name, {
+        value: section,
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
       lines.push(filler(), `[${name}]`);
       write(section, pairs);
     }
@@ -344,6 +353,19 @@ function projectFilesRoundTrip(): void {
       assert.deepEqual(plain(parseProjectGodot(text)), expected);
     }),
     { numRuns: 500 },
+  );
+
+  // Held on purpose rather than left to the generator, which found it once in a great many runs:
+  // a setting named `__proto__` reads back as a key of that name, in the root and in a section,
+  // and so does a section named that.
+  const named = plain(parseProjectGodot('__proto__=1\n[a]\n__proto__="x"\n[__proto__]\nb=2\n'));
+  assert.deepEqual(
+    named,
+    Object.fromEntries([
+      ['root', Object.fromEntries([['__proto__', 1]])],
+      ['a', Object.fromEntries([['__proto__', 'x']])],
+      ['__proto__', { b: 2 }],
+    ]),
   );
 }
 
