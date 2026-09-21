@@ -977,18 +977,18 @@ export async function handleDAPTool(
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    // A breakpoint is set on the editor's adapter with no game running, so a refusal there is
+    // about the editor or the file and never about a game: "start one with editor_run" sent a
+    // caller whose script the adapter could not find to start a game that would not have helped.
+    const cure =
+      toolName === 'dap_set_breakpoint' || toolName === 'dap_remove_breakpoint'
+        ? 'Breakpoints need the editor open, not a running game: editor_status says whether one is connected, and the path is the script as the project spells it.'
+        : 'The debug tools answer for a game the editor is playing: start one with editor_run.';
     return {
       // Marked as the failure it is: without this a caller reads a sentence about what went
       // wrong as the answer to what it asked, which is the one thing a tool must never do.
       isError: true,
-      content: [
-        {
-          type: 'text',
-          text:
-            `DAP tool '${toolName}' failed: ${message}. ` +
-            'The debug tools answer for a game the editor is playing: start one with editor_run.',
-        },
-      ],
+      content: [{ type: 'text', text: `DAP tool '${toolName}' failed: ${message}. ${cure}` }],
     };
   }
 }
