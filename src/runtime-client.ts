@@ -15,9 +15,10 @@
 import { existsSync, readdirSync, readFileSync, statSync, unlinkSync } from 'node:fs';
 import { createConnection } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { envValue } from './launch.js';
+import { startTimesOf } from './process-children.js';
 import { asParams, readNumber, readParams, readString } from './tool-args.js';
 
 /** The protocol version the addon has to speak. Bumped whenever a reply or request changes. */
@@ -286,11 +287,96 @@ function announcedAndGone(projectPath?: string): WentAway[] {
   return gone.filter((one) => one.noticedAt >= since && resolve(one.project) === wanted);
 }
 
+/**
+ * How long after an announcement was written a process may have started and still be the game
+ * that wrote it.
+ *
+ * The game starts, boots, and writes the announcement in its first frames, so its start is before
+ * the file's time by the boot and never after it. What this absorbs is the second the platforms
+ * round a start time to and the granularity of a file time, and nothing else. A process that
+ * began later than that is one that took the number after the game had gone, which is what a
+ * shell did downstream: an announcement of a game ended an hour before read as a game "still
+ * starting, or shutting down" for as long as the shell lived, because a number the operating
+ * system has handed out again answers to a signal exactly as the game did.
+ */
+export const STARTED_AFTER_ANNOUNCING_MS = 2_000;
+
+/**
+ * How long a process confirmed as its announcement's game is believed before it is asked again.
+ *
+ * Confirmed once, the number is the game's until the game goes, and the sweep takes the file the
+ * moment the number answers to nobody. A game that goes and has its number taken between two
+ * sweeps is the gap this bounds: a stale yes lasts at most this long, and asking the operating
+ * system costs an interpreter start on Windows, so it is not asked on every look.
+ */
+export const CONFIRMED_FOR_MS = 60_000;
+
+/**
+ * How old an announcement has to be before the process behind it is asked about at all.
+ *
+ * The question costs an interpreter start on Windows, and the sweep that asks it is the one the
+ * start's wait runs every fifty milliseconds while a game boots: asked of a fresh announcement it
+ * held that wait for half a second at the moment the game announced, and a fixture that needs the
+ * announcement found inside seven hundred milliseconds read the delay as the fault it guards. A
+ * number taken over inside a minute of the game announcing needs the game to have died and the
+ * number to have come round again within that minute, and the sweep after the minute asks anyway,
+ * so what this costs is a stale yes of at most a minute on a run that short.
+ */
+export const JUDGED_AFTER_MS = 60_000;
+
+/** What was decided about the process behind one announcement, and when the file said it. */
+interface Verdict {
+  readonly writtenAt: number;
+  readonly judgedAt: number;
+  readonly stranger: boolean;
+}
+
+const verdicts = new Map<string, Verdict>();
+
+/**
+ * Whether each announced process is the game that wrote its announcement, from when it started.
+ *
+ * Asked of the operating system once per file, and again once the confirmation has aged, in one
+ * question for all of them. A platform that will not say leaves the announcement believed, which
+ * is what it was before anything asked. [param startTimes] is the operating system's answer, an
+ * argument so a case can supply the disagreement rather than wait to meet one.
+ */
+export function strangersAmong(
+  candidates: readonly { file: string; pid: number; writtenAt: number }[],
+  now: number,
+  startTimes: (pids: readonly number[]) => Map<number, number> = startTimesOf,
+): Set<string> {
+  const toJudge = candidates.filter((one) => {
+    if (now - one.writtenAt < JUDGED_AFTER_MS) {
+      return false;
+    }
+    const known = verdicts.get(one.file);
+    return (
+      known === undefined ||
+      known.writtenAt !== one.writtenAt ||
+      (!known.stranger && now - known.judgedAt > CONFIRMED_FOR_MS)
+    );
+  });
+  if (toJudge.length > 0) {
+    const began = startTimes(toJudge.map((one) => one.pid));
+    for (const one of toJudge) {
+      const at = began.get(one.pid);
+      const stranger = at !== undefined && at - one.writtenAt > STARTED_AFTER_ANNOUNCING_MS;
+      verdicts.set(one.file, { writtenAt: one.writtenAt, judgedAt: now, stranger });
+    }
+  }
+  return new Set(
+    candidates.filter((one) => verdicts.get(one.file)?.stranger === true).map((one) => one.file),
+  );
+}
+
 function announcedIn(directory: string): Announced[] {
   if (!existsSync(directory)) {
     return [];
   }
   const found: Announced[] = [];
+  const candidates: { file: string; pid: number; writtenAt: number }[] = [];
+  const entries: { file: string; pid: number; alive: boolean }[] = [];
   for (const entry of readdirSync(directory)) {
     const report = ERROR_REPORT_PATTERN.exec(entry);
     if (report) {
@@ -304,14 +390,28 @@ function announcedIn(directory: string): Announced[] {
     const file = join(directory, entry);
     const pid = Number.parseInt(match[1] ?? '', 10);
     const alive = processAlive(pid);
-    const announced: Announced = alive ? parseAnnouncement(file, pid) : { kind: 'rubbish' };
+    entries.push({ file, pid, alive });
+    if (alive) {
+      try {
+        candidates.push({ file, pid, writtenAt: statSync(file).mtimeMs });
+      } catch {
+        // Taken by another reader between the listing and this; the parse below says rubbish.
+      }
+    }
+  }
+  const strangers = strangersAmong(candidates, Date.now());
+  for (const { file, pid, alive } of entries) {
+    // A number answering to a signal is not the game unless the process behind it is the one that
+    // wrote the file; one that is not is swept as a game that has gone, which is what it is.
+    const announced: Announced =
+      alive && !strangers.has(file) ? parseAnnouncement(file, pid) : { kind: 'rubbish' };
     if (announced.kind === 'rubbish') {
       // A game that announced and whose process has since gone, remembered before the file naming
       // it is removed. The sweep is what destroys the evidence: afterwards a refusal can only say
       // nothing is running, which is the same sentence a project with no addon gets and a project
       // nobody started gets. The one that matters is the game that was there and died, and it is
       // the only one of the three the caller has to act on.
-      if (!alive) {
+      if (!alive || strangers.has(file)) {
         wentAway(file, pid);
       }
       try {
@@ -319,11 +419,75 @@ function announcedIn(directory: string): Announced[] {
       } catch {
         // Another reader may have cleaned it first, which is the same outcome.
       }
+      verdicts.delete(file);
       continue;
     }
     found.push(announced);
   }
+  // A verdict about a file this directory no longer holds goes with the file, so a machine playing
+  // games all day does not keep one per game it ever saw: a game that quits removes its own
+  // announcement, and that removal is not a sweep.
+  const held = new Set(entries.map((one) => one.file));
+  const here = join(directory, '.');
+  for (const file of verdicts.keys()) {
+    if (dirname(file) === here && !held.has(file)) {
+      verdicts.delete(file);
+    }
+  }
   return found;
+}
+
+/**
+ * The longest a stop waits for the game it ended to go before taking its announcement down. The
+ * editor ends a game with a kill and the operating system reaps it inside a second; a process
+ * still there after this is one the stop did not end, and its announcement stays with it.
+ */
+const ENDED_WITHIN_MS = 3_000;
+
+/**
+ * The announcement of the game [param pid] taken down by the server that ended it, once the
+ * process has gone, wherever the game announced.
+ *
+ * The next sweep would take it the same way, and what this closes is the gap before that sweep.
+ * A number the operating system hands out again inside the gap answers to a signal as the game
+ * did, and the file then reads as a game "still starting, or shutting down" for as long as the
+ * newcomer lives: a shell downstream held one for an hour after a stop, through two further runs
+ * and a restart of the editor. The server that ended the game is the one place that knows both
+ * the number and that ending it was meant, so it takes the file the moment the number falls
+ * silent rather than leaving it for whatever looks next. Only once the process has gone, because
+ * a stop the editor did not carry out is a game still running, and the sweep judges that one by
+ * when it started.
+ */
+export async function announcementEnded(
+  pid: number,
+  directories: readonly string[] = runtimeDirectories(),
+): Promise<void> {
+  const files = directories
+    .map((directory) => join(directory, `runtime-${pid}.json`))
+    .filter((file) => existsSync(file));
+  const first = files[0];
+  if (first === undefined) {
+    return;
+  }
+  const until = Date.now() + ENDED_WITHIN_MS;
+  while (processAlive(pid)) {
+    const left = until - Date.now();
+    if (left <= 0) {
+      return;
+    }
+    await delay(Math.min(LOOK_EVERY_MS, left));
+  }
+  // Remembered once however many directories held it: a game writes one file, and the refusal
+  // this feeds counts games rather than copies.
+  wentAway(first, pid);
+  for (const file of files) {
+    try {
+      unlinkSync(file);
+    } catch {
+      // A sweep took it between the look and this, which is the same outcome.
+    }
+    verdicts.delete(file);
+  }
 }
 
 /**
