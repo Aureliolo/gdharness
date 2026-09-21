@@ -72,6 +72,7 @@ import {
   parseProcessTable,
   processTree,
   readCommandLine,
+  startTimesOf,
 } from '../src/process-children.js';
 import { secondsFromClock } from '../src/process-time.js';
 import { projectStructure, searchProject } from '../src/project-scan.js';
@@ -90,14 +91,18 @@ import {
 } from '../src/run-record.js';
 import {
   announcedSince,
+  CONFIRMED_FOR_MS,
   chooseRuntime,
   discoverRuntimes,
   errorReportOf,
+  JUDGED_AFTER_MS,
   RUNTIME_PROTOCOL,
   type RuntimeEndpoint,
   runtimeDirectories,
   runtimeDirectory,
   runtimesAnnounced,
+  STARTED_AFTER_ANNOUNCING_MS,
+  strangersAmong,
 } from '../src/runtime-client.js';
 import { discardWith } from '../src/scratch.js';
 import {
@@ -2341,6 +2346,21 @@ type RawRequest = (method: string, params: unknown, timeoutMs?: number) => Promi
 const ENGINE_CALL_TIMEOUT_MS = 120_000;
 
 /**
+ * How long a windowed engine is given to announce on a runner with a display.
+ *
+ * The first windowed boot in a run is the slow one, and the runner decides how slow: on the macOS
+ * leg the second windowed boot of one run announced in 9750ms and the first had not announced in
+ * 60000ms, with the game still running when the wait gave up, twice in one evening. The
+ * compatibility renderer is already asked for. What the second boot has that the first has not is
+ * the shader cache the first one filled, since every project these fixtures play is named the
+ * same and so shares a user:// directory, and compiling the engine's built-in shaders on a runner
+ * with no GPU is the cost that lands on whichever fixture plays first. Not this project's to
+ * shorten. Measured rather than guessed: each fixture prints what its boot took, so this can be
+ * read against what the legs actually do.
+ */
+const WINDOWED_BOOT_MS = 150_000;
+
+/**
  * Runs the built server over stdio, initialised and ready for tools/call, and hands `call` and
  * `request` to the body. The transport is the point: these fixtures are about what a peer can
  * put on the wire, and reaching into the class directly would not carry a `__proto__` through
@@ -3906,6 +3926,178 @@ function testAGameThatAnnouncedAndWentIsSaidSo(): void {
       `a project this game did not belong to gets the ordinary answer: ${other}`,
     );
   } finally {
+    sweep(root);
+  }
+}
+
+/**
+ * An announcement whose number has come round again is not a running game.
+ *
+ * The sweep read "a process with this pid exists" as "the game that wrote this is running", and
+ * a number the operating system has handed out again satisfies the first exactly as the game did.
+ * A shell downstream took the number of a game ended an hour before, and `editor_status` listed
+ * that game as "still starting, or shutting down" through two further runs and a restart of the
+ * editor. What a newcomer cannot have is the game's start: a game starts, boots and announces, so
+ * its process began before its file was written, and a process that began after the file is one
+ * that took the number afterwards.
+ *
+ * The operating system's answer is handed in, so the disagreement is supplied rather than waited
+ * for. The rest of the judgement is held here too: the second the platforms round a start to
+ * does not make a game a stranger, a platform that will not say leaves the announcement believed,
+ * a fresh announcement is not asked about at all, a confirmation is believed for a while and asked
+ * again once it has aged, a verdict is kept while the file is the same one, and a stranger stays
+ * one without being asked again.
+ */
+function testAnAnnouncementIsItsOwnProcess(): void {
+  const now = Date.now();
+  const asked: number[][] = [];
+  const began = new Map<number, number>();
+  const startTimes = (pids: readonly number[]): Map<number, number> => {
+    asked.push([...pids]);
+    return new Map([...pids].filter((pid) => began.has(pid)).map((pid) => [pid, began.get(pid) ?? 0]));
+  };
+  const file = (pid: number): string => join('announced', `runtime-${pid}.json`);
+  const anHourAgo = now - 60 * 60 * 1000;
+  const twoMinutesAgo = now - 2 * JUDGED_AFTER_MS;
+  const candidates = [
+    // Ended an hour ago; the number now belongs to something that started ten minutes ago.
+    { file: file(101), pid: 101, writtenAt: anHourAgo },
+    // Booted five seconds before it announced, the ordinary shape.
+    { file: file(102), pid: 102, writtenAt: twoMinutesAgo },
+    // Rounded to a second after its own announcement by a platform that rounds starts.
+    { file: file(103), pid: 103, writtenAt: twoMinutesAgo },
+    // A platform that will not say when it started.
+    { file: file(104), pid: 104, writtenAt: twoMinutesAgo },
+    // Announced ten seconds ago, by a process the platform would call a stranger if asked.
+    { file: file(105), pid: 105, writtenAt: now - 10_000 },
+  ];
+  began.set(101, now - 10 * 60 * 1000);
+  began.set(102, twoMinutesAgo - 5_000);
+  began.set(103, twoMinutesAgo + STARTED_AFTER_ANNOUNCING_MS - 500);
+  began.set(105, now - 1_000);
+
+  const strangers = strangersAmong(candidates, now, startTimes);
+  assert.deepEqual(
+    [...strangers],
+    [file(101)],
+    'the announcement whose process began after it was written is the stranger, and only it',
+  );
+  assert.deepEqual(
+    asked,
+    [[101, 102, 103, 104]],
+    'every aged announcement is asked about in one question, and the fresh one is not asked about at all',
+  );
+
+  // Believed for a while: the same sweep a second later asks nobody, and the stranger is still one.
+  const again = strangersAmong(candidates, now + 1_000, startTimes);
+  assert.deepEqual([...again], [file(101)], 'a verdict holds without being asked again');
+  assert.equal(asked.length, 1, 'nobody is asked again inside the window');
+
+  // Once the confirmation has aged, the confirmed ones are asked again and the stranger is not: a
+  // number that was somebody else's does not become the game's by waiting. The fresh one has aged
+  // into the question by now, and is judged the moment it is.
+  const later = strangersAmong(candidates, now + CONFIRMED_FOR_MS + 1_000, startTimes);
+  assert.deepEqual(
+    [...later],
+    [file(101), file(105)],
+    'the stranger is still one, and the aged one is judged',
+  );
+  assert.deepEqual(
+    asked[1],
+    [102, 103, 104, 105],
+    `the confirmed announcements are asked about again, the stranger is not, and the fresh one is now aged into the question: ${JSON.stringify(asked)}`,
+  );
+  assert.equal(asked.length, 2, JSON.stringify(asked));
+
+  // A file written again is a new announcement, whatever was decided about the old one: the game
+  // that took the number back is asked about afresh, and it is the game.
+  began.set(101, now - 30_000);
+  const rewritten = [{ file: file(101), pid: 101, writtenAt: now - 20_000 }];
+  assert.deepEqual(
+    [...strangersAmong(rewritten, now + CONFIRMED_FOR_MS + 2_000, startTimes)],
+    [],
+    'an announcement written after the verdict is judged afresh, and a process older than it is its game',
+  );
+  assert.deepEqual(asked[2], [101], JSON.stringify(asked));
+}
+
+/**
+ * The platform says when a process started, and the sweep acts on it.
+ *
+ * The case above supplies the operating system's answer; this one requires that there is one, for
+ * a real process, on this platform. Every judgement above passes on a platform that never answers,
+ * because an announcement nobody can judge is believed, so the answer is a dependency to assert
+ * rather than assume. And the sweep is run against the real answer once: a live process whose
+ * announcement is older than the process itself is swept as a game that has gone, and the same
+ * process announced afresh is listed, so the sweep is what dropped it and not the file.
+ */
+function testAStaleAnnouncementWhoseNumberCameRoundIsSwept(): void {
+  const before = Date.now();
+  const newcomer = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  const root = mkdtempSync(join(tmpdir(), 'gdharness-came-round-'));
+  try {
+    const pid = newcomer.pid;
+    assert.ok(typeof pid === 'number', 'the fixture needs a live process to have taken the number');
+    const ended: SpawnSyncReturns<string> = spawnSync(process.execPath, ['--eval', ''], { encoding: 'utf8' });
+    assert.ok(ended.pid > 0, 'and one that has gone, to be left out of the answer');
+
+    const said = startTimesOf([pid, process.pid, ended.pid]);
+    const at = said.get(pid);
+    assert.ok(at !== undefined, `the platform says when pid ${pid} started: ${JSON.stringify([...said])}`);
+    assert.ok(
+      at >= before - STARTED_AFTER_ANNOUNCING_MS && at <= Date.now() + STARTED_AFTER_ANNOUNCING_MS,
+      `and the start it gives is the one just seen, to the second the platform rounds to: ${at} against ${before}`,
+    );
+    const own = said.get(process.pid);
+    assert.ok(own !== undefined, 'this process is answered about in the same question');
+    assert.ok(own <= at, 'and began no later than the child it just started');
+    assert.equal(said.has(ended.pid), false, 'a process that has gone is left out rather than made up');
+
+    const directory = join(root, 'gdharness');
+    mkdirSync(directory, { recursive: true });
+    const announcement = join(directory, `runtime-${pid}.json`);
+    const announce = (): void => {
+      writeFileSync(
+        announcement,
+        JSON.stringify({
+          protocol: RUNTIME_PROTOCOL,
+          pid,
+          port: 51_778,
+          address: '127.0.0.1',
+          project: { name: 'CameRound', path: root },
+        }),
+        'utf8',
+      );
+    };
+    // The announcement of a game ended an hour ago, whose number the process above then took.
+    announce();
+    const anHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+    utimesSync(announcement, anHourAgo, anHourAgo);
+    const swept = runtimesAnnounced([directory]);
+    assert.deepEqual(
+      swept.running,
+      [],
+      `a process that began after the announcement is not its game: ${JSON.stringify(swept)}`,
+    );
+    assert.equal(existsSync(announcement), false, 'and the announcement is swept');
+    const choice = chooseRuntime(swept.running, root, swept.unspoken);
+    assert.match(
+      'problem' in choice ? choice.problem : '',
+      new RegExp(`announced itself and its process is gone: pid ${pid}`),
+      `the game that went is reported as gone: ${JSON.stringify(choice)}`,
+    );
+
+    // The same process announced now is a game: the sweep dropped the file for its age against the
+    // process, not for the process or the file.
+    announce();
+    const listed = runtimesAnnounced([directory]);
+    assert.deepEqual(
+      listed.running.map((one) => one.pid),
+      [pid],
+      `a fresh announcement of the same process is listed: ${JSON.stringify(listed)}`,
+    );
+  } finally {
+    newcomer.kill();
     sweep(root);
   }
 }
@@ -8130,13 +8322,15 @@ async function withAPlayingEditor(
       // otherwise, and a headless start is spawned rather than played, which is a different case.
       const start = async (runtimeWaitMs: number): Promise<{ answer: unknown; waitedMs: number }> => {
         const began = Date.now();
+        // The request outlives the wait it asks for, so a game that boots slowly is reported as
+        // one that has not announced rather than as a request that timed out.
         const response = await server.request(
           'tools/call',
           {
             name: 'editor_run',
             arguments: { projectPath: project, op: 'start', headless: false, runtimeWaitMs },
           },
-          30_000,
+          runtimeWaitMs + 30_000,
         );
         // A refusal is plain text, and a fixture reading fields off null learns nothing from it.
         const answered = parseTextContent(response) ?? { refused: textOf(response) };
@@ -8730,6 +8924,7 @@ async function testAnInjectedMotionCarriesHowFarThePointerMoved(): Promise<void>
         '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
           '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
       );
+      const began = Date.now();
       const started = parseTextContent(
         await server.request(
           'tools/call',
@@ -8742,14 +8937,15 @@ async function testAnInjectedMotionCarriesHowFarThePointerMoved(): Promise<void>
               // The compatibility renderer where there is a window, for the reason the opened
               // menu fixture asks for it: the window is what this needs, not the pipelines.
               ...(headless ? {} : { args: ['--rendering-method', 'gl_compatibility'] }),
-              runtimeWaitMs: 60_000,
+              runtimeWaitMs: headless ? 60_000 : WINDOWED_BOOT_MS,
             },
           },
-          ENGINE_CALL_TIMEOUT_MS,
+          WINDOWED_BOOT_MS + 30_000,
         ),
       );
       try {
         assert.equal(get(started, 'runtime', 'listening'), true, JSON.stringify(started));
+        console.log(`injected motion: the engine announced after ${Date.now() - began}ms`);
         const call = async (name: string, args: Record<string, unknown>): Promise<unknown> =>
           parseTextContent(
             await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS),
@@ -8941,7 +9137,7 @@ async function testAKeyDoesNotChooseFromAnOpenedMenu(): Promise<void> {
             'popup/item_1/text = "Two"\npopup/item_1/id = 1\n' +
             'popup/item_2/text = "Three"\npopup/item_2/id = 2\n',
         );
-        const started = await start(60_000);
+        const started = await start(WINDOWED_BOOT_MS);
         assert.equal(
           get(started.answer, 'runtime', 'listening'),
           true,
@@ -10334,6 +10530,14 @@ async function testAStopCanEndWhatTheGameStarted(): Promise<void> {
         );
         assert.ok(await cameTrue(() => !alive(worker), 5_000), 'the worker is gone');
         assert.ok(alive(other), 'and the other child is still there');
+        // The bench itself outlived the stop, so its announcement is not the stop's to take: a
+        // file taken while its process runs hides a game, and the sweep judges this one by when
+        // it started.
+        assert.ok(alive(benchPid), 'the bench is still there');
+        assert.ok(
+          existsSync(join(runtimeDir, `runtime-${benchPid}.json`)),
+          'and a stop that did not end the process leaves its announcement',
+        );
       },
     );
   } finally {
@@ -10348,6 +10552,86 @@ async function testAStopCanEndWhatTheGameStarted(): Promise<void> {
     }
     if (held.bench?.exitCode === null) {
       held.bench.kill();
+    }
+  }
+}
+
+/**
+ * A stop takes the announcement of the game it ended down with it.
+ *
+ * The sweep would take it the next time anything looked, and the gap before that look is where
+ * the number came round downstream: the stop was the last call of a session, a shell started
+ * afterwards took the number, and every later look found a process behind the file and reported
+ * a game still starting. The server that ended the game knows the number and that ending it was
+ * meant, so the file goes as the process does, and a status read straight after the stop has
+ * nothing to misread.
+ *
+ * The fake editor's game is a process of this fixture's, announced inside the start's wait and
+ * killed when the editor is asked to stop; the file is read the moment the stop answers, before
+ * anything else could sweep it. The positive is the announcement being there for the stop to
+ * take, and the stop naming the process it ended.
+ */
+async function testAStopTakesTheEndedGamesAnnouncementDown(): Promise<void> {
+  const held: { game: ChildProcess | null } = { game: null };
+  try {
+    await withAPlayingEditor(
+      ({ adapter, project, runtimeDir }) =>
+        (tool) => {
+          if (tool === 'play_scene') {
+            const game = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+            held.game = game;
+            const pid = game.pid;
+            assert.ok(typeof pid === 'number', 'the fixture needs a live game');
+            setTimeout(() => {
+              writeFileSync(
+                join(runtimeDir, `runtime-${pid}.json`),
+                JSON.stringify({
+                  protocol: RUNTIME_PROTOCOL,
+                  pid,
+                  port: 51_998,
+                  address: '127.0.0.1',
+                  project: { name: 'Played', path: project },
+                  editor_pid: FAKE_EDITOR_PID,
+                }),
+                'utf8',
+              );
+            }, 100);
+            return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
+          }
+          if (tool === 'playing_status') {
+            const playing = held.game?.exitCode === null;
+            return { ok: true, playing, scenePath: playing ? 'res://main.tscn' : '', debugPort: adapter };
+          }
+          if (tool === 'stop_playing') {
+            held.game?.kill();
+            return { ok: true };
+          }
+          return { ok: true };
+        },
+      async ({ server, runtimeDir, start }) => {
+        const started = await start(3_000);
+        const pid = held.game?.pid;
+        assert.ok(typeof pid === 'number', 'the play should have started the game');
+        assert.equal(get(started.answer, 'runtime', 'pid'), pid, JSON.stringify(started.answer));
+        const announcement = join(runtimeDir, `runtime-${pid}.json`);
+        assert.ok(existsSync(announcement), 'the announcement is there for the stop to take');
+
+        const stopped = parseTextContent(
+          await server.request('tools/call', { name: 'editor_run', arguments: { op: 'stop' } }, 60_000),
+        );
+        assert.equal(get(stopped, 'endedPid'), pid, JSON.stringify(stopped));
+        assert.equal(get(stopped, 'exitedBeforeStop'), false, JSON.stringify(stopped));
+        assert.equal(alive(pid), false, 'the game is gone by the time the stop answers');
+        assert.equal(
+          existsSync(announcement),
+          false,
+          'and its announcement went with it, before anything else looked',
+        );
+      },
+    );
+  } finally {
+    if (held.game?.exitCode === null) {
+      held.game.kill();
     }
   }
 }
@@ -13704,6 +13988,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testACommandLineIsReadTheWayTheEngineReadsIt,
   testChildrenAreListedWhileTheParentLives,
   testAStopCanEndWhatTheGameStarted,
+  testAStopTakesTheEndedGamesAnnouncementDown,
   testASettingTheEditorDroppedIsNamed,
   testACleanupThatCannotFinishStillFinishes,
   testADiagnosticTheFileContradictsIsNamed,
@@ -13742,6 +14027,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnErrorReportOutlivesItsGameForAnHour,
   testAPidPicksOneOfSeveralGames,
   testAGameThatAnnouncedAndWentIsSaidSo,
+  testAnAnnouncementIsItsOwnProcess,
+  testAStaleAnnouncementWhoseNumberCameRoundIsSwept,
   testANotYetRuntimeIsNotTheSameAsNoRuntime,
   testARefusalDoesNotDenyTheRuntimeItCanSee,
   testAStartSaysWhatItLeftRunning,

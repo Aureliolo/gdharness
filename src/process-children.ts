@@ -1,8 +1,64 @@
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync, spawnSync } from 'node:child_process';
 import { basename } from 'node:path';
 import { promisify } from 'node:util';
 
 const run = promisify(execFile);
+
+/**
+ * When each of [param pids] started, as milliseconds, for the ones the platform will say.
+ *
+ * One question for all of them, because the Windows answer is an interpreter start of half a
+ * second and a bench that fans out announces a game per worker: asked one at a time, a sweep of
+ * thirty announcements would sit for fifteen seconds before answering about any of them. A pid
+ * left out of the answer is one the platform would not say about, which is not the same as one
+ * that has gone and is never read as it. Synchronous, because the sweep that asks is.
+ */
+export function startTimesOf(pids: readonly number[]): Map<number, number> {
+  const began = new Map<number, number>();
+  if (pids.length === 0) {
+    return began;
+  }
+  try {
+    if (process.platform === 'win32') {
+      const filter = pids.map((pid) => `ProcessId=${pid}`).join(' OR ');
+      const said = execFileSync(
+        'powershell',
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          `Get-CimInstance Win32_Process -Filter "${filter}" | ForEach-Object { "$($_.ProcessId) $(([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds())" }`,
+        ],
+        { encoding: 'utf8', timeout: ASK_TIMEOUT_MS, windowsHide: true },
+      );
+      for (const line of said.split('\n')) {
+        const found = /^\s*(\d+)\s+(\d+)\s*$/.exec(line);
+        if (found?.[1] !== undefined && found[2] !== undefined) {
+          began.set(Number(found[1]), Number(found[2]));
+        }
+      }
+      return began;
+    }
+    // Read whatever ps printed rather than its exit status: a pid among these that has gone makes
+    // ps exit non-zero after printing the rest, and the rest is the answer. In the C locale, since
+    // lstart is a date in words and the words are the ones Date.parse reads.
+    const said = spawnSync('ps', ['-p', pids.join(','), '-o', 'pid=,lstart='], {
+      encoding: 'utf8',
+      timeout: ASK_TIMEOUT_MS,
+      env: { ...process.env, LC_ALL: 'C' },
+    }).stdout;
+    for (const line of said.split('\n')) {
+      const found = /^\s*(\d+)\s+(.+)$/.exec(line);
+      const at = Date.parse(found?.[2]?.trim() ?? '');
+      if (found?.[1] !== undefined && !Number.isNaN(at)) {
+        began.set(Number(found[1]), at);
+      }
+    }
+  } catch {
+    // The platform would not say, which the empty map is.
+  }
+  return began;
+}
 
 /**
  * Long enough for the operating system to list every process on a machine that is busy. A stop

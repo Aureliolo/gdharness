@@ -119,6 +119,7 @@ import {
 import {
   ANNOUNCE_BUDGET_MS,
   announcedSince,
+  announcementEnded,
   chooseRuntime,
   discoverRuntimes,
   errorReportOf,
@@ -5154,6 +5155,12 @@ class GodotServer {
     this.logDebug('Stopping the running game');
     await this.endActiveGame('editor_run stop');
     const ended = children === null ? null : endChildrenAmong(children);
+    // The announcement of the game just ended goes with it, here rather than on the next sweep,
+    // because a number the operating system hands out again before that sweep reads as the game
+    // still starting for as long as the newcomer lives.
+    if (wasRunning && endedPid !== null) {
+      await announcementEnded(endedPid);
+    }
     return this.jsonTextResponse({
       stopped: true,
       through: stopped.throughEditor ? 'editor' : 'gdharness',
