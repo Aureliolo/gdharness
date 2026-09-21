@@ -40,7 +40,7 @@ import {
   unloadedTypes,
   unseenByEditor,
 } from '../src/class-cache.js';
-import { GodotDAPClient, type HeldBreakpoint } from '../src/dap_client.js';
+import { GodotDAPClient, handleDAPTool, type HeldBreakpoint } from '../src/dap_client.js';
 import { dictionary, emptyRecord } from '../src/dictionary.js';
 import { forAnswer, GameLog } from '../src/game-log.js';
 import {
@@ -1375,6 +1375,59 @@ async function testABreakpointSetHereKeepsTheEditorsOwn(): Promise<void> {
       socket.write(toggled('/game/main.gd', 9, 'new'));
     },
   );
+}
+
+/**
+ * A breakpoint the adapter refuses is refused about the editor and the file, not about a game.
+ *
+ * Every debug tool's failure closed with "start one with editor_run", and a breakpoint is set on
+ * the editor's adapter with no game running: a caller whose script the adapter could not find was
+ * sent to start a game that would not have helped. The stack tools keep the sentence, since a
+ * session is what they need.
+ */
+async function testABreakpointRefusalNamesTheEditor(): Promise<void> {
+  const respond: FramedPeerHandler = (message, socket) => {
+    const command = String(message['command']);
+    const refused = command === 'setBreakpoints' || command === 'attach';
+    socket.write(
+      frameJsonRpc({
+        seq: Number(message['seq']) + 100,
+        type: 'response',
+        request_seq: message['seq'],
+        command,
+        success: !refused,
+        ...(refused
+          ? { message: command === 'attach' ? 'Not running' : 'Unable to find file at: gone.gd' }
+          : { body: {} }),
+      }),
+    );
+  };
+  await withFramedPeer(respond, async (port) => {
+    const client = new GodotDAPClient(port, '127.0.0.1');
+    const missing = await handleDAPTool(client, 'dap_set_breakpoint', {
+      scriptPath: '/game/gone.gd',
+      line: 3,
+    });
+    assert.equal(missing.isError, true, JSON.stringify(missing));
+    assert.match(
+      text(missing.content[0]?.text),
+      /Unable to find file at: gone\.gd/,
+      "the adapter's own words",
+    );
+    assert.match(
+      text(missing.content[0]?.text),
+      /Breakpoints need the editor open, not a running game/,
+      `and the cure is about the editor and the file: ${missing.content[0]?.text}`,
+    );
+    const noGame = await handleDAPTool(client, 'dap_get_stack_trace', {});
+    assert.equal(noGame.isError, true, JSON.stringify(noGame));
+    assert.match(
+      text(noGame.content[0]?.text),
+      /start one with editor_run/,
+      `a stack read with no game is still sent to start one: ${noGame.content[0]?.text}`,
+    );
+    await client.abandon();
+  });
 }
 
 /**
@@ -11016,6 +11069,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAContinueByAnotherClientIsKnownHere,
   testBreakpointsAreSentAgainBeforeAPlay,
   testTheBreakpointNoteIsTheProjects,
+  testABreakpointRefusalNamesTheEditor,
   testABreakpointSetHereKeepsTheEditorsOwn,
   testAnEditorThatClearsBreakpointsIsSaidSo,
   testProjectGodotResistsPrototypeKeys,
