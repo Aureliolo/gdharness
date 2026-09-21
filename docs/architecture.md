@@ -492,6 +492,15 @@ id, holding the port and the project path. The server reads that directory:
 Two games can run at once. `projectPath` picks between them, and `editor_status` lists what it can
 reach.
 
+A file whose process is gone is swept on the way past, and a file whose number is held by a process
+that began after the file was written is swept the same way: a game boots before it announces, so
+its start precedes its file, and a process that started later took the number after the game had
+gone. Measured downstream, where a shell held the number of a game ended an hour before and the
+file read as a game "still starting" through two further runs. The start time is asked of the
+operating system once per file, after the file is a minute old, and again once a minute after a
+confirmation. `editor_run stop` takes the file of the game it ended down itself, once the process
+has gone, so the common case never reaches that judgement.
+
 A script run is not one of them. Autoloads come up for `godot -s` as well, so a test tier or a
 batch tool would bind a port and announce itself under the project's own path, and a client asking
 the runtime anything while sixteen of those run gets whichever answers first. The addon stays quiet
