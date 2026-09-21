@@ -26,9 +26,8 @@ property reads right now, what the console printed, what broke and on which line
 Hand this to your agent:
 
 ```text
-Install gdharness into this project by following
-https://aureliolo.github.io/gdharness/agent.md, then tell me what it asked you to
-recommend back to me.
+Install gdharness here by following https://aureliolo.github.io/gdharness/agent.md,
+then tell me what it asked you to recommend back to me.
 ```
 
 Or do it yourself, and pick your harness:
