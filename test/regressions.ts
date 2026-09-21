@@ -40,7 +40,7 @@ import {
   unloadedTypes,
   unseenByEditor,
 } from '../src/class-cache.js';
-import { GodotDAPClient } from '../src/dap_client.js';
+import { GodotDAPClient, type HeldBreakpoint } from '../src/dap_client.js';
 import { dictionary, emptyRecord } from '../src/dictionary.js';
 import { forAnswer, GameLog } from '../src/game-log.js';
 import {
@@ -1261,6 +1261,120 @@ async function testBreakpointsAreSentAgainBeforeAPlay(): Promise<void> {
     assert.equal(session.breakpointsHeld().length, held, 'a refused set leaves the set as it was');
     await session.abandon();
   });
+}
+
+/**
+ * Setting a breakpoint here never takes away the ones set in the editor by hand, and a breakpoint
+ * of this side's clicked off there is not held here either.
+ *
+ * The adapter takes a file's whole list and removes what is not in it, so a list carrying only
+ * this side's lines cleared the user's own breakpoints in that file. With breakpoint syncing on,
+ * the editor names every breakpoint to a session as it opens and echoes every toggle after, as
+ * `breakpoint` events, so what is sent is the union of the two, less the one being removed, and
+ * removing a line here clears it whoever set it. What the editor said is learned per connection,
+ * and a removal it reports takes the line out of what is held and tells the note.
+ */
+async function testABreakpointSetHereKeepsTheEditorsOwn(): Promise<void> {
+  const sent: { path: string; lines: number[] }[] = [];
+  let peer: Socket | null = null;
+  const toggled = (path: string, line: number, reason: 'new' | 'removed'): Buffer =>
+    frameJsonRpc({
+      seq: 1,
+      type: 'event',
+      event: 'breakpoint',
+      body: { reason, breakpoint: { id: line, verified: true, line, source: { path } } },
+    });
+  const respond: FramedPeerHandler = (message, socket) => {
+    const command = String(message['command']);
+    const arguments_ = isRecord(message['arguments']) ? message['arguments'] : {};
+    const source = isRecord(arguments_['source']) ? arguments_['source'] : {};
+    const path = text(source['path']);
+    const lines =
+      command === 'setBreakpoints'
+        ? asArray(arguments_['breakpoints']).map((one) => Number(get(one, 'line')))
+        : [];
+    if (command === 'setBreakpoints') {
+      sent.push({ path, lines });
+    }
+    socket.write(
+      frameJsonRpc({
+        seq: Number(message['seq']) + 100,
+        type: 'response',
+        request_seq: message['seq'],
+        command,
+        success: true,
+        body: {},
+      }),
+    );
+    // Echoed the way Godot echoes a toggle, after the answer.
+    for (const line of lines) {
+      socket.write(toggled(path, line, 'new'));
+    }
+  };
+
+  await withFramedPeer(
+    respond,
+    async (port) => {
+      const session = new GodotDAPClient(port, '127.0.0.1');
+      const noted: HeldBreakpoint[][] = [];
+      session.setBreakpointsSink((held) => {
+        noted.push(held);
+      });
+      await session.connect();
+      assert.ok(
+        await cameTrue(() => session.breakpointsInEditor().length === 1),
+        'the editor names its own breakpoints to a session as it opens',
+      );
+      assert.deepEqual(session.breakpointsInEditor(), [{ scriptPath: '/game/main.gd', lines: [5, 9] }]);
+
+      await session.setBreakpoint('/game/main.gd', 12);
+      assert.deepEqual(
+        sent.at(-1),
+        { path: '/game/main.gd', lines: [5, 9, 12] },
+        `setting a line sends the editor's own lines with it: ${JSON.stringify(sent)}`,
+      );
+      assert.deepEqual(
+        session.breakpointsHeld(),
+        [{ scriptPath: '/game/main.gd', lines: [12] }],
+        'held: mine',
+      );
+      assert.deepEqual(
+        session.breakpointsInEditor(),
+        [{ scriptPath: '/game/main.gd', lines: [5, 9] }],
+        "and the editor's own stay the editor's, echo or no echo",
+      );
+
+      await session.removeBreakpoint('/game/main.gd', 9);
+      assert.deepEqual(
+        sent.at(-1),
+        { path: '/game/main.gd', lines: [5, 12] },
+        `removing a line clears it whoever set it: ${JSON.stringify(sent)}`,
+      );
+      assert.deepEqual(session.breakpointsInEditor(), [{ scriptPath: '/game/main.gd', lines: [5] }]);
+
+      // The user clicks this side's breakpoint off in the gutter: the editor says so, and it is
+      // not held here any more, which the note is told.
+      assert.ok(peer !== null, 'the adapter holds the connection it will send the event on');
+      peer.write(toggled('/game/main.gd', 12, 'removed'));
+      assert.ok(
+        await cameTrue(() => session.breakpointsHeld().length === 0),
+        'a breakpoint of this side clicked off in the editor is not held here',
+      );
+      assert.deepEqual(noted.at(-1), [], 'and the note is told the set is empty');
+      const before = sent.length;
+      const again = await session.reapplyBreakpoints();
+      assert.equal(sent.length, before, 'so nothing is sent for it before the next play');
+      assert.deepEqual(again.applied, []);
+
+      await session.abandon();
+      assert.deepEqual(session.breakpointsInEditor(), [], 'what the editor said ends with the connection');
+    },
+    (socket) => {
+      peer = socket;
+      socket.write(toggled('/game/main.gd', 5, 'new'));
+      socket.write(toggled('/game/main.gd', 9, 'new'));
+    },
+  );
 }
 
 /**
@@ -4459,7 +4573,7 @@ function testTheCureIsWrittenWhole(): void {
   ];
   // What the tree holds today and not a comfortable minimum, so one place going quiet lowers this
   // in the same change and somebody confirms it was meant.
-  assert.equal(offered.length, 19, `the places offering a remedy should all be found, not ${offered.length}`);
+  assert.equal(offered.length, 21, `the places offering a remedy should all be found, not ${offered.length}`);
 
   // Across whitespace, because a rendered file wraps where the source did not and a sentence that
   // breaks at "the" is the same sentence. Change, edit and touch, because the claim is about what
@@ -7324,6 +7438,113 @@ async function testAnEditorOnAnotherVersionIsStillAskedWhatItIsPlaying(): Promis
     );
   } finally {
     editor?.close();
+    await server.stop();
+    sweep(project);
+  }
+}
+
+/**
+ * An editor that clears its breakpoints when a session opens is said so, and one that keeps them
+ * is not.
+ *
+ * Godot's adapter answers `initialize` by clearing every breakpoint in the script editor unless
+ * `network/debug_adapter/sync_breakpoints` is on, and it is off by default, so a harness session
+ * took the user's breakpoints away on its first debug call. The addon turns the setting on as it
+ * loads and says in its greeting whether it holds; an editor saying it does not is running an
+ * older addon than the one on disk, and one saying nothing is older still. Both are told apart in
+ * the advice, since one is a restart and the other might be a setting.
+ *
+ * Three greetings on one server, each from a fresh socket the way a restarted editor greets.
+ */
+async function testAnEditorThatClearsBreakpointsIsSaidSo(): Promise<void> {
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-sync-'));
+  const port = await reservePort();
+  const server = new ServerProcess({ env: { GDHARNESS_BRIDGE_PORT: String(port) } });
+  const editor: { socket: WebSocket | null } = { socket: null };
+  try {
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    await server.initialize('regression-test');
+    const status = async (): Promise<unknown> =>
+      parseTextContent(await server.request('tools/call', { name: 'editor_status', arguments: {} }));
+    // Each greeting waits for the last editor to be gone from the server's point of view before
+    // the next dials in, and then for a greeting that is its own: the bridge takes a moment to
+    // notice a socket closing, and a status read in that moment answers about the editor before.
+    let greetedAt = '';
+    const greet = async (saying: Record<string, unknown>): Promise<unknown> => {
+      if (editor.socket !== null) {
+        editor.socket.close();
+        let gone = false;
+        for (let waited = 0; waited < 10_000 && !gone; waited += 100) {
+          await delay(100);
+          gone = get(await status(), 'editor', 'connected') === false;
+        }
+        assert.ok(gone, 'the previous fixture editor should have been seen leaving');
+      }
+      const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+      editor.socket = socket;
+      await new Promise<void>((resolve, reject) => {
+        socket.once('open', () => {
+          resolve();
+        });
+        socket.once('error', reject);
+      });
+      socket.on('message', (raw: Buffer) => {
+        const message: unknown = JSON.parse(String(raw));
+        if (isRecord(message) && message['type'] === 'tool_invoke') {
+          socket.send(
+            JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result: { ok: true } }),
+          );
+        }
+      });
+      socket.send(
+        JSON.stringify({
+          type: 'godot_ready',
+          project_path: project,
+          addon_version: SERVER_VERSION,
+          ...saying,
+        }),
+      );
+      let seen: unknown = null;
+      for (let waited = 0; waited < 10_000; waited += 100) {
+        await delay(100);
+        seen = await status();
+        if (
+          get(seen, 'editor', 'connected') === true &&
+          text(get(seen, 'editor', 'connectedAt')) !== greetedAt
+        ) {
+          break;
+        }
+      }
+      assert.equal(get(seen, 'editor', 'connected'), true, 'the fixture editor should be greeted');
+      greetedAt = text(get(seen, 'editor', 'connectedAt'));
+      return seen;
+    };
+
+    const clearing = await greet({ syncs_breakpoints: false });
+    assert.equal(get(clearing, 'editor', 'syncsBreakpoints'), false, JSON.stringify(clearing));
+    assert.match(
+      text(get(clearing, 'editor', 'breakpointsAtRisk')),
+      /clears every breakpoint .*sync_breakpoints is off.*editor_launch restart/s,
+      `an editor with syncing off is said to clear breakpoints, with the restart as the remedy: ${JSON.stringify(clearing)}`,
+    );
+
+    const silent = await greet({});
+    assert.equal(get(silent, 'editor', 'syncsBreakpoints'), undefined, JSON.stringify(silent));
+    assert.match(
+      text(get(silent, 'editor', 'breakpointsAtRisk')),
+      /cannot be told.*predates the report.*editor_launch restart/s,
+      `an addon too old to say is said to be that: ${JSON.stringify(silent)}`,
+    );
+
+    const keeping = await greet({ syncs_breakpoints: true });
+    assert.equal(get(keeping, 'editor', 'syncsBreakpoints'), true, JSON.stringify(keeping));
+    assert.equal(
+      get(keeping, 'editor', 'breakpointsAtRisk'),
+      undefined,
+      `an editor that keeps its breakpoints has nothing said about them: ${JSON.stringify(keeping)}`,
+    );
+  } finally {
+    editor.socket?.terminate();
     await server.stop();
     sweep(project);
   }
@@ -10816,6 +11037,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAContinueByAnotherClientIsKnownHere,
   testBreakpointsAreSentAgainBeforeAPlay,
   testTheBreakpointNoteIsTheProjects,
+  testABreakpointSetHereKeepsTheEditorsOwn,
+  testAnEditorThatClearsBreakpointsIsSaidSo,
   testProjectGodotResistsPrototypeKeys,
 
   testAnAnswerFromAStaleAddonSaysSo,
