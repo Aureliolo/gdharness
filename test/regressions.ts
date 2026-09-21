@@ -7921,12 +7921,17 @@ async function testAPlayedStartStopsWaitingForAGameThatIsOver(): Promise<void> {
       }
       assert.ok(greeted, 'the fake editor should have been greeted, or nothing below is reached');
 
+      // Windowed, said outright: a start on a host with no display is headless unless told
+      // otherwise, and a headless start is spawned rather than played, which is a different case.
       const start = async (runtimeWaitMs: number): Promise<{ answer: unknown; waitedMs: number }> => {
         const began = Date.now();
         const answer = parseTextContent(
           await server.request(
             'tools/call',
-            { name: 'editor_run', arguments: { projectPath: project, op: 'start', runtimeWaitMs } },
+            {
+              name: 'editor_run',
+              arguments: { projectPath: project, op: 'start', headless: false, runtimeWaitMs },
+            },
             30_000,
           ),
         );
