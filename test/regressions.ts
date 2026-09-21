@@ -82,6 +82,7 @@ import {
   couldStillBeTheRecordedRun,
   judgeRun,
   listeningPid,
+  listeningPidInNetstat,
   readRunRecord,
   recordRunEnded,
   runningAs,
@@ -7677,6 +7678,29 @@ function testACleanupThatCannotFinishStillFinishes(): void {
  * to refuse anything and the second is.
  */
 async function testWhoIsHoldingAPortIsAskable(): Promise<void> {
+  // The Windows table as netstat prints it, with the header, both address families, a
+  // connection that is not listening on the port asked about, and a UDP line with no state.
+  const table = [
+    '',
+    'Active Connections',
+    '',
+    '  Proto  Local Address          Foreign Address        State           PID',
+    '  TCP    0.0.0.0:135            0.0.0.0:0              LISTENING       1234',
+    '  TCP    127.0.0.1:6006         127.0.0.1:51000        ESTABLISHED     4321',
+    '  TCP    127.0.0.1:6006         0.0.0.0:0              LISTENING       4321',
+    '  TCP    [::]:16006             [::]:0                 LISTENING       5555',
+    '  UDP    0.0.0.0:6006           *:*                                    7777',
+  ].join('\r\n');
+  assert.equal(
+    listeningPidInNetstat(table, 6006),
+    4321,
+    'the listener on the port, not the connection on it',
+  );
+  assert.equal(listeningPidInNetstat(table, 16006), 5555, 'an IPv6 listener reads the same way');
+  assert.equal(listeningPidInNetstat(table, 135), 1234);
+  assert.equal(listeningPidInNetstat(table, 6007), null, 'a port nobody listens on names nobody');
+  assert.equal(listeningPidInNetstat(table, 600), null, 'and a port that is a prefix of one is not it');
+
   const port = await reservePort();
   assert.equal(listeningPid(port), null, 'a port nobody is listening on has no holder to name');
 
@@ -7688,14 +7712,21 @@ async function testWhoIsHoldingAPortIsAskable(): Promise<void> {
         resolve();
       });
     });
+    const askedAt = Date.now();
     const holder = listeningPid(port);
+    const took = Date.now() - askedAt;
     // Null is allowed: a platform that will not say is a case this has to have, and reading it as
-    // "somebody else" would refuse every working setup on that platform.
-    if (holder !== null) {
+    // "somebody else" would refuse every working setup on that platform. Windows says, through
+    // netstat, and the time it takes is printed, since the ask sits on the play path in a call
+    // that holds every other request: PowerShell's answer took a second here and nine on a runner.
+    if (process.platform === 'win32') {
+      assert.equal(holder, process.pid, `Windows names the holder of a port, through netstat: ${holder}`);
+    } else if (holder !== null) {
       assert.equal(holder, process.pid, 'and the holder of one this process took is this process');
     } else {
       console.log('port holder regression: this platform would not say who is listening');
     }
+    console.log(`port holder regression: the platform answered in ${took}ms`);
   } finally {
     await new Promise<void>((resolve) => {
       held.close(() => {
@@ -8255,6 +8286,10 @@ async function withAPlayingEditor(
       GDHARNESS_BRIDGE_PORT: String(port),
       GDHARNESS_RUNTIME_DIR: runtimeDir,
       GODOT_PATH: options.engine ?? process.execPath,
+      // The server's own account of a start, kept in its stderr for the fixture that fails on
+      // how long one took: without it a start that sat nine seconds on a played game left
+      // nothing behind to say where the time went.
+      DEBUG: 'true',
     },
   });
   const editor: { socket: WebSocket | null } = { socket: null };
@@ -8419,9 +8454,22 @@ async function testAPlayedStartStopsWaitingForAGameThatIsOver(): Promise<void> {
         /no longer running/,
         JSON.stringify(over.answer),
       );
+      // Printed on every run, since the Windows leg once answered in 8930ms with nothing else in
+      // the log to say where the time went: the number on the runs that pass is what that one
+      // has to be read against.
+      console.log(`played start over: the start answered after ${over.waitedMs}ms`);
+      for (const line of server.stderr.split('\n')) {
+        if (
+          /announce wait ended|playing_status did not|playing_status answered after|Tool (stop_playing|play_scene)/.test(
+            line,
+          )
+        ) {
+          console.log(`played start over: ${line.trim()}`);
+        }
+      }
       assert.ok(
         over.waitedMs < 5_000,
-        `and the answer does not wait out the budget: ${over.waitedMs}ms of 10000`,
+        `and the answer does not wait out the budget: ${over.waitedMs}ms of 10000\nthe server said:\n${server.stderr.slice(-4000)}`,
       );
       // With an adapter that answers everything, so the refusal can only come from the editor's
       // word: attached and read, the adapter would say the game is running with no stack.
