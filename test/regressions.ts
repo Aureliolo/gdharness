@@ -8829,6 +8829,23 @@ async function testAKeyDoesNotChooseFromAnOpenedMenu(): Promise<void> {
           return `${counted.join(', ')}, window focused ${JSON.stringify(get(focused, 'result'))}`;
         };
 
+        // The two halves of a click one at a time, read separately, since one leg reports the
+        // menu opened and closed again inside the click and this says which half shut it.
+        const rect = await call('runtime_inspect', { op: 'rect', nodePath: '/root/Main/Pick' });
+        const at = {
+          x: asNumber(get(rect, 'window', 'position', 'x')) + asNumber(get(rect, 'window', 'size', 'x')) / 2,
+          y: asNumber(get(rect, 'window', 'position', 'y')) + asNumber(get(rect, 'window', 'size', 'y')) / 2,
+        };
+        await call('runtime_input', { op: 'mouse_click', ...at, pressed: true });
+        await settle();
+        console.log(`opened menu: after a press alone, ${await account()}`);
+        await call('runtime_input', { op: 'mouse_click', ...at, pressed: false });
+        await settle();
+        console.log(`opened menu: after its release, ${await account()}`);
+        await call('runtime_input', { op: 'key', keycode: 'Escape' });
+        await settle();
+        console.log(`opened menu: after Escape, ${await account()}`);
+
         const clicked = await call('runtime_input', { op: 'click', nodePath: '/root/Main/Pick' });
         assert.equal(get(clicked, 'landed'), true, JSON.stringify(clicked));
         await settle();
