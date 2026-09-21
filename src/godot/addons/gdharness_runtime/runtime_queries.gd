@@ -212,7 +212,18 @@ static func _is_literal(pattern: String) -> bool:
 ## only, a glob matched nothing at all and an empty answer reads as a control that is not on the
 ## screen: twice in one session here, over a button that was.
 static func _says(said: String, wanted: String) -> bool:
-	return said.containsn(wanted) if _is_literal(wanted) else said.matchn(wanted)
+	var words: String = as_said(wanted)
+	return said.containsn(words) if _is_literal(words) else said.matchn(words)
+
+
+## [param wanted] as words on a screen: a backslash followed by n is a line break.
+##
+## A button with two lines on it was asked for with the break written as the two characters, the
+## way it is typed into a JSON string one escape short, and was answered as not there: 0 found,
+## which reads as a control that is not on the screen. Nothing on a screen says a backslash and
+## an n, so the two characters mean the break to everybody who writes them.
+static func as_said(wanted: String) -> String:
+	return wanted.replace("\\n", "\n")
 
 
 ## Every filter but the name, so a find that came back empty can say how many nodes the name was
