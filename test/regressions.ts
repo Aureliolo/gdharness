@@ -8525,7 +8525,16 @@ async function testARuntimeCallReachesThisServersOwnGame(): Promise<void> {
           const line = buffered.slice(0, newline);
           buffered = buffered.slice(newline + 1);
           newline = buffered.indexOf('\n');
-          const asked = JSON.parse(line) as { id: number };
+          const asked = JSON.parse(line) as { id: number; command: string; params: { output_path?: string } };
+          // A capture is answered through the file the server named, as the addon answers it.
+          const into = asked.params.output_path;
+          if (asked.command === 'capture_screenshot' && into !== undefined) {
+            writeFileSync(into, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+            socket.write(
+              `${JSON.stringify({ id: asked.id, type: 'screenshot_file', path: into, width: 1, height: 1, format: 'png' })}\n`,
+            );
+            continue;
+          }
           socket.write(`${JSON.stringify({ id: asked.id, type: 'tree', game: name })}\n`);
         }
       });
@@ -8611,6 +8620,18 @@ async function testARuntimeCallReachesThisServersOwnGame(): Promise<void> {
           get(named, 'answeredBy'),
           undefined,
           `and a game the caller named is not reported as chosen for them: ${JSON.stringify(named)}`,
+        );
+        // A capture answers with an image and a sentence rather than a record, so the sentence
+        // says which game it came from when that was a choice.
+        const captured = await server.request(
+          'tools/call',
+          { name: 'runtime_capture', arguments: { op: 'screenshot' } },
+          60_000,
+        );
+        assert.match(
+          textOf(captured) ?? '',
+          new RegExp(`Screenshot captured: 1x1 png from pid ${bench.pid}, the game this server holds`),
+          `a capture names the game it came from: ${textOf(captured)}`,
         );
       },
       { realAddon: true },
