@@ -377,6 +377,14 @@ refusing to keep.
 lines are not lost. The game then belongs to the editor's debugger: `debug_*` speaks to that
 session and `editor_output` reads the console over it.
 
+A start waits for the game to announce its runtime, and the wait is sized to the project. The
+usual budget is five seconds, which a project that boots in eight overran on every start until
+the caller passed `runtimeWaitMs` each time. So the announcement's time against the run's start is
+noted in the project's `.godot/gdharness-boot.json` whenever a game is tied to its run, inside the
+wait or at the first status call after it, and the next start with no `runtimeWaitMs` waits half
+as long again as that: never less than the usual, never more than a minute, and never sized to a
+boot of more than five minutes, which is a run doing what it was asked before its first frame.
+
 The adapter relays what the game prints and not what it reports. A `push_error` raised in a game
 the editor plays goes to the editor's own stderr, which nobody reads, and to the editor's Errors
 tab, which the adapter does not forward, so `editor_output` answered `clean: true` about a game
