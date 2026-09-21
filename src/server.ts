@@ -4471,6 +4471,11 @@ class GodotServer {
    * sat out its whole budget on the same reading. Every answer about whether a run is going comes
    * through here, so no two fields of one answer disagree about it. [param editorSays] is the
    * editor's word when the caller has just asked for it, null when the editor would not say.
+   *
+   * The editor is asked only when there is no process to ask: a played run whose game announced
+   * is judged by that process, and a wait polling four times a second for an hour would
+   * otherwise put fourteen thousand questions to the editor for an answer the operating system
+   * already gave. The editor's word is still taken when the caller has it in hand.
    */
   private async runStillGoing(run: GodotProcess, editorSays?: boolean | null): Promise<boolean> {
     if (!run.throughEditor) {
@@ -4479,6 +4484,9 @@ class GodotServer {
     const announced = this.announcedPidOf(run);
     if (announced !== undefined && !alive(announced)) {
       return false;
+    }
+    if (announced !== undefined && editorSays === undefined) {
+      return stillRunning(run);
     }
     return runIsUp(
       run,
