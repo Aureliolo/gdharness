@@ -21,6 +21,7 @@ import {
   readdirSync,
   readFileSync,
   readSync,
+  statSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, normalize, relative } from 'node:path';
@@ -35,6 +36,7 @@ import {
   ListToolsRequestSchema,
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
+import { readBootNote, waitSizedTo, writeBootNote } from './boot-note.js';
 import { readBreakpointNote, writeBreakpointNote } from './breakpoint-note.js';
 import { announceBridge, announcementPath, readAnnouncement, withdrawBridge } from './bridge-announce.js';
 import {
@@ -474,11 +476,26 @@ function endedToStartThis(ended: EndedRun | null): string {
   return ` ${which} was ended to start this one; its output is no longer what editor_output answers about.`;
 }
 
+/** The wait a start gives its game to announce, and the last boot it was sized to when it was. */
+interface AnnounceBudget {
+  readonly ms: number;
+  readonly sizedToMs?: number;
+}
+
+/**
+ * The longest boot a start notes for the next one. A game that spends ten minutes doing what its
+ * arguments asked before its first frame is a run, not a boot, and the next start of the project
+ * without those arguments should not wait for it.
+ */
+const LONGEST_BOOT_NOTED_MS = 5 * 60_000;
+
 /** What was true when the wait for an announcement ran out. */
 interface AfterWaiting {
   /** Whether the addon is on disk at all, since a project without it can never announce. */
   readonly addon: boolean;
   readonly budgetMs: number;
+  /** The last boot the budget was sized to, when it was longer than usual for that reason. */
+  readonly sizedToMs?: number;
   readonly heldAt: StoppedAt | null;
   readonly running: boolean;
   /**
@@ -529,12 +546,18 @@ export function runtimeVerdict(
     after.playingSeen === false
       ? 'the editor has not yet reported the game as playing, which a restarted editor does not until its scan is over'
       : 'the game is still running';
+  // Said when the wait was already longer than usual for this project, so a caller reading the
+  // note does not pass a runtimeWaitMs shorter than the one they just had.
+  const sized =
+    after.sizedToMs === undefined
+      ? ''
+      : `, half as long again as the ${after.sizedToMs}ms its last game took,`;
   return {
     listening: false,
     mayYetAnnounce: after.running,
     note: after.running
-      ? `nothing announced itself within ${after.budgetMs}ms and ${state}, so it may announce a moment from now: editor_status says whether it has, and editor_run start takes runtimeWaitMs to wait longer than this${after.withArgs ? ', which a run carrying its own arguments may well need, since whatever they ask the game to do before its first frame is inside this wait' : ''}`
-      : `nothing announced itself within ${after.budgetMs}ms and the game is no longer running, so nothing is going to: editor_output has what it printed on the way down`,
+      ? `nothing announced itself within ${after.budgetMs}ms${sized} and ${state}, so it may announce a moment from now: editor_status says whether it has, and editor_run start takes runtimeWaitMs to wait longer than this${after.withArgs ? ', which a run carrying its own arguments may well need, since whatever they ask the game to do before its first frame is inside this wait' : ''}`
+      : `nothing announced itself within ${after.budgetMs}ms${sized} and the game is no longer running, so nothing is going to: editor_output has what it printed on the way down`,
     heldAt: null,
   };
 }
@@ -3671,7 +3694,7 @@ class GodotServer {
       platform: process.platform,
       variables: process.env,
     });
-    const runtimeWaitMs = readNonNegativeNumber(args, 'runtimeWaitMs') ?? ANNOUNCE_BUDGET_MS;
+    const runtimeWaitMs = this.announceBudget(args, project.value.path);
     const editorWouldPlay = !headless || editorPlaysHeadless(project.value.file);
     if (this.godotBridge.isConnected() && editorWouldPlay && given.value.length === 0) {
       return await this.playThroughEditor(
@@ -3772,9 +3795,10 @@ class GodotServer {
   private async runtimeUp(
     projectPath: string,
     before: ReadonlySet<number>,
-    budgetMs: number,
+    budget: AnnounceBudget,
     withArgs: boolean,
   ): Promise<Record<string, unknown>> {
+    const budgetMs = budget.ms;
     if (!existsSync(join(projectPath, RUNTIME_AUTOLOAD.path))) {
       return runtimeVerdict(null, { addon: false, budgetMs, heldAt: null, running: false, withArgs });
     }
@@ -3846,10 +3870,12 @@ class GodotServer {
     const going = this.currentRun();
     if (endpoint !== null && going !== null && going.announcedPid === undefined) {
       going.announcedPid = endpoint.pid;
+      this.noteBootOf(going, endpoint);
     }
     return runtimeVerdict(endpoint, {
       addon: true,
       budgetMs,
+      ...(budget.sizedToMs === undefined ? {} : { sizedToMs: budget.sizedToMs }),
       heldAt: this.dapClient?.whereItStopped() ?? null,
       // Only asked when there is no announcement to answer with: a game that announced is up, and
       // asking the editor about a played one costs a round trip the answer would not use.
@@ -3857,6 +3883,45 @@ class GodotServer {
       withArgs,
       ...(going?.throughEditor === true ? { playingSeen: going.seenPlaying === true } : {}),
     });
+  }
+
+  /**
+   * The wait a start gives its game to announce: what the caller asked for, or else the usual
+   * budget sized to the project's last boot, and which of the two it was.
+   */
+  private announceBudget(args: OperationParams, projectPath: string): AnnounceBudget {
+    const asked = readNonNegativeNumber(args, 'runtimeWaitMs');
+    if (asked !== undefined) {
+      return { ms: asked };
+    }
+    const lastBoot = readBootNote(projectPath);
+    const ms = waitSizedTo(lastBoot);
+    return lastBoot !== null && ms > ANNOUNCE_BUDGET_MS ? { ms, sizedToMs: lastBoot } : { ms };
+  }
+
+  /**
+   * How long [param run]'s game took to announce, noted for the next start of its project.
+   *
+   * From the announcement's own time rather than from when the tie was made, since a game tied
+   * late, at the first status call after the start's wait ran out, announced well before that
+   * call. Only a reading that can be one: a file older than the run is a stranger's, and a boot
+   * of more than a few minutes is a run doing what it was asked before its first frame, which is
+   * not what the next start should be sized to.
+   */
+  private noteBootOf(run: GodotProcess, endpoint: RuntimeEndpoint): void {
+    if (run.projectPath === null) {
+      return;
+    }
+    let announcedAt: number;
+    try {
+      announcedAt = statSync(endpoint.file).mtimeMs;
+    } catch {
+      return;
+    }
+    const took = announcedAt - run.startedAt;
+    if (took > 0 && took <= LONGEST_BOOT_NOTED_MS) {
+      writeBootNote(run.projectPath, took);
+    }
   }
 
   /**
@@ -3872,7 +3937,7 @@ class GodotServer {
     refreshedClasses: readonly string[],
     projectPath: string,
     alreadyPlaying: ReadonlySet<number>,
-    runtimeWaitMs: number,
+    runtimeWaitMs: AnnounceBudget,
     ended: EndedRun | null,
   ): Promise<ToolResponse> {
     const log = new GameLog();
@@ -4437,6 +4502,7 @@ class GodotServer {
     const theOne = candidates.length === 1 ? candidates[0] : undefined;
     if (theOne !== undefined) {
       run.announcedPid = theOne.pid;
+      this.noteBootOf(run, theOne);
     }
     return run.announcedPid;
   }

@@ -116,6 +116,8 @@ browser lookup. If no check ran, say so rather than calling it verified.
 - A start says under `runtime` whether the game is something the `runtime_*` tools can talk to yet.
   When it is not, read `mayYetAnnounce` before giving up: false is a runtime that is not coming,
   true is a game still on its way up, and `runtimeWaitMs` waits longer on a project that boots slowly.
+  The server notes how long each game took to announce, so from the second start on a slow
+  project is waited for without being asked.
 - Read `editor_output` after every run.
 - Measure the running game: `runtime_inspect` for what is on screen, `runtime_invoke` for a value,
   `runtime_wait` instead of sleeping.
