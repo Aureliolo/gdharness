@@ -274,21 +274,20 @@ export function runningAs(pid: number): RunningAs | null {
  * Null is "the operating system would not say", which is not the same as "it is not this editor's"
  * and must not be treated as one. Every caller here already has that distinction: not knowing is
  * never grounds to refuse.
+ *
+ * Asked of `netstat` on Windows rather than of PowerShell's Get-NetTCPConnection, which loads a
+ * module before it answers: a second on this machine and nine on a loaded runner, all of it
+ * spent inside a synchronous call that holds every other request while it runs. A start through
+ * the editor asks this once, before the play, and a fixture read that second as the announce wait
+ * sitting out its budget. netstat answers in tens of milliseconds and is on every Windows.
  */
 export function listeningPid(port: number): number | null {
   try {
     if (process.platform === 'win32') {
-      const said = execFileSync(
-        'powershell',
-        [
-          '-NoProfile',
-          '-NonInteractive',
-          '-Command',
-          `(Get-NetTCPConnection -State Listen -LocalPort ${port} -ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess`,
-        ],
-        { encoding: 'utf8', timeout: 15_000 },
-      ).trim();
-      return /^\d+$/.test(said) ? Number(said) : null;
+      return listeningPidInNetstat(
+        execFileSync('netstat', ['-ano'], { encoding: 'utf8', timeout: 15_000 }),
+        port,
+      );
     }
     // `lsof` is on macOS by default and usual on Linux; `ss` is the modern Linux answer and is not
     // on macOS. Both are asked rather than one picked by platform, because what decides is which is
@@ -311,6 +310,25 @@ export function listeningPid(port: number): number | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * The pid holding [param port] open for listening in [param printed], as `netstat -ano` prints
+ * the table: protocol, local address, foreign address, state, pid, on IPv4 and on IPv6 alike,
+ * with the port after the last colon of the address. Null when no line says so.
+ */
+export function listeningPidInNetstat(printed: string, port: number): number | null {
+  for (const line of printed.split(/\r?\n/)) {
+    const fields = /^\s*TCP\s+(\S+)\s+\S+\s+LISTENING\s+(\d+)\s*$/i.exec(line);
+    if (fields === null) {
+      continue;
+    }
+    const local = fields[1] ?? '';
+    if (Number(local.slice(local.lastIndexOf(':') + 1)) === port) {
+      return Number(fields[2]);
+    }
+  }
+  return null;
 }
 
 /**

@@ -5,8 +5,8 @@
   // pages, Windows does, and on a 32-core machine the reservation fails outright.
   "entry": ["src/cli.ts", "src/server-entry.ts", "scripts/*.ts", "test/*.ts"],
   "project": ["src/**/*.ts", "scripts/**/*.ts", "test/**/*.ts"],
-  // gdlint and gdformat come from .venv, and tasklist and powershell are Windows' own: none of
-  // them is a dependency anything could install, and a run that needs them is on a machine that
-  // has them or answers that it will not say.
-  "ignoreBinaries": ["gdlint", "gdformat", "tasklist"]
+  // gdlint and gdformat come from .venv, and tasklist, netstat and powershell are Windows' own:
+  // none of them is a dependency anything could install, and a run that needs them is on a
+  // machine that has them or answers that it will not say.
+  "ignoreBinaries": ["gdlint", "gdformat", "tasklist", "netstat"]
 }
