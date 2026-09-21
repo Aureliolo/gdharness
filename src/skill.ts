@@ -114,6 +114,12 @@ The autoload reaches an export. \`gdharness runtime off\` in the project before 
 move. There is no pause and no step out: Godot's debug adapter implements neither, so use a
 breakpoint on the line you want instead.
 
+A held game draws nothing and answers no \`runtime_*\` call. The server says so at once when it
+knows, naming why the game is held and \`debug_control continue\` as what lets it go, and
+\`editor_output\` and \`editor_status\` carry the same under \`heldAt\`. A breakpoint set with
+\`debug_breakpoint\` holds for every start until \`debug_breakpoint remove\`, across a reconnect,
+so take it off when the question it was for is answered.
+
 ## Editing
 
 \`scene_tree\` for what a scene holds, rather than what the \`.tscn\` text implies. \`scene_node\`,
