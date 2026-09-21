@@ -91,7 +91,9 @@ that is running, and the project on disk. ${TOOL_SPECS.length} tools, named \`do
 | Answer a dialog | \`runtime_input click\` on its button, or \`key\` Escape to dismiss it: an [AcceptDialog] reads that key itself and never asks the InputMap, so \`ui_cancel\` leaves it standing |
 | Press a bound key | \`runtime_input action\` or \`key\`, a whole press unless you hold it |
 | Where a 3D node is on screen | \`runtime_inspect\` \`rect\`, rather than unprojecting by hand |
-| Wait for something in a running game | \`runtime_wait\`, never a sleep; \`until\` with \`says\` for a panel that rebuilds its own labels |
+| Wait for something in a running game | \`runtime_wait\`, never a sleep; \`until\` with \`says\` for a panel that rebuilds its own labels. The words have to be shown: a button that exists hidden through an animation does not satisfy it until it appears, unless \`includeHidden\` says otherwise |
+| What every label on a screen says | \`runtime_inspect tree\` with \`properties\` naming \`text\`, which reads it off every node that has one; \`includeProperties\` is every stored property of every node and ran to seventy-six thousand characters for one row |
+| Whether this engine has a method or property, and what it takes | \`editor_classes info\` with \`member\`, which answers that one member and which class declares it rather than the whole class |
 | Wait for a run to finish | \`editor_run wait\`, never a sleep or a shell loop on the pid: it answers as \`editor_output\` does, once the run is over |
 | End a bench and the workers it opened | \`editor_run stop\` with \`andChildren\`, never a process listing by scene name: it ends every process under the run's, to any depth, that is a game of the project, announced as one or the project's engine run with \`--path\` on it, names them under \`endedChildren\` with what identified each, and leaves and names any other |
 | A picture, for a person who asked to see one | \`runtime_capture\` |

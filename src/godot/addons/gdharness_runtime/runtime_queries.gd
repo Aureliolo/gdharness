@@ -30,17 +30,33 @@ func _init(host: Node, values: Values) -> void:
 	_values = values
 
 
+## The tree under a node, to a depth, with every stored property on each node when asked for all
+## of them or the named ones when a list is given.
+##
+## The list is the shape most questions about a screen take: the `text` of every label and
+## button under a panel. All of them for one row of a form answered seventy-six thousand
+## characters, and the same question as a find with one property answered two.
 func get_tree(params: Dictionary) -> Dictionary:
 	var root_path: String = str(params.get("root", "/root"))
 	var max_depth: int = Read.as_int(params.get("depth", 3), 3)
 	var include_properties: bool = Read.as_bool(params.get("include_properties", false))
+	var named: Array[String] = []
+	var listed: Variant = params.get("properties", [])
+	if listed is Array:
+		for each: Variant in listed:
+			named.append(str(each))
+	else:
+		return {"type": "error", "message": "properties must be a list of property names"}
 
 	var reached: Dictionary = Values.node_at(_host.get_tree().root, root_path)
 	if reached.has("message"):
 		return reached
 	var root: Node = reached["node"]
 
-	return {"type": "tree", "root": _serialize_node_tree(root, 0, max_depth, include_properties)}
+	return {
+		"type": "tree",
+		"root": _serialize_node_tree(root, 0, max_depth, include_properties, named),
+	}
 
 
 ## Nodes matching every filter given, as paths, so a caller can name what it wants without
@@ -91,7 +107,7 @@ func find_nodes(params: Dictionary) -> Dictionary:
 		var node: Node = pending.pop_front()
 		var rest: bool = _matches_apart_from_name(node, wanted)
 		if rest and _named(node, wanted["name"]):
-			if not include_hidden and not _shown(node):
+			if not include_hidden and not shown(node):
 				hidden += 1
 			elif found.size() >= limit:
 				truncated = true
@@ -144,8 +160,8 @@ func find_nodes(params: Dictionary) -> Dictionary:
 ## a plain Node sitting between a hidden panel and a label has no visibility to ask about, and the
 ## label answers that it is visible while nothing of it is on screen. Walking up is what makes a
 ## row hidden because the panel holding it is hidden, which is what somebody checking a screen is
-## asking about.
-static func _shown(node: Node) -> bool:
+## asking about. A wait on words asks the same, so it reads this too.
+static func shown(node: Node) -> bool:
 	var walk: Node = node
 	while walk != null:
 		if not _drawn(walk):
@@ -846,8 +862,12 @@ func get_metrics(params: Dictionary) -> Dictionary:
 	return {"type": "metrics", "data": selected}
 
 
-func _serialize_node_tree(node: Node, depth: int, max_depth: int, include_properties: bool) -> Dictionary:
+func _serialize_node_tree(
+	node: Node, depth: int, max_depth: int, include_properties: bool, named: Array[String]
+) -> Dictionary:
 	var result: Dictionary = _serialize_node(node, include_properties)
+	if not named.is_empty():
+		result["properties"] = _named_properties_of(node, str(result["path"]), named)
 
 	if depth < max_depth:
 		var children: Array = []
@@ -856,10 +876,26 @@ func _serialize_node_tree(node: Node, depth: int, max_depth: int, include_proper
 		# it is wrong, and it is what sends somebody looking for another way to press the button.
 		# `depth` is what keeps the answer a size worth reading.
 		for child: Node in node.get_children(true):
-			children.append(_serialize_node_tree(child, depth + 1, max_depth, include_properties))
+			children.append(_serialize_node_tree(child, depth + 1, max_depth, include_properties, named))
 		result["children"] = children
 
 	return result
+
+
+## The named properties a node has, read the way a find reads its one: through a colon path as
+## well, and a name this node has not got is left out rather than answered null, since a tree
+## holds nodes of every class and a label's `text` is not a container's.
+func _named_properties_of(node: Node, path: String, named: Array[String]) -> Dictionary:
+	var properties: Dictionary = {}
+	for wanted: String in named:
+		var reached: Dictionary = _reached(node, path, wanted)
+		if reached.has("message"):
+			continue
+		var holder: Variant = reached["holder"]
+		var name: String = reached["name"]
+		if _can_read(holder, name):
+			properties[wanted] = _values.serialize(_read(holder, name))
+	return properties
 
 
 func _serialize_node(node: Node, include_properties: bool) -> Dictionary:

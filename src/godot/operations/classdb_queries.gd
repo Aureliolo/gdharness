@@ -92,6 +92,10 @@ func query_class_info(params: Dictionary) -> Dictionary:
 	if not ClassDB.class_exists(class_name_str):
 		return _log.failure("Class not found: " + class_name_str)
 
+	var member: String = str(params.get("member", ""))
+	if not member.is_empty():
+		return _member_of(class_name_str, member)
+
 	var methods: Array[Dictionary] = _methods_of(class_name_str, include_inherited)
 	var properties: Array[Dictionary] = _properties_of(class_name_str, include_inherited)
 	var signals: Array[Dictionary] = _signals_of(class_name_str, include_inherited)
@@ -128,6 +132,77 @@ func query_class_info(params: Dictionary) -> Dictionary:
 		"signals": signals,
 		"enums": enums
 	}
+
+
+# One member of a class by name, wherever in its ancestry it is declared.
+#
+# The question a member is asked by name for is "does this engine have it, and what does it take":
+# the whole class in answer to that ran to seventy thousand characters for Control, and the member
+# is as often an ancestor's as the class's own, so the ancestry is walked without being asked. Each
+# match says which class declares it. Nothing found names the members whose names contain the one
+# asked for, since the usual miss is a spelling.
+func _member_of(class_name_str: String, member: String) -> Dictionary:
+	var found: Array[Dictionary] = []
+	var current: String = class_name_str
+	while not current.is_empty():
+		for m: Dictionary in _methods_of(current, false):
+			if m["name"] == member:
+				found.append({"kind": "method", "declared_in": current, "member": m})
+		for p: Dictionary in _properties_of(current, false):
+			if p["name"] == member:
+				found.append({"kind": "property", "declared_in": current, "member": p})
+		for s: Dictionary in _signals_of(current, false):
+			if s["name"] == member:
+				found.append({"kind": "signal", "declared_in": current, "member": s})
+		for e: String in ClassDB.class_get_enum_list(current, true):
+			if e == member:
+				var values: Dictionary = {}
+				for c: String in ClassDB.class_get_enum_constants(current, e, true):
+					values[c] = ClassDB.class_get_integer_constant(current, c)
+				found.append(
+					{"kind": "enum", "declared_in": current, "member": {"name": e, "values": values}}
+				)
+		for c: String in ClassDB.class_get_integer_constant_list(current, true):
+			if c == member:
+				var value: int = ClassDB.class_get_integer_constant(current, c)
+				found.append(
+					{"kind": "constant", "declared_in": current, "member": {"name": c, "value": value}}
+				)
+		current = ClassDB.get_parent_class(current)
+
+	if found.is_empty():
+		var alike: Array[String] = _members_alike(class_name_str, member)
+		var hint: String = (
+			"" if alike.is_empty() else " Members with names containing it: " + ", ".join(alike) + "."
+		)
+		return _log.failure(
+			"%s and its ancestors declare no member named %s.%s" % [class_name_str, member, hint]
+		)
+
+	return {"class_name": class_name_str, "member": member, "found": found}
+
+
+# The names, across a class and its ancestors, that contain the asked-for one, case-insensitively.
+func _members_alike(class_name_str: String, member: String) -> Array[String]:
+	var alike: Array[String] = []
+	var wanted: String = member.to_lower()
+	var current: String = class_name_str
+	while not current.is_empty():
+		for m: Dictionary in _methods_of(current, false):
+			var name: String = m["name"]
+			if name.to_lower().contains(wanted) and not alike.has(name):
+				alike.append(name)
+		for p: Dictionary in _properties_of(current, false):
+			var name: String = p["name"]
+			if name.to_lower().contains(wanted) and not alike.has(name):
+				alike.append(name)
+		for s: Dictionary in _signals_of(current, false):
+			var name: String = s["name"]
+			if name.to_lower().contains(wanted) and not alike.has(name):
+				alike.append(name)
+		current = ClassDB.get_parent_class(current)
+	alike.sort()
+	return alike
 
 
 # Inspect class inheritance hierarchy
