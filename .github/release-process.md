@@ -2,10 +2,11 @@
 
 ## What a human does
 
-Run **Prepare release** from the Actions tab and pick `patch`, `minor` or `major`, or type an
-exact version. It raises the version in `package.json`, `server.json` and the README on a
-`release/vX.Y.Z` branch, with a signed commit, opens the pull request, and links it in the run
-summary.
+Run **Prepare release** from the Actions tab with `patch`, which is every release from 1.0.0 on
+([what a bump means](CONTRIBUTING.md#versions)); `minor` is for a release the owner has marked as
+one, and `major` and the exact-version field exist for the workflow's own completeness. It raises
+the version in `package.json`, `server.json` and the README on a `release/vX.Y.Z` branch, with a
+signed commit, opens the pull request, and links it in the run summary.
 
 That pull request's checks are held at the start. GitHub creates the runs for anything a
 workflow opens with the job token but does not start them, so the merge box carries a banner
