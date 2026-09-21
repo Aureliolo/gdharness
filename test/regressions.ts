@@ -7711,6 +7711,68 @@ async function testAGameTheEditorHasStoppedPlayingIsNotStillActive(): Promise<vo
       false,
       `and the run should not still be reported as active: ${JSON.stringify(afterwards)}`,
     );
+
+    // The same answer from the two calls that used to have their own: editor_output said running
+    // about this game for the rest of the session, and editor_run wait sat out its whole budget,
+    // because both read a record that no process number could ever contradict. A game the editor
+    // plays and that announced no runtime is the editor's to report on, and it said it had stopped.
+    const began = Date.now();
+    const waited = parseTextContent(
+      await server.request(
+        'tools/call',
+        { name: 'editor_run', arguments: { op: 'wait', timeoutMs: 20_000 } },
+        30_000,
+      ),
+    );
+    assert.equal(
+      get(waited, 'running'),
+      false,
+      `a wait on a run the editor says is over ends at once: ${JSON.stringify(waited)}`,
+    );
+    assert.ok(Date.now() - began < 5000, `and does not sit out its budget: ${Date.now() - began}ms of 20000`);
+    const output = parseTextContent(
+      await server.request('tools/call', { name: 'editor_output', arguments: {} }),
+    );
+    assert.equal(get(output, 'running'), false, `and editor_output says the same: ${JSON.stringify(output)}`);
+    assert.equal(
+      get(output, 'endedUnwatched'),
+      true,
+      `as a run that ended with nobody collecting its code: ${JSON.stringify(output)}`,
+    );
+    const stop = async (): Promise<unknown> =>
+      parseTextContent(await server.request('tools/call', { name: 'editor_run', arguments: { op: 'stop' } }));
+    const afterReading = await stop();
+    assert.equal(
+      get(afterReading, 'exitedBeforeStop'),
+      true,
+      `and a stop finds it over: ${JSON.stringify(afterReading)}`,
+    );
+
+    // The editor plays again and the game goes again, and this time the stop is the first call
+    // after it went: nothing has read the run, so the stop has only the editor's word to go on,
+    // and it used to claim it had ended a game that had ended itself.
+    playing = true;
+    let pickedUp = false;
+    for (let waited = 0; waited < 10_000 && !pickedUp; waited += 100) {
+      await delay(100);
+      const seen = parseTextContent(
+        await server.request('tools/call', { name: 'editor_status', arguments: {} }),
+      );
+      pickedUp = get(seen, 'game', 'processActive') === true;
+    }
+    assert.ok(pickedUp, 'the second play should be picked up, or the stop below is about nothing');
+    playing = false;
+    const first = await stop();
+    assert.equal(
+      get(first, 'exitedBeforeStop'),
+      true,
+      `a stop as the first call after the editor says the game went takes the editor's word: ${JSON.stringify(first)}`,
+    );
+    assert.match(
+      text(get(first, 'note')),
+      /over before the stop, so nothing was ended here/,
+      JSON.stringify(first),
+    );
   } finally {
     editor?.close();
     await server.stop();
