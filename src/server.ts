@@ -308,6 +308,33 @@ export function runIsUp(run: GodotProcess | null, editorSays: boolean | null): b
   return editorSays ?? stillRunning(run);
 }
 
+/**
+ * The run a start ended to happen. The pid is the run's own or the one its game announced, and
+ * null for a game the editor was playing that never announced one, which is the one kind of run
+ * with no number of any sort.
+ */
+interface EndedRun {
+  readonly pid: number | null;
+}
+
+/** The field on a start's answer: the number when there is one, true when a run was ended and has none. */
+function endedPreviousRun(ended: EndedRun | null): number | true | undefined {
+  if (ended === null) {
+    return undefined;
+  }
+  return ended.pid ?? true;
+}
+
+/** The sentence a start adds to its message when it ended a run to happen. */
+function endedToStartThis(ended: EndedRun | null): string {
+  if (ended === null) {
+    return '';
+  }
+  const which =
+    ended.pid === null ? 'The game the editor was playing' : `The run that was going, pid ${ended.pid},`;
+  return ` ${which} was ended to start this one; its output is no longer what editor_output answers about.`;
+}
+
 /** What was true when the wait for an announcement ran out. */
 interface AfterWaiting {
   /** Whether the addon is on disk at all, since a project without it can never announce. */
@@ -3420,10 +3447,14 @@ class GodotServer {
     // Kept so the answer can say it. A start that quietly ends the run somebody was reading is
     // the same silence as a run dying on its own, and the caller reads the second as the first:
     // a bench that stops mid-measurement with nothing said sends them looking at their engine.
-    let ended: number | null = null;
-    if (stillRunning(this.currentRun())) {
+    // Whether there is one to end is asked the way every other answer asks it, so a played run
+    // the editor says is over is not "ended" here and then reported as ended; and a played run
+    // that is going is named by the number its game announced, when it announced one.
+    let ended: EndedRun | null = null;
+    const before = this.currentRun();
+    if (before !== null && (await this.runStillGoing(before))) {
       this.logDebug('Ending the running game before starting another');
-      ended = this.currentRun()?.pid ?? null;
+      ended = { pid: before.pid ?? before.announcedPid ?? null };
       await this.endActiveGame(
         'editor_run start, which ends the run that was going before it starts another',
       );
@@ -3491,10 +3522,7 @@ class GodotServer {
         ? ' The editor cannot be handed arguments for a game it plays, so this one was started ' +
           'here: the debug_* tools answer only for a game the editor is playing.'
         : '';
-    const endedForThis =
-      ended === null
-        ? ''
-        : ` The run that was going, pid ${ended}, was ended to start this one; its output is no longer what editor_output answers about.`;
+    const endedForThis = endedToStartThis(ended);
     // A game of this project that was already running and that this server cannot read. It is not
     // in `ended`, because ending a run goes through the sweep that drops these, so the start left
     // it running and said nothing: two games, one of them unmentioned and unreachable. Said on the
@@ -3503,7 +3531,7 @@ class GodotServer {
     // spawned start does not replace, whether the reason it cannot be reached is a protocol gap or
     // simply that nothing here holds it: the refusals for those two states both said a start would
     // end it, and a start measured against each left it running.
-    const stranded = wereHereFirst.filter((one) => one.pid !== ended && alive(one.pid));
+    const stranded = wereHereFirst.filter((one) => one.pid !== ended?.pid && alive(one.pid));
     const named = stranded
       .map((one) => (one.protocol === null ? `pid ${one.pid}` : `pid ${one.pid} on protocol ${one.protocol}`))
       .join(', ');
@@ -3525,7 +3553,7 @@ class GodotServer {
       refreshedClasses: refreshed.value,
       // Which run this start ended, when it ended one, so a bench that stopped is answered for
       // here rather than looked for in the engine.
-      endedPreviousRun: ended ?? undefined,
+      endedPreviousRun: endedPreviousRun(ended),
       runtime: await this.runtimeUp(
         project.value.path,
         alreadyPlaying,
@@ -3623,7 +3651,7 @@ class GodotServer {
     projectPath: string,
     alreadyPlaying: ReadonlySet<number>,
     runtimeWaitMs: number,
-    ended: number | null,
+    ended: EndedRun | null,
   ): Promise<ToolResponse> {
     const log = new GameLog();
     try {
@@ -3697,7 +3725,7 @@ class GodotServer {
       // Which port the editor's debugger took, since it is the one port Godot has no command
       // line option for and the addon moves itself off when another editor is holding it.
       debugPort: readNumber(asParams(JSON.parse(answer.content[0]?.text ?? '{}')), 'debugPort'),
-      endedPreviousRun: ended ?? undefined,
+      endedPreviousRun: endedPreviousRun(ended),
       // What the game was told to stop on before it started, so a play that runs through a line
       // the caller asked for is checked against this rather than against memory. Absent when
       // nothing is held, and the refusals only when there were any.
@@ -3718,9 +3746,7 @@ class GodotServer {
       message:
         'The editor is playing it, so its debugger holds it: the debug_* tools can reach it, ' +
         'editor_output reads its console through the debug adapter, and editor_run stop ends it.' +
-        (ended === null
-          ? ''
-          : ` The run that was going, pid ${ended}, was ended to start this one; its output is no longer what editor_output answers about.`),
+        endedToStartThis(ended),
     });
   }
 

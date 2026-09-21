@@ -7907,6 +7907,7 @@ async function testAPlayedStartStopsWaitingForAGameThatIsOver(): Promise<void> {
   };
   let playing = false;
   let diesOnBoot = false;
+  let stops = 0;
   const server = new ServerProcess({
     env: {
       GDHARNESS_BRIDGE_PORT: String(port),
@@ -7951,6 +7952,7 @@ async function testAPlayedStartStopsWaitingForAGameThatIsOver(): Promise<void> {
           result = { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
         } else if (tool === 'stop_playing') {
           playing = false;
+          stops += 1;
         } else if (tool === 'playing_status') {
           result = { ok: true, playing, scenePath: playing ? 'res://main.tscn' : '', debugPort: adapter };
         }
@@ -8006,6 +8008,20 @@ async function testAPlayedStartStopsWaitingForAGameThatIsOver(): Promise<void> {
       diesOnBoot = true;
       const over = await start(10_000);
       assert.equal(get(over.answer, 'through'), 'editor', JSON.stringify(over.answer));
+      // This start ended the game the editor was still playing, and says so. A played run that
+      // announced no runtime has no number of any kind, and the answer used to say nothing about
+      // it, as though the caller's game had stopped on its own.
+      assert.equal(stops, 1, 'the start should have had the editor stop the game it was playing');
+      assert.equal(
+        get(over.answer, 'endedPreviousRun'),
+        true,
+        `and should say a run with no number was ended: ${JSON.stringify(over.answer)}`,
+      );
+      assert.match(
+        text(get(over.answer, 'message')),
+        /The game the editor was playing was ended to start this one/,
+        JSON.stringify(over.answer),
+      );
       assert.equal(
         get(over.answer, 'runtime', 'mayYetAnnounce'),
         false,
@@ -8028,6 +8044,17 @@ async function testAPlayedStartStopsWaitingForAGameThatIsOver(): Promise<void> {
         stack,
         /The last run has already ended, so there is no debug session/,
         `a stack read on the run that died is refused as a run that is over: ${stack}`,
+      );
+      // A start after a game that died ends nothing, and says nothing about ending one: the
+      // record alone read as a run still going, so the editor was told to stop and the answer
+      // reported a run ended that had ended itself.
+      const afterOver = await start(1_500);
+      assert.equal(get(afterOver.answer, 'through'), 'editor', JSON.stringify(afterOver.answer));
+      assert.equal(stops, 1, 'a start after a game that died has nothing to have the editor stop');
+      assert.equal(
+        get(afterOver.answer, 'endedPreviousRun'),
+        undefined,
+        `and reports no run ended: ${JSON.stringify(afterOver.answer)}`,
       );
     });
   } finally {
