@@ -4604,7 +4604,10 @@ class GodotServer {
       running: going,
       exitCode: run.exitCode,
       through: run.throughEditor ? 'editor' : 'gdharness',
-      pid: run.pid,
+      // The number the game announced, for a run the editor plays: the process is the same one
+      // whichever side started it, and null here read as "no process" beside a runtimes list
+      // naming it.
+      pid: run.pid ?? this.announcedPidOf(run) ?? null,
       errors: run.log.count('error'),
       warnings: run.log.count('warning'),
       // Undefined rather than true once the console has gone, because clean is a claim about the

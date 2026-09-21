@@ -8246,6 +8246,7 @@ async function testALateAnnouncementIsTiedToThePlayedRun(): Promise<void> {
         /the game announced no runtime, so nothing here has its process id/,
         `and the answer says why: ${JSON.stringify(untied)}`,
       );
+      assert.equal(get(untied, 'pid'), null, `and names no process: ${JSON.stringify(untied)}`);
 
       assert.ok(
         await cameTrue(() => announcement !== null && existsSync(announcement), 5_000),
@@ -8258,6 +8259,11 @@ async function testALateAnnouncementIsTiedToThePlayedRun(): Promise<void> {
         `once the game has announced, the run is asked by that number: ${JSON.stringify(tied)}`,
       );
       assert.ok(Number(get(tied, 'cpuSeconds')) >= 0, JSON.stringify(tied));
+      assert.equal(
+        get(tied, 'pid'),
+        process.pid,
+        `and the run is named by the number it announced: ${JSON.stringify(tied)}`,
+      );
 
       // The stop names the same number. A played run has no pid here, and the stop answered null
       // under endedPid about a process the same server had been reading cpu for.
