@@ -198,10 +198,11 @@ func wait_until(params: Dictionary) -> Dictionary:
 ## and the screen is the part that stays put.
 func _wait_until_said(node_path: String, said: String, timeout_ms: int) -> Dictionary:
 	var started: int = Time.get_ticks_msec()
-	var found: bool = _anything_says(node_path, said)
+	var words: String = Queries.as_said(said)
+	var found: bool = _anything_says(node_path, words)
 	while not found and Time.get_ticks_msec() - started < timeout_ms:
 		await _host.get_tree().process_frame
-		found = _anything_says(node_path, said)
+		found = _anything_says(node_path, words)
 
 	return {
 		"type": "condition",
