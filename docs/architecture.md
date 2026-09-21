@@ -307,6 +307,13 @@ Two projects, two harness sessions, two servers and two editors therefore work a
 so `runtime_*` needs no `projectPath` on a machine running two. One server still serves one
 editor: the bridge carries a single connection.
 
+Two servers on one project is the harder case, since their games announce the same project. A
+game the editor plays says which editor: the editor addon puts its process id into its own
+environment as it loads, every game it plays inherits that, and the runtime announces it as
+`editor_pid`. A game some other server started announces none, so a start waiting for its game's
+runtime passes over a stranger's announcement however fresh, and `editor_status` lists `editorPid`
+under each runtime so a caller can tell them apart too.
+
 **The editor bridge is not at a number anybody agreed on.** A server set up by `setup` knows which
 project it serves, so it takes 6505 when that is free and any free port when it is not, and writes
 where it landed to `.godot/gdharness-bridge.json` inside that project. The editor addon reads that

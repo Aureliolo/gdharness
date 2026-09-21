@@ -31,6 +31,13 @@ export interface RuntimeEndpoint {
   readonly address: string;
   readonly project: { readonly name: string; readonly path: string };
   readonly file: string;
+  /**
+   * The editor that played this game, when the game was played by one running the editor addon:
+   * the addon puts its process id into its environment and the game announces what it inherited.
+   * Absent for a game started any other way, and for one carrying a runtime addon from before
+   * this was announced.
+   */
+  readonly editorPid?: number;
 }
 
 /**
@@ -139,7 +146,18 @@ function parseAnnouncement(file: string, pid: number): Announced {
   if (protocol !== RUNTIME_PROTOCOL) {
     return { kind: 'unspoken', unspoken: { pid, protocol: protocol ?? 0, project: named } };
   }
-  return { kind: 'runtime', endpoint: { pid, port, address, project: named, file } };
+  const editorPid = readNumber(fields, 'editor_pid');
+  return {
+    kind: 'runtime',
+    endpoint: {
+      pid,
+      port,
+      address,
+      project: named,
+      file,
+      ...(editorPid !== undefined && Number.isInteger(editorPid) && editorPid > 0 ? { editorPid } : {}),
+    },
+  };
 }
 
 /** What a sweep of the announcement directories found: games to talk to, and games too new. */
@@ -286,6 +304,12 @@ export interface WaitingForRuntime {
   readonly directories?: readonly string[];
   /** Answered on every look. True ends the wait: a game held at a breakpoint is not booting. */
   readonly giveUp?: () => boolean;
+  /**
+   * Whether a fresh announcement of the project is the game waited for. Everything is, unless
+   * this says otherwise: a game that names an editor other than the one that was asked to play
+   * is somebody else's, however fresh.
+   */
+  readonly accept?: (endpoint: RuntimeEndpoint) => boolean;
 }
 
 /**
@@ -310,7 +334,10 @@ export async function announcedSince(
   const until = Date.now() + Math.max(waiting.budgetMs ?? ANNOUNCE_BUDGET_MS, 0);
   for (;;) {
     const fresh = discoverRuntimes(directories).find(
-      (endpoint) => !before.has(endpoint.pid) && resolve(endpoint.project.path) === wanted,
+      (endpoint) =>
+        !before.has(endpoint.pid) &&
+        resolve(endpoint.project.path) === wanted &&
+        (waiting.accept?.(endpoint) ?? true),
     );
     if (fresh !== undefined) {
       return fresh;
