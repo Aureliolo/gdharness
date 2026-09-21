@@ -4115,26 +4115,12 @@ class GodotServer {
       brokeOn: null,
       pickedUpPlaying: true,
     };
-    // The one game announced for this project, when there is one, so the run is asked of the
-    // operating system the way the run that started it was. Without it a picked-up run has no
-    // number at all, and `running` stayed true after the game had quit for as long as the record
-    // lasted, beside a status call taking the editor's word that nothing was playing.
-    const announced = this.theOneAnnouncedForOurProject();
-    if (announced !== undefined) {
-      picked.announcedPid = announced.pid;
-    }
+    // No `announcedBefore`: a picked-up run saw nothing announced, so `announcedPidOf` ties it to
+    // the one game announced for this project, and the run is asked of the operating system the
+    // way the run that started it was. Without a number `running` stayed true after the game had
+    // quit for as long as the record lasted, beside a status call taking the editor's word that
+    // nothing was playing.
     this.activeProcess = picked;
-  }
-
-  /**
-   * The game announced for this project when exactly one is, else undefined.
-   *
-   * One and not the first of several: a bench opens many workers from one project, and a run tied
-   * to the wrong worker is reported over the moment that worker finishes.
-   */
-  private theOneAnnouncedForOurProject(): RuntimeEndpoint | undefined {
-    const ofProject = this.allAnnouncedForOurProject(runtimesAnnounced().running);
-    return ofProject.length === 1 ? ofProject[0] : undefined;
   }
 
   /**
@@ -4147,6 +4133,9 @@ class GodotServer {
    * while the same call listed the game under runtimes. Tied here to the one game of this project
    * the start did not see announced before it played, and for a picked-up run, which saw nothing,
    * to the one game announced at all.
+   *
+   * One and not the first of several: a bench opens many workers from one project, and a run tied
+   * to the wrong worker is reported over the moment that worker finishes.
    */
   private announcedPidOf(run: GodotProcess): number | undefined {
     if (!run.throughEditor || run.announcedPid !== undefined) {
