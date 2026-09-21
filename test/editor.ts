@@ -23,6 +23,8 @@ import {
   mkdtempSync,
   readFileSync,
   realpathSync,
+  renameSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
@@ -1452,6 +1454,84 @@ async function testARescanKeepsWhatTheRebuildWrote({ call, project }: Editor): P
       `and the editor still holding the short list should be said: ${text(scanned)}`,
     );
   }
+}
+
+/**
+ * A rescan does not write a class the editor still holds for a script that is gone back into the
+ * cache, and says what it dropped.
+ *
+ * The other direction from the case above. A `class_name` script renamed on disk, its `.uid`
+ * moved with it and the class renamed inside: the editor goes on holding the old class for the
+ * old path, and the scan writes that list over the cache, so the cache carries both the new class
+ * and the old one at a path that does not exist. The next engine to read it fails on `Could not
+ * parse global class "Pace" from "res://ui/pace.gd"` in whichever correct script shares the bare
+ * name, and the scan had answered `ok: true` with nothing else. Reproduced three times downstream,
+ * the third one controlled: a rebuild removed the ghost and one scan put it back.
+ *
+ * What is held is the invariant the report proposed: after a scan, every entry the cache carries
+ * names a file that exists, and the answer names what it dropped. Whether the editor is still
+ * holding the ghost is the editor's business and the note's.
+ */
+async function testARescanDropsAClassWhoseScriptIsGone({ call, project }: Editor): Promise<void> {
+  const cache = join(project, '.godot', 'global_script_class_cache.cfg');
+  const ui = join(project, 'ui');
+  mkdirSync(ui, { recursive: true });
+  writeFileSync(join(ui, 'pace.gd'), 'class_name Pace\nextends RefCounted\n');
+  // The bare name shared by a correct script, which is where the failure lands downstream.
+  writeFileSync(
+    join(ui, 'settings.gd'),
+    'class_name Settings\nextends RefCounted\n\nenum Pace { SLOW, FAST }\n',
+  );
+  const picked = await call('editor_rescan', { projectPath: project });
+  assert.ok(
+    readFileSync(cache, 'utf8').includes('"Pace"'),
+    `the editor should hold Pace first: ${text(picked)}`,
+  );
+
+  // Renamed on disk, the way a project does it: the file, the class in it, and the sidecar.
+  writeFileSync(join(ui, 'tempo.gd'), 'class_name Tempo\nextends RefCounted\n');
+  rmSync(join(ui, 'pace.gd'));
+  if (existsSync(join(ui, 'pace.gd.uid'))) {
+    renameSync(join(ui, 'pace.gd.uid'), join(ui, 'tempo.gd.uid'));
+  }
+
+  const scanned = await call('editor_rescan', { projectPath: project });
+  const after = readFileSync(cache, 'utf8');
+  assert.ok(after.includes('"Tempo"'), `the new class is in the cache: ${text(scanned)}`);
+  assert.ok(
+    !after.includes('res://ui/pace.gd'),
+    `and the old path is not, whatever the editor still holds: ${text(scanned)}\n${after}`,
+  );
+  // Every entry names a file, which is the invariant rather than the reading.
+  for (const [, path] of after.matchAll(/"path":\s*"res:\/\/([^"]+)"/g)) {
+    assert.ok(existsSync(join(project, path ?? '')), `every cached path exists: res://${path}`);
+  }
+  assert.deepEqual(
+    asArray(get(scanned, 'cacheDropped') ?? []).map((one) => asString(one)),
+    ['Pace'],
+    `the answer names what it dropped: ${text(scanned)}`,
+  );
+  assert.match(
+    asString(get(scanned, 'note')),
+    /editor_launch restart/,
+    `and says the editor still holds it: ${text(scanned)}`,
+  );
+  assert.equal(get(scanned, 'ok'), true, `the cache is right when the call comes back: ${text(scanned)}`);
+
+  // The consequence the report named: a headless engine reading the cache now parses the script
+  // that shares the bare name. The engine having run is the positive beside that absence; what
+  // else this project's three-frame boot reports at exit is its own business.
+  const checked = await call('editor_run', { projectPath: project, op: 'check' });
+  assert.equal(
+    get(checked, 'exitCode'),
+    0,
+    `an engine reading the cache after the scan runs: ${text(checked)}`,
+  );
+  assert.ok(asNumber(get(checked, 'frames')) >= 1, `and draws frames: ${text(checked)}`);
+  const parseFailures = asArray(get(checked, 'entries')).filter((entry) =>
+    asString(get(entry, 'text')).includes('Could not parse global class'),
+  );
+  assert.deepEqual(parseFailures, [], `with no ghost class to fail parsing on: ${text(checked)}`);
 }
 
 /**
@@ -3367,6 +3447,7 @@ async function main(): Promise<void> {
     ['testAClassTheEditorCannotSee', testAClassTheEditorCannotSee],
     ['testAScanWritesTheCacheFromTheEditor', testAScanWritesTheCacheFromTheEditor],
     ['testARescanKeepsWhatTheRebuildWrote', testARescanKeepsWhatTheRebuildWrote],
+    ['testARescanDropsAClassWhoseScriptIsGone', testARescanDropsAClassWhoseScriptIsGone],
     ['testTheClassCheckKnowsWhichProjectItIsAbout', testTheClassCheckKnowsWhichProjectItIsAbout],
     ['testASettingReadFromTheEditor', testASettingReadFromTheEditor],
     ['testLanguageServer', testLanguageServer],
