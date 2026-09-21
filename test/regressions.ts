@@ -10028,6 +10028,24 @@ async function aRealBenchTakesItsWorkerWithIt(engine: string, tiedAtStart: boole
           `${shape}: a call naming no pid reaches the bench: ${JSON.stringify(inspected)}`,
         );
         assert.match(JSON.stringify(inspected), /"Bench"/, `${shape}: and it is the bench's tree`);
+        // The boot is noted for the next start whichever way the run was tied: inside the wait
+        // for the first shape, and through the process tree at the call above for the second,
+        // where three games announced and nothing else could say which was the run's. The
+        // headless starts downstream are tied after their wait, and a note written only inside
+        // the wait would leave them waiting the usual budget on every start.
+        assert.ok(
+          existsSync(bootNotePath(project)),
+          `${shape}: the boot is noted once the run is tied; the server said:\n${server.stderr
+            .split('\n')
+            .filter((line) => line.includes('boot of pid'))
+            .join('\n')}`,
+        );
+        const noted: unknown = JSON.parse(readFileSync(bootNotePath(project), 'utf8'));
+        const bootMs = asNumber(get(noted, 'announcedAfterMs'), `${shape}: the boot is noted`);
+        assert.ok(
+          bootMs > 0 && bootMs < 60_000,
+          `${shape}: the note is the announcement's time against the start: ${bootMs}ms`,
+        );
         assert.doesNotMatch(JSON.stringify(inspected), /"Worker"/, `${shape}: not the worker's`);
 
         // Processor time is the bench's, which has been working every frame since it started,

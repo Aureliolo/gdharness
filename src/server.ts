@@ -3869,8 +3869,7 @@ class GodotServer {
     // `announcedSince` excludes everything that was already announced before the start.
     const going = this.currentRun();
     if (endpoint !== null && going !== null && going.announcedPid === undefined) {
-      going.announcedPid = endpoint.pid;
-      this.noteBootOf(going, endpoint);
+      this.tie(going, endpoint);
     }
     return runtimeVerdict(endpoint, {
       addon: true,
@@ -3919,6 +3918,9 @@ class GodotServer {
       return;
     }
     const took = announcedAt - run.startedAt;
+    this.logDebug(
+      `boot of pid ${endpoint.pid} announced ${Math.round(took)}ms after the start of ${run.projectPath}`,
+    );
     if (took > 0 && took <= LONGEST_BOOT_NOTED_MS) {
       writeBootNote(run.projectPath, took);
     }
@@ -4491,8 +4493,9 @@ class GodotServer {
     // The caller's sweep when it has one: a status call asks this once per announced game, and a
     // bench with thirty workers announced would otherwise read the directory thirty times over.
     const ours = this.announcedOfTheRunsProject(run, announced ?? runtimesAnnounced().running);
-    if (run.pid !== null && ours.some((one) => one.pid === run.pid)) {
-      run.announcedPid = run.pid;
+    const own = ours.find((one) => one.pid === run.pid);
+    if (own !== undefined) {
+      this.tie(run, own);
       return run.announcedPid;
     }
     const before = run.announcedBefore ?? new Set<number>();
@@ -4501,8 +4504,7 @@ class GodotServer {
     );
     const theOne = candidates.length === 1 ? candidates[0] : undefined;
     if (theOne !== undefined) {
-      run.announcedPid = theOne.pid;
-      this.noteBootOf(run, theOne);
+      this.tie(run, theOne);
     }
     return run.announcedPid;
   }
@@ -4581,7 +4583,7 @@ class GodotServer {
     if (tree === undefined) {
       return undefined;
     }
-    return this.tieThroughTheTree(run, tree, new Set(ours.map((one) => one.pid)));
+    return this.tieThroughTheTree(run, tree, ours);
   }
 
   /**
@@ -4623,24 +4625,37 @@ class GodotServer {
   private tieThroughTheTree(
     run: GodotProcess,
     tree: ProcessTree,
-    games: ReadonlySet<number>,
+    announced: readonly RuntimeEndpoint[],
   ): number | undefined {
     const root = run.pid ?? (run.throughEditor ? this.godotBridge.getStatus().editorPid : undefined);
     if (root === undefined) {
       return undefined;
     }
-    if (games.has(root)) {
-      run.announcedPid = root;
-      return root;
+    const games = new Set(announced.map((one) => one.pid));
+    const own = announced.find((one) => one.pid === root);
+    if (own !== undefined) {
+      this.tie(run, own);
+      return own.pid;
     }
-    const nearest = descendantsIn(tree, root).filter(
-      (one) => games.has(one) && !gameBetween(tree, one, root, games),
-    );
+    const under = new Set(descendantsIn(tree, root));
+    const nearest = announced.filter((one) => under.has(one.pid) && !gameBetween(tree, one.pid, root, games));
     const theOne = nearest.length === 1 ? nearest[0] : undefined;
     if (theOne !== undefined) {
-      run.announcedPid = theOne;
+      this.tie(run, theOne);
     }
-    return theOne;
+    return theOne?.pid;
+  }
+
+  /**
+   * Ties [param run] to the game that announced as [param endpoint], and notes the boot for the
+   * next start of the project. The one place a tie is made, so a run tied by the wait, by a
+   * status call after it or through the process tree is noted the same way: the headless starts
+   * downstream are tied by the second, and a note written by the first alone left them waiting
+   * the usual budget on every start.
+   */
+  private tie(run: GodotProcess, endpoint: RuntimeEndpoint): void {
+    run.announcedPid = endpoint.pid;
+    this.noteBootOf(run, endpoint);
   }
 
   /**
@@ -5345,7 +5360,7 @@ class GodotServer {
     const games = new Set(announced.map((one) => one.pid));
     const own =
       this.announcedPidOf(run, announced) ??
-      this.tieThroughTheTree(run, tree, games) ??
+      this.tieThroughTheTree(run, tree, announced) ??
       run.gamePid ??
       this.gameByCommandLineIn(run, tree);
     if (own !== undefined && run.announcedPid === undefined) {
