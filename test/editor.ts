@@ -3091,8 +3091,8 @@ async function testAPlayedRunsConsoleArrivesOnItsOwn({ call, project }: Editor):
   );
   assert.match(
     text(get(ended, 'note')),
-    /is not the editor's to stop and is still running/,
-    `and what a stop does not reach is said: ${text(ended)}`,
+    /is not the editor's to stop and was not signalled; andChildren ends/,
+    `and what a stop does not reach is said, with the argument that reaches it: ${text(ended)}`,
   );
 }
 

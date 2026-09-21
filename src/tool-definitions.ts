@@ -818,7 +818,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'boolean',
         ops: ['stop'],
         description:
-          "stop: also end what the game started for itself, with OS.create_process or otherwise, such as a bench's workers. Only the children of the run's process that are announced as games of this project are ended, named under endedChildren; any other child is left and named under childrenLeft. Default false, and the run's process is ended either way.",
+          "stop: also end what the game started for itself, with OS.create_process or otherwise, such as a bench's workers and whatever those started in turn. Only the processes under the run's, to any depth, that are announced as games of this project are ended, named under endedChildren; any other process under it is left and named under childrenLeft, and childrenUnknown is true when nothing could be listed, with the note saying whether the platform would not or the run has no process to list under. Default false, and the run's process is ended either way.",
       },
     },
     requires: [],

@@ -89,7 +89,7 @@ import {
 import { DEFAULT_LSP_PORT, GodotLSPClient, handleLSPTool } from './lsp_client.js';
 import { isSameDirectory, realPathOr, resolveWithinProject } from './paths.js';
 import { freePort, portFromEnvOrNull } from './ports.js';
-import { childrenOf } from './process-children.js';
+import { descendantsIn, type ProcessTree, processTree } from './process-children.js';
 import { cpuSecondsOf } from './process-time.js';
 import { projectStructure, scriptsWithoutUid, searchProject } from './project-scan.js';
 import { parseProjectGodot, settingKeys, settingsDroppedReport, setupResourceHandlers } from './resources.js';
@@ -327,20 +327,76 @@ function endedPreviousRun(ended: EndedRun | null): number | true | undefined {
 }
 
 /**
+ * The processes under a run's, read while the run lived: the announced games of its project and
+ * the rest, or why they could not be read.
+ */
+type StartedByTheRun =
+  | { readonly unknown: 'platform' | 'no process' }
+  | { readonly unknown: false; readonly games: readonly number[]; readonly others: readonly number[] };
+
+/** What a stop did about the processes under the run's, or why it could not do anything. */
+interface ChildrenEnded {
+  readonly ended: readonly number[];
+  readonly left: readonly number[];
+  readonly unknown: false | 'platform' | 'no process';
+}
+
+/**
+ * Whether an announced game stands between [param pid] and [param root] in [param tree]: the
+ * ancestors strictly between the two, and whether any of them is in [param games].
+ */
+function announcedBetween(tree: ProcessTree, pid: number, root: number, games: ReadonlySet<number>): boolean {
+  const seen = new Set<number>([pid]);
+  let parent = tree.get(pid);
+  while (parent !== undefined && parent !== root && !seen.has(parent)) {
+    if (games.has(parent)) {
+      return true;
+    }
+    seen.add(parent);
+    parent = tree.get(parent);
+  }
+  return false;
+}
+
+/**
+ * The announced games among what the run started, ended; the rest named.
+ *
+ * Signalled after the run is, and a game that was gone before the signal reached it is ended all
+ * the same: one that exits as its slice ends, or one the platform takes down with its parent. It
+ * was listed while the run lived and it is gone now, which is the state the caller asked for,
+ * whichever side brought it about, and it is not a worker left.
+ */
+function endChildrenAmong(started: StartedByTheRun): ChildrenEnded {
+  if (started.unknown !== false) {
+    return { ended: [], left: [], unknown: started.unknown };
+  }
+  const ended: number[] = [];
+  for (const game of started.games) {
+    try {
+      process.kill(game);
+    } catch {
+      // Gone between the listing and the signal, with the run.
+    }
+    ended.push(game);
+  }
+  return { ended, left: [...started.others], unknown: false };
+}
+
+/**
  * What a stop says about the processes the game started for itself: left running unless the stop
  * was asked to end them, and then what it ended, what it left, or that the platform would not say.
  */
-function aboutTheChildren(
-  ended: { ended: number[]; left: number[]; unknown: boolean } | null,
-  throughEditor: boolean,
-): string {
+function aboutTheChildren(ended: ChildrenEnded | null, throughEditor: boolean): string {
   if (ended === null) {
     return throughEditor
-      ? "Anything that game started for itself, with OS.create_process or otherwise, is not the editor's to stop and is still running; andChildren ends what it started that is announced as a game of this project."
-      : 'Anything that game started for itself, with OS.create_process or otherwise, is a separate process and is still running; andChildren ends what it started that is announced as a game of this project.';
+      ? "Anything that game started for itself, with OS.create_process or otherwise, is not the editor's to stop and was not signalled; andChildren ends what it started that is announced as a game of this project."
+      : 'Anything that game started for itself, with OS.create_process or otherwise, is a separate process this stop did not signal; andChildren ends what it started that is announced as a game of this project.';
   }
-  if (ended.unknown) {
+  if (ended.unknown === 'platform') {
     return 'andChildren was asked for and this platform would not list what the game had started, so nothing else was ended.';
+  }
+  if (ended.unknown === 'no process') {
+    return 'andChildren was asked for and this run has no process id to list under: the editor plays it and its game announced none, so nothing else was ended.';
   }
   const counted = (n: number): string => `${n} ${n === 1 ? 'process' : 'processes'}`;
   const endedToo =
@@ -3562,6 +3618,9 @@ class GodotServer {
     });
     this.logDebug(`Running Godot project: ${engine.value} ${cmdArgs.join(' ')}`);
     const started = this.spawnKeptGame(engine.value, cmdArgs, project.value.path);
+    // For a game that announces after the start's wait under a number the handle does not have,
+    // which the Windows console build does: the tie then falls to freshness, as a played run's.
+    started.announcedBefore = alreadyPlaying;
     // Kept after it exits rather than dropped, because a run that quits on its own is the whole
     // point of a headless one: a bench, a report, a tool scene. Dropping the reference on exit
     // threw its output away before anybody could read it, and left editor_output answering "no
@@ -3690,12 +3749,15 @@ class GodotServer {
         return !editorSaysGoing;
       },
     });
-    // Kept on the run, for a run the editor is playing. That is the one kind with no handle and no
-    // pid of its own, so its liveness is the editor's word and nothing else; this is a number the
-    // game gave for itself, and it is what the announcement was waited for. Only when it is this
-    // run's: `announcedSince` excludes everything that was already announced before the start.
+    // Kept on the run: a number the game gave for itself, which is what the announcement was
+    // waited for. For a run the editor plays it is the only process the run has, so its liveness
+    // is the editor's word without it. For a run started here it is usually the handle's own
+    // number and not always: the Windows console build is a wrapper that starts the engine as its
+    // child, so the game announces a number the handle does not have, and a runtime call asking
+    // for this server's own game found nothing under the handle's. Only when it is this run's:
+    // `announcedSince` excludes everything that was already announced before the start.
     const going = this.currentRun();
-    if (endpoint !== null && going?.throughEditor === true && going.announcedPid === undefined) {
+    if (endpoint !== null && going !== null && going.announcedPid === undefined) {
       going.announcedPid = endpoint.pid;
     }
     return runtimeVerdict(endpoint, {
@@ -4181,15 +4243,15 @@ class GodotServer {
   }
 
   /**
-   * The process the game of a played run announced itself as, tied to the run when it has not
-   * been yet.
+   * The process the game of a run announced itself as, tied to the run when it has not been yet.
    *
    * A game that announces inside the start's wait is tied there. One that announces after it, a
-   * project that boots for longer than the budget, was never tied at all: the run went on being
-   * judged from the editor's word alone and answered cpu with "nothing here has its process id"
-   * while the same call listed the game under runtimes. Tied here to the one game of this project
-   * the start did not see announced before it played, and for a picked-up run, which saw nothing,
-   * to the one game announced at all.
+   * project that boots for longer than the budget, was never tied at all: a played run went on
+   * being judged from the editor's word alone and answered cpu with "nothing here has its process
+   * id" while the same call listed the game under runtimes. Tied here to the process the run
+   * holds when that is what announced, which is certain, and otherwise to the one game of this
+   * project the start did not see announced before it played, and for a picked-up run, which saw
+   * nothing, to the one game announced at all.
    *
    * One and not the first of several: a bench opens many workers from one project, and a run tied
    * to the wrong worker is reported over the moment that worker finishes.
@@ -4203,16 +4265,20 @@ class GodotServer {
    * freshness alone, as before.
    */
   private announcedPidOf(run: GodotProcess, announced?: readonly RuntimeEndpoint[]): number | undefined {
-    if (!run.throughEditor || run.announcedPid !== undefined) {
+    if (run.announcedPid !== undefined) {
+      return run.announcedPid;
+    }
+    // The caller's sweep when it has one: a status call asks this once per announced game, and a
+    // bench with thirty workers announced would otherwise read the directory thirty times over.
+    const ours = this.announcedOfTheRunsProject(run, announced ?? runtimesAnnounced().running);
+    if (run.pid !== null && ours.some((one) => one.pid === run.pid)) {
+      run.announcedPid = run.pid;
       return run.announcedPid;
     }
     const before = run.announcedBefore ?? new Set<number>();
-    // The caller's sweep when it has one: a status call asks this once per announced game, and a
-    // bench with thirty workers announced would otherwise read the directory thirty times over.
-    const fresh = this.allAnnouncedForOurProject(announced ?? runtimesAnnounced().running).filter(
-      (one) => !before.has(one.pid),
+    const candidates = ours.filter(
+      (one) => !before.has(one.pid) && this.isTheGameOf(run, one, run.projectPath),
     );
-    const candidates = fresh.filter((one) => this.playedByOurEditor(one, run.projectPath));
     const theOne = candidates.length === 1 ? candidates[0] : undefined;
     if (theOne !== undefined) {
       run.announcedPid = theOne.pid;
@@ -4241,8 +4307,93 @@ class GodotServer {
     ) {
       return undefined;
     }
-    const its = run.throughEditor ? this.announcedPidOf(run, running) : run.pid;
-    return its !== null && its !== undefined && running.some((one) => one.pid === its) ? its : undefined;
+    const its = this.announcedPidOf(run, running);
+    return its !== undefined && running.some((one) => one.pid === its) ? its : undefined;
+  }
+
+  /**
+   * `ownGameAmong` for the run that nothing else could tie, asked of the process tree.
+   *
+   * A bench that announces after the start's wait and opens a worker before anything asks is two
+   * games of the project, both fresh, and freshness cannot pick between them: every runtime call
+   * from the session that started the bench was refused with "pass pid" from then on. The tree
+   * can, which costs an ask of the operating system, so it is asked here, where the answer is
+   * needed, and once, since a tie is kept on the run. Nothing to ask when the run has been tied
+   * already, which is `ownGameAmong` having judged the tie and found the game gone or elsewhere.
+   */
+  private async ownGameThroughTheTree(
+    running: readonly RuntimeEndpoint[],
+    projectPath: string | undefined,
+  ): Promise<number | undefined> {
+    const run = this.currentRun();
+    if (run === null || !stillRunning(run) || run.announcedPid !== undefined) {
+      return undefined;
+    }
+    if (
+      projectPath !== undefined &&
+      run.projectPath !== null &&
+      !isSameDirectory(run.projectPath, projectPath)
+    ) {
+      return undefined;
+    }
+    const its = await this.tiedThroughTheTree(run, running);
+    return its !== undefined && running.some((one) => one.pid === its) ? its : undefined;
+  }
+
+  /**
+   * `announcedPidOf` continued through the process tree: the run's own game when nothing else
+   * could tie it, at the cost of asking the operating system for the tree, which is a PowerShell
+   * start on Windows. Asked only when there is something to decide between, and the tie sticks.
+   */
+  private async tiedThroughTheTree(
+    run: GodotProcess,
+    announced: readonly RuntimeEndpoint[],
+  ): Promise<number | undefined> {
+    if (run.announcedPid !== undefined) {
+      return run.announcedPid;
+    }
+    const ours = this.announcedOfTheRunsProject(run, announced);
+    if (ours.length === 0) {
+      return undefined;
+    }
+    const tree = await processTree();
+    if (tree === undefined) {
+      return undefined;
+    }
+    return this.tieThroughTheTree(run, tree, new Set(ours.map((one) => one.pid)));
+  }
+
+  /**
+   * The game of [param run] found in [param tree], and tied to the run when found.
+   *
+   * The announced process under the run's own with no announced process between the two: a
+   * worker has the game above it and a wrapper announces nothing, so with the Windows console
+   * build, whose handle is a wrapper that starts the engine as its child, the engine is found and
+   * its workers are not. For a run the editor plays, whose game the editor started, the editor's
+   * process stands in for the handle. The handle itself when it is announced, which is the
+   * ordinary engine. One and not the first of several, as everywhere a tie is made.
+   */
+  private tieThroughTheTree(
+    run: GodotProcess,
+    tree: ProcessTree,
+    games: ReadonlySet<number>,
+  ): number | undefined {
+    const root = run.pid ?? (run.throughEditor ? this.godotBridge.getStatus().editorPid : undefined);
+    if (root === undefined) {
+      return undefined;
+    }
+    if (games.has(root)) {
+      run.announcedPid = root;
+      return root;
+    }
+    const nearest = descendantsIn(tree, root).filter(
+      (one) => games.has(one) && !announcedBetween(tree, one, root, games),
+    );
+    const theOne = nearest.length === 1 ? nearest[0] : undefined;
+    if (theOne !== undefined) {
+      run.announcedPid = theOne;
+    }
+    return theOne;
   }
 
   /**
@@ -4464,6 +4615,22 @@ class GodotServer {
     return this.allAnnouncedForOurProject(announced)[0] ?? null;
   }
 
+  /**
+   * The announced games of [param run]'s project. A run started here names its project, which a
+   * server started without one and with no editor connected has no other way of knowing; a run
+   * that names none is judged by this server's, as everything else is.
+   */
+  private announcedOfTheRunsProject<T extends { project: { path: string } }>(
+    run: GodotProcess,
+    announced: readonly T[],
+  ): T[] {
+    const project = run.projectPath;
+    if (project === null) {
+      return this.allAnnouncedForOurProject(announced);
+    }
+    return announced.filter((one) => one.project.path !== '' && isSameDirectory(project, one.project.path));
+  }
+
   private allAnnouncedForOurProject<T extends { project: { path: string } }>(announced: readonly T[]): T[] {
     const status = this.godotBridge.getStatus();
     const mine = this.ownProject ?? (status.connected ? (status.projectPath ?? null) : null);
@@ -4661,12 +4828,22 @@ class GodotServer {
     // Only while it is going: a process that has exited has no processor time left to report, and
     // asking after a pid that is gone answers about whatever holds that number next.
     //
-    // The number the game announced for itself serves for a run the editor plays: that run has no
-    // handle here, but a game with the runtime addon has said which process it is, and a bench
-    // played from the editor was being told nothing here had its process id while the same answer
-    // listed it under runtimes.
+    // The number the game announced for itself is asked first. For a run the editor plays it is
+    // the only number there is: that run has no handle here, but a game with the runtime addon
+    // has said which process it is, and a bench played from the editor was being told nothing
+    // here had its process id while the same answer listed it under runtimes. For a run started
+    // here it is the game rather than the handle, which differ under the Windows console build:
+    // the handle is a wrapper that does no work, so its processor time stands still however hard
+    // the engine under it is grinding, which is exactly the reading this exists to tell apart.
+    // Found through the process tree when nothing else has tied it, since this ask already costs
+    // what that costs and is made rarely.
     const wanted = readBoolean(args, 'cpu') ?? false;
-    const processToAsk = run.pid ?? this.announcedPidOf(run) ?? null;
+    const processToAsk = wanted
+      ? (this.announcedPidOf(run) ??
+        (stillRunning(run) ? await this.tiedThroughTheTree(run, runtimesAnnounced().running) : undefined) ??
+        run.pid ??
+        null)
+      : null;
     const cpuSeconds =
       wanted && processToAsk !== null && stillRunning(run) ? await cpuSecondsOf(processToAsk) : undefined;
     const notes: string[] = [];
@@ -4808,14 +4985,13 @@ class GodotServer {
     const endedPid = stopped.pid ?? this.announcedPidOf(stopped) ?? null;
     // Listed before the run is ended, because ending it is what makes them somebody else's
     // children: POSIX hands them to init the moment the parent goes, and the question "whose are
-    // you" has no answer after that.
+    // you" has no answer after that. Which of them are games is read now too, since a sweep taken
+    // after the stop reads a worker that went down with its parent as never having been one.
     const children =
-      readBoolean(args, 'andChildren') === true && wasRunning && endedPid !== null
-        ? await childrenOf(endedPid)
-        : null;
+      readBoolean(args, 'andChildren') === true && wasRunning ? await this.whatTheRunStarted(stopped) : null;
     this.logDebug('Stopping the running game');
     await this.endActiveGame('editor_run stop');
-    const ended = children === null ? null : this.endChildrenAmong(children, stopped.projectPath);
+    const ended = children === null ? null : endChildrenAmong(children);
     return this.jsonTextResponse({
       stopped: true,
       through: stopped.throughEditor ? 'editor' : 'gdharness',
@@ -4828,16 +5004,17 @@ class GodotServer {
       // number is the one its game announced, when it announced one: the process is the same
       // whichever side ended it.
       endedPid,
-      // What the game had started for itself and this stop ended with it, when asked to: the
-      // children the operating system listed under the run's process that are announced as games
-      // of this project. A child that is neither is left and named, since what it is cannot be
-      // told from here and a number is not a licence to signal.
+      // What the game had started for itself and is gone with it, when asked to: the processes the
+      // operating system listed under the run's, to any depth, that were announced as games of
+      // this project, signalled here or taken down with the run before the signal reached them.
+      // A process under the run that is not one of those is left and named, since what it is
+      // cannot be told from here and a number is not a licence to signal.
       ...(ended === null
         ? {}
         : {
             endedChildren: ended.ended,
             childrenLeft: ended.left.length === 0 ? undefined : ended.left,
-            childrenUnknown: ended.unknown ? true : undefined,
+            childrenUnknown: ended.unknown === false ? undefined : true,
           }),
       // Whether there was anything left to stop. A run whose exit nobody collected, which is a
       // played run picked up after a reconnect and gone since, has no exit code and is over all
@@ -4861,40 +5038,44 @@ class GodotServer {
   }
 
   /**
-   * The children of an ended run that are announced games of its project, ended; the rest named.
+   * What [param run] has started for itself, read while it is still there to be asked about:
+   * every process under the run's, to any depth, sorted into the ones announced as games of the
+   * run's project and the rest.
    *
-   * Being a child of the run is the property a stranger's bench cannot have, and being announced
-   * as a game of the project is what says a child is a game at all rather than whatever else a
-   * game might start. Both are required before a number is signalled. Undefined children are a
-   * platform that would not list them, which is said rather than read as none.
+   * Being under the run is the property a stranger's bench cannot have, and being announced as a
+   * game of the project is what says a process is a game at all rather than whatever else a game
+   * might start. To any depth rather than one, because the process the run holds is not always
+   * the game: the Windows console build is a wrapper whose child is the engine, and a worker the
+   * engine opens is the wrapper's grandchild. The run's own game is not something it started, so
+   * it is neither listed nor, when it is under the handle, taken for a worker. Under the game as
+   * well as under the handle, since a run the editor plays has no handle and its game is all
+   * there is to list under.
+   *
+   * A platform that would not list its processes, and a run with no process to list under, are
+   * each said rather than read as a game that started nothing.
    */
-  private endChildrenAmong(
-    children: readonly number[] | undefined,
-    projectPath: string | null,
-  ): { ended: number[]; left: number[]; unknown: boolean } {
-    if (children === undefined) {
-      return { ended: [], left: [], unknown: true };
+  private async whatTheRunStarted(run: GodotProcess): Promise<StartedByTheRun> {
+    const tree = await processTree();
+    if (tree === undefined) {
+      return { unknown: 'platform' };
     }
-    const games = new Set(
-      runtimesAnnounced()
-        .running.filter((one) => projectPath === null || isSameDirectory(one.project.path, projectPath))
-        .map((one) => one.pid),
-    );
-    const ended: number[] = [];
-    const left: number[] = [];
-    for (const child of children) {
-      if (!games.has(child)) {
-        left.push(child);
-        continue;
-      }
-      try {
-        process.kill(child);
-        ended.push(child);
-      } catch {
-        // Gone between the listing and the signal, which is the state this asks for.
-      }
+    const announced = this.announcedOfTheRunsProject(run, runtimesAnnounced().running);
+    const games = new Set(announced.map((one) => one.pid));
+    const own = this.announcedPidOf(run, announced) ?? this.tieThroughTheTree(run, tree, games);
+    const roots = [run.pid, own].filter((one): one is number => one !== null && one !== undefined);
+    if (roots.length === 0) {
+      return { unknown: 'no process' };
     }
-    return { ended, left, unknown: false };
+    const under = new Set(roots.flatMap((root) => descendantsIn(tree, root)));
+    for (const root of roots) {
+      under.delete(root);
+    }
+    const started = [...under].sort((a, b) => a - b);
+    return {
+      unknown: false,
+      games: started.filter((one) => games.has(one)),
+      others: started.filter((one) => !games.has(one)),
+    };
   }
 
   /**
@@ -5287,7 +5468,11 @@ class GodotServer {
     // caller who started a bench and asks about it was refused with "pass pid" the moment the
     // bench opened its first worker.
     const wanted = typeof projectPath === 'string' ? projectPath : (this.ownProject ?? undefined);
-    const own = typeof pid === 'number' ? undefined : this.ownGameAmong(announced.running, wanted);
+    const own =
+      typeof pid === 'number'
+        ? undefined
+        : (this.ownGameAmong(announced.running, wanted) ??
+          (await this.ownGameThroughTheTree(announced.running, wanted)));
     const choice = chooseRuntime(
       announced.running,
       wanted,
