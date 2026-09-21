@@ -85,28 +85,49 @@ const DEFLATED = 8;
 const NEEDS_ZIP64 = 0xffffffff;
 
 /**
+ * How the attempts at a download are spaced, in milliseconds between one and the next.
+ *
+ * Sized to what it absorbs. A reset or a refusal lands in milliseconds, and a second attempt in
+ * the same millisecond is close enough to the first to fail with it, so nothing is immediate. A
+ * gateway timeout from the release host is the other shape: GitHub's download front answered
+ * 504 to three attempts two seconds apart, and an outage of that kind clears in tens of seconds
+ * to a minute, so the spacing doubles until a minute has been given over to it in all. Longer
+ * than that is a host that is down, and a red build saying so is the right answer.
+ */
+const DOWNLOAD_WAITS_MS = [2_000, 4_000, 8_000, 16_000, 32_000] as const;
+
+/**
  * The release asset, or a throw naming what came back instead.
  *
- * Three attempts, spaced, because a transient network failure here is a red build that says
- * nothing about the code. Spaced rather than immediate: what fails this way is a reset or a
- * refusal that lands in milliseconds, and a second attempt in the same millisecond is close
- * enough to the first to fail with it.
+ * Retried, because a transient network failure here is a red build that says nothing about the
+ * code; each failed attempt is printed so the log shows what the host answered and when.
  */
-export async function download(url: string): Promise<Buffer> {
+export async function download(
+  url: string,
+  fetching: (url: string) => Promise<Response> = (target) => fetch(target, { redirect: 'follow' }),
+  waiting: (ms: number) => Promise<void> = (ms) => new Promise((wake) => setTimeout(wake, ms)),
+): Promise<Buffer> {
   let lastFailure: unknown = null;
 
-  for (let attempt = 1; attempt <= 3; attempt += 1) {
-    if (attempt > 1) {
-      await new Promise((wake) => setTimeout(wake, 2_000));
+  for (let attempt = 0; attempt <= DOWNLOAD_WAITS_MS.length; attempt += 1) {
+    const wait = attempt === 0 ? undefined : DOWNLOAD_WAITS_MS[attempt - 1];
+    if (wait !== undefined) {
+      await waiting(wait);
     }
     try {
-      const response = await fetch(url, { redirect: 'follow' });
+      const response = await fetching(url);
       if (!response.ok) {
         throw new Error(`${url} answered ${response.status} ${response.statusText}`);
       }
       return Buffer.from(await response.arrayBuffer());
     } catch (failure) {
       lastFailure = failure;
+      const next = DOWNLOAD_WAITS_MS[attempt];
+      const reason = failure instanceof Error ? failure.message : String(failure);
+      console.error(
+        `attempt ${attempt + 1} of ${DOWNLOAD_WAITS_MS.length + 1} failed: ${reason}` +
+          (next === undefined ? '' : `; trying again in ${next / 1000}s`),
+      );
     }
   }
 
