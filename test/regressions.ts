@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import { type ChildProcess, type SpawnSyncReturns, spawn, spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import {
-  copyFileSync,
   cpSync,
   existsSync,
   mkdirSync,
@@ -7921,12 +7920,14 @@ const FAKE_EDITOR_PID = process.pid;
  * result is sent back, so a fixture decides what the editor says it is playing, and when.
  *
  * The addon on disk is a stub unless [param options.realAddon] asks for the one this repository
- * ships, which is what says whether games of the project announce the editor that played them.
+ * ships, which is what says whether games of the project announce the editor that played them;
+ * with it the addon is registered as the project's autoload too, so a real engine given the
+ * project by [param options.engine] runs it and announces.
  */
 async function withAPlayingEditor(
   answer: (where: Pick<PlayingEditorStage, 'adapter' | 'project' | 'runtimeDir'>) => EditorToolAnswer,
   body: (stage: PlayingEditorStage) => Promise<void>,
-  options: { realAddon?: boolean } = {},
+  options: { realAddon?: boolean; engine?: string } = {},
 ): Promise<void> {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-played-over-'));
   const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-played-over-rt-'));
@@ -7948,26 +7949,30 @@ async function withAPlayingEditor(
     env: {
       GDHARNESS_BRIDGE_PORT: String(port),
       GDHARNESS_RUNTIME_DIR: runtimeDir,
-      GODOT_PATH: process.execPath,
+      GODOT_PATH: options.engine ?? process.execPath,
     },
   });
   const editor: { socket: WebSocket | null } = { socket: null };
   try {
     await withFramedPeer(answerEverything, async (adapter) => {
+      const registered =
+        options.realAddon === true
+          ? '\n[autoload]\n\nGdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n'
+          : '';
       writeFileSync(
         join(project, 'project.godot'),
         '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Played"\n' +
-          'run/main_scene="res://main.tscn"\n',
+          `run/main_scene="res://main.tscn"\n${registered}`,
       );
       writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
       // The wait only happens for a project that could announce, which is one with the addon on
-      // disk. Nothing runs it here.
-      mkdirSync(join(project, 'addons', 'gdharness_runtime'), { recursive: true });
-      const autoload = join(project, 'addons', 'gdharness_runtime', 'runtime_autoload.gd');
+      // disk. A stub, unless the fixture wants the real one run by a real engine.
+      const addon = join(project, 'addons', 'gdharness_runtime');
       if (options.realAddon === true) {
-        copyFileSync(join('src', 'godot', 'addons', 'gdharness_runtime', 'runtime_autoload.gd'), autoload);
+        cpSync(join('src', 'godot', 'addons', 'gdharness_runtime'), addon, { recursive: true });
       } else {
-        writeFileSync(autoload, 'extends Node\n');
+        mkdirSync(addon, { recursive: true });
+        writeFileSync(join(addon, 'runtime_autoload.gd'), 'extends Node\n');
       }
       await server.initialize('regression-test');
 
@@ -8416,6 +8421,78 @@ async function testTheEditorsGameIsToldFromAnotherOfTheSameProject(): Promise<vo
       }
     }
   }
+}
+
+/**
+ * A game this server spawned beside a connected editor is still its own, though it names no editor.
+ *
+ * The rule that tells the editor's game from a stranger's reads an announcement naming no editor,
+ * in a project whose addon announces editors, as somebody else's. That is right for a run the
+ * editor plays and wrong for a run this server started: a spawned game inherited no editor to
+ * name, so under the played rule a spawned start waited its whole budget on its own game and
+ * answered that nothing had announced. The editor tier found it on the first run, with a real
+ * engine, which is why this one runs a real engine too: the announcement has to come from the
+ * addon as it is, in the environment a spawned game actually gets.
+ */
+async function testASpawnedGameBesideAnEditorIsStillItsOwn(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('spawned game beside an editor regression skipped (Godot not found)');
+    return;
+  }
+  await withAPlayingEditor(
+    ({ adapter }) =>
+      (tool) =>
+        tool === 'playing_status'
+          ? { ok: true, playing: false, scenePath: '', debugPort: adapter }
+          : { ok: true },
+    async ({ server, project }) => {
+      const answer = parseTextContent(
+        await server.request(
+          'tools/call',
+          {
+            name: 'editor_run',
+            arguments: { projectPath: project, op: 'start', headless: true, runtimeWaitMs: 20_000 },
+          },
+          ENGINE_CALL_TIMEOUT_MS,
+        ),
+      );
+      try {
+        assert.equal(
+          get(answer, 'through'),
+          'gdharness',
+          `a headless start is spawned: ${JSON.stringify(answer)}`,
+        );
+        assert.equal(
+          get(answer, 'runtime', 'listening'),
+          true,
+          `the spawned game's own announcement is the one waited for: ${JSON.stringify(answer)}`,
+        );
+        const status = parseTextContent(
+          await server.request(
+            'tools/call',
+            { name: 'editor_status', arguments: {} },
+            ENGINE_CALL_TIMEOUT_MS,
+          ),
+        );
+        assert.equal(
+          get(status, 'game', 'runtimes', 0, 'editorPid'),
+          undefined,
+          `and it names no editor, having been started here: ${JSON.stringify(status)}`,
+        );
+      } finally {
+        await server.request(
+          'tools/call',
+          { name: 'editor_run', arguments: { op: 'stop' } },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+      }
+    },
+    { realAddon: true, engine },
+  );
 }
 
 async function testTheEditorsRunIsTheOneAnsweredFor(): Promise<void> {
@@ -11752,6 +11829,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheAnnounceWaitIsNotHeldByASlowEditor,
   testALateAnnouncementIsTiedToThePlayedRun,
   testTheEditorsGameIsToldFromAnotherOfTheSameProject,
+  testASpawnedGameBesideAnEditorIsStillItsOwn,
   testASettingTheEditorDroppedIsNamed,
   testACleanupThatCannotFinishStillFinishes,
   testADiagnosticTheFileContradictsIsNamed,

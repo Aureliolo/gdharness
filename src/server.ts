@@ -3625,10 +3625,13 @@ class GodotServer {
     let editorSaysGoing = true;
     const endpoint = await announcedSince(projectPath, before, {
       budgetMs,
-      // Not a game of this project that names another editor as the one that played it: that
-      // one is somebody else's, and a start that took it for its own would answer listening
-      // about a game it did not start while its own was still booting.
-      accept: (one) => this.playedByOurEditor(one, projectPath),
+      // Not a game of this project that somebody else started: for a run the editor plays, one
+      // naming another editor as the one that played it, or none where the project's games name
+      // theirs; for a run started here, one naming the editor at all, since a game this server
+      // spawned inherited no editor to name. A start that took a stranger's game for its own
+      // answered listening about a process it did not start while its own was still booting,
+      // and a spawned start judged by the played rule waited its whole budget on its own game.
+      accept: (one) => this.isTheGameOf(this.currentRun(), one, projectPath),
       // A game held at a breakpoint set before the run is not booting any more, and waiting out
       // the budget on one says nothing. It cannot announce until it is let go. Nor is there
       // anything to wait for once the process is over: a boot that fails on a parse error is
@@ -4206,6 +4209,27 @@ class GodotServer {
       return endpoint.editorPid === editor;
     }
     return !runtimeAddonAnnouncesEditors(projectPath ?? this.ownProject);
+  }
+
+  /**
+   * Whether an announced game could be [param run]'s own: the editor's, for a run the editor
+   * plays, and for a run started here one that names no editor, since a game this server spawned
+   * inherited no editor to name and one that names the connected editor is that editor's game.
+   * No run at all is nothing's game.
+   */
+  private isTheGameOf(
+    run: GodotProcess | null,
+    endpoint: RuntimeEndpoint,
+    projectPath: string | null,
+  ): boolean {
+    if (run === null) {
+      return false;
+    }
+    if (run.throughEditor) {
+      return this.playedByOurEditor(endpoint, projectPath);
+    }
+    const editor = this.godotBridge.getStatus().editorPid;
+    return endpoint.editorPid === undefined || endpoint.editorPid !== editor;
   }
 
   /**
