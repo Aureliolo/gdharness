@@ -11,6 +11,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { createServer, type Server, type Socket } from 'node:net';
@@ -91,6 +92,7 @@ import {
   announcedSince,
   chooseRuntime,
   discoverRuntimes,
+  errorReportOf,
   RUNTIME_PROTOCOL,
   type RuntimeEndpoint,
   runtimeDirectories,
@@ -3937,6 +3939,45 @@ function testAGameTooNewToTalkToIsStillAGame(): void {
     writeFileSync(dead, '{}', 'utf8');
     runtimesAnnounced([directory]);
     assert.ok(!existsSync(dead), 'an announcement nobody is behind is still deleted');
+  } finally {
+    sweep(root);
+  }
+}
+
+/**
+ * A game's error report outlives the game by an hour, and no longer.
+ *
+ * The announcement goes the moment the game does, because it is what says a game is there to
+ * talk to. The report is different: it is what the run's last errors are read from, and the
+ * server reading the run may not look until after the game has gone, so a report is kept until
+ * its game has been gone for an hour. One belonging to a live process is never touched, whatever
+ * its age. Found by `errorReportOf` in whichever directory the game announced in.
+ */
+function testAnErrorReportOutlivesItsGameForAnHour(): void {
+  const root = mkdtempSync(join(tmpdir(), 'gdharness-report-sweep-'));
+  try {
+    const directory = join(root, 'gdharness');
+    mkdirSync(directory, { recursive: true });
+    const hoursAgo = (hours: number): Date => new Date(Date.now() - hours * 60 * 60 * 1000);
+    const stale = join(directory, 'runtime-999999998.log');
+    const recent = join(directory, 'runtime-999999999.log');
+    const living = join(directory, `runtime-${process.pid}.log`);
+    for (const [path, age] of [
+      [stale, 2],
+      [recent, 0.5],
+      [living, 48],
+    ] as const) {
+      writeFileSync(path, 'ERROR: something\n   at: somewhere (res://x.gd:1)\n', 'utf8');
+      utimesSync(path, hoursAgo(age), hoursAgo(age));
+    }
+    assert.equal(errorReportOf(process.pid, [join(root, 'elsewhere'), directory]), living);
+    assert.equal(errorReportOf(999999997, [directory]), null, 'a game that reported nothing has no file');
+
+    const announced = runtimesAnnounced([directory]);
+    assert.deepEqual(announced.running, [], 'a report is not an announcement');
+    assert.ok(!existsSync(stale), 'a report whose game has been gone for two hours is swept');
+    assert.ok(existsSync(recent), 'one whose game went half an hour ago is kept for the reader');
+    assert.ok(existsSync(living), "a live game's report is kept whatever its age");
   } finally {
     sweep(root);
   }
@@ -8504,6 +8545,162 @@ async function testASpawnedGameBesideAnEditorIsStillItsOwn(): Promise<void> {
 }
 
 /**
+ * What a game the editor plays reports reaches editor_output and the transcript.
+ *
+ * The editor's game prints to the editor's own stderr, which nobody reads, and the debug adapter
+ * relays what the game prints and not what it reports: a `push_error` raised in one reached
+ * neither `editor_output` nor the transcript, and a run whose game had just refused something
+ * out loud was answered `clean: true`. Every clean verdict a project had read off a played run
+ * was in question. The runtime addon now takes the report where it is made, with a Logger in the
+ * game, and the server reads it beside the announcement.
+ *
+ * A real engine stands in for the editor's game: the fake editor starts it on `play_scene` with
+ * the editor's mark in its environment, the way a real editor's game inherits it, so the addon
+ * announces the editor and writes the report. One error and one warning at boot, and an error
+ * raised later through a runtime call, so the report is read both on the first look and after.
+ */
+async function testAPlayedGamesReportsReachTheOutput(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('played game reports regression skipped (Godot not found)');
+    return;
+  }
+  const held: { game: ChildProcess | null } = { game: null };
+  try {
+    await withAPlayingEditor(
+      ({ adapter, project, runtimeDir }) =>
+        (tool) => {
+          if (tool === 'play_scene') {
+            held.game = spawn(engine, ['--headless', '--path', project], {
+              stdio: 'ignore',
+              env: {
+                ...process.env,
+                GDHARNESS_RUNTIME_DIR: runtimeDir,
+                GDHARNESS_EDITOR_PID: String(FAKE_EDITOR_PID),
+              },
+            });
+            return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
+          }
+          if (tool === 'playing_status') {
+            return {
+              ok: true,
+              playing: held.game?.exitCode === null,
+              scenePath: 'res://main.tscn',
+              debugPort: adapter,
+            };
+          }
+          if (tool === 'stop_playing') {
+            held.game?.kill();
+            return { ok: true };
+          }
+          return { ok: true };
+        },
+      async ({ server, project, start }) => {
+        writeFileSync(
+          join(project, 'main.gd'),
+          'extends Node\n\n\nfunc _ready() -> void:\n' +
+            '\tpush_error("clock: 7.5 is not one of the speeds on offer")\n' +
+            '\tpush_warning("the ladder has five rungs")\n\n\n' +
+            'func refuse(value: float) -> void:\n' +
+            '\tpush_error("refused %s at runtime" % value)\n',
+        );
+        writeFileSync(
+          join(project, 'main.tscn'),
+          '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+            '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+        );
+        const started = await start(20_000);
+        assert.equal(get(started.answer, 'through'), 'editor', JSON.stringify(started.answer));
+        assert.equal(get(started.answer, 'runtime', 'listening'), true, JSON.stringify(started.answer));
+
+        const output = async (args: Record<string, unknown>): Promise<unknown> =>
+          parseTextContent(
+            await server.request(
+              'tools/call',
+              { name: 'editor_output', arguments: args },
+              ENGINE_CALL_TIMEOUT_MS,
+            ),
+          );
+        const lines = (answer: unknown): string[] =>
+          asArray(get(answer, 'entries')).map(
+            (entry) => `${text(get(entry, 'severity'))}: ${text(get(entry, 'text'))}`,
+          );
+        // The boot's error and warning: reported before the run was tied, and read on the first
+        // look, with the engine's own `at:` line under the headline.
+        const first = await output({});
+        assert.equal(
+          get(first, 'clean'),
+          false,
+          `a run that reported an error is not clean: ${JSON.stringify(first)}`,
+        );
+        assert.equal(get(first, 'errors'), 1, JSON.stringify(lines(first)));
+        assert.equal(get(first, 'warnings'), 1, JSON.stringify(lines(first)));
+        assert.ok(
+          lines(first).includes('error: clock: 7.5 is not one of the speeds on offer'),
+          `the push_error is an error entry: ${JSON.stringify(lines(first))}`,
+        );
+        assert.ok(
+          lines(first).includes('warning: the ladder has five rungs'),
+          `and the push_warning a warning entry: ${JSON.stringify(lines(first))}`,
+        );
+        const errorEntry = asArray(get(first, 'entries')).find(
+          (entry) => text(get(entry, 'text')) === 'clock: 7.5 is not one of the speeds on offer',
+        );
+        assert.match(
+          asArray(get(errorEntry, 'detail')).map(text).join('\n'),
+          /at: push_error/,
+          `with where it was raised under it: ${JSON.stringify(errorEntry)}`,
+        );
+        const transcript = text(get(first, 'transcript'));
+        assert.match(
+          readFileSync(transcript, 'utf8'),
+          /^ERROR: clock: 7\.5 is not one of the speeds on offer$/m,
+          "and the transcript carries the report in the engine's own line",
+        );
+
+        // An error raised later, through a runtime call, is in the next read and nothing is read
+        // twice.
+        const refused = parseTextContent(
+          await server.request(
+            'tools/call',
+            {
+              name: 'runtime_invoke',
+              arguments: { op: 'call', nodePath: '/root/Main', method: 'refuse', args: [7.5] },
+            },
+            ENGINE_CALL_TIMEOUT_MS,
+          ),
+        );
+        assert.ok(refused !== null, 'the call reaches the game');
+        const since = await output({ severity: 'error', sinceLastCall: true });
+        assert.deepEqual(
+          lines(since),
+          ['error: refused 7.5 at runtime'],
+          `only the new error, at error severity: ${JSON.stringify(lines(since))}`,
+        );
+        assert.equal(get(since, 'errors'), 2, JSON.stringify(since));
+        assert.equal(get(since, 'clean'), false, JSON.stringify(since));
+        const again = await output({ severity: 'error', sinceLastCall: true });
+        assert.deepEqual(lines(again), [], `and nothing is reported twice: ${JSON.stringify(lines(again))}`);
+
+        await server.request(
+          'tools/call',
+          { name: 'editor_run', arguments: { op: 'stop' } },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+      },
+      { realAddon: true, engine },
+    );
+  } finally {
+    if (held.game?.exitCode === null) {
+      held.game.kill();
+    }
+  }
+}
+
+/**
  * A stop with andChildren ends a worker a real game opened with OS.create_process.
  *
  * The regression beside this one measures the mechanism with Node processes standing in for the
@@ -12795,6 +12992,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testALateAnnouncementIsTiedToThePlayedRun,
   testTheEditorsGameIsToldFromAnotherOfTheSameProject,
   testASpawnedGameBesideAnEditorIsStillItsOwn,
+  testAPlayedGamesReportsReachTheOutput,
   testARealBenchTakesItsWorkerWithIt,
   testAStopEndsTheProjectsUnannouncedWorkers,
   testARuntimeCallReachesThisServersOwnGame,
@@ -12836,6 +13034,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheStaleHalfIsNamedCorrectly,
   testAGameIsFoundWhereverItAnnounced,
   testAGameTooNewToTalkToIsStillAGame,
+  testAnErrorReportOutlivesItsGameForAnHour,
   testAPidPicksOneOfSeveralGames,
   testAGameThatAnnouncedAndWentIsSaidSo,
   testANotYetRuntimeIsNotTheSameAsNoRuntime,

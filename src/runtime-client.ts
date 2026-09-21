@@ -12,7 +12,7 @@
  * the connection, and a game that accepted it and then said nothing.
  */
 
-import { existsSync, readdirSync, readFileSync, unlinkSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync, unlinkSync } from 'node:fs';
 import { createConnection } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -82,6 +82,33 @@ export function runtimeDirectories(variables: NodeJS.ProcessEnv = process.env): 
   }
   return [...new Set(candidates.map((path) => resolve(path)))];
 }
+
+/**
+ * The file a game the editor plays writes the engine's error reports to, beside its announcement
+ * and named the same way. Kept in step with `ERROR_REPORT_NAME` in the runtime autoload.
+ */
+const ERROR_REPORT_PATTERN = /^runtime-(\d+)\.log$/;
+
+/** The error report of the game with [param pid], in whichever directory it announced in. */
+export function errorReportOf(
+  pid: number,
+  directories: readonly string[] = runtimeDirectories(),
+): string | null {
+  for (const directory of directories) {
+    const path = join(directory, `runtime-${pid}.log`);
+    if (existsSync(path)) {
+      return path;
+    }
+  }
+  return null;
+}
+
+/**
+ * How long a report outlives its game before the sweep takes it. Long enough for the server that
+ * was reading the run to take the last of it after the game has gone, which is when the last
+ * errors matter most, and short enough that a machine playing games all day does not keep them.
+ */
+const ERROR_REPORT_KEEP_MS = 60 * 60 * 1000;
 
 /** Whether a process with this id exists. Signal 0 delivers nothing and only checks. */
 function processAlive(pid: number): boolean {
@@ -265,6 +292,11 @@ function announcedIn(directory: string): Announced[] {
   }
   const found: Announced[] = [];
   for (const entry of readdirSync(directory)) {
+    const report = ERROR_REPORT_PATTERN.exec(entry);
+    if (report) {
+      sweepErrorReport(join(directory, entry), Number.parseInt(report[1] ?? '', 10));
+      continue;
+    }
     const match = ANNOUNCEMENT_PATTERN.exec(entry);
     if (!match) {
       continue;
@@ -292,6 +324,24 @@ function announcedIn(directory: string): Announced[] {
     found.push(announced);
   }
   return found;
+}
+
+/**
+ * A report whose game is gone and that has sat for longer than the keep is removed. Not with the
+ * announcement, which goes the moment the game does: the report is what the run's last errors are
+ * read from, and the server reading the run may not look until after the game has gone.
+ */
+function sweepErrorReport(path: string, pid: number, now = Date.now()): void {
+  if (processAlive(pid)) {
+    return;
+  }
+  try {
+    if (now - statSync(path).mtimeMs >= ERROR_REPORT_KEEP_MS) {
+      unlinkSync(path);
+    }
+  } catch {
+    // Taken by another reader first, or still held open, which the next sweep will get.
+  }
 }
 
 /** How often the wait below looks, and the longest it will wait at all. */

@@ -11,6 +11,7 @@ extends Node
 ## id and the reply carries it back.
 
 const Capture = preload("runtime_capture.gd")
+const ErrorReport = preload("error_report.gd")
 const InputCommands = preload("runtime_input.gd")
 const Queries = preload("runtime_queries.gd")
 const Read = preload("reading.gd")
@@ -35,6 +36,11 @@ const SCRIPT_RUNS_SETTING: String = "gdharness/runtime/serve_script_runs"
 ## another of the same project that some other server started. Kept in step with
 ## `EDITOR_PID_VARIABLE` in the editor addon's bridge client.
 const EDITOR_PID_VARIABLE: String = "GDHARNESS_EDITOR_PID"
+
+## The file the engine's error reports go to, beside the announcement and named the same way,
+## which is where the server reads them for a run the editor plays. Kept in step with
+## `errorReportPath` in src/runtime-client.ts.
+const ERROR_REPORT_NAME: String = "runtime-%d.log"
 
 var values: Values = Values.new()
 
@@ -61,6 +67,9 @@ var _outgoing: Dictionary = {}
 var _port: int = 0
 var _enabled: bool = true
 var _announcement: String = ""
+## Held for as long as the game runs: a Logger the engine has is kept by reference, and one
+## that goes away mid-run takes the report with it.
+var _errors: ErrorReport
 ## Every command, by the name a request uses, as the module method that answers it.
 var _commands: Dictionary = {}
 
@@ -98,11 +107,33 @@ func _ready() -> void:
 	# even be un-paused over the socket. A debug server has to stay responsive while the game
 	# is frozen, to inspect, capture, inject or resume it.
 	process_mode = Node.PROCESS_MODE_ALWAYS
+	_report_errors()
 	_start_server()
 
 
 func _exit_tree() -> void:
+	if _errors != null:
+		OS.remove_logger(_errors)
+		_errors = null
 	_cleanup()
+
+
+## The engine's error reports, written to a file for the server, for a game the editor plays.
+##
+## Only for one the editor plays: a game the server starts itself has its stderr in the run's
+## transcript already, and a game somebody runs from a terminal has it on the terminal. The
+## editor's game prints to the editor's stderr, which nobody reads, and the editor's debug
+## adapter relays what the game prints and not what it reports. Before the server starts, so
+## a port that cannot be bound is reported there too, and whether or not the server comes up.
+func _report_errors() -> void:
+	if not OS.get_environment(EDITOR_PID_VARIABLE).is_valid_int():
+		return
+	var directory: String = _announcement_directory()
+	var made: Error = DirAccess.make_dir_recursive_absolute(directory)
+	if made != OK and made != ERR_ALREADY_EXISTS:
+		return
+	_errors = ErrorReport.new(directory.path_join(ERROR_REPORT_NAME % OS.get_process_id()))
+	OS.add_logger(_errors)
 
 
 func _process(_delta: float) -> void:
