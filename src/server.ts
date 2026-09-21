@@ -4360,12 +4360,28 @@ class GodotServer {
     const until = Date.now() + budgetMs;
     // Drained as it goes rather than once at the end: the pipes are what the output is read from,
     // and a run that fills them while nobody reads blocks on its own print.
-    while (stillRunning(run) && Date.now() < until) {
+    while ((await this.runStillGoing(run)) && Date.now() < until) {
       this.drainEditorOutput(run);
       this.drainTranscript(run);
       await delay(RUN_POLL_MS);
     }
-    return await this.handleGetDebugOutput(args, stillRunning(run) ? budgetMs : undefined);
+    return await this.handleGetDebugOutput(args, (await this.runStillGoing(run)) ? budgetMs : undefined);
+  }
+
+  /**
+   * Whether a run is still going, asked of whoever can say.
+   *
+   * The operating system, for every run with a process to ask about. The editor, for a run it is
+   * playing whose game announced no runtime: that run has no process number of any kind, so
+   * `stillRunning` alone can only say yes for as long as the record lasts, and editor_output said
+   * `running: true` about such a game for the rest of the session while its own note claimed the
+   * editor had been asked. editor_run wait sat out its whole budget on the same reading.
+   */
+  private async runStillGoing(run: GodotProcess): Promise<boolean> {
+    if (!run.throughEditor || run.announcedPid !== undefined) {
+      return stillRunning(run);
+    }
+    return runIsUp(run, (await this.editorPlayingState())?.playing ?? null);
   }
 
   private async handleGetDebugOutput(args: OperationParams, waitedMs?: number): Promise<ToolResponse> {
@@ -4378,7 +4394,8 @@ class GodotServer {
     this.drainTranscript(run);
     // A run picked up alive and since ended, caught here rather than left reading as running. The
     // last of its output is already in, because the drain above ran first.
-    if (run.endedUnwatched !== true && !stillRunning(run)) {
+    const going = await this.runStillGoing(run);
+    if (run.endedUnwatched !== true && !going) {
       run.log.finish();
       run.endedUnwatched = run.exitCode === null;
     }
@@ -4478,7 +4495,7 @@ class GodotServer {
       );
     }
     return this.jsonTextResponse({
-      running: stillRunning(run),
+      running: going,
       exitCode: run.exitCode,
       through: run.throughEditor ? 'editor' : 'gdharness',
       pid: run.pid,
@@ -4536,7 +4553,7 @@ class GodotServer {
     this.drainEditorOutput(stopped);
     this.drainTranscript(stopped);
     // Read before the stop, since a game that goes on the stop is one that was running.
-    const wasRunning = stillRunning(stopped);
+    const wasRunning = await this.runStillGoing(stopped);
     this.logDebug('Stopping the running game');
     await this.endActiveGame('editor_run stop');
     return this.jsonTextResponse({
