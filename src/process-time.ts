@@ -3,8 +3,14 @@ import { promisify } from 'node:util';
 
 const run = promisify(execFile);
 
-/** Long enough for the operating system to answer about one process, short enough to never hold a call. */
-const ASK_TIMEOUT_MS = 2_000;
+/**
+ * Long enough for the operating system to answer about one process on a machine that is busy,
+ * short enough not to hold a call that asked for the reading on purpose. On Windows the answer
+ * is a PowerShell start, which a loaded machine, a bench with thirty workers grinding or a
+ * shared runner, holds past two seconds: the reading was being given up on exactly when it was
+ * wanted, since a machine under load is the one whose run somebody is watching for a stall.
+ */
+const ASK_TIMEOUT_MS = 6_000;
 
 /**
  * Processor seconds a process has used, or undefined when the platform will not say.
