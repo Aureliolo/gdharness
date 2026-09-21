@@ -8593,6 +8593,11 @@ async function testASpawnedGameBesideAnEditorIsStillItsOwn(): Promise<void> {
  * difference from there is what a real move would carry; a relative the caller gives is kept. Read
  * off a script in the game that records what the events said, since the answer's own `relative`
  * only says what was sent.
+ *
+ * The other thing a drag reads is which buttons are down as the pointer moves, and a motion
+ * between a held click and its release carried none, so a drag written as "moved with the left
+ * button down" never began. The mask is what Input holds, which the injected click sets; the
+ * click's own events carry it too, the pressed button in on the press and out on the release.
  */
 async function testAnInjectedMotionCarriesHowFarThePointerMoved(): Promise<void> {
   const engine = resolveGodotPath();
@@ -8612,12 +8617,17 @@ async function testAnInjectedMotionCarriesHowFarThePointerMoved(): Promise<void>
     async ({ server, project }) => {
       writeFileSync(
         join(project, 'main.gd'),
-        'extends Node\n\nvar last_relative: Vector2 = Vector2.ZERO\nvar motions: int = 0\n\n\n' +
+        'extends Node\n\nvar last_relative: Vector2 = Vector2.ZERO\nvar last_mask: int = 0\n' +
+          'var last_button_mask: int = 0\nvar motions: int = 0\n\n\n' +
           'func _input(event: InputEvent) -> void:\n' +
           '\tif event is InputEventMouseMotion:\n' +
           '\t\tvar motion: InputEventMouseMotion = event\n' +
           '\t\tlast_relative = motion.relative\n' +
-          '\t\tmotions += 1\n',
+          '\t\tlast_mask = motion.button_mask\n' +
+          '\t\tmotions += 1\n' +
+          '\tif event is InputEventMouseButton:\n' +
+          '\t\tvar button: InputEventMouseButton = event\n' +
+          '\t\tlast_button_mask = button.button_mask\n',
       );
       writeFileSync(
         join(project, 'main.tscn'),
@@ -8672,6 +8682,23 @@ async function testAnInjectedMotionCarriesHowFarThePointerMoved(): Promise<void>
         // all: the pair fallback answers zero for a missing pair, which would swallow the axis.
         const oneAxis = await call('runtime_input', { op: 'mouse_motion', x: 40, y: 30, relativeX: 7 });
         assert.deepEqual(get(oneAxis, 'relative'), [7, 0], JSON.stringify(oneAxis));
+        // A motion while a button is held carries that button, as a real drag's does: a drag
+        // written as "moved with the left button down" reads the mask and not the click before.
+        await call('runtime_wait', { op: 'frames', frames: 2 });
+        assert.equal(await read('last_mask'), 0, 'no button held, none carried');
+        // Sent as fast as a caller can, with no wait between: an answer that came back before
+        // the event was delivered would let the next event read the state from before it.
+        await call('runtime_input', { op: 'mouse_click', x: 40, y: 30, pressed: true });
+        const dragged = await call('runtime_input', { op: 'mouse_motion', x: 60, y: 30 });
+        assert.deepEqual(get(dragged, 'relative'), [20, 0], JSON.stringify(dragged));
+        await call('runtime_input', { op: 'mouse_click', x: 60, y: 30, pressed: false });
+        assert.equal(await read('last_button_mask'), 0, 'the release carries the button no longer');
+        assert.equal(await read('last_mask'), 1, 'the left button was held through the motion before it');
+        await call('runtime_input', { op: 'mouse_click', x: 60, y: 30, pressed: true });
+        assert.equal(await read('last_button_mask'), 1, 'the press carries the button it presses');
+        await call('runtime_input', { op: 'mouse_click', x: 60, y: 30, pressed: false });
+        await call('runtime_input', { op: 'mouse_motion', x: 80, y: 30 });
+        assert.equal(await read('last_mask'), 0, 'and a motion after the release carries none');
       } finally {
         await server.request(
           'tools/call',
