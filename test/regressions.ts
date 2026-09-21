@@ -8686,18 +8686,19 @@ async function testAnInjectedMotionCarriesHowFarThePointerMoved(): Promise<void>
         // written as "moved with the left button down" reads the mask and not the click before.
         await call('runtime_wait', { op: 'frames', frames: 2 });
         assert.equal(await read('last_mask'), 0, 'no button held, none carried');
+        // Sent as fast as a caller can, with no wait between: an answer that came back before
+        // the event was delivered would let the next event read the state from before it.
         await call('runtime_input', { op: 'mouse_click', x: 40, y: 30, pressed: true });
-        await call('runtime_wait', { op: 'frames', frames: 2 });
-        assert.equal(await read('last_button_mask'), 1, 'the press carries the button it presses');
-        await call('runtime_input', { op: 'mouse_motion', x: 60, y: 30 });
-        await call('runtime_wait', { op: 'frames', frames: 2 });
-        assert.equal(await read('last_mask'), 1, 'the left button held through the motion');
+        const dragged = await call('runtime_input', { op: 'mouse_motion', x: 60, y: 30 });
+        assert.deepEqual(get(dragged, 'relative'), [20, 0], JSON.stringify(dragged));
         await call('runtime_input', { op: 'mouse_click', x: 60, y: 30, pressed: false });
-        await call('runtime_wait', { op: 'frames', frames: 2 });
-        assert.equal(await read('last_button_mask'), 0, 'the release carries it no longer');
+        assert.equal(await read('last_button_mask'), 0, 'the release carries the button no longer');
+        assert.equal(await read('last_mask'), 1, 'the left button was held through the motion before it');
+        await call('runtime_input', { op: 'mouse_click', x: 60, y: 30, pressed: true });
+        assert.equal(await read('last_button_mask'), 1, 'the press carries the button it presses');
+        await call('runtime_input', { op: 'mouse_click', x: 60, y: 30, pressed: false });
         await call('runtime_input', { op: 'mouse_motion', x: 80, y: 30 });
-        await call('runtime_wait', { op: 'frames', frames: 2 });
-        assert.equal(await read('last_mask'), 0, 'nor does the motion after it');
+        assert.equal(await read('last_mask'), 0, 'and a motion after the release carries none');
       } finally {
         await server.request(
           'tools/call',
