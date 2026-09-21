@@ -1725,6 +1725,7 @@ class GodotServer {
               root: readNonEmptyString(args, 'nodePath') ?? '/root',
               depth: readPositiveNumber(args, 'depth') ?? 3,
               include_properties: readBoolean(args, 'includeProperties') ?? false,
+              properties: readArray(args, 'properties') ?? [],
             });
           case 'find':
             return await this.handleFindRuntimeNodes(args);
@@ -5896,6 +5897,9 @@ class GodotServer {
             ...(readNonEmptyString(args, 'says') === undefined
               ? {}
               : { says: readNonEmptyString(args, 'says') }),
+            ...(readBoolean(args, 'includeHidden') === undefined
+              ? {}
+              : { include_hidden: readBoolean(args, 'includeHidden') }),
             timeout_ms: timeoutMs,
           },
           patience,

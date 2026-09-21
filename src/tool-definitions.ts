@@ -900,7 +900,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'editor_rescan',
     description:
-      'Makes the running editor scan the project filesystem, so files written outside it are picked up. The scan is a change-detecting walk rather than an unconditional reparse, so a file another engine has already imported reads as settled and the walk does not look inside it: its class_name then stays out of the list the editor resolves against, however many times you scan. Any class in that state is named under unseenByEditor, which is what no check on disk can see, since the declaration and the cache are both correct there and only the editor disagrees. The cure is this call on its own, with no change to the declaring script: measured against a real editor on three platforms, with idle waits of the same length ruled out so the scan is credited rather than the time it takes, and reproduced in a second project against its own reproduction in 203ms. editor_launch restart also does it and costs a window, and project_import refresh_classes does not: it rewrites the cache and does not touch what the editor is holding. A scan writes .godot/global_script_class_cache.cfg from the list the editor is holding, so a class the editor cannot resolve goes out of that file with it. That is not a reason to refuse the scan, because on a class the editor has merely not walked yet the scan is the cure; what the answer does instead is name the loss under cacheLost and rebuild the cache from the files, naming what came back under cacheRestored, so no fresh engine, CI run or clone inherits the short file. An editor that lost classes is still holding the short list, so the note says to restart it before scanning again. Needs the editor connected.',
+      'Makes the running editor scan the project filesystem, so files written outside it are picked up. The scan is a change-detecting walk rather than an unconditional reparse, so a file another engine has already imported reads as settled and the walk does not look inside it: its class_name then stays out of the list the editor resolves against, however many times you scan. Any class in that state is named under unseenByEditor, which is what no check on disk can see, since the declaration and the cache are both correct there and only the editor disagrees. The cure is this call on its own, with no change to the declaring script: measured against a real editor on three platforms, with idle waits of the same length ruled out so the scan is credited rather than the time it takes, and reproduced in a second project against its own reproduction in 203ms. editor_launch restart also does it and costs a window, and project_import refresh_classes does not: it rewrites the cache and does not touch what the editor is holding. A scan writes .godot/global_script_class_cache.cfg from the list the editor is holding, so a class the editor cannot resolve goes out of that file with it. That is not a reason to refuse the scan, because on a class the editor has merely not walked yet the scan is the cure; what the answer does instead is name the loss under cacheLost and rebuild the cache from the files, naming what came back under cacheRestored, so no fresh engine, CI run or clone inherits the short file. An editor that lost classes is still holding the short list, so the note says to restart it before scanning again. A script or shader written outside the editor has no .uid sidecar until something imports it, and the scan writes one beside it, which a project that commits sidecars needs before the commit. Needs the editor connected.',
     parameters: {
       projectPath: PROJECT_PATH,
       timeoutMs: { type: 'number', description: 'How long to wait for the scan. Default 30000.' },
@@ -938,11 +938,20 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       instantiableOnly: { type: 'boolean', description: 'query: leave out abstract classes. Default false.' },
       className: { type: 'string', description: 'info, inheritance: the class.' },
       includeInherited: { type: 'boolean', description: 'info: include inherited members. Default false.' },
+      member: {
+        type: 'string',
+        ops: ['info'],
+        description:
+          'info: one member by name, a method, property, signal, enum or constant, with its signature and which class declares it, looked for on the class and every ancestor. The whole of Control is seventy thousand characters; the question "does this engine have it, and what does it take" is this. A name nothing declares is refused with the members whose names contain it.',
+      },
     },
     requires: ['projectPath'],
     operations: {
       query: { summary: 'classes matching a filter or category', requires: [] },
-      info: { summary: 'methods, properties, signals and enums of one class', requires: ['className'] },
+      info: {
+        summary: 'methods, properties, signals and enums of one class, or one member of it by name',
+        requires: ['className'],
+      },
       inheritance: { summary: 'ancestors and descendants of one class', requires: ['className'] },
     },
     defaultOperation: 'query',
@@ -974,7 +983,15 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       includeProperties: {
         type: 'boolean',
         ops: ['tree'],
-        description: "tree: include each node's properties. Default false.",
+        description:
+          'tree: include every stored property of each node. Default false, and one row of a form answered seventy-six thousand characters with it; properties names the few that are wanted.',
+      },
+      properties: {
+        type: 'array',
+        items: { type: 'string' },
+        ops: ['tree'],
+        description:
+          'tree: the properties to read off each node, by name, so the text of every label and button under a panel is one call: a node that has not got one leaves it out. Colons read through what a node holds, as property does for find.',
       },
       className: {
         type: 'string',
@@ -1183,7 +1200,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'number',
         ops: ['mouse_motion'],
         description:
-          'mouse_motion: the movement the event carries. Left out, it is the distance from where the pointer last was, which is what a control that drags reads; give it to send a motion the position does not show.',
+          'mouse_motion: the movement the event carries. Left out, it is the distance from where the last injected pointer event put the pointer, and none for the first; that is what a control that drags reads. Give it to send a motion the position does not show.',
       },
       relativeY: {
         type: 'number',
@@ -1206,7 +1223,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       action: { summary: 'press an action, or hold it', requires: ['action'] },
       key: {
         summary:
-          'press a key, or hold it. Not for a menu a click has opened: an OptionButton or PopupMenu pops up as a window of its own that a key sent to the game never reaches, so an arrow moves nothing in it and Enter closes it with nothing chosen. choose is what selects there',
+          "press a key, or hold it. Not for a menu a click has opened: an OptionButton or PopupMenu pops up as a window of its own that a key sent to the game never reaches, so an arrow moves nothing in it and Enter closes it with nothing chosen. choose is what selects there. The limit is that menu's own navigation, not windows in general: an embedded dialog whose owner reads keys in _input gets them, and a binding catcher up in one takes the key first time",
         requires: ['keycode'],
       },
       text: {
@@ -1221,7 +1238,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       mouse_motion: {
         summary:
-          'move the mouse to a position, carrying the distance from where it last was unless relativeX and relativeY say otherwise, and the buttons held, so a control that drags moves under a run of these between a held mouse_click and its release',
+          'move the mouse to a position, carrying the distance from where the last injected event put it unless relativeX and relativeY say otherwise, and the buttons held, so a control that drags moves under a run of these between a held mouse_click and its release',
         requires: ['x', 'y'],
       },
     },
@@ -1246,7 +1263,13 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['until'],
         description:
-          'until: wait for these words to appear anywhere under nodePath instead of for a property, which is how a panel that rebuilds its labels is waited on at all: the labels are named afresh each redraw and the panel is what stays put. Case-insensitive, part of a line, hidden nodes included; a label with a line break is matched with the break in the words, and a backslash followed by n counts as one. Instead of, not as well as: a call carrying this and a property is refused, because they ask about different things and answering one of them silently is how a caller watches a screen believing they are watching a property.',
+          'until: wait for these words to appear anywhere under nodePath instead of for a property, which is how a panel that rebuilds its labels is waited on at all: the labels are named afresh each redraw and the panel is what stays put. Case-insensitive, part of a line, on a node the player can see unless includeHidden says otherwise; a label with a line break is matched with the break in the words, and a backslash followed by n counts as one. Instead of, not as well as: a call carrying this and a property is refused, because they ask about different things and answering one of them silently is how a caller watches a screen believing they are watching a property.',
+      },
+      includeHidden: {
+        type: 'boolean',
+        ops: ['until'],
+        description:
+          'until, with says: count words on a hidden node too. Default false, since a wait for words is a wait for them to be shown: a button that exists hidden through a whole animation carries its words the whole time and satisfied the wait at once, and every wait on that screen fell back to counting frames.',
       },
       timeoutMs: {
         type: 'number',

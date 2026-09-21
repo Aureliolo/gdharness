@@ -275,8 +275,41 @@ func _check_hidden_nodes_can_be_left_out() -> void:
 	if values != ["scouted twice"]:
 		_fail("the property is still read off what is left: %s" % str(with_text))
 
+	await _check_a_tree_reads_the_properties_named(shelf)
+
 	shelf.queue_free()
 	await node.get_tree().process_frame
+
+
+## The named properties on every node of a tree, which is the text of every label under a panel
+## in one call: a node that has not got one leaves it out, and the whole property set stays off
+## unless asked for, since one row of a form answered seventy-six thousand characters with it.
+func _check_a_tree_reads_the_properties_named(shelf: Control) -> void:
+	var named: Dictionary = await node._execute_command(
+		"get_tree", {"root": "/root/Shelf", "depth": 2, "properties": ["text", "visible"]}
+	)
+	var top: Dictionary = named.get("root", {})
+	var top_properties: Dictionary = top.get("properties", {})
+	if top_properties.keys() != ["visible"] or top_properties.get("visible") != true:
+		_fail("a control with no text carries only the property it has: %s" % str(top))
+	var texts: Dictionary = {}
+	for child: Dictionary in top.get("children", []):
+		var child_properties: Dictionary = child.get("properties", {})
+		if child_properties.has("text"):
+			texts[str(child.get("name", ""))] = child_properties.get("text")
+	if texts != {"ShownRow": "scouted twice", "HiddenRow": "never scouted"}:
+		_fail("each label carries its text and the drawer none: %s" % str(named))
+	var whole: Dictionary = await node._execute_command("get_tree", {"root": "/root/Shelf", "depth": 1})
+	var whole_top: Dictionary = whole.get("root", {})
+	if whole_top.has("properties"):
+		_fail("a tree asked for no properties carries none: %s" % str(whole))
+	var refused: Dictionary = await node._execute_command(
+		"get_tree", {"root": "/root/Shelf", "properties": "text"}
+	)
+	if refused.get("type") != "error" or not str(refused.get("message", "")).contains("list"):
+		_fail("a properties that is not a list is refused: %s" % str(refused))
+	if shelf.get_child_count() != 3:
+		_fail("the reads changed nothing: %d children" % shelf.get_child_count())
 
 
 ## A property that is not a property of any node, which is where a game keeps everything worth

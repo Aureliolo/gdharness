@@ -115,7 +115,8 @@ func wait_until(params: Dictionary) -> Dictionary:
 			)
 		}
 	if not says.is_empty():
-		return await _wait_until_said(node_path, says, timeout_ms)
+		var include_hidden: bool = Read.as_bool(params.get("include_hidden", false))
+		return await _wait_until_said(node_path, says, timeout_ms, include_hidden)
 	if property.is_empty():
 		return {"type": "error", "message": "A property and a value, or says, are required"}
 	if not params.has("value"):
@@ -196,34 +197,40 @@ func wait_until(params: Dictionary) -> Dictionary:
 ## on a node that was freed a frame later, and that is what it answered: the date along the top of a
 ## hall could not be waited on at all. What a caller is watching for is a word arriving on a screen,
 ## and the screen is the part that stays put.
-func _wait_until_said(node_path: String, said: String, timeout_ms: int) -> Dictionary:
+##
+## On the screen, which is to say shown: a control carrying the words while hidden satisfied the
+## wait at once, so a duel screen whose "Carry on" button exists hidden through the whole sweep
+## answered met in two milliseconds while the sweep was still animating, and every wait on that
+## screen fell back to counting frames. [param include_hidden] asks the other question, for a
+## caller waiting on words a hidden node holds.
+func _wait_until_said(node_path: String, said: String, timeout_ms: int, include_hidden: bool) -> Dictionary:
 	var started: int = Time.get_ticks_msec()
 	var words: String = Queries.as_said(said)
-	var found: bool = _anything_says(node_path, words)
+	var found: bool = _anything_says(node_path, words, include_hidden)
 	while not found and Time.get_ticks_msec() - started < timeout_ms:
 		await _host.get_tree().process_frame
-		found = _anything_says(node_path, words)
+		found = _anything_says(node_path, words, include_hidden)
 
 	return {
 		"type": "condition",
 		"path": node_path,
 		"says": said,
 		"met": found,
+		"include_hidden": include_hidden,
 		"elapsed_ms": Time.get_ticks_msec() - started,
 	}
 
 
-## Whether anything under [param node_path] says [param said], the node itself included. Hidden
-## nodes count, for the reason a find answers off them: a caller may be waiting for a dialog that
-## is built before it is shown.
-func _anything_says(node_path: String, said: String) -> bool:
+## Whether anything under [param node_path] says [param said], the node itself included, and shown
+## unless hidden ones are wanted too.
+func _anything_says(node_path: String, said: String, include_hidden: bool) -> bool:
 	var root: Node = _host.get_tree().root.get_node_or_null(node_path)
 	if root == null:
 		return false
 	var pending: Array[Node] = [root]
 	while not pending.is_empty():
 		var node: Node = pending.pop_back()
-		if Queries.said_by(node).containsn(said):
+		if Queries.said_by(node).containsn(said) and (include_hidden or Queries.shown(node)):
 			return true
 		pending.append_array(node.get_children(true))
 	return false
