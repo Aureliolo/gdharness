@@ -4761,7 +4761,7 @@ function testTheCureIsWrittenWhole(): void {
   ];
   // What the tree holds today and not a comfortable minimum, so one place going quiet lowers this
   // in the same change and somebody confirms it was meant.
-  assert.equal(offered.length, 22, `the places offering a remedy should all be found, not ${offered.length}`);
+  assert.equal(offered.length, 24, `the places offering a remedy should all be found, not ${offered.length}`);
 
   // Across whitespace, because a rendered file wraps where the source did not and a sentence that
   // breaks at "the" is the same sentence. Change, edit and touch, because the claim is about what
@@ -13465,7 +13465,12 @@ async function testARepairThatCouldNotRunIsNotReported(): Promise<void> {
       // from the list this editor is holding, which is the whole of what the real one does to it.
       if (tool === 'rescan_filesystem' && args['statusOnly'] !== true) {
         scans += 1;
-        const entries = holds.map((name) => `{\n"class": &"${name}",\n"path": "res://${name}.gd"\n}`);
+        // At the path the script is at, as the editor writes it: an entry at a path that is not on
+        // disk is a ghost the scan takes out, and a stand-in that spelt the path with a capital was
+        // one on the Linux leg alone.
+        const entries = holds.map(
+          (name) => `{\n"class": &"${name}",\n"path": "res://${name.toLowerCase()}.gd"\n}`,
+        );
         writeFileSync(cache, `list=[${entries.join(', ')}]\n`);
       }
       const result =

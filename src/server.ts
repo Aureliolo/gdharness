@@ -38,6 +38,7 @@ import {
 import { readBreakpointNote, writeBreakpointNote } from './breakpoint-note.js';
 import { announceBridge, announcementPath, readAnnouncement, withdrawBridge } from './bridge-announce.js';
 import {
+  cachedAtMissingPaths,
   cachedClasses,
   cacheWrittenAt,
   classesNamedIn,
@@ -5360,6 +5361,11 @@ class GodotServer {
     const writtenBefore = projectPath === '' ? null : cacheWrittenAt(projectPath);
     const blind = await this.classesTheEditorCannotSee(args);
     const atRisk = before === null ? [] : blind.unseen.filter((one) => before.has(one.className));
+    // The other direction, and the more damaging one: a class the editor still holds for a script
+    // that is gone. The scan writes the editor's list, so this comes back into the cache at a path
+    // that is not there, and the next engine to read it fails on a correct script. Known before
+    // the scan, from the editor's own list, so the write can be waited for and then undone.
+    const ghosts = blind.stillHeld ?? [];
 
     const first = await this.handleViaBridge('rescan_filesystem', args);
     if (first.isError) {
@@ -5390,7 +5396,11 @@ class GodotServer {
     // editor goes idle reads the one that is about to be replaced. Waited for only where a class
     // is known to be at risk, because an editor holding every class the cache holds writes the
     // same list back and the old file and the new one then say the same thing.
-    if (!busy && projectPath !== '' && (atRisk.length > 0 || blind.unchecked !== undefined)) {
+    if (
+      !busy &&
+      projectPath !== '' &&
+      (atRisk.length > 0 || ghosts.length > 0 || blind.unchecked !== undefined)
+    ) {
       const until = Date.now() + CACHE_WRITE_MS;
       while (Date.now() < until && cacheWrittenAt(projectPath) === writtenBefore) {
         await new Promise((settle) => setTimeout(settle, 100));
@@ -5400,13 +5410,25 @@ class GodotServer {
     const after = projectPath === '' || busy ? null : cachedClasses(projectPath);
     const lost =
       before === null || after === null ? [] : [...before.keys()].filter((name) => !after.has(name));
+    // What the scan wrote for a file that is not there, read off the cache itself rather than off
+    // the editor's list: the invariant is the file, and an entry naming a path that does not exist
+    // is wrong whoever put it there.
+    const atMissingPaths = after === null ? [] : cachedAtMissingPaths(after, projectPath);
 
     // Put back rather than reported. The scan is worth running even when it costs the cache: on a
     // class the editor has simply not walked yet, scanning is the cure, and refusing on that
     // evidence refuses the call that fixes it. What is not worth leaving is the file, so the
     // rebuild that the note used to tell the caller to run is run here instead. It reads the files
-    // rather than the editor, so a class genuinely deleted stays deleted.
-    const restored = lost.length > 0 ? await this.rebuildCacheAfterLoss(projectPath, lost) : [];
+    // rather than the editor, so a class genuinely deleted stays deleted, which is also what takes
+    // an entry at a missing path out.
+    const restored =
+      lost.length > 0 || atMissingPaths.length > 0 ? await this.rebuildCacheAfterLoss(projectPath, lost) : [];
+    const rebuilt = atMissingPaths.length > 0 ? cachedClasses(projectPath) : null;
+    const dropped =
+      rebuilt === null
+        ? []
+        : atMissingPaths.filter((name) => !cachedAtMissingPaths(rebuilt, projectPath).includes(name));
+    const stillAtMissingPaths = atMissingPaths.filter((name) => !dropped.includes(name));
 
     // After the scan rather than before it. The scan settles what the editor knows about the files;
     // this settles what it has already built from one of them, and building from a file the scan
@@ -5431,8 +5453,40 @@ class GodotServer {
     const checked = busy ? { unseen: [] } : await this.classesTheEditorCannotSee(args);
     const unseen = checked.unseen;
     const stillGone = lost.filter((name) => !restored.includes(name));
+    const notes: string[] = [];
+    if (busy) {
+      notes.push(
+        'The editor was still scanning or importing when the wait ran out, so new files may not be visible yet.',
+      );
+    } else if (stillGone.length > 0) {
+      notes.push(
+        'The scan wrote the class cache from the list this editor is holding, that list is shorter than the file was, and rebuilding the cache from the files did not bring these back. Every engine that reads the cache next, including a test run, will report them as unknown identifiers. Restart the editor with editor_launch restart before scanning again.',
+      );
+    } else if (lost.length > 0) {
+      notes.push(
+        'The scan wrote the class cache from the list this editor is holding, which is shorter than the file was, so the cache was rebuilt from the files and these classes are back in it. Nothing was lost, but this editor is still holding the short list: do not rescan again until it has been restarted with editor_launch restart, because it will write the same list over the file each time.',
+      );
+    } else if (unseen.length > 0) {
+      notes.push(
+        'The scan finished and these classes are still not in the list the editor resolves against, so every use of them reads as an unknown identifier. Its walk skips a file another engine has already imported. Rescan again on its own, which is the measured cure and needs no change to the declaring script, or restart the editor with editor_launch restart.',
+      );
+    }
+    if (stillAtMissingPaths.length > 0) {
+      notes.push(
+        `The scan wrote the class cache with ${stillAtMissingPaths.join(', ')} at a path that is not on disk, and rebuilding the cache from the files did not take it out. The next engine to read the cache fails on "Could not parse global class" in whichever correct script shares the bare name. Restart the editor with editor_launch restart, then run project_import refresh_classes.`,
+      );
+    } else if (dropped.length > 0) {
+      notes.push(
+        `The scan wrote the class cache from the list this editor is holding, and that list still has ${dropped.join(', ')} for a script that is gone, so the cache was rebuilt from the files without it. The editor goes on holding it and writes it back on every scan until it is restarted with editor_launch restart; until then a scan is followed by this same rebuild.`,
+      );
+    }
     return this.jsonTextResponse({
-      ok: !busy && unseen.length === 0 && stillGone.length === 0 && checked.unchecked === undefined,
+      ok:
+        !busy &&
+        unseen.length === 0 &&
+        stillGone.length === 0 &&
+        stillAtMissingPaths.length === 0 &&
+        checked.unchecked === undefined,
       stillWorking: busy,
       waitedMs: Date.now() - started,
       // Both readings, because they answer different questions. What the copy held before says
@@ -5444,16 +5498,10 @@ class GodotServer {
       unseenByEditor: unseen.length > 0 ? unseen : undefined,
       cacheLost: lost.length > 0 ? lost : undefined,
       cacheRestored: restored.length > 0 ? restored : undefined,
+      cacheDropped: dropped.length > 0 ? dropped : undefined,
+      cacheAtMissingPaths: stillAtMissingPaths.length > 0 ? stillAtMissingPaths : undefined,
       classesUnchecked: checked.unchecked,
-      note: busy
-        ? 'The editor was still scanning or importing when the wait ran out, so new files may not be visible yet.'
-        : stillGone.length > 0
-          ? 'The scan wrote the class cache from the list this editor is holding, that list is shorter than the file was, and rebuilding the cache from the files did not bring these back. Every engine that reads the cache next, including a test run, will report them as unknown identifiers. Restart the editor with editor_launch restart before scanning again.'
-          : lost.length > 0
-            ? 'The scan wrote the class cache from the list this editor is holding, which is shorter than the file was, so the cache was rebuilt from the files and these classes are back in it. Nothing was lost, but this editor is still holding the short list: do not rescan again until it has been restarted with editor_launch restart, because it will write the same list over the file each time.'
-            : unseen.length > 0
-              ? 'The scan finished and these classes are still not in the list the editor resolves against, so every use of them reads as an unknown identifier. Its walk skips a file another engine has already imported. Rescan again on its own, which is the measured cure and needs no change to the declaring script, or restart the editor with editor_launch restart.'
-              : undefined,
+      note: notes.length > 0 ? notes.join(' ') : undefined,
     });
   }
 
