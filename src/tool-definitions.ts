@@ -1146,7 +1146,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'boolean',
         ops: ['action', 'key', 'mouse_click'],
         description:
-          'action, key: leave it out and the press is a whole one, down and up a frame apart. true holds it down, false lets go of one being held. mouse_click is one raw event, so it is down unless you say false.',
+          'action, key: leave it out and the press is a whole one, down and up a frame apart. true holds it down, false lets go of one being held. mouse_click is one raw event, so it is down unless you say false; a wheel button down is a whole step, since a wheel is never held.',
       },
       strength: { type: 'number', ops: ['action'], description: 'action: 0 to 1. Default 1.' },
       keycode: {
@@ -1233,7 +1233,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       mouse_click: {
         summary:
-          'one mouse button event at a position, carrying the buttons held once it has happened. A drag is a press held with pressed true, motions, and a release with pressed false',
+          'one mouse button event at a position, carrying the buttons held once it has happened. A drag is a press held with pressed true, motions, and a release with pressed false. A wheel button is a whole step, press and release together as a mouse sends one, and the answer says released: a lone wheel press holds the viewport on the control that took it, so every click after it lands there',
         requires: ['x', 'y'],
       },
       mouse_motion: {
