@@ -7650,6 +7650,34 @@ async function testAGameTheEditorHasStoppedPlayingIsNotStillActive(): Promise<vo
       false,
       `and the run should not still be reported as active: ${JSON.stringify(afterwards)}`,
     );
+
+    // The same answer from the two calls that used to have their own: editor_output said running
+    // about this game for the rest of the session, and editor_run wait sat out its whole budget,
+    // because both read a record that no process number could ever contradict. A game the editor
+    // plays and that announced no runtime is the editor's to report on, and it said it had stopped.
+    const began = Date.now();
+    const waited = parseTextContent(
+      await server.request(
+        'tools/call',
+        { name: 'editor_run', arguments: { op: 'wait', timeoutMs: 20_000 } },
+        30_000,
+      ),
+    );
+    assert.equal(
+      get(waited, 'running'),
+      false,
+      `a wait on a run the editor says is over ends at once: ${JSON.stringify(waited)}`,
+    );
+    assert.ok(Date.now() - began < 5000, `and does not sit out its budget: ${Date.now() - began}ms of 20000`);
+    const output = parseTextContent(
+      await server.request('tools/call', { name: 'editor_output', arguments: {} }),
+    );
+    assert.equal(get(output, 'running'), false, `and editor_output says the same: ${JSON.stringify(output)}`);
+    assert.equal(
+      get(output, 'endedUnwatched'),
+      true,
+      `as a run that ended with nobody collecting its code: ${JSON.stringify(output)}`,
+    );
   } finally {
     editor?.close();
     await server.stop();
