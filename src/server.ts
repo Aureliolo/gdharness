@@ -225,6 +225,17 @@ function projectSpelling(projectPath: string, absolutePath: string): string {
 }
 
 /**
+ * The two arguments that pick a game for a runtime command, carried as the caller gave them.
+ *
+ * Every runtime tool takes them and every op forwards them, so they are lifted off the call in
+ * one place rather than named at each of the thirteen sites, where one site forgetting `pid`
+ * would be a tool that refuses a bench's workers while the others answer.
+ */
+function whichGame(args: OperationParams): { projectPath: unknown; pid: unknown } {
+  return { projectPath: args['projectPath'], pid: args['pid'] };
+}
+
+/**
  * Why a game is sitting still, as a clause: the adapter's reason, and its own words for an error.
  *
  * Godot reports `breakpoint`, `step` and `exception`; `attached` is this side's word for a hold
@@ -1519,7 +1530,7 @@ class GodotServer {
         switch (op) {
           case 'tree':
             return await this.handleRuntimeCommand('get_tree', {
-              projectPath: args['projectPath'],
+              ...whichGame(args),
               root: readNonEmptyString(args, 'nodePath') ?? '/root',
               depth: readPositiveNumber(args, 'depth') ?? 3,
               include_properties: readBoolean(args, 'includeProperties') ?? false,
@@ -1528,25 +1539,25 @@ class GodotServer {
             return await this.handleFindRuntimeNodes(args);
           case 'text':
             return await this.handleRuntimeCommand('read_text', {
-              projectPath: args['projectPath'],
+              ...whichGame(args),
               root: readNonEmptyString(args, 'nodePath') ?? '/root',
               include_hidden: readBoolean(args, 'includeHidden') ?? false,
               limit: readPositiveNumber(args, 'limit') ?? 500,
             });
           case 'rect':
             return await this.handleRuntimeCommand('get_rect', {
-              projectPath: args['projectPath'],
+              ...whichGame(args),
               path: readNonEmptyString(args, 'nodePath') ?? '',
             });
           case 'property':
             return await this.handleRuntimeCommand('get_property', {
-              projectPath: args['projectPath'],
+              ...whichGame(args),
               path: readNonEmptyString(args, 'nodePath') ?? '',
               property: readNonEmptyString(args, 'property') ?? '',
             });
           default:
             return await this.handleRuntimeCommand('get_metrics', {
-              projectPath: args['projectPath'],
+              ...whichGame(args),
               metrics: readArray(args, 'metrics') ?? [],
             });
         }
@@ -1555,13 +1566,13 @@ class GodotServer {
         // on the game's side.
         return op === 'set'
           ? await this.handleRuntimeCommand('set_property', {
-              projectPath: args['projectPath'],
+              ...whichGame(args),
               path: readNonEmptyString(args, 'nodePath') ?? '',
               property: readString(args, 'property') ?? '',
               value: args['value'],
             })
           : await this.handleRuntimeCommand('call_method', {
-              projectPath: args['projectPath'],
+              ...whichGame(args),
               path: readNonEmptyString(args, 'nodePath') ?? '',
               method: readString(args, 'method') ?? '',
               args: readArray(args, 'args') ?? [],
@@ -1574,7 +1585,7 @@ class GodotServer {
       case 'runtime_input':
         if (op === 'click') {
           return await this.handleRuntimeCommand('click', {
-            projectPath: args['projectPath'],
+            ...whichGame(args),
             path: readNonEmptyString(args, 'nodePath') ?? '',
             button: readString(args, 'button') ?? 'left',
             double: readBoolean(args, 'doubleClick') ?? false,
@@ -1584,7 +1595,7 @@ class GodotServer {
           // `index` is passed on only when it was given, because the addon reads whether it is
           // there as which of the two ways the caller named the item.
           return await this.handleRuntimeCommand('choose', {
-            projectPath: args['projectPath'],
+            ...whichGame(args),
             path: readNonEmptyString(args, 'nodePath') ?? '',
             text: readString(args, 'text') ?? '',
             ...(args['index'] === undefined ? {} : { index: args['index'] }),
@@ -4349,12 +4360,28 @@ class GodotServer {
     const until = Date.now() + budgetMs;
     // Drained as it goes rather than once at the end: the pipes are what the output is read from,
     // and a run that fills them while nobody reads blocks on its own print.
-    while (stillRunning(run) && Date.now() < until) {
+    while ((await this.runStillGoing(run)) && Date.now() < until) {
       this.drainEditorOutput(run);
       this.drainTranscript(run);
       await delay(RUN_POLL_MS);
     }
-    return await this.handleGetDebugOutput(args, stillRunning(run) ? budgetMs : undefined);
+    return await this.handleGetDebugOutput(args, (await this.runStillGoing(run)) ? budgetMs : undefined);
+  }
+
+  /**
+   * Whether a run is still going, asked of whoever can say.
+   *
+   * The operating system, for every run with a process to ask about. The editor, for a run it is
+   * playing whose game announced no runtime: that run has no process number of any kind, so
+   * `stillRunning` alone can only say yes for as long as the record lasts, and editor_output said
+   * `running: true` about such a game for the rest of the session while its own note claimed the
+   * editor had been asked. editor_run wait sat out its whole budget on the same reading.
+   */
+  private async runStillGoing(run: GodotProcess): Promise<boolean> {
+    if (!run.throughEditor || run.announcedPid !== undefined) {
+      return stillRunning(run);
+    }
+    return runIsUp(run, (await this.editorPlayingState())?.playing ?? null);
   }
 
   private async handleGetDebugOutput(args: OperationParams, waitedMs?: number): Promise<ToolResponse> {
@@ -4367,7 +4394,8 @@ class GodotServer {
     this.drainTranscript(run);
     // A run picked up alive and since ended, caught here rather than left reading as running. The
     // last of its output is already in, because the drain above ran first.
-    if (run.endedUnwatched !== true && !stillRunning(run)) {
+    const going = await this.runStillGoing(run);
+    if (run.endedUnwatched !== true && !going) {
       run.log.finish();
       run.endedUnwatched = run.exitCode === null;
     }
@@ -4467,7 +4495,7 @@ class GodotServer {
       );
     }
     return this.jsonTextResponse({
-      running: stillRunning(run),
+      running: going,
       exitCode: run.exitCode,
       through: run.throughEditor ? 'editor' : 'gdharness',
       pid: run.pid,
@@ -4524,6 +4552,8 @@ class GodotServer {
     }
     this.drainEditorOutput(stopped);
     this.drainTranscript(stopped);
+    // Read before the stop, since a game that goes on the stop is one that was running.
+    const wasRunning = await this.runStillGoing(stopped);
     this.logDebug('Stopping the running game');
     await this.endActiveGame('editor_run stop');
     return this.jsonTextResponse({
@@ -4536,14 +4566,19 @@ class GodotServer {
       // won. A stop that says which process it ended is one a caller can compare against what they
       // know their game started; one that says "stopped" is not.
       endedPid: stopped.pid,
-      exitedBeforeStop: stopped.exitCode !== null,
+      // Whether there was anything left to stop. A run whose exit nobody collected, which is a
+      // played run picked up after a reconnect and gone since, has no exit code and is over all
+      // the same; answering false there said a game had been ended that had ended itself.
+      exitedBeforeStop: stopped.exitCode !== null || !wasRunning,
       exitCode: stopped.exitCode,
       errors: stopped.log.count('error'),
       warnings: stopped.log.count('warning'),
       clean: stopped.log.count('error') === 0,
-      note: stopped.throughEditor
-        ? "The editor was asked to stop the scene it is playing. Anything that game started for itself, with OS.create_process or otherwise, is not the editor's to stop and is still running."
-        : 'The process named under endedPid was ended. Anything that game started for itself, with OS.create_process or otherwise, is a separate process and is still running.',
+      note: !wasRunning
+        ? 'This run was over before the stop, so nothing was ended here: editor_output has what it printed and how it ended. Anything that game started for itself, with OS.create_process or otherwise, is a separate process and may still be running.'
+        : stopped.throughEditor
+          ? "The editor was asked to stop the scene it is playing. Anything that game started for itself, with OS.create_process or otherwise, is not the editor's to stop and is still running."
+          : 'The process named under endedPid was ended. Anything that game started for itself, with OS.create_process or otherwise, is a separate process and is still running.',
       entries: forAnswer(
         stopped.log.select({ severity: 'warning', sinceLastCall: false, limit: 200 }).entries,
       ),
@@ -4926,16 +4961,18 @@ class GodotServer {
     args: unknown,
     timeoutMs: number = this.runtimeTimeoutMs(),
   ): Promise<ToolResponse> {
-    const { op: _op, projectPath, ...params } = asParams(args);
+    const { op: _op, projectPath, pid, ...params } = asParams(args);
     const announced = runtimesAnnounced();
     // A server set up for a project answers about that project's game and no other. Two
     // projects open in two harness sessions are two games announced on the same machine, and
     // without this the second one to start is a game this server would talk to as readily as
-    // its own, with nothing in the answer saying which it reached.
+    // its own, with nothing in the answer saying which it reached. A pid picks one game out of
+    // several running from one project, which is what a bench with workers is.
     const choice = chooseRuntime(
       announced.running,
       typeof projectPath === 'string' ? projectPath : (this.ownProject ?? undefined),
       announced.unspoken,
+      typeof pid === 'number' ? pid : undefined,
     );
     if ('problem' in choice) {
       return this.createErrorResponse(choice.problem);
@@ -5026,7 +5063,7 @@ class GodotServer {
     const includeHidden = readBoolean(args, 'includeHidden');
     return await this.handleRuntimeCommand('find_nodes', {
       ...filters,
-      projectPath: args['projectPath'],
+      ...whichGame(args),
       root: readNonEmptyString(args, 'nodePath') ?? '/root',
       limit: readPositiveNumber(args, 'limit') ?? 100,
       ...(property === undefined ? {} : { property }),
@@ -5052,11 +5089,7 @@ class GodotServer {
       // than off `timeoutMs`, which this op does not take: how long a run of frames is worth
       // waiting for is the count, and a second knob on it is one nobody could set correctly.
       const waited = patienceForFrames(frames, this.runtimeTimeoutMs());
-      return await this.handleRuntimeCommand(
-        'wait_frames',
-        { projectPath: args['projectPath'], frames },
-        waited,
-      );
+      return await this.handleRuntimeCommand('wait_frames', { ...whichGame(args), frames }, waited);
     }
 
     const timeoutMs = readPositiveNumber(args, 'timeoutMs') ?? 5000;
@@ -5066,7 +5099,7 @@ class GodotServer {
       ? await this.handleRuntimeCommand(
           'wait_signal',
           {
-            projectPath: args['projectPath'],
+            ...whichGame(args),
             path: nodePath,
             signal: readString(args, 'signal') ?? '',
             timeout_ms: timeoutMs,
@@ -5076,7 +5109,7 @@ class GodotServer {
       : await this.handleRuntimeCommand(
           'wait_until',
           {
-            projectPath: args['projectPath'],
+            ...whichGame(args),
             path: nodePath,
             property: readString(args, 'property') ?? '',
             value: args['value'],

@@ -40,7 +40,7 @@ import {
   unloadedTypes,
   unseenByEditor,
 } from '../src/class-cache.js';
-import { GodotDAPClient, type HeldBreakpoint } from '../src/dap_client.js';
+import { GodotDAPClient, type HeldBreakpoint, handleDAPTool } from '../src/dap_client.js';
 import { dictionary, emptyRecord } from '../src/dictionary.js';
 import { forAnswer, GameLog } from '../src/game-log.js';
 import {
@@ -84,6 +84,7 @@ import {
   chooseRuntime,
   discoverRuntimes,
   RUNTIME_PROTOCOL,
+  type RuntimeEndpoint,
   runtimeDirectories,
   runtimeDirectory,
   runtimesAnnounced,
@@ -1378,6 +1379,59 @@ async function testABreakpointSetHereKeepsTheEditorsOwn(): Promise<void> {
 }
 
 /**
+ * A breakpoint the adapter refuses is refused about the editor and the file, not about a game.
+ *
+ * Every debug tool's failure closed with "start one with editor_run", and a breakpoint is set on
+ * the editor's adapter with no game running: a caller whose script the adapter could not find was
+ * sent to start a game that would not have helped. The stack tools keep the sentence, since a
+ * session is what they need.
+ */
+async function testABreakpointRefusalNamesTheEditor(): Promise<void> {
+  const respond: FramedPeerHandler = (message, socket) => {
+    const command = String(message['command']);
+    const refused = command === 'setBreakpoints' || command === 'attach';
+    socket.write(
+      frameJsonRpc({
+        seq: Number(message['seq']) + 100,
+        type: 'response',
+        request_seq: message['seq'],
+        command,
+        success: !refused,
+        ...(refused
+          ? { message: command === 'attach' ? 'Not running' : 'Unable to find file at: gone.gd' }
+          : { body: {} }),
+      }),
+    );
+  };
+  await withFramedPeer(respond, async (port) => {
+    const client = new GodotDAPClient(port, '127.0.0.1');
+    const missing = await handleDAPTool(client, 'dap_set_breakpoint', {
+      scriptPath: '/game/gone.gd',
+      line: 3,
+    });
+    assert.equal(missing.isError, true, JSON.stringify(missing));
+    assert.match(
+      text(missing.content[0]?.text),
+      /Unable to find file at: gone\.gd/,
+      "the adapter's own words",
+    );
+    assert.match(
+      text(missing.content[0]?.text),
+      /Breakpoints need the editor open, not a running game/,
+      `and the cure is about the editor and the file: ${missing.content[0]?.text}`,
+    );
+    const noGame = await handleDAPTool(client, 'dap_get_stack_trace', {});
+    assert.equal(noGame.isError, true, JSON.stringify(noGame));
+    assert.match(
+      text(noGame.content[0]?.text),
+      /start one with editor_run/,
+      `a stack read with no game is still sent to start one: ${noGame.content[0]?.text}`,
+    );
+    await client.abandon();
+  });
+}
+
+/**
  * The breakpoint note round-trips through the project and refuses what is not the project's.
  *
  * Kept relative so the note is the project's rather than this machine's, read back resolved the
@@ -2437,7 +2491,7 @@ async function testAnArgumentMeantForAnotherOpIsRefused(): Promise<void> {
     // And the refusal spells out what the op does take, which is what saves the second wrong call.
     assert.match(
       await call('runtime_inspect', { op: 'text', depth: 2 }),
-      /text takes: projectPath, nodePath, limit, includeHidden/,
+      /text takes: projectPath, pid, nodePath, limit, includeHidden/,
       'and should say what text takes instead',
     );
     // The run tools ask it of three ops that share a schema, where the wrong-op argument is the
@@ -3878,6 +3932,66 @@ function testAGameTooNewToTalkToIsStillAGame(): void {
   } finally {
     sweep(root);
   }
+}
+
+/**
+ * A process id picks one game out of several running from one project.
+ *
+ * A bench fans out to thirty-one workers from the same project, every one of them announcing, and
+ * a runtime call with the project path was refused with "stop all but one", which is not advice a
+ * bench can take. The pid on every runtime tool is what picks one, and the refusals name it. A pid
+ * nobody is running, or one running another project than the path names, is refused with what is
+ * running, since a number guessed from a stale listing must not reach a different game.
+ */
+function testAPidPicksOneOfSeveralGames(): void {
+  const project = join(tmpdir(), 'gdharness-bench');
+  const other = join(tmpdir(), 'gdharness-other');
+  const game = (pid: number, path: string): RuntimeEndpoint => ({
+    pid,
+    port: 50_000 + pid,
+    address: '127.0.0.1',
+    project: { name: basename(path), path },
+    file: join(path, `runtime-${pid}.json`),
+  });
+  const workers = [game(11, project), game(12, project), game(13, project)];
+  const all = [...workers, game(21, other)];
+
+  const several = chooseRuntime(all, project);
+  assert.ok('problem' in several, 'three games from one project is a question the path cannot settle');
+  assert.match(text(get(several, 'problem')), /Several games are running from .*Pass pid to choose one/);
+  const none = chooseRuntime(all);
+  assert.match(text(get(none, 'problem')), /Pass projectPath to choose one, or pid/);
+
+  const picked = chooseRuntime(all, project, [], 12);
+  assert.deepEqual(picked, { endpoint: workers[1] }, 'the pid picks the worker, with the path agreeing');
+  const alone = chooseRuntime(all, undefined, [], 13);
+  assert.deepEqual(alone, { endpoint: workers[2] }, 'and on its own');
+
+  const wrong = chooseRuntime(all, project, [], 21);
+  assert.match(
+    text(get(wrong, 'problem')),
+    /pid 21 is running .*gdharness-other, not .*gdharness-bench/,
+    `a pid from another project is refused rather than reached: ${JSON.stringify(wrong)}`,
+  );
+  const gone = chooseRuntime(all, project, [], 99);
+  assert.match(
+    text(get(gone, 'problem')),
+    /No running game has pid 99\. Running: pid 11/,
+    JSON.stringify(gone),
+  );
+  const nothing = chooseRuntime([], undefined, [], 99);
+  assert.match(text(get(nothing, 'problem')), /none with pid 99/, JSON.stringify(nothing));
+  const tooNewOne = chooseRuntime(
+    [],
+    undefined,
+    [{ pid: 7, protocol: RUNTIME_PROTOCOL + 1, project: { name: 'x', path: project } }],
+    7,
+  );
+  assert.match(
+    text(get(tooNewOne, 'problem')),
+    /protocol this server does not speak/,
+    JSON.stringify(tooNewOne),
+  );
 }
 
 /**
@@ -7650,6 +7764,68 @@ async function testAGameTheEditorHasStoppedPlayingIsNotStillActive(): Promise<vo
       false,
       `and the run should not still be reported as active: ${JSON.stringify(afterwards)}`,
     );
+
+    // The same answer from the two calls that used to have their own: editor_output said running
+    // about this game for the rest of the session, and editor_run wait sat out its whole budget,
+    // because both read a record that no process number could ever contradict. A game the editor
+    // plays and that announced no runtime is the editor's to report on, and it said it had stopped.
+    const began = Date.now();
+    const waited = parseTextContent(
+      await server.request(
+        'tools/call',
+        { name: 'editor_run', arguments: { op: 'wait', timeoutMs: 20_000 } },
+        30_000,
+      ),
+    );
+    assert.equal(
+      get(waited, 'running'),
+      false,
+      `a wait on a run the editor says is over ends at once: ${JSON.stringify(waited)}`,
+    );
+    assert.ok(Date.now() - began < 5000, `and does not sit out its budget: ${Date.now() - began}ms of 20000`);
+    const output = parseTextContent(
+      await server.request('tools/call', { name: 'editor_output', arguments: {} }),
+    );
+    assert.equal(get(output, 'running'), false, `and editor_output says the same: ${JSON.stringify(output)}`);
+    assert.equal(
+      get(output, 'endedUnwatched'),
+      true,
+      `as a run that ended with nobody collecting its code: ${JSON.stringify(output)}`,
+    );
+    const stop = async (): Promise<unknown> =>
+      parseTextContent(await server.request('tools/call', { name: 'editor_run', arguments: { op: 'stop' } }));
+    const afterReading = await stop();
+    assert.equal(
+      get(afterReading, 'exitedBeforeStop'),
+      true,
+      `and a stop finds it over: ${JSON.stringify(afterReading)}`,
+    );
+
+    // The editor plays again and the game goes again, and this time the stop is the first call
+    // after it went: nothing has read the run, so the stop has only the editor's word to go on,
+    // and it used to claim it had ended a game that had ended itself.
+    playing = true;
+    let pickedUp = false;
+    for (let waited = 0; waited < 10_000 && !pickedUp; waited += 100) {
+      await delay(100);
+      const seen = parseTextContent(
+        await server.request('tools/call', { name: 'editor_status', arguments: {} }),
+      );
+      pickedUp = get(seen, 'game', 'processActive') === true;
+    }
+    assert.ok(pickedUp, 'the second play should be picked up, or the stop below is about nothing');
+    playing = false;
+    const first = await stop();
+    assert.equal(
+      get(first, 'exitedBeforeStop'),
+      true,
+      `a stop as the first call after the editor says the game went takes the editor's word: ${JSON.stringify(first)}`,
+    );
+    assert.match(
+      text(get(first, 'note')),
+      /over before the stop, so nothing was ended here/,
+      JSON.stringify(first),
+    );
   } finally {
     editor?.close();
     await server.stop();
@@ -7802,7 +7978,7 @@ async function testTheEditorsRunIsTheOneAnsweredFor(): Promise<void> {
  * is about is unmistakable from the wait it replaced.
  */
 async function testAStatusCallIsNotHeldByAHeldGame(): Promise<void> {
-  await withAHeldGame({ toldOnConnect: null }, async ({ server, game, gamePid }) => {
+  await withAHeldGame({ toldOnConnect: null }, async ({ server, game, gamePid, project }) => {
     const status = async (): Promise<unknown> =>
       parseTextContent(await server.request('tools/call', { name: 'editor_status', arguments: {} }, 60_000));
     const began = Date.now();
@@ -7823,6 +7999,22 @@ async function testAStatusCallIsNotHeldByAHeldGame(): Promise<void> {
     assert.ok(
       took < 15_000,
       `a held game does not cost the status call the runtime timeout: ${took}ms with the timeout at 30000`,
+    );
+
+    // A pid nobody is running is refused with what is, before anything is sent: the number reaches
+    // the chooser through the tool, which is the half a unit fixture on the chooser cannot hold.
+    const nobody = await server.request(
+      'tools/call',
+      {
+        name: 'runtime_inspect',
+        arguments: { projectPath: project, pid: 999_999_999, op: 'tree', nodePath: '/root' },
+      },
+      60_000,
+    );
+    assert.match(
+      textOf(nobody) ?? JSON.stringify(nobody),
+      new RegExp(`No running game has pid 999999999\\. Running: pid ${gamePid}`),
+      `a pid that is nobody's is refused naming who is running: ${textOf(nobody)}`,
     );
 
     // Before the game goes: running, by the process the pick-up tied it to.
@@ -7847,6 +8039,22 @@ async function testAStatusCallIsNotHeldByAHeldGame(): Promise<void> {
     assert.equal(get(over, 'running'), false, `a run whose process has gone is over: ${ended}`);
     assert.equal(get(over, 'heldAt'), null, `and held nowhere: ${ended}`);
     assert.equal(get(over, 'heldUnknown'), undefined, `with nothing left open about it: ${ended}`);
+
+    // A stop of a run that is over says nothing was ended: a picked-up run has no exit code for
+    // anybody to have collected, and the answer used to read as a game ended by this call.
+    const stop = parseTextContent(
+      await server.request('tools/call', { name: 'editor_run', arguments: { op: 'stop' } }, 60_000),
+    );
+    assert.equal(
+      get(stop, 'exitedBeforeStop'),
+      true,
+      `a run that had gone was over before the stop: ${JSON.stringify(stop)}`,
+    );
+    assert.match(
+      text(get(stop, 'note')),
+      /over before the stop, so nothing was ended here/,
+      JSON.stringify(stop),
+    );
   });
 }
 
@@ -8775,6 +8983,11 @@ async function testARunOutlivesItsServer(): Promise<void> {
 
       const stopped: unknown = JSON.parse(await call('editor_run', { op: 'stop' }, ENGINE_CALL_TIMEOUT_MS));
       assert.equal(get(stopped, 'stopped'), true, JSON.stringify(stopped));
+      assert.equal(
+        get(stopped, 'exitedBeforeStop'),
+        false,
+        `a run that was going when the stop came is said to have been ended by it: ${JSON.stringify(stopped)}`,
+      );
     }, env);
 
     await delay(1000);
@@ -10986,6 +11199,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheStaleHalfIsNamedCorrectly,
   testAGameIsFoundWhereverItAnnounced,
   testAGameTooNewToTalkToIsStillAGame,
+  testAPidPicksOneOfSeveralGames,
   testAGameThatAnnouncedAndWentIsSaidSo,
   testANotYetRuntimeIsNotTheSameAsNoRuntime,
   testARefusalDoesNotDenyTheRuntimeItCanSee,
@@ -11016,6 +11230,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAContinueByAnotherClientIsKnownHere,
   testBreakpointsAreSentAgainBeforeAPlay,
   testTheBreakpointNoteIsTheProjects,
+  testABreakpointRefusalNamesTheEditor,
   testABreakpointSetHereKeepsTheEditorsOwn,
   testAnEditorThatClearsBreakpointsIsSaidSo,
   testProjectGodotResistsPrototypeKeys,
