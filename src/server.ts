@@ -3549,6 +3549,10 @@ class GodotServer {
     if (!existsSync(join(projectPath, RUNTIME_AUTOLOAD.path))) {
       return runtimeVerdict(null, { addon: false, budgetMs, heldAt: null, running: false, withArgs });
     }
+    // The editor is asked about a run it is playing no more often than the wait loop asks it, so
+    // a look every fifty milliseconds does not become a request every fifty milliseconds.
+    let editorAskedAt = 0;
+    let editorSaysGoing = true;
     const endpoint = await announcedSince(projectPath, before, {
       budgetMs,
       // A game held at a breakpoint set before the run is not booting any more, and waiting out
@@ -3556,8 +3560,23 @@ class GodotServer {
       // anything to wait for once the process is over: a boot that fails on a parse error is
       // gone in half a second, and sitting out the rest of the budget delays the answer that
       // says so. The announcement is looked for before this is asked, so a game that announced
-      // and then quit is still found.
-      giveUp: () => this.dapClient?.isStopped() === true || !stillRunning(this.currentRun()),
+      // and then quit is still found. A run the editor plays has no process to ask, so the editor
+      // is asked instead: without that a played scene that died on boot was waited for the whole
+      // budget and then reported, correctly, as no longer running.
+      giveUp: async () => {
+        if (this.dapClient?.isStopped() === true) {
+          return true;
+        }
+        const run = this.currentRun();
+        if (run === null || !run.throughEditor) {
+          return !stillRunning(run);
+        }
+        if (Date.now() - editorAskedAt >= RUN_POLL_MS) {
+          editorAskedAt = Date.now();
+          editorSaysGoing = await this.runStillGoing(run);
+        }
+        return !editorSaysGoing;
+      },
     });
     // Kept on the run, for a run the editor is playing. That is the one kind with no handle and no
     // pid of its own, so its liveness is the editor's word and nothing else; this is a number the
