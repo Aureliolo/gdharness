@@ -2971,7 +2971,7 @@ class GodotServer {
       announced.running.map(async (endpoint) => {
         // Not asked when the session was told: a game it knows is held is listed as held, with
         // what lets it go, rather than pinged for the wait and listed as possibly paused.
-        const held = this.knownHoldOn(endpoint);
+        const held = this.knownHoldOn(endpoint, announced.running);
         const reply =
           held === null
             ? await runtimeRequest(endpoint, 'ping', {}, HOLD_PING_MS)
@@ -4137,12 +4137,14 @@ class GodotServer {
    * One and not the first of several: a bench opens many workers from one project, and a run tied
    * to the wrong worker is reported over the moment that worker finishes.
    */
-  private announcedPidOf(run: GodotProcess): number | undefined {
+  private announcedPidOf(run: GodotProcess, announced?: readonly RuntimeEndpoint[]): number | undefined {
     if (!run.throughEditor || run.announcedPid !== undefined) {
       return run.announcedPid;
     }
     const before = run.announcedBefore ?? new Set<number>();
-    const fresh = this.allAnnouncedForOurProject(runtimesAnnounced().running).filter(
+    // The caller's sweep when it has one: a status call asks this once per announced game, and a
+    // bench with thirty workers announced would otherwise read the directory thirty times over.
+    const fresh = this.allAnnouncedForOurProject(announced ?? runtimesAnnounced().running).filter(
       (one) => !before.has(one.pid),
     );
     const theOne = fresh.length === 1 ? fresh[0] : undefined;
@@ -5008,13 +5010,13 @@ class GodotServer {
    * never read off it. And only knowledge counts: a session that has not been told answers null
    * here whether the game is held or not, and the caller goes on to ask the game itself.
    */
-  private knownHoldOn(endpoint: RuntimeEndpoint): StoppedAt | null {
+  private knownHoldOn(endpoint: RuntimeEndpoint, announced?: readonly RuntimeEndpoint[]): StoppedAt | null {
     const run = this.activeProcess;
     const session = this.dapClient;
     if (run === null || !run.throughEditor || !stillRunning(run) || session === null) {
       return null;
     }
-    if (this.announcedPidOf(run) !== endpoint.pid || !session.holdIsKnown()) {
+    if (this.announcedPidOf(run, announced) !== endpoint.pid || !session.holdIsKnown()) {
       return null;
     }
     return session.whereItStopped();
@@ -5104,7 +5106,7 @@ class GodotServer {
     // whole runtime timeout, ten seconds, and then a guess that it may be paused at a breakpoint.
     // The session was told, so it says so at once and says what lets the game go. Knowledge and
     // not a default: a session opened after the stop has not been told and asks nothing here.
-    const held = this.knownHoldOn(choice.endpoint);
+    const held = this.knownHoldOn(choice.endpoint, announced.running);
     if (held !== null) {
       return this.createErrorResponse(
         `The game (pid ${choice.endpoint.pid}) is held by the editor's debugger, ${describeHalt(held)}, and answers no runtime call while it is.`,
