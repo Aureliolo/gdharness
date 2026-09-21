@@ -804,15 +804,21 @@ func _click_in_the_world(node_path: String, item: Node3D, params: Dictionary) ->
 	}
 
 
+## The buttons a real pointer event carries are the ones held as it happens, and Input keeps that
+## from every button event it is given, injected ones included, so a motion between a held click
+## and its release is a drag to a control that reads the mask rather than remembering the click.
 func _motion(position: Vector2, relative: Vector2) -> InputEventMouseMotion:
 	var event: InputEventMouseMotion = InputEventMouseMotion.new()
 	event.position = position
 	event.global_position = position
 	event.relative = relative
 	event.screen_relative = relative
+	event.button_mask = Input.get_mouse_button_mask()
 	return event
 
 
+## A button event carries the buttons held once it has happened: the pressed one among them, the
+## released one out. A wheel step is a button with no mask, as it is from a real mouse.
 func _button(position: Vector2, button: int, pressed: bool, double: bool) -> InputEventMouseButton:
 	var event: InputEventMouseButton = InputEventMouseButton.new()
 	event.position = position
@@ -820,7 +826,18 @@ func _button(position: Vector2, button: int, pressed: bool, double: bool) -> Inp
 	event.button_index = button as MouseButton
 	event.pressed = pressed
 	event.double_click = double
+	var held: int = Input.get_mouse_button_mask()
+	var own: int = _mask_of(button)
+	event.button_mask = (held | own) if pressed else (held & ~own)
 	return event
+
+
+## The mask bit for a button, which is the engine's own mapping: left 1, right 2, middle 4, the
+## two extra buttons 128 and 256. The wheel steps between have none.
+func _mask_of(button: int) -> int:
+	if button >= MOUSE_BUTTON_WHEEL_UP and button <= MOUSE_BUTTON_WHEEL_RIGHT:
+		return 0
+	return 1 << (button - 1)
 
 
 ## What to say about a name that is not a mouse button, with the ones that are.

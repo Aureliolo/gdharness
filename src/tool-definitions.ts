@@ -1214,10 +1214,14 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
           'type a string into the field being edited, a character at a time, and say what it landed in',
         requires: ['text'],
       },
-      mouse_click: { summary: 'one mouse button event at a position', requires: ['x', 'y'] },
+      mouse_click: {
+        summary:
+          'one mouse button event at a position, carrying the buttons held once it has happened. A drag is a press held with pressed true, motions, and a release with pressed false',
+        requires: ['x', 'y'],
+      },
       mouse_motion: {
         summary:
-          'move the mouse to a position, carrying the distance from where it last was unless relativeX and relativeY say otherwise, so a control that drags moves under a run of these',
+          'move the mouse to a position, carrying the distance from where it last was unless relativeX and relativeY say otherwise, and the buttons held, so a control that drags moves under a run of these between a held mouse_click and its release',
         requires: ['x', 'y'],
       },
     },
