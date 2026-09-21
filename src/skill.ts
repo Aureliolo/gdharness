@@ -91,7 +91,7 @@ that is running, and the project on disk. ${TOOL_SPECS.length} tools, named \`do
 | Where a 3D node is on screen | \`runtime_inspect\` \`rect\`, rather than unprojecting by hand |
 | Wait for something in a running game | \`runtime_wait\`, never a sleep; \`until\` with \`says\` for a panel that rebuilds its own labels |
 | Wait for a run to finish | \`editor_run wait\`, never a sleep or a shell loop on the pid: it answers as \`editor_output\` does, once the run is over |
-| End a bench and the workers it opened | \`editor_run stop\` with \`andChildren\`, never a process listing by scene name: it ends the children of the run's process that are announced as games of the project, names them under \`endedChildren\`, and leaves and names any other child |
+| End a bench and the workers it opened | \`editor_run stop\` with \`andChildren\`, never a process listing by scene name: it ends every process under the run's, to any depth, that is announced as a game of the project, names them under \`endedChildren\`, and leaves and names any other |
 | A picture, for a person who asked to see one | \`runtime_capture\` |
 
 These need the runtime autoload, which \`gdharness setup\` registers. \`runtime_capture\` needs a
