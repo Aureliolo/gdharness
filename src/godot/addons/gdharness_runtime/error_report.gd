@@ -17,6 +17,8 @@ func _init(path: String) -> void:
 	_path = path
 
 
+# The engine's own signature for a Logger, eight parameters and not this project's to shape.
+# gdlint:ignore = function-arguments-number
 func _log_error(
 	function: String,
 	file: String,
