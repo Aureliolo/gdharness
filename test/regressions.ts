@@ -7748,6 +7748,22 @@ async function testAGameTheEditorHasStoppedPlayingIsNotStillActive(): Promise<vo
       true,
       `and that run should read as active: ${JSON.stringify(whilePlaying)}`,
     );
+    // Whether it is held cannot be told: no session has been told of a stop and the game announced
+    // no runtime to ask. That is the honest answer about a game that is up, and the positive for
+    // the assertion below, which wants this note gone once the game is not.
+    assert.equal(
+      get(whilePlaying, 'game', 'heldUnknown'),
+      true,
+      `whether a played game with no runtime is held cannot be told while it is up: ${JSON.stringify(whilePlaying)}`,
+    );
+    const debugState = async (): Promise<string> =>
+      textOf(await server.request('tools/call', { name: 'debug_state', arguments: { op: 'stack' } })) ?? '';
+    const whileUp = await debugState();
+    assert.match(
+      whileUp,
+      /debug adapter did not answer/,
+      `while the game is up, a stack read goes to the adapter, which nothing here serves: ${whileUp}`,
+    );
 
     // The game quits. Nothing else changes: the record is still there and still names the run.
     playing = false;
@@ -7763,6 +7779,27 @@ async function testAGameTheEditorHasStoppedPlayingIsNotStillActive(): Promise<vo
       get(afterwards, 'game', 'processActive'),
       false,
       `and the run should not still be reported as active: ${JSON.stringify(afterwards)}`,
+    );
+    // A run that is over is held nowhere, in the same answer: the hold used to be judged from the
+    // record alone, so this call said the game might be sitting at a breakpoint beside the field
+    // saying it was gone.
+    assert.equal(
+      get(afterwards, 'game', 'heldAt'),
+      null,
+      `and a run that is over is held nowhere: ${JSON.stringify(afterwards)}`,
+    );
+    assert.equal(
+      get(afterwards, 'game', 'heldUnknown'),
+      undefined,
+      `with nothing left unknown about it: ${JSON.stringify(afterwards)}`,
+    );
+    // The debug tools say the same, rather than reporting the adapter of a game that has gone as
+    // one that did not answer about a game the editor is playing.
+    const afterGone = await debugState();
+    assert.match(
+      afterGone,
+      /The last run has already ended, so there is no debug session/,
+      `a stack read on a run the editor says is over is refused as a run that is over: ${afterGone}`,
     );
 
     // The same answer from the two calls that used to have their own: editor_output said running
@@ -7828,6 +7865,173 @@ async function testAGameTheEditorHasStoppedPlayingIsNotStillActive(): Promise<vo
     );
   } finally {
     editor?.close();
+    await server.stop();
+    sweep(project);
+    sweep(runtimeDir);
+  }
+}
+
+/**
+ * A start through the editor does not sit out its announce budget on a game that died on boot.
+ *
+ * `testAStartStopsWaitingForAGameThatIsOver` holds this for a run this server spawned, which has
+ * a process to ask. A run the editor plays has none, and the wait for its announcement read the
+ * record, which says a played run is going for as long as it lasts. So a scene that died on a
+ * parse error was waited for the whole budget and then reported, correctly, as no longer
+ * running: the right answer, five seconds late by default and as late as `runtimeWaitMs` asks.
+ * The editor is what knows, and the wait asks it the way `editor_run wait` does.
+ *
+ * The first start is the positive: while the editor says it is playing, the wait runs its
+ * budget out and says the game may yet announce. Without it the second half is satisfied by a
+ * wait that gives up on every played run at once.
+ *
+ * A socket for the editor and a scripted adapter, because what is under test is which source the
+ * wait reads, and a real editor can only be made to play a game that dies by being given one.
+ */
+async function testAPlayedStartStopsWaitingForAGameThatIsOver(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-played-over-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-played-over-rt-'));
+  const port = await reservePort();
+  const answerEverything: FramedPeerHandler = (message, socket) => {
+    const command = String(message['command']);
+    socket.write(
+      frameJsonRpc({
+        seq: Number(message['seq']) + 1000,
+        type: 'response',
+        request_seq: message['seq'],
+        command,
+        success: true,
+        body: command === 'threads' ? { threads: [] } : {},
+      }),
+    );
+  };
+  let playing = false;
+  let diesOnBoot = false;
+  const server = new ServerProcess({
+    env: {
+      GDHARNESS_BRIDGE_PORT: String(port),
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+      GODOT_PATH: process.execPath,
+    },
+  });
+  const editor: { socket: WebSocket | null } = { socket: null };
+  try {
+    await withFramedPeer(answerEverything, async (adapter) => {
+      writeFileSync(
+        join(project, 'project.godot'),
+        '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Played"\n' +
+          'run/main_scene="res://main.tscn"\n',
+      );
+      writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
+      // The wait only happens for a project that could announce, which is one with the addon on
+      // disk. Nothing runs it here.
+      mkdirSync(join(project, 'addons', 'gdharness_runtime'), { recursive: true });
+      writeFileSync(join(project, 'addons', 'gdharness_runtime', 'runtime_autoload.gd'), 'extends Node\n');
+      await server.initialize('regression-test');
+
+      const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+      editor.socket = socket;
+      await new Promise<void>((resolve, reject) => {
+        socket.once('open', () => {
+          resolve();
+        });
+        socket.once('error', reject);
+      });
+      socket.on('message', (raw: Buffer) => {
+        const message: unknown = JSON.parse(String(raw));
+        if (!isRecord(message) || message['type'] !== 'tool_invoke') {
+          return;
+        }
+        const tool = String(message['tool']);
+        let result: Record<string, unknown> = { ok: true };
+        if (tool === 'play_scene') {
+          // Answered as the editor answers it, with the game just spawned. Whether that game is
+          // still there by the time anybody asks is the variable below.
+          playing = !diesOnBoot;
+          result = { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
+        } else if (tool === 'stop_playing') {
+          playing = false;
+        } else if (tool === 'playing_status') {
+          result = { ok: true, playing, scenePath: playing ? 'res://main.tscn' : '', debugPort: adapter };
+        }
+        socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result }));
+      });
+      socket.send(
+        JSON.stringify({
+          type: 'godot_ready',
+          project_path: project,
+          addon_version: SERVER_VERSION,
+          dap_port: adapter,
+        }),
+      );
+      let greeted = false;
+      for (let waited = 0; waited < 10_000 && !greeted; waited += 100) {
+        await delay(100);
+        const seen = parseTextContent(
+          await server.request('tools/call', { name: 'editor_status', arguments: {} }),
+        );
+        greeted = text(get(seen, 'editor', 'projectPath')) === project;
+      }
+      assert.ok(greeted, 'the fake editor should have been greeted, or nothing below is reached');
+
+      // Windowed, said outright: a start on a host with no display is headless unless told
+      // otherwise, and a headless start is spawned rather than played, which is a different case.
+      const start = async (runtimeWaitMs: number): Promise<{ answer: unknown; waitedMs: number }> => {
+        const began = Date.now();
+        const answer = parseTextContent(
+          await server.request(
+            'tools/call',
+            {
+              name: 'editor_run',
+              arguments: { projectPath: project, op: 'start', headless: false, runtimeWaitMs },
+            },
+            30_000,
+          ),
+        );
+        return { answer, waitedMs: Date.now() - began };
+      };
+
+      const going = await start(1_500);
+      assert.equal(get(going.answer, 'through'), 'editor', JSON.stringify(going.answer));
+      assert.equal(
+        get(going.answer, 'runtime', 'mayYetAnnounce'),
+        true,
+        `a played game the editor still reports may yet announce: ${JSON.stringify(going.answer)}`,
+      );
+      assert.ok(
+        going.waitedMs >= 1_500,
+        `and is waited for the whole budget while the editor says it is playing: ${going.waitedMs}ms of 1500`,
+      );
+
+      diesOnBoot = true;
+      const over = await start(10_000);
+      assert.equal(get(over.answer, 'through'), 'editor', JSON.stringify(over.answer));
+      assert.equal(
+        get(over.answer, 'runtime', 'mayYetAnnounce'),
+        false,
+        `a played game the editor says is over is not going to announce: ${JSON.stringify(over.answer)}`,
+      );
+      assert.match(
+        text(get(over.answer, 'runtime', 'note')),
+        /no longer running/,
+        JSON.stringify(over.answer),
+      );
+      assert.ok(
+        over.waitedMs < 5_000,
+        `and the answer does not wait out the budget: ${over.waitedMs}ms of 10000`,
+      );
+      // With an adapter that answers everything, so the refusal can only come from the editor's
+      // word: attached and read, the adapter would say the game is running with no stack.
+      const stack =
+        textOf(await server.request('tools/call', { name: 'debug_state', arguments: { op: 'stack' } })) ?? '';
+      assert.match(
+        stack,
+        /The last run has already ended, so there is no debug session/,
+        `a stack read on the run that died is refused as a run that is over: ${stack}`,
+      );
+    });
+  } finally {
+    editor.socket?.terminate();
     await server.stop();
     sweep(project);
     sweep(runtimeDir);
@@ -11164,6 +11368,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARuntimeCallToAHeldGameIsRefusedAtOnce,
   testAnEditorOnAnotherVersionIsStillAskedWhatItIsPlaying,
   testAGameTheEditorHasStoppedPlayingIsNotStillActive,
+  testAPlayedStartStopsWaitingForAGameThatIsOver,
   testASettingTheEditorDroppedIsNamed,
   testACleanupThatCannotFinishStillFinishes,
   testADiagnosticTheFileContradictsIsNamed,
