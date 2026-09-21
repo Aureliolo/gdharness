@@ -121,7 +121,8 @@ browser lookup. If no check ran, say so rather than calling it verified.
   `runtime_wait` instead of sleeping.
 - Colons in a property or method name reach through the objects a node holds, `_game:clock:speed`
   to read or write one and `_game:run:advance` to call one, which is where a game keeps its state
-  and most of what it does.
+  and most of what it does. A step written as a call, `get_viewport():gui_get_focus_owner`, walks
+  into what a method taking no arguments returned, for the questions only a method answers.
 - A refusal names the state it is in and what changes it. Read it rather than retrying.
 
 ## Reference

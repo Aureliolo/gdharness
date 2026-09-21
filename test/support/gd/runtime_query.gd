@@ -47,6 +47,18 @@ class Person:
 var held: Kept = Kept.new()
 var roster: Array = [Person.new("Ada"), Person.new("Bram")]
 var tray: Dictionary = {"post": 3, "wages": 12}
+
+
+func keeper() -> Kept:
+	return held
+
+
+func first(index: int) -> Person:
+	return roster[index]
+
+
+func anyone(index: int = 0) -> Person:
+	return roster[index]
 """
 
 var failures: Array[String] = []
@@ -483,6 +495,103 @@ func _check_calling_through_a_path() -> void:
 		_fail("and a method the holder has not got names the holder it looked on: %s" % str(unknown))
 
 
+## A step written as a call walks into what the method returned.
+##
+## Some of what hangs off a node is only reachable by asking: which control holds the focus is a
+## question for the viewport a control is in, and the viewport is a method's answer rather than a
+## property. A project asked "get_viewport:gui_get_focus_owner" of a control and was refused for a
+## property the control has not got, then found the answer by knowing which window the control was
+## in. The brackets are what make a step a call, so a method spelled bare is refused with the
+## spelling that would have worked, a method that needs an argument is refused as one, and a call is
+## walked through by a read, a write, a method call and a wait alike. A write onto the call itself is
+## refused, since what a method returns is not a place.
+##
+## The wait is the one that walks again every frame: the holder a path found at the start is not
+## the one the game holds a frame later when the game replaces it, so a run object built afresh each
+## day would leave a wait watching the day before.
+func _check_calling_a_step_along_the_path(hero: Node2D, button: Button) -> void:
+	var before: Dictionary = await node._execute_command(
+		"get_property", {"path": "/root/Level/Hero", "property": "held:inner:depth"}
+	)
+	var was: int = Read.as_int(before.get("value", 0))
+
+	var through: Dictionary = await node._execute_command(
+		"get_property", {"path": "/root/Level/Hero", "property": "keeper():inner:depth"}
+	)
+	if through.get("type") != "property" or through.get("value") != was:
+		_fail("a step written as a call walks into what the method returned: %s" % str(through))
+
+	button.grab_focus()
+	var focused: Dictionary = await node._execute_command(
+		"call_method", {"path": "/root/Panel/Go", "method": "get_viewport():gui_get_focus_owner"}
+	)
+	var owner: Dictionary = focused.get("result", {}) if focused.get("result") is Dictionary else {}
+	if focused.get("type") != "method_result" or owner.get("path") != "/root/Panel/Go":
+		_fail("who holds the focus in the viewport a control is in is one call: %s" % str(focused))
+
+	var bare: Dictionary = await node._execute_command(
+		"get_property", {"path": "/root/Level/Hero", "property": "keeper:inner:depth"}
+	)
+	var hinted: String = str(bare.get("message", ""))
+	if bare.get("type") != "error" or not hinted.contains("which a path calls as keeper()"):
+		_fail("a method spelled as a property is refused with the spelling that calls it: %s" % str(bare))
+
+	var needing: Dictionary = await node._execute_command(
+		"get_property", {"path": "/root/Level/Hero", "property": "first():called"}
+	)
+	var refused: String = str(needing.get("message", ""))
+	if needing.get("type") != "error" or not refused.contains("takes 1 argument, and a path can only call"):
+		_fail("a method that needs an argument is refused as one: %s" % str(needing))
+
+	var defaulted: Dictionary = await node._execute_command(
+		"get_property", {"path": "/root/Level/Hero", "property": "anyone():called"}
+	)
+	if defaulted.get("value") != "Ada":
+		_fail("a method whose arguments all have defaults is called with none: %s" % str(defaulted))
+
+	var no_such: Dictionary = await node._execute_command(
+		"get_property", {"path": "/root/Level/Hero", "property": "nobody():called"}
+	)
+	if no_such.get("type") != "error" or not str(no_such.get("message", "")).contains("has no method nobody"):
+		_fail("a call to a method the holder has not got says so: %s" % str(no_such))
+
+	var written: Dictionary = await node._execute_command(
+		"set_property", {"path": "/root/Level/Hero", "property": "keeper():inner:depth", "value": was + 10}
+	)
+	if written.get("type") != "property_set" or written.get("new_value") != was + 10:
+		_fail("a write walks through a call to the place it names: %s" % str(written))
+
+	var onto_the_call: Dictionary = await node._execute_command(
+		"set_property", {"path": "/root/Level/Hero", "property": "keeper()", "value": 1}
+	)
+	if (
+		onto_the_call.get("type") != "error"
+		or not str(onto_the_call.get("message", "")).contains("not a place")
+	):
+		_fail("a write onto the call itself is refused: %s" % str(onto_the_call))
+
+	var called: Dictionary = await node._execute_command(
+		"call_method", {"path": "/root/Level/Hero", "method": "keeper():inner:deepen()", "args": [1]}
+	)
+	if called.get("type") != "method_result" or called.get("result") != was + 11:
+		_fail("a call is walked through by a method call, with or without its own brackets: %s" % str(called))
+
+	# The holder is swapped after the wait has read it once: the read happens on the call, the swap
+	# at the end of the frame, and the next look walks from the node again and finds the new one.
+	var script: GDScript = hero.get_script()
+	var kept: GDScript = script.get_script_constant_map()["Kept"]
+	var swapped: Resource = kept.new()
+	var inner: Resource = swapped.get("inner")
+	inner.set("depth", 100)
+	hero.set_deferred("held", swapped)
+	var waited: Dictionary = await node._execute_command(
+		"wait_until",
+		{"path": "/root/Level/Hero", "property": "keeper():inner:depth", "value": 100, "timeout_ms": 2000}
+	)
+	if waited.get("type") != "condition" or waited.get("met") != true or waited.get("value") != 100:
+		_fail("a wait walks the path again each frame, so a replaced holder is followed: %s" % str(waited))
+
+
 ## A node path with colons in it, which is where a caller puts the path to what a node holds before
 ## reading that the property and the method are what take them.
 ##
@@ -616,6 +725,7 @@ func _check() -> void:
 
 	await _check_reading_through_a_path()
 	await _check_calling_through_a_path()
+	await _check_calling_a_step_along_the_path(hero, button)
 	await _check_a_node_path_that_reaches_past_a_node()
 
 	var serialised: Variant = node.values.serialize(hero)
