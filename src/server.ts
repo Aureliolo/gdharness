@@ -4670,8 +4670,10 @@ class GodotServer {
       // that prints ended and thirty left grinding, which went on writing their slice files until
       // the next run of the same bench read their lines as its own and reported 107.9% of runs
       // won. A stop that says which process it ended is one a caller can compare against what they
-      // know their game started; one that says "stopped" is not.
-      endedPid: stopped.pid,
+      // know their game started; one that says "stopped" is not. For a run the editor plays the
+      // number is the one its game announced, when it announced one: the process is the same
+      // whichever side ended it.
+      endedPid: stopped.pid ?? this.announcedPidOf(stopped) ?? null,
       // Whether there was anything left to stop. A run whose exit nobody collected, which is a
       // played run picked up after a reconnect and gone since, has no exit code and is over all
       // the same; answering false there said a game had been ended that had ended itself.

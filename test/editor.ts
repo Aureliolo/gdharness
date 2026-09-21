@@ -3061,9 +3061,19 @@ async function testAPlayedRunsConsoleArrivesOnItsOwn({ call, project }: Editor):
   // fanned out to thirty-one workers with OS.create_process, had the one process that prints
   // ended, and the thirty left grinding wrote their slices into the next run of the same bench,
   // which then reported 107.9% of runs won.
+  // Named by the number the game announced, which is the one the status call lists it under:
+  // this run has no handle here, and the stop used to answer null about a process the same
+  // server had just been talking to.
+  const before = await call('editor_status', {});
+  const announced = asArray(get(before, 'game', 'runtimes')).map((one) => asNumber(get(one, 'pid')));
+  assert.equal(announced.length, 1, `one game should be announced before the stop: ${text(before)}`);
   const ended = await call('editor_run', { op: 'stop' });
   assert.equal(get(ended, 'stopped'), true, `the run should stop: ${text(ended)}`);
-  assert.equal(get(ended, 'endedPid'), null, `an editor-played run has no pid here: ${text(ended)}`);
+  assert.equal(
+    get(ended, 'endedPid'),
+    announced[0],
+    `an editor-played run is named by the process its game announced: ${text(ended)}`,
+  );
   assert.match(
     text(get(ended, 'note')),
     /is not the editor's to stop and is still running/,

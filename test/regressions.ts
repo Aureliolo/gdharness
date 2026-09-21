@@ -8258,6 +8258,19 @@ async function testALateAnnouncementIsTiedToThePlayedRun(): Promise<void> {
         `once the game has announced, the run is asked by that number: ${JSON.stringify(tied)}`,
       );
       assert.ok(Number(get(tied, 'cpuSeconds')) >= 0, JSON.stringify(tied));
+
+      // The stop names the same number. A played run has no pid here, and the stop answered null
+      // under endedPid about a process the same server had been reading cpu for.
+      const stopped = parseTextContent(
+        await server.request('tools/call', { name: 'editor_run', arguments: { op: 'stop' } }, 60_000),
+      );
+      assert.equal(get(stopped, 'stopped'), true, JSON.stringify(stopped));
+      assert.equal(
+        get(stopped, 'endedPid'),
+        process.pid,
+        `the stop names the process the game announced: ${JSON.stringify(stopped)}`,
+      );
+      assert.equal(get(stopped, 'exitedBeforeStop'), false, JSON.stringify(stopped));
     },
   );
 }
