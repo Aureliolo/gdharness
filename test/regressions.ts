@@ -7695,6 +7695,22 @@ async function testAGameTheEditorHasStoppedPlayingIsNotStillActive(): Promise<vo
       true,
       `and that run should read as active: ${JSON.stringify(whilePlaying)}`,
     );
+    // Whether it is held cannot be told: no session has been told of a stop and the game announced
+    // no runtime to ask. That is the honest answer about a game that is up, and the positive for
+    // the assertion below, which wants this note gone once the game is not.
+    assert.equal(
+      get(whilePlaying, 'game', 'heldUnknown'),
+      true,
+      `whether a played game with no runtime is held cannot be told while it is up: ${JSON.stringify(whilePlaying)}`,
+    );
+    const debugState = async (): Promise<string> =>
+      textOf(await server.request('tools/call', { name: 'debug_state', arguments: { op: 'stack' } })) ?? '';
+    const whileUp = await debugState();
+    assert.match(
+      whileUp,
+      /debug adapter did not answer/,
+      `while the game is up, a stack read goes to the adapter, which nothing here serves: ${whileUp}`,
+    );
 
     // The game quits. Nothing else changes: the record is still there and still names the run.
     playing = false;
@@ -7710,6 +7726,27 @@ async function testAGameTheEditorHasStoppedPlayingIsNotStillActive(): Promise<vo
       get(afterwards, 'game', 'processActive'),
       false,
       `and the run should not still be reported as active: ${JSON.stringify(afterwards)}`,
+    );
+    // A run that is over is held nowhere, in the same answer: the hold used to be judged from the
+    // record alone, so this call said the game might be sitting at a breakpoint beside the field
+    // saying it was gone.
+    assert.equal(
+      get(afterwards, 'game', 'heldAt'),
+      null,
+      `and a run that is over is held nowhere: ${JSON.stringify(afterwards)}`,
+    );
+    assert.equal(
+      get(afterwards, 'game', 'heldUnknown'),
+      undefined,
+      `with nothing left unknown about it: ${JSON.stringify(afterwards)}`,
+    );
+    // The debug tools say the same, rather than reporting the adapter of a game that has gone as
+    // one that did not answer about a game the editor is playing.
+    const afterGone = await debugState();
+    assert.match(
+      afterGone,
+      /The last run has already ended, so there is no debug session/,
+      `a stack read on a run the editor says is over is refused as a run that is over: ${afterGone}`,
     );
 
     // The same answer from the two calls that used to have their own: editor_output said running
@@ -7924,6 +7961,15 @@ async function testAPlayedStartStopsWaitingForAGameThatIsOver(): Promise<void> {
       assert.ok(
         over.waitedMs < 5_000,
         `and the answer does not wait out the budget: ${over.waitedMs}ms of 10000`,
+      );
+      // With an adapter that answers everything, so the refusal can only come from the editor's
+      // word: attached and read, the adapter would say the game is running with no stack.
+      const stack =
+        textOf(await server.request('tools/call', { name: 'debug_state', arguments: { op: 'stack' } })) ?? '';
+      assert.match(
+        stack,
+        /The last run has already ended, so there is no debug session/,
+        `a stack read on the run that died is refused as a run that is over: ${stack}`,
       );
     });
   } finally {
