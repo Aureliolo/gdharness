@@ -89,6 +89,7 @@ import {
 import { DEFAULT_LSP_PORT, GodotLSPClient, handleLSPTool } from './lsp_client.js';
 import { isSameDirectory, realPathOr, resolveWithinProject } from './paths.js';
 import { freePort, portFromEnvOrNull } from './ports.js';
+import { childrenOf } from './process-children.js';
 import { cpuSecondsOf } from './process-time.js';
 import { projectStructure, scriptsWithoutUid, searchProject } from './project-scan.js';
 import { parseProjectGodot, settingKeys, settingsDroppedReport, setupResourceHandlers } from './resources.js';
@@ -323,6 +324,34 @@ function endedPreviousRun(ended: EndedRun | null): number | true | undefined {
     return undefined;
   }
   return ended.pid ?? true;
+}
+
+/**
+ * What a stop says about the processes the game started for itself: left running unless the stop
+ * was asked to end them, and then what it ended, what it left, or that the platform would not say.
+ */
+function aboutTheChildren(
+  ended: { ended: number[]; left: number[]; unknown: boolean } | null,
+  throughEditor: boolean,
+): string {
+  if (ended === null) {
+    return throughEditor
+      ? "Anything that game started for itself, with OS.create_process or otherwise, is not the editor's to stop and is still running; andChildren ends what it started that is announced as a game of this project."
+      : 'Anything that game started for itself, with OS.create_process or otherwise, is a separate process and is still running; andChildren ends what it started that is announced as a game of this project.';
+  }
+  if (ended.unknown) {
+    return 'andChildren was asked for and this platform would not list what the game had started, so nothing else was ended.';
+  }
+  const counted = (n: number): string => `${n} ${n === 1 ? 'process' : 'processes'}`;
+  const endedToo =
+    ended.ended.length === 0
+      ? 'The game had started nothing announced as a game of this project, so nothing else was ended.'
+      : `${counted(ended.ended.length)} the game had started for itself, announced as games of this project, ${ended.ended.length === 1 ? 'was' : 'were'} ended with it, named under endedChildren.`;
+  const leftToo =
+    ended.left.length === 0
+      ? ''
+      : ` ${counted(ended.left.length)} it had started ${ended.left.length === 1 ? 'was' : 'were'} left, named under childrenLeft: not announced as a game of this project, so what ${ended.left.length === 1 ? 'it is' : 'they are'} cannot be told from here.`;
+  return `${endedToo}${leftToo}`;
 }
 
 /** The sentence a start adds to its message when it ended a run to happen. */
@@ -1557,7 +1586,7 @@ class GodotServer {
         return op === 'restart' ? await this.handleRestartEditor() : await this.handleLaunchEditor(args);
       case 'editor_run':
         if (op === 'stop') {
-          return await this.handleStopProject();
+          return await this.handleStopProject(args);
         }
         if (op === 'wait') {
           return await this.handleWaitForRun(args);
@@ -4763,7 +4792,7 @@ class GodotServer {
   }
 
   /** editor_run stop: the game is ended and its verdict answered, errors and warnings kept. */
-  private async handleStopProject(): Promise<ToolResponse> {
+  private async handleStopProject(args: OperationParams): Promise<ToolResponse> {
     // Before anything is picked to end. A reconnect leaves the editor-played run unrecorded, and
     // what would otherwise be adopted here is the last run this project spawned: a pid belonging
     // to something nobody asked about, offered to be killed while the run the caller means goes on.
@@ -4776,8 +4805,17 @@ class GodotServer {
     this.drainTranscript(stopped);
     // Read before the stop, since a game that goes on the stop is one that was running.
     const wasRunning = await this.runStillGoing(stopped);
+    const endedPid = stopped.pid ?? this.announcedPidOf(stopped) ?? null;
+    // Listed before the run is ended, because ending it is what makes them somebody else's
+    // children: POSIX hands them to init the moment the parent goes, and the question "whose are
+    // you" has no answer after that.
+    const children =
+      readBoolean(args, 'andChildren') === true && wasRunning && endedPid !== null
+        ? await childrenOf(endedPid)
+        : null;
     this.logDebug('Stopping the running game');
     await this.endActiveGame('editor_run stop');
+    const ended = children === null ? null : this.endChildrenAmong(children, stopped.projectPath);
     return this.jsonTextResponse({
       stopped: true,
       through: stopped.throughEditor ? 'editor' : 'gdharness',
@@ -4789,7 +4827,18 @@ class GodotServer {
       // know their game started; one that says "stopped" is not. For a run the editor plays the
       // number is the one its game announced, when it announced one: the process is the same
       // whichever side ended it.
-      endedPid: stopped.pid ?? this.announcedPidOf(stopped) ?? null,
+      endedPid,
+      // What the game had started for itself and this stop ended with it, when asked to: the
+      // children the operating system listed under the run's process that are announced as games
+      // of this project. A child that is neither is left and named, since what it is cannot be
+      // told from here and a number is not a licence to signal.
+      ...(ended === null
+        ? {}
+        : {
+            endedChildren: ended.ended,
+            childrenLeft: ended.left.length === 0 ? undefined : ended.left,
+            childrenUnknown: ended.unknown ? true : undefined,
+          }),
       // Whether there was anything left to stop. A run whose exit nobody collected, which is a
       // played run picked up after a reconnect and gone since, has no exit code and is over all
       // the same; answering false there said a game had been ended that had ended itself.
@@ -4800,13 +4849,52 @@ class GodotServer {
       clean: stopped.log.count('error') === 0,
       note: !wasRunning
         ? 'This run was over before the stop, so nothing was ended here: editor_output has what it printed and how it ended. Anything that game started for itself, with OS.create_process or otherwise, is a separate process and may still be running.'
-        : stopped.throughEditor
-          ? "The editor was asked to stop the scene it is playing. Anything that game started for itself, with OS.create_process or otherwise, is not the editor's to stop and is still running."
-          : 'The process named under endedPid was ended. Anything that game started for itself, with OS.create_process or otherwise, is a separate process and is still running.',
+        : `${
+            stopped.throughEditor
+              ? 'The editor was asked to stop the scene it is playing.'
+              : 'The process named under endedPid was ended.'
+          } ${aboutTheChildren(ended, stopped.throughEditor)}`,
       entries: forAnswer(
         stopped.log.select({ severity: 'warning', sinceLastCall: false, limit: 200 }).entries,
       ),
     });
+  }
+
+  /**
+   * The children of an ended run that are announced games of its project, ended; the rest named.
+   *
+   * Being a child of the run is the property a stranger's bench cannot have, and being announced
+   * as a game of the project is what says a child is a game at all rather than whatever else a
+   * game might start. Both are required before a number is signalled. Undefined children are a
+   * platform that would not list them, which is said rather than read as none.
+   */
+  private endChildrenAmong(
+    children: readonly number[] | undefined,
+    projectPath: string | null,
+  ): { ended: number[]; left: number[]; unknown: boolean } {
+    if (children === undefined) {
+      return { ended: [], left: [], unknown: true };
+    }
+    const games = new Set(
+      runtimesAnnounced()
+        .running.filter((one) => projectPath === null || isSameDirectory(one.project.path, projectPath))
+        .map((one) => one.pid),
+    );
+    const ended: number[] = [];
+    const left: number[] = [];
+    for (const child of children) {
+      if (!games.has(child)) {
+        left.push(child);
+        continue;
+      }
+      try {
+        process.kill(child);
+        ended.push(child);
+      } catch {
+        // Gone between the listing and the signal, which is the state this asks for.
+      }
+    }
+    return { ended, left, unknown: false };
   }
 
   /**

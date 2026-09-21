@@ -64,6 +64,7 @@ import {
 import { GodotLSPClient } from '../src/lsp_client.js';
 import { isWithinRoot, resolveWithinProject } from '../src/paths.js';
 import { freePort } from '../src/ports.js';
+import { childrenOf } from '../src/process-children.js';
 import { secondsFromClock } from '../src/process-time.js';
 import { projectStructure, searchProject } from '../src/project-scan.js';
 import { parseProjectGodot, settingKeys, settingsDroppedReport } from '../src/resources.js';
@@ -8648,6 +8649,151 @@ async function testARuntimeCallReachesThisServersOwnGame(): Promise<void> {
   }
 }
 
+/**
+ * A stop asked to end what the game started ends the children announced as games of the project,
+ * and only those.
+ *
+ * A bench fans out to workers with OS.create_process, and a stop ended the bench and left the
+ * workers grinding, as its note said; the session that hit it ended them by pid from a process
+ * listing on the scene name, by hand, every time. Being a child of the run's process is the
+ * property a stranger's bench cannot have, and being announced as a game of the project is what
+ * says a child is a game at all: both are required before a number is signalled, so a child that
+ * is not announced is left and named. The listing is taken before the run is ended, since ending
+ * it reparents the children on POSIX and the question has no answer afterwards.
+ *
+ * The bench is a process of this fixture's that starts two children of its own, one announced as a
+ * game and one not, and the editor stage ties the run to it. The positive is the other child still
+ * there after the stop: a stop that ended every child would pass the first assertion as well.
+ */
+async function testAStopCanEndWhatTheGameStarted(): Promise<void> {
+  // Asked of a real process first, since the listing is a thing the platform has to supply and
+  // its absence is otherwise a stop that quietly ends nothing.
+  const probe = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  try {
+    assert.ok(typeof probe.pid === 'number');
+    const listed = await childrenOf(process.pid);
+    assert.ok(listed !== undefined, "this platform has to list a process's children");
+    assert.ok(listed.includes(probe.pid), `the child just spawned is listed: ${JSON.stringify(listed)}`);
+  } finally {
+    probe.kill();
+  }
+
+  const held: { bench: ChildProcess | null } = { bench: null };
+  let worker = 0;
+  let other = 0;
+  try {
+    await withAPlayingEditor(
+      ({ adapter, project, runtimeDir }) =>
+        async (tool) => {
+          if (tool === 'play_scene') {
+            const started = spawn(
+              process.execPath,
+              [
+                '-e',
+                "const { spawn } = require('node:child_process');" +
+                  "const child = () => spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });" +
+                  'const worker = child(); const other = child();' +
+                  "process.stdout.write(JSON.stringify({ worker: worker.pid, other: other.pid }) + '\\n');" +
+                  'setInterval(() => {}, 1000);',
+              ],
+              { stdio: ['ignore', 'pipe', 'ignore'] },
+            );
+            held.bench = started;
+            const benchPid = started.pid;
+            assert.ok(typeof benchPid === 'number', 'the fixture needs a live bench');
+            const printed = await new Promise<string>((resolve) => {
+              let text = '';
+              started.stdout.setEncoding('utf8');
+              started.stdout.on('data', (chunk: string) => {
+                text += chunk;
+                if (text.includes('\n')) resolve(text);
+              });
+            });
+            const pids = JSON.parse(printed.trim()) as { worker: number; other: number };
+            worker = pids.worker;
+            other = pids.other;
+            const announce = (pid: number): void => {
+              writeFileSync(
+                join(runtimeDir, `runtime-${pid}.json`),
+                JSON.stringify({
+                  protocol: RUNTIME_PROTOCOL,
+                  pid,
+                  port: 51_997,
+                  address: '127.0.0.1',
+                  project: { name: 'Played', path: project },
+                }),
+                'utf8',
+              );
+            };
+            // The bench first, inside the wait, so the run is tied to it; the worker after.
+            setTimeout(() => {
+              announce(benchPid);
+            }, 100);
+            setTimeout(() => {
+              announce(pids.worker);
+            }, 400);
+            return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
+          }
+          if (tool === 'playing_status') {
+            return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
+          }
+          return { ok: true };
+        },
+      async ({ server, runtimeDir, start }) => {
+        const started = await start(3_000);
+        const benchPid = held.bench?.pid;
+        assert.ok(typeof benchPid === 'number', 'the play should have started the bench');
+        assert.equal(get(started.answer, 'runtime', 'pid'), benchPid, JSON.stringify(started.answer));
+        assert.ok(
+          await cameTrue(() => existsSync(join(runtimeDir, `runtime-${worker}.json`)), 5_000),
+          'the worker should have announced',
+        );
+        const stopped = parseTextContent(
+          await server.request(
+            'tools/call',
+            { name: 'editor_run', arguments: { op: 'stop', andChildren: true } },
+            60_000,
+          ),
+        );
+        assert.equal(get(stopped, 'endedPid'), benchPid, JSON.stringify(stopped));
+        assert.deepEqual(
+          get(stopped, 'endedChildren'),
+          [worker],
+          `the child announced as a game of the project is ended: ${JSON.stringify(stopped)}`,
+        );
+        assert.deepEqual(
+          get(stopped, 'childrenLeft'),
+          [other],
+          `and the child that is not is left and named: ${JSON.stringify(stopped)}`,
+        );
+        assert.match(
+          text(get(stopped, 'note')),
+          /1 process the game had started for itself.*was ended with it/,
+        );
+        assert.match(
+          text(get(stopped, 'note')),
+          /1 process it had started was left, named under childrenLeft/,
+        );
+        assert.ok(await cameTrue(() => !alive(worker), 5_000), 'the worker is gone');
+        assert.ok(alive(other), 'and the other child is still there');
+      },
+    );
+  } finally {
+    for (const pid of [worker, other]) {
+      if (pid > 0 && alive(pid)) {
+        try {
+          process.kill(pid);
+        } catch {
+          // Gone already.
+        }
+      }
+    }
+    if (held.bench?.exitCode === null) {
+      held.bench.kill();
+    }
+  }
+}
+
 async function testTheEditorsRunIsTheOneAnsweredFor(): Promise<void> {
   const port = await reservePort();
   // Reserved and then left alone, so nothing is listening on it: the adapter this run's console
@@ -11984,6 +12130,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheEditorsGameIsToldFromAnotherOfTheSameProject,
   testASpawnedGameBesideAnEditorIsStillItsOwn,
   testARuntimeCallReachesThisServersOwnGame,
+  testAStopCanEndWhatTheGameStarted,
   testASettingTheEditorDroppedIsNamed,
   testACleanupThatCannotFinishStillFinishes,
   testADiagnosticTheFileContradictsIsNamed,

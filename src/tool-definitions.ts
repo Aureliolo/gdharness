@@ -814,6 +814,12 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         description:
           'check: how long to give the boot before it is called hung. Default 60000. wait: how long to wait for the run to end before answering anyway. Default 600000.',
       },
+      andChildren: {
+        type: 'boolean',
+        ops: ['stop'],
+        description:
+          "stop: also end what the game started for itself, with OS.create_process or otherwise, such as a bench's workers. Only the children of the run's process that are announced as games of this project are ended, named under endedChildren; any other child is left and named under childrenLeft. Default false, and the run's process is ended either way.",
+      },
     },
     requires: [],
     operations: {
@@ -823,7 +829,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       stop: {
         summary:
-          'end the run and answer with what it printed last, naming the process ended under endedPid: a game that started processes of its own keeps them',
+          'end the run and answer with what it printed last, naming the process ended under endedPid: a game that started processes of its own keeps them unless andChildren says to end those too',
         requires: [],
       },
       check: {
