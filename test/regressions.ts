@@ -23,6 +23,13 @@ import { WebSocket } from 'ws';
 import { serviceDidNotAnswer } from '../scripts/audit-production.js';
 import { pullRequestNumbers, shipsToUsers } from '../scripts/release-notes.js';
 import { sharedCopies } from '../scripts/sync-shared-gd.js';
+import {
+  bootNotePath,
+  LONGEST_SIZED_WAIT_MS,
+  readBootNote,
+  waitSizedTo,
+  writeBootNote,
+} from '../src/boot-note.js';
 import { breakpointNotePath, readBreakpointNote, writeBreakpointNote } from '../src/breakpoint-note.js';
 import { announcementPath, BRIDGE_ANNOUNCE_PROTOCOL, readAnnouncement } from '../src/bridge-announce.js';
 import {
@@ -91,6 +98,7 @@ import {
   writeRunRecord,
 } from '../src/run-record.js';
 import {
+  ANNOUNCE_BUDGET_MS,
   announcedSince,
   CONFIRMED_FOR_MS,
   chooseRuntime,
@@ -8561,6 +8569,181 @@ async function testTheAnnounceWaitIsNotHeldByASlowEditor(): Promise<void> {
 }
 
 /**
+ * The arithmetic of a sized wait, and what a start says when the wait it sized ran out.
+ *
+ * Half as long again as the last boot, never less than the usual budget and never more than a
+ * minute; and a note that names the boot it was sized to, so a caller reading "wait longer" does
+ * not pass a runtimeWaitMs shorter than the one they just had. The note on disk round-trips, and
+ * a note that is missing or rubbish reads as no boot known.
+ */
+function testTheWaitSizedToABootIsSaid(): void {
+  assert.equal(waitSizedTo(null), ANNOUNCE_BUDGET_MS, 'no boot known is the usual budget');
+  assert.equal(waitSizedTo(1_000), ANNOUNCE_BUDGET_MS, 'a quick boot is still given the usual');
+  assert.equal(waitSizedTo(8_200), 12_300, 'a slow one is given half as long again');
+  assert.equal(waitSizedTo(100_000), LONGEST_SIZED_WAIT_MS, 'and never more than the ceiling');
+  const said = runtimeVerdict(null, {
+    addon: true,
+    budgetMs: 12_300,
+    sizedToMs: 8_200,
+    heldAt: null,
+    running: true,
+    withArgs: false,
+  });
+  assert.match(
+    text(get(said, 'note')),
+    /within 12300ms, half as long again as the 8200ms its last game took, and the game is still running/,
+    `the note names the boot the wait was sized to: ${JSON.stringify(said)}`,
+  );
+  const unsized = runtimeVerdict(null, {
+    addon: true,
+    budgetMs: 5_000,
+    heldAt: null,
+    running: true,
+    withArgs: false,
+  });
+  assert.match(text(get(unsized, 'note')), /within 5000ms and the game/, JSON.stringify(unsized));
+
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-boot-note-'));
+  try {
+    assert.equal(readBootNote(project), null, 'a project with no note has no boot known');
+    writeBootNote(project, 8_200.4);
+    assert.equal(readBootNote(project), 8_200, 'the note round-trips, whole milliseconds');
+    writeFileSync(bootNotePath(project), 'not json', 'utf8');
+    assert.equal(readBootNote(project), null, 'rubbish reads as no boot known');
+    writeFileSync(bootNotePath(project), JSON.stringify({ announcedAfterMs: -3 }), 'utf8');
+    assert.equal(readBootNote(project), null, 'and so does a boot that took less than nothing');
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * The wait a start gives its game is sized to how long the project's last game took to announce.
+ *
+ * A project downstream announces at eight seconds on its machine, every time, and every start
+ * with the usual budget answered `listening: false` about a game that was fine; the way through
+ * was to pass `runtimeWaitMs` on every call. So the announcement's time is noted against the
+ * run's start, in the project's own `.godot`, and the next start without a `runtimeWaitMs` waits
+ * half as long again as that, never less than the usual and never more than a minute.
+ *
+ * The game here announces 6.5 s after each play, from a live process. The first start is given a
+ * second and does not find it; the status call after the announcement ties the run late and
+ * writes the note; the second start names no wait, is given 9.75 s, and finds it. Disarmed to the
+ * usual budget, the second start runs out at 5 s on a game that announces at 6.5.
+ */
+async function testTheWaitIsSizedToTheLastBoot(): Promise<void> {
+  const announcesAfterMs = 6_500;
+  const games: ChildProcess[] = [];
+  const openGame = (): number => {
+    const game = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+    games.push(game);
+    assert.ok(typeof game.pid === 'number', 'the fixture needs a live game to announce');
+    return game.pid;
+  };
+  let playing = false;
+  try {
+    await withAPlayingEditor(
+      ({ adapter, project, runtimeDir }) =>
+        (tool) => {
+          if (tool === 'play_scene') {
+            const pid = openGame();
+            playing = true;
+            setTimeout(() => {
+              writeFileSync(
+                join(runtimeDir, `runtime-${pid}.json`),
+                JSON.stringify({
+                  protocol: RUNTIME_PROTOCOL,
+                  pid,
+                  port: 51_995,
+                  address: '127.0.0.1',
+                  project: { name: 'Played', path: project },
+                  editor_pid: FAKE_EDITOR_PID,
+                }),
+                'utf8',
+              );
+            }, announcesAfterMs);
+            return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
+          }
+          if (tool === 'playing_status') {
+            return { ok: true, playing, scenePath: playing ? 'res://main.tscn' : '', debugPort: adapter };
+          }
+          if (tool === 'stop_playing') {
+            playing = false;
+            for (const game of games) {
+              game.kill();
+            }
+            return { ok: true };
+          }
+          return { ok: true };
+        },
+      async ({ server, project, runtimeDir, start }) => {
+        const first = await start(1_000);
+        assert.equal(
+          get(first.answer, 'runtime', 'listening'),
+          false,
+          `a second is not long enough for this game: ${JSON.stringify(first.answer)}`,
+        );
+        assert.match(
+          text(get(first.answer, 'runtime', 'note')),
+          /within 1000ms and/,
+          `and the note says what the wait was, unsized: ${JSON.stringify(first.answer)}`,
+        );
+        assert.equal(existsSync(join(project, '.godot', 'gdharness-boot.json')), false, 'nothing noted yet');
+        const firstPid = games[0]?.pid;
+        assert.ok(
+          await cameTrue(
+            () => existsSync(join(runtimeDir, `runtime-${firstPid}.json`)),
+            announcesAfterMs + 5_000,
+          ),
+          'the game announces after the wait',
+        );
+        // The status call is what ties the run to the game that announced after the wait, and
+        // the tie is what writes the note.
+        const seen = parseTextContent(
+          await server.request('tools/call', { name: 'editor_status', arguments: {} }, 60_000),
+        );
+        assert.equal(
+          asArray(get(seen, 'game', 'runtimes')).length,
+          1,
+          `the game is listed once it has announced: ${JSON.stringify(seen)}`,
+        );
+        const noted: unknown = JSON.parse(readFileSync(bootNotePath(project), 'utf8'));
+        const took = asNumber(get(noted, 'announcedAfterMs'), 'the note says how long the boot took');
+        assert.ok(
+          took >= announcesAfterMs - 1_500 && took <= announcesAfterMs + 3_000,
+          `the boot noted is the announcement's time against the run's start: ${took}ms for a game announcing at ${announcesAfterMs}ms`,
+        );
+        await server.request('tools/call', { name: 'editor_run', arguments: { op: 'stop' } }, 60_000);
+
+        // The second start names no wait, so it is given what the last boot says it needs.
+        const began = Date.now();
+        const second = parseTextContent(
+          await server.request(
+            'tools/call',
+            { name: 'editor_run', arguments: { projectPath: project, op: 'start', headless: false } },
+            60_000,
+          ),
+        );
+        const waitedMs = Date.now() - began;
+        assert.equal(
+          get(second, 'runtime', 'listening'),
+          true,
+          `the second start waits long enough for this project on its own: ${JSON.stringify(second)} after ${waitedMs}ms`,
+        );
+        assert.equal(get(second, 'runtime', 'pid'), games[1]?.pid, JSON.stringify(second));
+        console.log(`sized wait: the second start found the game after ${waitedMs}ms`);
+      },
+    );
+  } finally {
+    for (const game of games) {
+      if (game.exitCode === null) {
+        game.kill();
+      }
+    }
+  }
+}
+
+/**
  * A play the editor has not started yet is not a game that has gone.
  *
  * A restarted editor plays once its scan is over: it answered the play with "not playing", went
@@ -14165,6 +14348,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAGameTheEditorHasStoppedPlayingIsNotStillActive,
   testAPlayedStartStopsWaitingForAGameThatIsOver,
   testTheAnnounceWaitIsNotHeldByASlowEditor,
+  testTheWaitSizedToABootIsSaid,
+  testTheWaitIsSizedToTheLastBoot,
   testAPlayTheEditorHasNotStartedIsNotAGameThatHasGone,
   testALateAnnouncementIsTiedToThePlayedRun,
   testTheEditorsGameIsToldFromAnotherOfTheSameProject,
