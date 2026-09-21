@@ -9110,7 +9110,7 @@ async function testAKeyDoesNotChooseFromAnOpenedMenu(): Promise<void> {
         writeFileSync(
           join(project, 'main.gd'),
           'extends Control\n\nvar presses: int = 0\nvar openings: int = 0\nvar closings: int = 0\n' +
-            'var log: Array[String] = []\n\n\n' +
+            'var log: Array[String] = []\nvar focus_changed_at: int = 0\n\n\n' +
             'func _ready() -> void:\n' +
             '\tvar pick: OptionButton = $Pick\n' +
             '\tvar menu: PopupMenu = pick.get_popup()\n' +
@@ -9120,11 +9120,16 @@ async function testAKeyDoesNotChooseFromAnOpenedMenu(): Promise<void> {
             '\tmenu.focus_entered.connect(func() -> void: _note("menu focus_entered"))\n' +
             '\tmenu.focus_exited.connect(func() -> void: _note("menu focus_exited"))\n' +
             '\tmenu.visibility_changed.connect(func() -> void: _note("menu visible %s" % menu.visible))\n' +
-            '\tget_window().focus_entered.connect(func() -> void: _note("window focus_entered"))\n' +
-            '\tget_window().focus_exited.connect(func() -> void: _note("window focus_exited"))\n' +
+            '\tget_window().focus_entered.connect(func() -> void: _focus("window focus_entered"))\n' +
+            '\tget_window().focus_exited.connect(func() -> void: _focus("window focus_exited"))\n' +
             '\tget_window().size_changed.connect(func() -> void: _note("window size %s" % get_window().size))\n\n\n' +
             'func _note(what: String) -> void:\n' +
-            '\tlog.append("%d %s" % [Engine.get_process_frames(), what])\n',
+            '\tlog.append("%d %s" % [Engine.get_process_frames(), what])\n\n\n' +
+            'func _focus(what: String) -> void:\n' +
+            '\tfocus_changed_at = Engine.get_process_frames()\n' +
+            '\t_note(what)\n\n\n' +
+            'func focus_settled() -> bool:\n' +
+            '\treturn get_window().has_focus() and Engine.get_process_frames() - focus_changed_at >= 30\n',
         );
         writeFileSync(
           join(project, 'main.tscn'),
@@ -9169,24 +9174,28 @@ async function testAKeyDoesNotChooseFromAnOpenedMenu(): Promise<void> {
           return `${counted.join(', ')}, window focused ${JSON.stringify(get(focused, 'result'))}, noted: ${noted}`;
         };
 
-        // The window has to be the focused one before the menu is opened. The macOS runner
-        // focuses it a frame or two after the game announces, and an embedded popup closes when
-        // its window's focus moves: a menu opened on the frame before that focus arrived was
-        // read as closed, with the log showing focus_entered on the window, focus_exited on the
-        // menu and popup_hide on the same frame. A player's window is focused long before they
-        // click, so this is the fixture catching up with that, not the click.
-        const focused = async (): Promise<boolean> =>
-          get(
-            await call('runtime_invoke', { op: 'call', nodePath: '/root', method: 'has_focus' }),
-            'result',
-          ) === true;
-        const patience = Date.now() + 10_000;
-        let hasFocus = await focused();
-        while (!hasFocus && Date.now() < patience) {
-          await delay(100);
-          hasFocus = await focused();
-        }
-        assert.ok(hasFocus, `the window should be focused before anything is clicked: ${await account()}`);
+        // The window has to be the focused one before the menu is opened, and to have been so
+        // for a while. The macOS runner focuses it a frame or two after the game announces, and
+        // an embedded popup closes when its window's focus moves: a menu opened on the frame
+        // before that focus arrived was read as closed, with the log showing focus_entered on the
+        // window, focus_exited on the menu and popup_hide on the same frame. Held for thirty
+        // frames rather than read once, because the runner's focus also flickers: a window read as
+        // focused lost it on frame 3 and got it back on frame 7, and the menu opened on frame 6
+        // was closed by the return. A player's window is focused long before they click, so this
+        // is the fixture catching up with that, not the click. Through the wait, which walks the
+        // call again every frame.
+        const settled = await call('runtime_wait', {
+          op: 'until',
+          nodePath: '/root/Main',
+          property: 'focus_settled()',
+          value: true,
+          timeoutMs: 15_000,
+        });
+        assert.equal(
+          get(settled, 'met'),
+          true,
+          `the window should have held the focus for thirty frames before anything is clicked: ${JSON.stringify(settled)}, ${await account()}`,
+        );
 
         const clicked = await call('runtime_input', { op: 'click', nodePath: '/root/Main/Pick' });
         assert.equal(get(clicked, 'landed'), true, JSON.stringify(clicked));
