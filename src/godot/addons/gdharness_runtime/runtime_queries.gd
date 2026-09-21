@@ -247,9 +247,25 @@ func _matches_apart_from_name(node: Node, wanted: Dictionary[String, String]) ->
 		if not script is Script:
 			return false
 		var attached: Script = script
-		if attached.get_global_name() != wanted["class"]:
+		if not _script_is(attached, wanted["class"]):
 			return false
 	return true
+
+
+## Whether [param attached] is the script class [param wanted], the way a typed `is` reads it: its
+## own class_name, or one it extends at any distance.
+##
+## The class_name alone answered 0 for `Card` over a tree of rows whose scripts extend Card two
+## steps down, IntakeRow extends DocketCard extends Card, while `is_class` reaches every native
+## subclass. A caller naming a class means what extends it, whichever side of the line the class
+## is declared on.
+static func _script_is(attached: Script, wanted: String) -> bool:
+	var walk: Script = attached
+	while walk != null:
+		if walk.get_global_name() == wanted:
+			return true
+		walk = walk.get_base_script()
+	return false
 
 
 ## Where a node is on screen: a Control's rectangle, a Node2D's position, or the place a 3D node
