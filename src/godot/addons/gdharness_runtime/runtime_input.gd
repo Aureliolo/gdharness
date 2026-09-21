@@ -341,15 +341,29 @@ func inject_mouse_click(params: Dictionary) -> Dictionary:
 	}
 
 
+## Moves the pointer to a position, with the movement the event carries taken from where the
+## pointer last was unless the caller says otherwise.
+##
+## A real pointer never arrives without a `relative`, and a control that drags reads that field
+## rather than the position, so a motion carrying none leaves a grip where it was however far the
+## position moved. The viewport remembers where the last motion put the pointer, injected or not,
+## so the difference from there is what a real move would have carried. A relative the caller gives
+## is kept, since a game may want to read a motion the position does not show.
 func inject_mouse_motion(params: Dictionary) -> Dictionary:
 	var point: Variant = _read_point(params, "x", "y", "position")
 	if point is String:
 		return {"type": "error", "message": point}
 	var position: Vector2 = point
-	var movement: Variant = _read_point(params, "relativeX", "relativeY", "relative")
-	if movement is String:
-		return {"type": "error", "message": movement}
-	var relative: Vector2 = movement
+	var relative: Vector2 = position - _host.get_viewport().get_mouse_position()
+	if params.has("relativeX") or params.has("relativeY"):
+		relative = Vector2(
+			Read.as_float(params.get("relativeX", 0.0)), Read.as_float(params.get("relativeY", 0.0))
+		)
+	elif params.has("relative"):
+		var movement: Variant = _read_point(params, "relativeX", "relativeY", "relative")
+		if movement is String:
+			return {"type": "error", "message": movement}
+		relative = movement
 
 	Input.parse_input_event(_motion(position, relative))
 
@@ -795,6 +809,7 @@ func _motion(position: Vector2, relative: Vector2) -> InputEventMouseMotion:
 	event.position = position
 	event.global_position = position
 	event.relative = relative
+	event.screen_relative = relative
 	return event
 
 
