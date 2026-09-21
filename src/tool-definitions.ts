@@ -1206,7 +1206,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       action: { summary: 'press an action, or hold it', requires: ['action'] },
       key: {
         summary:
-          'press a key, or hold it. Not for a menu a click has opened: an OptionButton or PopupMenu pops up as a window of its own, and a key sent to the game closes it without choosing, which choose does',
+          'press a key, or hold it. Not for a menu a click has opened: an OptionButton or PopupMenu pops up as a window of its own that a key sent to the game never reaches, so an arrow moves nothing in it and Enter closes it with nothing chosen. choose is what selects there',
         requires: ['keycode'],
       },
       text: {
