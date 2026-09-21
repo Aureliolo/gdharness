@@ -30,6 +30,12 @@ const SCRIPT_FLAGS: PackedStringArray = ["-s", "--script"]
 ## Serve a script run anyway, for somebody driving a `-s` script rather than a game.
 const SCRIPT_RUNS_SETTING: String = "gdharness/runtime/serve_script_runs"
 
+## The variable the editor addon puts into its own environment, which every game the editor plays
+## inherits: it says which editor played this game, so a server can tell the editor's game from
+## another of the same project that some other server started. Kept in step with
+## `EDITOR_PID_VARIABLE` in the editor addon's bridge client.
+const EDITOR_PID_VARIABLE: String = "GDHARNESS_EDITOR_PID"
+
 var values: Values = Values.new()
 
 # The modules are members and not locals of _init, because a Callable holds its object by id
@@ -250,7 +256,7 @@ func _announce(bind_address: String) -> void:
 ## What the announcement file and the welcome both carry: enough to pick this game out of
 ## several and to know whether the server speaks its protocol.
 func _identity(bind_address: String) -> Dictionary:
-	return {
+	var identity: Dictionary = {
 		"protocol": PROTOCOL,
 		"pid": OS.get_process_id(),
 		"port": _port,
@@ -262,6 +268,10 @@ func _identity(bind_address: String) -> Dictionary:
 		},
 		"godot": Engine.get_version_info().get("string", ""),
 	}
+	var played_by: String = OS.get_environment(EDITOR_PID_VARIABLE)
+	if played_by.is_valid_int():
+		identity["editor_pid"] = played_by.to_int()
+	return identity
 
 
 func _send_welcome(client: StreamPeerTCP) -> void:

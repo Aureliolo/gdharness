@@ -717,6 +717,23 @@ function hasMainScene(projectFile: string): boolean {
  * can be known to open no window, and it is what lets a headless request still go through the
  * editor, which is the only route with a debugger attached.
  */
+/**
+ * Whether the runtime addon in the project announces which editor played a game, which the
+ * addon does from the version that reads `GDHARNESS_EDITOR_PID` out of the game's environment.
+ * Read from the file rather than remembered, since an upgrade rewrites it under a running server;
+ * a project with no addon, or one this server cannot read, announces nothing of the kind.
+ */
+function runtimeAddonAnnouncesEditors(projectPath: string | null): boolean {
+  if (projectPath === null) {
+    return false;
+  }
+  try {
+    return readFileSync(join(projectPath, RUNTIME_AUTOLOAD.path), 'utf8').includes('"editor_pid"');
+  } catch {
+    return false;
+  }
+}
+
 function editorPlaysHeadless(projectFile: string): boolean {
   const runArgs = parseProjectGodot(readFileSync(projectFile, 'utf8'))['editor']?.['run/main_run_args'];
   return typeof runArgs === 'string' && /(?:^|\s)--headless(?:\s|$)/.test(runArgs);
@@ -2983,6 +3000,10 @@ class GodotServer {
           pid: endpoint.pid,
           port: endpoint.port,
           project: endpoint.project,
+          // Which editor played it, as the game announced: a game the editor played, and
+          // whatever that game started for itself, carries the editor's process id; a game
+          // another server started carries none. Absent when the game announced none.
+          editorPid: endpoint.editorPid,
           reachable: reply.ok,
           problem: reply.ok ? null : reply.message,
         };
@@ -3604,6 +3625,13 @@ class GodotServer {
     let editorSaysGoing = true;
     const endpoint = await announcedSince(projectPath, before, {
       budgetMs,
+      // Not a game of this project that somebody else started: for a run the editor plays, one
+      // naming another editor as the one that played it, or none where the project's games name
+      // theirs; for a run started here, one naming the editor at all, since a game this server
+      // spawned inherited no editor to name. A start that took a stranger's game for its own
+      // answered listening about a process it did not start while its own was still booting,
+      // and a spawned start judged by the played rule waited its whole budget on its own game.
+      accept: (one) => this.isTheGameOf(this.currentRun(), one, projectPath),
       // A game held at a breakpoint set before the run is not booting any more, and waiting out
       // the budget on one says nothing. It cannot announce until it is let go. Nor is there
       // anything to wait for once the process is over: a boot that fails on a parse error is
@@ -4136,6 +4164,14 @@ class GodotServer {
    *
    * One and not the first of several: a bench opens many workers from one project, and a run tied
    * to the wrong worker is reported over the moment that worker finishes.
+   *
+   * A game that says which editor played it is told apart from one that does not, or that names
+   * another editor: the editor addon marks its environment with its process id and the runtime
+   * announces what the game inherited, so a game of the same project that another server started
+   * beside the editor's is not the one, however fresh its announcement. The mark reaches whatever
+   * the game starts for itself too, so a bench and its workers all carry it and the count still
+   * decides between them. Games from a runtime addon that announces no editor are judged by
+   * freshness alone, as before.
    */
   private announcedPidOf(run: GodotProcess, announced?: readonly RuntimeEndpoint[]): number | undefined {
     if (!run.throughEditor || run.announcedPid !== undefined) {
@@ -4147,11 +4183,53 @@ class GodotServer {
     const fresh = this.allAnnouncedForOurProject(announced ?? runtimesAnnounced().running).filter(
       (one) => !before.has(one.pid),
     );
-    const theOne = fresh.length === 1 ? fresh[0] : undefined;
+    const candidates = fresh.filter((one) => this.playedByOurEditor(one, run.projectPath));
+    const theOne = candidates.length === 1 ? candidates[0] : undefined;
     if (theOne !== undefined) {
       run.announcedPid = theOne.pid;
     }
     return run.announcedPid;
+  }
+
+  /**
+   * Whether an announced game could be one the connected editor played.
+   *
+   * A game that names an editor is the editor's when it names this one. A game that names none
+   * is the editor's only when the project's runtime addon does not announce editors at all, in
+   * which case no game of the project does: with an addon that does, a game announcing no editor
+   * was started by something other than the editor, whatever project it is from. Everything
+   * passes when this server does not know which editor it has.
+   */
+  private playedByOurEditor(endpoint: RuntimeEndpoint, projectPath: string | null): boolean {
+    const editor = this.godotBridge.getStatus().editorPid;
+    if (editor === undefined) {
+      return true;
+    }
+    if (endpoint.editorPid !== undefined) {
+      return endpoint.editorPid === editor;
+    }
+    return !runtimeAddonAnnouncesEditors(projectPath ?? this.ownProject);
+  }
+
+  /**
+   * Whether an announced game could be [param run]'s own: the editor's, for a run the editor
+   * plays, and for a run started here one that names no editor, since a game this server spawned
+   * inherited no editor to name and one that names the connected editor is that editor's game.
+   * No run at all is nothing's game.
+   */
+  private isTheGameOf(
+    run: GodotProcess | null,
+    endpoint: RuntimeEndpoint,
+    projectPath: string | null,
+  ): boolean {
+    if (run === null) {
+      return false;
+    }
+    if (run.throughEditor) {
+      return this.playedByOurEditor(endpoint, projectPath);
+    }
+    const editor = this.godotBridge.getStatus().editorPid;
+    return endpoint.editorPid === undefined || endpoint.editorPid !== editor;
   }
 
   /**
