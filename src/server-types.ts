@@ -77,11 +77,16 @@ export interface GodotProcess {
    * was playing a game whose process had been ended from outside. A game carrying the runtime addon
    * announces its own process id, and that number can be asked of the operating system.
    *
-   * Only ever used to find a run over. A number that has come round to something else reads as
-   * alive, which is the answer the record gives anyway, so this can correct a wrong yes and never
-   * invents one.
+   * Used to find a run over, and to ask the operating system what the run has used. A number that
+   * has come round to something else reads as alive, which is the answer the record gives anyway,
+   * so this can correct a wrong yes and never invents one.
+   *
+   * Tied when the game announces, which is usually inside the start's wait and sometimes after
+   * it: `announcedBefore` is what the start saw announced before it played, so a later tie can
+   * tell this run's game from one that was already there.
    */
   announcedPid?: number;
+  announcedBefore?: ReadonlySet<number>;
   /**
    * Why this server ended the run, or null when it did not.
    *
