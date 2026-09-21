@@ -10636,6 +10636,87 @@ async function testAStopTakesTheEndedGamesAnnouncementDown(): Promise<void> {
   }
 }
 
+/**
+ * A stop takes the announcement down by the number the game announced under, which is not always
+ * the run's own.
+ *
+ * The Windows console build is a wrapper: the run holds the wrapper's process and the engine is
+ * its child, so the announcement is written under a number the run does not hold. A stop that
+ * took announcements down by the run's number alone left this one to the sweep, which is the gap
+ * the number can come round in. Measured before this was written: the engine was listed under the
+ * wrapper, and gone two seconds after the wrapper was killed, so the file is the stop's to take.
+ *
+ * Only where that build is, beside the engine the tier was given; elsewhere the run's number and
+ * the announced one are the same process and the case above holds it.
+ */
+async function testAStopTakesTheWrappedEnginesAnnouncementDown(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  const wrapper = godotPath === null ? null : godotPath.replace(/\.exe$/i, '_console.exe');
+  if (
+    process.platform !== 'win32' ||
+    godotPath === null ||
+    wrapper === godotPath ||
+    !existsSync(wrapper ?? '')
+  ) {
+    console.log('wrapped engine stop regression skipped (no console build beside GODOT_PATH)');
+    return;
+  }
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-wrapped-runtime-'));
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-wrapped-'));
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Wrapped"\n' +
+        'run/main_scene="res://main.tscn"\n\n[autoload]\n\n' +
+        'GdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n',
+    );
+    writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
+    cpSync(
+      join('src', 'godot', 'addons', 'gdharness_runtime'),
+      join(project, 'addons', 'gdharness_runtime'),
+      {
+        recursive: true,
+      },
+    );
+    await withStdioServer(
+      async (call) => {
+        const started: unknown = JSON.parse(
+          await call(
+            'editor_run',
+            { projectPath: project, op: 'start', headless: true, runtimeWaitMs: 60_000 },
+            ENGINE_CALL_TIMEOUT_MS,
+          ),
+        );
+        assert.equal(get(started, 'runtime', 'listening'), true, JSON.stringify(started));
+        const runPid = asNumber(get(started, 'pid'), 'the run holds a process');
+        const gamePid = asNumber(get(started, 'runtime', 'pid'), 'the game announced under a number');
+        assert.notEqual(
+          runPid,
+          gamePid,
+          'the console build holds the wrapper, and the engine announces as its child',
+        );
+        const announcement = join(runtimeDir, `runtime-${gamePid}.json`);
+        assert.ok(existsSync(announcement), 'the announcement is there for the stop to take');
+
+        const stopped: unknown = JSON.parse(await call('editor_run', { op: 'stop' }, 60_000));
+        assert.equal(get(stopped, 'endedPid'), runPid, JSON.stringify(stopped));
+        // Waited for rather than read once, so the assertion after it is about the file and not
+        // about how quickly the engine follows its wrapper.
+        assert.ok(await cameTrue(() => !alive(gamePid), 5_000), 'the engine goes with its wrapper');
+        assert.equal(
+          existsSync(announcement),
+          false,
+          'and its announcement went with it, taken by the number it announced under',
+        );
+      },
+      { GODOT_PATH: wrapper ?? '', GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+    );
+  } finally {
+    sweep(project);
+    sweep(runtimeDir);
+  }
+}
+
 async function testTheEditorsRunIsTheOneAnsweredFor(): Promise<void> {
   const port = await reservePort();
   // Reserved and then left alone, so nothing is listening on it: the adapter this run's console
@@ -13989,6 +14070,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testChildrenAreListedWhileTheParentLives,
   testAStopCanEndWhatTheGameStarted,
   testAStopTakesTheEndedGamesAnnouncementDown,
+  testAStopTakesTheWrappedEnginesAnnouncementDown,
   testASettingTheEditorDroppedIsNamed,
   testACleanupThatCannotFinishStillFinishes,
   testADiagnosticTheFileContradictsIsNamed,

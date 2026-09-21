@@ -5145,7 +5145,10 @@ class GodotServer {
     this.drainTranscript(stopped);
     // Read before the stop, since a game that goes on the stop is one that was running.
     const wasRunning = await this.runStillGoing(stopped);
-    const endedPid = stopped.pid ?? this.announcedPidOf(stopped) ?? null;
+    // Read now rather than after the stop, since the sweep it may take is of the announcements
+    // and the game's is about to go.
+    const announcedPid = this.announcedPidOf(stopped) ?? null;
+    const endedPid = stopped.pid ?? announcedPid;
     // Listed before the run is ended, because ending it is what makes them somebody else's
     // children: POSIX hands them to init the moment the parent goes, and the question "whose are
     // you" has no answer after that. Which of them are games is read now too, since a sweep taken
@@ -5157,9 +5160,17 @@ class GodotServer {
     const ended = children === null ? null : endChildrenAmong(children);
     // The announcement of the game just ended goes with it, here rather than on the next sweep,
     // because a number the operating system hands out again before that sweep reads as the game
-    // still starting for as long as the newcomer lives.
-    if (wasRunning && endedPid !== null) {
-      await announcementEnded(endedPid);
+    // still starting for as long as the newcomer lives. By the number the game announced under
+    // as well as by the run's own, since the two differ for the Windows console build: the run
+    // holds the wrapper and the announcement is the engine's, the wrapper's child, which goes
+    // with it. Measured: the child was listed under the wrapper and gone two seconds after the
+    // wrapper was killed.
+    if (wasRunning) {
+      for (const pid of new Set([endedPid, announcedPid])) {
+        if (pid !== null) {
+          await announcementEnded(pid);
+        }
+      }
     }
     return this.jsonTextResponse({
       stopped: true,
