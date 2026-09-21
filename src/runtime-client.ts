@@ -349,15 +349,41 @@ function tooNew(unspoken: readonly UnspokenRuntime[]): string {
 }
 
 /**
- * The one game to talk to. With a project path, the game running that project; without one,
- * the only game running. Two games and no project path is a question this cannot answer, and
- * the answer names both so the caller can.
+ * The one game to talk to. With a process id, that game; with a project path, the game running
+ * that project; without either, the only game running. Two games and nothing to tell them apart
+ * is a question this cannot answer, and the answer names both so the caller can.
+ *
+ * The process id is for a project running several games at once, which a bench fanning out to
+ * thirty-one workers does: "stop all but one" was the only advice, and it is not advice a bench
+ * can take. `editor_status` lists every game under `runtimes` with the number to pass.
  */
 export function chooseRuntime(
   endpoints: readonly RuntimeEndpoint[],
   projectPath?: string,
   unspoken: readonly UnspokenRuntime[] = [],
+  pid?: number,
 ): RuntimeChoice {
+  if (pid !== undefined) {
+    const named = endpoints.find((endpoint) => endpoint.pid === pid);
+    if (named !== undefined) {
+      if (projectPath !== undefined && resolve(named.project.path) !== resolve(projectPath)) {
+        return {
+          problem: `The game with pid ${pid} is running ${named.project.path}, not ${resolve(projectPath)}. Running: ${endpoints.map(describe).join('; ')}.`,
+        };
+      }
+      return { endpoint: named };
+    }
+    const tooNewToo = unspoken.find((game) => game.pid === pid);
+    if (tooNewToo !== undefined) {
+      return { problem: tooNew([tooNewToo]) };
+    }
+    return {
+      problem:
+        endpoints.length === 0
+          ? `No game with the runtime addon is running, so there is none with pid ${pid}. Start one with editor_run, or play the project from the editor with the addon enabled.`
+          : `No running game has pid ${pid}. Running: ${endpoints.map(describe).join('; ')}. editor_status lists them under runtimes as they come and go.`,
+    };
+  }
   if (endpoints.length === 0) {
     if (unspoken.length > 0) {
       return { problem: tooNew(unspoken) };
@@ -400,14 +426,14 @@ export function chooseRuntime(
       return { endpoint: matching[0] };
     }
     return {
-      problem: `Several games are running from ${wanted}: ${matching.map(describe).join('; ')}. Stop all but one.`,
+      problem: `Several games are running from ${wanted}: ${matching.map(describe).join('; ')}. Pass pid to choose one.`,
     };
   }
   if (endpoints.length === 1 && endpoints[0]) {
     return { endpoint: endpoints[0] };
   }
   return {
-    problem: `Several games are running: ${endpoints.map(describe).join('; ')}. Pass projectPath to choose one.`,
+    problem: `Several games are running: ${endpoints.map(describe).join('; ')}. Pass projectPath to choose one, or pid when they are from one project.`,
   };
 }
 
