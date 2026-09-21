@@ -33,6 +33,23 @@ class Watcher:
 			ups += 1
 
 
+## Counts the button events a control is handed, by button and by half, which is what says where
+## the viewport delivered a click rather than where the command said it sent one.
+class Counter:
+	extends Control
+
+	var presses: Dictionary = {}
+	var releases: Dictionary = {}
+
+	func _gui_input(event: InputEvent) -> void:
+		if event is not InputEventMouseButton:
+			return
+		var button: InputEventMouseButton = event
+		var tally: Dictionary = presses if button.pressed else releases
+		var so_far: int = Read.as_int(tally.get(button.button_index, 0), 0)
+		tally[button.button_index] = so_far + 1
+
+
 var failures: Array[String] = []
 
 var _field: LineEdit = null
@@ -60,6 +77,7 @@ func _everything() -> void:
 
 	await _check_keys(input)
 	_check_mouse(input)
+	await _check_a_wheel_step(input)
 	await _check_actions(input)
 	_check_typing(input)
 	await _type_with_keys(input)
@@ -153,6 +171,12 @@ func _check_mouse(input: InputCommands) -> void:
 	var nested: Dictionary = input.inject_mouse_click({"position": [1, 2], "button": 3})
 	if nested.get("position", []) != [1.0, 2.0] or nested.get("button", 0) != MOUSE_BUTTON_MIDDLE:
 		_fail("nested click: %s" % JSON.stringify(nested))
+	# Released, because a button left down holds the viewport's mouse focus on whatever took it,
+	# and the wheel check after this one is about exactly that.
+	var _right_up: Dictionary = input.inject_mouse_click(
+		{"x": 10, "y": 20, "button": "right", "pressed": false}
+	)
+	var _middle_up: Dictionary = input.inject_mouse_click({"x": 1, "y": 2, "button": 3, "pressed": false})
 
 	var short: Dictionary = input.inject_mouse_click({"position": [1]})
 	if short.get("type", "") != "error":
@@ -176,6 +200,59 @@ func _check_mouse(input: InputCommands) -> void:
 	var unknown: Dictionary = input.inject_mouse_click({"x": 1, "y": 1, "button": "scroll_up"})
 	if unknown.get("type", "") != "error":
 		_fail("a button name that is not one should be refused: %s" % JSON.stringify(unknown))
+
+
+## A wheel step is a press and a release together, the way a mouse sends one.
+##
+## A lone wheel press over a control leaves the viewport's mouse focus on that control with the
+## wheel's bit in its mask, and every click after it is handed to that control rather than to the
+## one under the pointer: a project scrolled a slider with wheel_down and then clicked Back twice,
+## landed true, and nothing happened, until it sent a release for the wheel by hand. Asserted on
+## what the two controls were handed rather than on the echo, since a lone press echoes exactly
+## like a whole step. The click on the second control is the positive: with the wheel released,
+## the viewport looks under the pointer again.
+func _check_a_wheel_step(input: InputCommands) -> void:
+	var taker: Counter = Counter.new()
+	taker.position = Vector2(0, 0)
+	taker.size = Vector2(100, 100)
+	root.add_child(taker)
+	var other: Counter = Counter.new()
+	other.position = Vector2(200, 0)
+	other.size = Vector2(100, 100)
+	root.add_child(other)
+	await process_frame
+
+	var notch: Dictionary = input.inject_mouse_click({"x": 50, "y": 50, "button": "wheel_down"})
+	await process_frame
+	if notch.get("released") != true:
+		_fail("a wheel click says it was released as well as pressed: %s" % JSON.stringify(notch))
+	if (
+		taker.presses.get(MOUSE_BUTTON_WHEEL_DOWN, 0) != 1
+		or taker.releases.get(MOUSE_BUTTON_WHEEL_DOWN, 0) != 1
+	):
+		_fail(
+			(
+				"the control under a wheel click is handed both halves of the step: presses %s, releases %s"
+				% [JSON.stringify(taker.presses), JSON.stringify(taker.releases)]
+			)
+		)
+
+	var _down: Dictionary = input.inject_mouse_click({"x": 250, "y": 50})
+	var _up: Dictionary = input.inject_mouse_click({"x": 250, "y": 50, "pressed": false})
+	await process_frame
+	if other.presses.get(MOUSE_BUTTON_LEFT, 0) != 1 or taker.presses.get(MOUSE_BUTTON_LEFT, 0) != 0:
+		_fail(
+			(
+				(
+					"a click after a wheel step lands under the pointer rather than on the control"
+					+ " that took the wheel: other %s, taker %s"
+				)
+				% [JSON.stringify(other.presses), JSON.stringify(taker.presses)]
+			)
+		)
+
+	taker.queue_free()
+	other.queue_free()
 
 
 ## What a field ends up holding, which is the only thing that says a key typed anything. Every
