@@ -40,7 +40,10 @@ runs:
         esac
 
         archive="${RUNNER_TEMP}/bun-${build}.zip"
-        curl -fsSL --proto '=https' --tlsv1.2 --retry 3 --retry-all-errors --retry-delay 2 -o "${archive}" \
+        # Retried on every failure with curl's own doubling wait, one second then two, four, up
+        # to thirty-two: a minute in all, which is what a gateway timeout on GitHub's download
+        # front takes to clear. A fixed two seconds between attempts gives up inside one.
+        curl -fsSL --proto '=https' --tlsv1.2 --retry 6 --retry-all-errors -o "${archive}" \
           "https://github.com/oven-sh/bun/releases/download/${tag}/bun-${build}.zip"
         # Compared here rather than through `sha256sum --check`: the macOS one is BSD's and does
         # not take the GNU options. Hashed from stdin because the GNU one prefixes its output
