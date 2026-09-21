@@ -1183,7 +1183,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'number',
         ops: ['mouse_motion'],
         description:
-          'mouse_motion: the movement the event carries. Left out, it is the distance from where the pointer last was, which is what a control that drags reads; give it to send a motion the position does not show.',
+          'mouse_motion: the movement the event carries. Left out, it is the distance from where the last injected pointer event put the pointer, and none for the first; that is what a control that drags reads. Give it to send a motion the position does not show.',
       },
       relativeY: {
         type: 'number',
@@ -1221,7 +1221,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       mouse_motion: {
         summary:
-          'move the mouse to a position, carrying the distance from where it last was unless relativeX and relativeY say otherwise, and the buttons held, so a control that drags moves under a run of these between a held mouse_click and its release',
+          'move the mouse to a position, carrying the distance from where the last injected event put it unless relativeX and relativeY say otherwise, and the buttons held, so a control that drags moves under a run of these between a held mouse_click and its release',
         requires: ['x', 'y'],
       },
     },

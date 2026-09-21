@@ -25,10 +25,29 @@ const HEADLESS_VIEWPORT: Vector2 = Vector2(64, 64)
 var _host: Node
 var _values: Values
 
+## Where the last injected pointer event put the pointer, once one has.
+##
+## Kept here rather than asked of the viewport: the root viewport answers get_mouse_position
+## from the operating system's pointer, which an injected event never moves, so on a desktop it
+## is wherever the user's mouse is, another monitor included, and every motion sent through the
+## bridge carried the distance from there. Only a headless run, with no pointer to read, followed
+## the injected events, which is why that reading measured right and a played game read it wrong.
+var _pointer: Vector2 = Vector2.ZERO
+var _pointer_placed: bool = false
+
 
 func _init(host: Node, values: Values) -> void:
 	_host = host
 	_values = values
+
+
+## The movement a pointer arriving at [param position] carries, which is the distance from where
+## the last injected event put it, and none at all for the first. The arrival is recorded.
+func _arrive(position: Vector2) -> Vector2:
+	var relative: Vector2 = position - _pointer if _pointer_placed else Vector2.ZERO
+	_pointer = position
+	_pointer_placed = true
+	return relative
 
 
 ## Presses [param params].action, and lets go of it again unless asked to hold it.
@@ -329,6 +348,9 @@ func inject_mouse_click(params: Dictionary) -> Dictionary:
 	var pressed: bool = Read.as_bool(params.get("pressed", true), true)
 	var double: bool = Read.as_bool(params.get("doubleClick", false))
 
+	# A button pressed somewhere puts the pointer there: the motion after a held press measures
+	# its drag from the press, which is where a real pointer would be.
+	var _moved: Vector2 = _arrive(position)
 	Input.parse_input_event(_button(position, button, pressed, double))
 
 	return {
@@ -342,19 +364,19 @@ func inject_mouse_click(params: Dictionary) -> Dictionary:
 
 
 ## Moves the pointer to a position, with the movement the event carries taken from where the
-## pointer last was unless the caller says otherwise.
+## last injected event put it unless the caller says otherwise.
 ##
 ## A real pointer never arrives without a `relative`, and a control that drags reads that field
 ## rather than the position, so a motion carrying none leaves a grip where it was however far the
-## position moved. The viewport remembers where the last motion put the pointer, injected or not,
-## so the difference from there is what a real move would have carried. A relative the caller gives
-## is kept, since a game may want to read a motion the position does not show.
+## position moved. The distance from where the bridge last put the pointer is what a real move
+## would have carried. A relative the caller gives is kept, since a game may want to read a motion
+## the position does not show.
 func inject_mouse_motion(params: Dictionary) -> Dictionary:
 	var point: Variant = _read_point(params, "x", "y", "position")
 	if point is String:
 		return {"type": "error", "message": point}
 	var position: Vector2 = point
-	var relative: Vector2 = position - _host.get_viewport().get_mouse_position()
+	var relative: Vector2 = _arrive(position)
 	if params.has("relativeX") or params.has("relativeY"):
 		relative = Vector2(
 			Read.as_float(params.get("relativeX", 0.0)), Read.as_float(params.get("relativeY", 0.0))
@@ -516,7 +538,7 @@ func click(params: Dictionary) -> Dictionary:
 	# Pushed into the viewport rather than through Input: Input accumulates events and flushes
 	# them at the next frame, so the hovered control read below would be the one from before
 	# the pointer moved. The viewport delivers it to the GUI the same way a real one arrives.
-	viewport.push_input(_motion(position, Vector2.ZERO))
+	viewport.push_input(_motion(position, _arrive(position)))
 	# What the engine itself thinks is under the pointer, which is the answer to "did it land",
 	# read before the press so the caller learns about a control on top rather than a click
 	# that went to it. Read in full here, path included, because nothing about that control
@@ -776,7 +798,7 @@ func _click_in_the_world(node_path: String, item: Node3D, params: Dictionary) ->
 		return _no_such_button(params.get("button"))
 	var double: bool = Read.as_bool(params.get("double", false))
 
-	viewport.push_input(_motion(position, Vector2.ZERO))
+	viewport.push_input(_motion(position, _arrive(position)))
 	# Read before the press, for the reason the Control click reads it: what the caller needs to
 	# know is whether a panel is sitting over the room, and the press is what would change it.
 	var hovered: Control = viewport.gui_get_hovered_control()
