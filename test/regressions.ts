@@ -7903,6 +7903,13 @@ interface PlayingEditorStage {
 type EditorToolAnswer = (tool: string) => Record<string, unknown> | Promise<Record<string, unknown>>;
 
 /**
+ * The process id the fake editor greets the server with, which its games would announce. This
+ * process, because the server checks that the debug adapter port the editor names is held by the
+ * editor it is talking to, and the scripted adapter is served from here.
+ */
+const FAKE_EDITOR_PID = process.pid;
+
+/**
  * A server with a fake editor on its bridge and a scripted adapter that answers everything, for
  * a project with the runtime addon on disk, so a start waits for an announcement, and nothing
  * running to make one unless the fixture writes it into `runtimeDir` itself.
@@ -7911,10 +7918,16 @@ type EditorToolAnswer = (tool: string) => Record<string, unknown> | Promise<Reco
  * from and how long it waits, and a real editor can only be made to play a game that dies by being
  * given one. [param answer] is the editor: it is handed each tool the server invokes and its
  * result is sent back, so a fixture decides what the editor says it is playing, and when.
+ *
+ * The addon on disk is a stub unless [param options.realAddon] asks for the one this repository
+ * ships, which is what says whether games of the project announce the editor that played them;
+ * with it the addon is registered as the project's autoload too, so a real engine given the
+ * project by [param options.engine] runs it and announces.
  */
 async function withAPlayingEditor(
   answer: (where: Pick<PlayingEditorStage, 'adapter' | 'project' | 'runtimeDir'>) => EditorToolAnswer,
   body: (stage: PlayingEditorStage) => Promise<void>,
+  options: { realAddon?: boolean; engine?: string } = {},
 ): Promise<void> {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-played-over-'));
   const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-played-over-rt-'));
@@ -7936,22 +7949,31 @@ async function withAPlayingEditor(
     env: {
       GDHARNESS_BRIDGE_PORT: String(port),
       GDHARNESS_RUNTIME_DIR: runtimeDir,
-      GODOT_PATH: process.execPath,
+      GODOT_PATH: options.engine ?? process.execPath,
     },
   });
   const editor: { socket: WebSocket | null } = { socket: null };
   try {
     await withFramedPeer(answerEverything, async (adapter) => {
+      const registered =
+        options.realAddon === true
+          ? '\n[autoload]\n\nGdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n'
+          : '';
       writeFileSync(
         join(project, 'project.godot'),
         '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Played"\n' +
-          'run/main_scene="res://main.tscn"\n',
+          `run/main_scene="res://main.tscn"\n${registered}`,
       );
       writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
       // The wait only happens for a project that could announce, which is one with the addon on
-      // disk. Nothing runs it here.
-      mkdirSync(join(project, 'addons', 'gdharness_runtime'), { recursive: true });
-      writeFileSync(join(project, 'addons', 'gdharness_runtime', 'runtime_autoload.gd'), 'extends Node\n');
+      // disk. A stub, unless the fixture wants the real one run by a real engine.
+      const addon = join(project, 'addons', 'gdharness_runtime');
+      if (options.realAddon === true) {
+        cpSync(join('src', 'godot', 'addons', 'gdharness_runtime'), addon, { recursive: true });
+      } else {
+        mkdirSync(addon, { recursive: true });
+        writeFileSync(join(addon, 'runtime_autoload.gd'), 'extends Node\n');
+      }
       await server.initialize('regression-test');
 
       const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
@@ -7978,6 +8000,7 @@ async function withAPlayingEditor(
           project_path: project,
           addon_version: SERVER_VERSION,
           dap_port: adapter,
+          editor_pid: FAKE_EDITOR_PID,
         }),
       );
       let greeted = false;
@@ -7994,16 +8017,16 @@ async function withAPlayingEditor(
       // otherwise, and a headless start is spawned rather than played, which is a different case.
       const start = async (runtimeWaitMs: number): Promise<{ answer: unknown; waitedMs: number }> => {
         const began = Date.now();
-        const answered = parseTextContent(
-          await server.request(
-            'tools/call',
-            {
-              name: 'editor_run',
-              arguments: { projectPath: project, op: 'start', headless: false, runtimeWaitMs },
-            },
-            30_000,
-          ),
+        const response = await server.request(
+          'tools/call',
+          {
+            name: 'editor_run',
+            arguments: { projectPath: project, op: 'start', headless: false, runtimeWaitMs },
+          },
+          30_000,
         );
+        // A refusal is plain text, and a fixture reading fields off null learns nothing from it.
+        const answered = parseTextContent(response) ?? { refused: textOf(response) };
         return { answer: answered, waitedMs: Date.now() - began };
       };
       await body({ server, project, runtimeDir, adapter, start });
@@ -8282,6 +8305,193 @@ async function testALateAnnouncementIsTiedToThePlayedRun(): Promise<void> {
       );
       assert.equal(get(stopped, 'exitedBeforeStop'), false, JSON.stringify(stopped));
     },
+  );
+}
+
+/**
+ * The editor's game is told apart from another game of the same project announced beside it.
+ *
+ * A played run is tied to the process its game announced, and the tie went by freshness alone:
+ * the one game of the project announced since the play. A game of the same project that some
+ * other server started in that window is exactly as fresh, and the start took it for its own,
+ * answering listening about a process it did not start while its game was still booting; the
+ * tie after the wait did the same. Freshness is a property every game of the project shares, so
+ * the mark is one they cannot: the editor addon puts its process id into its environment, every
+ * game the editor plays inherits it, and the runtime announces it. A game announcing another
+ * editor, or none where the project's addon announces one, is somebody else's.
+ *
+ * Two rounds, because the tie is made in two places. In the first the foreign game announces
+ * first and inside the start's wait, naming no editor, and the wait has to pass over it for the
+ * editor's own. In the second both announce after the wait, the foreign one naming another
+ * editor, and the tie made on the next answer has to pick the editor's own. Real processes stand
+ * in for the games, since an announcement of a process that is gone is swept before it is read.
+ */
+async function testTheEditorsGameIsToldFromAnotherOfTheSameProject(): Promise<void> {
+  const games: ChildProcess[] = [];
+  const aGame = (): number => {
+    const game = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+    games.push(game);
+    assert.ok(typeof game.pid === 'number', 'the fixture needs live processes to announce');
+    return game.pid;
+  };
+  const announce = (runtimeDir: string, project: string, pid: number, editorPid?: number): void => {
+    writeFileSync(
+      join(runtimeDir, `runtime-${pid}.json`),
+      JSON.stringify({
+        protocol: RUNTIME_PROTOCOL,
+        pid,
+        port: 51_996,
+        address: '127.0.0.1',
+        project: { name: 'Played', path: project },
+        ...(editorPid === undefined ? {} : { editor_pid: editorPid }),
+      }),
+      'utf8',
+    );
+  };
+  let round = 0;
+  let ours = 0;
+  let theirs = 0;
+  try {
+    await withAPlayingEditor(
+      ({ adapter, project, runtimeDir }) =>
+        (tool) => {
+          if (tool === 'play_scene') {
+            round += 1;
+            theirs = aGame();
+            ours = aGame();
+            if (round === 1) {
+              // Theirs first and unmarked, ours 300 ms later: both inside the first wait.
+              announce(runtimeDir, project, theirs);
+              setTimeout(() => {
+                announce(runtimeDir, project, ours, FAKE_EDITOR_PID);
+              }, 300);
+            } else {
+              // Both after the second wait, theirs naming an editor that is not this one.
+              setTimeout(() => {
+                announce(runtimeDir, project, theirs, FAKE_EDITOR_PID + 1);
+                announce(runtimeDir, project, ours, FAKE_EDITOR_PID);
+              }, 600);
+            }
+            return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
+          }
+          if (tool === 'playing_status') {
+            return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
+          }
+          return { ok: true };
+        },
+      async ({ server, runtimeDir, start }) => {
+        const first = await start(3_000);
+        assert.equal(get(first.answer, 'through'), 'editor', JSON.stringify(first.answer));
+        assert.equal(
+          get(first.answer, 'runtime', 'listening'),
+          true,
+          `the editor's own game should have been found: ${JSON.stringify(first.answer)}`,
+        );
+        assert.equal(
+          get(first.answer, 'runtime', 'pid'),
+          ours,
+          `and it is the game the editor played, not the one announced first: ${JSON.stringify(first.answer)}`,
+        );
+
+        const second = await start(200);
+        assert.equal(
+          get(second.answer, 'runtime', 'mayYetAnnounce'),
+          true,
+          `the second wait should run out before either announces: ${JSON.stringify(second.answer)}`,
+        );
+        assert.ok(
+          await cameTrue(() => existsSync(join(runtimeDir, `runtime-${ours}.json`)), 5_000),
+          'both announcements should have landed',
+        );
+        const output = parseTextContent(
+          await server.request('tools/call', { name: 'editor_output', arguments: {} }, 60_000),
+        );
+        assert.equal(
+          get(output, 'pid'),
+          ours,
+          `the run is tied to the game the editor played, not the one naming another editor: ${JSON.stringify(output)}`,
+        );
+      },
+      { realAddon: true },
+    );
+  } finally {
+    for (const game of games) {
+      if (game.exitCode === null) {
+        game.kill();
+      }
+    }
+  }
+}
+
+/**
+ * A game this server spawned beside a connected editor is still its own, though it names no editor.
+ *
+ * The rule that tells the editor's game from a stranger's reads an announcement naming no editor,
+ * in a project whose addon announces editors, as somebody else's. That is right for a run the
+ * editor plays and wrong for a run this server started: a spawned game inherited no editor to
+ * name, so under the played rule a spawned start waited its whole budget on its own game and
+ * answered that nothing had announced. The editor tier found it on the first run, with a real
+ * engine, which is why this one runs a real engine too: the announcement has to come from the
+ * addon as it is, in the environment a spawned game actually gets.
+ */
+async function testASpawnedGameBesideAnEditorIsStillItsOwn(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('spawned game beside an editor regression skipped (Godot not found)');
+    return;
+  }
+  await withAPlayingEditor(
+    ({ adapter }) =>
+      (tool) =>
+        tool === 'playing_status'
+          ? { ok: true, playing: false, scenePath: '', debugPort: adapter }
+          : { ok: true },
+    async ({ server, project }) => {
+      const answer = parseTextContent(
+        await server.request(
+          'tools/call',
+          {
+            name: 'editor_run',
+            arguments: { projectPath: project, op: 'start', headless: true, runtimeWaitMs: 20_000 },
+          },
+          ENGINE_CALL_TIMEOUT_MS,
+        ),
+      );
+      try {
+        assert.equal(
+          get(answer, 'through'),
+          'gdharness',
+          `a headless start is spawned: ${JSON.stringify(answer)}`,
+        );
+        assert.equal(
+          get(answer, 'runtime', 'listening'),
+          true,
+          `the spawned game's own announcement is the one waited for: ${JSON.stringify(answer)}`,
+        );
+        const status = parseTextContent(
+          await server.request(
+            'tools/call',
+            { name: 'editor_status', arguments: {} },
+            ENGINE_CALL_TIMEOUT_MS,
+          ),
+        );
+        assert.equal(
+          get(status, 'game', 'runtimes', 0, 'editorPid'),
+          undefined,
+          `and it names no editor, having been started here: ${JSON.stringify(status)}`,
+        );
+      } finally {
+        await server.request(
+          'tools/call',
+          { name: 'editor_run', arguments: { op: 'stop' } },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+      }
+    },
+    { realAddon: true, engine },
   );
 }
 
@@ -11618,6 +11828,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAPlayedStartStopsWaitingForAGameThatIsOver,
   testTheAnnounceWaitIsNotHeldByASlowEditor,
   testALateAnnouncementIsTiedToThePlayedRun,
+  testTheEditorsGameIsToldFromAnotherOfTheSameProject,
+  testASpawnedGameBesideAnEditorIsStillItsOwn,
   testASettingTheEditorDroppedIsNamed,
   testACleanupThatCannotFinishStillFinishes,
   testADiagnosticTheFileContradictsIsNamed,

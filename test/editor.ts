@@ -3052,7 +3052,17 @@ async function testAPlayedRunsConsoleArrivesOnItsOwn({ call, project }: Editor):
   // past its budget, so what is held is that the question was put to that process.
   const asked = await call('editor_output', { cpu: true });
   const pid = asNumber(get(asked, 'pid'), 'a played game that announced is named by that number');
-  assert.equal(pid, asNumber(get(await call('editor_status', {}), 'game', 'runtimes', 0, 'pid')));
+  const status = await call('editor_status', {});
+  assert.equal(pid, asNumber(get(status, 'game', 'runtimes', 0, 'pid')));
+  // The game says which editor played it, through the environment the editor addon marks and the
+  // game inherits: this is the property that tells the editor's game from another of the same
+  // project that some other server started, and it is asserted here through a real editor, a
+  // real play and the real addon, since the mark is written by one process and read by two others.
+  assert.equal(
+    get(status, 'game', 'runtimes', 0, 'editorPid'),
+    asNumber(get(status, 'editor', 'editorPid'), 'the editor should say which process it is'),
+    `the played game announces the editor that played it: ${text(status)}`,
+  );
   const cpuSeconds = get(asked, 'cpuSeconds');
   assert.ok(
     (typeof cpuSeconds === 'number' && cpuSeconds >= 0) ||

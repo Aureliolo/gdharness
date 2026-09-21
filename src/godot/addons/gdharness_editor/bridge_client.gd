@@ -43,6 +43,12 @@ const DAP_ASKED: String = "GDHARNESS_DAP_PORT"
 ## What a server that opened this editor says about itself, so that being opened by one is stated
 ## rather than guessed at from the ports. Kept in step with `OPENED_BY_A_SERVER` in src/launch.ts.
 const OPENED_BY_A_SERVER: String = "GDHARNESS_OPENED_BY_A_SERVER"
+## Put into this editor's own environment as it loads, so every game it plays inherits it and
+## the runtime addon can announce which editor played it. A game of the same project that some
+## other server started has no such variable, or another editor's number, and that is what
+## tells the two apart when both are announced at once. Kept in step with `EDITOR_PID_VARIABLE`
+## in the runtime autoload.
+const EDITOR_PID_VARIABLE: String = "GDHARNESS_EDITOR_PID"
 
 ## How long one attempt is given before the address is called a bad one.
 ##
@@ -93,6 +99,7 @@ func _ready() -> void:
 	_project_path = ProjectSettings.globalize_path("res://")
 	version_at_load = _loaded_version()
 	_keep_breakpoints_through_sessions()
+	OS.set_environment(EDITOR_PID_VARIABLE, str(OS.get_process_id()))
 
 	_reconnect_timer = Timer.new()
 	_reconnect_timer.one_shot = true
