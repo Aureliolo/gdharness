@@ -8627,13 +8627,13 @@ async function testAnInjectedMotionCarriesHowFarThePointerMoved(): Promise<void>
       writeFileSync(
         join(project, 'main.gd'),
         'extends Node\n\nvar last_relative: Vector2 = Vector2.ZERO\nvar last_mask: int = 0\n' +
-          'var last_button_mask: int = 0\nvar motions: int = 0\n\n\n' +
+          'var last_button_mask: int = 0\nvar arrived: Array[Vector2] = []\n\n\n' +
           'func _input(event: InputEvent) -> void:\n' +
           '\tif event is InputEventMouseMotion:\n' +
           '\t\tvar motion: InputEventMouseMotion = event\n' +
           '\t\tlast_relative = motion.relative\n' +
           '\t\tlast_mask = motion.button_mask\n' +
-          '\t\tmotions += 1\n' +
+          '\t\tarrived.append(motion.position)\n' +
           '\tif event is InputEventMouseButton:\n' +
           '\t\tvar button: InputEventMouseButton = event\n' +
           '\t\tlast_button_mask = button.button_mask\n',
@@ -8688,7 +8688,19 @@ async function testAnInjectedMotionCarriesHowFarThePointerMoved(): Promise<void>
         );
         await call('runtime_wait', { op: 'frames', frames: 2 });
         assert.deepEqual(await lastRelative(), [30, 20], 'and the game read the same distance off the event');
-        assert.equal(await read('motions'), 2, 'from two motions');
+        // Both injected motions reached the game at the points they were sent to. Named by
+        // position rather than counted, since a real pointer resting inside a new window is a
+        // motion of its own on the Windows runner, and a count would be about that as well.
+        const arrived = asArray(await read('arrived')).map((point) => [get(point, 'x'), get(point, 'y')]);
+        for (const point of [
+          [10, 10],
+          [40, 30],
+        ]) {
+          assert.ok(
+            arrived.some((at) => at[0] === point[0] && at[1] === point[1]),
+            `the motion to ${JSON.stringify(point)} reached the game: ${JSON.stringify(arrived)}`,
+          );
+        }
         // A relative the caller gives is what the event carries, whatever the position says.
         const told = await call('runtime_input', {
           op: 'mouse_motion',
