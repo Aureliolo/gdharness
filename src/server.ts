@@ -4898,12 +4898,14 @@ class GodotServer {
     // the engine under it is grinding, which is exactly the reading this exists to tell apart.
     // Found through the process tree when nothing else has tied it, since this ask already costs
     // what that costs and is made rarely.
+    //
+    // Read once for the whole answer. The tree is seconds to read on a loaded machine, and an
+    // announcement landing inside that read tied the run for the `pid` field below and not for
+    // the reading above it, so one answer said there was no process to ask and named one.
     const wanted = readBoolean(args, 'cpu') ?? false;
+    const announced = this.announcedPidOf(run);
     const processToAsk = wanted
-      ? (this.announcedPidOf(run) ??
-        (stillRunning(run) ? await this.gameProcessOf(run) : undefined) ??
-        run.pid ??
-        null)
+      ? (announced ?? (stillRunning(run) ? await this.gameProcessOf(run) : undefined) ?? run.pid ?? null)
       : null;
     const cpuSeconds =
       wanted && processToAsk !== null && stillRunning(run) ? await cpuSecondsOf(processToAsk) : undefined;
@@ -4986,8 +4988,9 @@ class GodotServer {
       through: run.throughEditor ? 'editor' : 'gdharness',
       // The number the game announced, for a run the editor plays: the process is the same one
       // whichever side started it, and null here read as "no process" beside a runtimes list
-      // naming it.
-      pid: run.pid ?? this.announcedPidOf(run) ?? null,
+      // naming it. The reading taken above, or the tie the reading above made, and not a fresh
+      // look, so this agrees with what cpu was asked of.
+      pid: run.pid ?? announced ?? run.announcedPid ?? null,
       errors: run.log.count('error'),
       warnings: run.log.count('warning'),
       // Undefined rather than true once the console has gone, because clean is a claim about the
