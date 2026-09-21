@@ -8665,9 +8665,19 @@ async function testARuntimeCallReachesThisServersOwnGame(): Promise<void> {
  * game and one not, and the editor stage ties the run to it. The positive is the other child still
  * there after the stop: a stop that ended every child would pass the first assertion as well.
  */
-async function testAStopCanEndWhatTheGameStarted(): Promise<void> {
-  // Asked of a real process first, since the listing is a thing the platform has to supply and
-  // its absence is otherwise a stop that quietly ends nothing.
+/**
+ * A process's children are listed while it lives, and on POSIX not after: the reason a stop asked
+ * to end them lists them before ending the run.
+ *
+ * The listing is a thing the platform has to supply, and its absence would otherwise be a stop
+ * that quietly ends nothing, so an answer is required of every platform. The second half is the
+ * claim the ordering in `handleStopProject` rests on, measured rather than reasoned: a parent
+ * started here with a child of its own is ended, and the child is asked for again. POSIX hands an
+ * orphan to init, so the listing under the dead parent is empty; Windows keeps the dead parent's
+ * number on the child, so the listing still names it there, which is why the ordering is written
+ * for the platform that forgets rather than the one that remembers.
+ */
+async function testChildrenAreListedWhileTheParentLives(): Promise<void> {
   const probe = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
   try {
     assert.ok(typeof probe.pid === 'number');
@@ -8678,6 +8688,69 @@ async function testAStopCanEndWhatTheGameStarted(): Promise<void> {
     probe.kill();
   }
 
+  // The grandchild is started detached, the way a game starts a worker: a child Node keeps in its
+  // job object on Windows dies with its parent, which is Node's doing and not the platform's, and
+  // what is measured here is what the platform does with an orphan.
+  const parent = spawn(
+    process.execPath,
+    [
+      '-e',
+      "const { spawn } = require('node:child_process');" +
+        "const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', detached: true });" +
+        'child.unref();' +
+        "process.stdout.write(String(child.pid) + '\\n');" +
+        'setInterval(() => {}, 1000);',
+    ],
+    { stdio: ['ignore', 'pipe', 'ignore'] },
+  );
+  let child = 0;
+  try {
+    assert.ok(typeof parent.pid === 'number');
+    const printed = await new Promise<string>((resolve) => {
+      let text = '';
+      parent.stdout.setEncoding('utf8');
+      parent.stdout.on('data', (chunk: string) => {
+        text += chunk;
+        if (text.includes('\n')) resolve(text);
+      });
+    });
+    child = Number(printed.trim());
+    assert.ok(child > 0 && alive(child), 'the grandchild is there to be listed');
+    const alive_ = await childrenOf(parent.pid);
+    assert.deepEqual(alive_, [child], `listed under the living parent: ${JSON.stringify(alive_)}`);
+
+    parent.kill();
+    assert.ok(
+      await cameTrue(() => parent.exitCode !== null || parent.signalCode !== null, 5_000),
+      'the parent should have ended',
+    );
+    assert.ok(alive(child), 'the orphan is still there');
+    const afterwards = await childrenOf(parent.pid);
+    assert.ok(afterwards !== undefined, 'the platform still answers about a number that is gone');
+    if (process.platform === 'win32') {
+      assert.deepEqual(
+        afterwards,
+        [child],
+        `Windows keeps the dead parent on the child: ${JSON.stringify(afterwards)}`,
+      );
+    } else {
+      assert.deepEqual(afterwards, [], `POSIX has handed the orphan to init: ${JSON.stringify(afterwards)}`);
+    }
+  } finally {
+    if (child > 0 && alive(child)) {
+      try {
+        process.kill(child);
+      } catch {
+        // Gone already.
+      }
+    }
+    if (parent.exitCode === null && parent.signalCode === null) {
+      parent.kill();
+    }
+  }
+}
+
+async function testAStopCanEndWhatTheGameStarted(): Promise<void> {
   const held: { bench: ChildProcess | null } = { bench: null };
   let worker = 0;
   let other = 0;
@@ -12130,6 +12203,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheEditorsGameIsToldFromAnotherOfTheSameProject,
   testASpawnedGameBesideAnEditorIsStillItsOwn,
   testARuntimeCallReachesThisServersOwnGame,
+  testChildrenAreListedWhileTheParentLives,
   testAStopCanEndWhatTheGameStarted,
   testASettingTheEditorDroppedIsNamed,
   testACleanupThatCannotFinishStillFinishes,
