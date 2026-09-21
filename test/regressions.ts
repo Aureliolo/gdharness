@@ -8782,12 +8782,22 @@ async function testAKeyDoesNotChooseFromAnOpenedMenu(): Promise<void> {
         // and shut again on its own.
         writeFileSync(
           join(project, 'main.gd'),
-          'extends Control\n\nvar presses: int = 0\nvar openings: int = 0\nvar closings: int = 0\n\n\n' +
+          'extends Control\n\nvar presses: int = 0\nvar openings: int = 0\nvar closings: int = 0\n' +
+            'var log: Array[String] = []\n\n\n' +
             'func _ready() -> void:\n' +
             '\tvar pick: OptionButton = $Pick\n' +
-            '\tpick.pressed.connect(func() -> void: presses += 1)\n' +
-            '\tpick.get_popup().about_to_popup.connect(func() -> void: openings += 1)\n' +
-            '\tpick.get_popup().popup_hide.connect(func() -> void: closings += 1)\n',
+            '\tvar menu: PopupMenu = pick.get_popup()\n' +
+            '\tpick.pressed.connect(func() -> void:\n\t\tpresses += 1\n\t\t_note("pressed"))\n' +
+            '\tmenu.about_to_popup.connect(func() -> void:\n\t\topenings += 1\n\t\t_note("about_to_popup"))\n' +
+            '\tmenu.popup_hide.connect(func() -> void:\n\t\tclosings += 1\n\t\t_note("popup_hide"))\n' +
+            '\tmenu.focus_entered.connect(func() -> void: _note("menu focus_entered"))\n' +
+            '\tmenu.focus_exited.connect(func() -> void: _note("menu focus_exited"))\n' +
+            '\tmenu.visibility_changed.connect(func() -> void: _note("menu visible %s" % menu.visible))\n' +
+            '\tget_window().focus_entered.connect(func() -> void: _note("window focus_entered"))\n' +
+            '\tget_window().focus_exited.connect(func() -> void: _note("window focus_exited"))\n' +
+            '\tget_window().size_changed.connect(func() -> void: _note("window size %s" % get_window().size))\n\n\n' +
+            'func _note(what: String) -> void:\n' +
+            '\tlog.append("%d %s" % [Engine.get_process_frames(), what])\n',
         );
         writeFileSync(
           join(project, 'main.tscn'),
@@ -8826,7 +8836,10 @@ async function testAKeyDoesNotChooseFromAnOpenedMenu(): Promise<void> {
             nodePath: '/root',
             method: 'has_focus',
           });
-          return `${counted.join(', ')}, window focused ${JSON.stringify(get(focused, 'result'))}`;
+          const noted = asArray(await property('/root/Main', 'log'))
+            .map(text)
+            .join('; ');
+          return `${counted.join(', ')}, window focused ${JSON.stringify(get(focused, 'result'))}, noted: ${noted}`;
         };
 
         // The two halves of a click one at a time, read separately, since one leg reports the
