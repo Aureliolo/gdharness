@@ -3596,7 +3596,10 @@ class GodotServer {
       return runtimeVerdict(null, { addon: false, budgetMs, heldAt: null, running: false, withArgs });
     }
     // The editor is asked about a run it is playing no more often than the wait loop asks it, so
-    // a look every fifty milliseconds does not become a request every fifty milliseconds.
+    // a look every fifty milliseconds does not become a request every fifty milliseconds, and
+    // beside the looks rather than between them: an editor that does not answer holds the
+    // question for a second, and an announcement that lands in that second should not wait it out.
+    let asking: Promise<void> | null = null;
     let editorAskedAt = 0;
     let editorSaysGoing = true;
     const endpoint = await announcedSince(projectPath, before, {
@@ -3609,7 +3612,7 @@ class GodotServer {
       // and then quit is still found. A run the editor plays has no process to ask, so the editor
       // is asked instead: without that a played scene that died on boot was waited for the whole
       // budget and then reported, correctly, as no longer running.
-      giveUp: async () => {
+      giveUp: () => {
         if (this.dapClient?.isStopped() === true) {
           return true;
         }
@@ -3617,9 +3620,15 @@ class GodotServer {
         if (run === null || !run.throughEditor) {
           return !stillRunning(run);
         }
-        if (Date.now() - editorAskedAt >= RUN_POLL_MS) {
+        if (asking === null && Date.now() - editorAskedAt >= RUN_POLL_MS) {
           editorAskedAt = Date.now();
-          editorSaysGoing = await this.runStillGoing(run);
+          asking = this.runStillGoing(run)
+            .then((going) => {
+              editorSaysGoing = going;
+            })
+            .finally(() => {
+              asking = null;
+            });
         }
         return !editorSaysGoing;
       },
@@ -3636,7 +3645,9 @@ class GodotServer {
       addon: true,
       budgetMs,
       heldAt: this.dapClient?.whereItStopped() ?? null,
-      running: going === null ? false : await this.runStillGoing(going),
+      // Only asked when there is no announcement to answer with: a game that announced is up, and
+      // asking the editor about a played one costs a round trip the answer would not use.
+      running: endpoint !== null || (going !== null && (await this.runStillGoing(going))),
       withArgs,
     });
   }
