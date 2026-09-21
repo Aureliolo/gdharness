@@ -10363,6 +10363,43 @@ function testACommandLineIsReadTheWayTheEngineReadsIt(): void {
     [1],
     'a chain that never reaches the root ends where the tree does',
   );
+
+  // A listing that says when each began, as the Windows one does, and a link that is to a number
+  // rather than to a process: 30 was left behind by whatever held 10 before this wrapper did, and
+  // began before the wrapper, which no child of it could have. The positive is the engine, which
+  // began after the wrapper and is still its child; and a process the system would not date is
+  // linked by its number alone, as before.
+  const dated = parseProcessTable(
+    [
+      '10 1 1000 wrapper',
+      '11 10 1500 engine',
+      '12 11 2000 worker',
+      '30 10 500 orphan of an earlier 10',
+      "31 30 600 the orphan's own child",
+      '40 10 0 undated',
+    ].join('\n'),
+    true,
+  );
+  assert.deepEqual(
+    [...dated.entries()].slice(0, 2),
+    [
+      [10, { parent: 1, command: 'wrapper', startedAt: 1000 }],
+      [11, { parent: 10, command: 'engine', startedAt: 1500 }],
+    ],
+    'the third column is when each began',
+  );
+  assert.deepEqual(dated.get(40), { parent: 10, command: 'undated' }, 'zero is no time at all');
+  assert.deepEqual(
+    descendantsIn(dated, 10),
+    [11, 40, 12],
+    'a child that began before its parent is not its child, and takes its own children with it',
+  );
+  assert.deepEqual(ancestorsIn(dated, 12, 10), [11, 10], 'the chain up through real links is whole');
+  assert.deepEqual(
+    ancestorsIn(dated, 31, 10),
+    [30],
+    'and a chain up through a stale link stops at the process that was really there',
+  );
 }
 
 /**
@@ -10384,6 +10421,23 @@ async function testChildrenAreListedWhileTheParentLives(): Promise<void> {
     const listed = await childrenOf(process.pid);
     assert.ok(listed !== undefined, "this platform has to list a process's children");
     assert.ok(listed.includes(probe.pid), `the child just spawned is listed: ${JSON.stringify(listed)}`);
+    // Windows keeps a dead parent's number on its orphans, so its listing has to say when each
+    // process began or a link cannot be told from a number that came round: required of the
+    // platform rather than assumed, since a listing without times would keep every link and the
+    // guard on them would be quietly gone.
+    if (process.platform === 'win32') {
+      const tree = await processTree();
+      const dated = tree?.get(probe.pid)?.startedAt;
+      assert.ok(
+        dated !== undefined && dated > 0,
+        `the Windows listing dates each process: ${JSON.stringify(tree?.get(probe.pid))}`,
+      );
+      const own = tree?.get(process.pid)?.startedAt;
+      assert.ok(
+        own !== undefined && own <= dated,
+        'and this process began no later than the child it spawned',
+      );
+    }
   } finally {
     probe.kill();
   }
