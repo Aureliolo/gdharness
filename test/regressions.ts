@@ -8497,6 +8497,279 @@ async function testASpawnedGameBesideAnEditorIsStillItsOwn(): Promise<void> {
 }
 
 /**
+ * A stop with andChildren ends a worker a real game opened with OS.create_process.
+ *
+ * The regression beside this one measures the mechanism with Node processes standing in for the
+ * games. This is the shape downstream actually has, under the engine: a bench scene that opens a
+ * worker with `OS.create_process`, which opens a helper of its own, all three announcing through
+ * the runtime addon as games of the project, the bench started headless by this server. The stop
+ * has to list the worker and the helper under the bench by asking the operating system, end them,
+ * and name them, and their announcements have to be gone afterwards because the processes are.
+ *
+ * Run under every shape of engine the machine has. The Windows console build is a wrapper that
+ * starts the engine as its child, so the process this server holds is not the game, the game
+ * announces a number the handle does not have, and the worker is the handle's grandchild: a
+ * listing one level deep found the game and took it for a worker, and found no worker at all. The
+ * archive the installer unpacks carries both builds, so the sibling is run when it is there.
+ *
+ * And twice under each: with the bench announcing inside the start's wait, which ties the run to
+ * its game there, and with the wait too short for that, so that by the time anything asks, the
+ * bench and its worker have both announced and neither is fresher than the other. Under the
+ * wrapper that is the case only the process tree can decide, and the case a bench that boots
+ * slowly puts every stop in.
+ */
+async function testARealBenchTakesItsWorkerWithIt(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('real bench and worker regression skipped (Godot not found)');
+    return;
+  }
+  const consoleSibling = engine.replace(/(_console)?\.exe$/i, '_console.exe');
+  const engines =
+    process.platform === 'win32' && consoleSibling !== engine && existsSync(consoleSibling)
+      ? [engine, consoleSibling]
+      : [engine];
+  for (const each of engines) {
+    for (const tiedAtStart of [true, false]) {
+      await aRealBenchTakesItsWorkerWithIt(each, tiedAtStart);
+    }
+  }
+}
+
+async function aRealBenchTakesItsWorkerWithIt(engine: string, tiedAtStart: boolean): Promise<void> {
+  const shape = `${basename(engine)}, ${tiedAtStart ? 'tied at the start' : 'announced after the start'}`;
+  await withAPlayingEditor(
+    ({ adapter }) =>
+      (tool) =>
+        tool === 'playing_status'
+          ? { ok: true, playing: false, scenePath: '', debugPort: adapter }
+          : { ok: true },
+    async ({ server, project, runtimeDir }) => {
+      // The bench works, every frame, so that its processor time is a number that separates it
+      // from a wrapper standing in front of it.
+      writeFileSync(
+        join(project, 'bench.gd'),
+        'extends Node\n\n\nfunc _ready() -> void:\n' +
+          '\tvar worker := OS.create_process(\n' +
+          '\t\tOS.get_executable_path(),\n' +
+          '\t\t["--headless", "--path", ProjectSettings.globalize_path("res://"), "res://worker.tscn"]\n' +
+          '\t)\n' +
+          '\tprint("worker %d" % worker)\n\n\n' +
+          'func _process(_delta: float) -> void:\n' +
+          '\tvar until := Time.get_ticks_msec() + 12\n' +
+          '\twhile Time.get_ticks_msec() < until:\n' +
+          '\t\tpass\n',
+      );
+      writeFileSync(
+        join(project, 'main.tscn'),
+        '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://bench.gd" id="1"]\n\n' +
+          '[node name="Bench" type="Node"]\nscript = ExtResource("1")\n',
+      );
+      // The worker opens a helper of its own, so the stop has a process two levels down to find:
+      // one level would end the worker and leave the helper, and under the wrapper the helper is
+      // three levels below the handle. Its pid goes into a file, since what a process opened with
+      // OS.create_process prints reaches no transcript.
+      writeFileSync(
+        join(project, 'worker.gd'),
+        'extends Node\n\n\nfunc _ready() -> void:\n' +
+          '\tif "--leaf" in OS.get_cmdline_user_args():\n' +
+          '\t\treturn\n' +
+          '\tvar helper := OS.create_process(\n' +
+          '\t\tOS.get_executable_path(),\n' +
+          '\t\t["--headless", "--path", ProjectSettings.globalize_path("res://"), "res://worker.tscn", "--", "--leaf"]\n' +
+          '\t)\n' +
+          '\tvar note := FileAccess.open(ProjectSettings.globalize_path("res://helper.pid"), FileAccess.WRITE)\n' +
+          '\tnote.store_string(str(helper))\n' +
+          '\tnote.close()\n',
+      );
+      writeFileSync(
+        join(project, 'worker.tscn'),
+        '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://worker.gd" id="1"]\n\n' +
+          '[node name="Worker" type="Node"]\nscript = ExtResource("1")\n',
+      );
+
+      const status = async (): Promise<unknown> =>
+        parseTextContent(
+          await server.request(
+            'tools/call',
+            { name: 'editor_status', arguments: {} },
+            ENGINE_CALL_TIMEOUT_MS,
+          ),
+        );
+      const startResponse = await server.request(
+        'tools/call',
+        {
+          name: 'editor_run',
+          arguments: {
+            projectPath: project,
+            op: 'start',
+            headless: true,
+            runtimeWaitMs: tiedAtStart ? 20_000 : 1,
+          },
+        },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+      const started = parseTextContent(startResponse) ?? { refused: textOf(startResponse) };
+      let workerPid = 0;
+      let helperPid = 0;
+      try {
+        assert.equal(
+          get(started, 'runtime', 'listening'),
+          tiedAtStart,
+          `${shape}: ${JSON.stringify(started)}`,
+        );
+        const benchPid = asNumber(get(started, 'pid'), 'the spawned bench has a pid');
+        // The worker announces on its own boot, a moment after the bench's, and the helper after
+        // that. Waited for on disk rather than through the server, because a status call in the
+        // moment between the announcements would tie the run to the one game announced, and the
+        // second shape is about the stop that finds several.
+        const announcedFiles = (): string[] =>
+          readdirSync(runtimeDir).filter((entry) => /^runtime-\d+\.json$/.test(entry));
+        assert.ok(
+          await cameTrue(() => announcedFiles().length === 3, 30_000),
+          `${shape}: the bench, its worker and the helper should all announce: ${JSON.stringify(announcedFiles())}`,
+        );
+        const helperNote = join(project, 'helper.pid');
+        assert.ok(
+          await cameTrue(() => existsSync(helperNote), 5_000),
+          `${shape}: the worker wrote the helper's pid`,
+        );
+        helperPid = Number(readFileSync(helperNote, 'utf8').trim());
+        assert.ok(
+          helperPid > 0,
+          `${shape}: the helper's pid is a number: ${readFileSync(helperNote, 'utf8')}`,
+        );
+        const running = asArray(get(await status(), 'game', 'runtimes'));
+        assert.equal(running.length, 3, `${shape}: ${JSON.stringify(running)}`);
+        // Which of the two is the worker is what the bench printed, not the one that is not the
+        // handle: under the Windows console build the handle is a wrapper and neither is it.
+        const printed = parseTextContent(
+          await server.request(
+            'tools/call',
+            { name: 'editor_output', arguments: {} },
+            ENGINE_CALL_TIMEOUT_MS,
+          ),
+        );
+        const printedAt = Date.now();
+        const workerLine = asArray(get(printed, 'entries'))
+          .map((entry) => /^worker (\d+)$/.exec(text(get(entry, 'text')).trim()))
+          .find((match) => match !== null);
+        assert.ok(workerLine, `${shape}: the bench printed the worker's pid: ${JSON.stringify(printed)}`);
+        workerPid = Number(workerLine[1]);
+        assert.ok(
+          running.some((one) => asNumber(get(one, 'pid')) === workerPid),
+          `${shape}: the worker the bench printed is one of the announced games: ${JSON.stringify(running)}`,
+        );
+        assert.ok(
+          running.some((one) => asNumber(get(one, 'pid')) === helperPid),
+          `${shape}: and so is the helper the worker opened: ${JSON.stringify(running)}`,
+        );
+        const benchGame = running
+          .map((one) => asNumber(get(one, 'pid')))
+          .find((pid) => pid !== workerPid && pid !== helperPid);
+        assert.ok(benchGame !== undefined, `${shape}: the remaining announced game is the bench`);
+
+        // A call naming no game reaches the bench, not its worker, and says so: with three games
+        // of the project announced and the run tied to none yet, this is the tree's answer.
+        const inspected = parseTextContent(
+          await server.request(
+            'tools/call',
+            { name: 'runtime_inspect', arguments: { op: 'tree', nodePath: '/root' } },
+            ENGINE_CALL_TIMEOUT_MS,
+          ),
+        );
+        assert.equal(
+          get(inspected, 'answeredBy'),
+          benchGame,
+          `${shape}: a call naming no pid reaches the bench: ${JSON.stringify(inspected)}`,
+        );
+        assert.match(JSON.stringify(inspected), /"Bench"/, `${shape}: and it is the bench's tree`);
+        assert.doesNotMatch(JSON.stringify(inspected), /"Worker"/, `${shape}: not the worker's`);
+
+        // Processor time is the bench's, which has been working every frame since it started,
+        // and not a wrapper's, which does nothing and would read as a bench standing still. The
+        // number when the platform gives one, or its note when it would not, since a loaded
+        // Windows runner holds the ask past its budget. Two seconds in, so that a bench sharing
+        // a runner with its own worker and helper has had a quarter of a core's worth to show.
+        await delay(Math.max(0, 2_000 - asNumber(get(printed, 'elapsedMs')) - (Date.now() - printedAt)));
+        const measured = parseTextContent(
+          await server.request(
+            'tools/call',
+            { name: 'editor_output', arguments: { cpu: true } },
+            ENGINE_CALL_TIMEOUT_MS,
+          ),
+        );
+        const cpuSeconds = get(measured, 'cpuSeconds');
+        if (cpuSeconds === undefined) {
+          assert.match(
+            text(get(measured, 'note')),
+            /cpu was asked for and this platform would not say/,
+            `${shape}: no number and no note: ${JSON.stringify(measured)}`,
+          );
+        } else {
+          assert.ok(
+            asNumber(cpuSeconds) >= 0.5,
+            `${shape}: the bench has been working since it started, and the reading says so: ${JSON.stringify(measured)}`,
+          );
+        }
+
+        const stopped = parseTextContent(
+          await server.request(
+            'tools/call',
+            { name: 'editor_run', arguments: { op: 'stop', andChildren: true } },
+            ENGINE_CALL_TIMEOUT_MS,
+          ),
+        );
+        assert.equal(get(stopped, 'endedPid'), benchPid, `${shape}: ${JSON.stringify(stopped)}`);
+        assert.deepEqual(
+          get(stopped, 'endedChildren'),
+          [workerPid, helperPid].sort((a, b) => a - b),
+          `${shape}: the worker the bench opened and the helper the worker opened are ended with it: ${JSON.stringify(stopped)}`,
+        );
+        assert.equal(get(stopped, 'childrenLeft'), undefined, `${shape}: ${JSON.stringify(stopped)}`);
+        assert.ok(
+          await cameTrue(() => !alive(workerPid) && !alive(helperPid), 10_000),
+          `${shape}: and both processes are gone`,
+        );
+        // Given a moment, since the stop signals and answers without waiting for the exit, and a
+        // process that has been signalled is read as alive until the operating system is done
+        // with it.
+        const deadline = Date.now() + 10_000;
+        let afterwards = asArray(get(await status(), 'game', 'runtimes'));
+        while (afterwards.length > 0 && Date.now() < deadline) {
+          await delay(250);
+          afterwards = asArray(get(await status(), 'game', 'runtimes'));
+        }
+        assert.deepEqual(
+          afterwards,
+          [],
+          `${shape}: nothing of the project is announced afterwards: ${JSON.stringify(afterwards)}`,
+        );
+      } finally {
+        for (const pid of [workerPid, helperPid]) {
+          if (pid > 0 && alive(pid)) {
+            try {
+              process.kill(pid);
+            } catch {
+              // Gone already.
+            }
+          }
+        }
+        await server.request(
+          'tools/call',
+          { name: 'editor_run', arguments: { op: 'stop' } },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+      }
+    },
+    { realAddon: true, engine },
+  );
+}
+
+/**
  * A runtime call with no pid reaches the game this server holds when several are running.
  *
  * A bench fans out to workers from the same project, and every runtime call from the session that
@@ -8809,6 +9082,25 @@ async function testAStopCanEndWhatTheGameStarted(): Promise<void> {
           }
           if (tool === 'playing_status') {
             return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
+          }
+          if (tool === 'stop_playing') {
+            // The worker goes as the run is ended, before the stop's own signal reaches it, as a
+            // worker sharing its parent's job on Windows does, or one that exits as its slice
+            // ends. Listed while the bench lived and gone when signalled, it is still one the
+            // caller asked to be ended and is, so it is named as ended rather than dropped. The
+            // bench itself is left to the fixture's end: on Windows a Node child dies with its
+            // parent, and the other child has to be there afterwards to be reported as left.
+            // Only once there is a worker: the start ends what this editor claims to be playing
+            // before it plays, and a signal to pid 0 is a signal to this process's own group.
+            if (worker > 0) {
+              try {
+                process.kill(worker);
+              } catch {
+                // Gone already.
+              }
+              assert.ok(await cameTrue(() => !alive(worker), 5_000), 'the worker went with the stop');
+            }
+            return { ok: true };
           }
           return { ok: true };
         },
@@ -12202,6 +12494,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testALateAnnouncementIsTiedToThePlayedRun,
   testTheEditorsGameIsToldFromAnotherOfTheSameProject,
   testASpawnedGameBesideAnEditorIsStillItsOwn,
+  testARealBenchTakesItsWorkerWithIt,
   testARuntimeCallReachesThisServersOwnGame,
   testChildrenAreListedWhileTheParentLives,
   testAStopCanEndWhatTheGameStarted,

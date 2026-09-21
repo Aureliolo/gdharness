@@ -4,53 +4,112 @@ import { promisify } from 'node:util';
 const run = promisify(execFile);
 
 /**
- * Long enough for the operating system to list one process's children on a machine that is busy.
- * A stop that asked for the children waits on this once, before the run is ended.
+ * Long enough for the operating system to list every process on a machine that is busy. A stop
+ * that asked for the children waits on this once, before the run is ended.
  */
 const ASK_TIMEOUT_MS = 15_000;
 
+/** Every process the operating system lists right now, by its parent. */
+export type ProcessTree = ReadonlyMap<number, number>;
+
 /**
- * The processes whose parent is [param pid], as the operating system lists them right now.
+ * The whole process table as parent links, taken in one ask.
  *
- * A game that fans out to workers with OS.create_process is their parent for as long as it lives,
- * and only that long: ending it reparents them, to init on POSIX, so the list has to be taken
- * while the parent is still there. Asked of the operating system rather than of the announcements,
- * because being a game of the project is what a stranger's bench also is, and being this run's
- * child is the property a stranger's bench cannot have.
- *
- * Empty when the platform will not say, which the caller reports rather than reads as "none".
+ * Asked of the operating system rather than of the announcements, because being a game of the
+ * project is what a stranger's bench also is, and being under this run's process is the property a
+ * stranger's bench cannot have. One ask rather than one per process, because a bench with thirty
+ * workers is thirty children and on Windows every ask is a PowerShell start. Undefined when the
+ * platform will not say, which the caller reports rather than reads as an empty machine.
  */
-export async function childrenOf(pid: number): Promise<number[] | undefined> {
+export async function processTree(): Promise<ProcessTree | undefined> {
   try {
-    const printed = process.platform === 'win32' ? await askWindows(pid) : await askPosix(pid);
-    return printed
-      .split(/\r?\n/)
-      .map((line) => Number(line.trim()))
-      .filter((child) => Number.isInteger(child) && child > 0);
-  } catch (error) {
-    // pgrep exits 1 for "no process matched", which is an answer rather than a refusal.
-    if (process.platform !== 'win32' && (error as { code?: unknown }).code === 1) {
-      return [];
+    const printed = process.platform === 'win32' ? await askWindows() : await askPosix();
+    const tree = new Map<number, number>();
+    for (const line of printed.split(/\r?\n/)) {
+      const [pid, parent] = line
+        .trim()
+        .split(/[\s,]+/)
+        .map((field) => Number(field));
+      if (
+        pid !== undefined &&
+        parent !== undefined &&
+        Number.isInteger(pid) &&
+        Number.isInteger(parent) &&
+        pid > 0
+      ) {
+        tree.set(pid, parent);
+      }
     }
+    return tree;
+  } catch {
     return undefined;
   }
 }
 
-async function askWindows(pid: number): Promise<string> {
+/** The processes whose parent is [param pid], as [param tree] has them. */
+function childrenIn(tree: ProcessTree, pid: number): number[] {
+  const children: number[] = [];
+  for (const [child, parent] of tree) {
+    if (parent === pid) {
+      children.push(child);
+    }
+  }
+  return children;
+}
+
+/**
+ * Every process under [param pid], to any depth, nearest first.
+ *
+ * A game that fans out with OS.create_process is its workers' parent, and only for as long as it
+ * lives: ending it reparents them, to init on POSIX, so the tree has to be read while the parent
+ * is still there. To any depth because the process a run holds is not always the game: a console
+ * wrapper on Windows starts the engine as its child, and the engine's workers are the wrapper's
+ * grandchildren.
+ */
+export function descendantsIn(tree: ProcessTree, pid: number): number[] {
+  const found: number[] = [];
+  const queue = [pid];
+  const seen = new Set<number>([pid]);
+  while (queue.length > 0) {
+    const next = queue.shift();
+    if (next === undefined) {
+      break;
+    }
+    for (const child of childrenIn(tree, next)) {
+      if (!seen.has(child)) {
+        seen.add(child);
+        found.push(child);
+        queue.push(child);
+      }
+    }
+  }
+  return found;
+}
+
+/** The processes whose parent is [param pid] right now, or undefined when the platform will not say. */
+export async function childrenOf(pid: number): Promise<number[] | undefined> {
+  const tree = await processTree();
+  return tree === undefined ? undefined : childrenIn(tree, pid);
+}
+
+async function askWindows(): Promise<string> {
   const { stdout } = await run(
     'powershell.exe',
     [
       '-NoProfile',
       '-NonInteractive',
       '-Command',
-      `(Get-CimInstance Win32_Process -Filter "ParentProcessId=${pid}").ProcessId`,
+      'Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId) $($_.ParentProcessId)" }',
     ],
-    { timeout: ASK_TIMEOUT_MS, windowsHide: true },
+    { timeout: ASK_TIMEOUT_MS, windowsHide: true, maxBuffer: 16 * 1024 * 1024 },
   );
   return stdout;
 }
 
-async function askPosix(pid: number): Promise<string> {
-  const { stdout } = await run('pgrep', ['-P', String(pid)], { timeout: ASK_TIMEOUT_MS });
+async function askPosix(): Promise<string> {
+  const { stdout } = await run('ps', ['-e', '-o', 'pid=,ppid='], {
+    timeout: ASK_TIMEOUT_MS,
+    maxBuffer: 16 * 1024 * 1024,
+  });
   return stdout;
 }
