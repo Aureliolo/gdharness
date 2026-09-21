@@ -331,6 +331,13 @@ clean, threw at run time, and failed the fixture on a missing field three assert
 the one under test. Typecheck before you believe a disarm, and check the message names the assertion
 you disarmed.
 
+The bundle is also what the suite runs, one server per fixture, so a build started while the suite
+is running hands the fixtures after it a file that is being written. Three fixtures failed in one
+run that way: the stale-build guard on the first, then two whose server answered nothing, from a
+bundle that was half a file when it was started. Nothing in those two messages says so, and each
+reads as a fault in the tool it called. Do not edit or build while a suite is running; a suite that
+failed beside a build is rerun before anything in it is believed.
+
 Shorten as well as empty. A check whose reading comes back empty usually fails loudly, and the same
 check reading one entry fewer usually does not: it looks at one thing less and passes. So a floor of
 25 on a table of 31 is an anchor against a pattern that stopped matching altogether and no guard at
