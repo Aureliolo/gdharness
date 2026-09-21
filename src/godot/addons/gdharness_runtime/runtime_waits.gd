@@ -128,44 +128,15 @@ func wait_until(params: Dictionary) -> Dictionary:
 	# met" after the whole timeout, which is what a game that never reached the state answers too,
 	# so a mistyped name and a condition that did not happen read the same. The property read
 	# refuses that typo in one call, and two tools disagreeing about it is the fault.
-	var missing: String = Queries.nothing_under(node, property, node_path)
-	if not missing.is_empty():
-		return {"type": "error", "message": missing}
+	var watched: Dictionary = _watched(node, node_path, property)
+	if watched.has("message"):
+		return watched
 
-	var current: Variant = node.get(property)
+	var current: Variant = watched["value"]
 	var wanted: Variant = _values.fitted(params["value"], typeof(current))
-	# Refused before anything is evaluated, because the evaluation is what does the damage: an
-	# object compared against anything else is a hard error in GDScript, raised inside the game,
-	# which holds it at a debugger break. Both types are named because the caller cannot see either
-	# from where they are standing.
-	if not Values.comparable(current, wanted):
-		return {
-			"type": "error",
-			"message":
-			(
-				(
-					"%s.%s holds %s and the value to wait for is %s. Those cannot be compared, and"
-					+ " waiting on it would stop the game rather than answer about it."
-				)
-				% [node_path, property, type_string(typeof(current)), type_string(typeof(wanted))]
-			)
-		}
-	# And a value that cannot become what the property holds, which lands worse than the halt: a
-	# word where a number goes became 0.0, 0.0 already equalled the property, and the wait answered
-	# met the instant it started, about a state nobody asked about, with the real value beside it.
-	# A refusal is read and a met is acted on.
-	if not Values.acceptable(wanted, typeof(current)):
-		return {
-			"type": "error",
-			"message":
-			(
-				(
-					"%s.%s holds %s and the value to wait for is %s, which cannot become one:"
-					+ " waiting on it would answer about a state nobody asked for."
-				)
-				% [node_path, property, type_string(typeof(current)), type_string(typeof(wanted))]
-			)
-		}
+	var refused: String = _not_comparable(current, wanted, node_path, property)
+	if not refused.is_empty():
+		return {"type": "error", "message": refused}
 
 	var started: int = Time.get_ticks_msec()
 	# The type is checked every time round, not only at the top: a property that holds an object a
@@ -178,7 +149,10 @@ func wait_until(params: Dictionary) -> Dictionary:
 		await _host.get_tree().process_frame
 		if not is_instance_valid(node):
 			return {"type": "error", "message": "%s was freed while waiting" % node_path}
-		current = node.get(property)
+		watched = _watched(node, node_path, property)
+		if watched.has("message"):
+			return watched
+		current = watched["value"]
 
 	return {
 		"type": "condition",
@@ -188,6 +162,60 @@ func wait_until(params: Dictionary) -> Dictionary:
 		"value": _values.serialize(current),
 		"elapsed_ms": Time.get_ticks_msec() - started,
 	}
+
+
+## Why [param wanted] cannot be waited for against [param current], or "" when it can.
+##
+## Refused before anything is evaluated, because the evaluation is what does the damage: an object
+## compared against anything else is a hard error in GDScript, raised inside the game, which holds
+## it at a debugger break. Both types are named because the caller cannot see either from where
+## they are standing.
+##
+## And a value that cannot become what the property holds, which lands worse than the halt: a word
+## where a number goes became 0.0, 0.0 already equalled the property, and the wait answered met the
+## instant it started, about a state nobody asked about, with the real value beside it. A refusal
+## is read and a met is acted on.
+static func _not_comparable(current: Variant, wanted: Variant, node_path: String, property: String) -> String:
+	var types: Array[String] = [
+		node_path, property, type_string(typeof(current)), type_string(typeof(wanted))
+	]
+	if not Values.comparable(current, wanted):
+		return (
+			(
+				"%s.%s holds %s and the value to wait for is %s. Those cannot be compared, and"
+				+ " waiting on it would stop the game rather than answer about it."
+			)
+			% types
+		)
+	if not Values.acceptable(wanted, typeof(current)):
+		return (
+			(
+				"%s.%s holds %s and the value to wait for is %s, which cannot become one:"
+				+ " waiting on it would answer about a state nobody asked for."
+			)
+			% types
+		)
+	return ""
+
+
+## What [param property] reads as on [param node] right now, under `value`, or a `message` saying
+## why it cannot be read.
+##
+## Through the same walk as the property read, so a wait can watch what a node holds,
+## "_game:run:day", and what a call answers, "get_viewport():gui_get_focus_owner()". Walked from the
+## node every time rather than read off the holder found at the start, because a game replaces what
+## its nodes hold: a run object built afresh each day would leave a wait watching the day before. A
+## step that has gone in the meantime ends the wait with what went.
+static func _watched(node: Node, node_path: String, property: String) -> Dictionary:
+	var reached: Dictionary = Queries.walk_to(node, node_path, property)
+	if reached.has("message"):
+		return reached
+	var holder: Variant = reached["holder"]
+	var named: String = reached["name"]
+	var missing: String = Queries.nothing_under(holder, named, str(reached["called"]))
+	if not missing.is_empty():
+		return {"type": "error", "message": missing}
+	return {"value": Queries.read_under(holder, named)}
 
 
 ## Waits until something under [param node_path] has [param said] written on it.
