@@ -8712,6 +8712,203 @@ async function testAnInjectedMotionCarriesHowFarThePointerMoved(): Promise<void>
 }
 
 /**
+ * A key sent to the game does not choose from a menu a click has opened; choose does.
+ *
+ * An OptionButton's menu opens as a window of its own, and an injected key is delivered to the
+ * game's main window, so it never reaches the menu: the item under the pointer stays where it
+ * was, and Enter, which presses the button that owns the menu, closes it without choosing. The
+ * key op's description sends a caller to choose for this, and this is what holds the description
+ * to what the engine does. A windowed run played through the fake editor, the shape downstream
+ * has: a headless engine has no windows and a click there opens nothing, and a host with no
+ * display cannot run one and says so.
+ */
+async function testAKeyDoesNotChooseFromAnOpenedMenu(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('opened menu regression skipped (Godot not found)');
+    return;
+  }
+  if (resolveHeadless(undefined, { platform: process.platform, variables: process.env })) {
+    console.log('opened menu regression skipped (no display for a windowed run)');
+    return;
+  }
+  const held: { game: ChildProcess | null } = { game: null };
+  const said: string[] = [];
+  try {
+    await withAPlayingEditor(
+      ({ adapter, project, runtimeDir }) =>
+        (tool) => {
+          if (tool === 'play_scene') {
+            // The compatibility renderer, since the window is what this needs and not the
+            // renderer: Forward+ on a macOS runner's paravirtual Metal device spent twenty
+            // seconds compiling its pipelines before the scene ran, with nothing said but the
+            // device's name. What the engine says is kept for the next time it does not announce.
+            held.game = spawn(engine, ['--path', project, '--rendering-method', 'gl_compatibility'], {
+              stdio: ['ignore', 'pipe', 'pipe'],
+              env: {
+                ...process.env,
+                GDHARNESS_RUNTIME_DIR: runtimeDir,
+                GDHARNESS_EDITOR_PID: String(FAKE_EDITOR_PID),
+              },
+            });
+            held.game.stdout?.on('data', (chunk: Buffer) => {
+              said.push(String(chunk));
+            });
+            held.game.stderr?.on('data', (chunk: Buffer) => {
+              said.push(String(chunk));
+            });
+            return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
+          }
+          if (tool === 'playing_status') {
+            return {
+              ok: true,
+              playing: held.game?.exitCode === null,
+              scenePath: 'res://main.tscn',
+              debugPort: adapter,
+            };
+          }
+          if (tool === 'stop_playing') {
+            held.game?.kill();
+            return { ok: true };
+          }
+          return { ok: true };
+        },
+      async ({ server, project, start }) => {
+        // The scene counts what the button and its menu did, so a menu that reads as closed can
+        // be told apart from a click that never pressed the button and from a menu that opened
+        // and shut again on its own.
+        writeFileSync(
+          join(project, 'main.gd'),
+          'extends Control\n\nvar presses: int = 0\nvar openings: int = 0\nvar closings: int = 0\n' +
+            'var log: Array[String] = []\n\n\n' +
+            'func _ready() -> void:\n' +
+            '\tvar pick: OptionButton = $Pick\n' +
+            '\tvar menu: PopupMenu = pick.get_popup()\n' +
+            '\tpick.pressed.connect(func() -> void:\n\t\tpresses += 1\n\t\t_note("pressed"))\n' +
+            '\tmenu.about_to_popup.connect(func() -> void:\n\t\topenings += 1\n\t\t_note("about_to_popup"))\n' +
+            '\tmenu.popup_hide.connect(func() -> void:\n\t\tclosings += 1\n\t\t_note("popup_hide"))\n' +
+            '\tmenu.focus_entered.connect(func() -> void: _note("menu focus_entered"))\n' +
+            '\tmenu.focus_exited.connect(func() -> void: _note("menu focus_exited"))\n' +
+            '\tmenu.visibility_changed.connect(func() -> void: _note("menu visible %s" % menu.visible))\n' +
+            '\tget_window().focus_entered.connect(func() -> void: _note("window focus_entered"))\n' +
+            '\tget_window().focus_exited.connect(func() -> void: _note("window focus_exited"))\n' +
+            '\tget_window().size_changed.connect(func() -> void: _note("window size %s" % get_window().size))\n\n\n' +
+            'func _note(what: String) -> void:\n' +
+            '\tlog.append("%d %s" % [Engine.get_process_frames(), what])\n',
+        );
+        writeFileSync(
+          join(project, 'main.tscn'),
+          '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+            '[node name="Main" type="Control"]\nanchors_preset = 15\n' +
+            'anchor_right = 1.0\nanchor_bottom = 1.0\nscript = ExtResource("1")\n\n' +
+            '[node name="Pick" type="OptionButton" parent="."]\noffset_left = 20.0\n' +
+            'offset_top = 20.0\noffset_right = 200.0\noffset_bottom = 60.0\nselected = 0\n' +
+            'item_count = 3\npopup/item_0/text = "One"\npopup/item_0/id = 0\n' +
+            'popup/item_1/text = "Two"\npopup/item_1/id = 1\n' +
+            'popup/item_2/text = "Three"\npopup/item_2/id = 2\n',
+        );
+        const started = await start(60_000);
+        assert.equal(
+          get(started.answer, 'runtime', 'listening'),
+          true,
+          `${JSON.stringify(started.answer)}\nthe engine said:\n${said.join('')}`,
+        );
+        // Printed so the wait above can be sized to what a windowed boot takes on each leg.
+        console.log(`opened menu: the windowed engine announced after ${started.waitedMs}ms`);
+        const call = async (name: string, args: Record<string, unknown>): Promise<unknown> =>
+          parseTextContent(
+            await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS),
+          );
+        const property = async (nodePath: string, name: string): Promise<unknown> =>
+          get(await call('runtime_inspect', { op: 'property', nodePath, property: name }), 'value');
+        const settle = async (): Promise<unknown> => call('runtime_wait', { op: 'frames', frames: 3 });
+        const account = async (): Promise<string> => {
+          const counted = await Promise.all(
+            ['presses', 'openings', 'closings'].map(
+              async (name) => `${name} ${String(await property('/root/Main', name))}`,
+            ),
+          );
+          const focused = await call('runtime_invoke', {
+            op: 'call',
+            nodePath: '/root',
+            method: 'has_focus',
+          });
+          const noted = asArray(await property('/root/Main', 'log'))
+            .map(text)
+            .join('; ');
+          return `${counted.join(', ')}, window focused ${JSON.stringify(get(focused, 'result'))}, noted: ${noted}`;
+        };
+
+        // The two halves of a click one at a time, read separately, since one leg reports the
+        // menu opened and closed again inside the click and this says which half shut it.
+        const rect = await call('runtime_inspect', { op: 'rect', nodePath: '/root/Main/Pick' });
+        const at = {
+          x: asNumber(get(rect, 'window', 'position', 'x')) + asNumber(get(rect, 'window', 'size', 'x')) / 2,
+          y: asNumber(get(rect, 'window', 'position', 'y')) + asNumber(get(rect, 'window', 'size', 'y')) / 2,
+        };
+        await call('runtime_input', { op: 'mouse_click', ...at, pressed: true });
+        await settle();
+        console.log(`opened menu: after a press alone, ${await account()}`);
+        await call('runtime_input', { op: 'mouse_click', ...at, pressed: false });
+        await settle();
+        console.log(`opened menu: after its release, ${await account()}`);
+        await call('runtime_input', { op: 'key', keycode: 'Escape' });
+        await settle();
+        console.log(`opened menu: after Escape, ${await account()}`);
+
+        const clicked = await call('runtime_input', { op: 'click', nodePath: '/root/Main/Pick' });
+        assert.equal(get(clicked, 'landed'), true, JSON.stringify(clicked));
+        await settle();
+        const menus = asArray(
+          get(await call('runtime_inspect', { op: 'find', className: 'PopupMenu' }), 'nodes'),
+        );
+        assert.equal(menus.length, 1, 'the button owns one menu');
+        const menu = text(get(menus[0], 'path'));
+        assert.equal(
+          await property(menu, 'visible'),
+          true,
+          `the click opened the menu: ${await account()}, click ${JSON.stringify(clicked)}`,
+        );
+        // Printed on a pass too, so a leg where it fails has a working leg's reading beside it.
+        console.log(`opened menu: after the click, ${await account()}`);
+
+        await call('runtime_input', { op: 'key', keycode: 'Down' });
+        await settle();
+        assert.equal(
+          await property(menu, 'visible'),
+          true,
+          `an arrow key leaves the menu open: ${await account()}`,
+        );
+        await call('runtime_input', { op: 'key', keycode: 'Enter' });
+        await settle();
+        assert.equal(await property(menu, 'visible'), false, `Enter closes it: ${await account()}`);
+        assert.equal(await property('/root/Main/Pick', 'selected'), 0, 'having chosen nothing');
+
+        const chosen = await call('runtime_input', { op: 'choose', nodePath: '/root/Main/Pick', index: 2 });
+        assert.equal(get(chosen, 'type'), 'chosen', JSON.stringify(chosen));
+        await settle();
+        assert.equal(await property('/root/Main/Pick', 'selected'), 2, 'choose is what selects');
+        assert.equal(await property('/root/Main/Pick', 'text'), 'Three', 'and the button shows it');
+
+        await server.request(
+          'tools/call',
+          { name: 'editor_run', arguments: { op: 'stop' } },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+      },
+      { realAddon: true, engine },
+    );
+  } finally {
+    if (held.game?.exitCode === null) {
+      held.game.kill();
+    }
+  }
+}
+
+/**
  * A find by className reaches the nodes whose script extends that class, at any distance.
  *
  * `className Card` answered 0 over a tree of rows whose scripts extend Card two steps down,
@@ -13354,6 +13551,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASpawnedGameBesideAnEditorIsStillItsOwn,
   testAFindByClassReachesWhatExtendsIt,
   testAnInjectedMotionCarriesHowFarThePointerMoved,
+  testAKeyDoesNotChooseFromAnOpenedMenu,
   testAWrittenLineBreakMatchesATwoLineLabel,
   testAPlayedGamesReportsReachTheOutput,
   testARealBenchTakesItsWorkerWithIt,

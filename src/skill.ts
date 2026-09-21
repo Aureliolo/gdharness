@@ -87,7 +87,7 @@ that is running, and the project on disk. ${TOOL_SPECS.length} tools, named \`do
 | Press the next thing after a click that changed screen | \`runtime_wait until\` with \`says\` and a word the new screen shows, then the click. A click sent straight after a screen change lands on a control the new screen is about to free, answers \`landed: true\`, and does nothing; a frame count is a number nobody can pick correctly across a cold start and a warm one, and waiting for the words answered in about 130ms where twenty frames had not been enough |
 | Fill in a field | \`runtime_input click\` on it, then \`runtime_input text\` with \`replace\`; a submitted field has to be clicked again |
 | Click somebody standing in a 3D room | \`runtime_input click\` on the Node3D, which aims at what it draws |
-| Pick something out of a dropdown | \`runtime_input choose\` on it, by what the item says |
+| Pick something out of a dropdown | \`runtime_input choose\` on it, by what the item says, rather than a click and keys: the menu opens as a window of its own that an injected key never reaches, so Enter closes it with nothing chosen |
 | Answer a dialog | \`runtime_input click\` on its button, or \`key\` Escape to dismiss it: an [AcceptDialog] reads that key itself and never asks the InputMap, so \`ui_cancel\` leaves it standing |
 | Press a bound key | \`runtime_input action\` or \`key\`, a whole press unless you hold it |
 | Where a 3D node is on screen | \`runtime_inspect\` \`rect\`, rather than unprojecting by hand |
