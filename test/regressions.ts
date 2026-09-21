@@ -7993,8 +7993,26 @@ async function testAPlayedStartStopsWaitingForAGameThatIsOver(): Promise<void> {
         return { answer, waitedMs: Date.now() - began };
       };
 
+      // The editor is playing a game this server has never heard of, the way a replacement server
+      // after a reconnect finds one, and the start is the first call to notice. It ends that game
+      // to play its own and says so: a played run that announced no runtime has no number of any
+      // kind, and the answer used to say nothing about it, as though the caller's game had stopped
+      // on its own. The replacement's start said nothing either way, because it never asked the
+      // editor what was playing before deciding there was nothing to end.
+      playing = true;
       const going = await start(1_500);
       assert.equal(get(going.answer, 'through'), 'editor', JSON.stringify(going.answer));
+      assert.equal(stops, 1, 'the start should have had the editor stop the game it was playing');
+      assert.equal(
+        get(going.answer, 'endedPreviousRun'),
+        true,
+        `and should say a run with no number was ended: ${JSON.stringify(going.answer)}`,
+      );
+      assert.match(
+        text(get(going.answer, 'message')),
+        /The game the editor was playing was ended to start this one/,
+        JSON.stringify(going.answer),
+      );
       assert.equal(
         get(going.answer, 'runtime', 'mayYetAnnounce'),
         true,
@@ -8008,19 +8026,11 @@ async function testAPlayedStartStopsWaitingForAGameThatIsOver(): Promise<void> {
       diesOnBoot = true;
       const over = await start(10_000);
       assert.equal(get(over.answer, 'through'), 'editor', JSON.stringify(over.answer));
-      // This start ended the game the editor was still playing, and says so. A played run that
-      // announced no runtime has no number of any kind, and the answer used to say nothing about
-      // it, as though the caller's game had stopped on its own.
-      assert.equal(stops, 1, 'the start should have had the editor stop the game it was playing');
+      assert.equal(stops, 2, 'the start should have had the editor stop the game this server played');
       assert.equal(
         get(over.answer, 'endedPreviousRun'),
         true,
-        `and should say a run with no number was ended: ${JSON.stringify(over.answer)}`,
-      );
-      assert.match(
-        text(get(over.answer, 'message')),
-        /The game the editor was playing was ended to start this one/,
-        JSON.stringify(over.answer),
+        `and should say so: ${JSON.stringify(over.answer)}`,
       );
       assert.equal(
         get(over.answer, 'runtime', 'mayYetAnnounce'),
@@ -8050,7 +8060,7 @@ async function testAPlayedStartStopsWaitingForAGameThatIsOver(): Promise<void> {
       // reported a run ended that had ended itself.
       const afterOver = await start(1_500);
       assert.equal(get(afterOver.answer, 'through'), 'editor', JSON.stringify(afterOver.answer));
-      assert.equal(stops, 1, 'a start after a game that died has nothing to have the editor stop');
+      assert.equal(stops, 2, 'a start after a game that died has nothing to have the editor stop');
       assert.equal(
         get(afterOver.answer, 'endedPreviousRun'),
         undefined,

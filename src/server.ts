@@ -3449,7 +3449,11 @@ class GodotServer {
     // a bench that stops mid-measurement with nothing said sends them looking at their engine.
     // Whether there is one to end is asked the way every other answer asks it, so a played run
     // the editor says is over is not "ended" here and then reported as ended; and a played run
-    // that is going is named by the number its game announced, when it announced one.
+    // that is going is named by the number its game announced, when it announced one. The editor
+    // is asked what it is playing first, as every answer about a run asks it: a replacement
+    // server had no record of the game the editor was playing, so its start had the editor stop
+    // that game and said nothing about it.
+    await this.pickUpWhatTheEditorIsPlaying();
     let ended: EndedRun | null = null;
     const before = this.currentRun();
     if (before !== null && (await this.runStillGoing(before))) {
