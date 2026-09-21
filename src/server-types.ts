@@ -94,6 +94,12 @@ export interface GodotProcess {
   announcedPid?: number;
   announcedBefore?: ReadonlySet<number>;
   /**
+   * The process doing the run's work when that is neither `pid` nor an announced one: the engine
+   * under the Windows console wrapper, for a project whose game announces nothing. Found through
+   * the process tree by its command line and kept, since the tree is a PowerShell start to read.
+   */
+  gamePid?: number;
+  /**
    * Why this server ended the run, or null when it did not.
    *
    * A run that vanished and a run this tool killed look the same from outside: the process is
