@@ -81,18 +81,35 @@ export function argumentsOf(spec: ToolSpec, op: string): string[] {
 }
 
 /**
- * The tools that take no `projectPath`, read off the schemas rather than remembered.
+ * The calls that take no `projectPath`, read off the schemas rather than remembered: a tool that
+ * declares none, and an op of a tool whose `projectPath` belongs to other ops.
  *
  * Both the skill and the tool reference open by saying which calls need one, and both said it in
  * prose that named the `runtime_*` and `debug_*` families and nothing else. `editor_status` takes no
  * arguments at all and `editor_output` takes its own, and an argument a tool does not declare is
  * refused rather than ignored, so a session following that sentence failed on what is often its
  * first call. Generated here so the sentence cannot go on being true of a surface that moved.
+ *
+ * By op and not by tool, since a call is an op. Read by tool the list named four tools and stood
+ * beside per-op lines that refused what it promised: `editor_run stop` and `wait` and
+ * `editor_launch restart` take none, on a tool that takes one for its other ops, and a session
+ * following the sentence was refused twice in an hour with "stop takes: andChildren". Each such op
+ * is named with its tool, the way a call is written.
  */
-export function toolsWithoutProjectPath(): string[] {
-  return TOOL_SPECS.filter((spec) => !Object.hasOwn(spec.parameters, 'projectPath'))
-    .map((spec) => spec.name)
-    .sort();
+export function callsWithoutProjectPath(): string[] {
+  const calls: string[] = [];
+  for (const spec of TOOL_SPECS) {
+    if (!Object.hasOwn(spec.parameters, 'projectPath')) {
+      calls.push(spec.name);
+      continue;
+    }
+    for (const op of Object.keys(spec.operations ?? {})) {
+      if (!opTakes(spec, op, 'projectPath')) {
+        calls.push(`${spec.name} ${op}`);
+      }
+    }
+  }
+  return calls.sort();
 }
 
 /**
@@ -108,7 +125,7 @@ export function toolsWithoutProjectPath(): string[] {
  * read those branches out of this function rather than out of a copy of it, since a copy is wrong
  * in the same way as the original or in a different one, and neither tells you anything.
  */
-export function projectPathSentence(without: readonly string[] = toolsWithoutProjectPath()): string {
+export function projectPathSentence(without: readonly string[] = callsWithoutProjectPath()): string {
   if (without.length === 0) {
     return 'Every call takes `projectPath`';
   }

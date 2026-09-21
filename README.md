@@ -53,16 +53,16 @@ emptily, so a call that succeeded is a call that was understood.
 
 ## At a glance
 
-|           |                                                                                  |
-| --------- | -------------------------------------------------------------------------------- |
-| Needs     | Godot 4.7 or newer, Node 22 or newer. Runs under Bun 1.4 too.                    |
-| Surface   | 30 tools named `domain_verb`, and 4 `godot://` resources                         |
-| Reaches   | The editor that is open, a game it is playing, and the project on disk           |
-| Harnesses | 35, written inside the project wherever the harness has a project config         |
-| Skill     | Written to `.agents/skills`, which every major harness reads                     |
-| Install   | npm, or a Sigstore-signed archive with an SBOM, SLSA Build Level 3               |
-| Proven    | Every tool driven against Godot 4.7.2 in CI, on Windows, Linux and macOS         |
-| Status    | 0.x: pin an exact version. [What a bump means](.github/CONTRIBUTING.md#versions) |
+|           |                                                                                      |
+| --------- | ------------------------------------------------------------------------------------ |
+| Needs     | Godot 4.7 or newer, Node 22 or newer. Runs under Bun 1.4 too.                        |
+| Surface   | 30 tools named `domain_verb`, and 4 `godot://` resources                             |
+| Reaches   | The editor that is open, a game it is playing, and the project on disk               |
+| Harnesses | 35, written inside the project wherever the harness has a project config             |
+| Skill     | Written to `.agents/skills`, which every major harness reads                         |
+| Install   | npm, or a Sigstore-signed archive with an SBOM, SLSA Build Level 3                   |
+| Proven    | Every tool driven against Godot 4.7.2 in CI, on Windows, Linux and macOS             |
+| Status    | 1.0: every release is a patch. [What a bump means](.github/CONTRIBUTING.md#versions) |
 
 Older 4.x is likely to work and is not tested.
 
