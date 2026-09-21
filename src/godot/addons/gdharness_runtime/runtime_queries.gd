@@ -182,10 +182,10 @@ func _found(node: Node, wanted_property: String) -> Dictionary:
 	if wanted_property.is_empty():
 		return entry
 	entry["property"] = wanted_property
-	# Through a path as well, for the reason [method _reached] gives. A step that is not there on
+	# Through a path as well, for the reason [method walk_to] gives. A step that is not there on
 	# this node reads as not having the property rather than as a refusal, which is the rule this
 	# whole function is written to: a find matches nodes of several classes on purpose.
-	var reached: Dictionary = _reached(node, str(entry["path"]), wanted_property)
+	var reached: Dictionary = walk_to(node, str(entry["path"]), wanted_property)
 	if reached.has("message"):
 		entry["has_property"] = false
 		return entry
@@ -194,7 +194,7 @@ func _found(node: Node, wanted_property: String) -> Dictionary:
 	var has: bool = _can_read(holder, named)
 	entry["has_property"] = has
 	if has:
-		entry["value"] = _values.serialize(_read(holder, named))
+		entry["value"] = _values.serialize(read_under(holder, named))
 	return entry
 
 
@@ -548,7 +548,7 @@ func get_property(params: Dictionary) -> Dictionary:
 		return standing
 	var node: Node = standing["node"]
 
-	var reached: Dictionary = _reached(node, node_path, property)
+	var reached: Dictionary = walk_to(node, node_path, property)
 	if reached.has("message"):
 		return reached
 
@@ -563,7 +563,7 @@ func get_property(params: Dictionary) -> Dictionary:
 		"type": "property",
 		"path": node_path,
 		"property": property,
-		"value": _values.serialize(_read(holder, named)),
+		"value": _values.serialize(read_under(holder, named)),
 	}
 
 
@@ -579,10 +579,16 @@ func get_property(params: Dictionary) -> Dictionary:
 ## at a time rather than handed to that method, which answers null for a path that goes wrong
 ## halfway along and for one that ends on null.
 ##
+## A step written as a call, "get_viewport()", calls a method of that name that takes no arguments
+## and walks into what it returned. Some of what hangs off a node is only reachable by asking:
+## which control holds the focus is a question for the viewport a control is in, and the viewport
+## is a method's answer rather than a property. Spelled with the brackets so a reader sees a call
+## where one happens, and so a method can never shadow a property of the same name.
+##
 ## Answers with a `message` instead when a step along the way is not there or holds something that
 ## is not an object, naming the step rather than the whole path: "/root/Main:_game has no property
 ## clocks" is a typo found, and "no property _game:clocks:speed" is a puzzle.
-func _reached(node: Node, node_path: String, reaching: String) -> Dictionary:
+static func walk_to(node: Node, node_path: String, reaching: String) -> Dictionary:
 	var parts: PackedStringArray = reaching.split(":")
 	var holder: Variant = node
 	var called: String = node_path
@@ -590,7 +596,7 @@ func _reached(node: Node, node_path: String, reaching: String) -> Dictionary:
 		var named: String = parts[step]
 		if not _can_read(holder, named):
 			return {"type": "error", "message": _nothing_there(holder, named, called)}
-		holder = _read(holder, named)
+		holder = read_under(holder, named)
 		called = "%s:%s" % [called, named]
 		if not _can_hold(holder):
 			var wanted: String = parts[step + 1]
@@ -629,8 +635,31 @@ static func _can_read(holder: Variant, named: String) -> bool:
 		return map.has(named) or map.has(StringName(named))
 	if holder is Object:
 		var object: Object = holder
+		var method: String = _called(named)
+		if not method.is_empty():
+			return _arguments_required(object, method) == 0
 		return _has_property(object, named)
 	return false
+
+
+## The method a step written as a call names, "get_viewport()" being get_viewport, or "" for a
+## step that is a name.
+static func _called(named: String) -> String:
+	return named.trim_suffix("()") if named.ends_with("()") else ""
+
+
+## How many arguments [param method] on [param object] has to be given, or -1 when there is no such
+## method. Read off the method list rather than [method Object.has_method], because a path can only
+## call a method with nothing, and a method with a required argument called with nothing raises
+## inside the game rather than answering.
+static func _arguments_required(object: Object, method: String) -> int:
+	for entry: Dictionary in object.get_method_list():
+		if str(entry.get("name", "")) != method:
+			continue
+		var params: Array = entry.get("args", [])
+		var defaults: Array = entry.get("default_args", [])
+		return params.size() - defaults.size()
+	return -1
 
 
 ## Put [param value] where [param named] points. Only ever called once [method _can_read] agrees,
@@ -653,8 +682,9 @@ static func _write(holder: Variant, named: String, value: Variant) -> void:
 	object.set(named, value)
 
 
-## What [param holder] holds under [param named]. Only ever called once [method _can_read] agrees.
-static func _read(holder: Variant, named: String) -> Variant:
+## What [param holder] holds under [param named], or answers to it when [param named] is a call.
+## Only ever called once [method _can_read] agrees.
+static func read_under(holder: Variant, named: String) -> Variant:
 	if holder is Array:
 		var items: Array = holder
 		return items[_index_in(named, items.size())]
@@ -664,6 +694,9 @@ static func _read(holder: Variant, named: String) -> Variant:
 			return map[named]
 		return map[StringName(named)]
 	var object: Object = holder
+	var method: String = _called(named)
+	if not method.is_empty():
+		return object.call(method)
 	return object.get(named)
 
 
@@ -701,6 +734,23 @@ static func _nothing_there(holder: Variant, named: String, called: String) -> St
 		if keys.size() > 8:
 			rest = " and %d more" % [keys.size() - 8]
 		return "%s has no key %s; it is keyed by %s%s" % [called, named, ", ".join(some), rest]
+	var object: Object = holder
+	var method: String = _called(named)
+	if not method.is_empty():
+		var required: int = _arguments_required(object, method)
+		if required == -1:
+			return "%s has no method %s" % [called, method]
+		return (
+			"%s.%s takes %d argument%s, and a path can only call a method that takes none"
+			% [called, method, required, "" if required == 1 else "s"]
+		)
+	# A method spelled as a property is the likeliest thing behind a name the object has no property
+	# for, and the caller is one pair of brackets away from what they meant.
+	if object.has_method(named):
+		return (
+			"%s has no property %s; it has a method of that name, which a path calls as %s()"
+			% [called, named, named]
+		)
 	return "%s has no property %s" % [called, named]
 
 
@@ -726,18 +776,29 @@ func set_property(params: Dictionary) -> Dictionary:
 		return standing
 	var node: Node = standing["node"]
 
-	# Through a path as well, for the reason [method _reached] gives, and read back off the same
+	# Through a path as well, for the reason [method walk_to] gives, and read back off the same
 	# holder afterwards: a set that does not take says so by answering with the old value, which is
 	# how a typed container refusing a write is told from one accepting it.
-	var reached: Dictionary = _reached(node, node_path, property)
+	var reached: Dictionary = walk_to(node, node_path, property)
 	if reached.has("message"):
 		return reached
 
 	var holder: Variant = reached["holder"]
 	var named: String = reached["name"]
+	# A call can be walked through and read, and is not a place: what it returns is the method's
+	# to hand out, and writing "into" it would set nothing the game keeps.
+	if not _called(named).is_empty():
+		return {
+			"type": "error",
+			"message":
+			(
+				"%s:%s is a call, and a call is not a place to write: name a property"
+				% [reached["called"], named]
+			)
+		}
 	if not _can_read(holder, named):
 		return {"type": "error", "message": _nothing_there(holder, named, str(reached["called"]))}
-	var old_value: Variant = _read(holder, named)
+	var old_value: Variant = read_under(holder, named)
 	# The same rule the call path holds: a value that cannot become what the property holds is
 	# refused rather than written. Writing it means the engine picks something, and what it picks
 	# for a word where a number goes is zero, which the answer then reports as the new value.
@@ -759,7 +820,7 @@ func set_property(params: Dictionary) -> Dictionary:
 		"path": node_path,
 		"property": property,
 		"old_value": _values.serialize(old_value),
-		"new_value": _values.serialize(_read(holder, named))
+		"new_value": _values.serialize(read_under(holder, named))
 	}
 
 
@@ -776,10 +837,10 @@ func call_method(params: Dictionary) -> Dictionary:
 		return standing
 	var node: Node = standing["node"]
 
-	# Through a path as well, for the reason [method _reached] gives. What a game does hangs off its
+	# Through a path as well, for the reason [method walk_to] gives. What a game does hangs off its
 	# nodes as much as its state does, so reading `_game:run:day` while being unable to call
 	# `_game:run:advance` answers half of what a node holds and refuses the other half.
-	var reached: Dictionary = _reached(node, node_path, method)
+	var reached: Dictionary = walk_to(node, node_path, method)
 	if reached.has("message"):
 		return reached
 
@@ -798,6 +859,11 @@ func call_method(params: Dictionary) -> Dictionary:
 		}
 	var holder: Object = reached["holder"]
 	var named: String = reached["name"]
+	# The method a call ends on is the one being called whether or not it carries the brackets a
+	# step along the way would: "get_viewport():gui_get_focus_owner()" is the same call as without
+	# the last pair.
+	if not _called(named).is_empty():
+		named = _called(named)
 	if not holder.has_method(named):
 		return {"type": "error", "message": "%s has no method %s" % [reached["called"], named]}
 
@@ -888,13 +954,13 @@ func _serialize_node_tree(
 func _named_properties_of(node: Node, path: String, named: Array[String]) -> Dictionary:
 	var properties: Dictionary = {}
 	for wanted: String in named:
-		var reached: Dictionary = _reached(node, path, wanted)
+		var reached: Dictionary = walk_to(node, path, wanted)
 		if reached.has("message"):
 			continue
 		var holder: Variant = reached["holder"]
 		var name: String = reached["name"]
 		if _can_read(holder, name):
-			properties[wanted] = _values.serialize(_read(holder, name))
+			properties[wanted] = _values.serialize(read_under(holder, name))
 	return properties
 
 
