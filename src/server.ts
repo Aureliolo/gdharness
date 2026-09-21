@@ -4524,6 +4524,8 @@ class GodotServer {
     }
     this.drainEditorOutput(stopped);
     this.drainTranscript(stopped);
+    // Read before the stop, since a game that goes on the stop is one that was running.
+    const wasRunning = stillRunning(stopped);
     this.logDebug('Stopping the running game');
     await this.endActiveGame('editor_run stop');
     return this.jsonTextResponse({
@@ -4536,14 +4538,19 @@ class GodotServer {
       // won. A stop that says which process it ended is one a caller can compare against what they
       // know their game started; one that says "stopped" is not.
       endedPid: stopped.pid,
-      exitedBeforeStop: stopped.exitCode !== null,
+      // Whether there was anything left to stop. A run whose exit nobody collected, which is a
+      // played run picked up after a reconnect and gone since, has no exit code and is over all
+      // the same; answering false there said a game had been ended that had ended itself.
+      exitedBeforeStop: stopped.exitCode !== null || !wasRunning,
       exitCode: stopped.exitCode,
       errors: stopped.log.count('error'),
       warnings: stopped.log.count('warning'),
       clean: stopped.log.count('error') === 0,
-      note: stopped.throughEditor
-        ? "The editor was asked to stop the scene it is playing. Anything that game started for itself, with OS.create_process or otherwise, is not the editor's to stop and is still running."
-        : 'The process named under endedPid was ended. Anything that game started for itself, with OS.create_process or otherwise, is a separate process and is still running.',
+      note: !wasRunning
+        ? 'This run was over before the stop, so nothing was ended here: editor_output has what it printed and how it ended. Anything that game started for itself, with OS.create_process or otherwise, is a separate process and may still be running.'
+        : stopped.throughEditor
+          ? "The editor was asked to stop the scene it is playing. Anything that game started for itself, with OS.create_process or otherwise, is not the editor's to stop and is still running."
+          : 'The process named under endedPid was ended. Anything that game started for itself, with OS.create_process or otherwise, is a separate process and is still running.',
       entries: forAnswer(
         stopped.log.select({ severity: 'warning', sinceLastCall: false, limit: 200 }).entries,
       ),
