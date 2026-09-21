@@ -193,6 +193,14 @@ is not the fault it guards, and the first run of the cpu case on the Windows leg
 Hold that the question was put to the right process, which is the number or the note saying the
 platform would not answer about it, and hold which process by a field the platform has no part in.
 
+A measurement of the platform taken through a stand-in measures the stand-in's own behaviour
+first. The fixtures here use Node processes for games, and a Node child on Windows sits in its
+parent's job object, so it dies with the parent; a Godot worker started with OS.create_process
+does not. The case written to measure what the platform does with an orphan, which is what the
+order of a stop rests on, measured Node's job object instead and reported that the orphan was
+gone. Start the stand-in detached, and before reading any measurement through a stand-in, ask
+which of its behaviours are its own.
+
 The fourth way is a second guard covering the one you broke, and the wrong conclusion it invites is
 that the line you disarmed was doing nothing. Two fixes landed together on where a parameter list
 ends: the trailing comment comes off the whole line before anything reads it, and the closing
