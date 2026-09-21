@@ -7924,6 +7924,22 @@ async function testAStatusCallIsNotHeldByAHeldGame(): Promise<void> {
     assert.equal(get(over, 'running'), false, `a run whose process has gone is over: ${ended}`);
     assert.equal(get(over, 'heldAt'), null, `and held nowhere: ${ended}`);
     assert.equal(get(over, 'heldUnknown'), undefined, `with nothing left open about it: ${ended}`);
+
+    // A stop of a run that is over says nothing was ended: a picked-up run has no exit code for
+    // anybody to have collected, and the answer used to read as a game ended by this call.
+    const stop = parseTextContent(
+      await server.request('tools/call', { name: 'editor_run', arguments: { op: 'stop' } }, 60_000),
+    );
+    assert.equal(
+      get(stop, 'exitedBeforeStop'),
+      true,
+      `a run that had gone was over before the stop: ${JSON.stringify(stop)}`,
+    );
+    assert.match(
+      text(get(stop, 'note')),
+      /over before the stop, so nothing was ended here/,
+      JSON.stringify(stop),
+    );
   });
 }
 
@@ -8852,6 +8868,11 @@ async function testARunOutlivesItsServer(): Promise<void> {
 
       const stopped: unknown = JSON.parse(await call('editor_run', { op: 'stop' }, ENGINE_CALL_TIMEOUT_MS));
       assert.equal(get(stopped, 'stopped'), true, JSON.stringify(stopped));
+      assert.equal(
+        get(stopped, 'exitedBeforeStop'),
+        false,
+        `a run that was going when the stop came is said to have been ended by it: ${JSON.stringify(stopped)}`,
+      );
     }, env);
 
     await delay(1000);
