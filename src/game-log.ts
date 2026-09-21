@@ -1,8 +1,9 @@
 /**
  * What a running game printed, read as the engine writes it rather than as raw lines.
  *
- * The engine reports a problem as a headline (`ERROR:`, `SCRIPT ERROR:`, `WARNING:`, or the
- * `USER` forms push_error and push_warning produce) followed by indented lines that say where:
+ * The engine reports a problem as a headline (`ERROR:`, `SCRIPT ERROR:`, `SHADER ERROR:`,
+ * `WARNING:`, or the `USER` forms push_error and push_warning produce) followed by indented lines
+ * that say where:
  * an `at:` line, and a backtrace when there is one. Those belong to the headline, so a filter
  * on severity keeps them with it, and a count of errors counts problems and not lines.
  */
@@ -36,7 +37,7 @@ export interface LogEntry {
   readonly detail: readonly string[];
 }
 
-const HEADLINE = /^(USER )?(SCRIPT ERROR|ERROR|WARNING):\s?(.*)$/;
+const HEADLINE = /^(USER )?(SCRIPT ERROR|SHADER ERROR|ERROR|WARNING):\s?(.*)$/;
 
 /** An ANSI colour sequence: the escape byte, a bracket, the parameters, the letter m. */
 const COLOUR_CODE = new RegExp(`${String.fromCharCode(0x1b)}\\[[0-9;]*m`, 'g');
