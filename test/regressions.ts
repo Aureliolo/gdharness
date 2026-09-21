@@ -8585,14 +8585,21 @@ async function testASpawnedGameBesideAnEditorIsStillItsOwn(): Promise<void> {
 }
 
 /**
- * An injected mouse motion carries the distance from where the pointer last was.
+ * An injected mouse motion carries the distance from where the last injected event put the pointer.
  *
  * A control that drags reads the event's `relative` rather than its position, and every motion
  * sent through the bridge said it had moved by nothing, so a grip under a bridge drag stood still
- * through the whole drag. The viewport remembers where the last motion put the pointer, so the
- * difference from there is what a real move would carry; a relative the caller gives is kept. Read
- * off a script in the game that records what the events said, since the answer's own `relative`
- * only says what was sent.
+ * through the whole drag. The distance from where the bridge last put the pointer is what a real
+ * move would carry, and the first motion has nowhere to have come from; a relative the caller
+ * gives is kept. Read off a script in the game that records what the events said, since the
+ * answer's own `relative` only says what was sent.
+ *
+ * Windowed wherever the host has a display, because the reading that is wrong is only wrong
+ * there: the root viewport answers its mouse position from the operating system's pointer, which
+ * an injected event never moves, so a bridge that took its last position from the viewport
+ * answered the distance from wherever the user's mouse sat, another monitor included, off by
+ * thousands on a played game while a headless run, with no pointer to read, measured it right. A
+ * host with no display runs it headless and holds the arithmetic alone.
  *
  * The other thing a drag reads is which buttons are down as the pointer moves, and a motion
  * between a held click and its release carried none, so a drag written as "moved with the left
@@ -8608,6 +8615,8 @@ async function testAnInjectedMotionCarriesHowFarThePointerMoved(): Promise<void>
     console.log('injected motion regression skipped (Godot not found)');
     return;
   }
+  const headless = resolveHeadless(undefined, { platform: process.platform, variables: process.env });
+  console.log(`injected motion regression runs ${headless ? 'headless: no display here' : 'windowed'}`);
   await withAPlayingEditor(
     ({ adapter }) =>
       (tool) =>
@@ -8639,7 +8648,15 @@ async function testAnInjectedMotionCarriesHowFarThePointerMoved(): Promise<void>
           'tools/call',
           {
             name: 'editor_run',
-            arguments: { projectPath: project, op: 'start', headless: true, runtimeWaitMs: 20_000 },
+            arguments: {
+              projectPath: project,
+              op: 'start',
+              headless,
+              // The compatibility renderer where there is a window, for the reason the opened
+              // menu fixture asks for it: the window is what this needs, not the pipelines.
+              ...(headless ? {} : { args: ['--rendering-method', 'gl_compatibility'] }),
+              runtimeWaitMs: 60_000,
+            },
           },
           ENGINE_CALL_TIMEOUT_MS,
         ),
@@ -8656,8 +8673,13 @@ async function testAnInjectedMotionCarriesHowFarThePointerMoved(): Promise<void>
           const value = await read('last_relative');
           return [get(value, 'x'), get(value, 'y')];
         };
-        // The pointer put somewhere first, so the second motion has a known place to move from.
-        await call('runtime_input', { op: 'mouse_motion', x: 10, y: 10 });
+        // The first motion has nowhere to have come from, wherever the real pointer sits.
+        const first = await call('runtime_input', { op: 'mouse_motion', x: 10, y: 10 });
+        assert.deepEqual(
+          get(first, 'relative'),
+          [0, 0],
+          `the first motion moves from nowhere: ${JSON.stringify(first)}`,
+        );
         const moved = await call('runtime_input', { op: 'mouse_motion', x: 40, y: 30 });
         assert.deepEqual(
           get(moved, 'relative'),
@@ -8687,10 +8709,16 @@ async function testAnInjectedMotionCarriesHowFarThePointerMoved(): Promise<void>
         await call('runtime_wait', { op: 'frames', frames: 2 });
         assert.equal(await read('last_mask'), 0, 'no button held, none carried');
         // Sent as fast as a caller can, with no wait between: an answer that came back before
-        // the event was delivered would let the next event read the state from before it.
-        await call('runtime_input', { op: 'mouse_click', x: 40, y: 30, pressed: true });
+        // the event was delivered would let the next event read the state from before it. The
+        // press lands somewhere the pointer was not, since a press puts the pointer where it
+        // pressed and the drag after it measures from there.
+        await call('runtime_input', { op: 'mouse_click', x: 50, y: 40, pressed: true });
         const dragged = await call('runtime_input', { op: 'mouse_motion', x: 60, y: 30 });
-        assert.deepEqual(get(dragged, 'relative'), [20, 0], JSON.stringify(dragged));
+        assert.deepEqual(
+          get(dragged, 'relative'),
+          [10, -10],
+          `the drag measures from the press: ${JSON.stringify(dragged)}`,
+        );
         await call('runtime_input', { op: 'mouse_click', x: 60, y: 30, pressed: false });
         assert.equal(await read('last_button_mask'), 0, 'the release carries the button no longer');
         assert.equal(await read('last_mask'), 1, 'the left button was held through the motion before it');
