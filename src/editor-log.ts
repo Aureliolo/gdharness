@@ -174,6 +174,8 @@ interface Slot {
   readonly allDifferent?: true;
   readonly some?: readonly string[];
   readonly more?: number;
+  /** An earlier slot whose value decides this one, when there is one. */
+  readonly movesWith?: number;
 }
 
 /** A message shape several lines share, with what stood in its slots and what came before it. */
@@ -294,11 +296,17 @@ export function bursts(entries: readonly LogEntry[], before: number): readonly R
 
 function slotsOf(values: readonly (readonly string[])[], count: number): readonly Slot[] {
   const width = Math.max(0, ...values.map((row) => row.length));
+  const distinct: string[][] = [];
+  for (let at = 0; at < width; at += 1) {
+    distinct.push([...new Set(values.map((row) => row[at]).filter((one) => one !== undefined))]);
+  }
   const slots: Slot[] = [];
   for (let at = 0; at < width; at += 1) {
-    const seen = [...new Set(values.map((row) => row[at]).filter((one) => one !== undefined))];
+    const seen = distinct[at] ?? [];
+    const partner = theSlotItMovesWith(values, distinct, at);
+    const paired = partner === undefined ? {} : { movesWith: partner };
     if (seen.length === count && count > 1) {
-      slots.push({ distinct: seen.length, allDifferent: true });
+      slots.push({ distinct: seen.length, allDifferent: true, ...paired });
       continue;
     }
     const some = seen.slice(0, NAMED_VALUES);
@@ -306,9 +314,56 @@ function slotsOf(values: readonly (readonly string[])[], count: number): readonl
       distinct: seen.length,
       some,
       ...(seen.length > some.length ? { more: seen.length - some.length } : {}),
+      ...paired,
     });
   }
   return slots;
+}
+
+/**
+ * The earlier slot this one goes one for one with, when there is one.
+ *
+ * Worth more than either count on its own, because it is the finding rather than a measurement of
+ * it. A wall whose class names and source paths move together says that every name that would not
+ * resolve belongs to one directory and every file it is named in belongs to another, which is the
+ * sentence a reader is trying to arrive at; two slots each reading "23 distinct" leaves them to
+ * guess whether that is one correspondence or two independent spreads.
+ */
+function theSlotItMovesWith(
+  values: readonly (readonly string[])[],
+  distinct: readonly (readonly string[])[],
+  at: number,
+): number | undefined {
+  const mine = distinct[at] ?? [];
+  if (mine.length < 2) {
+    return undefined;
+  }
+  for (let other = 0; other < at; other += 1) {
+    if ((distinct[other] ?? []).length !== mine.length) {
+      continue;
+    }
+    const goesWith = new Map<string, string>();
+    let oneForOne = true;
+    for (const row of values) {
+      const theirs = row[other];
+      const ours = row[at];
+      if (theirs === undefined || ours === undefined) {
+        oneForOne = false;
+        break;
+      }
+      const already = goesWith.get(theirs);
+      if (already === undefined) {
+        goesWith.set(theirs, ours);
+      } else if (already !== ours) {
+        oneForOne = false;
+        break;
+      }
+    }
+    if (oneForOne) {
+      return other;
+    }
+  }
+  return undefined;
 }
 
 /**

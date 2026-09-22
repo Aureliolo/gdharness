@@ -515,6 +515,15 @@ interface AnnounceBudget {
  */
 const LONGEST_BOOT_NOTED_MS = 5 * 60_000;
 
+/**
+ * The most repeated message shapes an editor's console is grouped into for one answer.
+ *
+ * The entries beside them are already capped, and a console with many kinds of repeated warning
+ * would otherwise put a group for each one on top of that. Twenty of the largest, because a wall
+ * worth a call is a wall with a count, and the ones below twenty are already in the entries.
+ */
+const MOST_GROUPS = 20;
+
 /** What was true when the wait for an announcement ran out. */
 interface AfterWaiting {
   /** Whether the addon is on disk at all, since a project without it can never announce. */
@@ -5287,6 +5296,12 @@ class GodotServer {
       limit: readPositiveNumber(args, 'limit') ?? 200,
     });
     const everything = console.log.everything();
+    // Capped the way the entries are, and for the same reason: this answer goes into somebody's
+    // context, and a console with a hundred different repeated messages would otherwise carry a
+    // hundred groups on top of the two hundred entries. Sorted by count, so the cap takes the
+    // small ones, and what it took is said rather than left to be inferred from a short list.
+    const grouped = bursts(everything, readPositiveNumber(args, 'before') ?? 3);
+    const shown = grouped.slice(0, MOST_GROUPS);
     return this.jsonTextResponse({
       editorPid: status.editorPid,
       projectPath,
@@ -5297,7 +5312,8 @@ class GodotServer {
         warning: console.log.count('warning'),
         info: console.log.count('info'),
       },
-      repeated: bursts(everything, readPositiveNumber(args, 'before') ?? 3),
+      repeated: shown,
+      moreShapes: grouped.length > shown.length ? grouped.length - shown.length : undefined,
       entries: forAnswer(selected.entries),
       omitted: selected.omitted === 0 ? undefined : selected.omitted,
     });

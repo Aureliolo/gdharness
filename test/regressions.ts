@@ -4393,6 +4393,78 @@ function testAWallOfOneMessageCollapsesToItsShape(): void {
   once.append('transcript', 'ERROR: something happened\nsomething else\n');
   once.finish();
   assert.deepEqual(bursts(once.everything(), 3), []);
+
+  // Two slots that go one for one, which is the sentence a reader is trying to arrive at: every
+  // name that would not resolve belongs to one directory and every file it is named in belongs to
+  // another. Two slots each reading "three distinct" leaves that to be guessed.
+  const paired = new GameLog();
+  paired.append(
+    'transcript',
+    ['Run', 'Encounter', 'Component', 'Run']
+      .map(
+        (name, at) =>
+          `ERROR: res://tests/suite${at}.gd:${at + 4} - Could not parse global class "${name}" from "res://core/${name.toLowerCase()}.gd"`,
+      )
+      .join('\n'),
+  );
+  paired.finish();
+  const together = bursts(paired.everything(), 3)[0];
+  assert.ok(together !== undefined);
+  const [where, named, script] = together.slots;
+  assert.ok(where !== undefined && named !== undefined && script !== undefined);
+  assert.equal(where.allDifferent, true, 'the location is a different one every time');
+  assert.equal(named.distinct, 3, JSON.stringify(together.slots));
+  assert.equal(script.distinct, 3, JSON.stringify(together.slots));
+  assert.equal(script.movesWith, 1, `the path follows the name: ${JSON.stringify(together.slots)}`);
+  assert.equal(named.movesWith, undefined, 'and the first of a pair is not said to follow');
+
+  // Two slots of the same size that do not go one for one, which is what tells this apart from
+  // counting. Without a case like it, equal counts and a correspondence are the same thing here
+  // and the check agrees whatever it does.
+  const crossed = new GameLog();
+  crossed.append(
+    'transcript',
+    [
+      ['Alpha', 'one'],
+      ['Alpha', 'two'],
+      ['Beta', 'one'],
+      ['Beta', 'two'],
+    ]
+      .map(([name, part]) => `ERROR: class "${name}" needs "${part}"`)
+      .join('\n'),
+  );
+  crossed.finish();
+  const independent = bursts(crossed.everything(), 3)[0];
+  assert.ok(independent !== undefined);
+  const [first, second] = independent.slots;
+  assert.ok(first !== undefined && second !== undefined);
+  assert.equal(first.distinct, 2, JSON.stringify(independent.slots));
+  assert.equal(second.distinct, 2, JSON.stringify(independent.slots));
+  assert.equal(
+    second.movesWith,
+    undefined,
+    `two of each that vary independently are not a correspondence: ${JSON.stringify(independent.slots)}`,
+  );
+
+  // Biggest first, which is what makes capping the list in the answer safe: the answer keeps the
+  // largest twenty groups, and a console with more kinds of repeated warning than that drops the
+  // smallest, which are the ones already visible among the entries.
+  const crowd = new GameLog();
+  const said: string[] = [];
+  for (let kind = 0; kind < 25; kind += 1) {
+    for (let again = 0; again <= kind; again += 1) {
+      said.push(`WARNING: kind ${kind} said "${again}"`);
+    }
+  }
+  crowd.append('transcript', `${said.join('\n')}\n`);
+  crowd.finish();
+  const counts = bursts(crowd.everything(), 3).map((group) => group.count);
+  assert.equal(counts.length, 24, `a shape said once is no group: ${counts.join(', ')}`);
+  assert.deepEqual(
+    counts,
+    [...counts].sort((one, other) => other - one),
+    `groups come biggest first: ${counts.join(', ')}`,
+  );
 }
 
 /**
