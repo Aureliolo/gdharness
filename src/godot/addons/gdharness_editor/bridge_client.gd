@@ -13,6 +13,8 @@ const Read = preload("reading.gd")
 const DEFAULT_URL: String = "ws://127.0.0.1:6505/godot"
 ## Written beside the addon by the install, so it names the version this copy came from.
 const VERSION_MARKER: String = "res://addons/gdharness_editor/.gdharness-version"
+## Written beside it, kept in step with `DIGEST_MARKER` in src/setup.ts.
+const DIGEST_MARKER: String = "res://addons/gdharness_editor/.gdharness-digest"
 ## Written by the server that serves this project, saying where its bridge actually is. Kept in
 ## step with `announcementPath` in src/bridge-announce.ts.
 const ANNOUNCEMENT: String = "res://.godot/gdharness-bridge.json"
@@ -70,6 +72,8 @@ var server_url: String = DEFAULT_URL
 ## What this copy was when it loaded, which is what the editor is running until it is restarted.
 ## See [method _loaded_version] for why it is held rather than read when it is wanted.
 var version_at_load: String = ""
+## The digest of the editor addon code this copy loaded, held for the same reason.
+var digest_at_load: String = ""
 
 var _is_connected: bool = false
 var _reconnect_timer: Timer
@@ -98,6 +102,7 @@ var _connecting_for: float = 0.0
 func _ready() -> void:
 	_project_path = ProjectSettings.globalize_path("res://")
 	version_at_load = _loaded_version()
+	digest_at_load = _loaded_digest()
 	_keep_breakpoints_through_sessions()
 	OS.set_environment(EDITOR_PID_VARIABLE, str(OS.get_process_id()))
 
@@ -290,6 +295,7 @@ func _handle_connect() -> void:
 			"type": "godot_ready",
 			"project_path": _project_path,
 			"addon_version": version_at_load,
+			"addon_digest": digest_at_load,
 			"editor_pid": OS.get_process_id(),
 			"lsp_port": _serves(LSP_ASKED, LSP_SETTING),
 			"dap_port": _serves(DAP_ASKED, DAP_SETTING),
@@ -408,9 +414,19 @@ func _serving(setting: String) -> int:
 ## and `addonIsStale` reporting false over an editor still running the old code, which is exactly
 ## what it exists to catch.
 func _loaded_version() -> String:
-	if not FileAccess.file_exists(VERSION_MARKER):
+	return _read_marker(VERSION_MARKER)
+
+
+## The same for the digest of the editor addon code, which an upgrade that leaves the code alone
+## rewrites unchanged, so the server can tell an editor that needs a restart from one that does not.
+func _loaded_digest() -> String:
+	return _read_marker(DIGEST_MARKER)
+
+
+func _read_marker(path: String) -> String:
+	if not FileAccess.file_exists(path):
 		return ""
-	var file: FileAccess = FileAccess.open(VERSION_MARKER, FileAccess.READ)
+	var file: FileAccess = FileAccess.open(path, FileAccess.READ)
 	if file == null:
 		return ""
 	var text: String = file.get_as_text().strip_edges()

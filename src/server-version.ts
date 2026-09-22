@@ -25,6 +25,26 @@ export const SERVER_VERSION = (() => {
 const UNVERSIONED = 'an addon from before versions were reported';
 
 /**
+ * Whether the editor is running addon code other than what this server ships.
+ *
+ * By digest when both sides have one, because the version moves on every release and the editor
+ * addon mostly does not: compared by version, an upgrade that left the addon alone called every
+ * editor stale and sent it to a restart that loaded the same code. An addon from before digests
+ * reports none, and the version is all there is to go on.
+ */
+export function editorIsStale(
+  addonVersion: string | undefined,
+  serverVersion: string,
+  addonDigest?: string,
+  shippedDigest?: string,
+): boolean {
+  if (addonDigest !== undefined && addonDigest !== '' && shippedDigest !== undefined) {
+    return addonDigest !== shippedDigest;
+  }
+  return addonVersion !== serverVersion;
+}
+
+/**
  * What to do about an editor and a server shipping different addons, or undefined when they agree.
  *
  * Which half is behind decides the answer, and getting it wrong sends the reader the wrong way.
@@ -33,11 +53,19 @@ const UNVERSIONED = 'an addon from before versions were reported';
  * already started, so a project upgraded mid-session has the *newer* addon on disk and restarting
  * the editor widens the gap: what that one wants is the MCP server reconnected.
  */
-export function addonMismatch(addonVersion: string | undefined, serverVersion: string): string | undefined {
-  if (addonVersion === serverVersion) {
+export function addonMismatch(
+  addonVersion: string | undefined,
+  serverVersion: string,
+  addonDigest?: string,
+  shippedDigest?: string,
+): string | undefined {
+  if (!editorIsStale(addonVersion, serverVersion, addonDigest, shippedDigest)) {
     return undefined;
   }
   const reported = addonVersion ?? '';
+  if (reported === serverVersion) {
+    return `The editor is running a different build of the ${reported} addon from the one this server ships. Restart it with editor_launch restart to pick this one up.`;
+  }
   const editor = reported === '' ? UNVERSIONED : `the ${reported} addon`;
   const both = `The editor is running ${editor} while this server ships ${serverVersion}.`;
   if (reported !== '' && isNewer(reported, serverVersion)) {
@@ -62,8 +90,10 @@ export function markIfStale(
   answer: unknown,
   addonVersion: string | undefined,
   serverVersion: string,
+  addonDigest?: string,
+  shippedDigest?: string,
 ): unknown {
-  const staleNote = addonMismatch(addonVersion, serverVersion);
+  const staleNote = addonMismatch(addonVersion, serverVersion, addonDigest, shippedDigest);
   if (staleNote === undefined || typeof answer !== 'object' || answer === null || Array.isArray(answer)) {
     return answer;
   }

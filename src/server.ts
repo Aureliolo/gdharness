@@ -156,11 +156,12 @@ import type {
 import {
   addonMismatch,
   DEBUG_MODE,
+  editorIsStale,
   GODOT_DEBUG_MODE_DEFAULT,
   markIfStale,
   SERVER_VERSION,
 } from './server-version.js';
-import { installedAddonVersion, RUNTIME_AUTOLOAD } from './setup.js';
+import { installedAddonVersion, RUNTIME_AUTOLOAD, shippedEditorDigest } from './setup.js';
 import {
   asParams,
   readArray,
@@ -2818,6 +2819,8 @@ class GodotServer {
         },
         this.godotBridge.getStatus().addonVersion,
         SERVER_VERSION,
+        this.godotBridge.getStatus().addonDigest,
+        shippedEditorDigest(),
       ),
     );
   }
@@ -3185,7 +3188,9 @@ class GodotServer {
     // The addon an editor loaded at startup, against the one this server ships. An install
     // replaces the files under a running editor without changing what it is serving, and the
     // only other sign of that is a tool answering as the old version did.
-    const stale = status.connected && status.addonVersion !== SERVER_VERSION;
+    const stale =
+      status.connected &&
+      editorIsStale(status.addonVersion, SERVER_VERSION, status.addonDigest, shippedEditorDigest());
     const unfinished = this.restartLeftUnfinished(status.connected);
     return {
       ...status,
@@ -3225,7 +3230,9 @@ class GodotServer {
       // this in its own answer; an open cannot, because it returns before the save happens.
       ...(status.connected ? this.whatTheLaunchedEditorDropped() : {}),
       startupError: this.bridgeStartupError,
-      staleNote: stale ? addonMismatch(status.addonVersion, SERVER_VERSION) : undefined,
+      staleNote: stale
+        ? addonMismatch(status.addonVersion, SERVER_VERSION, status.addonDigest, shippedEditorDigest())
+        : undefined,
       ...this.breakpointsAtRisk(),
       retryingBridge: this.bridgeRetry === null ? undefined : true,
       // Where the editor was told to look, when this server knows which project to tell. Worth
@@ -3492,8 +3499,8 @@ class GodotServer {
       editorPid: now.editorPid,
       addonVersion: now.addonVersion,
       serverVersion: SERVER_VERSION,
-      addonIsStale: now.addonVersion !== SERVER_VERSION,
-      staleNote: addonMismatch(now.addonVersion, SERVER_VERSION),
+      addonIsStale: editorIsStale(now.addonVersion, SERVER_VERSION, now.addonDigest, shippedEditorDigest()),
+      staleNote: addonMismatch(now.addonVersion, SERVER_VERSION, now.addonDigest, shippedEditorDigest()),
       ...this.whatTheEditorDropped(settingsBefore, after),
       tookMs: Date.now() - began,
     });
@@ -6111,6 +6118,8 @@ class GodotServer {
           await this.godotBridge.invokeTool(toolName, args),
           this.godotBridge.getStatus().addonVersion,
           SERVER_VERSION,
+          this.godotBridge.getStatus().addonDigest,
+          shippedEditorDigest(),
         ),
       );
     } catch (error) {

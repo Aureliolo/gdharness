@@ -137,13 +137,15 @@ import {
   uidsLeftNote,
 } from '../src/server.js';
 import type { GodotProcess } from '../src/server-types.js';
-import { addonMismatch, markIfStale, SERVER_VERSION } from '../src/server-version.js';
+import { addonMismatch, editorIsStale, markIfStale, SERVER_VERSION } from '../src/server-version.js';
 import {
   ADDONS,
   autoloadIsOurs,
   installAddons,
+  installedEditorDigest,
   RUNTIME_AUTOLOAD,
   SCRIPT_RUNS_SETTING,
+  shippedEditorDigest,
 } from '../src/setup.js';
 import { skillFiles } from '../src/skill.js';
 import { readNonNegativeNumber, readPositiveNumber } from '../src/tool-args.js';
@@ -5666,7 +5668,7 @@ function testTheCureIsWrittenWhole(): void {
   ];
   // What the tree holds today and not a comfortable minimum, so one place going quiet lowers this
   // in the same change and somebody confirms it was meant.
-  assert.equal(offered.length, 28, `the places offering a remedy should all be found, not ${offered.length}`);
+  assert.equal(offered.length, 29, `the places offering a remedy should all be found, not ${offered.length}`);
 
   // Across whitespace, because a rendered file wraps where the source did not and a sentence that
   // breaks at "the" is the same sentence. Change, edit and touch, because the claim is about what
@@ -5973,6 +5975,157 @@ function testTheStaleHalfIsNamedCorrectly(): void {
     );
     assert.match(said, /^The editor is running (an|the) \S/, `and should read as a sentence: ${said}`);
   }
+}
+
+/**
+ * Whether an editor is stale is a question about the code it loaded, not the number on it.
+ *
+ * The version moves on every release and the editor addon mostly does not. Compared by version,
+ * 1.0.12, which changed no addon file, called every editor stale on every answer and told it to
+ * restart into the same code; the upgrade command said the same, and a downstream project was
+ * told by gdharness to take a restart that its own release notes said it did not need.
+ *
+ * The digest is taken over both editor plugins and nothing else, because the runtime addon is
+ * loaded by a game from disk each time it starts and is never the editor's to be behind on.
+ */
+function testStalenessIsTheEditorCodeNotTheVersion(): void {
+  const same = 'a'.repeat(64);
+  const other = 'b'.repeat(64);
+  const answer = { ok: true };
+
+  assert.equal(editorIsStale('1.0.11', '1.0.12', same, same), false, 'same code under an older number');
+  assert.equal(addonMismatch('1.0.11', '1.0.12', same, same), undefined, 'so there is nothing to say');
+  assert.deepEqual(markIfStale(answer, '1.0.11', '1.0.12', same, same), answer, 'and the answer is unmarked');
+
+  assert.equal(editorIsStale('1.0.12', '1.0.12', other, same), true, 'different code under the same number');
+  const rebuilt = addonMismatch('1.0.12', '1.0.12', other, same) ?? '';
+  assert.match(rebuilt, /different build of the 1\.0\.12 addon/, rebuilt);
+  assert.match(rebuilt, /editor_launch restart/, rebuilt);
+  assert.equal(rebuilt.match(/\baddon\b/g)?.length, 1, `names the addon once: ${rebuilt}`);
+  assert.equal(get(markIfStale(answer, '1.0.12', '1.0.12', other, same), 'addonIsStale'), true);
+
+  // An addon from before digests greets with none, or with an empty one, and a server that cannot
+  // read its own addons has none to compare; each leaves the version as the only evidence.
+  for (const [addonDigest, shipped] of [
+    [undefined, same],
+    ['', same],
+    [same, undefined],
+  ] as const) {
+    assert.equal(editorIsStale('1.0.11', '1.0.12', addonDigest, shipped), true, `${addonDigest}/${shipped}`);
+    assert.equal(editorIsStale('1.0.12', '1.0.12', addonDigest, shipped), false, `${addonDigest}/${shipped}`);
+  }
+
+  // What an install writes: the digest of the shipped editor code, the same one the server compares
+  // against, and the same from one install to the next.
+  const source = mkdtempSync(join(tmpdir(), 'gdharness-digest-source-'));
+  const projects = [0, 1, 2, 3].map(() => mkdtempSync(join(tmpdir(), 'gdharness-digest-')));
+  try {
+    installAddons(projects[0] ?? '');
+    installAddons(projects[1] ?? '');
+    const written = installedEditorDigest(projects[0] ?? '') ?? '';
+    assert.match(written, /^[0-9a-f]{64}$/, `an install writes a digest: ${written}`);
+    assert.equal(written, shippedEditorDigest(), 'which is the one the server holds');
+    assert.equal(installedEditorDigest(projects[1] ?? ''), written, 'and every install writes the same one');
+
+    // A copy of the shipped addons with one byte changed in a runtime file, then one in the second
+    // editor plugin: the first is not the editor's code, the second is.
+    cpSync('src/godot/addons', source, { recursive: true });
+    const runtime = join(source, 'gdharness_runtime', 'runtime_autoload.gd');
+    writeFileSync(runtime, `${readFileSync(runtime, 'utf8')}\n`);
+    installAddons(projects[2] ?? '', source);
+    assert.equal(
+      installedEditorDigest(projects[2] ?? ''),
+      written,
+      'a runtime change is not an editor change',
+    );
+    const plugin = join(source, 'auto_reload', 'plugin.cfg');
+    writeFileSync(plugin, `${readFileSync(plugin, 'utf8')}\n`);
+    installAddons(projects[3] ?? '', source);
+    const changed = installedEditorDigest(projects[3] ?? '') ?? '';
+    assert.match(changed, /^[0-9a-f]{64}$/, changed);
+    assert.notEqual(changed, written, 'a change to either editor plugin is');
+  } finally {
+    sweep(source);
+    for (const project of projects) {
+      sweep(project);
+    }
+  }
+}
+
+/**
+ * A server greeted by an editor on an older version and the shipped editor code calls it current.
+ *
+ * The other half of the case above, through the bridge: the digest has to arrive in the greeting,
+ * be kept, and be compared against what this server's own bundle ships, which is a different copy
+ * of the addons from the source tree the case above hashes. A second editor greeting with a
+ * digest that is not the shipped one is the positive: the same server calls that one stale.
+ */
+async function testAnEditorOnTheShippedCodeIsNotCalledStale(): Promise<void> {
+  const statusFor = async (addonDigest: string): Promise<unknown> => {
+    const project = mkdtempSync(join(tmpdir(), 'gdharness-digest-editor-'));
+    const port = await reservePort();
+    let editor: WebSocket | null = null;
+    const server = new ServerProcess({ env: { GDHARNESS_BRIDGE_PORT: String(port) } });
+    try {
+      writeFileSync(
+        join(project, 'project.godot'),
+        '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Digest"\n',
+      );
+      await server.initialize('regression-test');
+      const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+      editor = socket;
+      await new Promise<void>((resolve, reject) => {
+        socket.once('open', () => {
+          resolve();
+        });
+        socket.once('error', reject);
+      });
+      socket.on('message', (raw: Buffer) => {
+        const message: unknown = JSON.parse(String(raw));
+        if (isRecord(message) && message['type'] === 'tool_invoke') {
+          socket.send(
+            JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result: { ok: true } }),
+          );
+        }
+      });
+      socket.send(
+        JSON.stringify({
+          type: 'godot_ready',
+          project_path: project,
+          addon_version: '0.0.1-behind',
+          addon_digest: addonDigest,
+        }),
+      );
+      for (let waited = 0; waited < 10_000; waited += 100) {
+        const status = parseTextContent(
+          await server.request('tools/call', { name: 'editor_status', arguments: {} }),
+        );
+        if (text(get(status, 'editor', 'projectPath')) === project) {
+          return status;
+        }
+        await delay(100);
+      }
+      throw new Error('the fake editor was never greeted');
+    } finally {
+      editor?.close();
+      await server.stop();
+      sweep(project);
+    }
+  };
+
+  const shipped = shippedEditorDigest() ?? '';
+  const current = await statusFor(shipped);
+  assert.equal(get(current, 'editor', 'addonVersion'), '0.0.1-behind', JSON.stringify(current));
+  assert.equal(get(current, 'editor', 'addonDigest'), shipped, JSON.stringify(current));
+  assert.equal(
+    get(current, 'editor', 'addonIsStale'),
+    false,
+    `the shipped code is current: ${JSON.stringify(current)}`,
+  );
+
+  const behind = await statusFor('0'.repeat(64));
+  assert.equal(get(behind, 'editor', 'addonIsStale'), true, `other code is stale: ${JSON.stringify(behind)}`);
+  assert.match(text(get(behind, 'editor', 'staleNote')), /editor_launch restart/, JSON.stringify(behind));
 }
 
 /**
@@ -13615,6 +13768,10 @@ function testAnUpgradeReadsTheEngineOutOfTheConfigItRewrites(): void {
     // Installed, so upgrade has something to upgrade from, and written without the search too.
     const first = cli('setup', projectDir, '--no-connect');
     assert.equal(first.status, 0, `setup should find the engine in the config: ${first.output}`);
+    // An install from before digests has none, and then nothing says the editor code is unchanged.
+    const digestMarker = join(projectDir, 'addons', 'gdharness_editor', '.gdharness-digest');
+    assert.ok(existsSync(digestMarker), 'setup should have written the digest it is removed from here');
+    rmSync(digestMarker);
 
     const upgraded = cli('upgrade', projectDir);
     assert.equal(
@@ -13623,6 +13780,8 @@ function testAnUpgradeReadsTheEngineOutOfTheConfigItRewrites(): void {
       `upgrade should not refuse for a path it is holding: ${upgraded.output}`,
     );
     assert.match(upgraded.output, /replaced .*gdharness_editor/, upgraded.output);
+    assert.match(upgraded.output, /Restart it with the\s+editor_launch restart/, upgraded.output);
+    assert.ok(existsSync(digestMarker), 'and the upgrade writes the digest back');
     // And the value it read is still the value it writes, which is what made the refusal absurd.
     assert.equal(
       text(get(JSON.parse(readFileSync(mcp, 'utf8')), 'mcpServers', 'gdharness', 'env', 'GODOT_PATH')),
@@ -13754,6 +13913,10 @@ function testCommandLineSetup(): void {
     const beforeUpgrade = skillDirs();
     const upgraded = cli('upgrade', projectDir);
     assert.equal(upgraded.status, 0, `upgrade:\n${upgraded.stdout}${upgraded.stderr}`);
+    // Setup and upgrade from one build install the same editor code, so there is nothing to
+    // restart the editor for, and saying there was sent a project to a restart that changed nothing.
+    assert.match(upgraded.stdout, /Nothing for the editor/, upgraded.stdout);
+    assert.doesNotMatch(upgraded.stdout, /Restart it with the/, upgraded.stdout);
     assert.match(
       readFileSync(project, 'utf8'),
       /GdharnessRuntime="\*res:\/\/boot\/gdharness_loader\.gd"/,
@@ -15766,6 +15929,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheUncachedNoteSaysWhichRemedyStartsAnEngine,
   testARestartWaitsForTheEditorToSayWhoItIs,
   testTheStaleHalfIsNamedCorrectly,
+  testStalenessIsTheEditorCodeNotTheVersion,
+  testAnEditorOnTheShippedCodeIsNotCalledStale,
   testAGameIsFoundWhereverItAnnounced,
   testAGameTooNewToTalkToIsStillAGame,
   testAWallOfOneMessageCollapsesToItsShape,

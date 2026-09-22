@@ -59,6 +59,7 @@ interface GodotReadyMessage {
   type: 'godot_ready';
   project_path: string;
   addon_version?: string;
+  addon_digest?: string;
   editor_pid?: number;
   /** The three ports this editor serves, so a server talks to this one and not another. */
   lsp_port?: number;
@@ -107,6 +108,8 @@ interface GodotConnectionInfo {
   lastPongAt?: Date;
   /** The addon version this editor loaded, which an install under it does not change. */
   addonVersion?: string;
+  /** The digest of the editor addon code it loaded, absent from an addon older than digests. */
+  addonDigest?: string | undefined;
   /** Which process is on the other end, since a restarted editor is a new one. */
   editorPid?: number | undefined;
   /**
@@ -144,6 +147,7 @@ interface BridgeStatus {
   connectedAt?: Date | undefined;
   lastPongAt?: Date | undefined;
   addonVersion?: string | undefined;
+  addonDigest?: string | undefined;
   editorPid?: number | undefined;
   lspPort?: number | undefined;
   dapPort?: number | undefined;
@@ -420,6 +424,7 @@ export class GodotBridge extends EventEmitter {
       connectedAt: this.connectionInfo?.connectedAt,
       lastPongAt: this.connectionInfo?.lastPongAt,
       addonVersion: this.connectionInfo?.addonVersion,
+      addonDigest: this.connectionInfo?.addonDigest,
       editorPid: this.connectionInfo?.editorPid,
       lspPort: this.connectionInfo?.lspPort,
       dapPort: this.connectionInfo?.dapPort,
@@ -592,6 +597,7 @@ export class GodotBridge extends EventEmitter {
           // An older addon sends no version at all, which is itself worth reporting: it is one
           // installed before this was written, so it is certainly not the shipped one.
           this.connectionInfo.addonVersion = message.addon_version ?? '';
+          this.connectionInfo.addonDigest = message.addon_digest;
           this.connectionInfo.editorPid = message.editor_pid;
           // Zero is the addon saying it could not find out, which is the same answer as an addon
           // too old to be asked, and both are the defaults.
