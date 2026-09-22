@@ -3705,6 +3705,17 @@ class GodotServer {
         [OPENED_BY_A_SERVER]: '1',
       },
     });
+    // Which editor the log beside it belongs to, so a server that did not open this editor can
+    // still tell its console from the one a previous editor left on disk.
+    //
+    // Here rather than after the wait below, because the pid exists the moment spawn returns and
+    // the wait is where this server could be replaced. A note written on the far side of it would
+    // leave a gap in which the editor is up and writing a console that nothing can claim, which
+    // reads as an editor whose console belongs to somebody else. A note for a spawn that then
+    // fails costs nothing: it names a pid no editor ever connects under.
+    if (editor.pid !== undefined) {
+      writeEditorLogNote(projectPath, editor.pid);
+    }
     const started = await new Promise<string | null>((resolve) => {
       editor.once('spawn', () => {
         resolve(null);
@@ -3715,11 +3726,6 @@ class GodotServer {
     });
     if (started !== null) {
       return { pid: null, error: started };
-    }
-    // Which editor the log beside it belongs to, so a server that did not open this editor can
-    // still tell its console from the one a previous editor left on disk.
-    if (editor.pid !== undefined) {
-      writeEditorLogNote(projectPath, editor.pid);
     }
     editor.unref();
     // Remembered so that "nothing is coming" and "the editor this server just started is still
