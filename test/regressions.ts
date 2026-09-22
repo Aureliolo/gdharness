@@ -9939,27 +9939,14 @@ async function testAPlayTheEditorHasNotStartedIsNotAGameThatHasGone(): Promise<v
  * announced is this one, so the number is real.
  */
 async function testALateAnnouncementIsTiedToThePlayedRun(): Promise<void> {
-  const announcesAfterMs = 600;
-  let announcement: string | null = null;
   await withAPlayingEditor(
-    ({ adapter, project, runtimeDir }) =>
+    ({ adapter }) =>
       (tool) => {
+        // The announcement is written from the body once the untied reading is taken, rather than
+        // on a timer from here: the rest of the start lies between the play and the end of its
+        // wait, and a loaded runner can take longer over it than any timer that has to lose to the
+        // wait allows.
         if (tool === 'play_scene') {
-          announcement = join(runtimeDir, `runtime-${process.pid}.json`);
-          const file = announcement;
-          setTimeout(() => {
-            writeFileSync(
-              file,
-              JSON.stringify({
-                protocol: RUNTIME_PROTOCOL,
-                pid: process.pid,
-                port: 51_995,
-                address: '127.0.0.1',
-                project: { name: 'Played', path: project },
-              }),
-              'utf8',
-            );
-          }, announcesAfterMs);
           return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
         }
         if (tool === 'playing_status') {
@@ -9967,7 +9954,7 @@ async function testALateAnnouncementIsTiedToThePlayedRun(): Promise<void> {
         }
         return { ok: true };
       },
-    async ({ server, start }) => {
+    async ({ server, project, runtimeDir, start }) => {
       const started = await start(200);
       assert.equal(get(started.answer, 'through'), 'editor', JSON.stringify(started.answer));
       assert.equal(
@@ -9992,9 +9979,16 @@ async function testALateAnnouncementIsTiedToThePlayedRun(): Promise<void> {
       );
       assert.equal(get(untied, 'pid'), null, `and names no process: ${JSON.stringify(untied)}`);
 
-      assert.ok(
-        await cameTrue(() => announcement !== null && existsSync(announcement), 5_000),
-        'the announcement should have landed',
+      writeFileSync(
+        join(runtimeDir, `runtime-${process.pid}.json`),
+        JSON.stringify({
+          protocol: RUNTIME_PROTOCOL,
+          pid: process.pid,
+          port: 51_995,
+          address: '127.0.0.1',
+          project: { name: 'Played', path: project },
+        }),
+        'utf8',
       );
       const tied = await cpu();
       assert.equal(
@@ -11752,17 +11746,17 @@ async function testARuntimeCallReachesThisServersOwnGame(): Promise<void> {
       ({ adapter, project, runtimeDir }) =>
         async (tool) => {
           if (tool === 'play_scene') {
-            // The bench announces inside the wait and is tied to the run; its worker, which it
-            // opened for itself and which inherited the same mark, announces a moment later.
+            // The bench announces inside the wait and is tied to the run. Its worker, which it
+            // opened for itself and which inherited the same mark, announces from the body once the
+            // start has answered: on a timer from here both could be announced before the wait
+            // began, when a loaded runner is slow over the rest of the start, and then which one
+            // was tied would come down to the order the directory lists them in.
             bench = await aGame('bench');
             worker = await aGame('worker');
-            const [ours, spawned] = [bench, worker];
+            const ours = bench;
             setTimeout(() => {
               announce(runtimeDir, project, ours);
             }, 100);
-            setTimeout(() => {
-              announce(runtimeDir, project, spawned);
-            }, 400);
             return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
           }
           if (tool === 'playing_status') {
@@ -11770,17 +11764,11 @@ async function testARuntimeCallReachesThisServersOwnGame(): Promise<void> {
           }
           return { ok: true };
         },
-      async ({ server, runtimeDir, start }) => {
+      async ({ server, project, runtimeDir, start }) => {
         const started = await start(3_000);
         assert.ok(bench !== null && worker !== null, 'the play should have opened both games');
         assert.equal(get(started.answer, 'runtime', 'pid'), bench.pid, JSON.stringify(started.answer));
-        assert.ok(
-          await cameTrue(
-            () => worker !== null && existsSync(join(runtimeDir, `runtime-${worker.pid}.json`)),
-            5_000,
-          ),
-          'the worker should have announced',
-        );
+        announce(runtimeDir, project, worker);
 
         const inspect = async (extra: Record<string, unknown>): Promise<unknown> =>
           parseTextContent(
@@ -12117,6 +12105,9 @@ async function testAStopCanEndWhatTheGameStarted(): Promise<void> {
   const held: { bench: ChildProcess | null } = { bench: null };
   let worker = 0;
   let other = 0;
+  let announceWorker = (): void => {
+    throw new Error('the play should have set up the worker before the body announces it');
+  };
   try {
     await withAPlayingEditor(
       ({ adapter, project, runtimeDir }) =>
@@ -12161,13 +12152,14 @@ async function testAStopCanEndWhatTheGameStarted(): Promise<void> {
                 'utf8',
               );
             };
-            // The bench first, inside the wait, so the run is tied to it; the worker after.
+            // The bench first, inside the wait, so the run is tied to it; the worker from the body
+            // once the start has answered, so it cannot be announced before the wait begins.
             setTimeout(() => {
               announce(benchPid);
             }, 100);
-            setTimeout(() => {
+            announceWorker = () => {
               announce(pids.worker);
-            }, 400);
+            };
             return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
           }
           if (tool === 'playing_status') {
@@ -12199,10 +12191,8 @@ async function testAStopCanEndWhatTheGameStarted(): Promise<void> {
         const benchPid = held.bench?.pid;
         assert.ok(typeof benchPid === 'number', 'the play should have started the bench');
         assert.equal(get(started.answer, 'runtime', 'pid'), benchPid, JSON.stringify(started.answer));
-        assert.ok(
-          await cameTrue(() => existsSync(join(runtimeDir, `runtime-${worker}.json`)), 5_000),
-          'the worker should have announced',
-        );
+        announceWorker();
+        assert.ok(existsSync(join(runtimeDir, `runtime-${worker}.json`)), 'the worker has announced');
         const stopped = parseTextContent(
           await server.request(
             'tools/call',
