@@ -11,6 +11,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
@@ -5671,6 +5672,45 @@ async function testARuntimeCallWaitsForTheGameThisServerStarted(): Promise<void>
     sweep(project);
     sweep(runtimeDir);
   }
+}
+
+/**
+ * A game announcing its project by the real path is found by a caller naming it through a link.
+ *
+ * The engine announces the path it resolved, and a caller names the one they typed. On macOS the
+ * temporary directory is a link into /private, and a headless start there waited its whole minute
+ * and answered `listening: false` about a game that had announced: the paths were compared as
+ * strings. Any project reached through a link is the same case. A junction on Windows, which needs
+ * no privileges, stands in for the link.
+ */
+function testAGameIsFoundThroughALinkToItsProject(): Promise<void> {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-linked-'));
+  const real = join(root, 'real');
+  const linked = join(root, 'linked');
+  const directory = join(root, 'announced');
+  mkdirSync(real);
+  mkdirSync(directory);
+  symlinkSync(real, linked, 'junction');
+  writeFileSync(
+    join(directory, `runtime-${process.pid}.json`),
+    JSON.stringify({
+      protocol: RUNTIME_PROTOCOL,
+      pid: process.pid,
+      port: 51_250,
+      address: '127.0.0.1',
+      project: { name: 'Linked', path: real },
+    }),
+    'utf8',
+  );
+  return announcedSince(linked, new Set(), { budgetMs: 2_000, directories: [directory] })
+    .then((found) => {
+      assert.equal(found?.port, 51_250, 'the game is found by the path the caller named');
+      const chosen = chooseRuntime([found], linked);
+      assert.ok('endpoint' in chosen, `and chosen for that path: ${JSON.stringify(chosen)}`);
+    })
+    .finally(() => {
+      sweep(root);
+    });
 }
 
 async function testAStartWaitsForTheGameToAnnounceItself(): Promise<void> {
@@ -16211,6 +16251,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testATestServerWritesWhereNoRealRunIs,
   testAStartStopsWaitingForAGameThatIsOver,
   testAStartWaitsForTheGameToAnnounceItself,
+  testAGameIsFoundThroughALinkToItsProject,
   testARuntimeCallWaitsForTheGameThisServerStarted,
   testARunCanBeGivenItsOwnEnvironment,
   testARunsEnvironmentIsBuiltInOrder,
