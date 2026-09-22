@@ -67,6 +67,14 @@ import {
   type StoppedAt,
 } from './dap_client.js';
 import { dictionary, emptyRecord } from './dictionary.js';
+import {
+  bursts,
+  clearEditorLog,
+  editorConsole,
+  editorLogPath,
+  theConsoleWasNotCaptured,
+  writeEditorLogNote,
+} from './editor-log.js';
 import { errorMessage, Refusal } from './errors.js';
 import { forAnswer, GameLog, type LogEntry } from './game-log.js';
 import {
@@ -506,6 +514,15 @@ interface AnnounceBudget {
  * without those arguments should not wait for it.
  */
 const LONGEST_BOOT_NOTED_MS = 5 * 60_000;
+
+/**
+ * The most repeated message shapes an editor's console is grouped into for one answer.
+ *
+ * The entries beside them are already capped, and a console with many kinds of repeated warning
+ * would otherwise put a group for each one on top of that. Twenty of the largest, because a wall
+ * worth a call is a wall with a count, and the ones below twenty are already in the entries.
+ */
+const MOST_GROUPS = 20;
 
 /** What was true when the wait for an announcement ran out. */
 interface AfterWaiting {
@@ -3676,7 +3693,8 @@ class GodotServer {
     // as well as on the command line because the engine keeps what it was told to itself, and the
     // third variable is this server saying it opened this editor, which is what decides who may
     // open it again.
-    const editor = spawn(engine, editorArguments(projectPath, ports), {
+    clearEditorLog(projectPath);
+    const editor = spawn(engine, editorArguments(projectPath, ports, editorLogPath(projectPath)), {
       stdio: 'ignore',
       detached: true,
       env: {
@@ -3687,6 +3705,17 @@ class GodotServer {
         [OPENED_BY_A_SERVER]: '1',
       },
     });
+    // Which editor the log beside it belongs to, so a server that did not open this editor can
+    // still tell its console from the one a previous editor left on disk.
+    //
+    // Here rather than after the wait below, because the pid exists the moment spawn returns and
+    // the wait is where this server could be replaced. A note written on the far side of it would
+    // leave a gap in which the editor is up and writing a console that nothing can claim, which
+    // reads as an editor whose console belongs to somebody else. A note for a spawn that then
+    // fails costs nothing: it names a pid no editor ever connects under.
+    if (editor.pid !== undefined) {
+      writeEditorLogNote(projectPath, editor.pid);
+    }
     const started = await new Promise<string | null>((resolve) => {
       editor.once('spawn', () => {
         resolve(null);
@@ -5236,7 +5265,79 @@ class GodotServer {
     return runIsUp(run, said);
   }
 
+  /**
+   * editor_output op: "editor": what the editor itself printed, from its first line.
+   *
+   * The whole session rather than since the harness connected. The output worth reading is
+   * disproportionately startup output, printed while the class cache, the plugins and the language
+   * server are racing each other, and a harness connects after all of that: a field starting at
+   * connect would have shown an empty console for the one event a project downstream needed.
+   *
+   * Grouped as well as listed, because the shape that brought this about is hundreds of lines
+   * differing only by a name and a path. The grouping is over the whole console and not over what
+   * the filter admits: the only evidence of cause in that case was a plugin announcing itself on
+   * the line before the wall began, which is an info line that a severity filter drops.
+   */
+  private handleEditorConsole(args: OperationParams): ToolResponse {
+    const status = this.godotBridge.getStatus();
+    const projectPath = status.projectPath ?? this.ownProject ?? undefined;
+    if (projectPath === undefined) {
+      return this.createErrorResponse('No editor is connected, so there is no console to read.', [
+        'editor_status says whether one is connected and whether it may yet be',
+        'editor_launch opens one, and an editor opened here has its console captured',
+      ]);
+    }
+    const console = editorConsole(projectPath, status.editorPid ?? null, status.openedByAServer === true);
+    if ('kind' in console) {
+      return this.createErrorResponse(theConsoleWasNotCaptured(console, projectPath), [
+        'editor_launch restart replaces this editor with one whose console is captured',
+        'editor_output with no op answers about the game a run is playing, which is a different log',
+      ]);
+    }
+    const severity = readString(args, 'severity');
+    const selected = console.log.select({
+      severity: severity === 'error' || severity === 'warning' ? severity : 'info',
+      sinceLastCall: false,
+      contains: readNonEmptyString(args, 'contains'),
+      limit: readPositiveNumber(args, 'limit') ?? 200,
+    });
+    const everything = console.log.everything();
+    // Capped the way the entries are, and for the same reason: this answer goes into somebody's
+    // context, and a console with a hundred different repeated messages would otherwise carry a
+    // hundred groups on top of the two hundred entries. Sorted by count, so the cap takes the
+    // small ones, and what it took is said rather than left to be inferred from a short list.
+    const grouped = bursts(everything, readPositiveNumber(args, 'before') ?? 3);
+    const shown = grouped.slice(0, MOST_GROUPS);
+    return this.jsonTextResponse({
+      editorPid: status.editorPid,
+      projectPath,
+      capturedIn: console.path,
+      // Said only when it happened: a console read whole needs no sentence about how much of it
+      // was read, and one that was cut off is a different answer from one that is all there.
+      ...(console.of === undefined
+        ? {}
+        : {
+            readFromTheStart: console.readBytes,
+            consoleBytes: console.of,
+            truncatedNote: `This editor's console is ${console.of} bytes and the first ${console.readBytes} of them were read, which is the start of the session rather than the end of it. Restart the editor to begin a fresh console.`,
+          }),
+      lines: everything.length,
+      counts: {
+        error: console.log.count('error'),
+        warning: console.log.count('warning'),
+        info: console.log.count('info'),
+      },
+      repeated: shown,
+      moreShapes: grouped.length > shown.length ? grouped.length - shown.length : undefined,
+      entries: forAnswer(selected.entries),
+      omitted: selected.omitted === 0 ? undefined : selected.omitted,
+    });
+  }
+
   private async handleGetDebugOutput(args: OperationParams, waitedMs?: number): Promise<ToolResponse> {
+    if (readString(args, 'op') === 'editor') {
+      return this.handleEditorConsole(args);
+    }
     await this.pickUpWhatTheEditorIsPlaying();
     const run = this.currentRun();
     if (!run) {
