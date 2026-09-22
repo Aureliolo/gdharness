@@ -4559,7 +4559,7 @@ async function testAnEditorWritesItsConsoleWhereTheServerLooks(): Promise<void> 
         'config/name="ConsoleProbe"',
         '',
         '[editor_plugins]',
-        'enabled=PackedStringArray("res://addons/console_probe/plugin.cfg")',
+        'enabled=PackedStringArray("res://addons/console_probe/plugin.cfg", "res://addons/wont_parse/plugin.cfg")',
         '',
       ].join('\n'),
     );
@@ -4579,6 +4579,27 @@ async function testAnEditorWritesItsConsoleWhereTheServerLooks(): Promise<void> 
         '\tpush_error(\'Could not parse global class "Beta"\')',
         '',
       ].join('\n'),
+    );
+
+    // A second plugin that will not load, so the engine's own parse errors are in the console
+    // beside the raised ones. Those are the lines this exists for and they are not push_error:
+    // they arrive as `SCRIPT ERROR: Parse Error: ...` with an indented `at:` line under them, and
+    // a parser that read the headline as ordinary text would give a wall back as a few info
+    // entries with no symptom saying so.
+    const broken = join(project, 'addons', 'wont_parse');
+    mkdirSync(broken, { recursive: true });
+    mkdirSync(join(project, 'core'), { recursive: true });
+    writeFileSync(
+      join(project, 'core', 'run.gd'),
+      'extends RefCounted\nclass_name ConsoleProbeRun\n\nfunc broken() -> void:\n\tthis is not gdscript\n',
+    );
+    writeFileSync(
+      join(broken, 'plugin.cfg'),
+      '[plugin]\nname="Will Not Parse"\ndescription=""\nauthor=""\nversion="1.0"\nscript="plugin.gd"\n',
+    );
+    writeFileSync(
+      join(broken, 'plugin.gd'),
+      '@tool\nextends EditorPlugin\n\nconst Run = preload("res://core/run.gd")\n',
     );
 
     clearEditorLog(project);
@@ -4616,10 +4637,22 @@ async function testAnEditorWritesItsConsoleWhereTheServerLooks(): Promise<void> 
       texts.includes('CONSOLE PROBE loaded'),
       `an editor plugin's print reaches it, so it is an editor's console: ${texts.join(' | ')}`,
     );
-    assert.equal(
-      console_.log.count('error'),
-      2,
-      `and push_error arrives with its severity: ${JSON.stringify(forAnswer(printed))}`,
+    assert.ok(
+      console_.log.count('error') >= 3,
+      `push_error and the engine's own errors both arrive with their severity: ${JSON.stringify(forAnswer(printed))}`,
+    );
+
+    // The engine's own parse error, which is the line this whole route exists for and is not one
+    // the fixture raised. Its headline is flush left and the `at:` under it is indented, so the
+    // parser takes the headline as the error and the location as its detail. Asserted because a
+    // headline read as ordinary text has no symptom: the wall comes back as a few info entries
+    // and a reader sees a quiet console.
+    const parseError = printed.find((entry) => entry.text.startsWith('Parse Error: '));
+    assert.ok(parseError !== undefined, `the engine reports the unparsable script: ${texts.join(' | ')}`);
+    assert.equal(parseError.severity, 'error', JSON.stringify(parseError));
+    assert.ok(
+      parseError.detail.some((line) => line.startsWith('at: ')),
+      `with its location folded under it rather than standing as its own entry: ${JSON.stringify(parseError)}`,
     );
 
     // The two errors differ only by a quoted name, which is the shape the whole grouping exists
