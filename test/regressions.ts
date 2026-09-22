@@ -3837,6 +3837,42 @@ function testTheEngineWritesItsSavesWhereItWasTold(): void {
         `${process.platform}: user:// should be under the directory it was moved to, ${home}, not ${printed}`,
       );
     }
+
+    // A directory that is not there yet, which is what a caller naming one for a single run has:
+    // `savesIn` says the engine makes it, and a caller who had to make it first would find that
+    // out by having their first run write into the player's saves instead. Several levels deep,
+    // since the engine adds Godot/app_userdata/<project> under whatever it is given anyway.
+    const never = join(home, 'never', 'made');
+    assert.equal(existsSync(never), false, 'the fixture starts with the directory genuinely absent');
+    writeFileSync(
+      join(projectDir, 'writes.gd'),
+      'extends SceneTree\n\n\nfunc _init() -> void:\n' +
+        '\tvar file: FileAccess = FileAccess.open("user://probe.txt", FileAccess.WRITE)\n' +
+        '\tif file != null:\n\t\tfile.store_string("written")\n\t\tfile.close()\n' +
+        '\tprint("WROTE=" + str(FileAccess.file_exists("user://probe.txt")) + " AT=" + OS.get_user_data_dir())\n' +
+        '\tquit()\n',
+    );
+    const made = spawnSync(godotPath, ['--headless', '--path', projectDir, '--script', 'res://writes.gd'], {
+      encoding: 'utf8',
+      env: userDataIn(never),
+      timeout: ENGINE_CALL_TIMEOUT_MS,
+    });
+    assert.match(
+      made.stdout,
+      /WROTE=true/,
+      `the engine writes its saves whether or not the directory was there:\n${made.stdout}\n${made.stderr}`,
+    );
+    const wroteAt = /AT=(.+)/.exec(made.stdout)?.[1]?.trim() ?? '';
+    assert.equal(
+      spelled(wroteAt).startsWith(spelled(never)),
+      !savesStayPut(),
+      `${process.platform}: and wrote under the directory it was given, ${never}, rather than ${wroteAt}`,
+    );
+    assert.equal(
+      existsSync(never),
+      !savesStayPut(),
+      `${process.platform}: which is a directory the engine made, since nothing here did:\n${made.stdout}`,
+    );
   } finally {
     sweep(projectDir);
     sweep(home);
