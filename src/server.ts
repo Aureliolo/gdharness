@@ -3871,10 +3871,16 @@ class GodotServer {
     });
     // How the wait ended, for the log a slow start is read back from: what it found, how long it
     // took, and how often the editor was asked on the way.
+    // A run started here never asks the editor, and "last said playing" about an editor nobody
+    // asked is the closure's starting value rather than an answer.
+    const asked =
+      editorAsks === 0
+        ? 'editor not asked'
+        : `editor asked ${editorAsks === 1 ? 'once' : `${editorAsks} times`}, last said ${lastSaid()}`;
     this.logDebug(
       `announce wait ended after ${Date.now() - waitBegan}ms: ${
         endpoint === null ? 'nothing announced' : `pid ${endpoint.pid} announced`
-      }, editor asked ${editorAsks} times, last said ${lastSaid()}`,
+      }, ${asked}`,
     );
     // Kept on the run: a number the game gave for itself, which is what the announcement was
     // waited for. For a run the editor plays it is the only process the run has, so its liveness
