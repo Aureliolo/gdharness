@@ -7,12 +7,12 @@
     "source": "github"
   },
   "websiteUrl": "https://github.com/Aureliolo/gdharness#readme",
-  "version": "1.0.11",
+  "version": "1.0.12",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "gdharness",
-      "version": "1.0.11",
+      "version": "1.0.12",
       "transport": {
         "type": "stdio"
       },
