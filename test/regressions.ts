@@ -144,6 +144,7 @@ import {
   opTakes,
   projectPathSentence,
   TOOL_SPECS,
+  theGamePicked,
   toolSpec,
 } from '../src/tool-definitions.js';
 import { namedType, renderToolsMarkdown } from '../src/tool-reference.js';
@@ -6552,6 +6553,23 @@ function testTheProjectPathSentenceNamesEveryCallThatTakesNone(): void {
     projectPathSentence(['editor_status']),
     /except `editor_status`, which takes none$/,
     'and one of them reads as one',
+  );
+
+  // The other sentence both renderings share, and the schema with them: which game answers a
+  // call that names neither. It was written three times and said a different amount each time,
+  // which is how a session with a second project's game listed beside its own was left with
+  // "not needed with one game" and no way to tell what had answered it.
+  const picked = theGamePicked();
+  assert.ok(
+    renderToolsMarkdown().includes(picked),
+    'the tool reference carries the generated pick unaltered',
+  );
+  assert.ok((skillFiles('0.0.0').get('SKILL.md') ?? '').includes(picked), 'and so does the skill');
+  const schema = toolSpec('runtime_inspect')?.parameters['projectPath']?.['description'];
+  assert.equal(typeof schema, 'string', 'the running-game path still has a description');
+  assert.ok(
+    text(schema).includes(picked.replaceAll('`', '')),
+    `and it carries the same pick, without the markup a schema has no use for: ${text(schema)}`,
   );
 }
 
