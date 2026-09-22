@@ -482,8 +482,9 @@ jobs:
     if: github.repository == 'Aureliolo/gdharness'
     needs: [build, publish, npm]
     runs-on: ubuntu-24.04
-    # Room for the five-minute read-back below, which only a registry that has gone quiet uses.
-    timeout-minutes: 15
+    # Room for the twenty-minute wait on npm and the five-minute read-back below, which only a
+    # slow npm or a registry that has gone quiet uses.
+    timeout-minutes: 35
     permissions:
       contents: read # Reads server.json at the tag, which is the thing being published.
       id-token: write # The registry takes this instead of a token, the way npm does above.
@@ -601,7 +602,32 @@ jobs:
             echo "The registry does not serve ${name} ${VERSION}; publishing it."
             reached_the_registry "${RUNNER_TEMP}/mcp-publisher" validate
             reached_the_registry "${RUNNER_TEMP}/mcp-publisher" login github-oidc
-            reached_the_registry "${RUNNER_TEMP}/mcp-publisher" publish
+
+            # The registry checks the npm version from its own side, and npm serves a new version
+            # to one resolver minutes before another: on 1.0.12 it refused with "version '1.0.12'
+            # was not found" while the install jobs were already reading it. That refusal is a
+            # validation failure, so nothing was written and asking again is safe. Twenty minutes,
+            # the window the npm waits above use, since the delay is npm's and has no stated bound.
+            published=""
+            for attempt in $(seq 1 40); do
+              status=0
+              output=$(reached_the_registry "${RUNNER_TEMP}/mcp-publisher" publish 2>&1) || status=$?
+              printf '%s\n' "${output}"
+              if [ "${status}" = "0" ]; then
+                published=yes
+                break
+              fi
+              if ! grep -qF "version '${VERSION}' was not found" <<<"${output}"; then
+                exit "${status}"
+              fi
+              echo "The registry does not see ${package}@${VERSION} on npm yet; asked ${attempt} times."
+              sleep 30
+            done
+            if [ -z "${published}" ]; then
+              echo "The registry never saw ${package}@${VERSION} on npm in twenty minutes." >&2
+              echo "Re-run this job: it publishes nothing it already serves." >&2
+              exit 1
+            fi
 
             # A version the registry has just accepted takes a moment to be served, and "not yet"
             # and "never" look identical from here, so it is asked again rather than read as a
