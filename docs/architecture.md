@@ -507,7 +507,9 @@ gone. Measured downstream, where a shell held the number of a game ended an hour
 file read as a game "still starting" through two further runs. The start time is asked of the
 operating system once per file, after the file is a minute old, and again once a minute after a
 confirmation. `editor_run stop` takes the file of the game it ended down itself, once the process
-has gone, so the common case never reaches that judgement.
+has gone, so the common case never reaches that judgement. A file that will not parse under a
+number a live process holds is left for the next look, not swept: the game opens its file empty
+and fills it in the same instant, and a look between the two reads nothing.
 
 A script run is not one of them. Autoloads come up for `godot -s` as well, so a test tier or a
 batch tool would bind a port and announce itself under the project's own path, and a client asking

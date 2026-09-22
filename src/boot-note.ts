@@ -57,17 +57,22 @@ export function writeBootNote(projectPath: string, announcedAfterMs: number): vo
 export const LONGEST_SIZED_WAIT_MS = 60_000;
 
 /**
+ * The wait a boot of [param lastBootMs] earns before the ceiling: half as long again rather than
+ * the boot itself, because a boot varies from one start to the next and a budget that the last
+ * boot exactly fills is one the next boot overruns half the time.
+ */
+export function halfAsLongAgain(lastBootMs: number): number {
+  return Math.round(lastBootMs * 1.5);
+}
+
+/**
  * The wait a start gives when the caller names none: the usual budget, or half as long again as
- * the last boot took when that is more, up to the ceiling.
- *
- * Half as long again rather than the last boot itself, because a boot varies from one start to
- * the next and a budget that the last boot exactly fills is one the next boot overruns half the
- * time. Never less than the usual, so a project whose last game announced in a second is not
- * given a second.
+ * the last boot took when that is more, up to the ceiling. Never less than the usual, so a
+ * project whose last game announced in a second is not given a second.
  */
 export function waitSizedTo(lastBootMs: number | null, usual: number = ANNOUNCE_BUDGET_MS): number {
   if (lastBootMs === null) {
     return usual;
   }
-  return Math.min(LONGEST_SIZED_WAIT_MS, Math.max(usual, Math.round(lastBootMs * 1.5)));
+  return Math.min(LONGEST_SIZED_WAIT_MS, Math.max(usual, halfAsLongAgain(lastBootMs)));
 }
