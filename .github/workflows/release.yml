@@ -233,12 +233,47 @@ jobs:
 
           # No token anywhere: the OIDC token this job asked for is the credential, and npm
           # generates and publishes its own provenance attestation from it without being asked.
-          npm publish "${archive}" --access public
+          #
+          # A version the registry already holds is taken as done rather than as a refusal, so
+          # this job can be re-run. Publishing is irreversible and a run that uploaded the archive
+          # and then lost the answer has nothing left to do, but `npm publish` cannot tell those
+          # apart and refuses either way, which would leave the jobs behind this one unable to
+          # run at all. Nothing downstream trusts the publish for saying so: the job below reads
+          # what the registry serves and compares it against the archive this repository signed.
+          status=0
+          npm publish "${archive}" --access public 2>&1 | tee "${RUNNER_TEMP}/publish.log" || status=$?
+          if [ "${status}" != "0" ]; then
+            if grep -qF "previously published versions: ${VERSION}" "${RUNNER_TEMP}/publish.log"; then
+              echo "The registry already holds gdharness@${VERSION}; there is nothing to publish."
+              exit 0
+            fi
+            exit "${status}"
+          fi
 
-      # The claim made in the documentation is that what npm serves is the archive this repository
-      # signed, so somebody can install from npm and verify against the release bundle. That is
-      # only true if the registry stores the bytes it was given, which is checked rather than
-      # assumed: if npm ever repacks, this fails on the release that first did it.
+  # The claim made in the documentation is that what npm serves is the archive this repository
+  # signed, so somebody can install from npm and verify against the release bundle. That is only
+  # true if the registry stores the bytes it was given, which is checked rather than assumed: if
+  # npm ever repacks, this fails on the release that first did it.
+  #
+  # Its own job rather than a step in the one above: it reports on something already done, and a
+  # report must not be able to strand the work behind it. Inside the npm job, the registry taking
+  # its time over 1.0.11 skipped the MCP registry entry and all three install checks, which need
+  # `npm` and not this, and the entry every marketplace reads stayed a release behind. Nothing
+  # that can fail belongs between an irreversible act and the work that depends on it.
+  served:
+    name: npm serves what was signed
+    if: github.repository == 'Aureliolo/gdharness'
+    needs: [build, npm]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Download the bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-bundle
+          path: dist
+
       - name: The published tarball is the archive that was signed
         shell: bash
         env:
@@ -252,8 +287,15 @@ jobs:
           # publishing it, for a package that was there all along. Asked again rather than read
           # as a verdict, because "not found yet" and "not published" look identical here, and
           # asked online each time because a packument that missed is cached for five minutes.
+          #
+          # What the window absorbs is npm's own processing after it has accepted the upload,
+          # which npm describes as "a few minutes" and puts no number on. Twenty of them, and not
+          # a window sized to the lag that has been seen: that ran 1m54s to 3m25s over 1.0.6
+          # through 1.0.10, which makes five minutes look ample, and then 7m11s on 1.0.11, which
+          # is the release this stopped on. Waiting longer costs runner minutes on something
+          # already published and immutable; stopping early costs the answer.
           url=""
-          for attempt in $(seq 1 30); do
+          for attempt in $(seq 1 120); do
             if url="$(npm view --prefer-online "gdharness@${VERSION}" dist.tarball 2>/dev/null)" && [ -n "${url}" ]; then
               break
             fi
@@ -262,7 +304,9 @@ jobs:
           done
 
           if [ -z "${url}" ]; then
-            echo "The registry never served gdharness@${VERSION}, five minutes after publishing it." >&2
+            echo "gdharness@${VERSION} is published; the registry had not served it twenty" >&2
+            echo "minutes later, so these bytes are unconfirmed rather than wrong. Re-run this" >&2
+            echo "job once npm serves the version." >&2
             exit 1
           fi
 
@@ -308,7 +352,9 @@ jobs:
             runner: macos-26
 
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 15
+    # Room for the twenty-minute wait below and three npx installs behind it, on the slowest of
+    # the three runners; a timeout here reads as a broken install and would be a slow registry.
+    timeout-minutes: 35
 
     # A packument is cached for five minutes once fetched, so the first ask that missed is what
     # every later one in the job is answered from. On the job rather than on the step that waits,
@@ -335,7 +381,10 @@ jobs:
           VERSION: ${{ needs.build.outputs.version }}
         run: |
           set -euo pipefail
-          for attempt in $(seq 1 30); do
+          # Twenty minutes, for the reason the job above waits that long: the delay being absorbed
+          # is npm's, it has no stated bound, and an edge that has not caught up yet is not an
+          # install that is broken.
+          for attempt in $(seq 1 120); do
             if npx -y "gdharness@${VERSION}" --version > /dev/null 2>&1; then
               echo "The registry serves ${VERSION} to npx here; asked ${attempt} times."
               exit 0
@@ -343,7 +392,8 @@ jobs:
             echo "The registry does not serve ${VERSION} to npx here yet; asked ${attempt} times."
             sleep 10
           done
-          echo "The registry here never served gdharness@${VERSION}, five minutes after publishing it." >&2
+          echo "This runner's registry edge never served gdharness@${VERSION}, twenty minutes" >&2
+          echo "after publishing it, so the install below was never tried." >&2
           exit 1
 
       # No checkout: a reader has none of this repository, and anything taken from it here would

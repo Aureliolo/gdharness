@@ -65,9 +65,14 @@ nothing. `release.yml` calls `release-build.yml`, which runs the first three job
 5. **npm**, in `release.yml`, publishes that same signed archive to npm, which is how every
    harness actually installs the server. Tokenless: npm's trusted publisher for the package
    names this workflow and the job's OIDC token is the whole credential, so npm adds its own
-   provenance on top. It then downloads what npm serves and fails unless those bytes hash to
-   the archive that was signed.
-6. **registry**, in `release.yml`, publishes `server.json` to the official MCP registry, the
+   provenance on top. The job ends there, because publishing cannot be undone and everything
+   after it either reports or depends on it.
+6. **npm serves what was signed**, in `release.yml`, downloads what the registry hands out and
+   fails unless those bytes hash to the archive that was signed. It reports: the release is on
+   npm by the time it runs, so a red job here is a reason to look, not a release that stopped.
+7. **installs**, in `release.yml`, installs the published version with `npx` on Linux, Windows
+   and macOS and runs it, because publishing is not installing. It reports for the same reason.
+8. **registry**, in `release.yml`, publishes `server.json` to the official MCP registry, the
    entry that clients and every marketplace downstream of it read. Tokenless again: the
    registry has no accounts, and grants the `io.github.Aureliolo/*` namespace to whatever this
    workflow's OIDC token proves it is. It runs last because the registry checks that the npm
