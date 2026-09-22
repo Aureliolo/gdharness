@@ -10085,13 +10085,11 @@ async function testTheEditorsGameIsToldFromAnotherOfTheSameProject(): Promise<vo
               setTimeout(() => {
                 announce(runtimeDir, project, ours, FAKE_EDITOR_PID);
               }, 300);
-            } else {
-              // Both after the second wait, theirs naming an editor that is not this one.
-              setTimeout(() => {
-                announce(runtimeDir, project, theirs, FAKE_EDITOR_PID + 1);
-                announce(runtimeDir, project, ours, FAKE_EDITOR_PID);
-              }, 600);
             }
+            // The second round announces from the body once the start has answered, rather than on
+            // a timer from here: what lies between the play and the end of the wait is the rest of
+            // the start, and a loaded Windows runner took longer over it than a 600 ms timer allowed,
+            // so the game announced inside a 200 ms wait and the round measured nothing.
             return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
           }
           if (tool === 'playing_status') {
@@ -10099,7 +10097,7 @@ async function testTheEditorsGameIsToldFromAnotherOfTheSameProject(): Promise<vo
           }
           return { ok: true };
         },
-      async ({ server, runtimeDir, start }) => {
+      async ({ server, project, runtimeDir, start }) => {
         const first = await start(3_000);
         assert.equal(get(first.answer, 'through'), 'editor', JSON.stringify(first.answer));
         assert.equal(
@@ -10119,6 +10117,9 @@ async function testTheEditorsGameIsToldFromAnotherOfTheSameProject(): Promise<vo
           true,
           `the second wait should run out before either announces: ${JSON.stringify(second.answer)}`,
         );
+        // Both after the second wait, theirs naming an editor that is not this one.
+        announce(runtimeDir, project, theirs, FAKE_EDITOR_PID + 1);
+        announce(runtimeDir, project, ours, FAKE_EDITOR_PID);
         assert.ok(
           await cameTrue(() => existsSync(join(runtimeDir, `runtime-${ours}.json`)), 5_000),
           'both announcements should have landed',
