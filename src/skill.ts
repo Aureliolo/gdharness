@@ -97,6 +97,7 @@ that is running, and the project on disk. ${TOOL_SPECS.length} tools, named \`do
 | Whether this engine has a method or property, and what it takes | \`editor_classes info\` with \`member\`, which answers that one member and which class declares it rather than the whole class |
 | Wait for a run to finish | \`editor_run wait\`, never a sleep or a shell loop on the pid: it answers as \`editor_output\` does, once the run is over |
 | End a bench and the workers it opened | \`editor_run stop\` with \`andChildren\`, never a process listing by scene name: it ends every process under the run's, to any depth, that is a game of the project, announced as one or the project's engine run with \`--path\` on it, names them under \`endedChildren\` with what identified each, and leaves and names any other |
+| Play a game without touching the player's saves | \`editor_run start\` with \`savesIn\`, a directory for this run's \`user://\`: the editor plays with its own environment, so a run given one is started by the server, and the answer says under \`savesNote\` when the platform ignores it |
 | A picture, for a person who asked to see one | \`runtime_capture\` |
 
 These need the runtime autoload, which \`gdharness setup\` registers. \`runtime_capture\` needs a
