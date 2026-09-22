@@ -814,6 +814,18 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
           'The game\'s own arguments, what OS.get_cmdline_user_args() answers, such as ["--level=2"]. The separator is added here. A run with any is started by this server rather than by the editor, which fixes the game\'s command line when it opens the project, so the debug_* tools do not answer for it.',
       },
       headless: { type: 'boolean', ops: ['start'], description: 'start: force a window or no window.' },
+      savesIn: {
+        type: 'string',
+        ops: ['start', 'check'],
+        description:
+          "An absolute directory for this run's user://, so a game that saves writes nowhere near the copy somebody plays: opening a save writes the one being left, and a game that autosaves writes on its own. Godot takes no flag for it, so this is the environment, and the run is started by this server rather than played by the editor, which cannot be given one. On macOS the engine reads user:// off HOME and ignores it, measured on 4.7.2, and the answer says so under savesNote rather than leaving the caller to find out from the player's save list.",
+      },
+      env: {
+        type: 'object',
+        ops: ['start', 'check'],
+        description:
+          "Environment variables for this run alone, as a map of strings, over the server's own environment. Like savesIn, a run carrying any is started by this server rather than played by the editor. Names beginning with GDHARNESS_ are refused: they are this server's contract with the addon in the game, and the runtime directory is set here whatever the rest of the environment says, so a game that moves TEMP still announces where this server looks.",
+      },
       runtimeWaitMs: {
         type: 'number',
         ops: ['start'],

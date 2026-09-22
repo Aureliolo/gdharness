@@ -25,7 +25,7 @@ import {
   statSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join, normalize, relative } from 'node:path';
+import { basename, dirname, isAbsolute, join, normalize, relative } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -83,8 +83,10 @@ import { orphansPrinted, parseJUnit, type TestReport, whyNoReport } from './juni
 import {
   type EditorPorts,
   editorArguments,
+  environmentFor,
   envValue,
   OPENED_BY_A_SERVER,
+  RESERVED_VARIABLE_PREFIX,
   resolveHeadless,
   runArguments,
   SAVES_NOT_MOVED_NOTE,
@@ -157,6 +159,7 @@ import {
   readNonEmptyString,
   readNonNegativeNumber,
   readNumber,
+  readParams,
   readPositiveNumber,
   readString,
   readStringArray,
@@ -953,6 +956,17 @@ function camelCased(params: unknown): OperationParams {
 }
 
 type Checked<T> = { ok: true; value: T } | { ok: false; response: ToolResponse };
+
+/** What a run was asked to carry: where its saves go, and any variables of its own. */
+interface RunEnvironment {
+  readonly savesIn?: string;
+  readonly env?: Readonly<Record<string, string>>;
+}
+
+/** Whether [param asked] is anything the editor cannot be given, so the run has to be spawned. */
+function needsItsOwnProcess(asked: RunEnvironment): boolean {
+  return asked.savesIn !== undefined || asked.env !== undefined;
+}
 
 class GodotServer {
   // Registration goes through the protocol object rather than McpServer's registerTool: the
@@ -1953,6 +1967,64 @@ class GodotServer {
       };
     }
     return { ok: true, value: given };
+  }
+
+  /**
+   * The environment a run was asked for: a directory for its `user://`, variables of its own, or
+   * neither, which is this server's own environment unchanged.
+   *
+   * Refused rather than trimmed, in both directions a caller can get it wrong. A relative
+   * `savesIn` is a directory relative to wherever this server happens to have been started, which
+   * is not a place the caller can point at afterwards. A `GDHARNESS_` variable is this server's
+   * contract with the addon, and a run given its own would announce itself where nothing looks.
+   */
+  private runEnvironment(args: OperationParams): Checked<RunEnvironment> {
+    const savesIn = readNonEmptyString(args, 'savesIn');
+    if (savesIn !== undefined && !isAbsolute(savesIn)) {
+      return {
+        ok: false,
+        response: this.createErrorResponse(`savesIn must be an absolute path, not "${savesIn}".`, [
+          "Name the directory user:// should be under, such as a temporary directory of this run's own",
+        ]),
+      };
+    }
+    if (args['env'] === undefined) {
+      return { ok: true, value: savesIn === undefined ? {} : { savesIn } };
+    }
+    const given = readParams(args, 'env');
+    if (given === undefined) {
+      return {
+        ok: false,
+        response: this.createErrorResponse('env must be a map of names to string values.', [
+          'Pass the variables this run needs, such as {"MY_FLAG": "1"}',
+        ]),
+      };
+    }
+    const env: Record<string, string> = {};
+    for (const [name, value] of Object.entries(given)) {
+      if (typeof value !== 'string') {
+        return {
+          ok: false,
+          response: this.createErrorResponse(`env values must be strings, and ${name} is ${typeof value}.`, [
+            'Pass every value as a string, such as {"WORKERS": "4"}',
+          ]),
+        };
+      }
+      if (name.toUpperCase().startsWith(RESERVED_VARIABLE_PREFIX)) {
+        return {
+          ok: false,
+          response: this.createErrorResponse(
+            `env may not set ${name}: names beginning with ${RESERVED_VARIABLE_PREFIX} are this server's own.`,
+            [
+              'GDHARNESS_RUNTIME_DIR is where the game announces itself and this server looks for it',
+              'Name the directory for user:// with savesIn rather than by moving the environment yourself',
+            ],
+          ),
+        };
+      }
+      env[name] = value;
+    }
+    return { ok: true, value: { ...(savesIn === undefined ? {} : { savesIn }), env } };
   }
 
   /**
@@ -3677,6 +3749,10 @@ class GodotServer {
     if (!given.ok) {
       return given.response;
     }
+    const asked = this.runEnvironment(args);
+    if (!asked.ok) {
+      return asked.response;
+    }
     // Asked to run a project with no main scene, the engine puts up a modal box and waits for
     // a click, even headless on Windows: a process on a pipe that never exits.
     if (!sceneToRun && !hasMainScene(project.value.file)) {
@@ -3701,7 +3777,14 @@ class GodotServer {
 
     const sceneArgument = sceneToRun?.ok ? sceneToRun.relativePath : null;
     if (op === 'check') {
-      return await this.checkBoot(engine.value, project.value.path, sceneArgument, args, given.value);
+      return await this.checkBoot(
+        engine.value,
+        project.value.path,
+        sceneArgument,
+        args,
+        given.value,
+        asked.value,
+      );
     }
 
     // Asked of the record as well as of this server, because a run started before a reconnect is
@@ -3744,6 +3827,12 @@ class GodotServer {
     // editor would play it headless too. Otherwise it is spawned: answering a request for no
     // window with a window would be answering a different question.
     //
+    // A run asking for an environment of its own is spawned for the same reason: the editor plays
+    // the game as a child of itself with the environment it was started with, and a session
+    // cannot restart the editor to move one variable. That is how a game gets a `user://` of its
+    // own, which Godot takes no flag for, so the only windowed run a session could watch was one
+    // writing into the player's saves.
+    //
     // And a run carrying the game's own arguments is spawned whatever else is true, because the
     // editor cannot be given any: it builds the game's command line out of
     // `editor/run/main_run_args`, which it reads when it opens the project. Measured against
@@ -3757,7 +3846,12 @@ class GodotServer {
     });
     const runtimeWaitMs = this.announceBudget(args, project.value.path);
     const editorWouldPlay = !headless || editorPlaysHeadless(project.value.file);
-    if (this.godotBridge.isConnected() && editorWouldPlay && given.value.length === 0) {
+    if (
+      this.godotBridge.isConnected() &&
+      editorWouldPlay &&
+      given.value.length === 0 &&
+      !needsItsOwnProcess(asked.value)
+    ) {
       return await this.playThroughEditor(
         sceneArgument,
         refreshed.value,
@@ -3775,7 +3869,14 @@ class GodotServer {
       userArgs: given.value,
     });
     this.logDebug(`Running Godot project: ${engine.value} ${cmdArgs.join(' ')}`);
-    const started = this.spawnKeptGame(engine.value, cmdArgs, project.value.path);
+    const started = this.spawnKeptGame(
+      engine.value,
+      cmdArgs,
+      project.value.path,
+      needsItsOwnProcess(asked.value)
+        ? environmentFor({ ...asked.value, runtimeDirectory: runtimeDirectory() })
+        : undefined,
+    );
     // For a game that announces after the start's wait under a number the handle does not have,
     // which the Windows console build does: the tie then falls to freshness, as a played run's.
     started.announcedBefore = alreadyPlaying;
@@ -3792,7 +3893,10 @@ class GodotServer {
       this.godotBridge.isConnected() && editorWouldPlay && given.value.length > 0
         ? ' The editor cannot be handed arguments for a game it plays, so this one was started ' +
           'here: the debug_* tools answer only for a game the editor is playing.'
-        : '';
+        : this.godotBridge.isConnected() && editorWouldPlay && needsItsOwnProcess(asked.value)
+          ? ' The editor plays a game with its own environment, so a run given one was started ' +
+            'here: the debug_* tools answer only for a game the editor is playing.'
+          : '';
     const endedForThis = endedToStartThis(ended);
     // A game of this project that was already running and that this server cannot read. It is not
     // in `ended`, because ending a run goes through the sweep that drops these, so the start left
@@ -3822,6 +3926,9 @@ class GodotServer {
       // that has not printed yet looks like.
       transcript: started.transcript,
       refreshedClasses: refreshed.value,
+      // Said on the start that asked for it rather than left to the player's save list: on macOS
+      // the engine reads user:// off HOME, so a run asked to save elsewhere saved where they do.
+      savesNote: asked.value.savesIn !== undefined && savesStayPut() ? SAVES_NOT_MOVED_NOTE : undefined,
       // Which run this start ended, when it ended one, so a bench that stopped is answered for
       // here rather than looked for in the engine.
       endedPreviousRun: endedPreviousRun(ended),
@@ -5023,11 +5130,18 @@ class GodotServer {
     scene: string | null,
     args: OperationParams,
     userArgs: readonly string[],
+    asked: RunEnvironment = {},
   ): Promise<ToolResponse> {
     const frames = readPositiveNumber(args, 'frames') ?? 3;
     const timeoutMs = readPositiveNumber(args, 'timeoutMs') ?? 60000;
     const cmdArgs = runArguments({ projectPath, headless: true, scene, quitAfter: frames, userArgs });
-    const boot = this.spawnGame(godotPath, cmdArgs);
+    const boot = this.spawnGame(
+      godotPath,
+      cmdArgs,
+      needsItsOwnProcess(asked)
+        ? environmentFor({ ...asked, runtimeDirectory: runtimeDirectory() })
+        : undefined,
+    );
 
     const hung = await new Promise<boolean>((resolve) => {
       const timer = setTimeout(() => {
@@ -5054,6 +5168,7 @@ class GodotServer {
       frames,
       errors,
       warnings,
+      savesNote: asked.savesIn !== undefined && savesStayPut() ? SAVES_NOT_MOVED_NOTE : undefined,
       entries: forAnswer(boot.log.select({ severity: 'warning', sinceLastCall: false, limit: 200 }).entries),
     });
   }
