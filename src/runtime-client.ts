@@ -18,6 +18,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { envValue } from './launch.js';
+import { isSameDirectory, realPathOr } from './paths.js';
 import { startTimesOf } from './process-children.js';
 import { asParams, readNumber, readParams, readString } from './tool-args.js';
 
@@ -283,8 +284,7 @@ function announcedAndGone(projectPath?: string): WentAway[] {
     return [];
   }
   const since = Date.now() - GONE_WINDOW_MS;
-  const wanted = resolve(projectPath);
-  return gone.filter((one) => one.noticedAt >= since && resolve(one.project) === wanted);
+  return gone.filter((one) => one.noticedAt >= since && isSameDirectory(one.project, projectPath));
 }
 
 /**
@@ -548,14 +548,16 @@ export async function announcedSince(
   before: ReadonlySet<number>,
   waiting: WaitingForRuntime = {},
 ): Promise<RuntimeEndpoint | null> {
-  const wanted = resolve(projectPath);
   const directories = waiting.directories ?? runtimeDirectories();
   const until = Date.now() + Math.max(waiting.budgetMs ?? ANNOUNCE_BUDGET_MS, 0);
   for (;;) {
+    // Through links, because the engine announces the path it resolved and a caller names the
+    // one they typed: on macOS the temporary directory is a link into /private, and a project
+    // under it announced a path this compared unequal to, so its game was never found.
     const fresh = discoverRuntimes(directories).find(
       (endpoint) =>
         !before.has(endpoint.pid) &&
-        resolve(endpoint.project.path) === wanted &&
+        isSameDirectory(endpoint.project.path, projectPath) &&
         (waiting.accept?.(endpoint) ?? true),
     );
     if (fresh !== undefined) {
@@ -593,7 +595,7 @@ function theOneProject(endpoints: readonly RuntimeEndpoint[]): string | undefine
   if (endpoints.some((endpoint) => endpoint.project.path === '')) {
     return undefined;
   }
-  const paths = new Set(endpoints.map((endpoint) => resolve(endpoint.project.path)));
+  const paths = new Set(endpoints.map((endpoint) => realPathOr(resolve(endpoint.project.path))));
   const only = [...paths][0];
   return paths.size === 1 ? only : undefined;
 }
@@ -681,7 +683,7 @@ export function chooseRuntime(
   if (pid !== undefined) {
     const named = endpoints.find((endpoint) => endpoint.pid === pid);
     if (named !== undefined) {
-      if (projectPath !== undefined && resolve(named.project.path) !== resolve(projectPath)) {
+      if (projectPath !== undefined && !isSameDirectory(named.project.path, projectPath)) {
         return {
           problem: `The game with pid ${pid} is running ${named.project.path}, not ${resolve(projectPath)}. Running: ${endpoints.map(describe).join('; ')}.`,
         };
@@ -740,7 +742,7 @@ export function chooseRuntime(
   }
   if (projectPath !== undefined) {
     const wanted = resolve(projectPath);
-    const matching = endpoints.filter((endpoint) => resolve(endpoint.project.path) === wanted);
+    const matching = endpoints.filter((endpoint) => isSameDirectory(endpoint.project.path, wanted));
     if (matching.length === 0) {
       return {
         problem: `No running game is from ${wanted}. Running: ${endpoints.map(describe).join('; ')}.`,
