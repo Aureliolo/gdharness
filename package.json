@@ -75,8 +75,8 @@
     "fast-check": "4.10.2",
     "knip": "6.37.0",
     "markdownlint-cli2": "0.23.3",
-    "marked": "18.0.13",
-    "oxlint": "1.83.0",
+    "marked": "18.0.14",
+    "oxlint": "1.85.0",
     "oxlint-tsgolint": "7.0.2002",
     "prettier": "3.9.8",
     "typescript": "7.0.2"
