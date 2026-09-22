@@ -65,9 +65,14 @@ nothing. `release.yml` calls `release-build.yml`, which runs the first three job
 5. **npm**, in `release.yml`, publishes that same signed archive to npm, which is how every
    harness actually installs the server. Tokenless: npm's trusted publisher for the package
    names this workflow and the job's OIDC token is the whole credential, so npm adds its own
-   provenance on top. It then downloads what npm serves and fails unless those bytes hash to
-   the archive that was signed.
-6. **registry**, in `release.yml`, publishes `server.json` to the official MCP registry, the
+   provenance on top. The job ends there, because publishing cannot be undone and everything
+   after it either reports or depends on it.
+6. **npm serves what was signed**, in `release.yml`, downloads what the registry hands out and
+   fails unless those bytes hash to the archive that was signed. It reports: the release is on
+   npm by the time it runs, so a red job here is a reason to look, not a release that stopped.
+7. **installs**, in `release.yml`, installs the published version with `npx` on Linux, Windows
+   and macOS and runs it, because publishing is not installing. It reports for the same reason.
+8. **registry**, in `release.yml`, publishes `server.json` to the official MCP registry, the
    entry that clients and every marketplace downstream of it read. Tokenless again: the
    registry has no accounts, and grants the `io.github.Aureliolo/*` namespace to whatever this
    workflow's OIDC token proves it is. It runs last because the registry checks that the npm
@@ -132,6 +137,14 @@ such a version, naming it, before it writes a branch.
 
 ## When a release job fails
 
+Re-running the release workflow on the tag is the first thing to try, and it is safe. Each of the
+three steps that publish something asks what is already there before acting: the release job
+passes when the tag already carries exactly the four files, the npm job takes a version the
+registry already holds as done, and the MCP registry job publishes nothing it already serves
+correctly. Re-running a release whose jobs all went red therefore does the parts that did not
+happen and leaves alone the parts that did. "Tag release" can be run by hand too, and starts the
+release workflow again on a tag that already exists.
+
 - **Tag does not match package version**: the tag was created outside `release-tag.yml`, at a
   commit whose `package.json` says something else. It cannot be taken back, because a push that
   deletes a `v*` tag is refused by the ruleset. Go through Prepare release for the version that
@@ -153,9 +166,20 @@ such a version, naming it, before it writes a branch.
   dropped the field.
 - **You do not have permission to publish this server**: `server.json` names something outside
   `io.github.Aureliolo/*`, which is the only namespace a token from this repository is given.
-- **The registry never served X**, or **The registry serves ...**: the publish was accepted and
-  what came back a minute later is missing or not this version. The release and npm are
-  unaffected. Do not rerun the job: a registry version is published once and cannot be
-  republished or edited, so a rerun fails at the publish step instead. Read the entry yourself
-  at `registry.modelcontextprotocol.io/v0.1/servers/io.github.Aureliolo%2Fgdharness/versions/latest`,
-  and if it really is wrong, that version is spent there and the next release replaces it.
+- **X was accepted; the registry had not served it five minutes later**: the publish went
+  through and the entry has not appeared. The release and npm are unaffected. Rerun the job: it
+  reads what the registry serves before publishing anything, so it will confirm the entry if it
+  has arrived by then and publish nothing twice. You can read it yourself at
+  `registry.modelcontextprotocol.io/v0.1/servers/io.github.Aureliolo%2Fgdharness/versions/latest`.
+- **The registry serves ...** followed by **Expected: ...**: an entry for this version exists and
+  is not the one this release publishes, so the publish is not skipped and will be refused. A
+  registry version is published once, so that version is spent there and the next release
+  replaces it.
+- **gdharness@X is published; the registry had not served it twenty minutes later**: npm took the
+  archive and has not served it back yet. The release, npm and the registry entry are unaffected;
+  only the comparison against the signed archive is outstanding. Rerun that job once
+  `npm view gdharness@X` answers. This happened on 1.0.11, where npm took 7m11s against a
+  five-minute window, and at the time it took two jobs down with it.
+- **vX.Y.Z already has a release, and it carries ...**: the tag has a release with something other
+  than the four files, which means an upload failed part way. A published release is not rewritten
+  here, so look at what is attached before deciding anything.
