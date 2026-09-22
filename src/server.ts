@@ -6266,6 +6266,84 @@ class GodotServer {
   }
 
   /**
+   * Waits for the game this server started to announce, when it is still coming up, and says so
+   * when it has not by the end of the wait. Null when there is no such game, or it has announced.
+   *
+   * Issue #609: a stop and then a start straight away, and the next runtime_* call was refused with
+   * "announced itself and its process is gone" about the run that had just been stopped, telling
+   * the caller to start another while the new game was seconds from answering. With nothing
+   * announced the refusal looked only at games that had gone, and the run this server holds, which
+   * it had itself said may yet announce, was not asked about at all. A caller reaching for
+   * runtime_wait here is asking to wait for exactly that game.
+   */
+  private async ownRunOnItsWay(
+    projectPath: string | null | undefined,
+    budgetMs: number,
+  ): Promise<string | null> {
+    const run = this.currentRun();
+    const project = projectPath ?? run?.projectPath ?? null;
+    if (
+      run === null ||
+      project === null ||
+      run.announcedPid !== undefined ||
+      (run.projectPath !== null && !isSameDirectory(run.projectPath, project)) ||
+      !existsSync(join(project, RUNTIME_AUTOLOAD.path)) ||
+      !(await this.runStillGoing(run))
+    ) {
+      return null;
+    }
+    const already = runtimesAnnounced().running;
+    // Only an announcement written since this run started can be its game. The run stopped just
+    // before it is still listed while its process is dying (on Linux, until it is reaped), and it
+    // is a game of the same project naming no editor, so it passed for this run's own: the call
+    // went to it and met a closed port.
+    // The run's own record of what was up before it comes first, as it does in announcedPidOf; the
+    // file's time is for a run started without one.
+    const announcedSinceTheStart = (one: RuntimeEndpoint): boolean => {
+      if (run.announcedBefore !== undefined) {
+        return !run.announcedBefore.has(one.pid);
+      }
+      try {
+        return statSync(one.file).mtimeMs >= run.startedAt;
+      } catch {
+        return false;
+      }
+    };
+    if (already.some((one) => announcedSinceTheStart(one) && this.isTheGameOf(run, one, project))) {
+      return null;
+    }
+    const which = run.throughEditor ? 'the game the editor is playing for it' : `pid ${run.pid ?? 'unknown'}`;
+    // Waited for only while it could still be booting: the wait a start gives this project, and
+    // one call's timeout past that. A game that keeps its runtime off on purpose, as a project's
+    // bench workers do, never announces, and every call against it would otherwise sit out the
+    // whole timeout before saying so.
+    const comingUpUntil = run.startedAt + waitSizedTo(readBootNote(project)) + budgetMs;
+    const remaining = comingUpUntil - Date.now();
+    if (remaining <= 0) {
+      const seconds = Math.round((Date.now() - run.startedAt) / 1000);
+      return `The game this server started (${which}) has been running for ${seconds}s and has not announced its runtime, so there is nothing to talk to. A game that keeps the runtime off, as a project's own loader can for some scenes, never announces; editor_output says what it has printed.`;
+    }
+    const endpoint = await announcedSince(project, new Set(already.map((one) => one.pid)), {
+      budgetMs: Math.min(budgetMs, remaining),
+      accept: (one) => this.isTheGameOf(this.currentRun(), one, project),
+      giveUp: () => this.currentRun() !== run || this.dapClient?.isStopped() === true || !stillRunning(run),
+    });
+    if (endpoint !== null) {
+      // Through a call because the wait above can overlap another call tying the same run, and a
+      // second tie would note a second, later boot time for it.
+      const tiedMeanwhile = (): boolean => run.announcedPid !== undefined;
+      if (!tiedMeanwhile()) {
+        this.tie(run, endpoint);
+      }
+      return null;
+    }
+    if (this.currentRun() !== run || !(await this.runStillGoing(run))) {
+      return null;
+    }
+    return `The game this server started (${which}) is still coming up and has not announced its runtime after a wait of ${Math.min(budgetMs, remaining)}ms, so there is nothing to talk to yet. It is still running: ask again in a moment rather than starting another.`;
+  }
+
+  /**
    * One command to the running game, and its answer as a tool result.
    *
    * `op` and `projectPath` are the server's business and stay here: the first chose the
@@ -6279,6 +6357,19 @@ class GodotServer {
     timeoutMs: number = this.runtimeTimeoutMs(),
   ): Promise<ToolResponse> {
     const { op: _op, projectPath, pid, ...params } = asParams(args);
+    const waited =
+      typeof pid === 'number'
+        ? null
+        : await this.ownRunOnItsWay(
+            typeof projectPath === 'string' ? projectPath : this.ownProject,
+            timeoutMs,
+          );
+    if (waited !== null) {
+      return this.createErrorResponse(waited, [
+        'editor_status lists it under runtimes once it has announced',
+        'editor_output says what it has printed so far',
+      ]);
+    }
     const announced = runtimesAnnounced();
     // A server set up for a project answers about that project's game and no other. Two
     // projects open in two harness sessions are two games announced on the same machine, and
