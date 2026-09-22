@@ -5625,7 +5625,10 @@ async function testARuntimeCallWaitsForTheGameThisServerStarted(): Promise<void>
       'first start',
     );
     const firstPid = asNumber(get(first, 'runtime', 'pid'), 'the first game announced');
-    await call('editor_run', { projectPath: project, op: 'stop' });
+    // The explicit stop is the report's first step, and it is checked because a stop that was
+    // refused leaves the second start to end the first run instead, which is a different path.
+    const firstStop = jsonOf(await call('editor_run', { op: 'stop' }), 'first stop');
+    assert.equal(get(firstStop, 'stopped'), true, JSON.stringify(firstStop));
 
     const second = jsonOf(
       await call('editor_run', { projectPath: project, op: 'start', headless: true, runtimeWaitMs: 0 }),
@@ -5639,17 +5642,23 @@ async function testARuntimeCallWaitsForTheGameThisServerStarted(): Promise<void>
     assert.equal(get(second, 'runtime', 'mayYetAnnounce'), true, JSON.stringify(second));
 
     const waited = await call('runtime_wait', { op: 'frames', frames: 1 });
-    assert.ok(waited.trimStart().startsWith('{'), `the wait reaches the new game: ${waited}`);
-    assert.doesNotMatch(waited, new RegExp(`pid ${firstPid}`), waited);
+    assert.ok(
+      waited.trimStart().startsWith('{'),
+      `the wait reaches the new game rather than the stopped one (pid ${firstPid}): ${waited}`,
+    );
+    // The stopped game can still be listed while its process is being reaped, so what is held is
+    // that the new one is there, not that the old one has gone.
     const status = jsonOf(await call('editor_status', {}), 'editor_status');
     const reachable = asArray(get(status, 'game', 'runtimes')).map((one) => get(one, 'pid'));
     assert.ok(
-      reachable.length === 1 && reachable[0] !== firstPid,
-      `the new game is the one up: ${JSON.stringify(reachable)}`,
+      reachable.some((one) => one !== firstPid),
+      `the new game is up beside stopped pid ${firstPid}: ${JSON.stringify(reachable)}`,
     );
+    const secondStop = jsonOf(await call('editor_run', { op: 'stop' }), 'second stop');
+    assert.equal(get(secondStop, 'stopped'), true, JSON.stringify(secondStop));
   } finally {
     try {
-      await call('editor_run', { projectPath: project, op: 'stop' });
+      await call('editor_run', { op: 'stop' });
     } catch {
       // Stopped already, or the server is gone; the sweep below is what must happen.
     }

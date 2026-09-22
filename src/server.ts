@@ -6293,7 +6293,23 @@ class GodotServer {
       return null;
     }
     const already = runtimesAnnounced().running;
-    if (already.some((one) => this.isTheGameOf(run, one, project))) {
+    // Only an announcement written since this run started can be its game. The run stopped just
+    // before it is still listed while its process is dying (on Linux, until it is reaped), and it
+    // is a game of the same project naming no editor, so it passed for this run's own: the call
+    // went to it and met a closed port.
+    // The run's own record of what was up before it comes first, as it does in announcedPidOf; the
+    // file's time is for a run started without one.
+    const announcedSinceTheStart = (one: RuntimeEndpoint): boolean => {
+      if (run.announcedBefore !== undefined) {
+        return !run.announcedBefore.has(one.pid);
+      }
+      try {
+        return statSync(one.file).mtimeMs >= run.startedAt;
+      } catch {
+        return false;
+      }
+    };
+    if (already.some((one) => announcedSinceTheStart(one) && this.isTheGameOf(run, one, project))) {
       return null;
     }
     const which = run.throughEditor ? 'the game the editor is playing for it' : `pid ${run.pid ?? 'unknown'}`;
