@@ -993,6 +993,8 @@ class GodotServer {
    * back to the scan that just refused. Keyed by pid so a restarted editor starts clean.
    */
   private readonly shortListEditors = new Map<string, number | undefined>();
+  /** What the class cache held after the last rebuild this server ran, by project path. */
+  private readonly cacheLastRebuilt = new Map<string, ReadonlySet<string>>();
 
   /**
    * The editor this server started that has not dialled in yet, by pid, or null.
@@ -1653,10 +1655,17 @@ class GodotServer {
         const contained = this.containProjectFiles(asks);
         return contained.ok ? await this.handleViaBridge(editorSide, contained.value) : contained.response;
       }
-      const answered = await this.headless(headless, answerable);
+      if (headless !== 'refresh_class_cache') {
+        return await this.headless(headless, answerable);
+      }
+      const project = this.project(answerable);
+      if (!project.ok) {
+        return project.response;
+      }
+      const answered = this.answer(await this.rebuildClassCache(project.value.path));
       // The one answer that reads most like a clean bill of health and is not: "added: []" means
       // the file on disk was already right, which is exactly the state an editor goes blind in.
-      return headless === 'refresh_class_cache' && this.godotBridge.isConnected()
+      return this.godotBridge.isConnected()
         ? await this.alsoSayWhatTheEditorCannotSee(answered, args)
         : answered;
     }
@@ -2460,7 +2469,7 @@ class GodotServer {
       return engine.response;
     }
 
-    const classes = await this.operation('refresh_class_cache', {}, project.value.path);
+    const classes = await this.rebuildClassCache(project.value.path);
     if (!classes.ok) {
       return this.answer(classes);
     }
@@ -5690,13 +5699,57 @@ class GodotServer {
     if (projectPath === '') {
       return [];
     }
-    const rebuilt = await this.operation('refresh_class_cache', {}, projectPath);
+    const rebuilt = await this.rebuildClassCache(projectPath);
     if (!rebuilt.ok) {
       this.logDebug(`Could not rebuild the class cache after a scan: ${rebuilt.message}`);
       return [];
     }
     const now = cachedClasses(projectPath);
     return now === null ? [] : lost.filter((name) => now.has(name));
+  }
+
+  /**
+   * The class cache rebuilt from the files, with what the rebuild shows about the editor.
+   *
+   * Every rebuild goes through here so a class the files gained can be told from one the cache
+   * had and lost: what the last rebuild left is remembered per project, and a class in it that
+   * the cache no longer held when this rebuild began was written out in between by whatever
+   * writes the cache, which is the editor on every save and scan. Downstream, an editor holding
+   * a list six classes short of the files put the same six into `classes.added` on every test
+   * run of an afternoon, and nothing said whose doing that was. An editor seen doing it is
+   * remembered as one whose scan would lose them again, so the notes that send a caller to the
+   * rescan send them to the restart instead.
+   */
+  private async rebuildClassCache(projectPath: string): Promise<HeadlessOutcome> {
+    const key = resolve(projectPath);
+    const before = cachedClasses(projectPath);
+    const remembered = this.cacheLastRebuilt.get(key);
+    const rebuilt = await this.operation('refresh_class_cache', {}, projectPath);
+    if (!rebuilt.ok) {
+      return rebuilt;
+    }
+    const after = cachedClasses(projectPath);
+    if (after === null) {
+      return rebuilt;
+    }
+    this.cacheLastRebuilt.set(key, new Set(after.keys()));
+    const lost =
+      remembered === undefined || before === null
+        ? []
+        : [...remembered].filter((name) => !before.has(name) && after.has(name)).sort();
+    if (lost.length === 0 || !this.godotBridge.isConnected()) {
+      return rebuilt;
+    }
+    this.shortListEditors.set(key, this.godotBridge.getStatus().editorPid);
+    const them = lost.length === 1 ? 'it' : 'them';
+    return {
+      ...rebuilt,
+      payload: {
+        ...rebuilt.payload,
+        lostSinceLastRebuild: lost,
+        note: `The cache held ${lost.join(', ')} after the last rebuild and not when this one began, so the editor holding this project wrote it without ${them} in between: it holds a list shorter than the files and writes that list on every save and scan, and each rebuild puts ${them} back. editor_launch restart is what ends it.`,
+      },
+    };
   }
 
   /**
@@ -5720,7 +5773,11 @@ class GodotServer {
     if (checked.unseen.length === 0 && stillHeld.length === 0 && checked.unchecked === undefined) {
       return answered;
     }
-    const notes: string[] = [];
+    const payload = asParams(JSON.parse(first.text));
+    // What the rebuild itself said comes first: a class the editor wrote out since the last
+    // rebuild is the reason it cannot see it now.
+    const said = readString(payload, 'note');
+    const notes: string[] = said === undefined ? [] : [said];
     if (checked.unseen.length > 0) {
       const projectPath = typeof args['projectPath'] === 'string' ? args['projectPath'] : '';
       // The same fork as the diagnostics' remedy: on an editor whose scan writes a shorter list
@@ -5737,7 +5794,7 @@ class GodotServer {
       );
     }
     return this.jsonTextResponse({
-      ...asParams(JSON.parse(first.text)),
+      ...payload,
       unseenByEditor: checked.unseen.length > 0 ? checked.unseen : undefined,
       stillHeldByEditor: stillHeld.length > 0 ? stillHeld : undefined,
       classesUnchecked: checked.unchecked,
