@@ -135,14 +135,31 @@ export function projectPathSentence(without: readonly string[] = callsWithoutPro
   } none`;
 }
 
+/**
+ * Which game answers a `runtime_*` or `debug_*` call that names neither `projectPath` nor `pid`.
+ *
+ * Built once and rendered into the skill, the tool reference and the argument's own description,
+ * because it was written in each of those separately and each said a different amount of it: the
+ * reference said those tools "pick between running games" and stopped, and `projectPath` said
+ * "not needed with one game", which says nothing about two. A session with another project's game
+ * listed beside its own read both and could not tell what was answering it. What decides is in
+ * `chooseRuntime` and in `ownGameAmong` above it, so the sentence is one and the order is theirs.
+ */
+export function theGamePicked(): string {
+  return (
+    'the game this server started or is playing when it is among those running, named under ' +
+    '`answeredBy` where there was a choice; else the only game there is; else a refusal naming ' +
+    'every game, which is what a machine running two projects at once gets'
+  );
+}
+
 const PROJECT_PATH: JsonSchema = {
   type: 'string',
   description: 'Absolute path to the project directory, the one holding project.godot.',
 };
 const RUNNING_PROJECT_PATH: JsonSchema = {
   type: 'string',
-  description:
-    'Which game, when more than one is running: the project directory it was started from. Not needed with one game.',
+  description: `Which game, when more than one is running: the project directory it was started from. The pick without it, in order: ${theGamePicked().replaceAll('`', '')}. Not needed with one game, nor for a call to this server's own.`,
 };
 const RUNNING_PID: JsonSchema = {
   type: 'number',
