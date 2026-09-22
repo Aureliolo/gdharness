@@ -54,6 +54,18 @@ const RUNTIME_BOOT_MS = 30_000;
 /** How much of the server's log a failing case carries: the case's own start and wait, not the tier's. */
 const SERVER_ACCOUNT_CHARS = 8_000;
 
+/** The tail of [param server]'s log, which is where the case that failed is. */
+function accountOf(server: ServerProcess): string {
+  return server.stderr.slice(-SERVER_ACCOUNT_CHARS).trim();
+}
+
+/** [param failure] with [param server]'s account after it, for a server a case brought up itself. */
+function withTheAccountOf(server: ServerProcess, failure: unknown): Error {
+  return new Error(
+    `${failure instanceof Error ? failure.stack : String(failure)}\n\nThe replacement server's last ${SERVER_ACCOUNT_CHARS} characters:\n${accountOf(server)}`,
+  );
+}
+
 const SCENE = 'res://fixture.tscn';
 
 /** An action bound to nothing, for the input tool to name. */
@@ -767,9 +779,8 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
         : `gone (exit ${editor.exitCode ?? 'none'}, signal ${editor.signalCode ?? 'none'})`;
     // The tail rather than the whole: a tier's log runs to thousands of lines, and the case that
     // failed is the last thing in it.
-    const account = server.stderr.slice(-SERVER_ACCOUNT_CHARS).trim();
     throw new Error(
-      `${failure instanceof Error ? failure.stack : String(failure)}\n\nThe editor this started is ${state}. It said:\n${said}\n\nThe server's last ${SERVER_ACCOUNT_CHARS} characters:\n${account}`,
+      `${failure instanceof Error ? failure.stack : String(failure)}\n\nThe editor this started is ${state}. It said:\n${said}\n\nThe server's last ${SERVER_ACCOUNT_CHARS} characters:\n${accountOf(server)}`,
     );
   } finally {
     // The game first: it is the editor's child and outlives it, so a run that failed part way
@@ -1968,6 +1979,8 @@ async function testAPlayedRunOutlivesTheServerUnderIt(godotPath: string): Promis
       assert.equal(get(ended, 'through'), 'editor', `through the editor that owns it: ${text(ended)}`);
       await delay(1500);
       assert.ok(!alive(pid), 'after which the game is actually gone, rather than reported gone');
+    } catch (failure) {
+      throw withTheAccountOf(replacement, failure);
     } finally {
       await replacement.stop();
     }
@@ -2168,6 +2181,8 @@ async function testAHeldGameIsStillHeldForTheReplacement(godotPath: string): Pro
       });
       assert.deepEqual(get(cleared, 'held'), [], `the replacement can take it off again: ${text(cleared)}`);
       await answered('editor_run', { op: 'stop' });
+    } catch (failure) {
+      throw withTheAccountOf(replacement, failure);
     } finally {
       await replacement.stop();
     }
