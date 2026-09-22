@@ -10741,6 +10741,42 @@ function testACommandLineIsReadTheWayTheEngineReadsIt(): void {
 }
 
 /**
+ * A command line with a character outside ASCII is listed as it is.
+ *
+ * Every check that identifies an engine by its command line compares it against a project path
+ * or an engine path, and a path with an umlaut in it is an ordinary path. Windows PowerShell
+ * writes a pipe in the console's code page, so read as UTF-8 here `Müller` arrived as `M�ller`
+ * and nothing matched: a worker under a project at such a path was nobody's, and a run record
+ * naming one read as a process that had gone. Both readers ask the platform for UTF-8 now, and
+ * this holds it on every platform for a process started with that argument.
+ */
+async function testACommandLineOutsideAsciiIsListedWhole(): Promise<void> {
+  const named = 'Müller-ß-€';
+  const probe = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', '--', named], {
+    stdio: 'ignore',
+  });
+  try {
+    assert.ok(typeof probe.pid === 'number', 'the fixture needs a live process to list');
+    const tree = await processTree();
+    const listed = tree?.get(probe.pid)?.command ?? '';
+    assert.ok(
+      listed.includes(named),
+      `the process tree lists the argument as it is: ${JSON.stringify(listed)}`,
+    );
+    const recorded = runningAs(probe.pid);
+    assert.ok(recorded !== null, 'the run record reads the process at all');
+    assert.equal(
+      recorded.kind,
+      'commandLine',
+      `the run record reads a command line: ${JSON.stringify(recorded)}`,
+    );
+    assert.ok(recorded.text.includes(named), `and reads the argument as it is: ${JSON.stringify(recorded)}`);
+  } finally {
+    probe.kill();
+  }
+}
+
+/**
  * A process's children are listed while it lives, and on POSIX not after: the reason a stop asked
  * to end them lists them before ending the run.
  *
@@ -14812,6 +14848,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStopEndsTheProjectsUnannouncedWorkers,
   testARuntimeCallReachesThisServersOwnGame,
   testACommandLineIsReadTheWayTheEngineReadsIt,
+  testACommandLineOutsideAsciiIsListedWhole,
   testChildrenAreListedWhileTheParentLives,
   testAStopCanEndWhatTheGameStarted,
   testAStopTakesTheEndedGamesAnnouncementDown,
