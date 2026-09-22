@@ -10216,7 +10216,18 @@ async function aRealBenchTakesItsWorkerWithIt(engine: string, tiedAtStart: boole
           `${shape}: nothing of the project is announced afterwards: ${JSON.stringify(afterwards)}`,
         );
       } finally {
-        for (const pid of [workerPid, helperPid]) {
+        await server.request(
+          'tools/call',
+          { name: 'editor_run', arguments: { op: 'stop' } },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+        // Everything that announced in this fixture's own directory is this fixture's, so every
+        // one still alive after the stop is ended by the number its announcement carries, whether
+        // or not the fixture got as far as learning it: four workers were found running on this
+        // machine from runs that failed before the worker's number had been read.
+        for (const entry of readdirSync(runtimeDir)) {
+          const announced = /^runtime-(\d+)\.json$/.exec(entry);
+          const pid = announced === null ? 0 : Number(announced[1]);
           if (pid > 0 && alive(pid)) {
             try {
               process.kill(pid);
@@ -10225,11 +10236,6 @@ async function aRealBenchTakesItsWorkerWithIt(engine: string, tiedAtStart: boole
             }
           }
         }
-        await server.request(
-          'tools/call',
-          { name: 'editor_run', arguments: { op: 'stop' } },
-          ENGINE_CALL_TIMEOUT_MS,
-        );
       }
     },
     { realAddon: true, engine },
@@ -10417,7 +10423,13 @@ async function aStopEndsTheProjectsUnannouncedWorkers(engine: string): Promise<v
           assert.ok(alive(other), `${shape}: while the other child is still there`);
         }
       } finally {
-        for (const pid of [...workers, other]) {
+        // Listed before the stop, since POSIX hands a bench's orphans to init the moment it goes:
+        // everything under the bench is this fixture's, learned or not, so a run that failed
+        // before the workers' numbers were read still leaves no engine behind.
+        const benchPid = get(started, 'pid');
+        const tree = typeof benchPid === 'number' ? await processTree() : undefined;
+        const under = tree === undefined || typeof benchPid !== 'number' ? [] : descendantsIn(tree, benchPid);
+        for (const pid of [...workers, other, ...under]) {
           if (pid > 0 && alive(pid)) {
             try {
               process.kill(pid);
