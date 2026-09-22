@@ -24,7 +24,7 @@ import {
   statSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join, normalize, relative, resolve } from 'node:path';
+import { basename, dirname, join, normalize, relative } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -56,6 +56,7 @@ import {
   unloadedTypes,
   unseenByEditor,
 } from './class-cache.js';
+import { readClassNote, writeClassNote } from './class-note.js';
 import { configDisagrees } from './config-pin.js';
 import {
   DEFAULT_DAP_PORT,
@@ -985,17 +986,6 @@ class GodotServer {
   private successorWatch: NodeJS.Timeout | null = null;
   private lastProjectPath: string | null = null;
   private shutdownInitiated = false;
-  /**
-   * The editor whose last scan wrote a class cache shorter than the file, by project path and the
-   * editor's pid. Such an editor holds a class list behind the files and writes it over the cache
-   * on every scan, so a rescan cannot load the class the diagnostics cannot resolve; only a
-   * restart does, and the advice on those diagnostics has to say so rather than send the caller
-   * back to the scan that just refused. Keyed by pid so a restarted editor starts clean.
-   */
-  private readonly shortListEditors = new Map<string, number | undefined>();
-  /** What the class cache held after the last rebuild this server ran, by project path. */
-  private readonly cacheLastRebuilt = new Map<string, ReadonlySet<string>>();
-
   /**
    * The editor this server started that has not dialled in yet, by pid, or null.
    *
@@ -2840,15 +2830,25 @@ class GodotServer {
   }
 
   /**
-   * Whether the editor connected now is the one whose last scan of [param projectPath] wrote a
-   * class cache shorter than the file. A restarted editor has a new pid and starts clean.
+   * Whether the editor connected now is the one whose last scan or save of [param projectPath]
+   * wrote a class cache shorter than the file. Such an editor holds a class list behind the files
+   * and writes it over the cache every time, so a rescan cannot load the class the diagnostics
+   * cannot resolve; only a restart does, and the advice has to say so rather than send the caller
+   * back to the scan that just refused. Read from the project's note, so a server that replaced
+   * the one that saw the loss knows too; by pid, so a restarted editor starts clean.
    */
   private editorWritesAShortList(projectPath: string): boolean {
-    const key = resolve(projectPath);
-    return (
-      this.shortListEditors.has(key) &&
-      this.shortListEditors.get(key) === this.godotBridge.getStatus().editorPid
-    );
+    const recorded = readClassNote(projectPath)?.shortListEditorPid;
+    return recorded !== undefined && recorded === (this.godotBridge.getStatus().editorPid ?? null);
+  }
+
+  /** Records that the editor connected now wrote [param projectPath]'s class cache short. */
+  private noteAShortListEditor(projectPath: string): void {
+    const note = readClassNote(projectPath);
+    writeClassNote(projectPath, {
+      rebuiltWith: note?.rebuiltWith ?? [],
+      shortListEditorPid: this.godotBridge.getStatus().editorPid ?? null,
+    });
   }
 
   /** A declaring script's text, or null when the path will not open. */
@@ -5590,7 +5590,7 @@ class GodotServer {
     const lost =
       before === null || after === null ? [] : [...before.keys()].filter((name) => !after.has(name));
     if (lost.length > 0) {
-      this.shortListEditors.set(resolve(projectPath), this.godotBridge.getStatus().editorPid);
+      this.noteAShortListEditor(projectPath);
     }
     // What the scan wrote for a file that is not there, read off the cache itself rather than off
     // the editor's list: the invariant is the file, and an entry naming a path that does not exist
@@ -5721,9 +5721,8 @@ class GodotServer {
    * rescan send them to the restart instead.
    */
   private async rebuildClassCache(projectPath: string): Promise<HeadlessOutcome> {
-    const key = resolve(projectPath);
     const before = cachedClasses(projectPath);
-    const remembered = this.cacheLastRebuilt.get(key);
+    const noted = readClassNote(projectPath);
     const rebuilt = await this.operation('refresh_class_cache', {}, projectPath);
     if (!rebuilt.ok) {
       return rebuilt;
@@ -5732,15 +5731,22 @@ class GodotServer {
     if (after === null) {
       return rebuilt;
     }
-    this.cacheLastRebuilt.set(key, new Set(after.keys()));
     const lost =
-      remembered === undefined || before === null
+      noted === null || before === null
         ? []
-        : [...remembered].filter((name) => !before.has(name) && after.has(name)).sort();
-    if (lost.length === 0 || !this.godotBridge.isConnected()) {
+        : noted.rebuiltWith.filter((name) => !before.has(name) && after.has(name)).sort();
+    const seenLosing = lost.length > 0 && this.godotBridge.isConnected();
+    writeClassNote(projectPath, {
+      rebuiltWith: [...after.keys()].sort(),
+      ...(seenLosing
+        ? { shortListEditorPid: this.godotBridge.getStatus().editorPid ?? null }
+        : noted?.shortListEditorPid === undefined
+          ? {}
+          : { shortListEditorPid: noted.shortListEditorPid }),
+    });
+    if (!seenLosing) {
       return rebuilt;
     }
-    this.shortListEditors.set(key, this.godotBridge.getStatus().editorPid);
     const them = lost.length === 1 ? 'it' : 'them';
     return {
       ...rebuilt,

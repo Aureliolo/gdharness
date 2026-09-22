@@ -49,6 +49,7 @@ import {
   unloadedTypes,
   unseenByEditor,
 } from '../src/class-cache.js';
+import { classNotePath, readClassNote } from '../src/class-note.js';
 import { GodotDAPClient, type HeldBreakpoint, handleDAPTool } from '../src/dap_client.js';
 import { dictionary, emptyRecord } from '../src/dictionary.js';
 import { forAnswer, GameLog, type LogEntry } from '../src/game-log.js';
@@ -14381,26 +14382,33 @@ async function testARepairThatCouldNotRunIsNotReported(): Promise<void> {
  * and only the restart cleared it. The two tools disagreed about one state and the caller read
  * both.
  *
- * The server that saw the scan lose classes is the one that knows, so it remembers the editor by
- * pid: the same diagnostics say restart on that editor, and say rescan again once a restarted
- * editor, with a new pid, has dialled in. The cache is put back by hand here where the rebuild
- * would have put it, since this server has no engine; what is under test is the sentence, which
- * turns on the loss having been seen and not on how the cache came back.
+ * The server that saw the scan lose classes is the one that knows, so it writes the editor's pid
+ * into the project's class note: the same diagnostics say restart on that editor, from the server
+ * that saw it and from the one that replaces that server at the next reconnect, and say rescan
+ * again once a restarted editor, with a new pid, has dialled in. The cache is put back by hand
+ * here where the rebuild would have put it, since this server has no engine; what is under test
+ * is the sentence, which turns on the loss having been seen and not on how the cache came back.
  */
 async function testTheDiagnosticsRemedyKnowsAnEditorThatWritesAShortList(): Promise<void> {
   await withFakeLanguageServer(
     (uri) => uri,
     async (lspPort) => {
-      const port = await reservePort();
-      const server = new ServerProcess({
-        env: {
-          GDHARNESS_BRIDGE_PORT: String(port),
-          GDHARNESS_LSP_PORT: String(lspPort),
-          GODOT_PATH: join(tmpdir(), 'gdharness-no-such-godot'),
-        },
-      });
       const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-short-list-'));
       const sockets: WebSocket[] = [];
+      const servers: ServerProcess[] = [];
+      const startServer = async (): Promise<{ server: ServerProcess; port: number }> => {
+        const port = await reservePort();
+        const server = new ServerProcess({
+          env: {
+            GDHARNESS_BRIDGE_PORT: String(port),
+            GDHARNESS_LSP_PORT: String(lspPort),
+            GODOT_PATH: join(tmpdir(), 'gdharness-no-such-godot'),
+          },
+        });
+        servers.push(server);
+        await server.initialize('regression-test');
+        return { server, port };
+      };
       try {
         writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
         mkdirSync(join(project, '.godot'), { recursive: true });
@@ -14413,10 +14421,9 @@ async function testTheDiagnosticsRemedyKnowsAnEditorThatWritesAShortList(): Prom
           'list=[{\n"class": &"Hero",\n"path": "res://hero.gd"\n}, {\n"class": &"Missing",\n"path": "res://missing.gd"\n}]\n';
         writeFileSync(cache, whole);
 
-        await server.initialize('regression-test');
         // The editor holds Hero alone, so a scan writes a cache without Missing.
         const holds = ['Hero'];
-        const dialIn = async (editorPid: number): Promise<void> => {
+        const dialIn = async (server: ServerProcess, port: number, editorPid: number): Promise<void> => {
           const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
           sockets.push(socket);
           await new Promise<void>((resolve, reject) => {
@@ -14465,29 +14472,37 @@ async function testTheDiagnosticsRemedyKnowsAnEditorThatWritesAShortList(): Prom
             `the editor with pid ${editorPid} should have reached the server, or this proves nothing`,
           );
         };
-        const diagnose = async (): Promise<unknown> =>
+        const diagnose = async (server: ServerProcess): Promise<unknown> =>
           parseTextContent(
             await server.request('tools/call', {
               name: 'script_diagnostics',
               arguments: { projectPath: project, scriptPath: 'res://user.gd' },
             }),
           );
+        const unresolved = [{ type: 'Missing', declaredIn: 'res://missing.gd', inTheClassCache: true }];
+        const offersTheRescan = /editor_rescan clears it, measured against a real editor/;
+        const offersTheRestart =
+          /editor_rescan will not clear it here: this editor wrote the class cache from a list shorter than the file on its last scan and writes the same list on every scan, so editor_launch restart is what loads it\./;
 
-        await dialIn(4242);
-        const first = await diagnose();
+        const first = await startServer();
+        await dialIn(first.server, first.port, 4242);
+        const before = await diagnose(first.server);
         assert.deepEqual(
-          get(first, 'typesTheEditorHasNotLoaded'),
-          [{ type: 'Missing', declaredIn: 'res://missing.gd', inTheClassCache: true }],
-          `the class is declared, cached and unresolved: ${JSON.stringify(first)}`,
+          get(before, 'typesTheEditorHasNotLoaded'),
+          unresolved,
+          `the class is declared, cached and unresolved: ${JSON.stringify(before)}`,
         );
         assert.match(
-          text(get(first, 'staleAnalysis')),
-          /editor_rescan clears it, measured against a real editor/,
-          `before any scan has lost anything, the rescan is the remedy: ${JSON.stringify(first)}`,
+          text(get(before, 'staleAnalysis')),
+          offersTheRescan,
+          `before any scan has lost anything, the rescan is the remedy: ${JSON.stringify(before)}`,
         );
 
         const scanned = parseTextContent(
-          await server.request('tools/call', { name: 'editor_rescan', arguments: { projectPath: project } }),
+          await first.server.request('tools/call', {
+            name: 'editor_rescan',
+            arguments: { projectPath: project },
+          }),
         );
         assert.deepEqual(
           asArray(get(scanned, 'cacheLost') ?? []).map(String),
@@ -14496,33 +14511,53 @@ async function testTheDiagnosticsRemedyKnowsAnEditorThatWritesAShortList(): Prom
         );
         writeFileSync(cache, whole);
 
-        const afterLoss = await diagnose();
+        const afterLoss = await diagnose(first.server);
         assert.deepEqual(
           get(afterLoss, 'typesTheEditorHasNotLoaded'),
-          [{ type: 'Missing', declaredIn: 'res://missing.gd', inTheClassCache: true }],
+          unresolved,
           `still declared, cached and unresolved: ${JSON.stringify(afterLoss)}`,
         );
         assert.match(
           text(get(afterLoss, 'staleAnalysis')),
-          /editor_rescan will not clear it here: this editor wrote the class cache from a list shorter than the file on its last scan and writes the same list on every scan, so editor_launch restart is what loads it\./,
+          offersTheRestart,
           `on the editor that lost it, the remedy is the restart: ${JSON.stringify(afterLoss)}`,
+        );
+        assert.equal(
+          readClassNote(project)?.shortListEditorPid,
+          4242,
+          `and the editor is written into the project's note: ${readFileSync(classNotePath(project), 'utf8')}`,
+        );
+
+        // The server is replaced, as at every reconnect, while the same editor stays up: the
+        // replacement has seen no scan and answers from the note.
+        sockets[0]?.close();
+        await first.server.stop();
+        const second = await startServer();
+        await dialIn(second.server, second.port, 4242);
+        const replaced = await diagnose(second.server);
+        assert.match(
+          text(get(replaced, 'staleAnalysis')),
+          offersTheRestart,
+          `a replacement server on the same editor still says restart: ${JSON.stringify(replaced)}`,
         );
 
         // A restarted editor is a new process with a new pid, and starts clean.
-        sockets[0]?.close();
+        sockets[1]?.close();
         await delay(1100);
-        await dialIn(4343);
-        const restarted = await diagnose();
+        await dialIn(second.server, second.port, 4343);
+        const restarted = await diagnose(second.server);
         assert.match(
           text(get(restarted, 'staleAnalysis')),
-          /editor_rescan clears it, measured against a real editor/,
+          offersTheRescan,
           `a restarted editor is offered the rescan again: ${JSON.stringify(restarted)}`,
         );
       } finally {
         for (const socket of sockets) {
           socket.terminate();
         }
-        await server.stop();
+        for (const server of servers) {
+          await server.stop();
+        }
         sweep(project);
       }
     },
