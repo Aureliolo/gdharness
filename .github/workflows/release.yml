@@ -112,27 +112,46 @@ jobs:
             "dist/gdharness-${VERSION}.intoto.jsonl"
           )
 
+          # A draft is a release `gh release create` began and did not finish: it makes the release
+          # as a draft, uploads, then publishes. On 1.0.15 GitHub answered the create with a 500
+          # after making the draft, which stood empty, and the check below read it as a published
+          # release carrying the wrong files. A draft was never public, so it is removed and the
+          # release made again.
+          drop_unfinished_draft() {
+            if [ "$(gh release view "${GITHUB_REF_NAME}" --json isDraft --jq .isDraft 2> /dev/null)" = "true" ]; then
+              echo "${GITHUB_REF_NAME} has a draft left by an unfinished create; removing it."
+              gh release delete "${GITHUB_REF_NAME}" --yes
+            fi
+          }
+
           # A release the tag already carries is taken as done, so the whole run can be re-run
           # after a later job fails. A published release is never rewritten here, so the way to be
           # idempotent about it is to confirm it is already right rather than to write it again,
           # and "already right" means these four files and no others.
           #
           # Half a release is a third answer rather than either of those, and it says which files
-          # are there. `gh release create` uploads after it creates, so a failed upload leaves a
-          # release standing with some of them, and a re-run without this would stop on `release
-          # already exists` and say nothing about what the tag actually carries.
-          if gh release view "${GITHUB_REF_NAME}" > /dev/null 2>&1; then
+          # are there. A re-run without this would stop on `release already exists` and say
+          # nothing about what the tag actually carries.
+          already_released() {
+            if ! gh release view "${GITHUB_REF_NAME}" > /dev/null 2>&1; then
+              return 1
+            fi
             have="$(gh release view "${GITHUB_REF_NAME}" --json assets --jq '.assets[].name' | sort)"
             want="$(printf '%s\n' "${assets[@]##*/}" | sort)"
             if [ "${have}" = "${want}" ]; then
-              echo "${GITHUB_REF_NAME} is already released with all four files; there is nothing to publish."
-              exit 0
+              echo "${GITHUB_REF_NAME} is released with all four files."
+              return 0
             fi
             echo "${GITHUB_REF_NAME} already has a release, and it carries:" >&2
             printf '%s\n' "${have}" >&2
             echo "rather than the four files this job publishes. A published release is not" >&2
             echo "rewritten here, so this needs a person." >&2
             exit 1
+          }
+
+          drop_unfinished_draft
+          if already_released; then
+            exit 0
           fi
 
           # printf rather than a heredoc: an unquoted heredoc runs the backticks in the code
@@ -182,10 +201,26 @@ jobs:
           # of them reach the machine they install onto. Two projects guessed wrong the same way
           # on the same day.
           cat notes/changelog.md >> notes.md
-          gh release create "${GITHUB_REF_NAME}" "${assets[@]}" \
-            --verify-tag \
-            --notes-file notes.md \
-            --title "gdharness ${VERSION}"
+
+          # Asked again after a failure, because the failure seen was GitHub's own 500. What the
+          # failed attempt left is looked at first: a draft is removed, and a release that went
+          # through despite the error is taken as done by the same check as a re-run.
+          for attempt in 1 2 3; do
+            if gh release create "${GITHUB_REF_NAME}" "${assets[@]}" \
+              --verify-tag \
+              --notes-file notes.md \
+              --title "gdharness ${VERSION}"; then
+              exit 0
+            fi
+            drop_unfinished_draft
+            if already_released; then
+              exit 0
+            fi
+            echo "Creating the release failed on attempt ${attempt}." >&2
+            sleep 15
+          done
+          echo "The release could not be created in three attempts." >&2
+          exit 1
 
   # npm is how every harness actually installs a server: each one's config is some spelling of
   # `npx -y gdharness@VERSION`. The archive published here is the one the attest job signed, so
