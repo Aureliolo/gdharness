@@ -47,6 +47,7 @@ import {
   classesNamedIn,
   contradictedDiagnostics,
   declaredClasses,
+  declaredSince,
   heldButGone,
   missingMemberIn,
   staleAnalysisNote,
@@ -5974,6 +5975,7 @@ class GodotServer {
    */
   private async rebuildClassCache(projectPath: string): Promise<HeadlessOutcome> {
     const before = cachedClasses(projectPath);
+    const writtenBefore = cacheWrittenAt(projectPath);
     const noted = readClassNote(projectPath);
     const rebuilt = await this.operation('refresh_class_cache', {}, projectPath);
     if (!rebuilt.ok) {
@@ -5987,7 +5989,9 @@ class GodotServer {
       noted === null || before === null
         ? []
         : noted.rebuiltWith.filter((name) => !before.has(name) && after.has(name)).sort();
-    const seenLosing = lost.length > 0 && this.godotBridge.isConnected();
+    const cameBack = writtenBefore === null ? [] : declaredSince(projectPath, after, lost, writtenBefore);
+    const droppedByTheEditor = lost.filter((name) => !cameBack.includes(name));
+    const seenLosing = droppedByTheEditor.length > 0 && this.godotBridge.isConnected();
     writeClassNote(projectPath, {
       rebuiltWith: [...after.keys()].sort(),
       ...(seenLosing
@@ -5996,16 +6000,27 @@ class GodotServer {
           ? {}
           : { shortListEditorPid: noted.shortListEditorPid }),
     });
-    if (!seenLosing) {
+    const notes: string[] = [];
+    if (seenLosing) {
+      const them = droppedByTheEditor.length === 1 ? 'it' : 'them';
+      notes.push(
+        `The cache held ${droppedByTheEditor.join(', ')} after the last rebuild and not when this one began, so the editor holding this project wrote it without ${them} in between: it holds a list shorter than the files and writes that list on every save and scan, and each rebuild puts ${them} back. editor_launch restart is what ends it.`,
+      );
+    }
+    if (cameBack.length > 0) {
+      notes.push(
+        `${cameBack.join(', ')} left the cache while ${cameBack.length === 1 ? 'its script was' : 'their scripts were'} gone: the script${cameBack.length === 1 ? ' is' : 's are'} newer than the cache the editor last wrote, so it listed what was on disk then. editor_rescan picks ${cameBack.length === 1 ? 'it' : 'them'} up.`,
+      );
+    }
+    if (notes.length === 0) {
       return rebuilt;
     }
-    const them = lost.length === 1 ? 'it' : 'them';
     return {
       ...rebuilt,
       payload: {
         ...rebuilt.payload,
         lostSinceLastRebuild: lost,
-        note: `The cache held ${lost.join(', ')} after the last rebuild and not when this one began, so the editor holding this project wrote it without ${them} in between: it holds a list shorter than the files and writes that list on every save and scan, and each rebuild puts ${them} back. editor_launch restart is what ends it.`,
+        note: notes.join(' '),
       },
     };
   }

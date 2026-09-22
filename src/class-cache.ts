@@ -379,6 +379,34 @@ export function cacheWrittenAt(projectPath: string): number | null {
 }
 
 /**
+ * Which of [param names] are declared by a script written after [param since].
+ *
+ * A class the cache lost is the editor's doing only if its file was there when the editor wrote
+ * the cache. A file taken away and put back (a stash, a checkout, a move) is written fresh, so it
+ * is newer than a cache the editor wrote while it was gone: that editor listed what was on disk,
+ * and a rescan picks the class up as it does any class that has appeared. Read as a short list,
+ * it sent a caller to a restart the rescan made unnecessary.
+ */
+export function declaredSince(
+  projectPath: string,
+  paths: ReadonlyMap<string, string>,
+  names: readonly string[],
+  since: number,
+): string[] {
+  return names.filter((name) => {
+    const path = paths.get(name);
+    if (path === undefined || !path.startsWith('res://')) {
+      return false;
+    }
+    try {
+      return statSync(join(projectPath, path.slice('res://'.length))).mtimeMs > since;
+    } catch {
+      return false;
+    }
+  });
+}
+
+/**
  * The classes a cache records at a path that is not on disk, by name.
  *
  * The one invariant a cache can be held to without asking anybody: every entry names a file. An
