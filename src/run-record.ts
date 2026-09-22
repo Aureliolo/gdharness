@@ -24,6 +24,7 @@
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
+import { POWERSHELL_UTF8 } from './process-children.js';
 import { runtimeDirectories, runtimeDirectory } from './runtime-client.js';
 
 /** What a run leaves behind so another server can find it. */
@@ -346,7 +347,7 @@ function windowsCommandLine(pid: number): string | null {
         '-NoProfile',
         '-NonInteractive',
         '-Command',
-        `$p = Get-CimInstance Win32_Process -Filter "ProcessId=${pid}"; if ($p) { $p.CreationDate.ToUniversalTime().ToString("o"); $p.CommandLine }`,
+        `${POWERSHELL_UTF8}$p = Get-CimInstance Win32_Process -Filter "ProcessId=${pid}"; if ($p) { $p.CreationDate.ToUniversalTime().ToString("o"); $p.CommandLine }`,
       ],
       { encoding: 'utf8', timeout: 15_000, windowsHide: true },
     ).trim();

@@ -5,6 +5,15 @@ import { promisify } from 'node:util';
 const run = promisify(execFile);
 
 /**
+ * What every PowerShell command that prints text begins with. Windows PowerShell writes a pipe
+ * in the console's code page, so a command line with a character outside ASCII arrived here, read
+ * as UTF-8, with that character replaced: `Müller` read as `M�ller`, and no comparison against
+ * the project path or the engine path could match it. Measured on this machine, where a process
+ * carries a 0x81 in its command line right now.
+ */
+export const POWERSHELL_UTF8 = '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; ';
+
+/**
  * When each of [param pids] started, as milliseconds, for the ones the platform will say.
  *
  * One question for all of them, because the Windows answer is an interpreter start of half a
@@ -297,7 +306,7 @@ async function askWindows(): Promise<string> {
       '-Command',
       // The start beside the parent link, because the link alone is not to be believed on
       // Windows: see `linked`. Zero for the few processes the system will not date.
-      'Get-CimInstance Win32_Process | ForEach-Object { $began = 0; if ($_.CreationDate) { $began = ([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds() }; "$($_.ProcessId) $($_.ParentProcessId) $began $($_.CommandLine)" }',
+      `${POWERSHELL_UTF8}Get-CimInstance Win32_Process | ForEach-Object { $began = 0; if ($_.CreationDate) { $began = ([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds() }; "$($_.ProcessId) $($_.ParentProcessId) $began $($_.CommandLine)" }`,
     ],
     { timeout: ASK_TIMEOUT_MS, windowsHide: true, maxBuffer: 16 * 1024 * 1024 },
   );
