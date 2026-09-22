@@ -190,6 +190,17 @@ export class GameLog {
   }
 
   /**
+   * Every entry, for a reader that groups rather than filters.
+   *
+   * Apart from `select` because it marks nothing seen and admits everything: a burst is found by
+   * what the whole log holds, and the line that explains one is usually an ordinary print that
+   * any severity floor above info would have dropped.
+   */
+  everything(): readonly LogEntry[] {
+    return this.entries;
+  }
+
+  /**
    * Entries at or above a severity, optionally only those since the last time this was asked
    * and only those mentioning a phrase, and at most `limit` of the newest.
    *

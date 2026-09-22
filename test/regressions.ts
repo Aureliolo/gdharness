@@ -52,6 +52,15 @@ import {
 import { classNotePath, readClassNote } from '../src/class-note.js';
 import { GodotDAPClient, type HeldBreakpoint, handleDAPTool } from '../src/dap_client.js';
 import { dictionary, emptyRecord } from '../src/dictionary.js';
+import {
+  bursts,
+  clearEditorLog,
+  editorConsole,
+  editorLogPath,
+  shapeOf,
+  theConsoleWasNotCaptured,
+  writeEditorLogNote,
+} from '../src/editor-log.js';
 import { forAnswer, GameLog, type LogEntry } from '../src/game-log.js';
 import {
   anEditorIsStillComing,
@@ -2579,6 +2588,24 @@ async function testAnArgumentMeantForAnotherOpIsRefused(): Promise<void> {
       'while the argument start does read reaches the project check',
     );
 
+    // The editor's console is read off disk on every call, so there is no mark to be since and no
+    // process to ask for processor time. Both would have been accepted and ignored.
+    assert.match(
+      await call('editor_output', { op: 'editor', sinceLastCall: true }),
+      /editor_output editor does not take sinceLastCall/,
+      'a mark the editor console cannot keep is refused rather than ignored',
+    );
+    assert.match(
+      await call('editor_output', { op: 'editor', cpu: true }),
+      /editor takes: severity, contains, limit, before/,
+      'and the refusal says what the editor op does take',
+    );
+    assert.match(
+      await call('editor_output', { op: 'run', before: 3 }),
+      /editor_output run does not take before/,
+      'and the grouping argument is refused on the run the other way round',
+    );
+
     // One rule across the editor_* family, and it is not "all or none": an op takes projectPath
     // where it is being told which project, and does not where it is about the editor or the run
     // already in hand. Getting that boundary wrong cost a downstream session two calls, one in
@@ -4276,6 +4303,404 @@ function testAnAnnouncementBeingWrittenIsNotSwept(): void {
   }
 }
 
+/**
+ * A wall of one message collapses to a count, what varied in it, and the line above it.
+ *
+ * The case is a project downstream whose editor printed hundreds of `Could not parse global class`
+ * lines at startup. Everything gdharness could see said the project was fine, because everything
+ * gdharness could see was something other than the editor's console, and the owner had to read the
+ * window and paste it.
+ *
+ * Two shapes rather than one is the answer their wall wants: a class whose script would not parse
+ * and a class whose name resolved to nothing mean different things, so the normalisation is
+ * deliberately conservative about what it collapses.
+ *
+ * What a severity filter would have thrown away is the line the diagnosis rested on. The errors
+ * began immediately after a plugin announced itself, which is an info line, so the context is
+ * carried with the group and is found by walking back past the burst rather than by counting
+ * lines: a fixed three would have missed it the moment the wall was four lines long.
+ */
+function testAWallOfOneMessageCollapsesToItsShape(): void {
+  const shaped = shapeOf('Parse Error: Could not parse global class "Run" from "res://core/run.gd"');
+  assert.equal(shaped.shape, 'Parse Error: Could not parse global class … from …');
+  assert.deepEqual(shaped.values, ['"Run"', '"res://core/run.gd"']);
+  const located = shapeOf('res://tests/pieces_test.gd:26 - Parse Error');
+  assert.equal(located.shape, '… - Parse Error', 'a path and the line on it are one slot');
+  assert.deepEqual(located.values, ['res://tests/pieces_test.gd:26']);
+
+  // The whole line the engine prints, which is a location and then the message. Three placeholders
+  // and three values in the order they stand in the line: taken a pattern at a time the two quoted
+  // values came back first and the location last, so the file an error was found in would have
+  // been read as the script that would not parse.
+  const wholeLine = shapeOf(
+    'res://tests/pieces_test.gd:26 - Parse Error: Could not parse global class "Run" from "res://core/run.gd"',
+  );
+  assert.equal(wholeLine.shape, '… - Parse Error: Could not parse global class … from …');
+  assert.deepEqual(wholeLine.values, ['res://tests/pieces_test.gd:26', '"Run"', '"res://core/run.gd"']);
+
+  const log = new GameLog();
+  const classes = ['Run', 'Encounter', 'Component', 'Run', 'Encounter'];
+  log.append(
+    'transcript',
+    [
+      'Godot Engine v4.7.2.stable.official',
+      'Loading GdUnit4 Plugin success',
+      ...classes.map(
+        (name, at) =>
+          `ERROR: Parse Error: Could not parse global class "${name}" from "res://core/file${at}.gd"`,
+      ),
+      'ERROR: Could not find script for class "Missing"',
+      'ERROR: Could not find script for class "Absent"',
+      '',
+    ].join('\n'),
+  );
+  log.finish();
+  const groups = bursts(log.everything(), 3);
+  assert.equal(groups.length, 2, `two shapes, not one and not seven: ${JSON.stringify(groups)}`);
+
+  const wall = groups[0];
+  assert.ok(wall !== undefined);
+  assert.equal(wall.count, 5, JSON.stringify(wall));
+  assert.equal(wall.shape, 'Parse Error: Could not parse global class … from …');
+  assert.equal(wall.severity, 'error');
+  assert.match(wall.first.text, /"Run" from "res:\/\/core\/file0\.gd"/, JSON.stringify(wall));
+
+  // The slot that says something and the slot that says nothing, told apart. Three names across
+  // five lines is the finding; five different paths across five lines is the count again.
+  assert.deepEqual(wall.slots[0], { distinct: 3, some: ['"Run"', '"Encounter"', '"Component"'] });
+  assert.deepEqual(wall.slots[1], { distinct: 5, allDifferent: true });
+
+  // The plugin line, which is info and sits above a burst five lines long.
+  assert.deepEqual(
+    wall.before,
+    ['Godot Engine v4.7.2.stable.official', 'Loading GdUnit4 Plugin success'],
+    `the ordinary lines above the wall come with it: ${JSON.stringify(wall)}`,
+  );
+
+  const other = groups[1];
+  assert.ok(other !== undefined);
+  assert.equal(other.count, 2, JSON.stringify(other));
+  assert.equal(other.shape, 'Could not find script for class …');
+  assert.deepEqual(
+    other.before,
+    ['Godot Engine v4.7.2.stable.official', 'Loading GdUnit4 Plugin success'],
+    'and the walk back past the first burst finds the same two rather than five error lines',
+  );
+
+  // A line printed once is not a burst: it is already in the entries, and a group of one would be
+  // the same line said twice in one answer.
+  const once = new GameLog();
+  once.append('transcript', 'ERROR: something happened\nsomething else\n');
+  once.finish();
+  assert.deepEqual(bursts(once.everything(), 3), []);
+
+  // Two slots that go one for one, which is the sentence a reader is trying to arrive at: every
+  // name that would not resolve belongs to one directory and every file it is named in belongs to
+  // another. Two slots each reading "three distinct" leaves that to be guessed.
+  const paired = new GameLog();
+  paired.append(
+    'transcript',
+    ['Run', 'Encounter', 'Component', 'Run']
+      .map(
+        (name, at) =>
+          `ERROR: res://tests/suite${at}.gd:${at + 4} - Could not parse global class "${name}" from "res://core/${name.toLowerCase()}.gd"`,
+      )
+      .join('\n'),
+  );
+  paired.finish();
+  const together = bursts(paired.everything(), 3)[0];
+  assert.ok(together !== undefined);
+  const [where, named, script] = together.slots;
+  assert.ok(where !== undefined && named !== undefined && script !== undefined);
+  assert.equal(where.allDifferent, true, 'the location is a different one every time');
+  assert.equal(named.distinct, 3, JSON.stringify(together.slots));
+  assert.equal(script.distinct, 3, JSON.stringify(together.slots));
+  assert.equal(script.movesWith, 1, `the path follows the name: ${JSON.stringify(together.slots)}`);
+  assert.equal(named.movesWith, undefined, 'and the first of a pair is not said to follow');
+
+  // Two slots of the same size that do not go one for one, which is what tells this apart from
+  // counting. Without a case like it, equal counts and a correspondence are the same thing here
+  // and the check agrees whatever it does.
+  const crossed = new GameLog();
+  crossed.append(
+    'transcript',
+    [
+      ['Alpha', 'one'],
+      ['Alpha', 'two'],
+      ['Beta', 'one'],
+      ['Beta', 'two'],
+    ]
+      .map(([name, part]) => `ERROR: class "${name}" needs "${part}"`)
+      .join('\n'),
+  );
+  crossed.finish();
+  const independent = bursts(crossed.everything(), 3)[0];
+  assert.ok(independent !== undefined);
+  const [first, second] = independent.slots;
+  assert.ok(first !== undefined && second !== undefined);
+  assert.equal(first.distinct, 2, JSON.stringify(independent.slots));
+  assert.equal(second.distinct, 2, JSON.stringify(independent.slots));
+  assert.equal(
+    second.movesWith,
+    undefined,
+    `two of each that vary independently are not a correspondence: ${JSON.stringify(independent.slots)}`,
+  );
+
+  // Biggest first, which is what makes capping the list in the answer safe: the answer keeps the
+  // largest twenty groups, and a console with more kinds of repeated warning than that drops the
+  // smallest, which are the ones already visible among the entries.
+  const crowd = new GameLog();
+  const said: string[] = [];
+  for (let kind = 0; kind < 25; kind += 1) {
+    for (let again = 0; again <= kind; again += 1) {
+      said.push(`WARNING: kind ${kind} said "${again}"`);
+    }
+  }
+  crowd.append('transcript', `${said.join('\n')}\n`);
+  crowd.finish();
+  const counts = bursts(crowd.everything(), 3).map((group) => group.count);
+  assert.equal(counts.length, 24, `a shape said once is no group: ${counts.join(', ')}`);
+  assert.deepEqual(
+    counts,
+    [...counts].sort((one, other) => other - one),
+    `groups come biggest first: ${counts.join(', ')}`,
+  );
+}
+
+/**
+ * There is no console to read, said three different ways.
+ *
+ * An empty answer is the one thing this must never give, because an editor that printed nothing
+ * and an editor nobody captured look identical from the outside, and the project this was built
+ * for would have read the first as the wall having gone away.
+ */
+function testAnUncapturedConsoleSaysWhichEditorItIs(): void {
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-console-'));
+  try {
+    const byHand = editorConsole(project, 4242, false);
+    assert.ok('kind' in byHand && byHand.kind === 'not ours', JSON.stringify(byHand));
+    assert.match(
+      theConsoleWasNotCaptured(byHand, project),
+      /not opened by gdharness.*not an editor that printed nothing/s,
+      'an editor somebody opened is named as that rather than answered empty',
+    );
+
+    // Opened by a server, with no note: a server from before consoles were captured leaves this,
+    // and so does one whose project could not be written into.
+    const older = editorConsole(project, 4242, true);
+    assert.ok('kind' in older && older.kind === 'older server', JSON.stringify(older));
+
+    // A note for a different editor, which is last night's log sitting beside this morning's
+    // editor: the one way this could answer with somebody else's output.
+    writeEditorLogNote(project, 111);
+    writeFileSync(editorLogPath(project), 'ERROR: from the editor that has gone\n');
+    const stale = editorConsole(project, 4242, true);
+    assert.ok('kind' in stale && stale.kind === 'older server', JSON.stringify(stale));
+    assert.match(
+      theConsoleWasNotCaptured(stale, project),
+      /belongs to editor 111 rather than to this one/,
+      'and it names the editor whose output that file is',
+    );
+
+    // The same note, the editor it names, and the log it was written for.
+    writeEditorLogNote(project, 4242);
+    writeFileSync(
+      editorLogPath(project),
+      'Godot Engine v4.7.2.stable.official\nERROR: Parse Error: something\n',
+    );
+    const ours = editorConsole(project, 4242, true);
+    assert.ok(!('kind' in ours), `the editor named by the note is read: ${JSON.stringify(ours)}`);
+    if (!('kind' in ours)) {
+      assert.equal(ours.log.count('error'), 1, 'the severity comes off the headline as it does for a game');
+      assert.equal(ours.log.everything().length, 2);
+      assert.equal(ours.path, editorLogPath(project));
+      assert.equal(ours.of, undefined, 'a console read whole says nothing about how much of it was read');
+    }
+
+    // An editor left open for days printing warnings writes a file with no bound on it, and
+    // reading one whole is this server allocating it. The start is kept, because the session from
+    // the editor's first line is what this promises, and the cut lands on a line boundary so the
+    // last entry is not half a line reported as a whole one.
+    const line = `WARNING: this editor has been open a long time ${'x'.repeat(200)}\n`;
+    writeFileSync(editorLogPath(project), line.repeat(60_000));
+    const huge = editorConsole(project, 4242, true);
+    assert.ok(!('kind' in huge), JSON.stringify(huge));
+    if (!('kind' in huge)) {
+      assert.equal(huge.of, line.length * 60_000, 'the whole size is reported');
+      assert.ok(
+        huge.readBytes !== undefined && huge.readBytes <= 8 * 1024 * 1024,
+        `and no more than the cap was read: ${huge.readBytes}`,
+      );
+      const last = huge.log.everything().at(-1);
+      assert.ok(last !== undefined);
+      assert.equal(last.severity, 'warning', JSON.stringify(last));
+      assert.equal(
+        last.text,
+        line.trimEnd().replace('WARNING: ', ''),
+        `the last entry is a whole line rather than half of one: ${JSON.stringify(last)}`,
+      );
+    }
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * A real editor writes its console where this server reads it, through the argv the server builds.
+ *
+ * The chain nothing else can check. The functions above are told what the file holds; this asks an
+ * engine to write one. `--log-file` on an editor is the whole mechanism, and it is a claim about
+ * Godot rather than about this code: measured here so that an engine which stopped honouring it,
+ * or an argv that stopped passing it, fails on the case built for it rather than as an empty
+ * console somebody reads as a quiet editor.
+ *
+ * Headless, because this is about what the editor prints and not about what it shows, and through
+ * `editorArguments` rather than a list written out here, since an argv written twice is an argv
+ * that can differ from the one the server spawns.
+ *
+ * The project carries an editor plugin that prints on load. The engine's own first line would pass
+ * on any engine start at all, including one that never became an editor.
+ */
+async function testAnEditorWritesItsConsoleWhereTheServerLooks(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('editor console regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-editor-console-'));
+  try {
+    const addon = join(project, 'addons', 'console_probe');
+    mkdirSync(addon, { recursive: true });
+    writeFileSync(
+      join(project, 'project.godot'),
+      [
+        '; Engine configuration file.',
+        'config_version=5',
+        '',
+        '[application]',
+        'config/name="ConsoleProbe"',
+        '',
+        '[editor_plugins]',
+        'enabled=PackedStringArray("res://addons/console_probe/plugin.cfg", "res://addons/wont_parse/plugin.cfg")',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(addon, 'plugin.cfg'),
+      '[plugin]\nname="Console Probe"\ndescription=""\nauthor=""\nversion="1.0"\nscript="plugin.gd"\n',
+    );
+    writeFileSync(
+      join(addon, 'plugin.gd'),
+      [
+        '@tool',
+        'extends EditorPlugin',
+        '',
+        'func _enter_tree() -> void:',
+        '\tprint("CONSOLE PROBE loaded")',
+        '\tpush_error(\'Could not parse global class "Alpha"\')',
+        '\tpush_error(\'Could not parse global class "Beta"\')',
+        '',
+      ].join('\n'),
+    );
+
+    // A second plugin that will not load, so the engine's own parse errors are in the console
+    // beside the raised ones. Those are the lines this exists for and they are not push_error:
+    // they arrive as `SCRIPT ERROR: Parse Error: ...` with an indented `at:` line under them, and
+    // a parser that read the headline as ordinary text would give a wall back as a few info
+    // entries with no symptom saying so.
+    const broken = join(project, 'addons', 'wont_parse');
+    mkdirSync(broken, { recursive: true });
+    mkdirSync(join(project, 'core'), { recursive: true });
+    writeFileSync(
+      join(project, 'core', 'run.gd'),
+      'extends RefCounted\nclass_name ConsoleProbeRun\n\nfunc broken() -> void:\n\tthis is not gdscript\n',
+    );
+    writeFileSync(
+      join(broken, 'plugin.cfg'),
+      '[plugin]\nname="Will Not Parse"\ndescription=""\nauthor=""\nversion="1.0"\nscript="plugin.gd"\n',
+    );
+    writeFileSync(
+      join(broken, 'plugin.gd'),
+      '@tool\nextends EditorPlugin\n\nconst Run = preload("res://core/run.gd")\n',
+    );
+
+    clearEditorLog(project);
+    const editor = spawn(
+      godotPath,
+      [
+        ...editorArguments(project, { lsp: 0, dap: 0 }, editorLogPath(project)),
+        '--headless',
+        '--quit-after',
+        '2000',
+      ],
+      { stdio: 'ignore' },
+    );
+    const pid = editor.pid ?? 0;
+    assert.ok(pid > 0, 'the editor has a process id to write a note about');
+    writeEditorLogNote(project, pid);
+    await new Promise<void>((done) => {
+      editor.once('exit', () => {
+        done();
+      });
+    });
+
+    const console_ = editorConsole(project, pid, true);
+    assert.ok(!('kind' in console_), `the editor's console should be readable: ${JSON.stringify(console_)}`);
+    if ('kind' in console_) {
+      return;
+    }
+    const printed = console_.log.everything();
+    const texts = printed.map((entry) => entry.text);
+    assert.ok(
+      texts.some((line) => line.startsWith('Godot Engine v')),
+      `it is an engine console: ${texts.slice(0, 5).join(' | ')}`,
+    );
+    assert.ok(
+      texts.includes('CONSOLE PROBE loaded'),
+      `an editor plugin's print reaches it, so it is an editor's console: ${texts.join(' | ')}`,
+    );
+    assert.ok(
+      console_.log.count('error') >= 3,
+      `push_error and the engine's own errors both arrive with their severity: ${JSON.stringify(forAnswer(printed))}`,
+    );
+
+    // The engine's own parse error, which is the line this whole route exists for and is not one
+    // the fixture raised. Its headline is flush left and the `at:` under it is indented, so the
+    // parser takes the headline as the error and the location as its detail. Asserted because a
+    // headline read as ordinary text has no symptom: the wall comes back as a few info entries
+    // and a reader sees a quiet console.
+    const parseError = printed.find((entry) => entry.text.startsWith('Parse Error: '));
+    assert.ok(parseError !== undefined, `the engine reports the unparsable script: ${texts.join(' | ')}`);
+    assert.equal(parseError.severity, 'error', JSON.stringify(parseError));
+    assert.ok(
+      parseError.detail.some((line) => line.startsWith('at: ')),
+      `with its location folded under it rather than standing as its own entry: ${JSON.stringify(parseError)}`,
+    );
+
+    // The two errors differ only by a quoted name, which is the shape the whole grouping exists
+    // for, and the plugin's own print is the ordinary line above them.
+    const groups = bursts(printed, 3);
+    const wall = groups.find((group) => group.shape.includes('Could not parse global class'));
+    assert.ok(wall !== undefined, `the two errors are one shape: ${JSON.stringify(groups)}`);
+    assert.equal(wall.count, 2, JSON.stringify(wall));
+    assert.deepEqual(wall.slots[0], { distinct: 2, allDifferent: true }, JSON.stringify(wall));
+    assert.ok(
+      wall.before.includes('CONSOLE PROBE loaded'),
+      `with the line above the burst: ${JSON.stringify(wall)}`,
+    );
+
+    // The same file read as another editor's is refused rather than handed over, which is the one
+    // way this could answer with output that is not the connected editor's.
+    const asAnother = editorConsole(project, pid + 1, true);
+    assert.ok('kind' in asAnother && asAnother.kind === 'older server', JSON.stringify(asAnother));
+  } finally {
+    sweep(project);
+  }
+}
+
 function testAGameTooNewToTalkToIsStillAGame(): void {
   const root = mkdtempSync(join(tmpdir(), 'gdharness-unspoken-'));
   try {
@@ -5241,7 +5666,7 @@ function testTheCureIsWrittenWhole(): void {
   ];
   // What the tree holds today and not a comfortable minimum, so one place going quiet lowers this
   // in the same change and somebody confirms it was meant.
-  assert.equal(offered.length, 27, `the places offering a remedy should all be found, not ${offered.length}`);
+  assert.equal(offered.length, 28, `the places offering a remedy should all be found, not ${offered.length}`);
 
   // Across whitespace, because a rendered file wraps where the source did not and a sentence that
   // breaks at "the" is the same sentence. Change, edit and touch, because the claim is about what
@@ -5828,8 +6253,10 @@ function testRunArgumentsLeaveTheLocalDebuggerOff(): void {
   // editor_launch spawns detached with its output dropped, so the only thing that can be
   // asserted about it is the argv, and the only thing that can go wrong quietly is the argv.
   // The two ports are named on it because Godot keeps one language server and one debug adapter
-  // per machine rather than per editor, and the second editor open otherwise binds neither.
-  assert.deepEqual(editorArguments('/p', { lsp: 6005, dap: 6006 }), [
+  // per machine rather than per editor, and the second editor open otherwise binds neither. The
+  // log file is the only way anything reads what an editor prints, since its console reaches no
+  // plugin: an editor spawned without it is one whose startup nobody can see.
+  assert.deepEqual(editorArguments('/p', { lsp: 6005, dap: 6006 }, '/p/.godot/gdharness-editor.log'), [
     '-e',
     '--path',
     '/p',
@@ -5837,6 +6264,8 @@ function testRunArgumentsLeaveTheLocalDebuggerOff(): void {
     '6005',
     '--dap-port',
     '6006',
+    '--log-file',
+    '/p/.godot/gdharness-editor.log',
   ]);
   // The scene as a res:// path and last: the engine reads it positionally, so text beginning
   // with a dash would otherwise be another option to it.
@@ -15339,6 +15768,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheStaleHalfIsNamedCorrectly,
   testAGameIsFoundWhereverItAnnounced,
   testAGameTooNewToTalkToIsStillAGame,
+  testAWallOfOneMessageCollapsesToItsShape,
+  testAnUncapturedConsoleSaysWhichEditorItIs,
+  testAnEditorWritesItsConsoleWhereTheServerLooks,
   testAnErrorReportOutlivesItsGameForAnHour,
   testAPidPicksOneOfSeveralGames,
   testAGameThatAnnouncedAndWentIsSaidSo,
