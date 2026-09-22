@@ -105,6 +105,36 @@ jobs:
           VERSION: ${{ needs.build.outputs.version }}
         run: |
           set -euo pipefail
+          assets=(
+            "dist/gdharness-${VERSION}.tgz"
+            "dist/gdharness-${VERSION}.tgz.sha256"
+            "dist/gdharness-${VERSION}.spdx.json"
+            "dist/gdharness-${VERSION}.intoto.jsonl"
+          )
+
+          # A release the tag already carries is taken as done, so the whole run can be re-run
+          # after a later job fails. A published release is never rewritten here, so the way to be
+          # idempotent about it is to confirm it is already right rather than to write it again,
+          # and "already right" means these four files and no others.
+          #
+          # Half a release is a third answer rather than either of those, and it says which files
+          # are there. `gh release create` uploads after it creates, so a failed upload leaves a
+          # release standing with some of them, and a re-run without this would stop on `release
+          # already exists` and say nothing about what the tag actually carries.
+          if gh release view "${GITHUB_REF_NAME}" > /dev/null 2>&1; then
+            have="$(gh release view "${GITHUB_REF_NAME}" --json assets --jq '.assets[].name' | sort)"
+            want="$(printf '%s\n' "${assets[@]##*/}" | sort)"
+            if [ "${have}" = "${want}" ]; then
+              echo "${GITHUB_REF_NAME} is already released with all four files; there is nothing to publish."
+              exit 0
+            fi
+            echo "${GITHUB_REF_NAME} already has a release, and it carries:" >&2
+            printf '%s\n' "${have}" >&2
+            echo "rather than the four files this job publishes. A published release is not" >&2
+            echo "rewritten here, so this needs a person." >&2
+            exit 1
+          fi
+
           # printf rather than a heredoc: an unquoted heredoc runs the backticks in the code
           # fences as commands, and a quoted one cannot see VERSION. Single quotes keep the
           # fences literal, double quotes take the version.
@@ -152,11 +182,7 @@ jobs:
           # of them reach the machine they install onto. Two projects guessed wrong the same way
           # on the same day.
           cat notes/changelog.md >> notes.md
-          gh release create "${GITHUB_REF_NAME}" \
-            "dist/gdharness-${VERSION}.tgz" \
-            "dist/gdharness-${VERSION}.tgz.sha256" \
-            "dist/gdharness-${VERSION}.spdx.json" \
-            "dist/gdharness-${VERSION}.intoto.jsonl" \
+          gh release create "${GITHUB_REF_NAME}" "${assets[@]}" \
             --verify-tag \
             --notes-file notes.md \
             --title "gdharness ${VERSION}"
@@ -263,24 +289,28 @@ jobs:
   served:
     name: npm serves what was signed
     if: github.repository == 'Aureliolo/gdharness'
-    needs: [build, npm]
+    needs: [build, publish, npm]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    permissions:
+      contents: read # Reads the checksum off the release, which is the record of what shipped.
 
     steps:
-      - name: Download the bundle
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: release-bundle
-          path: dist
-
       - name: The published tarball is the archive that was signed
         shell: bash
         env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           VERSION: ${{ needs.build.outputs.version }}
         run: |
           set -euo pipefail
-          expected="$(cut -d' ' -f1 < "dist/gdharness-${VERSION}.tgz.sha256")"
+          # Taken off the release rather than out of this run's build artifact. The release is the
+          # record of what shipped and is never rewritten, so this compares npm against the bytes
+          # that were published. Against a rebuild it would compare npm against whatever this run
+          # produced, which is the same thing only if the archive packs byte for byte identically
+          # every time, and that is a property of `bun pm pack` nothing here asserts.
+          gh release download "${GITHUB_REF_NAME}" --pattern "gdharness-${VERSION}.tgz.sha256" --dir .
+          expected="$(cut -d' ' -f1 < "gdharness-${VERSION}.tgz.sha256")"
 
           # The registry takes a moment to serve a version it has just accepted, and a first
           # publish takes longer still: this answered 404 for gdharness@0.4.1 seconds after
