@@ -5020,7 +5020,7 @@ function testTheCureIsWrittenWhole(): void {
   ];
   // What the tree holds today and not a comfortable minimum, so one place going quiet lowers this
   // in the same change and somebody confirms it was meant.
-  assert.equal(offered.length, 26, `the places offering a remedy should all be found, not ${offered.length}`);
+  assert.equal(offered.length, 27, `the places offering a remedy should all be found, not ${offered.length}`);
 
   // Across whitespace, because a rendered file wraps where the source did not and a sentence that
   // breaks at "the" is the same sentence. Change, edit and touch, because the claim is about what
@@ -9244,16 +9244,18 @@ async function testAnInjectedMotionCarriesHowFarThePointerMoved(): Promise<void>
           ? { ok: true, playing: false, scenePath: '', debugPort: adapter }
           : { ok: true },
     async ({ server, project, runtimeDir }) => {
+      // Every motion, with where it landed: a windowed run on a desk has a real pointer, and a
+      // motion of its own from that pointer arriving after an injected one is what a reading of
+      // "the last motion" was measuring once. Each reading below is of the last motion at the
+      // point the injection named, which no pointer resting in a new window lands on.
       writeFileSync(
         join(project, 'main.gd'),
-        'extends Node\n\nvar last_relative: Vector2 = Vector2.ZERO\nvar last_mask: int = 0\n' +
-          'var last_button_mask: int = 0\nvar arrived: Array[Vector2] = []\n\n\n' +
+        'extends Node\n\nvar last_button_mask: int = 0\nvar motions: Array[Dictionary] = []\n\n\n' +
           'func _input(event: InputEvent) -> void:\n' +
           '\tif event is InputEventMouseMotion:\n' +
           '\t\tvar motion: InputEventMouseMotion = event\n' +
-          '\t\tlast_relative = motion.relative\n' +
-          '\t\tlast_mask = motion.button_mask\n' +
-          '\t\tarrived.append(motion.position)\n' +
+          '\t\tmotions.append({"x": motion.position.x, "y": motion.position.y, ' +
+          '"rx": motion.relative.x, "ry": motion.relative.y, "mask": motion.button_mask})\n' +
           '\tif event is InputEventMouseButton:\n' +
           '\t\tvar button: InputEventMouseButton = event\n' +
           '\t\tlast_button_mask = button.button_mask\n',
@@ -9301,9 +9303,14 @@ async function testAnInjectedMotionCarriesHowFarThePointerMoved(): Promise<void>
           );
         const read = async (property: string): Promise<unknown> =>
           get(await call('runtime_inspect', { op: 'property', nodePath: '/root/Main', property }), 'value');
-        const lastRelative = async (): Promise<[unknown, unknown]> => {
-          const value = await read('last_relative');
-          return [get(value, 'x'), get(value, 'y')];
+        // The last motion the game saw at a point, which is the injected one: named by position
+        // rather than taken as the latest, since a real pointer resting inside a new window is a
+        // motion of its own on a desk and on the Windows runner, and it lands nowhere named here.
+        const motionAt = async (x: number, y: number): Promise<{ relative: unknown[]; mask: unknown }> => {
+          const seen = asArray(await read('motions'));
+          const last = seen.filter((motion) => get(motion, 'x') === x && get(motion, 'y') === y).at(-1);
+          assert.ok(last !== undefined, `a motion reached the game at ${x},${y}: ${JSON.stringify(seen)}`);
+          return { relative: [get(last, 'rx'), get(last, 'ry')], mask: get(last, 'mask') };
         };
         // The first motion has nowhere to have come from, wherever the real pointer sits.
         const first = await call('runtime_input', { op: 'mouse_motion', x: 10, y: 10 });
@@ -9319,20 +9326,14 @@ async function testAnInjectedMotionCarriesHowFarThePointerMoved(): Promise<void>
           `the motion says how far the pointer moved: ${JSON.stringify(moved)}`,
         );
         await call('runtime_wait', { op: 'frames', frames: 2 });
-        assert.deepEqual(await lastRelative(), [30, 20], 'and the game read the same distance off the event');
-        // Both injected motions reached the game at the points they were sent to. Named by
-        // position rather than counted, since a real pointer resting inside a new window is a
-        // motion of its own on the Windows runner, and a count would be about that as well.
-        const arrived = asArray(await read('arrived')).map((point) => [get(point, 'x'), get(point, 'y')]);
-        for (const point of [
-          [10, 10],
-          [40, 30],
-        ]) {
-          assert.ok(
-            arrived.some((at) => at[0] === point[0] && at[1] === point[1]),
-            `the motion to ${JSON.stringify(point)} reached the game: ${JSON.stringify(arrived)}`,
-          );
-        }
+        // Both injected motions reached the game at the points they were sent to, and the second
+        // carried the distance the answer said.
+        await motionAt(10, 10);
+        assert.deepEqual(
+          (await motionAt(40, 30)).relative,
+          [30, 20],
+          'and the game read the same distance off the event',
+        );
         // A relative the caller gives is what the event carries, whatever the position says.
         const told = await call('runtime_input', {
           op: 'mouse_motion',
@@ -9343,7 +9344,7 @@ async function testAnInjectedMotionCarriesHowFarThePointerMoved(): Promise<void>
         });
         assert.deepEqual(get(told, 'relative'), [5, -5], JSON.stringify(told));
         await call('runtime_wait', { op: 'frames', frames: 2 });
-        assert.deepEqual(await lastRelative(), [5, -5], 'a given relative is kept');
+        assert.deepEqual((await motionAt(40, 30)).relative, [5, -5], 'a given relative is kept');
         // One axis given says the motion on it, and nothing on the other, rather than nothing at
         // all: the pair fallback answers zero for a missing pair, which would swallow the axis.
         const oneAxis = await call('runtime_input', { op: 'mouse_motion', x: 40, y: 30, relativeX: 7 });
@@ -9351,7 +9352,7 @@ async function testAnInjectedMotionCarriesHowFarThePointerMoved(): Promise<void>
         // A motion while a button is held carries that button, as a real drag's does: a drag
         // written as "moved with the left button down" reads the mask and not the click before.
         await call('runtime_wait', { op: 'frames', frames: 2 });
-        assert.equal(await read('last_mask'), 0, 'no button held, none carried');
+        assert.equal((await motionAt(40, 30)).mask, 0, 'no button held, none carried');
         // Sent as fast as a caller can, with no wait between: an answer that came back before
         // the event was delivered would let the next event read the state from before it. The
         // press lands somewhere the pointer was not, since a press puts the pointer where it
@@ -9365,12 +9366,17 @@ async function testAnInjectedMotionCarriesHowFarThePointerMoved(): Promise<void>
         );
         await call('runtime_input', { op: 'mouse_click', x: 60, y: 30, pressed: false });
         assert.equal(await read('last_button_mask'), 0, 'the release carries the button no longer');
-        assert.equal(await read('last_mask'), 1, 'the left button was held through the motion before it');
+        assert.equal(
+          (await motionAt(60, 30)).mask,
+          1,
+          'the left button was held through the motion before it',
+        );
         await call('runtime_input', { op: 'mouse_click', x: 60, y: 30, pressed: true });
         assert.equal(await read('last_button_mask'), 1, 'the press carries the button it presses');
         await call('runtime_input', { op: 'mouse_click', x: 60, y: 30, pressed: false });
         await call('runtime_input', { op: 'mouse_motion', x: 80, y: 30 });
-        assert.equal(await read('last_mask'), 0, 'and a motion after the release carries none');
+        await call('runtime_wait', { op: 'frames', frames: 2 });
+        assert.equal((await motionAt(80, 30)).mask, 0, 'and a motion after the release carries none');
       } finally {
         await server.request(
           'tools/call',
@@ -14595,6 +14601,55 @@ async function testAShortenedCacheIsRebuilt(): Promise<void> {
       knows = text(get(parseTextContent(status), 'editor', 'projectPath')) === project;
     }
     assert.ok(knows, 'the fixture editor should have reached the server, or this proves nothing');
+
+    // Before any scan: a rebuild that finds the file already right names the class the editor is
+    // not holding, and with no loss seen yet the remedy is the rescan.
+    const refresh = async (): Promise<unknown> =>
+      parseTextContent(
+        await server.request(
+          'tools/call',
+          { name: 'project_import', arguments: { projectPath: project, op: 'refresh_classes' } },
+          ENGINE_CALL_TIMEOUT_MS,
+        ),
+      );
+    const first = await refresh();
+    assert.deepEqual(
+      asArray(get(first, 'unseenByEditor') ?? []).map((one) => get(one, 'className')),
+      ['Squire'],
+      `the editor is not holding Squire: ${JSON.stringify(first)}`,
+    );
+    assert.equal(
+      get(first, 'lostSinceLastRebuild'),
+      undefined,
+      `and nothing has been lost yet: ${JSON.stringify(first)}`,
+    );
+    assert.match(text(get(first, 'note')), /editor_rescan does, on its own/, JSON.stringify(first));
+
+    // The editor saves, which writes the cache from the list it holds: no scan, no call here,
+    // just the file getting shorter between two rebuilds. Downstream this put the same six classes
+    // into classes.added on every test run of an afternoon, with nothing saying whose doing it was.
+    writeFileSync(cache, 'list=[{\n"class": &"Hero",\n"path": "res://hero.gd"\n}]\n');
+    const second = await refresh();
+    assert.deepEqual(
+      asArray(get(second, 'added') ?? []).map(String),
+      ['Squire'],
+      `the rebuild puts the class back: ${JSON.stringify(second)}`,
+    );
+    assert.deepEqual(
+      asArray(get(second, 'lostSinceLastRebuild') ?? []).map(String),
+      ['Squire'],
+      `and says it had been there after the last rebuild: ${JSON.stringify(second)}`,
+    );
+    assert.match(
+      text(get(second, 'note')),
+      /^The cache held Squire after the last rebuild and not when this one began, so the editor holding this project wrote it without it in between: it holds a list shorter than the files and writes that list on every save and scan, and each rebuild puts it back\. editor_launch restart is what ends it\. The cache on disk is right now/,
+      `naming the editor as the writer, ahead of what it cannot see: ${JSON.stringify(second)}`,
+    );
+    assert.match(
+      text(get(second, 'note')),
+      /editor_rescan will not reach it either on this editor/,
+      `and the remedy for what it cannot see is the restart from here on: ${JSON.stringify(second)}`,
+    );
 
     const scanned = await server.request('tools/call', {
       name: 'editor_rescan',
