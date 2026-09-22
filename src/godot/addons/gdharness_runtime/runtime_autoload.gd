@@ -267,21 +267,44 @@ func _announce(bind_address: String) -> void:
 		)
 		return
 	var path: String = directory.path_join("runtime-%d.json" % OS.get_process_id())
-	var file: FileAccess = FileAccess.open(path, FileAccess.WRITE)
+	# Written whole under a name no server reads and moved into place, so no look ever meets
+	# the file empty: a server sweeping the directory between an open and a write took the
+	# announcement for a dead game's leftover, and the directory is shared by every server on
+	# the machine, older ones included.
+	var staged: String = path + ".tmp"
+	var file: FileAccess = FileAccess.open(staged, FileAccess.WRITE)
 	if file == null:
 		push_warning(
 			(
 				"[gdharness] cannot write %s (%s); the server will not find this game"
-				% [path, FileAccess.get_open_error()]
+				% [staged, FileAccess.get_open_error()]
 			)
 		)
 		return
-	var announced: bool = file.store_string(JSON.stringify(_identity(bind_address)))
+	var written: bool = file.store_string(JSON.stringify(_identity(bind_address)))
 	file.close()
-	if not announced:
-		push_warning("[gdharness] cannot write %s; the server will not find this game" % path)
+	if not written:
+		push_warning("[gdharness] cannot write %s; the server will not find this game" % staged)
+		_unstage(staged)
+		return
+	var moved: Error = DirAccess.rename_absolute(staged, path)
+	if moved != OK:
+		push_warning(
+			(
+				"[gdharness] cannot move %s to %s (%s); the server will not find this game"
+				% [staged, path, moved]
+			)
+		)
+		_unstage(staged)
 		return
 	_announcement = path
+
+
+## Takes a staged announcement down after a write or a move that failed. The answer is taken
+## rather than dropped, since these scripts compile under the game's own warning levels; a
+## staged file that will not go either is nothing any server reads.
+func _unstage(staged: String) -> void:
+	var _removed: Error = DirAccess.remove_absolute(staged)
 
 
 ## What the announcement file and the welcome both carry: enough to pick this game out of
