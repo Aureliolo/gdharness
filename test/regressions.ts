@@ -4307,6 +4307,44 @@ function testAGameTooNewToTalkToIsStillAGame(): void {
     assert.ok(!problem.includes('No game'), `the answer does not claim nobody is playing: ${problem}`);
     assert.ok(problem.includes('this server is the older half'), `it names the older half: ${problem}`);
 
+    // Games on both sides of this server at once, which one upgrade produces: an editor-played
+    // game from an older addon outliving a pin that moved, and a game started after it. One
+    // remedy cannot serve both, and the branch was never rendered because every case had one
+    // game in it.
+    const game = (
+      pid: number,
+      protocol: number,
+    ): { pid: number; protocol: number; project: { name: string; path: string } } => ({
+      pid,
+      protocol,
+      project: { name: 'Fixture', path: root },
+    });
+    const bothSides = chooseRuntime([], undefined, [
+      game(41, RUNTIME_PROTOCOL + 1),
+      game(42, RUNTIME_PROTOCOL - 1),
+    ]);
+    const said = text(get(bothSides, 'problem'));
+    assert.match(said, /reconnect this server for pid 41/, said);
+    assert.match(said, /reinstall the addon and restart pid 42/, said);
+    assert.match(said, /in protocols this server does not speak/, `two numbers are not one: ${said}`);
+
+    const bothOlder = chooseRuntime([], undefined, [
+      game(43, RUNTIME_PROTOCOL - 1),
+      game(44, RUNTIME_PROTOCOL - 1),
+    ]);
+    const older = text(get(bothOlder, 'problem'));
+    assert.match(older, /2 games are running, in a protocol this server does not speak/, older);
+    assert.match(older, /reinstall it and restart those games/, older);
+
+    // A pid nobody is running, with games announcing a protocol this server cannot read. The
+    // answer used to be "No game with the runtime addon is running", which is false while those
+    // games are up and sends the reader to start another beside them.
+    const strayPid = chooseRuntime([], undefined, [game(45, RUNTIME_PROTOCOL + 1)], 999);
+    const stray = text(get(strayPid, 'problem'));
+    assert.match(stray, /No game reachable from here has pid 999/, stray);
+    assert.match(stray, /pid 45 speaks/, `and the game that is running is named: ${stray}`);
+    assert.doesNotMatch(stray, /Start one with editor_run/, stray);
+
     // The check earning its keep: a dead process's announcement is still rubbish, and is still
     // swept. Without this the one above passes on a function that never deletes anything.
     const dead = join(directory, 'runtime-999999999.json');
@@ -4365,6 +4403,12 @@ function testAnErrorReportOutlivesItsGameForAnHour(): void {
  * bench can take. The pid on every runtime tool is what picks one, and the refusals name it. A pid
  * nobody is running, or one running another project than the path names, is refused with what is
  * running, since a number guessed from a stale listing must not reach a different game.
+ *
+ * Each refusal is held to asking for something that settles the shape it is refusing. Several
+ * games of one project with nothing named led with `projectPath`, which reaches the refusal for
+ * several games of one project rather than a game, and put the argument that does settle it second
+ * and behind a condition the reader had to check. Every case here named something, so that branch
+ * was the one nothing rendered.
  */
 function testAPidPicksOneOfSeveralGames(): void {
   const project = join(tmpdir(), 'gdharness-bench');
@@ -4381,9 +4425,49 @@ function testAPidPicksOneOfSeveralGames(): void {
 
   const several = chooseRuntime(all, project);
   assert.ok('problem' in several, 'three games from one project is a question the path cannot settle');
-  assert.match(text(get(several, 'problem')), /Several games are running from .*Pass pid to choose one/);
+  assert.match(text(get(several, 'problem')), /^3 games are running from .*Pass pid to choose one/);
+
+  // The same three with nothing named at all, which is what a bench asking a runtime call gets
+  // and what no case here rendered. Leading with projectPath sent the caller to the refusal
+  // above, so the one argument that settles it is what this asserts, by its own name.
+  const benchAlone = chooseRuntime(workers);
+  assert.ok('problem' in benchAlone, 'three games of one project settle no better unasked');
+  const unasked = text(get(benchAlone, 'problem'));
+  assert.match(unasked, /^3 games are running from /, unasked);
+  assert.match(unasked, /Pass pid to choose one; projectPath cannot/, unasked);
+  for (const worker of workers) {
+    assert.match(unasked, new RegExp(`pid ${worker.pid} on 127\\.0\\.0\\.1:${worker.port}`), unasked);
+  }
+  // Once in the sentence rather than beside every game: thirty-one workers of one project put
+  // three kilobytes of the same path into the answer a bench is the one reading.
+  assert.equal(unasked.split(resolve(project)).length - 1, 1, `the project is named once: ${unasked}`);
+
+  // A game whose announcement carried no project path is parsed as an empty one, and an empty
+  // path resolves to wherever this server was started. Two of those agree on a directory neither
+  // game has heard of, and saying they are both running from it would be an answer made up out
+  // of this process's own state.
+  const pathless = (pid: number): RuntimeEndpoint => ({
+    pid,
+    port: 50_000 + pid,
+    address: '127.0.0.1',
+    project: { name: '', path: '' },
+    file: join(tmpdir(), `runtime-${pid}.json`),
+  });
+  const unnamed = text(get(chooseRuntime([pathless(61), pathless(62)]), 'problem'));
+  assert.doesNotMatch(unnamed, new RegExp(resolve('.').replaceAll('\\', '\\\\')), unnamed);
+  assert.match(unnamed, /^Several games are running: /, `they are listed one by one instead: ${unnamed}`);
+  for (const pid of [61, 62]) {
+    assert.match(unnamed, new RegExp(`pid ${pid} on `), unnamed);
+  }
+
+  // Two projects is the other side of that, where projectPath is worth offering because it does
+  // narrow, and pid still settles it outright.
   const none = chooseRuntime(all);
-  assert.match(text(get(none, 'problem')), /Pass projectPath to choose one, or pid/);
+  assert.match(
+    text(get(none, 'problem')),
+    /Pass pid to choose one, or projectPath when the project you mean is running only one/,
+    text(get(none, 'problem')),
+  );
 
   const picked = chooseRuntime(all, project, [], 12);
   assert.deepEqual(picked, { endpoint: workers[1] }, 'the pid picks the worker, with the path agreeing');
@@ -4422,6 +4506,18 @@ function testAPidPicksOneOfSeveralGames(): void {
   // what it was being answered by; both documents now say the order, and the middle step, the
   // server's own game, is the one this function never sees, so it is named as belonging to the
   // caller above rather than left to look like a branch in here.
+  // The sentence names an argument for each shape, and three copies of one sentence agree with
+  // each other whatever it says, so each claim is put to the thing it describes: `pid` settles a
+  // bench, and `projectPath` settles two projects running one game each.
+  const sentence = theGamePicked();
+  assert.match(sentence, /`pid` when they are all one project/, sentence);
+  assert.match(sentence, /`projectPath` when they are not/, sentence);
+  assert.deepEqual(
+    chooseRuntime([game(51, project), game(52, other)], other),
+    { endpoint: game(52, other) },
+    'the project path settles it when the project named is running one game',
+  );
+
   const theOnlyOne = chooseRuntime([game(31, other)]);
   assert.deepEqual(theOnlyOne, { endpoint: game(31, other) }, 'the only game there is answers');
   const twoProjects = chooseRuntime([game(41, project), game(42, other)]);
@@ -9742,6 +9838,14 @@ async function testARunCanBeGivenItsOwnEnvironment(): Promise<void> {
  * compiling pipelines. The scene counts what the button and its menu did and logs their focus
  * and visibility events by frame, which is what separated a menu the click never opened from
  * one that opened and shut on its own; every assertion about the menu carries that account.
+ *
+ * It needs the foreground of whatever machine it runs on, which a CI runner gives and a
+ * developer's does not: focus belongs to the desktop rather than to this game, so a window
+ * opening beside it takes it away. Measured here on 2026-09-22, where an editor for another
+ * project started at 17:02:39 and this failed at the focus wait between 17:03 and 17:11 with
+ * `window focus_exited` in the log. The failure it produces then is about the machine and not
+ * about the input path, which is why the assertion below says so rather than leaving the next
+ * reader to debug the click.
  */
 async function testAKeyDoesNotChooseFromAnOpenedMenu(): Promise<void> {
   const engine = resolveGodotPath();
@@ -9888,7 +9992,7 @@ async function testAKeyDoesNotChooseFromAnOpenedMenu(): Promise<void> {
         assert.equal(
           get(settled, 'met'),
           true,
-          `the window should have held the focus for thirty frames before anything is clicked: ${JSON.stringify(settled)}, ${await account()}`,
+          `the window should have held the focus for thirty frames before anything is clicked: ${JSON.stringify(settled)}, ${await account()}. A focus_exited in that log, or a window that never reads as focused, is another window on this desktop holding the foreground rather than anything about the input path: check what else is open before reading this as a fault here.`,
         );
 
         const clicked = await call('runtime_input', { op: 'click', nodePath: '/root/Main/Pick' });

@@ -575,12 +575,80 @@ function describe(endpoint: RuntimeEndpoint): string {
   return `pid ${endpoint.pid} on ${endpoint.address}:${endpoint.port} (${endpoint.project.name || 'unnamed'} at ${endpoint.project.path})`;
 }
 
+/** The same, for a list whose project the sentence around it has already named. */
+function describeWithin(endpoint: RuntimeEndpoint): string {
+  return `pid ${endpoint.pid} on ${endpoint.address}:${endpoint.port}`;
+}
+
+/**
+ * The one project every one of [param endpoints] is running, when they are running one.
+ *
+ * Which argument can settle a choice depends on this and on nothing else, so it is asked before
+ * the refusal is written rather than left to the reader to work out from a list.
+ */
+function theOneProject(endpoints: readonly RuntimeEndpoint[]): string | undefined {
+  // An announcement carrying no project path is allowed through the parser as an empty one, and
+  // `resolve('')` is this server's working directory: two of those would agree on a path neither
+  // game has ever heard of and put it in the answer as the project both are running.
+  if (endpoints.some((endpoint) => endpoint.project.path === '')) {
+    return undefined;
+  }
+  const paths = new Set(endpoints.map((endpoint) => resolve(endpoint.project.path)));
+  const only = [...paths][0];
+  return paths.size === 1 ? only : undefined;
+}
+
+/**
+ * Several games, all of one project, and the argument that tells them apart.
+ *
+ * Said the same way whether the caller named the project or not, because the situation is the
+ * same either way: naming it again narrows nothing. The project is in the sentence, so each game
+ * carries only what differs, which for a bench of thirty-one workers is the difference between a
+ * line and three kilobytes of the same path.
+ */
+function severalFrom(project: string, games: readonly RuntimeEndpoint[]): string {
+  return (
+    `${games.length} games are running from ${project}: ${games.map(describeWithin).join('; ')}. ` +
+    'Pass pid to choose one; projectPath cannot, because every one of them has this one. ' +
+    'editor_status lists them under runtimes.'
+  );
+}
+
 /**
  * What to say when the only games running speak a protocol this server was not built for.
  *
  * Which half is behind, and what to do about it, because "no game is running" is the one answer
  * that is certainly false here and it sends the reader to start a second game.
  */
+/**
+ * Which half is behind, and what to do about it, for games announcing [param unspoken].
+ *
+ * One function because the sentence is said in two places, here and in the refusal `editor_run`
+ * gives for a game of this server's project it cannot read, and a remedy written twice is a
+ * remedy that ends up said two ways.
+ *
+ * Both halves at once is a real state rather than a tidy-up: an editor-played game from an older
+ * addon outlives an upgrade that moves this number, while a game started after it is ahead of the
+ * server. One remedy cannot serve both, and naming only one leaves the other game unmentioned in
+ * the answer that is about it.
+ */
+export function whichHalfIsBehind(unspoken: readonly UnspokenRuntime[]): string {
+  const pids = (games: readonly UnspokenRuntime[]): string =>
+    games.map((game) => `pid ${game.pid}`).join(', ');
+  const ahead = unspoken.filter((game) => game.protocol > RUNTIME_PROTOCOL);
+  const behind = unspoken.filter((game) => game.protocol < RUNTIME_PROTOCOL);
+  if (ahead.length > 0 && behind.length > 0) {
+    return (
+      `they are on both sides of it: reconnect this server for ${pids(ahead)}, and reinstall the ` +
+      `addon and restart ${pids(behind)}`
+    );
+  }
+  if (ahead.length > 0) {
+    return 'this server is the older half: reconnect it so it spawns the installed version';
+  }
+  return `the addon is the older half: reinstall it and restart ${behind.length === 1 ? 'the game' : 'those games'}`;
+}
+
 function tooNew(unspoken: readonly UnspokenRuntime[]): string {
   const named = unspoken
     .map(
@@ -588,10 +656,11 @@ function tooNew(unspoken: readonly UnspokenRuntime[]): string {
         `pid ${game.pid} speaks ${game.protocol} (${game.project.name || 'unnamed'} at ${game.project.path})`,
     )
     .join('; ');
-  const half = unspoken.some((game) => game.protocol > RUNTIME_PROTOCOL)
-    ? 'this server is the older half: reconnect it so it spawns the installed version'
-    : 'the addon is the older half: reinstall it and restart the game';
-  return `A game is running, in a protocol this server does not speak ${named}. This server speaks ${RUNTIME_PROTOCOL}, so ${half}.`;
+  const count = unspoken.length === 1 ? 'A game is running' : `${unspoken.length} games are running`;
+  // Two games on either side of this server announce two different protocols, and calling that
+  // "a protocol" reads as one number the reader could go and look up.
+  const spoken = new Set(unspoken.map((game) => game.protocol)).size === 1 ? 'a protocol' : 'protocols';
+  return `${count}, in ${spoken} this server does not speak: ${named}. This server speaks ${RUNTIME_PROTOCOL}, so ${whichHalfIsBehind(unspoken)}.`;
 }
 
 /**
@@ -623,11 +692,20 @@ export function chooseRuntime(
     if (tooNewToo !== undefined) {
       return { problem: tooNew([tooNewToo]) };
     }
+    if (endpoints.length > 0) {
+      return {
+        problem: `No running game has pid ${pid}. Running: ${endpoints.map(describe).join('; ')}. editor_status lists them under runtimes as they come and go.`,
+      };
+    }
+    // A pid nobody is running, with games announcing a protocol this server cannot read, is not
+    // "no game is running": that sentence is certainly false here and sends the reader to start a
+    // second game beside the ones already going. The pid is gone either way, and what to do about
+    // the games that are there is the same thing it is when no pid was named.
+    if (unspoken.length > 0) {
+      return { problem: `No game reachable from here has pid ${pid}. ${tooNew(unspoken)}` };
+    }
     return {
-      problem:
-        endpoints.length === 0
-          ? `No game with the runtime addon is running, so there is none with pid ${pid}. Start one with editor_run, or play the project from the editor with the addon enabled.`
-          : `No running game has pid ${pid}. Running: ${endpoints.map(describe).join('; ')}. editor_status lists them under runtimes as they come and go.`,
+      problem: `No game with the runtime addon is running, so there is none with pid ${pid}. Start one with editor_run, or play the project from the editor with the addon enabled.`,
     };
   }
   if (endpoints.length === 0) {
@@ -671,15 +749,20 @@ export function chooseRuntime(
     if (matching.length === 1 && matching[0]) {
       return { endpoint: matching[0] };
     }
-    return {
-      problem: `Several games are running from ${wanted}: ${matching.map(describe).join('; ')}. Pass pid to choose one.`,
-    };
+    return { problem: severalFrom(wanted, matching) };
   }
   if (endpoints.length === 1 && endpoints[0]) {
     return { endpoint: endpoints[0] };
   }
+  // A bench and its workers are several games and one project, and the refusal used to lead with
+  // `projectPath`, which lands on the refusal above rather than on a game: the one argument that
+  // works came second and behind a condition the reader had to check for themselves.
+  const shared = theOneProject(endpoints);
+  if (shared !== undefined) {
+    return { problem: severalFrom(shared, endpoints) };
+  }
   return {
-    problem: `Several games are running: ${endpoints.map(describe).join('; ')}. Pass projectPath to choose one, or pid when they are from one project.`,
+    problem: `Several games are running: ${endpoints.map(describe).join('; ')}. Pass pid to choose one, or projectPath when the project you mean is running only one.`,
   };
 }
 
