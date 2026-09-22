@@ -387,6 +387,18 @@ refusing to keep.
 lines are not lost. The game then belongs to the editor's debugger: `debug_*` speaks to that
 session and `editor_output` reads the console over it.
 
+Three things take that away and start the game here instead, and all three are things the editor
+cannot be given: the game's own `args`, which it builds from `editor/run/main_run_args` when it
+opens the project; `savesIn`, a directory for this run's `user://`, which Godot takes no flag for
+and which therefore has to be the environment; and `env`, variables for the run alone. A game the
+editor plays inherits the editor's environment, and a session cannot restart the editor to move
+one variable, so the windowed run somebody watches was the one run that could not be kept out of
+the player's saves. The run's environment is this server's, with `user://` moved when a directory
+was named and the caller's variables over that, and `GDHARNESS_RUNTIME_DIR` set last: the addon
+derives where it announces from the temporary directory where `XDG_RUNTIME_DIR` is unset, so a run
+given a temporary directory of its own would otherwise announce where nothing looks. Names
+beginning with `GDHARNESS_` are refused for the same reason.
+
 A start waits for the game to announce its runtime, and the wait is sized to the project. The
 usual budget is five seconds, which a project that boots in eight overran on every start until
 the caller passed `runtimeWaitMs` each time. So the announcement's time against the run's start is

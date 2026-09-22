@@ -63,6 +63,7 @@ import {
 import { EDITOR_READS, HEADLESS_OPERATIONS } from '../src/headless-operations.js';
 import {
   editorArguments,
+  environmentFor,
   envValue,
   OPENED_BY_A_SERVER,
   resolveHeadless,
@@ -2555,7 +2556,7 @@ async function testAnArgumentMeantForAnotherOpIsRefused(): Promise<void> {
     );
     assert.match(
       await call('editor_run', { op: 'start', projectPath: '/p', frames: 3 }),
-      /start takes: projectPath, scene, args, headless, runtimeWaitMs/,
+      /start takes: projectPath, scene, args, headless, savesIn, env, runtimeWaitMs/,
       'and the refusal says what start takes instead',
     );
     assert.match(
@@ -3711,6 +3712,61 @@ function testATestRunKeepsOutOfThePlayersSaves(): void {
     Object.keys(environment).filter((name) => name.toLowerCase() === 'appdata'),
     ['APPDATA'],
     'and a machine spelling it another way is left holding one of it rather than two',
+  );
+}
+
+/**
+ * The environment a run is given, in each shape a caller can ask for.
+ *
+ * A run can be asked for a `user://` of its own, for variables of its own, or for both, and the
+ * runtime directory is set after all of it. That last part is the one worth holding: the addon
+ * derives where it announces from `OS.get_temp_dir()` where `XDG_RUNTIME_DIR` is unset, which on
+ * Windows reads `TMP` and `TEMP`, so a run given a temporary directory of its own, which is an
+ * ordinary thing to want, would announce where this server never looks and its start would say no
+ * runtime came up about a game that is running.
+ */
+function testARunsEnvironmentIsBuiltInOrder(): void {
+  const theirs = { APPDATA: 'C:/Users/somebody/AppData/Roaming', TEMP: 'C:/Temp', TERM: 'dumb' };
+  const runtime = 'C:/Users/somebody/AppData/Local/Temp/gdharness';
+
+  const plain = environmentFor({ runtimeDirectory: runtime }, theirs);
+  assert.equal(plain['TERM'], 'dumb', 'a run asking for nothing is handed what this server has');
+  assert.equal(plain['APPDATA'], theirs.APPDATA, 'with its saves where they were');
+  assert.equal(plain['GDHARNESS_RUNTIME_DIR'], runtime, 'and the runtime directory named');
+
+  const moved = environmentFor({ savesIn: 'D:/saves', runtimeDirectory: runtime }, theirs);
+  assert.equal(moved['APPDATA'], 'D:/saves', 'a run given a directory for user:// has it on Windows');
+  assert.equal(moved['XDG_DATA_HOME'], 'D:/saves', 'and on Linux');
+  assert.equal(moved['TEMP'], 'C:/Temp', 'and nothing else moves with it');
+
+  const carried = environmentFor({ env: { WORKERS: '4', TERM: 'xterm' }, runtimeDirectory: runtime }, theirs);
+  assert.equal(carried['WORKERS'], '4', "a run's own variable is set");
+  assert.equal(carried['TERM'], 'xterm', 'and one it names again is its value rather than ours');
+
+  const both = environmentFor(
+    { savesIn: 'D:/saves', env: { TEMP: 'D:/scratch' }, runtimeDirectory: runtime },
+    theirs,
+  );
+  assert.equal(both['APPDATA'], 'D:/saves', 'both together move the saves');
+  assert.equal(both['TEMP'], 'D:/scratch', 'and carry the variable');
+  assert.equal(
+    both['GDHARNESS_RUNTIME_DIR'],
+    runtime,
+    'and the announcement still goes where this server looks, whatever the run did to the temporary directory',
+  );
+
+  // The runtime directory is set last, so it is this server's whatever else was asked for. The
+  // tool refuses a caller naming it, so nothing reaching this function through `editor_run` can
+  // carry one; the guarantee is the function's own, and a second caller asking for an
+  // environment would otherwise inherit an ordering that has never been read.
+  const named = environmentFor(
+    { env: { GDHARNESS_RUNTIME_DIR: 'D:/elsewhere' }, runtimeDirectory: runtime },
+    theirs,
+  );
+  assert.equal(
+    named['GDHARNESS_RUNTIME_DIR'],
+    runtime,
+    'a variable naming the runtime directory does not move it',
   );
 }
 
@@ -9391,6 +9447,159 @@ async function testAnInjectedMotionCarriesHowFarThePointerMoved(): Promise<void>
 }
 
 /**
+ * A run asked for an environment of its own gets one, and is started here to have it.
+ *
+ * Godot takes no flag for the user data directory, so `user://` can only be moved by the
+ * environment, and the editor plays a game as a child of itself with the environment it was
+ * started with. Downstream that left the one engine a session can watch, the windowed one, as the
+ * only engine it could not isolate: playing to watch the game wrote into the player's saves,
+ * because opening another save writes the one being left and a fresh one autosaves as it plays.
+ *
+ * The editor here is connected and the project's own run arguments say it plays headless, so this
+ * start would be played by the editor, which in this fixture is a stub that never really plays;
+ * asking for an environment is what makes the server start the game itself. So the answer saying
+ * `through: gdharness` and a real runtime announcing are the same assertion twice over: nothing
+ * announces on the editor's path here at all.
+ *
+ * What the game reads back is the measurement. The saves are checked against `savesStayPut`, the
+ * same function the answer's note reads, so an engine that starts honouring the variables on
+ * macOS fails here and the change that makes it pass is the change that stops the note.
+ */
+async function testARunCanBeGivenItsOwnEnvironment(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('run environment regression skipped (Godot not found)');
+    return;
+  }
+  const saves = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-run-saves-'));
+  try {
+    await withAPlayingEditor(
+      ({ adapter }) =>
+        (tool) =>
+          tool === 'playing_status'
+            ? { ok: true, playing: false, scenePath: '', debugPort: adapter }
+            : { ok: true },
+      async ({ server, project }) => {
+        // The editor plays this project headless, so a headless start would be its to play and
+        // the environment is the only reason the server takes it instead.
+        const settings = join(project, 'project.godot');
+        writeFileSync(
+          settings,
+          `${readFileSync(settings, 'utf8')}\n[editor]\n\nrun/main_run_args="--headless"\n`,
+        );
+        writeFileSync(
+          join(project, 'main.gd'),
+          'extends Node\n\nvar saves: String = ""\nvar carried: String = ""\n\n\n' +
+            'func _ready() -> void:\n' +
+            '\tsaves = OS.get_user_data_dir()\n' +
+            '\tcarried = OS.get_environment("GAME_FIXTURE_FLAG")\n',
+        );
+        writeFileSync(
+          join(project, 'main.tscn'),
+          '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+            '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+        );
+
+        const call = async (name: string, args: Record<string, unknown>): Promise<unknown> =>
+          parseTextContent(
+            await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS),
+          );
+        const started = await call('editor_run', {
+          projectPath: project,
+          op: 'start',
+          headless: true,
+          savesIn: saves,
+          env: { GAME_FIXTURE_FLAG: 'carried' },
+          runtimeWaitMs: 60_000,
+        });
+        try {
+          assert.equal(
+            get(started, 'through'),
+            'gdharness',
+            `a run given an environment is started here rather than played: ${JSON.stringify(started)}`,
+          );
+          assert.equal(
+            get(started, 'runtime', 'listening'),
+            true,
+            `and it announced, which the editor's stub never would: ${JSON.stringify(started)}`,
+          );
+          const read = async (property: string): Promise<unknown> =>
+            get(await call('runtime_inspect', { op: 'property', nodePath: '/root/Main', property }), 'value');
+          assert.equal(await read('carried'), 'carried', "the game reads the run's own variable");
+
+          const printed = text(await read('saves'));
+          const spelled = (path: string): string => path.replaceAll('\\', '/').toLowerCase();
+          const moved = spelled(printed).startsWith(spelled(saves));
+          if (savesStayPut()) {
+            assert.equal(
+              moved,
+              false,
+              `${process.platform}: the engine has started honouring the moved environment, ${printed}`,
+            );
+            assert.equal(
+              get(started, 'savesNote'),
+              SAVES_NOT_MOVED_NOTE,
+              `and the answer says the saves did not move: ${JSON.stringify(started)}`,
+            );
+          } else {
+            assert.ok(moved, `user:// should be under ${saves}, not ${printed}`);
+            assert.equal(
+              get(started, 'savesNote'),
+              undefined,
+              `and nothing claims otherwise: ${JSON.stringify(started)}`,
+            );
+          }
+        } finally {
+          await server.request(
+            'tools/call',
+            { name: 'editor_run', arguments: { op: 'stop' } },
+            ENGINE_CALL_TIMEOUT_MS,
+          );
+        }
+
+        // The two a caller can get wrong, refused rather than trimmed: a variable of this
+        // server's own would send the game's announcement where nothing looks, and a relative
+        // directory names a place only this server's own working directory can find.
+        const refused = async (args: Record<string, unknown>): Promise<string> => {
+          const response = await server.request(
+            'tools/call',
+            { name: 'editor_run', arguments: { projectPath: project, op: 'start', ...args } },
+            ENGINE_CALL_TIMEOUT_MS,
+          );
+          assert.equal(
+            get(response, 'result', 'isError'),
+            true,
+            `should have been refused: ${text(response)}`,
+          );
+          return textOf(response) ?? '';
+        };
+        assert.match(
+          await refused({ env: { GDHARNESS_RUNTIME_DIR: saves } }),
+          /env may not set GDHARNESS_RUNTIME_DIR/,
+          "a variable of this server's own is refused by name",
+        );
+        assert.match(
+          await refused({ env: { WORKERS: 4 } }),
+          /env values must be strings, and WORKERS is number/,
+          'and a value that is not a string is refused saying what it was',
+        );
+        assert.match(
+          await refused({ savesIn: 'saves' }),
+          /savesIn must be an absolute path, not "saves"/,
+          'and a relative directory for user:// is refused',
+        );
+      },
+      { realAddon: true, engine },
+    );
+  } finally {
+    sweep(saves);
+  }
+}
+
+/**
  * A key sent to the game does not choose from a menu a click has opened; choose does.
  *
  * An OptionButton's menu opens as a window of its own, and an injected key is delivered to the
@@ -14909,6 +15118,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testATestServerWritesWhereNoRealRunIs,
   testAStartStopsWaitingForAGameThatIsOver,
   testAStartWaitsForTheGameToAnnounceItself,
+  testARunCanBeGivenItsOwnEnvironment,
+  testARunsEnvironmentIsBuiltInOrder,
   testATestRunKeepsOutOfThePlayersSaves,
   testTheEngineWritesItsSavesWhereItWasTold,
   testParametersReachTheEngine,

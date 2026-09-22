@@ -166,6 +166,34 @@ export function savesStayPut(platform: NodeJS.Platform = process.platform): bool
   return platform === 'darwin';
 }
 
+/**
+ * The prefix this server's own variables carry, which a caller's environment may not set.
+ *
+ * They are the contract between this server and the addon in the game: which directory the game
+ * announces itself in, and which editor played it. A run given one of its own would announce
+ * where nothing looks, so the start that asked for it would answer that no runtime came up about
+ * a game that is running and talking to somebody else's directory.
+ */
+export const RESERVED_VARIABLE_PREFIX = 'GDHARNESS_';
+
+/**
+ * The environment a run is given: the server's own, with `user://` moved when the caller named a
+ * directory for it and their variables over the top, and the runtime directory last.
+ *
+ * Last because it is the one variable whose value decides whether this server can find the game
+ * at all, and the caller's own variables can move it without naming it: `OS.get_temp_dir()` reads
+ * `TMP` and `TEMP` on Windows, and the addon derives the announcement directory from that where
+ * `XDG_RUNTIME_DIR` is unset. So a run that moves the temporary directory, which is an ordinary
+ * thing to want, would otherwise announce somewhere this server never looks.
+ */
+export function environmentFor(
+  options: { savesIn?: string; env?: Readonly<Record<string, string>>; runtimeDirectory: string },
+  variables: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const base = options.savesIn === undefined ? { ...variables } : userDataIn(options.savesIn, variables);
+  return { ...base, ...options.env, GDHARNESS_RUNTIME_DIR: options.runtimeDirectory };
+}
+
 /** What a run is told when its saves could not be moved, which is the half nothing said. */
 export const SAVES_NOT_MOVED_NOTE =
   'On macOS the engine reads user:// off HOME and ignores the variables that move it elsewhere, measured on Godot 4.7.2, so this run wrote its saves where the player keeps theirs. A suite that saves a game has written into the same folder as the copy being played, and one that tidies up after itself may have removed real saves.';
