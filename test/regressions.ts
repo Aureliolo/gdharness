@@ -4328,6 +4328,16 @@ function testAWallOfOneMessageCollapsesToItsShape(): void {
   assert.equal(located.shape, '… - Parse Error', 'a path and the line on it are one slot');
   assert.deepEqual(located.values, ['res://tests/pieces_test.gd:26']);
 
+  // The whole line the engine prints, which is a location and then the message. Three placeholders
+  // and three values in the order they stand in the line: taken a pattern at a time the two quoted
+  // values came back first and the location last, so the file an error was found in would have
+  // been read as the script that would not parse.
+  const wholeLine = shapeOf(
+    'res://tests/pieces_test.gd:26 - Parse Error: Could not parse global class "Run" from "res://core/run.gd"',
+  );
+  assert.equal(wholeLine.shape, '… - Parse Error: Could not parse global class … from …');
+  assert.deepEqual(wholeLine.values, ['res://tests/pieces_test.gd:26', '"Run"', '"res://core/run.gd"']);
+
   const log = new GameLog();
   const classes = ['Run', 'Encounter', 'Component', 'Run', 'Encounter'];
   log.append(

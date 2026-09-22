@@ -202,15 +202,43 @@ const WALK_BACK_LIMIT = 500;
  */
 const SLOTS = [/"[^"]*"/g, /'[^']*'/g, /\b(?:res|user):\/\/\S+/g, /(?<=\.gd|\.tscn|\.cs):\d+(?::\d+)?/g];
 
-/** The shape of [param text], and the values that were taken out of it, left to right. */
+/**
+ * The shape of [param text], and the values that were taken out of it, left to right.
+ *
+ * Left to right across all the patterns at once rather than one pattern at a time, because the
+ * values are reported alongside the shape and a reader matches the nth value to the nth `…` in it.
+ * A pattern at a time puts them in the order the patterns are written: an engine line reading
+ * `res://tests/x.gd:26 - ... global class "Run" from "res://core/run.gd"` renders three
+ * placeholders and returned the two quoted values first and the location last, so the file the
+ * error was found in was reported as though it were the script that would not parse.
+ */
 export function shapeOf(text: string): { shape: string; values: string[] } {
   const values: string[] = [];
-  let shape = text;
-  for (const pattern of SLOTS) {
-    shape = shape.replace(pattern, (matched) => {
-      values.push(matched);
-      return '…';
-    });
+  let shape = '';
+  let at = 0;
+  while (at < text.length) {
+    let earliest: { index: number; value: string } | null = null;
+    for (const pattern of SLOTS) {
+      pattern.lastIndex = at;
+      const found = pattern.exec(text);
+      // The longer of two starting together, so a quoted path is one value rather than a quote
+      // around a path: the patterns overlap by design and the widest reading is the honest one.
+      if (
+        found !== null &&
+        (earliest === null ||
+          found.index < earliest.index ||
+          (found.index === earliest.index && found[0].length > earliest.value.length))
+      ) {
+        earliest = { index: found.index, value: found[0] };
+      }
+    }
+    if (earliest === null) {
+      shape += text.slice(at);
+      break;
+    }
+    shape += `${text.slice(at, earliest.index)}…`;
+    values.push(earliest.value);
+    at = earliest.index + earliest.value.length;
   }
   return { shape, values };
 }
