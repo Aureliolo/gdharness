@@ -8,7 +8,17 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { cachedClasses, staleAgainst } from './class-cache.js';
@@ -56,6 +66,68 @@ export const PORT_SETTING = 'gdharness/runtime/port';
 /** Written into each installed addon, so doctor can tell an old copy from the shipped one. */
 const VERSION_MARKER = '.gdharness-version';
 
+/**
+ * Written beside the version marker in the editor addon: a digest of the code an editor loads.
+ *
+ * The version changes on every release and the editor's code does not, so a version comparison
+ * called an editor stale after every upgrade and sent it to a restart that changed nothing. The
+ * digest is taken from the shipped copy at install time rather than from the project, because
+ * the editor writes `.uid` and import files into its addons and those are not the code it loaded.
+ */
+const DIGEST_MARKER = '.gdharness-digest';
+
+/** The digest of the editor plugins in `from`, which is what an open editor has loaded of ours. */
+function editorAddonDigest(from: string = shippedAddonsDirectory()): string {
+  const hash = createHash('sha256');
+  const walk = (directory: string, relative: string): void => {
+    for (const name of readdirSync(directory).sort()) {
+      if (name === VERSION_MARKER || name === DIGEST_MARKER) {
+        continue;
+      }
+      const path = join(directory, name);
+      const inside = `${relative}/${name}`;
+      if (statSync(path).isDirectory()) {
+        walk(path, inside);
+      } else {
+        hash.update(`${inside}\n`);
+        hash.update(readFileSync(path));
+        hash.update('\n');
+      }
+    }
+  };
+  for (const name of EDITOR_PLUGINS) {
+    walk(join(from, name), name);
+  }
+  return hash.digest('hex');
+}
+
+let shippedDigest: string | null | undefined;
+
+/**
+ * The digest of the editor plugins this package ships, taken once, or undefined when they cannot
+ * be read, which leaves staleness to the version as it was before digests.
+ */
+export function shippedEditorDigest(): string | undefined {
+  if (shippedDigest === undefined) {
+    try {
+      shippedDigest = editorAddonDigest();
+    } catch {
+      shippedDigest = null;
+    }
+  }
+  return shippedDigest ?? undefined;
+}
+
+/** The digest the installed editor addon was written with, or null for a copy from before digests. */
+export function installedEditorDigest(projectPath: string): string | null {
+  const marker = join(projectPath, 'addons', ADDONS[0], DIGEST_MARKER);
+  if (!existsSync(marker)) {
+    return null;
+  }
+  const said = readFileSync(marker, 'utf8').trim();
+  return said === '' ? null : said;
+}
+
 /** Where the shipped addons are, beside this module in the build and in the source tree alike. */
 function shippedAddonsDirectory(): string {
   return join(dirname(fileURLToPath(import.meta.url)), 'godot', 'addons');
@@ -91,6 +163,7 @@ export function installAddons(
     writeFileSync(join(target, VERSION_MARKER), `${SERVER_VERSION}\n`);
     installed.push({ name, path: target, replaced });
   }
+  writeFileSync(join(projectPath, 'addons', ADDONS[0], DIGEST_MARKER), `${editorAddonDigest(from)}\n`);
   return installed;
 }
 

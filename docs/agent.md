@@ -66,8 +66,8 @@ Without it, `runtime_*` has nothing to talk to.
 ## 3. Verify
 
 1. `editor_status` with nothing open: reports no editor, does not fail.
-2. Open the project in the editor. `editor_status`: `connected` true, `addonVersion` equal to
-   `serverVersion`. If `addonIsStale`, run `editor_launch restart`.
+2. Open the project in the editor. `editor_status`: `connected` true, `addonIsStale` false. If
+   `addonIsStale`, run `editor_launch restart`.
 3. `project_info`: returns the project name and main scene.
 4. `editor_run`, `editor_output`, `editor_run stop`.
 
@@ -82,9 +82,10 @@ npx -y gdharness@<new> upgrade
 ```
 
 `upgrade` re-pins every config that already names gdharness and touches no config that does not.
-Then reconnect the MCP server, and restart an open editor with `editor_launch restart`. Confirm
-with `editor_status`: `addonVersion` equal to `serverVersion`, `addonIsStale` false. Skipping
-either leaves the old version answering.
+Then reconnect the MCP server, and restart an open editor with `editor_launch restart` when
+`upgrade` says the editor addons changed. Confirm with `editor_status`: `addonIsStale` false.
+Skipping either step when it is needed leaves the old version answering. `addonVersion` can
+still be the older number when the editor code did not change, and that is fine.
 
 ## Installing from the signed archive instead
 
