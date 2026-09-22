@@ -60,10 +60,15 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          bun scripts/bump-version.ts "${VERSION:-$BUMP}"
+          # The files the bump wrote, from the script's own report: the README is only among
+          # them while it pins a version, and the commit and the pull request name what changed.
+          bumped="$(bun scripts/bump-version.ts "${VERSION:-$BUMP}" | tee /dev/stderr)"
+          files="$(sed -n 's/^Updated: //p' <<<"${bumped}")"
+          test -n "${files}"
           next="$(bun -e "console.log((await Bun.file('package.json').json()).version)")"
           echo "version=${next}" >> "${GITHUB_OUTPUT}"
           echo "branch=release/v${next}" >> "${GITHUB_OUTPUT}"
+          echo "files=${files}" >> "${GITHUB_OUTPUT}"
 
       # A tag rather than a release: a version can be tagged with no release attached, and the
       # tag ruleset lets nothing move or delete one, so that number is spent either way.
@@ -97,10 +102,12 @@ jobs:
           EXPECTED_HEAD_OID: ${{ github.sha }}
           BRANCH: ${{ steps.bump.outputs.branch }}
           VERSION: ${{ steps.bump.outputs.version }}
+          FILES: ${{ steps.bump.outputs.files }}
         run: |
           set -euo pipefail
-          bun scripts/commit-signed.ts "${BRANCH}" "Release v${VERSION}" \
-            package.json server.json README.md
+          # Word-split on purpose: the report is a comma-separated list of paths without spaces.
+          # shellcheck disable=SC2086
+          bun scripts/commit-signed.ts "${BRANCH}" "Release v${VERSION}" ${FILES//,/ }
 
       - name: Open the release pull request
         env:
@@ -108,9 +115,11 @@ jobs:
           GH_REPO: ${{ github.repository }}
           BRANCH: ${{ steps.bump.outputs.branch }}
           VERSION: ${{ steps.bump.outputs.version }}
+          FILES: ${{ steps.bump.outputs.files }}
         run: |
           set -euo pipefail
-          body="Raises the version to ${VERSION} in package.json, server.json and the README."
+          named="$(sed 's/, \([^,]*\)$/ and \1/' <<<"${FILES}")"
+          body="Raises the version to ${VERSION} in ${named}."
           body="${body} Merging this tags v${VERSION}, which builds, signs and publishes the release."
 
           # The label is what keeps this pull request out of the next release's notes, which
