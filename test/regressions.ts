@@ -5624,6 +5624,11 @@ async function testARuntimeCallWaitsForTheGameThisServerStarted(): Promise<void>
       await call('editor_run', { projectPath: project, op: 'start', headless: true, runtimeWaitMs: 60_000 }),
       'first start',
     );
+    assert.equal(
+      get(first, 'runtime', 'listening'),
+      true,
+      `the first game announces: ${JSON.stringify(first)}`,
+    );
     const firstPid = asNumber(get(first, 'runtime', 'pid'), 'the first game announced');
     // The explicit stop is the report's first step, and it is checked because a stop that was
     // refused leaves the second start to end the first run instead, which is a different path.
