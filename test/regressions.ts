@@ -4548,6 +4548,59 @@ function testAnUncapturedConsoleSaysWhichEditorItIs(): void {
 }
 
 /**
+ * The console of an editor this server launched is read before that editor has connected.
+ *
+ * Reported downstream: `editor_output op: "editor"`, asked while an editor gdharness had just
+ * launched was still connecting, answered "This editor was not opened by gdharness". Who opened an
+ * editor was taken only from the editor's own greeting, so before the greeting there was no
+ * editor as far as the answer knew and the default was "not ours". Startup is when the console
+ * matters most, because a wall of parse errors goes past before the editor dials in.
+ *
+ * The engine is a stand-in that exits at once, so what is exercised is the server's own record of
+ * what it launched: the note it writes for that pid, then a console written here for it. Asked
+ * before anything was launched, the same call says no editor is connected, which is the other
+ * wrong reading the old default gave.
+ */
+async function testALaunchedEditorsConsoleIsReadBeforeItConnects(): Promise<void> {
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-console-early-'));
+  const server = new ServerProcess({ env: { GODOT_PATH: process.execPath, GDHARNESS_PROJECT: project } });
+  const call = async (name: string, args: Record<string, unknown>): Promise<string> =>
+    textOf(await server.request('tools/call', { name, arguments: args })) ?? '';
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Early"\n',
+    );
+    await server.initialize('regression-test');
+
+    const before = await call('editor_output', { op: 'editor' });
+    assert.match(before, /No editor is connected/, `nothing launched and nothing connected: ${before}`);
+
+    const opened = await call('editor_launch', { op: 'open', projectPath: project });
+    const pid = asNumber(get(jsonOf(opened, 'editor_launch open'), 'pid'));
+    assert.ok(pid > 0, `the fixture needs a launch with a pid: ${opened}`);
+
+    writeFileSync(editorLogPath(project), 'Godot Engine v4.7.2.stable.official\nERROR: Parse Error: early\n');
+    const early = await call('editor_output', { op: 'editor' });
+    assert.ok(early.trimStart().startsWith('{'), `a console rather than a refusal: ${early}`);
+    const read = jsonOf(early, 'editor_output op editor');
+    assert.equal(get(read, 'editorPid'), pid, `the console is the launched editor's: ${early}`);
+    assert.equal(get(read, 'counts', 'error'), 1, early);
+    // Which of the two depends on the stand-in, which may still be running or may have gone: what
+    // is held is that the answer says the editor has not connected, and says it once.
+    assert.equal(
+      [get(read, 'stillConnecting'), get(read, 'exitedBeforeConnecting')].filter((flag) => flag === true)
+        .length,
+      1,
+      `and it says the editor has not connected: ${early}`,
+    );
+  } finally {
+    await server.stop();
+    sweep(project);
+  }
+}
+
+/**
  * A real editor writes its console where this server reads it, through the argv the server builds.
  *
  * The chain nothing else can check. The functions above are told what the file holds; this asks an
@@ -15929,6 +15982,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheUncachedNoteSaysWhichRemedyStartsAnEngine,
   testARestartWaitsForTheEditorToSayWhoItIs,
   testTheStaleHalfIsNamedCorrectly,
+  testALaunchedEditorsConsoleIsReadBeforeItConnects,
   testStalenessIsTheEditorCodeNotTheVersion,
   testAnEditorOnTheShippedCodeIsNotCalledStale,
   testAGameIsFoundWhereverItAnnounced,

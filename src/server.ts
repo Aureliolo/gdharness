@@ -5294,7 +5294,23 @@ class GodotServer {
         'editor_launch opens one, and an editor opened here has its console captured',
       ]);
     }
-    const console = editorConsole(projectPath, status.editorPid ?? null, status.openedByAServer === true);
+    // Before the editor dials in, what is known about it is what this server launched. Its console
+    // is already being written by then, and startup is what the console is for, so an editor still
+    // connecting was answered "not opened by gdharness" at exactly the moment its wall of parse
+    // errors was going past. Once it has connected, its own report of who opened it decides.
+    const launched = status.connected ? null : (this.launchedEditor?.pid ?? null);
+    if (!status.connected && launched === null) {
+      return this.createErrorResponse('No editor is connected, so there is no console to read.', [
+        'editor_status says whether one is connected and whether it may yet be',
+        'editor_launch opens one, and an editor opened here has its console captured',
+      ]);
+    }
+    const editorPid = status.connected ? (status.editorPid ?? null) : launched;
+    const console = editorConsole(
+      projectPath,
+      editorPid,
+      status.connected ? status.openedByAServer === true : true,
+    );
     if ('kind' in console) {
       return this.createErrorResponse(theConsoleWasNotCaptured(console, projectPath), [
         'editor_launch restart replaces this editor with one whose console is captured',
@@ -5316,8 +5332,14 @@ class GodotServer {
     const grouped = bursts(everything, readPositiveNumber(args, 'before') ?? 3);
     const shown = grouped.slice(0, MOST_GROUPS);
     return this.jsonTextResponse({
-      editorPid: status.editorPid,
+      editorPid: editorPid ?? undefined,
       projectPath,
+      // Said only before it connects, so a short console is read as one still being written.
+      ...(status.connected
+        ? {}
+        : this.launchedEditorIsUp()
+          ? { stillConnecting: true }
+          : { exitedBeforeConnecting: true }),
       capturedIn: console.path,
       // Said only when it happened: a console read whole needs no sentence about how much of it
       // was read, and one that was cut off is a different answer from one that is all there.
