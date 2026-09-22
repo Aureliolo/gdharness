@@ -24,7 +24,7 @@ import {
   statSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join, normalize, relative } from 'node:path';
+import { basename, dirname, join, normalize, relative, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -985,6 +985,14 @@ class GodotServer {
   private successorWatch: NodeJS.Timeout | null = null;
   private lastProjectPath: string | null = null;
   private shutdownInitiated = false;
+  /**
+   * The editor whose last scan wrote a class cache shorter than the file, by project path and the
+   * editor's pid. Such an editor holds a class list behind the files and writes it over the cache
+   * on every scan, so a rescan cannot load the class the diagnostics cannot resolve; only a
+   * restart does, and the advice on those diagnostics has to say so rather than send the caller
+   * back to the scan that just refused. Keyed by pid so a restarted editor starts clean.
+   */
+  private readonly shortListEditors = new Map<string, number | undefined>();
 
   /**
    * The editor this server started that has not dialled in yet, by pid, or null.
@@ -2803,8 +2811,15 @@ class GodotServer {
     }
     const stale = unloaded.filter((type) => type.inTheClassCache);
     if (stale.length > 0) {
+      // The remedy depends on which editor this is. One whose last scan wrote a shorter list than
+      // the file holds a list behind the files and writes it again on every scan, so the scan
+      // that clears this on a healthy editor does nothing on it: a caller was sent to a rescan
+      // that had just told them not to rescan again.
+      const remedy = this.editorWritesAShortList(projectPath)
+        ? 'editor_rescan will not clear it here: this editor wrote the class cache from a list shorter than the file on its last scan and writes the same list on every scan, so editor_launch restart is what loads it.'
+        : 'editor_rescan clears it, measured against a real editor with waiting the same length ruled out; editor_launch restart also does, and costs more.';
       notes.push(
-        `${stale.map((type) => type.type).join(', ')} ${stale.length === 1 ? 'is' : 'are'} in the class cache and still unresolved here, which is the editor's loaded list being behind rather than anything on disk. A game launched now reads the cache and resolves ${stale.length === 1 ? 'it' : 'them'}, so the run and the diagnostics disagree. editor_rescan clears it, measured against a real editor with waiting the same length ruled out; editor_launch restart also does, and costs more.`,
+        `${stale.map((type) => type.type).join(', ')} ${stale.length === 1 ? 'is' : 'are'} in the class cache and still unresolved here, which is the editor's loaded list being behind rather than anything on disk. A game launched now reads the cache and resolves ${stale.length === 1 ? 'it' : 'them'}, so the run and the diagnostics disagree. ${remedy}`,
       );
     }
 
@@ -2813,6 +2828,18 @@ class GodotServer {
       ...(unloaded.length === 0 ? {} : { typesTheEditorHasNotLoaded: unloaded }),
       ...(notes.length === 0 ? {} : { staleAnalysis: notes.join(' ') }),
     };
+  }
+
+  /**
+   * Whether the editor connected now is the one whose last scan of [param projectPath] wrote a
+   * class cache shorter than the file. A restarted editor has a new pid and starts clean.
+   */
+  private editorWritesAShortList(projectPath: string): boolean {
+    const key = resolve(projectPath);
+    return (
+      this.shortListEditors.has(key) &&
+      this.shortListEditors.get(key) === this.godotBridge.getStatus().editorPid
+    );
   }
 
   /** A declaring script's text, or null when the path will not open. */
@@ -5553,6 +5580,9 @@ class GodotServer {
     const after = projectPath === '' || busy ? null : cachedClasses(projectPath);
     const lost =
       before === null || after === null ? [] : [...before.keys()].filter((name) => !after.has(name));
+    if (lost.length > 0) {
+      this.shortListEditors.set(resolve(projectPath), this.godotBridge.getStatus().editorPid);
+    }
     // What the scan wrote for a file that is not there, read off the cache itself rather than off
     // the editor's list: the invariant is the file, and an entry naming a path that does not exist
     // is wrong whoever put it there.
@@ -5692,8 +5722,13 @@ class GodotServer {
     }
     const notes: string[] = [];
     if (checked.unseen.length > 0) {
+      const projectPath = typeof args['projectPath'] === 'string' ? args['projectPath'] : '';
+      // The same fork as the diagnostics' remedy: on an editor whose scan writes a shorter list
+      // than the file, the rescan is the call that loses classes rather than the one that loads.
       notes.push(
-        'The cache on disk is right now, and the editor holding this project is still not resolving these: rewriting the file does not reach the list it already loaded. editor_rescan does, on its own and with no change to the declaring script; editor_launch restart also does, and costs more.',
+        projectPath !== '' && this.editorWritesAShortList(projectPath)
+          ? 'The cache on disk is right now, and the editor holding this project is still not resolving these: rewriting the file does not reach the list it already loaded. editor_rescan will not reach it either on this editor, whose last scan wrote the cache from a list shorter than the file and would again; editor_launch restart is what loads them.'
+          : 'The cache on disk is right now, and the editor holding this project is still not resolving these: rewriting the file does not reach the list it already loaded. editor_rescan does, on its own and with no change to the declaring script; editor_launch restart also does, and costs more.',
       );
     }
     if (stillHeld.length > 0) {
