@@ -403,17 +403,22 @@ function announcedIn(directory: string): Announced[] {
   for (const { file, pid, alive } of entries) {
     // A number answering to a signal is not the game unless the process behind it is the one that
     // wrote the file; one that is not is swept as a game that has gone, which is what it is.
-    const announced: Announced =
-      alive && !strangers.has(file) ? parseAnnouncement(file, pid) : { kind: 'rubbish' };
+    const gone = !alive || strangers.has(file);
+    const announced: Announced = gone ? { kind: 'rubbish' } : parseAnnouncement(file, pid);
     if (announced.kind === 'rubbish') {
+      // A file that will not parse under a live number is one being written: the game opens it
+      // empty and fills it in the same instant, and a look between the two reads nothing. The
+      // next look reads it whole, and a sweep here takes an announcement the game has made and
+      // will not make again, so its run is never found under any wait.
+      if (!gone) {
+        continue;
+      }
       // A game that announced and whose process has since gone, remembered before the file naming
       // it is removed. The sweep is what destroys the evidence: afterwards a refusal can only say
       // nothing is running, which is the same sentence a project with no addon gets and a project
       // nobody started gets. The one that matters is the game that was there and died, and it is
       // the only one of the three the caller has to act on.
-      if (!alive || strangers.has(file)) {
-        wentAway(file, pid);
-      }
+      wentAway(file, pid);
       try {
         unlinkSync(file);
       } catch {

@@ -25,6 +25,7 @@ import { pullRequestNumbers, shipsToUsers } from '../scripts/release-notes.js';
 import { sharedCopies } from '../scripts/sync-shared-gd.js';
 import {
   bootNotePath,
+  halfAsLongAgain,
   LONGEST_SIZED_WAIT_MS,
   readBootNote,
   waitSizedTo,
@@ -50,7 +51,7 @@ import {
 } from '../src/class-cache.js';
 import { GodotDAPClient, type HeldBreakpoint, handleDAPTool } from '../src/dap_client.js';
 import { dictionary, emptyRecord } from '../src/dictionary.js';
-import { forAnswer, GameLog } from '../src/game-log.js';
+import { forAnswer, GameLog, type LogEntry } from '../src/game-log.js';
 import {
   anEditorIsStillComing,
   CONNECT_WINDOW_MS,
@@ -115,12 +116,14 @@ import {
 } from '../src/runtime-client.js';
 import { discardWith } from '../src/scratch.js';
 import {
+  aboveTheRunner,
   alive,
   PLAY_STARTS_WITHIN_MS,
   PROJECT_FILE_ARGUMENTS,
   patienceForFrames,
   runIsUp,
   runtimeVerdict,
+  uidsLeftNote,
 } from '../src/server.js';
 import type { GodotProcess } from '../src/server-types.js';
 import { addonMismatch, markIfStale, SERVER_VERSION } from '../src/server-version.js';
@@ -4111,6 +4114,61 @@ function testAStaleAnnouncementWhoseNumberCameRoundIsSwept(): void {
   }
 }
 
+/**
+ * An announcement that is still being written is left for the next look.
+ *
+ * The game opens its announcement empty and fills it in the same instant, and the start's wait
+ * looks every fifty milliseconds. A look that landed between the two read nothing, and the sweep
+ * took a file that would not parse for a game that had gone: the game then printed that it had
+ * announced, the file was not there, and no wait ever found the run. A file that will not parse
+ * under a live number is kept, and the same file read whole a moment later is the game. The
+ * sweep still runs beside it: an unreadable file under a number nobody holds goes as before,
+ * which is what shows the look happened at all.
+ */
+function testAnAnnouncementBeingWrittenIsNotSwept(): void {
+  const root = mkdtempSync(join(tmpdir(), 'gdharness-being-written-'));
+  try {
+    const directory = join(root, 'gdharness');
+    mkdirSync(directory, { recursive: true });
+    const ended: SpawnSyncReturns<string> = spawnSync(process.execPath, ['--eval', ''], { encoding: 'utf8' });
+    assert.ok(ended.pid > 0, 'the fixture needs a number nobody holds');
+    const beingWritten = join(directory, `runtime-${process.pid}.json`);
+    const abandoned = join(directory, `runtime-${ended.pid}.json`);
+    const identity = {
+      protocol: RUNTIME_PROTOCOL,
+      pid: process.pid,
+      port: 51_779,
+      address: '127.0.0.1',
+      project: { name: 'BeingWritten', path: root },
+    };
+    for (const torn of ['', JSON.stringify(identity).slice(0, 20)]) {
+      writeFileSync(beingWritten, torn, 'utf8');
+      writeFileSync(abandoned, torn, 'utf8');
+      const looked = runtimesAnnounced([directory]);
+      assert.deepEqual(
+        looked.running,
+        [],
+        `nothing is listed from a file that will not parse yet: ${JSON.stringify(looked)}`,
+      );
+      assert.equal(existsSync(abandoned), false, 'an unreadable file under a number nobody holds is swept');
+      assert.equal(
+        existsSync(beingWritten),
+        true,
+        `and one under a live number is left for the next look: ${JSON.stringify(torn)}`,
+      );
+    }
+    writeFileSync(beingWritten, JSON.stringify(identity), 'utf8');
+    const whole = runtimesAnnounced([directory]);
+    assert.deepEqual(
+      whole.running.map((one) => one.pid),
+      [process.pid],
+      `the same file read whole is the game: ${JSON.stringify(whole)}`,
+    );
+  } finally {
+    sweep(root);
+  }
+}
+
 function testAGameTooNewToTalkToIsStillAGame(): void {
   const root = mkdtempSync(join(tmpdir(), 'gdharness-unspoken-'));
   try {
@@ -7561,6 +7619,20 @@ async function testAStructureReadDescribesTheScriptItRead(): Promise<void> {
 }
 
 async function testRefreshingUidsMakesTheSidecarAndWritesNoScene(): Promise<void> {
+  // The sentence for files the engine declined, rendered for each count, since the branch only
+  // runs when an engine refuses a file and no fixture here has one it refuses.
+  assert.match(uidsLeftNote(0), /^No scene was written: this reads the project and imports it/);
+  assert.match(
+    uidsLeftNote(1),
+    /^One file still has no \.uid, named under stillWithoutUid, which is the engine declining to import it rather than this op skipping it\. No scene was written\.$/,
+    uidsLeftNote(1),
+  );
+  assert.match(
+    uidsLeftNote(3),
+    /^3 files still have no \.uid, named under stillWithoutUid, which is the engine declining to import them rather than this op skipping them\. No scene was written\.$/,
+    uidsLeftNote(3),
+  );
+
   const godotPath = resolveGodotPath();
   if (!godotPath) {
     if (process.env['GDHARNESS_REQUIRE_GODOT']) {
@@ -7610,6 +7682,7 @@ async function testRefreshingUidsMakesTheSidecarAndWritesNoScene(): Promise<void
       );
       assert.ok(existsSync(sidecar), 'and it is on disk, which is where the caller will look for it');
       assert.deepEqual(asArray(get(answered, 'stillWithoutUid')), [], JSON.stringify(answered));
+      assert.equal(get(answered, 'note'), uidsLeftNote(0), JSON.stringify(answered));
 
       assert.equal(
         readFileSync(join(project, 'main.tscn'), 'utf8'),
@@ -8579,6 +8652,7 @@ async function testTheAnnounceWaitIsNotHeldByASlowEditor(): Promise<void> {
 function testTheWaitSizedToABootIsSaid(): void {
   assert.equal(waitSizedTo(null), ANNOUNCE_BUDGET_MS, 'no boot known is the usual budget');
   assert.equal(waitSizedTo(1_000), ANNOUNCE_BUDGET_MS, 'a quick boot is still given the usual');
+  assert.equal(halfAsLongAgain(8_200), 12_300, 'half as long again is the boot and half of it');
   assert.equal(waitSizedTo(8_200), 12_300, 'a slow one is given half as long again');
   assert.equal(waitSizedTo(100_000), LONGEST_SIZED_WAIT_MS, 'and never more than the ceiling');
   const said = runtimeVerdict(null, {
@@ -8593,6 +8667,40 @@ function testTheWaitSizedToABootIsSaid(): void {
     text(get(said, 'note')),
     /within 12300ms, half as long again as the 8200ms its last game took, and the game is still running/,
     `the note names the boot the wait was sized to: ${JSON.stringify(said)}`,
+  );
+  // A boot the ceiling cut short of half as long again: the wait is named as the ceiling and the
+  // boot is given whole, since "half as long again as 100000ms" is not what 60000ms is, and the
+  // boot is the number a caller sizes their own runtimeWaitMs to.
+  const capped = runtimeVerdict(null, {
+    addon: true,
+    budgetMs: LONGEST_SIZED_WAIT_MS,
+    sizedToMs: 100_000,
+    heldAt: null,
+    running: true,
+    withArgs: false,
+  });
+  assert.match(
+    text(get(capped, 'note')),
+    new RegExp(
+      `within ${LONGEST_SIZED_WAIT_MS}ms, the longest a start waits unasked though its last game took 100000ms to announce, and the game is still running`,
+    ),
+    `a capped wait is named as the ceiling, not as half as long again: ${JSON.stringify(capped)}`,
+  );
+  // A boot whose half as long again is the ceiling exactly is both, and is said the usual way.
+  const exact = runtimeVerdict(null, {
+    addon: true,
+    budgetMs: LONGEST_SIZED_WAIT_MS,
+    sizedToMs: 40_000,
+    heldAt: null,
+    running: false,
+    withArgs: false,
+  });
+  assert.match(
+    text(get(exact, 'note')),
+    new RegExp(
+      `within ${LONGEST_SIZED_WAIT_MS}ms, half as long again as the 40000ms its last game took, and the game is no longer running`,
+    ),
+    `a wait that is half as long again and the ceiling at once is half as long again: ${JSON.stringify(exact)}`,
   );
   const unsized = runtimeVerdict(null, {
     addon: true,
@@ -12218,6 +12326,36 @@ async function testARunOutlivesItsServer(): Promise<void> {
  * a project without the runner has to be refused, and nothing of the run may be left behind.
  */
 async function testGdUnitRunner(): Promise<void> {
+  // The trimmed backtrace's last line, rendered for one frame and for several, since a real run
+  // below leaves the runner's usual twenty and never one.
+  const pushed = (detail: string[]): LogEntry => ({
+    index: 0,
+    severity: 'error',
+    source: 'stderr',
+    text: 'minded',
+    detail,
+  });
+  assert.deepEqual(
+    aboveTheRunner(pushed(['[0] test (res://test/a_test.gd:4)', '[1] run (res://addons/gdUnit4/src/x.gd:9)']))
+      .detail,
+    ['[0] test (res://test/a_test.gd:4)', '[and one frame inside addons/gdUnit4/]'],
+  );
+  assert.deepEqual(
+    aboveTheRunner(
+      pushed([
+        '[0] test (res://test/a_test.gd:4)',
+        '[1] run (res://addons/gdUnit4/src/x.gd:9)',
+        '[2] stage (res://addons/gdUnit4/src/y.gd:2)',
+      ]),
+    ).detail,
+    ['[0] test (res://test/a_test.gd:4)', '[and 2 frames inside addons/gdUnit4/]'],
+  );
+  assert.deepEqual(
+    aboveTheRunner(pushed(['[0] test (res://test/a_test.gd:4)'])).detail,
+    ['[0] test (res://test/a_test.gd:4)'],
+    'a backtrace with no runner in it is left whole',
+  );
+
   const godotPath = resolveGodotPath();
   const gdunit = process.env['GDUNIT4_PATH'];
   if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
@@ -14437,6 +14575,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAGameThatAnnouncedAndWentIsSaidSo,
   testAnAnnouncementIsItsOwnProcess,
   testAStaleAnnouncementWhoseNumberCameRoundIsSwept,
+  testAnAnnouncementBeingWrittenIsNotSwept,
   testANotYetRuntimeIsNotTheSameAsNoRuntime,
   testARefusalDoesNotDenyTheRuntimeItCanSee,
   testAStartSaysWhatItLeftRunning,

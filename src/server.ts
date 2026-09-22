@@ -36,7 +36,7 @@ import {
   ListToolsRequestSchema,
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
-import { readBootNote, waitSizedTo, writeBootNote } from './boot-note.js';
+import { halfAsLongAgain, readBootNote, waitSizedTo, writeBootNote } from './boot-note.js';
 import { readBreakpointNote, writeBreakpointNote } from './breakpoint-note.js';
 import { announceBridge, announcementPath, readAnnouncement, withdrawBridge } from './bridge-announce.js';
 import {
@@ -466,6 +466,18 @@ function aboutTheChildren(ended: ChildrenEnded | null, throughEditor: boolean): 
   return `${endedToo}${leftToo}`;
 }
 
+/**
+ * What refresh_uids says about the files the engine would not import, counted in their number:
+ * the list is under stillWithoutUid, and the sentence is what says the engine declined them.
+ */
+export function uidsLeftNote(left: number): string {
+  if (left === 0) {
+    return 'No scene was written: this reads the project and imports it, and does not resave anything.';
+  }
+  const them = left === 1 ? 'it' : 'them';
+  return `${left === 1 ? 'One file' : `${left} files`} still ${left === 1 ? 'has' : 'have'} no .uid, named under stillWithoutUid, which is the engine declining to import ${them} rather than this op skipping ${them}. No scene was written.`;
+}
+
 /** The sentence a start adds to its message when it ended a run to happen. */
 function endedToStartThis(ended: EndedRun | null): string {
   if (ended === null) {
@@ -547,11 +559,15 @@ export function runtimeVerdict(
       ? 'the editor has not yet reported the game as playing, which a restarted editor does not until its scan is over'
       : 'the game is still running';
   // Said when the wait was already longer than usual for this project, so a caller reading the
-  // note does not pass a runtimeWaitMs shorter than the one they just had.
+  // note does not pass a runtimeWaitMs shorter than the one they just had. A wait the ceiling cut
+  // short of half as long again is named as the ceiling, since "half as long again as 100000ms"
+  // is not what 60000ms is, and the boot itself is the number the caller sizes their own wait to.
   const sized =
     after.sizedToMs === undefined
       ? ''
-      : `, half as long again as the ${after.sizedToMs}ms its last game took,`;
+      : halfAsLongAgain(after.sizedToMs) > after.budgetMs
+        ? `, the longest a start waits unasked though its last game took ${after.sizedToMs}ms to announce,`
+        : `, half as long again as the ${after.sizedToMs}ms its last game took,`;
   return {
     listening: false,
     mayYetAnnounce: after.running,
@@ -835,7 +851,7 @@ const RUNNER_DIRECTORY = 'addons/gdUnit4/';
  * caused it, which is the whole of what anybody reads. Said rather than dropped, so a backtrace
  * that looks short is one that says why.
  */
-function aboveTheRunner(entry: LogEntry): LogEntry {
+export function aboveTheRunner(entry: LogEntry): LogEntry {
   const runner = entry.detail.findIndex((line) => line.includes(RUNNER_DIRECTORY));
   if (runner < 0) {
     return entry;
@@ -843,7 +859,10 @@ function aboveTheRunner(entry: LogEntry): LogEntry {
   const cut = entry.detail.length - runner;
   return {
     ...entry,
-    detail: [...entry.detail.slice(0, runner), `[and ${cut} frames inside ${RUNNER_DIRECTORY}]`],
+    detail: [
+      ...entry.detail.slice(0, runner),
+      `[and ${cut === 1 ? 'one frame' : `${cut} frames`} inside ${RUNNER_DIRECTORY}]`,
+    ],
   };
 }
 
@@ -2182,10 +2201,7 @@ class GodotServer {
         stillWithoutUid: after,
         // Said rather than implied: the op resaved every scene for as long as it existed, so a
         // caller who knows it by its diff needs telling that the diff is the bug and is gone.
-        note:
-          after.length > 0
-            ? `${after.length} still have no .uid, which is the engine declining to import them rather than this op skipping them. No scene was written.`
-            : 'No scene was written: this reads the project and imports it, and does not resave anything.',
+        note: uidsLeftNote(after.length),
       },
     });
   }
