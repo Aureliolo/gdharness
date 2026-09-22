@@ -4112,6 +4112,61 @@ function testAStaleAnnouncementWhoseNumberCameRoundIsSwept(): void {
   }
 }
 
+/**
+ * An announcement that is still being written is left for the next look.
+ *
+ * The game opens its announcement empty and fills it in the same instant, and the start's wait
+ * looks every fifty milliseconds. A look that landed between the two read nothing, and the sweep
+ * took a file that would not parse for a game that had gone: the game then printed that it had
+ * announced, the file was not there, and no wait ever found the run. A file that will not parse
+ * under a live number is kept, and the same file read whole a moment later is the game. The
+ * sweep still runs beside it: an unreadable file under a number nobody holds goes as before,
+ * which is what shows the look happened at all.
+ */
+function testAnAnnouncementBeingWrittenIsNotSwept(): void {
+  const root = mkdtempSync(join(tmpdir(), 'gdharness-being-written-'));
+  try {
+    const directory = join(root, 'gdharness');
+    mkdirSync(directory, { recursive: true });
+    const ended: SpawnSyncReturns<string> = spawnSync(process.execPath, ['--eval', ''], { encoding: 'utf8' });
+    assert.ok(ended.pid > 0, 'the fixture needs a number nobody holds');
+    const beingWritten = join(directory, `runtime-${process.pid}.json`);
+    const abandoned = join(directory, `runtime-${ended.pid}.json`);
+    const identity = {
+      protocol: RUNTIME_PROTOCOL,
+      pid: process.pid,
+      port: 51_779,
+      address: '127.0.0.1',
+      project: { name: 'BeingWritten', path: root },
+    };
+    for (const torn of ['', JSON.stringify(identity).slice(0, 20)]) {
+      writeFileSync(beingWritten, torn, 'utf8');
+      writeFileSync(abandoned, torn, 'utf8');
+      const looked = runtimesAnnounced([directory]);
+      assert.deepEqual(
+        looked.running,
+        [],
+        `nothing is listed from a file that will not parse yet: ${JSON.stringify(looked)}`,
+      );
+      assert.equal(existsSync(abandoned), false, 'an unreadable file under a number nobody holds is swept');
+      assert.equal(
+        existsSync(beingWritten),
+        true,
+        `and one under a live number is left for the next look: ${JSON.stringify(torn)}`,
+      );
+    }
+    writeFileSync(beingWritten, JSON.stringify(identity), 'utf8');
+    const whole = runtimesAnnounced([directory]);
+    assert.deepEqual(
+      whole.running.map((one) => one.pid),
+      [process.pid],
+      `the same file read whole is the game: ${JSON.stringify(whole)}`,
+    );
+  } finally {
+    sweep(root);
+  }
+}
+
 function testAGameTooNewToTalkToIsStillAGame(): void {
   const root = mkdtempSync(join(tmpdir(), 'gdharness-unspoken-'));
   try {
@@ -14461,6 +14516,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAGameThatAnnouncedAndWentIsSaidSo,
   testAnAnnouncementIsItsOwnProcess,
   testAStaleAnnouncementWhoseNumberCameRoundIsSwept,
+  testAnAnnouncementBeingWrittenIsNotSwept,
   testANotYetRuntimeIsNotTheSameAsNoRuntime,
   testARefusalDoesNotDenyTheRuntimeItCanSee,
   testAStartSaysWhatItLeftRunning,
