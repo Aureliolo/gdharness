@@ -379,11 +379,49 @@ honest and it will not be obvious to the next reader.
 Disarming a containment guard is the one disarm that can escape while it is disarmed. Give the
 disarmed run somewhere harmless to escape to before running it.
 
+Running one suite is not running the suite. `bun test/regressions.ts` is one file of the fifteen
+the CI job runs, and the other fourteen are not a slower tier of the same thing, they are different
+callers of the same code. A change to one sentence three files assert about left the regressions
+green and failed `test/bridge.ts` on the push, on `build-and-test` and on an engine leg at once.
+Run what CI runs before believing a change is done, which here is `test:ci`, `test:integration` and
+`test:metadata` beside the regressions.
+
+Keep the whole output of a run, because the message is the only thing that says what happened and
+a `| tail` keeps the stack and drops it. An engine fixture failed once here and passed on every
+rerun afterwards, and nothing is left to say why: the message went past the end of the window.
+Redirect the run to a file and read the file, so the one occurrence is still there when it turns
+out not to repeat.
+
+A case that needs something the whole machine has only one of fails for reasons that are not about
+it. The windowed menu case asserts that the game's window holds the focus for thirty frames, and
+focus belongs to the desktop rather than to the game: an editor for another project opened at
+17:02:39 during a run here and the case failed at that wait with `window focus_exited` in its log.
+A CI runner gives it a machine to itself and a developer's does not. Loosening it is the wrong
+answer, because the assertion is about the thing the case is for. Say in the case what it needs,
+and have the assertion say that a focus lost mid-run is the desktop rather than the input path, so
+the next reader is not sent to debug the click.
+
 ## Releasing
 
 Work the tracker to empty, then ship. When issues are open, fix all of them, then cut a release
 carrying the fixes rather than leaving them sitting on `main` unreleased. A fix nobody can install
 is not delivered.
+
+A report must not stand between an irreversible act and the work that depends on it. The release
+takes three acts that cannot be taken back, and the step comparing what npm serves against the
+signed archive sat inside the npm job, after the publish. On 1.0.11 npm took 7m11s to serve the
+version against a five-minute window, the job went red, and the two jobs behind it were skipped for
+needing that job rather than that step: the MCP registry entry and the install checks on three
+platforms. The listing every marketplace reads stayed a release behind, and the registry entry for
+that version can never be made, because publishing there happens once. Widening the window makes it
+rarer and leaves the shape alone. Ask of every such step whether what comes next depends on the act
+or on the report of it, and move the report out.
+
+Then ask the same question of each act on its own: can this run be run again? All three refused to
+act on something already done, so a release run that failed anywhere after the first publish could
+not be re-run at all, and the tag workflow, dispatched by hand on a tag that already existed, said
+"nothing to do" and exited without starting the release, which is exactly the state somebody
+presses that button in.
 
 **Every release is a patch.** From 1.0.0 the next version is 1.0.1, then 1.0.2, and so on: a fix,
 an addition nothing has to adapt to, a new argument, a new field in an answer, a new tool, a new op,

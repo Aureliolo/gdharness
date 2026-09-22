@@ -329,6 +329,18 @@ An announcement naming a process that has gone is ignored, and a server with no 
 in, which is any config written by hand, holds out for its configured port instead: it keeps asking
 for it every two seconds and `editor_status` says it is waiting and why.
 
+**An editor gdharness opens writes its console to `.godot/gdharness-editor.log`,** because nothing
+can read it otherwise. What an editor prints goes to a console no plugin can reach, so the addon
+cannot scrape it from inside, and an editor in self-contained mode writes no log of its own: a
+project whose editor printed hundreds of parse errors at startup had every gdharness tool agreeing
+it was fine, and the only way to the wall was somebody reading the window. So `editor_launch` asks
+the engine for a log file as it starts, and `editor_output op: "editor"` reads it. The engine
+replaces that file when it opens it, so one file is one editor session from its first line, which
+is where a wall of startup errors will be. Beside it, `.godot/gdharness-editor.json` records which
+editor the log belongs to: a log from yesterday's editor is still on disk today, and reading it as
+this one's would answer with a session that has ended. An editor somebody opened by hand has no log
+at all and is refused saying so.
+
 The editor keeps asking from its end too, so the order the two start in does not matter. A socket
 pointed at a port nothing is listening on sits in its connect for thirty seconds before it gives
 up, which outlasts a harness reconnect: an editor opened ahead of its server reaches the bridge

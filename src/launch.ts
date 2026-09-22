@@ -105,9 +105,26 @@ export interface EditorPorts {
  * The two ports are named rather than left to the editor settings, which are one file for every
  * editor on the machine: without this the second editor to open binds neither, and every script
  * and debug tool behind it is answered by the first one about a different project.
+ *
+ * The log file is the only way anything here can read what the editor prints. An editor's console
+ * reaches no plugin, so the addon cannot scrape it, and an editor in self-contained mode writes no
+ * log of its own; asking for one at the start is what makes `editor_output op: "editor"` possible
+ * at all, and only for an editor this server opened. Away from the project's own
+ * `user://logs/godot.log` for the reason every other engine start here is: that file is rotated by
+ * whichever process starts next, and a game would rotate it out from under the editor.
  */
-export function editorArguments(projectPath: string, ports: EditorPorts): string[] {
-  return ['-e', '--path', projectPath, '--lsp-port', String(ports.lsp), '--dap-port', String(ports.dap)];
+export function editorArguments(projectPath: string, ports: EditorPorts, logFile: string): string[] {
+  return [
+    '-e',
+    '--path',
+    projectPath,
+    '--lsp-port',
+    String(ports.lsp),
+    '--dap-port',
+    String(ports.dap),
+    '--log-file',
+    logFile,
+  ];
 }
 
 /**

@@ -68,6 +68,14 @@ that is running, and the project on disk. ${TOOL_SPECS.length} tools, named \`do
   runtime addon announces nothing, so there is no process id and \`running\` is the editor's answer,
   which can lag by seconds after the game has gone. \`editor_status\` names the game under
   \`runtimes\`, which does not depend on the editor answering.
+- When the tools all say the project is fine and something is still wrong, read the editor's own
+  console with \`editor_output op: "editor"\`. It is a different log from the one above and the only
+  way anything here sees what the editor printed: its console reaches no plugin, so an editor
+  gdharness opened is asked for a log file as it starts, and one somebody opened by hand is refused
+  rather than answered empty. It carries the whole session from the editor's first line, which is
+  where a wall of startup errors will be, with repeated messages grouped under \`repeated\` and the
+  ordinary lines above each group beside them: a plugin announcing itself on the line before a
+  burst of parse errors is usually the whole diagnosis.
 - One server, one editor. A second project is a second harness session with its own server, and
   that works: each editor is opened on its own language server and debug adapter ports, and says
   where it serves. Two editors on one project is the thing to refuse.

@@ -890,7 +890,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'editor_output',
     description:
-      "What the project started by editor_run has printed, as entries with a severity: the errors and warnings the engine reported, each with where it happened, and everything else as info. For a run the editor plays the reports come from the game itself, through the runtime addon, since the editor's debugger relays what a game prints and not what it reports; a played game without the runtime addon answers here with its prints alone. Answers with the counts and the verdict as well as the entries. heldAt is three answers: null for a run this server knows is not held, running or over, an object for one it knows is held at a breakpoint, whether the adapter said so or the runtime did by accepting a connection and never answering, and absent with heldUnknown beside it for a server that connected to the debugger after the stop and has no runtime to ask, since the adapter reports a stop only to the sessions connected when it happened. A run that has quit still answers here, with running false and its exit code, until the next one starts. A run this server started also answers with transcript, the file both its streams are written to: uncapped, written while the run is going, and the thing to read or tail for a long run rather than the engine's own log, which every engine start rotates away. Read the file for output and this answer for state: endedBy says whether gdharness ended the run, and a transcript that has stopped growing is a run between prints rather than a run that is over. running is asked of the operating system whenever there is a process to ask about, which is every run this server started and every editor-played run whose game announced its runtime. For an editor-played run that never announced, there is no process id here and running is the editor's answer, which can lag: one measured elsewhere reported a game as playing for fifteen seconds after its process had been ended from outside. editor_status names that game under runtimes, which does not depend on the editor answering.",
+      "What the project started by editor_run has printed, as entries with a severity: the errors and warnings the engine reported, each with where it happened, and everything else as info. For a run the editor plays the reports come from the game itself, through the runtime addon, since the editor's debugger relays what a game prints and not what it reports; a played game without the runtime addon answers here with its prints alone. Answers with the counts and the verdict as well as the entries. heldAt is three answers: null for a run this server knows is not held, running or over, an object for one it knows is held at a breakpoint, whether the adapter said so or the runtime did by accepting a connection and never answering, and absent with heldUnknown beside it for a server that connected to the debugger after the stop and has no runtime to ask, since the adapter reports a stop only to the sessions connected when it happened. A run that has quit still answers here, with running false and its exit code, until the next one starts. A run this server started also answers with transcript, the file both its streams are written to: uncapped, written while the run is going, and the thing to read or tail for a long run rather than the engine's own log, which every engine start rotates away. Read the file for output and this answer for state: endedBy says whether gdharness ended the run, and a transcript that has stopped growing is a run between prints rather than a run that is over. running is asked of the operating system whenever there is a process to ask about, which is every run this server started and every editor-played run whose game announced its runtime. For an editor-played run that never announced, there is no process id here and running is the editor's answer, which can lag: one measured elsewhere reported a game as playing for fifteen seconds after its process had been ended from outside. editor_status names that game under runtimes, which does not depend on the editor answering. op: \"editor\" answers about the editor itself instead, which is a different log and the only way anything here can read what an editor printed: its console reaches no plugin, so the addon cannot scrape it, and an editor gdharness opened is asked for a log file as it starts. That covers the whole session from the editor's first line, which is where the output worth reading usually is, since the class cache, the plugins and the language server all say what they have to say before any harness has connected. The answer carries the entries in the order they were printed and, beside them under repeated, each message shape several lines share: how many, what varied in each slot of it and how many different values stood there, the first occurrence, and the ordinary lines above the group, found by walking back past the group rather than by counting lines. An editor somebody opened by hand has no console here and is refused saying so rather than answered empty, because an editor that printed nothing and an editor nobody captured are not the same thing.",
     parameters: {
       severity: {
         type: 'string',
@@ -898,11 +898,18 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         description: 'The least severe entry to include. Default info, which is everything.',
       },
       sinceLastCall: {
+        // A run's log is held open and remembers how far a caller has been shown. The editor's is
+        // read off disk on every call, so there is no mark to move and nothing to be since: taking
+        // this there would be accepting an argument and ignoring it.
+        ops: ['run'],
         type: 'boolean',
         description:
           'Only entries this has not already answered with at this severity. Default false. Measured per severity floor and not across them, so polling for errors leaves the rest of the output for a later read rather than consuming it, and a read with contains is a search over the whole run and consumes nothing.',
       },
       cpu: {
+        // About a running process, which an editor's console is not: the question is what it
+        // printed, and it is answered from a file whether the editor is still there or not.
+        ops: ['run'],
         type: 'boolean',
         description:
           'Also answer with cpuSeconds, the processor time the run has used. Default false, because asking costs a subprocess. Worth it when elapsedMs is climbing and nothing is being printed: processor time standing still is a run that has stopped doing anything, rather than one that is slow.',
@@ -917,7 +924,25 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         description:
           'The most entries to answer with, newest kept. Default 200, and omitted says how many matching entries that left out. A run long enough to pass it needs this raised, not just filtered: filtering narrows what counts as matching, and the newest of those is still all one answer carries.',
       },
+      before: {
+        ops: ['editor'],
+        type: 'number',
+        description:
+          'How many lines above a repeated group to carry with it, counting only lines that are not themselves part of a group. Default 3. The line that explains a wall of identical errors is the last ordinary line above it, so this walks past the wall rather than a fixed distance back.',
+      },
     },
+    operations: {
+      run: {
+        summary: 'What the game a run is playing has printed, which is everything described above',
+        requires: [],
+      },
+      editor: {
+        summary:
+          'What the connected editor itself has printed, from its first line, with repeated messages grouped and the ordinary lines above each group carried with it',
+        requires: [],
+      },
+    },
+    defaultOperation: 'run',
     requires: [],
   },
   {
