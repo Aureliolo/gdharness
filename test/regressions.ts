@@ -2375,6 +2375,19 @@ const ENGINE_CALL_TIMEOUT_MS = 120_000;
 const WINDOWED_BOOT_MS = 150_000;
 
 /**
+ * How long three engines of one bench are given to announce between them.
+ *
+ * Thirty seconds was sized to a machine doing nothing else, and this machine does: another
+ * project's six headless engines were running when this failed, with the commit charge at 55 GB
+ * of an 85 GB limit, and nothing announced in the window at all. What binds an engine starting is
+ * the commit charge rather than free memory, measured downstream on the same machine the same
+ * day, and an engine that cannot commit either starts slowly or comes up with nothing loaded. So
+ * this is sized to three cold boots on a machine under load rather than to three on a quiet one:
+ * the assertion is unchanged, and what it no longer does is fail about the neighbours.
+ */
+const BENCH_ANNOUNCE_MS = 90_000;
+
+/**
  * Runs the built server over stdio, initialised and ready for tools/call, and hands `call` and
  * `request` to the body. The transport is the point: these fixtures are about what a peer can
  * put on the wire, and reaching into the class directly would not carry a `__proto__` through
@@ -4401,6 +4414,24 @@ function testAPidPicksOneOfSeveralGames(): void {
     /protocol this server does not speak/,
     JSON.stringify(tooNewOne),
   );
+
+  // The sentence the reference and the schema both give for a call that names neither, held
+  // against what the pick does rather than against itself. A session downstream saw a second
+  // project's game listed beside its own, read "not needed with one game" and could not tell
+  // what it was being answered by; both documents now say the order, and the middle step, the
+  // server's own game, is the one this function never sees, so it is named as belonging to the
+  // caller above rather than left to look like a branch in here.
+  const theOnlyOne = chooseRuntime([game(31, other)]);
+  assert.deepEqual(theOnlyOne, { endpoint: game(31, other) }, 'the only game there is answers');
+  const twoProjects = chooseRuntime([game(41, project), game(42, other)]);
+  assert.ok('problem' in twoProjects, 'two projects and nothing to tell them apart is a refusal');
+  for (const named of [project, other]) {
+    assert.match(
+      text(get(twoProjects, 'problem')),
+      new RegExp(named.replaceAll('\\', '\\\\')),
+      `and it names every game running: ${JSON.stringify(twoProjects)}`,
+    );
+  }
 }
 
 /**
@@ -10384,7 +10415,7 @@ async function aRealBenchTakesItsWorkerWithIt(engine: string, tiedAtStart: boole
         const announcedFiles = (): string[] =>
           readdirSync(runtimeDir).filter((entry) => /^runtime-\d+\.json$/.test(entry));
         assert.ok(
-          await cameTrue(() => announcedFiles().length === 3, 30_000),
+          await cameTrue(() => announcedFiles().length === 3, BENCH_ANNOUNCE_MS),
           `${shape}: the bench, its worker and the helper should all announce: ${JSON.stringify(announcedFiles())}`,
         );
         const helperNote = join(project, 'helper.pid');

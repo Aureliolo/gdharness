@@ -142,7 +142,7 @@ const PROJECT_PATH: JsonSchema = {
 const RUNNING_PROJECT_PATH: JsonSchema = {
   type: 'string',
   description:
-    'Which game, when more than one is running: the project directory it was started from. Not needed with one game.',
+    "Which game, when more than one is running: the project directory it was started from. The pick without it, in order: the game this server started or is playing when it is among those running, which is the usual answer and is named under answeredBy; else the only game there is; else a refusal naming every game, since a machine running two projects at once has two servers and either could be meant. Not needed with one game, nor for a call to this server's own.",
 };
 const RUNNING_PID: JsonSchema = {
   type: 'number',
