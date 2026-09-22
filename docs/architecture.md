@@ -359,6 +359,16 @@ the scan drops out of the file, and the next fresh engine, CI run or clone start
 narrower one. Reading the file after a scan therefore says nothing the editor has not already
 said, which is why `unseenByEditor` is the whole answer and not half of it.
 
+The editor writes that file on every save as well, so an editor holding a shorter list than the
+files takes the same classes out of it between any two rebuilds, and each rebuild puts them back.
+Every rebuild the server runs, for `refresh_classes`, for a test run or after a scan, writes what
+it left into `.godot/gdharness-classes.json`; a class in that list that the cache no longer holds
+when the next rebuild begins is named under `lostSinceLastRebuild`, and the editor's pid goes into
+the same note as one whose scan or save writes the cache short. On that editor the rescan loads
+nothing, so `script_diagnostics` and `refresh_classes` send the caller to `editor_launch restart`
+rather than to it, from whichever server is running by then; a restarted editor has a new pid and
+is offered the rescan again.
+
 Neither of those reaches the language server, which keeps a cache of its own that nothing on the
 editor side invalidates. Godot answers about a file the client has opened from the copy the client
 handed it, and holds that parse, and that parse holds the parses of everything the file depends
