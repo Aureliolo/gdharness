@@ -508,8 +508,10 @@ file read as a game "still starting" through two further runs. The start time is
 operating system once per file, after the file is a minute old, and again once a minute after a
 confirmation. `editor_run stop` takes the file of the game it ended down itself, once the process
 has gone, so the common case never reaches that judgement. A file that will not parse under a
-number a live process holds is left for the next look, not swept: the game opens its file empty
-and fills it in the same instant, and a look between the two reads nothing.
+number a live process holds is left for the next look, not swept, and the addon writes the file
+whole under a `.tmp` name and moves it into place: the directory is shared by every server on the
+machine, and one still running an older sweep would otherwise take a file it met between the
+game's open and its write.
 
 A script run is not one of them. Autoloads come up for `godot -s` as well, so a test tier or a
 batch tool would bind a port and announce itself under the project's own path, and a client asking
