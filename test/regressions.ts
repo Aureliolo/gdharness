@@ -12585,6 +12585,10 @@ async function testGdUnitRunner(): Promise<void> {
           ['report_999'],
           'the report this run wrote is cleaned up, and nothing else is',
         );
+        // With the other run's report gone, the next run takes the shared directory down with its
+        // own: a project that has been tested is left as it was found, and an empty directory of
+        // ours in somebody's .godot is a leftover however small.
+        rmSync(elsewhere, { recursive: true, force: true });
 
         const only: unknown = JSON.parse(
           await call(
@@ -12602,6 +12606,11 @@ async function testGdUnitRunner(): Promise<void> {
         );
         assert.equal(get(only, 'passed'), true, JSON.stringify(only, null, 2));
         assert.equal(get(only, 'tests'), 4);
+        assert.equal(
+          existsSync(join(projectDir, '.godot', 'gdharness-reports')),
+          false,
+          `the reports directory goes with the last report in it: ${readdirSync(join(projectDir, '.godot')).join(', ')}`,
+        );
         // Nothing stopped early in the runs above, and the answer says so by leaving the field
         // out. Asserted here so the presence of it below means something.
         assert.equal(get(run, 'notRun'), undefined, JSON.stringify(run, null, 2));
