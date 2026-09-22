@@ -6,7 +6,7 @@
  */
 
 import { ENGINE_PASSES, HEADLESS_OPERATIONS } from './headless-operations.js';
-import { argumentsOf, projectPathSentence, TOOL_SPECS } from './tool-definitions.js';
+import { argumentsOf, projectPathSentence, TOOL_SPECS, theGamePicked } from './tool-definitions.js';
 
 /** What a schema's `type` is called in prose, for the one argument or two that take either. */
 export function namedType(declared: unknown): string {
@@ -73,7 +73,8 @@ export function renderToolsMarkdown(): string {
     '`op`. An unknown op or argument is refused with the valid set listed. Generated from the server.',
     '',
     `${projectPathSentence()}: the \`runtime_*\` and \`debug_*\` ones pick between running games`,
-    'instead, and the others answer about the editor on this server. An argument a tool does not',
+    'instead, and the others answer about the editor on this server. The pick, when a call names',
+    `neither \`projectPath\` nor \`pid\`: ${theGamePicked()}. An argument a tool does not`,
     'declare is refused rather than ignored. Answers are read from the engine after the change, not',
     'echoed from the request. Engine stderr comes back under `engine_messages`.',
     '',
