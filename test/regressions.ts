@@ -5020,7 +5020,7 @@ function testTheCureIsWrittenWhole(): void {
   ];
   // What the tree holds today and not a comfortable minimum, so one place going quiet lowers this
   // in the same change and somebody confirms it was meant.
-  assert.equal(offered.length, 24, `the places offering a remedy should all be found, not ${offered.length}`);
+  assert.equal(offered.length, 26, `the places offering a remedy should all be found, not ${offered.length}`);
 
   // Across whitespace, because a rendered file wraps where the source did not and a sentence that
   // breaks at "the" is the same sentence. Change, edit and touch, because the claim is about what
@@ -14364,6 +14364,166 @@ async function testARepairThatCouldNotRunIsNotReported(): Promise<void> {
 }
 
 /**
+ * The remedy the diagnostics offer for a class the editor has not loaded knows which editor it is.
+ *
+ * On a healthy editor `editor_rescan` loads the class, measured in the editor tier. An editor whose
+ * scan writes a class cache shorter than the file holds a list behind the files and writes it
+ * again on every scan, so the same rescan loads nothing there; its own answer says not to rescan
+ * again until a restart. Downstream, a new `class_name` went through both in order: the rescan
+ * answered `cacheLost` and `cacheRestored` with that note, the diagnostics on a script using the
+ * class still could not resolve it and their `staleAnalysis` sent the caller back to the rescan,
+ * and only the restart cleared it. The two tools disagreed about one state and the caller read
+ * both.
+ *
+ * The server that saw the scan lose classes is the one that knows, so it remembers the editor by
+ * pid: the same diagnostics say restart on that editor, and say rescan again once a restarted
+ * editor, with a new pid, has dialled in. The cache is put back by hand here where the rebuild
+ * would have put it, since this server has no engine; what is under test is the sentence, which
+ * turns on the loss having been seen and not on how the cache came back.
+ */
+async function testTheDiagnosticsRemedyKnowsAnEditorThatWritesAShortList(): Promise<void> {
+  await withFakeLanguageServer(
+    (uri) => uri,
+    async (lspPort) => {
+      const port = await reservePort();
+      const server = new ServerProcess({
+        env: {
+          GDHARNESS_BRIDGE_PORT: String(port),
+          GDHARNESS_LSP_PORT: String(lspPort),
+          GODOT_PATH: join(tmpdir(), 'gdharness-no-such-godot'),
+        },
+      });
+      const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-short-list-'));
+      const sockets: WebSocket[] = [];
+      try {
+        writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+        mkdirSync(join(project, '.godot'), { recursive: true });
+        writeFileSync(join(project, 'hero.gd'), 'class_name Hero\nextends Node\n');
+        // Named for the diagnostic the stand-in language server publishes about every file.
+        writeFileSync(join(project, 'missing.gd'), 'class_name Missing\nextends Node\n');
+        writeFileSync(join(project, 'user.gd'), 'extends Node\n\nvar missing: Missing = Missing.new()\n');
+        const cache = join(project, '.godot', 'global_script_class_cache.cfg');
+        const whole =
+          'list=[{\n"class": &"Hero",\n"path": "res://hero.gd"\n}, {\n"class": &"Missing",\n"path": "res://missing.gd"\n}]\n';
+        writeFileSync(cache, whole);
+
+        await server.initialize('regression-test');
+        // The editor holds Hero alone, so a scan writes a cache without Missing.
+        const holds = ['Hero'];
+        const dialIn = async (editorPid: number): Promise<void> => {
+          const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+          sockets.push(socket);
+          await new Promise<void>((resolve, reject) => {
+            socket.once('open', () => {
+              resolve();
+            });
+            socket.once('error', reject);
+          });
+          socket.on('message', (raw: Buffer) => {
+            const message: unknown = JSON.parse(String(raw));
+            if (!isRecord(message) || message['type'] !== 'tool_invoke') {
+              return;
+            }
+            const tool = String(message['tool']);
+            const args = isRecord(message['args']) ? message['args'] : {};
+            if (tool === 'rescan_filesystem' && args['statusOnly'] !== true) {
+              const entries = holds.map(
+                (name) => `{\n"class": &"${name}",\n"path": "res://${name.toLowerCase()}.gd"\n}`,
+              );
+              writeFileSync(cache, `list=[${entries.join(', ')}]\n`);
+            }
+            const result =
+              tool === 'rescan_filesystem'
+                ? { ok: true, scanning: false, importing: false, pending: false }
+                : { ok: true, classes: holds };
+            socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result }));
+          });
+          socket.send(
+            JSON.stringify({
+              type: 'godot_ready',
+              project_path: project,
+              addon_version: SERVER_VERSION,
+              editor_pid: editorPid,
+            }),
+          );
+          let known = false;
+          for (let waited = 0; waited < 10_000 && !known; waited += 100) {
+            await delay(100);
+            const status = parseTextContent(
+              await server.request('tools/call', { name: 'editor_status', arguments: {} }),
+            );
+            known = get(status, 'editor', 'editorPid') === editorPid;
+          }
+          assert.ok(
+            known,
+            `the editor with pid ${editorPid} should have reached the server, or this proves nothing`,
+          );
+        };
+        const diagnose = async (): Promise<unknown> =>
+          parseTextContent(
+            await server.request('tools/call', {
+              name: 'script_diagnostics',
+              arguments: { projectPath: project, scriptPath: 'res://user.gd' },
+            }),
+          );
+
+        await dialIn(4242);
+        const first = await diagnose();
+        assert.deepEqual(
+          get(first, 'typesTheEditorHasNotLoaded'),
+          [{ type: 'Missing', declaredIn: 'res://missing.gd', inTheClassCache: true }],
+          `the class is declared, cached and unresolved: ${JSON.stringify(first)}`,
+        );
+        assert.match(
+          text(get(first, 'staleAnalysis')),
+          /editor_rescan clears it, measured against a real editor/,
+          `before any scan has lost anything, the rescan is the remedy: ${JSON.stringify(first)}`,
+        );
+
+        const scanned = parseTextContent(
+          await server.request('tools/call', { name: 'editor_rescan', arguments: { projectPath: project } }),
+        );
+        assert.deepEqual(
+          asArray(get(scanned, 'cacheLost') ?? []).map(String),
+          ['Missing'],
+          `the scan wrote the short list: ${JSON.stringify(scanned)}`,
+        );
+        writeFileSync(cache, whole);
+
+        const afterLoss = await diagnose();
+        assert.deepEqual(
+          get(afterLoss, 'typesTheEditorHasNotLoaded'),
+          [{ type: 'Missing', declaredIn: 'res://missing.gd', inTheClassCache: true }],
+          `still declared, cached and unresolved: ${JSON.stringify(afterLoss)}`,
+        );
+        assert.match(
+          text(get(afterLoss, 'staleAnalysis')),
+          /editor_rescan will not clear it here: this editor wrote the class cache from a list shorter than the file on its last scan and writes the same list on every scan, so editor_launch restart is what loads it\./,
+          `on the editor that lost it, the remedy is the restart: ${JSON.stringify(afterLoss)}`,
+        );
+
+        // A restarted editor is a new process with a new pid, and starts clean.
+        sockets[0]?.close();
+        await delay(1100);
+        await dialIn(4343);
+        const restarted = await diagnose();
+        assert.match(
+          text(get(restarted, 'staleAnalysis')),
+          /editor_rescan clears it, measured against a real editor/,
+          `a restarted editor is offered the rescan again: ${JSON.stringify(restarted)}`,
+        );
+      } finally {
+        for (const socket of sockets) {
+          socket.terminate();
+        }
+        await server.stop();
+        sweep(project);
+      }
+    },
+  );
+}
+
+/**
  * A scan that shortened the class cache has it rebuilt from the files.
  *
  * The other half of the case above, and the one that needs a real engine, because the rebuild is a
@@ -14448,6 +14608,26 @@ async function testAShortenedCacheIsRebuilt(): Promise<void> {
     assert.ok(readFileSync(cache, 'utf8').includes('Squire'), `and the file holds it again: ${said}`);
     // Still not ok, because the editor is holding the short list and the next scan drops it again.
     assert.match(text(get(answer, 'note')), /editor_launch restart/, said);
+
+    // The rebuild's own answer on the same editor: the class it cannot see is named, and the
+    // remedy is the restart rather than the rescan that has just been measured losing it.
+    const rebuilt = parseTextContent(
+      await server.request(
+        'tools/call',
+        { name: 'project_import', arguments: { projectPath: project, op: 'refresh_classes' } },
+        ENGINE_CALL_TIMEOUT_MS,
+      ),
+    );
+    assert.deepEqual(
+      asArray(get(rebuilt, 'unseenByEditor') ?? []).map((one) => get(one, 'className')),
+      ['Squire'],
+      `the editor still cannot see the class the file has: ${JSON.stringify(rebuilt)}`,
+    );
+    assert.match(
+      text(get(rebuilt, 'note')),
+      /editor_rescan will not reach it either on this editor, whose last scan wrote the cache from a list shorter than the file and would again; editor_launch restart is what loads them\./,
+      `and the note does not send the caller back to the scan: ${JSON.stringify(rebuilt)}`,
+    );
   } finally {
     editor?.terminate();
     await server.stop();
@@ -14518,6 +14698,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testClassesAnEditorIsNotHolding,
   testAScanThatHasNotStartedIsNotFinished,
   testARepairThatCouldNotRunIsNotReported,
+  testTheDiagnosticsRemedyKnowsAnEditorThatWritesAShortList,
   testAShortenedCacheIsRebuilt,
   testTheEditorsRunIsTheOneAnsweredFor,
   testAStatusCallIsNotHeldByAHeldGame,
