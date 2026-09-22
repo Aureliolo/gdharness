@@ -36,7 +36,7 @@ import {
   ListToolsRequestSchema,
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
-import { readBootNote, waitSizedTo, writeBootNote } from './boot-note.js';
+import { halfAsLongAgain, readBootNote, waitSizedTo, writeBootNote } from './boot-note.js';
 import { readBreakpointNote, writeBreakpointNote } from './breakpoint-note.js';
 import { announceBridge, announcementPath, readAnnouncement, withdrawBridge } from './bridge-announce.js';
 import {
@@ -547,11 +547,15 @@ export function runtimeVerdict(
       ? 'the editor has not yet reported the game as playing, which a restarted editor does not until its scan is over'
       : 'the game is still running';
   // Said when the wait was already longer than usual for this project, so a caller reading the
-  // note does not pass a runtimeWaitMs shorter than the one they just had.
+  // note does not pass a runtimeWaitMs shorter than the one they just had. A wait the ceiling cut
+  // short of half as long again is named as the ceiling, since "half as long again as 100000ms"
+  // is not what 60000ms is, and the boot itself is the number the caller sizes their own wait to.
   const sized =
     after.sizedToMs === undefined
       ? ''
-      : `, half as long again as the ${after.sizedToMs}ms its last game took,`;
+      : halfAsLongAgain(after.sizedToMs) > after.budgetMs
+        ? `, the longest a start waits unasked though its last game took ${after.sizedToMs}ms to announce,`
+        : `, half as long again as the ${after.sizedToMs}ms its last game took,`;
   return {
     listening: false,
     mayYetAnnounce: after.running,

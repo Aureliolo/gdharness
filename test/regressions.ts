@@ -25,6 +25,7 @@ import { pullRequestNumbers, shipsToUsers } from '../scripts/release-notes.js';
 import { sharedCopies } from '../scripts/sync-shared-gd.js';
 import {
   bootNotePath,
+  halfAsLongAgain,
   LONGEST_SIZED_WAIT_MS,
   readBootNote,
   waitSizedTo,
@@ -8579,6 +8580,7 @@ async function testTheAnnounceWaitIsNotHeldByASlowEditor(): Promise<void> {
 function testTheWaitSizedToABootIsSaid(): void {
   assert.equal(waitSizedTo(null), ANNOUNCE_BUDGET_MS, 'no boot known is the usual budget');
   assert.equal(waitSizedTo(1_000), ANNOUNCE_BUDGET_MS, 'a quick boot is still given the usual');
+  assert.equal(halfAsLongAgain(8_200), 12_300, 'half as long again is the boot and half of it');
   assert.equal(waitSizedTo(8_200), 12_300, 'a slow one is given half as long again');
   assert.equal(waitSizedTo(100_000), LONGEST_SIZED_WAIT_MS, 'and never more than the ceiling');
   const said = runtimeVerdict(null, {
@@ -8593,6 +8595,40 @@ function testTheWaitSizedToABootIsSaid(): void {
     text(get(said, 'note')),
     /within 12300ms, half as long again as the 8200ms its last game took, and the game is still running/,
     `the note names the boot the wait was sized to: ${JSON.stringify(said)}`,
+  );
+  // A boot the ceiling cut short of half as long again: the wait is named as the ceiling and the
+  // boot is given whole, since "half as long again as 100000ms" is not what 60000ms is, and the
+  // boot is the number a caller sizes their own runtimeWaitMs to.
+  const capped = runtimeVerdict(null, {
+    addon: true,
+    budgetMs: LONGEST_SIZED_WAIT_MS,
+    sizedToMs: 100_000,
+    heldAt: null,
+    running: true,
+    withArgs: false,
+  });
+  assert.match(
+    text(get(capped, 'note')),
+    new RegExp(
+      `within ${LONGEST_SIZED_WAIT_MS}ms, the longest a start waits unasked though its last game took 100000ms to announce, and the game is still running`,
+    ),
+    `a capped wait is named as the ceiling, not as half as long again: ${JSON.stringify(capped)}`,
+  );
+  // A boot whose half as long again is the ceiling exactly is both, and is said the usual way.
+  const exact = runtimeVerdict(null, {
+    addon: true,
+    budgetMs: LONGEST_SIZED_WAIT_MS,
+    sizedToMs: 40_000,
+    heldAt: null,
+    running: false,
+    withArgs: false,
+  });
+  assert.match(
+    text(get(exact, 'note')),
+    new RegExp(
+      `within ${LONGEST_SIZED_WAIT_MS}ms, half as long again as the 40000ms its last game took, and the game is no longer running`,
+    ),
+    `a wait that is half as long again and the ceiling at once is half as long again: ${JSON.stringify(exact)}`,
   );
   const unsized = runtimeVerdict(null, {
     addon: true,
