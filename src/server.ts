@@ -13,6 +13,8 @@ import { randomUUID } from 'node:crypto';
 import {
   appendFileSync,
   closeSync,
+  constants,
+  copyFileSync,
   existsSync,
   fstatSync,
   mkdirSync,
@@ -25,7 +27,7 @@ import {
   statSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, dirname, isAbsolute, join, normalize, relative } from 'node:path';
+import { basename, dirname, extname, isAbsolute, join, normalize, relative } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -103,7 +105,7 @@ import {
   userDataIn,
 } from './launch.js';
 import { DEFAULT_LSP_PORT, GodotLSPClient, handleLSPTool } from './lsp_client.js';
-import { isSameDirectory, realPathOr, resolveWithinProject } from './paths.js';
+import { isSameDirectory, isWithinRoot, realPathOr, resolveWithinProject } from './paths.js';
 import { freePort, portFromEnvOrNull } from './ports.js';
 import {
   ancestorsIn,
@@ -233,6 +235,40 @@ const HOLD_PING_MS = 2_000;
  * that a game which has stopped drawing is still called stuck rather than waited on for a minute.
  */
 const SLOWEST_FRAME_RATE = 20;
+
+/**
+ * Why a capture may not be saved at [param outputPath], or null when it may.
+ *
+ * Issue #614: a screen judged during an unattended session could only be described, because the
+ * picture came back inline and nowhere else. Saving it means this server writes a file where the
+ * caller says, so the place is held tightly: an absolute path, a PNG, in a directory that exists,
+ * outside every project in [param projects] so a capture never becomes a file the game or its
+ * export picks up, and never over a file that is already there.
+ */
+export function captureDestinationRefusal(outputPath: string, projects: readonly string[]): string | null {
+  if (/^(res|user):\/\//.test(outputPath)) {
+    return `outputPath ${outputPath} is a Godot path; a capture is saved outside the project, at an absolute path on this machine.`;
+  }
+  if (!isAbsolute(outputPath)) {
+    return `outputPath ${outputPath} is not absolute; name the whole path, so where it is written does not depend on this server's directory.`;
+  }
+  if (extname(outputPath).toLowerCase() !== '.png') {
+    return `outputPath ${outputPath} does not end in .png, which is what a capture is.`;
+  }
+  const directory = realPathOr(dirname(outputPath));
+  if (!existsSync(directory)) {
+    return `outputPath's directory ${dirname(outputPath)} does not exist; a capture creates no directories.`;
+  }
+  const where = join(directory, basename(outputPath));
+  const inside = projects.find((project) => project !== '' && isWithinRoot(realPathOr(project), where));
+  if (inside !== undefined) {
+    return `outputPath ${outputPath} is inside the project at ${inside}; a capture is saved outside it, so it never becomes part of the game.`;
+  }
+  if (existsSync(where)) {
+    return `outputPath ${outputPath} already exists; a capture is not written over a file. Name a new one.`;
+  }
+  return null;
+}
 
 /**
  * How long a wait of this many frames is given before the game is called stuck, which is never
@@ -6356,7 +6392,7 @@ class GodotServer {
     args: unknown,
     timeoutMs: number = this.runtimeTimeoutMs(),
   ): Promise<ToolResponse> {
-    const { op: _op, projectPath, pid, ...params } = asParams(args);
+    const { op: _op, projectPath, pid, outputPath, ...params } = asParams(args);
     const waited =
       typeof pid === 'number'
         ? null
@@ -6420,6 +6456,17 @@ class GodotServer {
     }
 
     const expectsScreenshot = command === 'capture_screenshot' || command === 'capture_viewport';
+    // Checked before the game is asked, so a refused place costs no capture.
+    const saveTo = expectsScreenshot && typeof outputPath === 'string' ? outputPath : null;
+    if (saveTo !== null) {
+      const refusal = captureDestinationRefusal(saveTo, [
+        choice.endpoint.project.path,
+        ...(this.ownProject === null ? [] : [this.ownProject]),
+      ]);
+      if (refusal !== null) {
+        return this.createErrorResponse(refusal);
+      }
+    }
     const screenshotDir = expectsScreenshot
       ? mkdtempSync(join(tmpdir(), 'gdharness-runtime-screenshot-'))
       : null;
@@ -6452,11 +6499,21 @@ class GodotServer {
       const dimensions = `${readNumber(payload, 'width') ?? 0}x${readNumber(payload, 'height') ?? 0} ${
         readString(payload, 'format') ?? 'unknown'
       }`;
+      // Exclusive, so a file that appeared since the check is still not written over.
+      if (saveTo !== null) {
+        try {
+          copyFileSync(screenshotPath, saveTo, constants.COPYFILE_EXCL);
+        } catch (error) {
+          return this.createErrorResponse(
+            `The capture was taken and could not be saved at ${saveTo}: ${errorMessage(error)}`,
+          );
+        }
+      }
       return {
         content: [
           {
             type: 'text',
-            text: `Screenshot captured: ${dimensions}${chosenAmongSeveral ? ` from pid ${own}, the game this server holds` : ''}`,
+            text: `Screenshot captured: ${dimensions}${chosenAmongSeveral ? ` from pid ${own}, the game this server holds` : ''}${saveTo === null ? '' : `. Saved to ${saveTo}`}`,
           },
           { type: 'image', data: readFileSync(screenshotPath).toString('base64'), mimeType: 'image/png' },
         ],
@@ -6521,7 +6578,17 @@ class GodotServer {
     }
 
     const timeoutMs = readPositiveNumber(args, 'timeoutMs') ?? 5000;
-    const nodePath = readNonEmptyString(args, 'nodePath') ?? '';
+    const asked = readNonEmptyString(args, 'nodePath');
+    // Words are waited for anywhere in the game when no node is named, which is what the skill
+    // told callers to do and the tool refused. A property belongs to one node, so it has none to
+    // default to.
+    if (asked === undefined && op === 'until' && readNonEmptyString(args, 'says') === undefined) {
+      return this.createErrorResponse(
+        'runtime_wait until needs nodePath to wait for a property: the property belongs to that node.',
+        ['With says instead of property, nodePath can be left out and the whole game is searched'],
+      );
+    }
+    const nodePath = asked ?? '/root';
     const patience = Math.max(this.runtimeTimeoutMs(), timeoutMs + 5000);
     return op === 'signal'
       ? await this.handleRuntimeCommand(
