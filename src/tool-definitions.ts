@@ -149,7 +149,8 @@ export function theGamePicked(): string {
   return (
     'the game this server started or is playing when it is among those running, named under ' +
     '`answeredBy` where there was a choice; else the only game there is; else a refusal naming ' +
-    'every game, which is what a machine running two projects at once gets'
+    'every game and which argument tells them apart, `pid` when they are all one project and ' +
+    '`projectPath` when they are not'
   );
 }
 

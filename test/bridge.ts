@@ -619,11 +619,15 @@ async function main(): Promise<void> {
         name: 'other',
       });
       try {
-        assert.match(
-          textOf(await call('runtime_inspect', {})) ?? '',
-          /Several games are running: .*Pass projectPath/,
-          'two games and no projectPath is refused with both named',
-        );
+        // Two projects, so both arguments can settle it and the refusal offers both. The other
+        // shape, several games of one project, cannot be settled by the path and says so: that
+        // is a pure choice and lives with its neighbours in the regressions.
+        const both = textOf(await call('runtime_inspect', {})) ?? '';
+        assert.match(both, /Several games are running: .*Pass pid to choose one/, both);
+        assert.match(both, /or projectPath when the project you mean is running only one/, both);
+        for (const named of [projectPath, otherProject]) {
+          assert.ok(both.includes(named), `both games are named: ${both}`);
+        }
         const chosen = await payload('runtime_inspect', { projectPath: otherProject });
         assert.equal(get(chosen, 'root', 'name'), 'other', 'projectPath picks the game running that project');
         const first = await payload('runtime_inspect', { projectPath });

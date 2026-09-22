@@ -135,6 +135,7 @@ import {
   runtimeRequest,
   runtimesAnnounced,
   type UnspokenRuntime,
+  whichHalfIsBehind,
 } from './runtime-client.js';
 import { discard } from './scratch.js';
 import type {
@@ -4997,10 +4998,7 @@ class GodotServer {
     // and unreachable. The two branches look alike and the game underneath them is not the same one.
     const unreadable = this.aRuntimeOfOursIsTooFarOff();
     if (unreadable !== null) {
-      const behind =
-        unreadable.protocol > RUNTIME_PROTOCOL
-          ? 'this server is the older half: reconnect it so it spawns the installed version'
-          : 'the addon is the older half: reinstall it and restart the game';
+      const behind = whichHalfIsBehind([unreadable]);
       return (
         `A game is running for ${unreadable.project.path}, pid ${unreadable.pid}, announced in protocol` +
         ` ${unreadable.protocol}, which this server does not speak: it speaks ${RUNTIME_PROTOCOL}, so ${behind}.` +
