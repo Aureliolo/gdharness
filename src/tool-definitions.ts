@@ -1170,6 +1170,11 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       width: { type: 'number', description: 'Scale the image to this width.' },
       height: { type: 'number', description: 'Scale the image to this height.' },
+      outputPath: {
+        type: 'string',
+        description:
+          'Also save the picture as a PNG at this absolute path, for somebody to open later; the answer says where. Refused unless it ends in .png, its directory exists, it is outside the project, and no file is there already.',
+      },
     },
     requires: [],
     operations: {
@@ -1195,7 +1200,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['action'],
         description:
-          'action: the InputMap action name. An engine dialog is not answered this way: AcceptDialog reads the Escape key itself and never asks the InputMap, so ui_cancel goes in and the question stays up. Dismiss one with key Escape, or click its button.',
+          'action: the InputMap action name. An engine dialog is not answered this way: AcceptDialog reads the Escape key itself and never asks the InputMap, so ui_cancel goes in and the question stays up. Dismiss one with the key op and keycode Escape, or click its button.',
       },
       pressed: {
         type: 'boolean',
@@ -1310,7 +1315,12 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         ops: ['frames'],
         description: 'frames: how many to let pass, 1 to 600. More than that is refused.',
       },
-      nodePath: { type: 'string', ops: ['signal', 'until'], description: 'signal, until: the node.' },
+      nodePath: {
+        type: 'string',
+        ops: ['signal', 'until'],
+        description:
+          'signal, until: the node. Needed for a signal and for a property; for says it defaults to /root, the whole screen.',
+      },
       signal: { type: 'string', ops: ['signal'], description: 'signal: the signal name.' },
       property: {
         type: 'string',
@@ -1323,7 +1333,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['until'],
         description:
-          'until: wait for these words to appear anywhere under nodePath instead of for a property, which is how a panel that rebuilds its labels is waited on at all: the labels are named afresh each redraw and the panel is what stays put. Case-insensitive, part of a line, on a node the player can see unless includeHidden says otherwise; a label with a line break is matched with the break in the words, and a backslash followed by n counts as one. Instead of, not as well as: a call carrying this and a property is refused, because they ask about different things and answering one of them silently is how a caller watches a screen believing they are watching a property.',
+          'until: wait for these words to appear anywhere under nodePath, or anywhere in the game when no nodePath is given, instead of for a property, which is how a panel that rebuilds its labels is waited on at all: the labels are named afresh each redraw and the panel is what stays put. Case-insensitive, part of a line, on a node the player can see unless includeHidden says otherwise; a label with a line break is matched with the break in the words, and a backslash followed by n counts as one. Instead of, not as well as: a call carrying this and a property is refused, because they ask about different things and answering one of them silently is how a caller watches a screen believing they are watching a property.',
       },
       includeHidden: {
         type: 'boolean',
@@ -1347,7 +1357,9 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       until: {
         summary:
           'wait for a property to read as a value, or for words to appear under a node, and answer with what it found',
-        requires: ['nodePath'],
+        // Not required here: a wait for words has a node to default to and a wait for a property
+        // does not, and the declaration cannot say which, so the handler asks.
+        requires: [],
       },
     },
   },

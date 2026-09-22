@@ -130,6 +130,7 @@ import { discardWith } from '../src/scratch.js';
 import {
   aboveTheRunner,
   alive,
+  captureDestinationRefusal,
   PLAY_STARTS_WITHIN_MS,
   PROJECT_FILE_ARGUMENTS,
   patienceForFrames,
@@ -10980,6 +10981,23 @@ async function testAWrittenLineBreakMatchesATwoLineLabel(): Promise<void> {
           timeoutMs: 2_000,
         });
         assert.equal(get(waited, 'met'), true, `a wait on the same words is met: ${JSON.stringify(waited)}`);
+        // Issue #615: the skill waits for words with no node named, and the tool refused that. With
+        // none, the whole game is where the words are looked for.
+        const anywhere = await call('runtime_wait', {
+          op: 'until',
+          says: 'ward\\nSHIELDS',
+          timeoutMs: 2_000,
+        });
+        assert.equal(get(anywhere, 'met'), true, `and with no nodePath at all: ${JSON.stringify(anywhere)}`);
+        // A property still needs its node, since it belongs to one.
+        const unnamed = textOf(
+          await server.request(
+            'tools/call',
+            { name: 'runtime_wait', arguments: { op: 'until', property: 'visible', value: true } },
+            ENGINE_CALL_TIMEOUT_MS,
+          ),
+        );
+        assert.match(unnamed ?? '', /needs nodePath to wait for a property/, unnamed ?? '');
         const absent = await call('runtime_inspect', { op: 'find', says: 'WARD\\nshields 4' });
         assert.deepEqual(
           asArray(get(absent, 'nodes')),
@@ -11808,6 +11826,35 @@ async function testARuntimeCallReachesThisServersOwnGame(): Promise<void> {
           new RegExp(`Screenshot captured: 1x1 png from pid ${bench.pid}, the game this server holds`),
           `a capture names the game it came from: ${textOf(captured)}`,
         );
+
+        // Issue #614: the picture saved as a file for somebody to open later, outside the project.
+        const kept = mkdtempSync(join(tmpdir(), 'gdharness-kept-capture-'));
+        try {
+          const saveAt = join(kept, 'screen.png');
+          const capture = async (outputPath: string): Promise<string> =>
+            textOf(
+              await server.request(
+                'tools/call',
+                { name: 'runtime_capture', arguments: { op: 'screenshot', outputPath } },
+                60_000,
+              ),
+            ) ?? '';
+          const saved = await capture(saveAt);
+          assert.match(saved, /Saved to .*screen\.png/, saved);
+          assert.ok(existsSync(saveAt), `the capture was written where it says: ${saved}`);
+          assert.deepEqual(
+            [...readFileSync(saveAt)],
+            [0x89, 0x50, 0x4e, 0x47],
+            'the file holds the picture the game wrote',
+          );
+          const again = await capture(saveAt);
+          assert.match(again, /already exists; a capture is not written over a file/, again);
+          const intoTheGame = await capture(join(project, 'screen.png'));
+          assert.match(intoTheGame, /is inside the project/, intoTheGame);
+          assert.equal(existsSync(join(project, 'screen.png')), false, 'and nothing was written there');
+        } finally {
+          sweep(kept);
+        }
       },
       { realAddon: true },
     );
@@ -14988,6 +15035,80 @@ async function testEveryReservedPortIsItsOwn(): Promise<void> {
 }
 
 /**
+ * Every place a capture may not be saved is refused, and the place it may is accepted.
+ *
+ * Each refusal is taken on its own input, with everything else about the path right, so a check
+ * that stopped firing is seen as the one path it let through.
+ */
+function testACaptureIsSavedOnlyWhereItMayBe(): void {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-capture-place-'));
+  const project = join(root, 'project');
+  const outside = join(root, 'outside');
+  mkdirSync(project);
+  mkdirSync(outside);
+  writeFileSync(join(outside, 'taken.png'), 'x');
+  try {
+    const refused = (path: string): string => captureDestinationRefusal(path, [project]) ?? 'accepted';
+    assert.equal(refused(join(outside, 'screen.png')), 'accepted', 'a new PNG outside the project');
+    assert.match(refused('res://screen.png'), /is a Godot path/);
+    assert.match(refused('user://screen.png'), /is a Godot path/);
+    assert.match(refused('screen.png'), /is not absolute/);
+    assert.match(refused(join(outside, 'screen.jpg')), /does not end in \.png/);
+    assert.match(
+      refused(join(outside, 'missing', 'screen.png')),
+      /does not exist; a capture creates no directories/,
+    );
+    assert.match(refused(join(project, 'screen.png')), /is inside the project/);
+    assert.match(refused(join(outside, 'taken.png')), /already exists/);
+  } finally {
+    sweep(root);
+  }
+}
+
+/** How many "`tool op` with `argument`" phrases the skill and the docs hold today, as a floor. */
+const ARGUMENT_MENTIONS = 10;
+
+/**
+ * Every argument the skill names for an op is one that op takes.
+ *
+ * Issue #616: the skill said to press a key with `runtime_input` `key`, which reads as an argument
+ * called `key`; the tool refused it and named `keycode`. The tool-name check below reads the tool
+ * and the op and had nothing to say about the word after them. This reads the phrase the skill
+ * uses for it, "`tool op` with `argument`", from the rendered skill and every document, and asks
+ * the schema whether that op takes that argument. A phrase written some other way is not read, so
+ * the floor holds the count: a rewording that stops matching lowers it in the same change.
+ */
+function testEveryArgumentTheSkillNamesIsOneTheOpTakes(): void {
+  const phrase = /`([a-z_]+) ([a-z_]+)` with `([a-zA-Z_]+)`/g;
+  const wrongIn = (text: string): string[] =>
+    [...text.matchAll(phrase)]
+      .filter(([, tool, op, argument]) => {
+        const declared = toolSpec(tool ?? '')?.parameters[argument ?? ''];
+        const ops = declared?.ops;
+        return declared === undefined || (Array.isArray(ops) && !ops.includes(op));
+      })
+      .map(([whole]) => whole);
+
+  // The check itself, on the phrase #616 would have been written as.
+  assert.deepEqual(wrongIn('`runtime_input key` with `key`'), ['`runtime_input key` with `key`']);
+  assert.deepEqual(wrongIn('`runtime_input key` with `keycode`'), []);
+
+  const sources = [
+    ...[...skillFiles('0.0.0')].map(([name, text]) => ({ where: `the skill: ${name}`, text })),
+    ...readdirSync('docs')
+      .filter((name) => name.endsWith('.md'))
+      .map((name) => ({ where: join('docs', name), text: readFileSync(join('docs', name), 'utf8') })),
+    ...readdirSync('.')
+      .filter((name) => name.endsWith('.md'))
+      .map((name) => ({ where: name, text: readFileSync(name, 'utf8') })),
+  ];
+  const seen = sources.reduce((count, { text }) => count + [...text.matchAll(phrase)].length, 0);
+  const wrong = sources.flatMap(({ where, text }) => wrongIn(text).map((one) => `${where}: ${one}`));
+  assert.deepEqual(wrong, [], 'every argument named for an op is one the op takes');
+  assert.ok(seen >= ARGUMENT_MENTIONS, `only ${seen} phrases were read; the pattern is not matching`);
+}
+
+/**
  * How many tool names the tree mentions today, as a floor under the reading below.
  *
  * Set to what is there rather than to a round number, so removing mentions means lowering this in
@@ -16135,6 +16256,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheCopiedHelperReadsTheSameEverywhere,
   testEveryReservedPortIsItsOwn,
   testEveryToolNamedInProseIsATool,
+  testEveryArgumentTheSkillNamesIsOneTheOpTakes,
+  testACaptureIsSavedOnlyWhereItMayBe,
   testTheEditorIsOfferedWhereItCanAnswer,
   testAReadAskedOfTheEditorIsNotAnsweredFromDisk,
   testAConfigNamingAnotherVersionIsSaid,
