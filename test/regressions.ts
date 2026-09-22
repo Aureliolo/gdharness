@@ -122,6 +122,7 @@ import {
   patienceForFrames,
   runIsUp,
   runtimeVerdict,
+  uidsLeftNote,
 } from '../src/server.js';
 import type { GodotProcess } from '../src/server-types.js';
 import { addonMismatch, markIfStale, SERVER_VERSION } from '../src/server-version.js';
@@ -7617,6 +7618,20 @@ async function testAStructureReadDescribesTheScriptItRead(): Promise<void> {
 }
 
 async function testRefreshingUidsMakesTheSidecarAndWritesNoScene(): Promise<void> {
+  // The sentence for files the engine declined, rendered for each count, since the branch only
+  // runs when an engine refuses a file and no fixture here has one it refuses.
+  assert.match(uidsLeftNote(0), /^No scene was written: this reads the project and imports it/);
+  assert.match(
+    uidsLeftNote(1),
+    /^One file still has no \.uid, named under stillWithoutUid, which is the engine declining to import it rather than this op skipping it\. No scene was written\.$/,
+    uidsLeftNote(1),
+  );
+  assert.match(
+    uidsLeftNote(3),
+    /^3 files still have no \.uid, named under stillWithoutUid, which is the engine declining to import them rather than this op skipping them\. No scene was written\.$/,
+    uidsLeftNote(3),
+  );
+
   const godotPath = resolveGodotPath();
   if (!godotPath) {
     if (process.env['GDHARNESS_REQUIRE_GODOT']) {
@@ -7666,6 +7681,7 @@ async function testRefreshingUidsMakesTheSidecarAndWritesNoScene(): Promise<void
       );
       assert.ok(existsSync(sidecar), 'and it is on disk, which is where the caller will look for it');
       assert.deepEqual(asArray(get(answered, 'stillWithoutUid')), [], JSON.stringify(answered));
+      assert.equal(get(answered, 'note'), uidsLeftNote(0), JSON.stringify(answered));
 
       assert.equal(
         readFileSync(join(project, 'main.tscn'), 'utf8'),

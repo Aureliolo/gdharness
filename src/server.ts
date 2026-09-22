@@ -466,6 +466,18 @@ function aboutTheChildren(ended: ChildrenEnded | null, throughEditor: boolean): 
   return `${endedToo}${leftToo}`;
 }
 
+/**
+ * What refresh_uids says about the files the engine would not import, counted in their number:
+ * the list is under stillWithoutUid, and the sentence is what says the engine declined them.
+ */
+export function uidsLeftNote(left: number): string {
+  if (left === 0) {
+    return 'No scene was written: this reads the project and imports it, and does not resave anything.';
+  }
+  const them = left === 1 ? 'it' : 'them';
+  return `${left === 1 ? 'One file' : `${left} files`} still ${left === 1 ? 'has' : 'have'} no .uid, named under stillWithoutUid, which is the engine declining to import ${them} rather than this op skipping ${them}. No scene was written.`;
+}
+
 /** The sentence a start adds to its message when it ended a run to happen. */
 function endedToStartThis(ended: EndedRun | null): string {
   if (ended === null) {
@@ -2186,10 +2198,7 @@ class GodotServer {
         stillWithoutUid: after,
         // Said rather than implied: the op resaved every scene for as long as it existed, so a
         // caller who knows it by its diff needs telling that the diff is the bug and is gone.
-        note:
-          after.length > 0
-            ? `${after.length} still have no .uid, which is the engine declining to import them rather than this op skipping them. No scene was written.`
-            : 'No scene was written: this reads the project and imports it, and does not resave anything.',
+        note: uidsLeftNote(after.length),
       },
     });
   }
