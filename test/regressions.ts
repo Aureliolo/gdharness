@@ -15697,6 +15697,116 @@ async function testTheDiagnosticsRemedyKnowsAnEditorThatWritesAShortList(): Prom
 }
 
 /**
+ * A class whose script was gone when the editor wrote the cache is not the editor's loss.
+ *
+ * Issue #607, from a project that took a script away with `git stash` and put it back with `stash
+ * pop` while the editor was open. The editor wrote the cache while the file was gone, which was
+ * the right list at the time, and `refresh_classes` read the class going missing between two
+ * rebuilds as an editor writing a short list: it said to restart, marked the editor as one whose
+ * rescan loses classes, and so said the rescan would not reach it. A plain rescan did.
+ *
+ * The two are told apart by the script being newer than the cache the editor last wrote. The times
+ * are set here rather than left to the clock, so the case does not depend on how finely a file
+ * system records them. The case above keeps the other side: a script older than the short write.
+ */
+async function testAClassWhoseScriptCameBackIsNotTheEditorsLoss(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('restored class regression skipped (Godot not found)');
+    return;
+  }
+
+  const port = await reservePort();
+  const server = new ServerProcess({ env: { GDHARNESS_BRIDGE_PORT: String(port), GODOT_PATH: godotPath } });
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-restored-'));
+  let editor: WebSocket | null = null;
+  try {
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    mkdirSync(join(project, '.godot'), { recursive: true });
+    writeFileSync(join(project, 'guild.gd'), 'class_name Guild\nextends Node\n');
+    const owing = join(project, 'owing.gd');
+    writeFileSync(owing, 'class_name Owing\nextends Node\n');
+    const cache = join(project, '.godot', 'global_script_class_cache.cfg');
+
+    await server.initialize('regression-test');
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+    editor = socket;
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', () => {
+        resolve();
+      });
+      socket.once('error', reject);
+    });
+    socket.on('message', (raw: Buffer) => {
+      const message: unknown = JSON.parse(String(raw));
+      if (!isRecord(message) || message['type'] !== 'tool_invoke') {
+        return;
+      }
+      const result =
+        String(message['tool']) === 'rescan_filesystem'
+          ? { ok: true, scanning: false, importing: false, pending: false }
+          : { ok: true, classes: ['Guild'] };
+      socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result }));
+    });
+    socket.send(
+      JSON.stringify({ type: 'godot_ready', project_path: project, addon_version: SERVER_VERSION }),
+    );
+    let knows = false;
+    for (let waited = 0; waited < 10_000 && !knows; waited += 100) {
+      await delay(100);
+      const status = await server.request('tools/call', { name: 'editor_status', arguments: {} });
+      knows = text(get(parseTextContent(status), 'editor', 'projectPath')) === project;
+    }
+    assert.ok(knows, 'the fixture editor should have reached the server, or this proves nothing');
+
+    const refresh = async (): Promise<unknown> =>
+      parseTextContent(
+        await server.request(
+          'tools/call',
+          { name: 'project_import', arguments: { projectPath: project, op: 'refresh_classes' } },
+          ENGINE_CALL_TIMEOUT_MS,
+        ),
+      );
+    // A first rebuild, so there is a last rebuild holding Owing to lose it from.
+    const first = await refresh();
+    assert.deepEqual(
+      [...(cachedClasses(project)?.keys() ?? [])].sort(),
+      ['Guild', 'Owing'],
+      JSON.stringify(first),
+    );
+
+    // The stash: the script goes, and the editor writes the list it sees, which is right.
+    rmSync(owing);
+    writeFileSync(cache, 'list=[{\n"class": &"Guild",\n"path": "res://guild.gd"\n}]\n');
+    const hourAgo = Date.now() / 1000 - 3600;
+    utimesSync(cache, hourAgo, hourAgo);
+    // The pop: the script is written again, after the cache.
+    writeFileSync(owing, 'class_name Owing\nextends Node\n');
+
+    const second = await refresh();
+    const said = JSON.stringify(second);
+    assert.deepEqual(asArray(get(second, 'lostSinceLastRebuild') ?? []).map(String), ['Owing'], said);
+    assert.match(
+      text(get(second, 'note')),
+      /Owing left the cache while its script was gone: the script is newer than the cache the editor last wrote, so it listed what was on disk then\. editor_rescan picks it up\./,
+      said,
+    );
+    assert.doesNotMatch(text(get(second, 'note')), /editor_launch restart is what/, said);
+    // And the editor is not remembered as one that loses classes, which is what turned the remedy
+    // for what it cannot see into the restart.
+    assert.equal(readClassNote(project)?.shortListEditorPid, undefined, said);
+    assert.match(text(get(second, 'note')), /editor_rescan does, on its own/, said);
+  } finally {
+    editor?.close();
+    await server.stop();
+    sweep(project);
+  }
+}
+
+/**
  * A scan that shortened the class cache has it rebuilt from the files.
  *
  * The other half of the case above, and the one that needs a real engine, because the rebuild is a
@@ -15922,6 +16032,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARepairThatCouldNotRunIsNotReported,
   testTheDiagnosticsRemedyKnowsAnEditorThatWritesAShortList,
   testAShortenedCacheIsRebuilt,
+  testAClassWhoseScriptCameBackIsNotTheEditorsLoss,
   testTheEditorsRunIsTheOneAnsweredFor,
   testAStatusCallIsNotHeldByAHeldGame,
   testARuntimeCallToAHeldGameIsRefusedAtOnce,
