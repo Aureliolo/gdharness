@@ -9243,7 +9243,7 @@ async function testAnInjectedMotionCarriesHowFarThePointerMoved(): Promise<void>
         tool === 'playing_status'
           ? { ok: true, playing: false, scenePath: '', debugPort: adapter }
           : { ok: true },
-    async ({ server, project }) => {
+    async ({ server, project, runtimeDir }) => {
       writeFileSync(
         join(project, 'main.gd'),
         'extends Node\n\nvar last_relative: Vector2 = Vector2.ZERO\nvar last_mask: int = 0\n' +
@@ -9285,6 +9285,16 @@ async function testAnInjectedMotionCarriesHowFarThePointerMoved(): Promise<void>
       try {
         assert.equal(get(started, 'runtime', 'listening'), true, JSON.stringify(started));
         console.log(`injected motion: the engine announced after ${Date.now() - began}ms`);
+        // The addon writes its announcement whole under a name no server reads and moves it into
+        // place, so a look never meets it empty: the announcement is there and the stage is not.
+        const announcedAs = `runtime-${asNumber(get(started, 'runtime', 'pid'), 'pid')}.json`;
+        const listed = readdirSync(runtimeDir);
+        assert.ok(listed.includes(announcedAs), `the game announced under its number: ${listed.join(', ')}`);
+        assert.deepEqual(
+          listed.filter((entry) => entry.endsWith('.tmp')),
+          [],
+          `and nothing staged outlives the move: ${listed.join(', ')}`,
+        );
         const call = async (name: string, args: Record<string, unknown>): Promise<unknown> =>
           parseTextContent(
             await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS),
