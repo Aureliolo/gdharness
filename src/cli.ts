@@ -37,6 +37,7 @@ import {
   enablePlugins,
   inspectProject,
   installAddons,
+  installedEditorDigest,
   RUNTIME_AUTOLOAD,
   removeAddons,
   setRuntime,
@@ -448,6 +449,9 @@ async function upgrade(): Promise<void> {
   const godot = await engine(projectPath);
   console.log(installed === version ? `already ${version}; reinstalling` : `${installed} -> ${version}`);
 
+  // Read before the copy replaces it. A copy from before digests has none, and then nothing says
+  // the code is the same, so the restart is asked for as it always was.
+  const digestBefore = installedEditorDigest(projectPath);
   for (const addon of installAddons(projectPath)) {
     console.log(`${addon.replaced ? 'replaced' : 'installed'} ${addon.path}`);
   }
@@ -488,10 +492,14 @@ async function upgrade(): Promise<void> {
     console.log(`skill: ${written.replaced ? 'replaced' : 'written'} ${written.path}`);
   }
 
-  console.log(`\nOn ${version}. Two things this could not do for you:`);
+  console.log(`\nOn ${version}. What is left for you:`);
   console.log(
-    '  1. The open editor is still running the addons it loaded at startup. Restart it with the\n' +
-      '     editor_launch restart tool, which closes and reopens the window.',
+    digestBefore !== null && digestBefore === installedEditorDigest(projectPath)
+      ? '  1. Nothing for the editor: this upgrade left the editor addons the same code as before,\n' +
+          '     so it gives an open editor nothing to restart for. editor_status says addonIsStale\n' +
+          '     if the editor is older than that.'
+      : '  1. The open editor is still running the addons it loaded at startup. Restart it with the\n' +
+          '     editor_launch restart tool, which closes and reopens the window.',
   );
   console.log(harnessNote({ moved, written, byHand }, [launch.command, ...launch.args].join(' ')));
 }
