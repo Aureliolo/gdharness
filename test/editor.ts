@@ -51,6 +51,8 @@ const LSP_READY_TIMEOUT_MS = 90_000;
 const GAME_STOP_TIMEOUT_MS = 90_000;
 /** How long a start waits for that game to announce its runtime, for the same reason. */
 const RUNTIME_BOOT_MS = 30_000;
+/** How much of the server's log a failing case carries: the case's own start and wait, not the tier's. */
+const SERVER_ACCOUNT_CHARS = 8_000;
 
 const SCENE = 'res://fixture.tscn';
 
@@ -650,6 +652,10 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
     GDHARNESS_LSP_PORT: String(lspPort),
     GDHARNESS_DAP_PORT: String(dapPort),
     GODOT_PATH: godotPath,
+    // The server's own account, kept in its stderr for the case that fails: a start that waited
+    // thirty seconds on a game whose console said it had announced left nothing behind saying
+    // what the wait looked at, and the editor's output is the other half of that evidence.
+    DEBUG: 'true',
   };
   const server = new ServerProcess({ env: serverEnv });
 
@@ -759,8 +765,11 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
       editor.exitCode === null && editor.signalCode === null
         ? 'still running'
         : `gone (exit ${editor.exitCode ?? 'none'}, signal ${editor.signalCode ?? 'none'})`;
+    // The tail rather than the whole: a tier's log runs to thousands of lines, and the case that
+    // failed is the last thing in it.
+    const account = server.stderr.slice(-SERVER_ACCOUNT_CHARS).trim();
     throw new Error(
-      `${failure instanceof Error ? failure.stack : String(failure)}\n\nThe editor this started is ${state}. It said:\n${said}`,
+      `${failure instanceof Error ? failure.stack : String(failure)}\n\nThe editor this started is ${state}. It said:\n${said}\n\nThe server's last ${SERVER_ACCOUNT_CHARS} characters:\n${account}`,
     );
   } finally {
     // The game first: it is the editor's child and outlives it, so a run that failed part way
