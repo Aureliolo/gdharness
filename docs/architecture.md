@@ -46,8 +46,11 @@ restart.
 
 That matters when a fix is being verified. "Upgraded and the tier is green" says the files are
 right, not that the thing answering is. `editor_status` is what settles it: `addonIsStale`
-compares what the editor loaded against this server, and `projectIs` catches the other direction,
-a project upgraded while the server kept running, which nothing else reports at all.
+compares the editor addon code the editor loaded against the code this server ships (by a digest
+the install writes as `.gdharness-digest`, so an upgrade that leaves that code alone does not call
+the editor stale; an addon from before digests is compared by version), and `projectIs` catches
+the other direction, a project upgraded while the server kept running, which nothing else reports
+at all.
 
 Every answer that came out of the editor carries `addonIsStale` and `staleNote` too, when the two
 halves differ. Only `editor_status` used to, so an editor several releases behind went on

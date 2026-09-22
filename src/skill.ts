@@ -47,7 +47,8 @@ that is running, and the project on disk. ${TOOL_SPECS.length} tools, named \`do
   this server is connected to. There is no ambient project, and an argument a tool does not declare is refused
   rather than ignored.
 - \`editor_status\` says whether an editor is connected and whether its addon matches the server.
-  \`addonIsStale\` means they differ, and \`staleNote\` says which half is behind: an editor that
+  \`addonIsStale\` means the editor is running different addon code from what the server ships
+  (an older \`addonVersion\` on the same code is not stale), and \`staleNote\` says which half is behind: an editor that
   needs restarting, or a server that needs reconnecting in your harness. Every answer that came
   from the editor carries the same two when they differ, so a stale addon cannot answer quietly:
   believe a restart over a diagnostic that arrived with them.
