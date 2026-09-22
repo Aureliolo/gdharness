@@ -9490,12 +9490,16 @@ async function testARunCanBeGivenItsOwnEnvironment(): Promise<void> {
           settings,
           `${readFileSync(settings, 'utf8')}\n[editor]\n\nrun/main_run_args="--headless"\n`,
         );
+        // The game says what it read twice over: as properties, for the start that a runtime can
+        // be asked about, and as a warning, which is what a boot probe's answer carries. Nothing
+        // a boot prints reaches the check's entries, since those are warnings and above.
         writeFileSync(
           join(project, 'main.gd'),
           'extends Node\n\nvar saves: String = ""\nvar carried: String = ""\n\n\n' +
             'func _ready() -> void:\n' +
             '\tsaves = OS.get_user_data_dir()\n' +
-            '\tcarried = OS.get_environment("GAME_FIXTURE_FLAG")\n',
+            '\tcarried = OS.get_environment("GAME_FIXTURE_FLAG")\n' +
+            '\tpush_warning("FIXTURE saves=%s flag=%s" % [saves, carried])\n',
         );
         writeFileSync(
           join(project, 'main.tscn'),
@@ -9590,6 +9594,46 @@ async function testARunCanBeGivenItsOwnEnvironment(): Promise<void> {
           await refused({ savesIn: 'saves' }),
           /savesIn must be an absolute path, not "saves"/,
           'and a relative directory for user:// is refused',
+        );
+
+        // The boot probe takes the same two and spawns its own engine, so it is the branch a
+        // start's reproduction never reaches: a caller checking whether a project comes up at all
+        // is the one most likely to want it kept away from the saves, since a boot that fails
+        // half way through is exactly what leaves files behind.
+        const booted = await call('editor_run', {
+          projectPath: project,
+          op: 'check',
+          savesIn: saves,
+          env: { GAME_FIXTURE_FLAG: 'checked' },
+          frames: 3,
+        });
+        assert.equal(
+          get(booted, 'booted'),
+          true,
+          `the check boots with an environment: ${JSON.stringify(booted)}`,
+        );
+        // What the booted game itself read, off its own warning, rather than the note this server
+        // writes from what it was asked for: that note reads the same whether or not the
+        // environment ever reached the engine.
+        const warned =
+          asArray(get(booted, 'entries'))
+            .map((entry) => text(get(entry, 'text')))
+            .find((line) => line.includes('FIXTURE ')) ?? '';
+        assert.match(
+          warned,
+          /flag=checked/,
+          `the boot read the run's own variable: ${JSON.stringify(booted)}`,
+        );
+        const bootSaves = /saves=(.+?) flag=/.exec(warned)?.[1] ?? '';
+        assert.equal(
+          bootSaves.replaceAll('\\', '/').toLowerCase().startsWith(saves.replaceAll('\\', '/').toLowerCase()),
+          !savesStayPut(),
+          `and put user:// where the platform allows: ${warned}`,
+        );
+        assert.equal(
+          get(booted, 'savesNote'),
+          savesStayPut() ? SAVES_NOT_MOVED_NOTE : undefined,
+          `and says what the platform did with the saves: ${JSON.stringify(booted)}`,
         );
       },
       { realAddon: true, engine },
