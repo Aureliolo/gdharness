@@ -4514,6 +4514,31 @@ function testAnUncapturedConsoleSaysWhichEditorItIs(): void {
       assert.equal(ours.log.count('error'), 1, 'the severity comes off the headline as it does for a game');
       assert.equal(ours.log.everything().length, 2);
       assert.equal(ours.path, editorLogPath(project));
+      assert.equal(ours.of, undefined, 'a console read whole says nothing about how much of it was read');
+    }
+
+    // An editor left open for days printing warnings writes a file with no bound on it, and
+    // reading one whole is this server allocating it. The start is kept, because the session from
+    // the editor's first line is what this promises, and the cut lands on a line boundary so the
+    // last entry is not half a line reported as a whole one.
+    const line = `WARNING: this editor has been open a long time ${'x'.repeat(200)}\n`;
+    writeFileSync(editorLogPath(project), line.repeat(60_000));
+    const huge = editorConsole(project, 4242, true);
+    assert.ok(!('kind' in huge), JSON.stringify(huge));
+    if (!('kind' in huge)) {
+      assert.equal(huge.of, line.length * 60_000, 'the whole size is reported');
+      assert.ok(
+        huge.readBytes !== undefined && huge.readBytes <= 8 * 1024 * 1024,
+        `and no more than the cap was read: ${huge.readBytes}`,
+      );
+      const last = huge.log.everything().at(-1);
+      assert.ok(last !== undefined);
+      assert.equal(last.severity, 'warning', JSON.stringify(last));
+      assert.equal(
+        last.text,
+        line.trimEnd().replace('WARNING: ', ''),
+        `the last entry is a whole line rather than half of one: ${JSON.stringify(last)}`,
+      );
     }
   } finally {
     sweep(project);

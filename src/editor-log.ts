@@ -21,7 +21,17 @@
  * downstream to conclude the wall had gone away.
  */
 
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname, join } from 'node:path';
 import { GameLog, type LogEntry, type Severity } from './game-log.js';
 import { asParams, readNumber, readString } from './tool-args.js';
@@ -140,7 +150,9 @@ export function editorConsole(
   projectPath: string,
   editorPid: number | null,
   openedByAServer: boolean,
-): { readonly log: GameLog; readonly path: string } | NoConsole {
+):
+  | { readonly log: GameLog; readonly path: string; readonly readBytes?: number; readonly of?: number }
+  | NoConsole {
   if (!openedByAServer) {
     return { kind: 'not ours' };
   }
@@ -153,9 +165,39 @@ export function editorConsole(
     return { kind: 'not written' };
   }
   const log = new GameLog();
-  log.append('transcript', readFileSync(path, 'utf8'));
+  const { text, of } = theFirstOf(path);
+  log.append('transcript', text);
   log.finish();
-  return { log, path };
+  return { log, path, ...(of === undefined ? {} : { readBytes: text.length, of }) };
+}
+
+/**
+ * The most of an editor's console that is read into one answer.
+ *
+ * An editor left open for days printing warnings writes a file with no bound on it, and reading
+ * one whole would be this server allocating it, which takes the session down rather than answering
+ * badly. The start rather than the end, because the promise this makes is the session from the
+ * editor's first line, and startup is where the output worth reading is.
+ */
+const MOST_CONSOLE_BYTES = 8 * 1024 * 1024;
+
+function theFirstOf(path: string): { text: string; of?: number } {
+  const whole = statSync(path).size;
+  if (whole <= MOST_CONSOLE_BYTES) {
+    return { text: readFileSync(path, 'utf8') };
+  }
+  const handle = openSync(path, 'r');
+  try {
+    const buffer = Buffer.alloc(MOST_CONSOLE_BYTES);
+    const read = readSync(handle, buffer, 0, MOST_CONSOLE_BYTES, 0);
+    // To the last newline, so the answer does not end on half a line that would be parsed as a
+    // whole one and reported as something the editor never printed.
+    const decoded = buffer.subarray(0, read).toString('utf8');
+    const lastLine = decoded.lastIndexOf('\n');
+    return { text: lastLine === -1 ? decoded : decoded.slice(0, lastLine + 1), of: whole };
+  } finally {
+    closeSync(handle);
+  }
 }
 
 /**
@@ -237,6 +279,14 @@ export function shapeOf(text: string): { shape: string; values: string[] } {
     if (earliest === null) {
       shape += text.slice(at);
       break;
+    }
+    // Every pattern above needs at least two characters, so this cannot be reached today. It is
+    // here because a pattern that can match nothing would leave the cursor where it is, and the
+    // loop would spin inside the server rather than answer wrongly.
+    if (earliest.value.length === 0) {
+      shape += text.slice(at, at + 1);
+      at += 1;
+      continue;
     }
     shape += `${text.slice(at, earliest.index)}…`;
     values.push(earliest.value);

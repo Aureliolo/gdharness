@@ -5312,6 +5312,15 @@ class GodotServer {
       editorPid: status.editorPid,
       projectPath,
       capturedIn: console.path,
+      // Said only when it happened: a console read whole needs no sentence about how much of it
+      // was read, and one that was cut off is a different answer from one that is all there.
+      ...(console.of === undefined
+        ? {}
+        : {
+            readFromTheStart: console.readBytes,
+            consoleBytes: console.of,
+            truncatedNote: `This editor's console is ${console.of} bytes and the first ${console.readBytes} of them were read, which is the start of the session rather than the end of it. Restart the editor to begin a fresh console.`,
+          }),
       lines: everything.length,
       counts: {
         error: console.log.count('error'),
