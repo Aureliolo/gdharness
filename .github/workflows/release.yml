@@ -105,6 +105,36 @@ jobs:
           VERSION: ${{ needs.build.outputs.version }}
         run: |
           set -euo pipefail
+          assets=(
+            "dist/gdharness-${VERSION}.tgz"
+            "dist/gdharness-${VERSION}.tgz.sha256"
+            "dist/gdharness-${VERSION}.spdx.json"
+            "dist/gdharness-${VERSION}.intoto.jsonl"
+          )
+
+          # A release the tag already carries is taken as done, so the whole run can be re-run
+          # after a later job fails. A published release is never rewritten here, so the way to be
+          # idempotent about it is to confirm it is already right rather than to write it again,
+          # and "already right" means these four files and no others.
+          #
+          # Half a release is a third answer rather than either of those, and it says which files
+          # are there. `gh release create` uploads after it creates, so a failed upload leaves a
+          # release standing with some of them, and a re-run without this would stop on `release
+          # already exists` and say nothing about what the tag actually carries.
+          if gh release view "${GITHUB_REF_NAME}" > /dev/null 2>&1; then
+            have="$(gh release view "${GITHUB_REF_NAME}" --json assets --jq '.assets[].name' | sort)"
+            want="$(printf '%s\n' "${assets[@]##*/}" | sort)"
+            if [ "${have}" = "${want}" ]; then
+              echo "${GITHUB_REF_NAME} is already released with all four files; there is nothing to publish."
+              exit 0
+            fi
+            echo "${GITHUB_REF_NAME} already has a release, and it carries:" >&2
+            printf '%s\n' "${have}" >&2
+            echo "rather than the four files this job publishes. A published release is not" >&2
+            echo "rewritten here, so this needs a person." >&2
+            exit 1
+          fi
+
           # printf rather than a heredoc: an unquoted heredoc runs the backticks in the code
           # fences as commands, and a quoted one cannot see VERSION. Single quotes keep the
           # fences literal, double quotes take the version.
@@ -152,11 +182,7 @@ jobs:
           # of them reach the machine they install onto. Two projects guessed wrong the same way
           # on the same day.
           cat notes/changelog.md >> notes.md
-          gh release create "${GITHUB_REF_NAME}" \
-            "dist/gdharness-${VERSION}.tgz" \
-            "dist/gdharness-${VERSION}.tgz.sha256" \
-            "dist/gdharness-${VERSION}.spdx.json" \
-            "dist/gdharness-${VERSION}.intoto.jsonl" \
+          gh release create "${GITHUB_REF_NAME}" "${assets[@]}" \
             --verify-tag \
             --notes-file notes.md \
             --title "gdharness ${VERSION}"
@@ -233,27 +259,73 @@ jobs:
 
           # No token anywhere: the OIDC token this job asked for is the credential, and npm
           # generates and publishes its own provenance attestation from it without being asked.
-          npm publish "${archive}" --access public
+          #
+          # A version the registry already holds is taken as done rather than as a refusal, so
+          # this job can be re-run. Publishing is irreversible and a run that uploaded the archive
+          # and then lost the answer has nothing left to do, but `npm publish` cannot tell those
+          # apart and refuses either way, which would leave the jobs behind this one unable to
+          # run at all. Nothing downstream trusts the publish for saying so: the job below reads
+          # what the registry serves and compares it against the archive this repository signed.
+          status=0
+          npm publish "${archive}" --access public 2>&1 | tee "${RUNNER_TEMP}/publish.log" || status=$?
+          if [ "${status}" != "0" ]; then
+            if grep -qF "previously published versions: ${VERSION}" "${RUNNER_TEMP}/publish.log"; then
+              echo "The registry already holds gdharness@${VERSION}; there is nothing to publish."
+              exit 0
+            fi
+            exit "${status}"
+          fi
 
-      # The claim made in the documentation is that what npm serves is the archive this repository
-      # signed, so somebody can install from npm and verify against the release bundle. That is
-      # only true if the registry stores the bytes it was given, which is checked rather than
-      # assumed: if npm ever repacks, this fails on the release that first did it.
+  # The claim made in the documentation is that what npm serves is the archive this repository
+  # signed, so somebody can install from npm and verify against the release bundle. That is only
+  # true if the registry stores the bytes it was given, which is checked rather than assumed: if
+  # npm ever repacks, this fails on the release that first did it.
+  #
+  # Its own job rather than a step in the one above: it reports on something already done, and a
+  # report must not be able to strand the work behind it. Inside the npm job, the registry taking
+  # its time over 1.0.11 skipped the MCP registry entry and all three install checks, which need
+  # `npm` and not this, and the entry every marketplace reads stayed a release behind. Nothing
+  # that can fail belongs between an irreversible act and the work that depends on it.
+  served:
+    name: npm serves what was signed
+    if: github.repository == 'Aureliolo/gdharness'
+    needs: [build, publish, npm]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read # Reads the checksum off the release, which is the record of what shipped.
+
+    steps:
       - name: The published tarball is the archive that was signed
         shell: bash
         env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           VERSION: ${{ needs.build.outputs.version }}
         run: |
           set -euo pipefail
-          expected="$(cut -d' ' -f1 < "dist/gdharness-${VERSION}.tgz.sha256")"
+          # Taken off the release rather than out of this run's build artifact. The release is the
+          # record of what shipped and is never rewritten, so this compares npm against the bytes
+          # that were published. Against a rebuild it would compare npm against whatever this run
+          # produced, which is the same thing only if the archive packs byte for byte identically
+          # every time, and that is a property of `bun pm pack` nothing here asserts.
+          gh release download "${GITHUB_REF_NAME}" --pattern "gdharness-${VERSION}.tgz.sha256" --dir .
+          expected="$(cut -d' ' -f1 < "gdharness-${VERSION}.tgz.sha256")"
 
           # The registry takes a moment to serve a version it has just accepted, and a first
           # publish takes longer still: this answered 404 for gdharness@0.4.1 seconds after
           # publishing it, for a package that was there all along. Asked again rather than read
           # as a verdict, because "not found yet" and "not published" look identical here, and
           # asked online each time because a packument that missed is cached for five minutes.
+          #
+          # What the window absorbs is npm's own processing after it has accepted the upload,
+          # which npm describes as "a few minutes" and puts no number on. Twenty of them, and not
+          # a window sized to the lag that has been seen: that ran 1m54s to 3m25s over 1.0.6
+          # through 1.0.10, which makes five minutes look ample, and then 7m11s on 1.0.11, which
+          # is the release this stopped on. Waiting longer costs runner minutes on something
+          # already published and immutable; stopping early costs the answer.
           url=""
-          for attempt in $(seq 1 30); do
+          for attempt in $(seq 1 120); do
             if url="$(npm view --prefer-online "gdharness@${VERSION}" dist.tarball 2>/dev/null)" && [ -n "${url}" ]; then
               break
             fi
@@ -262,7 +334,9 @@ jobs:
           done
 
           if [ -z "${url}" ]; then
-            echo "The registry never served gdharness@${VERSION}, five minutes after publishing it." >&2
+            echo "gdharness@${VERSION} is published; the registry had not served it twenty" >&2
+            echo "minutes later, so these bytes are unconfirmed rather than wrong. Re-run this" >&2
+            echo "job once npm serves the version." >&2
             exit 1
           fi
 
@@ -308,7 +382,9 @@ jobs:
             runner: macos-26
 
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 15
+    # Room for the twenty-minute wait below and three npx installs behind it, on the slowest of
+    # the three runners; a timeout here reads as a broken install and would be a slow registry.
+    timeout-minutes: 35
 
     # A packument is cached for five minutes once fetched, so the first ask that missed is what
     # every later one in the job is answered from. On the job rather than on the step that waits,
@@ -335,7 +411,10 @@ jobs:
           VERSION: ${{ needs.build.outputs.version }}
         run: |
           set -euo pipefail
-          for attempt in $(seq 1 30); do
+          # Twenty minutes, for the reason the job above waits that long: the delay being absorbed
+          # is npm's, it has no stated bound, and an edge that has not caught up yet is not an
+          # install that is broken.
+          for attempt in $(seq 1 120); do
             if npx -y "gdharness@${VERSION}" --version > /dev/null 2>&1; then
               echo "The registry serves ${VERSION} to npx here; asked ${attempt} times."
               exit 0
@@ -343,7 +422,8 @@ jobs:
             echo "The registry does not serve ${VERSION} to npx here yet; asked ${attempt} times."
             sleep 10
           done
-          echo "The registry here never served gdharness@${VERSION}, five minutes after publishing it." >&2
+          echo "This runner's registry edge never served gdharness@${VERSION}, twenty minutes" >&2
+          echo "after publishing it, so the install below was never tried." >&2
           exit 1
 
       # No checkout: a reader has none of this repository, and anything taken from it here would
@@ -402,7 +482,8 @@ jobs:
     if: github.repository == 'Aureliolo/gdharness'
     needs: [build, publish, npm]
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    # Room for the five-minute read-back below, which only a registry that has gone quiet uses.
+    timeout-minutes: 15
     permissions:
       contents: read # Reads server.json at the tag, which is the thing being published.
       id-token: write # The registry takes this instead of a token, the way npm does above.
@@ -438,10 +519,50 @@ jobs:
       # release-tag.yml and release-build.yml refuse a tag where it disagrees with package.json,
       # so the file at this commit already names this release. `validate` is the cheap proof of
       # that before a publish that would otherwise fail with the entry half made.
-      - name: Publish to the MCP registry
+      #
+      # The entry is read back rather than the publish believed, which is the rule every tool here
+      # is held to, and the same read decides whether there is anything to publish at all. That is
+      # what makes this job re-runnable: `mcp-publisher publish` refuses a version the registry
+      # already holds, so a run that published and then failed reading the entry back could not be
+      # resumed by hand or otherwise. Asking first costs nothing, because this registry answers
+      # about a version it has just taken in under a second: 0.2s, 0.2s, 15s, 0.2s over 1.0.7
+      # through 1.0.10.
+      - name: Publish to the MCP registry and read the entry back
         shell: bash
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
         run: |
           set -euo pipefail
+
+          # Read from the manifest rather than written twice: a name that drifts from server.json
+          # would check some other server, or nothing, and pass either way.
+          name="$(jq -er '.name' server.json)"
+          package="$(jq -er '.packages[0].identifier' server.json)"
+          url="https://registry.modelcontextprotocol.io/v0.1/servers/${name//\//%2F}/versions/${VERSION}"
+
+          # The version, the package it sends clients to, and that this is the version they get
+          # when they ask for the latest one. An entry pointing at the wrong package installs
+          # somebody else's server on somebody's machine.
+          expected="${VERSION} ${package}@${VERSION} true"
+
+          # A version that is not there answers 404 and says nothing; one that is there and wrong
+          # says what it is. The second is why the publish is not skipped merely because something
+          # holds this version: a wrong entry sends this on to `publish`, which refuses it, which
+          # is the loud failure that state deserves.
+          serves_this_version() {
+            local body served
+            body="$(curl -fsSL --proto '=https' --tlsv1.2 "${url}")" || return 1
+            served="$(printf '%s' "${body}" | jq -er '
+              [.server.version,
+               .server.packages[0].identifier + "@" + .server.packages[0].version,
+               (._meta["io.modelcontextprotocol.registry/official"].isLatest | tostring)]
+              | join(" ")')" || return 1
+            if [ "${served}" != "${expected}" ]; then
+              echo "The registry serves: ${served}" >&2
+              echo "Expected:            ${expected}" >&2
+              return 1
+            fi
+          }
 
           # Retried only when the call never reached the registry. The archive download above
           # already retries and these three did not, so a registry that was briefly unreachable
@@ -472,56 +593,35 @@ jobs:
             done
           }
 
-          reached_the_registry "${RUNNER_TEMP}/mcp-publisher" validate
-          reached_the_registry "${RUNNER_TEMP}/mcp-publisher" login github-oidc
-          reached_the_registry "${RUNNER_TEMP}/mcp-publisher" publish
+          if serves_this_version; then
+            echo "The registry already serves ${name} ${VERSION}; there is nothing to publish."
+          else
+            # Said out loud because the 404 curl prints just above it is the ordinary case here,
+            # and an unexplained curl error reads like something going wrong.
+            echo "The registry does not serve ${name} ${VERSION}; publishing it."
+            reached_the_registry "${RUNNER_TEMP}/mcp-publisher" validate
+            reached_the_registry "${RUNNER_TEMP}/mcp-publisher" login github-oidc
+            reached_the_registry "${RUNNER_TEMP}/mcp-publisher" publish
 
-      # Read back what the registry serves rather than believe what the publish printed, which is
-      # the rule every tool here is held to. A version that published but is not served reaches
-      # nobody, and would otherwise surface weeks later as a marketplace showing an old version.
-      - name: The registry serves this version
-        shell: bash
-        env:
-          VERSION: ${{ needs.build.outputs.version }}
-        run: |
-          set -euo pipefail
-          # Read from the manifest rather than written twice: a name that drifts from server.json
-          # would check some other server, or nothing, and pass either way.
-          name="$(jq -er '.name' server.json)"
-          url="https://registry.modelcontextprotocol.io/v0.1/servers/${name//\//%2F}/versions/${VERSION}"
+            # A version the registry has just accepted takes a moment to be served, and "not yet"
+            # and "never" look identical from here, so it is asked again rather than read as a
+            # verdict the first time. Five minutes, against reads that have answered in under a
+            # second: what the window absorbs is this registry's own indexing, which it puts no
+            # number on, and a wait on something already published costs only runner minutes.
+            arrived=""
+            for attempt in $(seq 1 60); do
+              if serves_this_version; then
+                arrived=yes
+                break
+              fi
+              echo "The registry does not serve ${VERSION} yet; asked ${attempt} times."
+              sleep 5
+            done
 
-          # A version the registry has just accepted takes a moment to be served, and "not yet"
-          # and "never" look identical from here, so it is asked again rather than read as a
-          # verdict the first time.
-          body=""
-          for attempt in $(seq 1 12); do
-            if body="$(curl -fsSL --proto '=https' --tlsv1.2 "${url}")" && [ -n "${body}" ]; then
-              break
+            if [ -z "${arrived}" ]; then
+              echo "${name} ${VERSION} was accepted; the registry had not served it five minutes" >&2
+              echo "later. Re-run this job: it publishes nothing it already serves." >&2
+              exit 1
             fi
-            echo "The registry does not serve ${VERSION} yet; asked ${attempt} times."
-            body=""
-            sleep 5
-          done
-
-          if [ -z "${body}" ]; then
-            echo "The registry never served ${name} ${VERSION}, a minute after publishing it." >&2
-            exit 1
           fi
-
-          # The version, the package it sends clients to, and that this is the version they get
-          # when they ask for the latest one. An entry pointing at the wrong package installs
-          # somebody else's server on somebody's machine.
-          served="$(printf '%s' "${body}" | jq -er '
-            [.server.version,
-             .server.packages[0].identifier + "@" + .server.packages[0].version,
-             (._meta["io.modelcontextprotocol.registry/official"].isLatest | tostring)]
-            | join(" ")')"
-          package="$(jq -er '.packages[0].identifier' server.json)"
-          expected="${VERSION} ${package}@${VERSION} true"
-
-          if [ "${served}" != "${expected}" ]; then
-            echo "The registry serves: ${served}" >&2
-            echo "Expected:            ${expected}" >&2
-            exit 1
-          fi
-          echo "The registry serves ${name} ${VERSION}, pointing at gdharness@${VERSION}."
+          echo "The registry serves ${name} ${VERSION}, pointing at ${package}@${VERSION}."

@@ -79,20 +79,30 @@ jobs:
             # gh api writes the response body to stdout, so it is only run once the ref is known.
             tagged="$(gh api "repos/${GH_REPO}/commits/v${version}" --jq .sha)"
 
-            if [[ "${tagged}" == "${GITHUB_SHA}" ]]; then
+            if [[ "${tagged}" != "${GITHUB_SHA}" ]]; then
+              echo "v${version} is tagged at ${tagged}, not ${GITHUB_SHA}, so this version cannot" >&2
+              echo "be released. Nothing can move that tag; raise the version past it." >&2
+              exit 1
+            fi
+
+            if [[ "${EVENT_NAME}" != "workflow_dispatch" ]]; then
               echo "v${version} already points at this commit; nothing to do."
               exit 0
             fi
 
-            echo "v${version} is tagged at ${tagged}, not ${GITHUB_SHA}, so this version cannot" >&2
-            echo "be released. Nothing can move that tag; raise the version past it." >&2
-            exit 1
+            # Asked for by hand with the tag already made. The tag is not what was missing, so
+            # this is the recovery case, and falling through to the dispatch below is the whole
+            # point of it: the tag and the dispatch are two steps of one act, and a run that made
+            # the tag and did not reach the dispatch leaves nothing else able to start the
+            # release. Stopping here because the tag exists would have made this button do
+            # nothing in exactly the state somebody presses it.
+            echo "v${version} is already tagged at this commit."
+          else
+            gh api "repos/${GH_REPO}/git/refs" \
+              -f "ref=refs/tags/v${version}" \
+              -f "sha=${GITHUB_SHA}"
+            echo "Tagged v${version} at ${GITHUB_SHA}."
           fi
-
-          gh api "repos/${GH_REPO}/git/refs" \
-            -f "ref=refs/tags/v${version}" \
-            -f "sha=${GITHUB_SHA}"
-          echo "Tagged v${version} at ${GITHUB_SHA}."
 
           # An event caused by the job token starts no workflow, so the tag push above is
           # invisible to the release workflow's trigger; a dispatch is not.
