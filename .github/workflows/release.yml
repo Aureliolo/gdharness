@@ -601,15 +601,19 @@ jobs:
             # and an unexplained curl error reads like something going wrong.
             echo "The registry does not serve ${name} ${VERSION}; publishing it."
             reached_the_registry "${RUNNER_TEMP}/mcp-publisher" validate
-            reached_the_registry "${RUNNER_TEMP}/mcp-publisher" login github-oidc
 
             # The registry checks the npm version from its own side, and npm serves a new version
             # to one resolver minutes before another: on 1.0.12 it refused with "version '1.0.12'
             # was not found" while the install jobs were already reading it. That refusal is a
             # validation failure, so nothing was written and asking again is safe. Twenty minutes,
             # the window the npm waits above use, since the delay is npm's and has no stated bound.
+            #
+            # Logged in again before every attempt: the registry's token lasts about five minutes,
+            # and on 1.0.14 the eleventh attempt was refused with "token is expired" after ten npm
+            # refusals made on one login.
             published=""
             for attempt in $(seq 1 40); do
+              reached_the_registry "${RUNNER_TEMP}/mcp-publisher" login github-oidc
               status=0
               output=$(reached_the_registry "${RUNNER_TEMP}/mcp-publisher" publish 2>&1) || status=$?
               printf '%s\n' "${output}"
