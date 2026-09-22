@@ -5575,6 +5575,90 @@ async function testAStartStopsWaitingForAGameThatIsOver(): Promise<void> {
  * after a start was answered "No game with the runtime addon is running" about a game that was
  * starting, and the way through was to make the same call again. Twice in one session.
  */
+/**
+ * A runtime call made while the game this server just started is still coming up waits for it.
+ *
+ * Issue #609: a stop, a start straight after it, and the next runtime_wait was refused with "A game
+ * with the runtime addon announced itself and its process is gone" about the run that had just
+ * been stopped, telling the caller to start another. The new game answered a few seconds later.
+ * With nothing announced the refusal only looked at games that had gone.
+ *
+ * A real engine and the real runtime addon, because the state is two runs of it a moment apart:
+ * the first announces and is stopped, which leaves the announcement that was named, and the second
+ * is started with no wait at all, so the call lands before it has announced. `listening: false` on
+ * that start is held as the setup's own assertion, since a start that found the game up would
+ * prove nothing about the call after it.
+ */
+async function testARuntimeCallWaitsForTheGameThisServerStarted(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('runtime call during boot regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-coming-up-'));
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-coming-up-runtime-'));
+  const server = new ServerProcess({ env: { GODOT_PATH: godotPath, GDHARNESS_RUNTIME_DIR: runtimeDir } });
+  const call = async (name: string, args: Record<string, unknown>): Promise<string> =>
+    textOf(await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS)) ?? '';
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="ComingUp"\n' +
+        'run/main_scene="res://main.tscn"\n\n[autoload]\n\n' +
+        `${RUNTIME_AUTOLOAD.name}="*res://${RUNTIME_AUTOLOAD.path}"\n`,
+    );
+    writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
+    cpSync(
+      join('src', 'godot', 'addons', 'gdharness_runtime'),
+      join(project, 'addons', 'gdharness_runtime'),
+      {
+        recursive: true,
+      },
+    );
+    await server.initialize('regression-test');
+
+    const first = jsonOf(
+      await call('editor_run', { projectPath: project, op: 'start', headless: true, runtimeWaitMs: 60_000 }),
+      'first start',
+    );
+    const firstPid = asNumber(get(first, 'runtime', 'pid'), 'the first game announced');
+    await call('editor_run', { projectPath: project, op: 'stop' });
+
+    const second = jsonOf(
+      await call('editor_run', { projectPath: project, op: 'start', headless: true, runtimeWaitMs: 0 }),
+      'second start',
+    );
+    assert.equal(
+      get(second, 'runtime', 'listening'),
+      false,
+      `the call has to land before it announces: ${JSON.stringify(second)}`,
+    );
+    assert.equal(get(second, 'runtime', 'mayYetAnnounce'), true, JSON.stringify(second));
+
+    const waited = await call('runtime_wait', { op: 'frames', frames: 1 });
+    assert.ok(waited.trimStart().startsWith('{'), `the wait reaches the new game: ${waited}`);
+    assert.doesNotMatch(waited, new RegExp(`pid ${firstPid}`), waited);
+    const status = jsonOf(await call('editor_status', {}), 'editor_status');
+    const reachable = asArray(get(status, 'game', 'runtimes')).map((one) => get(one, 'pid'));
+    assert.ok(
+      reachable.length === 1 && reachable[0] !== firstPid,
+      `the new game is the one up: ${JSON.stringify(reachable)}`,
+    );
+  } finally {
+    try {
+      await call('editor_run', { projectPath: project, op: 'stop' });
+    } catch {
+      // Stopped already, or the server is gone; the sweep below is what must happen.
+    }
+    await server.stop();
+    sweep(project);
+    sweep(runtimeDir);
+  }
+}
+
 async function testAStartWaitsForTheGameToAnnounceItself(): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), 'gdharness-waiting-'));
   try {
@@ -16113,6 +16197,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testATestServerWritesWhereNoRealRunIs,
   testAStartStopsWaitingForAGameThatIsOver,
   testAStartWaitsForTheGameToAnnounceItself,
+  testARuntimeCallWaitsForTheGameThisServerStarted,
   testARunCanBeGivenItsOwnEnvironment,
   testARunsEnvironmentIsBuiltInOrder,
   testATestRunKeepsOutOfThePlayersSaves,
