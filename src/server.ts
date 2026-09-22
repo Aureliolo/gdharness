@@ -21,6 +21,7 @@ import {
   readdirSync,
   readFileSync,
   readSync,
+  rmdirSync,
   statSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -2525,6 +2526,14 @@ class GodotServer {
       reportProblem = errorMessage(error);
     } finally {
       discard(reportsDir, userData);
+      // The directory the runs share goes with the last report in it, so a project that has
+      // been tested is left as it was found. A run still writing beside this one keeps it full,
+      // and a removal that fails for that reason is the answer wanted.
+      try {
+        rmdirSync(dirname(reportsDir));
+      } catch {
+        // Not empty, or already gone: either way it is not this run's to take.
+      }
     }
 
     const engineEntries = run.log
