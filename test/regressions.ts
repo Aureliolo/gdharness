@@ -51,7 +51,7 @@ import {
 } from '../src/class-cache.js';
 import { GodotDAPClient, type HeldBreakpoint, handleDAPTool } from '../src/dap_client.js';
 import { dictionary, emptyRecord } from '../src/dictionary.js';
-import { forAnswer, GameLog } from '../src/game-log.js';
+import { forAnswer, GameLog, type LogEntry } from '../src/game-log.js';
 import {
   anEditorIsStillComing,
   CONNECT_WINDOW_MS,
@@ -116,6 +116,7 @@ import {
 } from '../src/runtime-client.js';
 import { discardWith } from '../src/scratch.js';
 import {
+  aboveTheRunner,
   alive,
   PLAY_STARTS_WITHIN_MS,
   PROJECT_FILE_ARGUMENTS,
@@ -12313,6 +12314,36 @@ async function testARunOutlivesItsServer(): Promise<void> {
  * a project without the runner has to be refused, and nothing of the run may be left behind.
  */
 async function testGdUnitRunner(): Promise<void> {
+  // The trimmed backtrace's last line, rendered for one frame and for several, since a real run
+  // below leaves the runner's usual twenty and never one.
+  const pushed = (detail: string[]): LogEntry => ({
+    index: 0,
+    severity: 'error',
+    source: 'stderr',
+    text: 'minded',
+    detail,
+  });
+  assert.deepEqual(
+    aboveTheRunner(pushed(['[0] test (res://test/a_test.gd:4)', '[1] run (res://addons/gdUnit4/src/x.gd:9)']))
+      .detail,
+    ['[0] test (res://test/a_test.gd:4)', '[and one frame inside addons/gdUnit4/]'],
+  );
+  assert.deepEqual(
+    aboveTheRunner(
+      pushed([
+        '[0] test (res://test/a_test.gd:4)',
+        '[1] run (res://addons/gdUnit4/src/x.gd:9)',
+        '[2] stage (res://addons/gdUnit4/src/y.gd:2)',
+      ]),
+    ).detail,
+    ['[0] test (res://test/a_test.gd:4)', '[and 2 frames inside addons/gdUnit4/]'],
+  );
+  assert.deepEqual(
+    aboveTheRunner(pushed(['[0] test (res://test/a_test.gd:4)'])).detail,
+    ['[0] test (res://test/a_test.gd:4)'],
+    'a backtrace with no runner in it is left whole',
+  );
+
   const godotPath = resolveGodotPath();
   const gdunit = process.env['GDUNIT4_PATH'];
   if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {

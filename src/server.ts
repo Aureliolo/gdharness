@@ -851,7 +851,7 @@ const RUNNER_DIRECTORY = 'addons/gdUnit4/';
  * caused it, which is the whole of what anybody reads. Said rather than dropped, so a backtrace
  * that looks short is one that says why.
  */
-function aboveTheRunner(entry: LogEntry): LogEntry {
+export function aboveTheRunner(entry: LogEntry): LogEntry {
   const runner = entry.detail.findIndex((line) => line.includes(RUNNER_DIRECTORY));
   if (runner < 0) {
     return entry;
@@ -859,7 +859,10 @@ function aboveTheRunner(entry: LogEntry): LogEntry {
   const cut = entry.detail.length - runner;
   return {
     ...entry,
-    detail: [...entry.detail.slice(0, runner), `[and ${cut} frames inside ${RUNNER_DIRECTORY}]`],
+    detail: [
+      ...entry.detail.slice(0, runner),
+      `[and ${cut === 1 ? 'one frame' : `${cut} frames`} inside ${RUNNER_DIRECTORY}]`,
+    ],
   };
 }
 
