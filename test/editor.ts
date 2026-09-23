@@ -2288,17 +2288,18 @@ async function stackWithin(
 async function testDebugging({ call, refusal, attempt, play, project }: Editor): Promise<void> {
   const main = { projectPath: project, scriptPath: 'res://main.gd' };
 
-  // Nothing is running yet, and the whole trap this replaces was that every one of these
-  // answered with an empty stack: the same answer a game stopped in an empty frame gives.
-  assert.match(
-    await refusal('debug_state', { op: 'stack' }),
-    /No game is running.*editor_run start/s,
-    'a stack asked for with no game should name the command that starts one',
-  );
+  // Nothing is playing, and the whole trap this replaces was that every one of these answered with
+  // an empty stack: the same answer a game stopped in an empty frame gives. The case before this one
+  // stopped its run, which is still the run the server holds, so the refusal is the one for a run
+  // that has ended; the property held is the same either way: no session, and the command to start
+  // a run that has one.
+  const noStack = await refusal('debug_state', { op: 'stack' });
+  assert.match(noStack, /no debug session to answer for/, noStack);
+  assert.match(noStack, /editor_run start/, `a stack with nothing playing names what starts one: ${noStack}`);
   assert.match(
     await refusal('debug_control', { op: 'continue' }),
-    /No game is running/,
-    'and so should a step asked for with no game',
+    /no debug session to answer for/,
+    'and so should a step asked for with nothing playing',
   );
 
   // The print, so the frame the game stops in is _ready with the sum already worked out.

@@ -333,6 +333,11 @@ function stillRunning(run: GodotProcess | null): boolean {
   if (run?.exitCode !== null || run.endedUnwatched === true) {
     return false;
   }
+  // Ended here, which is settled before any process is asked: the kill lands a moment before the
+  // handle reports the exit, and a played run's only other source is the editor's word.
+  if (typeof run.endedHere === 'string') {
+    return false;
+  }
   // A run with no handle is one this server did not start, so nothing here is listening for it to
   // exit. Asked of the operating system on every answer rather than remembered from the moment it
   // was picked up, or a bench that finished an hour ago goes on being reported as running and
@@ -378,6 +383,11 @@ export function runIsUp(run: GodotProcess | null, editorSays: boolean | null, no
   if (run?.throughEditor !== true) {
     return stillRunning(run);
   }
+  // Stopped here: the editor's "not playing" inside the grace below would otherwise read as a play
+  // still on its way, about a run this server has just had the editor stop.
+  if (typeof run.endedHere === 'string') {
+    return false;
+  }
   // A process that is gone settles it before the editor is taken at its word. Godot went on
   // reporting a game it was playing whose process had been ended from outside, for fifteen seconds
   // and an empty runtime list, which is the editor being stale rather than wrong to consult.
@@ -414,18 +424,26 @@ export function noCodeWillCome(run: Pick<GodotProcess, 'exitCode' | 'process'>):
  * server that had started it fifty seconds earlier. [param announced] is whether the game said
  * which process it is, and [param couldAnnounce] whether its project has the runtime addon to say
  * it with: a played game that could have announced and never did stopped while it was starting,
- * or was closed in the editor before it got that far.
+ * or was closed in the editor before it got that far. [param endedHere] is whether this server
+ * ended it, which the answer says in a sentence of its own: then how it ended is known, and only
+ * why there is no code is left to say.
  */
 export function endedWithoutACode(run: {
   readonly throughEditor: boolean;
   readonly announced: boolean;
   readonly couldAnnounce: boolean;
+  readonly endedHere: boolean;
 }): string {
   if (!run.throughEditor) {
-    return 'This run was started by another server, the one this server replaced or one running beside it, and it ended with nothing here waiting on it, so its exit code was never collected. Everything it printed is below, read back from its transcript.';
+    return run.endedHere
+      ? 'This run was started by another server, so nothing here held it and its exit code was never collected. Everything it printed is below, read back from its transcript.'
+      : 'This run was started by another server, the one this server replaced or one running beside it, and it ended with nothing here waiting on it, so its exit code was never collected. Everything it printed is below, read back from its transcript.';
   }
   const kept =
     "A game the editor plays is the editor's own child, so its exit code stays with the editor and none was collected here.";
+  if (run.endedHere) {
+    return `${kept} What it printed is below.`;
+  }
   if (!run.announced && run.couldAnnounce) {
     return `The editor stopped playing this run before its game announced a runtime, so the game ended while it was starting or was closed in the editor. ${kept} What it printed is below, and editor_output with op "editor" has what the editor said about it.`;
   }
@@ -3939,6 +3957,7 @@ class GodotServer {
       ended = { pid: before.pid ?? this.announcedPidOf(before) ?? null };
       await this.endActiveGame(
         'editor_run start, which ends the run that was going before it starts another',
+        true,
       );
     }
 
@@ -4462,10 +4481,16 @@ class GodotServer {
     game.log.record('error', halt.text);
   }
 
-  /** Ends whatever is running, whichever way it was started, and says so on the run it ended. */
-  private async endActiveGame(reason: string): Promise<void> {
+  /**
+   * Ends whatever is running, whichever way it was started, and says so on the run it ended.
+   *
+   * The run is kept rather than dropped, so what it printed and how it ended are still what
+   * editor_output answers with. Dropped, the answer after a stop fell through to the notes on disk,
+   * which are shared by every project on the machine: a played run stopped before it announced was
+   * answered with another project's recorded run, refused as not this server's to answer for.
+   */
+  private async endActiveGame(reason: string, going: boolean): Promise<void> {
     const running = this.activeProcess;
-    this.activeProcess = null;
     // Read before the note is taken away, because it is what says the pid below still means this
     // run: the number alone does not.
     const recorded = running?.process === null ? readRunRecord() : null;
@@ -4473,7 +4498,10 @@ class GodotServer {
     // note outlives this process unless it is taken away here. Only this project's, because the
     // directories it is looked for in are shared with whatever else is running on this machine.
     clearRunRecord((record) => this.couldBeOurs(record.projectPath));
-    if (!running) {
+    // A run already over is left as it ended. Marked here, one that had quit on its own would be
+    // answered as ended by this server, and a second stop would put a run it did end through the
+    // pid check again and write over what the first stop recorded.
+    if (!running || !going) {
       return;
     }
     running.endedHere = reason;
@@ -4724,7 +4752,14 @@ class GodotServer {
       return;
     }
     const going = this.activeProcess;
-    if (going !== null) {
+    // A run this server ended gives way to a play the editor has started since, which is the current
+    // run: the editor was told to stop, so its "playing" is a new play. Only a run ended here. The
+    // editor goes on reporting a game whose process was ended from outside, so for a played run
+    // that ended on its own "playing" can be the same play, still being reported; and a spawned run
+    // that finished on its own is output somebody is waiting to read, which a scene played in the
+    // editor meanwhile is not.
+    const givesWay = going !== null && !stillRunning(going) && typeof going.endedHere === 'string';
+    if (going !== null && !givesWay) {
       // An editor-played run whose adapter has gone, with the editor still playing it. Reconnected
       // here rather than left silent: the gap is already recorded and cannot be filled, and the
       // alternative to trying is a run that prints for another hour into nothing.
@@ -5555,12 +5590,31 @@ class GodotServer {
         `The wait of ${waitedMs}ms ran out and the run is still going, so this is what it had printed by then rather than everything it will print. editor_run wait again to keep waiting.`,
       );
     }
+    // Which of the two silences this is. A run gdharness ended and a run that stopped being there
+    // print the same nothing and answer with the same exit code, and the difference is the whole
+    // question when a bench dies mid-measurement: one of them is this tool's doing and is on the
+    // record here, and the other sends the reader to look at their own machine. Said before why
+    // there is no code, since who ended it is what that sentence then leans on.
+    if (typeof run.endedHere === 'string') {
+      notes.push(`This run was ended here, by ${run.endedHere}.`);
+    } else if (!stillRunning(run) && !run.throughEditor && run.exitCode !== null) {
+      // A zero exit is not one of the two silences: nothing kills a process into exiting cleanly,
+      // so the game reached its own end and said so. Reported as the same open question it used to
+      // be, it read as an incident on every clean finish, which for a bench that prints and quits
+      // is every finish it has.
+      notes.push(
+        run.exitCode === 0
+          ? 'This run quit on its own, cleanly: exit code 0.'
+          : 'Nothing here ended this run: it stopped on its own or something outside this server stopped it.',
+      );
+    }
     if (run.endedUnwatched === true) {
       notes.push(
         endedWithoutACode({
           throughEditor: run.throughEditor,
           announced: announced !== undefined || run.announcedPid !== undefined,
           couldAnnounce: run.projectPath !== null && existsSync(join(run.projectPath, RUNTIME_AUTOLOAD.path)),
+          endedHere: typeof run.endedHere === 'string',
         }),
       );
     }
@@ -5578,23 +5632,6 @@ class GodotServer {
       const back = this.dapClient?.isConnected() === true;
       notes.push(
         `The debug adapter this run's console arrives over went away while the run was going, so what is below has a hole in it and the counts are of what was heard rather than of what was printed. ${back ? 'It is connected again, and the line marking where is in the log.' : 'It is still gone, so nothing further will arrive here.'} The project's own user://logs/godot.log has the rest, and "no entries" here means "not heard" rather than a quiet run.`,
-      );
-    }
-    // Which of the two silences this is. A run gdharness ended and a run that stopped being there
-    // print the same nothing and answer with the same exit code, and the difference is the whole
-    // question when a bench dies mid-measurement: one of them is this tool's doing and is on the
-    // record here, and the other sends the reader to look at their own machine.
-    if (typeof run.endedHere === 'string') {
-      notes.push(`This run was ended here, by ${run.endedHere}.`);
-    } else if (!stillRunning(run) && !run.throughEditor && run.exitCode !== null) {
-      // A zero exit is not one of the two silences: nothing kills a process into exiting cleanly,
-      // so the game reached its own end and said so. Reported as the same open question it used to
-      // be, it read as an incident on every clean finish, which for a bench that prints and quits
-      // is every finish it has.
-      notes.push(
-        run.exitCode === 0
-          ? 'This run quit on its own, cleanly: exit code 0.'
-          : 'Nothing here ended this run: it stopped on its own or something outside this server stopped it.',
       );
     }
     // Where the rest of it is, which nothing said. A long run is capped at `limit` entries and the
@@ -5689,7 +5726,7 @@ class GodotServer {
     const children =
       readBoolean(args, 'andChildren') === true && wasRunning ? await this.whatTheRunStarted(stopped) : null;
     this.logDebug('Stopping the running game');
-    await this.endActiveGame('editor_run stop');
+    await this.endActiveGame('editor_run stop', wasRunning);
     const ended = children === null ? null : endChildrenAmong(children);
     // The announcement of the game just ended goes with it, here rather than on the next sweep,
     // because a number the operating system hands out again before that sweep reads as the game
@@ -5736,8 +5773,11 @@ class GodotServer {
           }),
       // Whether there was anything left to stop. A run whose exit nobody collected, which is a
       // played run picked up after a reconnect and gone since, has no exit code and is over all
-      // the same; answering false there said a game had been ended that had ended itself.
-      exitedBeforeStop: stopped.exitCode !== null || !wasRunning,
+      // the same; answering false there said a game had been ended that had ended itself. Read
+      // before the stop and not off the exit code after it: the kill's exit lands while this answer
+      // is being built, so the code was there for a run this very stop had ended, and on Linux the
+      // answer said it had exited before the stop.
+      exitedBeforeStop: !wasRunning,
       exitCode: stopped.exitCode,
       errors: stopped.log.count('error'),
       warnings: stopped.log.count('warning'),
@@ -5746,7 +5786,9 @@ class GodotServer {
         ? 'This run was over before the stop, so nothing was ended here: editor_output has what it printed and how it ended. Anything that game started for itself, with OS.create_process or otherwise, is a separate process and may still be running.'
         : `${
             stopped.throughEditor
-              ? 'The editor was asked to stop the scene it is playing.'
+              ? endedPid === null
+                ? 'The editor was asked to stop the scene it is playing. Its game had not announced a runtime, so no process was named under endedPid, and its exit code stays with the editor.'
+                : 'The editor was asked to stop the scene it is playing.'
               : 'The process named under endedPid was ended.'
           } ${aboutTheChildren(ended, stopped.throughEditor)}`,
       entries: forAnswer(
