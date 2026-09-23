@@ -1921,6 +1921,9 @@ async function testABridgeThatMovedSaysFromWhere(): Promise<void> {
   const moved = new ServerProcess({
     env: { GDHARNESS_PROJECT: project, GDHARNESS_BRIDGE_PORT: String(wanted) },
   });
+  const beside = new ServerProcess({
+    env: { GDHARNESS_PROJECT: project, GDHARNESS_BRIDGE_PORT: String(wanted) },
+  });
   const free = await reservePort();
   const settled = new ServerProcess({
     env: { GDHARNESS_PROJECT: project, GDHARNESS_BRIDGE_PORT: String(free) },
@@ -1929,6 +1932,21 @@ async function testABridgeThatMovedSaysFromWhere(): Promise<void> {
     writeFileSync(
       join(project, 'project.godot'),
       '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="MovedBridge"\n',
+    );
+    // What a server that crashed leaves behind: an announcement for this port naming a process that
+    // is gone. Nothing is going to let go of the port on its behalf, so it is not waited on.
+    const gone = spawnSync(process.execPath, ['-e', ''], { encoding: 'utf8' });
+    mkdirSync(dirname(announcementPath(project)), { recursive: true });
+    writeFileSync(
+      announcementPath(project),
+      JSON.stringify({
+        protocol: BRIDGE_ANNOUNCE_PROTOCOL,
+        host: '127.0.0.1',
+        port: wanted,
+        pid: gone.pid,
+        version: '1.0.0',
+        startedAt: new Date().toISOString(),
+      }),
     );
     await moved.initialize('regression-test');
     const editor = get(
@@ -1946,6 +1964,28 @@ async function testABridgeThatMovedSaysFromWhere(): Promise<void> {
       ),
       said,
     );
+
+    // A live server of this project announced on another port is not the one holding this one, so
+    // it is neither waited on nor named.
+    writeFileSync(
+      announcementPath(project),
+      JSON.stringify({
+        protocol: BRIDGE_ANNOUNCE_PROTOCOL,
+        host: '127.0.0.1',
+        port: took,
+        pid: process.pid,
+        version: '1.0.0',
+        startedAt: new Date().toISOString(),
+      }),
+    );
+    await beside.initialize('regression-test');
+    const other = get(
+      parseTextContent(await beside.request('tools/call', { name: 'editor_status', arguments: {} })),
+      'editor',
+    );
+    assert.equal(get(other, 'bridgeHandover'), undefined, JSON.stringify(other));
+    assert.notEqual(get(other, 'port'), wanted, `it moved at once: ${JSON.stringify(other)}`);
+    assert.match(text(get(other, 'portNote')), /was held by another process/, JSON.stringify(other));
 
     await settled.initialize('regression-test');
     const plain = get(
@@ -1972,6 +2012,7 @@ async function testABridgeThatMovedSaysFromWhere(): Promise<void> {
     }
   } finally {
     await moved.stop();
+    await beside.stop();
     await settled.stop();
     await new Promise<void>((resolve) => {
       holder.close(() => {
@@ -2108,19 +2149,27 @@ async function testARestartLeftHalfDoneIsSaid(): Promise<void> {
  *
  * Both halves matter. The predecessor goes, and the announcement it leaves behind is the live
  * server's rather than a file it took down on its way out.
+ *
+ * And the replacement ends on the port both were configured with. It used to take a free one
+ * while the predecessor still held it, so every other reconnect left the configured port empty for
+ * the session and a pinned port read as ignored; it waits for the predecessor to let go instead.
+ * A port of the fixture's own, since the default is whatever server this machine has on it.
  */
 async function testASupersededServerStandsDown(): Promise<void> {
   const project = mkdtempSync(join(tmpdir(), 'gdharness-superseded-'));
   const announced = announcementPath(project);
+  const port = await reservePort();
+  const env = { GDHARNESS_PROJECT: project, GDHARNESS_BRIDGE_PORT: String(port) };
 
-  const first = new ServerProcess({ env: { GDHARNESS_PROJECT: project } });
+  const first = new ServerProcess({ env });
   let second: ServerProcess | null = null;
   try {
     await first.initialize('regression-test');
     const mine = readAnnouncement(announced);
     assert.ok(mine, 'the first server should announce, or this proves nothing');
+    assert.equal(mine.port, port, 'on the port it was configured with');
 
-    second = new ServerProcess({ env: { GDHARNESS_PROJECT: project } });
+    second = new ServerProcess({ env });
     await second.initialize('regression-test');
     const theirs = readAnnouncement(announced);
     assert.notEqual(theirs?.pid, mine.pid, 'the second server should take the announcement over');
@@ -2138,9 +2187,99 @@ async function testASupersededServerStandsDown(): Promise<void> {
       'and should leave the live announcement where the editor reads it',
     );
     assert.equal(second.exited, false, 'while the server that replaced it carries on');
+
+    // On the configured port once the predecessor has let go of it, not moved off it.
+    const replacement = second;
+    const editorOf = async (): Promise<unknown> =>
+      get(
+        parseTextContent(await replacement.request('tools/call', { name: 'editor_status', arguments: {} })),
+        'editor',
+      );
+    let status = await editorOf();
+    for (let waited = 0; get(status, 'bridgeHandover') !== undefined && waited < 20_000; waited += 250) {
+      await delay(250);
+      status = await editorOf();
+    }
+    assert.equal(
+      get(status, 'port'),
+      port,
+      `the replacement took the configured port: ${JSON.stringify(status)}`,
+    );
+    assert.equal(get(status, 'portWanted'), undefined, JSON.stringify(status));
+    assert.equal(readAnnouncement(announced)?.port, port, 'and announces that port');
   } finally {
     await first.stop();
     await second?.stop();
+    sweep(project);
+  }
+}
+
+/**
+ * A predecessor that does not let go of the configured port is not waited on for ever.
+ *
+ * A server from before servers watched for a successor never stands down, and neither does one
+ * that is wedged. The replacement waits the handover out, then takes a free port, announces it, and
+ * says in portNote which process kept the configured one. The holder stands in as a listener on the
+ * port and an announcement naming this live process, which is what a predecessor looks like.
+ */
+async function testAPredecessorThatKeepsThePortIsNotWaitedOnForEver(): Promise<void> {
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-held-over-'));
+  const port = await reservePort();
+  const holder = createServer();
+  await new Promise<void>((resolve) => {
+    holder.listen(port, '127.0.0.1', resolve);
+  });
+  mkdirSync(dirname(announcementPath(project)), { recursive: true });
+  writeFileSync(
+    announcementPath(project),
+    JSON.stringify({
+      protocol: BRIDGE_ANNOUNCE_PROTOCOL,
+      host: '127.0.0.1',
+      port,
+      pid: process.pid,
+      version: '1.0.0',
+      startedAt: new Date().toISOString(),
+    }),
+  );
+  const server = new ServerProcess({
+    env: { GDHARNESS_PROJECT: project, GDHARNESS_BRIDGE_PORT: String(port) },
+  });
+  try {
+    await server.initialize('regression-test');
+    const editorOf = async (): Promise<unknown> =>
+      get(
+        parseTextContent(await server.request('tools/call', { name: 'editor_status', arguments: {} })),
+        'editor',
+      );
+    const waiting = await editorOf();
+    assert.equal(
+      get(waiting, 'bridgeHandover', 'fromPid'),
+      process.pid,
+      `while it waits, it says for whom: ${JSON.stringify(waiting)}`,
+    );
+    let status = waiting;
+    for (let waited = 0; get(status, 'bridgeHandover') !== undefined && waited < 30_000; waited += 500) {
+      await delay(500);
+      status = await editorOf();
+    }
+    const took = asNumber(get(status, 'port'), 'it is listening somewhere');
+    assert.notEqual(took, port, `it moved off the held port: ${JSON.stringify(status)}`);
+    assert.equal(get(status, 'portWanted'), port, JSON.stringify(status));
+    assert.match(
+      text(get(status, 'portNote')),
+      new RegExp(
+        `was held by pid ${process.pid}, the gdharness server this one replaced, which had not let go of it`,
+      ),
+      JSON.stringify(status),
+    );
+    assert.equal(readAnnouncement(announcementPath(project))?.port, took, 'and announces where it went');
+  } finally {
+    await server.stop();
+    await new Promise<void>((resolve) => {
+      holder.close(() => {
+        resolve();
+      });
+    });
     sweep(project);
   }
 }
@@ -17127,6 +17266,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARestartLeftHalfDoneIsSaid,
   testABridgeThatMovedSaysFromWhere,
   testASupersededServerStandsDown,
+  testAPredecessorThatKeepsThePortIsNotWaitedOnForEver,
   testAProjectUpgradedUnderTheServerIsSaid,
   testEveryDispatchedNameExistsOnBothSides,
   testEveryEngineParameterCanBeSent,
