@@ -1227,6 +1227,18 @@ async function main(): Promise<void> {
   }
 
   const projectDir = createProject(godotPath);
+  // The gate on its own, in seconds, for after a GDScript edit: gdlint and gdformat pass a script
+  // the engine refuses under warnings as errors, and a regression run with an engine loads the
+  // addon under the default warnings, so both said yes to an addon that did not compile.
+  if (process.argv.includes('typed')) {
+    try {
+      testTypedGate(godotPath, projectDir);
+    } finally {
+      sweep(projectDir);
+    }
+    console.log('typed gate passed');
+    return;
+  }
   try {
     testTypedGate(godotPath, projectDir);
     runFixture(godotPath, projectDir, 'scene_parse');
