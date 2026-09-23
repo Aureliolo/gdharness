@@ -5290,8 +5290,11 @@ class GodotServer {
     const budgetMs = readPositiveNumber(args, 'timeoutMs') ?? WAIT_FOR_RUN_MS;
     const until = Date.now() + budgetMs;
     // Drained as it goes rather than once at the end: the pipes are what the output is read from,
-    // and a run that fills them while nobody reads blocks on its own print.
-    while ((await this.runStillGoing(run)) && Date.now() < until) {
+    // and a run that fills them while nobody reads blocks on its own print. Stopped when the caller
+    // cancels, since nobody is left to answer and a played run is asked of the editor on every
+    // pass; the run itself is not this call's to end, so it goes on.
+    const cancelled = callSignal();
+    while (cancelled?.aborted !== true && (await this.runStillGoing(run)) && Date.now() < until) {
       this.drainEditorOutput(run);
       this.drainTranscript(run);
       await delay(RUN_POLL_MS);
