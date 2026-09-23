@@ -12372,6 +12372,7 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
           'var by_name: Dictionary[String, Gear] = {"head": null}\n' +
           'var spare: RefCounted = RefCounted.new()\nvar count: int = 3\n' +
           'var done_at: Array[int] = []\nvar tally: Dictionary[String, int] = {}\nvar board: Array[int] = []\n' +
+          'var names: PackedStringArray = PackedStringArray(["Ada", "Bram"])\n' +
           'var locked: int = 5:\n\tset(value):\n\t\tpass\n\n\n' +
           'func _ready() -> void:\n' +
           '\tfor index: int in 4:\n\t\tvar piece: Gear = Gear.new()\n' +
@@ -12630,6 +12631,26 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
         5,
         'and the refused call changed nothing',
       );
+
+      // A packed list, which a game keeps names in as often as an Array, and which a path could not
+      // step into at all: "names:1" answered that names held no object to read 1 off.
+      assert.equal(get((await read('names:1')).parsed, 'value'), 'Bram', (await read('names:1')).said);
+      assert.equal(get((await read('names:size()')).parsed, 'value'), 2, 'a packed list answers its size');
+      assert.match((await read('names:9')).said, /names is a packed list of 2, so there is no 9 in it/);
+      assert.match((await read('names:sort()')).said, /not one of the calls a path makes on one.*size\(\)/);
+      const renamed = await tool('runtime_invoke', {
+        op: 'set',
+        nodePath: '/root/Main',
+        property: 'names:0',
+        value: 'Cass',
+      });
+      assert.equal(get(renamed.parsed, 'new_value'), 'Cass', renamed.said);
+      assert.deepEqual(
+        get((await read('names')).parsed, 'value'),
+        ['Cass', 'Bram'],
+        'an element written through a path is written into the list the game holds',
+      );
+
       const waitFor = async (timeoutMs: number): Promise<unknown> =>
         (
           await tool('runtime_wait', {

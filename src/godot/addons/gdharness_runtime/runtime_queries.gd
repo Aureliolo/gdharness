@@ -705,7 +705,11 @@ func call_method(params: Dictionary) -> Dictionary:
 	# rather than as "has no method", which reads as a misspelling of a method that was never going
 	# to be there, and with the element spelled out, since a method on what it holds is the usual aim.
 	if not reached["holder"] is Object:
-		var sort: String = "a list" if reached["holder"] is Array else "a map"
+		var sort: String = "a list"
+		if reached["holder"] is Dictionary:
+			sort = "a map"
+		elif Paths.packed(reached["holder"]):
+			sort = "a packed list"
 		var spelled: String = str(reached["name"])
 		if Paths.method_of(spelled).is_empty():
 			spelled += "()"
