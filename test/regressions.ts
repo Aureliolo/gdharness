@@ -5147,11 +5147,13 @@ async function testARunEndedWithoutACodeSaysWhy(): Promise<void> {
   }
 
   const handle = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
-  try {
-    assert.equal(noCodeWillCome({ exitCode: null, process: handle }), false, 'a handle brings its code');
-  } finally {
-    await endGame(handle);
-  }
+  const exited = new Promise<void>((resolve) => {
+    handle.once('exit', () => {
+      resolve();
+    });
+  });
+  assert.equal(noCodeWillCome({ exitCode: null, process: handle }), false, 'a handle brings its code');
+  await exited;
   assert.equal(noCodeWillCome({ exitCode: null, process: null }), true, 'nothing here holds this one');
   assert.equal(noCodeWillCome({ exitCode: 0, process: null }), false, 'and this one has its code');
 }
@@ -9813,6 +9815,18 @@ async function testAPlayedStartStopsWaitingForAGameThatIsOver(): Promise<void> {
         stack,
         /The last run has already ended, so there is no debug session/,
         `a stack read on the run that died is refused as a run that is over: ${stack}`,
+      );
+      // And its output says what is known about how it went: before it announced, with its code
+      // left with the editor. This server started it a moment ago, and the note once said it had
+      // outlived the server that started it.
+      const output = parseTextContent(
+        await server.request('tools/call', { name: 'editor_output', arguments: {} }),
+      );
+      assert.equal(get(output, 'running'), false, JSON.stringify(output));
+      assert.match(
+        text(get(output, 'note')),
+        /The editor stopped playing this run before its game announced a runtime, so the game ended while it was starting or was closed in the editor\./,
+        `the output says the game went while it was starting: ${JSON.stringify(output)}`,
       );
       // A start after a game that died ends nothing, and says nothing about ending one: the
       // record alone read as a run still going, so the editor was told to stop and the answer
