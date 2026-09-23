@@ -42,6 +42,7 @@ import {
 import { halfAsLongAgain, readBootNote, waitSizedTo, writeBootNote } from './boot-note.js';
 import { readBreakpointNote, writeBreakpointNote } from './breakpoint-note.js';
 import { announceBridge, announcementPath, readAnnouncement, withdrawBridge } from './bridge-announce.js';
+import { callSignal, withCallSignal } from './call-signal.js';
 import {
   cachedAtMissingPaths,
   cachedClasses,
@@ -1392,7 +1393,7 @@ class GodotServer {
 
   private setupToolHandlers(): void {
     this.mcp.server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: this.tools }));
-    this.mcp.server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    this.mcp.server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       this.logDebug(`Handling tool request: ${request.params.name}`);
       const spec = toolSpec(request.params.name);
       if (!spec) {
@@ -1413,7 +1414,9 @@ class GodotServer {
       // Started here and not waited for: whatever it learns lands on a later call, and a
       // registry that never answers costs this one nothing.
       this.updates.refresh();
-      const answer = await this.answered(spec.name, checked.op ?? '', args);
+      const answer = await withCallSignal(extra.signal, () =>
+        this.answered(spec.name, checked.op ?? '', args),
+      );
       return this.withFeedbackNotice(this.withUpdateNotice(answer));
     });
   }
@@ -2523,7 +2526,10 @@ class GodotServer {
     let exitCode = 0;
     try {
       // An export of a real project is slow, so it gets five minutes rather than the default.
-      const { stdout, stderr } = await run(engine.value, exportArgs, { timeout: 300000 });
+      const { stdout, stderr } = await run(engine.value, exportArgs, {
+        timeout: 300000,
+        signal: callSignal(),
+      });
       log.append('stdout', stdout);
       log.append('stderr', stderr);
     } catch (error) {
@@ -4479,6 +4485,25 @@ class GodotServer {
    */
   private spawnGame(godotPath: string, cmdArgs: string[], env?: NodeJS.ProcessEnv): SpawnedGame {
     const child = spawn(godotPath, cmdArgs, { stdio: ['ignore', 'pipe', 'pipe'], ...(env ? { env } : {}) });
+    // The same reasoning at the other end of the call: a caller who cancelled is no longer the
+    // reader this run is held for, so it is ended with the call rather than at its own timeout.
+    const cancelled = callSignal();
+    if (cancelled !== undefined) {
+      const end = (): void => {
+        if (child.exitCode === null && child.signalCode === null) {
+          this.logDebug(`The call waiting on pid ${child.pid ?? 'unknown'} was cancelled; ending it.`);
+          child.kill();
+        }
+      };
+      if (cancelled.aborted) {
+        end();
+      } else {
+        cancelled.addEventListener('abort', end, { once: true });
+        child.once('exit', () => {
+          cancelled.removeEventListener('abort', end);
+        });
+      }
+    }
     const log = new GameLog();
     const started: SpawnedGame = {
       process: child,
