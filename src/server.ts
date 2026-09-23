@@ -91,7 +91,7 @@ import { GodotLocator } from './godot-path.js';
 import { type HeadlessOutcome, runImport, runOperation } from './headless.js';
 import { EDITOR_READS, ENGINE_PASSES, HEADLESS_OPERATIONS } from './headless-operations.js';
 import { DefectsSeen, defectReport, feedbackNotice } from './issues.js';
-import { orphansPrinted, parseJUnit, type TestReport, whyNoReport } from './junit.js';
+import { orphansPrinted, parseJUnit, type TestReport, whyNoReport, withActualsPrinted } from './junit.js';
 import {
   type EditorPorts,
   editorArguments,
@@ -2872,6 +2872,12 @@ class GodotServer {
     this.logDebug(`Running tests: ${engine.value} ${cmdArgs.join(' ')}`);
     const userData = mkdtempSync(join(tmpdir(), 'gdharness-tests-'));
     const run = this.spawnGame(engine.value, cmdArgs, userDataIn(userData));
+    // As printed, colours and all, beside the log that strips them: the colours are where gdUnit4
+    // marks which characters of a failing string were there, and its report drops them.
+    const console: Buffer[] = [];
+    run.process.stdout?.on('data', (data: Buffer) => {
+      console.push(data);
+    });
     const hung = await new Promise<boolean>((resolve) => {
       const timer = setTimeout(() => {
         run.process.kill();
@@ -2975,10 +2981,13 @@ class GodotServer {
       };
     }
 
-    const failed = report.suites.flatMap((suite) =>
-      suite.cases
-        .filter((entry) => entry.status === 'failed' || entry.status === 'error')
-        .map((entry) => ({ ...entry, path: suite.path })),
+    const failed = withActualsPrinted(
+      report.suites.flatMap((suite) =>
+        suite.cases
+          .filter((entry) => entry.status === 'failed' || entry.status === 'error')
+          .map((entry) => ({ ...entry, path: suite.path })),
+      ),
+      Buffer.concat(console).toString('utf8'),
     );
     // What the report cannot say. gdUnit4 decides the run's state on orphan nodes and writes none
     // of that into its XML, so a tier that passed every case and left nodes behind arrived as the

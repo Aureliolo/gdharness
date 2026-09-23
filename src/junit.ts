@@ -302,6 +302,117 @@ export function whyNoReport(printed: readonly string[], asked: string): string |
   return printed.some((line) => NOTHING_RAN.test(line)) ? `no test cases found at ${asked}` : null;
 }
 
+const ESCAPE = String.fromCharCode(0x1b);
+
+/**
+ * A failing value the runner printed as a character diff, with the assertion it belongs to: the
+ * value a string equality found, between " but was" and the location line that follows it.
+ */
+const PRINTED_ACTUAL = new RegExp(
+  ` but was\\n '([\\s\\S]*?)'((?:${ESCAPE}\\[[0-9;]*m)*)\\tat ('[^'\\n]*' in \\S+:\\d+)`,
+  'g',
+);
+const COLOUR = new RegExp(`${ESCAPE}\\[([0-9;]*)m`, 'g');
+
+/** How gdUnit4 spells a character it marks, read back into the character. */
+const SPELLED: Readonly<Record<string, string>> = {
+  '<LF>': '\n',
+  '<CR>': '\r',
+  '<TAB>': '\t',
+  '<BS>': '\b',
+  '<FF>': '\f',
+  '<VT>': '\v',
+  '<BEL>': '\u0007',
+  '<ESC>': ESCAPE,
+  '<DEL>': '\u007f',
+};
+
+function unspelled(text: string): string {
+  return text.replace(/<(?:LF|CR|TAB|BS|FF|VT|BEL|ESC|DEL|0x[0-9A-F]{2})>/g, (spelling) =>
+    spelling.startsWith('<0x')
+      ? String.fromCharCode(Number.parseInt(spelling.slice(3, 5), 16))
+      : (SPELLED[spelling] ?? spelling),
+  );
+}
+
+/**
+ * [param printed] read as gdUnit4's character diff: `merged` is what the report keeps once the
+ * marks are gone, and `actual` is the value the assertion found.
+ *
+ * A character on a red background is one the value lacked and one on green is one it had in
+ * addition, told apart by which channel is the larger; the rest were in both. A marked character
+ * that does not print, such as a line feed, is spelled out as "<LF>".
+ */
+function readDiff(printed: string): { merged: string; actual: string } {
+  let merged = '';
+  let actual = '';
+  let background: 'missing' | 'added' | null = null;
+  let last = 0;
+  const take = (text: string): void => {
+    merged += text;
+    if (background === null) {
+      actual += text;
+    } else if (background === 'added') {
+      actual += unspelled(text);
+    }
+  };
+  for (const match of printed.matchAll(COLOUR)) {
+    take(printed.slice(last, match.index));
+    last = match.index + match[0].length;
+    const codes = (match[1] ?? '').split(';');
+    if (codes[0] === '48' && codes[1] === '2') {
+      background = Number(codes[2]) > Number(codes[3]) ? 'missing' : 'added';
+    } else if (codes[0] === '0' || codes[0] === '') {
+      background = null;
+    }
+  }
+  take(printed.slice(last));
+  return { merged, actual };
+}
+
+/** The sentence a detail carries when both sides printed alike and nothing could say which was which. */
+export const BOTH_SIDES_ALIKE_NOTE =
+  '[gdharness: the expected and the actual printed alike because gdUnit4 drops the marks that tell them apart when it writes its report, and the runner printed no copy of this one, so neither side above is the value the assertion found.]';
+
+/**
+ * [param failed] with each failing string equality's actual value put back, read off [param
+ * printed], which is what the runner wrote to its console with the colours left in.
+ *
+ * gdUnit4 prints a failing string's value as a character diff against the expected one, marked
+ * with background colours, and strips the marks when it writes the JUnit report: what is left is
+ * both strings merged, so an empty value reads as the expected string in full, and "abXd" against
+ * "abcd" reads "abcXd". The console keeps the marks. A detail the console has no copy of, whose two
+ * sides read alike, says so rather than letting either side stand as the value.
+ */
+export function withActualsPrinted<Case extends { readonly detail: string | null }>(
+  failed: readonly Case[],
+  printed: string,
+): Case[] {
+  // A line break reaches a pipe as CRLF on Windows, and the report is written with every carriage
+  // return taken out, so the two are compared the way the report spells them.
+  const diffs = [...printed.replaceAll('\r\n', '\n').matchAll(PRINTED_ACTUAL)].map((match) => ({
+    at: match[3] ?? '',
+    ...readDiff(match[1] ?? ''),
+  }));
+  return failed.map((entry) => {
+    if (entry.detail === null) {
+      return entry;
+    }
+    let detail = entry.detail;
+    for (const diff of diffs) {
+      const wrong = ` but was\n '${diff.merged.replaceAll('\r', '')}'\n\tat ${diff.at}`;
+      if (detail.includes(wrong)) {
+        detail = detail.replace(wrong, () => ` but was\n '${diff.actual}'\n\tat ${diff.at}`);
+      }
+    }
+    const alike = /Expecting:\n '([\s\S]*)'\n but was\n '\1'\n\tat /.test(detail);
+    if (alike) {
+      detail = `${detail}\n${BOTH_SIDES_ALIKE_NOTE}`;
+    }
+    return detail === entry.detail ? entry : { ...entry, detail };
+  });
+}
+
 /** One suite that finished with nodes still in the tree, and how many. */
 interface SuiteOrphans {
   /** The suite's script, as gdUnit4 names it on the line announcing the run. */
