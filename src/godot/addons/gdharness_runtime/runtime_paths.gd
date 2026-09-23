@@ -6,6 +6,51 @@ extends RefCounted
 
 const Values = preload("runtime_values.gd")
 
+## The calls a path makes on a list or a map: those that take no arguments and change nothing.
+##
+## Named rather than asked of the engine, because asking about a method a list does not have logs an
+## error into the game's output, and a typo in a path is not the game's error. The ones that change
+## what they are called on, such as clear(), sort() and pop_back(), are left out: a path is how a
+## read and a wait reach what they read, and a wait asks many times.
+const LIST_CALLS: Array[String] = [
+	"size",
+	"is_empty",
+	"front",
+	"back",
+	"max",
+	"min",
+	"pick_random",
+	"hash",
+	"duplicate",
+	"duplicate_deep",
+	"is_read_only",
+	"is_typed",
+	"get_typed_builtin",
+	"get_typed_class_name",
+	"get_typed_script",
+]
+const MAP_CALLS: Array[String] = [
+	"size",
+	"is_empty",
+	"keys",
+	"values",
+	"hash",
+	"duplicate",
+	"duplicate_deep",
+	"is_read_only",
+	"is_typed",
+	"is_typed_key",
+	"is_typed_value",
+	"get_typed_key_builtin",
+	"get_typed_key_class_name",
+	"get_typed_key_script",
+	"get_typed_value_builtin",
+	"get_typed_value_class_name",
+	"get_typed_value_script",
+]
+## The calls an empty list has nothing to answer, which the engine reports as an error when asked.
+const NEEDS_AN_ELEMENT: Array[String] = ["front", "back", "pick_random"]
+
 
 ## What [param reaching] names something on, which is the node itself until the name has a colon
 ## in it, and the last name along that path.
@@ -23,7 +68,9 @@ const Values = preload("runtime_values.gd")
 ## and walks into what it returned. Some of what hangs off a node is only reachable by asking:
 ## which control holds the focus is a question for the viewport a control is in, and the viewport
 ## is a method's answer rather than a property. Spelled with the brackets so a reader sees a call
-## where one happens, and so a method can never shadow a property of the same name.
+## where one happens, and so a method can never shadow a property of the same name. A list or a map
+## answers the calls that read it, "board:size()" or "inbox:keys()", listed in [constant LIST_CALLS]
+## and [constant MAP_CALLS].
 ##
 ## Answers with a `message` instead when a step along the way is not there or holds something that
 ## is not an object, naming the step rather than the whole path: "/root/Main:_game has no property
@@ -117,9 +164,14 @@ static func nothing_under(holder: Variant, named: String, called: String) -> Str
 static func can_read(holder: Variant, named: String) -> bool:
 	if holder is Array:
 		var items: Array = holder
+		var list_call: String = method_of(named)
+		if not list_call.is_empty():
+			return list_call in LIST_CALLS and not (items.is_empty() and list_call in NEEDS_AN_ELEMENT)
 		return _index_in(named, items.size()) != -1
 	if holder is Dictionary:
 		var map: Dictionary = holder
+		if not method_of(named).is_empty():
+			return method_of(named) in MAP_CALLS
 		return map.has(named) or map.has(StringName(named))
 	if holder is Object:
 		var object: Object = holder
@@ -173,6 +225,8 @@ static func write(holder: Variant, named: String, value: Variant) -> void:
 ## What [param holder] holds under [param named], or answers to it when [param named] is a call.
 ## Only ever called once [method can_read] agrees.
 static func read_under(holder: Variant, named: String) -> Variant:
+	if (holder is Array or holder is Dictionary) and not method_of(named).is_empty():
+		return Callable.create(holder, method_of(named)).call()
 	if holder is Array:
 		var items: Array = holder
 		return items[_index_in(named, items.size())]
@@ -207,10 +261,17 @@ static func _index_in(named: String, size: int) -> int:
 ## so a list says how long it is and a map says what it is keyed by. The step is named rather than
 ## the whole path, because the step is the typo.
 static func nothing_there(holder: Variant, named: String, called_as: String) -> String:
+	var container_call: String = method_of(named)
 	if holder is Array:
 		var items: Array = holder
+		if container_call in NEEDS_AN_ELEMENT and items.is_empty():
+			return "%s is an empty list, so it has no %s" % [called_as, named]
+		if not container_call.is_empty():
+			return container_calls_refused(called_as, "a list", container_call)
 		return "%s is a list of %d, so there is no %s in it" % [called_as, items.size(), named]
 	if holder is Dictionary:
+		if not container_call.is_empty():
+			return container_calls_refused(called_as, "a map", container_call)
 		var map: Dictionary = holder
 		var keys: Array = map.keys()
 		# Eight of them, because a map keyed by something unexpected is told by the first few and a
@@ -240,6 +301,19 @@ static func nothing_there(holder: Variant, named: String, called_as: String) -> 
 			% [called_as, named, named]
 		)
 	return "%s has no property %s" % [called_as, named]
+
+
+## Why [param method] is not a call a path makes on [param sort] ("a list" or "a map"), naming
+## the calls it does make.
+static func container_calls_refused(called_as: String, sort: String, method: String) -> String:
+	var calls: Array[String] = LIST_CALLS if sort == "a list" else MAP_CALLS
+	var spelled: Array[String] = []
+	for each: String in calls:
+		spelled.append(each + "()")
+	return (
+		"%s is %s, and %s() is not one of the calls a path makes on one, which read it and take no arguments: %s"
+		% [called_as, sort, method, ", ".join(spelled)]
+	)
 
 
 ## Whether [param holder] declares [param named]. Asked of the list rather than read, because a
