@@ -17,6 +17,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import process from 'node:process';
+import type { AnnouncedServer } from './bridge-announce.js';
 import {
   parsedYamlHas,
   removeToml,
@@ -1011,24 +1012,44 @@ export interface Repinned {
  * printed above it and sends a caller to reconnect something that would come back on the same
  * server, since there is no config for the reconnect to read.
  */
-export function harnessNote(repinned: Repinned, now: string): string {
+export function harnessNote(
+  repinned: Repinned,
+  now: string,
+  running: { readonly server: AnnouncedServer; readonly isThisVersion: boolean } | null = null,
+): string {
   // Carried into the first two answers rather than branching again: a project can hold a config this
   // writes and a harness it cannot, and the config's own answer is still the true one.
   const alsoByHand =
     repinned.byHand === 0
       ? ''
       : `\n     ${repinned.byHand === 1 ? 'One harness above was' : `${repinned.byHand} harnesses above were`} handed a command to run instead; run it too.`;
+  // What is running is read from the server's own announcement for the project, when a live one has
+  // made one. The config's previous line is what the harness would spawn next, not what it spawned:
+  // after two upgrades without a reconnect it named a version that had never run (#622).
+  const serving =
+    running === null
+      ? '     No gdharness server is announcing itself for this project, so which one your harness\n' +
+        '     is running cannot be read from here.\n'
+      : `     The server serving this project is gdharness ${running.server.version} (pid ${running.server.pid})${running.isThisVersion ? ', which is already this version.' : '.'}\n`;
+  if (
+    running?.isThisVersion === true &&
+    repinned.byHand === 0 &&
+    (repinned.moved.length > 0 || repinned.written > 0)
+  ) {
+    return `  2. Nothing for the harness: the server serving this project is gdharness ${running.server.version}\n     (pid ${running.server.pid}), which is already this version.`;
+  }
   if (repinned.moved.length > 0) {
     return (
-      `  2. Your harness is still running the server it spawned from ${repinned.moved.join(', ')}.\n` +
-      `     Its config names ${now} now.\n` +
+      `  2. Your harness config held ${repinned.moved.join(', ')} before this upgrade.\n` +
+      `     It names ${now} now.\n` +
+      serving +
       `     Reconnect the MCP server, or restart the harness.${alsoByHand}`
     );
   }
   if (repinned.written > 0) {
     return (
-      '  2. Your harness config already named this version, but the server it is running is\n' +
-      '     whichever one it spawned when the session started, which this cannot see from here.\n' +
+      '  2. Your harness config already named this version.\n' +
+      serving +
       `     Reconnect the MCP server, or restart the harness.${alsoByHand}`
     );
   }
