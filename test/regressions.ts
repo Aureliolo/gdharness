@@ -5554,6 +5554,103 @@ async function testARefusalDoesNotDenyTheRuntimeItCanSee(): Promise<void> {
   }
 }
 
+/**
+ * runtimeConnected is about this server's project, and another project's game is listed as such.
+ *
+ * Reported from ostinato, whose server's editor_status said runtimeConnected true while the only
+ * game up was fantasy-guild-manager's. A runtime_* call on a server set up for a project reaches
+ * that project's games unless another is named, so the flag told the caller a call would land that
+ * would be refused. Two fake games that answer, one of each project: with only the other project's
+ * announced the flag is false and the game is listed as not this project's, and with this
+ * project's beside it the flag is true, which is the half that shows the flag reads games at all.
+ */
+async function testRuntimeConnectedIsAboutThisProjectsGames(): Promise<void> {
+  const mine = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-mine-'));
+  const theirs = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-theirs-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-two-projects-rt-'));
+  const listening: Server[] = [];
+  const children: ChildProcess[] = [];
+  const game = async (project: string): Promise<number> => {
+    const answering = createServer((socket) => {
+      socket.setEncoding('utf8');
+      socket.write(`${JSON.stringify({ type: 'welcome', protocol: RUNTIME_PROTOCOL })}\n`);
+      let buffered = '';
+      socket.on('data', (chunk: string) => {
+        buffered += chunk;
+        for (let at = buffered.indexOf('\n'); at !== -1; at = buffered.indexOf('\n')) {
+          const asked = JSON.parse(buffered.slice(0, at)) as { id: number };
+          buffered = buffered.slice(at + 1);
+          socket.write(`${JSON.stringify({ id: asked.id, type: 'pong' })}\n`);
+        }
+      });
+      socket.on('error', () => {});
+    });
+    listening.push(answering);
+    await new Promise<void>((ready) => answering.listen(0, '127.0.0.1', ready));
+    // A live process for the announcement to name, since one naming a process that is gone is swept.
+    const holder = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+    children.push(holder);
+    const pid = holder.pid ?? 0;
+    writeFileSync(
+      join(runtimeDir, `runtime-${pid}.json`),
+      JSON.stringify({
+        protocol: RUNTIME_PROTOCOL,
+        pid,
+        port: portOf(answering),
+        address: '127.0.0.1',
+        project: { name: basename(project), path: project },
+      }),
+      'utf8',
+    );
+    return pid;
+  };
+  const server = new ServerProcess({ env: { GDHARNESS_PROJECT: mine, GDHARNESS_RUNTIME_DIR: runtimeDir } });
+  try {
+    writeFileSync(join(mine, 'project.godot'), 'config_version=5\n');
+    await server.initialize('regression-test');
+    const status = async (): Promise<unknown> =>
+      parseTextContent(await server.request('tools/call', { name: 'editor_status', arguments: {} }));
+
+    const other = await game(theirs);
+    const aside = await status();
+    const listed = asArray(get(aside, 'game', 'runtimes'));
+    assert.equal(listed.length, 1, JSON.stringify(aside));
+    assert.equal(get(listed[0], 'pid'), other, JSON.stringify(aside));
+    assert.equal(
+      get(listed[0], 'reachable'),
+      true,
+      `the other project's game answers: ${JSON.stringify(aside)}`,
+    );
+    assert.equal(get(listed[0], 'ofThisProject'), false, JSON.stringify(aside));
+    assert.equal(
+      get(aside, 'game', 'runtimeConnected'),
+      false,
+      `not this project's: ${JSON.stringify(aside)}`,
+    );
+
+    const own = await game(mine);
+    const beside = await status();
+    const ours = asArray(get(beside, 'game', 'runtimes')).find((one) => get(one, 'pid') === own);
+    assert.equal(get(ours, 'ofThisProject'), true, JSON.stringify(beside));
+    assert.equal(
+      get(beside, 'game', 'runtimeConnected'),
+      true,
+      `this project's game counts: ${JSON.stringify(beside)}`,
+    );
+  } finally {
+    await server.stop();
+    for (const answering of listening) {
+      answering.close();
+    }
+    for (const child of children) {
+      child.kill();
+    }
+    sweep(mine);
+    sweep(theirs);
+    sweep(runtimeDir);
+  }
+}
+
 async function testATestServerWritesWhereNoRealRunIs(): Promise<void> {
   const project = mkdtempSync(join(tmpdir(), 'gdharness-isolation-'));
   const shared = join(runtimeDirectory(withoutRuntimeDir(process.env)), 'runs', 'run.json');
@@ -16499,6 +16596,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARefusalDoesNotDenyTheRuntimeItCanSee,
   testAStartSaysWhatItLeftRunning,
   testATestServerWritesWhereNoRealRunIs,
+  testRuntimeConnectedIsAboutThisProjectsGames,
   testAStartStopsWaitingForAGameThatIsOver,
   testAStartWaitsForTheGameToAnnounceItself,
   testAGameIsFoundThroughALinkToItsProject,

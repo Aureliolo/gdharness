@@ -3383,6 +3383,11 @@ class GodotServer {
           pid: endpoint.pid,
           port: endpoint.port,
           project: endpoint.project,
+          // Said when this server serves a project: its runtime_* calls reach that project's games
+          // unless a caller names another, so another project's game is listed and not counted.
+          ...(this.ownProject === null
+            ? {}
+            : { ofThisProject: isSameDirectory(endpoint.project.path, this.ownProject) }),
           // Which editor played it, as the game announced: a game the editor played, and
           // whatever that game started for itself, carries the editor's process id; a game
           // another server started carries none. Absent when the game announced none.
@@ -3437,7 +3442,11 @@ class GodotServer {
         // The same three answers editor_output gives, for the same run: absent when there is no
         // run to ask about.
         ...hold,
-        runtimeConnected: games.some((game) => game.reachable),
+        // About the games a runtime_* call reaches without being told which, which for a server set
+        // up for a project is that project's. Counting every game on the machine said true on a
+        // server whose own project had none running, beside another project's game, and the next
+        // runtime call was refused (reported from ostinato, with fantasy-guild-manager's game up).
+        runtimeConnected: games.some((game) => game.reachable && game.ofThisProject !== false),
         runtimes: games,
         // Games announcing a protocol this server was not built to read. Apart from the list above
         // rather than folded into it, because nothing here can reach them and calling them runtimes
