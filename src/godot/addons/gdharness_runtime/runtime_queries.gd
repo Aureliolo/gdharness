@@ -379,11 +379,17 @@ static func _drawn(node: Node) -> bool:
 ## Public because three questions are the same question: what a screen reads as, which nodes say a
 ## given word, and whether anything has come to say it yet. Two copies of what a node says is how
 ## the three of them come to disagree about a SpinBox.
+##
+## Read rather than looked up in the property list, which the engine builds afresh on every call: a
+## wait asks this of every node on the screen every frame, and on a hall of 3,500 nodes the lookup
+## took the game it was watching from 60 frames a second to 11. A node without the property reads
+## as null, which is not a string.
 static func said_by(node: Node) -> String:
-	for property: Dictionary in node.get_property_list():
-		if str(property.get("name", "")) == "text" and Read.as_int(property.get("type", 0)) == TYPE_STRING:
-			return str(node.get("text")).strip_edges()
-	return ""
+	var text: Variant = node.get("text")
+	if not text is String:
+		return ""
+	var words: String = text
+	return words.strip_edges()
 
 
 func get_rect(params: Dictionary) -> Dictionary:
