@@ -164,6 +164,7 @@ import {
   GODOT_DEBUG_MODE_DEFAULT,
   markIfStale,
   SERVER_VERSION,
+  sameCodeNote,
 } from './server-version.js';
 import { installedAddonVersion, RUNTIME_AUTOLOAD, shippedEditorDigest } from './setup.js';
 import {
@@ -3342,6 +3343,9 @@ class GodotServer {
           : `Port ${status.portWanted}, the one this server was configured with, was held by another process when the bridge started, so it took ${status.port} and announced that where the editor looks for it${this.announcedAt === null ? '' : `, ${this.announcedAt}`}. The editor finds it there; the next server started takes ${status.portWanted} again if it is free.`,
       staleNote: stale
         ? addonMismatch(status.addonVersion, SERVER_VERSION, status.addonDigest, shippedEditorDigest())
+        : undefined,
+      addonNote: status.connected
+        ? sameCodeNote(status.addonVersion, SERVER_VERSION, status.addonDigest, shippedEditorDigest())
         : undefined,
       ...this.breakpointsAtRisk(),
       retryingBridge: this.bridgeRetry === null ? undefined : true,

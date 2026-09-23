@@ -141,7 +141,13 @@ import {
   uidsLeftNote,
 } from '../src/server.js';
 import type { GodotProcess } from '../src/server-types.js';
-import { addonMismatch, editorIsStale, markIfStale, SERVER_VERSION } from '../src/server-version.js';
+import {
+  addonMismatch,
+  editorIsStale,
+  markIfStale,
+  SERVER_VERSION,
+  sameCodeNote,
+} from '../src/server-version.js';
 import {
   ADDONS,
   autoloadIsOurs,
@@ -6667,10 +6673,27 @@ async function testAnEditorOnTheShippedCodeIsNotCalledStale(): Promise<void> {
     false,
     `the shipped code is current: ${JSON.stringify(current)}`,
   );
+  // And says why the older label is fine, since an older addonVersion beside this server's version
+  // was read as something to fix and an editor was restarted for nothing.
+  assert.equal(
+    get(current, 'editor', 'addonNote'),
+    `The editor loaded the 0.0.1-behind addons, which are the same code this ${SERVER_VERSION} server ships, so nothing needs restarting; addonVersion changes at the next editor start.`,
+    JSON.stringify(current),
+  );
 
   const behind = await statusFor('0'.repeat(64));
   assert.equal(get(behind, 'editor', 'addonIsStale'), true, `other code is stale: ${JSON.stringify(behind)}`);
   assert.match(text(get(behind, 'editor', 'staleNote')), /editor_launch restart/, JSON.stringify(behind));
+  assert.equal(
+    get(behind, 'editor', 'addonNote'),
+    undefined,
+    `stale code is not called the same code: ${JSON.stringify(behind)}`,
+  );
+  // The branches no greeting above reaches: a matching version has nothing to explain, and neither
+  // does an editor that sent no digest, whose code nothing here can vouch for.
+  assert.equal(sameCodeNote(SERVER_VERSION, SERVER_VERSION, shipped, shipped), undefined);
+  assert.equal(sameCodeNote('0.0.1-behind', SERVER_VERSION, undefined, shipped), undefined);
+  assert.equal(sameCodeNote('0.0.1-behind', SERVER_VERSION, '', shipped), undefined);
 }
 
 /**
