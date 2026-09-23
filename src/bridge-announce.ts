@@ -1,6 +1,7 @@
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { errorMessage } from './errors.js';
+import { startTimesOf } from './process-children.js';
 
 /**
  * Where this server says its editor bridge is, so an editor can find it without anybody having
@@ -19,7 +20,7 @@ export function announcementPath(projectPath: string): string {
 }
 
 /** What the editor reads: enough to reach this bridge, and to tell a live one from a leftover. */
-interface BridgeAnnouncement {
+export interface BridgeAnnouncement {
   readonly protocol: number;
   readonly host: string;
   readonly port: number;
@@ -51,6 +52,49 @@ export function readAnnouncement(path: string): BridgeAnnouncement | null {
   } catch {
     return null;
   }
+}
+
+/** A server announcing itself for a project: which version, and which process. */
+export interface AnnouncedServer {
+  readonly version: string;
+  readonly pid: number;
+}
+
+/**
+ * The server [param announcement] describes, when the process under its pid could have written it.
+ *
+ * [param startedAt] is when the process holding that pid started, or undefined when it is gone or
+ * the platform will not say. A pid is handed out again once its holder has gone, so a live process
+ * under it is not enough: the one that wrote the announcement started before writing it, which a
+ * process that took the number afterwards cannot have done. A second of slack, since some
+ * platforms give the start to the second and the announcement carries milliseconds.
+ */
+export function serverBehind(
+  announcement: BridgeAnnouncement | null,
+  startedAt: number | undefined,
+): AnnouncedServer | null {
+  if (announcement === null || typeof announcement.version !== 'string' || startedAt === undefined) {
+    return null;
+  }
+  const announcedAt = Date.parse(announcement.startedAt);
+  if (Number.isNaN(announcedAt) || startedAt > announcedAt + 1000) {
+    return null;
+  }
+  return { version: announcement.version, pid: announcement.pid };
+}
+
+/**
+ * The server serving [param projectPath] right now, as its own announcement says, or null when no
+ * live server has announced itself there. What `upgrade` names as the one a harness is running,
+ * rather than the version its config held before, which is only the running one if a reconnect
+ * happened in between.
+ */
+export function serverServing(projectPath: string): AnnouncedServer | null {
+  const announcement = readAnnouncement(announcementPath(projectPath));
+  if (announcement === null) {
+    return null;
+  }
+  return serverBehind(announcement, startTimesOf([announcement.pid]).get(announcement.pid));
 }
 
 /** Whether the announcement at [param path] is the one this process wrote. */

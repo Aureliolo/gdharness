@@ -12,6 +12,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import process from 'node:process';
+import { type BridgeAnnouncement, serverBehind } from '../src/bridge-announce.js';
 import {
   candidates,
   configPath,
@@ -354,6 +355,80 @@ function testTheUpgradeNoteNamesTheConfigRatherThanTheAddons(): void {
   assert.match(still, /already named this version/, 'it says the config was already there');
   assert.doesNotMatch(still, /9\.9\.10 *\n? *when/, 'and claims nothing about what is running');
   assert.match(still, /Reconnect the MCP server/, 'and still says what to do');
+}
+
+/**
+ * What an upgrade says is running is what the server serving the project says, not the old pin.
+ *
+ * Issue #622: two upgrades without a reconnect, and the second said "your harness is still running
+ * the server it spawned from gdharness@1.0.15" while editor_status answered 1.0.13. The line the
+ * config held before this upgrade is what a reconnect would have spawned, not what is running, and
+ * a session wrote it down as the running version twice. The running server is taken as an argument
+ * here, which is what the live one's own announcement says, so the case where the two disagree is
+ * the case written down.
+ */
+function testTheUpgradeNoteNamesTheServerThatIsRunning(): void {
+  const now = 'npx -y gdharness@1.0.16';
+  const repinned = { moved: ['npx -y gdharness@1.0.15'], written: 1, byHand: 0 };
+
+  const older = harnessNote(repinned, now, {
+    server: { version: '1.0.13', pid: 4242 },
+    isThisVersion: false,
+  });
+  assert.match(older, /server serving this project is gdharness 1\.0\.13 \(pid 4242\)/, older);
+  assert.match(older, /config held npx -y gdharness@1\.0\.15 before this upgrade/, older);
+  assert.match(older, /Reconnect the MCP server/, older);
+  assert.doesNotMatch(older, /still running the server it spawned from/, older);
+
+  const unseen = harnessNote(repinned, now, null);
+  assert.match(unseen, /No gdharness server is announcing itself for this project/, unseen);
+  assert.match(unseen, /config held npx -y gdharness@1\.0\.15 before this upgrade/, unseen);
+  assert.match(unseen, /Reconnect the MCP server/, unseen);
+
+  const current = harnessNote(repinned, now, {
+    server: { version: '1.0.16', pid: 4242 },
+    isThisVersion: true,
+  });
+  assert.match(current, /Nothing for the harness: .*gdharness 1\.0\.16/s, current);
+  assert.doesNotMatch(current, /Reconnect/, current);
+
+  const already = harnessNote({ moved: [], written: 1, byHand: 0 }, now, {
+    server: { version: '1.0.13', pid: 4242 },
+    isThisVersion: false,
+  });
+  assert.match(already, /already named this version/, already);
+  assert.match(already, /gdharness 1\.0\.13 \(pid 4242\)/, already);
+
+  assert.equal(new Set([older, unseen, current]).size, 3, 'the three readings give three answers');
+}
+
+/**
+ * The server behind an announcement is the process that could have written it.
+ *
+ * A pid is handed out again once its holder has gone, so a live process under the announced pid
+ * is not the server unless it started before the announcement was written. The start time is an
+ * argument, so the recycled case is written down rather than waited for.
+ */
+function testAnAnnouncementIsReadOnlyFromTheProcessThatWroteIt(): void {
+  const at = '2026-09-23T01:00:00.000Z';
+  const announced: BridgeAnnouncement = {
+    protocol: 1,
+    host: '127.0.0.1',
+    port: 6505,
+    pid: 4242,
+    version: '1.0.13',
+    startedAt: at,
+  };
+  const written = Date.parse(at);
+  assert.deepEqual(serverBehind(announced, written - 5_000), { version: '1.0.13', pid: 4242 }, 'the writer');
+  assert.deepEqual(
+    serverBehind(announced, written + 500),
+    { version: '1.0.13', pid: 4242 },
+    'within the second a platform gives',
+  );
+  assert.equal(serverBehind(announced, written + 60_000), null, 'a process that took the number afterwards');
+  assert.equal(serverBehind(announced, undefined), null, 'a pid nobody holds');
+  assert.equal(serverBehind(null, written), null, 'no announcement');
 }
 
 /**
@@ -791,6 +866,8 @@ const TESTS = [
   testAnInstallSaysWhatItLaunchedInsteadOf,
   testTheUpgradeNoteNamesTheConfigRatherThanTheAddons,
   testTheUpgradeNoteSeparatesTheThreeWaysNothingMoved,
+  testTheUpgradeNoteNamesTheServerThatIsRunning,
+  testAnAnnouncementIsReadOnlyFromTheProcessThatWroteIt,
   testAConfigThatDoesNotParseIsLeftAlone,
   testDetectionNeverReachesOutOfTheProject,
   testEveryCandidateCarriesWhyItIsOffered,
