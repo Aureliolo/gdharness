@@ -629,14 +629,49 @@ func set_property(params: Dictionary) -> Dictionary:
 					% [reached["called"], named, type_string(wanted), type_string(typeof(given))]
 				)
 			}
+		var typed: Dictionary = _values.typed_like(given, old_value, _element_object.bind(node, node_path))
+		if typed.has("message"):
+			return {
+				"type": "error",
+				"message":
+				"%s.%s is a typed %s: %s." % [reached["called"], named, _sort_of(old_value), typed["message"]]
+			}
+		given = typed["value"]
 	Paths.write(holder, named, given)
+	var now: Variant = Paths.read_under(holder, named)
+	# Read back rather than trusted. The engine drops a write it will not take without a word, and
+	# the answer then showed the old value as the new one, shaped as a success: a typed container
+	# refusing a plain list did exactly that. A value the property changed on the way in, a setter
+	# clamping it, still changed it, so only a write that left the property as it was is refused.
+	if (
+		Values.comparable(given, old_value)
+		and given != old_value
+		and Values.comparable(now, old_value)
+		and now == old_value
+	):
+		return {
+			"type": "error",
+			"message":
+			(
+				(
+					"%s.%s was given %s and still holds %s: the engine kept what it had,"
+					+ " which a property it will not write does."
+				)
+				% [
+					reached["called"],
+					named,
+					JSON.stringify(_values.serialize(given)),
+					JSON.stringify(_values.serialize(now))
+				]
+			)
+		}
 
 	return {
 		"type": "property_set",
 		"path": node_path,
 		"property": property,
 		"old_value": _values.serialize(old_value),
-		"new_value": _values.serialize(Paths.read_under(holder, named))
+		"new_value": _values.serialize(now)
 	}
 
 
@@ -711,11 +746,39 @@ func call_method(params: Dictionary) -> Dictionary:
 					% [reached["called"], named, type_string(wants), index + 1, type_string(typeof(given))]
 				)
 			}
+		# A typed list or map is built as one, since a plain one handed to such a parameter raises
+		# inside the game, which is what every check here exists to stop.
+		var container: Variant = _values.parameter_container(holder, named, index)
+		if container != null:
+			var typed: Dictionary = _values.typed_like(
+				given, container, _element_object.bind(node, node_path)
+			)
+			if typed.has("message"):
+				return {
+					"type": "error",
+					"message":
+					(
+						"%s.%s takes a typed %s as argument %d: %s."
+						% [reached["called"], named, _sort_of(container), index + 1, typed["message"]]
+					)
+				}
+			given = typed["value"]
 		deserialized_args.append(given)
 
 	var result: Variant = holder.callv(named, deserialized_args)
 
 	return {"type": "method_result", "path": node_path, "method": method, "result": _values.serialize(result)}
+
+
+## [method _object_named] with the path first, which is the order [method Values.typed_like] calls
+## an element resolver in.
+func _element_object(given: Variant, declared: String, node: Node, node_path: String) -> Dictionary:
+	return _object_named(node, node_path, given, declared)
+
+
+## "list" or "map", for a refusal about a typed container.
+static func _sort_of(container: Variant) -> String:
+	return "list" if container is Array else "map"
 
 
 ## The object [param given] names for a slot or a parameter declared as [param declared], as
