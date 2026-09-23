@@ -592,7 +592,7 @@ func set_property(params: Dictionary) -> Dictionary:
 	var named: String = reached["name"]
 	# A call can be walked through and read, and is not a place: what it returns is the method's
 	# to hand out, and writing "into" it would set nothing the game keeps.
-	if not Paths.called(named).is_empty():
+	if not Paths.method_of(named).is_empty():
 		return {
 			"type": "error",
 			"message":
@@ -611,7 +611,7 @@ func set_property(params: Dictionary) -> Dictionary:
 	var wanted: int = slot["type"] if slot["type"] != TYPE_NIL else typeof(old_value)
 	var given: Variant
 	if wanted == TYPE_OBJECT and (value is String or value is Dictionary):
-		var named_object: Dictionary = _object_named(node, node_path, value, slot["class"])
+		var named_object: Dictionary = _object_named(node, node_path, value, str(slot["class"]))
 		if named_object.has("message"):
 			return {
 				"type": "error",
@@ -678,8 +678,8 @@ func call_method(params: Dictionary) -> Dictionary:
 	# The method a call ends on is the one being called whether or not it carries the brackets a
 	# step along the way would: "get_viewport():gui_get_focus_owner()" is the same call as without
 	# the last pair.
-	if not Paths.called(named).is_empty():
-		named = Paths.called(named)
+	if not Paths.method_of(named).is_empty():
+		named = Paths.method_of(named)
 	if not holder.has_method(named):
 		return {"type": "error", "message": "%s has no method %s" % [reached["called"], named]}
 

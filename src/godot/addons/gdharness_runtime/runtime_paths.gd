@@ -123,7 +123,7 @@ static func can_read(holder: Variant, named: String) -> bool:
 		return map.has(named) or map.has(StringName(named))
 	if holder is Object:
 		var object: Object = holder
-		var method: String = called(named)
+		var method: String = method_of(named)
 		if not method.is_empty():
 			return _arguments_required(object, method) == 0
 		return _has_property(object, named)
@@ -132,7 +132,7 @@ static func can_read(holder: Variant, named: String) -> bool:
 
 ## The method a step written as a call names, "get_viewport()" being get_viewport, or "" for a
 ## step that is a name.
-static func called(named: String) -> String:
+static func method_of(named: String) -> String:
 	return named.trim_suffix("()") if named.ends_with("()") else ""
 
 
@@ -182,7 +182,7 @@ static func read_under(holder: Variant, named: String) -> Variant:
 			return map[named]
 		return map[StringName(named)]
 	var object: Object = holder
-	var method: String = called(named)
+	var method: String = method_of(named)
 	if not method.is_empty():
 		return object.call(method)
 	return object.get(named)
@@ -223,7 +223,7 @@ static func nothing_there(holder: Variant, named: String, called_as: String) -> 
 			rest = " and %d more" % [keys.size() - 8]
 		return "%s has no key %s; it is keyed by %s%s" % [called_as, named, ", ".join(some), rest]
 	var object: Object = holder
-	var method: String = called(named)
+	var method: String = method_of(named)
 	if not method.is_empty():
 		var required: int = _arguments_required(object, method)
 		if required == -1:
