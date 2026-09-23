@@ -38,6 +38,7 @@
     "test:regressions": "bun test/regressions.ts",
     "test:detection": "bun test/godot-detection.ts",
     "test:engine": "bun test/engine-gdscript.ts",
+    "test:typed": "bun test/engine-gdscript.ts typed",
     "test:editor": "bun test/editor.ts",
     "test:zip": "bun test/zip-extract.ts",
     "test:fuzz": "bun test/fuzz.ts",
