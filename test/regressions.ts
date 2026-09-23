@@ -15330,6 +15330,62 @@ async function testGdUnitRunner(): Promise<void> {
         assert.equal(get(empty, 'passed'), false, nowhere);
         assert.equal(get(empty, 'verdict'), 'nothing at res://tests', nowhere);
         assert.equal(get(empty, 'tests'), 0, nowhere);
+
+        // A failing string's value, which gdUnit4 prints as a character diff against the expected
+        // one and writes into its report with the marks stripped, so both strings came back merged:
+        // an empty value read as the expected string in full. Each shape of diff once: all missing,
+        // one swapped, a shared line break, and a line break only the value had, which the diff
+        // spells as <LF>.
+        mkdirSync(join(projectDir, 'strings'));
+        writeFileSync(
+          join(projectDir, 'strings', 'words_test.gd'),
+          [
+            'extends GdUnitTestSuite',
+            '',
+            '',
+            'func test_nothing_said() -> void:',
+            '\tassert_str("").is_equal("abc")',
+            '',
+            '',
+            'func test_one_swapped() -> void:',
+            '\tassert_str("abXd").is_equal("abcd")',
+            '',
+            '',
+            'func test_a_second_line() -> void:',
+            '\tassert_str("one\\ntwo").is_equal("one\\nthree")',
+            '',
+            '',
+            'func test_a_break_only_it_had() -> void:',
+            '\tassert_str("a\\nb").is_equal("ab")',
+            '',
+          ].join('\n'),
+        );
+        const worded: unknown = JSON.parse(
+          await call(
+            'project_test',
+            { projectPath: projectDir, path: 'res://strings' },
+            ENGINE_CALL_TIMEOUT_MS * 3,
+          ),
+        );
+        const detailOf = (name: string): string =>
+          text(
+            get(
+              asArray(get(worded, 'failed')).find((entry) => get(entry, 'name') === name),
+              'detail',
+            ),
+          );
+        const found: [string, string][] = [
+          ['test_nothing_said', ''],
+          ['test_one_swapped', 'abXd'],
+          ['test_a_second_line', 'one\ntwo'],
+          ['test_a_break_only_it_had', 'a\nb'],
+        ];
+        for (const [name, value] of found) {
+          assert.ok(
+            detailOf(name).includes(` but was\n '${value}'\n\tat '${name}'`),
+            `${name} says the value was ${JSON.stringify(value)}: ${JSON.stringify(detailOf(name))}`,
+          );
+        }
       },
       { GODOT_PATH: godotPath },
     );
