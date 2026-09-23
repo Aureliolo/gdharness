@@ -10420,6 +10420,133 @@ async function testAFailedEngineRunSaysHowItEnded(): Promise<void> {
   );
 }
 
+/**
+ * A wait for words leaves the game it watches its speed.
+ *
+ * It looked through every node on the screen every frame, and asked each for its property list to
+ * learn whether it had text: on a hall of 3,500 nodes the game fell from 60 frames a second to 11,
+ * its clock lost three quarters of its time, and a wait for a date timed out on a clock that turned
+ * a day every thirty seconds. Measured here as the frame rate during a words wait against the rate
+ * during a property wait over the same time, in one game.
+ *
+ * Twenty thousand nodes rather than the reported 3,500, because two things keep the rate and each
+ * needs a hall that shows it. Reading text cheaply makes a look on 3,500 nodes cost well under a
+ * frame, so looking every frame kept the rate and pacing went untested; at this size a cheap look
+ * still costs a real share of a frame, and only pacing keeps the rate. Pacing alone would keep the
+ * rate over the expensive reading too, by looking once in the whole wait, which the count of looks
+ * shows.
+ */
+async function testAWordsWaitLeavesTheGameItsSpeed(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('words wait speed regression skipped (Godot not found)');
+    return;
+  }
+  await withAPlayingEditor(
+    ({ adapter }) =>
+      (tool) =>
+        tool === 'playing_status'
+          ? { ok: true, playing: false, scenePath: '', debugPort: adapter }
+          : { ok: true },
+    async ({ server, project }) => {
+      writeFileSync(
+        join(project, 'main.gd'),
+        'extends Control\n\nvar never: int = 0\nvar date: Label = Label.new()\n\n\n' +
+          'func _ready() -> void:\n' +
+          '\tvar small: Control = Control.new()\n\tsmall.name = "Small"\n\tadd_child(small)\n' +
+          '\tvar large: Control = Control.new()\n\tlarge.name = "Large"\n\tadd_child(large)\n' +
+          '\tfor row: int in 4000:\n' +
+          '\t\tvar line: HBoxContainer = HBoxContainer.new()\n' +
+          '\t\tvar into: Control = small if row < 700 else large\n\t\tinto.add_child(line)\n' +
+          '\t\tfor cell: int in 2:\n\t\t\tvar label: Label = Label.new()\n' +
+          '\t\t\tlabel.text = "row %d cell %d" % [row, cell]\n\t\t\tline.add_child(label)\n' +
+          '\t\tvar go: Button = Button.new()\n\t\tgo.text = "Go %d" % row\n\t\tline.add_child(go)\n' +
+          '\t\tline.add_child(ColorRect.new())\n' +
+          '\tdate.text = "Spring 16"\n\tsmall.add_child(date)\n\n\n' +
+          'func turn_the_day() -> void:\n\tdate.text = "Spring 17"\n',
+      );
+      writeFileSync(
+        join(project, 'main.tscn'),
+        '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+          '[node name="Main" type="Control"]\nscript = ExtResource("1")\n',
+      );
+      const call = async (name: string, args: Record<string, unknown>): Promise<unknown> =>
+        parseTextContent(
+          await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS),
+        );
+      const started = await call('editor_run', {
+        projectPath: project,
+        op: 'start',
+        headless: true,
+        args: ['--stay'],
+        runtimeWaitMs: 30_000,
+      });
+      assert.equal(get(started, 'runtime', 'listening'), true, JSON.stringify(started));
+      // Frames a second over one wait of each kind, as each wait counted them. The game's own frame
+      // counter read either side of the call also counts the frames of the calls reading it, which
+      // hid a wait running at a third of the rate behind a figure near the unwatched one.
+      const rateOver = async (
+        nodePath: string,
+        args: Record<string, unknown>,
+      ): Promise<{ rate: number; answer: unknown }> => {
+        const answer = await call('runtime_wait', { op: 'until', nodePath, timeoutMs: 2_000, ...args });
+        const said = JSON.stringify(answer);
+        return {
+          rate: asNumber(get(answer, 'frames'), said) / asNumber(get(answer, 'elapsed_ms'), said),
+          answer,
+        };
+      };
+
+      // How often it looked, over the part of the hall the size of the report's. A look that asks
+      // every node for its property list costs over a second here, and pacing then leaves one look
+      // in the wait besides the last; read cheaply, a look costs milliseconds and there are dozens.
+      const small = await rateOver('/root/Main/Small', { says: 'words nobody says' });
+      assert.ok(
+        asNumber(get(small.answer, 'looks')) >= 5,
+        `a words wait looks many times in two seconds on 3,500 nodes: ${JSON.stringify(small.answer)}`,
+      );
+
+      const unwatched = await rateOver('/root/Main', { property: 'never', value: 1 });
+      assert.equal(get(unwatched.answer, 'met'), false, JSON.stringify(unwatched.answer));
+      const watched = await rateOver('/root/Main', { says: 'words nobody says' });
+      assert.equal(get(watched.answer, 'met'), false, JSON.stringify(watched.answer));
+      assert.ok(
+        watched.rate >= unwatched.rate / 2,
+        `the game runs at ${watched.rate * 1000} frames a second while words are waited for, against ${unwatched.rate * 1000} while a property is: ${JSON.stringify(watched.answer)}`,
+      );
+
+      // Words that arrive after the last paced look and before the time runs out are still found:
+      // on the whole hall the looks are about half a second apart, so a wait of 300ms with the day
+      // turned 100ms into it meets only through the look taken as the time runs out.
+      const [late] = await Promise.all([
+        call('runtime_wait', { op: 'until', nodePath: '/root/Main', says: 'Spring 17', timeoutMs: 300 }),
+        delay(100).then(() =>
+          call('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'turn_the_day' }),
+        ),
+      ]);
+      assert.equal(
+        get(late, 'met'),
+        true,
+        `words that came between looks are found: ${JSON.stringify(late)}`,
+      );
+
+      // And words that are there are found.
+      const turned = await call('runtime_wait', {
+        op: 'until',
+        nodePath: '/root/Main',
+        says: 'Spring 17',
+        timeoutMs: 5_000,
+      });
+      assert.equal(get(turned, 'met'), true, JSON.stringify(turned));
+      await call('editor_run', { op: 'stop' });
+    },
+    { realAddon: true, engine },
+  );
+}
+
 async function testAPlayedStartStopsWaitingForAGameThatIsOver(): Promise<void> {
   let playing = false;
   let diesOnBoot = false;
@@ -17757,6 +17884,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStoppedSpawnedRunGivesWayToAPlay,
   testAKilledRunHasNoExitCode,
   testAFailedEngineRunSaysHowItEnded,
+  testAWordsWaitLeavesTheGameItsSpeed,
   testTheAnnounceWaitIsNotHeldByASlowEditor,
   testTheWaitSizedToABootIsSaid,
   testTheWaitIsSizedToTheLastBoot,
