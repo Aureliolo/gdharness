@@ -10024,6 +10024,55 @@ async function testAPlayTheEditorHasNotStartedIsNotAGameThatHasGone(): Promise<v
  * the positive for the untied state, and a number once the announcement has landed. The process
  * announced is this one, so the number is real.
  */
+/**
+ * A cancelled editor_run wait stops waiting, and leaves the run alone.
+ *
+ * The same gap as a cancelled test tier, one step removed: the wait loops for up to ten minutes,
+ * and for a run the editor plays each pass asks the editor whether it is still playing. A caller
+ * that cancelled left that going for the rest of the budget. The editor's answers are counted, so
+ * the wait is seen asking before the cancel and seen to stop after it; the run is not the wait's to
+ * end, and editor_output still answers about it.
+ */
+async function testACancelledWaitStopsAskingTheEditor(): Promise<void> {
+  let asked = 0;
+  await withAPlayingEditor(
+    ({ adapter }) =>
+      (tool) => {
+        if (tool === 'playing_status') {
+          asked += 1;
+        }
+        return tool === 'play_scene' || tool === 'playing_status'
+          ? { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter }
+          : { ok: true };
+      },
+    async ({ server, start }) => {
+      await start(200);
+      const id = server.nextRequestId;
+      void server
+        .request('tools/call', { name: 'editor_run', arguments: { op: 'wait', timeoutMs: 60_000 } }, 70_000)
+        .catch(() => {
+          // A cancelled request is not answered.
+        });
+      const before = asked;
+      assert.ok(
+        await cameTrue(() => asked >= before + 3, 5_000),
+        `the wait should be asking the editor: ${asked}`,
+      );
+
+      server.notify('notifications/cancelled', { requestId: id, reason: 'the caller stopped waiting' });
+      await delay(1_000);
+      const settled = asked;
+      await delay(2_000);
+      assert.equal(asked, settled, `the wait should stop asking once cancelled: ${settled} then ${asked}`);
+
+      const output = parseTextContent(
+        await server.request('tools/call', { name: 'editor_output', arguments: {} }, 60_000),
+      );
+      assert.equal(get(output, 'running'), true, `and the run goes on: ${JSON.stringify(output)}`);
+    },
+  );
+}
+
 async function testALateAnnouncementIsTiedToThePlayedRun(): Promise<void> {
   await withAPlayingEditor(
     ({ adapter }) =>
@@ -16381,6 +16430,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheWaitIsSizedToTheLastBoot,
   testAPlayTheEditorHasNotStartedIsNotAGameThatHasGone,
   testALateAnnouncementIsTiedToThePlayedRun,
+  testACancelledWaitStopsAskingTheEditor,
   testTheEditorsGameIsToldFromAnotherOfTheSameProject,
   testASpawnedGameBesideAnEditorIsStillItsOwn,
   testAFindByClassReachesWhatExtendsIt,
