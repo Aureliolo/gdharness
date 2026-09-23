@@ -3,6 +3,7 @@ extends RefCounted
 ## The commands that take time: they let the game run and answer when what was waited for has
 ## happened, or when the time ran out, so the caller never sleeps for a guessed length.
 
+const Paths = preload("runtime_paths.gd")
 const Queries = preload("runtime_queries.gd")
 const Read = preload("reading.gd")
 const Values = preload("runtime_values.gd")
@@ -207,15 +208,15 @@ static func _not_comparable(current: Variant, wanted: Variant, node_path: String
 ## its nodes hold: a run object built afresh each day would leave a wait watching the day before. A
 ## step that has gone in the meantime ends the wait with what went.
 static func _watched(node: Node, node_path: String, property: String) -> Dictionary:
-	var reached: Dictionary = Queries.walk_to(node, node_path, property)
+	var reached: Dictionary = Paths.walk_to(node, node_path, property)
 	if reached.has("message"):
 		return reached
 	var holder: Variant = reached["holder"]
 	var named: String = reached["name"]
-	var missing: String = Queries.nothing_under(holder, named, str(reached["called"]))
+	var missing: String = Paths.nothing_under(holder, named, str(reached["called"]))
 	if not missing.is_empty():
 		return {"type": "error", "message": missing}
-	return {"value": Queries.read_under(holder, named)}
+	return {"value": Paths.read_under(holder, named)}
 
 
 ## Waits until something under [param node_path] has [param said] written on it.
