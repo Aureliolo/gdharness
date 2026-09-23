@@ -391,6 +391,48 @@ export function runIsUp(run: GodotProcess | null, editorSays: boolean | null, no
 }
 
 /**
+ * Whether a run judged over will never have an exit code here, which is so only when nothing here
+ * holds it.
+ *
+ * A run this server spawned is judged over as soon as the process its game announced has gone,
+ * which can be before the handle's exit event has delivered the code; under the Windows console
+ * build the handle is a wrapper that exits after the game it started. Marked unwatched then, the
+ * code arrived afterwards beside a note saying none had been collected.
+ */
+export function noCodeWillCome(run: Pick<GodotProcess, 'exitCode' | 'process'>): boolean {
+  return run.exitCode === null && run.process === null;
+}
+
+/**
+ * Why a run that is over has no exit code here, said for the cause that applies.
+ *
+ * Two kinds of run end with nobody here collecting a code. A game the editor plays is the editor's
+ * child, so its code stays with the editor however long this server has been up; and a run read
+ * back from the note another server left was being waited on by that server, not this one. One
+ * sentence served both and named the second cause for the first: a played game that died while
+ * starting on a loaded machine was reported as having outlived the server that started it, by the
+ * server that had started it fifty seconds earlier. [param announced] is whether the game said
+ * which process it is, and [param couldAnnounce] whether its project has the runtime addon to say
+ * it with: a played game that could have announced and never did stopped while it was starting,
+ * or was closed in the editor before it got that far.
+ */
+export function endedWithoutACode(run: {
+  readonly throughEditor: boolean;
+  readonly announced: boolean;
+  readonly couldAnnounce: boolean;
+}): string {
+  if (!run.throughEditor) {
+    return 'This run was started by another server, the one this server replaced or one running beside it, and it ended with nothing here waiting on it, so its exit code was never collected. Everything it printed is below, read back from its transcript.';
+  }
+  const kept =
+    "A game the editor plays is the editor's own child, so its exit code stays with the editor and none was collected here.";
+  if (!run.announced && run.couldAnnounce) {
+    return `The editor stopped playing this run before its game announced a runtime, so the game ended while it was starting or was closed in the editor. ${kept} What it printed is below, and editor_output with op "editor" has what the editor said about it.`;
+  }
+  return `The editor stopped playing this run. ${kept} What it printed is below.`;
+}
+
+/**
  * The run a start ended to happen. The pid is the run's own or the one its game announced, and
  * null for a game the editor was playing that never announced one, which is the one kind of run
  * with no number of any sort.
@@ -5453,7 +5495,7 @@ class GodotServer {
     const going = await this.runStillGoing(run);
     if (run.endedUnwatched !== true && !going) {
       run.log.finish();
-      run.endedUnwatched = run.exitCode === null;
+      run.endedUnwatched = noCodeWillCome(run);
     }
     const severity = readString(args, 'severity');
     const selected = run.log.select({
@@ -5515,7 +5557,11 @@ class GodotServer {
     }
     if (run.endedUnwatched === true) {
       notes.push(
-        'This run outlived the server that started it and is over now, so its exit code was never collected. Everything it printed is below, read back from its transcript.',
+        endedWithoutACode({
+          throughEditor: run.throughEditor,
+          announced: announced !== undefined || run.announcedPid !== undefined,
+          couldAnnounce: run.projectPath !== null && existsSync(join(run.projectPath, RUNTIME_AUTOLOAD.path)),
+        }),
       );
     }
     // A run found already playing, rather than one this server started. The log begins where it was
