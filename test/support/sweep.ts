@@ -10,10 +10,21 @@ import { discard, type Surviving } from '../../src/scratch.js';
  * of directories had swept the first of them before failing on the second.
  */
 
-const survived: Surviving[] = [];
+const survived: (Surviving & { during: string | null })[] = [];
+
+/**
+ * The fixture whose directories are being swept, named beside anything it leaves. A path under the
+ * system temporary directory says which helper made it and not which case, and leftovers found
+ * after a whole run could not be traced to the fixture that left them.
+ */
+let during: string | null = null;
+
+export function sweepingFor(fixture: string | null): void {
+  during = fixture;
+}
 
 export function sweep(...paths: (string | null | undefined)[]): void {
-  survived.push(...discard(...paths));
+  survived.push(...discard(...paths).map((left) => ({ ...left, during })));
 }
 
 /**
@@ -28,8 +39,8 @@ export function reportUnswept(): boolean {
     return false;
   }
   console.error(`${survived.length} temporary director${survived.length === 1 ? 'y' : 'ies'} left behind:`);
-  for (const { path, reason } of survived) {
-    console.error(`  ${path}: ${reason}`);
+  for (const { path, reason, during: fixture } of survived) {
+    console.error(`  ${path}${fixture === null ? '' : ` (${fixture})`}: ${reason}`);
   }
   return true;
 }
