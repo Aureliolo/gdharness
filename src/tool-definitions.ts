@@ -1130,7 +1130,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       value: {
         ops: ['set'],
         blank: true,
-        description: 'set: the value, fitted to the property\'s type. "" writes an empty string.',
+        description:
+          'set: the value, fitted to the property\'s type. "" writes an empty string. A property typed as or holding an object takes a path naming one the game holds, the way call\'s args do, and holds that instance.',
       },
       method: {
         type: 'string',
@@ -1141,7 +1142,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       args: {
         type: 'array',
         ops: ['call'],
-        description: "call: the arguments, fitted to the method's parameter types.",
+        description:
+          'call: the arguments, fitted to the method\'s parameter types. A parameter typed as an object takes a path naming one the game holds and is handed that instance: a colon path read from nodePath, "_game:run:wares:3", or one starting at a node, "/root/Main/Hud" or "/root/Main:_game:run". A path that reaches no object, or an object of another class than the parameter declares, is refused.',
       },
     },
     requires: ['nodePath'],
