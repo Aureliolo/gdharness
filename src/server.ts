@@ -415,6 +415,38 @@ export function noCodeWillCome(run: Pick<GodotProcess, 'exitCode' | 'process'>):
 }
 
 /**
+ * How long a stop waits for what it signalled to be gone before it answers.
+ *
+ * Ten seconds covers a windowed engine closing its renderer on a loaded machine; the kill is
+ * immediate on Windows and a SIGTERM elsewhere, which Godot answers by quitting.
+ */
+const STOP_WAIT_MS = 10_000;
+
+/**
+ * Whether [param handle] has exited and every process in [param pids] is gone, waited for up to
+ * [param withinMs].
+ *
+ * A stop answered the moment the signal was sent, so it said a process was ended while the process
+ * was still there: a caller removing the project straight afterwards found its directory still
+ * held by the game, which on Windows cannot be removed, and the answer had no exit code because
+ * the exit had not been collected yet. The pids are the game's own where it announced one, since
+ * under the Windows console build the handle is a wrapper that goes before the engine does.
+ */
+async function untilGone(
+  handle: ChildProcess | null,
+  pids: readonly number[],
+  withinMs = STOP_WAIT_MS,
+): Promise<boolean> {
+  const gone = (): boolean =>
+    (handle?.exitCode !== null || handle.signalCode !== null) && pids.every((pid) => !alive(pid));
+  const deadline = Date.now() + withinMs;
+  while (!gone() && Date.now() < deadline) {
+    await delay(50);
+  }
+  return gone();
+}
+
+/**
  * Why a run that is over has no exit code here, said for the cause that applies.
  *
  * Two kinds of run end with nobody here collecting a code. A game the editor plays is the editor's
@@ -851,6 +883,19 @@ const BRIDGE_RETRY_MS = 2_000;
 const SUCCESSOR_CHECK_MS = 10_000;
 
 /**
+ * How long a replacement waits for its predecessor to let go of the configured bridge port before
+ * taking another. The predecessor looks for a successor every `SUCCESSOR_CHECK_MS`, and then has
+ * its shutdown to get through, so this covers one full check and the shutdown after it.
+ */
+const HANDOVER_MS = SUCCESSOR_CHECK_MS + 5_000;
+
+/**
+ * How often the port is asked for while waiting. The editor tries again a second after its socket
+ * closes, so the port has to be taken well inside that.
+ */
+const HANDOVER_POLL_MS = 250;
+
+/**
  * How long to wait for the editor's own class-cache write after it reports a scan finished.
  *
  * The write is deferred past the scan, so the file read the instant the editor goes idle is the
@@ -1149,6 +1194,10 @@ class GodotServer {
    */
   private readonly ownProject: string | null;
   private announcedAt: string | null = null;
+  /** The predecessor this server is waiting on for the configured bridge port, while it waits. */
+  private handingOverFrom: number | null = null;
+  /** The predecessor that was still holding the configured port when the wait for it ran out. */
+  private notHandedOverBy: number | null = null;
 
   constructor() {
     this.ownProject = envValue('GDHARNESS_PROJECT') ?? null;
@@ -1212,6 +1261,7 @@ class GodotServer {
     // A bridge that cannot bind must not take the stdio server down with it: the tools that
     // need no editor still work, and editor_status says what happened.
     try {
+      await this.takeOverFromAPredecessor();
       await this.godotBridge.start();
       this.bridgeStartupError = null;
       const bridgeStatus = this.godotBridge.getStatus();
@@ -1228,6 +1278,57 @@ class GodotServer {
       console.error('[SERVER] Continuing without bridge-backed editor tools, and trying again.');
       this.keepTryingTheBridge();
     }
+  }
+
+  /**
+   * Waits for the server this one replaces to let go of the configured port, rather than moving.
+   *
+   * A reconnect starts the replacement while the old server still holds the port, so the
+   * replacement took a free one instead, every other reconnect: the old server stood down seconds
+   * later and left the configured port empty for the rest of the session, beside a pin in
+   * `.mcp.json` that read as ignored. The old server stands down when the project's announcement
+   * names another live server, so this one claims the announcement first, on the same port so a
+   * connected editor has no new address to follow, and binds when the port comes free. The editor
+   * reconnects to the same address when the old socket closes.
+   *
+   * Only for this project's own predecessor on the configured port. Anything else holding it is not
+   * going to let go on being told, and the bridge moves as before. Neither is a predecessor that
+   * does not stand down in time: a version from before servers watched for a successor never does,
+   * and the bridge then moves and announces where it went.
+   */
+  private async takeOverFromAPredecessor(): Promise<void> {
+    if (this.ownProject === null) {
+      return;
+    }
+    const wanted = this.godotBridge.configuredPort;
+    const announced = readAnnouncement(announcementPath(this.ownProject));
+    if (
+      announced === null ||
+      announced.pid === process.pid ||
+      announced.port !== wanted ||
+      !alive(announced.pid)
+    ) {
+      return;
+    }
+    this.handingOverFrom = announced.pid;
+    this.announcedAt = announceBridge(this.ownProject, {
+      host: this.godotBridge.getStatus().host,
+      port: wanted,
+      version: SERVER_VERSION,
+    });
+    const until = Date.now() + HANDOVER_MS;
+    let taken = false;
+    while (!taken && Date.now() < until && !this.shutdownInitiated) {
+      try {
+        await this.godotBridge.start(false);
+        taken = true;
+        this.logDebug(`Took port ${wanted} over from pid ${announced.pid}`);
+      } catch {
+        await delay(HANDOVER_POLL_MS);
+      }
+    }
+    this.handingOverFrom = null;
+    this.notHandedOverBy = taken ? null : announced.pid;
   }
 
   /**
@@ -3340,7 +3441,22 @@ class GodotServer {
       portNote:
         status.portWanted === undefined
           ? undefined
-          : `Port ${status.portWanted}, the one this server was configured with, was held by another process when the bridge started, so it took ${status.port} and announced that where the editor looks for it${this.announcedAt === null ? '' : `, ${this.announcedAt}`}. The editor finds it there; the next server started takes ${status.portWanted} again if it is free.`,
+          : `Port ${status.portWanted}, the one this server was configured with, was held ${
+              this.notHandedOverBy === null
+                ? 'by another process'
+                : `by pid ${this.notHandedOverBy}, the gdharness server this one replaced, which had not let go of it ${HANDOVER_MS / 1000} seconds after being told it was replaced`
+            } when the bridge started, so it took ${status.port} and announced that where the editor looks for it${this.announcedAt === null ? '' : `, ${this.announcedAt}`}. The editor finds it there; the next server started takes ${status.portWanted} again if it is free.`,
+      // Waiting for the server this one replaces to let go of the configured port, which it does
+      // within seconds of seeing this one announced. Said so a bridge not yet listening reads as a
+      // handover in progress rather than a bridge that failed.
+      bridgeHandover:
+        this.handingOverFrom === null
+          ? undefined
+          : {
+              fromPid: this.handingOverFrom,
+              port: this.godotBridge.configuredPort,
+              note: `The gdharness server this one replaced, pid ${this.handingOverFrom}, still holds port ${this.godotBridge.configuredPort} and is standing down; this server takes the port when it lets go, and takes another after ${HANDOVER_MS / 1000} seconds if it does not.`,
+            },
       staleNote: stale
         ? addonMismatch(status.addonVersion, SERVER_VERSION, status.addonDigest, shippedEditorDigest())
         : undefined,
@@ -4500,7 +4616,7 @@ class GodotServer {
    * which are shared by every project on the machine: a played run stopped before it announced was
    * answered with another project's recorded run, refused as not this server's to answer for.
    */
-  private async endActiveGame(reason: string, going: boolean): Promise<void> {
+  private async endActiveGame(reason: string, going: boolean): Promise<boolean> {
     const running = this.activeProcess;
     // Read before the note is taken away, because it is what says the pid below still means this
     // run: the number alone does not.
@@ -4513,20 +4629,22 @@ class GodotServer {
     // answered as ended by this server, and a second stop would put a run it did end through the
     // pid check again and write over what the first stop recorded.
     if (!running || !going) {
-      return;
+      return true;
     }
     running.endedHere = reason;
+    // Read before anything is signalled, since the announcement goes with the game.
+    const announced = this.announcedPidOf(running);
     if (running.throughEditor) {
       await this.handleViaBridge('stop_playing', {});
-      return;
+      return await untilGone(null, announced === undefined ? [] : [announced]);
     }
     if (running.process !== null) {
       // Started here, so there is a handle, and a handle cannot come to mean another process.
       running.process.kill();
-      return;
+      return await untilGone(running.process, announced === undefined ? [] : [announced]);
     }
     if (running.pid === null) {
-      return;
+      return true;
     }
     // A run picked back up after a restart: the handle belonged to a server that is gone and the
     // number is all that is left. A number is not an identity, though. The operating system hands
@@ -4538,7 +4656,7 @@ class GodotServer {
         'warning',
         `This run was not ended here: pid ${running.pid} no longer answers as the run that was recorded, so nothing was signalled. If that process is still the game, end it yourself; if it is not, it belongs to something else.`,
       );
-      return;
+      return true;
     }
     // What was signalled, in the run's own log, with the command line the operating system gave for
     // it. A kill by number is the one act here that cannot be taken back, and three runs elsewhere
@@ -4554,6 +4672,7 @@ class GodotServer {
       // Ended between being read and being stopped, which is the state this asks for.
       landed = false;
     }
+    const gone = await untilGone(null, [running.pid]);
     // Written after the attempt rather than before it, so the line says what happened rather than
     // what was about to. A note that announces an act it has not performed is wrong for every run
     // that was already over by the time it was signalled, which is the ordinary way a run ends.
@@ -4563,6 +4682,7 @@ class GodotServer {
         ? `gdharness ended pid ${running.pid}, which the operating system described as ${described}.`
         : `gdharness signalled pid ${running.pid} and it was already gone; the operating system had described it as ${described}.`,
     );
+    return gone;
   }
 
   /**
@@ -5737,7 +5857,7 @@ class GodotServer {
     const children =
       readBoolean(args, 'andChildren') === true && wasRunning ? await this.whatTheRunStarted(stopped) : null;
     this.logDebug('Stopping the running game');
-    await this.endActiveGame('editor_run stop', wasRunning);
+    const gone = await this.endActiveGame('editor_run stop', wasRunning);
     const ended = children === null ? null : endChildrenAmong(children);
     // The announcement of the game just ended goes with it, here rather than on the next sweep,
     // because a number the operating system hands out again before that sweep reads as the game
@@ -5801,6 +5921,10 @@ class GodotServer {
                 ? 'The editor was asked to stop the scene it is playing. Its game had not announced a runtime, so no process was named under endedPid, and its exit code stays with the editor.'
                 : 'The editor was asked to stop the scene it is playing.'
               : 'The process named under endedPid was ended.'
+          }${
+            gone
+              ? ''
+              : ` It had not exited ${STOP_WAIT_MS / 1000} seconds after being told to, so it may still be going: editor_status says whether it is.`
           } ${aboutTheChildren(ended, stopped.throughEditor)}`,
       entries: forAnswer(
         stopped.log.select({ severity: 'warning', sinceLastCall: false, limit: 200 }).entries,
