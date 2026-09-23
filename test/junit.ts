@@ -5,7 +5,14 @@
  */
 
 import assert from 'node:assert/strict';
-import { MalformedReportError, orphansPrinted, parseJUnit, whyNoReport } from '../src/junit.js';
+import {
+  BOTH_SIDES_ALIKE_NOTE,
+  MalformedReportError,
+  orphansPrinted,
+  parseJUnit,
+  whyNoReport,
+  withActualsPrinted,
+} from '../src/junit.js';
 
 /** What gdUnit4 printed for a run pointed at a directory that is not there, as it printed it. */
 const NOTHING_THERE = [
@@ -192,7 +199,60 @@ function testOrphansAreReadOffTheConsole(): void {
   assert.equal(noSummary.suites.length, 2);
 }
 
+/**
+ * A failing string's value put back from the console, which keeps the diff marks the report drops.
+ * The console lines are gdUnit4's own, as the runner printed them on 4.7.2, ended both ways: a pipe
+ * on Windows carries CRLF, which the report has none of.
+ */
+function testAFailingStringReadsItsValue(): void {
+  for (const ending of ['\n', '\r\n']) {
+    readsItsValue(ending);
+  }
+}
+
+function readsItsValue(ending: string): void {
+  const e = String.fromCharCode(0x1b);
+  const printed = [
+    ` but was`,
+    ` '${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[38;2;255;255;255mabc${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255m${e}[0m'${e}[0m${e}[38;2;173;216;230m\tat 'test_empty' in res://test/words_test.gd:5${e}[0m`,
+    ` but was`,
+    ` '${e}[38;2;30;144;255mab${e}[48;2;38;0;0m${e}[38;2;255;255;255mc${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255m${e}[48;2;0;38;0m${e}[38;2;255;255;255mX<LF>${e}[0m${e}[38;2;30;144;255m${e}[48;2;0;38;0m${e}[0m${e}[38;2;30;144;255md${e}[0m'${e}[0m${e}[38;2;173;216;230m\tat 'test_swapped' in res://test/words_test.gd:9${e}[0m`,
+  ].join(ending);
+  const reported = (name: string, line: number, expected: string, merged: string): { detail: string } => ({
+    detail: `Expecting:\n '${expected}'\n but was\n '${merged}'\n\tat '${name}' in res://test/words_test.gd:${line}`,
+  });
+  const [empty, swapped, elsewhere, numbers] = withActualsPrinted(
+    [
+      reported('test_empty', 5, 'abc', 'abc'),
+      reported('test_swapped', 9, 'abcd', 'abcX<LF>d'),
+      reported('test_unprinted', 12, 'same', 'same'),
+      { detail: "Expecting:\n 5\n but was\n 4\n\tat 'test_sums' in res://test/words_test.gd:15" },
+    ],
+    printed,
+  );
+  assert.match(
+    empty?.detail ?? '',
+    / but was\n ''\n\tat 'test_empty'/,
+    `an empty value reads as empty, lines ended ${JSON.stringify(ending)}`,
+  );
+  assert.match(
+    swapped?.detail ?? '',
+    / but was\n 'abX\nd'\n\tat 'test_swapped'/,
+    'a swapped character reads as the one the value had, and a marked line break as a line break',
+  );
+  assert.ok(
+    (elsewhere?.detail ?? '').endsWith(BOTH_SIDES_ALIKE_NOTE),
+    `a detail the console kept no copy of says its two sides cannot be told apart: ${elsewhere?.detail}`,
+  );
+  assert.equal(
+    numbers?.detail,
+    "Expecting:\n 5\n but was\n 4\n\tat 'test_sums' in res://test/words_test.gd:15",
+    'anything that is not a merged string is left as it was',
+  );
+}
+
 testWhatGdUnitWrites();
+testAFailingStringReadsItsValue();
 testEntitiesAndShapes();
 testMalformedReportsAreRefused();
 testARunThatFoundNothingIsNotAPass();
