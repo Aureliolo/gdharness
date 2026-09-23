@@ -4618,6 +4618,91 @@ async function testALaunchedEditorsConsoleIsReadBeforeItConnects(): Promise<void
  * The project carries an editor plugin that prints on load. The engine's own first line would pass
  * on any engine start at all, including one that never became an editor.
  */
+/**
+ * A call the client cancels takes the engine it started with it.
+ *
+ * Reported twice by ostinato: a project_test cancelled from the client left GdUnitCmdTool's engine
+ * running until the call's own ten-minute timeout. The handler never read the cancellation, so an
+ * engine held for a reader went on with no reader. A boot check is the same kind of run through the
+ * same spawn, and is driven here because it needs nothing but the engine: a scene that blocks in
+ * _ready keeps it alive, the check is given two minutes, and the call is cancelled once the engine
+ * is seen. The engine is found by the fixture's own project path on its command line, which is
+ * nothing else's on this machine.
+ */
+async function testACancelledCallEndsTheEngineItStarted(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('cancelled call regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-cancelled-'));
+  const server = new ServerProcess({ env: { GODOT_PATH: godotPath } });
+  const ours = async (): Promise<number[]> => {
+    const tree = await processTree();
+    assert.ok(tree !== undefined, 'the platform should list its processes for this to prove anything');
+    return [...tree].filter(([, one]) => one.command.includes(project)).map(([pid]) => pid);
+  };
+  let seen: number[] = [];
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Cancelled"\n' +
+        'run/main_scene="res://main.tscn"\n',
+    );
+    writeFileSync(
+      join(project, 'hold.gd'),
+      'extends Node\n\n\nfunc _ready() -> void:\n\tOS.delay_msec(120000)\n',
+    );
+    writeFileSync(
+      join(project, 'main.tscn'),
+      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://hold.gd" id="1"]\n\n' +
+        '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+    );
+    await server.initialize('regression-test');
+
+    const id = server.nextRequestId;
+    void server
+      .request(
+        'tools/call',
+        { name: 'editor_run', arguments: { projectPath: project, op: 'check', timeoutMs: 110_000 } },
+        130_000,
+      )
+      .catch(() => {
+        // A cancelled request is not answered; the fixture reads the process table instead.
+      });
+    for (let waited = 0; waited < 30_000 && seen.length === 0; waited += 500) {
+      await delay(500);
+      seen = await ours();
+    }
+    assert.ok(seen.length > 0, 'the check should have started an engine on the fixture project');
+
+    server.notify('notifications/cancelled', { requestId: id, reason: 'the caller stopped waiting' });
+    let left = seen;
+    for (let waited = 0; waited < 10_000 && left.length > 0; waited += 500) {
+      await delay(500);
+      left = await ours();
+    }
+    assert.deepEqual(
+      left,
+      [],
+      `the engine should end with the call, not at its own timeout: pid ${seen.join(', ')}`,
+    );
+  } finally {
+    for (const pid of await ours()) {
+      try {
+        process.kill(pid);
+      } catch {
+        // Gone between the listing and the signal.
+      }
+    }
+    await server.stop();
+    sweep(project);
+  }
+}
+
 async function testAnEditorWritesItsConsoleWhereTheServerLooks(): Promise<void> {
   const godotPath = resolveGodotPath();
   if (!godotPath) {
@@ -16353,6 +16438,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAWallOfOneMessageCollapsesToItsShape,
   testAnUncapturedConsoleSaysWhichEditorItIs,
   testAnEditorWritesItsConsoleWhereTheServerLooks,
+  testACancelledCallEndsTheEngineItStarted,
   testAnErrorReportOutlivesItsGameForAnHour,
   testAPidPicksOneOfSeveralGames,
   testAGameThatAnnouncedAndWentIsSaidSo,
