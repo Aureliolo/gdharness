@@ -12073,7 +12073,8 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
           'func total(numbers: Array[int]) -> int:\n\tvar sum: int = 0\n\tfor n: int in numbers:\n\t\tsum += n\n' +
           '\treturn sum\n\n\n' +
           'func armour(pieces: Array[Gear]) -> String:\n\tvar labels: Array[String] = []\n' +
-          '\tfor piece: Gear in pieces:\n\t\tlabels.append(piece.label)\n\treturn ", ".join(labels)\n',
+          '\tfor piece: Gear in pieces:\n\t\tlabels.append(piece.label)\n\treturn ", ".join(labels)\n\n\n' +
+          'func slow(ms: int) -> String:\n\tOS.delay_msec(ms)\n\tcount += 1\n\treturn "done after %d" % ms\n',
       );
       writeFileSync(
         join(project, 'main.tscn'),
@@ -12231,6 +12232,60 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
         stray.said,
         /^\/root\/Main\.armour takes a typed list as argument 1: element 0 is 7(\.0)?, which cannot become Gear\.$/,
         stray.said,
+      );
+
+      // A call that outlasts the wait is not a failure. It runs on and does what it was asked, so the
+      // answer is pending with an id, and the reply is collected by that id once it comes. The
+      // counter is read too, because a call answered as failed was repeated and ran twice.
+      const before = asNumber(get(JSON.parse((await invoke('get', ['count'])).said), 'result'));
+      const invokeWaiting = async (args: Record<string, unknown>): Promise<unknown> =>
+        parseTextContent(
+          await server.request(
+            'tools/call',
+            { name: 'runtime_invoke', arguments: args },
+            ENGINE_CALL_TIMEOUT_MS,
+          ),
+        );
+      const pending = await invokeWaiting({
+        op: 'call',
+        nodePath: '/root/Main',
+        method: 'slow',
+        args: [3000],
+        timeoutMs: 500,
+      });
+      assert.equal(
+        get(pending, 'pending'),
+        true,
+        `a long call is pending, not failed: ${JSON.stringify(pending)}`,
+      );
+      const requestId = asNumber(get(pending, 'requestId'), 'with an id to collect it by');
+      assert.match(text(get(pending, 'note')), /Nothing was cancelled/, JSON.stringify(pending));
+      const early = await invokeWaiting({ op: 'result', requestId });
+      assert.equal(get(early, 'pending'), true, `asked early, it is still running: ${JSON.stringify(early)}`);
+      let collected: unknown = early;
+      for (let waited = 0; get(collected, 'pending') === true && waited < 20_000; waited += 250) {
+        await delay(250);
+        collected = await invokeWaiting({ op: 'result', requestId });
+      }
+      assert.equal(
+        get(collected, 'result'),
+        'done after 3000',
+        `and collected once it comes: ${JSON.stringify(collected)}`,
+      );
+      assert.equal(
+        asNumber(get(JSON.parse((await invoke('get', ['count'])).said), 'result')),
+        before + 1,
+        'the call ran once',
+      );
+      assert.match(
+        textOf(
+          await server.request('tools/call', {
+            name: 'runtime_invoke',
+            arguments: { op: 'result', requestId: 999_999 },
+          }),
+        ) ?? '',
+        /No request 999999 is waiting to be collected here/,
+        'an id this server never gave is refused',
       );
 
       await server.request(
