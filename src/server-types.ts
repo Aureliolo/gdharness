@@ -38,8 +38,16 @@ export interface GodotProcess {
    */
   projectPath: string | null;
   startedAt: number;
-  /** Set once the process has ended; null while it runs. */
+  /** Set once the process has exited with a code; null while it runs, and for a signalled end. */
   exitCode: number | null;
+  /**
+   * The signal that ended the process, which then has no exit code; null otherwise.
+   *
+   * Its own field rather than a stand-in code, because every stand-in is a code some program can
+   * exit with: -1 is also what a crash or `exit(-1)` leaves on Windows, and a caller reading a run
+   * that died could not tell whether a stop ended it or it ended itself.
+   */
+  exitSignal: string | null;
   /**
    * True for a run found over with no exit code collected here, because nothing here held it.
    *

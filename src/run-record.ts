@@ -51,6 +51,8 @@ export interface RunRecord {
    * harness replaced that server before anybody asked.
    */
   readonly exitCode?: number;
+  /** The signal that ended it instead, under the same conditions; a signalled run has no code. */
+  readonly exitSignal?: string;
 }
 
 /** Where a run's note and its transcript are kept, beside the runtime's own announcements. */
@@ -163,14 +165,22 @@ function editorNoteAt(path: string): EditorRunNote | null {
  * Only when the note is still this run's. These directories are shared by every server on the
  * machine, and writing an exit code over somebody else's note would end their run on paper.
  */
-export function recordRunEnded(pid: number, exitCode: number): void {
+export function recordRunEnded(
+  pid: number,
+  ending: { readonly exitCode: number | null; readonly exitSignal: string | null },
+): void {
   const path = recordPath();
   const record = recordAt(path);
   if (record === null || record.pid !== pid) {
     return;
   }
+  const written = {
+    ...record,
+    ...(ending.exitCode === null ? {} : { exitCode: ending.exitCode }),
+    ...(ending.exitSignal === null ? {} : { exitSignal: ending.exitSignal }),
+  };
   try {
-    writeFileSync(path, JSON.stringify({ ...record, exitCode }, null, 2), 'utf8');
+    writeFileSync(path, JSON.stringify(written, null, 2), 'utf8');
   } catch {
     // Gone or unwritable, which is a state every reader of this note already handles.
   }
@@ -213,6 +223,7 @@ function recordAt(path: string): RunRecord | null {
     arguments: Array.isArray(args) ? args.filter((value): value is string => typeof value === 'string') : [],
     ...(typeof fields['command'] === 'string' ? { command: fields['command'] } : {}),
     ...(typeof fields['exitCode'] === 'number' ? { exitCode: fields['exitCode'] } : {}),
+    ...(typeof fields['exitSignal'] === 'string' ? { exitSignal: fields['exitSignal'] } : {}),
   };
 }
 

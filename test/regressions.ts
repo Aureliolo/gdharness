@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
-import { type ChildProcess, type SpawnSyncReturns, spawn, spawnSync } from 'node:child_process';
+import { type ChildProcess, execFile, type SpawnSyncReturns, spawn, spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import {
   cpSync,
@@ -132,6 +132,7 @@ import {
   alive,
   captureDestinationRefusal,
   endedWithoutACode,
+  endingOf,
   noCodeWillCome,
   PLAY_STARTS_WITHIN_MS,
   PROJECT_FILE_ARGUMENTS,
@@ -5416,10 +5417,27 @@ async function testARunEndedWithoutACodeSaysWhy(): Promise<void> {
       resolve();
     });
   });
-  assert.equal(noCodeWillCome({ exitCode: null, process: handle }), false, 'a handle brings its code');
+  assert.equal(
+    noCodeWillCome({ exitCode: null, exitSignal: null, process: handle }),
+    false,
+    'a handle brings its code',
+  );
   await exited;
-  assert.equal(noCodeWillCome({ exitCode: null, process: null }), true, 'nothing here holds this one');
-  assert.equal(noCodeWillCome({ exitCode: 0, process: null }), false, 'and this one has its code');
+  assert.equal(
+    noCodeWillCome({ exitCode: null, exitSignal: null, process: null }),
+    true,
+    'nothing here holds this one',
+  );
+  assert.equal(
+    noCodeWillCome({ exitCode: 0, exitSignal: null, process: null }),
+    false,
+    'and this one has its code',
+  );
+  assert.equal(
+    noCodeWillCome({ exitCode: null, exitSignal: 'SIGTERM', process: null }),
+    false,
+    'and this one has its ending, which was a signal',
+  );
 }
 
 function testANotYetRuntimeIsNotTheSameAsNoRuntime(): void {
@@ -5435,6 +5453,7 @@ function testANotYetRuntimeIsNotTheSameAsNoRuntime(): void {
     projectPath: '/p',
     startedAt: Date.now(),
     exitCode: null,
+    exitSignal: null,
     throughEditor: true,
     brokeOn: null,
     seenPlaying: true,
@@ -10206,17 +10225,17 @@ async function testAStoppedSpawnedRunGivesWayToAPlay(): Promise<void> {
         false,
         `it was going until the stop: ${JSON.stringify(stopped)}`,
       );
-      // And gone by the time the stop answers, with the code it exited on: the answer used to be
-      // given as the signal left, so the process was still there, holding its project directory,
-      // and no exit code had been collected yet.
+      // And gone by the time the stop answers, with how it exited: the answer used to be given as
+      // the signal left, so the process was still there, holding its project directory, and its
+      // exit had not been collected yet.
       assert.equal(
         alive(asNumber(get(stopped, 'endedPid'))),
         false,
         `the game is gone: ${JSON.stringify(stopped)}`,
       );
       assert.equal(
-        typeof get(stopped, 'exitCode'),
-        'number',
+        get(stopped, 'exitSignal'),
+        'SIGTERM',
         `and its exit is collected: ${JSON.stringify(stopped)}`,
       );
 
@@ -10231,6 +10250,173 @@ async function testAStoppedSpawnedRunGivesWayToAPlay(): Promise<void> {
       playing = false;
     },
     { realAddon: true, engine },
+  );
+}
+
+/**
+ * A run ended by a signal has no exit code, and says which signal instead.
+ *
+ * Node hands the exit handler a null code and the signal's name for a process that went to a
+ * signal, and the null was written down as -1. That is also a code a program can exit with: a
+ * crash or `exit(-1)` leaves it on Windows, so a caller reading a dead run could not tell a stop
+ * from the game ending itself. A run that exits with a code keeps it, which is the other half.
+ *
+ * Both endings are read from the run note as well as from the answers, since the note is what the
+ * next server reads after a reconnect, and the server that saw a kept run exit wrote nothing there.
+ */
+async function testAKilledRunHasNoExitCode(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('killed run exit code regression skipped (Godot not found)');
+    return;
+  }
+  await withAPlayingEditor(
+    ({ adapter }) =>
+      (tool) =>
+        tool === 'playing_status'
+          ? { ok: true, playing: false, scenePath: '', debugPort: adapter }
+          : { ok: true },
+    async ({ server, project, runtimeDir }) => {
+      writeFileSync(
+        join(project, 'main.gd'),
+        'extends Node\n\n\nfunc _ready() -> void:\n' +
+          '\tif OS.get_cmdline_user_args().has("--exit-3"):\n' +
+          '\t\tget_tree().quit.call_deferred(3)\n',
+      );
+      writeFileSync(
+        join(project, 'main.tscn'),
+        '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+          '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+      );
+      const call = async (name: string, args: Record<string, unknown>): Promise<unknown> =>
+        parseTextContent(
+          await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS),
+        );
+      const note = (): Record<string, unknown> =>
+        JSON.parse(readFileSync(join(runtimeDir, 'runs', 'run.json'), 'utf8')) as Record<string, unknown>;
+
+      const kept = await call('editor_run', {
+        projectPath: project,
+        op: 'start',
+        headless: true,
+        args: ['--stay'],
+        runtimeWaitMs: 20_000,
+      });
+      assert.equal(get(kept, 'through'), 'gdharness', JSON.stringify(kept));
+      const stopped = await call('editor_run', { op: 'stop' });
+      assert.equal(
+        get(stopped, 'exitCode'),
+        null,
+        `a killed run has no exit code: ${JSON.stringify(stopped)}`,
+      );
+      assert.equal(get(stopped, 'exitSignal'), 'SIGTERM', `and names the signal: ${JSON.stringify(stopped)}`);
+      assert.match(
+        text(get(stopped, 'note')),
+        /ended by SIGTERM and so has no exit code/,
+        JSON.stringify(stopped),
+      );
+      const read = await call('editor_output', {});
+      assert.equal(get(read, 'running'), false, JSON.stringify(read));
+      assert.equal(get(read, 'exitCode'), null, `editor_output agrees: ${JSON.stringify(read)}`);
+      assert.equal(get(read, 'exitSignal'), 'SIGTERM', JSON.stringify(read));
+      assert.equal(get(read, 'endedBy'), 'editor_run stop', JSON.stringify(read));
+
+      const coded = await call('editor_run', {
+        projectPath: project,
+        op: 'start',
+        headless: true,
+        args: ['--exit-3'],
+        runtimeWaitMs: 20_000,
+      });
+      assert.equal(get(coded, 'through'), 'gdharness', JSON.stringify(coded));
+      const finished = await call('editor_run', { op: 'wait', timeoutMs: 30_000 });
+      assert.equal(get(finished, 'running'), false, JSON.stringify(finished));
+      assert.equal(
+        get(finished, 'exitCode'),
+        3,
+        `a code the game exited with is kept: ${JSON.stringify(finished)}`,
+      );
+      assert.equal(get(finished, 'exitSignal'), undefined, JSON.stringify(finished));
+      const codedNote = note();
+      assert.equal(codedNote['pid'], get(coded, 'pid'), JSON.stringify(codedNote));
+      assert.equal(
+        codedNote['exitCode'],
+        3,
+        `and written where the next server reads: ${JSON.stringify(codedNote)}`,
+      );
+      assert.equal(codedNote['exitSignal'], undefined, JSON.stringify(codedNote));
+
+      // Ended from outside, which a stop's clearing of the note does not reach. Windows has no
+      // signal to send: killing a process there is TerminateProcess with exit code 1.
+      const outside = await call('editor_run', {
+        projectPath: project,
+        op: 'start',
+        headless: true,
+        args: ['--stay'],
+        runtimeWaitMs: 20_000,
+      });
+      const outsidePid = asNumber(get(outside, 'pid'));
+      assert.equal(alive(outsidePid), true, JSON.stringify(outside));
+      process.kill(outsidePid, 'SIGTERM');
+      const killed = await call('editor_run', { op: 'wait', timeoutMs: 30_000 });
+      const killedNote = note();
+      assert.equal(killedNote['pid'], outsidePid, JSON.stringify(killedNote));
+      if (process.platform === 'win32') {
+        assert.equal(get(killed, 'exitCode'), 1, JSON.stringify(killed));
+        assert.equal(get(killed, 'exitSignal'), undefined, JSON.stringify(killed));
+        assert.equal(killedNote['exitCode'], 1, JSON.stringify(killedNote));
+      } else {
+        assert.equal(get(killed, 'exitCode'), null, JSON.stringify(killed));
+        assert.equal(get(killed, 'exitSignal'), 'SIGTERM', JSON.stringify(killed));
+        assert.match(
+          text(get(killed, 'note')),
+          /something outside this server sent it SIGTERM/,
+          JSON.stringify(killed),
+        );
+        assert.equal(
+          killedNote['exitSignal'],
+          'SIGTERM',
+          `the note keeps the signal: ${JSON.stringify(killedNote)}`,
+        );
+        assert.equal(killedNote['exitCode'], undefined, JSON.stringify(killedNote));
+      }
+    },
+    { realAddon: true, engine },
+  );
+}
+
+/**
+ * An engine run through execFile that failed says how it ended, read off the error Node gave.
+ *
+ * A timeout kills with a signal and leaves no code, and a process that prints past the buffer is
+ * killed with Node's reason as a string code. Both were answered as exit code -1. The errors are
+ * the real ones, from real processes, because their shape is what is being read.
+ */
+async function testAFailedEngineRunSaysHowItEnded(): Promise<void> {
+  const failing = (args: string[], options: { timeout?: number; maxBuffer?: number }): Promise<unknown> =>
+    new Promise((resolve) => {
+      execFile(process.execPath, args, options, (error) => {
+        resolve(error);
+      });
+    });
+  const stays = 'setTimeout(() => {}, 20000)';
+  assert.deepEqual(
+    endingOf((await failing(['-e', stays], { timeout: 300 })) as object),
+    { exitCode: null, exitSignal: 'SIGTERM', failure: null },
+    'a run past its timeout was killed and has no code',
+  );
+  assert.deepEqual(
+    endingOf((await failing(['-e', `console.log("x".repeat(100)); ${stays}`], { maxBuffer: 10 })) as object),
+    { exitCode: null, exitSignal: null, failure: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' },
+    'a run that printed past the buffer was ended by Node, which says why',
+  );
+  assert.deepEqual(
+    endingOf((await failing(['-e', 'process.exit(3)'], {})) as object),
+    { exitCode: 3, exitSignal: null, failure: null },
+    'a code the process exited with is its own',
   );
 }
 
@@ -14043,10 +14229,10 @@ function testAnExitCodeOutlivesTheServerThatSawIt(): void {
     });
     assert.equal(readRunRecord()?.exitCode, undefined, 'a run still going has no ending to report');
 
-    recordRunEnded(9999, 3);
+    recordRunEnded(9999, { exitCode: 3, exitSignal: null });
     assert.equal(readRunRecord()?.exitCode, undefined, "another run's ending is not written into this note");
 
-    recordRunEnded(4242, 3);
+    recordRunEnded(4242, { exitCode: 3, exitSignal: null });
     const after = readRunRecord();
     assert.ok(after !== null, 'the note should still be there to read');
     assert.equal(after.exitCode, 3, 'the code its own server saw is kept for whoever reads next');
@@ -14317,6 +14503,57 @@ function testTheEditorHoldingAProjectIsNotARunOfIt(): void {
  * which of the two kinds of not-running this is. A run that ended with nobody waiting on it has
  * no exit code anywhere, and saying so beats reporting a zero nobody collected.
  */
+/**
+ * The ending another server wrote into the note is the one this server answers with, whether it
+ * was a code or a signal. A signal read back as nothing would say nobody was waiting on the run.
+ */
+async function testARecordedEndingIsReadBack(): Promise<void> {
+  const ended: SpawnSyncReturns<string> = spawnSync(process.execPath, ['-e', ''], { encoding: 'utf8' });
+  assert.ok(ended.pid > 0, 'the fixture needs a process that has been and gone');
+  const endings = [
+    { recorded: { exitSignal: 'SIGKILL' }, exitCode: null, exitSignal: 'SIGKILL', said: /sent it SIGKILL/ },
+    { recorded: { exitCode: 3 }, exitCode: 3, exitSignal: undefined, said: /stopped on its own/ },
+  ];
+  for (const ending of endings) {
+    const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-recorded-ending-'));
+    try {
+      const runs = join(runtimeDir, 'runs');
+      mkdirSync(runs, { recursive: true });
+      const transcript = join(runs, 'run-1.log');
+      writeFileSync(transcript, 'row 1: 42 wins\n');
+      writeFileSync(
+        join(runs, 'run.json'),
+        JSON.stringify({
+          pid: ended.pid,
+          transcript,
+          startedAt: Date.now() - 60_000,
+          projectPath: join(runtimeDir, 'project'),
+          arguments: ['--headless', '--path', join(runtimeDir, 'project')],
+          ...ending.recorded,
+        }),
+        'utf8',
+      );
+      await withStdioServer(
+        async (call) => {
+          const output: unknown = jsonOf(await call('editor_output', { limit: 200 }), 'editor_output');
+          assert.equal(get(output, 'running'), false, JSON.stringify(output));
+          assert.equal(get(output, 'exitCode'), ending.exitCode, JSON.stringify(output));
+          assert.equal(get(output, 'exitSignal'), ending.exitSignal, JSON.stringify(output));
+          assert.equal(
+            get(output, 'endedUnwatched'),
+            undefined,
+            `its ending was recorded: ${JSON.stringify(output)}`,
+          );
+          assert.match(text(get(output, 'note')), ending.said, JSON.stringify(output));
+        },
+        { GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: join(runtimeDir, 'project') },
+      );
+    } finally {
+      sweep(runtimeDir);
+    }
+  }
+}
+
 async function testARunEndedUnwatchedIsStillReadable(): Promise<void> {
   const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-unwatched-'));
   try {
@@ -17409,6 +17646,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAPlayedStartStopsWaitingForAGameThatIsOver,
   testAStoppedRunIsStillTheOneAnswered,
   testAStoppedSpawnedRunGivesWayToAPlay,
+  testAKilledRunHasNoExitCode,
+  testAFailedEngineRunSaysHowItEnded,
   testTheAnnounceWaitIsNotHeldByASlowEditor,
   testTheWaitSizedToABootIsSaid,
   testTheWaitIsSizedToTheLastBoot,
@@ -17500,6 +17739,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAPidIsNotAnIdentity,
   testTheEditorHoldingAProjectIsNotARunOfIt,
   testARunEndedUnwatchedIsStillReadable,
+  testARecordedEndingIsReadBack,
   testARunEndedWithoutACodeSaysWhy,
   testAForeignRunSurvivesAStart,
   testARunOutlivesItsServer,
