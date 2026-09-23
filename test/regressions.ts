@@ -12244,7 +12244,7 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
         'extends Node\n\nvar wares: Array[Gear] = []\nvar worn: Gear = null\n' +
           'var by_name: Dictionary[String, Gear] = {"head": null}\n' +
           'var spare: RefCounted = RefCounted.new()\nvar count: int = 3\n' +
-          'var done_at: Array[int] = []\nvar tally: Dictionary[String, int] = {}\n' +
+          'var done_at: Array[int] = []\nvar tally: Dictionary[String, int] = {}\nvar board: Array[int] = []\n' +
           'var locked: int = 5:\n\tset(value):\n\t\tpass\n\n\n' +
           'func _ready() -> void:\n' +
           '\tfor index: int in 4:\n\t\tvar piece: Gear = Gear.new()\n' +
@@ -12472,6 +12472,59 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
         ) ?? '',
         /No request 999999 is waiting to be collected here/,
         'an id this server never gave is refused',
+      );
+
+      // A list's size is a call on the list, and a wait for a board to fill is written against it.
+      // The step was read as an index, so the answer was "a list of 5, so there is no size() in it".
+      const tool = async (
+        name: string,
+        args: Record<string, unknown>,
+      ): Promise<{ parsed: unknown; said: string }> => {
+        const response = await server.request(
+          'tools/call',
+          { name, arguments: args },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+        return { parsed: parseTextContent(response), said: textOf(response) ?? '' };
+      };
+      const read = async (property: string): Promise<{ parsed: unknown; said: string }> =>
+        tool('runtime_inspect', { op: 'property', nodePath: '/root/Main', property });
+      assert.equal(get((await read('wares:size()')).parsed, 'value'), 5, (await read('wares:size()')).said);
+      assert.equal(get((await read('board:size()')).parsed, 'value'), 0, 'an empty list has a size too');
+      assert.deepEqual(
+        get((await read('by_name:keys()')).parsed, 'value'),
+        ['head'],
+        'a map answers its keys',
+      );
+      assert.match((await read('board:back()')).said, /is an empty list, so it has no back\(\)/);
+      assert.match((await read('wares:clear()')).said, /not one of the calls a path makes on one/);
+      assert.equal(
+        get((await read('wares:size()')).parsed, 'value'),
+        5,
+        'and the refused call changed nothing',
+      );
+      const waitFor = async (timeoutMs: number): Promise<unknown> =>
+        (
+          await tool('runtime_wait', {
+            op: 'until',
+            nodePath: '/root/Main',
+            property: 'board:size()',
+            value: 1,
+            timeoutMs,
+          })
+        ).parsed;
+      const unmet = await waitFor(500);
+      assert.equal(
+        get(unmet, 'met'),
+        false,
+        `a list still empty is not waited out: ${JSON.stringify(unmet)}`,
+      );
+      await tool('runtime_invoke', { op: 'set', nodePath: '/root/Main', property: 'board', value: [7] });
+      const met = await waitFor(5_000);
+      assert.equal(
+        get(met, 'met'),
+        true,
+        `a wait on a list's size is met when it gets there: ${JSON.stringify(met)}`,
       );
 
       await server.request(

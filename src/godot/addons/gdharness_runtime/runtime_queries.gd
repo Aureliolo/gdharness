@@ -695,17 +695,33 @@ func call_method(params: Dictionary) -> Dictionary:
 	if reached.has("message"):
 		return reached
 
-	# A list or a map can be stepped through on the way, and is not a thing with methods when the
-	# path stops on one: said in those terms rather than as "has no method", which reads as a
-	# misspelling of a method that was never going to be there.
+	# A list or a map answers the calls a path makes on one, and nothing else: said in those terms
+	# rather than as "has no method", which reads as a misspelling of a method that was never going
+	# to be there, and with the element spelled out, since a method on what it holds is the usual aim.
 	if not reached["holder"] is Object:
 		var sort: String = "a list" if reached["holder"] is Array else "a map"
+		var spelled: String = str(reached["name"])
+		if Paths.method_of(spelled).is_empty():
+			spelled += "()"
+		if args.is_empty() and Paths.can_read(reached["holder"], spelled):
+			var answered: Variant = Paths.read_under(reached["holder"], spelled)
+			return {
+				"type": "method_result",
+				"path": node_path,
+				"method": method,
+				"result": _values.serialize(answered),
+			}
+		var why: String = (
+			"%s:%s takes no arguments" % [reached["called"], spelled]
+			if Paths.can_read(reached["holder"], spelled)
+			else Paths.nothing_there(reached["holder"], spelled, str(reached["called"]))
+		)
 		return {
 			"type": "error",
 			"message":
 			(
-				"%s is %s, which has no methods: name the element to call it on, as in %s:0:%s"
-				% [reached["called"], sort, reached["called"], reached["name"]]
+				"%s. A method of what %s holds is called on the element, as in %s:0:%s"
+				% [why, sort, reached["called"], reached["name"]]
 			)
 		}
 	var holder: Object = reached["holder"]
