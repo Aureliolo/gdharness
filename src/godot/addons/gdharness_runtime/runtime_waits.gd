@@ -15,6 +15,10 @@ const CEILING_MSEC: int = 120000
 ## The most frames one wait may cover, which is about half a minute of a game drawing slowly.
 const MOST_FRAMES: int = 600
 
+## How long a wait for words leaves between looks, as a multiple of what the last look took: nine
+## gives looking about a tenth of the time.
+const LOOKS_APART: int = 9
+
 var _host: Node
 var _values: Values
 
@@ -140,6 +144,7 @@ func wait_until(params: Dictionary) -> Dictionary:
 		return {"type": "error", "message": refused}
 
 	var started: int = Time.get_ticks_msec()
+	var frames: int = 0
 	# The type is checked every time round, not only at the top: a property that holds an object a
 	# frame later is the same error arriving late.
 	while (
@@ -148,6 +153,7 @@ func wait_until(params: Dictionary) -> Dictionary:
 		and Time.get_ticks_msec() - started < timeout_ms
 	):
 		await _host.get_tree().process_frame
+		frames += 1
 		if not is_instance_valid(node):
 			return {"type": "error", "message": "%s was freed while waiting" % node_path}
 		watched = _watched(node, node_path, property)
@@ -162,6 +168,7 @@ func wait_until(params: Dictionary) -> Dictionary:
 		"met": Values.comparable(current, wanted) and current == wanted,
 		"value": _values.serialize(current),
 		"elapsed_ms": Time.get_ticks_msec() - started,
+		"frames": frames,
 	}
 
 
@@ -232,13 +239,36 @@ static func _watched(node: Node, node_path: String, property: String) -> Diction
 ## answered met in two milliseconds while the sweep was still animating, and every wait on that
 ## screen fell back to counting frames. [param include_hidden] asks the other question, for a
 ## caller waiting on words a hidden node holds.
+##
+## Paced by what a look costs, so the watching leaves the game its speed: every frame while a look is
+## cheap, and on a screen large enough for one to cost a real share of a frame, often enough that
+## looking takes about a tenth of the time. Every frame on a hall of 3,500 nodes held the game at a
+## sixth of its frame rate, and its clock, which advances by the frame's delta, lost three quarters
+## of its time, so a wait for a date timed out on a clock that turned a day every thirty seconds.
+## The answer says how many frames the wait spanned and how many looks it took, which is how a
+## caller sees what it cost.
 func _wait_until_said(node_path: String, said: String, timeout_ms: int, include_hidden: bool) -> Dictionary:
 	var started: int = Time.get_ticks_msec()
 	var words: String = Queries.as_said(said)
-	var found: bool = _anything_says(node_path, words, include_hidden)
-	while not found and Time.get_ticks_msec() - started < timeout_ms:
+	var frames: int = 0
+	var looks: int = 0
+	var next_look: int = 0
+	var found: bool = false
+	while true:
+		if Time.get_ticks_usec() >= next_look:
+			var looking: int = Time.get_ticks_usec()
+			found = _anything_says(node_path, words, include_hidden)
+			looks += 1
+			next_look = Time.get_ticks_usec() + (Time.get_ticks_usec() - looking) * LOOKS_APART
+		if found or Time.get_ticks_msec() - started >= timeout_ms:
+			break
 		await _host.get_tree().process_frame
+		frames += 1
+	# One more look at the end, so words that arrived between two paced looks are not answered as
+	# never having come.
+	if not found:
 		found = _anything_says(node_path, words, include_hidden)
+		looks += 1
 
 	return {
 		"type": "condition",
@@ -247,6 +277,8 @@ func _wait_until_said(node_path: String, said: String, timeout_ms: int, include_
 		"met": found,
 		"include_hidden": include_hidden,
 		"elapsed_ms": Time.get_ticks_msec() - started,
+		"frames": frames,
+		"looks": looks,
 	}
 
 
