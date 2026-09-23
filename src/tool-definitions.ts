@@ -1125,13 +1125,13 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['set'],
         description:
-          'set: which one to write. Colons write through what a node holds, "_game:run:day", and a number or a key steps into a list or a map on the way, "_game:run:roster:0:name", a negative number counting from the end, and a step written as a call, "get_viewport():gui_embed_subwindows", walks through what a method taking no arguments returned. The answer reads back off the same holder, so a write a typed container refused shows as an unchanged value.',
+          'set: which one to write. Colons write through what a node holds, "_game:run:day", and a number or a key steps into a list or a map on the way, "_game:run:roster:0:name", a negative number counting from the end, and a step written as a call, "get_viewport():gui_embed_subwindows", walks through what a method taking no arguments returned. The answer reads back off the same holder, and a write that leaves the property as it was, because the engine would not take it, is refused and says what the property still holds.',
       },
       value: {
         ops: ['set'],
         blank: true,
         description:
-          'set: the value, fitted to the property\'s type. "" writes an empty string. A property typed as or holding an object takes a path naming one the game holds, the way call\'s args do, and holds that instance.',
+          'set: the value, fitted to the property\'s type. "" writes an empty string. A property typed as or holding an object takes a path naming one the game holds, the way call\'s args do, and holds that instance. A typed list or map, such as Array[int] or Dictionary[String, int], takes a JSON list or object with each element fitted to its element type, and an element that cannot become one is refused by its index or key.',
       },
       method: {
         type: 'string',
@@ -1143,7 +1143,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'array',
         ops: ['call'],
         description:
-          'call: the arguments, fitted to the method\'s parameter types. A parameter typed as an object takes a path naming one the game holds and is handed that instance: a colon path read from nodePath, "_game:run:wares:3", or one starting at a node, "/root/Main/Hud" or "/root/Main:_game:run". A path that reaches no object, or an object of another class than the parameter declares, is refused.',
+          'call: the arguments, fitted to the method\'s parameter types. A parameter typed as an object takes a path naming one the game holds and is handed that instance: a colon path read from nodePath, "_game:run:wares:3", or one starting at a node, "/root/Main/Hud" or "/root/Main:_game:run". A path that reaches no object, or an object of another class than the parameter declares, is refused. A parameter typed as a list or map, such as Array[int] or Array[Gear], is built from a JSON list or object element by element, objects named by their paths.',
       },
     },
     requires: ['nodePath'],
