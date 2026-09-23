@@ -5773,8 +5773,11 @@ class GodotServer {
           }),
       // Whether there was anything left to stop. A run whose exit nobody collected, which is a
       // played run picked up after a reconnect and gone since, has no exit code and is over all
-      // the same; answering false there said a game had been ended that had ended itself.
-      exitedBeforeStop: stopped.exitCode !== null || !wasRunning,
+      // the same; answering false there said a game had been ended that had ended itself. Read
+      // before the stop and not off the exit code after it: the kill's exit lands while this answer
+      // is being built, so the code was there for a run this very stop had ended, and on Linux the
+      // answer said it had exited before the stop.
+      exitedBeforeStop: !wasRunning,
       exitCode: stopped.exitCode,
       errors: stopped.log.count('error'),
       warnings: stopped.log.count('warning'),
