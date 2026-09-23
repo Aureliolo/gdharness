@@ -324,6 +324,38 @@ function describeHalt(halt: StoppedAt): string {
   }
 }
 
+/** Whether the process has exited, with a code or to a signal. */
+function exited(run: Pick<GodotProcess, 'exitCode' | 'exitSignal'>): boolean {
+  return run.exitCode !== null || run.exitSignal !== null;
+}
+
+/**
+ * How an engine run through execFile ended, read off the error it failed with.
+ *
+ * Three shapes: a number is the process's own exit code; a signal is a process killed with no code,
+ * which is what execFile does at its timeout; and a string is Node's reason for having killed it,
+ * such as more output than the buffer holds. All three were once answered as exit code -1, which is
+ * also a code a program can exit with.
+ */
+export function endingOf(failed: { readonly code?: unknown; readonly signal?: unknown }): {
+  exitCode: number | null;
+  exitSignal: string | null;
+  failure: string | null;
+} {
+  return {
+    exitCode: typeof failed.code === 'number' ? failed.code : null,
+    exitSignal: typeof failed.signal === 'string' ? failed.signal : null,
+    failure: typeof failed.code === 'string' ? failed.code : null,
+  };
+}
+
+/** How a process that has exited ended, for a sentence. */
+function howItExited(run: Pick<GodotProcess, 'exitCode' | 'exitSignal'>): string {
+  return run.exitSignal === null
+    ? `exit code ${run.exitCode ?? 'unknown'}`
+    : `ended by ${run.exitSignal}, with no exit code`;
+}
+
 /**
  * Whether a run is still going.
  *
@@ -332,7 +364,7 @@ function describeHalt(halt: StoppedAt): string {
  * the third must never read as the second.
  */
 function stillRunning(run: GodotProcess | null): boolean {
-  if (run?.exitCode !== null || run.endedUnwatched === true) {
+  if (run === null || exited(run) || run.endedUnwatched === true) {
     return false;
   }
   // Ended here, which is settled before any process is asked: the kill lands a moment before the
@@ -411,8 +443,8 @@ export function runIsUp(run: GodotProcess | null, editorSays: boolean | null, no
  * build the handle is a wrapper that exits after the game it started. Marked unwatched then, the
  * code arrived afterwards beside a note saying none had been collected.
  */
-export function noCodeWillCome(run: Pick<GodotProcess, 'exitCode' | 'process'>): boolean {
-  return run.exitCode === null && run.process === null;
+export function noCodeWillCome(run: Pick<GodotProcess, 'exitCode' | 'exitSignal' | 'process'>): boolean {
+  return !exited(run) && run.process === null;
 }
 
 /**
@@ -422,6 +454,12 @@ export function noCodeWillCome(run: Pick<GodotProcess, 'exitCode' | 'process'>):
  * immediate on Windows and a SIGTERM elsewhere, which Godot answers by quitting.
  */
 const STOP_WAIT_MS = 10_000;
+
+/**
+ * How long a handle is given to report the exit of a game already seen to have gone. Milliseconds
+ * in practice; bounded because every answer about the run waits on it.
+ */
+const EXIT_REPORTED_WITHIN_MS = 2_000;
 
 /**
  * Whether [param handle] has exited and every process in [param pids] is gone, waited for up to
@@ -2296,11 +2334,11 @@ class GodotServer {
     // A finished run is kept so its output can still be read, and a readable log is not a debug
     // session. Said apart from "nothing is running", because the two are answered by different
     // things: one wants a run started, the other has its answer waiting in editor_output.
-    if (game !== null && game.exitCode !== null) {
+    if (game !== null && exited(game)) {
       return {
         ok: false,
         response: this.createErrorResponse(
-          `The last run has already finished (exit code ${game.exitCode}), so there is no debug session to answer for.`,
+          `The last run has already finished (${howItExited(game)}), so there is no debug session to answer for.`,
           [
             'editor_output still reads what it printed, until the next run starts',
             'editor_run start plays another, which the debugger can hold',
@@ -2715,11 +2753,14 @@ class GodotServer {
     this.logDebug(`Exporting: ${engine.value} ${exportArgs.join(' ')}`);
 
     const log = new GameLog();
-    let exitCode = 0;
+    let ending: ReturnType<typeof endingOf> = { exitCode: 0, exitSignal: null, failure: null };
     try {
-      // An export of a real project is slow, so it gets five minutes rather than the default.
+      // An export of a real project is slow, so it gets five minutes rather than the default. And
+      // room to talk: execFile kills a process that prints past its buffer, a mebibyte by default,
+      // and what an export prints grows with the project.
       const { stdout, stderr } = await run(engine.value, exportArgs, {
         timeout: 300000,
+        maxBuffer: 64 * 1024 * 1024,
         signal: callSignal(),
       });
       log.append('stdout', stdout);
@@ -2728,10 +2769,10 @@ class GodotServer {
       if (!(error instanceof Error && 'stdout' in error && 'stderr' in error)) {
         return this.createErrorResponse(`Export could not be run: ${errorMessage(error)}`);
       }
-      const failed = error as Error & { stdout: string; stderr: string; code?: number | string };
+      const failed = error as Error & { stdout: string; stderr: string; code?: unknown; signal?: unknown };
       log.append('stdout', failed.stdout);
       log.append('stderr', failed.stderr);
-      exitCode = typeof failed.code === 'number' ? failed.code : -1;
+      ending = endingOf(failed);
     } finally {
       discard(exportLogs);
     }
@@ -2739,19 +2780,30 @@ class GodotServer {
 
     const problems = log.select({ severity: 'warning', sinceLastCall: false, limit: 200 });
     const verdict = {
-      exported: exitCode === 0 && log.count('error') === 0 && existsSync(output.absolutePath),
+      exported: ending.exitCode === 0 && log.count('error') === 0 && existsSync(output.absolutePath),
       preset,
       outputPath: output.relativePath,
       debug,
-      exitCode,
+      exitCode: ending.exitCode,
+      exitSignal: ending.exitSignal ?? undefined,
+      failure: ending.failure ?? undefined,
       errors: log.count('error'),
       warnings: log.count('warning'),
       entries: forAnswer(problems.entries),
     };
     if (!verdict.exported) {
+      const why =
+        ending.exitSignal === null
+          ? ending.failure === null
+            ? ''
+            : ` The engine was ended by Node (${ending.failure}), so it has no exit code.`
+          : ` The engine was ended by ${ending.exitSignal}, so it has no exit code: the export ran past its five minutes or the call was cancelled.`;
       return {
         content: [
-          { type: 'text', text: `Export with preset '${preset}' did not produce ${output.relativePath}.` },
+          {
+            type: 'text',
+            text: `Export with preset '${preset}' did not produce ${output.relativePath}.${why}`,
+          },
           { type: 'text', text: JSON.stringify(verdict, null, 2) },
         ],
         isError: true,
@@ -2884,7 +2936,9 @@ class GodotServer {
     const nothingRan = hung ? null : whyNoReport(said, asked);
     const verdict = hung
       ? `hung: killed after ${timeoutMs} ms`
-      : (nothingRan ?? verdicts[exitCode ?? -1] ?? `exit ${exitCode ?? 'unknown'}`);
+      : (nothingRan ??
+        (exitCode === null ? undefined : verdicts[exitCode]) ??
+        (run.exitSignal === null ? `exit ${exitCode ?? 'unknown'}` : howItExited(run)));
     // Said on every answer from a run whose saves could not be moved, whichever way it ended: a
     // tier that failed still wrote wherever it wrote, and the run that found nothing to do is the
     // one exception, since it never started a game.
@@ -2906,6 +2960,7 @@ class GodotServer {
                 verdict,
                 tests: 0,
                 exitCode,
+                exitSignal: run.exitSignal ?? undefined,
                 hung,
                 arguments: cmdArgs,
                 entries: forAnswer(printed.slice(0, 60)),
@@ -2956,6 +3011,7 @@ class GodotServer {
       passed: !hung && exitCode === 0 && report.failures === 0 && report.errors === 0,
       verdict,
       exitCode,
+      exitSignal: run.exitSignal ?? undefined,
       tests: report.tests,
       failures: report.failures,
       errors: report.errors,
@@ -4481,6 +4537,7 @@ class GodotServer {
       projectPath,
       startedAt,
       exitCode: null,
+      exitSignal: null,
       throughEditor: true,
       brokeOn: null,
       announcedBefore: alreadyPlaying,
@@ -4754,6 +4811,7 @@ class GodotServer {
       projectPath: null,
       startedAt: Date.now(),
       exitCode: null,
+      exitSignal: null,
       throughEditor: false,
       brokeOn: null,
     };
@@ -4763,15 +4821,11 @@ class GodotServer {
     child.stderr.on('data', (data: Buffer) => {
       log.append('stderr', data);
     });
-    child.on('exit', (code: number | null) => {
-      this.logDebug(`Godot process exited with code ${code ?? 'none'}`);
+    child.on('exit', (code: number | null, signal: NodeJS.Signals | null) => {
+      this.logDebug(`Godot process exited with code ${code ?? 'none'}, signal ${signal ?? 'none'}`);
       log.finish();
-      started.exitCode = code ?? -1;
-      // Into the note as well as into this process, because this process is the one the harness
-      // replaces without warning: an exit seen and not written down is an exit nobody can read.
-      if (started.pid !== null) {
-        recordRunEnded(started.pid, started.exitCode);
-      }
+      started.exitCode = code;
+      started.exitSignal = code === null ? signal : null;
     });
     child.on('error', (err: Error) => {
       console.error('Failed to start Godot process:', err);
@@ -4827,14 +4881,21 @@ class GodotServer {
       projectPath,
       startedAt,
       exitCode: null,
+      exitSignal: null,
       throughEditor: false,
       brokeOn: null,
     };
-    child.on('exit', (code: number | null) => {
-      this.logDebug(`Godot process exited with code ${code ?? 'none'}`);
+    child.on('exit', (code: number | null, signal: NodeJS.Signals | null) => {
+      this.logDebug(`Godot process exited with code ${code ?? 'none'}, signal ${signal ?? 'none'}`);
       this.drainTranscript(started);
       log.finish();
-      started.exitCode = code ?? -1;
+      started.exitCode = code;
+      started.exitSignal = code === null ? signal : null;
+      // Into the note as well as into this process, because this process is the one the harness
+      // replaces without warning: an exit seen and not written down is an exit nobody can read.
+      if (started.pid !== null) {
+        recordRunEnded(started.pid, { exitCode: started.exitCode, exitSignal: started.exitSignal });
+      }
     });
     child.on('error', (err: Error) => {
       console.error('Failed to start Godot process:', err);
@@ -4972,6 +5033,7 @@ class GodotServer {
       projectPath: project,
       startedAt: note?.startedAt ?? Date.now(),
       exitCode: null,
+      exitSignal: null,
       throughEditor: true,
       brokeOn: null,
       pickedUpPlaying: true,
@@ -5240,6 +5302,7 @@ class GodotServer {
       projectPath: record.projectPath === '' ? null : record.projectPath,
       startedAt: record.startedAt,
       exitCode: null,
+      exitSignal: null,
       throughEditor: false,
       brokeOn: null,
     };
@@ -5253,7 +5316,8 @@ class GodotServer {
       // nobody was waiting on the process and what it exited with is nowhere, which is said as
       // unknown rather than guessed at.
       adopted.exitCode = record.exitCode ?? null;
-      adopted.endedUnwatched = record.exitCode === undefined;
+      adopted.exitSignal = record.exitSignal ?? null;
+      adopted.endedUnwatched = !exited(adopted);
     }
     this.activeProcess = adopted;
     return adopted;
@@ -5507,6 +5571,7 @@ class GodotServer {
       booted: !hung && boot.exitCode === 0 && errors === 0,
       hung,
       exitCode: boot.exitCode,
+      exitSignal: boot.exitSignal ?? undefined,
       durationMs: Date.now() - boot.startedAt,
       frames,
       errors,
@@ -5568,7 +5633,13 @@ class GodotServer {
    */
   private async runStillGoing(run: GodotProcess, editorSays?: boolean | null): Promise<boolean> {
     if (!run.throughEditor) {
-      return stillRunning(run);
+      const going = stillRunning(run);
+      // Judged over because the game it announced has gone, which is a moment before the handle
+      // reports the exit: answered then, the run was over with no exit code and nothing saying why.
+      if (!going && run.process !== null && !exited(run)) {
+        await untilGone(run.process, [], EXIT_REPORTED_WITHIN_MS);
+      }
+      return going;
     }
     const announced = this.announcedPidOf(run);
     if (announced !== undefined && !alive(announced)) {
@@ -5758,7 +5829,7 @@ class GodotServer {
     // there is no code, since who ended it is what that sentence then leans on.
     if (typeof run.endedHere === 'string') {
       notes.push(`This run was ended here, by ${run.endedHere}.`);
-    } else if (!stillRunning(run) && !run.throughEditor && run.exitCode !== null) {
+    } else if (!stillRunning(run) && !run.throughEditor && exited(run)) {
       // A zero exit is not one of the two silences: nothing kills a process into exiting cleanly,
       // so the game reached its own end and said so. Reported as the same open question it used to
       // be, it read as an incident on every clean finish, which for a bench that prints and quits
@@ -5766,7 +5837,9 @@ class GodotServer {
       notes.push(
         run.exitCode === 0
           ? 'This run quit on its own, cleanly: exit code 0.'
-          : 'Nothing here ended this run: it stopped on its own or something outside this server stopped it.',
+          : run.exitSignal === null
+            ? 'Nothing here ended this run: it stopped on its own or something outside this server stopped it.'
+            : `Nothing here ended this run: something outside this server sent it ${run.exitSignal}, so it has no exit code.`,
       );
     }
     if (run.endedUnwatched === true) {
@@ -5815,6 +5888,7 @@ class GodotServer {
     return this.jsonTextResponse({
       running: going,
       exitCode: run.exitCode,
+      exitSignal: run.exitSignal ?? undefined,
       through: run.throughEditor ? 'editor' : 'gdharness',
       // The number the game announced, for a run the editor plays: the process is the same one
       // whichever side started it, and null here read as "no process" beside a runtimes list
@@ -5940,6 +6014,7 @@ class GodotServer {
       // answer said it had exited before the stop.
       exitedBeforeStop: !wasRunning,
       exitCode: stopped.exitCode,
+      exitSignal: stopped.exitSignal ?? undefined,
       errors: stopped.log.count('error'),
       warnings: stopped.log.count('warning'),
       clean: stopped.log.count('error') === 0,
@@ -5951,6 +6026,10 @@ class GodotServer {
                 ? 'The editor was asked to stop the scene it is playing. Its game had not announced a runtime, so no process was named under endedPid, and its exit code stays with the editor.'
                 : 'The editor was asked to stop the scene it is playing.'
               : 'The process named under endedPid was ended.'
+          }${
+            stopped.exitSignal === null
+              ? ''
+              : ` It was ended by ${stopped.exitSignal} and so has no exit code.`
           }${
             gone
               ? ''
