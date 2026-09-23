@@ -131,6 +131,8 @@ import {
   aboveTheRunner,
   alive,
   captureDestinationRefusal,
+  endedWithoutACode,
+  noCodeWillCome,
   PLAY_STARTS_WITHIN_MS,
   PROJECT_FILE_ARGUMENTS,
   patienceForFrames,
@@ -5106,6 +5108,54 @@ function testAPidPicksOneOfSeveralGames(): void {
  * other wanted an install, and the answer was the same sentence. A start on a big project is
  * exactly where the difference matters, since that is the boot most likely to outlast a budget.
  */
+/**
+ * A run over with no exit code says why there is none, in terms of the run it was.
+ *
+ * One sentence served every such run and named a restart for all of them: a game the editor played
+ * that died while starting on a loaded machine was reported as having outlived the server that
+ * started it, by that same server, fifty seconds after it started it. Every branch is rendered,
+ * since a reproduction reaches one of them. And a run with a handle is never marked as having no
+ * code coming, because the handle's exit event brings one, sometimes after the game it announced
+ * has gone.
+ */
+async function testARunEndedWithoutACodeSaysWhy(): Promise<void> {
+  const other = endedWithoutACode({ throughEditor: false, announced: true, couldAnnounce: true });
+  assert.match(other, /^This run was started by another server/, other);
+  const starting = endedWithoutACode({ throughEditor: true, announced: false, couldAnnounce: true });
+  assert.match(
+    starting,
+    /^The editor stopped playing this run before its game announced a runtime, so the game ended while it was starting or was closed in the editor\. /,
+    starting,
+  );
+  assert.match(starting, /exit code stays with the editor/, starting);
+  assert.match(starting, /editor_output with op "editor"/, starting);
+  // A project without the runtime addon never announces, so its game not having done so says
+  // nothing about when it ended; and a game that did announce was past starting.
+  for (const [announced, couldAnnounce] of [
+    [true, true],
+    [false, false],
+  ] as const) {
+    const said = endedWithoutACode({ throughEditor: true, announced, couldAnnounce });
+    assert.equal(
+      said,
+      "The editor stopped playing this run. A game the editor plays is the editor's own child, so its exit code stays with the editor and none was collected here. What it printed is below.",
+      `announced ${String(announced)}, could announce ${String(couldAnnounce)}: ${said}`,
+    );
+  }
+  for (const said of [other, starting]) {
+    assert.doesNotMatch(said, /outlived/, said);
+  }
+
+  const handle = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+  try {
+    assert.equal(noCodeWillCome({ exitCode: null, process: handle }), false, 'a handle brings its code');
+  } finally {
+    await endGame(handle);
+  }
+  assert.equal(noCodeWillCome({ exitCode: null, process: null }), true, 'nothing here holds this one');
+  assert.equal(noCodeWillCome({ exitCode: 0, process: null }), false, 'and this one has its code');
+}
+
 function testANotYetRuntimeIsNotTheSameAsNoRuntime(): void {
   // Who is asked whether the game is still up, which is what "may yet announce" rests on. A run
   // the editor plays has no handle and no exit code here, so the record says "going" for as long
@@ -9440,6 +9490,15 @@ async function testAGameTheEditorHasStoppedPlayingIsNotStillActive(): Promise<vo
       true,
       `as a run that ended with nobody collecting its code: ${JSON.stringify(output)}`,
     );
+    // Said as the editor's run it is. This server started it moments ago, and the note once told
+    // callers such a run had outlived the server that started it.
+    assert.ok(
+      text(get(output, 'note')).includes(
+        "The editor stopped playing this run. A game the editor plays is the editor's own child, so its exit code stays with the editor and none was collected here. What it printed is below.",
+      ),
+      `and says whose the missing code is: ${text(get(output, 'note'))}`,
+    );
+    assert.doesNotMatch(text(get(output, 'note')), /outlived/, text(get(output, 'note')));
     const stop = async (): Promise<unknown> =>
       parseTextContent(await server.request('tools/call', { name: 'editor_run', arguments: { op: 'stop' } }));
     const afterReading = await stop();
@@ -13485,6 +13544,11 @@ async function testARunEndedUnwatchedIsStillReadable(): Promise<void> {
           null,
           `nobody was waiting on it, so there is no code to report: ${JSON.stringify(output)}`,
         );
+        assert.match(
+          text(get(output, 'note')),
+          /^This run was started by another server, the one this server replaced or one running beside it, and it ended with nothing here waiting on it/,
+          `saying whose run it was: ${text(get(output, 'note'))}`,
+        );
         assert.equal(get(output, 'errors'), 1, JSON.stringify(output));
         assert.equal(
           get(output, 'transcript'),
@@ -16612,6 +16676,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAPidIsNotAnIdentity,
   testTheEditorHoldingAProjectIsNotARunOfIt,
   testARunEndedUnwatchedIsStillReadable,
+  testARunEndedWithoutACodeSaysWhy,
   testAForeignRunSurvivesAStart,
   testARunOutlivesItsServer,
   testGdUnitRunner,

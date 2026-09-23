@@ -41,12 +41,13 @@ export interface GodotProcess {
   /** Set once the process has ended; null while it runs. */
   exitCode: number | null;
   /**
-   * True for a run found already over, with nobody having been there to see it end.
+   * True for a run found over with no exit code collected here, because nothing here held it.
    *
    * The difference between this and a clean `exitCode` is the difference between "it exited 0"
-   * and "it is not there any more, and what it exited with is recorded nowhere": a server that
-   * was restarted mid-run was never waiting on the process, so no code was ever collected. Said
-   * rather than guessed, because a guessed zero reads as a run that finished its work.
+   * and "it is not there any more, and what it exited with is recorded nowhere here": a run read
+   * back from another server's note was that server's to wait on, and a game the editor plays is
+   * the editor's child. Said rather than guessed, because a guessed zero reads as a run that
+   * finished its work. `endedWithoutACode` says which of the two it was.
    */
   endedUnwatched?: boolean;
   /** True when the editor was asked to play it, so stopping it is the editor's job too. */
