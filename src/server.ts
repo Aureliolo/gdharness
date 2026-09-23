@@ -415,6 +415,38 @@ export function noCodeWillCome(run: Pick<GodotProcess, 'exitCode' | 'process'>):
 }
 
 /**
+ * How long a stop waits for what it signalled to be gone before it answers.
+ *
+ * Ten seconds covers a windowed engine closing its renderer on a loaded machine; the kill is
+ * immediate on Windows and a SIGTERM elsewhere, which Godot answers by quitting.
+ */
+const STOP_WAIT_MS = 10_000;
+
+/**
+ * Whether [param handle] has exited and every process in [param pids] is gone, waited for up to
+ * [param withinMs].
+ *
+ * A stop answered the moment the signal was sent, so it said a process was ended while the process
+ * was still there: a caller removing the project straight afterwards found its directory still
+ * held by the game, which on Windows cannot be removed, and the answer had no exit code because
+ * the exit had not been collected yet. The pids are the game's own where it announced one, since
+ * under the Windows console build the handle is a wrapper that goes before the engine does.
+ */
+async function untilGone(
+  handle: ChildProcess | null,
+  pids: readonly number[],
+  withinMs = STOP_WAIT_MS,
+): Promise<boolean> {
+  const gone = (): boolean =>
+    (handle?.exitCode !== null || handle.signalCode !== null) && pids.every((pid) => !alive(pid));
+  const deadline = Date.now() + withinMs;
+  while (!gone() && Date.now() < deadline) {
+    await delay(50);
+  }
+  return gone();
+}
+
+/**
  * Why a run that is over has no exit code here, said for the cause that applies.
  *
  * Two kinds of run end with nobody here collecting a code. A game the editor plays is the editor's
@@ -4584,7 +4616,7 @@ class GodotServer {
    * which are shared by every project on the machine: a played run stopped before it announced was
    * answered with another project's recorded run, refused as not this server's to answer for.
    */
-  private async endActiveGame(reason: string, going: boolean): Promise<void> {
+  private async endActiveGame(reason: string, going: boolean): Promise<boolean> {
     const running = this.activeProcess;
     // Read before the note is taken away, because it is what says the pid below still means this
     // run: the number alone does not.
@@ -4597,20 +4629,22 @@ class GodotServer {
     // answered as ended by this server, and a second stop would put a run it did end through the
     // pid check again and write over what the first stop recorded.
     if (!running || !going) {
-      return;
+      return true;
     }
     running.endedHere = reason;
+    // Read before anything is signalled, since the announcement goes with the game.
+    const announced = this.announcedPidOf(running);
     if (running.throughEditor) {
       await this.handleViaBridge('stop_playing', {});
-      return;
+      return await untilGone(null, announced === undefined ? [] : [announced]);
     }
     if (running.process !== null) {
       // Started here, so there is a handle, and a handle cannot come to mean another process.
       running.process.kill();
-      return;
+      return await untilGone(running.process, announced === undefined ? [] : [announced]);
     }
     if (running.pid === null) {
-      return;
+      return true;
     }
     // A run picked back up after a restart: the handle belonged to a server that is gone and the
     // number is all that is left. A number is not an identity, though. The operating system hands
@@ -4622,7 +4656,7 @@ class GodotServer {
         'warning',
         `This run was not ended here: pid ${running.pid} no longer answers as the run that was recorded, so nothing was signalled. If that process is still the game, end it yourself; if it is not, it belongs to something else.`,
       );
-      return;
+      return true;
     }
     // What was signalled, in the run's own log, with the command line the operating system gave for
     // it. A kill by number is the one act here that cannot be taken back, and three runs elsewhere
@@ -4638,6 +4672,7 @@ class GodotServer {
       // Ended between being read and being stopped, which is the state this asks for.
       landed = false;
     }
+    const gone = await untilGone(null, [running.pid]);
     // Written after the attempt rather than before it, so the line says what happened rather than
     // what was about to. A note that announces an act it has not performed is wrong for every run
     // that was already over by the time it was signalled, which is the ordinary way a run ends.
@@ -4647,6 +4682,7 @@ class GodotServer {
         ? `gdharness ended pid ${running.pid}, which the operating system described as ${described}.`
         : `gdharness signalled pid ${running.pid} and it was already gone; the operating system had described it as ${described}.`,
     );
+    return gone;
   }
 
   /**
@@ -5821,7 +5857,7 @@ class GodotServer {
     const children =
       readBoolean(args, 'andChildren') === true && wasRunning ? await this.whatTheRunStarted(stopped) : null;
     this.logDebug('Stopping the running game');
-    await this.endActiveGame('editor_run stop', wasRunning);
+    const gone = await this.endActiveGame('editor_run stop', wasRunning);
     const ended = children === null ? null : endChildrenAmong(children);
     // The announcement of the game just ended goes with it, here rather than on the next sweep,
     // because a number the operating system hands out again before that sweep reads as the game
@@ -5885,6 +5921,10 @@ class GodotServer {
                 ? 'The editor was asked to stop the scene it is playing. Its game had not announced a runtime, so no process was named under endedPid, and its exit code stays with the editor.'
                 : 'The editor was asked to stop the scene it is playing.'
               : 'The process named under endedPid was ended.'
+          }${
+            gone
+              ? ''
+              : ` It had not exited ${STOP_WAIT_MS / 1000} seconds after being told to, so it may still be going: editor_status says whether it is.`
           } ${aboutTheChildren(ended, stopped.throughEditor)}`,
       entries: forAnswer(
         stopped.log.select({ severity: 'warning', sinceLastCall: false, limit: 200 }).entries,
