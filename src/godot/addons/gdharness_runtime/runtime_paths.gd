@@ -48,6 +48,22 @@ const MAP_CALLS: Array[String] = [
 	"get_typed_value_class_name",
 	"get_typed_value_script",
 ]
+## The calls a path makes on a packed list, which has fewer than a list: measured on 4.7.2, it has no
+## front(), back(), max(), min() or hash().
+const PACKED_CALLS: Array[String] = ["size", "is_empty", "duplicate", "to_byte_array"]
+## The packed lists, which a game keeps names and points in as often as it keeps them in an Array.
+const PACKED: Array[int] = [
+	TYPE_PACKED_BYTE_ARRAY,
+	TYPE_PACKED_INT32_ARRAY,
+	TYPE_PACKED_INT64_ARRAY,
+	TYPE_PACKED_FLOAT32_ARRAY,
+	TYPE_PACKED_FLOAT64_ARRAY,
+	TYPE_PACKED_STRING_ARRAY,
+	TYPE_PACKED_VECTOR2_ARRAY,
+	TYPE_PACKED_VECTOR3_ARRAY,
+	TYPE_PACKED_COLOR_ARRAY,
+	TYPE_PACKED_VECTOR4_ARRAY,
+]
 ## The calls an empty list has nothing to answer, which the engine reports as an error when asked.
 const NEEDS_AN_ELEMENT: Array[String] = ["front", "back", "pick_random"]
 
@@ -142,7 +158,13 @@ static func object_at(root: Node, node: Node, node_path: String, given: Variant)
 ## Whether a step can be taken into [param value] at all: an object, a list or a map can be walked
 ## into, and a number or a string is where a path ends whether the caller meant it to or not.
 static func _can_hold(value: Variant) -> bool:
-	return value is Object or value is Array or value is Dictionary
+	return value is Object or value is Array or value is Dictionary or packed(value)
+
+
+## Whether [param value] is a packed list. Stepped into the way a list is, by index, and a write into
+## one reaches the game's own copy, since packed lists share their storage until one is duplicated.
+static func packed(value: Variant) -> bool:
+	return typeof(value) in PACKED
 
 
 ## What is wrong with reading [param named] off [param holder], or "" when nothing is.
@@ -168,6 +190,10 @@ static func can_read(holder: Variant, named: String) -> bool:
 		if not list_call.is_empty():
 			return list_call in LIST_CALLS and not (items.is_empty() and list_call in NEEDS_AN_ELEMENT)
 		return _index_in(named, items.size()) != -1
+	if packed(holder):
+		if not method_of(named).is_empty():
+			return method_of(named) in PACKED_CALLS
+		return _index_in(named, len(holder)) != -1
 	if holder is Dictionary:
 		var map: Dictionary = holder
 		if not method_of(named).is_empty():
@@ -209,6 +235,10 @@ static func write(holder: Variant, named: String, value: Variant) -> void:
 		var items: Array = holder
 		items[_index_in(named, items.size())] = value
 		return
+	if packed(holder):
+		var list: Variant = holder
+		list[_index_in(named, len(holder))] = value
+		return
 	if holder is Dictionary:
 		var map: Dictionary = holder
 		# Written back under the key it was found under, since a map keyed by StringName and one
@@ -225,11 +255,14 @@ static func write(holder: Variant, named: String, value: Variant) -> void:
 ## What [param holder] holds under [param named], or answers to it when [param named] is a call.
 ## Only ever called once [method can_read] agrees.
 static func read_under(holder: Variant, named: String) -> Variant:
-	if (holder is Array or holder is Dictionary) and not method_of(named).is_empty():
+	if (holder is Array or holder is Dictionary or packed(holder)) and not method_of(named).is_empty():
 		return Callable.create(holder, method_of(named)).call()
 	if holder is Array:
 		var items: Array = holder
 		return items[_index_in(named, items.size())]
+	if packed(holder):
+		var list: Variant = holder
+		return list[_index_in(named, len(holder))]
 	if holder is Dictionary:
 		var map: Dictionary = holder
 		if map.has(named):
@@ -269,6 +302,10 @@ static func nothing_there(holder: Variant, named: String, called_as: String) -> 
 		if not container_call.is_empty():
 			return container_calls_refused(called_as, "a list", container_call)
 		return "%s is a list of %d, so there is no %s in it" % [called_as, items.size(), named]
+	if packed(holder):
+		if not container_call.is_empty():
+			return container_calls_refused(called_as, "a packed list", container_call)
+		return "%s is a packed list of %d, so there is no %s in it" % [called_as, len(holder), named]
 	if holder is Dictionary:
 		if not container_call.is_empty():
 			return container_calls_refused(called_as, "a map", container_call)
@@ -303,10 +340,14 @@ static func nothing_there(holder: Variant, named: String, called_as: String) -> 
 	return "%s has no property %s" % [called_as, named]
 
 
-## Why [param method] is not a call a path makes on [param sort] ("a list" or "a map"), naming
-## the calls it does make.
+## Why [param method] is not a call a path makes on [param sort] ("a list", "a packed list" or "a
+## map"), naming the calls it does make.
 static func container_calls_refused(called_as: String, sort: String, method: String) -> String:
-	var calls: Array[String] = LIST_CALLS if sort == "a list" else MAP_CALLS
+	var calls: Array[String] = MAP_CALLS
+	if sort == "a list":
+		calls = LIST_CALLS
+	elif sort == "a packed list":
+		calls = PACKED_CALLS
 	var spelled: Array[String] = []
 	for each: String in calls:
 		spelled.append(each + "()")
