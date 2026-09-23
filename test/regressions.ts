@@ -131,6 +131,8 @@ import {
   aboveTheRunner,
   alive,
   captureDestinationRefusal,
+  endedWithoutACode,
+  noCodeWillCome,
   PLAY_STARTS_WITHIN_MS,
   PROJECT_FILE_ARGUMENTS,
   patienceForFrames,
@@ -165,7 +167,7 @@ import { CACHE_MS, cacheFile, isNewer, registryFor, UpdateCheck } from '../src/u
 import { asArray, asNumber, get, text } from './support/json.js';
 import { isRecord, type JsonRpcMessage, parseTextContent, textOf } from './support/json-rpc.js';
 import { reservePort, ServerProcess } from './support/server.js';
-import { reportUnswept, sweep } from './support/sweep.js';
+import { reportUnswept, sweep, sweepingFor } from './support/sweep.js';
 
 async function withOccupiedBridgePort<T>(run: () => Promise<T>): Promise<T> {
   const blocker = createServer();
@@ -1758,7 +1760,11 @@ async function testEditorStatusPortConflict(): Promise<void> {
     const server = new ServerProcess();
     try {
       await delay(500);
-      assert.equal(server.exited, false, 'server should stay alive when the bridge port is occupied');
+      assert.equal(
+        server.exited,
+        false,
+        `server should stay alive when the bridge port is occupied; it exited with ${String(server.child.exitCode ?? server.child.signalCode)} and said:\n${server.stderr}`,
+      );
       await server.initialize('regression-test');
 
       const response = await server.request('tools/call', { name: 'editor_status', arguments: {} });
@@ -5106,6 +5112,56 @@ function testAPidPicksOneOfSeveralGames(): void {
  * other wanted an install, and the answer was the same sentence. A start on a big project is
  * exactly where the difference matters, since that is the boot most likely to outlast a budget.
  */
+/**
+ * A run over with no exit code says why there is none, in terms of the run it was.
+ *
+ * One sentence served every such run and named a restart for all of them: a game the editor played
+ * that died while starting on a loaded machine was reported as having outlived the server that
+ * started it, by that same server, fifty seconds after it started it. Every branch is rendered,
+ * since a reproduction reaches one of them. And a run with a handle is never marked as having no
+ * code coming, because the handle's exit event brings one, sometimes after the game it announced
+ * has gone.
+ */
+async function testARunEndedWithoutACodeSaysWhy(): Promise<void> {
+  const other = endedWithoutACode({ throughEditor: false, announced: true, couldAnnounce: true });
+  assert.match(other, /^This run was started by another server/, other);
+  const starting = endedWithoutACode({ throughEditor: true, announced: false, couldAnnounce: true });
+  assert.match(
+    starting,
+    /^The editor stopped playing this run before its game announced a runtime, so the game ended while it was starting or was closed in the editor\. /,
+    starting,
+  );
+  assert.match(starting, /exit code stays with the editor/, starting);
+  assert.match(starting, /editor_output with op "editor"/, starting);
+  // A project without the runtime addon never announces, so its game not having done so says
+  // nothing about when it ended; and a game that did announce was past starting.
+  for (const [announced, couldAnnounce] of [
+    [true, true],
+    [false, false],
+  ] as const) {
+    const said = endedWithoutACode({ throughEditor: true, announced, couldAnnounce });
+    assert.equal(
+      said,
+      "The editor stopped playing this run. A game the editor plays is the editor's own child, so its exit code stays with the editor and none was collected here. What it printed is below.",
+      `announced ${String(announced)}, could announce ${String(couldAnnounce)}: ${said}`,
+    );
+  }
+  for (const said of [other, starting]) {
+    assert.doesNotMatch(said, /outlived/, said);
+  }
+
+  const handle = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+  const exited = new Promise<void>((resolve) => {
+    handle.once('exit', () => {
+      resolve();
+    });
+  });
+  assert.equal(noCodeWillCome({ exitCode: null, process: handle }), false, 'a handle brings its code');
+  await exited;
+  assert.equal(noCodeWillCome({ exitCode: null, process: null }), true, 'nothing here holds this one');
+  assert.equal(noCodeWillCome({ exitCode: 0, process: null }), false, 'and this one has its code');
+}
+
 function testANotYetRuntimeIsNotTheSameAsNoRuntime(): void {
   // Who is asked whether the game is still up, which is what "may yet announce" rests on. A run
   // the editor plays has no handle and no exit code here, so the record says "going" for as long
@@ -9440,6 +9496,15 @@ async function testAGameTheEditorHasStoppedPlayingIsNotStillActive(): Promise<vo
       true,
       `as a run that ended with nobody collecting its code: ${JSON.stringify(output)}`,
     );
+    // Said as the editor's run it is. This server started it moments ago, and the note once told
+    // callers such a run had outlived the server that started it.
+    assert.ok(
+      text(get(output, 'note')).includes(
+        "The editor stopped playing this run. A game the editor plays is the editor's own child, so its exit code stays with the editor and none was collected here. What it printed is below.",
+      ),
+      `and says whose the missing code is: ${text(get(output, 'note'))}`,
+    );
+    assert.doesNotMatch(text(get(output, 'note')), /outlived/, text(get(output, 'note')));
     const stop = async (): Promise<unknown> =>
       parseTextContent(await server.request('tools/call', { name: 'editor_run', arguments: { op: 'stop' } }));
     const afterReading = await stop();
@@ -9533,12 +9598,14 @@ const FAKE_EDITOR_PID = process.pid;
  * The addon on disk is a stub unless [param options.realAddon] asks for the one this repository
  * ships, which is what says whether games of the project announce the editor that played them;
  * with it the addon is registered as the project's autoload too, so a real engine given the
- * project by [param options.engine] runs it and announces.
+ * project by [param options.engine] runs it and announces. [param options.held] is the game the
+ * fake editor started, ended before the project is removed: a real engine keeps files open inside
+ * it, and a case that failed before its own stop left the directory behind on Windows.
  */
 async function withAPlayingEditor(
   answer: (where: Pick<PlayingEditorStage, 'adapter' | 'project' | 'runtimeDir'>) => EditorToolAnswer,
   body: (stage: PlayingEditorStage) => Promise<void>,
-  options: { realAddon?: boolean; engine?: string } = {},
+  options: { realAddon?: boolean; engine?: string; held?: { game: ChildProcess | null } } = {},
 ): Promise<void> {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-played-over-'));
   const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-played-over-rt-'));
@@ -9651,9 +9718,24 @@ async function withAPlayingEditor(
   } finally {
     editor.socket?.terminate();
     await server.stop();
+    await endGame(options.held?.game);
     sweep(project);
     sweep(runtimeDir);
   }
+}
+
+/** Ends [param game] and waits for it to have gone, so nothing it held open is still held. */
+async function endGame(game: ChildProcess | null | undefined): Promise<void> {
+  if (game?.exitCode !== null || game.signalCode !== null) {
+    return;
+  }
+  const gone = new Promise<void>((resolve) => {
+    game.once('exit', () => {
+      resolve();
+    });
+  });
+  game.kill();
+  await gone;
 }
 
 async function testAPlayedStartStopsWaitingForAGameThatIsOver(): Promise<void> {
@@ -9754,6 +9836,18 @@ async function testAPlayedStartStopsWaitingForAGameThatIsOver(): Promise<void> {
         stack,
         /The last run has already ended, so there is no debug session/,
         `a stack read on the run that died is refused as a run that is over: ${stack}`,
+      );
+      // And its output says what is known about how it went: before it announced, with its code
+      // left with the editor. This server started it a moment ago, and the note once said it had
+      // outlived the server that started it.
+      const output = parseTextContent(
+        await server.request('tools/call', { name: 'editor_output', arguments: {} }),
+      );
+      assert.equal(get(output, 'running'), false, JSON.stringify(output));
+      assert.match(
+        text(get(output, 'note')),
+        /The editor stopped playing this run before its game announced a runtime, so the game ended while it was starting or was closed in the editor\./,
+        `the output says the game went while it was starting: ${JSON.stringify(output)}`,
       );
       // A start after a game that died ends nothing, and says nothing about ending one: the
       // record alone read as a run still going, so the editor was told to stop and the answer
@@ -10862,186 +10956,180 @@ async function testAKeyDoesNotChooseFromAnOpenedMenu(): Promise<void> {
   }
   const held: { game: ChildProcess | null } = { game: null };
   const said: string[] = [];
-  try {
-    await withAPlayingEditor(
-      ({ adapter, project, runtimeDir }) =>
-        (tool) => {
-          if (tool === 'play_scene') {
-            // The compatibility renderer, since the window is what this needs and not the
-            // renderer: Forward+ on a macOS runner's paravirtual Metal device spent twenty
-            // seconds compiling its pipelines before the scene ran, with nothing said but the
-            // device's name. What the engine says is kept for the next time it does not announce.
-            held.game = spawn(engine, ['--path', project, '--rendering-method', 'gl_compatibility'], {
-              stdio: ['ignore', 'pipe', 'pipe'],
-              env: {
-                ...process.env,
-                GDHARNESS_RUNTIME_DIR: runtimeDir,
-                GDHARNESS_EDITOR_PID: String(FAKE_EDITOR_PID),
-              },
-            });
-            held.game.stdout?.on('data', (chunk: Buffer) => {
-              said.push(String(chunk));
-            });
-            held.game.stderr?.on('data', (chunk: Buffer) => {
-              said.push(String(chunk));
-            });
-            return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
-          }
-          if (tool === 'playing_status') {
-            return {
-              ok: true,
-              playing: held.game?.exitCode === null,
-              scenePath: 'res://main.tscn',
-              debugPort: adapter,
-            };
-          }
-          if (tool === 'stop_playing') {
-            held.game?.kill();
-            return { ok: true };
-          }
-          return { ok: true };
-        },
-      async ({ server, project, start }) => {
-        // The scene counts what the button and its menu did, so a menu that reads as closed can
-        // be told apart from a click that never pressed the button and from a menu that opened
-        // and shut again on its own.
-        writeFileSync(
-          join(project, 'main.gd'),
-          'extends Control\n\nvar presses: int = 0\nvar openings: int = 0\nvar closings: int = 0\n' +
-            'var log: Array[String] = []\nvar focus_changed_at: int = 0\n\n\n' +
-            'func _ready() -> void:\n' +
-            '\tvar pick: OptionButton = $Pick\n' +
-            '\tvar menu: PopupMenu = pick.get_popup()\n' +
-            '\tpick.pressed.connect(func() -> void:\n\t\tpresses += 1\n\t\t_note("pressed"))\n' +
-            '\tmenu.about_to_popup.connect(func() -> void:\n\t\topenings += 1\n\t\t_note("about_to_popup"))\n' +
-            '\tmenu.popup_hide.connect(func() -> void:\n\t\tclosings += 1\n\t\t_note("popup_hide"))\n' +
-            '\tmenu.focus_entered.connect(func() -> void: _note("menu focus_entered"))\n' +
-            '\tmenu.focus_exited.connect(func() -> void: _note("menu focus_exited"))\n' +
-            '\tmenu.visibility_changed.connect(func() -> void: _note("menu visible %s" % menu.visible))\n' +
-            '\tget_window().focus_entered.connect(func() -> void: _focus("window focus_entered"))\n' +
-            '\tget_window().focus_exited.connect(func() -> void: _focus("window focus_exited"))\n' +
-            '\tget_window().size_changed.connect(func() -> void: _note("window size %s" % get_window().size))\n\n\n' +
-            'func _note(what: String) -> void:\n' +
-            '\tlog.append("%d %s" % [Engine.get_process_frames(), what])\n\n\n' +
-            'func _focus(what: String) -> void:\n' +
-            '\tfocus_changed_at = Engine.get_process_frames()\n' +
-            '\t_note(what)\n\n\n' +
-            'func focus_settled() -> bool:\n' +
-            '\treturn get_window().has_focus() and Engine.get_process_frames() - focus_changed_at >= 30\n',
-        );
-        writeFileSync(
-          join(project, 'main.tscn'),
-          '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
-            '[node name="Main" type="Control"]\nanchors_preset = 15\n' +
-            'anchor_right = 1.0\nanchor_bottom = 1.0\nscript = ExtResource("1")\n\n' +
-            '[node name="Pick" type="OptionButton" parent="."]\noffset_left = 20.0\n' +
-            'offset_top = 20.0\noffset_right = 200.0\noffset_bottom = 60.0\nselected = 0\n' +
-            'item_count = 3\npopup/item_0/text = "One"\npopup/item_0/id = 0\n' +
-            'popup/item_1/text = "Two"\npopup/item_1/id = 1\n' +
-            'popup/item_2/text = "Three"\npopup/item_2/id = 2\n',
-        );
-        const started = await start(WINDOWED_BOOT_MS);
-        assert.equal(
-          get(started.answer, 'runtime', 'listening'),
-          true,
-          `${JSON.stringify(started.answer)}\nthe engine said:\n${said.join('')}`,
-        );
-        // Printed so the wait above can be sized to what a windowed boot takes on each leg.
-        console.log(`opened menu: the windowed engine announced after ${started.waitedMs}ms`);
-        const call = async (name: string, args: Record<string, unknown>): Promise<unknown> =>
-          parseTextContent(
-            await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS),
-          );
-        const property = async (nodePath: string, name: string): Promise<unknown> =>
-          get(await call('runtime_inspect', { op: 'property', nodePath, property: name }), 'value');
-        const settle = async (): Promise<unknown> => call('runtime_wait', { op: 'frames', frames: 3 });
-        const account = async (): Promise<string> => {
-          const counted = await Promise.all(
-            ['presses', 'openings', 'closings'].map(
-              async (name) => `${name} ${String(await property('/root/Main', name))}`,
-            ),
-          );
-          const focused = await call('runtime_invoke', {
-            op: 'call',
-            nodePath: '/root',
-            method: 'has_focus',
+  await withAPlayingEditor(
+    ({ adapter, project, runtimeDir }) =>
+      (tool) => {
+        if (tool === 'play_scene') {
+          // The compatibility renderer, since the window is what this needs and not the
+          // renderer: Forward+ on a macOS runner's paravirtual Metal device spent twenty
+          // seconds compiling its pipelines before the scene ran, with nothing said but the
+          // device's name. What the engine says is kept for the next time it does not announce.
+          held.game = spawn(engine, ['--path', project, '--rendering-method', 'gl_compatibility'], {
+            stdio: ['ignore', 'pipe', 'pipe'],
+            env: {
+              ...process.env,
+              GDHARNESS_RUNTIME_DIR: runtimeDir,
+              GDHARNESS_EDITOR_PID: String(FAKE_EDITOR_PID),
+            },
           });
-          const noted = asArray(await property('/root/Main', 'log'))
-            .map(text)
-            .join('; ');
-          return `${counted.join(', ')}, window focused ${JSON.stringify(get(focused, 'result'))}, noted: ${noted}`;
-        };
-
-        // The window has to be the focused one before the menu is opened, and to have been so
-        // for a while. The macOS runner focuses it a frame or two after the game announces, and
-        // an embedded popup closes when its window's focus moves: a menu opened on the frame
-        // before that focus arrived was read as closed, with the log showing focus_entered on the
-        // window, focus_exited on the menu and popup_hide on the same frame. Held for thirty
-        // frames rather than read once, because the runner's focus also flickers: a window read as
-        // focused lost it on frame 3 and got it back on frame 7, and the menu opened on frame 6
-        // was closed by the return. A player's window is focused long before they click, so this
-        // is the fixture catching up with that, not the click. Through the wait, which walks the
-        // call again every frame.
-        const settled = await call('runtime_wait', {
-          op: 'until',
-          nodePath: '/root/Main',
-          property: 'focus_settled()',
-          value: true,
-          timeoutMs: 15_000,
-        });
-        assert.equal(
-          get(settled, 'met'),
-          true,
-          `the window should have held the focus for thirty frames before anything is clicked: ${JSON.stringify(settled)}, ${await account()}. A focus_exited in that log, or a window that never reads as focused, is another window on this desktop holding the foreground rather than anything about the input path: check what else is open before reading this as a fault here.`,
-        );
-
-        const clicked = await call('runtime_input', { op: 'click', nodePath: '/root/Main/Pick' });
-        assert.equal(get(clicked, 'landed'), true, JSON.stringify(clicked));
-        await settle();
-        const menus = asArray(
-          get(await call('runtime_inspect', { op: 'find', className: 'PopupMenu' }), 'nodes'),
-        );
-        assert.equal(menus.length, 1, 'the button owns one menu');
-        const menu = text(get(menus[0], 'path'));
-        assert.equal(
-          await property(menu, 'visible'),
-          true,
-          `the click opened the menu: ${await account()}, click ${JSON.stringify(clicked)}`,
-        );
-        // Printed on a pass too, so a leg where it fails has a working leg's reading beside it.
-        console.log(`opened menu: after the click, ${await account()}`);
-
-        await call('runtime_input', { op: 'key', keycode: 'Down' });
-        await settle();
-        assert.equal(
-          await property(menu, 'visible'),
-          true,
-          `an arrow key leaves the menu open: ${await account()}`,
-        );
-        await call('runtime_input', { op: 'key', keycode: 'Enter' });
-        await settle();
-        assert.equal(await property(menu, 'visible'), false, `Enter closes it: ${await account()}`);
-        assert.equal(await property('/root/Main/Pick', 'selected'), 0, 'having chosen nothing');
-
-        const chosen = await call('runtime_input', { op: 'choose', nodePath: '/root/Main/Pick', index: 2 });
-        assert.equal(get(chosen, 'type'), 'chosen', JSON.stringify(chosen));
-        await settle();
-        assert.equal(await property('/root/Main/Pick', 'selected'), 2, 'choose is what selects');
-        assert.equal(await property('/root/Main/Pick', 'text'), 'Three', 'and the button shows it');
-
-        await server.request(
-          'tools/call',
-          { name: 'editor_run', arguments: { op: 'stop' } },
-          ENGINE_CALL_TIMEOUT_MS,
-        );
+          held.game.stdout?.on('data', (chunk: Buffer) => {
+            said.push(String(chunk));
+          });
+          held.game.stderr?.on('data', (chunk: Buffer) => {
+            said.push(String(chunk));
+          });
+          return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
+        }
+        if (tool === 'playing_status') {
+          return {
+            ok: true,
+            playing: held.game?.exitCode === null,
+            scenePath: 'res://main.tscn',
+            debugPort: adapter,
+          };
+        }
+        if (tool === 'stop_playing') {
+          held.game?.kill();
+          return { ok: true };
+        }
+        return { ok: true };
       },
-      { realAddon: true, engine },
-    );
-  } finally {
-    if (held.game?.exitCode === null) {
-      held.game.kill();
-    }
-  }
+    async ({ server, project, start }) => {
+      // The scene counts what the button and its menu did, so a menu that reads as closed can
+      // be told apart from a click that never pressed the button and from a menu that opened
+      // and shut again on its own.
+      writeFileSync(
+        join(project, 'main.gd'),
+        'extends Control\n\nvar presses: int = 0\nvar openings: int = 0\nvar closings: int = 0\n' +
+          'var log: Array[String] = []\nvar focus_changed_at: int = 0\n\n\n' +
+          'func _ready() -> void:\n' +
+          '\tvar pick: OptionButton = $Pick\n' +
+          '\tvar menu: PopupMenu = pick.get_popup()\n' +
+          '\tpick.pressed.connect(func() -> void:\n\t\tpresses += 1\n\t\t_note("pressed"))\n' +
+          '\tmenu.about_to_popup.connect(func() -> void:\n\t\topenings += 1\n\t\t_note("about_to_popup"))\n' +
+          '\tmenu.popup_hide.connect(func() -> void:\n\t\tclosings += 1\n\t\t_note("popup_hide"))\n' +
+          '\tmenu.focus_entered.connect(func() -> void: _note("menu focus_entered"))\n' +
+          '\tmenu.focus_exited.connect(func() -> void: _note("menu focus_exited"))\n' +
+          '\tmenu.visibility_changed.connect(func() -> void: _note("menu visible %s" % menu.visible))\n' +
+          '\tget_window().focus_entered.connect(func() -> void: _focus("window focus_entered"))\n' +
+          '\tget_window().focus_exited.connect(func() -> void: _focus("window focus_exited"))\n' +
+          '\tget_window().size_changed.connect(func() -> void: _note("window size %s" % get_window().size))\n\n\n' +
+          'func _note(what: String) -> void:\n' +
+          '\tlog.append("%d %s" % [Engine.get_process_frames(), what])\n\n\n' +
+          'func _focus(what: String) -> void:\n' +
+          '\tfocus_changed_at = Engine.get_process_frames()\n' +
+          '\t_note(what)\n\n\n' +
+          'func focus_settled() -> bool:\n' +
+          '\treturn get_window().has_focus() and Engine.get_process_frames() - focus_changed_at >= 30\n',
+      );
+      writeFileSync(
+        join(project, 'main.tscn'),
+        '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+          '[node name="Main" type="Control"]\nanchors_preset = 15\n' +
+          'anchor_right = 1.0\nanchor_bottom = 1.0\nscript = ExtResource("1")\n\n' +
+          '[node name="Pick" type="OptionButton" parent="."]\noffset_left = 20.0\n' +
+          'offset_top = 20.0\noffset_right = 200.0\noffset_bottom = 60.0\nselected = 0\n' +
+          'item_count = 3\npopup/item_0/text = "One"\npopup/item_0/id = 0\n' +
+          'popup/item_1/text = "Two"\npopup/item_1/id = 1\n' +
+          'popup/item_2/text = "Three"\npopup/item_2/id = 2\n',
+      );
+      const started = await start(WINDOWED_BOOT_MS);
+      assert.equal(
+        get(started.answer, 'runtime', 'listening'),
+        true,
+        `${JSON.stringify(started.answer)}\nthe engine said:\n${said.join('')}`,
+      );
+      // Printed so the wait above can be sized to what a windowed boot takes on each leg.
+      console.log(`opened menu: the windowed engine announced after ${started.waitedMs}ms`);
+      const call = async (name: string, args: Record<string, unknown>): Promise<unknown> =>
+        parseTextContent(
+          await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS),
+        );
+      const property = async (nodePath: string, name: string): Promise<unknown> =>
+        get(await call('runtime_inspect', { op: 'property', nodePath, property: name }), 'value');
+      const settle = async (): Promise<unknown> => call('runtime_wait', { op: 'frames', frames: 3 });
+      const account = async (): Promise<string> => {
+        const counted = await Promise.all(
+          ['presses', 'openings', 'closings'].map(
+            async (name) => `${name} ${String(await property('/root/Main', name))}`,
+          ),
+        );
+        const focused = await call('runtime_invoke', {
+          op: 'call',
+          nodePath: '/root',
+          method: 'has_focus',
+        });
+        const noted = asArray(await property('/root/Main', 'log'))
+          .map(text)
+          .join('; ');
+        return `${counted.join(', ')}, window focused ${JSON.stringify(get(focused, 'result'))}, noted: ${noted}`;
+      };
+
+      // The window has to be the focused one before the menu is opened, and to have been so
+      // for a while. The macOS runner focuses it a frame or two after the game announces, and
+      // an embedded popup closes when its window's focus moves: a menu opened on the frame
+      // before that focus arrived was read as closed, with the log showing focus_entered on the
+      // window, focus_exited on the menu and popup_hide on the same frame. Held for thirty
+      // frames rather than read once, because the runner's focus also flickers: a window read as
+      // focused lost it on frame 3 and got it back on frame 7, and the menu opened on frame 6
+      // was closed by the return. A player's window is focused long before they click, so this
+      // is the fixture catching up with that, not the click. Through the wait, which walks the
+      // call again every frame.
+      const settled = await call('runtime_wait', {
+        op: 'until',
+        nodePath: '/root/Main',
+        property: 'focus_settled()',
+        value: true,
+        timeoutMs: 15_000,
+      });
+      assert.equal(
+        get(settled, 'met'),
+        true,
+        `the window should have held the focus for thirty frames before anything is clicked: ${JSON.stringify(settled)}, ${await account()}. A focus_exited in that log, or a window that never reads as focused, is another window on this desktop holding the foreground rather than anything about the input path: check what else is open before reading this as a fault here.`,
+      );
+
+      const clicked = await call('runtime_input', { op: 'click', nodePath: '/root/Main/Pick' });
+      assert.equal(get(clicked, 'landed'), true, JSON.stringify(clicked));
+      await settle();
+      const menus = asArray(
+        get(await call('runtime_inspect', { op: 'find', className: 'PopupMenu' }), 'nodes'),
+      );
+      assert.equal(menus.length, 1, 'the button owns one menu');
+      const menu = text(get(menus[0], 'path'));
+      assert.equal(
+        await property(menu, 'visible'),
+        true,
+        `the click opened the menu: ${await account()}, click ${JSON.stringify(clicked)}`,
+      );
+      // Printed on a pass too, so a leg where it fails has a working leg's reading beside it.
+      console.log(`opened menu: after the click, ${await account()}`);
+
+      await call('runtime_input', { op: 'key', keycode: 'Down' });
+      await settle();
+      assert.equal(
+        await property(menu, 'visible'),
+        true,
+        `an arrow key leaves the menu open: ${await account()}`,
+      );
+      await call('runtime_input', { op: 'key', keycode: 'Enter' });
+      await settle();
+      assert.equal(await property(menu, 'visible'), false, `Enter closes it: ${await account()}`);
+      assert.equal(await property('/root/Main/Pick', 'selected'), 0, 'having chosen nothing');
+
+      const chosen = await call('runtime_input', { op: 'choose', nodePath: '/root/Main/Pick', index: 2 });
+      assert.equal(get(chosen, 'type'), 'chosen', JSON.stringify(chosen));
+      await settle();
+      assert.equal(await property('/root/Main/Pick', 'selected'), 2, 'choose is what selects');
+      assert.equal(await property('/root/Main/Pick', 'text'), 'Three', 'and the button shows it');
+
+      await server.request(
+        'tools/call',
+        { name: 'editor_run', arguments: { op: 'stop' } },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+    },
+    { realAddon: true, engine, held },
+  );
 }
 
 /**
@@ -11272,147 +11360,343 @@ async function testAPlayedGamesReportsReachTheOutput(): Promise<void> {
     return;
   }
   const held: { game: ChildProcess | null } = { game: null };
-  try {
-    await withAPlayingEditor(
-      ({ adapter, project, runtimeDir }) =>
-        (tool) => {
-          if (tool === 'play_scene') {
-            held.game = spawn(engine, ['--headless', '--path', project], {
-              stdio: 'ignore',
-              env: {
-                ...process.env,
-                GDHARNESS_RUNTIME_DIR: runtimeDir,
-                GDHARNESS_EDITOR_PID: String(FAKE_EDITOR_PID),
-              },
-            });
-            return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
-          }
-          if (tool === 'playing_status') {
-            return {
-              ok: true,
-              playing: held.game?.exitCode === null,
-              scenePath: 'res://main.tscn',
-              debugPort: adapter,
-            };
-          }
-          if (tool === 'stop_playing') {
-            held.game?.kill();
-            return { ok: true };
-          }
-          return { ok: true };
-        },
-      async ({ server, project, start }) => {
-        writeFileSync(
-          join(project, 'main.gd'),
-          'extends Node\n\n\nfunc _ready() -> void:\n' +
-            '\tpush_error("clock: 7.5 is not one of the speeds on offer")\n' +
-            '\tpush_warning("the ladder has five rungs")\n\n\n' +
-            'func refuse(value: float) -> void:\n' +
-            '\tpush_error("refused %s at runtime" % value)\n',
-        );
-        writeFileSync(
-          join(project, 'main.tscn'),
-          '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
-            '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
-        );
-        const started = await start(20_000);
-        assert.equal(get(started.answer, 'through'), 'editor', JSON.stringify(started.answer));
-        assert.equal(get(started.answer, 'runtime', 'listening'), true, JSON.stringify(started.answer));
-
-        const output = async (args: Record<string, unknown>): Promise<unknown> =>
-          parseTextContent(
-            await server.request(
-              'tools/call',
-              { name: 'editor_output', arguments: args },
-              ENGINE_CALL_TIMEOUT_MS,
-            ),
-          );
-        const lines = (answer: unknown): string[] =>
-          asArray(get(answer, 'entries')).map(
-            (entry) => `${text(get(entry, 'severity'))}: ${text(get(entry, 'text'))}`,
-          );
-        // The boot's error and warning, with the engine's own `at:` line under the headline. Given a
-        // moment to arrive: the runtime autoload announces in its own _ready and the main scene
-        // reports in its, a frame later, so a read the instant the start answers can come before
-        // the report is written, which it did once on macOS. What is held is that it arrives. Both
-        // halves of it: the two are written as two lines, and a read between them has the error
-        // and not yet the warning, which it did once on macOS as well.
-        const deadline = Date.now() + 10_000;
-        let first = await output({});
-        while (
-          (asNumber(get(first, 'errors')) === 0 || asNumber(get(first, 'warnings')) === 0) &&
-          Date.now() < deadline
-        ) {
-          await delay(200);
-          first = await output({});
+  await withAPlayingEditor(
+    ({ adapter, project, runtimeDir }) =>
+      (tool) => {
+        if (tool === 'play_scene') {
+          held.game = spawn(engine, ['--headless', '--path', project], {
+            stdio: 'ignore',
+            env: {
+              ...process.env,
+              GDHARNESS_RUNTIME_DIR: runtimeDir,
+              GDHARNESS_EDITOR_PID: String(FAKE_EDITOR_PID),
+            },
+          });
+          return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
         }
-        assert.equal(
-          get(first, 'clean'),
-          false,
-          `a run that reported an error is not clean: ${JSON.stringify(first)}`,
-        );
-        assert.equal(get(first, 'errors'), 1, JSON.stringify(lines(first)));
-        assert.equal(get(first, 'warnings'), 1, JSON.stringify(lines(first)));
-        assert.ok(
-          lines(first).includes('error: clock: 7.5 is not one of the speeds on offer'),
-          `the push_error is an error entry: ${JSON.stringify(lines(first))}`,
-        );
-        assert.ok(
-          lines(first).includes('warning: the ladder has five rungs'),
-          `and the push_warning a warning entry: ${JSON.stringify(lines(first))}`,
-        );
-        const errorEntry = asArray(get(first, 'entries')).find(
-          (entry) => text(get(entry, 'text')) === 'clock: 7.5 is not one of the speeds on offer',
-        );
-        assert.match(
-          asArray(get(errorEntry, 'detail')).map(text).join('\n'),
-          /at: push_error/,
-          `with where it was raised under it: ${JSON.stringify(errorEntry)}`,
-        );
-        const transcript = text(get(first, 'transcript'));
-        assert.match(
-          readFileSync(transcript, 'utf8'),
-          /^ERROR: clock: 7\.5 is not one of the speeds on offer$/m,
-          "and the transcript carries the report in the engine's own line",
-        );
+        if (tool === 'playing_status') {
+          return {
+            ok: true,
+            playing: held.game?.exitCode === null,
+            scenePath: 'res://main.tscn',
+            debugPort: adapter,
+          };
+        }
+        if (tool === 'stop_playing') {
+          held.game?.kill();
+          return { ok: true };
+        }
+        return { ok: true };
+      },
+    async ({ server, project, start }) => {
+      writeFileSync(
+        join(project, 'main.gd'),
+        'extends Node\n\n\nfunc _ready() -> void:\n' +
+          '\tpush_error("clock: 7.5 is not one of the speeds on offer")\n' +
+          '\tpush_warning("the ladder has five rungs")\n\n\n' +
+          'func refuse(value: float) -> void:\n' +
+          '\tpush_error("refused %s at runtime" % value)\n',
+      );
+      writeFileSync(
+        join(project, 'main.tscn'),
+        '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+          '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+      );
+      const started = await start(20_000);
+      assert.equal(get(started.answer, 'through'), 'editor', JSON.stringify(started.answer));
+      assert.equal(get(started.answer, 'runtime', 'listening'), true, JSON.stringify(started.answer));
 
-        // An error raised later, through a runtime call, is in the next read and nothing is read
-        // twice.
-        const refused = parseTextContent(
+      const output = async (args: Record<string, unknown>): Promise<unknown> =>
+        parseTextContent(
           await server.request(
             'tools/call',
-            {
-              name: 'runtime_invoke',
-              arguments: { op: 'call', nodePath: '/root/Main', method: 'refuse', args: [7.5] },
-            },
+            { name: 'editor_output', arguments: args },
             ENGINE_CALL_TIMEOUT_MS,
           ),
         );
-        assert.ok(refused !== null, 'the call reaches the game');
-        const since = await output({ severity: 'error', sinceLastCall: true });
-        assert.deepEqual(
-          lines(since),
-          ['error: refused 7.5 at runtime'],
-          `only the new error, at error severity: ${JSON.stringify(lines(since))}`,
+      const lines = (answer: unknown): string[] =>
+        asArray(get(answer, 'entries')).map(
+          (entry) => `${text(get(entry, 'severity'))}: ${text(get(entry, 'text'))}`,
         );
-        assert.equal(get(since, 'errors'), 2, JSON.stringify(since));
-        assert.equal(get(since, 'clean'), false, JSON.stringify(since));
-        const again = await output({ severity: 'error', sinceLastCall: true });
-        assert.deepEqual(lines(again), [], `and nothing is reported twice: ${JSON.stringify(lines(again))}`);
+      // The boot's error and warning, with the engine's own `at:` line under the headline. Given a
+      // moment to arrive: the runtime autoload announces in its own _ready and the main scene
+      // reports in its, a frame later, so a read the instant the start answers can come before
+      // the report is written, which it did once on macOS. What is held is that it arrives. Both
+      // halves of it: the two are written as two lines, and a read between them has the error
+      // and not yet the warning, which it did once on macOS as well.
+      const deadline = Date.now() + 10_000;
+      let first = await output({});
+      while (
+        (asNumber(get(first, 'errors')) === 0 || asNumber(get(first, 'warnings')) === 0) &&
+        Date.now() < deadline
+      ) {
+        await delay(200);
+        first = await output({});
+      }
+      assert.equal(
+        get(first, 'clean'),
+        false,
+        `a run that reported an error is not clean: ${JSON.stringify(first)}`,
+      );
+      assert.equal(get(first, 'errors'), 1, JSON.stringify(lines(first)));
+      assert.equal(get(first, 'warnings'), 1, JSON.stringify(lines(first)));
+      assert.ok(
+        lines(first).includes('error: clock: 7.5 is not one of the speeds on offer'),
+        `the push_error is an error entry: ${JSON.stringify(lines(first))}`,
+      );
+      assert.ok(
+        lines(first).includes('warning: the ladder has five rungs'),
+        `and the push_warning a warning entry: ${JSON.stringify(lines(first))}`,
+      );
+      const errorEntry = asArray(get(first, 'entries')).find(
+        (entry) => text(get(entry, 'text')) === 'clock: 7.5 is not one of the speeds on offer',
+      );
+      assert.match(
+        asArray(get(errorEntry, 'detail')).map(text).join('\n'),
+        /at: push_error/,
+        `with where it was raised under it: ${JSON.stringify(errorEntry)}`,
+      );
+      const transcript = text(get(first, 'transcript'));
+      assert.match(
+        readFileSync(transcript, 'utf8'),
+        /^ERROR: clock: 7\.5 is not one of the speeds on offer$/m,
+        "and the transcript carries the report in the engine's own line",
+      );
 
+      // An error raised later, through a runtime call, is in the next read and nothing is read
+      // twice.
+      const refused = parseTextContent(
         await server.request(
           'tools/call',
-          { name: 'editor_run', arguments: { op: 'stop' } },
+          {
+            name: 'runtime_invoke',
+            arguments: { op: 'call', nodePath: '/root/Main', method: 'refuse', args: [7.5] },
+          },
+          ENGINE_CALL_TIMEOUT_MS,
+        ),
+      );
+      assert.ok(refused !== null, 'the call reaches the game');
+      const since = await output({ severity: 'error', sinceLastCall: true });
+      assert.deepEqual(
+        lines(since),
+        ['error: refused 7.5 at runtime'],
+        `only the new error, at error severity: ${JSON.stringify(lines(since))}`,
+      );
+      assert.equal(get(since, 'errors'), 2, JSON.stringify(since));
+      assert.equal(get(since, 'clean'), false, JSON.stringify(since));
+      const again = await output({ severity: 'error', sinceLastCall: true });
+      assert.deepEqual(lines(again), [], `and nothing is reported twice: ${JSON.stringify(lines(again))}`);
+
+      await server.request(
+        'tools/call',
+        { name: 'editor_run', arguments: { op: 'stop' } },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+    },
+    { realAddon: true, engine, held },
+  );
+}
+
+/**
+ * A method taking an object is handed the instance an argument's path names, not a copy and not
+ * null.
+ *
+ * JSON carries no objects, so a parameter typed as one could only ever be given null, and a drive
+ * had to reach a state through the buttons that one call would have made. The argument is a path
+ * to what the game holds, read from the node the method is on or from a node an absolute path
+ * names, and the check is identity: the game compares what it was handed with its own element by
+ * `is_same`.
+ *
+ * The parameter is a script class, `Gear`, because that is the reported shape and the one
+ * `is_class` does not answer for; a `Helm` extending it stands at the end of the list, so a
+ * subclass has to be recognised through the script's inheritance. Each refusal is paired with the
+ * game still holding what the last good call gave it, so a refusal is known not to have called
+ * the method with something else.
+ */
+async function testACallTakesAnObjectByItsPath(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('object argument regression skipped (Godot not found)');
+    return;
+  }
+  const held: { game: ChildProcess | null } = { game: null };
+  await withAPlayingEditor(
+    ({ adapter, project, runtimeDir }) =>
+      (tool) => {
+        if (tool === 'play_scene') {
+          held.game = spawn(engine, ['--headless', '--path', project], {
+            stdio: 'ignore',
+            env: {
+              ...process.env,
+              GDHARNESS_RUNTIME_DIR: runtimeDir,
+              GDHARNESS_EDITOR_PID: String(FAKE_EDITOR_PID),
+            },
+          });
+          return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
+        }
+        if (tool === 'playing_status') {
+          return {
+            ok: true,
+            playing: held.game?.exitCode === null,
+            scenePath: 'res://main.tscn',
+            debugPort: adapter,
+          };
+        }
+        if (tool === 'stop_playing') {
+          held.game?.kill();
+          return { ok: true };
+        }
+        return { ok: true };
+      },
+    async ({ server, project, start }) => {
+      writeFileSync(
+        join(project, 'gear.gd'),
+        'class_name Gear\nextends RefCounted\n\nvar label: String = ""\n',
+      );
+      writeFileSync(join(project, 'helm.gd'), 'class_name Helm\nextends Gear\n');
+      writeFileSync(
+        join(project, 'main.gd'),
+        'extends Node\n\nvar wares: Array[Gear] = []\nvar worn: Gear = null\n' +
+          'var by_name: Dictionary[String, Gear] = {"head": null}\n' +
+          'var spare: RefCounted = RefCounted.new()\nvar count: int = 3\n\n\n' +
+          'func _ready() -> void:\n' +
+          '\tfor index: int in 4:\n\t\tvar piece: Gear = Gear.new()\n' +
+          '\t\tpiece.label = "piece %d" % index\n\t\twares.append(piece)\n' +
+          '\tvar helm: Helm = Helm.new()\n\thelm.label = "helm"\n\twares.append(helm)\n\n\n' +
+          'func wear(piece: Gear) -> String:\n\tworn = piece\n\treturn piece.label\n\n\n' +
+          'func take_off(piece: Gear) -> bool:\n\tworn = piece\n\treturn worn == null\n\n\n' +
+          'func worn_is(index: int) -> bool:\n\treturn is_same(worn, wares[index])\n\n\n' +
+          'func same(one: int, other: int) -> bool:\n\treturn is_same(wares[one], wares[other])\n\n\n' +
+          'func head_is(index: int) -> bool:\n\treturn is_same(by_name["head"], wares[index])\n\n\n' +
+          'func named(node: Node) -> String:\n\treturn node.name\n',
+      );
+      writeFileSync(
+        join(project, 'main.tscn'),
+        '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+          '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+      );
+      // A game run straight off the files knows a script class only once the project has been
+      // imported, which is what writes the list of global classes an editor would have.
+      const imported = spawnSync(engine, ['--headless', '--path', project, '--import'], {
+        encoding: 'utf8',
+        timeout: 120_000,
+      });
+      assert.equal(imported.status, 0, `the project imports: ${imported.stdout}${imported.stderr}`);
+      const started = await start(20_000);
+      assert.equal(get(started.answer, 'runtime', 'listening'), true, JSON.stringify(started.answer));
+
+      const invoke = async (method: string, args: unknown[]): Promise<{ result: unknown; said: string }> => {
+        const response = await server.request(
+          'tools/call',
+          { name: 'runtime_invoke', arguments: { op: 'call', nodePath: '/root/Main', method, args } },
           ENGINE_CALL_TIMEOUT_MS,
         );
-      },
-      { realAddon: true, engine },
-    );
-  } finally {
-    if (held.game?.exitCode === null) {
-      held.game.kill();
-    }
-  }
+        const parsed = parseTextContent(response);
+        return {
+          result: parsed === null ? undefined : get(parsed, 'result'),
+          said: textOf(response) ?? '',
+        };
+      };
+      const wearing = async (index: number): Promise<unknown> => (await invoke('worn_is', [index])).result;
+
+      const worn = await invoke('wear', ['wares:2']);
+      assert.equal(worn.result, 'piece 2', `a path from the node hands over that element: ${worn.said}`);
+      assert.equal(await wearing(2), true, 'and the game holds that very instance, not a copy');
+
+      const absolute = await invoke('wear', ['/root/Main:wares:-1']);
+      assert.equal(
+        absolute.result,
+        'helm',
+        `a path from a named node, counting from the end: ${absolute.said}`,
+      );
+      assert.equal(await wearing(4), true, 'a subclass of the declared script class is accepted as it');
+
+      const node = await invoke('named', ['/root/Main']);
+      assert.equal(node.result, 'Main', `a node is named by its path alone: ${node.said}`);
+
+      const cleared = await invoke('take_off', [null]);
+      assert.equal(cleared.result, true, `null still reaches an object parameter as null: ${cleared.said}`);
+      await invoke('wear', ['wares:4']);
+
+      const refusals: [unknown, RegExp][] = [
+        [
+          'wares:9',
+          /^\/root\/Main\.wear argument 1: \/root\/Main:wares is a list of 5, so there is no 9 in it$/,
+        ],
+        ['count', /^\/root\/Main\.wear argument 1: \/root\/Main:count holds int, not an object$/],
+        ['spare', /^\/root\/Main\.wear argument 1: spare is RefCounted, not a Gear$/],
+        ['/root/Nope:wares:0', /^\/root\/Main\.wear argument 1: Node not found: \/root\/Nope$/],
+        [{ _type: 'Object', class: 'RefCounted', id: 1 }, /argument 1: an object is named by its path/],
+      ];
+      for (const [given, expected] of refusals) {
+        const refused = await invoke('wear', [given]);
+        assert.equal(refused.result, undefined, `${JSON.stringify(given)} is refused: ${refused.said}`);
+        assert.match(refused.said, expected, `and says why: ${refused.said}`);
+        assert.equal(
+          await wearing(4),
+          true,
+          `wear was not called with anything for ${JSON.stringify(given)}`,
+        );
+      }
+
+      // The same naming on a write. Each slot starts empty or holding another piece, so the write
+      // is what puts the instance there: an empty `Gear` property reads as no type at all, and is
+      // told apart from an untyped one only by what it declares.
+      const set = async (property: string, value: unknown): Promise<{ written: boolean; said: string }> => {
+        const response = await server.request(
+          'tools/call',
+          { name: 'runtime_invoke', arguments: { op: 'set', nodePath: '/root/Main', property, value } },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+        return { written: parseTextContent(response) !== null, said: textOf(response) ?? '' };
+      };
+      await invoke('take_off', [null]);
+      const intoProperty = await set('worn', 'wares:1');
+      assert.ok(intoProperty.written, `an empty typed property takes a path: ${intoProperty.said}`);
+      assert.equal(await wearing(1), true, 'and holds that very instance');
+      const intoList = await set('wares:0', 'wares:3');
+      assert.ok(intoList.written, `a typed list slot takes one: ${intoList.said}`);
+      assert.equal((await invoke('same', [0, 3])).result, true, 'and holds the instance the path named');
+      const intoMap = await set('by_name:head', '/root/Main:wares:2');
+      assert.ok(intoMap.written, `an empty typed map slot takes one: ${intoMap.said}`);
+      assert.equal(
+        (await invoke('head_is', [2])).result,
+        true,
+        'and the map holds the instance the path named',
+      );
+
+      const refusedWrites: [string, unknown, RegExp][] = [
+        ['worn', 'spare', /^\/root\/Main\.worn holds an object: spare is RefCounted, not a Gear$/],
+        ['wares:0', 'spare', /^\/root\/Main:wares\.0 holds an object: spare is RefCounted, not a Gear$/],
+        [
+          'worn',
+          'count',
+          /^\/root\/Main\.worn holds an object: \/root\/Main:count holds int, not an object$/,
+        ],
+      ];
+      for (const [property, value, expected] of refusedWrites) {
+        const refused = await set(property, value);
+        assert.equal(
+          refused.written,
+          false,
+          `${property} = ${JSON.stringify(value)} is refused: ${refused.said}`,
+        );
+        assert.match(refused.said, expected, `and says why: ${refused.said}`);
+      }
+      assert.equal(await wearing(1), true, 'the refused writes left the property as it was');
+      assert.equal((await invoke('same', [0, 3])).result, true, 'and the list slot');
+
+      await server.request(
+        'tools/call',
+        { name: 'editor_run', arguments: { op: 'stop' } },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+    },
+    { realAddon: true, engine, held },
+  );
 }
 
 /**
@@ -12542,67 +12826,62 @@ async function testAStopCanEndWhatTheGameStarted(): Promise<void> {
  */
 async function testAStopTakesTheEndedGamesAnnouncementDown(): Promise<void> {
   const held: { game: ChildProcess | null } = { game: null };
-  try {
-    await withAPlayingEditor(
-      ({ adapter, project, runtimeDir }) =>
-        (tool) => {
-          if (tool === 'play_scene') {
-            const game = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
-            held.game = game;
-            const pid = game.pid;
-            assert.ok(typeof pid === 'number', 'the fixture needs a live game');
-            setTimeout(() => {
-              writeFileSync(
-                join(runtimeDir, `runtime-${pid}.json`),
-                JSON.stringify({
-                  protocol: RUNTIME_PROTOCOL,
-                  pid,
-                  port: 51_998,
-                  address: '127.0.0.1',
-                  project: { name: 'Played', path: project },
-                  editor_pid: FAKE_EDITOR_PID,
-                }),
-                'utf8',
-              );
-            }, 100);
-            return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
-          }
-          if (tool === 'playing_status') {
-            const playing = held.game?.exitCode === null;
-            return { ok: true, playing, scenePath: playing ? 'res://main.tscn' : '', debugPort: adapter };
-          }
-          if (tool === 'stop_playing') {
-            held.game?.kill();
-            return { ok: true };
-          }
+  await withAPlayingEditor(
+    ({ adapter, project, runtimeDir }) =>
+      (tool) => {
+        if (tool === 'play_scene') {
+          const game = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+          held.game = game;
+          const pid = game.pid;
+          assert.ok(typeof pid === 'number', 'the fixture needs a live game');
+          setTimeout(() => {
+            writeFileSync(
+              join(runtimeDir, `runtime-${pid}.json`),
+              JSON.stringify({
+                protocol: RUNTIME_PROTOCOL,
+                pid,
+                port: 51_998,
+                address: '127.0.0.1',
+                project: { name: 'Played', path: project },
+                editor_pid: FAKE_EDITOR_PID,
+              }),
+              'utf8',
+            );
+          }, 100);
+          return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
+        }
+        if (tool === 'playing_status') {
+          const playing = held.game?.exitCode === null;
+          return { ok: true, playing, scenePath: playing ? 'res://main.tscn' : '', debugPort: adapter };
+        }
+        if (tool === 'stop_playing') {
+          held.game?.kill();
           return { ok: true };
-        },
-      async ({ server, runtimeDir, start }) => {
-        const started = await start(3_000);
-        const pid = held.game?.pid;
-        assert.ok(typeof pid === 'number', 'the play should have started the game');
-        assert.equal(get(started.answer, 'runtime', 'pid'), pid, JSON.stringify(started.answer));
-        const announcement = join(runtimeDir, `runtime-${pid}.json`);
-        assert.ok(existsSync(announcement), 'the announcement is there for the stop to take');
-
-        const stopped = parseTextContent(
-          await server.request('tools/call', { name: 'editor_run', arguments: { op: 'stop' } }, 60_000),
-        );
-        assert.equal(get(stopped, 'endedPid'), pid, JSON.stringify(stopped));
-        assert.equal(get(stopped, 'exitedBeforeStop'), false, JSON.stringify(stopped));
-        assert.equal(alive(pid), false, 'the game is gone by the time the stop answers');
-        assert.equal(
-          existsSync(announcement),
-          false,
-          'and its announcement went with it, before anything else looked',
-        );
+        }
+        return { ok: true };
       },
-    );
-  } finally {
-    if (held.game?.exitCode === null) {
-      held.game.kill();
-    }
-  }
+    async ({ server, runtimeDir, start }) => {
+      const started = await start(3_000);
+      const pid = held.game?.pid;
+      assert.ok(typeof pid === 'number', 'the play should have started the game');
+      assert.equal(get(started.answer, 'runtime', 'pid'), pid, JSON.stringify(started.answer));
+      const announcement = join(runtimeDir, `runtime-${pid}.json`);
+      assert.ok(existsSync(announcement), 'the announcement is there for the stop to take');
+
+      const stopped = parseTextContent(
+        await server.request('tools/call', { name: 'editor_run', arguments: { op: 'stop' } }, 60_000),
+      );
+      assert.equal(get(stopped, 'endedPid'), pid, JSON.stringify(stopped));
+      assert.equal(get(stopped, 'exitedBeforeStop'), false, JSON.stringify(stopped));
+      assert.equal(alive(pid), false, 'the game is gone by the time the stop answers');
+      assert.equal(
+        existsSync(announcement),
+        false,
+        'and its announcement went with it, before anything else looked',
+      );
+    },
+    { held },
+  );
 }
 
 /**
@@ -13484,6 +13763,11 @@ async function testARunEndedUnwatchedIsStillReadable(): Promise<void> {
           get(output, 'exitCode'),
           null,
           `nobody was waiting on it, so there is no code to report: ${JSON.stringify(output)}`,
+        );
+        assert.match(
+          text(get(output, 'note')),
+          /^This run was started by another server, the one this server replaced or one running beside it, and it ended with nothing here waiting on it/,
+          `saying whose run it was: ${text(get(output, 'note'))}`,
         );
         assert.equal(get(output, 'errors'), 1, JSON.stringify(output));
         assert.equal(
@@ -16535,6 +16819,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAKeyDoesNotChooseFromAnOpenedMenu,
   testAWrittenLineBreakMatchesATwoLineLabel,
   testAPlayedGamesReportsReachTheOutput,
+  testACallTakesAnObjectByItsPath,
   testARealBenchTakesItsWorkerWithIt,
   testAStopEndsTheProjectsUnannouncedWorkers,
   testARuntimeCallReachesThisServersOwnGame,
@@ -16612,6 +16897,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAPidIsNotAnIdentity,
   testTheEditorHoldingAProjectIsNotARunOfIt,
   testARunEndedUnwatchedIsStillReadable,
+  testARunEndedWithoutACodeSaysWhy,
   testAForeignRunSurvivesAStart,
   testARunOutlivesItsServer,
   testGdUnitRunner,
@@ -16692,6 +16978,7 @@ async function main(): Promise<void> {
 
   const failed: string[] = [];
   for (const test of chosen) {
+    sweepingFor(test.name);
     try {
       await test();
     } catch (error) {
