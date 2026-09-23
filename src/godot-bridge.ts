@@ -158,6 +158,12 @@ interface BridgeStatus {
   queuedResources: number;
   /** When an editor already up could first have reached this bridge, absent until it listens. */
   listeningSince?: Date | undefined;
+  /**
+   * The port this bridge was configured with, present only when it is on another one because that
+   * was held. Read beside a pinned `GDHARNESS_BRIDGE_PORT`, a different `port` otherwise looks like
+   * the pin being ignored.
+   */
+  portWanted?: number | undefined;
 }
 
 /**
@@ -434,6 +440,11 @@ export class GodotBridge extends EventEmitter {
       pendingRequests: this.pendingRequests.size,
       queuedResources: this.resourceQueues.size,
       listeningSince: this.listeningSince ?? undefined,
+      // Not for port 0, which asks for whichever port is free and so is never moved off.
+      portWanted:
+        this.wantedPort !== 0 && this.boundPort !== null && this.boundPort !== this.wantedPort
+          ? this.wantedPort
+          : undefined,
     };
   }
 
