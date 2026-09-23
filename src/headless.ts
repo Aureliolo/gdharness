@@ -12,6 +12,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
+import { callSignal } from './call-signal.js';
 import { emptyRecord } from './dictionary.js';
 import { GameLog, type LogEntry } from './game-log.js';
 import { discard } from './scratch.js';
@@ -117,14 +118,11 @@ export async function runImport(
 > {
   const logDir = mkdtempSync(join(tmpdir(), 'gdharness-import-'));
   try {
-    const { stderr } = await run(godotPath, [
-      '--headless',
-      '--log-file',
-      join(logDir, 'engine.log'),
-      '--path',
-      projectPath,
-      '--import',
-    ]);
+    const { stderr } = await run(
+      godotPath,
+      ['--headless', '--log-file', join(logDir, 'engine.log'), '--path', projectPath, '--import'],
+      { signal: callSignal() },
+    );
     return { ok: true, messages: problems(stderr) };
   } catch (error) {
     if (error instanceof Error && 'stdout' in error && 'stderr' in error) {
@@ -178,7 +176,8 @@ export async function runOperation(
   let stdout: string;
   let stderr: string;
   try {
-    ({ stdout, stderr } = await run(engine.godotPath, args));
+    // Ended with the call when the caller cancels it, rather than left to finish for nobody.
+    ({ stdout, stderr } = await run(engine.godotPath, args, { signal: callSignal() }));
   } catch (error) {
     if (error instanceof Error && 'stdout' in error && 'stderr' in error) {
       const failed = error as Error & { stdout: string; stderr: string; code?: number | string };

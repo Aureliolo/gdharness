@@ -198,6 +198,11 @@ export class ServerProcess {
     this.write({ jsonrpc: '2.0', method, params });
   }
 
+  /** The id the next request will carry, so a fixture can cancel a request it has sent. */
+  get nextRequestId(): number {
+    return this.nextId;
+  }
+
   /** Sends a request and resolves with its response, or rejects when the server dies or stalls. */
   async request(method: string, params: unknown = {}, timeoutMs = 10_000): Promise<JsonRpcMessage> {
     const id = this.nextId;
