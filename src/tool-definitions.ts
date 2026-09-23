@@ -1085,6 +1085,11 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         ops: ['metrics'],
         description: 'metrics: which to read. Default all.',
       },
+      timeoutMs: {
+        type: 'number',
+        description:
+          'How long to wait for the answer before answering pending with a requestId, which runtime_invoke op result collects the reply by. Default 10000, or GDHARNESS_RUNTIME_TIMEOUT_MS.',
+      },
     },
     requires: [],
     operations: {
@@ -1116,11 +1121,15 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'runtime_invoke',
     description:
-      'Sets a property or calls a method on a node in the running game. Needs the game running with the runtime addon.',
+      'Sets a property or calls a method on a node in the running game. Needs the game running with the runtime addon. A call that takes longer than timeoutMs is not cancelled: the answer is pending: true with a requestId, the call goes on and does everything it was asked, and op result with that requestId collects its reply once it comes.',
     parameters: {
       projectPath: RUNNING_PROJECT_PATH,
       pid: RUNNING_PID,
-      nodePath: { type: 'string', description: 'Absolute node path, such as "/root/Main/Player".' },
+      nodePath: {
+        type: 'string',
+        ops: ['set', 'call'],
+        description: 'Absolute node path, such as "/root/Main/Player".',
+      },
       property: {
         type: 'string',
         ops: ['set'],
@@ -1145,16 +1154,31 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         description:
           'call: the arguments, fitted to the method\'s parameter types. A parameter typed as an object takes a path naming one the game holds and is handed that instance: a colon path read from nodePath, "_game:run:wares:3", or one starting at a node, "/root/Main/Hud" or "/root/Main:_game:run". A path that reaches no object, or an object of another class than the parameter declares, is refused. A parameter typed as a list or map, such as Array[int] or Array[Gear], is built from a JSON list or object element by element, objects named by their paths.',
       },
+      timeoutMs: {
+        type: 'number',
+        ops: ['set', 'call'],
+        description:
+          'set, call: how long to wait for the answer before answering pending with a requestId, which does not stop the call. Default 10000, or GDHARNESS_RUNTIME_TIMEOUT_MS. Give a longer one for a call known to take a while, such as one that plays many turns in one go.',
+      },
+      requestId: {
+        type: 'number',
+        ops: ['result'],
+        description: 'result: the requestId a pending answer gave.',
+      },
     },
-    requires: ['nodePath'],
+    requires: [],
     operations: {
       set: {
         summary: 'set a property, on a node or on an object it holds',
-        requires: ['property', 'value'],
+        requires: ['nodePath', 'property', 'value'],
       },
       call: {
         summary: 'call a method, on a node or on an object it holds, and return its result',
-        requires: ['method'],
+        requires: ['nodePath', 'method'],
+      },
+      result: {
+        summary: 'collect the reply to a set or call whose wait ran out, by the requestId it answered with',
+        requires: ['requestId'],
       },
     },
   },

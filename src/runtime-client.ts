@@ -774,9 +774,54 @@ export type RuntimeReply =
       readonly ok: false;
       readonly reason: 'refused' | 'busy' | 'protocol' | 'error';
       readonly message: string;
+      /** For a request the wait ran out on: the id its answer is kept under when it comes. */
+      readonly requestId?: number;
     };
 
 let nextRequestId = 1;
+
+/**
+ * How long a request the wait ran out on is still listened for.
+ *
+ * Long enough for any call somebody would make in one go, a year of play in a single frame
+ * included, and short enough that a game that never answers does not hold a socket for the rest of
+ * the session.
+ */
+const LATE_ANSWER_MS = 30 * 60_000;
+
+/** How many late answers are kept, the oldest going first. */
+const LATE_KEPT = 50;
+
+/** What became of a request the wait ran out on, kept under its id for `lateAnswer`. */
+export type LateAnswer =
+  | { readonly state: 'waiting'; readonly command: string; readonly sentAt: number }
+  | {
+      readonly state: 'answered';
+      readonly command: string;
+      readonly sentAt: number;
+      readonly answeredAt: number;
+      readonly reply: RuntimeReply;
+    }
+  | { readonly state: 'never'; readonly command: string; readonly sentAt: number; readonly why: string };
+
+const lateAnswers = new Map<number, LateAnswer>();
+
+function keepLate(id: number, answer: LateAnswer): void {
+  lateAnswers.delete(id);
+  lateAnswers.set(id, answer);
+  while (lateAnswers.size > LATE_KEPT) {
+    const oldest = lateAnswers.keys().next().value;
+    if (oldest === undefined) {
+      break;
+    }
+    lateAnswers.delete(oldest);
+  }
+}
+
+/** What became of request [param id] after its wait ran out, or undefined for an id not kept. */
+export function lateAnswer(id: number): LateAnswer | undefined {
+  return lateAnswers.get(id);
+}
 
 /**
  * One request to one game, answered by the reply that carries its id.
@@ -784,21 +829,46 @@ let nextRequestId = 1;
  * The first line a game sends is its welcome, which names the protocol it speaks; a game built
  * against an older addon is told apart from one that answered wrongly. Anything else on the
  * wire that does not carry the id is somebody else's business and is skipped.
+ *
+ * A request the wait runs out on is not cancelled, and nothing could cancel it: the game has it,
+ * and a call that takes longer than the wait goes on and does everything it was asked. The answer
+ * used to call that a failure, a game "paused at a breakpoint or stuck in a long frame", and a
+ * caller who believed it repeated calls that had already run. With [param keepListening] the socket
+ * stays open after the wait, unreferenced, and the reply is kept under the request's id for
+ * `lateAnswer`.
  */
 export function runtimeRequest(
   endpoint: RuntimeEndpoint,
   command: string,
   params: Record<string, unknown>,
   timeoutMs: number,
+  keepListening = false,
 ): Promise<RuntimeReply> {
   const id = nextRequestId++;
+  const sentAt = Date.now();
   return new Promise((settle) => {
     let done = false;
+    let late = false;
     let buffered = '';
     let welcomed = false;
 
     const socket = createConnection({ port: endpoint.port, host: endpoint.address });
+    let lateTimer: NodeJS.Timeout | null = null;
     const finish = (reply: RuntimeReply): void => {
+      if (late) {
+        if (lateTimer !== null) {
+          clearTimeout(lateTimer);
+        }
+        socket.destroy();
+        keepLate(
+          id,
+          reply.ok || reply.reason === 'error'
+            ? { state: 'answered', command, sentAt, answeredAt: Date.now(), reply }
+            : { state: 'never', command, sentAt, why: reply.message },
+        );
+        late = false;
+        return;
+      }
       if (done) {
         return;
       }
@@ -808,10 +878,35 @@ export function runtimeRequest(
       settle(reply);
     };
     const timer = setTimeout(() => {
-      finish({
+      const still = welcomed
+        ? `The game (${describe(endpoint)}) has the request and did not answer '${command}' within ${timeoutMs}ms.`
+        : `The game (${describe(endpoint)}) did not answer '${command}' within ${timeoutMs}ms and had not taken the request: its frame has not ended since it was sent, which a long frame or a breakpoint does, and the request runs when it does.`;
+      if (!keepListening) {
+        finish({
+          ok: false,
+          reason: 'busy',
+          message: `${still} It is either working through something long or held at a breakpoint.`,
+        });
+        return;
+      }
+      // Answered now, and still listened for: the reply is kept when it comes.
+      done = true;
+      late = true;
+      keepLate(id, { state: 'waiting', command, sentAt });
+      lateTimer = setTimeout(() => {
+        finish({
+          ok: false,
+          reason: 'busy',
+          message: `No answer came within ${LATE_ANSWER_MS / 60_000} minutes.`,
+        });
+      }, LATE_ANSWER_MS);
+      lateTimer.unref();
+      socket.unref();
+      settle({
         ok: false,
         reason: 'busy',
-        message: `The game (${describe(endpoint)}) accepted the connection but did not answer '${command}' within ${timeoutMs}ms. It may be paused at a breakpoint or stuck in a long frame.`,
+        requestId: id,
+        message: `${still} Nothing was cancelled: a call that takes longer than the wait goes on and does everything it was asked, so read the state back rather than repeating it. runtime_invoke op result with requestId ${id} answers with its reply once it comes, and timeoutMs waits longer next time. A game held at a breakpoint instead is one debug_state stack answers about.`,
       });
     }, timeoutMs);
 
@@ -822,7 +917,7 @@ export function runtimeRequest(
     socket.on('data', (chunk: string) => {
       buffered += chunk;
       let newline = buffered.indexOf('\n');
-      while (newline !== -1 && !done) {
+      while (newline !== -1 && (!done || late)) {
         const line = buffered.slice(0, newline).trim();
         buffered = buffered.slice(newline + 1);
         newline = buffered.indexOf('\n');
