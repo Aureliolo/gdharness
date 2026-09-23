@@ -429,12 +429,56 @@ func _check_reading_into_a_list() -> void:
 	if called.get("result") != "ADA":
 		_fail("a method is called on an element of a list: %s" % str(called))
 
-	# A list is not a thing with methods, and saying "has no method" would read as a misspelling.
+	# A list answers the calls that read it and nothing else, and saying "has no method" would read
+	# as a misspelling.
 	var on_the_list: Dictionary = await node._execute_command(
 		"call_method", {"path": "/root/Level/Hero", "method": "roster:loudly"}
 	)
-	if on_the_list.get("type") != "error" or not str(on_the_list.get("message", "")).contains("is a list"):
-		_fail("a path stopping on a list says so in those terms: %s" % str(on_the_list))
+	var refused: String = str(on_the_list.get("message", ""))
+	if (
+		on_the_list.get("type") != "error"
+		or not refused.contains("is a list")
+		or not refused.contains("size()")
+	):
+		_fail("a path stopping on a list says so in those terms, with what it answers: %s" % str(on_the_list))
+
+	await _check_calling_a_list()
+
+
+## A list and a map answer the calls that read them, as a step: a board's size is what a wait for it
+## to fill is written against, and the step read it as an index and said the list had no size() in
+## it. Mutators are refused, because a path is how a read and a wait reach what they read.
+func _check_calling_a_list() -> void:
+	var cases: Array[Array] = [
+		["roster:size()", 2],
+		["roster:is_empty()", false],
+		["roster:back():called", "Cass"],
+		["tray:keys()", ["post", "wages"]],
+		["tray:size()", 2],
+	]
+	for case: Array in cases:
+		var read: Dictionary = await node._execute_command(
+			"get_property", {"path": "/root/Level/Hero", "property": case[0]}
+		)
+		if read.get("type") != "property" or read.get("value") != case[1]:
+			_fail("%s reads %s: %s" % [case[0], str(case[1]), str(read)])
+
+	var counted: Dictionary = await node._execute_command(
+		"call_method", {"path": "/root/Level/Hero", "method": "roster:size"}
+	)
+	if counted.get("type") != "method_result" or counted.get("result") != 2:
+		_fail("the call op makes the same call on a list: %s" % str(counted))
+
+	var emptied: Dictionary = await node._execute_command(
+		"get_property", {"path": "/root/Level/Hero", "property": "roster:clear()"}
+	)
+	var kept: Dictionary = await node._execute_command(
+		"get_property", {"path": "/root/Level/Hero", "property": "roster:size()"}
+	)
+	if emptied.get("type") != "error" or not str(emptied.get("message", "")).contains("not one of the calls"):
+		_fail("a call that changes the list is refused: %s" % str(emptied))
+	if kept.get("value") != 2:
+		_fail("and the list is as it was: %s" % str(kept))
 
 	# And the list itself, which was twelve copies of the word RefCounted with nothing to tell them
 	# apart. Each element carries what the game calls it, so a roster reads as people.
