@@ -10067,6 +10067,19 @@ async function testAStoppedSpawnedRunGivesWayToAPlay(): Promise<void> {
         false,
         `it was going until the stop: ${JSON.stringify(stopped)}`,
       );
+      // And gone by the time the stop answers, with the code it exited on: the answer used to be
+      // given as the signal left, so the process was still there, holding its project directory,
+      // and no exit code had been collected yet.
+      assert.equal(
+        alive(asNumber(get(stopped, 'endedPid'))),
+        false,
+        `the game is gone: ${JSON.stringify(stopped)}`,
+      );
+      assert.equal(
+        typeof get(stopped, 'exitCode'),
+        'number',
+        `and its exit is collected: ${JSON.stringify(stopped)}`,
+      );
 
       playing = true;
       const current = await call('editor_output', {});
