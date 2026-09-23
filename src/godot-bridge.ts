@@ -290,14 +290,20 @@ export class GodotBridge extends EventEmitter {
     return this.boundPort ?? this.wantedPort;
   }
 
+  /** The port it was configured with, whichever one it ends up on. */
+  public get configuredPort(): number {
+    return this.wantedPort;
+  }
+
   /**
    * Takes the port it was given, or any free one when that is held and it is allowed to move.
    *
    * Two projects open at once both want the same port, because nothing varies it per project, so
    * the second editor bridge never came up at all. A server that can announce where it landed
-   * does not need the port to be the one anybody agreed on beforehand.
+   * does not need the port to be the one anybody agreed on beforehand. [param moveIfHeld] false
+   * refuses a held port instead, for a caller that knows the holder is about to let it go.
    */
-  public async start(): Promise<void> {
+  public async start(moveIfHeld = true): Promise<void> {
     if (this.httpServer) {
       return;
     }
@@ -305,7 +311,7 @@ export class GodotBridge extends EventEmitter {
       await this.listenOn(this.wantedPort);
     } catch (error) {
       const held = error instanceof Error && 'code' in error && error.code === 'EADDRINUSE';
-      if (!held || !this.mayMove) {
+      if (!held || !this.mayMove || !moveIfHeld) {
         throw error;
       }
       this.log('warn', `Editor bridge port ${this.wantedPort} is held; taking another one.`);
