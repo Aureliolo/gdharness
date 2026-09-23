@@ -45,6 +45,33 @@ export function editorIsStale(
 }
 
 /**
+ * Why an editor reporting another version than this server's is not stale, or undefined when there
+ * is nothing to explain: the versions match, or the code is not known to be the same.
+ *
+ * An upgrade that leaves the editor addons alone leaves an open editor reporting the version it
+ * loaded at startup, which is right: it is running that code, and that code is this version's. The
+ * answer then showed an older addonVersion beside addonIsStale false, and a session read the gap as
+ * something to fix and restarted its editor for nothing.
+ */
+export function sameCodeNote(
+  addonVersion: string | undefined,
+  serverVersion: string,
+  addonDigest?: string,
+  shippedDigest?: string,
+): string | undefined {
+  if (
+    addonVersion === undefined ||
+    addonVersion === serverVersion ||
+    addonDigest === undefined ||
+    addonDigest === '' ||
+    addonDigest !== shippedDigest
+  ) {
+    return undefined;
+  }
+  return `The editor loaded the ${addonVersion} addons, which are the same code this ${serverVersion} server ships, so nothing needs restarting; addonVersion changes at the next editor start.`;
+}
+
+/**
  * What to do about an editor and a server shipping different addons, or undefined when they agree.
  *
  * Which half is behind decides the answer, and getting it wrong sends the reader the wrong way.
