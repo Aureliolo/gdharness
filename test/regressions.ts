@@ -5123,9 +5123,19 @@ function testAPidPicksOneOfSeveralGames(): void {
  * has gone.
  */
 async function testARunEndedWithoutACodeSaysWhy(): Promise<void> {
-  const other = endedWithoutACode({ throughEditor: false, announced: true, couldAnnounce: true });
+  const other = endedWithoutACode({
+    throughEditor: false,
+    announced: true,
+    couldAnnounce: true,
+    endedHere: false,
+  });
   assert.match(other, /^This run was started by another server/, other);
-  const starting = endedWithoutACode({ throughEditor: true, announced: false, couldAnnounce: true });
+  const starting = endedWithoutACode({
+    throughEditor: true,
+    announced: false,
+    couldAnnounce: true,
+    endedHere: false,
+  });
   assert.match(
     starting,
     /^The editor stopped playing this run before its game announced a runtime, so the game ended while it was starting or was closed in the editor\. /,
@@ -5139,14 +5149,39 @@ async function testARunEndedWithoutACodeSaysWhy(): Promise<void> {
     [true, true],
     [false, false],
   ] as const) {
-    const said = endedWithoutACode({ throughEditor: true, announced, couldAnnounce });
+    const said = endedWithoutACode({ throughEditor: true, announced, couldAnnounce, endedHere: false });
     assert.equal(
       said,
       "The editor stopped playing this run. A game the editor plays is the editor's own child, so its exit code stays with the editor and none was collected here. What it printed is below.",
       `announced ${String(announced)}, could announce ${String(couldAnnounce)}: ${said}`,
     );
   }
-  for (const said of [other, starting]) {
+  // Ended here, the answer says so in a sentence of its own, so this one only says why there is no
+  // code: a played game stopped before it announced did not end "while it was starting", this
+  // server ended it, and a run another server started was not waited on by anybody here.
+  const stoppedHere = endedWithoutACode({
+    throughEditor: true,
+    announced: false,
+    couldAnnounce: true,
+    endedHere: true,
+  });
+  assert.equal(
+    stoppedHere,
+    "A game the editor plays is the editor's own child, so its exit code stays with the editor and none was collected here. What it printed is below.",
+    stoppedHere,
+  );
+  const otherEndedHere = endedWithoutACode({
+    throughEditor: false,
+    announced: false,
+    couldAnnounce: true,
+    endedHere: true,
+  });
+  assert.match(
+    otherEndedHere,
+    /^This run was started by another server, so nothing here held it/,
+    otherEndedHere,
+  );
+  for (const said of [other, starting, stoppedHere, otherEndedHere]) {
     assert.doesNotMatch(said, /outlived/, said);
   }
 
@@ -7222,6 +7257,21 @@ async function testAFinishedRunCanStillBeRead(): Promise<void> {
         assert.ok(
           readFileSync(named, 'utf8').includes('the answer is 42'),
           `and the file it named holds what the run printed: ${named}`,
+        );
+
+        // A stop after it quit ends nothing, and the run is still answered as the one that quit on
+        // its own. The stop keeps the run it was asked about, so marking it on the way through
+        // would have this server claim an exit it had nothing to do with.
+        const late: unknown = JSON.parse(await call('editor_run', { op: 'stop' }, ENGINE_CALL_TIMEOUT_MS));
+        assert.equal(get(late, 'exitedBeforeStop'), true, JSON.stringify(late));
+        const afterStop: unknown = JSON.parse(
+          await call('editor_output', { limit: 200 }, ENGINE_CALL_TIMEOUT_MS),
+        );
+        assert.equal(get(afterStop, 'endedBy'), null, `still nothing ended it: ${JSON.stringify(afterStop)}`);
+        assert.match(
+          text(get(afterStop, 'note')),
+          /quit on its own, cleanly: exit code 0/,
+          JSON.stringify(afterStop),
         );
       },
       { GODOT_PATH: godotPath },
@@ -9736,6 +9786,197 @@ async function endGame(game: ChildProcess | null | undefined): Promise<void> {
   });
   game.kill();
   await gone;
+}
+
+/**
+ * A run this server stopped is still the run it answers about.
+ *
+ * The stop used to drop the run, so editor_output afterwards fell through to the notes on disk,
+ * and those are shared by every project on the machine: a played run stopped before its game
+ * announced was answered with another project's recorded run, refused as not this server's to
+ * answer for, and what the stop had done was nowhere. Written with another project's note on disk,
+ * which is the shape it was found in; without one the answer was "No game is running", no better.
+ *
+ * Then the states keeping the run creates. A second stop finds the run over and leaves it as the
+ * first recorded it, rather than ending it again. A scene the editor plays afterwards is the
+ * current run: a run this server stopped gives way to it, as it did while it was dropped, and asked
+ * before anything has read the stopped run, since a read is what otherwise settles it as over. And
+ * a play the editor never reported as playing, which is what an editor still scanning answers, is
+ * over once stopped rather than a play still on its way for the rest of the grace.
+ */
+async function testAStoppedRunIsStillTheOneAnswered(): Promise<void> {
+  let playing = false;
+  let answersThePlay = true;
+  await withAPlayingEditor(
+    ({ adapter, runtimeDir }) => {
+      // Another project's run, recorded and alive: this process, so the note is one a server would
+      // take seriously rather than sweep as over.
+      mkdirSync(join(runtimeDir, 'runs'), { recursive: true });
+      const transcript = join(runtimeDir, 'runs', 'elsewhere.log');
+      writeFileSync(transcript, 'another project printing its bench\n');
+      writeFileSync(
+        join(runtimeDir, 'runs', 'run.json'),
+        JSON.stringify({
+          pid: process.pid,
+          transcript,
+          startedAt: Date.now() - 60_000,
+          projectPath: join(runtimeDir, 'elsewhere'),
+          arguments: ['--headless'],
+          command: process.execPath,
+        }),
+      );
+      return (tool) => {
+        if (tool === 'play_scene') {
+          playing = answersThePlay;
+          return { ok: true, playing: answersThePlay, scenePath: 'res://main.tscn', debugPort: adapter };
+        }
+        if (tool === 'stop_playing') {
+          playing = false;
+          return { ok: true };
+        }
+        if (tool === 'playing_status') {
+          return { ok: true, playing, scenePath: playing ? 'res://main.tscn' : '', debugPort: adapter };
+        }
+        return { ok: true };
+      };
+    },
+    async ({ server, start }) => {
+      // A refusal is plain text, kept as the answer so an assertion reading a field shows it.
+      const call = async (name: string, args: Record<string, unknown>): Promise<unknown> => {
+        const response = await server.request('tools/call', { name, arguments: args });
+        return parseTextContent(response) ?? textOf(response);
+      };
+      const started = await start(300);
+      assert.equal(get(started.answer, 'through'), 'editor', JSON.stringify(started.answer));
+      assert.equal(get(started.answer, 'runtime', 'listening'), false, JSON.stringify(started.answer));
+
+      const stopped = await call('editor_run', { op: 'stop' });
+      assert.equal(get(stopped, 'stopped'), true, JSON.stringify(stopped));
+      assert.equal(get(stopped, 'endedPid'), null, JSON.stringify(stopped));
+      assert.match(
+        text(get(stopped, 'note')),
+        /Its game had not announced a runtime, so no process was named under endedPid/,
+        `the stop says why it names no process: ${JSON.stringify(stopped)}`,
+      );
+
+      const output = await call('editor_output', {});
+      assert.equal(
+        get(output, 'through'),
+        'editor',
+        `this server's own run is answered: ${JSON.stringify(output)}`,
+      );
+      assert.equal(get(output, 'running'), false, JSON.stringify(output));
+      assert.equal(get(output, 'endedBy'), 'editor_run stop', JSON.stringify(output));
+      assert.ok(
+        text(get(output, 'note')).startsWith(
+          "This run was ended here, by editor_run stop. A game the editor plays is the editor's own child, so its exit code stays with the editor and none was collected here.",
+        ),
+        `saying who ended it and why there is no code: ${text(get(output, 'note'))}`,
+      );
+
+      const again = await call('editor_run', { op: 'stop' });
+      assert.equal(get(again, 'exitedBeforeStop'), true, JSON.stringify(again));
+      assert.equal(
+        get(await call('editor_output', {}), 'endedBy'),
+        'editor_run stop',
+        'a second stop leaves the run as the first one recorded it',
+      );
+
+      // A scene played in the editor since, by anybody, straight after a stop: that is the run now.
+      await start(300);
+      await call('editor_run', { op: 'stop' });
+      playing = true;
+      const current = await call('editor_output', {});
+      assert.equal(
+        get(current, 'running'),
+        true,
+        `the editor's new play is picked up: ${JSON.stringify(current)}`,
+      );
+      assert.match(
+        text(get(current, 'note')),
+        /The editor was already playing this when this server reached it/,
+        JSON.stringify(current),
+      );
+
+      // An editor that never reported the play as playing, stopped inside the grace a play is given
+      // to start in.
+      answersThePlay = false;
+      await start(300);
+      assert.equal(get(await call('editor_run', { op: 'stop' }), 'stopped'), true);
+      const unstarted = await call('editor_output', {});
+      assert.equal(
+        get(unstarted, 'running'),
+        false,
+        `a play stopped here is not still on its way: ${JSON.stringify(unstarted)}`,
+      );
+      assert.equal(get(unstarted, 'endedBy'), 'editor_run stop', JSON.stringify(unstarted));
+    },
+  );
+}
+
+/**
+ * A spawned run this server stopped gives way to a scene the editor plays afterwards.
+ *
+ * The other half of the rule above. A spawned run that finished on its own stays the answer,
+ * because its output is what somebody is waiting to read; one this server was asked to stop is
+ * finished with, and the editor's play is the current run, as it was while a stop dropped the run.
+ * A real engine, because the run has to be going until the stop ends it.
+ */
+async function testAStoppedSpawnedRunGivesWayToAPlay(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('stopped spawned run regression skipped (Godot not found)');
+    return;
+  }
+  let playing = false;
+  await withAPlayingEditor(
+    ({ adapter }) =>
+      (tool) => {
+        if (tool === 'playing_status') {
+          return { ok: true, playing, scenePath: playing ? 'res://main.tscn' : '', debugPort: adapter };
+        }
+        return { ok: true };
+      },
+    async ({ server, project }) => {
+      const call = async (name: string, args: Record<string, unknown>): Promise<unknown> => {
+        const response = await server.request(
+          'tools/call',
+          { name, arguments: args },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+        return parseTextContent(response) ?? textOf(response);
+      };
+      // Arguments of its own, which is what has this server start it rather than the editor.
+      const started = await call('editor_run', {
+        projectPath: project,
+        op: 'start',
+        headless: true,
+        args: ['--stay'],
+        runtimeWaitMs: 20_000,
+      });
+      assert.equal(get(started, 'through'), 'gdharness', JSON.stringify(started));
+      const stopped = await call('editor_run', { op: 'stop' });
+      assert.equal(
+        get(stopped, 'exitedBeforeStop'),
+        false,
+        `it was going until the stop: ${JSON.stringify(stopped)}`,
+      );
+
+      playing = true;
+      const current = await call('editor_output', {});
+      assert.equal(
+        get(current, 'through'),
+        'editor',
+        `the editor's play is the run now: ${JSON.stringify(current)}`,
+      );
+      assert.equal(get(current, 'running'), true, JSON.stringify(current));
+      playing = false;
+    },
+    { realAddon: true, engine },
+  );
 }
 
 async function testAPlayedStartStopsWaitingForAGameThatIsOver(): Promise<void> {
@@ -16806,6 +17047,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEditorOnAnotherVersionIsStillAskedWhatItIsPlaying,
   testAGameTheEditorHasStoppedPlayingIsNotStillActive,
   testAPlayedStartStopsWaitingForAGameThatIsOver,
+  testAStoppedRunIsStillTheOneAnswered,
+  testAStoppedSpawnedRunGivesWayToAPlay,
   testTheAnnounceWaitIsNotHeldByASlowEditor,
   testTheWaitSizedToABootIsSaid,
   testTheWaitIsSizedToTheLastBoot,
