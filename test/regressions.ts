@@ -1896,6 +1896,86 @@ async function testAProjectUpgradedUnderTheServerIsSaid(): Promise<void> {
  * note is there: without it the young server's `true` is the right answer and is asserted as such,
  * so the `false` below is the note and not the window having closed.
  */
+/**
+ * A bridge that moved off the port it was configured with says so, and which port that was.
+ *
+ * A server that can announce where it listens takes another port when its own is held, which is
+ * right: after a reconnect the server being replaced can still be letting go of it. The answer then
+ * gave the new port and nothing else, and read beside `GDHARNESS_BRIDGE_PORT` pinned in the
+ * project's `.mcp.json` it looked like the pin being ignored. Paired with a server on a free port,
+ * which reports neither field, so the fields are the move and not always there.
+ */
+async function testABridgeThatMovedSaysFromWhere(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-moved-bridge-'));
+  const wanted = await reservePort();
+  const holder = createServer();
+  await new Promise<void>((resolve) => {
+    holder.listen(wanted, '127.0.0.1', resolve);
+  });
+  const moved = new ServerProcess({
+    env: { GDHARNESS_PROJECT: project, GDHARNESS_BRIDGE_PORT: String(wanted) },
+  });
+  const free = await reservePort();
+  const settled = new ServerProcess({
+    env: { GDHARNESS_PROJECT: project, GDHARNESS_BRIDGE_PORT: String(free) },
+  });
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="MovedBridge"\n',
+    );
+    await moved.initialize('regression-test');
+    const editor = get(
+      parseTextContent(await moved.request('tools/call', { name: 'editor_status', arguments: {} })),
+      'editor',
+    );
+    const said = JSON.stringify(editor);
+    const took = asNumber(get(editor, 'port'), 'the bridge is on a port');
+    assert.notEqual(took, wanted, `the held port was not taken: ${said}`);
+    assert.equal(get(editor, 'portWanted'), wanted, `the configured port is named: ${said}`);
+    assert.match(
+      text(get(editor, 'portNote')),
+      new RegExp(
+        `^Port ${wanted}, the one this server was configured with, was held by another process when the bridge started, so it took ${took} and announced that where the editor looks for it`,
+      ),
+      said,
+    );
+
+    await settled.initialize('regression-test');
+    const plain = get(
+      parseTextContent(await settled.request('tools/call', { name: 'editor_status', arguments: {} })),
+      'editor',
+    );
+    assert.equal(get(plain, 'port'), free, JSON.stringify(plain));
+    assert.equal(
+      get(plain, 'portWanted'),
+      undefined,
+      `a bridge on its own port names no other: ${JSON.stringify(plain)}`,
+    );
+    assert.equal(get(plain, 'portNote'), undefined, JSON.stringify(plain));
+
+    // A bridge asked for port 0 asked for whichever port is free, so the one it lands on is not a
+    // move away from anything.
+    const anyPort = createBridge(0, 1000, '127.0.0.1', project);
+    await anyPort.start();
+    try {
+      assert.notEqual(anyPort.getStatus().port, 0, 'it is listening on a real port');
+      assert.equal(anyPort.getStatus().portWanted, undefined, 'and names no port it moved from');
+    } finally {
+      await anyPort.stop();
+    }
+  } finally {
+    await moved.stop();
+    await settled.stop();
+    await new Promise<void>((resolve) => {
+      holder.close(() => {
+        resolve();
+      });
+    });
+    sweep(project);
+  }
+}
+
 async function testARestartLeftHalfDoneIsSaid(): Promise<void> {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-half-restart-'));
   const port = await reservePort();
@@ -17022,6 +17102,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEveryFixtureIsCalled,
   testBothEndsAgreeAboutTheAnnouncement,
   testARestartLeftHalfDoneIsSaid,
+  testABridgeThatMovedSaysFromWhere,
   testASupersededServerStandsDown,
   testAProjectUpgradedUnderTheServerIsSaid,
   testEveryDispatchedNameExistsOnBothSides,

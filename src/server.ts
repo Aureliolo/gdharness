@@ -3333,6 +3333,13 @@ class GodotServer {
       // this in its own answer; an open cannot, because it returns before the save happens.
       ...(status.connected ? this.whatTheLaunchedEditorDropped() : {}),
       startupError: this.bridgeStartupError,
+      // Why `port` is not the one configured, when it is not. Beside a pinned port it read as the pin
+      // being ignored, when the pinned port had been held as this server started: after a reconnect,
+      // by the server this one replaced, still letting go of it.
+      portNote:
+        status.portWanted === undefined
+          ? undefined
+          : `Port ${status.portWanted}, the one this server was configured with, was held by another process when the bridge started, so it took ${status.port} and announced that where the editor looks for it${this.announcedAt === null ? '' : `, ${this.announcedAt}`}. The editor finds it there; the next server started takes ${status.portWanted} again if it is free.`,
       staleNote: stale
         ? addonMismatch(status.addonVersion, SERVER_VERSION, status.addonDigest, shippedEditorDigest())
         : undefined,
