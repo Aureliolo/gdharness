@@ -141,6 +141,7 @@ import {
   chooseRuntime,
   discoverRuntimes,
   errorReportOf,
+  lateAnswer,
   RUNTIME_PROTOCOL,
   type RuntimeEndpoint,
   runtimeDirectory,
@@ -2004,58 +2005,87 @@ class GodotServer {
       case 'editor_rescan':
         return await this.handleRescanFilesystem(args);
 
-      case 'runtime_inspect':
+      case 'runtime_inspect': {
+        const patience = readPositiveNumber(args, 'timeoutMs') ?? this.runtimeTimeoutMs();
         switch (op) {
           case 'tree':
-            return await this.handleRuntimeCommand('get_tree', {
-              ...whichGame(args),
-              root: readNonEmptyString(args, 'nodePath') ?? '/root',
-              depth: readPositiveNumber(args, 'depth') ?? 3,
-              include_properties: readBoolean(args, 'includeProperties') ?? false,
-              properties: readArray(args, 'properties') ?? [],
-            });
+            return await this.handleRuntimeCommand(
+              'get_tree',
+              {
+                ...whichGame(args),
+                root: readNonEmptyString(args, 'nodePath') ?? '/root',
+                depth: readPositiveNumber(args, 'depth') ?? 3,
+                include_properties: readBoolean(args, 'includeProperties') ?? false,
+                properties: readArray(args, 'properties') ?? [],
+              },
+              patience,
+            );
           case 'find':
-            return await this.handleFindRuntimeNodes(args);
+            return await this.handleFindRuntimeNodes(args, patience);
           case 'text':
-            return await this.handleRuntimeCommand('read_text', {
-              ...whichGame(args),
-              root: readNonEmptyString(args, 'nodePath') ?? '/root',
-              include_hidden: readBoolean(args, 'includeHidden') ?? false,
-              limit: readPositiveNumber(args, 'limit') ?? 500,
-            });
+            return await this.handleRuntimeCommand(
+              'read_text',
+              {
+                ...whichGame(args),
+                root: readNonEmptyString(args, 'nodePath') ?? '/root',
+                include_hidden: readBoolean(args, 'includeHidden') ?? false,
+                limit: readPositiveNumber(args, 'limit') ?? 500,
+              },
+              patience,
+            );
           case 'rect':
-            return await this.handleRuntimeCommand('get_rect', {
-              ...whichGame(args),
-              path: readNonEmptyString(args, 'nodePath') ?? '',
-            });
+            return await this.handleRuntimeCommand(
+              'get_rect',
+              { ...whichGame(args), path: readNonEmptyString(args, 'nodePath') ?? '' },
+              patience,
+            );
           case 'property':
-            return await this.handleRuntimeCommand('get_property', {
-              ...whichGame(args),
-              path: readNonEmptyString(args, 'nodePath') ?? '',
-              property: readNonEmptyString(args, 'property') ?? '',
-            });
+            return await this.handleRuntimeCommand(
+              'get_property',
+              {
+                ...whichGame(args),
+                path: readNonEmptyString(args, 'nodePath') ?? '',
+                property: readNonEmptyString(args, 'property') ?? '',
+              },
+              patience,
+            );
           default:
-            return await this.handleRuntimeCommand('get_metrics', {
-              ...whichGame(args),
-              metrics: readArray(args, 'metrics') ?? [],
-            });
+            return await this.handleRuntimeCommand(
+              'get_metrics',
+              { ...whichGame(args), metrics: readArray(args, 'metrics') ?? [] },
+              patience,
+            );
         }
-      case 'runtime_invoke':
+      }
+      case 'runtime_invoke': {
+        if (op === 'result') {
+          return this.handleLateAnswer(args);
+        }
+        const patience = readPositiveNumber(args, 'timeoutMs') ?? this.runtimeTimeoutMs();
         // The value and the arguments are fitted to the property's or the method's own types
         // on the game's side.
         return op === 'set'
-          ? await this.handleRuntimeCommand('set_property', {
-              ...whichGame(args),
-              path: readNonEmptyString(args, 'nodePath') ?? '',
-              property: readString(args, 'property') ?? '',
-              value: args['value'],
-            })
-          : await this.handleRuntimeCommand('call_method', {
-              ...whichGame(args),
-              path: readNonEmptyString(args, 'nodePath') ?? '',
-              method: readString(args, 'method') ?? '',
-              args: readArray(args, 'args') ?? [],
-            });
+          ? await this.handleRuntimeCommand(
+              'set_property',
+              {
+                ...whichGame(args),
+                path: readNonEmptyString(args, 'nodePath') ?? '',
+                property: readString(args, 'property') ?? '',
+                value: args['value'],
+              },
+              patience,
+            )
+          : await this.handleRuntimeCommand(
+              'call_method',
+              {
+                ...whichGame(args),
+                path: readNonEmptyString(args, 'nodePath') ?? '',
+                method: readString(args, 'method') ?? '',
+                args: readArray(args, 'args') ?? [],
+              },
+              patience,
+            );
+      }
       case 'runtime_capture':
         return await this.handleRuntimeCommand(
           op === 'screenshot' ? 'capture_screenshot' : 'capture_viewport',
@@ -6737,7 +6767,21 @@ class GodotServer {
         command,
         screenshotPath ? { ...params, output_path: screenshotPath } : params,
         timeoutMs,
+        !expectsScreenshot,
       );
+      // A request the wait ran out on is still going in the game, so it is answered as pending
+      // rather than as a failure: the call has not failed, and a caller told it had repeated calls
+      // that had already run.
+      if (!reply.ok && reply.requestId !== undefined) {
+        return this.jsonTextResponse({
+          pending: true,
+          requestId: reply.requestId,
+          command,
+          waitedMs: timeoutMs,
+          note: reply.message,
+          ...answeredBy,
+        });
+      }
       if (!reply.ok) {
         return this.createErrorResponse(reply.message);
       }
@@ -6783,8 +6827,51 @@ class GodotServer {
     }
   }
 
+  /**
+   * runtime_invoke result: what became of a request whose wait ran out, by the id its pending
+   * answer gave.
+   *
+   * The reply is kept when it comes, so a call that outlived the wait is collected rather than made
+   * again to find out what it did.
+   */
+  private handleLateAnswer(args: OperationParams): ToolResponse {
+    const requestId = readPositiveNumber(args, 'requestId') ?? 0;
+    const late = lateAnswer(requestId);
+    if (late === undefined) {
+      return this.createErrorResponse(
+        `No request ${requestId} is waiting to be collected here: an id is kept only from a pending answer this server gave, and only for its fifty most recent.`,
+      );
+    }
+    if (late.state === 'waiting') {
+      return this.jsonTextResponse({
+        pending: true,
+        requestId,
+        command: late.command,
+        sentAgoMs: Date.now() - late.sentAt,
+        note: 'The game has not answered it yet. It is still being listened for, and this answers with the reply once it comes.',
+      });
+    }
+    if (late.state === 'never') {
+      return this.createErrorResponse(
+        `Request ${requestId} ('${late.command}') got no answer: ${late.why} Read the state back to see whether it ran.`,
+      );
+    }
+    const reply = late.reply;
+    if (!reply.ok) {
+      return this.createErrorResponse(
+        `Request ${requestId} ('${late.command}') was answered with a refusal: ${reply.message}`,
+      );
+    }
+    const { id: _id, ...payload } = reply.payload;
+    return this.jsonTextResponse({
+      ...payload,
+      requestId,
+      answeredAfterMs: late.answeredAt - late.sentAt,
+    });
+  }
+
   /** runtime_inspect find: only the filters that were given are sent, so the game decides. */
-  private async handleFindRuntimeNodes(args: OperationParams): Promise<ToolResponse> {
+  private async handleFindRuntimeNodes(args: OperationParams, patience: number): Promise<ToolResponse> {
     const filters: Record<string, unknown> = {};
     const className = readNonEmptyString(args, 'className');
     const script = readNonEmptyString(args, 'script');
@@ -6806,18 +6893,22 @@ class GodotServer {
     // panel had been rebuilt and half the paths were gone.
     const property = readNonEmptyString(args, 'property');
     const includeHidden = readBoolean(args, 'includeHidden');
-    return await this.handleRuntimeCommand('find_nodes', {
-      ...filters,
-      ...whichGame(args),
-      root: readNonEmptyString(args, 'nodePath') ?? '/root',
-      limit: readPositiveNumber(args, 'limit') ?? 100,
-      ...(property === undefined ? {} : { property }),
-      // Sent only when asked for, so what goes over the wire stays what the caller named. The
-      // default lives on the addon side and is true there, unlike the same argument on text: a
-      // find names a class or a group and means the node whether or not it is drawn, while text
-      // is what somebody reads off the screen.
-      ...(includeHidden === undefined ? {} : { include_hidden: includeHidden }),
-    });
+    return await this.handleRuntimeCommand(
+      'find_nodes',
+      {
+        ...filters,
+        ...whichGame(args),
+        root: readNonEmptyString(args, 'nodePath') ?? '/root',
+        limit: readPositiveNumber(args, 'limit') ?? 100,
+        ...(property === undefined ? {} : { property }),
+        // Sent only when asked for, so what goes over the wire stays what the caller named. The
+        // default lives on the addon side and is true there, unlike the same argument on text: a
+        // find names a class or a group and means the node whether or not it is drawn, while text
+        // is what somebody reads off the screen.
+        ...(includeHidden === undefined ? {} : { include_hidden: includeHidden }),
+      },
+      patience,
+    );
   }
 
   /**
