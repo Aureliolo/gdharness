@@ -11905,7 +11905,9 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
         join(project, 'main.gd'),
         'extends Node\n\nvar wares: Array[Gear] = []\nvar worn: Gear = null\n' +
           'var by_name: Dictionary[String, Gear] = {"head": null}\n' +
-          'var spare: RefCounted = RefCounted.new()\nvar count: int = 3\n\n\n' +
+          'var spare: RefCounted = RefCounted.new()\nvar count: int = 3\n' +
+          'var done_at: Array[int] = []\nvar tally: Dictionary[String, int] = {}\n' +
+          'var locked: int = 5:\n\tset(value):\n\t\tpass\n\n\n' +
           'func _ready() -> void:\n' +
           '\tfor index: int in 4:\n\t\tvar piece: Gear = Gear.new()\n' +
           '\t\tpiece.label = "piece %d" % index\n\t\twares.append(piece)\n' +
@@ -11915,7 +11917,11 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
           'func worn_is(index: int) -> bool:\n\treturn is_same(worn, wares[index])\n\n\n' +
           'func same(one: int, other: int) -> bool:\n\treturn is_same(wares[one], wares[other])\n\n\n' +
           'func head_is(index: int) -> bool:\n\treturn is_same(by_name["head"], wares[index])\n\n\n' +
-          'func named(node: Node) -> String:\n\treturn node.name\n',
+          'func named(node: Node) -> String:\n\treturn node.name\n\n\n' +
+          'func total(numbers: Array[int]) -> int:\n\tvar sum: int = 0\n\tfor n: int in numbers:\n\t\tsum += n\n' +
+          '\treturn sum\n\n\n' +
+          'func armour(pieces: Array[Gear]) -> String:\n\tvar labels: Array[String] = []\n' +
+          '\tfor piece: Gear in pieces:\n\t\tlabels.append(piece.label)\n\treturn ", ".join(labels)\n',
       );
       writeFileSync(
         join(project, 'main.tscn'),
@@ -12032,6 +12038,48 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
       }
       assert.equal(await wearing(1), true, 'the refused writes left the property as it was');
       assert.equal((await invoke('same', [0, 3])).result, true, 'and the list slot');
+
+      // A typed container written with the plain one JSON carries. The engine keeps what it held and
+      // says nothing, so this answered as a set whose old and new values were both [].
+      const listed = await set('done_at', [30, '12']);
+      assert.ok(listed.written, `a list is fitted to Array[int]: ${listed.said}`);
+      assert.deepEqual(
+        get(JSON.parse(listed.said), 'new_value'),
+        [30, 12],
+        `with each element fitted: ${listed.said}`,
+      );
+      const worded = await set('done_at', ['thirty']);
+      assert.equal(worded.written, false, `an element that is no number is refused: ${worded.said}`);
+      assert.match(
+        worded.said,
+        /^\/root\/Main\.done_at is a typed list: element 0 is "thirty", which cannot become int\.$/,
+        worded.said,
+      );
+      const mapped = await set('tally', { wins: '3' });
+      assert.ok(mapped.written, `a map is fitted to Dictionary[String, int]: ${mapped.said}`);
+      assert.match(mapped.said, /"new_value":\s*\{\s*"wins":\s*3\s*\}/, mapped.said);
+
+      // A write the engine will not take is refused rather than answered as done.
+      const kept = await set('locked', 9);
+      assert.equal(kept.written, false, `a property that ignores the write is refused: ${kept.said}`);
+      assert.match(
+        kept.said,
+        /^\/root\/Main\.locked was given 9 and still holds 5: the engine kept what it had/,
+        kept.said,
+      );
+
+      // And a typed list as an argument, which raised inside the game when handed a plain one.
+      const summed = await invoke('total', [[1, 2, '3']]);
+      assert.equal(summed.result, 6, `an Array[int] argument is built from the list: ${summed.said}`);
+      const pieces = await invoke('armour', [['wares:0', '/root/Main:wares:-1']]);
+      // wares:0 holds piece 3 by now, written there by the list-slot set above.
+      assert.equal(pieces.result, 'piece 3, helm', `and an Array[Gear] from paths: ${pieces.said}`);
+      const stray = await invoke('armour', [[7]]);
+      assert.match(
+        stray.said,
+        /^\/root\/Main\.armour takes a typed list as argument 1: element 0 is 7(\.0)?, which cannot become Gear\.$/,
+        stray.said,
+      );
 
       await server.request(
         'tools/call',
