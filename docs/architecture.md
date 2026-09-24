@@ -361,18 +361,29 @@ once the server is there, rather than waiting for somebody to restart it.
 | `editor_run`                                                          | Editor bridge when an editor is connected, otherwise a spawned game | Nothing, though the editor changes what it does |
 | `editor_status`                                                       | All of them, reporting what answers                                 | Nothing                                         |
 
-`project_import refresh_classes` is the one headless call that also asks the editor, when one is
-connected and open on the same project. Rewriting the cache does not reach the list a running
-editor already loaded, so a class it cannot resolve stays unresolvable and the rebuild still
-answers `added: []`. Any such class comes back under `unseenByEditor`, and `classesUnchecked` says
-so when the editor would not answer, because a check that goes quiet on failure reads exactly like
-a clean project. `editor_rescan` reports the same two after its scan.
+`project_import refresh_classes` is the one headless call that also asks the editor what classes
+it holds, when one is connected and open on the same project. Rewriting the cache does not reach
+the list a running editor already loaded, so a class it cannot resolve stays unresolvable and the
+rebuild still answers `added: []`. Any such class comes back under `unseenByEditor`, and
+`classesUnchecked` says so when the editor would not answer, because a check that goes quiet on
+failure reads exactly like a clean project. `editor_rescan` reports the same two after its scan.
 
 The scan also writes `.godot/global_script_class_cache.cfg` from the list the editor is holding,
 so that file follows the editor rather than the project: a class the editor cannot resolve is one
 the scan drops out of the file, and the next fresh engine, CI run or clone starts from the
 narrower one. Reading the file after a scan therefore says nothing the editor has not already
 said, which is why `unseenByEditor` is the whole answer and not half of it.
+
+The write lands a frame after the editor stops reporting the scan, measured on 4.7.2, and an engine
+reads the file as it boots, so one started during the scan or in that frame resolves no global
+class at all. Every engine the server starts on a project (a run, a boot check, a test run, a
+headless operation, the import pass) first asks an editor open on that project with the addon's
+`scan_status`, waits out a scan or import in progress, then waits for the cache to be newer than the
+scan's end or for two seconds past it, and says how long under `waitedForEditorScanMs`. A class
+cache rebuild waits before it reads the cache it compares against, so the list the editor writes is
+the one compared. A scan still going after thirty seconds is an import of large assets rather than
+a script scan, and the engine starts anyway with a `scanNote`. An editor that does not answer, or
+whose addon predates `scan_status`, is not waited for.
 
 The editor writes that file on every save as well, so an editor holding a shorter list than the
 files takes the same classes out of it between any two rebuilds, and each rebuild puts them back.
