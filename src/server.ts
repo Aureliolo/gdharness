@@ -125,6 +125,7 @@ import { noteRestartBegun, type RestartNote, restartOwed, restartSettled } from 
 import {
   clearRunRecord,
   couldStillBeTheRecordedRun,
+  everyRunRecord,
   listeningPid,
   openTranscript,
   readEditorRunNote,
@@ -4935,12 +4936,15 @@ class GodotServer {
     const running = this.activeProcess;
     // Read before the note is taken away, because it is what says the pid below still means this
     // run: the number alone does not.
-    const recorded = running !== null && !running.throughEditor ? readRunRecord() : null;
+    const project = running?.projectPath ?? this.ourProject();
+    const recorded = running !== null && !running.throughEditor && project !== null ? readRunRecord(project) : null;
     // A run somebody has ended is not one the next server should offer to pick back up, and the
     // note outlives this process unless it is taken away here. Only this project's, because the
     // directories it is looked for in are shared with whatever else is running on this machine.
     const clearTheRecord = (): void => {
-      clearRunRecord((record) => this.couldBeOurs(record.projectPath));
+      if (project !== null) {
+        clearRunRecord(project);
+      }
     };
     // Except for a run a keeper holds, whose exit the keeper writes into the note as the game goes:
     // cleared first, that exit had nowhere to land, and the stop answered with no code at all.
@@ -5234,9 +5238,7 @@ class GodotServer {
     // note from another project's run would put its output under this one's heading, which is the
     // fault this whole method exists to end.
     const project = this.godotBridge.getStatus().projectPath ?? null;
-    const left = readEditorRunNote();
-    const note =
-      left !== null && project !== null && isSameDirectory(left.projectPath, project) ? left : null;
+    const note = project === null ? null : readEditorRunNote(project);
     const picked: GodotProcess = {
       pid: null,
       log: new GameLog(),
@@ -5503,7 +5505,8 @@ class GodotServer {
    * everything it printed. Both beat "No game is running", which was the answer to either.
    */
   private adoptRecordedRun(): GodotProcess | null {
-    const record = readRunRecord();
+    const project = this.ourProject();
+    const record = project === null ? null : readRunRecord(project);
     if (record === null || !this.couldBeOurs(record.projectPath)) {
       return null;
     }
@@ -5630,11 +5633,11 @@ class GodotServer {
         ' this game running as well.'
       );
     }
-    const record = readRunRecord();
+    const mine = this.ourProject();
+    const record = everyRunRecord().find((one) => mine === null || !isSameDirectory(one.projectPath, mine)) ?? null;
     if (record === null) {
       return `No game is running.${noEditor} Start one with editor_run.`;
     }
-    const mine = this.ownProject ?? (status.connected ? (status.projectPath ?? null) : null);
     const whose = record.projectPath === '' ? 'a project it does not name' : record.projectPath;
     const ours =
       mine === null
@@ -5718,8 +5721,7 @@ class GodotServer {
   }
 
   private couldBeOurs(project: string): boolean {
-    const status = this.godotBridge.getStatus();
-    const mine = this.ownProject ?? (status.connected ? (status.projectPath ?? null) : null);
+    const mine = this.ourProject();
     if (mine === null) {
       return false;
     }
@@ -5727,6 +5729,15 @@ class GodotServer {
     // server's, and the reason to keep reading it is the same reason it is not killed by pid
     // alone: the cost of being wrong lands on somebody else.
     return project !== '' && isSameDirectory(mine, project);
+  }
+
+  /**
+   * The project this server answers for: the one it was told to serve, or else the one the editor
+   * on the bridge has open, or null when it can name neither.
+   */
+  private ourProject(): string | null {
+    const status = this.godotBridge.getStatus();
+    return this.ownProject ?? (status.connected ? (status.projectPath ?? null) : null);
   }
 
   /**
@@ -5890,7 +5901,7 @@ class GodotServer {
   private async untilTheExitIsRecorded(run: GodotProcess): Promise<boolean> {
     const until = Date.now() + EXIT_REPORTED_WITHIN_MS;
     for (;;) {
-      const record = readRunRecord();
+      const record = run.projectPath === null ? null : readRunRecord(run.projectPath);
       if (
         record !== null &&
         record.pid === run.pid &&

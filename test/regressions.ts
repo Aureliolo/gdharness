@@ -100,6 +100,7 @@ import { projectStructure, searchProject } from '../src/project-scan.js';
 import { parseProjectGodot, settingKeys, settingsDroppedReport } from '../src/resources.js';
 import { noteRestartBegun, restartNotePath, restartOwed, restartSettled } from '../src/restart-note.js';
 import {
+  clearRunRecord,
   couldStillBeTheRecordedRun,
   judgeRun,
   listeningPid,
@@ -107,7 +108,9 @@ import {
   readRunRecord,
   recordRunEnded,
   runningAs,
+  runRecordPath,
   stillTheRecordedRun,
+  sweepTranscripts,
   writeEditorRunNote,
   writeRunRecord,
 } from '../src/run-record.js';
@@ -6305,7 +6308,8 @@ async function testRuntimeConnectedIsAboutThisProjectsGames(): Promise<void> {
 
 async function testATestServerWritesWhereNoRealRunIs(): Promise<void> {
   const project = mkdtempSync(join(tmpdir(), 'gdharness-isolation-'));
-  const shared = join(runtimeDirectory(withoutRuntimeDir(process.env)), 'runs', 'run.json');
+  // Where this project's note would land in the directory every gdharness on the machine shares.
+  const shared = runRecordPath(project, runtimeDirectory(withoutRuntimeDir(process.env)));
   // Read rather than removed: something of this machine's may be running, and a fixture that
   // cleared it would be doing the very thing it is here to prove cannot happen.
   const before = existsSync(shared) ? readFileSync(shared, 'utf8') : null;
@@ -6332,7 +6336,7 @@ async function testATestServerWritesWhereNoRealRunIs(): Promise<void> {
     assert.ok(pid > 0, `the fixture needs a run to have been started: ${JSON.stringify(started)}`);
 
     assert.ok(server.runtimeDir !== null, 'a server given no runtime directory is given one here');
-    const ours = join(server.runtimeDir, 'runs', 'run.json');
+    const ours = runRecordPath(project, server.runtimeDir);
     assert.ok(existsSync(ours), `the run is recorded in this server's own directory: ${ours}`);
     assert.equal(
       get(JSON.parse(readFileSync(ours, 'utf8')), 'pid'),
@@ -10393,7 +10397,7 @@ async function testAStoppedRunIsStillTheOneAnswered(): Promise<void> {
       const transcript = join(runtimeDir, 'runs', 'elsewhere.log');
       writeFileSync(transcript, 'another project printing its bench\n');
       writeFileSync(
-        join(runtimeDir, 'runs', 'run.json'),
+        runRecordPath(join(runtimeDir, 'elsewhere'), runtimeDir),
         JSON.stringify({
           pid: process.pid,
           transcript,
@@ -10613,7 +10617,7 @@ async function testAKilledRunHasNoExitCode(): Promise<void> {
           await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS),
         );
       const note = (): Record<string, unknown> =>
-        JSON.parse(readFileSync(join(runtimeDir, 'runs', 'run.json'), 'utf8')) as Record<string, unknown>;
+        JSON.parse(readFileSync(runRecordPath(project, runtimeDir), 'utf8')) as Record<string, unknown>;
 
       const kept = await call('editor_run', {
         projectPath: project,
@@ -14741,6 +14745,81 @@ async function withAHeldGame(
 }
 
 /**
+ * Each project keeps its own run note, so one project's runs cannot take another project's away.
+ *
+ * The runs directory is every project's on the machine, and there was one note in it: after
+ * fantasy-guild-manager started a game, ostinato started a dozen benches, each writing the note,
+ * so when fantasy-guild-manager's server was replaced its successor found no run of its own and
+ * refused to end its game as somebody else's. Two projects' notes are written here in turn, and
+ * each is read, ended and cleared without touching the other; the note every project shared before
+ * is still read for the project it names and for no other, since a run a server of that version
+ * started has to be picked up after the upgrade; and a transcript either note names outlives the
+ * sweep of old ones.
+ */
+function testRunNotesAreKeptPerProject(): void {
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-notes-'));
+  const guild = join(tmpdir(), 'the-guild');
+  const bench = join(tmpdir(), 'the-bench');
+  const had = process.env['GDHARNESS_RUNTIME_DIR'];
+  process.env['GDHARNESS_RUNTIME_DIR'] = runtimeDir;
+  try {
+    const runs = join(runtimeDir, 'runs');
+    mkdirSync(runs, { recursive: true });
+    const guildLog = join(runs, 'run-1.log');
+    const benchLog = join(runs, 'run-2.log');
+    writeFileSync(guildLog, 'guild\n');
+    writeFileSync(benchLog, 'bench\n');
+    const note = (projectPath: string, pid: number, transcript: string) => ({
+      pid,
+      transcript,
+      startedAt: Date.now(),
+      projectPath,
+      arguments: ['--path', projectPath],
+      command: 'godot',
+    });
+    writeRunRecord(note(guild, 22520, guildLog));
+    writeRunRecord(note(bench, 31337, benchLog));
+    assert.equal(readRunRecord(guild)?.pid, 22520, 'the guild run is still its note after the bench started');
+    assert.equal(readRunRecord(bench)?.pid, 31337, 'and the bench has its own');
+    // The same project spelled the way an editor reports it, with forward slashes.
+    assert.equal(readRunRecord(guild.replaceAll('\\', '/'))?.pid, 22520, 'whichever way the path is spelled');
+
+    recordRunEnded(bench, 31337, { exitCode: 0, exitSignal: null });
+    assert.equal(readRunRecord(bench)?.exitCode, 0, "the bench's ending goes into the bench's note");
+    assert.equal(readRunRecord(guild)?.exitCode, undefined, 'and not into the guild run');
+
+    // Old transcripts are swept, and one a note names is not, whichever project it is.
+    const aDayAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+    utimesSync(guildLog, aDayAgo, aDayAgo);
+    utimesSync(benchLog, aDayAgo, aDayAgo);
+    sweepTranscripts();
+    assert.ok(existsSync(guildLog), "the guild run's transcript is kept while its note names it");
+    assert.ok(existsSync(benchLog), "and so is the bench's");
+
+    clearRunRecord(bench);
+    assert.equal(readRunRecord(bench), null, 'clearing the bench takes its note away');
+    assert.equal(readRunRecord(guild)?.pid, 22520, 'and leaves the guild run');
+
+    // The one note every project shared before, left by a server of that version.
+    clearRunRecord(guild);
+    writeFileSync(join(runs, 'run.json'), JSON.stringify(note(guild, 40404, guildLog)));
+    assert.equal(readRunRecord(guild)?.pid, 40404, 'the shared note is read for the project it names');
+    assert.equal(readRunRecord(bench), null, 'and for no other');
+    clearRunRecord(bench);
+    assert.ok(existsSync(join(runs, 'run.json')), "another project's clear leaves it");
+    clearRunRecord(guild);
+    assert.equal(existsSync(join(runs, 'run.json')), false, "its own project's clear takes it away");
+  } finally {
+    if (had === undefined) {
+      delete process.env['GDHARNESS_RUNTIME_DIR'];
+    } else {
+      process.env['GDHARNESS_RUNTIME_DIR'] = had;
+    }
+    sweep(runtimeDir);
+  }
+}
+
+/**
  * What a run ended with outlives the server that watched it end.
  *
  * A run is spawned detached so a reconnect cannot take it, and the next server reads the note on
@@ -14749,11 +14828,12 @@ async function withAHeldGame(
  * that had finished cleanly under a server the harness then replaced came back reported as one
  * whose exit code "was never collected", which is true of the reading and false of the run.
  *
- * The note is shared by every server on this machine, so the half that matters as much is the one
- * where the pid is not ours: writing an ending into somebody else's note ends their bench on paper.
+ * A later run of the same project replaces the note, so the half that matters as much is the one
+ * where the pid is not the note's: writing an ending into it would end the later run on paper.
  */
 function testAnExitCodeOutlivesTheServerThatSawIt(): void {
   const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-ending-'));
+  const project = join(tmpdir(), 'a-game');
   const had = process.env['GDHARNESS_RUNTIME_DIR'];
   process.env['GDHARNESS_RUNTIME_DIR'] = runtimeDir;
   try {
@@ -14761,17 +14841,21 @@ function testAnExitCodeOutlivesTheServerThatSawIt(): void {
       pid: 4242,
       transcript: join(runtimeDir, 'run.log'),
       startedAt: Date.now(),
-      projectPath: join(tmpdir(), 'a-game'),
+      projectPath: project,
       arguments: ['--headless'],
       command: 'godot',
     });
-    assert.equal(readRunRecord()?.exitCode, undefined, 'a run still going has no ending to report');
+    assert.equal(readRunRecord(project)?.exitCode, undefined, 'a run still going has no ending to report');
 
-    recordRunEnded(9999, { exitCode: 3, exitSignal: null });
-    assert.equal(readRunRecord()?.exitCode, undefined, "another run's ending is not written into this note");
+    recordRunEnded(project, 9999, { exitCode: 3, exitSignal: null });
+    assert.equal(
+      readRunRecord(project)?.exitCode,
+      undefined,
+      "another run's ending is not written into this note",
+    );
 
-    recordRunEnded(4242, { exitCode: 3, exitSignal: null });
-    const after = readRunRecord();
+    recordRunEnded(project, 4242, { exitCode: 3, exitSignal: null });
+    const after = readRunRecord(project);
     assert.ok(after !== null, 'the note should still be there to read');
     assert.equal(after.exitCode, 3, 'the code its own server saw is kept for whoever reads next');
     assert.equal(after.pid, 4242, 'and the rest of the note is still there');
@@ -15060,7 +15144,7 @@ async function testARecordedEndingIsReadBack(): Promise<void> {
       const transcript = join(runs, 'run-1.log');
       writeFileSync(transcript, 'row 1: 42 wins\n');
       writeFileSync(
-        join(runs, 'run.json'),
+        runRecordPath(join(runtimeDir, 'project'), runtimeDir),
         JSON.stringify({
           pid: ended.pid,
           transcript,
@@ -15111,7 +15195,7 @@ async function testARunEndedUnwatchedIsStillReadable(): Promise<void> {
     assert.ok(ended.pid > 0, 'the fixture needs a process that has been and gone');
 
     writeFileSync(
-      join(runs, 'run.json'),
+      runRecordPath(join(runtimeDir, 'project'), runtimeDir),
       JSON.stringify({
         pid: ended.pid,
         transcript,
@@ -15330,7 +15414,7 @@ async function benchThroughAStart(
 
   try {
     writeFileSync(
-      join(runtimeDir, 'runs', 'run.json'),
+      runRecordPath(recorded, runtimeDir),
       JSON.stringify({
         pid: benchPid,
         command: process.execPath,
@@ -18668,6 +18752,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAFinishedRunCanStillBeRead,
   testOnlyOurOwnAutoloadIsRewritten,
   testAnExitCodeOutlivesTheServerThatSawIt,
+  testRunNotesAreKeptPerProject,
   testAPidIsNotAnIdentity,
   testTheEditorHoldingAProjectIsNotARunOfIt,
   testARunEndedUnwatchedIsStillReadable,
