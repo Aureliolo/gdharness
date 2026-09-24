@@ -1000,6 +1000,30 @@ interface ScanWait {
  * none, how long when there was, and a note when it gave up waiting, since a game started during a
  * scan can fail on a correct script and the caller would otherwise go looking in the script.
  */
+/** The scan-wait fields an answer already carries, to be passed on by an answer built from it. */
+function scanWaitIn(payload: OperationParams): { waitedForEditorScanMs?: number; scanNote?: string } {
+  const waited = readNumber(payload, 'waitedForEditorScanMs');
+  const note = readString(payload, 'scanNote');
+  return {
+    ...(waited === undefined ? {} : { waitedForEditorScanMs: waited }),
+    ...(note === undefined ? {} : { scanNote: note }),
+  };
+}
+
+/** [param outcome] carrying what was waited for before it, in its answer or its refusal. */
+function withScanWait(outcome: HeadlessOutcome, scanned: ScanWait): HeadlessOutcome {
+  if (scanned.waitedMs === 0) {
+    return outcome;
+  }
+  const said = scanWaitAnswer(scanned);
+  if (outcome.ok) {
+    return { ...outcome, payload: { ...outcome.payload, ...said } };
+  }
+  return said.scanNote === undefined
+    ? outcome
+    : { ...outcome, message: `${outcome.message} ${said.scanNote}` };
+}
+
 function scanWaitAnswer(scanned: ScanWait): {
   waitedForEditorScanMs?: number;
   scanNote?: string | undefined;
@@ -2695,25 +2719,33 @@ class GodotServer {
     }
     const projectPath = project.value.path;
 
+    // The import pass is an engine on the project that writes the class cache itself, so it waits
+    // for the open editor's scan the way every other engine started here does.
+    const scanned = await this.untilTheEditorsScanIsWritten(projectPath);
     const before = scriptsWithoutUid(projectPath);
     const imported = await runImport(engine.value, projectPath);
     if (!imported.ok) {
-      return this.answer(imported);
+      return this.answer(withScanWait(imported, scanned));
     }
     const after = scriptsWithoutUid(projectPath);
     const given = before.filter((script) => !after.includes(script));
 
-    return this.answer({
-      ok: true,
-      messages: imported.messages,
-      payload: {
-        uidsCreated: given,
-        stillWithoutUid: after,
-        // Said rather than implied: the op resaved every scene for as long as it existed, so a
-        // caller who knows it by its diff needs telling that the diff is the bug and is gone.
-        note: uidsLeftNote(after.length),
-      },
-    });
+    return this.answer(
+      withScanWait(
+        {
+          ok: true,
+          messages: imported.messages,
+          payload: {
+            uidsCreated: given,
+            stillWithoutUid: after,
+            // Said rather than implied: the op resaved every scene for as long as it existed, so a
+            // caller who knows it by its diff needs telling that the diff is the bug and is gone.
+            note: uidsLeftNote(after.length),
+          },
+        },
+        scanned,
+      ),
+    );
   }
 
   private async operation(
@@ -2732,13 +2764,18 @@ class GodotServer {
         messages: [],
       };
     }
+    // Every operation boots an engine on the project, and an engine resolves the project's classes
+    // from the cache as it starts, so one started while the editor rewrites it fails on correct
+    // scripts; a class cache rebuilt here would also be written over by the editor's list.
+    const scanned = await this.untilTheEditorsScanIsWritten(projectPath);
     this.logDebug(`Running ${operation} in ${projectPath}: ${JSON.stringify(params)}`);
-    return await runOperation(
+    const outcome = await runOperation(
       { godotPath: engine.value, script: this.operationsScript, debug: GODOT_DEBUG_MODE_DEFAULT },
       operation,
       params,
       projectPath,
     );
+    return withScanWait(outcome, scanned);
   }
 
   private answer(outcome: HeadlessOutcome): ToolResponse {
@@ -2979,10 +3016,13 @@ class GodotServer {
       return engine.response;
     }
 
+    // The rebuild waits out the editor's scan before it runs, so what it waited is what this run
+    // waited, and the engine below starts on the cache the rebuild left.
     const classes = await this.rebuildClassCache(project.value.path);
     if (!classes.ok) {
       return this.answer(classes);
     }
+    const scanned = scanWaitIn(classes.payload);
 
     // Under a name of this run's own. The directory is a path in the project rather than in this
     // process, so a second run against the same project wrote its report_1 beside the first's,
@@ -3112,6 +3152,7 @@ class GodotServer {
                 arguments: cmdArgs,
                 entries: forAnswer(printed.slice(0, 60)),
                 savesNote,
+                ...scanned,
               },
               null,
               2,
@@ -3174,6 +3215,7 @@ class GodotServer {
       orphans: orphans.total > 0 ? orphans.total : undefined,
       notRun: notRun > 0 ? notRun : undefined,
       savesNote,
+      ...scanned,
       // The word on its own was the whole answer, and it named neither what was warned nor where.
       note:
         verdict.startsWith('warnings') && warnings.length === 0
@@ -6578,6 +6620,13 @@ class GodotServer {
    * rescan send them to the restart instead.
    */
   private async rebuildClassCache(projectPath: string): Promise<HeadlessOutcome> {
+    // Before the cache is read for comparison, so a list the editor writes at the end of a scan is
+    // the one compared against rather than one that lands between the reading and the rebuild.
+    const scanned = await this.untilTheEditorsScanIsWritten(projectPath);
+    return withScanWait(await this.rebuildClassCacheFromDisk(projectPath), scanned);
+  }
+
+  private async rebuildClassCacheFromDisk(projectPath: string): Promise<HeadlessOutcome> {
     const before = cachedClasses(projectPath);
     const writtenBefore = cacheWrittenAt(projectPath);
     const noted = readClassNote(projectPath);

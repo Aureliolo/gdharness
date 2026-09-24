@@ -17442,6 +17442,156 @@ async function testAStartWaitsOutTheEditorsScan(): Promise<void> {
       `and an editor that is not scanning holds nothing up: ${idle.said}`,
     );
 
+    // A class cache rebuilt during a scan, which the editor's own write would land over a moment
+    // later, putting back whatever list it holds. The rebuild waits for that write and goes after
+    // it, so the file left behind is the rebuild's.
+    cacheBeforeTheScan();
+    const rebuildScanEnds = Date.now() + 1_000;
+    scanning = () => Date.now() < rebuildScanEnds;
+    finishedAt = rebuildScanEnds;
+    const editorWrites = delay(2_500).then(() => {
+      writeFileSync(cache, WRITTEN_AFTER_THE_SCAN);
+    });
+    const rebuilt = await server.request(
+      'tools/call',
+      { name: 'project_import', arguments: { projectPath: project, op: 'refresh_classes' } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    await editorWrites;
+    assert.doesNotMatch(
+      readFileSync(cache, 'utf8'),
+      /written after the scan/,
+      `a rebuild should come after the editor's write rather than under it: ${textOf(rebuilt)}`,
+    );
+    const rebuildWaited = get(parseTextContent(rebuilt), 'waitedForEditorScanMs');
+    assert.ok(
+      typeof rebuildWaited === 'number' && rebuildWaited >= 2_000,
+      `and say it waited: ${textOf(rebuilt)}`,
+    );
+
+    // Any other engine started on the project, which resolves the same classes as it boots.
+    cacheBeforeTheScan();
+    const listScanEnds = Date.now() + 1_000;
+    scanning = () => Date.now() < listScanEnds;
+    finishedAt = listScanEnds;
+    const listWrite = delay(1_500).then(() => {
+      writeFileSync(cache, WRITTEN_AFTER_THE_SCAN);
+    });
+    const listed = await server.request(
+      'tools/call',
+      { name: 'project_export', arguments: { projectPath: project, op: 'list' } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    await listWrite;
+    const listWaited = get(parseTextContent(listed), 'waitedForEditorScanMs');
+    assert.ok(
+      typeof listWaited === 'number' && listWaited >= 1_400,
+      `a headless operation waits for the scan and its write as well: ${textOf(listed)}`,
+    );
+
+    // A class the last rebuild listed and the editor's write leaves out. The rebuild compares the
+    // cache with what it wrote last time to say the editor dropped something, and that reading has
+    // to be of the cache the editor wrote, so it is taken after the wait rather than before it.
+    const keeper = join(project, 'keeper.gd');
+    writeFileSync(keeper, 'class_name Keeper\nextends Node\n');
+    const twoMinutesAgo = new Date(Date.now() - 120_000);
+    utimesSync(keeper, twoMinutesAgo, twoMinutesAgo);
+    cacheBeforeTheScan();
+    scanning = () => false;
+    finishedAt = Date.now() - 60_000;
+    await server.request(
+      'tools/call',
+      { name: 'project_import', arguments: { projectPath: project, op: 'refresh_classes' } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    const droppingScanEnds = Date.now() + 1_000;
+    scanning = () => Date.now() < droppingScanEnds;
+    finishedAt = droppingScanEnds;
+    const dropping = delay(2_500).then(() => {
+      writeFileSync(cache, EMPTY);
+    });
+    const afterTheDrop = await server.request(
+      'tools/call',
+      { name: 'project_import', arguments: { projectPath: project, op: 'refresh_classes' } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    await dropping;
+    assert.deepEqual(
+      get(parseTextContent(afterTheDrop), 'lostSinceLastRebuild'),
+      ['Keeper'],
+      `a class the editor's write dropped during the wait is named as dropped: ${textOf(afterTheDrop)}`,
+    );
+    rmSync(keeper);
+    scanning = () => false;
+    finishedAt = Date.now() - 60_000;
+    await server.request(
+      'tools/call',
+      { name: 'project_import', arguments: { projectPath: project, op: 'refresh_classes' } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+
+    // The import pass, an engine of its own that writes the class cache as well.
+    cacheBeforeTheScan();
+    const importScanEnds = Date.now() + 1_000;
+    scanning = () => Date.now() < importScanEnds;
+    finishedAt = importScanEnds;
+    const importWrite = delay(1_500).then(() => {
+      writeFileSync(cache, WRITTEN_AFTER_THE_SCAN);
+    });
+    const imported = await server.request(
+      'tools/call',
+      { name: 'project_import', arguments: { projectPath: project, op: 'refresh_uids' } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    await importWrite;
+    const importWaited = get(parseTextContent(imported), 'waitedForEditorScanMs');
+    assert.ok(
+      typeof importWaited === 'number' && importWaited >= 1_400,
+      `the import pass waits for the scan and its write: ${textOf(imported)}`,
+    );
+
+    // A gdUnit4 run, whose engine starts on the cache its class rebuild left, and whose answer is
+    // built apart from the rebuild's, so the wait has to be carried across.
+    const gdunit = process.env['GDUNIT4_PATH'];
+    if (gdunit && existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+      cpSync(gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
+      mkdirSync(join(project, 'test'));
+      writeFileSync(
+        join(project, 'test', 'sums_test.gd'),
+        'extends GdUnitTestSuite\n\n\nfunc test_two_and_two() -> void:\n\tassert_int(2 + 2).is_equal(4)\n',
+      );
+      cacheBeforeTheScan();
+      const testScanEnds = Date.now() + 1_000;
+      scanning = () => Date.now() < testScanEnds;
+      finishedAt = testScanEnds;
+      const testWrite = delay(1_500).then(() => {
+        writeFileSync(cache, WRITTEN_AFTER_THE_SCAN);
+      });
+      const tested = await server.request(
+        'tools/call',
+        { name: 'project_test', arguments: { projectPath: project } },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+      await testWrite;
+      const testWaited = get(parseTextContent(tested), 'waitedForEditorScanMs');
+      assert.ok(
+        typeof testWaited === 'number' && testWaited >= 1_400,
+        `a test run says it waited for the scan: ${textOf(tested)}`,
+      );
+      assert.equal(get(parseTextContent(tested), 'passed'), true, `and then ran: ${textOf(tested)}`);
+      rmSync(join(project, 'addons'), { recursive: true, force: true });
+      rmSync(join(project, 'test'), { recursive: true, force: true });
+      scanning = () => false;
+      finishedAt = Date.now() - 60_000;
+      await server.request(
+        'tools/call',
+        { name: 'project_import', arguments: { projectPath: project, op: 'refresh_classes' } },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+    } else {
+      console.log('the test run case of the scan regression skipped (GDUNIT4_PATH not set)');
+    }
+
     // A scan that does not end: started anyway, and said.
     cacheBeforeTheScan();
     scanning = () => true;
