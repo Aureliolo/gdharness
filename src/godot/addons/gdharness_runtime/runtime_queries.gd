@@ -385,6 +385,13 @@ static func _drawn(node: Node) -> bool:
 ## took the game it was watching from 60 frames a second to 11. A node without the property reads
 ## as null, which is not a string.
 static func said_by(node: Node) -> String:
+	# A RichTextLabel's text is its markup when it reads BBCode, and nobody reads the tags: a
+	# dossier line came back as "[b][color=#4fc2d4]Mollum Telken[/color], [/b]..." and a phrase
+	# running across a tag could not be found or waited for. The parsed text is what is drawn, and
+	# it also holds what a game added with append_text(), which the property never shows.
+	if node is RichTextLabel:
+		var rich: RichTextLabel = node
+		return rich.get_parsed_text().strip_edges()
 	var text: Variant = node.get("text")
 	if not text is String:
 		return ""

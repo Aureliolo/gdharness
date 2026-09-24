@@ -187,6 +187,39 @@ func _check_reading_the_screen(panel: Panel) -> void:
 	choices.free()
 
 
+## A RichTextLabel reads as its words, not its markup. Its text is the BBCode when it reads BBCode,
+## and a dossier line came back as "[b][color=#4fc2d4]Mollum Telken[/color], [/b]...", so a phrase
+## running across a tag could be neither read, found nor waited for. And a line a game adds with
+## append_text() is in no property at all.
+func _check_reading_rich_text() -> void:
+	var dossier: VBoxContainer = VBoxContainer.new()
+	dossier.name = "Dossier"
+	root.add_child(dossier)
+	var marked: RichTextLabel = RichTextLabel.new()
+	marked.bbcode_enabled = true
+	marked.fit_content = true
+	marked.text = "[b][color=#4fc2d4]Mollum Telken[/color], [/b][color=#c2ae92]a thief-taker[/color]"
+	dossier.add_child(marked)
+	var appended: RichTextLabel = RichTextLabel.new()
+	appended.fit_content = true
+	appended.append_text("Docket 72, [b]an errand[/b]")
+	dossier.add_child(appended)
+	await process_frame
+
+	var said: Dictionary = await node._execute_command("read_text", {"root": "/root/Dossier"})
+	var lines: Array = said.get("lines", [])
+	if lines != ["Mollum Telken, a thief-taker", "Docket 72, an errand"]:
+		_fail("rich text reads as what is drawn, with no tags in it: %s" % str(said))
+
+	var found: Dictionary = await node._execute_command(
+		"find_nodes", {"says": "Telken, a thief", "root": "/root/Dossier"}
+	)
+	if found.get("count") != 1:
+		_fail("a phrase running across a tag is found: %s" % str(found))
+
+	dossier.free()
+
+
 ## A name with no wildcard in it, which is the shape a caller writes when they mean "contains".
 ##
 ## [method String.matchn] answers nothing to it, and nothing is also what a name that is not in the
@@ -753,6 +786,7 @@ func _check() -> void:
 		_fail("a find from a root that is not there is refused: %s" % str(missing))
 
 	await _check_reading_the_screen(panel)
+	await _check_reading_rich_text()
 
 	var rect: Dictionary = await node._execute_command("get_rect", {"path": "/root/Panel/Go"})
 	var canvas: Dictionary = rect.get("canvas", {})
