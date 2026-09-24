@@ -265,7 +265,7 @@ function testTypedGate(godotPath: string, projectDir: string): void {
   const shipped = shippedScripts();
   const fixtures = fixtureScripts();
   assert.ok(shipped.length >= 15, `the package ships GDScript: ${shipped.length} files`);
-  assert.ok(fixtures.length >= 16, `the fixtures are GDScript: ${fixtures.length} files`);
+  assert.ok(fixtures.length >= 17, `the fixtures are GDScript: ${fixtures.length} files`);
   // The fixtures run under these settings on the engine leg and nowhere else, so a fixture that
   // discarded a return value passed every local check and failed there.
   const fixturesDir = join(projectDir, 'fixtures');
@@ -1274,6 +1274,7 @@ async function main(): Promise<void> {
     runFixture(godotPath, projectDir, 'runtime_serialize');
     runFixture(godotPath, projectDir, 'runtime_input');
     runFixture(godotPath, projectDir, 'runtime_query');
+    runFixture(godotPath, projectDir, 'runtime_words');
     runFixture(godotPath, projectDir, 'runtime_wait');
     runFixture(godotPath, projectDir, 'runtime_capture');
     // An editor opened before its server has to keep asking. The wait is read back rather than

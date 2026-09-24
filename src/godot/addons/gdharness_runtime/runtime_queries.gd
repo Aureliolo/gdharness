@@ -6,6 +6,7 @@ extends RefCounted
 const Paths = preload("runtime_paths.gd")
 const Read = preload("reading.gd")
 const Values = preload("runtime_values.gd")
+const Words = preload("runtime_words.gd")
 
 ## The most nodes one find answers with, unless asked for fewer: enough for any real query and
 ## far short of the tree dump a query exists to avoid.
@@ -251,7 +252,7 @@ func _matches_apart_from_name(node: Node, wanted: Dictionary[String, String]) ->
 	# What this node says, rather than everything said underneath it. A row is then found by the
 	# label in it, and the path answered is that label's, which is where the words a caller is
 	# looking at actually are: matching every container above it would answer with the screen.
-	if not wanted["says"].is_empty() and not _says(said_by(node), wanted["says"]):
+	if not wanted["says"].is_empty() and not _says(Words.said_by(node), wanted["says"]):
 		return false
 	var script: Variant = node.get_script()
 	if not wanted["script"].is_empty():
@@ -346,7 +347,7 @@ func _read_into(node: Node, include_hidden: bool, most: int, into: Array[String]
 	if not include_hidden and not _drawn(node):
 		return 0
 	var left_out: int = 0
-	for said: String in lines_said_by(node):
+	for said: String in Words.lines_said_by(node):
 		if into.size() < most:
 			into.append(said)
 		else:
@@ -370,106 +371,6 @@ static func _drawn(node: Node) -> bool:
 		return spatial.visible
 	var window: Window = node as Window
 	return window == null or window.visible
-
-
-## What one node says, or "" for a node that says nothing. Anything with a `text` property, which
-## is every label, button and field the interface is built out of.
-##
-## Public because three questions are the same question: what a screen reads as, which nodes say a
-## given word, and whether anything has come to say it yet. Two copies of what a node says is how
-## the three of them come to disagree about a SpinBox.
-##
-## Read rather than looked up in the property list, which the engine builds afresh on every call: a
-## wait asks this of every node on the screen every frame, and on a hall of 3,500 nodes the lookup
-## took the game it was watching from 60 frames a second to 11. A node without the property reads
-## as null, which is not a string.
-static func said_by(node: Node) -> String:
-	if _draws_a_list(node):
-		return "\n".join(lines_said_by(node))
-	return _text_of(node)
-
-
-## Every line [param node] draws for a player to read, one to an entry: a label's one line, or each
-## item of a control that draws a list of them. Tab titles, list items, tree rows and the items of an
-## open menu are held by the control rather than in any `text`, so a screen read as every label on
-## it and none of those, and a wait for a tab's title or a list item was never met.
-static func lines_said_by(node: Node) -> Array[String]:
-	var lines: Array[String] = []
-	if node is TabBar:
-		var bar: TabBar = node
-		for tab: int in bar.tab_count:
-			if not bar.is_tab_hidden(tab):
-				_keep(bar.get_tab_title(tab), lines)
-	elif node is ItemList:
-		var list: ItemList = node
-		for item: int in list.item_count:
-			_keep(list.get_item_text(item), lines)
-	elif node is PopupMenu:
-		var menu: PopupMenu = node
-		for item: int in menu.item_count:
-			if not menu.is_item_separator(item):
-				_keep(menu.get_item_text(item), lines)
-	elif node is Tree:
-		var tree: Tree = node
-		_tree_rows(tree.get_root(), tree.hide_root, tree.columns, lines)
-	else:
-		_keep(_text_of(node), lines)
-	return lines
-
-
-static func _draws_a_list(node: Node) -> bool:
-	return node is TabBar or node is ItemList or node is PopupMenu or node is Tree
-
-
-static func _keep(line: String, into: Array[String]) -> void:
-	var trimmed: String = line.strip_edges()
-	if not trimmed.is_empty():
-		into.append(trimmed)
-
-
-## The rows of a tree from [param item] down, a row being its columns' text side by side, and
-## nothing under a collapsed row or a hidden one, since neither is drawn. A hidden root is only the
-## place its children hang from.
-static func _tree_rows(item: TreeItem, skip: bool, columns: int, into: Array[String]) -> void:
-	if item == null or not item.visible:
-		return
-	if not skip:
-		var cells: Array[String] = []
-		for column: int in columns:
-			_keep(item.get_text(column), cells)
-		_keep("  ".join(cells), into)
-		if item.collapsed:
-			return
-	var child: TreeItem = item.get_first_child()
-	while child != null:
-		_tree_rows(child, false, columns, into)
-		child = child.get_next()
-
-
-## What a node with a `text` says, as it is drawn.
-static func _text_of(node: Node) -> String:
-	# A RichTextLabel's text is its markup when it reads BBCode, and nobody reads the tags: a
-	# dossier line came back as "[b][color=#4fc2d4]Mollum Telken[/color], [/b]..." and a phrase
-	# running across a tag could not be found or waited for. The parsed text is what is drawn, and
-	# it also holds what a game added with append_text(), which the property never shows.
-	if node is RichTextLabel:
-		var rich: RichTextLabel = node
-		return _shown_part(rich.get_parsed_text(), rich.visible_characters)
-	var text: Variant = node.get("text")
-	if not text is String:
-		return ""
-	var words: String = text
-	if node is Label:
-		var label: Label = node
-		return _shown_part(words, label.visible_characters)
-	return words.strip_edges()
-
-
-## As much of [param words] as is drawn: a label typing a line out shows [param drawn] characters
-## of it, and -1 is all of them. Read whole, a words wait was met on the first frame of a line being
-## typed out, before the player could read any of it.
-static func _shown_part(words: String, drawn: int) -> String:
-	return (words if drawn < 0 else words.substr(0, drawn)).strip_edges()
 
 
 func get_rect(params: Dictionary) -> Dictionary:

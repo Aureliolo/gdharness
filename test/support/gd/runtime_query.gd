@@ -187,112 +187,6 @@ func _check_reading_the_screen(panel: Panel) -> void:
 	choices.free()
 
 
-## A RichTextLabel reads as its words, not its markup. Its text is the BBCode when it reads BBCode,
-## and a dossier line came back as "[b][color=#4fc2d4]Mollum Telken[/color], [/b]...", so a phrase
-## running across a tag could be neither read, found nor waited for. And a line a game adds with
-## append_text() is in no property at all.
-func _check_reading_rich_text() -> void:
-	var dossier: VBoxContainer = VBoxContainer.new()
-	dossier.name = "Dossier"
-	root.add_child(dossier)
-	var marked: RichTextLabel = RichTextLabel.new()
-	marked.bbcode_enabled = true
-	marked.fit_content = true
-	marked.text = "[b][color=#4fc2d4]Mollum Telken[/color], [/b][color=#c2ae92]a thief-taker[/color]"
-	dossier.add_child(marked)
-	var appended: RichTextLabel = RichTextLabel.new()
-	appended.fit_content = true
-	appended.append_text("Docket 72, [b]an errand[/b]")
-	dossier.add_child(appended)
-	await process_frame
-
-	var said: Dictionary = await node._execute_command("read_text", {"root": "/root/Dossier"})
-	var lines: Array = said.get("lines", [])
-	if lines != ["Mollum Telken, a thief-taker", "Docket 72, an errand"]:
-		_fail("rich text reads as what is drawn, with no tags in it: %s" % str(said))
-
-	var found: Dictionary = await node._execute_command(
-		"find_nodes", {"says": "Telken, a thief", "root": "/root/Dossier"}
-	)
-	if found.get("count") != 1:
-		_fail("a phrase running across a tag is found: %s" % str(found))
-
-	# A line being typed out says as much of itself as is drawn, so a wait for its words is not met
-	# before the player can read them. A Label by count, a RichTextLabel by ratio, which sets the count.
-	var typed: Label = Label.new()
-	typed.text = "Spring 17"
-	typed.visible_characters = 6
-	dossier.add_child(typed)
-	marked.visible_ratio = 0.5
-	await process_frame
-	var partway: Dictionary = await node._execute_command("read_text", {"root": "/root/Dossier"})
-	var shown: Array = partway.get("lines", [])
-	if shown != ["Mollum Telken,", "Docket 72, an errand", "Spring"]:
-		_fail("text being typed out reads as far as it is drawn: %s" % str(partway))
-	var early: Dictionary = await node._execute_command(
-		"find_nodes", {"says": "Spring 17", "root": "/root/Dossier"}
-	)
-	if early.get("count") != 0:
-		_fail("and its words are not found before they are shown: %s" % str(early))
-
-	dossier.free()
-
-
-## The controls that draw a list of text rather than holding one `text`: tab titles, list items, tree
-## rows and an open menu's items. Each read as nothing, so a screen of tabs and lists came back as its
-## labels alone and a wait for a tab's title was never met.
-func _check_reading_lists() -> void:
-	var board: VBoxContainer = VBoxContainer.new()
-	board.name = "Board"
-	root.add_child(board)
-	var tabs: TabContainer = TabContainer.new()
-	board.add_child(tabs)
-	for title: String in ["Roster", "Ledger"]:
-		var page: Control = Control.new()
-		page.name = title
-		tabs.add_child(page)
-	var names: ItemList = ItemList.new()
-	var _ada: int = names.add_item("Ada")
-	var _bram: int = names.add_item("Bram")
-	board.add_child(names)
-	var tree: Tree = Tree.new()
-	var guild: TreeItem = tree.create_item()
-	guild.set_text(0, "Guild")
-	var member: TreeItem = tree.create_item(guild)
-	member.set_text(0, "Cass")
-	var kit: TreeItem = tree.create_item(member)
-	kit.set_text(0, "Blade")
-	member.collapsed = true
-	board.add_child(tree)
-	var menu: PopupMenu = PopupMenu.new()
-	menu.add_item("Hire")
-	menu.add_separator()
-	menu.add_item("Dismiss")
-	board.add_child(menu)
-	await process_frame
-
-	var closed: Dictionary = await node._execute_command("read_text", {"root": "/root/Board"})
-	if closed.get("lines", []) != ["Roster", "Ledger", "Ada", "Bram", "Guild", "Cass"]:
-		_fail("tabs, list items and tree rows read as lines, and not under a collapsed row: %s" % str(closed))
-
-	menu.show()
-	await process_frame
-	var opened: Dictionary = await node._execute_command("read_text", {"root": "/root/Board"})
-	var lines: Array = opened.get("lines", [])
-	if lines.slice(-2) != ["Hire", "Dismiss"]:
-		_fail("an open menu reads as its items, a separator as nothing: %s" % str(opened))
-
-	var found: Dictionary = await node._execute_command(
-		"find_nodes", {"says": "Ledger", "root": "/root/Board"}
-	)
-	var matched: Array = found.get("nodes", [])
-	var first: Dictionary = matched[0] if not matched.is_empty() else {}
-	if found.get("count") != 1 or first.get("type") != "TabBar":
-		_fail("a tab is found by its title, as the bar that draws it: %s" % str(found))
-
-	board.free()
-
-
 ## A name with no wildcard in it, which is the shape a caller writes when they mean "contains".
 ##
 ## [method String.matchn] answers nothing to it, and nothing is also what a name that is not in the
@@ -859,8 +753,6 @@ func _check() -> void:
 		_fail("a find from a root that is not there is refused: %s" % str(missing))
 
 	await _check_reading_the_screen(panel)
-	await _check_reading_rich_text()
-	await _check_reading_lists()
 
 	var rect: Dictionary = await node._execute_command("get_rect", {"path": "/root/Panel/Go"})
 	var canvas: Dictionary = rect.get("canvas", {})

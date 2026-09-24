@@ -1085,7 +1085,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['find'],
         description:
-          'find: part of what the node has written on it, case-insensitively, which is how a button is reached by the word on it rather than by a generated path. Its own text, so a row is found by the label in it, and hidden nodes match. A bare word is a contains; write a glob and it is one, matched against the whole of what the node says, the same as namePattern. A label with a line break is matched with the break in the words, and a backslash followed by n counts as one.',
+          'find: part of what the node has written on it as drawn, the way the text op reads it, case-insensitively, which is how a button is reached by the word on it rather than by a generated path. Its own text, so a row is found by the label in it, and hidden nodes match. A bare word is a contains; write a glob and it is one, matched against the whole of what the node says, the same as namePattern. A label with a line break is matched with the break in the words, and a backslash followed by n counts as one.',
       },
       limit: {
         type: 'integer',
@@ -1118,7 +1118,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       tree: { summary: 'the live scene tree', requires: [] },
       text: {
         summary:
-          "every line of text under nodePath, the values in its fields included, in the order somebody reads the screen, leaving out what is hidden and everything under it. Rich text reads as drawn, without its tags and only as far as it has been typed out, and tab titles, list items, tree rows and an open menu's items read a line each",
+          "every line of text under nodePath, the values in its fields included, in the order somebody reads the screen, leaving out what is hidden and everything under it. Every line reads as drawn: rich text without its tags, text only as far as it has been typed out, a translation rather than its key, an upper-case label in capitals and a secret field as its mask. Tab titles, menu bar titles, list items, a tree's column titles and rows, and an open menu's items read a line each",
         requires: [],
       },
       find: {
@@ -1285,7 +1285,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         ops: ['text', 'choose'],
         blank: true,
         description:
-          'text: what to type. A newline is Enter and a tab is Tab, a space is a space, and "" with replace empties the field. choose: the item to take, by what it says.',
+          'text: what to type. A newline is Enter and a tab is Tab, a space is a space, and "" with replace empties the field. choose: the item to take, by what it says as drawn, which in a game with translations is the translation; the key it holds is matched after that.',
       },
       replace: {
         type: 'boolean',
@@ -1354,7 +1354,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       text: {
         summary:
-          'type a string into the field being edited, a character at a time, and say what it landed in',
+          'type a string into the field being edited, a character at a time, and say what it landed in and what it holds afterwards, a secret field as its mask',
         requires: ['text'],
       },
       mouse_click: {
