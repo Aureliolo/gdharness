@@ -33,6 +33,19 @@ func capture_viewport(params: Dictionary) -> Dictionary:
 
 ## The server names the file, so a game cannot point it at a path of its own choosing; a call
 ## with no path is a call the server did not make.
+## The size a capture drawn at [param drawn] is scaled to, from the width and height asked for, 0
+## being not asked. One side alone keeps the picture's proportions, since that is what asking for a
+## smaller picture means: it was ignored unless both came, so the full-size picture was sent back.
+static func scaled_to(drawn: Vector2i, width: int, height: int) -> Vector2i:
+	if width > 0 and height > 0:
+		return Vector2i(width, height)
+	if width > 0 and drawn.x > 0:
+		return Vector2i(width, maxi(1, roundi(float(drawn.y) * width / drawn.x)))
+	if height > 0 and drawn.y > 0:
+		return Vector2i(maxi(1, roundi(float(drawn.x) * height / drawn.y)), height)
+	return drawn
+
+
 func _capture(viewport: Viewport, params: Dictionary) -> Dictionary:
 	var requested_path: String = str(params.get("output_path", ""))
 	if requested_path.is_empty():
@@ -61,10 +74,12 @@ func _capture(viewport: Viewport, params: Dictionary) -> Dictionary:
 	if image == null:
 		return {"type": "error", "message": "Failed to capture viewport image"}
 
-	var width: int = Read.as_int(params.get("width", 0))
-	var height: int = Read.as_int(params.get("height", 0))
-	if width > 0 and height > 0:
-		image.resize(width, height)
+	var drawn: Vector2i = Vector2i(image.get_width(), image.get_height())
+	var target: Vector2i = scaled_to(
+		drawn, Read.as_int(params.get("width", 0)), Read.as_int(params.get("height", 0))
+	)
+	if target != drawn:
+		image.resize(target.x, target.y)
 
 	var screenshot_path: String = requested_path
 	if screenshot_path.begins_with("user://") or screenshot_path.begins_with("res://"):

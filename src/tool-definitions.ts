@@ -1218,8 +1218,18 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         ops: ['viewport'],
         description: 'viewport: the Viewport node. Default the root viewport.',
       },
-      width: { type: 'number', description: 'Scale the image to this width.' },
-      height: { type: 'number', description: 'Scale the image to this height.' },
+      width: {
+        type: 'integer',
+        minimum: 1,
+        description:
+          "Scale the image to this width. Given alone, the height keeps the picture's proportions.",
+      },
+      height: {
+        type: 'integer',
+        minimum: 1,
+        description:
+          "Scale the image to this height. Given alone, the width keeps the picture's proportions.",
+      },
       outputPath: {
         type: 'string',
         description:
