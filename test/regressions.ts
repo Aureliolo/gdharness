@@ -5046,8 +5046,13 @@ async function testARunsEnvironmentStaysOffCommandLines(): Promise<void> {
 
     const tree = await processTree();
     assert.ok(tree !== undefined, 'the platform should list its processes for this to prove anything');
-    const keepers = [...tree.values()].filter((one) => one.command.includes('keeper.js'));
-    assert.ok(keepers.length > 0, 'the keeper holding the run should be listed, or nothing was looked at');
+    // The keeper holding this run, which is the game's parent: other keepers on the machine belong
+    // to other sessions' runs, and one from an older version is exactly what this is about.
+    const keeper = tree.get(tree.get(game)?.parent ?? 0);
+    assert.ok(
+      keeper?.command.includes('keeper.js') === true,
+      `the keeper holding the run should be listed as the game's parent, or nothing was looked at: ${keeper?.command ?? 'none'}`,
+    );
     const forms = [secret, ownValue].flatMap((value) => [
       value,
       Buffer.from(value, 'utf8').toString('base64url'),
@@ -5062,14 +5067,12 @@ async function testARunsEnvironmentStaysOffCommandLines(): Promise<void> {
       }
     }
     // Base64 of JSON does not line up with base64 of one value, so the spec's own shape is looked for
-    // too: any long base64 run on a keeper's line is a spec being carried there.
-    for (const keeper of keepers) {
-      assert.doesNotMatch(
-        keeper.command,
-        /[A-Za-z0-9_-]{200,}/,
-        `a keeper's command line should carry no encoded payload: ${keeper.command.slice(0, 300)}`,
-      );
-    }
+    // too: any long base64 run on the keeper's line is a spec being carried there.
+    assert.doesNotMatch(
+      keeper.command,
+      /[A-Za-z0-9_-]{200,}/,
+      `the keeper's command line should carry no encoded payload: ${keeper.command.slice(0, 300)}`,
+    );
   } finally {
     if (game > 0 && isAlive(game)) {
       process.kill(game);
