@@ -4,19 +4,12 @@ import type { GameLog } from './game-log.js';
 /** The game editor_run started, and everything it has said. */
 export interface GodotProcess {
   /**
-   * The game's own process, or null when the editor is playing it.
+   * The game's process id, which is all this server has of it.
    *
-   * A game the editor plays belongs to the editor's debugger, which is what makes the debug
-   * tools answer at all. Nothing here holds a handle to it, and its console arrives over the
-   * debug adapter rather than down a pipe.
-   */
-  process: ChildProcess | null;
-  /**
-   * The game's process id, which outlives the handle to it.
-   *
-   * A run picked back up after the server restarted has a number and no handle: the process
-   * belongs to nobody now, and a number is all that is left to ask after it or end it with.
-   * Null only for a game the editor is playing, which is the editor's to end.
+   * A spawned run is its keeper's child rather than this server's, so that the harness killing the
+   * server's process tree does not take it along, and a number is what is left to ask after it or
+   * end it with, whichever server started it. Null only for a game the editor is playing, which is
+   * the editor's to end.
    */
   pid: number | null;
   log: GameLog;
@@ -58,6 +51,11 @@ export interface GodotProcess {
    * finished its work. `endedWithoutACode` says which of the two it was.
    */
   endedUnwatched?: boolean;
+  /**
+   * Read back from the note another server left rather than started by this one, which is what
+   * `endedWithoutACode` needs to say whose the missing exit code was.
+   */
+  pickedUp?: boolean;
   /** True when the editor was asked to play it, so stopping it is the editor's job too. */
   throughEditor: boolean;
   /**

@@ -8,7 +8,7 @@
  * `dispatch`, and the arguments have been checked against the tool's spec before it is reached.
  */
 
-import { type ChildProcess, execFile, spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import {
   appendFileSync,
@@ -106,6 +106,7 @@ import {
   userDataIn,
 } from './launch.js';
 import { DEFAULT_LSP_PORT, GodotLSPClient, handleLSPTool } from './lsp_client.js';
+import { launchOutsideTheTree } from './outside.js';
 import { isSameDirectory, isWithinRoot, realPathOr, resolveWithinProject } from './paths.js';
 import { freePort, portFromEnvOrNull } from './ports.js';
 import {
@@ -115,6 +116,7 @@ import {
   type ProcessTree,
   processTree,
   readCommandLine,
+  startTimesOf,
 } from './process-children.js';
 import { cpuSecondsOf } from './process-time.js';
 import { projectStructure, scriptsWithoutUid, searchProject } from './project-scan.js';
@@ -127,12 +129,10 @@ import {
   openTranscript,
   readEditorRunNote,
   readRunRecord,
-  recordRunEnded,
   runningAs,
   stillTheRecordedRun,
   sweepTranscripts,
   writeEditorRunNote,
-  writeRunRecord,
 } from './run-record.js';
 import {
   ANNOUNCE_BUDGET_MS,
@@ -368,15 +368,15 @@ function stillRunning(run: GodotProcess | null): boolean {
     return false;
   }
   // Ended here, which is settled before any process is asked: the kill lands a moment before the
-  // handle reports the exit, and a played run's only other source is the editor's word.
+  // keeper records the exit, and a played run's only other source is the editor's word.
   if (typeof run.endedHere === 'string') {
     return false;
   }
-  // A run with no handle is one this server did not start, so nothing here is listening for it to
-  // exit. Asked of the operating system on every answer rather than remembered from the moment it
-  // was picked up, or a bench that finished an hour ago goes on being reported as running and
-  // whoever is polling for it to end never hears that it has.
-  if (!run.throughEditor && run.process === null && run.pid !== null) {
+  // A spawned run is held by its keeper rather than by this server, so nothing here is listening
+  // for it to exit. Asked of the operating system on every answer rather than remembered from when
+  // it was started or picked up, or a bench that finished an hour ago goes on being reported as
+  // running and whoever is polling for it to end never hears that it has.
+  if (!run.throughEditor && run.pid !== null) {
     return alive(run.pid);
   }
   // A played run that announced itself, asked of the operating system. The editor is the usual
@@ -435,16 +435,14 @@ export function runIsUp(run: GodotProcess | null, editorSays: boolean | null, no
 }
 
 /**
- * Whether a run judged over will never have an exit code here, which is so only when nothing here
- * holds it.
+ * Whether a run judged over will never have an exit code here.
  *
- * A run this server spawned is judged over as soon as the process its game announced has gone,
- * which can be before the handle's exit event has delivered the code; under the Windows console
- * build the handle is a wrapper that exits after the game it started. Marked unwatched then, the
- * code arrived afterwards beside a note saying none had been collected.
+ * Nothing here holds a game: a spawned run is its keeper's child and a played one the editor's.
+ * The keeper writes the exit into the run's record and `runStillGoing` takes it from there, so a
+ * run judged over with no code by then is one whose exit nobody wrote down.
  */
-export function noCodeWillCome(run: Pick<GodotProcess, 'exitCode' | 'exitSignal' | 'process'>): boolean {
-  return !exited(run) && run.process === null;
+export function noCodeWillCome(run: Pick<GodotProcess, 'exitCode' | 'exitSignal'>): boolean {
+  return !exited(run);
 }
 
 /**
@@ -456,28 +454,22 @@ export function noCodeWillCome(run: Pick<GodotProcess, 'exitCode' | 'exitSignal'
 const STOP_WAIT_MS = 10_000;
 
 /**
- * How long a handle is given to report the exit of a game already seen to have gone. Milliseconds
- * in practice; bounded because every answer about the run waits on it.
+ * How long a run's keeper is given to write the exit of a game already seen to have gone.
+ * Milliseconds in practice; bounded because every answer about the run waits on it.
  */
 const EXIT_REPORTED_WITHIN_MS = 2_000;
 
 /**
- * Whether [param handle] has exited and every process in [param pids] is gone, waited for up to
- * [param withinMs].
+ * Whether every process in [param pids] is gone, waited for up to [param withinMs].
  *
  * A stop answered the moment the signal was sent, so it said a process was ended while the process
  * was still there: a caller removing the project straight afterwards found its directory still
- * held by the game, which on Windows cannot be removed, and the answer had no exit code because
- * the exit had not been collected yet. The pids are the game's own where it announced one, since
- * under the Windows console build the handle is a wrapper that goes before the engine does.
+ * held by the game, which on Windows cannot be removed. The pids are the game's own where it
+ * announced one, since under the Windows console build the run's process is a wrapper that goes
+ * before the engine does.
  */
-async function untilGone(
-  handle: ChildProcess | null,
-  pids: readonly number[],
-  withinMs = STOP_WAIT_MS,
-): Promise<boolean> {
-  const gone = (): boolean =>
-    (handle?.exitCode !== null || handle.signalCode !== null) && pids.every((pid) => !alive(pid));
+async function untilGone(pids: readonly number[], withinMs = STOP_WAIT_MS): Promise<boolean> {
+  const gone = (): boolean => pids.every((pid) => !alive(pid));
   const deadline = Date.now() + withinMs;
   while (!gone() && Date.now() < deadline) {
     await delay(50);
@@ -505,7 +497,13 @@ export function endedWithoutACode(run: {
   readonly announced: boolean;
   readonly couldAnnounce: boolean;
   readonly endedHere: boolean;
+  readonly pickedUp: boolean;
 }): string {
+  // Started here, so its keeper was the one waiting on it, and the keeper writes the exit into the
+  // run's note as the game goes. None there means the keeper went first or the note was replaced.
+  if (!run.throughEditor && !run.pickedUp) {
+    return 'This run was started here, and the keeper holding it wrote no exit code into its note: the keeper was ended before the game, or another run replaced the note. Everything it printed is below, read back from its transcript.';
+  }
   if (!run.throughEditor) {
     return run.endedHere
       ? 'This run was started by another server, so nothing here held it and its exit code was never collected. Everything it printed is below, read back from its transcript.'
@@ -1310,7 +1308,7 @@ class GodotServer {
    * taken, which is the right reference for an editor that was already running and has to notice,
    * and no reference at all for one started afterwards.
    */
-  private launchedEditor: ChildProcess | null = null;
+  private launchedEditor: { readonly pid: number; readonly startedAt: number | null } | null = null;
 
   /**
    * What project.godot held when this server opened an editor on it, until that editor arrives.
@@ -3511,19 +3509,21 @@ class GodotServer {
   }
 
   /**
-   * Whether the editor this server started is still running, asked of the process it started.
+   * Whether the editor this server started is still running: its pid alive, and still the process
+   * that started when the editor did.
    *
-   * `exitCode === null && signalCode === null` is this process's own record of a child it holds,
-   * which cannot be answered wrongly by the operating system reusing a number.
-   *
-   * No case disarms this, and that is worth saying rather than leaving for somebody to discover.
-   * The old reading asked `alive()` of a remembered pid, and for a process that has exited the two
-   * agree: both say no. They part only where the number has been handed to something else, which is
-   * not a state a fixture can bring about on demand. What holds it is that the question is asked of
-   * a handle this server owns rather than of a number anybody's process might be wearing.
+   * The start time is what a reused number cannot share, since a pid is handed out again only after
+   * its holder has gone. Where the platform will not say when a process started, the pid alone is
+   * what is left, which is the reading this used to make and the one that named another process's
+   * number as an editor on its way.
    */
   private launchedEditorIsUp(): boolean {
-    return this.launchedEditor?.exitCode === null && this.launchedEditor.signalCode === null;
+    const launched = this.launchedEditor;
+    if (launched === null || !alive(launched.pid)) {
+      return false;
+    }
+    const now = startTimesOf([launched.pid]).get(launched.pid);
+    return launched.startedAt === null || now === undefined || now === launched.startedAt;
   }
 
   /** The one debug adapter client, which the debug tools and an editor-played game share. */
@@ -4178,9 +4178,10 @@ class GodotServer {
   }
 
   /**
-   * editor_launch: the editor as its own process, detached and with its output dropped. A pipe
-   * nobody reads fills up and blocks the editor at the first 64KB it prints, and the editor is
-   * meant to outlive this server.
+   * editor_launch: the editor as its own process, started through a launcher so it is nobody's
+   * child here, with its output dropped. A pipe nobody reads fills up and blocks the editor at the
+   * first 64KB it prints, and the editor is meant to outlive this server, which the harness ends by
+   * killing its process tree.
    */
   private async handleLaunchEditor(args: OperationParams): Promise<ToolResponse> {
     const project = this.project(args);
@@ -4256,9 +4257,12 @@ class GodotServer {
     // third variable is this server saying it opened this editor, which is what decides who may
     // open it again.
     clearEditorLog(projectPath);
-    const editor = spawn(engine, editorArguments(projectPath, ports, editorLogPath(projectPath)), {
-      stdio: 'ignore',
-      detached: true,
+    // Through a launcher that exits once the editor is up, so the editor is nobody's child here: the
+    // harness ends a server by killing its process tree, at every reconnect, and an editor spawned
+    // as this server's child went with it however detached it was.
+    const launched = await launchOutsideTheTree({
+      command: engine,
+      args: editorArguments(projectPath, ports, editorLogPath(projectPath)),
       env: {
         ...process.env,
         GDHARNESS_RUNTIME_DIR: runtimeDirectory(),
@@ -4267,47 +4271,29 @@ class GodotServer {
         [OPENED_BY_A_SERVER]: '1',
       },
     });
+    if ('error' in launched) {
+      return { pid: null, error: launched.error };
+    }
     // Which editor the log beside it belongs to, so a server that did not open this editor can
-    // still tell its console from the one a previous editor left on disk.
-    //
-    // Here rather than after the wait below, because the pid exists the moment spawn returns and
-    // the wait is where this server could be replaced. A note written on the far side of it would
-    // leave a gap in which the editor is up and writing a console that nothing can claim, which
-    // reads as an editor whose console belongs to somebody else. A note for a spawn that then
-    // fails costs nothing: it names a pid no editor ever connects under.
-    if (editor.pid !== undefined) {
-      writeEditorLogNote(projectPath, editor.pid);
-    }
-    const started = await new Promise<string | null>((resolve) => {
-      editor.once('spawn', () => {
-        resolve(null);
-      });
-      editor.once('error', (error: Error) => {
-        resolve(error.message);
-      });
-    });
-    if (started !== null) {
-      return { pid: null, error: started };
-    }
-    editor.unref();
+    // still tell its console from the one a previous editor left on disk. As soon as the pid is
+    // known, since this server can be replaced at any moment after it, and a note written later
+    // leaves an editor writing a console nothing can claim.
+    writeEditorLogNote(projectPath, launched.pid);
     // Remembered so that "nothing is coming" and "the editor this server just started is still
     // importing" stop being the same answer. The grace window is measured from the bridge taking
     // its port, which is the right reference for an editor that was already up and has to notice,
     // and no reference at all for one started afterwards: a launch on a server that has been up
     // longer than the window reads as final the moment it returns.
     //
-    // The process rather than its number, because the number is only good while the process holds
-    // it. This was a bare pid asked `alive()`, set once and never cleared, so an editor that
-    // exited without connecting left the pid behind and any later process the operating system
-    // handed it to answered yes: the server would then report that an editor it started was still
-    // on its way, and name a pid belonging to something else. A downstream reading of
-    // `mayYetConnect: true` with a game running and `false` once the game stopped is consistent
-    // with exactly that, and the same reasoning already forbids ending a run by pid alone here.
-    // Only when it has a number, because a child with none never started, and a handle whose
-    // `exitCode` has not been set yet would otherwise report an editor on its way that does not
-    // exist. A spawn that failed outright has already returned above.
-    this.launchedEditor = editor.pid === undefined ? null : editor;
-    return { pid: editor.pid ?? null, error: null };
+    // The pid with the time it started, because a pid alone is only good while the process holds
+    // it: an editor that exited without connecting left its number behind, and a later process the
+    // operating system handed it to answered yes, so the server reported an editor still on its way
+    // and named a pid belonging to something else. The launcher leaves no handle to ask instead.
+    this.launchedEditor = {
+      pid: launched.pid,
+      startedAt: startTimesOf([launched.pid]).get(launched.pid) ?? null,
+    };
+    return { pid: launched.pid, error: null };
   }
 
   /**
@@ -4467,7 +4453,7 @@ class GodotServer {
       userArgs: given.value,
     });
     this.logDebug(`Running Godot project: ${engine.value} ${cmdArgs.join(' ')}`);
-    const started = this.spawnKeptGame(
+    const started = await this.launchKeptGame(
       engine.value,
       cmdArgs,
       project.value.path,
@@ -4475,7 +4461,12 @@ class GodotServer {
         ? environmentFor({ ...asked.value, runtimeDirectory: runtimeDirectory() })
         : undefined,
     );
-    // For a game that announces after the start's wait under a number the handle does not have,
+    if ('error' in started) {
+      return this.createErrorResponse(`The game could not be started: ${started.error}`, [
+        'editor_status says which Godot this server runs and whether it answers',
+      ]);
+    }
+    // For a game that announces after the start's wait under a number the run's does not have,
     // which the Windows console build does: the tie then falls to freshness, as a played run's.
     started.announcedBefore = alreadyPlaying;
     // Kept after it exits rather than dropped, because a run that quits on its own is the whole
@@ -4516,7 +4507,7 @@ class GodotServer {
       started: true,
       through: 'gdharness',
       alsoRunning: stranded.length === 0 ? undefined : stranded.map((one) => one.pid),
-      pid: started.process.pid ?? null,
+      pid: started.pid,
       arguments: cmdArgs,
       // Named here rather than only by editor_output, because a caller who wants to watch the
       // file had to make a second call to learn it and a reconstructed name is worse than no
@@ -4635,10 +4626,10 @@ class GodotServer {
     );
     // Kept on the run: a number the game gave for itself, which is what the announcement was
     // waited for. For a run the editor plays it is the only process the run has, so its liveness
-    // is the editor's word without it. For a run started here it is usually the handle's own
-    // number and not always: the Windows console build is a wrapper that starts the engine as its
-    // child, so the game announces a number the handle does not have, and a runtime call asking
-    // for this server's own game found nothing under the handle's. Only when it is this run's:
+    // is the editor's word without it. For a run started here it is usually the run's own number
+    // and not always: the Windows console build is a wrapper that starts the engine as its child,
+    // so the game announces a number the run's process does not have, and a runtime call asking for
+    // this server's own game found nothing under the run's. Only when it is this run's:
     // `announcedSince` excludes everything that was already announced before the start.
     const going = this.currentRun();
     if (endpoint !== null && going !== null && going.announcedPid === undefined) {
@@ -4766,7 +4757,6 @@ class GodotServer {
     closeSync(transcript.fd);
     const playAnswer = asParams(JSON.parse(answer.content[0]?.text ?? '{}'));
     const played: GodotProcess = {
-      process: null,
       pid: null,
       log,
       transcript: transcript.path,
@@ -4945,11 +4935,19 @@ class GodotServer {
     const running = this.activeProcess;
     // Read before the note is taken away, because it is what says the pid below still means this
     // run: the number alone does not.
-    const recorded = running?.process === null ? readRunRecord() : null;
+    const recorded = running !== null && !running.throughEditor ? readRunRecord() : null;
     // A run somebody has ended is not one the next server should offer to pick back up, and the
     // note outlives this process unless it is taken away here. Only this project's, because the
     // directories it is looked for in are shared with whatever else is running on this machine.
-    clearRunRecord((record) => this.couldBeOurs(record.projectPath));
+    const clearTheRecord = (): void => {
+      clearRunRecord((record) => this.couldBeOurs(record.projectPath));
+    };
+    // Except for a run a keeper holds, whose exit the keeper writes into the note as the game goes:
+    // cleared first, that exit had nowhere to land, and the stop answered with no code at all.
+    const aKeeperHoldsIt = running !== null && going && !running.throughEditor && running.pid !== null;
+    if (!aKeeperHoldsIt) {
+      clearTheRecord();
+    }
     // A run already over is left as it ended. Marked here, one that had quit on its own would be
     // answered as ended by this server, and a second stop would put a run it did end through the
     // pid check again and write over what the first stop recorded.
@@ -4961,21 +4959,17 @@ class GodotServer {
     const announced = this.announcedPidOf(running);
     if (running.throughEditor) {
       await this.handleViaBridge('stop_playing', {});
-      return await untilGone(null, announced === undefined ? [] : [announced]);
-    }
-    if (running.process !== null) {
-      // Started here, so there is a handle, and a handle cannot come to mean another process.
-      running.process.kill();
-      return await untilGone(running.process, announced === undefined ? [] : [announced]);
+      return await untilGone(announced === undefined ? [] : [announced]);
     }
     if (running.pid === null) {
       return true;
     }
-    // A run picked back up after a restart: the handle belonged to a server that is gone and the
-    // number is all that is left. A number is not an identity, though. The operating system hands
+    // A spawned run, held by its keeper rather than by this server, so the number is all there is
+    // to end it with, whichever server started it. A number is not an identity, though. The operating system hands
     // a pid out again as soon as it is free, so signalling on the strength of it is how a stop
     // ends up killing whatever came after the run, which is not something that can be taken back.
     if (recorded === null || recorded.pid !== running.pid || !stillTheRecordedRun(recorded)) {
+      clearTheRecord();
       running.endedHere = null;
       running.log.record(
         'warning',
@@ -4997,7 +4991,18 @@ class GodotServer {
       // Ended between being read and being stopped, which is the state this asks for.
       landed = false;
     }
-    const gone = await untilGone(null, [running.pid]);
+    const gone = await untilGone([running.pid]);
+    if (gone) {
+      await this.untilTheExitIsRecorded(running);
+    }
+    // Ended by the signal sent here, which is what the run's ending is. Windows has no signal to
+    // send: the kill is TerminateProcess with exit code 1, and the keeper records the 1, which reads
+    // exactly like a game that exited with 1 of its own accord.
+    if (landed && gone) {
+      running.exitCode = null;
+      running.exitSignal = 'SIGTERM';
+    }
+    clearTheRecord();
     // Written after the attempt rather than before it, so the line says what happened rather than
     // what was about to. A note that announces an act it has not performed is wrong for every run
     // that was already over by the time it was signalled, which is the ordinary way a run ends.
@@ -5088,32 +5093,33 @@ class GodotServer {
    * killed run for a wedged one. A file is read by offset whenever somebody asks, which is also
    * what leaves the bytes there for the next server to read.
    */
-  private spawnKeptGame(
+  private async launchKeptGame(
     godotPath: string,
     cmdArgs: string[],
     projectPath: string,
     env?: NodeJS.ProcessEnv,
-  ): SpawnedGame {
+  ): Promise<GodotProcess | { error: string }> {
     const startedAt = Date.now();
     const transcript = openTranscript(startedAt);
-    let child: ChildProcess;
-    try {
-      child = spawn(godotPath, cmdArgs, {
-        stdio: ['ignore', transcript.fd, transcript.fd],
-        detached: true,
-        ...(env ? { env } : {}),
-      });
-    } finally {
-      // The child holds its own copy from here on, and this server only ever reads the file.
-      closeSync(transcript.fd);
+    // The keeper opens it again for the game; this server only ever reads it.
+    closeSync(transcript.fd);
+    // Through a launcher and a keeper rather than as this server's child. The harness ends a server
+    // by killing its process tree at every reconnect, and a run spawned here went with it however
+    // detached it was. The keeper is the game's parent, writes its record and its exit, and is
+    // nobody's child here once the launcher has gone.
+    const launched = await launchOutsideTheTree({
+      command: godotPath,
+      args: cmdArgs,
+      ...(env === undefined ? {} : { env }),
+      run: { transcript: transcript.path, startedAt, projectPath },
+    });
+    if ('error' in launched) {
+      return launched;
     }
-    // So this server exiting is not itself a reason for the run to end.
-    child.unref();
-    const log = new GameLog();
-    const started: SpawnedGame = {
-      process: child,
-      pid: child.pid ?? null,
-      log,
+    sweepTranscripts();
+    return {
+      pid: launched.pid,
+      log: new GameLog(),
       transcript: transcript.path,
       readOffset: 0,
       projectPath,
@@ -5123,35 +5129,6 @@ class GodotServer {
       throughEditor: false,
       brokeOn: null,
     };
-    child.on('exit', (code: number | null, signal: NodeJS.Signals | null) => {
-      this.logDebug(`Godot process exited with code ${code ?? 'none'}, signal ${signal ?? 'none'}`);
-      this.drainTranscript(started);
-      log.finish();
-      started.exitCode = code;
-      started.exitSignal = code === null ? signal : null;
-      // Into the note as well as into this process, because this process is the one the harness
-      // replaces without warning: an exit seen and not written down is an exit nobody can read.
-      if (started.pid !== null) {
-        recordRunEnded(started.pid, { exitCode: started.exitCode, exitSignal: started.exitSignal });
-      }
-    });
-    child.on('error', (err: Error) => {
-      console.error('Failed to start Godot process:', err);
-      log.append('stderr', `${err.message}\n`);
-      started.exitCode = -1;
-    });
-    if (started.pid !== null) {
-      writeRunRecord({
-        pid: started.pid,
-        transcript: transcript.path,
-        startedAt,
-        projectPath,
-        arguments: cmdArgs,
-        command: godotPath,
-      });
-    }
-    sweepTranscripts();
-    return started;
   }
 
   /**
@@ -5261,7 +5238,6 @@ class GodotServer {
     const note =
       left !== null && project !== null && isSameDirectory(left.projectPath, project) ? left : null;
     const picked: GodotProcess = {
-      process: null,
       pid: null,
       log: new GameLog(),
       // The file the answer reads back from, which every path that reports on a run drains before
@@ -5532,7 +5508,6 @@ class GodotServer {
       return null;
     }
     const adopted: GodotProcess = {
-      process: null,
       pid: record.pid,
       log: new GameLog(),
       transcript: record.transcript,
@@ -5543,6 +5518,7 @@ class GodotServer {
       exitSignal: null,
       throughEditor: false,
       brokeOn: null,
+      pickedUp: true,
     };
     this.drainTranscript(adopted);
     // Alive, and still the run this record describes. The second half is asked once, here, where
@@ -5874,10 +5850,18 @@ class GodotServer {
   private async runStillGoing(run: GodotProcess, editorSays?: boolean | null): Promise<boolean> {
     if (!run.throughEditor) {
       const going = stillRunning(run);
-      // Judged over because the game it announced has gone, which is a moment before the handle
-      // reports the exit: answered then, the run was over with no exit code and nothing saying why.
-      if (!going && run.process !== null && !exited(run)) {
-        await untilGone(run.process, [], EXIT_REPORTED_WITHIN_MS);
+      // The keeper that holds the game writes its exit into the record the moment it ends, which can
+      // be a moment after the process has gone: answered then, the run was over with no exit code
+      // and nothing saying why.
+      if (
+        !going &&
+        run.pid !== null &&
+        !exited(run) &&
+        run.endedUnwatched !== true &&
+        typeof run.endedHere !== 'string' &&
+        !(await this.untilTheExitIsRecorded(run))
+      ) {
+        run.endedUnwatched = true;
       }
       return going;
     }
@@ -5893,6 +5877,34 @@ class GodotServer {
       run.seenPlaying = true;
     }
     return runIsUp(run, said);
+  }
+
+  /**
+   * The exit a run's keeper wrote for [param run], taken into it, waited for as long as an exit
+   * takes to be reported. False when the record never said.
+   *
+   * Read from the record because nothing here holds the game: the keeper does, and the keeper is
+   * the one process that can wait on it. The record is the same one a replacement server reads, so
+   * the server that started a run and the one that picked it up answer its exit alike.
+   */
+  private async untilTheExitIsRecorded(run: GodotProcess): Promise<boolean> {
+    const until = Date.now() + EXIT_REPORTED_WITHIN_MS;
+    for (;;) {
+      const record = readRunRecord();
+      if (
+        record !== null &&
+        record.pid === run.pid &&
+        (record.exitCode !== undefined || record.exitSignal !== undefined)
+      ) {
+        run.exitCode = record.exitCode ?? null;
+        run.exitSignal = record.exitSignal ?? null;
+        return true;
+      }
+      if (Date.now() >= until) {
+        return false;
+      }
+      await delay(50);
+    }
   }
 
   /**
@@ -6090,6 +6102,7 @@ class GodotServer {
           announced: announced !== undefined || run.announcedPid !== undefined,
           couldAnnounce: run.projectPath !== null && existsSync(join(run.projectPath, RUNTIME_AUTOLOAD.path)),
           endedHere: typeof run.endedHere === 'string',
+          pickedUp: run.pickedUp === true,
         }),
       );
     }
@@ -6159,7 +6172,7 @@ class GodotServer {
       endedBy: stillRunning(run) ? undefined : (run.endedHere ?? null),
       // Named for a run this server did not start, because the note a run leaves behind is
       // shared by every server using this runtime directory: a caller can see whose run it is.
-      project: !run.throughEditor && run.process === null ? (run.projectPath ?? undefined) : undefined,
+      project: run.throughEditor ? undefined : (run.projectPath ?? undefined),
       // The file this run's output is written to, so watching a long one is reading a file meant
       // to be read rather than racing the engine for one that is not.
       transcript: run.transcript ?? undefined,

@@ -4877,6 +4877,184 @@ async function testALaunchedEditorsConsoleIsReadBeforeItConnects(): Promise<void
  * on any engine start at all, including one that never became an editor.
  */
 /**
+ * Ends [param root] and everything under it, the way the harness ends a server: every process
+ * whose parent chain leads to it, found by walking parent pids, then the root itself.
+ */
+async function killTheTree(root: number): Promise<void> {
+  const tree = await processTree();
+  assert.ok(tree !== undefined, 'the platform should list its processes for this to prove anything');
+  for (const pid of [...descendantsIn(tree, root), root]) {
+    try {
+      process.kill(pid);
+    } catch {
+      // Gone between the listing and the signal.
+    }
+  }
+}
+
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * What a server starts to outlive it is nobody's child there, so the harness's tree kill of the
+ * server leaves it running.
+ *
+ * Claude Code ends a gdharness server by killing its process tree, at every reconnect and every
+ * session end, and ostinato lost the editor its previous server had opened that way: spawned
+ * `detached` it was still the server's child, and a tree walk by parent pid reached it. A stand-in
+ * server launches a long-lived stand-in through the launcher the server uses, and the tree is then
+ * killed the way the harness kills it. The stand-in server holding its launch as a child is what
+ * the walk found; what is asserted is that the walk finds nothing, and that the launch outlives it.
+ */
+async function testALaunchIsOutsideTheServersTree(): Promise<void> {
+  const scratch = mkdtempSync(join(tmpdir(), 'gdharness-outside-'));
+  let launched = 0;
+  let standInPid = 0;
+  try {
+    const pidFile = join(scratch, 'launched.txt');
+    const server = join(scratch, 'server.mjs');
+    writeFileSync(
+      server,
+      [
+        `import { writeFileSync } from 'node:fs';`,
+        `import { launchOutsideTheTree } from ${JSON.stringify(pathToFileURL(resolve('build', 'outside.js')).href)};`,
+        `const launched = await launchOutsideTheTree(`,
+        `  { command: process.execPath, args: ['-e', 'setTimeout(() => {}, 120000)'] },`,
+        `  process.execPath,`,
+        `  ${JSON.stringify(resolve('build', 'keeper.js'))},`,
+        `);`,
+        `writeFileSync(${JSON.stringify(pidFile)}, JSON.stringify(launched));`,
+        `setInterval(() => {}, 1000);`,
+      ].join('\n'),
+    );
+    const standIn = spawn(process.execPath, [server], { stdio: 'ignore' });
+    standInPid = standIn.pid ?? 0;
+    for (let waited = 0; waited < 20_000 && !existsSync(pidFile); waited += 100) {
+      await delay(100);
+    }
+    const said: unknown = JSON.parse(readFileSync(pidFile, 'utf8'));
+    launched = asNumber(get(said, 'pid'));
+    assert.ok(isAlive(launched), `the launch should be running: ${JSON.stringify(said)}`);
+
+    const tree = await processTree();
+    assert.ok(tree !== undefined, 'the platform should list its processes for this to prove anything');
+    assert.ok(standIn.pid !== undefined && tree.has(standIn.pid), 'the stand-in server should be listed');
+    assert.ok(
+      !descendantsIn(tree, standIn.pid).includes(launched),
+      `the launch should be in no branch of the server's tree: pid ${launched}`,
+    );
+
+    await killTheTree(standIn.pid);
+    await delay(1_000);
+    assert.equal(isAlive(standIn.pid), false, 'the tree kill should have ended the stand-in server');
+    assert.ok(isAlive(launched), `and left the launch running: pid ${launched}`);
+  } finally {
+    // Both, whichever assertion failed: a stand-in server left running keeps this runner from
+    // exiting at all.
+    for (const pid of [launched, standInPid]) {
+      if (pid > 0 && isAlive(pid)) {
+        process.kill(pid);
+      }
+    }
+    sweep(scratch);
+  }
+}
+
+/**
+ * A run outlives the harness's tree kill of the server that started it, and the next server reads
+ * its exit code.
+ *
+ * The run is held by a keeper rather than by the server, and the keeper writes the exit into the
+ * run's note as the game ends. Before, the run was the server's child: a `taskkill /T` of a real
+ * server took a ninety-second run with it two seconds later. The game here quits with 7 after a few
+ * seconds, so the code a later server reports can only be the one the keeper wrote.
+ */
+async function testARunOutlivesItsServersTree(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('run outlives its server regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-outlives-'));
+  const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-outlives-runtime-'));
+  const env = { GODOT_PATH: godotPath, GDHARNESS_PROJECT: project, GDHARNESS_RUNTIME_DIR: runtime };
+  const first = new ServerProcess({ env });
+  let second: ServerProcess | null = null;
+  let game = 0;
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Outlives"\n' +
+        'run/main_scene="res://main.tscn"\n',
+    );
+    writeFileSync(
+      join(project, 'main.gd'),
+      'extends Node\n\n\nfunc _ready() -> void:\n\tget_tree().create_timer(6.0).timeout.connect(func() -> void: get_tree().quit(7))\n',
+    );
+    writeFileSync(
+      join(project, 'main.tscn'),
+      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+        '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+    );
+    await first.initialize('regression-test');
+    const started = await first.request(
+      'tools/call',
+      {
+        name: 'editor_run',
+        arguments: { projectPath: project, op: 'start', headless: true, runtimeWaitMs: 0 },
+      },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    game = asNumber(get(parseTextContent(started), 'pid'));
+    assert.ok(isAlive(game), `the run should be going: ${textOf(started)}`);
+
+    const serverPid = first.child.pid;
+    assert.ok(serverPid !== undefined, 'the server should have a pid');
+    await killTheTree(serverPid);
+    await delay(1_000);
+    assert.equal(isAlive(serverPid), false, 'the tree kill should have ended the server');
+    assert.ok(isAlive(game), `and left its run going: pid ${game}`);
+
+    second = new ServerProcess({ env });
+    await second.initialize('regression-test');
+    let answer: unknown = null;
+    let said = '';
+    for (let waited = 0; waited < 30_000; waited += 500) {
+      const read = await second.request('tools/call', { name: 'editor_output', arguments: {} });
+      said = textOf(read) ?? '';
+      answer = parseTextContent(read);
+      if (get(answer, 'running') === false) {
+        break;
+      }
+      await delay(500);
+    }
+    assert.equal(get(answer, 'running'), false, `the run should have ended: ${said}`);
+    assert.equal(
+      get(answer, 'exitCode'),
+      7,
+      `and the next server should read the code its keeper wrote: ${said}`,
+    );
+  } finally {
+    if (game > 0 && isAlive(game)) {
+      process.kill(game);
+    }
+    await first.stop().catch(() => undefined);
+    await second?.stop();
+    sweep(project);
+    sweep(runtime);
+  }
+}
+
+/**
  * A call the client cancels takes the engine it started with it.
  *
  * Reported twice by ostinato: a project_test cancelled from the client left GdUnitCmdTool's engine
@@ -5370,23 +5548,33 @@ function testAPidPicksOneOfSeveralGames(): void {
  * One sentence served every such run and named a restart for all of them: a game the editor played
  * that died while starting on a loaded machine was reported as having outlived the server that
  * started it, by that same server, fifty seconds after it started it. Every branch is rendered,
- * since a reproduction reaches one of them. And a run with a handle is never marked as having no
- * code coming, because the handle's exit event brings one, sometimes after the game it announced
- * has gone.
+ * since a reproduction reaches one of them: a spawned run this server started, whose keeper is
+ * what should have written the code, is not "started by another server".
  */
-async function testARunEndedWithoutACodeSaysWhy(): Promise<void> {
+function testARunEndedWithoutACodeSaysWhy(): void {
   const other = endedWithoutACode({
     throughEditor: false,
     announced: true,
     couldAnnounce: true,
     endedHere: false,
+    pickedUp: true,
   });
   assert.match(other, /^This run was started by another server/, other);
+  const ours = endedWithoutACode({
+    throughEditor: false,
+    announced: true,
+    couldAnnounce: true,
+    endedHere: false,
+    pickedUp: false,
+  });
+  assert.match(ours, /^This run was started here, and the keeper holding it wrote no exit code/, ours);
+  assert.doesNotMatch(ours, /another server/, ours);
   const starting = endedWithoutACode({
     throughEditor: true,
     announced: false,
     couldAnnounce: true,
     endedHere: false,
+    pickedUp: false,
   });
   assert.match(
     starting,
@@ -5401,7 +5589,13 @@ async function testARunEndedWithoutACodeSaysWhy(): Promise<void> {
     [true, true],
     [false, false],
   ] as const) {
-    const said = endedWithoutACode({ throughEditor: true, announced, couldAnnounce, endedHere: false });
+    const said = endedWithoutACode({
+      throughEditor: true,
+      announced,
+      couldAnnounce,
+      endedHere: false,
+      pickedUp: false,
+    });
     assert.equal(
       said,
       "The editor stopped playing this run. A game the editor plays is the editor's own child, so its exit code stays with the editor and none was collected here. What it printed is below.",
@@ -5416,6 +5610,7 @@ async function testARunEndedWithoutACodeSaysWhy(): Promise<void> {
     announced: false,
     couldAnnounce: true,
     endedHere: true,
+    pickedUp: false,
   });
   assert.equal(
     stoppedHere,
@@ -5427,40 +5622,21 @@ async function testARunEndedWithoutACodeSaysWhy(): Promise<void> {
     announced: false,
     couldAnnounce: true,
     endedHere: true,
+    pickedUp: true,
   });
   assert.match(
     otherEndedHere,
     /^This run was started by another server, so nothing here held it/,
     otherEndedHere,
   );
-  for (const said of [other, starting, stoppedHere, otherEndedHere]) {
+  for (const said of [other, ours, starting, stoppedHere, otherEndedHere]) {
     assert.doesNotMatch(said, /outlived/, said);
   }
 
-  const handle = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
-  const exited = new Promise<void>((resolve) => {
-    handle.once('exit', () => {
-      resolve();
-    });
-  });
+  assert.equal(noCodeWillCome({ exitCode: null, exitSignal: null }), true, 'nothing wrote this one down');
+  assert.equal(noCodeWillCome({ exitCode: 0, exitSignal: null }), false, 'and this one has its code');
   assert.equal(
-    noCodeWillCome({ exitCode: null, exitSignal: null, process: handle }),
-    false,
-    'a handle brings its code',
-  );
-  await exited;
-  assert.equal(
-    noCodeWillCome({ exitCode: null, exitSignal: null, process: null }),
-    true,
-    'nothing here holds this one',
-  );
-  assert.equal(
-    noCodeWillCome({ exitCode: 0, exitSignal: null, process: null }),
-    false,
-    'and this one has its code',
-  );
-  assert.equal(
-    noCodeWillCome({ exitCode: null, exitSignal: 'SIGTERM', process: null }),
+    noCodeWillCome({ exitCode: null, exitSignal: 'SIGTERM' }),
     false,
     'and this one has its ending, which was a signal',
   );
@@ -5471,7 +5647,6 @@ function testANotYetRuntimeIsNotTheSameAsNoRuntime(): void {
   // the editor plays has no handle and no exit code here, so the record says "going" for as long
   // as it exists, including for a game that died in its first frame.
   const played: GodotProcess = {
-    process: null,
     pid: null,
     log: new GameLog(),
     transcript: null,
@@ -18270,6 +18445,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheProjectWalksAgreeAboutWhatIsInIt,
   testClassesAnEditorIsNotHolding,
   testAScanThatHasNotStartedIsNotFinished,
+  testALaunchIsOutsideTheServersTree,
+  testARunOutlivesItsServersTree,
   testAStartWaitsOutTheEditorsScan,
   testARepairThatCouldNotRunIsNotReported,
   testTheDiagnosticsRemedyKnowsAnEditorThatWritesAShortList,
