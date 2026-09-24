@@ -826,6 +826,11 @@ function describeValue(value: unknown): string {
   if (Array.isArray(value)) {
     return 'a list';
   }
+  // The number itself, since the one refusal a number meets is being the wrong kind of number:
+  // "depth as integer, not a number" names the type it has in common with what was wanted.
+  if (typeof value === 'number') {
+    return String(value);
+  }
   return VALUE_NAMES[typeof value] ?? typeof value;
 }
 
@@ -898,6 +903,36 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 
 function outsideTheirLists(spec: ToolSpec, args: OperationParams): string[] {
   return Object.entries(args).flatMap(([name, value]) => unlistedValues(spec.parameters[name], value, name));
+}
+
+/**
+ * Which numbers fall outside the range their schema declares.
+ *
+ * The quiet fault a range stops is the same one a list does: a number the call cannot mean reaches
+ * a reader that takes it as absent and applies the default. A tree asked for at depth 0 answered
+ * three levels, four megabytes over a router node, and `before: 0` carried three lines anyway.
+ * Refused here, where the schema that says what a number may be is also what the client is shown.
+ */
+function outsideTheirRanges(spec: ToolSpec, args: OperationParams): string[] {
+  const complaints: string[] = [];
+  for (const [name, value] of Object.entries(args)) {
+    const schema = spec.parameters[name];
+    if (typeof value !== 'number' || schema === undefined) {
+      continue;
+    }
+    const least = typeof schema['minimum'] === 'number' ? schema['minimum'] : undefined;
+    const most = typeof schema['maximum'] === 'number' ? schema['maximum'] : undefined;
+    if ((least !== undefined && value < least) || (most !== undefined && value > most)) {
+      const range =
+        least !== undefined && most !== undefined
+          ? `from ${least} to ${most}`
+          : least !== undefined
+            ? `of ${least} or more`
+            : `of ${most} or less`;
+      complaints.push(`${name} ${range}, not ${value}`);
+    }
+  }
+  return complaints;
 }
 
 /**
@@ -1813,7 +1848,11 @@ class GodotServer {
       };
     }
 
-    const wrong = [...wrongTypes(spec, args), ...outsideTheirLists(spec, args)];
+    const wrong = [
+      ...wrongTypes(spec, args),
+      ...outsideTheirLists(spec, args),
+      ...outsideTheirRanges(spec, args),
+    ];
     if (wrong.length > 0) {
       return { ok: false, response: this.createErrorResponse(`${spec.name} takes ${wrong.join('; ')}.`) };
     }
@@ -2049,13 +2088,8 @@ class GodotServer {
           case 'tree': {
             // Zero is the node alone, which is how one node's properties are read, and not an
             // omission: read as positive it fell back to three levels, which over a router node
-            // answered four megabytes.
+            // answered four megabytes. The schema's range refuses anything below it.
             const depth = readNonNegativeNumber(args, 'depth');
-            if (args['depth'] !== undefined && (depth === undefined || !Number.isInteger(depth))) {
-              return this.createErrorResponse(
-                `depth is ${JSON.stringify(args['depth'])}, and depth takes a whole number of levels: 0 for the node alone.`,
-              );
-            }
             return await this.handleRuntimeCommand(
               'get_tree',
               {
@@ -5731,7 +5765,8 @@ class GodotServer {
     // context, and a console with a hundred different repeated messages would otherwise carry a
     // hundred groups on top of the two hundred entries. Sorted by count, so the cap takes the
     // small ones, and what it took is said rather than left to be inferred from a short list.
-    const grouped = bursts(everything, readPositiveNumber(args, 'before') ?? 3);
+    // Zero is a group with nothing above it, which is an answer; read as positive it carried three.
+    const grouped = bursts(everything, readNonNegativeNumber(args, 'before') ?? 3);
     const shown = grouped.slice(0, MOST_GROUPS);
     return this.jsonTextResponse({
       editorPid: editorPid ?? undefined,
