@@ -8,11 +8,20 @@
  * writes the run's record, hands the pid back, and waits: a server can wait only on its own
  * children and none is the game's, so this process is what sees the exit and writes it where the
  * next server reads it.
+ *
+ * Both are handed their spec down stdin, never on the command line: see `SentSpec`.
  */
 
 import { type ChildProcess, spawn } from 'node:child_process';
 import { closeSync, openSync } from 'node:fs';
-import { decodeSpec, KEEPER_SCRIPT, type OutsideSpec, readLaunched } from './outside.js';
+import {
+  KEEPER_SCRIPT,
+  readLaunched,
+  receivedSpec,
+  type SentSpec,
+  sendSpec,
+  withChanges,
+} from './outside.js';
 import { recordRunEnded, writeRunRecord } from './run-record.js';
 
 /**
@@ -21,14 +30,14 @@ import { recordRunEnded, writeRunRecord } from './run-record.js';
  * with no reader fills and then blocks the writer.
  */
 async function startDetached(
-  spec: OutsideSpec,
+  spec: SentSpec,
   output: number | 'ignore',
 ): Promise<{ child: ChildProcess; pid: number } | { error: string }> {
   return await new Promise((resolve) => {
     const child = spawn(spec.command, [...spec.args], {
       stdio: ['ignore', output, output],
       detached: true,
-      ...(spec.env === undefined ? {} : { env: spec.env }),
+      env: withChanges(process.env, spec.envChanges),
     });
     child.once('error', (error: Error) => {
       resolve({ error: error.message });
@@ -43,8 +52,8 @@ async function startDetached(
   });
 }
 
-async function launch(encoded: string): Promise<void> {
-  const spec = decodeSpec(encoded);
+async function launch(): Promise<void> {
+  const spec = await receivedSpec();
   if (spec.run === undefined) {
     const started = await startDetached(spec, 'ignore');
     if ('error' in started) {
@@ -55,8 +64,8 @@ async function launch(encoded: string): Promise<void> {
     }
     process.exit(0);
   }
-  const keeper = spawn(process.execPath, [KEEPER_SCRIPT, 'keep', encoded], {
-    stdio: ['ignore', 'pipe', 'pipe'],
+  const keeper = spawn(process.execPath, [KEEPER_SCRIPT, 'keep'], {
+    stdio: ['pipe', 'pipe', 'pipe'],
     detached: true,
     windowsHide: true,
   });
@@ -66,6 +75,7 @@ async function launch(encoded: string): Promise<void> {
     process.stdout.write(`error the keeper did not start: ${error.message}\n`);
     process.exit(0);
   });
+  sendSpec(keeper, spec);
   keeper.stderr.on('data', (chunk: Buffer) => {
     complained += chunk.toString();
   });
@@ -87,8 +97,8 @@ async function launch(encoded: string): Promise<void> {
   });
 }
 
-async function keep(encoded: string): Promise<void> {
-  const spec = decodeSpec(encoded);
+async function keep(): Promise<void> {
+  const spec = await receivedSpec();
   if (spec.run === undefined) {
     process.stdout.write('error a keeper was started without a run\n');
     process.exit(1);
@@ -126,12 +136,12 @@ async function keep(encoded: string): Promise<void> {
   process.stdout.end();
 }
 
-const [mode, encoded] = process.argv.slice(2);
-if (mode === 'launch' && encoded !== undefined) {
-  await launch(encoded);
-} else if (mode === 'keep' && encoded !== undefined) {
-  await keep(encoded);
+const mode = process.argv[2];
+if (mode === 'launch') {
+  await launch();
+} else if (mode === 'keep') {
+  await keep();
 } else {
-  process.stderr.write('keeper.js launch|keep <spec>\n');
+  process.stderr.write('keeper.js launch|keep, with the spec on stdin\n');
   process.exit(2);
 }

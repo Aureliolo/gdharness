@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
 import { type ChildProcess, execFile, type SpawnSyncReturns, spawn, spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import {
   cpSync,
@@ -4963,6 +4964,118 @@ async function testALaunchIsOutsideTheServersTree(): Promise<void> {
       }
     }
     sweep(scratch);
+  }
+}
+
+/**
+ * The environment a run is started with goes to it without passing through any command line.
+ *
+ * The launcher and the keeper were handed their spec as a command-line argument, base64 JSON, and
+ * the spec carried the run's whole environment: the server's, API keys and harness tokens
+ * included, readable by every process on the machine for as long as the keeper lived, which is as
+ * long as the run. Reported by fantasy-guild-manager as a security advisory against 1.0.30.
+ *
+ * A secret is put in the server's environment and a variable in the run's own; the game prints
+ * both, which is the half that shows the environment still arrives. While the game is up, no
+ * command line on the machine that runs the keeper carries either value, raw or in base64.
+ */
+async function testARunsEnvironmentStaysOffCommandLines(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('environment off command lines regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-environment-'));
+  const secret = `not-for-command-lines-${randomUUID()}`;
+  const ownValue = `only-this-run-${randomUUID()}`;
+  const server = new ServerProcess({
+    env: { GODOT_PATH: godotPath, GDHARNESS_PROJECT: project, GDHARNESS_TEST_SECRET: secret },
+  });
+  let game = 0;
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Environment"\n' +
+        'run/main_scene="res://main.tscn"\n',
+    );
+    writeFileSync(
+      join(project, 'main.gd'),
+      'extends Node\n\n\nfunc _ready() -> void:\n' +
+        '\tprint("secret=", OS.get_environment("GDHARNESS_TEST_SECRET"))\n' +
+        '\tprint("own=", OS.get_environment("RUN_OWN_VALUE"))\n' +
+        '\tget_tree().create_timer(20.0).timeout.connect(get_tree().quit)\n',
+    );
+    writeFileSync(
+      join(project, 'main.tscn'),
+      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+        '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+    );
+    await server.initialize('regression-test');
+    const started = await server.request(
+      'tools/call',
+      {
+        name: 'editor_run',
+        arguments: {
+          projectPath: project,
+          op: 'start',
+          headless: true,
+          runtimeWaitMs: 0,
+          env: { RUN_OWN_VALUE: ownValue },
+        },
+      },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    const answer = parseTextContent(started);
+    game = asNumber(get(answer, 'pid'));
+    const transcript = text(get(answer, 'transcript'));
+
+    let printed = '';
+    for (let waited = 0; waited < 20_000 && !printed.includes('own='); waited += 250) {
+      await delay(250);
+      printed = existsSync(transcript) ? readFileSync(transcript, 'utf8') : '';
+    }
+    assert.match(
+      printed,
+      new RegExp(`secret=${secret}`),
+      `the server's environment still reaches the game: ${printed}`,
+    );
+    assert.match(printed, new RegExp(`own=${ownValue}`), `and so does the run's own: ${printed}`);
+
+    const tree = await processTree();
+    assert.ok(tree !== undefined, 'the platform should list its processes for this to prove anything');
+    const keepers = [...tree.values()].filter((one) => one.command.includes('keeper.js'));
+    assert.ok(keepers.length > 0, 'the keeper holding the run should be listed, or nothing was looked at');
+    const forms = [secret, ownValue].flatMap((value) => [
+      value,
+      Buffer.from(value, 'utf8').toString('base64url'),
+      Buffer.from(value, 'utf8').toString('base64'),
+    ]);
+    for (const [pid, listed] of tree) {
+      for (const form of forms) {
+        assert.ok(
+          !listed.command.includes(form),
+          `pid ${pid}'s command line should not carry an environment value: ${listed.command.slice(0, 300)}`,
+        );
+      }
+    }
+    // Base64 of JSON does not line up with base64 of one value, so the spec's own shape is looked for
+    // too: any long base64 run on a keeper's line is a spec being carried there.
+    for (const keeper of keepers) {
+      assert.doesNotMatch(
+        keeper.command,
+        /[A-Za-z0-9_-]{200,}/,
+        `a keeper's command line should carry no encoded payload: ${keeper.command.slice(0, 300)}`,
+      );
+    }
+  } finally {
+    if (game > 0 && isAlive(game)) {
+      process.kill(game);
+    }
+    await server.stop();
+    sweep(project);
   }
 }
 
@@ -18447,6 +18560,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAScanThatHasNotStartedIsNotFinished,
   testALaunchIsOutsideTheServersTree,
   testARunOutlivesItsServersTree,
+  testARunsEnvironmentStaysOffCommandLines,
   testAStartWaitsOutTheEditorsScan,
   testARepairThatCouldNotRunIsNotReported,
   testTheDiagnosticsRemedyKnowsAnEditorThatWritesAShortList,
