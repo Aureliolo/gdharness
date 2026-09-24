@@ -980,6 +980,69 @@ const HANDOVER_POLL_MS = 250;
 const CACHE_WRITE_MS = 2_000;
 
 /**
+ * How long a start waits for the editor to finish a scan before starting anyway and saying so.
+ *
+ * The rescan tool's own default, since it is the same wait. A scan of a few hundred scripts takes
+ * a second or two; what runs longer is an import of large assets, and a caller who asked for a game
+ * is better served by one started with a note than by a refusal to start.
+ */
+const SCAN_WAIT_MS = 30_000;
+
+/** What a start waited for before the game was launched: an editor scan and its cache write. */
+interface ScanWait {
+  readonly waitedMs: number;
+  /** The wait ran out with the editor still scanning, so the game started during the scan. */
+  readonly stillScanning: boolean;
+}
+
+/**
+ * What a start or a boot check says about the editor scan it waited for: nothing when there was
+ * none, how long when there was, and a note when it gave up waiting, since a game started during a
+ * scan can fail on a correct script and the caller would otherwise go looking in the script.
+ */
+/** The scan-wait fields an answer already carries, to be passed on by an answer built from it. */
+function scanWaitIn(payload: OperationParams): { waitedForEditorScanMs?: number; scanNote?: string } {
+  const waited = readNumber(payload, 'waitedForEditorScanMs');
+  const note = readString(payload, 'scanNote');
+  return {
+    ...(waited === undefined ? {} : { waitedForEditorScanMs: waited }),
+    ...(note === undefined ? {} : { scanNote: note }),
+  };
+}
+
+/** [param outcome] carrying what was waited for before it, in its answer or its refusal. */
+function withScanWait(outcome: HeadlessOutcome, scanned: ScanWait): HeadlessOutcome {
+  if (scanned.waitedMs === 0) {
+    return outcome;
+  }
+  const said = scanWaitAnswer(scanned);
+  if (outcome.ok) {
+    return { ...outcome, payload: { ...outcome.payload, ...said } };
+  }
+  return said.scanNote === undefined
+    ? outcome
+    : { ...outcome, message: `${outcome.message} ${said.scanNote}` };
+}
+
+function scanWaitAnswer(scanned: ScanWait): {
+  waitedForEditorScanMs?: number;
+  scanNote?: string | undefined;
+} {
+  if (scanned.waitedMs === 0) {
+    return {};
+  }
+  return {
+    waitedForEditorScanMs: scanned.waitedMs,
+    scanNote: scanned.stillScanning
+      ? `The editor was still scanning the project after ${SCAN_WAIT_MS / 1000} seconds, so this ` +
+        'game started during the scan and may have read a class cache being rewritten. If ' +
+        'editor_output shows "Could not find type" for a class that is declared, editor_rescan ' +
+        'waits for the scan to finish, and a start after it reads the finished cache.'
+      : undefined,
+  };
+}
+
+/**
  * How long `editor_status` waits for an editor to say what it is playing.
  *
  * Short because it is a status call over a local socket answered from a field the editor already
@@ -2501,6 +2564,64 @@ class GodotServer {
   }
 
   /**
+   * Waits out a scan the editor open on this project is running, and the class cache write that
+   * follows it, so a game is not started against a cache being rewritten.
+   *
+   * The editor rewrites `.godot/global_script_class_cache.cfg` a frame after it stops reporting a
+   * scan, measured on 4.7.2, and a game reads the file as it boots. A start a few seconds after a
+   * formatter rewrote scripts booted a game that resolved no global class at all, 95 "Could not
+   * find type" errors, while the file read whole straight afterwards; the same start again booted
+   * clean. So a scan that is running is waited for, and then the write: until the file is newer
+   * than the scan's end, or until the write would have landed.
+   *
+   * Only an editor on this project can be asked, and one that cannot answer is not waited for:
+   * the start is what the caller asked for, and this only decides when it happens.
+   */
+  private async untilTheEditorsScanIsWritten(projectPath: string): Promise<ScanWait> {
+    const open = this.godotBridge.getStatus().projectPath;
+    if (!this.godotBridge.isConnected() || open === undefined || !isSameDirectory(open, projectPath)) {
+      return { waitedMs: 0, stillScanning: false };
+    }
+    const started = Date.now();
+    let sawAScan = false;
+    let scanEndedAt: number | null = null;
+    for (;;) {
+      const asked = Date.now();
+      let status: OperationParams;
+      try {
+        status = asParams(await this.godotBridge.invokeTool('scan_status', {}));
+      } catch {
+        return { waitedMs: Date.now() - started, stillScanning: false };
+      }
+      if (status['scanning'] === true || status['importing'] === true || status['pending'] === true) {
+        sawAScan = true;
+        if (Date.now() - started >= SCAN_WAIT_MS) {
+          return { waitedMs: Date.now() - started, stillScanning: true };
+        }
+        await new Promise((settle) => setTimeout(settle, 100));
+        continue;
+      }
+      // Measured from when the question was sent, which is no later than when the addon read its
+      // clock, so the end is never placed after the write that follows it.
+      const since = readNumber(status, 'sinceScanFinishedMs');
+      scanEndedAt = since !== undefined && since >= 0 ? asked - since : sawAScan ? asked : null;
+      break;
+    }
+    let waitedForTheWrite = false;
+    if (scanEndedAt !== null) {
+      const writeDue = scanEndedAt + CACHE_WRITE_MS;
+      while (Date.now() < writeDue && (cacheWrittenAt(projectPath) ?? 0) < scanEndedAt) {
+        waitedForTheWrite = true;
+        await new Promise((settle) => setTimeout(settle, 50));
+      }
+    }
+    return {
+      waitedMs: sawAScan || waitedForTheWrite ? Date.now() - started : 0,
+      stillScanning: false,
+    };
+  }
+
+  /**
    * Every file argument judged against the project and rewritten as its `res://` path, and a
    * plugin name judged as the directory under addons/ it names.
    */
@@ -2598,25 +2719,33 @@ class GodotServer {
     }
     const projectPath = project.value.path;
 
+    // The import pass is an engine on the project that writes the class cache itself, so it waits
+    // for the open editor's scan the way every other engine started here does.
+    const scanned = await this.untilTheEditorsScanIsWritten(projectPath);
     const before = scriptsWithoutUid(projectPath);
     const imported = await runImport(engine.value, projectPath);
     if (!imported.ok) {
-      return this.answer(imported);
+      return this.answer(withScanWait(imported, scanned));
     }
     const after = scriptsWithoutUid(projectPath);
     const given = before.filter((script) => !after.includes(script));
 
-    return this.answer({
-      ok: true,
-      messages: imported.messages,
-      payload: {
-        uidsCreated: given,
-        stillWithoutUid: after,
-        // Said rather than implied: the op resaved every scene for as long as it existed, so a
-        // caller who knows it by its diff needs telling that the diff is the bug and is gone.
-        note: uidsLeftNote(after.length),
-      },
-    });
+    return this.answer(
+      withScanWait(
+        {
+          ok: true,
+          messages: imported.messages,
+          payload: {
+            uidsCreated: given,
+            stillWithoutUid: after,
+            // Said rather than implied: the op resaved every scene for as long as it existed, so a
+            // caller who knows it by its diff needs telling that the diff is the bug and is gone.
+            note: uidsLeftNote(after.length),
+          },
+        },
+        scanned,
+      ),
+    );
   }
 
   private async operation(
@@ -2635,13 +2764,18 @@ class GodotServer {
         messages: [],
       };
     }
+    // Every operation boots an engine on the project, and an engine resolves the project's classes
+    // from the cache as it starts, so one started while the editor rewrites it fails on correct
+    // scripts; a class cache rebuilt here would also be written over by the editor's list.
+    const scanned = await this.untilTheEditorsScanIsWritten(projectPath);
     this.logDebug(`Running ${operation} in ${projectPath}: ${JSON.stringify(params)}`);
-    return await runOperation(
+    const outcome = await runOperation(
       { godotPath: engine.value, script: this.operationsScript, debug: GODOT_DEBUG_MODE_DEFAULT },
       operation,
       params,
       projectPath,
     );
+    return withScanWait(outcome, scanned);
   }
 
   private answer(outcome: HeadlessOutcome): ToolResponse {
@@ -2882,10 +3016,13 @@ class GodotServer {
       return engine.response;
     }
 
+    // The rebuild waits out the editor's scan before it runs, so what it waited is what this run
+    // waited, and the engine below starts on the cache the rebuild left.
     const classes = await this.rebuildClassCache(project.value.path);
     if (!classes.ok) {
       return this.answer(classes);
     }
+    const scanned = scanWaitIn(classes.payload);
 
     // Under a name of this run's own. The directory is a path in the project rather than in this
     // process, so a second run against the same project wrote its report_1 beside the first's,
@@ -3015,6 +3152,7 @@ class GodotServer {
                 arguments: cmdArgs,
                 entries: forAnswer(printed.slice(0, 60)),
                 savesNote,
+                ...scanned,
               },
               null,
               2,
@@ -3077,6 +3215,7 @@ class GodotServer {
       orphans: orphans.total > 0 ? orphans.total : undefined,
       notRun: notRun > 0 ? notRun : undefined,
       savesNote,
+      ...scanned,
       // The word on its own was the whole answer, and it named neither what was warned nor where.
       note:
         verdict.startsWith('warnings') && warnings.length === 0
@@ -3683,6 +3822,39 @@ class GodotServer {
     }
   }
 
+  /**
+   * Whether the editor is scanning, and how long ago it last finished one, asked with the same short
+   * wait as what it is playing. A start waits out a scan and the class cache write after it, and
+   * this is where a caller can see that state for itself. Null from an editor that did not answer,
+   * which includes one whose addon predates the question.
+   */
+  private async editorScanState(): Promise<{
+    scanning: boolean;
+    importing: boolean;
+    finishedMsAgo: number | null;
+  } | null> {
+    if (!this.godotBridge.getStatus().connected) {
+      return null;
+    }
+    try {
+      const answer = await Promise.race([
+        this.godotBridge.invokeTool('scan_status', {}),
+        delay(PLAYING_STATUS_MS).then(() => null),
+      ]);
+      if (answer === null) {
+        return null;
+      }
+      const since = readNumber(asParams(answer), 'sinceScanFinishedMs');
+      return {
+        scanning: readBoolean(asParams(answer), 'scanning') ?? false,
+        importing: readBoolean(asParams(answer), 'importing') ?? false,
+        finishedMsAgo: since === undefined || since < 0 ? null : since,
+      };
+    } catch {
+      return null;
+    }
+  }
+
   /** editor_status: the three things an agent asks before doing anything else, in one answer. */
   private async handleEditorStatus(): Promise<ToolResponse> {
     const located = await this.locator.find();
@@ -3744,7 +3916,11 @@ class GodotServer {
         hold: current === null ? {} : await this.holdOf(current, active),
       };
     })();
-    const [games, { playing, active, hold }] = await Promise.all([pinged, asked]);
+    const [games, { playing, active, hold }, scan] = await Promise.all([
+      pinged,
+      asked,
+      this.editorScanState(),
+    ]);
     return this.jsonTextResponse({
       editor: {
         ...this.getEditorStatusPayload(),
@@ -3752,6 +3928,7 @@ class GodotServer {
         // debugger takes a port again before every play, so the one in the greeting is a number
         // it has already moved off.
         debugPort: playing?.debugPort ?? this.godotBridge.getStatus().debugPort,
+        scan,
       },
       godot: {
         path: located.ok ? located.path : null,
@@ -4184,7 +4361,10 @@ class GodotServer {
     // The engine fixes its list of global classes when it starts and the editor writes that
     // list back over the cache, so a game launched after a `class_name` was written dies at its
     // first screen on "Could not find type". Rebuilt here from the declarations on disk rather
-    // than reported: the caller asked for a game, and this is what it takes to have one.
+    // than reported: the caller asked for a game, and this is what it takes to have one. After any
+    // scan the editor is running has written its own list, which would otherwise land over the
+    // rebuild, and which a game booted in the middle of reads half-written.
+    const scanned = await this.untilTheEditorsScanIsWritten(project.value.path);
     const refreshed = await this.refreshStaleClasses(project.value.path);
     if (!refreshed.ok) {
       return refreshed.response;
@@ -4198,6 +4378,7 @@ class GodotServer {
         sceneArgument,
         args,
         given.value,
+        scanned,
         asked.value,
       );
     }
@@ -4271,6 +4452,7 @@ class GodotServer {
       return await this.playThroughEditor(
         sceneArgument,
         refreshed.value,
+        scanned,
         project.value.path,
         alreadyPlaying,
         runtimeWaitMs,
@@ -4342,6 +4524,7 @@ class GodotServer {
       // that has not printed yet looks like.
       transcript: started.transcript,
       refreshedClasses: refreshed.value,
+      ...scanWaitAnswer(scanned),
       // Said on the start that asked for it rather than left to the player's save list: on macOS
       // the engine reads user:// off HOME, so a run asked to save elsewhere saved where they do.
       savesNote: asked.value.savesIn !== undefined && savesStayPut() ? SAVES_NOT_MOVED_NOTE : undefined,
@@ -4527,6 +4710,7 @@ class GodotServer {
   private async playThroughEditor(
     scene: string | null,
     refreshedClasses: readonly string[],
+    scanned: ScanWait,
     projectPath: string,
     alreadyPlaying: ReadonlySet<number>,
     runtimeWaitMs: AnnounceBudget,
@@ -4605,6 +4789,7 @@ class GodotServer {
       through: 'editor',
       scene: scene === null ? 'the main scene' : `res://${scene}`,
       refreshedClasses,
+      ...scanWaitAnswer(scanned),
       // Which port the editor's debugger took, since it is the one port Godot has no command
       // line option for and the addon moves itself off when another editor is holding it.
       debugPort: readNumber(playAnswer, 'debugPort'),
@@ -5590,6 +5775,7 @@ class GodotServer {
     scene: string | null,
     args: OperationParams,
     userArgs: readonly string[],
+    scanned: ScanWait,
     asked: RunEnvironment = {},
   ): Promise<ToolResponse> {
     const frames = readPositiveNumber(args, 'frames') ?? 3;
@@ -5629,6 +5815,7 @@ class GodotServer {
       frames,
       errors,
       warnings,
+      ...scanWaitAnswer(scanned),
       savesNote: asked.savesIn !== undefined && savesStayPut() ? SAVES_NOT_MOVED_NOTE : undefined,
       entries: forAnswer(boot.log.select({ severity: 'warning', sinceLastCall: false, limit: 200 }).entries),
     });
@@ -6433,6 +6620,13 @@ class GodotServer {
    * rescan send them to the restart instead.
    */
   private async rebuildClassCache(projectPath: string): Promise<HeadlessOutcome> {
+    // Before the cache is read for comparison, so a list the editor writes at the end of a scan is
+    // the one compared against rather than one that lands between the reading and the rebuild.
+    const scanned = await this.untilTheEditorsScanIsWritten(projectPath);
+    return withScanWait(await this.rebuildClassCacheFromDisk(projectPath), scanned);
+  }
+
+  private async rebuildClassCacheFromDisk(projectPath: string): Promise<HeadlessOutcome> {
     const before = cachedClasses(projectPath);
     const writtenBefore = cacheWrittenAt(projectPath);
     const noted = readClassNote(projectPath);

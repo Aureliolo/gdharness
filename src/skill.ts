@@ -169,6 +169,13 @@ a class it cannot resolve would go out of that file with it. The answer names th
 \`cacheRestored\`, so no fresh engine, CI run or clone inherits the short file. That is the same
 class \`unseenByEditor\` names, and the loss is not a reason to refuse the scan.
 
+The editor also scans on its own, when files change under it, and it rewrites that file just after
+the scan ends. Every engine this server starts on the project (a run, a boot check, a test run, a
+headless operation) waits until a scan in progress and the write after it are done, and says how
+long under \`waitedForEditorScanMs\`. A \`scanNote\` means a scan was still going after thirty
+seconds and the engine started anyway: a "Could not find type" from that engine is the scan, not
+the script, and \`editor_rescan\` followed by the same call again is the cure.
+
 A diagnostic about a member rather than a type, \`Static function "x()" not found in base "Y"\`
 about something the engine compiles, is a different thing and is no longer stale here: each ask
 gives the document back when its answer arrives, so the next one is read off disk. If one turns
