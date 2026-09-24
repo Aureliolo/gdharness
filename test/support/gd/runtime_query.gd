@@ -238,6 +238,61 @@ func _check_reading_rich_text() -> void:
 	dossier.free()
 
 
+## The controls that draw a list of text rather than holding one `text`: tab titles, list items, tree
+## rows and an open menu's items. Each read as nothing, so a screen of tabs and lists came back as its
+## labels alone and a wait for a tab's title was never met.
+func _check_reading_lists() -> void:
+	var board: VBoxContainer = VBoxContainer.new()
+	board.name = "Board"
+	root.add_child(board)
+	var tabs: TabContainer = TabContainer.new()
+	board.add_child(tabs)
+	for title: String in ["Roster", "Ledger"]:
+		var page: Control = Control.new()
+		page.name = title
+		tabs.add_child(page)
+	var names: ItemList = ItemList.new()
+	names.add_item("Ada")
+	names.add_item("Bram")
+	board.add_child(names)
+	var tree: Tree = Tree.new()
+	var guild: TreeItem = tree.create_item()
+	guild.set_text(0, "Guild")
+	var member: TreeItem = tree.create_item(guild)
+	member.set_text(0, "Cass")
+	var kit: TreeItem = tree.create_item(member)
+	kit.set_text(0, "Blade")
+	member.collapsed = true
+	board.add_child(tree)
+	var menu: PopupMenu = PopupMenu.new()
+	menu.add_item("Hire")
+	menu.add_separator()
+	menu.add_item("Dismiss")
+	board.add_child(menu)
+	await process_frame
+
+	var closed: Dictionary = await node._execute_command("read_text", {"root": "/root/Board"})
+	if closed.get("lines", []) != ["Roster", "Ledger", "Ada", "Bram", "Guild", "Cass"]:
+		_fail("tabs, list items and tree rows read as lines, and not under a collapsed row: %s" % str(closed))
+
+	menu.show()
+	await process_frame
+	var opened: Dictionary = await node._execute_command("read_text", {"root": "/root/Board"})
+	var lines: Array = opened.get("lines", [])
+	if lines.slice(-2) != ["Hire", "Dismiss"]:
+		_fail("an open menu reads as its items, a separator as nothing: %s" % str(opened))
+
+	var found: Dictionary = await node._execute_command(
+		"find_nodes", {"says": "Ledger", "root": "/root/Board"}
+	)
+	var matched: Array = found.get("nodes", [])
+	var first: Dictionary = matched[0] if not matched.is_empty() else {}
+	if found.get("count") != 1 or first.get("type") != "TabBar":
+		_fail("a tab is found by its title, as the bar that draws it: %s" % str(found))
+
+	board.free()
+
+
 ## A name with no wildcard in it, which is the shape a caller writes when they mean "contains".
 ##
 ## [method String.matchn] answers nothing to it, and nothing is also what a name that is not in the
@@ -805,6 +860,7 @@ func _check() -> void:
 
 	await _check_reading_the_screen(panel)
 	await _check_reading_rich_text()
+	await _check_reading_lists()
 
 	var rect: Dictionary = await node._execute_command("get_rect", {"path": "/root/Panel/Go"})
 	var canvas: Dictionary = rect.get("canvas", {})

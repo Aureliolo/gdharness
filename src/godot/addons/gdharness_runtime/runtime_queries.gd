@@ -346,8 +346,7 @@ func _read_into(node: Node, include_hidden: bool, most: int, into: Array[String]
 	if not include_hidden and not _drawn(node):
 		return 0
 	var left_out: int = 0
-	var said: String = said_by(node)
-	if not said.is_empty():
+	for said: String in lines_said_by(node):
 		if into.size() < most:
 			into.append(said)
 		else:
@@ -385,6 +384,70 @@ static func _drawn(node: Node) -> bool:
 ## took the game it was watching from 60 frames a second to 11. A node without the property reads
 ## as null, which is not a string.
 static func said_by(node: Node) -> String:
+	if _draws_a_list(node):
+		return "\n".join(lines_said_by(node))
+	return _text_of(node)
+
+
+## Every line [param node] draws for a player to read, one to an entry: a label's one line, or each
+## item of a control that draws a list of them. Tab titles, list items, tree rows and the items of an
+## open menu are held by the control rather than in any `text`, so a screen read as every label on
+## it and none of those, and a wait for a tab's title or a list item was never met.
+static func lines_said_by(node: Node) -> Array[String]:
+	var lines: Array[String] = []
+	if node is TabBar:
+		var bar: TabBar = node
+		for tab: int in bar.tab_count:
+			if not bar.is_tab_hidden(tab):
+				_keep(bar.get_tab_title(tab), lines)
+	elif node is ItemList:
+		var list: ItemList = node
+		for item: int in list.item_count:
+			_keep(list.get_item_text(item), lines)
+	elif node is PopupMenu:
+		var menu: PopupMenu = node
+		for item: int in menu.item_count:
+			if not menu.is_item_separator(item):
+				_keep(menu.get_item_text(item), lines)
+	elif node is Tree:
+		var tree: Tree = node
+		_tree_rows(tree.get_root(), tree.hide_root, tree.columns, lines)
+	else:
+		_keep(_text_of(node), lines)
+	return lines
+
+
+static func _draws_a_list(node: Node) -> bool:
+	return node is TabBar or node is ItemList or node is PopupMenu or node is Tree
+
+
+static func _keep(line: String, into: Array[String]) -> void:
+	var trimmed: String = line.strip_edges()
+	if not trimmed.is_empty():
+		into.append(trimmed)
+
+
+## The rows of a tree from [param item] down, a row being its columns' text side by side, and
+## nothing under a collapsed row or a hidden one, since neither is drawn. A hidden root is only the
+## place its children hang from.
+static func _tree_rows(item: TreeItem, skip: bool, columns: int, into: Array[String]) -> void:
+	if item == null or not item.visible:
+		return
+	if not skip:
+		var cells: Array[String] = []
+		for column: int in columns:
+			_keep(item.get_text(column), cells)
+		_keep("  ".join(cells), into)
+		if item.collapsed:
+			return
+	var child: TreeItem = item.get_first_child()
+	while child != null:
+		_tree_rows(child, false, columns, into)
+		child = child.get_next()
+
+
+## What a node with a `text` says, as it is drawn.
+static func _text_of(node: Node) -> String:
 	# A RichTextLabel's text is its markup when it reads BBCode, and nobody reads the tags: a
 	# dossier line came back as "[b][color=#4fc2d4]Mollum Telken[/color], [/b]..." and a phrase
 	# running across a tag could not be found or waited for. The parsed text is what is drawn, and

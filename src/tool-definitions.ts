@@ -1118,7 +1118,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       tree: { summary: 'the live scene tree', requires: [] },
       text: {
         summary:
-          'every line of text under nodePath, the values in its fields included, in the order somebody reads the screen, leaving out what is hidden and everything under it',
+          "every line of text under nodePath, the values in its fields included, in the order somebody reads the screen, leaving out what is hidden and everything under it. Rich text reads as drawn, without its tags and only as far as it has been typed out, and tab titles, list items, tree rows and an open menu's items read a line each",
         requires: [],
       },
       find: {
