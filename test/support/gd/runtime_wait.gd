@@ -59,6 +59,7 @@ func _run() -> void:
 	await _check_click()
 	await _check_the_room()
 	await _check_a_menu()
+	await _check_a_translated_menu()
 	await _check_frames()
 	await _check_signal()
 	await _check_until()
@@ -326,6 +327,54 @@ func _check_a_menu_says_no() -> void:
 	var unasked: Dictionary = await node._execute_command("choose", {"path": "/root/Picker"})
 	if unasked.get("type") != "error" or not str(unasked.get("message", "")).contains("by text or index"):
 		_fail("naming no item at all should say how to name one: %s" % str(unasked))
+
+
+## A menu in a game with translations holds keys and shows their translations. A caller reads the
+## translations off the screen and chooses by them, so they are what an item is chosen by, what the
+## answer and the refusals name, and what the button reads afterwards. No key contains its
+## translation, or matching a key by a contains would pass for matching the translation.
+func _check_a_translated_menu() -> void:
+	var words: Translation = Translation.new()
+	words.locale = TranslationServer.get_locale()
+	words.add_message("ACT_ENGAGE", "Hire")
+	words.add_message("ACT_RELEASE", "Dismiss")
+	words.add_message("ACT_TAX", "Levy")
+	TranslationServer.add_translation(words)
+	var orders: OptionButton = OptionButton.new()
+	orders.name = "Orders"
+	orders.position = Vector2(350, 200)
+	orders.size = Vector2(160, 30)
+	orders.add_item("ACT_ENGAGE", 10)
+	orders.add_item("ACT_RELEASE", 20)
+	orders.add_item("ACT_TAX", 30)
+	orders.set_item_disabled(2, true)
+	root.add_child(orders)
+	await process_frame
+
+	var took: Dictionary = await node._execute_command("choose", {"path": "/root/Orders", "text": "Dismiss"})
+	if took.get("type") != "chosen" or took.get("index") != 1:
+		_fail("a translated item should be chosen by the words it shows: %s" % str(took))
+	elif took.get("text") != "Dismiss" or took.get("shows") != "Dismiss":
+		_fail("and the answer should name it as shown: %s" % str(took))
+
+	var by_key: Dictionary = await node._execute_command(
+		"choose", {"path": "/root/Orders", "text": "ACT_ENGAGE"}
+	)
+	if by_key.get("type") != "chosen" or by_key.get("index") != 0:
+		_fail("and still by the key it holds: %s" % str(by_key))
+
+	var missing: Dictionary = await node._execute_command(
+		"choose", {"path": "/root/Orders", "text": "Nothing like it"}
+	)
+	if not str(missing.get("message", "")).contains("0: Hire, 1: Dismiss, 2: Levy"):
+		_fail("a refusal should list the items as shown: %s" % str(missing))
+
+	var greyed: Dictionary = await node._execute_command("choose", {"path": "/root/Orders", "text": "Levy"})
+	if not str(greyed.get("message", "")).contains("item 2, Levy, is disabled"):
+		_fail("a disabled item should be named as shown: %s" % str(greyed))
+
+	orders.free()
+	TranslationServer.remove_translation(words)
 
 
 ## The Yes on a confirmation dialog, which is what stands between a player and every destructive

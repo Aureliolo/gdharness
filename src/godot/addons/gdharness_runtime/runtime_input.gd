@@ -10,6 +10,7 @@ const Values = preload("runtime_values.gd")
 ## reports are the same place by construction rather than by agreement.
 const Queries = preload("runtime_queries.gd")
 const Read = preload("reading.gd")
+const Words = preload("runtime_words.gd")
 
 ## The distance from a capital letter to its small one in Unicode. A keycode holds the capital.
 const TO_SMALL: int = 32
@@ -239,11 +240,12 @@ static func _select_everything(focused: Control) -> bool:
 ## What the field says now, or null where the focus is not a field at all.
 ##
 ## A spin box rewrites its own text out of the number it parsed, so this is the only thing that
-## says whether what was typed became what the field means.
+## says whether what was typed became what the field means. A secret field answers with its mask,
+## which still says how many characters it took.
 static func _what_it_holds(focused: Control) -> Variant:
 	var field: LineEdit = focused as LineEdit
 	if field != null:
-		return field.text
+		return Words.masked(field) if field.secret else field.text
 	var box: TextEdit = focused as TextEdit
 	if box == null:
 		return null
@@ -666,7 +668,7 @@ func choose(params: Dictionary) -> Dictionary:
 	if menu.is_item_disabled(index):
 		return {
 			"type": "error",
-			"message": "%s item %d, %s, is disabled" % [node_path, index, menu.get_item_text(index)]
+			"message": "%s item %d, %s, is disabled" % [node_path, index, Words.item_says(menu, index)]
 		}
 
 	# Shown first, because a menu nobody has opened has no focus to move and Enter would go to
@@ -689,7 +691,7 @@ func choose(params: Dictionary) -> Dictionary:
 		"type": "chosen",
 		"path": node_path,
 		"index": index,
-		"text": menu.get_item_text(index),
+		"text": Words.item_says(menu, index),
 		"id": menu.get_item_id(index),
 		"opened": opened,
 		"menu": str(menu.get_path()),
@@ -699,7 +701,7 @@ func choose(params: Dictionary) -> Dictionary:
 	var chooser: OptionButton = node as OptionButton
 	if chooser != null:
 		answer["selected"] = chooser.get_selected()
-		answer["shows"] = chooser.text
+		answer["shows"] = Words.said_by(chooser)
 	return answer
 
 
@@ -718,6 +720,11 @@ static func _menu_of(node: Node) -> PopupMenu:
 
 ## Which item was asked for: `text`, matched exactly and then case-insensitively, or `index`.
 ## Minus one when neither names one that is there.
+##
+## `text` is matched against the words the item shows before the ones it holds. In a game with
+## translations they differ, and the shown ones are what a caller has read off the screen: an item
+## held as `ACT_ENGAGE` and shown as "Hire" refused "Hire" and listed the keys. The held words
+## still count after them, for a caller that has the key from the source.
 static func _wanted_item(menu: PopupMenu, params: Dictionary) -> int:
 	if params.has("index"):
 		var asked: int = Read.as_int(params.get("index", -1), -1)
@@ -725,20 +732,26 @@ static func _wanted_item(menu: PopupMenu, params: Dictionary) -> int:
 	var wanted: String = str(params.get("text", ""))
 	if wanted.is_empty():
 		return -1
+	var shown: Array[String] = []
+	var held: Array[String] = []
 	for index: int in menu.get_item_count():
-		if menu.get_item_text(index) == wanted:
-			return index
-	for index: int in menu.get_item_count():
-		if menu.get_item_text(index).nocasecmp_to(wanted) == 0:
-			return index
+		shown.append(Words.item_says(menu, index))
+		held.append(menu.get_item_text(index))
+	for words: Array[String] in [shown, held]:
+		for index: int in words.size():
+			if words[index] == wanted:
+				return index
+		for index: int in words.size():
+			if words[index].nocasecmp_to(wanted) == 0:
+				return index
 	return -1
 
 
-## What the menu says, for a refusal that names the choices rather than the miss.
+## What the menu shows, for a refusal that names the choices rather than the miss.
 static func _items_of(menu: PopupMenu) -> Array[String]:
 	var said: Array[String] = []
 	for index: int in menu.get_item_count():
-		said.append("%d: %s" % [index, menu.get_item_text(index)])
+		said.append("%d: %s" % [index, Words.item_says(menu, index)])
 	return said
 
 

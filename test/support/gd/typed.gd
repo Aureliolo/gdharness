@@ -1,15 +1,18 @@
 extends SceneTree
 
-## Every shipped script parsed under the project's warning settings, where an untyped
-## declaration is an error. A script that will not parse prints the reason to stderr, which is
-## what the runner reads; this only reports which files did not load, and how many it tried,
-## so the caller can tell a clean run from one that found nothing to check.
+## Every shipped script, and every fixture the runner copied to res://fixtures, parsed under the
+## project's warning settings, where an untyped declaration is an error. A script that will not
+## parse prints the reason to stderr, which is what the runner reads; this only reports which
+## files did not load, and how many it tried, so the caller can tell a clean run from one that
+## found nothing to check.
 
 var failures: Array[String] = []
 
 
 func _init() -> void:
-	var scripts: Array[String] = _scripts("res://operations") + _scripts("res://addons")
+	var scripts: Array[String] = (
+		_scripts("res://operations") + _scripts("res://addons") + _scripts("res://fixtures")
+	)
 	for path: String in scripts:
 		var script: Script = load(path)
 		if script == null or not script.can_instantiate():
