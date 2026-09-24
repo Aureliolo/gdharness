@@ -40,6 +40,8 @@ export interface RuntimeEndpoint {
    * this was announced.
    */
   readonly editorPid?: number;
+  /** When the announcement was written, which is what `judgeAnnouncedGame` holds the process to. */
+  readonly announcedAt?: number;
 }
 
 /**
@@ -137,6 +139,7 @@ export interface UnspokenRuntime {
   readonly pid: number;
   readonly protocol: number;
   readonly project: { readonly name: string; readonly path: string };
+  readonly announcedAt?: number;
 }
 
 function parseAnnouncement(file: string, pid: number): Announced {
@@ -165,6 +168,13 @@ function parseAnnouncement(file: string, pid: number): Announced {
     name: readString(project, 'name') ?? '',
     path: readString(project, 'path') ?? '',
   };
+  let announcedAt: number | undefined;
+  try {
+    announcedAt = statSync(file).mtimeMs;
+  } catch {
+    // Taken by another reader since it was read, and then nothing is held to its time.
+  }
+  const when = announcedAt === undefined ? {} : { announcedAt };
   // A protocol this server does not speak is a running game, not rubbish, and the difference
   // decides whether its announcement survives. Deleting it takes the game away from the newer
   // server that is about to replace this one as well: `setup.py` upgrades the addon on disk the
@@ -173,7 +183,7 @@ function parseAnnouncement(file: string, pid: number): Announced {
   // moves it, which is the minority of them. Kept and named instead, so the answer is which half is
   // behind rather than that nobody is playing anything.
   if (protocol !== RUNTIME_PROTOCOL) {
-    return { kind: 'unspoken', unspoken: { pid, protocol: protocol ?? 0, project: named } };
+    return { kind: 'unspoken', unspoken: { pid, protocol: protocol ?? 0, project: named, ...when } };
   }
   const editorPid = readNumber(fields, 'editor_pid');
   return {
@@ -185,6 +195,7 @@ function parseAnnouncement(file: string, pid: number): Announced {
       project: named,
       file,
       ...(editorPid !== undefined && Number.isInteger(editorPid) && editorPid > 0 ? { editorPid } : {}),
+      ...when,
     },
   };
 }

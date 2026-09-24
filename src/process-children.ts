@@ -247,9 +247,16 @@ export interface CommandLineRead {
  * the directory after it. Quoted where the platform quotes, which Windows does and `ps` does not,
  * so a directory with spaces in it is taken up to the next argument-shaped word rather than the
  * next space, and a quoted one as far as its closing quote.
+ *
+ * Only as far as the first `--` or `++`, because the engine passes everything after either to the
+ * game and reads none of it: a game given `-e` there is not an editor, and one given `--path` is
+ * not pointed anywhere. And with `%20` read as a space, which is how the editor writes a project path with
+ * spaces in it onto the game it plays, and how the engine reads it back.
  */
 export function readCommandLine(command: string): CommandLineRead {
-  const words = commandWords(command);
+  const all = commandWords(command);
+  const separator = all.findIndex((word) => word === '--' || word === '++');
+  const words = separator === -1 ? all : all.slice(0, separator);
   const executable = words[0] === undefined ? '' : basename(words[0].replaceAll('\\', '/'));
   const at = words.indexOf('--path');
   let projectPath: string | null = null;
@@ -261,7 +268,7 @@ export function readCommandLine(command: string): CommandLineRead {
       }
       taken.push(word);
     }
-    projectPath = taken.join(' ');
+    projectPath = taken.join(' ').replaceAll('%20', ' ');
   }
   return {
     executable,

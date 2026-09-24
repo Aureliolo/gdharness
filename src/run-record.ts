@@ -10,11 +10,13 @@
  * had just been thrown away. Reported twice in one session by a project running sweeps: a
  * six-setting sweep died after one row, a nine-cell sweep after five cells.
  *
- * Two things fix that, and both have to be on disk. The game is spawned detached, so the
- * operating system stops taking it down with whoever started it, and its output goes to a file
- * it holds open rather than to a pipe, so it never blocks on a reader that has gone and the
- * bytes survive the reader anyway. This record is the third piece: the note that says which
- * process and which file, so the next server can pick the run back up instead of denying it.
+ * Three things fix that. The game is started by a keeper outside the server's process tree (see
+ * `outside.ts`), so nothing that ends the server takes it down. Its output goes to a file it holds
+ * open rather than to a pipe, so it never blocks on a reader that has gone and the bytes survive
+ * the reader anyway. And this record says which process and which file, so the next server can
+ * pick the run back up instead of denying it. One record per project, because the directory is
+ * shared by every server on the machine, and one record for all of them was overwritten by
+ * whichever project started a run last.
  *
  * One transcript per run, named for when it started, because the alternative is what the engine
  * does to its own log: a second run rotates the file out from under the first, and the rows the
@@ -22,10 +24,21 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { basename, join } from 'node:path';
-import { POWERSHELL_UTF8 } from './process-children.js';
-import { runtimeDirectories, runtimeDirectory } from './runtime-client.js';
+import { createHash } from 'node:crypto';
+import {
+  mkdirSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
+import { isSameDirectory } from './paths.js';
+import { type CommandLineRead, POWERSHELL_UTF8, readCommandLine } from './process-children.js';
+import { runtimeDirectories, runtimeDirectory, STARTED_AFTER_ANNOUNCING_MS } from './runtime-client.js';
 
 /** What a run leaves behind so another server can find it. */
 export interface RunRecord {
@@ -58,23 +71,56 @@ function runsDirectory(): string {
   return join(runtimeDirectory(), 'runs');
 }
 
-function recordPath(): string {
-  return join(runsDirectory(), 'run.json');
+/**
+ * The part of a note's name that says whose project it is.
+ *
+ * One note per project, because the runs directory is every project's on the machine: with one
+ * note for all of them, a bench one project started overwrote the note of a run another project's
+ * server had started, and that server's successor after a reconnect found no run of its own and
+ * refused to end the game as somebody else's. Normalised the way `isSameDirectory` compares, so
+ * the spelling a server was given and the one its editor reports name the same note.
+ */
+/**
+ * [param path] with the links in whatever part of it exists resolved, and the rest as written.
+ *
+ * Resolved only when it exists, the key changed when the directory appeared: a server writes into
+ * its project's `.godot` as it starts, which creates the directory, so a note written for the
+ * project before that and one read after it named two files wherever the path runs through a link,
+ * as a macOS temporary directory does through `/var`.
+ */
+function realAsFarAsItExists(path: string): string {
+  const missing: string[] = [];
+  let at = path;
+  for (;;) {
+    try {
+      return join(realpathSync.native(at), ...missing);
+    } catch {
+      const parent = dirname(at);
+      if (parent === at) {
+        return path;
+      }
+      missing.unshift(basename(at));
+      at = parent;
+    }
+  }
+}
+
+function projectKey(projectPath: string): string {
+  const real = realAsFarAsItExists(resolve(projectPath)).replace(/[\\/]+$/, '');
+  const folded = process.platform === 'win32' || process.platform === 'darwin' ? real.toLowerCase() : real;
+  return createHash('sha256').update(folded.replaceAll('\\', '/')).digest('hex').slice(0, 16);
+}
+
+/** Where [param projectPath]'s run note is, in [param directory]'s runs. */
+export function runRecordPath(projectPath: string, directory = runtimeDirectory()): string {
+  return join(directory, 'runs', `note-${projectKey(projectPath)}.json`);
 }
 
 /**
- * Every place a note could have been left, newest first.
- *
- * Written to one directory and looked for in several, because the two servers either side of a
- * reconnect do not have to agree about where the temporary directory is. They usually do, being
- * started the same way by the same harness, but "usually" is how this project already lost a
- * session once: a game announced itself in `C:\Windows\Temp\gdharness` while the server watched
- * the user's own, and answered that nothing was running while something was. The same fallbacks
- * are read here, so that mismatch costs a lookup rather than the run.
+ * The one note every project shared before notes were per project, read so a run a server of that
+ * version started is still picked up and ended after the upgrade.
  */
-function recordPaths(): string[] {
-  return runtimeDirectories().map((directory) => join(directory, 'runs', 'run.json'));
-}
+const SHARED_NOTE = 'run.json';
 
 /**
  * A transcript nothing else is writing to, opened for appending.
@@ -91,7 +137,7 @@ export function openTranscript(startedAt: number): { path: string; fd: number } 
 
 export function writeRunRecord(record: RunRecord): void {
   mkdirSync(runsDirectory(), { recursive: true });
-  writeFileSync(recordPath(), JSON.stringify(record, null, 2), 'utf8');
+  writeFileSync(runRecordPath(record.projectPath), JSON.stringify(record, null, 2), 'utf8');
 }
 
 /**
@@ -112,20 +158,23 @@ export interface EditorRunNote {
   readonly startedAt: number;
 }
 
-function editorNotePath(): string {
-  return join(runsDirectory(), 'editor-run.json');
+/** Per project, for the same reason the run note is. */
+function editorNotePath(projectPath: string, directory = runtimeDirectory()): string {
+  return join(directory, 'runs', `editor-${projectKey(projectPath)}.json`);
 }
 
 export function writeEditorRunNote(note: EditorRunNote): void {
   mkdirSync(runsDirectory(), { recursive: true });
-  writeFileSync(editorNotePath(), JSON.stringify(note, null, 2), 'utf8');
+  writeFileSync(editorNotePath(note.projectPath), JSON.stringify(note, null, 2), 'utf8');
 }
 
-/** The editor-played run another server left a file for, or null when there is none to read. */
-export function readEditorRunNote(): EditorRunNote | null {
+/** The editor-played run of [param projectPath] another server left a file for, or null. */
+export function readEditorRunNote(projectPath: string): EditorRunNote | null {
   for (const directory of runtimeDirectories()) {
-    const note = editorNoteAt(join(directory, 'runs', 'editor-run.json'));
-    if (note !== null) {
+    const note =
+      editorNoteAt(editorNotePath(projectPath, directory)) ??
+      editorNoteAt(join(directory, 'runs', 'editor-run.json'));
+    if (note !== null && isSameDirectory(note.projectPath, projectPath)) {
       return note;
     }
   }
@@ -159,14 +208,15 @@ function editorNoteAt(path: string): EditorRunNote | null {
  * so without this a bench that had finished cleanly came back as one whose exit code "was never
  * collected". The keeper is the one process that can wait on the game, so it is the one that says.
  *
- * Only when the note is still this run's. These directories are shared by every server on the
- * machine, and writing an exit code over somebody else's note would end their run on paper.
+ * Only when the note is still this run's: a later run of the same project replaces it, and writing
+ * an exit code over that note would end the later run on paper.
  */
 export function recordRunEnded(
+  projectPath: string,
   pid: number,
   ending: { readonly exitCode: number | null; readonly exitSignal: string | null },
 ): void {
-  const path = recordPath();
+  const path = runRecordPath(projectPath);
   const record = recordAt(path);
   if (record === null || record.pid !== pid) {
     return;
@@ -183,15 +233,49 @@ export function recordRunEnded(
   }
 }
 
-/** The run another server left behind, or null when there is none to read. */
-export function readRunRecord(): RunRecord | null {
-  for (const path of recordPaths()) {
-    const record = recordAt(path);
-    if (record !== null) {
-      return record;
+/**
+ * The run of [param projectPath] a server left a note for, or null when there is none.
+ *
+ * Looked for in every runtime directory, because the two servers either side of a reconnect do not
+ * have to agree about where the temporary directory is. They usually do, being started the same way
+ * by the same harness, but "usually" is how this project already lost a session once: a game
+ * announced itself in the system temporary directory while the server watched the user's own, and
+ * answered that nothing was running while something was.
+ */
+export function readRunRecord(projectPath: string): RunRecord | null {
+  for (const directory of runtimeDirectories()) {
+    const own = recordAt(runRecordPath(projectPath, directory));
+    if (own !== null) {
+      return own;
+    }
+    const shared = recordAt(join(directory, 'runs', SHARED_NOTE));
+    if (shared !== null && shared.projectPath !== '' && isSameDirectory(shared.projectPath, projectPath)) {
+      return shared;
     }
   }
   return null;
+}
+
+/** Every run note on the machine, whichever project it is for, newest first. */
+export function everyRunRecord(): RunRecord[] {
+  const found: RunRecord[] = [];
+  for (const directory of runtimeDirectories()) {
+    let entries: string[];
+    try {
+      entries = readdirSync(join(directory, 'runs'));
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (entry === SHARED_NOTE || (entry.startsWith('note-') && entry.endsWith('.json'))) {
+        const record = recordAt(join(directory, 'runs', entry));
+        if (record !== null) {
+          found.push(record);
+        }
+      }
+    }
+  }
+  return found.sort((one, other) => other.startedAt - one.startedAt);
 }
 
 function recordAt(path: string): RunRecord | null {
@@ -440,12 +524,6 @@ export function couldStillBeTheRecordedRun(record: RunRecord): boolean {
   return judgeRun(record, runningAs(record.pid), 'possible');
 }
 
-/**
- * The editor, as its own command line says so. Godot takes both spellings and a game is given
- * neither.
- */
-const AN_EDITOR = /(?:^|\s)(?:-e|--editor)(?:\s|$)/;
-
 /** What the operating system will say about a process, and how much of it. */
 export interface RunningAs {
   readonly kind: 'image' | 'commandLine';
@@ -520,8 +598,9 @@ export function judgeRun(
   // `process.kill` the editor, which then goes with no crash log and nothing in its output.
   //
   // Only where the flags can be read. An image name cannot show them, and that answer is already
-  // too weak to kill on.
-  if (running.kind === 'commandLine' && AN_EDITOR.test(said)) {
+  // too weak to kill on. Read as the engine reads them, so a game given `-e` as one of its own
+  // arguments is not taken for an editor and left running by every stop.
+  if (running.kind === 'commandLine' && readCommandLine(running.text).editor) {
     return false;
   }
   if (record.projectPath === '') {
@@ -536,23 +615,66 @@ export function judgeRun(
   return said.includes(project);
 }
 
+/** Whether [param pid] is still the game that announced itself for [param projectPath]: see `judgeAnnouncedGame`. */
+export function stillTheAnnouncedGame(
+  pid: number,
+  projectPath: string,
+  announcedAt: number,
+): CommandLineRead | null {
+  return judgeAnnouncedGame(runningAs(pid), projectPath, announcedAt);
+}
+
 /**
- * Take the note away for a run that has ended, wherever it was left.
+ * The comparison for a game no note names, which a stop is asked to end by its number: what the
+ * operating system says about the process, the project the game announced itself for, and when it
+ * did. The reading of its command line when it is that game, null when it is not or cannot be told.
  *
- * Every candidate directory is looked in, for the same reason they are read, and each note is read
- * before it is removed: two servers share these directories, and the one whose run this is not
- * must not be the one that deletes it. [param ours] is how the caller says which are its own.
+ * Stricter than `judgeRun`, because there is no record of how the game was started to hold it to.
+ * The whole command line has to be readable and be this project's engine run: `--path` on the
+ * project and no editor flag, read as the engine reads them. The process has to have started
+ * before its announcement was written, since a game announces from its first frames and a number
+ * taken after that is somebody else's; and a platform that will not say when it started is not
+ * taken as having said yes.
  */
-export function clearRunRecord(ours: (record: RunRecord) => boolean = () => true): void {
-  for (const path of recordPaths()) {
-    const record = recordAt(path);
-    if (record === null || !ours(record)) {
-      continue;
-    }
-    try {
-      rmSync(path);
-    } catch {
-      // Already gone, which is the state this asks for.
+export function judgeAnnouncedGame(
+  running: RunningAs | null,
+  projectPath: string,
+  announcedAt: number,
+): CommandLineRead | null {
+  if (running?.kind !== 'commandLine' || running.startedAt === undefined) {
+    return null;
+  }
+  if (running.startedAt - announcedAt > STARTED_AFTER_ANNOUNCING_MS) {
+    return null;
+  }
+  const read = readCommandLine(running.text);
+  if (read.editor || read.projectPath === null || !isSameDirectory(read.projectPath, projectPath)) {
+    return null;
+  }
+  return read;
+}
+
+/**
+ * Take [param projectPath]'s note away for a run that has ended, wherever it was left.
+ *
+ * Every candidate directory is looked in, for the same reason they are read. The note every project
+ * shared before notes were per project is taken away only when it names this project, since another
+ * project's run may be the one it describes.
+ */
+export function clearRunRecord(projectPath: string): void {
+  for (const directory of runtimeDirectories()) {
+    const shared = join(directory, 'runs', SHARED_NOTE);
+    const sharedRecord = recordAt(shared);
+    const ours =
+      sharedRecord !== null &&
+      sharedRecord.projectPath !== '' &&
+      isSameDirectory(sharedRecord.projectPath, projectPath);
+    for (const path of [runRecordPath(projectPath, directory), ...(ours ? [shared] : [])]) {
+      try {
+        rmSync(path, { force: true });
+      } catch {
+        // Held open for a moment, which leaves it for the next clear.
+      }
     }
   }
 }
@@ -569,13 +691,13 @@ function ageMs(path: string, now: number): number {
 /**
  * Drop transcripts old enough that nobody is coming back for them.
  *
- * A file per run in a directory nothing ever empties is a leak, and the run that is still going
- * cannot be the one deleted, so the keep-alive is the record rather than a guess: whatever the
- * current record names is left alone whatever its age.
+ * A file per run in a directory nothing ever empties is a leak, and a run that is still going
+ * cannot be the one deleted, so the keep-alive is the notes rather than a guess: whatever any
+ * project's note names is left alone whatever its age.
  */
 export function sweepTranscripts(keepMs = 24 * 60 * 60 * 1000, now = Date.now()): void {
   const directory = runsDirectory();
-  const keep = readRunRecord()?.transcript;
+  const kept = new Set(everyRunRecord().map((record) => record.transcript));
   let entries: string[];
   try {
     entries = readdirSync(directory);
@@ -587,7 +709,7 @@ export function sweepTranscripts(keepMs = 24 * 60 * 60 * 1000, now = Date.now())
       continue;
     }
     const path = join(directory, entry);
-    if (path === keep || ageMs(path, now) < keepMs) {
+    if (kept.has(path) || ageMs(path, now) < keepMs) {
       continue;
     }
     try {
