@@ -128,7 +128,7 @@ async function keep(): Promise<void> {
     command: spec.command,
   });
   child.once('exit', (code: number | null, signal: NodeJS.Signals | null) => {
-    recordRunEnded(pid, { exitCode: code, exitSignal: code === null ? signal : null });
+    recordRunEnded(run.projectPath, pid, { exitCode: code, exitSignal: code === null ? signal : null });
     process.exit(0);
   });
   process.stdout.write(`pid ${pid}\n`);

@@ -465,7 +465,10 @@ child to that walk. So the server starts `build/keeper.js` as a launcher, which 
 exits as soon as it has the game's pid; the keeper is the game's parent and nobody's child here,
 so the walk has nothing to follow. The editor `editor_launch` opens goes through the same launcher
 without a keeper. Both of the game's streams are written to a transcript under the runtime
-directory, with a note beside it naming the process and the file. A file rather than a pipe
+directory, with a note beside it naming the process and the file: one note per project, because
+the directory is shared by every server on the machine, and a single note was overwritten by
+whichever project started a run last, which left the other project's server nothing to find its run
+by after a reconnect. A file rather than a pipe
 because a pipe with no reader fills and then blocks the writer: surviving the server down a pipe
 would only trade a killed run for a wedged one.
 
@@ -512,9 +515,18 @@ adopted another project's bench and ended it to start its own: six times in fift
 code 1 with nothing printed, while its owner bisected their own scenes looking for the cause.
 
 **Which process it is.** A pid is handed out again as soon as it is free, so before anything is
-signalled the process has to answer as the run the note describes: the command line where the
-platform gives it, the executable where it does not, and no when it will not say. Not knowing is
-not the same as knowing, and the caller asking is the one that kills.
+signalled the process has to answer as the run the server holds, which it started or picked up from
+the note: its engine, its project, and a start no later than the run's. The command line where the
+platform gives it, the executable where it does not, and no when it will not say; the flags are
+read as the engine reads its own, up to the `--` after which the game's begin, so a game given
+`-e` is not taken for an editor. Not knowing is not the same as knowing, and the caller asking is
+the one that kills. Held against what the server holds rather than against the note, because the
+note can be gone while the run goes on. A stop that signalled nothing answers `stopped: false` and
+names the number under `notSignalled`, since a caller reads `stopped`, not the warning beside it.
+
+A game no note names, left by a server before a reconnect or started some other way, is ended by
+`editor_run stop` with its `pid`, and only when it announced itself for this project and its whole
+command line is this project's engine run, started before the announcement was written.
 
 The first of those is the one that mattered. The pid in that story was correctly identified as the
 run its note described, and the run was somebody else's.

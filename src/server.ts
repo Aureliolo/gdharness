@@ -125,11 +125,14 @@ import { noteRestartBegun, type RestartNote, restartOwed, restartSettled } from 
 import {
   clearRunRecord,
   couldStillBeTheRecordedRun,
+  everyRunRecord,
   listeningPid,
   openTranscript,
+  type RunRecord,
   readEditorRunNote,
   readRunRecord,
   runningAs,
+  stillTheAnnouncedGame,
   stillTheRecordedRun,
   sweepTranscripts,
   writeEditorRunNote,
@@ -521,20 +524,96 @@ export function endedWithoutACode(run: {
 }
 
 /**
- * The run a start ended to happen. The pid is the run's own or the one its game announced, and
- * null for a game the editor was playing that never announced one, which is the one kind of run
- * with no number of any sort.
+ * How a stop went: the run is gone; it was signalled and was still there when the wait ran out; or
+ * nothing was signalled, because its pid no longer answers as the process the run was started as.
+ */
+type Ending = 'gone' | 'lingering' | 'refused';
+
+/** What a stop answers about the run it was asked to end, apart from what that run had started. */
+export interface StopVerdict {
+  readonly stopped: boolean;
+  readonly endedPid?: number | null;
+  readonly notSignalled?: number | null;
+  readonly clean?: boolean;
+  readonly note: string;
+  /** Whether the note goes on to say what became of the processes the run had started. */
+  readonly withChildren: boolean;
+}
+
+/**
+ * The verdict of a stop. `stopped` is false when nothing was signalled, and the run is then given
+ * no `endedPid` and no `clean`: a caller reads those fields as the game being gone and its verdict
+ * in, and a refusal said only in a warning beside `stopped: true` is one nobody reads.
+ */
+export function stopVerdict(stop: {
+  readonly wasRunning: boolean;
+  readonly ending: Ending;
+  readonly endedPid: number | null;
+  readonly throughEditor: boolean;
+  readonly exitSignal: string | null;
+  readonly errors: number;
+}): StopVerdict {
+  if (!stop.wasRunning) {
+    return {
+      stopped: true,
+      endedPid: stop.endedPid,
+      clean: stop.errors === 0,
+      note: 'This run was over before the stop, so nothing was ended here: editor_output has what it printed and how it ended. Anything that game started for itself, with OS.create_process or otherwise, is a separate process and may still be running.',
+      withChildren: false,
+    };
+  }
+  if (stop.ending === 'refused') {
+    return {
+      stopped: false,
+      notSignalled: stop.endedPid,
+      note: `Nothing was ended: pid ${stop.endedPid ?? 'unknown'} no longer answers as the process this run was started as (its engine, its project and when it started), so it was not signalled. If that process is still the game, end it yourself, for instance with runtime_invoke calling get_tree().quit() when the game has the runtime addon; if it is not, it belongs to something else.`,
+      withChildren: false,
+    };
+  }
+  return {
+    stopped: true,
+    endedPid: stop.endedPid,
+    clean: stop.errors === 0,
+    note: `${
+      stop.throughEditor
+        ? stop.endedPid === null
+          ? 'The editor was asked to stop the scene it is playing. Its game had not announced a runtime, so no process was named under endedPid, and its exit code stays with the editor.'
+          : 'The editor was asked to stop the scene it is playing.'
+        : 'The process named under endedPid was ended.'
+    }${stop.exitSignal === null ? '' : ` It was ended by ${stop.exitSignal} and so has no exit code.`}${
+      stop.ending === 'gone'
+        ? ''
+        : ` It had not exited ${STOP_WAIT_MS / 1000} seconds after being told to, so it may still be going: editor_status says whether it is.`
+    }`,
+    withChildren: true,
+  };
+}
+
+/**
+ * The run a start ended to happen, or tried to. The pid is the run's own or the one its game
+ * announced, and null for a game the editor was playing that never announced one, which is the one
+ * kind of run with no number of any sort.
  */
 interface EndedRun {
   readonly pid: number | null;
+  readonly ending: Ending;
 }
 
-/** The field on a start's answer: the number when there is one, true when a run was ended and has none. */
-function endedPreviousRun(ended: EndedRun | null): number | true | undefined {
-  if (ended === null) {
+/**
+ * The field on a start's answer: the number when there is one, true when a run was ended and has
+ * none. Absent for a run nothing was signalled for, which `previousRunLeft` names instead: a
+ * caller reading this field is reading whether the run it had is over.
+ */
+export function endedPreviousRun(ended: EndedRun | null): number | true | undefined {
+  if (ended === null || ended.ending === 'refused') {
     return undefined;
   }
   return ended.pid ?? true;
+}
+
+/** The field on a start's answer for a run it could not end, which is still going beside the new one. */
+export function previousRunLeft(ended: EndedRun | null): number | undefined {
+  return ended?.ending === 'refused' && ended.pid !== null ? ended.pid : undefined;
 }
 
 /** A process under the run that is a game of its project, and what says so. */
@@ -650,6 +729,29 @@ function aboutTheChildren(ended: ChildrenEnded | null, throughEditor: boolean): 
 }
 
 /**
+ * The fields a stop answers with about what the game had started, when it was asked to end those:
+ * the processes the operating system listed under the run's, to any depth, that are games of this
+ * project, announced as one or this project's engine run with --path on it, signalled here or taken
+ * down with the run before the signal reached them, each with what identified it. A process under
+ * the run that is neither is left and named, since what it is cannot be told from here and a
+ * number is not a licence to signal.
+ */
+function childrenFields(ended: ChildrenEnded | null): Record<string, unknown> {
+  if (ended === null) {
+    return {};
+  }
+  return {
+    endedChildren: ended.ended.map((one) => one.pid),
+    identifiedBy:
+      ended.ended.length === 0
+        ? undefined
+        : Object.fromEntries(ended.ended.map((one) => [String(one.pid), one.identifiedBy])),
+    childrenLeft: ended.left.length === 0 ? undefined : ended.left,
+    childrenUnknown: ended.unknown === false ? undefined : true,
+  };
+}
+
+/**
  * What refresh_uids says about the files the engine would not import, counted in their number:
  * the list is under stillWithoutUid, and the sentence is what says the engine declined them.
  */
@@ -661,14 +763,38 @@ export function uidsLeftNote(left: number): string {
   return `${left === 1 ? 'One file' : `${left} files`} still ${left === 1 ? 'has' : 'have'} no .uid, named under stillWithoutUid, which is the engine declining to import ${them} rather than this op skipping ${them}. No scene was written.`;
 }
 
+/**
+ * The sentence a start adds for the games of its project that were already running and that it
+ * did not end, because this server did not start them: each named, and the call that ends it.
+ */
+export function leftRunningNote(stranded: readonly { pid: number; protocol: number | null }[]): string {
+  if (stranded.length === 0) {
+    return '';
+  }
+  const named = stranded
+    .map((one) => (one.protocol === null ? `pid ${one.pid}` : `pid ${one.pid} on protocol ${one.protocol}`))
+    .join(', ');
+  const [only] = stranded;
+  return stranded.length === 1 && only !== undefined
+    ? ` A game of this project was already running and still is: ${named}. Starting this one did not end it, because this server did not start it. editor_run stop with pid ${only.pid} ends it and leaves this run going.`
+    : ` ${stranded.length} games of this project were already running and still are: ${named}. Starting this one did not end them, because this server did not start them. editor_run stop with the pid of each ends it and leaves this run going.`;
+}
+
 /** The sentence a start adds to its message when it ended a run to happen. */
-function endedToStartThis(ended: EndedRun | null): string {
+export function endedToStartThis(ended: EndedRun | null): string {
   if (ended === null) {
     return '';
   }
   const which =
     ended.pid === null ? 'The game the editor was playing' : `The run that was going, pid ${ended.pid},`;
-  return ` ${which} was ended to start this one; its output is no longer what editor_output answers about.`;
+  if (ended.ending === 'refused') {
+    return ` ${which} was not ended: that pid no longer answers as the process the run was started as, so nothing was signalled. If it is still the game, it is running beside this one and you have to end it yourself; if it is not, it belongs to something else.`;
+  }
+  const after =
+    ended.ending === 'lingering'
+      ? ` It had not exited ${STOP_WAIT_MS / 1000} seconds after being told to, so it may still be running beside this one: editor_status says whether it is.`
+      : '';
+  return ` ${which} was ended to start this one; its output is no longer what editor_output answers about.${after}`;
 }
 
 /** The wait a start gives its game to announce, and the last boot it was sized to when it was. */
@@ -4387,11 +4513,13 @@ class GodotServer {
     const before = this.currentRun();
     if (before !== null && (await this.runStillGoing(before))) {
       this.logDebug('Ending the running game before starting another');
-      ended = { pid: before.pid ?? this.announcedPidOf(before) ?? null };
-      await this.endActiveGame(
-        'editor_run start, which ends the run that was going before it starts another',
-        true,
-      );
+      ended = {
+        pid: before.pid ?? this.announcedPidOf(before) ?? null,
+        ending: await this.endActiveGame(
+          'editor_run start, which ends the run that was going before it starts another',
+          true,
+        ),
+      };
     }
 
     // Taken before anything starts, so the game waited for below is one nobody had seen: a game
@@ -4496,13 +4624,7 @@ class GodotServer {
     // simply that nothing here holds it: the refusals for those two states both said a start would
     // end it, and a start measured against each left it running.
     const stranded = wereHereFirst.filter((one) => one.pid !== ended?.pid && alive(one.pid));
-    const named = stranded
-      .map((one) => (one.protocol === null ? `pid ${one.pid}` : `pid ${one.pid} on protocol ${one.protocol}`))
-      .join(', ');
-    const alsoRunning =
-      stranded.length === 0
-        ? ''
-        : ` A game of this project was already running and still is: ${named}. Starting this one did not end it and nothing here can, because this server did not start it. End it yourself, or bring the halves to one version where a protocol is named.`;
+    const alsoRunning = leftRunningNote(stranded);
     return this.jsonTextResponse({
       started: true,
       through: 'gdharness',
@@ -4522,6 +4644,7 @@ class GodotServer {
       // Which run this start ended, when it ended one, so a bench that stopped is answered for
       // here rather than looked for in the engine.
       endedPreviousRun: endedPreviousRun(ended),
+      previousRunLeft: previousRunLeft(ended),
       runtime: await this.runtimeUp(
         project.value.path,
         alreadyPlaying,
@@ -4784,6 +4907,7 @@ class GodotServer {
       // line option for and the addon moves itself off when another editor is holding it.
       debugPort: readNumber(playAnswer, 'debugPort'),
       endedPreviousRun: endedPreviousRun(ended),
+      previousRunLeft: previousRunLeft(ended),
       // What the game was told to stop on before it started, so a play that runs through a line
       // the caller asked for is checked against this rather than against memory. Absent when
       // nothing is held, and the refusals only when there were any.
@@ -4931,16 +5055,16 @@ class GodotServer {
    * which are shared by every project on the machine: a played run stopped before it announced was
    * answered with another project's recorded run, refused as not this server's to answer for.
    */
-  private async endActiveGame(reason: string, going: boolean): Promise<boolean> {
+  private async endActiveGame(reason: string, going: boolean): Promise<Ending> {
     const running = this.activeProcess;
-    // Read before the note is taken away, because it is what says the pid below still means this
-    // run: the number alone does not.
-    const recorded = running !== null && !running.throughEditor ? readRunRecord() : null;
+    const project = running?.projectPath ?? this.ourProject();
     // A run somebody has ended is not one the next server should offer to pick back up, and the
     // note outlives this process unless it is taken away here. Only this project's, because the
     // directories it is looked for in are shared with whatever else is running on this machine.
     const clearTheRecord = (): void => {
-      clearRunRecord((record) => this.couldBeOurs(record.projectPath));
+      if (project !== null) {
+        clearRunRecord(project);
+      }
     };
     // Except for a run a keeper holds, whose exit the keeper writes into the note as the game goes:
     // cleared first, that exit had nowhere to land, and the stop answered with no code at all.
@@ -4952,30 +5076,42 @@ class GodotServer {
     // answered as ended by this server, and a second stop would put a run it did end through the
     // pid check again and write over what the first stop recorded.
     if (!running || !going) {
-      return true;
+      return 'gone';
     }
     running.endedHere = reason;
     // Read before anything is signalled, since the announcement goes with the game.
     const announced = this.announcedPidOf(running);
     if (running.throughEditor) {
       await this.handleViaBridge('stop_playing', {});
-      return await untilGone(announced === undefined ? [] : [announced]);
+      return (await untilGone(announced === undefined ? [] : [announced])) ? 'gone' : 'lingering';
     }
     if (running.pid === null) {
-      return true;
+      return 'gone';
     }
     // A spawned run, held by its keeper rather than by this server, so the number is all there is
     // to end it with, whichever server started it. A number is not an identity, though. The operating system hands
     // a pid out again as soon as it is free, so signalling on the strength of it is how a stop
     // ends up killing whatever came after the run, which is not something that can be taken back.
-    if (recorded === null || recorded.pid !== running.pid || !stillTheRecordedRun(recorded)) {
+    //
+    // Checked against what this server holds of the run rather than against the note on disk: the
+    // run was started here or picked up from that note, so it holds the same engine, project and
+    // start, and the note can be gone or name a later run while this one is still going.
+    const startedAs: RunRecord = {
+      pid: running.pid,
+      transcript: running.transcript ?? '',
+      startedAt: running.startedAt,
+      projectPath: running.projectPath ?? '',
+      arguments: [],
+      ...(running.command === undefined ? {} : { command: running.command }),
+    };
+    if (!stillTheRecordedRun(startedAs)) {
       clearTheRecord();
       running.endedHere = null;
       running.log.record(
         'warning',
-        `This run was not ended here: pid ${running.pid} no longer answers as the run that was recorded, so nothing was signalled. If that process is still the game, end it yourself; if it is not, it belongs to something else.`,
+        `This run was not ended here: pid ${running.pid} no longer answers as the process the run was started as, so nothing was signalled. If that process is still the game, end it yourself; if it is not, it belongs to something else.`,
       );
-      return true;
+      return 'refused';
     }
     // What was signalled, in the run's own log, with the command line the operating system gave for
     // it. A kill by number is the one act here that cannot be taken back, and three runs elsewhere
@@ -5012,7 +5148,7 @@ class GodotServer {
         ? `gdharness ended pid ${running.pid}, which the operating system described as ${described}.`
         : `gdharness signalled pid ${running.pid} and it was already gone; the operating system had described it as ${described}.`,
     );
-    return gone;
+    return gone ? 'gone' : 'lingering';
   }
 
   /**
@@ -5124,6 +5260,7 @@ class GodotServer {
       readOffset: 0,
       projectPath,
       startedAt,
+      command: godotPath,
       exitCode: null,
       exitSignal: null,
       throughEditor: false,
@@ -5234,9 +5371,7 @@ class GodotServer {
     // note from another project's run would put its output under this one's heading, which is the
     // fault this whole method exists to end.
     const project = this.godotBridge.getStatus().projectPath ?? null;
-    const left = readEditorRunNote();
-    const note =
-      left !== null && project !== null && isSameDirectory(left.projectPath, project) ? left : null;
+    const note = project === null ? null : readEditorRunNote(project);
     const picked: GodotProcess = {
       pid: null,
       log: new GameLog(),
@@ -5503,7 +5638,8 @@ class GodotServer {
    * everything it printed. Both beat "No game is running", which was the answer to either.
    */
   private adoptRecordedRun(): GodotProcess | null {
-    const record = readRunRecord();
+    const project = this.ourProject();
+    const record = project === null ? null : readRunRecord(project);
     if (record === null || !this.couldBeOurs(record.projectPath)) {
       return null;
     }
@@ -5514,6 +5650,7 @@ class GodotServer {
       readOffset: 0,
       projectPath: record.projectPath === '' ? null : record.projectPath,
       startedAt: record.startedAt,
+      ...(record.command === undefined ? {} : { command: record.command }),
       exitCode: null,
       exitSignal: null,
       throughEditor: false,
@@ -5595,12 +5732,9 @@ class GodotServer {
       return (
         `A game is running for ${live.project.path} and has announced its runtime on port ${live.port}, pid ${live.pid},` +
         ' but this server did not start it and cannot reach it through the editor, so editor_run and' +
-        ' editor_output have nothing to answer about. The runtime_* tools reach it now.' +
+        ` editor_output have nothing to answer about. The runtime_* tools reach it now, and editor_run stop with pid ${live.pid} ends it.` +
         ' A run started here is a separate process rather than a replacement, so starting one leaves' +
-        ' this game running as well.' +
-        (this.godotBridge.getStatus().connected
-          ? ''
-          : ' editor_status says whether an editor is on its way, and editor_run can end it once one is.')
+        ' this game running as well.'
       );
     }
     // The same game, announced in a protocol this server cannot speak. The sweep above drops those,
@@ -5625,16 +5759,17 @@ class GodotServer {
       return (
         `A game is running for ${unreadable.project.path}, pid ${unreadable.pid}, announced in protocol` +
         ` ${unreadable.protocol}, which this server does not speak: it speaks ${RUNTIME_PROTOCOL}, so ${behind}.` +
-        ' Until then neither editor_run nor the runtime_* tools can reach it.' +
+        ` Until then the runtime_* tools cannot reach it, and editor_run stop with pid ${unreadable.pid} ends it.` +
         ' A run started here is a separate process rather than a replacement, so starting one leaves' +
         ' this game running as well.'
       );
     }
-    const record = readRunRecord();
+    const mine = this.ourProject();
+    const record =
+      everyRunRecord().find((one) => mine === null || !isSameDirectory(one.projectPath, mine)) ?? null;
     if (record === null) {
       return `No game is running.${noEditor} Start one with editor_run.`;
     }
-    const mine = this.ownProject ?? (status.connected ? (status.projectPath ?? null) : null);
     const whose = record.projectPath === '' ? 'a project it does not name' : record.projectPath;
     const ours =
       mine === null
@@ -5718,8 +5853,7 @@ class GodotServer {
   }
 
   private couldBeOurs(project: string): boolean {
-    const status = this.godotBridge.getStatus();
-    const mine = this.ownProject ?? (status.connected ? (status.projectPath ?? null) : null);
+    const mine = this.ourProject();
     if (mine === null) {
       return false;
     }
@@ -5727,6 +5861,15 @@ class GodotServer {
     // server's, and the reason to keep reading it is the same reason it is not killed by pid
     // alone: the cost of being wrong lands on somebody else.
     return project !== '' && isSameDirectory(mine, project);
+  }
+
+  /**
+   * The project this server answers for: the one it was told to serve, or else the one the editor
+   * on the bridge has open, or null when it can name neither.
+   */
+  private ourProject(): string | null {
+    const status = this.godotBridge.getStatus();
+    return this.ownProject ?? (status.connected ? (status.projectPath ?? null) : null);
   }
 
   /**
@@ -5890,7 +6033,7 @@ class GodotServer {
   private async untilTheExitIsRecorded(run: GodotProcess): Promise<boolean> {
     const until = Date.now() + EXIT_REPORTED_WITHIN_MS;
     for (;;) {
-      const record = readRunRecord();
+      const record = run.projectPath === null ? null : readRunRecord(run.projectPath);
       if (
         record !== null &&
         record.pid === run.pid &&
@@ -6197,6 +6340,13 @@ class GodotServer {
     // to something nobody asked about, offered to be killed while the run the caller means goes on.
     await this.pickUpWhatTheEditorIsPlaying();
     const stopped = this.currentRun();
+    const named = readNumber(args, 'pid');
+    if (
+      named !== undefined &&
+      (stopped === null || (named !== stopped.pid && named !== this.announcedPidOf(stopped)))
+    ) {
+      return await this.stopAnnouncedGame(named, readBoolean(args, 'andChildren') === true);
+    }
     if (!stopped) {
       return this.createErrorResponse(this.nothingOfOursIsRunning());
     }
@@ -6215,8 +6365,10 @@ class GodotServer {
     const children =
       readBoolean(args, 'andChildren') === true && wasRunning ? await this.whatTheRunStarted(stopped) : null;
     this.logDebug('Stopping the running game');
-    const gone = await this.endActiveGame('editor_run stop', wasRunning);
-    const ended = children === null ? null : endChildrenAmong(children);
+    const ending = await this.endActiveGame('editor_run stop', wasRunning);
+    const refused = ending === 'refused';
+    // Nothing under a pid that is not the run's is the run's to end either.
+    const ended = children === null || refused ? null : endChildrenAmong(children);
     // The announcement of the game just ended goes with it, here rather than on the next sweep,
     // because a number the operating system hands out again before that sweep reads as the game
     // still starting for as long as the newcomer lives. By the number the game announced under
@@ -6224,15 +6376,23 @@ class GodotServer {
     // holds the wrapper and the announcement is the engine's, the wrapper's child, which goes
     // with it. Measured: the child was listed under the wrapper and gone two seconds after the
     // wrapper was killed.
-    if (wasRunning) {
+    if (wasRunning && !refused) {
       for (const pid of new Set([endedPid, announcedPid])) {
         if (pid !== null) {
           await announcementEnded(pid);
         }
       }
     }
+    const verdict = stopVerdict({
+      wasRunning,
+      ending,
+      endedPid,
+      throughEditor: stopped.throughEditor,
+      exitSignal: stopped.exitSignal,
+      errors: stopped.log.count('error'),
+    });
     return this.jsonTextResponse({
-      stopped: true,
+      stopped: verdict.stopped,
       through: stopped.throughEditor ? 'editor' : 'gdharness',
       // What was ended, named. One run is one process, and a game that started others is not one
       // of them: a bench fanning out to thirty-one workers with OS.create_process had the process
@@ -6242,24 +6402,9 @@ class GodotServer {
       // know their game started; one that says "stopped" is not. For a run the editor plays the
       // number is the one its game announced, when it announced one: the process is the same
       // whichever side ended it.
-      endedPid,
-      // What the game had started for itself and is gone with it, when asked to: the processes the
-      // operating system listed under the run's, to any depth, that are games of this project,
-      // announced as one or this project's engine run with --path on it, signalled here or taken
-      // down with the run before the signal reached them, each with what identified it. A process
-      // under the run that is neither is left and named, since what it is cannot be told from
-      // here and a number is not a licence to signal.
-      ...(ended === null
-        ? {}
-        : {
-            endedChildren: ended.ended.map((one) => one.pid),
-            identifiedBy:
-              ended.ended.length === 0
-                ? undefined
-                : Object.fromEntries(ended.ended.map((one) => [String(one.pid), one.identifiedBy])),
-            childrenLeft: ended.left.length === 0 ? undefined : ended.left,
-            childrenUnknown: ended.unknown === false ? undefined : true,
-          }),
+      endedPid: verdict.endedPid,
+      notSignalled: verdict.notSignalled,
+      ...childrenFields(ended),
       // Whether there was anything left to stop. A run whose exit nobody collected, which is a
       // played run picked up after a reconnect and gone since, has no exit code and is over all
       // the same; answering false there said a game had been ended that had ended itself. Read
@@ -6271,27 +6416,86 @@ class GodotServer {
       exitSignal: stopped.exitSignal ?? undefined,
       errors: stopped.log.count('error'),
       warnings: stopped.log.count('warning'),
-      clean: stopped.log.count('error') === 0,
-      note: !wasRunning
-        ? 'This run was over before the stop, so nothing was ended here: editor_output has what it printed and how it ended. Anything that game started for itself, with OS.create_process or otherwise, is a separate process and may still be running.'
-        : `${
-            stopped.throughEditor
-              ? endedPid === null
-                ? 'The editor was asked to stop the scene it is playing. Its game had not announced a runtime, so no process was named under endedPid, and its exit code stays with the editor.'
-                : 'The editor was asked to stop the scene it is playing.'
-              : 'The process named under endedPid was ended.'
-          }${
-            stopped.exitSignal === null
-              ? ''
-              : ` It was ended by ${stopped.exitSignal} and so has no exit code.`
-          }${
-            gone
-              ? ''
-              : ` It had not exited ${STOP_WAIT_MS / 1000} seconds after being told to, so it may still be going: editor_status says whether it is.`
-          } ${aboutTheChildren(ended, stopped.throughEditor)}`,
+      clean: verdict.clean,
+      note: verdict.withChildren
+        ? `${verdict.note} ${aboutTheChildren(ended, stopped.throughEditor)}`
+        : verdict.note,
       entries: forAnswer(
         stopped.log.select({ severity: 'warning', sinceLastCall: false, limit: 200 }).entries,
       ),
+    });
+  }
+
+  /**
+   * editor_run stop with a pid: a game of this project that no server here is holding, ended by its
+   * number once its announcement and its command line both say it is this project's game.
+   *
+   * For the runs nothing names: one a server before a reconnect started and left no note for, or
+   * one started some other way. Without this the only way to end one was to ask it to quit through
+   * runtime_invoke, which a game held at a breakpoint or hung does not answer, and killing it by
+   * hand is not something a caller should have to do to a game the harness launched.
+   */
+  private async stopAnnouncedGame(pid: number, andChildren: boolean): Promise<ToolResponse> {
+    const announced = runtimesAnnounced();
+    const game = [
+      ...this.allAnnouncedForOurProject(announced.running),
+      ...this.allAnnouncedForOurProject(announced.unspoken),
+    ].find((one) => one.pid === pid);
+    if (game === undefined) {
+      return this.createErrorResponse(
+        `pid ${pid} is not a game announced for this project, so nothing was signalled. editor_status lists this project's games under runtimes. A game that announces no runtime is ended by the server holding its run, or with andChildren by a stop of the run that started it.`,
+      );
+    }
+    const read =
+      game.announcedAt === undefined ? null : stillTheAnnouncedGame(pid, game.project.path, game.announcedAt);
+    if (read === null) {
+      return this.createErrorResponse(
+        `pid ${pid} announced itself as a game of this project, but the operating system does not describe it as this project's engine run started before that announcement (the engine with --path on the project and no editor flag), so nothing was signalled. If it is still the game, runtime_invoke can ask it to quit.`,
+      );
+    }
+    // What the children are listed under, as the run of a stop would be: the game's own number,
+    // which is the only process there is here.
+    const run: GodotProcess = {
+      pid,
+      log: new GameLog(),
+      transcript: null,
+      readOffset: 0,
+      projectPath: game.project.path,
+      startedAt: game.announcedAt ?? Date.now(),
+      exitCode: null,
+      exitSignal: null,
+      throughEditor: false,
+      brokeOn: null,
+      announcedPid: pid,
+    };
+    const children = andChildren ? await this.whatTheRunStarted(run) : null;
+    let landed = true;
+    try {
+      process.kill(pid);
+    } catch {
+      // Gone between being judged and being signalled.
+      landed = false;
+    }
+    const gone = await untilGone([pid]);
+    const ended = children === null ? null : endChildrenAmong(children);
+    if (gone) {
+      await announcementEnded(pid);
+    }
+    return this.jsonTextResponse({
+      stopped: true,
+      through: 'gdharness',
+      endedPid: pid,
+      ...childrenFields(ended),
+      exitedBeforeStop: !landed,
+      note: `${
+        landed
+          ? `pid ${pid} was ended: a game of this project that no server here was holding,`
+          : `pid ${pid} had already gone when it was signalled: a game of this project that no server here was holding,`
+      } identified by its announcement and by its command line, ${read.executable} run with --path ${read.projectPath ?? ''}. Nothing here read what it printed or holds its exit code, so neither is in this answer.${
+        gone
+          ? ''
+          : ` It had not exited ${STOP_WAIT_MS / 1000} seconds after being told to, so it may still be going: editor_status says whether it is.`
+      } ${aboutTheChildren(ended, false)}`,
     });
   }
 
