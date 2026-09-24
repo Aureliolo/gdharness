@@ -12651,6 +12651,26 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
         'an element written through a path is written into the list the game holds',
       );
 
+      // Depth 0 is the node alone, the one depth that reads exactly one node's properties. It read
+      // as "not given" and walked the default three levels, which over a router was 4 MB.
+      const tree = async (depth: unknown): Promise<{ parsed: unknown; said: string }> =>
+        tool('runtime_inspect', { op: 'tree', nodePath: '/root', depth, properties: ['name'] });
+      const alone = await tree(0);
+      assert.equal(get(alone.parsed, 'root', 'path'), '/root', alone.said);
+      assert.equal(
+        get(alone.parsed, 'root', 'children'),
+        undefined,
+        `depth 0 has no children: ${alone.said}`,
+      );
+      const oneLevel = await tree(1);
+      const children = asArray(get(oneLevel.parsed, 'root', 'children'));
+      assert.ok(children.length > 0, `depth 1 lists the children: ${oneLevel.said}`);
+      assert.ok(
+        children.every((child) => get(child, 'children') === undefined),
+        `and nothing under them: ${oneLevel.said}`,
+      );
+      assert.match((await tree(-1)).said, /depth is -1, and depth takes a whole number of levels/);
+
       const waitFor = async (timeoutMs: number): Promise<unknown> =>
         (
           await tool('runtime_wait', {
