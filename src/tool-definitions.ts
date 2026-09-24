@@ -876,6 +876,13 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         description:
           "stop: also end what the game started for itself, with OS.create_process or otherwise, such as a bench's workers and whatever those started in turn. Only the processes under the run's, to any depth, that are games of this project are ended: announced as one, or this project's engine run with --path on this project by its command line, which is how a bench whose workers deliberately carry no runtime is reached. They are named under endedChildren, with what identified each under identifiedBy; any other process under the run is left and named under childrenLeft, and childrenUnknown is true when nothing could be listed, with the note saying whether the platform would not or the run has no process to list under. Default false, and the run's process is ended either way.",
       },
+      pid: {
+        type: 'integer',
+        minimum: 1,
+        ops: ['stop'],
+        description:
+          "stop: a game of this project that no server here is holding, by its process id as editor_status lists it under runtimes: one a server before a reconnect started and left no note for, or one started some other way. It is ended only when it announced itself for this project and the operating system describes it as this project's engine run, --path on the project and no editor flag, started before it announced; otherwise nothing is signalled and the answer says which of those failed. The run this server holds is ended the ordinary way whether or not its number is given.",
+      },
     },
     requires: [],
     operations: {
@@ -885,7 +892,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       stop: {
         summary:
-          'end the run and answer with what it printed last, naming the process ended under endedPid: for a run the editor plays, the number its game announced under, read at the stop rather than remembered, and the operating system hands a freed number to the next process, so it can equal the game before it. A game that started processes of its own keeps them unless andChildren says to end those too',
+          'end the run and answer with what it printed last, naming the process ended under endedPid: for a run the editor plays, the number its game announced under, read at the stop rather than remembered, and the operating system hands a freed number to the next process, so it can equal the game before it. A game that started processes of its own keeps them unless andChildren says to end those too. stopped is false, with the number under notSignalled, when that number no longer answers as the process the run was started as and nothing was signalled',
         requires: [],
       },
       check: {
