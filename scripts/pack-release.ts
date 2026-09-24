@@ -38,7 +38,9 @@ try {
   await mkdir(path.join(stagingRoot, 'build'), { recursive: true });
 
   await Promise.all([
-    ...['cli.js', 'index.js'].map((name) =>
+    // keeper.js is started by index.js with Node rather than run as a bin, so it needs no mode, but
+    // without it every editor and run the server starts would fail to start.
+    ...['cli.js', 'index.js', 'keeper.js'].map((name) =>
       cp(path.join(root, 'build', name), path.join(stagingRoot, 'build', name)),
     ),
     cp(path.join(root, 'build', 'godot'), path.join(stagingRoot, 'build', 'godot'), { recursive: true }),
