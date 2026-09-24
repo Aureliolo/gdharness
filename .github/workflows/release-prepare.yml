@@ -81,7 +81,10 @@ jobs:
           VERSION: ${{ steps.bump.outputs.version }}
         run: |
           set -euo pipefail
-          if gh api "repos/${GH_REPO}/git/ref/tags/v${VERSION}" >/dev/null 2>&1; then
+          # Absent only on a 404: a failed request read as "free" would prepare a version whose
+          # tag is taken.
+          state="$(bun scripts/github-ref.ts state "tags/v${VERSION}")"
+          if [[ "${state}" == present ]]; then
             echo "v${VERSION} is already tagged. Pick a version whose tag is free." >&2
             exit 1
           fi
@@ -93,9 +96,7 @@ jobs:
           BRANCH: ${{ steps.bump.outputs.branch }}
         run: |
           set -euo pipefail
-          gh api "repos/${GH_REPO}/git/refs" \
-            -f "ref=refs/heads/${BRANCH}" \
-            -f "sha=${GITHUB_SHA}"
+          bun scripts/github-ref.ts create "heads/${BRANCH}" "${GITHUB_SHA}"
 
       - name: Commit the bump
         env:
