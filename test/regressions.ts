@@ -2883,6 +2883,32 @@ async function testAnArgumentMeantForAnotherOpIsRefused(): Promise<void> {
         `${JSON.stringify(call_)} is a call the op understands`,
       );
     }
+
+    // A number outside the range its schema declares is refused before anything reads it, since
+    // the readers take a number they cannot use as absent and apply the default. Each bound once,
+    // and the edge of each range accepted, which is the half a refusal of everything also passes.
+    const outside: [string, Record<string, unknown>, string][] = [
+      ['runtime_inspect', { op: 'tree', depth: -1 }, 'depth of 0 or more, not -1'],
+      ['runtime_inspect', { op: 'tree', depth: 1.5 }, 'depth as integer, not 1.5'],
+      ['runtime_inspect', { op: 'find', className: 'Label', limit: 0 }, 'limit of 1 or more, not 0'],
+      ['runtime_wait', { op: 'frames', frames: 601 }, 'frames from 1 to 600, not 601'],
+      ['runtime_input', { op: 'action', action: 'jump', strength: 1.5 }, 'strength from 0 to 1, not 1.5'],
+    ];
+    for (const [tool, args, said] of outside) {
+      const answer = await call(tool, args);
+      assert.ok(answer.includes(`${tool} takes ${said}.`), `${tool} ${JSON.stringify(args)}: ${answer}`);
+    }
+    for (const [tool, args] of [
+      ['runtime_inspect', { op: 'tree', depth: 0 }],
+      ['runtime_wait', { op: 'frames', frames: 600 }],
+      ['runtime_input', { op: 'action', action: 'jump', strength: 0 }],
+    ] as const) {
+      assert.match(
+        await call(tool, args),
+        /No game with the runtime addon is running/,
+        `${tool} ${JSON.stringify(args)} is inside its range`,
+      );
+    }
   });
 }
 
@@ -12669,7 +12695,7 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
         children.every((child) => get(child, 'children') === undefined),
         `and nothing under them: ${oneLevel.said}`,
       );
-      assert.match((await tree(-1)).said, /depth is -1, and depth takes a whole number of levels/);
+      assert.match((await tree(-1)).said, /runtime_inspect takes depth of 0 or more, not -1\./);
 
       const waitFor = async (timeoutMs: number): Promise<unknown> =>
         (
