@@ -217,6 +217,24 @@ func _check_reading_rich_text() -> void:
 	if found.get("count") != 1:
 		_fail("a phrase running across a tag is found: %s" % str(found))
 
+	# A line being typed out says as much of itself as is drawn, so a wait for its words is not met
+	# before the player can read them. A Label by count, a RichTextLabel by ratio, which sets the count.
+	var typed: Label = Label.new()
+	typed.text = "Spring 17"
+	typed.visible_characters = 6
+	dossier.add_child(typed)
+	marked.visible_ratio = 0.5
+	await process_frame
+	var partway: Dictionary = await node._execute_command("read_text", {"root": "/root/Dossier"})
+	var shown: Array = partway.get("lines", [])
+	if shown != ["Mollum Telken,", "Docket 72, an errand", "Spring"]:
+		_fail("text being typed out reads as far as it is drawn: %s" % str(partway))
+	var early: Dictionary = await node._execute_command(
+		"find_nodes", {"says": "Spring 17", "root": "/root/Dossier"}
+	)
+	if early.get("count") != 0:
+		_fail("and its words are not found before they are shown: %s" % str(early))
+
 	dossier.free()
 
 

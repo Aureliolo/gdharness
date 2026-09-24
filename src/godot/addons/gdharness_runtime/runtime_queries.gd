@@ -391,12 +391,22 @@ static func said_by(node: Node) -> String:
 	# it also holds what a game added with append_text(), which the property never shows.
 	if node is RichTextLabel:
 		var rich: RichTextLabel = node
-		return rich.get_parsed_text().strip_edges()
+		return _shown_part(rich.get_parsed_text(), rich.visible_characters)
 	var text: Variant = node.get("text")
 	if not text is String:
 		return ""
 	var words: String = text
+	if node is Label:
+		var label: Label = node
+		return _shown_part(words, label.visible_characters)
 	return words.strip_edges()
+
+
+## As much of [param words] as is drawn: a label typing a line out shows [param drawn] characters
+## of it, and -1 is all of them. Read whole, a words wait was met on the first frame of a line being
+## typed out, before the player could read any of it.
+static func _shown_part(words: String, drawn: int) -> String:
+	return (words if drawn < 0 else words.substr(0, drawn)).strip_edges()
 
 
 func get_rect(params: Dictionary) -> Dictionary:
