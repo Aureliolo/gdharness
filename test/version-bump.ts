@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { type Answer, type Ask, createRef, refState } from '../scripts/github-ref.js';
 import { get } from './support/json.js';
 
 const root = path.join(import.meta.dirname, '..');
@@ -58,3 +59,90 @@ try {
 }
 
 console.log('version bump synchronization checks passed');
+
+/**
+ * The refs a release is built on, asked through a stand-in for the API that answers in the order
+ * given. A 503 is the answer that stopped a release being prepared on 2026-09-23, and read as
+ * "absent" it would also have called a taken tag free.
+ */
+async function refsAreAskedUntilAnswered(): Promise<void> {
+  const scripted = (...answers: (Answer | Error)[]): { ask: Ask; asked: string[] } => {
+    const asked: string[] = [];
+    const ask: Ask = (method, requested) => {
+      asked.push(`${method} ${requested}`);
+      const next = answers.shift();
+      if (next === undefined) {
+        return Promise.reject(new Error(`nothing scripted for ${method} ${requested}`));
+      }
+      return next instanceof Error ? Promise.reject(next) : Promise.resolve(next);
+    };
+    return { ask, asked };
+  };
+  const pauses: number[] = [];
+  const pause = (ms: number): Promise<void> => {
+    pauses.push(ms);
+    return Promise.resolve();
+  };
+  const repository = 'owner/name';
+
+  assert.equal(
+    await refState(scripted({ status: 404, body: {} }).ask, repository, 'tags/v1.0.0', pause),
+    'absent',
+  );
+  assert.equal(
+    await refState(scripted({ status: 200, body: {} }).ask, repository, 'tags/v1.0.0', pause),
+    'present',
+  );
+
+  const busy = scripted({ status: 503, body: 'busy' }, new Error('socket hang up'), {
+    status: 200,
+    body: {},
+  });
+  assert.equal(await refState(busy.ask, repository, 'tags/v1.0.0', pause), 'present', 'a 503 is asked again');
+  assert.deepEqual(busy.asked, Array(3).fill('GET /repos/owner/name/git/ref/tags/v1.0.0'));
+  assert.deepEqual(pauses, [5_000, 10_000], 'with a longer pause each time');
+
+  const down = scripted(...Array.from({ length: 5 }, () => ({ status: 503, body: 'busy' })));
+  await assert.rejects(
+    refState(down.ask, repository, 'tags/v1.0.0', pause),
+    /failed on all 5 attempts; the last got HTTP 503/,
+    'a 503 on every attempt is a failure, never "absent"',
+  );
+
+  const sha = 'a'.repeat(40);
+  assert.equal(
+    await createRef(
+      scripted({ status: 502, body: 'bad gateway' }, { status: 201, body: {} }).ask,
+      repository,
+      'heads/b',
+      sha,
+      pause,
+    ),
+    'created',
+  );
+  assert.equal(
+    await createRef(
+      scripted({ status: 422, body: {} }, { status: 200, body: { object: { sha } } }).ask,
+      repository,
+      'heads/b',
+      sha,
+      pause,
+    ),
+    'existed',
+    'a ref already at the commit asked for is the ref wanted, so a rerun succeeds',
+  );
+  await assert.rejects(
+    createRef(
+      scripted({ status: 422, body: {} }, { status: 200, body: { object: { sha: 'b'.repeat(40) } } }).ask,
+      repository,
+      'tags/v1.0.0',
+      sha,
+      pause,
+    ),
+    /already exists at b{40}, not a{40}/,
+    'and one at another commit is refused rather than moved',
+  );
+}
+
+await refsAreAskedUntilAnswered();
+console.log('release ref checks passed');
