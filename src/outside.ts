@@ -13,7 +13,7 @@
  * the walk to follow.
  */
 
-import { spawn } from 'node:child_process';
+import { type ChildProcess, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 /** What to start, and for a run, where its output goes and how its record reads. */
@@ -29,23 +29,75 @@ export interface OutsideSpec {
   };
 }
 
+/**
+ * What crosses to the launcher and the keeper: the spec with its environment as the changes from
+ * the server's own, null for a variable taken away.
+ *
+ * Only the changes, because each process down the line inherits the rest the ordinary way, and the
+ * whole environment is the server's, API keys and harness tokens included. Over stdin rather than as
+ * an argument, because a command line is readable by every process on the machine for as long as the
+ * process lives, and the keeper lives as long as the run: the environment sat in one, whole.
+ */
+export interface SentSpec {
+  readonly command: string;
+  readonly args: readonly string[];
+  readonly envChanges: Readonly<Record<string, string | null>>;
+  readonly run?: OutsideSpec['run'];
+}
+
+function changesFrom(env: OutsideSpec['env'], base: NodeJS.ProcessEnv): Record<string, string | null> {
+  const changes: Record<string, string | null> = {};
+  if (env === undefined) {
+    return changes;
+  }
+  for (const [name, value] of Object.entries(env)) {
+    if (value !== undefined && base[name] !== value) {
+      changes[name] = value;
+    }
+  }
+  for (const name of Object.keys(base)) {
+    if (env[name] === undefined) {
+      changes[name] = null;
+    }
+  }
+  return changes;
+}
+
+/** [param changes] applied over [param base], which is what the started process is given. */
+export function withChanges(
+  base: NodeJS.ProcessEnv,
+  changes: Readonly<Record<string, string | null>>,
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...base };
+  for (const [name, value] of Object.entries(changes)) {
+    if (value === null) {
+      delete env[name];
+    } else {
+      env[name] = value;
+    }
+  }
+  return env;
+}
+
+/** Hands [param spec] to [param child] down its stdin, which is then closed. */
+export function sendSpec(child: ChildProcess, spec: SentSpec): void {
+  child.stdin?.end(JSON.stringify(spec), 'utf8');
+}
+
+/** The spec handed down this process's stdin. */
+export async function receivedSpec(): Promise<SentSpec> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) {
+    chunks.push(chunk as Buffer);
+  }
+  return JSON.parse(Buffer.concat(chunks).toString('utf8')) as SentSpec;
+}
+
 /** What the launcher handed back: the pid of what it started, or why it could not. */
 export type Launched = { readonly pid: number } | { readonly error: string };
 
 /** Beside the bundle that imports this, which is where the build puts it. */
 export const KEEPER_SCRIPT = fileURLToPath(new URL('./keeper.js', import.meta.url));
-
-/**
- * The spec as one argument. JSON in base64url, so no quoting rule of any shell or platform can bend
- * it on the way through a command line.
- */
-function encodeSpec(spec: OutsideSpec): string {
-  return Buffer.from(JSON.stringify(spec), 'utf8').toString('base64url');
-}
-
-export function decodeSpec(encoded: string): OutsideSpec {
-  return JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8')) as OutsideSpec;
-}
 
 /** The one line a launcher or a keeper hands back up: `pid N`, or `error` and why. */
 export function readLaunched(printed: string): Launched {
@@ -73,9 +125,15 @@ export async function launchOutsideTheTree(
   keeper = KEEPER_SCRIPT,
 ): Promise<Launched> {
   return await new Promise<Launched>((resolve) => {
-    const launcher = spawn(runtime, [keeper, 'launch', encodeSpec(spec)], {
-      stdio: ['ignore', 'pipe', 'pipe'],
+    const launcher = spawn(runtime, [keeper, 'launch'], {
+      stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
+    });
+    sendSpec(launcher, {
+      command: spec.command,
+      args: spec.args,
+      envChanges: changesFrom(spec.env, process.env),
+      ...(spec.run === undefined ? {} : { run: spec.run }),
     });
     let printed = '';
     let complained = '';
