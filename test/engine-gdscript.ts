@@ -60,11 +60,18 @@ function resolveGodotPath(): string | null {
 
 /** Every GDScript file the package ships, as the engine will see it inside the fixture project. */
 function shippedScripts(): string[] {
-  return ['operations', 'addons'].flatMap((root) =>
-    readdirSync(join('src', 'godot', root), { recursive: true, encoding: 'utf8' })
-      .filter((entry) => entry.endsWith('.gd'))
-      .map((entry) => `res://${root}/${entry.replaceAll('\\', '/')}`),
-  );
+  return ['operations', 'addons'].flatMap((root) => scriptsUnder(join('src', 'godot', root), root));
+}
+
+/** Every fixture script, as the engine will see it once the typed gate copies them to res://fixtures. */
+function fixtureScripts(): string[] {
+  return scriptsUnder(join('test', 'support', 'gd'), 'fixtures');
+}
+
+function scriptsUnder(directory: string, root: string): string[] {
+  return readdirSync(directory, { recursive: true, encoding: 'utf8' })
+    .filter((entry) => entry.endsWith('.gd'))
+    .map((entry) => `res://${root}/${entry.replaceAll('\\', '/')}`);
 }
 
 /**
@@ -256,12 +263,22 @@ function runFixture(godotPath: string, projectDir: string, name: string): unknow
  */
 function testTypedGate(godotPath: string, projectDir: string): void {
   const shipped = shippedScripts();
+  const fixtures = fixtureScripts();
   assert.ok(shipped.length >= 15, `the package ships GDScript: ${shipped.length} files`);
-  assert.equal(
-    get(runFixture(godotPath, projectDir, 'typed'), 'checked'),
-    shipped.length,
-    `every shipped script should be parsed: ${shipped.join(', ')}`,
-  );
+  assert.ok(fixtures.length >= 16, `the fixtures are GDScript: ${fixtures.length} files`);
+  // The fixtures run under these settings on the engine leg and nowhere else, so a fixture that
+  // discarded a return value passed every local check and failed there.
+  const fixturesDir = join(projectDir, 'fixtures');
+  cpSync(join('test', 'support', 'gd'), fixturesDir, { recursive: true });
+  try {
+    assert.equal(
+      get(runFixture(godotPath, projectDir, 'typed'), 'checked'),
+      shipped.length + fixtures.length,
+      `every shipped script and fixture should be parsed: ${[...shipped, ...fixtures].join(', ')}`,
+    );
+  } finally {
+    sweep(fixturesDir);
+  }
 
   const probeDir = join(projectDir, 'addons', 'probe');
   mkdirSync(probeDir, { recursive: true });

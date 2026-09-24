@@ -252,8 +252,8 @@ func _check_reading_lists() -> void:
 		page.name = title
 		tabs.add_child(page)
 	var names: ItemList = ItemList.new()
-	names.add_item("Ada")
-	names.add_item("Bram")
+	var _ada: int = names.add_item("Ada")
+	var _bram: int = names.add_item("Bram")
 	board.add_child(names)
 	var tree: Tree = Tree.new()
 	var guild: TreeItem = tree.create_item()
