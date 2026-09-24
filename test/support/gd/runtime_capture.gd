@@ -32,6 +32,8 @@ func _run() -> void:
 	):
 		_fail("a capture with no path should be refused for the path: %s" % JSON.stringify(without_path))
 
+	_check_scaling()
+
 	if failures.is_empty():
 		print(JSON.stringify({"ok": true}))
 		quit(0)
@@ -43,6 +45,25 @@ func _run() -> void:
 
 func _fail(message: String) -> void:
 	failures.append(message)
+
+
+## What a capture is scaled to. A width alone was ignored unless a height came with it, so asking for
+## a smaller picture sent back the full-size one; one side now keeps the picture's proportions.
+func _check_scaling() -> void:
+	var drawn: Vector2i = Vector2i(1920, 1080)
+	var cases: Array[Array] = [
+		[0, 0, Vector2i(1920, 1080)],
+		[960, 0, Vector2i(960, 540)],
+		[0, 270, Vector2i(480, 270)],
+		[100, 100, Vector2i(100, 100)],
+		[1, 0, Vector2i(1, 1)],
+	]
+	for case: Array in cases:
+		var width: int = case[0]
+		var height: int = case[1]
+		var scaled: Vector2i = CaptureCommands.scaled_to(drawn, width, height)
+		if scaled != case[2]:
+			_fail("width %d and height %d scale 1920x1080 to %s, not %s" % [width, height, case[2], scaled])
 
 
 func _check_refused(answer: Dictionary, what: String, output_path: String) -> void:
