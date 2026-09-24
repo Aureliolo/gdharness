@@ -17281,6 +17281,189 @@ async function testAScanThatHasNotStartedIsNotFinished(): Promise<void> {
 }
 
 /**
+ * A game is not started against a class cache the editor is about to rewrite.
+ *
+ * Downstream, a formatter rewrote a few scripts, the editor scanned them, and a start a few seconds
+ * later booted a game that resolved no global class: 95 "Could not find type" errors, a grey window,
+ * and a cache that read whole straight afterwards. Measured on 4.7.2, the editor writes the cache a
+ * frame after it stops reporting the scan, so the dangerous moment is both the scan and the frame
+ * after it.
+ *
+ * A fixture editor on the project reports a scan for a while, then says it finished just now, and
+ * writes a marked cache well after that, where the editor's own write would land. The game reads
+ * the cache as it boots and says whether the mark is there, so what is asserted is the thing that
+ * failed downstream: the game read the cache the scan wrote, not the one before it. Then the same
+ * editor long idle, which must not hold a start at all, and one that never finishes, which starts
+ * with a note rather than waiting for ever.
+ */
+async function testAStartWaitsOutTheEditorsScan(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('start waits out a scan regression skipped (Godot not found)');
+    return;
+  }
+  const port = await reservePort();
+  const server = new ServerProcess({ env: { GDHARNESS_BRIDGE_PORT: String(port), GODOT_PATH: godotPath } });
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-scan-start-'));
+  const cache = join(project, '.godot', 'global_script_class_cache.cfg');
+  const EMPTY = 'list=Array[Dictionary]([])\n';
+  const WRITTEN_AFTER_THE_SCAN = '; written after the scan\nlist=Array[Dictionary]([])\n';
+  let editor: WebSocket | null = null;
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="ScanStart"\n' +
+        'run/main_scene="res://main.tscn"\n',
+    );
+    writeFileSync(
+      join(project, 'main.gd'),
+      'extends Node\n\n\nfunc _ready() -> void:\n' +
+        '\tvar cache: String = FileAccess.get_file_as_string("res://.godot/global_script_class_cache.cfg")\n' +
+        '\tpush_warning("cache read: %s" % ("after the scan" if cache.contains("written after the scan") else "before it"))\n',
+    );
+    writeFileSync(
+      join(project, 'main.tscn'),
+      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+        '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+    );
+    mkdirSync(join(project, '.godot'), { recursive: true });
+    // The cache from before any scan here, dated a minute back: rewriting it just before a check
+    // would make it newer than the scan the check is told about, which is the editor's own write
+    // and not the file it replaces.
+    const cacheBeforeTheScan = (): void => {
+      writeFileSync(cache, EMPTY);
+      const aMinuteAgo = new Date(Date.now() - 60_000);
+      utimesSync(cache, aMinuteAgo, aMinuteAgo);
+    };
+    cacheBeforeTheScan();
+    await server.initialize('regression-test');
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+    editor = socket;
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', () => {
+        resolve();
+      });
+      socket.once('error', reject);
+    });
+
+    // What the fixture editor says about its scan, set by each case below.
+    let scanning: () => boolean = () => false;
+    let finishedAt = Date.now() - 60_000;
+    socket.on('message', (raw: Buffer) => {
+      const message: unknown = JSON.parse(String(raw));
+      if (!isRecord(message) || message['type'] !== 'tool_invoke') {
+        return;
+      }
+      const result =
+        String(message['tool']) === 'scan_status'
+          ? {
+              ok: true,
+              scanning: scanning(),
+              importing: false,
+              pending: false,
+              sinceScanFinishedMs: Date.now() - finishedAt,
+            }
+          : { ok: true, classes: [] };
+      socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result }));
+    });
+    socket.send(
+      JSON.stringify({ type: 'godot_ready', project_path: project, addon_version: SERVER_VERSION }),
+    );
+    let knows = false;
+    for (let waited = 0; waited < 10_000 && !knows; waited += 100) {
+      await delay(100);
+      const status = await server.request('tools/call', { name: 'editor_status', arguments: {} });
+      knows = text(get(parseTextContent(status), 'editor', 'projectPath')) === project;
+    }
+    assert.ok(knows, 'the fixture editor should have reached the server, or this proves nothing');
+
+    const check = async (): Promise<{ answer: unknown; said: string }> => {
+      const response = await server.request(
+        'tools/call',
+        { name: 'editor_run', arguments: { projectPath: project, op: 'check' } },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+      return { answer: parseTextContent(response), said: textOf(response) ?? '' };
+    };
+
+    // A scan for a second, then over, and the cache written a second and a half after that: later
+    // than a headless game takes to reach _ready, so a start that did not wait reads the old file.
+    const scanEnds = Date.now() + 1_000;
+    scanning = () => Date.now() < scanEnds;
+    finishedAt = scanEnds;
+    const writing = delay(2_500).then(() => {
+      writeFileSync(cache, WRITTEN_AFTER_THE_SCAN);
+    });
+    const waited = await check();
+    await writing;
+    assert.match(
+      waited.said,
+      /cache read: after the scan/,
+      `the game should read the cache the scan wrote, not the one before it: ${waited.said}`,
+    );
+    const waitedMs = get(waited.answer, 'waitedForEditorScanMs');
+    assert.ok(
+      typeof waitedMs === 'number' && waitedMs >= 2_000,
+      `and the answer should say it waited: ${waited.said}`,
+    );
+    assert.equal(
+      get(waited.answer, 'scanNote'),
+      undefined,
+      `a scan that finished needs no note: ${waited.said}`,
+    );
+
+    // A scan that ended a moment before the start was asked for, so the start never sees it
+    // running, with the write still to come. Only the time since it finished says to wait.
+    cacheBeforeTheScan();
+    scanning = () => false;
+    finishedAt = Date.now() - 200;
+    const late = delay(1_300).then(() => {
+      writeFileSync(cache, WRITTEN_AFTER_THE_SCAN);
+    });
+    const unseen = await check();
+    await late;
+    assert.match(
+      unseen.said,
+      /cache read: after the scan/,
+      `a scan that has just finished is waited for too, write and all: ${unseen.said}`,
+    );
+
+    // Long idle: the cache written well after the last scan, so nothing to wait for.
+    scanning = () => false;
+    finishedAt = Date.now() - 60_000;
+    const idle = await check();
+    assert.match(idle.said, /cache read: after the scan/, `an idle editor's cache is read: ${idle.said}`);
+    assert.equal(
+      get(idle.answer, 'waitedForEditorScanMs'),
+      undefined,
+      `and an editor that is not scanning holds nothing up: ${idle.said}`,
+    );
+
+    // A scan that does not end: started anyway, and said.
+    cacheBeforeTheScan();
+    scanning = () => true;
+    const endless = await check();
+    assert.ok(
+      asNumber(get(endless.answer, 'waitedForEditorScanMs')) >= 30_000,
+      `a scan that does not end is waited for as long as the budget: ${endless.said}`,
+    );
+    assert.match(
+      text(get(endless.answer, 'scanNote')),
+      /still scanning the project after 30 seconds/,
+      `and the start says it went ahead during it: ${endless.said}`,
+    );
+    assert.match(endless.said, /cache read: before it/, `the game still booted: ${endless.said}`);
+  } finally {
+    editor?.terminate();
+    await server.stop();
+    sweep(project);
+  }
+}
+
+/**
  * A repair that could not run is not reported as one.
  *
  * The editor writes the class cache at the end of a scan from the list it is holding, not from the
@@ -17937,6 +18120,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheProjectWalksAgreeAboutWhatIsInIt,
   testClassesAnEditorIsNotHolding,
   testAScanThatHasNotStartedIsNotFinished,
+  testAStartWaitsOutTheEditorsScan,
   testARepairThatCouldNotRunIsNotReported,
   testTheDiagnosticsRemedyKnowsAnEditorThatWritesAShortList,
   testAShortenedCacheIsRebuilt,
