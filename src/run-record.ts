@@ -25,9 +25,18 @@
 
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { basename, join, resolve } from 'node:path';
-import { isSameDirectory, realPathOr } from './paths.js';
+import {
+  mkdirSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
+import { isSameDirectory } from './paths.js';
 import { type CommandLineRead, POWERSHELL_UTF8, readCommandLine } from './process-children.js';
 import { runtimeDirectories, runtimeDirectory, STARTED_AFTER_ANNOUNCING_MS } from './runtime-client.js';
 
@@ -71,8 +80,33 @@ function runsDirectory(): string {
  * refused to end the game as somebody else's. Normalised the way `isSameDirectory` compares, so
  * the spelling a server was given and the one its editor reports name the same note.
  */
+/**
+ * [param path] with the links in whatever part of it exists resolved, and the rest as written.
+ *
+ * Resolved only when it exists, the key changed when the directory appeared: a server writes into
+ * its project's `.godot` as it starts, which creates the directory, so a note written for the
+ * project before that and one read after it named two files wherever the path runs through a link,
+ * as a macOS temporary directory does through `/var`.
+ */
+function realAsFarAsItExists(path: string): string {
+  const missing: string[] = [];
+  let at = path;
+  for (;;) {
+    try {
+      return join(realpathSync.native(at), ...missing);
+    } catch {
+      const parent = dirname(at);
+      if (parent === at) {
+        return path;
+      }
+      missing.unshift(basename(at));
+      at = parent;
+    }
+  }
+}
+
 function projectKey(projectPath: string): string {
-  const real = realPathOr(resolve(projectPath)).replace(/[\\/]+$/, '');
+  const real = realAsFarAsItExists(resolve(projectPath)).replace(/[\\/]+$/, '');
   const folded = process.platform === 'win32' || process.platform === 'darwin' ? real.toLowerCase() : real;
   return createHash('sha256').update(folded.replaceAll('\\', '/')).digest('hex').slice(0, 16);
 }

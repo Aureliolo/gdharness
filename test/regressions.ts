@@ -5092,6 +5092,38 @@ async function testARunsEnvironmentStaysOffCommandLines(): Promise<void> {
 }
 
 /**
+ * A project's note is named the same before its directory exists and after, through a link.
+ *
+ * The name resolved links only in a path that existed, and a server creates its project's
+ * directory as it starts by writing into `.godot`. Where the path ran through a link, as a macOS
+ * temporary directory runs through `/var`, a note written before the server started and one read
+ * after were two files, and the server said no game was running. Found on the macOS engine leg.
+ */
+function testANoteIsNamedTheSameBeforeAndAfterItsProjectExists(): void {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'gdharness-note-name-')));
+  try {
+    const real = join(root, 'real');
+    const link = join(root, 'link');
+    mkdirSync(real);
+    symlinkSync(real, link, 'junction');
+    const before = runRecordPath(join(link, 'project'), root);
+    mkdirSync(join(real, 'project'));
+    assert.equal(
+      runRecordPath(join(link, 'project'), root),
+      before,
+      'the note is the same file once the project directory exists',
+    );
+    assert.equal(
+      runRecordPath(join(real, 'project'), root),
+      before,
+      'and the same file whichever spelling reaches the directory',
+    );
+  } finally {
+    sweep(root);
+  }
+}
+
+/**
  * A stop that signalled nothing says so in the fields a caller reads, and so does a start.
  *
  * The stop refuses to signal a pid that no longer answers as the process the run was started as,
@@ -19260,6 +19292,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnExitCodeOutlivesTheServerThatSawIt,
   testRunNotesAreKeptPerProject,
   testAStopThatSignalsNothingSaysSo,
+  testANoteIsNamedTheSameBeforeAndAfterItsProjectExists,
   testAGamesOwnArgumentsDoNotMakeItAnEditor,
   testAnAnnouncedGameIsJudgedBeforeItIsEnded,
   testAPidIsNotAnIdentity,
