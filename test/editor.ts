@@ -1330,6 +1330,17 @@ async function testEditorRescan({ call, project }: Editor): Promise<void> {
   writeFileSync(join(project, 'late.gd'), 'extends Node\n');
   await call('editor_rescan', { projectPath: project });
 
+  // How long ago the scan finished comes from the addon alone, and a start that could not read it
+  // would wait out only the scans it happened to see running, so its absence has to fail here
+  // rather than pass as an editor that has never scanned.
+  const scan = get(await call('editor_status', {}), 'editor', 'scan');
+  assert.equal(get(scan, 'scanning'), false, `the scan it waited for is over: ${JSON.stringify(scan)}`);
+  const finishedMsAgo = get(scan, 'finishedMsAgo');
+  assert.ok(
+    typeof finishedMsAgo === 'number' && finishedMsAgo >= 0 && finishedMsAgo < 60_000,
+    `and the editor says how long ago it finished: ${JSON.stringify(scan)}`,
+  );
+
   const attached = await call('resource_edit', {
     projectPath: project,
     resourcePath: 'res://custom.tres',

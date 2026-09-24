@@ -18,6 +18,12 @@ var _scans_finished: int = 0
 var _scans_finished_at_request: int = 0
 var _scan_pending: bool = false
 
+## When the last scan finished, on the engine's clock, or -1 before the first. The editor writes
+## the class cache a frame after it stops reporting a scan, measured on 4.7.2, so a game started
+## in between reads a file being rewritten; how long ago the scan ended is what tells a caller
+## whether that write can still be coming.
+var _scan_finished_at_msec: int = -1
+
 
 func set_editor_plugin(plugin: EditorPlugin) -> void:
 	_editor_plugin = plugin
@@ -31,6 +37,7 @@ func set_editor_plugin(plugin: EditorPlugin) -> void:
 func _scan_finished() -> void:
 	_scans_finished += 1
 	_scan_pending = false
+	_scan_finished_at_msec = Time.get_ticks_msec()
 
 
 func _refresh_and_reload(scene_path: String) -> void:
@@ -674,4 +681,23 @@ func rescan_filesystem(args: Dictionary) -> Dictionary:
 		"importing": importing,
 		"pending": _scan_pending,
 		"scansFinished": _scans_finished,
+	}
+
+
+## Whether the editor is scanning, and how long ago its last scan finished, without asking for one.
+##
+## For a caller about to start a game: the editor rewrites the class cache a frame after a scan
+## stops reporting, so a game booted during the scan or in that frame reads a file being rewritten.
+## Apart from `rescan_filesystem` because asking must not start or count anything.
+func scan_status(_args: Dictionary) -> Dictionary:
+	if not _editor_plugin:
+		return {"ok": false, "error": "Editor plugin unavailable"}
+	var filesystem: EditorFileSystem = EditorInterface.get_resource_filesystem()
+	return {
+		"ok": true,
+		"scanning": filesystem.is_scanning(),
+		"importing": filesystem.is_importing(),
+		"pending": _scan_pending,
+		"sinceScanFinishedMs":
+		-1 if _scan_finished_at_msec < 0 else Time.get_ticks_msec() - _scan_finished_at_msec,
 	}

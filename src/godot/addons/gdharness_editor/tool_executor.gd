@@ -79,6 +79,7 @@ func _init_tools() -> void:
 		"disconnect_signal": [_scene_tools, "disconnect_signal"],
 		"list_connections": [_scene_tools, "list_connections"],
 		"rescan_filesystem": [_scene_tools, "rescan_filesystem"],
+		"scan_status": [_scene_tools, "scan_status"],
 		"global_classes": [_class_tools, "global_classes"],
 		"reload_script": [_class_tools, "reload_script"],
 		# Settings, for a caller that asked the editor rather than the file on disk
