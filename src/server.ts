@@ -2046,18 +2046,28 @@ class GodotServer {
       case 'runtime_inspect': {
         const patience = readPositiveNumber(args, 'timeoutMs') ?? this.runtimeTimeoutMs();
         switch (op) {
-          case 'tree':
+          case 'tree': {
+            // Zero is the node alone, which is how one node's properties are read, and not an
+            // omission: read as positive it fell back to three levels, which over a router node
+            // answered four megabytes.
+            const depth = readNonNegativeNumber(args, 'depth');
+            if (args['depth'] !== undefined && (depth === undefined || !Number.isInteger(depth))) {
+              return this.createErrorResponse(
+                `depth is ${JSON.stringify(args['depth'])}, and depth takes a whole number of levels: 0 for the node alone.`,
+              );
+            }
             return await this.handleRuntimeCommand(
               'get_tree',
               {
                 ...whichGame(args),
                 root: readNonEmptyString(args, 'nodePath') ?? '/root',
-                depth: readPositiveNumber(args, 'depth') ?? 3,
+                depth: depth ?? 3,
                 include_properties: readBoolean(args, 'includeProperties') ?? false,
                 properties: readArray(args, 'properties') ?? [],
               },
               patience,
             );
+          }
           case 'find':
             return await this.handleFindRuntimeNodes(args, patience);
           case 'text':

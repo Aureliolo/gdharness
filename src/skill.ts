@@ -179,6 +179,12 @@ up anyway, believe the run over the diagnostic and say so.
 An unknown op, an argument the tool does not name, or a missing required one is refused with the
 valid set spelled out, so a call that succeeded is a call that was understood.
 
+The running server decides what a tool takes, not the schema in your context. A conversation that
+began before gdharness was upgraded, and was resumed since, can go on holding the tool definitions
+it first loaded, even from a fresh search, while the server behind them is newer. When an answer
+names an op or an argument the schema you hold does not show, make the call as the answer says: the
+server accepts it or refuses it with what it does take.
+
 A tool that cannot answer says which state it is in and what changes it, rather than answering
 emptily: no game running, a game with no debugger behind it, a game running rather than stopped, a
 control outside a headless viewport. Read the refusal instead of retrying the call.
