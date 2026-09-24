@@ -457,21 +457,27 @@ long bench is not a reason to stop editing, and the new code arrives on the next
 `editor_run start`. A script attached to nothing on the open scene, a helper hanging off no node,
 is watched by nothing at all.
 
-That run belongs to the operating system rather than to the server. It is spawned detached and
-unreferenced, and both its streams are written to a transcript under the runtime directory, with a
-note beside it naming the process and the file. A harness restarts its MCP server whenever it
-likes, and an ordinary child dies with its parent: benches forty minutes into a sweep were killed
-twice in one session by a reconnect nobody asked for, and `editor_output` afterwards answered "No
-game is running" about output that had just been dropped. A file rather than a pipe for the same
-reason and one more, since a pipe with no reader fills and then blocks the writer: surviving the
-server down a pipe would only trade a killed run for a wedged one.
+That run belongs to the operating system rather than to the server. A harness restarts its MCP
+server whenever it likes, and Claude Code does it by killing the server's process tree, walking
+parent pids: benches forty minutes into a sweep were killed twice in one session by a reconnect
+nobody asked for, and spawning the run detached did not help, because a detached child is still a
+child to that walk. So the server starts `build/keeper.js` as a launcher, which starts a keeper and
+exits as soon as it has the game's pid; the keeper is the game's parent and nobody's child here,
+so the walk has nothing to follow. The editor `editor_launch` opens goes through the same launcher
+without a keeper. Both of the game's streams are written to a transcript under the runtime
+directory, with a note beside it naming the process and the file. A file rather than a pipe
+because a pipe with no reader fills and then blocks the writer: surviving the server down a pipe
+would only trade a killed run for a wedged one.
 
-So a server that finds no run of its own reads that note. A process still there is reported as
-running, with everything printed while nobody was reading; one that is gone is answered with its
-output and `endedUnwatched`, because nothing collected an exit code for it and a guessed zero
-reads as a run that finished its work. `editor_run stop` ends it by pid and takes the note away.
-One run is one process: what the game started for itself is not signalled and the answer says so,
-unless the stop is asked for `andChildren`, and then every process under the run's, to any depth,
+The keeper writes the note once the game is up and its exit into the note when it ends, since it
+is the one process that can wait on the game; the server that started the run and any server that
+picks it up read the exit from there alike. A process still there is reported as running, with
+everything printed while nobody was reading; one that is gone is answered with its output and the
+code the keeper wrote, or with `endedUnwatched` when the keeper went first and nothing wrote one,
+because a guessed zero reads as a run that finished its work. `editor_run stop` ends it by pid,
+reads the exit the keeper writes for it, and takes the note away. One run is one process: what the
+game started for itself is not signalled and the answer says so, unless the stop is asked for
+`andChildren`, and then every process under the run's, to any depth,
 that is a game of the project goes with it, listed before the run is ended because ending it is
 what makes them nobody's children on POSIX. A game of the project is one announced as such, or one
 whose command line is the project's engine run with `--path` on the project: a project that keeps

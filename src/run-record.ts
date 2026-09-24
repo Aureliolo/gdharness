@@ -44,11 +44,9 @@ export interface RunRecord {
    */
   readonly command?: string;
   /**
-   * What it exited with, when its server was still there to see it go.
+   * What it exited with, written by the keeper that holds the game the moment it ends.
    *
-   * Absent for a run that outlived the server which started it, which is the case this whole
-   * record exists for. Present is the other one: the run ended, the server saw it, and then the
-   * harness replaced that server before anybody asked.
+   * Absent while the run is going, and for a run whose keeper was ended before the game was.
    */
   readonly exitCode?: number;
   /** The signal that ended it instead, under the same conditions; a signalled run has no code. */
@@ -155,12 +153,11 @@ function editorNoteAt(path: string): EditorRunNote | null {
 }
 
 /**
- * The exit code kept in the note, for a run that ended while its server was still there.
+ * The exit code kept in the note, written by the run's keeper as the game ends.
  *
- * A run outlives its server on purpose and the next one reads this note rather than the process,
- * so without this a bench that had finished cleanly under a server since replaced came back as one
- * whose exit code "was never collected". That is true of the reading and false of the run: it was
- * collected, by the process that started it, and then thrown away when the harness reconnected.
+ * A run outlives its server on purpose and every server reads this note rather than the process,
+ * so without this a bench that had finished cleanly came back as one whose exit code "was never
+ * collected". The keeper is the one process that can wait on the game, so it is the one that says.
  *
  * Only when the note is still this run's. These directories are shared by every server on the
  * machine, and writing an exit code over somebody else's note would end their run on paper.

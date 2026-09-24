@@ -49,10 +49,14 @@ await mkdir(buildRoot, { recursive: true });
 
 await buildBundledEntrypoint('cli.ts', 'cli.js');
 await buildBundledEntrypoint('server-entry.ts', 'index.js');
+// Its own bundle beside index.js, which starts it with Node: the launcher and keeper that leave
+// what the server starts outside the server's process tree.
+await buildBundledEntrypoint('keeper.ts', 'keeper.js');
 
 for (const sourcePath of await collectTypeScriptEntries(sourceRoot)) {
   const relativePath = path.relative(sourceRoot, sourcePath);
-  if (relativePath === 'cli.ts' || relativePath === 'server-entry.ts') continue;
+  if (relativePath === 'cli.ts' || relativePath === 'server-entry.ts' || relativePath === 'keeper.ts')
+    continue;
 
   const outputPath = path.join(buildRoot, relativePath.replace(/\.ts$/, '.js'));
   await mkdir(path.dirname(outputPath), { recursive: true });

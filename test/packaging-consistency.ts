@@ -93,6 +93,7 @@ for (const requiredFile of [
   'package/package.json',
   'package/build/cli.js',
   'package/build/index.js',
+  'package/build/keeper.js',
   ...operationsModules.map((module) => `package/build/godot/operations/${module}`),
   'package/build/godot/addons/auto_reload/plugin.cfg',
   'package/build/godot/addons/gdharness_editor/plugin.cfg',
@@ -236,7 +237,7 @@ try {
       `packed ${executable} should start under the runtime npx is, got ${bundle.slice(0, 40)}`,
     );
   }
-  for (const bundleName of ['cli.js', 'index.js']) {
+  for (const bundleName of ['cli.js', 'index.js', 'keeper.js']) {
     const bundle = await readFile(path.join(packedRoot, 'build', bundleName), 'utf8');
     const externalPackageImport =
       /(?:from\s+|import\()["'](?:@modelcontextprotocol|fs-extra)(?:[/"'])/.exec(bundle)?.[0] ?? null;
