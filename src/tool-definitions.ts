@@ -365,7 +365,12 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       scenePath: SCENE_PATH,
       actionName: { type: 'string', description: 'Input action name, such as "jump".' },
       events: INPUT_EVENTS,
-      deadzone: { type: 'number', description: 'Input actions: analogue deadzone, 0 to 1. Default 0.5.' },
+      deadzone: {
+        type: 'number',
+        minimum: 0,
+        maximum: 1,
+        description: 'Input actions: analogue deadzone, 0 to 1. Default 0.5.',
+      },
       pluginName: { type: 'string', description: 'Folder name under addons/.' },
       busName: { type: 'string', description: 'Audio bus name.' },
       parentBusIndex: { type: 'number', description: 'Audio buses: the bus to send to. Default 0, Master.' },
@@ -521,7 +526,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
           'Stop each suite at its first failing case. Default false: every case runs. With it on, the counts are of what ran, notRun says how many cases were left, and fixing what is named and running again finds the next one, which looks like a flaky tier and is not.',
       },
       timeoutMs: {
-        type: 'number',
+        type: 'integer',
+        minimum: 1,
         description: 'How long the run may take before it is killed. Default 600000.',
       },
     },
@@ -719,8 +725,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         description:
           "structure: also list what the script inherits, walking extends through the project's other scripts. Each such member carries inherited_from, the file declaring it, and the answer gains inherits_from, the chain that was walked. A name the script overrides is listed at both its lines rather than once. A native base is not walked, since it declares nothing in a file: editor_classes info answers for those. Default false.",
       },
-      line: { type: 'number', description: 'completion, hover: zero-based line.' },
-      character: { type: 'number', description: 'completion, hover: zero-based column.' },
+      line: { type: 'integer', minimum: 0, description: 'completion, hover: zero-based line.' },
+      character: { type: 'integer', minimum: 0, description: 'completion, hover: zero-based column.' },
     },
     requires: ['projectPath', 'scriptPath'],
     operations: {
@@ -845,18 +851,21 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
           "Environment variables for this run alone, as a map of strings, over the server's own environment. Like savesIn, a run carrying any is started by this server rather than played by the editor. Names beginning with GDHARNESS_ are refused: they are this server's contract with the addon in the game, and the runtime directory is set here whatever the rest of the environment says, so a game that moves TEMP still announces where this server looks.",
       },
       runtimeWaitMs: {
-        type: 'number',
+        type: 'integer',
+        minimum: 0,
         ops: ['start'],
         description:
           'start: how long to wait for the game to announce its runtime before answering. Default 5000, or half as long again as the last boot of this project took when that is more, up to 60000: the server notes how long each game took to announce, so a project that boots slowly is waited for from its second start on without being asked to. What it waits for is the first frame, so everything the game does before drawing one is inside it, including work the args just asked for: a flag that simulates six years of game time before anything is drawn makes the announcement that late, on a project that announces promptly without it. Raise it for such a run rather than reading runtime listening false as a fault. 0 does not wait at all, which is the one to pass for a scene that announces nothing by construction, such as a bench that prints and quits.',
       },
       frames: {
-        type: 'number',
+        type: 'integer',
+        minimum: 1,
         ops: ['check'],
         description: 'check: frames to run before quitting. Default 3.',
       },
       timeoutMs: {
-        type: 'number',
+        type: 'integer',
+        minimum: 1,
         ops: ['check', 'wait'],
         description:
           'check: how long to give the boot before it is called hung. Default 60000. wait: how long to wait for the run to end before answering anyway. Default 600000.',
@@ -920,13 +929,15 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
           'Only entries mentioning this text, matched against everything the run has printed rather than against the entries this answer would otherwise carry: a line is found however much was printed after it.',
       },
       limit: {
-        type: 'number',
+        type: 'integer',
+        minimum: 1,
         description:
           'The most entries to answer with, newest kept. Default 200, and omitted says how many matching entries that left out. A run long enough to pass it needs this raised, not just filtered: filtering narrows what counts as matching, and the newest of those is still all one answer carries.',
       },
       before: {
         ops: ['editor'],
-        type: 'number',
+        type: 'integer',
+        minimum: 0,
         description:
           'How many lines above a repeated group to carry with it, counting only lines that are not themselves part of a group. Default 3. The line that explains a wall of identical errors is the last ordinary line above it, so this walks past the wall rather than a fixed distance back.',
       },
@@ -958,7 +969,11 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       'Makes the running editor scan the project filesystem, so files written outside it are picked up. The scan is a change-detecting walk rather than an unconditional reparse, so a file another engine has already imported reads as settled and the walk does not look inside it: its class_name then stays out of the list the editor resolves against, however many times you scan. Any class in that state is named under unseenByEditor, which is what no check on disk can see, since the declaration and the cache are both correct there and only the editor disagrees. The cure is this call on its own, with no change to the declaring script: measured against a real editor on three platforms, with idle waits of the same length ruled out so the scan is credited rather than the time it takes, and reproduced in a second project against its own reproduction in 203ms. editor_launch restart also does it and costs a window, and project_import refresh_classes does not: it rewrites the cache and does not touch what the editor is holding. A scan writes .godot/global_script_class_cache.cfg from the list the editor is holding, so a class the editor cannot resolve goes out of that file with it. That is not a reason to refuse the scan, because on a class the editor has merely not walked yet the scan is the cure; what the answer does instead is name the loss under cacheLost and rebuild the cache from the files, naming what came back under cacheRestored, so no fresh engine, CI run or clone inherits the short file. An editor that lost classes is still holding the short list, so the note says to restart it before scanning again. The other direction is guarded the same way: a class the editor still holds for a script that was renamed or deleted comes back into the cache at a path that is not there, and the next engine to read it fails on "Could not parse global class" in whichever correct script shares the bare name, so the cache is rebuilt without it and the answer names it under cacheDropped; the editor goes on holding it until it is restarted, and every scan until then ends in that rebuild. A script or shader written outside the editor has no .uid sidecar until something imports it, and the scan writes one beside it, which a project that commits sidecars needs before the commit. Needs the editor connected.',
     parameters: {
       projectPath: PROJECT_PATH,
-      timeoutMs: { type: 'number', description: 'How long to wait for the scan. Default 30000.' },
+      timeoutMs: {
+        type: 'integer',
+        minimum: 1,
+        description: 'How long to wait for the scan. Default 30000.',
+      },
       reloadScript: {
         type: 'string',
         description:
@@ -1035,7 +1050,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
           'property: which one to read. find: read this one off every node matched, so a panel of labels is one call rather than one per label. Colons read through what a node holds, "_game:clock:speed", which is where a game keeps what is worth asking about. A number or a key steps into a list or a map, "_game:run:roster:0:traits", which is how the lists a game keeps its state in are walked: a roster, a board, an in-tray. A packed list, such as a PackedStringArray, steps the same way. A negative number counts from the end. A step written as a call, "get_viewport():gui_get_focus_owner()", calls a method that takes no arguments and walks into what it returned, which is how a question only a method answers is read in one call: which control holds the focus in the viewport this one is in. A list or a map answers the calls that read it and take no arguments, "_game:run:board:size()" or "_game:inbox:keys()", and not those that change it, such as clear() or sort(). A step that is not there is named, and says what was there instead.',
       },
       depth: {
-        type: 'number',
+        type: 'integer',
+        minimum: 0,
         ops: ['tree'],
         description: 'tree: levels to descend, 0 for the node alone. Default 3.',
       },
@@ -1072,7 +1088,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
           'find: part of what the node has written on it, case-insensitively, which is how a button is reached by the word on it rather than by a generated path. Its own text, so a row is found by the label in it, and hidden nodes match. A bare word is a contains; write a glob and it is one, matched against the whole of what the node says, the same as namePattern. A label with a line break is matched with the break in the words, and a backslash followed by n counts as one.',
       },
       limit: {
-        type: 'number',
+        type: 'integer',
+        minimum: 1,
         ops: ['find', 'text'],
         description:
           'find: the most nodes to answer with, default 100. text: the most lines, default 500, with omitted saying how many lines that left behind. A screen whose dialog sits under a long list is a screen read with omitted greater than zero, so raise this or point root at the dialog rather than reading the answer as what is on screen.',
@@ -1090,7 +1107,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         description: 'metrics: which to read. Default all.',
       },
       timeoutMs: {
-        type: 'number',
+        type: 'integer',
+        minimum: 1,
         description:
           'How long to wait for the answer before answering pending with a requestId, which runtime_invoke op result collects the reply by. Default 10000, or GDHARNESS_RUNTIME_TIMEOUT_MS.',
       },
@@ -1159,13 +1177,15 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
           'call: the arguments, fitted to the method\'s parameter types. A parameter typed as an object takes a path naming one the game holds and is handed that instance: a colon path read from nodePath, "_game:run:wares:3", or one starting at a node, "/root/Main/Hud" or "/root/Main:_game:run". A path that reaches no object, or an object of another class than the parameter declares, is refused. A parameter typed as a list or map, such as Array[int] or Array[Gear], is built from a JSON list or object element by element, objects named by their paths.',
       },
       timeoutMs: {
-        type: 'number',
+        type: 'integer',
+        minimum: 1,
         ops: ['set', 'call'],
         description:
           'set, call: how long to wait for the answer before answering pending with a requestId, which does not stop the call. Default 10000, or GDHARNESS_RUNTIME_TIMEOUT_MS. Give a longer one for a call known to take a while, such as one that plays many turns in one go.',
       },
       requestId: {
-        type: 'number',
+        type: 'integer',
+        minimum: 1,
         ops: ['result'],
         description: 'result: the requestId a pending answer gave.',
       },
@@ -1238,7 +1258,13 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         description:
           'action, key: leave it out and the press is a whole one, down and up a frame apart. true holds it down, false lets go of one being held. mouse_click is one raw event, so it is down unless you say false; a wheel button down is a whole step, since a wheel is never held.',
       },
-      strength: { type: 'number', ops: ['action'], description: 'action: 0 to 1. Default 1.' },
+      strength: {
+        type: 'number',
+        minimum: 0,
+        maximum: 1,
+        ops: ['action'],
+        description: 'action: 0 to 1. Default 1.',
+      },
       keycode: {
         type: ['string', 'number'],
         ops: ['key'],
@@ -1341,7 +1367,9 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       projectPath: RUNNING_PROJECT_PATH,
       pid: RUNNING_PID,
       frames: {
-        type: 'number',
+        type: 'integer',
+        minimum: 1,
+        maximum: 600,
         ops: ['frames'],
         description: 'frames: how many to let pass, 1 to 600. More than that is refused.',
       },
@@ -1372,7 +1400,9 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
           'until, with says: count words on a hidden node too. Default false, since a wait for words is a wait for them to be shown: a button that exists hidden through a whole animation carries its words the whole time and satisfied the wait at once, and every wait on that screen fell back to counting frames.',
       },
       timeoutMs: {
-        type: 'number',
+        type: 'integer',
+        minimum: 1,
+        maximum: 120000,
         ops: ['signal', 'until'],
         description: 'signal, until: how long to wait before answering anyway, 1 to 120000. Default 5000.',
       },
@@ -1404,7 +1434,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     parameters: {
       projectPath: PROJECT_PATH,
       scriptPath: SCRIPT_PATH,
-      line: { type: 'number', description: 'One-based line.' },
+      line: { type: 'integer', minimum: 1, description: 'One-based line.' },
     },
     requires: ['projectPath', 'scriptPath', 'line'],
     operations: {
