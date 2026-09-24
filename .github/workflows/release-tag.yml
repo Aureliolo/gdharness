@@ -74,7 +74,9 @@ jobs:
             fi
           fi
 
-          if gh api "repos/${GH_REPO}/git/ref/tags/v${version}" >/dev/null 2>&1; then
+          # Absent only on a 404, since a failed request read as "untagged" would try to tag again.
+          state="$(bun scripts/github-ref.ts state "tags/v${version}")"
+          if [[ "${state}" == present ]]; then
             # Resolved through commits/ so an annotated tag answers with its commit too. A failing
             # gh api writes the response body to stdout, so it is only run once the ref is known.
             tagged="$(gh api "repos/${GH_REPO}/commits/v${version}" --jq .sha)"
@@ -98,9 +100,7 @@ jobs:
             # nothing in exactly the state somebody presses it.
             echo "v${version} is already tagged at this commit."
           else
-            gh api "repos/${GH_REPO}/git/refs" \
-              -f "ref=refs/tags/v${version}" \
-              -f "sha=${GITHUB_SHA}"
+            bun scripts/github-ref.ts create "tags/v${version}" "${GITHUB_SHA}"
             echo "Tagged v${version} at ${GITHUB_SHA}."
           fi
 
