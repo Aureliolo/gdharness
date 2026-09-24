@@ -10,11 +10,13 @@
  * had just been thrown away. Reported twice in one session by a project running sweeps: a
  * six-setting sweep died after one row, a nine-cell sweep after five cells.
  *
- * Two things fix that, and both have to be on disk. The game is spawned detached, so the
- * operating system stops taking it down with whoever started it, and its output goes to a file
- * it holds open rather than to a pipe, so it never blocks on a reader that has gone and the
- * bytes survive the reader anyway. This record is the third piece: the note that says which
- * process and which file, so the next server can pick the run back up instead of denying it.
+ * Three things fix that. The game is started by a keeper outside the server's process tree (see
+ * `outside.ts`), so nothing that ends the server takes it down. Its output goes to a file it holds
+ * open rather than to a pipe, so it never blocks on a reader that has gone and the bytes survive
+ * the reader anyway. And this record says which process and which file, so the next server can
+ * pick the run back up instead of denying it. One record per project, because the directory is
+ * shared by every server on the machine, and one record for all of them was overwritten by
+ * whichever project started a run last.
  *
  * One transcript per run, named for when it started, because the alternative is what the engine
  * does to its own log: a second run rotates the file out from under the first, and the rows the
@@ -26,8 +28,8 @@ import { createHash } from 'node:crypto';
 import { mkdirSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { isSameDirectory, realPathOr } from './paths.js';
-import { POWERSHELL_UTF8 } from './process-children.js';
-import { runtimeDirectories, runtimeDirectory } from './runtime-client.js';
+import { type CommandLineRead, POWERSHELL_UTF8, readCommandLine } from './process-children.js';
+import { runtimeDirectories, runtimeDirectory, STARTED_AFTER_ANNOUNCING_MS } from './runtime-client.js';
 
 /** What a run leaves behind so another server can find it. */
 export interface RunRecord {
@@ -488,12 +490,6 @@ export function couldStillBeTheRecordedRun(record: RunRecord): boolean {
   return judgeRun(record, runningAs(record.pid), 'possible');
 }
 
-/**
- * The editor, as its own command line says so. Godot takes both spellings and a game is given
- * neither.
- */
-const AN_EDITOR = /(?:^|\s)(?:-e|--editor)(?:\s|$)/;
-
 /** What the operating system will say about a process, and how much of it. */
 export interface RunningAs {
   readonly kind: 'image' | 'commandLine';
@@ -568,8 +564,9 @@ export function judgeRun(
   // `process.kill` the editor, which then goes with no crash log and nothing in its output.
   //
   // Only where the flags can be read. An image name cannot show them, and that answer is already
-  // too weak to kill on.
-  if (running.kind === 'commandLine' && AN_EDITOR.test(said)) {
+  // too weak to kill on. Read as the engine reads them, so a game given `-e` as one of its own
+  // arguments is not taken for an editor and left running by every stop.
+  if (running.kind === 'commandLine' && readCommandLine(running.text).editor) {
     return false;
   }
   if (record.projectPath === '') {
@@ -582,6 +579,45 @@ export function judgeRun(
   }
   const project = process.platform === 'win32' ? record.projectPath.toLowerCase() : record.projectPath;
   return said.includes(project);
+}
+
+/** Whether [param pid] is still the game that announced itself for [param projectPath]: see `judgeAnnouncedGame`. */
+export function stillTheAnnouncedGame(
+  pid: number,
+  projectPath: string,
+  announcedAt: number,
+): CommandLineRead | null {
+  return judgeAnnouncedGame(runningAs(pid), projectPath, announcedAt);
+}
+
+/**
+ * The comparison for a game no note names, which a stop is asked to end by its number: what the
+ * operating system says about the process, the project the game announced itself for, and when it
+ * did. The reading of its command line when it is that game, null when it is not or cannot be told.
+ *
+ * Stricter than `judgeRun`, because there is no record of how the game was started to hold it to.
+ * The whole command line has to be readable and be this project's engine run: `--path` on the
+ * project and no editor flag, read as the engine reads them. The process has to have started
+ * before its announcement was written, since a game announces from its first frames and a number
+ * taken after that is somebody else's; and a platform that will not say when it started is not
+ * taken as having said yes.
+ */
+export function judgeAnnouncedGame(
+  running: RunningAs | null,
+  projectPath: string,
+  announcedAt: number,
+): CommandLineRead | null {
+  if (running?.kind !== 'commandLine' || running.startedAt === undefined) {
+    return null;
+  }
+  if (running.startedAt - announcedAt > STARTED_AFTER_ANNOUNCING_MS) {
+    return null;
+  }
+  const read = readCommandLine(running.text);
+  if (read.editor || read.projectPath === null || !isSameDirectory(read.projectPath, projectPath)) {
+    return null;
+  }
+  return read;
 }
 
 /**

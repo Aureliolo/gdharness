@@ -31,6 +31,12 @@ export interface GodotProcess {
    */
   projectPath: string | null;
   startedAt: number;
+  /**
+   * The engine a spawned run was started with, which with its project and start is what says its
+   * pid still means it before anything is signalled: see `judgeRun`. Absent for a played run, and
+   * for one picked up from a note too old to name it, which is then judged on its project alone.
+   */
+  command?: string;
   /** Set once the process has exited with a code; null while it runs, and for a signalled end. */
   exitCode: number | null;
   /**

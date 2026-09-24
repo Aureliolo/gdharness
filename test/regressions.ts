@@ -102,6 +102,7 @@ import { noteRestartBegun, restartNotePath, restartOwed, restartSettled } from '
 import {
   clearRunRecord,
   couldStillBeTheRecordedRun,
+  judgeAnnouncedGame,
   judgeRun,
   listeningPid,
   listeningPidInNetstat,
@@ -135,14 +136,19 @@ import {
   aboveTheRunner,
   alive,
   captureDestinationRefusal,
+  endedPreviousRun,
+  endedToStartThis,
   endedWithoutACode,
   endingOf,
+  leftRunningNote,
   noCodeWillCome,
   PLAY_STARTS_WITHIN_MS,
   PROJECT_FILE_ARGUMENTS,
   patienceForFrames,
+  previousRunLeft,
   runIsUp,
   runtimeVerdict,
+  stopVerdict,
   uidsLeftNote,
 } from '../src/server.js';
 import type { GodotProcess } from '../src/server-types.js';
@@ -5086,6 +5092,489 @@ async function testARunsEnvironmentStaysOffCommandLines(): Promise<void> {
 }
 
 /**
+ * A stop that signalled nothing says so in the fields a caller reads, and so does a start.
+ *
+ * The stop refuses to signal a pid that no longer answers as the process the run was started as,
+ * and said so only in a warning among the entries, beside `stopped: true`, an `endedPid` and a
+ * note saying the process was ended. Reported by ostinato: the game went on running after two
+ * stops that both said it had been ended. A refusal needs a recycled pid to reach through a
+ * server, which no fixture can arrange, so the verdict is rendered for every ending instead.
+ */
+function testAStopThatSignalsNothingSaysSo(): void {
+  const refused = stopVerdict({
+    wasRunning: true,
+    ending: 'refused',
+    endedPid: 4242,
+    throughEditor: false,
+    exitSignal: null,
+    errors: 0,
+  });
+  assert.equal(refused.stopped, false, 'a stop that signalled nothing did not stop anything');
+  assert.equal(refused.notSignalled, 4242, 'and names the pid it left alone');
+  assert.equal(refused.endedPid, undefined, 'which it does not call ended');
+  assert.equal(refused.clean, undefined, 'and gives no verdict on a run that is still going');
+  assert.match(
+    refused.note,
+    /^Nothing was ended: pid 4242 /,
+    `the note says nothing was ended: ${refused.note}`,
+  );
+  assert.doesNotMatch(refused.note, /was ended\./, `and nowhere that it was: ${refused.note}`);
+
+  const gone = stopVerdict({
+    wasRunning: true,
+    ending: 'gone',
+    endedPid: 4242,
+    throughEditor: false,
+    exitSignal: 'SIGTERM',
+    errors: 1,
+  });
+  assert.equal(gone.stopped, true, 'a run the signal ended is stopped');
+  assert.equal(gone.endedPid, 4242, 'under the pid it was ended by');
+  assert.equal(gone.notSignalled, undefined, 'with nothing left unsignalled');
+  assert.equal(gone.clean, false, 'and its verdict counts its errors');
+  assert.match(gone.note, /^The process named under endedPid was ended\. It was ended by SIGTERM/, gone.note);
+  assert.equal(gone.withChildren, true, 'and goes on to say what became of what it started');
+
+  const lingering = stopVerdict({
+    wasRunning: true,
+    ending: 'lingering',
+    endedPid: 4242,
+    throughEditor: false,
+    exitSignal: null,
+    errors: 0,
+  });
+  assert.equal(lingering.stopped, true, 'a run that was signalled was stopped, as far as a stop can');
+  assert.match(lingering.note, /It had not exited \d+ seconds after being told to/, lingering.note);
+
+  const over = stopVerdict({
+    wasRunning: false,
+    ending: 'gone',
+    endedPid: 4242,
+    throughEditor: false,
+    exitSignal: null,
+    errors: 0,
+  });
+  assert.match(over.note, /^This run was over before the stop/, over.note);
+  assert.equal(over.withChildren, false, 'a run already over says nothing about what it started');
+
+  const played = stopVerdict({
+    wasRunning: true,
+    ending: 'gone',
+    endedPid: null,
+    throughEditor: true,
+    exitSignal: null,
+    errors: 0,
+  });
+  assert.match(
+    played.note,
+    /^The editor was asked to stop the scene it is playing\. Its game had not announced/,
+    played.note,
+  );
+
+  // The start that tried to end the run before it.
+  const left = { pid: 4242, ending: 'refused' } as const;
+  assert.equal(endedPreviousRun(left), undefined, 'a start that ended nothing says it ended nothing');
+  assert.equal(previousRunLeft(left), 4242, 'and names the run it left going');
+  assert.match(
+    endedToStartThis(left),
+    /pid 4242, was not ended: .*nothing was signalled/,
+    endedToStartThis(left),
+  );
+  const ended = { pid: 4242, ending: 'gone' } as const;
+  assert.equal(endedPreviousRun(ended), 4242, 'a start that ended a run names it');
+  assert.equal(previousRunLeft(ended), undefined, 'and leaves nothing going');
+  assert.match(endedToStartThis(ended), /pid 4242, was ended to start this one/, endedToStartThis(ended));
+  const slow = { pid: 4242, ending: 'lingering' } as const;
+  assert.match(
+    endedToStartThis(slow),
+    /had not exited \d+ seconds after being told to/,
+    endedToStartThis(slow),
+  );
+  const unnumbered = { pid: null, ending: 'refused' } as const;
+  assert.equal(previousRunLeft(unnumbered), undefined, 'a run with no number has none to name');
+  assert.equal(
+    endedPreviousRun({ pid: null, ending: 'gone' }),
+    true,
+    'and one ended with none is still said',
+  );
+}
+
+/**
+ * A game given `-e` or `--editor` as its own argument is not an editor.
+ *
+ * The identity check refuses a process whose command line carries the editor flag, and read the
+ * whole line, so a run started with `args: ["-e"]`, which the engine puts after `--` for the game,
+ * could never be stopped: it read as the editor of its own project.
+ */
+function testAGamesOwnArgumentsDoNotMakeItAnEditor(): void {
+  const project = join(tmpdir(), 'identity-project');
+  const record = {
+    pid: 1,
+    transcript: join(tmpdir(), 'none.log'),
+    startedAt: Date.now(),
+    projectPath: project,
+    arguments: [],
+    command: join(tmpdir(), 'godot.exe'),
+  };
+  const line = (rest: string) =>
+    ({ kind: 'commandLine', text: `${record.command} --path ${project}${rest}` }) as const;
+  assert.equal(judgeRun(record, line(' -- -e'), 'confirmed'), true, 'the game given -e is still the run');
+  assert.equal(judgeRun(record, line(' -- --editor'), 'confirmed'), true, 'and given --editor');
+  assert.equal(judgeRun(record, line(' -e'), 'confirmed'), false, 'the engine given -e is the editor');
+  assert.equal(judgeRun(record, line(' --editor -- x'), 'confirmed'), false, 'before the separator too');
+
+  // The same reading where a command line is taken apart rather than searched.
+  assert.equal(
+    readCommandLine(`godot --path ${project} -- -e`).editor,
+    false,
+    'a game given -e is not an editor',
+  );
+  assert.equal(readCommandLine(`godot -e --path ${project}`).editor, true, 'an engine given it is');
+  assert.equal(
+    readCommandLine(`godot --headless -- --path ${project}`).projectPath,
+    null,
+    "and a --path among the game's own arguments points the engine nowhere",
+  );
+  assert.equal(
+    readCommandLine('godot --path C:/Games/My%20Game --remote-debug tcp://127.0.0.1:6007').projectPath,
+    'C:/Games/My Game',
+    'the editor writes a space in the project path as %20, and the engine reads it back as a space',
+  );
+}
+
+/**
+ * A game a stop is asked to end by its number is judged from its announcement and its command line.
+ *
+ * There is no record of how such a game was started, so the judgement is stricter than a run's:
+ * the whole command line, this project's engine run with no editor flag, and a start no later than
+ * the announcement allows. Every way it can fail is a way a number can belong to something else.
+ */
+function testAnAnnouncedGameIsJudgedBeforeItIsEnded(): void {
+  const project = join(tmpdir(), 'announced-project');
+  const announcedAt = Date.now();
+  const running = (text: string, startedAt: number | null = announcedAt - 3_000) =>
+    ({ kind: 'commandLine', text, ...(startedAt === null ? {} : { startedAt }) }) as const;
+  const game = `godot.exe --path ${project} --remote-debug tcp://127.0.0.1:6007`;
+  assert.equal(
+    judgeAnnouncedGame(running(game), project, announcedAt)?.executable,
+    'godot.exe',
+    "this project's engine run, started before it announced, is the game",
+  );
+  assert.equal(
+    judgeAnnouncedGame(running(`${game} -- -e`), project, announcedAt)?.executable,
+    'godot.exe',
+    'and stays one when its own arguments carry -e',
+  );
+  assert.equal(
+    judgeAnnouncedGame(running(game, announcedAt + 60_000), project, announcedAt),
+    null,
+    'a process that started after the announcement took the number from the game',
+  );
+  assert.equal(
+    judgeAnnouncedGame(running(game, null), project, announcedAt),
+    null,
+    'a platform that will not say when it started has not said yes',
+  );
+  assert.equal(
+    judgeAnnouncedGame(running(`godot.exe -e --path ${project}`), project, announcedAt),
+    null,
+    "the project's editor is not its game",
+  );
+  assert.equal(
+    judgeAnnouncedGame(running(`godot.exe --path ${join(tmpdir(), 'elsewhere')}`), project, announcedAt),
+    null,
+    "another project's game is not this one's",
+  );
+  assert.equal(
+    judgeAnnouncedGame(
+      { kind: 'image', text: 'godot.exe', startedAt: announcedAt - 3_000 },
+      project,
+      announcedAt,
+    ),
+    null,
+    'an executable name says nothing about the project',
+  );
+  assert.equal(judgeAnnouncedGame(null, project, announcedAt), null, 'nor does no answer');
+}
+
+/**
+ * Another project's run leaves ours stoppable, by the server that started it and by the next.
+ *
+ * Every run on the machine wrote one note, `runs/run.json`, so a run started for another project
+ * overwrote ours. The server that started ours then checked the pid against that note, found
+ * another project's run, and signalled nothing; a server started after a reconnect found no run of
+ * ours at all. Reported by fantasy-guild-manager and by ostinato, whose sessions run side by side.
+ *
+ * The other project's run is written as a 1.0.30 server wrote it, into the shared note, and as this
+ * version writes it, into its own. Then one run of ours is stopped by a server that never saw it
+ * start, and a second by the server that started it with its own note gone, which leaves only what
+ * that server holds to say the pid is still the run.
+ */
+async function testAnotherProjectsRunLeavesOursStoppable(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('another project run regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-ours-'));
+  const theirs = join(realpathSync(tmpdir()), 'gdharness-theirs-not-created');
+  const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-ours-runtime-'));
+  const env = { GODOT_PATH: godotPath, GDHARNESS_PROJECT: project, GDHARNESS_RUNTIME_DIR: runtime };
+  const first = new ServerProcess({ env });
+  let second: ServerProcess | null = null;
+  const games: number[] = [];
+  const theirNote = JSON.stringify({
+    pid: process.pid,
+    transcript: join(runtime, 'theirs.log'),
+    startedAt: Date.now(),
+    projectPath: theirs,
+    arguments: ['--path', theirs],
+    command: godotPath,
+  });
+  const theirRunStarts = (): void => {
+    const own = runRecordPath(theirs, runtime);
+    mkdirSync(dirname(own), { recursive: true });
+    writeFileSync(join(dirname(own), 'run.json'), theirNote);
+    writeFileSync(own, theirNote);
+  };
+  const start = async (server: ServerProcess): Promise<number> => {
+    const started = await server.request(
+      'tools/call',
+      {
+        name: 'editor_run',
+        arguments: { projectPath: project, op: 'start', headless: true, runtimeWaitMs: 0 },
+      },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    const pid = asNumber(get(parseTextContent(started), 'pid'));
+    games.push(pid);
+    assert.ok(isAlive(pid), `the run should be going: ${textOf(started)}`);
+    return pid;
+  };
+  const stop = async (server: ServerProcess, pid: number, what: string): Promise<void> => {
+    const stopped = await server.request(
+      'tools/call',
+      { name: 'editor_run', arguments: { op: 'stop' } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    const answer = parseTextContent(stopped);
+    assert.equal(
+      get(answer, 'stopped'),
+      true,
+      `${what}: the stop should have ended the run: ${textOf(stopped)}`,
+    );
+    assert.equal(get(answer, 'endedPid'), pid, `${what}: and named it: ${textOf(stopped)}`);
+    for (let waited = 0; waited < 10_000 && isAlive(pid); waited += 250) {
+      await delay(250);
+    }
+    assert.equal(isAlive(pid), false, `${what}: and pid ${pid} should be gone`);
+  };
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Ours"\n' +
+        'run/main_scene="res://main.tscn"\n',
+    );
+    writeFileSync(
+      join(project, 'main.gd'),
+      'extends Node\n\n\nfunc _ready() -> void:\n\tget_tree().create_timer(90.0).timeout.connect(get_tree().quit)\n',
+    );
+    writeFileSync(
+      join(project, 'main.tscn'),
+      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+        '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+    );
+    await first.initialize('regression-test');
+
+    const firstGame = await start(first);
+    theirRunStarts();
+    const serverPid = first.child.pid;
+    assert.ok(serverPid !== undefined, 'the server should have a pid');
+    await killTheTree(serverPid);
+    await delay(1_000);
+    assert.ok(isAlive(firstGame), `the run should outlive its server: pid ${firstGame}`);
+    second = new ServerProcess({ env });
+    await second.initialize('regression-test');
+    await stop(second, firstGame, 'a server that never saw it start');
+
+    const secondGame = await start(second);
+    theirRunStarts();
+    const ours = runRecordPath(project, runtime);
+    assert.ok(existsSync(ours), `the run should have left its note at ${ours}`);
+    rmSync(ours);
+    await stop(second, secondGame, 'the server that started it');
+    assert.equal(
+      readFileSync(runRecordPath(theirs, runtime), 'utf8'),
+      theirNote,
+      "and the other project's note is left as it was",
+    );
+  } finally {
+    for (const pid of games) {
+      if (isAlive(pid)) {
+        process.kill(pid);
+      }
+    }
+    await first.stop().catch(() => undefined);
+    await second?.stop();
+    sweep(project);
+    sweep(runtime);
+  }
+}
+
+/**
+ * A game of this project that no note names is ended by its number, and nothing else is.
+ *
+ * A server before a reconnect that left no note, which every server before per-project notes could
+ * do by having its note overwritten, left a game the next server could see announced and could not
+ * end: `editor_run stop` took no pid, and the refusal told the caller to end it by hand. Reported
+ * by fantasy-guild-manager, who ended it by asking it to quit through runtime_invoke, which a game
+ * held at a breakpoint would not have answered.
+ *
+ * The run is started and its server killed, and the note is taken away, so the next server finds
+ * the game only by its announcement. A stop without the number is refused and names it; a number
+ * that is not a game of this project is refused and signals nothing, and so is one announced for
+ * this project whose process is not its engine; the game's number ends it.
+ */
+async function testAGameNoNoteNamesIsStoppedByItsNumber(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('stopped by its number regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-by-number-'));
+  const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-by-number-runtime-'));
+  const env = { GODOT_PATH: godotPath, GDHARNESS_PROJECT: project, GDHARNESS_RUNTIME_DIR: runtime };
+  const first = new ServerProcess({ env });
+  let second: ServerProcess | null = null;
+  let game = 0;
+  // Something alive whose number is not a game of this project, to be refused.
+  const bystander = spawn(process.execPath, ['--eval', 'setTimeout(() => {}, 120_000)', project], {
+    stdio: 'ignore',
+  });
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="By number"\n' +
+        'run/main_scene="res://main.tscn"\n\n[autoload]\n\n' +
+        'GdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n',
+    );
+    writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
+    cpSync(
+      join('src', 'godot', 'addons', 'gdharness_runtime'),
+      join(project, 'addons', 'gdharness_runtime'),
+      {
+        recursive: true,
+      },
+    );
+    await first.initialize('regression-test');
+    const started = await first.request(
+      'tools/call',
+      {
+        name: 'editor_run',
+        arguments: { projectPath: project, op: 'start', headless: true, runtimeWaitMs: 30_000 },
+      },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    const startedAnswer = parseTextContent(started);
+    game = asNumber(get(startedAnswer, 'pid'));
+    assert.equal(
+      get(get(startedAnswer, 'runtime'), 'listening'),
+      true,
+      `the game should have announced its runtime: ${textOf(started)}`,
+    );
+    const serverPid = first.child.pid;
+    assert.ok(serverPid !== undefined, 'the server should have a pid');
+    await killTheTree(serverPid);
+    await delay(1_000);
+    assert.ok(isAlive(game), `the run should outlive its server: pid ${game}`);
+    rmSync(runRecordPath(project, runtime));
+
+    second = new ServerProcess({ env });
+    await second.initialize('regression-test');
+    const unnamed = await second.request('tools/call', { name: 'editor_run', arguments: { op: 'stop' } });
+    assert.match(
+      textOf(unnamed) ?? '',
+      new RegExp(`editor_run stop with pid ${game} ends it`),
+      `a stop that cannot find the run names the number that would end it: ${textOf(unnamed)}`,
+    );
+    assert.ok(isAlive(game), 'and ends nothing');
+
+    const stranger = bystander.pid ?? 0;
+    assert.ok(stranger > 0, 'the fixture needs a process that is not a game');
+    const refused = await second.request('tools/call', {
+      name: 'editor_run',
+      arguments: { op: 'stop', pid: stranger },
+    });
+    assert.match(
+      textOf(refused) ?? '',
+      new RegExp(`^pid ${stranger} is not a game announced for this project, so nothing was signalled`),
+      `a number that is no game of this project is refused: ${textOf(refused)}`,
+    );
+    assert.ok(isAlive(stranger), 'and left alone');
+
+    // Announced for this project under the bystander's number, which is what a game that went and
+    // had its number taken leaves behind until a sweep notices: the announcement says it is ours
+    // and only the process can say it is not.
+    writeFileSync(
+      join(runtime, `runtime-${stranger}.json`),
+      JSON.stringify({
+        protocol: RUNTIME_PROTOCOL,
+        pid: stranger,
+        port: 51_234,
+        address: '127.0.0.1',
+        project: { name: 'By number', path: project },
+      }),
+      'utf8',
+    );
+    const unlike = await second.request('tools/call', {
+      name: 'editor_run',
+      arguments: { op: 'stop', pid: stranger },
+    });
+    assert.match(
+      textOf(unlike) ?? '',
+      new RegExp(
+        `^pid ${stranger} announced itself as a game of this project, but the operating system does not describe it as this project's engine run`,
+      ),
+      `an announced number whose process is not this project's engine is refused: ${textOf(unlike)}`,
+    );
+    assert.ok(isAlive(stranger), 'and left alone as well');
+
+    const named = await second.request(
+      'tools/call',
+      { name: 'editor_run', arguments: { op: 'stop', pid: game } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    const answer = parseTextContent(named);
+    assert.equal(get(answer, 'stopped'), true, `the game's own number ends it: ${textOf(named)}`);
+    assert.equal(get(answer, 'endedPid'), game, `and names it: ${textOf(named)}`);
+    assert.match(
+      text(get(answer, 'note')),
+      /identified by its announcement and by its command line/,
+      `and says what identified it: ${textOf(named)}`,
+    );
+    for (let waited = 0; waited < 10_000 && isAlive(game); waited += 250) {
+      await delay(250);
+    }
+    assert.equal(isAlive(game), false, `pid ${game} should be gone`);
+  } finally {
+    bystander.kill();
+    if (game > 0 && isAlive(game)) {
+      process.kill(game);
+    }
+    await first.stop().catch(() => undefined);
+    await second?.stop();
+    sweep(project);
+    sweep(runtime);
+  }
+}
+
+/**
  * A run outlives the harness's tree kill of the server that started it, and the next server reads
  * its exit code.
  *
@@ -5929,6 +6418,18 @@ async function testAStartSaysWhatItLeftRunning(): Promise<void> {
   for (const protocol of [RUNTIME_PROTOCOL, RUNTIME_PROTOCOL + 1]) {
     await aStartLeaves(protocol);
   }
+  // The branches one announced game does not reach.
+  assert.equal(leftRunningNote([]), '', 'nothing left running is nothing said');
+  const two = leftRunningNote([
+    { pid: 11, protocol: null },
+    { pid: 12, protocol: RUNTIME_PROTOCOL + 1 },
+  ]);
+  assert.match(
+    two,
+    /^ 2 games of this project were already running and still are: pid 11, pid 12 on protocol \d+\. Starting this one did not end them/,
+    two,
+  );
+  assert.match(two, /editor_run stop with the pid of each ends it and leaves this run going\.$/, two);
 }
 
 async function aStartLeaves(protocol: number): Promise<void> {
@@ -5994,7 +6495,7 @@ async function aStartLeaves(protocol: number): Promise<void> {
     );
     assert.match(
       answer,
-      /End it yourself/,
+      new RegExp(`editor_run stop with pid ${process.pid} ends it`),
       `and what the caller can do about it on protocol ${protocol}: ${answer}`,
     );
     // The run it did start, named apart from the one it left, so an answer that reported the new
@@ -13745,7 +14246,10 @@ function testACommandLineIsReadTheWayTheEngineReadsIt(): void {
   });
   assert.equal(readCommandLine('godot -e --path /p').editor, true);
   assert.equal(readCommandLine('godot --editor --path /p').editor, true);
-  assert.equal(readCommandLine('godot --path /p -- --editor').editor, true);
+  // After `--` or `++` every word is the game's: the engine hands them to OS.get_cmdline_user_args()
+  // and reads none of them, so neither of these is an editor.
+  assert.equal(readCommandLine('godot --path /p -- --editor').editor, false);
+  assert.equal(readCommandLine('godot --path /p ++ -e').editor, false);
   assert.deepEqual(readCommandLine('node script.js'), {
     executable: 'node',
     projectPath: null,
@@ -18647,6 +19151,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAScanThatHasNotStartedIsNotFinished,
   testALaunchIsOutsideTheServersTree,
   testARunOutlivesItsServersTree,
+  testAnotherProjectsRunLeavesOursStoppable,
+  testAGameNoNoteNamesIsStoppedByItsNumber,
   testARunsEnvironmentStaysOffCommandLines,
   testAStartWaitsOutTheEditorsScan,
   testARepairThatCouldNotRunIsNotReported,
@@ -18753,6 +19259,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testOnlyOurOwnAutoloadIsRewritten,
   testAnExitCodeOutlivesTheServerThatSawIt,
   testRunNotesAreKeptPerProject,
+  testAStopThatSignalsNothingSaysSo,
+  testAGamesOwnArgumentsDoNotMakeItAnEditor,
+  testAnAnnouncedGameIsJudgedBeforeItIsEnded,
   testAPidIsNotAnIdentity,
   testTheEditorHoldingAProjectIsNotARunOfIt,
   testARunEndedUnwatchedIsStillReadable,
