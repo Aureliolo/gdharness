@@ -6,6 +6,7 @@ extends RefCounted
 const Paths = preload("runtime_paths.gd")
 const Read = preload("reading.gd")
 const Values = preload("runtime_values.gd")
+const Words = preload("runtime_words.gd")
 
 ## The most nodes one find answers with, unless asked for fewer: enough for any real query and
 ## far short of the tree dump a query exists to avoid.
@@ -251,7 +252,7 @@ func _matches_apart_from_name(node: Node, wanted: Dictionary[String, String]) ->
 	# What this node says, rather than everything said underneath it. A row is then found by the
 	# label in it, and the path answered is that label's, which is where the words a caller is
 	# looking at actually are: matching every container above it would answer with the screen.
-	if not wanted["says"].is_empty() and not _says(said_by(node), wanted["says"]):
+	if not wanted["says"].is_empty() and not _says(Words.said_by(node), wanted["says"]):
 		return false
 	var script: Variant = node.get_script()
 	if not wanted["script"].is_empty():
@@ -346,8 +347,7 @@ func _read_into(node: Node, include_hidden: bool, most: int, into: Array[String]
 	if not include_hidden and not _drawn(node):
 		return 0
 	var left_out: int = 0
-	var said: String = said_by(node)
-	if not said.is_empty():
+	for said: String in Words.lines_said_by(node):
 		if into.size() < most:
 			into.append(said)
 		else:
@@ -371,25 +371,6 @@ static func _drawn(node: Node) -> bool:
 		return spatial.visible
 	var window: Window = node as Window
 	return window == null or window.visible
-
-
-## What one node says, or "" for a node that says nothing. Anything with a `text` property, which
-## is every label, button and field the interface is built out of.
-##
-## Public because three questions are the same question: what a screen reads as, which nodes say a
-## given word, and whether anything has come to say it yet. Two copies of what a node says is how
-## the three of them come to disagree about a SpinBox.
-##
-## Read rather than looked up in the property list, which the engine builds afresh on every call: a
-## wait asks this of every node on the screen every frame, and on a hall of 3,500 nodes the lookup
-## took the game it was watching from 60 frames a second to 11. A node without the property reads
-## as null, which is not a string.
-static func said_by(node: Node) -> String:
-	var text: Variant = node.get("text")
-	if not text is String:
-		return ""
-	var words: String = text
-	return words.strip_edges()
 
 
 func get_rect(params: Dictionary) -> Dictionary:
