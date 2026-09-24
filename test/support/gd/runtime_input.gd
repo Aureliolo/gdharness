@@ -320,6 +320,20 @@ func _check_typing(input: InputCommands) -> void:
 	if empty.get("type", "") != "error":
 		_fail("typing nothing over nothing should still be refused: %s" % JSON.stringify(empty))
 
+	# A password field answers with its mask, which still counts the characters, and never with
+	# the password: here one the field held before anything was typed, which the caller never sent.
+	field.secret = true
+	field.text = "hunter"
+	field.caret_column = field.text.length()
+	var hidden: Dictionary = input.inject_text({"text": "2"})
+	if field.text != "hunter2":
+		_fail("a secret field should take what is typed like any other: %s" % field.text)
+	if str(hidden.get("holds", "")) != field.secret_character.repeat(7):
+		_fail("and say what it holds as its mask: %s" % JSON.stringify(hidden))
+	if JSON.stringify(hidden).contains("hunter"):
+		_fail("and never the words behind it: %s" % JSON.stringify(hidden))
+	field.secret = false
+
 
 ## The key op types too, which is the half that was missing rather than the whole command.
 func _type_with_keys(input: InputCommands) -> void:

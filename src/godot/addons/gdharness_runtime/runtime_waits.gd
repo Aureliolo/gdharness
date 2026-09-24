@@ -7,6 +7,7 @@ const Paths = preload("runtime_paths.gd")
 const Queries = preload("runtime_queries.gd")
 const Read = preload("reading.gd")
 const Values = preload("runtime_values.gd")
+const Words = preload("runtime_words.gd")
 
 ## The longest one wait may last, whatever the request says: past this the server has long
 ## since given up on the reply.
@@ -291,7 +292,7 @@ func _anything_says(node_path: String, said: String, include_hidden: bool) -> bo
 	var pending: Array[Node] = [root]
 	while not pending.is_empty():
 		var node: Node = pending.pop_back()
-		if Queries.said_by(node).containsn(said) and (include_hidden or Queries.shown(node)):
+		if Words.said_by(node).containsn(said) and (include_hidden or Queries.shown(node)):
 			return true
 		pending.append_array(node.get_children(true))
 	return false

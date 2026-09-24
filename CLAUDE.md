@@ -9,7 +9,7 @@
 | `bun run lint`                                        | Biome, types, dead code and markdownlint.                    |
 | `bun run format:check`                                | Biome and Prettier.                                          |
 | `bun run lint:gd`, `bun run format:gd:check`          | gdlint and gdformat on `src/godot` and `test/support/gd`.    |
-| `bun run test:typed`                                  | Every shipped script parsed with warnings as errors; Godot.  |
+| `bun run test:typed`                                  | Shipped scripts and fixtures, warnings as errors; Godot.     |
 | `bun test/regressions.ts [name ...]`                  | Every regression; names select tests, loosely matched.       |
 | `bun run test:ci`                                     | The eleven fast files, regressions included.                 |
 | `test:integration`, `test:metadata`, `test:packaging` | The other four files the `build-and-test` job runs.          |
@@ -22,7 +22,9 @@ the temp directory and print where they landed.
 
 Run `test:typed` after any GDScript change. gdlint and gdformat pass a script the engine refuses with
 warnings as errors, and the regressions load the addons under the default warnings, so a local run
-with the engine passed a runtime addon that failed to compile on the Linux engine leg.
+with the engine passed a runtime addon that failed to compile on the Linux engine leg. The fixtures
+in `test/support/gd` compile under those settings too: one tried in a scratch project with default
+warnings passed there and failed on the leg for discarding what `ItemList.add_item` returns.
 
 `src/` is the TypeScript MCP server (entry points `server-entry.ts` and `cli.ts`), `src/godot/addons/`
 holds the editor and runtime addons in GDScript, `test/` has one file per suite, and `scripts/` holds
