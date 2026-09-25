@@ -380,12 +380,106 @@ func _import_status_of(resource_path: String, import_file_path: String) -> Dicti
 			"source_exists": true
 		}
 
-	var source_modified: int = FileAccess.get_modified_time(resource_path)
-	var import_modified: int = FileAccess.get_modified_time(import_file_path)
-
-	return {
-		"path": resource_path,
-		"status": "needs_reimport" if source_modified > import_modified else "up_to_date",
-		"import_file_exists": true,
-		"source_exists": true
+	var status: Dictionary = {
+		"path": resource_path, "status": "up_to_date", "import_file_exists": true, "source_exists": true
 	}
+	if FileAccess.get_modified_time(resource_path) > FileAccess.get_modified_time(import_file_path):
+		status["status"] = "needs_reimport"
+		status["reason"] = "the source changed after it was imported"
+		return status
+
+	# The sidecar alone does not say the import is there: deleting the outputs under
+	# .godot/imported is the ordinary way to force one, and a resource whose output is gone was
+	# answered as current, which is what a reimport is then skipped on.
+	var outputs: Array[String] = _outputs_of(import_file_path)
+	var missing: Array[String] = []
+	for output: String in outputs:
+		if not FileAccess.file_exists(output):
+			missing.append(output)
+	if not missing.is_empty():
+		status["status"] = "needs_reimport"
+		status["reason"] = "its imported output is not on disk"
+		status["missing_outputs"] = missing
+		return status
+
+	# A scene imported before the textures it uses were: it loads each image as it imports, so one
+	# imported ahead of them is built without them, and nothing about its own files says so. A second
+	# reimport started over one in progress did exactly that downstream, and 64 scenes that were
+	# untextured all read as up to date here.
+	var built_at: int = _oldest(outputs, import_file_path)
+	var before: Array[String] = []
+	for image: String in _images_of(resource_path):
+		if FileAccess.file_exists(image + ".import"):
+			if _newest(_outputs_of(image + ".import"), image + ".import") > built_at:
+				before.append(image)
+	if not before.is_empty():
+		status["status"] = "needs_reimport"
+		status["reason"] = "it was imported before the images it uses, so it was built without them"
+		status["imported_before"] = before
+	return status
+
+
+## The files an import wrote, from its sidecar's [code]dest_files[/code]; empty when it lists none.
+static func _outputs_of(import_file_path: String) -> Array[String]:
+	var config: ConfigFile = ConfigFile.new()
+	var outputs: Array[String] = []
+	if config.load(import_file_path) != OK:
+		return outputs
+	var listed: Variant = config.get_value("deps", "dest_files", [])
+	if listed is Array:
+		for one: Variant in listed:
+			outputs.append(str(one))
+	return outputs
+
+
+## When the earliest of [param outputs] was written, or [param fallback] when none is on disk.
+static func _oldest(outputs: Array[String], fallback: String) -> int:
+	var oldest: int = -1
+	for output: String in outputs:
+		if FileAccess.file_exists(output):
+			var at: int = FileAccess.get_modified_time(output)
+			oldest = at if oldest < 0 else mini(oldest, at)
+	return oldest if oldest >= 0 else FileAccess.get_modified_time(fallback)
+
+
+## When the latest of [param outputs] was written, or [param fallback] when none is on disk.
+static func _newest(outputs: Array[String], fallback: String) -> int:
+	var newest: int = -1
+	for output: String in outputs:
+		if FileAccess.file_exists(output):
+			newest = maxi(newest, FileAccess.get_modified_time(output))
+	return newest if newest >= 0 else FileAccess.get_modified_time(fallback)
+
+
+## The image files a glTF scene refers to by path, resolved against the scene's own directory.
+## Embedded images and every other scene format answer nothing.
+static func _images_of(scene_path: String) -> Array[String]:
+	var images: Array[String] = []
+	var text: String = ""
+	match scene_path.get_extension().to_lower():
+		"gltf":
+			text = FileAccess.get_file_as_string(scene_path)
+		"glb":
+			# A 12-byte header, then the first chunk: its length, its type, and for "JSON" the text.
+			var bytes: PackedByteArray = FileAccess.get_file_as_bytes(scene_path)
+			if bytes.size() >= 20 and bytes.decode_u32(16) == 0x4E4F534A:
+				var length: int = bytes.decode_u32(12)
+				text = bytes.slice(20, mini(20 + length, bytes.size())).get_string_from_utf8()
+	if text.is_empty():
+		return images
+	var parsed: Variant = JSON.parse_string(text)
+	if not parsed is Dictionary:
+		return images
+	var document: Dictionary = parsed
+	var listed: Variant = document.get("images", [])
+	if not listed is Array:
+		return images
+	for image: Variant in listed:
+		if not image is Dictionary:
+			continue
+		var entry: Dictionary = image
+		var uri: String = str(entry.get("uri", ""))
+		if uri.is_empty() or uri.begins_with("data:"):
+			continue
+		images.append(scene_path.get_base_dir().path_join(uri.uri_decode()).simplify_path())
+	return images

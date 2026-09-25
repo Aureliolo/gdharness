@@ -17,6 +17,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -904,6 +905,112 @@ function testOperations(godotPath: string, projectDir: string): void {
  * Each half adds a visible file beside an ignored one and counts, because a walk that had
  * stopped finding anything at all satisfies the absence just as well.
  */
+/**
+ * An import is current only when what it built is there and was built from what it uses.
+ *
+ * Status compared a source's time with its sidecar's and nothing else. Downstream, a reimport
+ * started over one in progress imported 64 glTF scenes before the textures they use, so every one
+ * came out untextured, and all 64 read as up to date. Deleting a resource's output under
+ * .godot/imported, the ordinary way to force an import, also read as up to date. Times are set by
+ * hand, so each case is the order it names whatever the clock did while the files were written.
+ */
+function testAnImportIsJudgedByWhatItWasBuiltFrom(godotPath: string, projectDir: string): void {
+  const operation = (name: string, params: unknown): unknown =>
+    runOperation(godotPath, projectDir, name, params);
+  const imported = join(projectDir, '.godot', 'imported');
+  mkdirSync(imported, { recursive: true });
+  mkdirSync(join(projectDir, 'models', 'tex'), { recursive: true });
+  const at = (path: string, seconds: number): void => {
+    utimesSync(path, seconds, seconds);
+  };
+  const sidecar = (path: string, output: string): void => {
+    writeFileSync(
+      `${path}.import`,
+      `[remap]\n\nimporter="scene"\npath="res://.godot/imported/${output}"\n\n[deps]\n\nsource_file="res://${path.slice(projectDir.length + 1).replaceAll('\\', '/')}"\ndest_files=["res://.godot/imported/${output}"]\n`,
+    );
+    writeFileSync(join(imported, output), 'imported');
+  };
+  const texture = join(projectDir, 'models', 'tex', 'wall.png');
+  writeFileSync(texture, 'fixture bytes, never decoded');
+  sidecar(texture, 'wall.png-1.ctex');
+  const scene = join(projectDir, 'models', 'hut.gltf');
+  writeFileSync(scene, JSON.stringify({ asset: { version: '2.0' }, images: [{ uri: 'tex/wall.png' }] }));
+  sidecar(scene, 'hut.gltf-1.scn');
+  const base = Math.floor(Date.now() / 1000) - 1000;
+  for (const path of [texture, scene]) {
+    at(path, base);
+    at(`${path}.import`, base + 10);
+  }
+  const statusOf = (resource: string): unknown =>
+    get(operation('get_import_status', { resource_path: resource }), 'resources', 0);
+
+  at(join(imported, 'hut.gltf-1.scn'), base + 10);
+  at(join(imported, 'wall.png-1.ctex'), base + 20);
+  const early = statusOf('models/hut.gltf');
+  assert.equal(
+    get(early, 'status'),
+    'needs_reimport',
+    `a scene built before its texture was: ${JSON.stringify(early)}`,
+  );
+  assert.deepEqual(get(early, 'imported_before'), ['res://models/tex/wall.png'], JSON.stringify(early));
+
+  at(join(imported, 'hut.gltf-1.scn'), base + 30);
+  const later = statusOf('models/hut.gltf');
+  assert.equal(
+    get(later, 'status'),
+    'up_to_date',
+    `and one built after it is current: ${JSON.stringify(later)}`,
+  );
+
+  // The texture older than anything of the scene's, so only the missing output can make it stale.
+  at(join(imported, 'wall.png-1.ctex'), base + 5);
+  rmSync(join(imported, 'hut.gltf-1.scn'));
+  const gone = statusOf('models/hut.gltf');
+  assert.equal(
+    get(gone, 'status'),
+    'needs_reimport',
+    `a resource whose output is gone: ${JSON.stringify(gone)}`,
+  );
+  assert.deepEqual(
+    get(gone, 'missing_outputs'),
+    ['res://.godot/imported/hut.gltf-1.scn'],
+    JSON.stringify(gone),
+  );
+
+  // The binary form, whose images are listed in its first chunk.
+  const json = Buffer.from(JSON.stringify({ asset: { version: '2.0' }, images: [{ uri: 'tex/wall.png' }] }));
+  const padded = Buffer.concat([json, Buffer.alloc((4 - (json.length % 4)) % 4, 0x20)]);
+  const header = Buffer.alloc(20);
+  header.write('glTF', 0, 'ascii');
+  header.writeUInt32LE(2, 4);
+  header.writeUInt32LE(20 + padded.length, 8);
+  header.writeUInt32LE(padded.length, 12);
+  header.writeUInt32LE(0x4e4f534a, 16);
+  const binary = join(projectDir, 'models', 'shed.glb');
+  writeFileSync(binary, Buffer.concat([header, padded]));
+  sidecar(binary, 'shed.glb-1.scn');
+  at(join(imported, 'wall.png-1.ctex'), base + 20);
+  at(binary, base);
+  at(`${binary}.import`, base + 10);
+  at(join(imported, 'shed.glb-1.scn'), base + 10);
+  const binaryEarly = statusOf('models/shed.glb');
+  assert.deepEqual(
+    get(binaryEarly, 'imported_before'),
+    ['res://models/tex/wall.png'],
+    `a .glb built before its texture was: ${JSON.stringify(binaryEarly)}`,
+  );
+
+  at(texture, base + 40);
+  const edited = statusOf('models/tex/wall.png');
+  assert.equal(
+    get(edited, 'status'),
+    'needs_reimport',
+    `a source changed since its import: ${JSON.stringify(edited)}`,
+  );
+  assert.match(asString(get(edited, 'reason')), /source changed/, JSON.stringify(edited));
+  rmSync(join(projectDir, 'models'), { recursive: true, force: true });
+}
+
 function testAGdignoreStopsTheWalk(godotPath: string, projectDir: string): void {
   const operation = (name: string, params: unknown): unknown =>
     runOperation(godotPath, projectDir, name, params);
@@ -1308,6 +1415,7 @@ async function main(): Promise<void> {
     testDependencyWalk(godotPath, projectDir);
     testOperations(godotPath, projectDir);
     testAGdignoreStopsTheWalk(godotPath, projectDir);
+    testAnImportIsJudgedByWhatItWasBuiltFrom(godotPath, projectDir);
     await testAnOperationLeavesARunningLogAlone(godotPath);
     testRefusals(godotPath, projectDir);
     testInstalledLayout(godotPath, projectDir);
