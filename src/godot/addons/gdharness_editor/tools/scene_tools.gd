@@ -656,10 +656,16 @@ func rescan_filesystem(args: Dictionary) -> Dictionary:
 		return {"ok": false, "error": "Editor plugin unavailable"}
 
 	var filesystem: EditorFileSystem = EditorInterface.get_resource_filesystem()
-	if not Read.as_bool(args.get("statusOnly", false)):
+	# Not over a scan or an import the editor is already running: a scan asked for then starts a
+	# second reimport over the first, and the editor logs "Task 'reimport' already exists" and two
+	# conditions from its progress dialog. Declined and said, so the caller waits and asks again.
+	var busy: bool = filesystem.is_scanning() or filesystem.is_importing()
+	var started: bool = false
+	if not Read.as_bool(args.get("statusOnly", false)) and not busy:
 		_scans_finished_at_request = _scans_finished
 		_scan_pending = true
 		filesystem.scan()
+		started = true
 
 	# Importing is reported separately from scanning, and a class is not registered until
 	# both are done, so a caller watching only one of them can look too early.
@@ -677,6 +683,7 @@ func rescan_filesystem(args: Dictionary) -> Dictionary:
 		_scan_pending = false
 	return {
 		"ok": true,
+		"started": started,
 		"scanning": scanning,
 		"importing": importing,
 		"pending": _scan_pending,
