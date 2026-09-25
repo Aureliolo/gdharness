@@ -49,10 +49,11 @@ static func lines_said_by(node: Node) -> Array[String]:
 		for item: int in list.item_count:
 			_keep(_as_drawn(node, list.get_item_text(item), list.get_item_auto_translate_mode(item)), lines)
 	elif node is PopupMenu:
+		# A separator too, by its title: the popup draws a titled one as a heading over the items
+		# below it, and one without a title says nothing and is dropped as an empty line.
 		var menu: PopupMenu = node
 		for item: int in menu.item_count:
-			if not menu.is_item_separator(item):
-				_keep(item_says(menu, item), lines)
+			_keep(item_says(menu, item), lines)
 	elif node is Tree:
 		var tree: Tree = node
 		if tree.column_titles_visible:

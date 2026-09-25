@@ -284,6 +284,46 @@ func _check_a_menu() -> void:
 	await _check_a_menu_says_no()
 
 	picker.free()
+	await _check_a_heading_is_not_a_choice()
+
+
+## A titled separator heads the items under it and can carry the same words as one of them. It is
+## read as a heading, so a caller may ask for it by name: the item is what is chosen, the heading
+## asked for alone is refused as a heading, and a refusal lists it as one.
+func _check_a_heading_is_not_a_choice() -> void:
+	var filter: OptionButton = OptionButton.new()
+	filter.name = "Filter"
+	filter.position = Vector2(350, 200)
+	filter.size = Vector2(160, 30)
+	filter.add_item("Everything", 10)
+	filter.add_separator("Quests")
+	filter.add_item("Quests", 20)
+	filter.add_separator()
+	filter.add_separator("The work")
+	filter.add_item("Hiring", 30)
+	root.add_child(filter)
+	await process_frame
+
+	var took: Dictionary = await node._execute_command("choose", {"path": "/root/Filter", "text": "Quests"})
+	if took.get("type") != "chosen" or took.get("index") != 2:
+		_fail("an item sharing its heading's words should be the one chosen: %s" % str(took))
+
+	var heading: Dictionary = await node._execute_command(
+		"choose", {"path": "/root/Filter", "text": "The work"}
+	)
+	if not str(heading.get("message", "")).contains("item 4, The work, is a separator heading"):
+		_fail("a heading asked for alone should be refused as one: %s" % str(heading))
+
+	var missing: Dictionary = await node._execute_command(
+		"choose", {"path": "/root/Filter", "text": "Nothing like it"}
+	)
+	var listed: String = str(missing.get("message", ""))
+	if not listed.contains(
+		"0: Everything, 1: Quests (a heading), 2: Quests, 4: The work (a heading), 5: Hiring"
+	):
+		_fail("a refusal should list headings as headings and leave out a bare separator: %s" % listed)
+
+	filter.free()
 
 
 func _check_choosing_by_what_it_says(chosen: Array[int]) -> void:
