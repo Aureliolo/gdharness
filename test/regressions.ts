@@ -18192,6 +18192,116 @@ async function testAScanThatHasNotStartedIsNotFinished(): Promise<void> {
 }
 
 /**
+ * A rescan waits out the editor's own scan or import rather than starting a second one over it.
+ *
+ * Downstream, 194 files were written and the editor had begun importing them when editor_rescan
+ * asked for a scan: the editor logged "Task 'reimport' already exists" and two conditions from its
+ * progress dialog, and the answer said nothing of the import in progress. The fixture editor
+ * imports for a while and declines a scan asked for meanwhile, as the addon now does. Three
+ * rescans: one with the editor already importing, one where it begins between the server's look
+ * and its request, and one with it idle.
+ */
+async function testARescanWaitsOutTheEditorsImport(): Promise<void> {
+  const port = await reservePort();
+  const server = new ServerProcess({ env: { GDHARNESS_BRIDGE_PORT: String(port) } });
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-importing-'));
+  let editor: WebSocket | null = null;
+  try {
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    await server.initialize('regression-test');
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+    editor = socket;
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', () => {
+        resolve();
+      });
+      socket.once('error', reject);
+    });
+
+    let busyUntil = 0;
+    let beginsOnTheNextAsk = false;
+    const scans = { started: 0, askedWhileBusy: 0 };
+    socket.on('message', (raw: Buffer) => {
+      const message: unknown = JSON.parse(String(raw));
+      if (!isRecord(message) || message['type'] !== 'tool_invoke') {
+        return;
+      }
+      const tool = String(message['tool']);
+      const args = isRecord(message['args']) ? message['args'] : {};
+      let result: Record<string, unknown> = { ok: true, classes: [] };
+      if (tool === 'rescan_filesystem' && args['statusOnly'] !== true) {
+        if (beginsOnTheNextAsk) {
+          beginsOnTheNextAsk = false;
+          busyUntil = Date.now() + 400;
+        }
+        const busy = Date.now() < busyUntil;
+        if (busy) {
+          scans.askedWhileBusy += 1;
+        } else {
+          scans.started += 1;
+        }
+        result = { ok: true, started: !busy, scanning: false, importing: busy, pending: false };
+      } else if (tool === 'rescan_filesystem' || tool === 'scan_status') {
+        result = { ok: true, scanning: false, importing: Date.now() < busyUntil, pending: false };
+      }
+      socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result }));
+    });
+    socket.send(
+      JSON.stringify({ type: 'godot_ready', project_path: project, addon_version: SERVER_VERSION }),
+    );
+
+    let knows = false;
+    for (let waited = 0; waited < 10_000 && !knows; waited += 100) {
+      await delay(100);
+      const status = await server.request('tools/call', { name: 'editor_status', arguments: {} });
+      knows = text(get(parseTextContent(status), 'editor', 'projectPath')) === project;
+    }
+    assert.ok(knows, 'the fixture editor should have reached the server, or this proves nothing');
+    const rescan = async (): Promise<unknown> =>
+      parseTextContent(
+        await server.request('tools/call', { name: 'editor_rescan', arguments: { projectPath: project } }),
+      );
+
+    busyUntil = Date.now() + 800;
+    const importing = await rescan();
+    assert.equal(
+      scans.askedWhileBusy,
+      0,
+      `no scan was asked for over the import: ${JSON.stringify(importing)}`,
+    );
+    assert.equal(scans.started, 1, `and one was once it finished: ${JSON.stringify(importing)}`);
+    assert.equal(get(importing, 'ok'), true, JSON.stringify(importing));
+    const waitedFor = get(importing, 'waitedForEditorScanMs');
+    assert.ok(
+      typeof waitedFor === 'number' && waitedFor >= 500,
+      `the answer says it waited for the editor's own import: ${JSON.stringify(importing)}`,
+    );
+
+    beginsOnTheNextAsk = true;
+    const raced = await rescan();
+    assert.equal(
+      scans.askedWhileBusy,
+      1,
+      `the scan asked for as the import began was declined: ${JSON.stringify(raced)}`,
+    );
+    assert.equal(scans.started, 2, `and asked for again once it finished: ${JSON.stringify(raced)}`);
+    assert.equal(get(raced, 'ok'), true, JSON.stringify(raced));
+
+    const idle = await rescan();
+    assert.equal(scans.started, 3, `an idle editor is scanned at once: ${JSON.stringify(idle)}`);
+    assert.equal(
+      get(idle, 'waitedForEditorScanMs'),
+      undefined,
+      `with no wait to report: ${JSON.stringify(idle)}`,
+    );
+  } finally {
+    editor?.terminate();
+    await server.stop();
+    sweep(project);
+  }
+}
+
+/**
  * A game is not started against a class cache the editor is about to rewrite.
  *
  * Downstream, a formatter rewrote a few scripts, the editor scanned them, and a start a few seconds
@@ -19181,6 +19291,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheProjectWalksAgreeAboutWhatIsInIt,
   testClassesAnEditorIsNotHolding,
   testAScanThatHasNotStartedIsNotFinished,
+  testARescanWaitsOutTheEditorsImport,
   testALaunchIsOutsideTheServersTree,
   testARunOutlivesItsServersTree,
   testAnotherProjectsRunLeavesOursStoppable,
