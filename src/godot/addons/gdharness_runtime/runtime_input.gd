@@ -664,7 +664,19 @@ func choose(params: Dictionary) -> Dictionary:
 			"message": "%s has no such item. It holds: %s" % [node_path, ", ".join(_items_of(menu))]
 		}
 	if menu.is_item_separator(index):
-		return {"type": "error", "message": "%s item %d is a separator, not a choice" % [node_path, index]}
+		var heading: String = Words.item_says(menu, index).strip_edges()
+		return {
+			"type": "error",
+			"message":
+			(
+				"%s item %d is a separator, not a choice" % [node_path, index]
+				if heading.is_empty()
+				else (
+					"%s item %d, %s, is a separator heading the items below it, not a choice"
+					% [node_path, index, heading]
+				)
+			)
+		}
 	if menu.is_item_disabled(index):
 		return {
 			"type": "error",
@@ -732,26 +744,39 @@ static func _wanted_item(menu: PopupMenu, params: Dictionary) -> int:
 	var wanted: String = str(params.get("text", ""))
 	if wanted.is_empty():
 		return -1
+	# The items before the separators, because a heading can carry the same words as an item under
+	# it, and finding the heading first refused the choice the caller meant. A separator is still
+	# looked for after, so a heading asked for by name is refused as one rather than as missing.
+	var order: Array[int] = []
+	for separators: bool in [false, true]:
+		for index: int in menu.get_item_count():
+			if menu.is_item_separator(index) == separators:
+				order.append(index)
 	var shown: Array[String] = []
 	var held: Array[String] = []
-	for index: int in menu.get_item_count():
+	for index: int in order:
 		shown.append(Words.item_says(menu, index))
 		held.append(menu.get_item_text(index))
 	for words: Array[String] in [shown, held]:
-		for index: int in words.size():
-			if words[index] == wanted:
-				return index
-		for index: int in words.size():
-			if words[index].nocasecmp_to(wanted) == 0:
-				return index
+		for at: int in words.size():
+			if words[at] == wanted:
+				return order[at]
+		for at: int in words.size():
+			if words[at].nocasecmp_to(wanted) == 0:
+				return order[at]
 	return -1
 
 
-## What the menu shows, for a refusal that names the choices rather than the miss.
+## What the menu shows, for a refusal that names the choices rather than the miss: a titled
+## separator marked as the heading it is, and one with no title left out, since it shows nothing.
 static func _items_of(menu: PopupMenu) -> Array[String]:
 	var said: Array[String] = []
 	for index: int in menu.get_item_count():
-		said.append("%d: %s" % [index, Words.item_says(menu, index)])
+		var words: String = Words.item_says(menu, index)
+		if not menu.is_item_separator(index):
+			said.append("%d: %s" % [index, words])
+		elif not words.strip_edges().is_empty():
+			said.append("%d: %s (a heading)" % [index, words])
 	return said
 
 
