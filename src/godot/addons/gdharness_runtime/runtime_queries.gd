@@ -104,6 +104,15 @@ func find_nodes(params: Dictionary) -> Dictionary:
 	# find would have matched if the name had been read the way it was probably meant.
 	var literal: bool = _is_literal(wanted["name"])
 	var nearly: int = 0
+	# The same for the words: a glob is matched against the whole text, and one written as a prefix
+	# by habit, "Taken together*", missed the label whose sentence those words are in the middle of.
+	# Nothing found then read as the words not being on screen, which is the wrong conclusion when
+	# checking that a change to the text landed.
+	var widened_says: String = _widened(wanted["says"])
+	var widened: Dictionary[String, String] = {}
+	for filter: String in wanted:
+		widened[filter] = widened_says if filter == "says" else wanted[filter]
+	var nearly_said: int = 0
 	var hidden: int = 0
 	while not pending.is_empty():
 		var node: Node = pending.pop_front()
@@ -118,6 +127,12 @@ func find_nodes(params: Dictionary) -> Dictionary:
 				found.append(_found(node, wanted_property))
 		elif rest and literal and str(node.name).containsn(wanted["name"]):
 			nearly += 1
+		elif (
+			not widened_says.is_empty()
+			and _named(node, wanted["name"])
+			and _matches_apart_from_name(node, widened)
+		):
+			nearly_said += 1
 		# Internal children included, which they were not. A ConfirmationDialog builds its Yes and
 		# its No as internal nodes, and a ScrollContainer its bars, so a find over a screen for
 		# every Button came back without the two buttons the player is being asked to press:
@@ -139,6 +154,16 @@ func find_nodes(params: Dictionary) -> Dictionary:
 			(
 				'name is matched as a glob against the whole name; %d node %s "%s", which "*%s*" would find'
 				% [nearly, holding, wanted["name"], wanted["name"]]
+			)
+		)
+	if found.is_empty() and nearly_said > 0:
+		(
+			notes
+			. append(
+				(
+					'says with a wildcard is matched as a glob against a node\'s whole text; "%s" would find %d node%s'
+					% [widened_says, nearly_said, "" if nearly_said == 1 else "s"]
+				)
 			)
 		)
 	# How many the filter took out, so a short answer is not read as a small screen. Left out
@@ -232,6 +257,15 @@ static func _is_literal(pattern: String) -> bool:
 static func _says(said: String, wanted: String) -> bool:
 	var words: String = as_said(wanted)
 	return said.containsn(words) if _is_literal(words) else said.matchn(words)
+
+
+## [param wanted], a glob, open at both ends so it matches its words anywhere in a text; "" when
+## it is not a glob, or already open at both ends, and so has nothing to suggest.
+static func _widened(wanted: String) -> String:
+	if wanted.is_empty() or _is_literal(wanted):
+		return ""
+	var open: String = "*" + wanted.lstrip("*").rstrip("*") + "*"
+	return "" if open == wanted else open
 
 
 ## [param wanted] as words on a screen: a backslash followed by n is a line break.
@@ -624,7 +658,10 @@ func set_property(params: Dictionary) -> Dictionary:
 				"%s.%s is a typed %s: %s." % [reached["called"], named, _sort_of(old_value), typed["message"]]
 			}
 		given = typed["value"]
+	# The write alone, setter included, which is where a property's cost is.
+	var began: int = Time.get_ticks_usec()
 	Paths.write(holder, named, given)
+	var elapsed: int = Time.get_ticks_usec() - began
 	var now: Variant = Paths.read_under(holder, named)
 	# Read back rather than trusted. The engine drops a write it will not take without a word, and
 	# the answer then showed the old value as the new one, shaped as a success: a typed container
@@ -658,7 +695,8 @@ func set_property(params: Dictionary) -> Dictionary:
 		"path": node_path,
 		"property": property,
 		"old_value": _values.serialize(old_value),
-		"new_value": _values.serialize(now)
+		"new_value": _values.serialize(now),
+		"elapsed_usec": elapsed
 	}
 
 
@@ -695,12 +733,15 @@ func call_method(params: Dictionary) -> Dictionary:
 		if Paths.method_of(spelled).is_empty():
 			spelled += "()"
 		if args.is_empty() and Paths.can_read(reached["holder"], spelled):
+			var read_from: int = Time.get_ticks_usec()
 			var answered: Variant = Paths.read_under(reached["holder"], spelled)
+			var read_for: int = Time.get_ticks_usec() - read_from
 			return {
 				"type": "method_result",
 				"path": node_path,
 				"method": method,
 				"result": _values.serialize(answered),
+				"elapsed_usec": read_for,
 			}
 		var why: String = (
 			"%s:%s takes no arguments" % [reached["called"], spelled]
@@ -772,9 +813,19 @@ func call_method(params: Dictionary) -> Dictionary:
 			given = typed["value"]
 		deserialized_args.append(given)
 
+	# Timed around the call alone, since the bridge's round trip is a second or more and swamps what
+	# one click's work costs; the frame metrics read whichever frame is last, which is not this one.
+	var began: int = Time.get_ticks_usec()
 	var result: Variant = holder.callv(named, deserialized_args)
+	var elapsed: int = Time.get_ticks_usec() - began
 
-	return {"type": "method_result", "path": node_path, "method": method, "result": _values.serialize(result)}
+	return {
+		"type": "method_result",
+		"path": node_path,
+		"method": method,
+		"result": _values.serialize(result),
+		"elapsed_usec": elapsed
+	}
 
 
 ## [method _object_named] with the path first, which is the order [method Values.typed_like] calls
