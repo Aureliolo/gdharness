@@ -124,6 +124,7 @@ func _check_reading_lists() -> void:
 	var menu: PopupMenu = PopupMenu.new()
 	menu.add_item("Hire")
 	menu.add_separator()
+	menu.add_separator("Staff")
 	menu.add_item("Dismiss")
 	board.add_child(menu)
 	await process_frame
@@ -136,8 +137,9 @@ func _check_reading_lists() -> void:
 	await process_frame
 	var opened: Dictionary = await node._execute_command("read_text", {"root": "/root/Board"})
 	var lines: Array = opened.get("lines", [])
-	if lines.slice(-2) != ["Hire", "Dismiss"]:
-		_fail("an open menu reads as its items, a separator as nothing: %s" % str(opened))
+	# A titled separator is drawn as a heading and read in its place; one with no title draws no words.
+	if lines.slice(-3) != ["Hire", "Staff", "Dismiss"]:
+		_fail("an open menu reads as its items and its separators' titles, in order: %s" % str(opened))
 
 	var found: Dictionary = await node._execute_command(
 		"find_nodes", {"says": "Ledger", "root": "/root/Board"}
