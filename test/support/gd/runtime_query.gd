@@ -47,6 +47,15 @@ class Person:
 var held: Kept = Kept.new()
 var roster: Array = [Person.new("Ada"), Person.new("Bram")]
 var tray: Dictionary = {"post": 3, "wages": 12}
+var burden: int = 0:
+	set(value):
+		OS.delay_usec(15000)
+		burden = value
+
+
+func linger(usec: int) -> int:
+	OS.delay_usec(usec)
+	return usec
 
 
 func keeper() -> Kept:
@@ -501,6 +510,32 @@ func _check_calling_a_list() -> void:
 		_fail("and a path that goes nowhere on one of them is not having it: %s" % str(absent))
 
 
+## How long a call or a write took inside the game, measured around it there: the bridge's round
+## trip is a second or more, so timing from outside measures the bridge. A method and a setter that
+## take a known time, and a quick call beside them, so a constant or a round trip would fail.
+func _check_the_time_work_takes() -> void:
+	var slow: Dictionary = await node._execute_command(
+		"call_method", {"path": "/root/Level/Hero", "method": "linger", "args": [30000]}
+	)
+	var slow_usec: int = Read.as_int(slow.get("elapsed_usec", -1), -1)
+	if slow.get("result") != 30000 or slow_usec < 30000 or slow_usec > 1000000:
+		_fail("a call says how long the method took inside the game: %s" % str(slow))
+
+	var quick: Dictionary = await node._execute_command(
+		"call_method", {"path": "/root/Level/Hero", "method": "linger", "args": [0]}
+	)
+	var quick_usec: int = Read.as_int(quick.get("elapsed_usec", -1), -1)
+	if quick_usec < 0 or quick_usec >= 30000:
+		_fail("and a quick one says it was quick: %s" % str(quick))
+
+	var written: Dictionary = await node._execute_command(
+		"set_property", {"path": "/root/Level/Hero", "property": "burden", "value": 5}
+	)
+	var written_usec: int = Read.as_int(written.get("elapsed_usec", -1), -1)
+	if written.get("new_value") != 5 or written_usec < 15000 or written_usec > 1000000:
+		_fail("a write says how long it took, its setter included: %s" % str(written))
+
+
 ## What a game does hangs off its nodes the same way its state does, so the op that calls a method
 ## reaches through the same colons the op that writes one does. Reading a guild's day while being
 ## unable to ask it for the next one is half of what a node holds.
@@ -736,6 +771,13 @@ func _check() -> void:
 	var whole_thing: Dictionary = await node._execute_command("find_nodes", {"says": "docket*"})
 	if whole_thing.get("count") != 0:
 		_fail("and a glob is matched against the whole of what is said: %s" % str(whole_thing))
+	# Written as a prefix by habit for words in the middle of a label, which is the miss that read as
+	# the words not being on screen: the answer says what the glob open at both ends would find.
+	if not str(whole_thing.get("note", "")).contains('"*docket*" would find 1 node'):
+		_fail("a glob that missed words further in says which glob finds them: %s" % str(whole_thing))
+	var said_nowhere: Dictionary = await node._execute_command("find_nodes", {"says": "dragon*"})
+	if said_nowhere.get("count") != 0 or said_nowhere.has("note"):
+		_fail("and a glob whose words are nowhere stays a plain nothing: %s" % str(said_nowhere))
 	var its_own: Dictionary = await node._execute_command("find_nodes", {"says": "sign the", "name": "Level"})
 	if its_own.get("count") != 0:
 		_fail("what a node says is its own, not what is said under it: %s" % str(its_own))
@@ -769,6 +811,7 @@ func _check() -> void:
 
 	await _check_reading_through_a_path()
 	await _check_calling_through_a_path()
+	await _check_the_time_work_takes()
 	await _check_calling_a_step_along_the_path(hero, button)
 	await _check_a_node_path_that_reaches_past_a_node()
 
