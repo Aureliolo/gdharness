@@ -1092,7 +1092,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['find'],
         description:
-          'find: part of what the node has written on it as drawn, the way the text op reads it, case-insensitively, which is how a button is reached by the word on it rather than by a generated path. Its own text, so a row is found by the label in it, and hidden nodes match. A bare word is a contains; write a glob and it is one, matched against the whole of what the node says, the same as namePattern. A label with a line break is matched with the break in the words, and a backslash followed by n counts as one.',
+          'find: part of what the node has written on it as drawn, the way the text op reads it, case-insensitively, which is how a button is reached by the word on it rather than by a generated path. Its own text, so a row is found by the label in it, and hidden nodes match. A bare word is a contains; write a glob and it is one, matched against the whole of what the node says, the same as namePattern, and a glob that finds nothing says under note how many nodes it would find open at both ends. A label with a line break is matched with the break in the words, and a backslash followed by n counts as one.',
       },
       limit: {
         type: 'integer',
@@ -1150,7 +1150,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'runtime_invoke',
     description:
-      'Sets a property or calls a method on a node in the running game. Needs the game running with the runtime addon. A call that takes longer than timeoutMs is not cancelled: the answer is pending: true with a requestId, the call goes on and does everything it was asked, and op result with that requestId collects its reply once it comes.',
+      'Sets a property or calls a method on a node in the running game. Needs the game running with the runtime addon. The answer carries elapsed_usec, how long the call or the write took inside the game, measured around it there: the round trip to the game is a second or more, so timing from outside measures that instead. A call that takes longer than timeoutMs is not cancelled: the answer is pending: true with a requestId, the call goes on and does everything it was asked, and op result with that requestId collects its reply once it comes.',
     parameters: {
       projectPath: RUNNING_PROJECT_PATH,
       pid: RUNNING_PID,
