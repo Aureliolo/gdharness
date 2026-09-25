@@ -6638,6 +6638,23 @@ class GodotServer {
   }
 
   /**
+   * Whether the editor is scanning or importing on its own right now. False when it cannot be
+   * asked, an addon without the question included: the rescan that follows declines for itself
+   * when the editor is busy, so not knowing here costs a retry rather than a second import.
+   */
+  private async editorIsScanningOrImporting(): Promise<boolean> {
+    if (!this.godotBridge.isConnected()) {
+      return false;
+    }
+    try {
+      const status = asParams(await this.godotBridge.invokeTool('scan_status', {}));
+      return status['scanning'] === true || status['importing'] === true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * editor_rescan: the scan started, then waited for. The waiting is here rather than in the
    * addon because the editor-side tool executor takes a Dictionary back and not a coroutine,
    * so the addon can only start the scan and report whether one is running. A caller that has
@@ -6662,9 +6679,31 @@ class GodotServer {
     // the scan, from the editor's own list, so the write can be waited for and then undone.
     const ghosts = blind.stillHeld ?? [];
 
-    const first = await this.handleViaBridge('rescan_filesystem', args);
-    if (first.isError) {
-      return first;
+    // The editor's own scan or import waited out rather than scanned over. An editor that has noticed
+    // new files is already importing them, and a scan asked for then starts a second reimport over
+    // the first: the editor logs "Task 'reimport' already exists" and two conditions from its
+    // progress dialog. The addon declines to start one while the editor is busy, so a scan it
+    // declined, because the editor began between the two questions, is asked for again.
+    let waitedForEditorMs = 0;
+    let first: ToolResponse;
+    for (;;) {
+      const busySince = Date.now();
+      let wasBusy = false;
+      while (Date.now() - started < timeoutMs && (await this.editorIsScanningOrImporting())) {
+        wasBusy = true;
+        await new Promise((settle) => setTimeout(settle, 100));
+      }
+      if (wasBusy) {
+        waitedForEditorMs += Date.now() - busySince;
+      }
+      first = await this.handleViaBridge('rescan_filesystem', args);
+      if (first.isError) {
+        return first;
+      }
+      const declined = asParams(JSON.parse(first.content[0]?.text ?? '{}'))['started'] === false;
+      if (!declined || Date.now() - started >= timeoutMs) {
+        break;
+      }
     }
 
     let busy = true;
@@ -6787,6 +6826,9 @@ class GodotServer {
         checked.unchecked === undefined,
       stillWorking: busy,
       waitedMs: Date.now() - started,
+      // How much of that was the editor's own scan or import, finished before this one was asked
+      // for, so an answer after a large write says the editor was already at work on it.
+      waitedForEditorScanMs: waitedForEditorMs > 0 ? waitedForEditorMs : undefined,
       // Both readings, because they answer different questions. What the copy held before says
       // whether this editor had the fault at all, which is the thing a caller cannot otherwise
       // find out; what it holds after says whether the call mended it.
