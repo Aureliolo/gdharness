@@ -936,6 +936,30 @@ function testAnImportIsJudgedByWhatItWasBuiltFrom(godotPath: string, _projectDir
     writeFileSync(join(dir, 'models', 'hut.gltf'), JSON.stringify(triangleUsing('tex/wall.png')));
     // Named before its image exists, so the import builds it without one.
     writeFileSync(join(dir, 'models', 'shack.gltf'), JSON.stringify(triangleUsing('tex/later.png')));
+    // Saved materials: one using the image the scenes name, one using another.
+    writeFileSync(join(dir, 'models', 'tex', 'stone.png'), solidPng(120, 120, 120));
+    mkdirSync(join(dir, 'materials'));
+    const material = (image: string): string =>
+      `[gd_resource type="StandardMaterial3D" load_steps=2 format=3]\n\n[ext_resource type="Texture2D" path="res://models/tex/${image}" id="1"]\n\n[resource]\nalbedo_texture = ExtResource("1")\n`;
+    writeFileSync(join(dir, 'materials', 'trim.tres'), material('wall.png'));
+    writeFileSync(join(dir, 'materials', 'stone.tres'), material('stone.png'));
+    // Its material set to the saved one by an import option, so the scene uses the image only
+    // through the material.
+    writeFileSync(join(dir, 'models', 'shed.gltf'), JSON.stringify(triangleUsing('tex/wall.png')));
+    writeFileSync(
+      join(dir, 'models', 'shed.gltf.import'),
+      '[remap]\n\nimporter="scene"\ntype="PackedScene"\n\n[params]\n\n_subresources={\n"materials": {\n"Trim": {\n"use_external/enabled": true,\n"use_external/path": "res://materials/trim.tres"\n}\n}\n}\n',
+    );
+    // Shaped by a post-import script that swaps its material for one using another image entirely.
+    writeFileSync(
+      join(dir, 'kit_import.gd'),
+      '@tool\nextends EditorScenePostImport\n\n\nfunc _post_import(scene: Node) -> Object:\n\tvar swapped: Material = load("res://materials/stone.tres")\n\tfor found: Node in scene.find_children("*", "MeshInstance3D", true, false):\n\t\tvar mesh: MeshInstance3D = found as MeshInstance3D\n\t\tmesh.mesh.surface_set_material(0, swapped)\n\treturn scene\n',
+    );
+    writeFileSync(join(dir, 'models', 'kit.gltf'), JSON.stringify(triangleUsing('tex/wall.png')));
+    writeFileSync(
+      join(dir, 'models', 'kit.gltf.import'),
+      '[remap]\n\nimporter="scene"\ntype="PackedScene"\n\n[params]\n\nimport_script/path="res://kit_import.gd"\n',
+    );
     importAll();
     writeFileSync(join(dir, 'models', 'tex', 'later.png'), solidPng(40, 200, 40));
     importAll();
@@ -945,6 +969,18 @@ function testAnImportIsJudgedByWhatItWasBuiltFrom(godotPath: string, _projectDir
       get(hut, 'status'),
       'up_to_date',
       `a scene imported with its texture is current: ${JSON.stringify(hut)}`,
+    );
+    const shed = statusOf('models/shed.gltf');
+    assert.equal(
+      get(shed, 'status'),
+      'up_to_date',
+      `a scene using its image through a saved material is current: ${JSON.stringify(shed)}`,
+    );
+    const kit = statusOf('models/kit.gltf');
+    assert.equal(
+      get(kit, 'status'),
+      'up_to_date',
+      `a scene an import script gave other images is current: ${JSON.stringify(kit)}`,
     );
     const shack = statusOf('models/shack.gltf');
     assert.equal(
@@ -1004,7 +1040,7 @@ function triangleUsing(uri: string): Record<string, unknown> {
     scenes: [{ nodes: [0] }],
     nodes: [{ mesh: 0 }],
     meshes: [{ primitives: [{ attributes: { POSITION: 0, TEXCOORD_0: 1 }, material: 0 }] }],
-    materials: [{ pbrMetallicRoughness: { baseColorTexture: { index: 0 } } }],
+    materials: [{ name: 'Trim', pbrMetallicRoughness: { baseColorTexture: { index: 0 } } }],
     textures: [{ source: 0 }],
     images: [{ uri }],
     buffers: [{ byteLength: 60, uri: `data:application/octet-stream;base64,${data.toString('base64')}` }],
