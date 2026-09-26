@@ -2508,6 +2508,10 @@ async function testAServerEndsWithAnEditorStillOnTheBridge(): Promise<void> {
  * Three of them now name a port outside this process, and the failure they share is the quiet
  * one: a server that used the default instead would talk to whatever holds it, or to nothing,
  * and report the editor unavailable while the value the user set sat there being ignored.
+ *
+ * Said as the tool's refusal, in the result and marked isError. The refusal is thrown from deep in
+ * the language server path, and a throw out of the request handler reached the caller as JSON-RPC
+ * internal error -32603, where a tool's own refusals do not belong.
  */
 async function testABadPortIsReported(): Promise<void> {
   const server = new ServerProcess({ env: { GDHARNESS_LSP_PORT: 'banana' } });
@@ -2517,8 +2521,10 @@ async function testABadPortIsReported(): Promise<void> {
       name: 'script_diagnostics',
       arguments: { projectPath: process.cwd(), scriptPath: 'src/godot/operations/logger.gd' },
     });
+    assert.equal(get(response, 'error'), undefined, `not a protocol error: ${JSON.stringify(response)}`);
+    assert.equal(get(response, 'result', 'isError'), true, JSON.stringify(response));
     assert.match(
-      text(get(response, 'error', 'message')),
+      textOf(response) ?? '',
       /GDHARNESS_LSP_PORT is "banana"/,
       'the answer should name the variable and what is wrong with it',
     );
