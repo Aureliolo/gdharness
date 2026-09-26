@@ -248,7 +248,10 @@ interface Editor {
   /** Calls a tool that must be refused and answers with the sentence it was refused with. */
   refusal: (name: string, args: Record<string, unknown>) => Promise<string>;
   /** Calls a tool and answers with how it went, for waiting on something to come up. */
-  attempt: (name: string, args: Record<string, unknown>) => Promise<{ ok: boolean; text: string }>;
+  attempt: (
+    name: string,
+    args: Record<string, unknown>,
+  ) => Promise<{ ok: boolean; text: string; answer: unknown }>;
   /**
    * Starts a run of the project and answers once its runtime is listening, failing if it is not.
    *
@@ -703,7 +706,13 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
       undefined,
       `${name} failed in the protocol rather than answering: ${JSON.stringify(failed)}`,
     );
-    return { ok: get(response, 'result', 'isError') !== true, text: textOf(response) ?? '' };
+    // `answer` is the first block parsed, as `call` reads it: the text joins every block, and an
+    // answer now and then carries a notice after its own, which the joined text is not JSON with.
+    return {
+      ok: get(response, 'result', 'isError') !== true,
+      text: textOf(response) ?? '',
+      answer: parseTextContent(response),
+    };
   };
 
   const play = async (args: Record<string, unknown> = {}): Promise<unknown> => {
@@ -2173,7 +2182,7 @@ async function testAHeldGameIsStillHeldForTheReplacement(godotPath: string): Pro
     await second.abandon();
     // The first server still holds it: a second client asking did not let it go.
     const stillSaid = await own.attempt('debug_state', { op: 'stack' });
-    const still = stillSaid.ok ? asArray(JSON.parse(stillSaid.text), 'stackFrames') : [];
+    const still = stillSaid.ok ? asArray(stillSaid.answer, 'stackFrames') : [];
     assert.equal(get(still[0], 'line'), BREAK_LINE, `and asking did not release it: ${stillSaid.text}`);
 
     // Now the client holding it goes, the way a harness reconnect ends a server: stdin ends and the
@@ -2403,7 +2412,7 @@ async function stackWithin(
   while (!reached(frames) && Date.now() < deadline) {
     const stack = await attempt('debug_state', { op: 'stack' });
     said = stack.text;
-    frames = stack.ok ? asArray(JSON.parse(stack.text), 'stackFrames') : [];
+    frames = stack.ok ? asArray(stack.answer, 'stackFrames') : [];
     if (!reached(frames)) await delay(500);
   }
   assert.ok(reached(frames), `${what}, and the adapter answered with: ${said}`);
@@ -3443,16 +3452,7 @@ async function ticksWithin(attempt: Editor['attempt'], project: string, what: st
       property: 'ticks',
     });
     said = asked.text;
-    let value: unknown = 0;
-    if (asked.ok) {
-      try {
-        value = get(JSON.parse(asked.text), 'value');
-      } catch {
-        assert.fail(
-          `${what}: runtime_inspect answered with text that is not JSON: ${JSON.stringify(asked.text)}`,
-        );
-      }
-    }
+    const value = asked.ok ? get(asked.answer, 'value') : 0;
     ticked = typeof value === 'number' ? value : 0;
     if (ticked === 0) await delay(500);
   }
