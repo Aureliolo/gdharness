@@ -24,6 +24,10 @@ var _scans_completed: int = 0
 ## whether that write can still be coming.
 var _scan_finished_at_msec: int = -1
 
+## How many reimports asked for through [method reimport_files] have finished. Counted here rather
+## than off `resources_reimported`, which a scan's own import emits as well.
+var _reimports_completed: int = 0
+
 
 func set_editor_plugin(plugin: EditorPlugin) -> void:
 	_editor_plugin = plugin
@@ -701,4 +705,44 @@ func scan_status(_args: Dictionary) -> Dictionary:
 		"importing": filesystem.is_importing(),
 		"sinceScanFinishedMs":
 		-1 if _scan_finished_at_msec < 0 else Time.get_ticks_msec() - _scan_finished_at_msec,
+		"reimportsCompleted": _reimports_completed,
 	}
+
+
+## Reimport the files named under `paths`, whatever their state, the way the editor's Reimport
+## button does, and report whether the reimport was started.
+##
+## Started on the next frame rather than run here: the editor imports on its main thread, and a
+## reimport of a few hundred scenes outlasts the wait on any one command. The caller waits for
+## `reimportsCompleted` in [method scan_status] to move past `reimportsCompletedBefore`. Declined
+## while the editor scans or imports, since `reimport_files` refuses to run inside an import.
+func reimport_files(args: Dictionary) -> Dictionary:
+	if not _editor_plugin:
+		return {"ok": false, "error": "Editor plugin unavailable"}
+	var paths: Array[String] = []
+	var given: Variant = args.get("paths", [])
+	if given is Array:
+		for path: Variant in given:
+			paths.append(str(path))
+	if paths.is_empty():
+		return {"ok": false, "error": "reimport_files needs paths"}
+	var filesystem: EditorFileSystem = EditorInterface.get_resource_filesystem()
+	var busy: bool = filesystem.is_scanning() or filesystem.is_importing()
+	if not busy:
+		_reimport.call_deferred(PackedStringArray(paths))
+	return {
+		"ok": true,
+		"started": not busy,
+		"scanning": filesystem.is_scanning(),
+		"importing": filesystem.is_importing(),
+		"reimportsCompletedBefore": _reimports_completed,
+	}
+
+
+func _reimport(paths: PackedStringArray) -> void:
+	var filesystem: EditorFileSystem = EditorInterface.get_resource_filesystem()
+	# A scan can begin between the answer and this frame, and its import would refuse this one.
+	while filesystem.is_scanning() or filesystem.is_importing():
+		await get_tree().process_frame
+	filesystem.reimport_files(paths)
+	_reimports_completed += 1
