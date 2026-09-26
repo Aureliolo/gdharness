@@ -155,6 +155,7 @@ import {
   previousRunLeft,
   runIsUp,
   runtimeVerdict,
+  scriptErrorsNote,
   stopVerdict,
   timedOutVerdict,
   uidsLeftNote,
@@ -16964,6 +16965,32 @@ async function testGdUnitRunner(): Promise<void> {
     'a rebuild naming no addon is left as it was',
   );
 
+  // The sentence for a run stopped at discovery, on the branches the real run below does not
+  // reach: one script with one error, and one script holding two.
+  const fault = (line: number, message: string): { path: string; line: number; message: string } => ({
+    path: 'res://test/a_test.gd',
+    line,
+    message,
+  });
+  assert.equal(
+    scriptErrorsNote([fault(5, 'Parse Error: one.')]),
+    'No tests ran: gdUnit4 could not load one script while looking for suites, and it runs no suite at all when one fails to load. res://test/a_test.gd:5 Parse Error: one.',
+  );
+  assert.match(
+    scriptErrorsNote([fault(5, 'Parse Error: one'), fault(9, 'Parse Error: two')]),
+    /could not load one script .* res:\/\/test\/a_test\.gd:5 Parse Error: one\. One more error in that script is under scriptErrors\.$/,
+  );
+  assert.match(
+    scriptErrorsNote([
+      fault(5, 'Parse Error: one.'),
+      { path: 'res://test/b_test.gd', line: 2, message: 'Parse Error: two' },
+      fault(9, 'Parse Error: three'),
+      fault(12, 'Parse Error: four'),
+    ]),
+    /could not load 2 scripts .* res:\/\/test\/a_test\.gd:5 Parse Error: one\. res:\/\/test\/b_test\.gd:2 Parse Error: two\. 2 more errors in those scripts are under scriptErrors\.$/,
+    'each script ends its own sentence, whether or not gdUnit4 gave it a period',
+  );
+
   const godotPath = resolveGodotPath();
   const gdunit = process.env['GDUNIT4_PATH'];
   if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
@@ -17417,6 +17444,69 @@ async function testGdUnitRunner(): Promise<void> {
         assert.ok(
           shapeOf('test_dictionary').includes(`but was\n '{\n\t"[lb]": 1\n  }'\n\tat 'test_dictionary'`),
           JSON.stringify(shapeOf('test_dictionary')),
+        );
+
+        // A directory where two suites do not load and one does. gdUnit4 stops at discovery and
+        // runs none of them, the good one included, which "script errors" alone did not say.
+        mkdirSync(join(projectDir, 'broken', 'deeper'), { recursive: true });
+        writeFileSync(
+          join(projectDir, 'broken', 'good_test.gd'),
+          [
+            'extends GdUnitTestSuite',
+            '',
+            '',
+            'func test_fine() -> void:',
+            '\tassert_int(1).is_equal(1)',
+            '',
+          ].join('\n'),
+        );
+        writeFileSync(
+          join(projectDir, 'broken', 'parse_test.gd'),
+          [
+            'extends GdUnitTestSuite',
+            '',
+            '',
+            'func test_does_not_parse() -> void:',
+            '\tassert_int(undefined_thing).is_equal(1)',
+            '',
+          ].join('\n'),
+        );
+        writeFileSync(
+          join(projectDir, 'broken', 'deeper', 'missing_base_test.gd'),
+          ['extends NoSuchBaseClass', '', '', 'func test_never() -> void:', '\tpass', ''].join('\n'),
+        );
+        const broken = await call(
+          'project_test',
+          { projectPath: projectDir, path: 'res://broken' },
+          ENGINE_CALL_TIMEOUT_MS * 3,
+        );
+        const brokenNote = broken.slice(0, broken.indexOf('{'));
+        assert.match(
+          brokenNote,
+          /^No tests ran: gdUnit4 could not load 2 scripts while looking for suites/,
+          broken,
+        );
+        assert.match(
+          brokenNote,
+          /res:\/\/broken\/parse_test\.gd:5 Parse Error: Identifier "undefined_thing"/,
+          broken,
+        );
+        const brokenAnswer: unknown = JSON.parse(broken.slice(broken.indexOf('{')));
+        assert.equal(get(brokenAnswer, 'verdict'), 'script errors in 2 scripts, so no suite ran', broken);
+        assert.deepEqual(
+          asArray(get(brokenAnswer, 'scriptErrors')).map(
+            (error) => `${text(get(error, 'path'))}:${Number(get(error, 'line'))}`,
+          ),
+          ['res://broken/deeper/missing_base_test.gd:1', 'res://broken/parse_test.gd:5'],
+        );
+        const brokenFrames = asArray(get(brokenAnswer, 'entries')).flatMap((entry) =>
+          get(entry, 'detail') === undefined ? [] : asArray(get(entry, 'detail')).map(text),
+        );
+        assert.ok(brokenFrames.length > 0, broken);
+        assert.equal(
+          brokenFrames.filter((line) => line.includes('addons/gdUnit4/src')).length,
+          0,
+          'the frames gdUnit4 took to load the scripts are counted, not listed',
         );
       },
       { GODOT_PATH: godotPath },
