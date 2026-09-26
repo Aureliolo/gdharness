@@ -1231,7 +1231,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'runtime_capture',
     description:
-      'A picture of the running game: the whole screen or one viewport, as an image. Needs the game running with a window.',
+      "A picture of the running game: the whole screen or one viewport, as an image. Needs the game running with a window. A capture asked for before the game's first frame is drawn waits for that frame, since the game announces itself before it and the viewport holds nothing it drew until then.",
     parameters: {
       projectPath: RUNNING_PROJECT_PATH,
       pid: RUNNING_PID,

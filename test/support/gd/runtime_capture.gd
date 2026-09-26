@@ -22,10 +22,10 @@ func _run() -> void:
 	var capture: CaptureCommands = CaptureCommands.new(host)
 
 	var output_path: String = OS.get_temp_dir().path_join("gdharness-capture-fixture.png")
-	_check_refused(capture.capture_screenshot({"output_path": output_path}), "screenshot", output_path)
-	_check_refused(capture.capture_viewport({"output_path": output_path}), "viewport", output_path)
+	_check_refused(await capture.capture_screenshot({"output_path": output_path}), "screenshot", output_path)
+	_check_refused(await capture.capture_viewport({"output_path": output_path}), "viewport", output_path)
 
-	var without_path: Dictionary = capture.capture_screenshot({})
+	var without_path: Dictionary = await capture.capture_screenshot({})
 	if (
 		without_path.get("type", "") != "error"
 		or not str(without_path.get("message", "")).contains("output_path")
