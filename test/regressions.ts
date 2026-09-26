@@ -18407,6 +18407,88 @@ async function testARescanWaitsForTheEditorToSettle(): Promise<void> {
 }
 
 /**
+ * A rescan answers once the scan it asked for has completed, which the editor's flags do not say.
+ *
+ * A threaded scan stops reporting itself when its thread finishes, and what it found is imported
+ * when the thread is joined, a frame or more later and longer in an editor in the background.
+ * Downstream, after 211 glTF scenes changed, a rescan answered in 1.9s and the editor then showed
+ * importing, with every scene still on its old hash. The fixture editor scans, then shows idle
+ * flags for longer than the settle window, then imports, and only then counts the scan completed.
+ */
+async function testARescanWaitsForItsScanToComplete(): Promise<void> {
+  const port = await reservePort();
+  const server = new ServerProcess({ env: { GDHARNESS_BRIDGE_PORT: String(port) } });
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-completing-'));
+  let editor: WebSocket | null = null;
+  try {
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    await server.initialize('regression-test');
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+    editor = socket;
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', () => {
+        resolve();
+      });
+      socket.once('error', reject);
+    });
+
+    // Scanning for 300ms, idle flags until 1200ms, importing until 1600ms, completed from then.
+    const COMPLETED_MS = 1600;
+    const scan: { startedAt: number | null } = { startedAt: null };
+    const state = (): { scanning: boolean; importing: boolean; scansCompleted: number } => {
+      const since = scan.startedAt === null ? -1 : Date.now() - scan.startedAt;
+      return {
+        scanning: since >= 0 && since < 300,
+        importing: since >= 1200 && since < COMPLETED_MS,
+        scansCompleted: since >= COMPLETED_MS ? 6 : 5,
+      };
+    };
+    socket.on('message', (raw: Buffer) => {
+      const message: unknown = JSON.parse(String(raw));
+      if (!isRecord(message) || message['type'] !== 'tool_invoke') {
+        return;
+      }
+      const tool = String(message['tool']);
+      const args = isRecord(message['args']) ? message['args'] : {};
+      let result: Record<string, unknown> = { ok: true, classes: [] };
+      if (tool === 'rescan_filesystem' && args['statusOnly'] !== true) {
+        scan.startedAt ??= Date.now();
+        result = { ok: true, started: true, scansCompletedBefore: 5, ...state() };
+      } else if (tool === 'rescan_filesystem' || tool === 'scan_status') {
+        result = { ok: true, ...state() };
+      }
+      socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result }));
+    });
+    socket.send(
+      JSON.stringify({ type: 'godot_ready', project_path: project, addon_version: SERVER_VERSION }),
+    );
+
+    let knows = false;
+    for (let waited = 0; waited < 10_000 && !knows; waited += 100) {
+      await delay(100);
+      const status = await server.request('tools/call', { name: 'editor_status', arguments: {} });
+      knows = text(get(parseTextContent(status), 'editor', 'projectPath')) === project;
+    }
+    assert.ok(knows, 'the fixture editor should have reached the server, or this proves nothing');
+
+    const scanned = await server.request('tools/call', {
+      name: 'editor_rescan',
+      arguments: { projectPath: project },
+    });
+    const answeredAt = Date.now();
+    assert.equal(get(parseTextContent(scanned), 'ok'), true, textOf(scanned) ?? '');
+    assert.ok(
+      scan.startedAt !== null && answeredAt >= scan.startedAt + COMPLETED_MS,
+      `the rescan answered after the editor counted its scan completed, not on idle flags: ${textOf(scanned)}`,
+    );
+  } finally {
+    editor?.terminate();
+    await server.stop();
+    sweep(project);
+  }
+}
+
+/**
  * A game is not started against a class cache the editor is about to rewrite.
  *
  * Downstream, a formatter rewrote a few scripts, the editor scanned them, and a start a few seconds
@@ -19398,6 +19480,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAScanThatHasNotStartedIsNotFinished,
   testARescanWaitsOutTheEditorsImport,
   testARescanWaitsForTheEditorToSettle,
+  testARescanWaitsForItsScanToComplete,
   testALaunchIsOutsideTheServersTree,
   testARunOutlivesItsServersTree,
   testAnotherProjectsRunLeavesOursStoppable,
