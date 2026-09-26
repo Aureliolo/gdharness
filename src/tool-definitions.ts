@@ -543,7 +543,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       timeoutMs: {
         type: 'integer',
         minimum: 1,
-        description: 'How long the run may take before it is killed. Default 600000.',
+        description:
+          'How long the run may take before it is killed. Default 600000. A run killed at the limit answers timedOut and silentForMs, how long it had printed nothing; it is called hung only when that was half the limit, or thirty seconds of a longer one, and otherwise it was still running and wants a longer timeoutMs or a narrower path.',
       },
     },
     requires: ['projectPath'],
