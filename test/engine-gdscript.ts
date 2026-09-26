@@ -23,6 +23,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { deflateSync } from 'node:zlib';
 import { runOperation as runThroughTheServersOwnPath } from '../src/headless.js';
 import { userDataIn } from '../src/launch.js';
 import { asArray, asNumber, asString, get, lastJsonLine } from './support/json.js';
@@ -906,109 +907,151 @@ function testOperations(godotPath: string, projectDir: string): void {
  * stopped finding anything at all satisfies the absence just as well.
  */
 /**
- * An import is current only when what it built is there and was built from what it uses.
+ * An import is judged by content: what it built is there, its source is the one it recorded, and a
+ * scene depends on every image it names.
  *
- * Status compared a source's time with its sidecar's and nothing else. Downstream, a reimport
- * started over one in progress imported 64 glTF scenes before the textures they use, so every one
- * came out untextured, and all 64 read as up to date. Deleting a resource's output under
- * .godot/imported, the ordinary way to force an import, also read as up to date. Times are set by
- * hand, so each case is the order it names whatever the clock did while the files were written.
+ * Status compared file times. That missed the case it was first written for, 64 glTF scenes
+ * imported before their textures and so untextured, all read as up to date; and once it compared
+ * more times it was wrong the other way: 31 images an installer rewrote byte for byte read as
+ * changed, and 33 correct scenes read as built before their textures, because a texture a 3D scene
+ * uses is reimported compressed after the scene. Everything here is imported by the engine itself
+ * with --import, so the files are the ones the editor writes.
  */
-function testAnImportIsJudgedByWhatItWasBuiltFrom(godotPath: string, projectDir: string): void {
-  const operation = (name: string, params: unknown): unknown =>
-    runOperation(godotPath, projectDir, name, params);
-  const imported = join(projectDir, '.godot', 'imported');
-  mkdirSync(imported, { recursive: true });
-  mkdirSync(join(projectDir, 'models', 'tex'), { recursive: true });
-  const at = (path: string, seconds: number): void => {
-    utimesSync(path, seconds, seconds);
+function testAnImportIsJudgedByWhatItWasBuiltFrom(godotPath: string, _projectDir: string): void {
+  const dir = createProject(godotPath);
+  const operation = (name: string, params: unknown): unknown => runOperation(godotPath, dir, name, params);
+  const importAll = (): void => {
+    const run = spawnSync(godotPath, ['--headless', '--path', dir, '--import'], {
+      encoding: 'utf8',
+      timeout: 180_000,
+    });
+    assert.equal(run.status, 0, `the project should import: ${run.stdout}\n${run.stderr}`);
   };
-  const sidecar = (path: string, output: string): void => {
-    writeFileSync(
-      `${path}.import`,
-      `[remap]\n\nimporter="scene"\npath="res://.godot/imported/${output}"\n\n[deps]\n\nsource_file="res://${path.slice(projectDir.length + 1).replaceAll('\\', '/')}"\ndest_files=["res://.godot/imported/${output}"]\n`,
-    );
-    writeFileSync(join(imported, output), 'imported');
-  };
-  const texture = join(projectDir, 'models', 'tex', 'wall.png');
-  writeFileSync(texture, 'fixture bytes, never decoded');
-  sidecar(texture, 'wall.png-1.ctex');
-  const scene = join(projectDir, 'models', 'hut.gltf');
-  writeFileSync(scene, JSON.stringify({ asset: { version: '2.0' }, images: [{ uri: 'tex/wall.png' }] }));
-  sidecar(scene, 'hut.gltf-1.scn');
-  const base = Math.floor(Date.now() / 1000) - 1000;
-  for (const path of [texture, scene]) {
-    at(path, base);
-    at(`${path}.import`, base + 10);
-  }
   const statusOf = (resource: string): unknown =>
     get(operation('get_import_status', { resource_path: resource }), 'resources', 0);
+  try {
+    mkdirSync(join(dir, 'models', 'tex'), { recursive: true });
+    const wall = join(dir, 'models', 'tex', 'wall.png');
+    writeFileSync(wall, solidPng(200, 40, 40));
+    writeFileSync(join(dir, 'models', 'hut.gltf'), JSON.stringify(triangleUsing('tex/wall.png')));
+    // Named before its image exists, so the import builds it without one.
+    writeFileSync(join(dir, 'models', 'shack.gltf'), JSON.stringify(triangleUsing('tex/later.png')));
+    importAll();
+    writeFileSync(join(dir, 'models', 'tex', 'later.png'), solidPng(40, 200, 40));
+    importAll();
 
-  at(join(imported, 'hut.gltf-1.scn'), base + 10);
-  at(join(imported, 'wall.png-1.ctex'), base + 20);
-  const early = statusOf('models/hut.gltf');
-  assert.equal(
-    get(early, 'status'),
-    'needs_reimport',
-    `a scene built before its texture was: ${JSON.stringify(early)}`,
-  );
-  assert.deepEqual(get(early, 'imported_before'), ['res://models/tex/wall.png'], JSON.stringify(early));
+    const hut = statusOf('models/hut.gltf');
+    assert.equal(
+      get(hut, 'status'),
+      'up_to_date',
+      `a scene imported with its texture is current: ${JSON.stringify(hut)}`,
+    );
+    const shack = statusOf('models/shack.gltf');
+    assert.equal(
+      get(shack, 'status'),
+      'needs_reimport',
+      `a scene imported before its texture existed was built without it: ${JSON.stringify(shack)}`,
+    );
+    assert.deepEqual(get(shack, 'imported_without'), ['res://models/tex/later.png'], JSON.stringify(shack));
 
-  at(join(imported, 'hut.gltf-1.scn'), base + 30);
-  const later = statusOf('models/hut.gltf');
-  assert.equal(
-    get(later, 'status'),
-    'up_to_date',
-    `and one built after it is current: ${JSON.stringify(later)}`,
-  );
+    // Rewritten byte for byte, which moves the time and not the content.
+    const later = Math.floor(Date.now() / 1000) + 60;
+    writeFileSync(wall, readFileSync(wall));
+    utimesSync(wall, later, later);
+    const same = statusOf('models/tex/wall.png');
+    assert.equal(
+      get(same, 'status'),
+      'up_to_date',
+      `a source rewritten unchanged is current: ${JSON.stringify(same)}`,
+    );
+    writeFileSync(wall, solidPng(10, 10, 200));
+    const edited = statusOf('models/tex/wall.png');
+    assert.equal(
+      get(edited, 'status'),
+      'needs_reimport',
+      `a source that changed is not: ${JSON.stringify(edited)}`,
+    );
+    assert.match(asString(get(edited, 'reason')), /source changed/, JSON.stringify(edited));
 
-  // The texture older than anything of the scene's, so only the missing output can make it stale.
-  at(join(imported, 'wall.png-1.ctex'), base + 5);
-  rmSync(join(imported, 'hut.gltf-1.scn'));
-  const gone = statusOf('models/hut.gltf');
-  assert.equal(
-    get(gone, 'status'),
-    'needs_reimport',
-    `a resource whose output is gone: ${JSON.stringify(gone)}`,
-  );
-  assert.deepEqual(
-    get(gone, 'missing_outputs'),
-    ['res://.godot/imported/hut.gltf-1.scn'],
-    JSON.stringify(gone),
-  );
+    // A texture otherwise current, so only the missing output can make it stale.
+    const imported = asArray(
+      get(operation('get_import_options', { resource_path: 'models/tex/later.png' }), 'deps', 'dest_files'),
+    );
+    const output = asString(imported[0]);
+    rmSync(join(dir, output.replace('res://', '')));
+    const gone = statusOf('models/tex/later.png');
+    assert.equal(
+      get(gone, 'status'),
+      'needs_reimport',
+      `a resource whose output is gone: ${JSON.stringify(gone)}`,
+    );
+    assert.deepEqual(get(gone, 'missing_outputs'), [output], JSON.stringify(gone));
+  } finally {
+    sweep(dir);
+  }
+}
 
-  // The binary form, whose images are listed in its first chunk.
-  const json = Buffer.from(JSON.stringify({ asset: { version: '2.0' }, images: [{ uri: 'tex/wall.png' }] }));
-  const padded = Buffer.concat([json, Buffer.alloc((4 - (json.length % 4)) % 4, 0x20)]);
-  const header = Buffer.alloc(20);
-  header.write('glTF', 0, 'ascii');
-  header.writeUInt32LE(2, 4);
-  header.writeUInt32LE(20 + padded.length, 8);
-  header.writeUInt32LE(padded.length, 12);
-  header.writeUInt32LE(0x4e4f534a, 16);
-  const binary = join(projectDir, 'models', 'shed.glb');
-  writeFileSync(binary, Buffer.concat([header, padded]));
-  sidecar(binary, 'shed.glb-1.scn');
-  at(join(imported, 'wall.png-1.ctex'), base + 20);
-  at(binary, base);
-  at(`${binary}.import`, base + 10);
-  at(join(imported, 'shed.glb-1.scn'), base + 10);
-  const binaryEarly = statusOf('models/shed.glb');
-  assert.deepEqual(
-    get(binaryEarly, 'imported_before'),
-    ['res://models/tex/wall.png'],
-    `a .glb built before its texture was: ${JSON.stringify(binaryEarly)}`,
-  );
+/** A glTF document of one textured triangle whose image is [uri], with its buffer inline. */
+function triangleUsing(uri: string): Record<string, unknown> {
+  const data = Buffer.alloc(60);
+  const values = [0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1];
+  for (const [index, value] of values.entries()) {
+    data.writeFloatLE(value, index * 4);
+  }
+  return {
+    asset: { version: '2.0' },
+    scene: 0,
+    scenes: [{ nodes: [0] }],
+    nodes: [{ mesh: 0 }],
+    meshes: [{ primitives: [{ attributes: { POSITION: 0, TEXCOORD_0: 1 }, material: 0 }] }],
+    materials: [{ pbrMetallicRoughness: { baseColorTexture: { index: 0 } } }],
+    textures: [{ source: 0 }],
+    images: [{ uri }],
+    buffers: [{ byteLength: 60, uri: `data:application/octet-stream;base64,${data.toString('base64')}` }],
+    bufferViews: [
+      { buffer: 0, byteOffset: 0, byteLength: 36 },
+      { buffer: 0, byteOffset: 36, byteLength: 24 },
+    ],
+    accessors: [
+      { bufferView: 0, componentType: 5126, count: 3, type: 'VEC3', min: [0, 0, 0], max: [1, 1, 0] },
+      { bufferView: 1, componentType: 5126, count: 3, type: 'VEC2' },
+    ],
+  };
+}
 
-  at(texture, base + 40);
-  const edited = statusOf('models/tex/wall.png');
-  assert.equal(
-    get(edited, 'status'),
-    'needs_reimport',
-    `a source changed since its import: ${JSON.stringify(edited)}`,
-  );
-  assert.match(asString(get(edited, 'reason')), /source changed/, JSON.stringify(edited));
-  rmSync(join(projectDir, 'models'), { recursive: true, force: true });
+/** A 4 by 4 PNG of one colour. */
+function solidPng(red: number, green: number, blue: number): Buffer {
+  const crc = (bytes: Buffer): number => {
+    let value = 0xffffffff;
+    for (const byte of bytes) {
+      value ^= byte;
+      for (let bit = 0; bit < 8; bit += 1) {
+        value = value & 1 ? (value >>> 1) ^ 0xedb88320 : value >>> 1;
+      }
+    }
+    return (value ^ 0xffffffff) >>> 0;
+  };
+  const chunk = (type: string, body: Buffer): Buffer => {
+    const length = Buffer.alloc(4);
+    length.writeUInt32BE(body.length);
+    const named = Buffer.concat([Buffer.from(type, 'ascii'), body]);
+    const check = Buffer.alloc(4);
+    check.writeUInt32BE(crc(named));
+    return Buffer.concat([length, named, check]);
+  };
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(4, 0);
+  header.writeUInt32BE(4, 4);
+  header.writeUInt8(8, 8);
+  header.writeUInt8(2, 9);
+  const row = Buffer.from([0, ...Array.from({ length: 4 }, () => [red, green, blue]).flat()]);
+  const pixels = deflateSync(Buffer.concat(Array.from({ length: 4 }, () => row)));
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk('IHDR', header),
+    chunk('IDAT', pixels),
+    chunk('IEND', Buffer.alloc(0)),
+  ]);
 }
 
 function testAGdignoreStopsTheWalk(godotPath: string, projectDir: string): void {

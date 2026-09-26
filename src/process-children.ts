@@ -98,13 +98,27 @@ export type ProcessTree = ReadonlyMap<number, ListedProcess>;
  */
 export async function processTree(): Promise<ProcessTree | undefined> {
   try {
-    if (process.platform === 'win32') {
-      return parseProcessTable(await askWindows(), true);
-    }
-    return parseProcessTable(await askPosix());
-  } catch {
+    const tree =
+      process.platform === 'win32'
+        ? parseProcessTable(await askWindows(), true)
+        : parseProcessTable(await askPosix());
+    lastListingFailure = undefined;
+    return tree;
+  } catch (error) {
+    lastListingFailure = error instanceof Error ? error.message : String(error);
     return undefined;
   }
+}
+
+let lastListingFailure: string | undefined;
+
+/**
+ * Why the last [method processTree] came back empty, or undefined when it did not. Kept because an
+ * answer of "the platform would not list its processes" with nothing behind it left a failure on a
+ * loaded runner with no way to tell a timeout from a refusal.
+ */
+export function whyTheProcessTreeFailed(): string | undefined {
+  return lastListingFailure;
 }
 
 /**
@@ -313,7 +327,9 @@ async function askWindows(): Promise<string> {
       '-Command',
       // The start beside the parent link, because the link alone is not to be believed on
       // Windows: see `linked`. Zero for the few processes the system will not date.
-      `${POWERSHELL_UTF8}Get-CimInstance Win32_Process | ForEach-Object { $began = 0; if ($_.CreationDate) { $began = ([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds() }; "$($_.ProcessId) $($_.ParentProcessId) $began $($_.CommandLine)" }`,
+      // Only the four properties read below: the whole object takes the query about twice as long,
+      // and on a loaded runner the listing ran past its budget and the tree was not read at all.
+      `${POWERSHELL_UTF8}Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,CreationDate,CommandLine | ForEach-Object { $began = 0; if ($_.CreationDate) { $began = ([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds() }; "$($_.ProcessId) $($_.ParentProcessId) $began $($_.CommandLine)" }`,
     ],
     { timeout: ASK_TIMEOUT_MS, windowsHide: true, maxBuffer: 16 * 1024 * 1024 },
   );

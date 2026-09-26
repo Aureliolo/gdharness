@@ -5677,7 +5677,14 @@ class GodotServer {
       // unknown rather than guessed at.
       adopted.exitCode = record.exitCode ?? null;
       adopted.exitSignal = record.exitSignal ?? null;
-      adopted.endedUnwatched = !exited(adopted);
+      // Not settled for a game just gone with nothing recorded yet: its keeper writes the exit a
+      // moment after the game ends, and settled here the run read as ended with no code while the
+      // code was being written. The wait every answer makes for that write has it instead. A pid
+      // now held by something else stays settled, since that game ended well before.
+      const exitMayBeComing = !alive(record.pid) && !exited(adopted);
+      if (!exitMayBeComing) {
+        adopted.endedUnwatched = !exited(adopted);
+      }
     }
     this.activeProcess = adopted;
     return adopted;

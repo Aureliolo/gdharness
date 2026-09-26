@@ -94,6 +94,7 @@ import {
   processTree,
   readCommandLine,
   startTimesOf,
+  whyTheProcessTreeFailed,
 } from '../src/process-children.js';
 import { secondsFromClock } from '../src/process-time.js';
 import { projectStructure, searchProject } from '../src/project-scan.js';
@@ -4892,7 +4893,10 @@ async function testALaunchedEditorsConsoleIsReadBeforeItConnects(): Promise<void
  */
 async function killTheTree(root: number): Promise<void> {
   const tree = await processTree();
-  assert.ok(tree !== undefined, 'the platform should list its processes for this to prove anything');
+  assert.ok(
+    tree !== undefined,
+    `the platform should list its processes for this to prove anything: ${whyTheProcessTreeFailed() ?? 'no reason recorded'}`,
+  );
   for (const pid of [...descendantsIn(tree, root), root]) {
     try {
       process.kill(pid);
@@ -4953,7 +4957,10 @@ async function testALaunchIsOutsideTheServersTree(): Promise<void> {
     assert.ok(isAlive(launched), `the launch should be running: ${JSON.stringify(said)}`);
 
     const tree = await processTree();
-    assert.ok(tree !== undefined, 'the platform should list its processes for this to prove anything');
+    assert.ok(
+      tree !== undefined,
+      `the platform should list its processes for this to prove anything: ${whyTheProcessTreeFailed() ?? 'no reason recorded'}`,
+    );
     assert.ok(standIn.pid !== undefined && tree.has(standIn.pid), 'the stand-in server should be listed');
     assert.ok(
       !descendantsIn(tree, standIn.pid).includes(launched),
@@ -5054,7 +5061,10 @@ async function testARunsEnvironmentStaysOffCommandLines(): Promise<void> {
     assert.match(printed, new RegExp(`own=${ownValue}`), `and so does the run's own: ${printed}`);
 
     const tree = await processTree();
-    assert.ok(tree !== undefined, 'the platform should list its processes for this to prove anything');
+    assert.ok(
+      tree !== undefined,
+      `the platform should list its processes for this to prove anything: ${whyTheProcessTreeFailed() ?? 'no reason recorded'}`,
+    );
     // The keeper holding this run, which is the game's parent: other keepers on the machine belong
     // to other sessions' runs, and one from an older version is exactly what this is about.
     const keeper = tree.get(tree.get(game)?.parent ?? 0);
@@ -5612,8 +5622,10 @@ async function testAGameNoNoteNamesIsStoppedByItsNumber(): Promise<void> {
  *
  * The run is held by a keeper rather than by the server, and the keeper writes the exit into the
  * run's note as the game ends. Before, the run was the server's child: a `taskkill /T` of a real
- * server took a ninety-second run with it two seconds later. The game here quits with 7 after a few
- * seconds, so the code a later server reports can only be the one the keeper wrote.
+ * server took a ninety-second run with it two seconds later. The game quits with 7 once told to,
+ * after its survival has been checked, so the code a later server reports can only be the one the
+ * keeper wrote. Told rather than timed: a game that quit after six seconds had quit on its own by
+ * the time a slow process listing on a loaded Windows runner let the check look at it.
  */
 async function testARunOutlivesItsServersTree(): Promise<void> {
   const godotPath = resolveGodotPath();
@@ -5638,7 +5650,7 @@ async function testARunOutlivesItsServersTree(): Promise<void> {
     );
     writeFileSync(
       join(project, 'main.gd'),
-      'extends Node\n\n\nfunc _ready() -> void:\n\tget_tree().create_timer(6.0).timeout.connect(func() -> void: get_tree().quit(7))\n',
+      'extends Node\n\n\nfunc _process(_delta: float) -> void:\n\tif FileAccess.file_exists("res://quit_now"):\n\t\tget_tree().quit(7)\n',
     );
     writeFileSync(
       join(project, 'main.tscn'),
@@ -5666,6 +5678,7 @@ async function testARunOutlivesItsServersTree(): Promise<void> {
 
     second = new ServerProcess({ env });
     await second.initialize('regression-test');
+    writeFileSync(join(project, 'quit_now'), '');
     let answer: unknown = null;
     let said = '';
     for (let waited = 0; waited < 30_000; waited += 500) {
@@ -5718,7 +5731,10 @@ async function testACancelledCallEndsTheEngineItStarted(): Promise<void> {
   const server = new ServerProcess({ env: { GODOT_PATH: godotPath } });
   const ours = async (): Promise<number[]> => {
     const tree = await processTree();
-    assert.ok(tree !== undefined, 'the platform should list its processes for this to prove anything');
+    assert.ok(
+      tree !== undefined,
+      `the platform should list its processes for this to prove anything: ${whyTheProcessTreeFailed() ?? 'no reason recorded'}`,
+    );
     return [...tree].filter(([, one]) => one.command.includes(project)).map(([pid]) => pid);
   };
   let seen: number[] = [];

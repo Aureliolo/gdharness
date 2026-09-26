@@ -383,10 +383,6 @@ func _import_status_of(resource_path: String, import_file_path: String) -> Dicti
 	var status: Dictionary = {
 		"path": resource_path, "status": "up_to_date", "import_file_exists": true, "source_exists": true
 	}
-	if FileAccess.get_modified_time(resource_path) > FileAccess.get_modified_time(import_file_path):
-		status["status"] = "needs_reimport"
-		status["reason"] = "the source changed after it was imported"
-		return status
 
 	# The sidecar alone does not say the import is there: deleting the outputs under
 	# .godot/imported is the ordinary way to force one, and a resource whose output is gone was
@@ -402,21 +398,57 @@ func _import_status_of(resource_path: String, import_file_path: String) -> Dicti
 		status["missing_outputs"] = missing
 		return status
 
-	# A scene imported before the textures it uses were: it loads each image as it imports, so one
-	# imported ahead of them is built without them, and nothing about its own files says so. A second
-	# reimport started over one in progress did exactly that downstream, and 64 scenes that were
-	# untextured all read as up to date here.
-	var built_at: int = _oldest(outputs, import_file_path)
-	var before: Array[String] = []
-	for image: String in _images_of(resource_path):
-		if FileAccess.file_exists(image + ".import"):
-			if _newest(_outputs_of(image + ".import"), image + ".import") > built_at:
-				before.append(image)
-	if not before.is_empty():
+	# By content, as the editor judges it: the hash of the source the import recorded, against the
+	# file. By time, an installer that rewrote 31 images byte for byte made every one read as changed,
+	# and the editor, which compares the hash, rightly imported none of them.
+	var recorded: String = _recorded_source_md5(resource_path)
+	var changed: bool = (
+		FileAccess.get_md5(resource_path) != recorded
+		if not recorded.is_empty()
+		else FileAccess.get_modified_time(resource_path) > FileAccess.get_modified_time(import_file_path)
+	)
+	if changed:
 		status["status"] = "needs_reimport"
-		status["reason"] = "it was imported before the images it uses, so it was built without them"
-		status["imported_before"] = before
+		status["reason"] = "the source changed after it was imported"
+		return status
+
+	# A scene built without an image it names: it loads each one as it imports, so one imported
+	# before the image was is built without it. Read off what the imported scene depends on, not off
+	# file times: a texture a 3D scene uses is reimported compressed after the scene, so its outputs
+	# are always the newer, and 33 correct scenes read as stale when judged that way.
+	var without: Array[String] = []
+	var images: Array[String] = _images_of(resource_path)
+	if not images.is_empty():
+		var depended: PackedStringArray = ResourceLoader.get_dependencies(resource_path)
+		for image: String in images:
+			if FileAccess.file_exists(image + ".import") and not _names(depended, image):
+				without.append(image)
+	if not without.is_empty():
+		status["status"] = "needs_reimport"
+		status["reason"] = "it was imported without images it uses, which were not imported yet"
+		status["imported_without"] = without
 	return status
+
+
+## The hash of its source that [param resource_path]'s last import recorded, or "" when there is no
+## record: the editor keeps it beside the outputs, under the same base name with [code].md5[/code].
+static func _recorded_source_md5(resource_path: String) -> String:
+	var record: String = (
+		"res://.godot/imported/%s-%s.md5" % [resource_path.get_file(), resource_path.md5_text()]
+	)
+	var config: ConfigFile = ConfigFile.new()
+	if config.load(record) != OK:
+		return ""
+	return str(config.get_value("", "source_md5", ""))
+
+
+## Whether [param dependencies], as [method ResourceLoader.get_dependencies] lists them, include
+## [param path]; each entry may carry a uid and a type ahead of the path.
+static func _names(dependencies: PackedStringArray, path: String) -> bool:
+	for entry: String in dependencies:
+		if entry == path or entry.ends_with("::" + path):
+			return true
+	return false
 
 
 ## The files an import wrote, from its sidecar's [code]dest_files[/code]; empty when it lists none.
@@ -430,25 +462,6 @@ static func _outputs_of(import_file_path: String) -> Array[String]:
 		for one: Variant in listed:
 			outputs.append(str(one))
 	return outputs
-
-
-## When the earliest of [param outputs] was written, or [param fallback] when none is on disk.
-static func _oldest(outputs: Array[String], fallback: String) -> int:
-	var oldest: int = -1
-	for output: String in outputs:
-		if FileAccess.file_exists(output):
-			var at: int = FileAccess.get_modified_time(output)
-			oldest = at if oldest < 0 else mini(oldest, at)
-	return oldest if oldest >= 0 else FileAccess.get_modified_time(fallback)
-
-
-## When the latest of [param outputs] was written, or [param fallback] when none is on disk.
-static func _newest(outputs: Array[String], fallback: String) -> int:
-	var newest: int = -1
-	for output: String in outputs:
-		if FileAccess.file_exists(output):
-			newest = maxi(newest, FileAccess.get_modified_time(output))
-	return newest if newest >= 0 else FileAccess.get_modified_time(fallback)
 
 
 ## The image files a glTF scene refers to by path, resolved against the scene's own directory.
