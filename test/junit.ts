@@ -11,6 +11,7 @@ import {
   orphansPrinted,
   parseJUnit,
   RENDERED_AWAY_NOTE,
+  scriptErrorsPrinted,
   VALUE_NOT_RECOVERED_NOTE,
   whyNoReport,
   withActualsPrinted,
@@ -152,6 +153,57 @@ function testARunThatSaidNothingOfTheSortIsLeftAlone(): void {
  * statistics end its block on one line with the state written after them, and the run's totals
  * come back under `Overall Summary`.
  */
+/**
+ * The scripts gdUnit4 could not load, read off the lines it printed on 4.7.2 with v6.2.1 for a
+ * directory holding a suite with an undeclared identifier, one extending a class that does not
+ * exist, one with two faults and a suite that loads.
+ */
+function testScriptErrorsAreReadOffTheConsole(): void {
+  const printed = [
+    'Scanning for test suites in: res://test',
+    'Parse Error: Could not find base class "NoSuchBaseClass".',
+    'Failed to load script "res://test/deeper/missing_base_test.gd" with error "Parse error".',
+    'Script errors were detected during test discovery!',
+    '  Parse Error: Could not find base class "NoSuchBaseClass".',
+    '\tat res://test/deeper/missing_base_test.gd:1',
+    '  Parse Error: Identifier "undefined_thing" not declared in the current scope.',
+    '\tat res://test/parse_test.gd:5',
+    '  Parse Error: Cannot assign a value of type "String" as "int".',
+    '\tat res://test/two_faults_test.gd:5',
+    '  Parse Error: Function "not_a_function()" not found in base self.',
+    '\tat res://test/two_faults_test.gd:9',
+    'Abnormal exit with 105',
+    'Run dispose test resources',
+  ];
+  assert.deepEqual(scriptErrorsPrinted(printed), [
+    {
+      path: 'res://test/deeper/missing_base_test.gd',
+      line: 1,
+      message: 'Parse Error: Could not find base class "NoSuchBaseClass".',
+    },
+    {
+      path: 'res://test/parse_test.gd',
+      line: 5,
+      message: 'Parse Error: Identifier "undefined_thing" not declared in the current scope.',
+    },
+    {
+      path: 'res://test/two_faults_test.gd',
+      line: 5,
+      message: 'Parse Error: Cannot assign a value of type "String" as "int".',
+    },
+    {
+      path: 'res://test/two_faults_test.gd',
+      line: 9,
+      message: 'Parse Error: Function "not_a_function()" not found in base self.',
+    },
+  ]);
+  assert.deepEqual(
+    scriptErrorsPrinted(printed.filter((line) => !line.startsWith('Script errors'))),
+    [],
+    'the engine lines before the block are not read as its entries',
+  );
+}
+
 function testOrphansAreReadOffTheConsole(): void {
   const printed = [
     'Run Test Suite: res://test/guild_test.gd',
@@ -484,4 +536,5 @@ testMalformedReportsAreRefused();
 testARunThatFoundNothingIsNotAPass();
 testARunThatSaidNothingOfTheSortIsLeftAlone();
 testOrphansAreReadOffTheConsole();
+testScriptErrorsAreReadOffTheConsole();
 console.log('junit reader tests passed');

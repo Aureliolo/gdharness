@@ -302,6 +302,43 @@ export function whyNoReport(printed: readonly string[], asked: string): string |
   return printed.some((line) => NOTHING_RAN.test(line)) ? `no test cases found at ${asked}` : null;
 }
 
+/** One error in a script gdUnit4 could not load while looking for suites. */
+export interface ScriptError {
+  readonly path: string;
+  readonly line: number;
+  readonly message: string;
+}
+
+const DISCOVERY_FAILED = 'Script errors were detected during test discovery!';
+
+/**
+ * The script errors gdUnit4 met while looking for suites, read off what it printed.
+ *
+ * One suite that does not load stops the whole run before its first case: gdUnit4 exits 105,
+ * writes no report and runs none of the suites that did load. What it prints is the line above,
+ * then each error as its message and an `at` line naming the script and line.
+ */
+export function scriptErrorsPrinted(printed: readonly string[]): ScriptError[] {
+  const start = printed.findIndex((line) => line.includes(DISCOVERY_FAILED));
+  if (start < 0) {
+    return [];
+  }
+  const found: ScriptError[] = [];
+  let message: string | null = null;
+  for (const line of printed.slice(start + 1)) {
+    const at = /^\s*at (res:\/\/.+):(\d+)\s*$/.exec(line);
+    if (at !== null && message !== null) {
+      found.push({ path: at[1] ?? '', line: Number(at[2]), message });
+      message = null;
+    } else if (at === null && message === null && /^ {2}\S/.test(line)) {
+      message = line.trim();
+    } else {
+      break;
+    }
+  }
+  return found;
+}
+
 const ESCAPE = String.fromCharCode(0x1b);
 
 const LOCATION = `'[^'\\n]*' in \\S+:\\d+`;
