@@ -1204,6 +1204,30 @@ const SCAN_SETTLED_MS = 500;
  */
 const REIMPORT_TIMEOUT_MS = 300_000;
 
+/** The project_settings ops that write the bus layout rather than project.godot. */
+const AUDIO_BUS_OPS: ReadonlySet<string> = new Set([
+  'add_audio_bus',
+  'set_audio_bus_effect',
+  'set_audio_bus_volume',
+]);
+
+/**
+ * The settings whose value differs between two readings of project.godot, added and removed ones
+ * included, or null when either reading failed and nobody can say.
+ */
+function changedSettings(
+  before: ReadonlyMap<string, unknown> | null,
+  after: ReadonlyMap<string, unknown> | null,
+): string[] | null {
+  if (before === null || after === null) {
+    return null;
+  }
+  const names = new Set([...before.keys(), ...after.keys()]);
+  return [...names]
+    .filter((name) => JSON.stringify(before.get(name)) !== JSON.stringify(after.get(name)))
+    .sort();
+}
+
 /** The path, status and reason of each resource a get_import_status answer lists. */
 function importStatuses(payload: OperationParams): { path: string; status: string; reason?: string }[] {
   const listed = payload['resources'];
@@ -2151,6 +2175,11 @@ class GodotServer {
     if (ENGINE_PASSES[tool]?.[op] !== undefined) {
       return op === 'reimport' ? await this.handleReimport(args) : await this.handleRefreshUids(args);
     }
+    const settingsWrite =
+      tool === 'project_settings' && op !== 'get' ? HEADLESS_OPERATIONS[tool]?.[op] : undefined;
+    if (settingsWrite !== undefined) {
+      return await this.handleProjectSettingsWrite(op, settingsWrite, args);
+    }
     if (tool === 'project_import' && op === 'set_options') {
       return await this.handleSetImportOptions(args);
     }
@@ -2941,6 +2970,81 @@ class GodotServer {
    * unless the caller said not to. Written alone, they reach the import only when the editor's next
    * scan finds the sidecar changed.
    */
+  /** Whether the editor on the bridge has [param projectPath] open. */
+  private editorHasOpen(projectPath: string): boolean {
+    const open = this.godotBridge.getStatus().projectPath;
+    return (
+      this.godotBridge.isConnected() &&
+      open !== undefined &&
+      open !== '' &&
+      isSameDirectory(open, projectPath)
+    );
+  }
+
+  /**
+   * A project_settings write: to the file through a headless engine, as ever, and then taken up by
+   * the editor when one serves the project.
+   *
+   * Written to the file alone, the editor went on holding the old values, answered them when asked,
+   * and would write them back over the new ones the next time it saved the project settings. So the
+   * settings the write changed, read off the file before and after, are handed to the editor to take
+   * from the file; and a bus layout, which the editor holds in its audio server, is reloaded there.
+   */
+  private async handleProjectSettingsWrite(
+    op: string,
+    operation: string,
+    args: OperationParams,
+  ): Promise<ToolResponse> {
+    const project = this.project(args);
+    if (!project.ok) {
+      return project.response;
+    }
+    const projectPath = project.value.path;
+    const served = this.editorHasOpen(projectPath);
+    const before = served ? this.settingKeysOf(projectPath) : null;
+    const written = await this.headless(operation, args);
+    if (!served || written.isError === true) {
+      return written;
+    }
+    const answer = asParams(JSON.parse(written.content[0]?.text ?? '{}'));
+    if (AUDIO_BUS_OPS.has(op)) {
+      return this.jsonTextResponse({ ...answer, ...(await this.editorTakes('adopt_audio_bus_layout', {})) });
+    }
+    const changed = changedSettings(before, this.settingKeysOf(projectPath));
+    if (changed === null) {
+      return this.jsonTextResponse({
+        ...answer,
+        editorNote:
+          'project.godot could not be read on both sides of the write, so what it changed is unknown and the open editor was not told: it may still hold the old values and write them back the next time it saves. editor_launch restart loads the file.',
+      });
+    }
+    if (changed.length === 0) {
+      return written;
+    }
+    const taken = await this.editorTakes('adopt_project_settings', { settings: changed });
+    return this.jsonTextResponse({
+      ...answer,
+      ...taken,
+      ...(taken['editorNote'] === undefined ? { editorAdopted: changed } : {}),
+    });
+  }
+
+  /** The editor asked to take up what a write changed, and what to add to the answer about it. */
+  private async editorTakes(command: string, args: OperationParams): Promise<OperationParams> {
+    try {
+      await this.godotBridge.invokeTool(command, args);
+      return {};
+    } catch (error) {
+      const message = errorMessage(error);
+      const why = message.includes('Unknown tool')
+        ? 'runs an addon from before writes were handed to it'
+        : `could not take the change (${message})`;
+      return {
+        editorNote: `The open editor ${why}, so it still holds the old values, answers them when asked, and writes them back over the file the next time it saves. editor_launch restart loads the file and the addon this server ships.`,
+      };
+    }
+  }
+
   private async handleSetImportOptions(args: OperationParams): Promise<ToolResponse> {
     const project = this.project(args);
     if (!project.ok) {
@@ -3021,12 +3125,7 @@ class GodotServer {
       };
     }
 
-    const open = this.godotBridge.getStatus().projectPath;
-    const viaEditor =
-      this.godotBridge.isConnected() &&
-      open !== undefined &&
-      open !== '' &&
-      isSameDirectory(open, projectPath);
+    const viaEditor = this.editorHasOpen(projectPath);
     const extra: OperationParams = {};
     if (viaEditor) {
       const inEditor = await this.reimportInTheEditor(targets, timeoutMs);

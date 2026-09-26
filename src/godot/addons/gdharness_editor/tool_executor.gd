@@ -85,6 +85,8 @@ func _init_tools() -> void:
 		"reload_script": [_class_tools, "reload_script"],
 		# Settings, for a caller that asked the editor rather than the file on disk
 		"get_project_setting": [_settings_tools, "get_project_setting"],
+		"adopt_project_settings": [_settings_tools, "adopt_project_settings"],
+		"adopt_audio_bus_layout": [_settings_tools, "adopt_audio_bus_layout"],
 		# Resource tools
 		"create_resource": [_resource_tools, "create_resource"],
 		"modify_resource": [_resource_tools, "modify_resource"],

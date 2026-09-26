@@ -337,7 +337,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'project_settings',
     description:
-      'Reads or writes project.godot: settings, autoloads, the main scene, input actions, plugins and audio buses.',
+      "Reads or writes project.godot: settings, autoloads, the main scene, input actions, plugins and audio buses. A write with an editor open on the project is handed to the editor, which takes the settings the write changed from the file (named under editorAdopted), or reloads the bus layout, so it answers the new values and does not save the old ones back over them. editorNote is an editor that could not take the write, one on an addon from before this, which still holds the old values until editor_launch restart. An enabled plugin's code still loads on the editor's next start.",
     parameters: {
       projectPath: PROJECT_PATH,
       setting: { type: 'string', description: 'Setting path, such as "display/window/size/viewport_width".' },
