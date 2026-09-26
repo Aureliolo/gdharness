@@ -3443,7 +3443,16 @@ async function ticksWithin(attempt: Editor['attempt'], project: string, what: st
       property: 'ticks',
     });
     said = asked.text;
-    const value = asked.ok ? get(JSON.parse(asked.text), 'value') : 0;
+    let value: unknown = 0;
+    if (asked.ok) {
+      try {
+        value = get(JSON.parse(asked.text), 'value');
+      } catch {
+        assert.fail(
+          `${what}: runtime_inspect answered with text that is not JSON: ${JSON.stringify(asked.text)}`,
+        );
+      }
+    }
     ticked = typeof value === 'number' ? value : 0;
     if (ticked === 0) await delay(500);
   }
