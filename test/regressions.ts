@@ -4898,9 +4898,8 @@ async function testALaunchedEditorsConsoleIsReadBeforeItConnects(): Promise<void
  * or an argv that stopped passing it, fails on the case built for it rather than as an empty
  * console somebody reads as a quiet editor.
  *
- * Headless, because this is about what the editor prints and not about what it shows, and through
- * `editorArguments` rather than a list written out here, since an argv written twice is an argv
- * that can differ from the one the server spawns.
+ * Through `editorArguments` rather than a list written out here, since an argv written twice is an
+ * argv that can differ from the one the server spawns.
  *
  * The project carries an editor plugin that prints on load. The engine's own first line would pass
  * on any engine start at all, including one that never became an editor.
@@ -5882,12 +5881,7 @@ async function testAnEditorWritesItsConsoleWhereTheServerLooks(): Promise<void> 
     clearEditorLog(project);
     const editor = spawn(
       godotPath,
-      [
-        ...editorArguments(project, { lsp: 0, dap: 0 }, editorLogPath(project)),
-        '--headless',
-        '--quit-after',
-        '2000',
-      ],
+      [...editorArguments(project, { lsp: 0, dap: 0 }, editorLogPath(project)), '--quit-after', '2000'],
       { stdio: 'ignore' },
     );
     const pid = editor.pid ?? 0;
@@ -8023,8 +8017,10 @@ function testRunArgumentsLeaveTheLocalDebuggerOff(): void {
   // per machine rather than per editor, and the second editor open otherwise binds neither. The
   // log file is the only way anything reads what an editor prints, since its console reaches no
   // plugin: an editor spawned without it is one whose startup nobody can see.
+  // Headless, so opening or restarting one puts no window on the desktop of whoever runs it.
   assert.deepEqual(editorArguments('/p', { lsp: 6005, dap: 6006 }, '/p/.godot/gdharness-editor.log'), [
     '-e',
+    '--headless',
     '--path',
     '/p',
     '--lsp-port',

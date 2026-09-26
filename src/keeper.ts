@@ -27,16 +27,20 @@ import { recordRunEnded, writeRunRecord } from './run-record.js';
 /**
  * The target started detached, so it is in no job object and no process group of this process;
  * its streams go to [param output], the transcript for a run and nowhere otherwise, since a pipe
- * with no reader fills and then blocks the writer.
+ * with no reader fills and then blocks the writer. [param hidden] for the editor, which is headless
+ * and so opens no window, but whose console an engine built as a console program would show; never
+ * for a game, whose window is what it is run for.
  */
 async function startDetached(
   spec: SentSpec,
   output: number | 'ignore',
+  hidden: boolean,
 ): Promise<{ child: ChildProcess; pid: number } | { error: string }> {
   return await new Promise((resolve) => {
     const child = spawn(spec.command, [...spec.args], {
       stdio: ['ignore', output, output],
       detached: true,
+      windowsHide: hidden,
       env: withChanges(process.env, spec.envChanges),
     });
     child.once('error', (error: Error) => {
@@ -55,7 +59,7 @@ async function startDetached(
 async function launch(): Promise<void> {
   const spec = await receivedSpec();
   if (spec.run === undefined) {
-    const started = await startDetached(spec, 'ignore');
+    const started = await startDetached(spec, 'ignore', true);
     if ('error' in started) {
       process.stdout.write(`error ${started.error}\n`);
     } else {
@@ -107,7 +111,7 @@ async function keep(): Promise<void> {
   const transcript = openSync(run.transcript, 'a');
   let started: Awaited<ReturnType<typeof startDetached>>;
   try {
-    started = await startDetached(spec, transcript);
+    started = await startDetached(spec, transcript, false);
   } finally {
     // The game holds its own copy from here on.
     closeSync(transcript);
