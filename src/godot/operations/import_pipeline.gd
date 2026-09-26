@@ -4,17 +4,45 @@ const Read = preload("reading.gd")
 const FileWalk = preload("file_walk.gd")
 const Log = preload("logger.gd")
 
+## What the engine imports with no tool outside it, for finding what has not been imported yet;
+## everything imported already is found by its sidecar whatever its extension.
 const IMPORTABLE_EXTENSIONS: Array[String] = [
-	"png", "jpg", "jpeg", "webp", "svg", "wav", "mp3", "ogg", "ttf", "otf", "glb", "gltf", "fbx", "obj"
+	"png",
+	"jpg",
+	"jpeg",
+	"webp",
+	"svg",
+	"bmp",
+	"tga",
+	"exr",
+	"hdr",
+	"dds",
+	"ktx",
+	"wav",
+	"mp3",
+	"ogg",
+	"ttf",
+	"otf",
+	"ttc",
+	"otc",
+	"woff",
+	"woff2",
+	"pfb",
+	"pfm",
+	"fnt",
+	"font",
+	"glb",
+	"gltf",
+	"fbx",
+	"obj",
+	"dae",
 ]
-
-## How many resources a scene's dependencies are followed through before the walk stops: a scene's
-## materials and what they use are a handful, and a project that references its way around a cycle
-## is not walked for ever.
-const DEPENDENCY_WALK_LIMIT: int = 200
+const EDITOR_DIRECTORY: String = "res://.godot/editor"
+const EDITOR_CACHE_PREFIX: String = "filesystem_cache"
 
 var _log: Log
 var _files: FileWalk = FileWalk.new()
+var _sidecar_md5s: Variant = null
 
 
 func _init(p_log: Log) -> void:
@@ -34,7 +62,9 @@ func get_import_status(params: Dictionary) -> Dictionary:
 	)
 
 	var resources: Array[Dictionary] = []
-	var summary: Dictionary = {"total": 0, "needs_reimport": 0, "up_to_date": 0, "missing_source": 0}
+	var summary: Dictionary = {
+		"total": 0, "needs_reimport": 0, "failed": 0, "up_to_date": 0, "missing_source": 0
+	}
 
 	if not resource_path.is_empty():
 		var full_path: String = resource_path
@@ -45,7 +75,17 @@ func get_import_status(params: Dictionary) -> Dictionary:
 		resources.append(status)
 		_tally(summary, status)
 	else:
+		# Sources by extension, for what has never been imported, and sidecars, for what was imported
+		# from a type the list does not name and for a sidecar whose source is gone.
+		var found: Dictionary[String, bool] = {}
 		for res_path: String in _files.find_files_with_extensions("res://", IMPORTABLE_EXTENSIONS):
+			found[res_path] = true
+		for sidecar: String in _files.find_files_with_extensions("res://", ["import"]):
+			found[sidecar.trim_suffix(".import")] = true
+		var paths: Array[String] = []
+		paths.assign(found.keys())
+		paths.sort()
+		for res_path: String in paths:
 			var status: Dictionary = _import_status_of(res_path, res_path + ".import")
 
 			if include_up_to_date or status["status"] != "up_to_date":
@@ -372,7 +412,7 @@ func _import_status_of(resource_path: String, import_file_path: String) -> Dicti
 		return {
 			"path": resource_path,
 			"status": "missing_source",
-			"import_file_exists": false,
+			"import_file_exists": FileAccess.file_exists(import_file_path),
 			"source_exists": false
 		}
 
@@ -381,6 +421,7 @@ func _import_status_of(resource_path: String, import_file_path: String) -> Dicti
 		return {
 			"path": resource_path,
 			"status": "needs_reimport",
+			"reason": "it has not been imported",
 			"import_file_exists": false,
 			"source_exists": true
 		}
@@ -389,33 +430,85 @@ func _import_status_of(resource_path: String, import_file_path: String) -> Dicti
 		"path": resource_path, "status": "up_to_date", "import_file_exists": true, "source_exists": true
 	}
 
+	# The checks are the ones EditorFileSystem::_test_for_reimport makes, in its order, so a resource
+	# reads as needing an import exactly when the editor's next scan would import it.
+	var sidecar: ConfigFile = ConfigFile.new()
+	var stale: Dictionary = (
+		_stale("its import file cannot be read")
+		if sidecar.load(import_file_path) != OK
+		else _sidecar_staleness(resource_path, import_file_path, sidecar)
+	)
+	var kept: bool = str(sidecar.get_value("remap", "importer", "")) in ["keep", "skip"]
+	if stale.is_empty() and not kept:
+		stale = _import_staleness(resource_path, sidecar)
+	status.merge(stale, true)
+	return status
+
+
+static func _stale(reason: String) -> Dictionary:
+	return {"status": "needs_reimport", "reason": reason}
+
+
+## What the editor reads off the sidecar before looking at the import: an answer for a stale or
+## failed resource, empty otherwise.
+func _sidecar_staleness(resource_path: String, import_file_path: String, sidecar: ConfigFile) -> Dictionary:
+	# The editor compares the sidecar with the one it last imported from before reading anything in
+	# it, so an option set without a reimport is imported on its next scan, and not before.
+	var imported_from: String = _imported_sidecar_md5s().get(resource_path, "")
+	if not imported_from.is_empty() and FileAccess.get_md5(import_file_path) != imported_from:
+		return _stale("its import file changed after it was imported, as setting an option does")
+
+	# A failed import is never tried again on its own: the editor skips it to avoid a loop of
+	# reimports, so it stays failed after its source is fixed until something asks for a reimport.
+	var valid: Variant = sidecar.get_value("remap", "valid", true)
+	if valid is bool and not valid:
+		return {
+			"status": "failed",
+			"reason": "its last import failed, and the editor does not try a failed import again on its own",
+		}
+	return {}
+
+
+## Whether the import itself is still the one its sidecar and source describe: an answer for a
+## stale resource, empty for a current one.
+static func _import_staleness(resource_path: String, sidecar: ConfigFile) -> Dictionary:
+	if not sidecar.has_section_key("remap", "uid"):
+		return _stale("its import file has no uid, which the import writes")
+
 	# The sidecar alone does not say the import is there: deleting the outputs under
 	# .godot/imported is the ordinary way to force one, and a resource whose output is gone was
 	# answered as current, which is what a reimport is then skipped on.
-	var outputs: Array[String] = _outputs_of(import_file_path)
+	var outputs: Array[String] = _outputs_of(sidecar)
 	var missing: Array[String] = []
 	for output: String in outputs:
 		if not FileAccess.file_exists(output):
 			missing.append(output)
 	if not missing.is_empty():
-		status["status"] = "needs_reimport"
-		status["reason"] = "its imported output is not on disk"
-		status["missing_outputs"] = missing
-		return status
+		var gone: Dictionary = _stale("its imported output is not on disk")
+		gone["missing_outputs"] = missing
+		return gone
+
+	var source_file: String = str(sidecar.get_value("deps", "source_file", ""))
+	if not source_file.is_empty() and source_file != resource_path:
+		return _stale("its import file was written for " + source_file)
 
 	# By content, as the editor judges it: the hash of the source the import recorded, against the
 	# file. By time, an installer that rewrote 31 images byte for byte made every one read as changed,
 	# and the editor, which compares the hash, rightly imported none of them.
-	var recorded: String = _recorded_source_md5(resource_path)
-	var changed: bool = (
-		FileAccess.get_md5(resource_path) != recorded
-		if not recorded.is_empty()
-		else FileAccess.get_modified_time(resource_path) > FileAccess.get_modified_time(import_file_path)
-	)
-	if changed:
-		status["status"] = "needs_reimport"
-		status["reason"] = "the source changed after it was imported"
-		return status
+	var recorded: Dictionary = _recorded_md5s(resource_path)
+	var recorded_source: String = recorded.get("source_md5", "")
+	if recorded_source.is_empty():
+		return _stale("its import recorded no hash of its source")
+	if FileAccess.get_md5(resource_path) != recorded_source:
+		return _stale("the source changed after it was imported")
+
+	var recorded_outputs: String = recorded.get("dest_md5", "")
+	if (
+		not outputs.is_empty()
+		and not recorded_outputs.is_empty()
+		and _md5_of_all(outputs) != recorded_outputs
+	):
+		return _stale("its imported output changed after it was imported")
 
 	# A scene built without an image it names: it loads each one as it imports, so one imported
 	# before the image was is built without it. Read off what the imported scene depends on, not off
@@ -429,28 +522,102 @@ func _import_status_of(resource_path: String, import_file_path: String) -> Dicti
 	# with one using other images entirely, which is the scene it was meant to build.
 	var without: Array[String] = []
 	var images: Array[String] = _images_of(resource_path)
-	if not images.is_empty() and not _shaped_by_a_script(import_file_path):
+	if not images.is_empty() and not _shaped_by_a_script(sidecar):
 		var depended: Dictionary[String, bool] = _depended_on(resource_path)
 		for image: String in images:
 			if FileAccess.file_exists(image + ".import") and not depended.has(image):
 				without.append(image)
-	if not without.is_empty():
-		status["status"] = "needs_reimport"
-		status["reason"] = "it was imported without images it uses, which were not imported yet"
-		status["imported_without"] = without
-	return status
+	if without.is_empty():
+		return {}
+	var built: Dictionary = _stale("it was imported without images it uses, which were not imported yet")
+	built["imported_without"] = without
+	return built
 
 
-## The hash of its source that [param resource_path]'s last import recorded, or "" when there is no
-## record: the editor keeps it beside the outputs, under the same base name with [code].md5[/code].
-static func _recorded_source_md5(resource_path: String) -> String:
+## The hashes [param resource_path]'s last import recorded, [code]source_md5[/code] of its source
+## and [code]dest_md5[/code] of its outputs, empty when there is no record: the editor keeps them
+## beside the outputs, under the same base name with [code].md5[/code].
+static func _recorded_md5s(resource_path: String) -> Dictionary:
 	var record: String = (
 		"res://.godot/imported/%s-%s.md5" % [resource_path.get_file(), resource_path.md5_text()]
 	)
 	var config: ConfigFile = ConfigFile.new()
 	if config.load(record) != OK:
+		return {}
+	return {
+		"source_md5": str(config.get_value("", "source_md5", "")),
+		"dest_md5": str(config.get_value("", "dest_md5", "")),
+	}
+
+
+## One md5 over the contents of [param paths] in turn, as [code]FileAccess::get_multiple_md5[/code]
+## computes the [code]dest_md5[/code] an import records.
+static func _md5_of_all(paths: Array[String]) -> String:
+	var hashing: HashingContext = HashingContext.new()
+	if hashing.start(HashingContext.HASH_MD5) != OK:
 		return ""
-	return str(config.get_value("", "source_md5", ""))
+	for path: String in paths:
+		var file: FileAccess = FileAccess.open(path, FileAccess.READ)
+		if file == null:
+			continue
+		while not file.eof_reached():
+			var chunk: PackedByteArray = file.get_buffer(32768)
+			if chunk.is_empty():
+				break
+			if hashing.update(chunk) != OK:
+				return ""
+	return hashing.finish().hex_encode()
+
+
+## The md5 of each resource's sidecar as the editor last imported it, keyed by path, from the cache
+## the editor writes under .godot/editor; empty when there is no cache or it cannot be read.
+func _imported_sidecar_md5s() -> Dictionary:
+	if _sidecar_md5s != null:
+		return _sidecar_md5s
+	var found: Dictionary = {}
+	_sidecar_md5s = found
+	var cache: String = _editor_cache_path()
+	var file: FileAccess = null if cache.is_empty() else FileAccess.open(cache, FileAccess.READ)
+	if file == null:
+		return found
+	# The first line is the import settings version; then a "::<dir>::<time>" line opens each
+	# directory, and each file line is nine fields split by "::", the last holding the file's
+	# dependencies, which may contain the splitter. The eighth field is "<>"-separated, with the
+	# sidecar's md5 sixth.
+	var directory: String = "res://"
+	var first: bool = true
+	while not file.eof_reached():
+		var line: String = file.get_line().strip_edges()
+		if first:
+			first = false
+			continue
+		if line.is_empty():
+			continue
+		if line.begins_with("::"):
+			var opened: PackedStringArray = line.split("::")
+			if opened.size() == 3:
+				directory = opened[1]
+			continue
+		var fields: PackedStringArray = line.split("::", true, 8)
+		if fields.size() < 9:
+			continue
+		var slices: PackedStringArray = fields[7].split("<>")
+		if slices.size() >= 7 and not slices[5].is_empty():
+			found[directory.path_join(fields[0])] = slices[5]
+	return found
+
+
+## The editor's filesystem cache, the newest version of it when an engine upgrade has left an older
+## one beside it, or "" when the project has none. Its name carries a format version that the
+## engine raises when the layout changes: 4.7.2 writes filesystem_cache10.
+static func _editor_cache_path() -> String:
+	var newest: int = -1
+	if not DirAccess.dir_exists_absolute(EDITOR_DIRECTORY):
+		return ""
+	for name: String in DirAccess.get_files_at(EDITOR_DIRECTORY):
+		if name.begins_with(EDITOR_CACHE_PREFIX) and name.trim_prefix(EDITOR_CACHE_PREFIX).is_valid_int():
+			newest = maxi(newest, name.trim_prefix(EDITOR_CACHE_PREFIX).to_int())
+	return "" if newest < 0 else EDITOR_DIRECTORY.path_join(EDITOR_CACHE_PREFIX + str(newest))
 
 
 ## The path of one entry [method ResourceLoader.get_dependencies] lists, past any uid and type.
@@ -459,41 +626,32 @@ static func _path_of(entry: String) -> String:
 	return entry if at < 0 else entry.substr(at + 2)
 
 
-## Every path [param resource_path] depends on, through the resources it depends on in turn, as far
-## as [constant DEPENDENCY_WALK_LIMIT] resources; a set, keyed by path.
+## Every path [param resource_path] depends on, through the resources it depends on in turn; a set,
+## keyed by path.
 static func _depended_on(resource_path: String) -> Dictionary[String, bool]:
 	var found: Dictionary[String, bool] = {}
 	var pending: Array[String] = [resource_path]
-	var walked: int = 0
-	while not pending.is_empty() and walked < DEPENDENCY_WALK_LIMIT:
+	# Every path is followed once, which ends the walk and survives a cycle; a cap or a list of
+	# extensions would leave out a material behind a long chain or in a saved .mesh.
+	while not pending.is_empty():
 		var next: String = pending.pop_back()
-		walked += 1
 		for entry: String in ResourceLoader.get_dependencies(next):
 			var path: String = _path_of(entry)
-			if found.has(path):
-				continue
-			found[path] = true
-			# Only what can hold further references: an image or a sound depends on nothing.
-			if path.get_extension().to_lower() in ["tres", "res", "tscn", "scn", "material"]:
+			if not found.has(path):
+				found[path] = true
 				pending.append(path)
 	return found
 
 
-## Whether the import of the file [param import_file_path] describes runs a post-import script.
-static func _shaped_by_a_script(import_file_path: String) -> bool:
-	var config: ConfigFile = ConfigFile.new()
-	if config.load(import_file_path) != OK:
-		return false
-	return not str(config.get_value("params", "import_script/path", "")).is_empty()
+## Whether the import [param sidecar] describes runs a post-import script.
+static func _shaped_by_a_script(sidecar: ConfigFile) -> bool:
+	return not str(sidecar.get_value("params", "import_script/path", "")).is_empty()
 
 
 ## The files an import wrote, from its sidecar's [code]dest_files[/code]; empty when it lists none.
-static func _outputs_of(import_file_path: String) -> Array[String]:
-	var config: ConfigFile = ConfigFile.new()
+static func _outputs_of(sidecar: ConfigFile) -> Array[String]:
 	var outputs: Array[String] = []
-	if config.load(import_file_path) != OK:
-		return outputs
-	var listed: Variant = config.get_value("deps", "dest_files", [])
+	var listed: Variant = sidecar.get_value("deps", "dest_files", [])
 	if listed is Array:
 		for one: Variant in listed:
 			outputs.append(str(one))
