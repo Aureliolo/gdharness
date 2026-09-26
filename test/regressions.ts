@@ -12,6 +12,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
   symlinkSync,
   utimesSync,
   writeFileSync,
@@ -185,6 +186,7 @@ import { namedType, renderToolsMarkdown } from '../src/tool-reference.js';
 import { CACHE_MS, cacheFile, isNewer, registryFor, UpdateCheck } from '../src/update-check.js';
 import { asArray, asNumber, get, text } from './support/json.js';
 import { isRecord, type JsonRpcMessage, parseTextContent, textOf } from './support/json-rpc.js';
+import { solidPng } from './support/png.js';
 import { reservePort, ServerProcess } from './support/server.js';
 import { reportUnswept, sweep, sweepingFor } from './support/sweep.js';
 
@@ -7263,7 +7265,7 @@ function testTheCureIsWrittenWhole(): void {
   ];
   // What the tree holds today and not a comfortable minimum, so one place going quiet lowers this
   // in the same change and somebody confirms it was meant.
-  assert.equal(offered.length, 29, `the places offering a remedy should all be found, not ${offered.length}`);
+  assert.equal(offered.length, 30, `the places offering a remedy should all be found, not ${offered.length}`);
 
   // Across whitespace, because a rendered file wraps where the source did not and a sentence that
   // breaks at "the" is the same sentence. Change, edit and touch, because the claim is about what
@@ -10136,6 +10138,126 @@ async function testRefreshingUidsMakesTheSidecarAndWritesNoScene(): Promise<void
         scene,
         'no scene is rewritten, header and uid included',
       );
+    } finally {
+      await server.stop();
+    }
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * project_import reimport reimports, without an editor, through the engine's own import pass.
+ *
+ * It answered "requested" and did nothing, and set_options said reimport_triggered over a sidecar
+ * it had only written. The pass reimports only what it judges stale, and it never tries a failed
+ * import again, so each case here is one the pass would skip on its own: a failed import whose
+ * source has since been fixed, and a current resource reimported with force, once with the editor's
+ * filesystem cache and once without it, since the two reach the reimport by different checks.
+ * The output's time is read before and after, because an answer built from a status read alone
+ * would pass on a resource nothing touched.
+ */
+async function testAReimportReimportsThroughTheEngine(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('reimport regression skipped (Godot not found)');
+    return;
+  }
+
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-reimport-'));
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Reimport"\n',
+    );
+    writeFileSync(join(project, 'good.png'), solidPng(40, 160, 40));
+    writeFileSync(join(project, 'broken.png'), 'not an image yet');
+
+    const server = new ServerProcess({ env: { GODOT_PATH: godotPath } });
+    try {
+      await server.initialize('regression-test');
+      const call = async (args: Record<string, unknown>): Promise<unknown> =>
+        parseTextContent(
+          await server.request(
+            'tools/call',
+            { name: 'project_import', arguments: { projectPath: project, ...args } },
+            ENGINE_CALL_TIMEOUT_MS,
+          ),
+        );
+      const outputOf = (resource: string): string => {
+        const sidecar = readFileSync(join(project, `${resource}.import`), 'utf8');
+        const path = /^path="res:\/\/([^"]+)"/m.exec(sidecar)?.[1];
+        assert.ok(path !== undefined, `${resource} should name its output: ${sidecar}`);
+        return join(project, path);
+      };
+
+      // Nothing imported yet: the pass imports what it has never seen, and says what failed.
+      const first = await call({ op: 'reimport' });
+      assert.equal(get(first, 'via'), 'engine', JSON.stringify(first));
+      assert.deepEqual(asArray(get(first, 'reimported')), ['res://good.png'], JSON.stringify(first));
+      assert.equal(
+        get(first, 'notReimported', 0, 'status'),
+        'failed',
+        `the image that is not one should be reported failed: ${JSON.stringify(first)}`,
+      );
+
+      // Fixed, which the editor never retries on its own.
+      writeFileSync(join(project, 'broken.png'), solidPng(160, 40, 40));
+      const fixed = await call({ op: 'reimport' });
+      assert.deepEqual(
+        asArray(get(fixed, 'reimported')),
+        ['res://broken.png'],
+        `a failed import whose source was fixed should be reimported: ${JSON.stringify(fixed)}`,
+      );
+      assert.deepEqual(asArray(get(fixed, 'notReimported')), [], JSON.stringify(fixed));
+
+      const nothing = await call({ op: 'reimport' });
+      assert.deepEqual(asArray(get(nothing, 'reimported')), [], JSON.stringify(nothing));
+      assert.match(String(get(nothing, 'note')), /Nothing needed reimporting/, JSON.stringify(nothing));
+
+      // Current, with and then without the cache.
+      const goodOutput = outputOf('good.png');
+      for (const cached of [true, false]) {
+        if (!cached) {
+          const editorDir = join(project, '.godot', 'editor');
+          const caches = readdirSync(editorDir).filter((name) => name.startsWith('filesystem_cache'));
+          assert.ok(
+            caches.length > 0,
+            `the pass should have written the cache: ${readdirSync(editorDir).join(', ')}`,
+          );
+          for (const cache of caches) {
+            rmSync(join(editorDir, cache));
+          }
+        }
+        const past = new Date(Date.now() - 60_000);
+        utimesSync(goodOutput, past, past);
+        const forced = await call({ op: 'reimport', resourcePath: 'good.png', force: true });
+        assert.deepEqual(
+          asArray(get(forced, 'reimported')),
+          ['res://good.png'],
+          `a current resource reimported with force (cache ${cached}): ${JSON.stringify(forced)}`,
+        );
+        assert.ok(
+          statSync(goodOutput).mtimeMs > past.getTime() + 1000,
+          `the import should have rewritten ${goodOutput} (cache ${cached})`,
+        );
+      }
+
+      // An option, applied by the reimport that follows it.
+      const set = await call({
+        op: 'set_options',
+        resourcePath: 'good.png',
+        options: { 'compress/mode': 1 },
+      });
+      assert.deepEqual(asArray(get(set, 'updated_options')), ['compress/mode'], JSON.stringify(set));
+      assert.deepEqual(asArray(get(set, 'reimport', 'reimported')), ['res://good.png'], JSON.stringify(set));
+      const kept = readFileSync(join(project, 'good.png.import'), 'utf8');
+      assert.match(kept, /^compress\/mode=1$/m, `the import should keep the option it was given:\n${kept}`);
+      const current = await call({ op: 'status', resourcePath: 'good.png' });
+      assert.equal(get(current, 'resources', 0, 'status'), 'up_to_date', JSON.stringify(current));
     } finally {
       await server.stop();
     }
@@ -17154,7 +17276,7 @@ function testEveryDispatchedNameExistsOnBothSides(): void {
     'src/godot/operations/godot_operations.gd',
     /^\t\t"([a-z_]+)":$/gm,
     'engine operations',
-    31,
+    30,
   );
   for (const [tool, operations] of Object.entries(HEADLESS_OPERATIONS)) {
     for (const [op, operation] of Object.entries(operations)) {
@@ -19681,6 +19803,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnAnnotatedDeclarationIsStillADeclaration,
   testAStructureReadDescribesTheScriptItRead,
   testRefreshingUidsMakesTheSidecarAndWritesNoScene,
+  testAReimportReimportsThroughTheEngine,
   testWhoIsHoldingAPortIsAskable,
   testWhatTheEditorSavedAwayIsReportedTheSameWay,
   testARestartSaysWhatTheEditorDropped,

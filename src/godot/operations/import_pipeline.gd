@@ -136,7 +136,6 @@ func set_import_options(params: Dictionary) -> Dictionary:
 		resource_path = "res://" + resource_path
 
 	var options: Dictionary = params.get("options", {})
-	var do_reimport: bool = Read.as_bool(params.get("reimport", true), true)
 
 	_log.info("Setting import options for: " + resource_path)
 
@@ -155,56 +154,28 @@ func set_import_options(params: Dictionary) -> Dictionary:
 	var updated_keys: Array[String] = []
 	for key: Variant in options:
 		var name: String = str(key)
-		config.set_value("params", name, options[key])
+		var value: Variant = _as_option(options[key], config.get_value("params", name, null))
+		config.set_value("params", name, value)
 		updated_keys.append(name)
-		_log.debug("Set " + name + " = " + str(options[key]))
+		_log.debug("Set " + name + " = " + str(value))
 
 	err = config.save(import_file_path)
 	if err != OK:
 		return _log.failure("Failed to save import file: " + str(err))
 
-	var result: Dictionary = {
-		"resource_path": resource_path, "updated_options": updated_keys, "reimport_triggered": do_reimport
-	}
-
-	# A headless engine has no importer to run, so the .import file is as far as this goes.
-	if do_reimport:
-		result["note"] = "Import file updated. Run the editor or use 'reimport_resource' to apply changes."
-
-	return result
+	# The reimport that applies them is the server's, through the editor or the engine's import.
+	return {"resource_path": resource_path, "updated_options": updated_keys}
 
 
-# Reimport a resource or all resources
-func reimport_resource(params: Dictionary) -> Dictionary:
-	var resource_path: String = str(params.get("resource_path", ""))
-	var force: bool = Read.as_bool(params.get("force", false))
-
-	_log.info(
-		(
-			"Reimporting"
-			+ (" resource: " + resource_path if not resource_path.is_empty() else " all modified resources")
-		)
-	)
-
-	# A full reimport is editor work; headless can only report what the state is.
-	var result: Dictionary = {
-		"status": "requested",
-		"resource_path": resource_path if not resource_path.is_empty() else "all",
-		"force": force,
-		"note": "Reimport in headless mode is limited. For full reimport, open the project in the editor."
-	}
-
-	if not resource_path.is_empty():
-		var full_path: String = resource_path
-		if not full_path.begins_with("res://"):
-			full_path = "res://" + full_path
-
-		if not FileAccess.file_exists(full_path):
-			return _log.failure("Resource file does not exist: " + full_path)
-
-		result["current_status"] = _import_status_of(full_path, full_path + ".import")["status"]
-
-	return result
+## [param given] as the option holds it. Every JSON number arrives as a float, and an enum option
+## such as compress/mode written as 1.0 is kept that way by the import, so a whole number becomes
+## an int unless the option already holds a float.
+static func _as_option(given: Variant, held: Variant) -> Variant:
+	if given is float and not held is float:
+		var number: float = given
+		if number == floorf(number):
+			return int(number)
+	return given
 
 
 # List export presets

@@ -118,8 +118,6 @@ func _run(operation: String, params: Dictionary) -> Dictionary:
 			payload = ImportPipeline.new(_log).get_import_options(params)
 		"set_import_options":
 			payload = ImportPipeline.new(_log).set_import_options(params)
-		"reimport_resource":
-			payload = ImportPipeline.new(_log).reimport_resource(params)
 		"list_export_presets":
 			payload = ImportPipeline.new(_log).list_export_presets(params)
 		"validate_project":
