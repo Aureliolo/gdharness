@@ -110,7 +110,9 @@ that is running, and the project on disk. ${TOOL_SPECS.length} tools, named \`do
 | A picture, for a person who asked to see one | \`runtime_capture\` |
 
 These need the runtime autoload, which \`gdharness setup\` registers. \`runtime_capture\` needs a
-window and refuses headless rather than handing back the last frame anything drew.
+window and refuses headless rather than handing back the last frame anything drew. On Windows a
+windowed run this server starts is on a desktop of its own, where it draws and can be captured but
+never shows or takes the keyboard.
 
 The autoload reads these settings and no others. \`${BIND_ADDRESS_SETTING}\`
 is \`127.0.0.1\` and should stay there: the command set includes \`call_method\`, \`set_property\`
@@ -162,7 +164,7 @@ them. \`editor_rescan\` asks it to scan and names any class it still cannot reso
 \`unseenByEditor\`: its walk skips a file a headless engine has already imported, so the
 declaration and the cache can both be right while the editor stays blind to it. Rescan again on
 its own, which is the measured cure and needs no change to the declaring script; \`editor_launch
-restart\` also does it and costs a window.
+restart\` also does it and costs a restart of the editor.
 
 The scan writes \`.godot/global_script_class_cache.cfg\` from the list the editor is holding, so
 a class it cannot resolve would go out of that file with it. The answer names that loss under
