@@ -21,6 +21,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
+import { inflateSync } from 'node:zlib';
 import { WebSocket } from 'ws';
 import { serviceDidNotAnswer } from '../scripts/audit-production.js';
 import { pullRequestNumbers, shipsToUsers } from '../scripts/release-notes.js';
@@ -251,6 +252,21 @@ function connectFake(bridge: ReturnType<typeof createBridge>, socket: FakeSocket
 /** The hello an editor sends once connected, which is where it says whose editor it is. */
 function saysHello(socket: FakeSocket, projectPath: string): void {
   socket.emit('message', Buffer.from(JSON.stringify({ type: 'godot_ready', project_path: projectPath })));
+}
+
+/**
+ * Why a windowed engine may not run here, or null when it may. Only CI runs one: on a developer's
+ * machine the window opens on their desktop and takes the foreground, and the owner ruled that
+ * development never shows windows. `GDHARNESS_ALLOW_WINDOWS` opts a machine in.
+ */
+function windowedRunRefused(): string | null {
+  if (!process.env['CI'] && !process.env['GDHARNESS_ALLOW_WINDOWS']) {
+    return 'windowed runs are left to CI, so no window opens on a desktop; GDHARNESS_ALLOW_WINDOWS runs them here';
+  }
+  if (resolveHeadless(undefined, { platform: process.platform, variables: process.env })) {
+    return 'no display for a windowed run';
+  }
+  return null;
 }
 
 function resolveGodotPath(): string | null {
@@ -12629,8 +12645,9 @@ async function testAKeyDoesNotChooseFromAnOpenedMenu(): Promise<void> {
     console.log('opened menu regression skipped (Godot not found)');
     return;
   }
-  if (resolveHeadless(undefined, { platform: process.platform, variables: process.env })) {
-    console.log('opened menu regression skipped (no display for a windowed run)');
+  const refused = windowedRunRefused();
+  if (refused !== null) {
+    console.log(`opened menu regression skipped (${refused})`);
     return;
   }
   const held: { game: ChildProcess | null } = { game: null };
@@ -12809,6 +12826,128 @@ async function testAKeyDoesNotChooseFromAnOpenedMenu(): Promise<void> {
     },
     { realAddon: true, engine, held },
   );
+}
+
+/**
+ * A capture asked for the moment the game announces is a picture of what the game drew.
+ *
+ * The runtime announces itself before the game's first frame, and until a frame has been drawn the
+ * viewport texture holds nothing the game drew: blank here, solid white downstream, where it was
+ * answered as a screenshot and read as the game flashing white on boot. The main scene takes three
+ * seconds over its `_ready`, which falls after the announcement and before the first frame, so the
+ * capture sent on the announcement is read before anything is drawn on every machine rather than
+ * on a slow one. Asked for at one pixel, so the answer is the scene's one colour and needs no
+ * decoder: a one-pixel PNG row reads the same under every filter.
+ */
+async function testACaptureBeforeTheFirstFrameWaitsForIt(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('first frame capture regression skipped (Godot not found)');
+    return;
+  }
+  const refused = windowedRunRefused();
+  if (refused !== null) {
+    console.log(`first frame capture regression skipped (${refused})`);
+    return;
+  }
+  const held: { game: ChildProcess | null } = { game: null };
+  const said: string[] = [];
+  await withAPlayingEditor(
+    ({ adapter, project, runtimeDir }) =>
+      (tool) => {
+        if (tool === 'play_scene') {
+          held.game = spawn(engine, ['--path', project, '--rendering-method', 'gl_compatibility'], {
+            stdio: ['ignore', 'pipe', 'pipe'],
+            env: {
+              ...process.env,
+              GDHARNESS_RUNTIME_DIR: runtimeDir,
+              GDHARNESS_EDITOR_PID: String(FAKE_EDITOR_PID),
+            },
+          });
+          held.game.stdout?.on('data', (chunk: Buffer) => {
+            said.push(String(chunk));
+          });
+          held.game.stderr?.on('data', (chunk: Buffer) => {
+            said.push(String(chunk));
+          });
+          return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
+        }
+        if (tool === 'playing_status') {
+          return {
+            ok: true,
+            playing: held.game?.exitCode === null,
+            scenePath: 'res://main.tscn',
+            debugPort: adapter,
+          };
+        }
+        if (tool === 'stop_playing') {
+          held.game?.kill();
+          return { ok: true };
+        }
+        return { ok: true };
+      },
+    async ({ server, project, start }) => {
+      writeFileSync(
+        join(project, 'main.gd'),
+        'extends ColorRect\n\n\nfunc _ready() -> void:\n\tOS.delay_msec(3000)\n',
+      );
+      writeFileSync(
+        join(project, 'main.tscn'),
+        '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+          '[node name="Main" type="ColorRect"]\nanchors_preset = 15\nanchor_right = 1.0\n' +
+          'anchor_bottom = 1.0\ncolor = Color(0.2, 0.4, 0.8, 1)\nscript = ExtResource("1")\n',
+      );
+      try {
+        const started = await start(WINDOWED_BOOT_MS);
+        assert.equal(
+          get(started.answer, 'runtime', 'listening'),
+          true,
+          `${JSON.stringify(started.answer)}\nthe engine said:\n${said.join('')}`,
+        );
+        const answered = await server.request(
+          'tools/call',
+          { name: 'runtime_capture', arguments: { op: 'screenshot', width: 1, height: 1 } },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+        const image = asArray(get(answered, 'result', 'content')).find(
+          (chunk) => get(chunk, 'type') === 'image',
+        );
+        assert.ok(image !== undefined, `the capture should answer an image: ${JSON.stringify(answered)}`);
+        const png = Buffer.from(String(get(image, 'data')), 'base64');
+        const pixel = [...onePixelOf(png)];
+        const expected = [51, 102, 204];
+        assert.ok(
+          expected.every((channel, index) => Math.abs((pixel[index] ?? -1) - channel) <= 3),
+          `the capture should be the scene's colour ${expected.join(',')}, not ${pixel.join(',')}`,
+        );
+      } finally {
+        await server.request(
+          'tools/call',
+          { name: 'editor_run', arguments: { op: 'stop' } },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+      }
+    },
+    { realAddon: true, engine, held },
+  );
+}
+
+/** The red, green and blue of a one-pixel PNG. */
+function onePixelOf(png: Buffer): Buffer {
+  const chunks: Buffer[] = [];
+  for (let at = 8; at < png.length; ) {
+    const length = png.readUInt32BE(at);
+    const type = png.toString('ascii', at + 4, at + 8);
+    if (type === 'IDAT') {
+      chunks.push(png.subarray(at + 8, at + 8 + length));
+    }
+    at += 12 + length;
+  }
+  // The filter byte, then the pixel: with no neighbours every filter leaves the bytes as they are.
+  return inflateSync(Buffer.concat(chunks)).subarray(1, 4);
 }
 
 /**
@@ -19513,6 +19652,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAFindByClassReachesWhatExtendsIt,
   testAnInjectedMotionCarriesHowFarThePointerMoved,
   testAKeyDoesNotChooseFromAnOpenedMenu,
+  testACaptureBeforeTheFirstFrameWaitsForIt,
   testAWrittenLineBreakMatchesATwoLineLabel,
   testAPlayedGamesReportsReachTheOutput,
   testACallTakesAnObjectByItsPath,
