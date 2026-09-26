@@ -6704,6 +6704,9 @@ class GodotServer {
     // nothing for a frame or more after that scan stops reporting itself.
     let waitedForEditorMs = 0;
     let first: ToolResponse;
+    // How many scans the editor had completed before the one asked for, from an addon that counts
+    // them: the scan asked for is over once the count has moved past it.
+    let completedBefore: number | undefined;
     for (;;) {
       const busySince = Date.now();
       let wasBusy = false;
@@ -6718,8 +6721,9 @@ class GodotServer {
       if (first.isError) {
         return first;
       }
-      const declined = asParams(JSON.parse(first.content[0]?.text ?? '{}'))['started'] === false;
-      if (!declined || Date.now() - started >= timeoutMs) {
+      const firstAnswer = asParams(JSON.parse(first.content[0]?.text ?? '{}'));
+      completedBefore = readNumber(firstAnswer, 'scansCompletedBefore');
+      if (firstAnswer['started'] !== false || Date.now() - started >= timeoutMs) {
         break;
       }
       await new Promise((settle) => setTimeout(settle, 100));
@@ -6740,7 +6744,14 @@ class GodotServer {
       // believed only for as long as a scan takes to start, since an addon that never cleared it
       // would otherwise hold every rescan for the whole budget.
       const pending = Boolean(status['pending']) && Date.now() - started < SCAN_START_MS;
-      busy = Boolean(status['scanning']) || Boolean(status['importing']) || pending;
+      // The scan's own end, which neither flag gives: a threaded scan stops reporting itself when its
+      // thread finishes, and what it found is imported when the thread is joined, a frame or more
+      // later and longer in an editor left in the background. Idle flags in between read as done,
+      // and a rescan after 211 changed scenes answered before any of them was imported.
+      const completed = readNumber(status, 'scansCompleted');
+      const notYetOver =
+        completedBefore !== undefined && completed !== undefined && completed <= completedBefore;
+      busy = Boolean(status['scanning']) || Boolean(status['importing']) || pending || notYetOver;
       if (busy) {
         idleSince = null;
       } else {
