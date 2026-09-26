@@ -98,9 +98,12 @@ export interface EditorPorts {
 /**
  * The engine's argument list for opening the editor on a project.
  *
- * Never `--headless`: this one exists to put an editor in front of a person, and one nobody can
- * see is not that. Pure for the same reason as the rest of this file, since the editor is
- * spawned detached and its argv appears in no tool's answer.
+ * Headless, so an editor a server opens or restarts puts no window on anybody's desktop: every
+ * addon upgrade restarts the editor of each project that has one, and the owner ruled that
+ * development never shows windows. A headless editor serves the bridge, the language server, the
+ * debug adapter and the games it plays, which is the editor the editor tests have always run.
+ * Pure for the same reason as the rest of this file, since the editor is spawned detached and
+ * its argv appears in no tool's answer.
  *
  * The two ports are named rather than left to the editor settings, which are one file for every
  * editor on the machine: without this the second editor to open binds neither, and every script
@@ -116,6 +119,7 @@ export interface EditorPorts {
 export function editorArguments(projectPath: string, ports: EditorPorts, logFile: string): string[] {
   return [
     '-e',
+    '--headless',
     '--path',
     projectPath,
     '--lsp-port',
