@@ -43,6 +43,7 @@ import {
   cacheWrittenAt,
   classesNamedIn,
   contradictedDiagnostics,
+  declaredClasses,
   declaresMember,
   heldButGone,
   missingMemberIn,
@@ -52,6 +53,7 @@ import {
   unknownTypeIn,
   unloadedTypes,
   unseenByEditor,
+  withAddonClassesCounted,
 } from '../src/class-cache.js';
 import { classNotePath, readClassNote } from '../src/class-note.js';
 import { GodotDAPClient, type HeldBreakpoint, handleDAPTool } from '../src/dap_client.js';
@@ -16930,6 +16932,38 @@ async function testGdUnitRunner(): Promise<void> {
     'a backtrace with no runner in it is left whole',
   );
 
+  // The rebuild's answer as a test run gives it, on the branches a first run does not reach: a
+  // changed list, addons with nothing but their own classes, and a rebuild naming no addon at all.
+  const listed = new Map([
+    ['Ledger', 'res://scripts/ledger.gd'],
+    ['GdUnitRunner', 'res://addons/gdUnit4/src/runner.gd'],
+    ['HarnessNote', 'res://addons/gdharness_editor/note.gd'],
+    ['GdUnitMock', 'res://addons/gdUnit4/src/mock.gd'],
+  ]);
+  assert.deepEqual(
+    withAddonClassesCounted(
+      {
+        added: ['GdUnitRunner', 'GdUnitMock', 'HarnessNote'],
+        changed: ['Ledger', 'GdUnitMock'],
+        removed: ['Gone'],
+      },
+      listed,
+    ),
+    {
+      added: [],
+      addedInAddons: { gdUnit4: 2, gdharness_editor: 1 },
+      changed: ['Ledger'],
+      changedInAddons: { gdUnit4: 1 },
+      removed: ['Gone'],
+    },
+  );
+  const ownOnly = { added: ['Ledger'], changed: [], classes: 4 };
+  assert.deepEqual(
+    withAddonClassesCounted(ownOnly, listed),
+    ownOnly,
+    'a rebuild naming no addon is left as it was',
+  );
+
   const godotPath = resolveGodotPath();
   const gdunit = process.env['GDUNIT4_PATH'];
   if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
@@ -17007,6 +17041,11 @@ async function testGdUnitRunner(): Promise<void> {
         '',
       ].join('\n'),
     );
+    mkdirSync(join(projectDir, 'scripts'));
+    writeFileSync(
+      join(projectDir, 'scripts', 'guild_ledger.gd'),
+      'class_name GuildLedger\nextends RefCounted\n',
+    );
 
     await withStdioServer(
       async (call) => {
@@ -17040,6 +17079,20 @@ async function testGdUnitRunner(): Promise<void> {
             skipped: get(run, 'skipped'),
           },
           { tests: 7, failures: 3, errors: 0, skipped: 1 },
+        );
+        // The first run after gdUnit4 was copied in, so the rebuild before it added every class
+        // gdUnit4 declares, its runner among them, which is what made the runner resolvable:
+        // counted, against what is on disk, while the project's own is named.
+        const inGdUnit = [...declaredClasses(projectDir).values()].filter((path) =>
+          path.startsWith('res://addons/gdUnit4/'),
+        ).length;
+        assert.ok(inGdUnit > 0, 'gdUnit4 declares classes of its own');
+        assert.deepEqual(
+          {
+            added: get(run, 'classes', 'added'),
+            addedInAddons: get(run, 'classes', 'addedInAddons'),
+          },
+          { added: ['GuildLedger'], addedInAddons: { gdUnit4: inGdUnit } },
         );
         assert.ok(
           existsSync(join(elsewhere, 'results.xml')),
@@ -17094,10 +17147,6 @@ async function testGdUnitRunner(): Promise<void> {
           frames.join('\n'),
         );
         assert.match(frames.at(-1) ?? '', /^\[and \d+ frames inside addons\/gdUnit4\/\]$/);
-        assert.ok(
-          asArray(get(run, 'classes', 'added')).includes('GdUnitTestCIRunner'),
-          'the runner was made resolvable by the class list rebuild',
-        );
         // This run's report is cleaned up and the other run's is still there. Asserted as the
         // whole listing, because the way this read before was that the shared directory had gone
         // altogether, which was true only because a run took every other run's reports with it.
