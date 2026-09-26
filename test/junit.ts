@@ -202,6 +202,19 @@ function testScriptErrorsAreReadOffTheConsole(): void {
     [],
     'the engine lines before the block are not read as its entries',
   );
+  // The order the Linux engine leg printed the same scripts in: the directory's, not the name's.
+  const block = printed.indexOf('Script errors were detected during test discovery!');
+  const pairs = [0, 1, 2, 3].map((pair) => printed.slice(block + 1 + pair * 2, block + 3 + pair * 2));
+  const linuxOrder = [
+    ...printed.slice(0, block + 1),
+    ...[pairs[1], pairs[0], pairs[3], pairs[2]].flatMap((pair) => pair ?? []),
+    ...printed.slice(block + 9),
+  ];
+  assert.deepEqual(
+    scriptErrorsPrinted(linuxOrder),
+    scriptErrorsPrinted(printed),
+    'the same scripts read in the same order whichever order the platform listed them in',
+  );
 }
 
 function testOrphansAreReadOffTheConsole(): void {

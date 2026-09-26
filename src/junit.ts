@@ -336,7 +336,9 @@ export function scriptErrorsPrinted(printed: readonly string[]): ScriptError[] {
       break;
     }
   }
-  return found;
+  // gdUnit4 lists them in the order the filesystem hands it the directory, which Linux and
+  // Windows disagree about, so the same project named its broken scripts in two orders.
+  return found.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : a.line - b.line));
 }
 
 const ESCAPE = String.fromCharCode(0x1b);
