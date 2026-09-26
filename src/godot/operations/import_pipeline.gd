@@ -8,6 +8,11 @@ const IMPORTABLE_EXTENSIONS: Array[String] = [
 	"png", "jpg", "jpeg", "webp", "svg", "wav", "mp3", "ogg", "ttf", "otf", "glb", "gltf", "fbx", "obj"
 ]
 
+## How many resources a scene's dependencies are followed through before the walk stops: a scene's
+## materials and what they use are a handful, and a project that references its way around a cycle
+## is not walked for ever.
+const DEPENDENCY_WALK_LIMIT: int = 200
+
 var _log: Log
 var _files: FileWalk = FileWalk.new()
 
@@ -416,12 +421,18 @@ func _import_status_of(resource_path: String, import_file_path: String) -> Dicti
 	# before the image was is built without it. Read off what the imported scene depends on, not off
 	# file times: a texture a 3D scene uses is reimported compressed after the scene, so its outputs
 	# are always the newer, and 33 correct scenes read as stale when judged that way.
+	#
+	# Followed through the resources the scene depends on, since a post-import script that swaps each
+	# material for a saved one leaves the scene depending on the material and only the material on
+	# the image: 211 correct scenes read as stale when only the scene's own list was read. And not
+	# held against a scene an import script shaped at all, since the script may replace a material
+	# with one using other images entirely, which is the scene it was meant to build.
 	var without: Array[String] = []
 	var images: Array[String] = _images_of(resource_path)
-	if not images.is_empty():
-		var depended: PackedStringArray = ResourceLoader.get_dependencies(resource_path)
+	if not images.is_empty() and not _shaped_by_a_script(import_file_path):
+		var depended: Dictionary[String, bool] = _depended_on(resource_path)
 		for image: String in images:
-			if FileAccess.file_exists(image + ".import") and not _names(depended, image):
+			if FileAccess.file_exists(image + ".import") and not depended.has(image):
 				without.append(image)
 	if not without.is_empty():
 		status["status"] = "needs_reimport"
@@ -442,13 +453,38 @@ static func _recorded_source_md5(resource_path: String) -> String:
 	return str(config.get_value("", "source_md5", ""))
 
 
-## Whether [param dependencies], as [method ResourceLoader.get_dependencies] lists them, include
-## [param path]; each entry may carry a uid and a type ahead of the path.
-static func _names(dependencies: PackedStringArray, path: String) -> bool:
-	for entry: String in dependencies:
-		if entry == path or entry.ends_with("::" + path):
-			return true
-	return false
+## The path of one entry [method ResourceLoader.get_dependencies] lists, past any uid and type.
+static func _path_of(entry: String) -> String:
+	var at: int = entry.rfind("::")
+	return entry if at < 0 else entry.substr(at + 2)
+
+
+## Every path [param resource_path] depends on, through the resources it depends on in turn, as far
+## as [constant DEPENDENCY_WALK_LIMIT] resources; a set, keyed by path.
+static func _depended_on(resource_path: String) -> Dictionary[String, bool]:
+	var found: Dictionary[String, bool] = {}
+	var pending: Array[String] = [resource_path]
+	var walked: int = 0
+	while not pending.is_empty() and walked < DEPENDENCY_WALK_LIMIT:
+		var next: String = pending.pop_back()
+		walked += 1
+		for entry: String in ResourceLoader.get_dependencies(next):
+			var path: String = _path_of(entry)
+			if found.has(path):
+				continue
+			found[path] = true
+			# Only what can hold further references: an image or a sound depends on nothing.
+			if path.get_extension().to_lower() in ["tres", "res", "tscn", "scn", "material"]:
+				pending.append(path)
+	return found
+
+
+## Whether the import of the file [param import_file_path] describes runs a post-import script.
+static func _shaped_by_a_script(import_file_path: String) -> bool:
+	var config: ConfigFile = ConfigFile.new()
+	if config.load(import_file_path) != OK:
+		return false
+	return not str(config.get_value("params", "import_script/path", "")).is_empty()
 
 
 ## The files an import wrote, from its sidecar's [code]dest_files[/code]; empty when it lists none.
