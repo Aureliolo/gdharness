@@ -60,6 +60,7 @@ import {
   unknownTypeIn,
   unloadedTypes,
   unseenByEditor,
+  withAddonClassesCounted,
 } from './class-cache.js';
 import { readClassNote, writeClassNote } from './class-note.js';
 import { configDisagrees } from './config-pin.js';
@@ -3788,7 +3789,7 @@ class GodotServer {
       engineErrors: run.log.count('error'),
       engineWarnings: run.log.count('warning'),
       engineEntries,
-      classes: classes.payload,
+      classes: withAddonClassesCounted(classes.payload, cachedClasses(project.value.path) ?? new Map()),
     });
   }
 
