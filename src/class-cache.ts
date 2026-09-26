@@ -73,6 +73,44 @@ export function cachedClasses(projectPath: string): Map<string, string> | null {
   return listed;
 }
 
+/**
+ * [param rebuilt], a class cache rebuild's answer, with the classes an addon declares counted per
+ * addon under `addedInAddons` and `changedInAddons` rather than named, and the project's own named
+ * as before. [param listed] is the rebuilt cache, which says where each class is declared.
+ *
+ * For an answer whose subject is something else. A test run rebuilds the cache first so a suite
+ * written a moment ago is found, and on the first run after gdUnit4 was copied in, the rebuild
+ * named every one of its two hundred classes: the few lines a clean tier answers in came back
+ * behind nine kilobytes of names nobody asked about.
+ */
+export function withAddonClassesCounted(
+  rebuilt: Readonly<Record<string, unknown>>,
+  listed: ReadonlyMap<string, string>,
+): Record<string, unknown> {
+  const counted: Record<string, unknown> = { ...rebuilt };
+  for (const key of ['added', 'changed']) {
+    const names = rebuilt[key];
+    if (!Array.isArray(names)) {
+      continue;
+    }
+    const own: unknown[] = [];
+    const perAddon: Record<string, number> = {};
+    for (const name of names) {
+      const addon = /^res:\/\/addons\/([^/]+)\//.exec(listed.get(String(name)) ?? '')?.[1];
+      if (addon === undefined) {
+        own.push(name);
+      } else {
+        perAddon[addon] = (perAddon[addon] ?? 0) + 1;
+      }
+    }
+    if (Object.keys(perAddon).length > 0) {
+      counted[key] = own;
+      counted[`${key}InAddons`] = perAddon;
+    }
+  }
+  return counted;
+}
+
 /** A member a diagnostic says is missing, and the type it says is missing it. */
 export interface MissingMember {
   readonly member: string;
