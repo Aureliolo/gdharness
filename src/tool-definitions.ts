@@ -465,7 +465,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     operations: {
       status: {
         summary:
-          'which resources are outdated or failed, or one resource with resourcePath, judged by content as the editor judges it: a source whose hash differs from the one its import recorded, an import whose output under .godot/imported is gone (missing_outputs), and a glTF scene whose import does not depend on an image it names, because it was built before that image was imported (imported_without; a scene whose import runs an import script is not judged on images), each with its reason',
+          'which resources are outdated or failed, or one resource with resourcePath, each with its reason. Judged by content with the checks the editor makes before it reimports: a sidecar changed since its import, as setting an option without a reimport leaves it; a sidecar with no uid or written for another file; an output under .godot/imported that is gone (missing_outputs) or changed; a source whose hash differs from the one its import recorded, or with no record. Beyond the editor, a glTF scene whose import does not depend on an image it names, because it was built before that image was imported (imported_without; a scene whose import runs an import script is not judged on images). failed is an import that failed, which the editor never tries again on its own. Without resourcePath, a sidecar whose source is gone is listed as missing_source',
         requires: [],
       },
       options: { summary: 'the import options of one resource', requires: ['resourcePath'] },
