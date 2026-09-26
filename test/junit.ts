@@ -10,6 +10,7 @@ import {
   MalformedReportError,
   orphansPrinted,
   parseJUnit,
+  VALUE_NOT_RECOVERED_NOTE,
   whyNoReport,
   withActualsPrinted,
 } from '../src/junit.js';
@@ -221,12 +222,13 @@ function readsItsValue(ending: string): void {
   const reported = (name: string, line: number, expected: string, merged: string): { detail: string } => ({
     detail: `Expecting:\n '${expected}'\n but was\n '${merged}'\n\tat '${name}' in res://test/words_test.gd:${line}`,
   });
-  const [empty, swapped, elsewhere, numbers] = withActualsPrinted(
+  const [empty, swapped, elsewhere, numbers, apart] = withActualsPrinted(
     [
       reported('test_empty', 5, 'abc', 'abc'),
       reported('test_swapped', 9, 'abcd', 'abcX<LF>d'),
       reported('test_unprinted', 12, 'same', 'same'),
       { detail: "Expecting:\n 5\n but was\n 4\n\tat 'test_sums' in res://test/words_test.gd:15" },
+      reported('test_unprinted_apart', 18, 'abcd', 'abcXd'),
     ],
     printed,
   );
@@ -249,10 +251,108 @@ function readsItsValue(ending: string): void {
     "Expecting:\n 5\n but was\n 4\n\tat 'test_sums' in res://test/words_test.gd:15",
     'anything that is not a merged string is left as it was',
   );
+  assert.ok(
+    (apart?.detail ?? '').endsWith(
+      `'abcXd'\n\tat 'test_unprinted_apart' in res://test/words_test.gd:18\n${VALUE_NOT_RECOVERED_NOTE}`,
+    ),
+    `a detail the console kept no copy of, whose sides differ, says its value may be the merge: ${apart?.detail}`,
+  );
+}
+
+/**
+ * A string equality after an array equality, read off the console that gdUnit4 v6.2.1 printed on
+ * 4.7.2 for the suite below, ended both ways. An array's value is followed by a table of
+ * differences and then its location, not by a quote and its location, so it is the one failure
+ * whose own report a match cannot end in.
+ *
+ *     func test_a_array_failure_first() -> void:
+ *         assert_array([0, 55, 110]).is_equal([0, 75, 150])
+ *     func test_the_sentence_alone() -> void:
+ *         assert_str(FOUND).is_equal(WANTED)
+ *     func test_a_mismatch_string_first() -> void:
+ *         assert_str("wanted deals 25; got deals 15").is_empty()
+ *     func test_the_sentence_after_others() -> void:
+ *         assert_str(FOUND).is_equal(WANTED)
+ */
+function testAStringAfterAnArrayReadsItsOwnValue(): void {
+  for (const ending of ['\n', '\r\n']) {
+    readsItsOwnValue(ending);
+  }
+}
+
+function readsItsOwnValue(ending: string): void {
+  const e = String.fromCharCode(0x1b);
+  const printed = [
+    `${e}[38;2;0;206;209mRun Test Suite: ${e}[0m${e}[38;2;250;235;215mres://mixed/mixed_test.gd${e}[0m`,
+    `  ${e}[38;2;250;235;215mres://mixed/mixed_test.gd${e}[0m${e}[38;2;128;128;128m > ${e}[0m${e}[38;2;250;235;215mtest_a_array_failure_first${e}[0m${e}[38;2;34;139;34m STARTED${e}[0m${e}[38;2;128;128;128m${e}[0m`,
+    `  ${e}[38;2;250;235;215mres://mixed/mixed_test.gd${e}[0m${e}[38;2;128;128;128m > ${e}[0m${e}[38;2;250;235;215mtest_a_array_failure_first${e}[0m${e}[38;2;178;34;34m${e}[1m FAILED${e}[0m${e}[38;2;100;149;237m 9ms${e}[0m`,
+    `  ${e}[38;2;0;206;209m${e}[1m${e}[4mReport:${e}[0m`,
+    `  ${e}[38;2;128;128;128m${e}[38;2;255;69;0mExpecting:${e}[0m`,
+    ` '${e}[38;2;30;144;255m[0, 75, 150]${e}[0m'`,
+    ` but was`,
+    ` '${e}[38;2;30;144;255m[0, ${e}[48;2;38;0;0m${e}[38;2;255;255;255m55${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255m, ${e}[48;2;38;0;0m${e}[38;2;255;255;255m110${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255m]${e}[0m'`,
+    ``,
+    `${e}[38;2;255;69;0mDifferences found:${e}[0m`,
+    `[table=3][cell][right]${e}[1mIndex${e}[0m[/right]\t[/cell][cell][right]${e}[1mCurrent${e}[0m[/right]\t[/cell][cell][right]${e}[1mExpected${e}[0m[/right]\t[/cell][cell][right]1[/right]\t[/cell][cell][right]55[/right]\t[/cell][cell][right]75[/right]\t[/cell][cell][right]2[/right]\t[/cell][cell][right]110[/right]\t[/cell][cell][right]150[/right]\t[/cell][/table]${e}[0m${e}[38;2;173;216;230m\tat 'test_a_array_failure_first' in res://mixed/mixed_test.gd:8${e}[0m${e}[38;2;128;128;128m${e}[0m`,
+    `${e}[38;2;128;128;128m${e}[0m`,
+    `  ${e}[38;2;250;235;215mres://mixed/mixed_test.gd${e}[0m${e}[38;2;128;128;128m > ${e}[0m${e}[38;2;250;235;215mtest_the_sentence_alone${e}[0m${e}[38;2;34;139;34m STARTED${e}[0m${e}[38;2;128;128;128m${e}[0m`,
+    `  ${e}[38;2;250;235;215mres://mixed/mixed_test.gd${e}[0m${e}[38;2;128;128;128m > ${e}[0m${e}[38;2;250;235;215mtest_the_sentence_alone${e}[0m${e}[38;2;178;34;34m${e}[1m FAILED${e}[0m${e}[38;2;100;149;237m 9ms${e}[0m`,
+    `  ${e}[38;2;0;206;209m${e}[1m${e}[4mReport:${e}[0m`,
+    `  ${e}[38;2;128;128;128m${e}[38;2;255;69;0mExpecting:${e}[0m`,
+    ` '${e}[38;2;30;144;255mevery word you speak is 1 louder, for every Ostinato you have spoken this duel${e}[0m'`,
+    ` but was`,
+    ` '${e}[38;2;30;144;255mevery word you speak is 1 louder, for every ${e}[48;2;38;0;0m${e}[38;2;255;255;255mO${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255ms${e}[48;2;38;0;0m${e}[38;2;255;255;255mtinato${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255m${e}[48;2;0;38;0m${e}[38;2;255;255;255mpell${e}[0m${e}[38;2;30;144;255m${e}[48;2;0;38;0m${e}[0m${e}[38;2;30;144;255m you have spoken this duel${e}[0m'${e}[0m${e}[38;2;173;216;230m\tat 'test_the_sentence_alone' in res://mixed/mixed_test.gd:12${e}[0m${e}[38;2;128;128;128m${e}[0m`,
+    `${e}[38;2;128;128;128m${e}[0m`,
+    `  ${e}[38;2;250;235;215mres://mixed/mixed_test.gd${e}[0m${e}[38;2;128;128;128m > ${e}[0m${e}[38;2;250;235;215mtest_a_mismatch_string_first${e}[0m${e}[38;2;34;139;34m STARTED${e}[0m${e}[38;2;128;128;128m${e}[0m`,
+    `  ${e}[38;2;250;235;215mres://mixed/mixed_test.gd${e}[0m${e}[38;2;128;128;128m > ${e}[0m${e}[38;2;250;235;215mtest_a_mismatch_string_first${e}[0m${e}[38;2;178;34;34m${e}[1m FAILED${e}[0m${e}[38;2;100;149;237m 9ms${e}[0m`,
+    `  ${e}[38;2;0;206;209m${e}[1m${e}[4mReport:${e}[0m`,
+    `  ${e}[38;2;128;128;128m${e}[38;2;255;69;0mExpecting:${e}[0m`,
+    ` must be empty but was`,
+    ` '${e}[38;2;30;144;255mwanted deals 25; got deals 15${e}[0m'${e}[0m${e}[38;2;173;216;230m\tat 'test_a_mismatch_string_first' in res://mixed/mixed_test.gd:16${e}[0m${e}[38;2;128;128;128m${e}[0m`,
+    `${e}[38;2;128;128;128m${e}[0m`,
+    `  ${e}[38;2;250;235;215mres://mixed/mixed_test.gd${e}[0m${e}[38;2;128;128;128m > ${e}[0m${e}[38;2;250;235;215mtest_the_sentence_after_others${e}[0m${e}[38;2;34;139;34m STARTED${e}[0m${e}[38;2;128;128;128m${e}[0m`,
+    `  ${e}[38;2;250;235;215mres://mixed/mixed_test.gd${e}[0m${e}[38;2;128;128;128m > ${e}[0m${e}[38;2;250;235;215mtest_the_sentence_after_others${e}[0m${e}[38;2;178;34;34m${e}[1m FAILED${e}[0m${e}[38;2;100;149;237m 9ms${e}[0m`,
+    `  ${e}[38;2;0;206;209m${e}[1m${e}[4mReport:${e}[0m`,
+    `  ${e}[38;2;128;128;128m${e}[38;2;255;69;0mExpecting:${e}[0m`,
+    ` '${e}[38;2;30;144;255mevery word you speak is 1 louder, for every Ostinato you have spoken this duel${e}[0m'`,
+    ` but was`,
+    ` '${e}[38;2;30;144;255mevery word you speak is 1 louder, for every ${e}[48;2;38;0;0m${e}[38;2;255;255;255mO${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255ms${e}[48;2;38;0;0m${e}[38;2;255;255;255mtinato${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255m${e}[48;2;0;38;0m${e}[38;2;255;255;255mpell${e}[0m${e}[38;2;30;144;255m${e}[48;2;0;38;0m${e}[0m${e}[38;2;30;144;255m you have spoken this duel${e}[0m'${e}[0m${e}[38;2;173;216;230m\tat 'test_the_sentence_after_others' in res://mixed/mixed_test.gd:20${e}[0m${e}[38;2;128;128;128m${e}[0m`,
+    `${e}[38;2;128;128;128m${e}[0m`,
+  ].join(ending);
+  const wanted = 'every word you speak is 1 louder, for every Ostinato you have spoken this duel';
+  const found = 'every word you speak is 1 louder, for every spell you have spoken this duel';
+  const merged = 'every word you speak is 1 louder, for every Ostinatopell you have spoken this duel';
+  const at = (name: string, line: number): string => `\tat '${name}' in res://mixed/mixed_test.gd:${line}`;
+  const arrayDetail = `Expecting:\n '[0, 75, 150]'\n but was\n '[0, 55, 110]'\n\nDifferences found:\nIndex\tCurrent\tExpected\t1\t55\t75\t2\t110\t150\t\n${at('test_a_array_failure_first', 8)}`;
+  const emptyDetail = `Expecting:\n must be empty but was\n 'wanted deals 25; got deals 15'\n${at('test_a_mismatch_string_first', 16)}`;
+  const [array, alone, empty, after] = withActualsPrinted(
+    [
+      { detail: arrayDetail },
+      { detail: `Expecting:\n '${wanted}'\n but was\n '${merged}'\n${at('test_the_sentence_alone', 12)}` },
+      { detail: emptyDetail },
+      {
+        detail: `Expecting:\n '${wanted}'\n but was\n '${merged}'\n${at('test_the_sentence_after_others', 20)}`,
+      },
+    ],
+    printed,
+  );
+  for (const [name, line, entry] of [
+    ['test_the_sentence_alone', 12, alone],
+    ['test_the_sentence_after_others', 20, after],
+  ] as const) {
+    assert.equal(
+      entry?.detail,
+      `Expecting:\n '${wanted}'\n but was\n '${found}'\n${at(name, line)}`,
+      `${name} reads the value it found, lines ended ${JSON.stringify(ending)}`,
+    );
+  }
+  assert.equal(array?.detail, arrayDetail, 'the array equality is left as the report wrote it');
+  assert.equal(empty?.detail, emptyDetail, 'a value with no marks is left as the report wrote it');
 }
 
 testWhatGdUnitWrites();
 testAFailingStringReadsItsValue();
+testAStringAfterAnArrayReadsItsOwnValue();
 testEntitiesAndShapes();
 testMalformedReportsAreRefused();
 testARunThatFoundNothingIsNotAPass();
