@@ -13,13 +13,13 @@ func _init(host: Node) -> void:
 
 
 func capture_screenshot(params: Dictionary) -> Dictionary:
-	return _capture(_host.get_tree().root, params)
+	return await _capture(_host.get_tree().root, params)
 
 
 func capture_viewport(params: Dictionary) -> Dictionary:
 	var viewport_path: String = str(params.get("viewportPath", ""))
 	if viewport_path.is_empty():
-		return capture_screenshot(params)
+		return await capture_screenshot(params)
 
 	var standing: Dictionary = Values.node_at(_host.get_tree().root, viewport_path)
 	if standing.has("message"):
@@ -28,7 +28,7 @@ func capture_viewport(params: Dictionary) -> Dictionary:
 	if not node is Viewport:
 		return {"type": "error", "message": "Node is not a Viewport: " + viewport_path}
 	var viewport: Viewport = node
-	return _capture(viewport, params)
+	return await _capture(viewport, params)
 
 
 ## The server names the file, so a game cannot point it at a path of its own choosing; a call
@@ -65,6 +65,13 @@ func _capture(viewport: Viewport, params: Dictionary) -> Dictionary:
 				+ "and every capture after it would be that frame. Restore the window and ask again."
 			),
 		}
+
+	# The game announces itself before its first frame, and until a frame has been drawn the texture
+	# holds nothing the game drew: blank on one machine, solid white on another, which a caller took
+	# for the game flashing white on boot. Measured on 4.7.2 with both renderers, only the first
+	# processed frame reads it so; the next one holds the scene.
+	while Engine.get_frames_drawn() == 0:
+		await _host.get_tree().process_frame
 
 	var viewport_texture: ViewportTexture = viewport.get_texture()
 	if viewport_texture == null:
