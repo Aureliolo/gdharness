@@ -1178,14 +1178,23 @@ function scanWaitAnswer(scanned: ScanWait): {
 const PLAYING_STATUS_MS = 1_000;
 
 /**
- * How long a scan may take to start before the answer stops waiting on it.
+ * How long an addon before 1.1.3 is believed when it says a scan it was asked for has not started.
  *
- * `EditorFileSystem.scan()` queues rather than runs, and the editor takes it up on a later frame,
- * so for the first of those frames both of the flags it offers are false and a poll reads the
- * scan as over. Two seconds is far past the frame or two a free editor needs and past what a busy
- * one needs, and it is the horizon on a flag rather than on the scan itself.
+ * Those addons took `EditorFileSystem.scan()` as queued and reported `pending` until the editor
+ * next said its filesystem changed. The call runs a scan or does nothing, so the flag is only a
+ * guess, and this is the horizon on it rather than on the scan.
  */
 const SCAN_START_MS = 2_000;
+
+/**
+ * How long the editor has to stay idle after a rescan before the rescan answers.
+ *
+ * What a scan finds is imported after the scan stops reporting itself, and an editor just told of
+ * files can begin its own scan a moment later; a rescan answered on the first idle look said it had
+ * finished while a changed file was still on its old import. Half a second is many frames and a
+ * small part of any scan worth waiting for.
+ */
+const SCAN_SETTLED_MS = 500;
 
 /** What to tell a caller whose file, scene, script or resource path landed outside the project. */
 /**
@@ -6683,7 +6692,9 @@ class GodotServer {
     // new files is already importing them, and a scan asked for then starts a second reimport over
     // the first: the editor logs "Task 'reimport' already exists" and two conditions from its
     // progress dialog. The addon declines to start one while the editor is busy, so a scan it
-    // declined, because the editor began between the two questions, is asked for again.
+    // declined is asked for again: because the editor began between the two questions, or because
+    // the editor's previous scan is still to be joined, which makes `scan()` return having done
+    // nothing for a frame or more after that scan stops reporting itself.
     let waitedForEditorMs = 0;
     let first: ToolResponse;
     for (;;) {
@@ -6704,26 +6715,33 @@ class GodotServer {
       if (!declined || Date.now() - started >= timeoutMs) {
         break;
       }
+      await new Promise((settle) => setTimeout(settle, 100));
     }
 
+    // Idle for a while rather than idle once: what a scan finds is imported after it stops
+    // reporting itself, and an editor that has just been told of files starts its own scan a moment
+    // later. Answered on the first idle look, a rescan after a large write said it had finished
+    // with a changed file still on its old import, and the editor's scan of it began straight after.
     let busy = true;
-    while (busy && Date.now() - started < timeoutMs) {
+    let idleSince: number | null = null;
+    while (Date.now() - started < timeoutMs) {
       await new Promise((settle) => setTimeout(settle, 100));
       const status = asParams(
         await this.godotBridge.invokeTool('rescan_filesystem', { ...args, statusOnly: true }),
       );
-      // `pending` is a scan that has been asked for and has not started. Without it, the first
-      // poll after asking reads two false flags off an editor that has not begun and calls the
-      // scan finished, which is how a rescan of 376 classes answered in 296ms and the editor
-      // then wrote its own stale class list over a cache that had just been corrected.
-      //
-      // Believed only for as long as a scan takes to start. The addon clears it on the editor's
-      // own finished-scan signal, and a scan that both started and finished between two polls
-      // would leave it set if that signal ever failed to arrive: waiting the whole budget on a
-      // flag is a worse answer than the one this fixes, so the flag has a horizon and the engine's
-      // own two have the rest.
+      // `pending` is from an addon before 1.1.3, which took a scan asked for as queued. It is
+      // believed only for as long as a scan takes to start, since an addon that never cleared it
+      // would otherwise hold every rescan for the whole budget.
       const pending = Boolean(status['pending']) && Date.now() - started < SCAN_START_MS;
       busy = Boolean(status['scanning']) || Boolean(status['importing']) || pending;
+      if (busy) {
+        idleSince = null;
+      } else {
+        idleSince ??= Date.now();
+        if (Date.now() - idleSince >= SCAN_SETTLED_MS) {
+          break;
+        }
+      }
     }
 
     // The write lands after the scan says it has finished, so reading the file the moment the
