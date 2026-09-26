@@ -11,12 +11,10 @@ var _editor_plugin: EditorPlugin = null
 var _values: Serialisation = Serialisation.new()
 var _properties: PropertyValues = PropertyValues.new()
 
-## How many scans the editor has finished, counted off its own signal, and what the count was when
-## a scan was last asked for. A queued scan has not started, so the flags the engine offers read
-## the same as one that is over; the count is what tells the two apart.
+## How many times the editor has said its filesystem changed, which a scan run on the main thread
+## does before `scan()` returns: counted so a rescan can tell a scan that ran there from one the
+## editor declined.
 var _scans_finished: int = 0
-var _scans_finished_at_request: int = 0
-var _scan_pending: bool = false
 
 ## When the last scan finished, on the engine's clock, or -1 before the first. The editor writes
 ## the class cache a frame after it stops reporting a scan, measured on 4.7.2, so a game started
@@ -36,7 +34,6 @@ func set_editor_plugin(plugin: EditorPlugin) -> void:
 
 func _scan_finished() -> void:
 	_scans_finished += 1
-	_scan_pending = false
 	_scan_finished_at_msec = Time.get_ticks_msec()
 
 
@@ -662,31 +659,24 @@ func rescan_filesystem(args: Dictionary) -> Dictionary:
 	var busy: bool = filesystem.is_scanning() or filesystem.is_importing()
 	var started: bool = false
 	if not Read.as_bool(args.get("statusOnly", false)) and not busy:
-		_scans_finished_at_request = _scans_finished
-		_scan_pending = true
+		var finished_before: int = _scans_finished
 		filesystem.scan()
-		started = true
+		# Whether the scan ran, read off the editor rather than assumed. `scan()` returns without
+		# a word while the thread of the scan before is still to be joined, which is a frame or
+		# more after that scan stops reporting itself, and that scan then signals as it is joined.
+		# Taken as started, the answer came from a scan begun before the files were written:
+		# downstream, a rescan after 698 files were rewritten answered finished in 1.5s and the
+		# one changed file stayed on its old import. A threaded scan reports itself from inside
+		# the call, and one run on this thread has finished and signalled before it returns.
+		started = filesystem.is_scanning() or _scans_finished != finished_before
 
 	# Importing is reported separately from scanning, and a class is not registered until
 	# both are done, so a caller watching only one of them can look too early.
-	#
-	# `pending` is the third state, and it is the one that was missing. A scan is queued rather
-	# than run, so for the first frames after asking, both flags are false and the editor has not
-	# started: a caller polling them reads "finished" off a scan that has not begun. Measured, a
-	# headless editor of 400 scripts takes 1619ms and answered honestly, while a downstream editor
-	# of 376 classes answered finished 296ms in and then wrote its own stale class list over the
-	# cache that had just been corrected. Whoever reads this is waiting for the scan to have
-	# landed, so "not yet" and "over" must not be spelled the same.
-	var scanning: bool = filesystem.is_scanning()
-	var importing: bool = filesystem.is_importing()
-	if scanning or importing or _scans_finished != _scans_finished_at_request:
-		_scan_pending = false
 	return {
 		"ok": true,
 		"started": started,
-		"scanning": scanning,
-		"importing": importing,
-		"pending": _scan_pending,
+		"scanning": filesystem.is_scanning(),
+		"importing": filesystem.is_importing(),
 		"scansFinished": _scans_finished,
 	}
 
@@ -704,7 +694,6 @@ func scan_status(_args: Dictionary) -> Dictionary:
 		"ok": true,
 		"scanning": filesystem.is_scanning(),
 		"importing": filesystem.is_importing(),
-		"pending": _scan_pending,
 		"sinceScanFinishedMs":
 		-1 if _scan_finished_at_msec < 0 else Time.get_ticks_msec() - _scan_finished_at_msec,
 	}
