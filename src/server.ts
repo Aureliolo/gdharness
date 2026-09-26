@@ -93,7 +93,15 @@ import { GodotLocator } from './godot-path.js';
 import { type HeadlessOutcome, runImport, runOperation } from './headless.js';
 import { EDITOR_READS, ENGINE_PASSES, HEADLESS_OPERATIONS } from './headless-operations.js';
 import { DefectsSeen, defectReport, feedbackNotice } from './issues.js';
-import { orphansPrinted, parseJUnit, type TestReport, whyNoReport, withActualsPrinted } from './junit.js';
+import {
+  orphansPrinted,
+  parseJUnit,
+  type ScriptError,
+  scriptErrorsPrinted,
+  type TestReport,
+  whyNoReport,
+  withActualsPrinted,
+} from './junit.js';
 import {
   type EditorPorts,
   editorArguments,
@@ -1234,6 +1242,26 @@ function changedSettings(
  * whatever the timeout: half of it, and never more than this.
  */
 const STALLED_AFTER_MS = 30_000;
+
+/**
+ * The sentence for a run gdUnit4 stopped at discovery, naming each script it could not load with
+ * its first error; every error is under `scriptErrors` beside it. The suites that did load are
+ * said not to have run, because a caller reading "script errors" took the rest of the tier as
+ * having passed.
+ */
+export function scriptErrorsNote(errors: readonly ScriptError[]): string {
+  const first = new Map<string, ScriptError>();
+  for (const error of errors) {
+    if (!first.has(error.path)) {
+      first.set(error.path, error);
+    }
+  }
+  const scripts = [...first.values()]
+    .map((error) => `${error.path}:${error.line} ${error.message}${error.message.endsWith('.') ? '' : '.'}`)
+    .join(' ');
+  const more = errors.length - first.size;
+  return `No tests ran: gdUnit4 could not load ${first.size === 1 ? 'one script' : `${first.size} scripts`} while looking for suites, and it runs no suite at all when one fails to load. ${scripts}${more > 0 ? ` ${more === 1 ? 'One more error' : `${more} more errors`} in ${first.size === 1 ? 'that script' : 'those scripts'} ${more === 1 ? 'is' : 'are'} under scriptErrors.` : ''}`;
+}
 
 /**
  * What a test run killed at [param timeoutMs] is called, from how long it had printed nothing.
@@ -3667,10 +3695,15 @@ class GodotServer {
     const nothingRan = timedOut ? null : whyNoReport(said, asked);
     const cutShort = timedOut ? timedOutVerdict(timeoutMs, silentForMs) : null;
     const hung = cutShort?.hung ?? false;
+    const scriptErrors = timedOut || exitCode !== 105 ? [] : scriptErrorsPrinted(said);
+    const brokenScripts = new Set(scriptErrors.map((error) => error.path)).size;
     const verdict =
       cutShort !== null
         ? cutShort.verdict
         : (nothingRan ??
+          (brokenScripts > 0
+            ? `script errors in ${brokenScripts === 1 ? 'one script' : `${brokenScripts} scripts`}, so no suite ran`
+            : undefined) ??
           (exitCode === null ? undefined : verdicts[exitCode]) ??
           (run.exitSignal === null ? `exit ${exitCode ?? 'unknown'}` : howItExited(run)));
     // Said on every answer from a run whose saves could not be moved, whichever way it ended: a
@@ -3680,9 +3713,11 @@ class GodotServer {
 
     if (report === null) {
       const note =
-        nothingRan === null
-          ? `The test run wrote no report (${verdict}${reportProblem ? `; ${reportProblem}` : ''}).`
-          : `No tests ran: ${verdict}.${elsewhereIn(project.value.path, asked)}`;
+        nothingRan !== null
+          ? `No tests ran: ${verdict}.${elsewhereIn(project.value.path, asked)}`
+          : scriptErrors.length > 0
+            ? scriptErrorsNote(scriptErrors)
+            : `The test run wrote no report (${verdict}${reportProblem ? `; ${reportProblem}` : ''}).`;
       return {
         content: [
           { type: 'text', text: note },
@@ -3697,8 +3732,9 @@ class GodotServer {
                 exitSignal: run.exitSignal ?? undefined,
                 hung,
                 ...(timedOut ? { timedOut, silentForMs } : {}),
+                ...(scriptErrors.length > 0 ? { scriptErrors } : {}),
                 arguments: cmdArgs,
-                entries: forAnswer(printed.slice(0, 60)),
+                entries: forAnswer(printed.slice(0, 60).map(aboveTheRunner)),
                 savesNote,
                 ...scanned,
               },
