@@ -98,12 +98,12 @@ export interface EditorPorts {
 /**
  * The engine's argument list for opening the editor on a project.
  *
- * Headless, so an editor a server opens or restarts puts no window on anybody's desktop: every
- * addon upgrade restarts the editor of each project that has one, and the owner ruled that
- * development never shows windows. A headless editor serves the bridge, the language server, the
- * debug adapter and the games it plays, which is the editor the editor tests have always run.
- * Pure for the same reason as the rest of this file, since the editor is spawned detached and
- * its argv appears in no tool's answer.
+ * Visible unless [param hidden]: the editor is the user's, and the owner wants one ordinary editor
+ * on the desktop in use. Hidden is headless, for somebody who wants it gone entirely; a headless
+ * editor serves the bridge, the language server, the debug adapter and the games it plays as a
+ * windowed one does, which is the editor the editor tests have always run. Pure for the same reason
+ * as the rest of this file, since the editor is spawned detached and its argv appears in no tool's
+ * answer.
  *
  * The two ports are named rather than left to the editor settings, which are one file for every
  * editor on the machine: without this the second editor to open binds neither, and every script
@@ -116,10 +116,15 @@ export interface EditorPorts {
  * `user://logs/godot.log` for the reason every other engine start here is: that file is rotated by
  * whichever process starts next, and a game would rotate it out from under the editor.
  */
-export function editorArguments(projectPath: string, ports: EditorPorts, logFile: string): string[] {
+export function editorArguments(
+  projectPath: string,
+  ports: EditorPorts,
+  logFile: string,
+  hidden: boolean,
+): string[] {
   return [
     '-e',
-    '--headless',
+    ...(hidden ? ['--headless'] : []),
     '--path',
     projectPath,
     '--lsp-port',
