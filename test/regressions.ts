@@ -55,6 +55,7 @@ import {
 } from '../src/class-cache.js';
 import { classNotePath, readClassNote } from '../src/class-note.js';
 import { GodotDAPClient, type HeldBreakpoint, handleDAPTool } from '../src/dap_client.js';
+import { HIDDEN_DESKTOP, windowsCommandLine } from '../src/desktop.js';
 import { dictionary, emptyRecord } from '../src/dictionary.js';
 import {
   bursts,
@@ -2844,7 +2845,7 @@ async function testAnArgumentMeantForAnotherOpIsRefused(): Promise<void> {
     );
     assert.match(
       await call('editor_run', { op: 'start', projectPath: '/p', frames: 3 }),
-      /start takes: projectPath, scene, args, headless, savesIn, env, runtimeWaitMs/,
+      /start takes: projectPath, scene, args, headless, visible, savesIn, env, runtimeWaitMs/,
       'and the refusal says what start takes instead',
     );
     assert.match(
@@ -4996,6 +4997,164 @@ async function testALaunchIsOutsideTheServersTree(): Promise<void> {
         process.kill(pid);
       }
     }
+    sweep(scratch);
+  }
+}
+
+/**
+ * The command line a run on its own desktop is started with reads back as the arguments it was
+ * given.
+ *
+ * CreateProcessW takes one string and the started program splits it again, so a project path with
+ * a space, a quote in an argument or a trailing backslash each come out as something else unless
+ * they were quoted the way the C runtime reads them. Read back by a real process rather than
+ * compared with a string written here, since the rule is the runtime's and not this test's.
+ */
+function testAWindowsCommandLineReadsBackAsItsArguments(): void {
+  const awkward = [
+    'plain',
+    'with space',
+    '',
+    'a"quote',
+    'C:\\dir with space\\',
+    'back\\\\"slash',
+    'tab\there',
+    '\\\\server\\share',
+  ];
+  const line = windowsCommandLine('x', [
+    '-e',
+    'console.log(JSON.stringify(process.argv.slice(1)))',
+    ...awkward,
+  ]);
+  if (process.platform !== 'win32') {
+    assert.equal(line.split(' ')[0], 'x', 'the command comes first');
+    console.log('command line round trip skipped (the C runtime rule is Windows only)');
+    return;
+  }
+  const run = spawnSync(process.execPath, [line.slice(2)], {
+    windowsVerbatimArguments: true,
+    encoding: 'utf8',
+  });
+  assert.deepEqual(JSON.parse(run.stdout) as unknown, awkward, `read back: ${run.stdout} ${run.stderr}`);
+}
+
+/**
+ * A run started on a desktop of its own is on that desktop, under its own pid.
+ *
+ * Every windowed run downstream put the game on the developer's screen and took the keyboard, and a
+ * window started hidden was measured still taking it; a desktop is the boundary Windows keeps focus
+ * inside. The launch goes through the launcher and the keeper the server uses, and the process
+ * launched asks Windows which desktop it is on, which is the one thing that can say where it
+ * went without a window being put anywhere to look at. The same launch without a desktop is the
+ * control: it reads the desktop in use, so the probe is known to read the desktop rather than to
+ * print the name it was expected to. The pid it prints is its own, because the keeper records the
+ * process the helper started and not the helper.
+ */
+async function testARunOnItsOwnDesktopIsThere(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('own desktop regression skipped (desktops are a Windows boundary)');
+    return;
+  }
+  const scratch = mkdtempSync(join(tmpdir(), 'gdharness-desktop-run-'));
+  const runtime = join(scratch, 'runtime');
+  mkdirSync(runtime);
+  const probe = [
+    "Add-Type -Namespace Probe -Name Desk -MemberDefinition '",
+    '[DllImport("user32.dll")] public static extern IntPtr GetThreadDesktop(uint thread);',
+    '[DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();',
+    '[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern bool GetUserObjectInformationW(IntPtr handle, int index, System.Text.StringBuilder into, int size, out int needed);',
+    "'",
+    '$name = New-Object System.Text.StringBuilder 256',
+    '$needed = 0',
+    '[void][Probe.Desk]::GetUserObjectInformationW([Probe.Desk]::GetThreadDesktop([Probe.Desk]::GetCurrentThreadId()), 2, $name, 512, [ref]$needed)',
+    '"desktop=$($name.ToString())"',
+  ].join('\n');
+  // Node as the process launched, asking a PowerShell of its own: Windows PowerShell started detached
+  // runs nothing, and the launch without a desktop starts its process detached. A child is on its
+  // parent's desktop, so the answer is the launched process's. Written to a file as well as printed,
+  // for the launch with no run, which is how an editor starts and has no transcript.
+  const asker = [
+    "const { spawnSync } = require('node:child_process');",
+    "const { writeFileSync } = require('node:fs');",
+    // Asked after the launch has answered and its launcher has gone, the way an editor starts a game
+    // long after it was opened: whatever held the desktop for the launch may have gone with it.
+    'Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 3000);',
+    `const asked = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', ${JSON.stringify(Buffer.from(probe, 'utf16le').toString('base64'))}], { encoding: 'utf8', windowsHide: true });`,
+    "const said = 'pid=' + process.pid + ' ' + asked.stdout.trim();",
+    'writeFileSync(process.argv[1], said);',
+    'console.log(said);',
+  ].join('\n');
+  const where = async (
+    name: string,
+    desktop: string | undefined,
+    read: 'transcript' | 'file',
+  ): Promise<{ pid: number; said: string }> => {
+    const transcript = join(scratch, `${name}.log`);
+    const written = join(scratch, `${name}.txt`);
+    const answer = join(scratch, `${name}.json`);
+    const launcher = join(scratch, `${name}.mjs`);
+    const spec = {
+      command: process.execPath,
+      args: ['-e', asker, written],
+      ...(read === 'transcript' ? { run: { transcript, startedAt: Date.now(), projectPath: scratch } } : {}),
+      ...(desktop === undefined ? {} : { desktop }),
+    };
+    writeFileSync(
+      launcher,
+      [
+        `import { writeFileSync } from 'node:fs';`,
+        `import { launchOutsideTheTree } from ${JSON.stringify(pathToFileURL(resolve('build', 'outside.js')).href)};`,
+        `const launched = await launchOutsideTheTree(`,
+        `  ${JSON.stringify(spec)},`,
+        `  process.execPath,`,
+        `  ${JSON.stringify(resolve('build', 'keeper.js'))},`,
+        `);`,
+        `writeFileSync(${JSON.stringify(answer)}, JSON.stringify(launched));`,
+      ].join('\n'),
+    );
+    const run = spawnSync(process.execPath, [launcher], {
+      env: { ...process.env, GDHARNESS_RUNTIME_DIR: runtime },
+      timeout: 90_000,
+      windowsHide: true,
+    });
+    assert.ok(existsSync(answer), `the launch should answer: ${String(run.stderr)}`);
+    const launched: unknown = JSON.parse(readFileSync(answer, 'utf8'));
+    assert.equal(
+      get(launched, 'error'),
+      undefined,
+      `the launch should start the probe: ${JSON.stringify(launched)}`,
+    );
+    const source = read === 'transcript' ? transcript : written;
+    let said = '';
+    for (let waited = 0; waited < 60_000 && !said.includes('desktop='); waited += 200) {
+      await delay(200);
+      said = existsSync(source) ? readFileSync(source, 'utf8') : '';
+    }
+    return { pid: asNumber(get(launched, 'pid')), said: said.trim() };
+  };
+  try {
+    const control = await where('control', undefined, 'transcript');
+    assert.match(
+      control.said,
+      /desktop=Default$/,
+      `the probe should read the desktop in use: ${control.said}`,
+    );
+    // A desktop of each case's own, so nothing but its own launch can be holding it open.
+    for (const read of ['file', 'transcript'] as const) {
+      const desktop = `${HIDDEN_DESKTOP}-${randomUUID().slice(0, 8)}`;
+      const hidden = await where(`hidden-${read}`, desktop, read);
+      assert.match(
+        hidden.said,
+        new RegExp(`desktop=${desktop}$`),
+        `the launch ${read === 'file' ? 'with no run, as an editor is,' : 'of a run'} should be on its own desktop: ${hidden.said}`,
+      );
+      assert.match(
+        hidden.said,
+        new RegExp(`^pid=${hidden.pid} `),
+        `under the pid the launch answered: ${hidden.said}`,
+      );
+    }
+  } finally {
     sweep(scratch);
   }
 }
@@ -19837,6 +19996,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARescanWaitsForTheEditorToSettle,
   testARescanWaitsForItsScanToComplete,
   testALaunchIsOutsideTheServersTree,
+  testAWindowsCommandLineReadsBackAsItsArguments,
+  testARunOnItsOwnDesktopIsThere,
   testARunOutlivesItsServersTree,
   testAnotherProjectsRunLeavesOursStoppable,
   testAGameNoNoteNamesIsStoppedByItsNumber,

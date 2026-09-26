@@ -853,6 +853,12 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
           'The game\'s own arguments, what OS.get_cmdline_user_args() answers, such as ["--level=2"]. The separator is added here. A run with any is started by this server rather than by the editor, which fixes the game\'s command line when it opens the project, so the debug_* tools do not answer for it.',
       },
       headless: { type: 'boolean', ops: ['start'], description: 'start: force a window or no window.' },
+      visible: {
+        type: 'boolean',
+        ops: ['start'],
+        description:
+          'start: on Windows, show the window on the desktop in use. By default a windowed run this server starts goes on a desktop of its own, where it renders and runtime_capture works but the window never shows and never takes the keyboard. A game the editor plays goes there too, since an editor this server opens is on that desktop. Elsewhere than Windows the window shows either way. Default false.',
+      },
       savesIn: {
         type: 'string',
         ops: ['start', 'check'],
