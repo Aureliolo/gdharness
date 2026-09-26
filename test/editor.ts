@@ -692,8 +692,17 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
     return textOf(response) ?? '';
   };
 
+  // A refusal is an answer a case may expect and retry past; an error in the protocol is the server
+  // failing to answer at all, which no case expects. It has no result, so it read as a success with
+  // no text, and a caller parsing that text failed on the parse with the server's error unseen.
   const attempt = async (name: string, args: Record<string, unknown>) => {
     const response = await invoke(name, args);
+    const failed = get(response, 'error');
+    assert.equal(
+      failed,
+      undefined,
+      `${name} failed in the protocol rather than answering: ${JSON.stringify(failed)}`,
+    );
     return { ok: get(response, 'result', 'isError') !== true, text: textOf(response) ?? '' };
   };
 
