@@ -17678,6 +17678,7 @@ function testCommandLineSetup(): void {
 
     const setup = cli('setup', projectDir);
     assert.equal(setup.status, 0, `setup:\n${setup.stdout}${setup.stderr}`);
+    assert.match(setup.stdout, /GdharnessRuntime autoload registered at /, setup.stdout);
     for (const addon of ['gdharness_editor', 'gdharness_runtime', 'auto_reload']) {
       assert.ok(existsSync(join(projectDir, 'addons', addon, '.gdharness-version')), `${addon} is installed`);
     }
@@ -17865,7 +17866,13 @@ function testCommandLineSetup(): void {
     const shared = join(projectDir, '.cursor', 'mcp.json');
     mkdirSync(dirname(shared), { recursive: true });
     writeFileSync(shared, JSON.stringify({ mcpServers: { other: { command: 'theirs' } } }), 'utf8');
-    assert.equal(cli('setup', projectDir, '--cursor').status, 0);
+    const setupAgain = cli('setup', projectDir, '--cursor');
+    assert.equal(setupAgain.status, 0, `setup again:\n${setupAgain.stdout}${setupAgain.stderr}`);
+    assert.match(
+      setupAgain.stdout,
+      /GdharnessRuntime autoload already registered at /,
+      'a setup over one already done says so, as the plugins do, rather than reporting a registration',
+    );
     assert.ok(existsSync(join(projectDir, '.agents', 'skills', 'gdharness', 'SKILL.md')), 'the skill is in');
 
     const removed = cli('uninstall', projectDir);
