@@ -11,12 +11,14 @@ var _editor_plugin: EditorPlugin = null
 var _values: Serialisation = Serialisation.new()
 var _properties: PropertyValues = PropertyValues.new()
 
-## How many times the editor has said its filesystem changed, which a scan run on the main thread
-## does before `scan()` returns: counted so a rescan can tell a scan that ran there from one the
-## editor declined.
-var _scans_finished: int = 0
+## How many scans the editor has completed, counted off `sources_changed`, which it emits at the end
+## of every scan once the reimport the scan found is done: the one moment a scan is over. Neither
+## flag it offers says so. A threaded scan stops reporting itself when its thread finishes, and its
+## import runs a frame or more later when the thread is joined; an editor in the background took
+## long enough over that frame that a rescan answered before the import of 211 changed scenes began.
+var _scans_completed: int = 0
 
-## When the last scan finished, on the engine's clock, or -1 before the first. The editor writes
+## When the last scan completed, on the engine's clock, or -1 before the first. The editor writes
 ## the class cache a frame after it stops reporting a scan, measured on 4.7.2, so a game started
 ## in between reads a file being rewritten; how long ago the scan ended is what tells a caller
 ## whether that write can still be coming.
@@ -26,14 +28,14 @@ var _scan_finished_at_msec: int = -1
 func set_editor_plugin(plugin: EditorPlugin) -> void:
 	_editor_plugin = plugin
 	var filesystem: EditorFileSystem = EditorInterface.get_resource_filesystem()
-	if not filesystem.filesystem_changed.is_connected(_scan_finished):
-		var watched: int = filesystem.filesystem_changed.connect(_scan_finished)
+	if not filesystem.sources_changed.is_connected(_scan_completed):
+		var watched: int = filesystem.sources_changed.connect(_scan_completed)
 		if watched != OK:
-			push_error("gdharness could not watch for finished scans: %d" % watched)
+			push_error("gdharness could not watch for completed scans: %d" % watched)
 
 
-func _scan_finished() -> void:
-	_scans_finished += 1
+func _scan_completed(_sources_exist: bool) -> void:
+	_scans_completed += 1
 	_scan_finished_at_msec = Time.get_ticks_msec()
 
 
@@ -658,8 +660,8 @@ func rescan_filesystem(args: Dictionary) -> Dictionary:
 	# conditions from its progress dialog. Declined and said, so the caller waits and asks again.
 	var busy: bool = filesystem.is_scanning() or filesystem.is_importing()
 	var started: bool = false
+	var completed_before: int = _scans_completed
 	if not Read.as_bool(args.get("statusOnly", false)) and not busy:
-		var finished_before: int = _scans_finished
 		filesystem.scan()
 		# Whether the scan ran, read off the editor rather than assumed. `scan()` returns without
 		# a word while the thread of the scan before is still to be joined, which is a frame or
@@ -668,16 +670,19 @@ func rescan_filesystem(args: Dictionary) -> Dictionary:
 		# downstream, a rescan after 698 files were rewritten answered finished in 1.5s and the
 		# one changed file stayed on its old import. A threaded scan reports itself from inside
 		# the call, and one run on this thread has finished and signalled before it returns.
-		started = filesystem.is_scanning() or _scans_finished != finished_before
+		started = filesystem.is_scanning() or _scans_completed != completed_before
 
 	# Importing is reported separately from scanning, and a class is not registered until
-	# both are done, so a caller watching only one of them can look too early.
+	# both are done, so a caller watching only one of them can look too early. The two counts are
+	# what a caller waits on: the scan it asked for is over once the count has moved past the one
+	# from before it was asked.
 	return {
 		"ok": true,
 		"started": started,
 		"scanning": filesystem.is_scanning(),
 		"importing": filesystem.is_importing(),
-		"scansFinished": _scans_finished,
+		"scansCompletedBefore": completed_before,
+		"scansCompleted": _scans_completed,
 	}
 
 
