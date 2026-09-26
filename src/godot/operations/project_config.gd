@@ -149,12 +149,13 @@ func add_autoload(params: Dictionary) -> Dictionary:
 	if not FileAccess.file_exists(path):
 		return _log.failure("Autoload file does not exist: " + path)
 
-	# Through ProjectSettings so the file is saved the way the editor saves it, header and
-	# every other line kept; a ConfigFile of project.godot drops the comments on the way out.
+	# Through ProjectSettings so the file is saved the way the editor saves it, which includes
+	# putting Godot's header back and dropping any comment somebody wrote into the file by hand.
 	var setting: String = "autoload/" + name
 	var was_updated: bool = ProjectSettings.has_setting(setting)
 
-	# An asterisk in front of the path is how project.godot marks an autoload as enabled.
+	# An asterisk in front of the path makes the autoload a global name as well. Without it the
+	# node still comes up under the root; only the name stops resolving.
 	ProjectSettings.set_setting(setting, ("*" if enabled else "") + path)
 	var err: Error = ProjectSettings.save()
 	if err != OK:

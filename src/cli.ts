@@ -137,7 +137,9 @@ async function registerRuntime(godot: HeadlessEngine, projectPath: string): Prom
   }
   if (autoloadIsOurs(named)) {
     said(await setRuntime(godot, projectPath, true), 'registering the runtime autoload');
-    console.log(`${RUNTIME_AUTOLOAD.name} autoload registered at res://${RUNTIME_AUTOLOAD.path}`);
+    console.log(
+      `${RUNTIME_AUTOLOAD.name} autoload ${named === null ? 'registered' : 'already registered'} at res://${RUNTIME_AUTOLOAD.path}`,
+    );
     return;
   }
   console.log(`${RUNTIME_AUTOLOAD.name} autoload left at ${named}, which this project registers itself`);
