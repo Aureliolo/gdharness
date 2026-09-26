@@ -26,6 +26,7 @@ import {
   renameSync,
   rmSync,
   statSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -38,6 +39,7 @@ import { SERVER_VERSION } from '../src/server-version.js';
 import { RUNTIME_AUTOLOAD } from '../src/setup.js';
 import { asArray, asNumber, asObject, asString, get, text } from './support/json.js';
 import { parseTextContent, textOf } from './support/json-rpc.js';
+import { solidPng } from './support/png.js';
 import { reservePort, ServerProcess } from './support/server.js';
 import { sweep } from './support/sweep.js';
 
@@ -1350,6 +1352,55 @@ async function testEditorRescan({ call, project }: Editor): Promise<void> {
   });
   assert.equal(get(attached, 'resourcePath'), 'res://custom.tres');
   assert.match(fileText(project, 'custom.tres'), /late\.gd/, 'the script should be on the resource');
+}
+
+/**
+ * project_import reimport through the editor that serves the project: a failed import whose source
+ * was fixed, which the editor never retries on its own, and a current resource with force. The
+ * addon starts the reimport on the next frame and the server waits for its count, so the output's
+ * time is read before and after: an answer from a status read alone would pass on an image nothing
+ * touched.
+ */
+async function testAReimportGoesThroughTheEditor({ call, project }: Editor): Promise<void> {
+  writeFileSync(join(project, 'reimport_good.png'), solidPng(40, 160, 40));
+  writeFileSync(join(project, 'reimport_broken.png'), 'not an image yet');
+  await call('editor_rescan', { projectPath: project });
+  const failed = await call('project_import', {
+    projectPath: project,
+    op: 'status',
+    resourcePath: 'reimport_broken.png',
+  });
+  assert.equal(
+    get(failed, 'resources', 0, 'status'),
+    'failed',
+    `the scan's import should fail: ${text(failed)}`,
+  );
+
+  writeFileSync(join(project, 'reimport_broken.png'), solidPng(160, 40, 40));
+  const fixed = await call('project_import', { projectPath: project, op: 'reimport' });
+  assert.equal(get(fixed, 'via'), 'editor', text(fixed));
+  assert.ok(
+    asArray(get(fixed, 'reimported')).includes('res://reimport_broken.png'),
+    `a failed import whose source was fixed should be reimported: ${text(fixed)}`,
+  );
+
+  const sidecar = fileText(project, 'reimport_good.png.import');
+  const output = /^path="res:\/\/([^"]+)"/m.exec(sidecar)?.[1];
+  assert.ok(output !== undefined, `the image should name its output: ${sidecar}`);
+  const past = new Date(Date.now() - 60_000);
+  utimesSync(join(project, output), past, past);
+  const forced = await call('project_import', {
+    projectPath: project,
+    op: 'reimport',
+    resourcePath: 'reimport_good.png',
+    force: true,
+  });
+  assert.equal(get(forced, 'via'), 'editor', text(forced));
+  assert.deepEqual(asArray(get(forced, 'reimported')), ['res://reimport_good.png'], text(forced));
+  assert.ok(
+    statSync(join(project, output)).mtimeMs > past.getTime() + 1000,
+    `the editor should have rewritten ${output}`,
+  );
 }
 
 /**
@@ -3480,6 +3531,7 @@ async function main(): Promise<void> {
     ['testResources', testResources],
     ['testResourcesOnNodes', testResourcesOnNodes],
     ['testEditorRescan', testEditorRescan],
+    ['testAReimportGoesThroughTheEditor', testAReimportGoesThroughTheEditor],
     ['testAClassTheEditorCannotSee', testAClassTheEditorCannotSee],
     ['testAScanWritesTheCacheFromTheEditor', testAScanWritesTheCacheFromTheEditor],
     ['testARescanKeepsWhatTheRebuildWrote', testARescanKeepsWhatTheRebuildWrote],
