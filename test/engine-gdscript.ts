@@ -11,6 +11,7 @@ import assert from 'node:assert/strict';
 import { type SpawnSyncReturns, spawn, spawnSync } from 'node:child_process';
 import {
   cpSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -960,7 +961,35 @@ function testAnImportIsJudgedByWhatItWasBuiltFrom(godotPath: string, _projectDir
       join(dir, 'models', 'kit.gltf.import'),
       '[remap]\n\nimporter="scene"\ntype="PackedScene"\n\n[params]\n\nimport_script/path="res://kit_import.gd"\n',
     );
+    // Its mesh saved to a .mesh file, which holds the material and so the image. The importer keys
+    // a mesh by the file's name and the mesh's.
+    writeFileSync(join(dir, 'models', 'barn.gltf'), JSON.stringify(triangleUsing('tex/wall.png', 'Barn')));
+    mkdirSync(join(dir, 'meshes'));
+    writeFileSync(
+      join(dir, 'models', 'barn.gltf.import'),
+      '[remap]\n\nimporter="scene"\ntype="PackedScene"\n\n[params]\n\n_subresources={\n"meshes": {\n"barn_Barn": {\n"save_to_file/enabled": true,\n"save_to_file/path": "res://meshes/barn.mesh"\n}\n}\n}\n',
+    );
+    // Its material the head of a chain of next passes longer than any cap a walk might set, with
+    // the image at the far end.
+    const chain = 201;
+    mkdirSync(join(dir, 'materials', 'chain'));
+    for (let link = 0; link < chain; link++) {
+      const last = link === chain - 1;
+      const uses = last
+        ? 'Texture2D" path="res://models/tex/wall.png'
+        : `Material" path="res://materials/chain/${link + 1}.tres`;
+      writeFileSync(
+        join(dir, 'materials', 'chain', `${link}.tres`),
+        `[gd_resource type="StandardMaterial3D" load_steps=2 format=3]\n\n[ext_resource type="${uses}" id="1"]\n\n[resource]\n${last ? 'albedo_texture' : 'next_pass'} = ExtResource("1")\n`,
+      );
+    }
+    writeFileSync(join(dir, 'models', 'yard.gltf'), JSON.stringify(triangleUsing('tex/wall.png')));
+    writeFileSync(
+      join(dir, 'models', 'yard.gltf.import'),
+      '[remap]\n\nimporter="scene"\ntype="PackedScene"\n\n[params]\n\n_subresources={\n"materials": {\n"Trim": {\n"use_external/enabled": true,\n"use_external/path": "res://materials/chain/0.tres"\n}\n}\n}\n',
+    );
     importAll();
+    assert.ok(existsSync(join(dir, 'meshes', 'barn.mesh')), 'the barn import should save its mesh to a file');
     writeFileSync(join(dir, 'models', 'tex', 'later.png'), solidPng(40, 200, 40));
     importAll();
 
@@ -981,6 +1010,18 @@ function testAnImportIsJudgedByWhatItWasBuiltFrom(godotPath: string, _projectDir
       get(kit, 'status'),
       'up_to_date',
       `a scene an import script gave other images is current: ${JSON.stringify(kit)}`,
+    );
+    const barn = statusOf('models/barn.gltf');
+    assert.equal(
+      get(barn, 'status'),
+      'up_to_date',
+      `a scene using its image through a saved mesh is current: ${JSON.stringify(barn)}`,
+    );
+    const yard = statusOf('models/yard.gltf');
+    assert.equal(
+      get(yard, 'status'),
+      'up_to_date',
+      `a scene using its image at the end of a long chain of resources is current: ${JSON.stringify(yard)}`,
     );
     const shack = statusOf('models/shack.gltf');
     assert.equal(
@@ -1028,7 +1069,7 @@ function testAnImportIsJudgedByWhatItWasBuiltFrom(godotPath: string, _projectDir
 }
 
 /** A glTF document of one textured triangle whose image is [uri], with its buffer inline. */
-function triangleUsing(uri: string): Record<string, unknown> {
+function triangleUsing(uri: string, meshName?: string): Record<string, unknown> {
   const data = Buffer.alloc(60);
   const values = [0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1];
   for (const [index, value] of values.entries()) {
@@ -1039,7 +1080,12 @@ function triangleUsing(uri: string): Record<string, unknown> {
     scene: 0,
     scenes: [{ nodes: [0] }],
     nodes: [{ mesh: 0 }],
-    meshes: [{ primitives: [{ attributes: { POSITION: 0, TEXCOORD_0: 1 }, material: 0 }] }],
+    meshes: [
+      {
+        ...(meshName ? { name: meshName } : {}),
+        primitives: [{ attributes: { POSITION: 0, TEXCOORD_0: 1 }, material: 0 }],
+      },
+    ],
     materials: [{ name: 'Trim', pbrMetallicRoughness: { baseColorTexture: { index: 0 } } }],
     textures: [{ source: 0 }],
     images: [{ uri }],

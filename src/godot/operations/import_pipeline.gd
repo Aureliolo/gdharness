@@ -8,11 +8,6 @@ const IMPORTABLE_EXTENSIONS: Array[String] = [
 	"png", "jpg", "jpeg", "webp", "svg", "wav", "mp3", "ogg", "ttf", "otf", "glb", "gltf", "fbx", "obj"
 ]
 
-## How many resources a scene's dependencies are followed through before the walk stops: a scene's
-## materials and what they use are a handful, and a project that references its way around a cycle
-## is not walked for ever.
-const DEPENDENCY_WALK_LIMIT: int = 200
-
 var _log: Log
 var _files: FileWalk = FileWalk.new()
 
@@ -459,22 +454,19 @@ static func _path_of(entry: String) -> String:
 	return entry if at < 0 else entry.substr(at + 2)
 
 
-## Every path [param resource_path] depends on, through the resources it depends on in turn, as far
-## as [constant DEPENDENCY_WALK_LIMIT] resources; a set, keyed by path.
+## Every path [param resource_path] depends on, through the resources it depends on in turn; a set,
+## keyed by path.
 static func _depended_on(resource_path: String) -> Dictionary[String, bool]:
 	var found: Dictionary[String, bool] = {}
 	var pending: Array[String] = [resource_path]
-	var walked: int = 0
-	while not pending.is_empty() and walked < DEPENDENCY_WALK_LIMIT:
+	# Every path is followed once, which ends the walk and survives a cycle; a cap or a list of
+	# extensions would leave out a material behind a long chain or in a saved .mesh.
+	while not pending.is_empty():
 		var next: String = pending.pop_back()
-		walked += 1
 		for entry: String in ResourceLoader.get_dependencies(next):
 			var path: String = _path_of(entry)
-			if found.has(path):
-				continue
-			found[path] = true
-			# Only what can hold further references: an image or a sound depends on nothing.
-			if path.get_extension().to_lower() in ["tres", "res", "tscn", "scn", "material"]:
+			if not found.has(path):
+				found[path] = true
 				pending.append(path)
 	return found
 
