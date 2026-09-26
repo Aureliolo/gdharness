@@ -29,6 +29,8 @@ export interface OutsideSpec {
   };
   /** A Windows desktop to start it on, where its windows neither show nor take the focus. */
   readonly desktop?: string;
+  /** Windows: show its first window without activating it, so it takes nobody's keyboard. */
+  readonly noActivate?: boolean;
 }
 
 /**
@@ -46,6 +48,7 @@ export interface SentSpec {
   readonly envChanges: Readonly<Record<string, string | null>>;
   readonly run?: OutsideSpec['run'];
   readonly desktop?: string;
+  readonly noActivate?: boolean;
 }
 
 function changesFrom(env: OutsideSpec['env'], base: NodeJS.ProcessEnv): Record<string, string | null> {
@@ -138,6 +141,7 @@ export async function launchOutsideTheTree(
       envChanges: changesFrom(spec.env, process.env),
       ...(spec.run === undefined ? {} : { run: spec.run }),
       ...(spec.desktop === undefined ? {} : { desktop: spec.desktop }),
+      ...(spec.noActivate === true ? { noActivate: true } : {}),
     });
     let printed = '';
     let complained = '';

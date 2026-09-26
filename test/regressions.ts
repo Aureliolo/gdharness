@@ -5045,6 +5045,105 @@ function testAWindowsCommandLineReadsBackAsItsArguments(): void {
 }
 
 /**
+ * A launch asked to start without activation is started with that show state, on the desktop in use.
+ *
+ * The visible editor is the user's, and opening or reopening it must not take the keyboard from
+ * whatever they are typing in. A program's first ShowWindow takes the show state its start named,
+ * whatever it asks for, so SW_SHOWNOACTIVATE in the start's own information is what keeps the
+ * window from being activated as it appears. That is read back by the process launched, which asks
+ * Windows for its own startup information: a probe compiled here, since Windows PowerShell started
+ * detached runs nothing. The launch without it is the control, started by Node, which names a show
+ * state of its own that is not this one.
+ */
+async function testALaunchWithoutActivationSaysSo(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('no-activate regression skipped (a Windows show state)');
+    return;
+  }
+  const scratch = mkdtempSync(join(tmpdir(), 'gdharness-noactivate-'));
+  try {
+    const probe = join(scratch, 'probe.exe');
+    const source = [
+      'using System;',
+      'using System.IO;',
+      'using System.Runtime.InteropServices;',
+      'public static class Probe {',
+      // Pointers rather than strings: the structure is the system's, and a marshalled string would be
+      // freed on the way back, which corrupts the heap.
+      '  [StructLayout(LayoutKind.Sequential)]',
+      '  struct StartupInfo {',
+      '    public int cb; public IntPtr reserved, desktop, title;',
+      '    public int x, y, xSize, ySize, xCount, yCount, fill, flags;',
+      '    public short show, reservedSize;',
+      '    public IntPtr reservedBytes, input, output, error;',
+      '  }',
+      '  [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern void GetStartupInfoW(ref StartupInfo info);',
+      '  public static void Main(string[] args) {',
+      '    StartupInfo info = new StartupInfo();',
+      '    info.cb = Marshal.SizeOf(typeof(StartupInfo));',
+      '    GetStartupInfoW(ref info);',
+      '    File.WriteAllText(args[0], "flags=" + info.flags + " show=" + info.show + " desktop=" + Marshal.PtrToStringUni(info.desktop));',
+      '  }',
+      '}',
+    ].join('\n');
+    const compiled = spawnSync(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        `Add-Type -TypeDefinition @'\n${source}\n'@ -OutputAssembly '${probe}' -OutputType ConsoleApplication`,
+      ],
+      { encoding: 'utf8', windowsHide: true },
+    );
+    assert.ok(existsSync(probe), `the probe should compile: ${compiled.stdout} ${compiled.stderr}`);
+
+    const said = async (name: string, noActivate: boolean): Promise<string> => {
+      const written = join(scratch, `${name}.txt`);
+      const answer = join(scratch, `${name}.json`);
+      const launcher = join(scratch, `${name}.mjs`);
+      const spec = { command: probe, args: [written], ...(noActivate ? { noActivate: true } : {}) };
+      writeFileSync(
+        launcher,
+        [
+          `import { writeFileSync } from 'node:fs';`,
+          `import { launchOutsideTheTree } from ${JSON.stringify(pathToFileURL(resolve('build', 'outside.js')).href)};`,
+          `const launched = await launchOutsideTheTree(${JSON.stringify(spec)}, process.execPath, ${JSON.stringify(resolve('build', 'keeper.js'))});`,
+          `writeFileSync(${JSON.stringify(answer)}, JSON.stringify(launched));`,
+        ].join('\n'),
+      );
+      spawnSync(process.execPath, [launcher], { timeout: 90_000, windowsHide: true });
+      const launched: unknown = existsSync(answer) ? JSON.parse(readFileSync(answer, 'utf8')) : null;
+      assert.equal(
+        get(launched, 'error'),
+        undefined,
+        `the launch should start the probe: ${JSON.stringify(launched)}`,
+      );
+      for (let waited = 0; waited < 30_000 && !existsSync(written); waited += 200) {
+        await delay(200);
+      }
+      return existsSync(written) ? readFileSync(written, 'utf8') : '';
+    };
+
+    const control = await said('control', false);
+    assert.match(control, /show=\d+/, `the probe should report its show state: ${control}`);
+    assert.doesNotMatch(
+      control,
+      /show=4 /,
+      `a launch not asked should not start without activation: ${control}`,
+    );
+    const quiet = await said('quiet', true);
+    // STARTF_USESHOWWINDOW is 1, so the flags are odd, and SW_SHOWNOACTIVATE is 4.
+    const flags = Number(/flags=(\d+)/.exec(quiet)?.[1] ?? Number.NaN);
+    assert.equal(flags % 2, 1, `the start should name a show state: ${quiet}`);
+    assert.match(quiet, /show=4 /, `and it should be SW_SHOWNOACTIVATE: ${quiet}`);
+    assert.doesNotMatch(quiet, new RegExp(HIDDEN_DESKTOP), `on the desktop in use: ${quiet}`);
+  } finally {
+    sweep(scratch);
+  }
+}
+
+/**
  * A run started on a desktop of its own is on that desktop, under its own pid.
  *
  * Every windowed run downstream put the game on the developer's screen and took the keyboard, and a
@@ -6046,7 +6145,7 @@ async function testAnEditorWritesItsConsoleWhereTheServerLooks(): Promise<void> 
     clearEditorLog(project);
     const editor = spawn(
       godotPath,
-      [...editorArguments(project, { lsp: 0, dap: 0 }, editorLogPath(project)), '--quit-after', '2000'],
+      [...editorArguments(project, { lsp: 0, dap: 0 }, editorLogPath(project), true), '--quit-after', '2000'],
       { stdio: 'ignore' },
     );
     const pid = editor.pid ?? 0;
@@ -8182,10 +8281,8 @@ function testRunArgumentsLeaveTheLocalDebuggerOff(): void {
   // per machine rather than per editor, and the second editor open otherwise binds neither. The
   // log file is the only way anything reads what an editor prints, since its console reaches no
   // plugin: an editor spawned without it is one whose startup nobody can see.
-  // Headless, so opening or restarting one puts no window on the desktop of whoever runs it.
-  assert.deepEqual(editorArguments('/p', { lsp: 6005, dap: 6006 }, '/p/.godot/gdharness-editor.log'), [
-    '-e',
-    '--headless',
+  // A visible editor by default, which is the user's; headless only when asked to be hidden.
+  const opened = [
     '--path',
     '/p',
     '--lsp-port',
@@ -8194,6 +8291,15 @@ function testRunArgumentsLeaveTheLocalDebuggerOff(): void {
     '6006',
     '--log-file',
     '/p/.godot/gdharness-editor.log',
+  ];
+  assert.deepEqual(editorArguments('/p', { lsp: 6005, dap: 6006 }, '/p/.godot/gdharness-editor.log', false), [
+    '-e',
+    ...opened,
+  ]);
+  assert.deepEqual(editorArguments('/p', { lsp: 6005, dap: 6006 }, '/p/.godot/gdharness-editor.log', true), [
+    '-e',
+    '--headless',
+    ...opened,
   ]);
   // The scene as a res:// path and last: the engine reads it positionally, so text beginning
   // with a dash would otherwise be another option to it.
@@ -20004,6 +20110,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testALaunchIsOutsideTheServersTree,
   testAWindowsCommandLineReadsBackAsItsArguments,
   testARunOnItsOwnDesktopIsThere,
+  testALaunchWithoutActivationSaysSo,
   testARunOutlivesItsServersTree,
   testAnotherProjectsRunLeavesOursStoppable,
   testAGameNoNoteNamesIsStoppedByItsNumber,

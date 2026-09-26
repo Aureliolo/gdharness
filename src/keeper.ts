@@ -17,7 +17,7 @@ import { closeSync, existsSync, mkdtempSync, openSync, readFileSync, rmSync } fr
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { onDesktop } from './desktop.js';
+import { throughHelper } from './desktop.js';
 import {
   KEEPER_SCRIPT,
   readLaunched,
@@ -34,7 +34,7 @@ import { recordRunEnded, writeRunRecord } from './run-record.js';
  * with no reader fills and then blocks the writer. [param hidden] for the editor, which is headless
  * and so opens no window, but whose console an engine built as a console program would show; never
  * for a game, whose window is what it is run for. [param detached] false and [param errors]
- * dropped only for the helper that starts a process on another desktop: Windows PowerShell will not
+ * dropped only for the helper that starts a process through Win32: Windows PowerShell will not
  * run detached, and writes its own progress to its error stream.
  */
 async function startDirectly(
@@ -65,26 +65,28 @@ async function startDirectly(
 }
 
 /**
- * [param spec] started on the desktop it names, through `onDesktop`: the child is the process that
- * waits for it there and exits with its code, and the pid is the target's own, read from the file
- * that process writes once the target has started.
+ * [param spec] started through `throughHelper`, on the desktop it names or shown without
+ * activation: the child is the process that waits for it and exits with its code, and the pid is
+ * the target's own, read from the file that process writes once the target has started.
  *
  * Windows PowerShell started detached exits at once and runs nothing, so the helper is this
  * process's own child, hidden, and in the job object Node gives its children: it goes when this
  * process does. The job lets its members' children leave it silently, so the target is in no job
- * and outlives both. So only a keeper starts one, since it waits for as long as the target runs: a
- * launcher that exited after the pid took the helper with it, and a process it had started could
- * no longer start one of its own on that desktop, which is what an editor does when it plays a game.
+ * and outlives both. So only a keeper starts one, since it waits for as long as the target runs.
+ * A launcher that exited after the pid took the helper with it, and a process it had started on a
+ * desktop of its own could no longer start one of its own there, which is what an editor does when
+ * it plays a game; and a start without activation needs its helper to hold the foreground.
  */
-async function startOnDesktop(
-  spec: SentSpec & { readonly desktop: string },
+async function startThroughHelper(
+  spec: SentSpec,
   output: number | 'ignore',
 ): Promise<{ child: ChildProcess; pid: number } | { error: string }> {
   const scratch = mkdtempSync(join(tmpdir(), 'gdharness-desktop-'));
   const pidFile = join(scratch, 'pid');
   const errorFile = join(scratch, 'error');
+  const where = spec.desktop === undefined ? 'without activation' : `on the ${spec.desktop} desktop`;
   try {
-    const wrapper = onDesktop(spec.desktop, spec.command, spec.args, pidFile, errorFile);
+    const wrapper = throughHelper(spec, spec.command, spec.args, pidFile, errorFile);
     const started = await startDirectly(
       { ...spec, command: wrapper.command, args: wrapper.args },
       output,
@@ -109,40 +111,46 @@ async function startOnDesktop(
         const why = existsSync(errorFile)
           ? readFileSync(errorFile, 'utf8').trim()
           : 'it exited saying nothing';
-        return { error: `it could not be started on the ${spec.desktop} desktop: ${why}` };
+        return { error: `it could not be started ${where}: ${why}` };
       }
       await delay(50);
     }
     started.child.kill();
-    return { error: `it was not started on the ${spec.desktop} desktop within ${DESKTOP_START_MS} ms` };
+    return { error: `it was not started ${where} within ${DESKTOP_START_MS} ms` };
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
 }
 
-/** How long a start on another desktop is given to name the process it started. */
+/** How long a start through the helper is given to name the process it started. */
 const DESKTOP_START_MS = 60_000;
 
-/** On the desktop the spec names where Windows has desktops, and directly otherwise. */
+/**
+ * Through the helper where Windows is asked for a desktop or a start without activation, which Node
+ * cannot name when it starts a process, and directly otherwise.
+ */
 async function startDetached(
   spec: SentSpec,
   output: number | 'ignore',
   hidden: boolean,
 ): Promise<{ child: ChildProcess; pid: number } | { error: string }> {
-  const desktop = spec.desktop;
-  return desktop !== undefined && process.platform === 'win32'
-    ? await startOnDesktop({ ...spec, desktop }, output)
+  return process.platform === 'win32' && (spec.desktop !== undefined || spec.noActivate === true)
+    ? await startThroughHelper(spec, output)
     : await startDirectly(spec, output, hidden);
 }
 
-/** Whether [param spec] goes on a desktop of its own, which only a keeper can hold it on. */
-function onItsOwnDesktop(spec: SentSpec): boolean {
-  return spec.desktop !== undefined && process.platform === 'win32';
+/**
+ * Whether [param spec] needs its helper kept for as long as it runs, which only a keeper does: one
+ * on a desktop of its own, for the desktop's sake, and one started without activation, whose helper
+ * holds the foreground while it starts.
+ */
+function needsItsHelperKept(spec: SentSpec): boolean {
+  return process.platform === 'win32' && (spec.desktop !== undefined || spec.noActivate === true);
 }
 
 async function launch(): Promise<void> {
   const spec = await receivedSpec();
-  if (spec.run === undefined && !onItsOwnDesktop(spec)) {
+  if (spec.run === undefined && !needsItsHelperKept(spec)) {
     const started = await startDetached(spec, 'ignore', true);
     if ('error' in started) {
       process.stdout.write(`error ${started.error}\n`);
@@ -188,8 +196,8 @@ async function launch(): Promise<void> {
 async function keep(): Promise<void> {
   const spec = await receivedSpec();
   const run = spec.run;
-  if (run === undefined && !onItsOwnDesktop(spec)) {
-    process.stdout.write('error a keeper was started without a run or a desktop\n');
+  if (run === undefined && !needsItsHelperKept(spec)) {
+    process.stdout.write('error a keeper was started without a run or a helper to keep\n');
     process.exit(1);
   }
   const transcript = run === undefined ? 'ignore' : openSync(run.transcript, 'a');
