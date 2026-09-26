@@ -18302,6 +18302,95 @@ async function testARescanWaitsOutTheEditorsImport(): Promise<void> {
 }
 
 /**
+ * A rescan answers once the editor has settled, not on the first moment it looks idle.
+ *
+ * Downstream, after 698 files were rewritten, a rescan answered finished in 1.5s while the one
+ * changed file was still on its old import, and the editor's own scan of it began straight after.
+ * What a scan finds is imported after the scan stops reporting itself. The fixture editor scans,
+ * goes quiet for a moment, then imports what it found; the rescan has to wait out the import. The
+ * first ask is declined with every flag false, as the addon now says when the editor's previous
+ * scan is still to be joined and `scan()` did nothing.
+ */
+async function testARescanWaitsForTheEditorToSettle(): Promise<void> {
+  const port = await reservePort();
+  const server = new ServerProcess({ env: { GDHARNESS_BRIDGE_PORT: String(port) } });
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-settling-'));
+  let editor: WebSocket | null = null;
+  try {
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    await server.initialize('regression-test');
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+    editor = socket;
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', () => {
+        resolve();
+      });
+      socket.once('error', reject);
+    });
+
+    let asks = 0;
+    // When the scan the rescan asked for started: scanning for 300ms from then, quiet for 200ms,
+    // then importing what it found until 1100ms.
+    const scan: { startedAt: number | null } = { startedAt: null };
+    const IMPORT_ENDS_MS = 1100;
+    const state = (): { scanning: boolean; importing: boolean } => {
+      if (scan.startedAt === null) {
+        return { scanning: false, importing: false };
+      }
+      const since = Date.now() - scan.startedAt;
+      return { scanning: since < 300, importing: since >= 500 && since < IMPORT_ENDS_MS };
+    };
+    socket.on('message', (raw: Buffer) => {
+      const message: unknown = JSON.parse(String(raw));
+      if (!isRecord(message) || message['type'] !== 'tool_invoke') {
+        return;
+      }
+      const tool = String(message['tool']);
+      const args = isRecord(message['args']) ? message['args'] : {};
+      let result: Record<string, unknown> = { ok: true, classes: [] };
+      if (tool === 'rescan_filesystem' && args['statusOnly'] !== true) {
+        asks += 1;
+        if (asks > 1 && scan.startedAt === null) {
+          scan.startedAt = Date.now();
+        }
+        result = { ok: true, started: scan.startedAt !== null, ...state() };
+      } else if (tool === 'rescan_filesystem' || tool === 'scan_status') {
+        result = { ok: true, ...state() };
+      }
+      socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result }));
+    });
+    socket.send(
+      JSON.stringify({ type: 'godot_ready', project_path: project, addon_version: SERVER_VERSION }),
+    );
+
+    let knows = false;
+    for (let waited = 0; waited < 10_000 && !knows; waited += 100) {
+      await delay(100);
+      const status = await server.request('tools/call', { name: 'editor_status', arguments: {} });
+      knows = text(get(parseTextContent(status), 'editor', 'projectPath')) === project;
+    }
+    assert.ok(knows, 'the fixture editor should have reached the server, or this proves nothing');
+
+    const scanned = await server.request('tools/call', {
+      name: 'editor_rescan',
+      arguments: { projectPath: project },
+    });
+    const answeredAt = Date.now();
+    const answer = parseTextContent(scanned);
+    assert.equal(asks, 2, `the scan the editor did nothing with was asked for again: ${textOf(scanned)}`);
+    assert.equal(get(answer, 'ok'), true, textOf(scanned) ?? '');
+    assert.ok(
+      scan.startedAt !== null && answeredAt >= scan.startedAt + IMPORT_ENDS_MS,
+      `the rescan answered after the import of what the scan found, not before it: ${textOf(scanned)}`,
+    );
+  } finally {
+    editor?.terminate();
+    await server.stop();
+    sweep(project);
+  }
+}
+
+/**
  * A game is not started against a class cache the editor is about to rewrite.
  *
  * Downstream, a formatter rewrote a few scripts, the editor scanned them, and a start a few seconds
@@ -19292,6 +19381,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testClassesAnEditorIsNotHolding,
   testAScanThatHasNotStartedIsNotFinished,
   testARescanWaitsOutTheEditorsImport,
+  testARescanWaitsForTheEditorToSettle,
   testALaunchIsOutsideTheServersTree,
   testARunOutlivesItsServersTree,
   testAnotherProjectsRunLeavesOursStoppable,
