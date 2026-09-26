@@ -9,8 +9,10 @@
 
 import assert from 'node:assert/strict';
 import { type SpawnSyncReturns, spawn, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   cpSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -729,7 +731,8 @@ function testOperations(godotPath: string, projectDir: string): void {
   );
   assert.equal(
     get(operation('reimport_resource', { resource_path: 'art.png' }), 'current_status'),
-    'up_to_date',
+    // A sidecar the engine never wrote has no uid and no recorded hash, and the editor imports it.
+    'needs_reimport',
   );
 
   const presets = operation('list_export_presets', {});
@@ -960,7 +963,49 @@ function testAnImportIsJudgedByWhatItWasBuiltFrom(godotPath: string, _projectDir
       join(dir, 'models', 'kit.gltf.import'),
       '[remap]\n\nimporter="scene"\ntype="PackedScene"\n\n[params]\n\nimport_script/path="res://kit_import.gd"\n',
     );
+    // Its mesh saved to a .mesh file, which holds the material and so the image. The importer keys
+    // a mesh by the file's name and the mesh's.
+    writeFileSync(join(dir, 'models', 'barn.gltf'), JSON.stringify(triangleUsing('tex/wall.png', 'Barn')));
+    mkdirSync(join(dir, 'meshes'));
+    writeFileSync(
+      join(dir, 'models', 'barn.gltf.import'),
+      '[remap]\n\nimporter="scene"\ntype="PackedScene"\n\n[params]\n\n_subresources={\n"meshes": {\n"barn_Barn": {\n"save_to_file/enabled": true,\n"save_to_file/path": "res://meshes/barn.mesh"\n}\n}\n}\n',
+    );
+    // Its material the head of a chain of next passes longer than any cap a walk might set, with
+    // the image at the far end.
+    const chain = 201;
+    mkdirSync(join(dir, 'materials', 'chain'));
+    for (let link = 0; link < chain; link++) {
+      const last = link === chain - 1;
+      const uses = last
+        ? 'Texture2D" path="res://models/tex/wall.png'
+        : `Material" path="res://materials/chain/${link + 1}.tres`;
+      writeFileSync(
+        join(dir, 'materials', 'chain', `${link}.tres`),
+        `[gd_resource type="StandardMaterial3D" load_steps=2 format=3]\n\n[ext_resource type="${uses}" id="1"]\n\n[resource]\n${last ? 'albedo_texture' : 'next_pass'} = ExtResource("1")\n`,
+      );
+    }
+    writeFileSync(join(dir, 'models', 'yard.gltf'), JSON.stringify(triangleUsing('tex/wall.png')));
+    writeFileSync(
+      join(dir, 'models', 'yard.gltf.import'),
+      '[remap]\n\nimporter="scene"\ntype="PackedScene"\n\n[params]\n\n_subresources={\n"materials": {\n"Trim": {\n"use_external/enabled": true,\n"use_external/path": "res://materials/chain/0.tres"\n}\n}\n}\n',
+    );
+    // One image for each way an import goes stale, so each is stale for its own reason only.
+    const tex = join(dir, 'models', 'tex');
+    for (const [name, red] of [
+      ['tint', 30],
+      ['bare', 60],
+      ['rug', 90],
+      ['dropped', 150],
+      ['plain', 180],
+      ['held', 210],
+    ] as const) {
+      writeFileSync(join(tex, `${name}.png`), solidPng(red, 90, 90));
+    }
+    writeFileSync(join(tex, 'held.png.import'), '[remap]\n\nimporter="keep"\n');
+    writeFileSync(join(tex, 'broken.png'), 'not an image at all');
     importAll();
+    assert.ok(existsSync(join(dir, 'meshes', 'barn.mesh')), 'the barn import should save its mesh to a file');
     writeFileSync(join(dir, 'models', 'tex', 'later.png'), solidPng(40, 200, 40));
     importAll();
 
@@ -981,6 +1026,18 @@ function testAnImportIsJudgedByWhatItWasBuiltFrom(godotPath: string, _projectDir
       get(kit, 'status'),
       'up_to_date',
       `a scene an import script gave other images is current: ${JSON.stringify(kit)}`,
+    );
+    const barn = statusOf('models/barn.gltf');
+    assert.equal(
+      get(barn, 'status'),
+      'up_to_date',
+      `a scene using its image through a saved mesh is current: ${JSON.stringify(barn)}`,
+    );
+    const yard = statusOf('models/yard.gltf');
+    assert.equal(
+      get(yard, 'status'),
+      'up_to_date',
+      `a scene using its image at the end of a long chain of resources is current: ${JSON.stringify(yard)}`,
     );
     const shack = statusOf('models/shack.gltf');
     assert.equal(
@@ -1022,13 +1079,135 @@ function testAnImportIsJudgedByWhatItWasBuiltFrom(godotPath: string, _projectDir
       `a resource whose output is gone: ${JSON.stringify(gone)}`,
     );
     assert.deepEqual(get(gone, 'missing_outputs'), [output], JSON.stringify(gone));
+
+    const expectStale = (resource: string, status: string, reason: RegExp, what: string): void => {
+      const found = statusOf(resource);
+      assert.equal(get(found, 'status'), status, `${what}: ${JSON.stringify(found)}`);
+      assert.match(asString(get(found, 'reason')), reason, `${what}: ${JSON.stringify(found)}`);
+    };
+    const held = statusOf('models/tex/held.png');
+    assert.equal(get(held, 'status'), 'up_to_date', `a resource kept as it is: ${JSON.stringify(held)}`);
+    expectStale('models/tex/broken.png', 'failed', /last import failed/, 'an image that would not import');
+
+    // An option set in the sidecar without a reimport, as set_options does; the editor holds the
+    // sidecar's hash from its last import in its filesystem cache.
+    const tintSidecar = join(tex, 'tint.png.import');
+    const tintText = readFileSync(tintSidecar, 'utf8');
+    assert.match(tintText, /compress\/mode=0/, 'the fixture should change an option the sidecar holds');
+    writeFileSync(tintSidecar, tintText.replace('compress/mode=0', 'compress/mode=1'));
+    expectStale(
+      'models/tex/tint.png',
+      'needs_reimport',
+      /import file changed/,
+      'an option set without a reimport',
+    );
+
+    // Its output rewritten, with the source and the sidecar as the import left them.
+    const rugOutput = asString(
+      asArray(
+        get(operation('get_import_options', { resource_path: 'models/tex/rug.png' }), 'deps', 'dest_files'),
+      )[0],
+    );
+    const rugFile = join(dir, rugOutput.replace('res://', ''));
+    writeFileSync(rugFile, Buffer.concat([readFileSync(rugFile), Buffer.from([0])]));
+    expectStale(
+      'models/tex/rug.png',
+      'needs_reimport',
+      /output changed/,
+      'an output changed after its import',
+    );
+
+    // A sidecar copied beside a copy of its image, naming the image it was written for.
+    writeFileSync(join(tex, 'twin.png'), readFileSync(join(tex, 'plain.png')));
+    writeFileSync(join(tex, 'twin.png.import'), readFileSync(join(tex, 'plain.png.import')));
+    expectStale(
+      'models/tex/twin.png',
+      'needs_reimport',
+      /written for res:\/\/models\/tex\/plain\.png/,
+      'a copied sidecar',
+    );
+
+    // Its record of the hashes gone, with everything else as the import left it.
+    const plainRecord = join(
+      dir,
+      '.godot',
+      'imported',
+      `plain.png-${createHash('md5').update('res://models/tex/plain.png').digest('hex')}.md5`,
+    );
+    assert.ok(existsSync(plainRecord), `the import should record its hashes at ${plainRecord}`);
+    rmSync(plainRecord);
+    expectStale(
+      'models/tex/plain.png',
+      'needs_reimport',
+      /no hash/,
+      'an import with no record of its hashes',
+    );
+
+    // Past the cache from here, since a sidecar with no uid is also a sidecar changed since its
+    // import, and the editor reads the cache first.
+    const cacheDir = join(dir, '.godot', 'editor');
+    const caches = readdirSync(cacheDir).filter((name) => name.startsWith('filesystem_cache'));
+    assert.ok(
+      caches.length > 0,
+      `the import should write the editor's filesystem cache: ${readdirSync(cacheDir).join(', ')}`,
+    );
+    for (const cache of caches) {
+      rmSync(join(cacheDir, cache));
+    }
+    const bareSidecar = join(tex, 'bare.png.import');
+    const bareText = readFileSync(bareSidecar, 'utf8');
+    assert.match(bareText, /^uid=/m, 'the fixture should remove a uid the sidecar holds');
+    writeFileSync(bareSidecar, bareText.replace(/^uid=.*\n/m, ''));
+    expectStale('models/tex/bare.png', 'needs_reimport', /no uid/, 'a sidecar without a uid');
+
+    // Walked for as a whole: a sidecar whose source is gone, and a source of a type the first
+    // import did not meet.
+    rmSync(join(tex, 'dropped.png'));
+    writeFileSync(join(tex, 'fresh.bmp'), solidBmp());
+    const walked = asArray(get(operation('get_import_status', {}), 'resources'));
+    const entry = (path: string): unknown => walked.find((one) => get(one, 'path') === path);
+    const dropped = entry('res://models/tex/dropped.png');
+    assert.equal(
+      get(dropped, 'status'),
+      'missing_source',
+      `a sidecar left behind: ${JSON.stringify(walked)}`,
+    );
+    assert.equal(get(dropped, 'import_file_exists'), true, JSON.stringify(dropped));
+    const fresh = entry('res://models/tex/fresh.bmp');
+    assert.equal(
+      get(fresh, 'status'),
+      'needs_reimport',
+      `a bitmap never imported: ${JSON.stringify(walked)}`,
+    );
+    const summary = get(operation('get_import_status', {}), 'summary');
+    assert.equal(
+      get(summary, 'failed'),
+      1,
+      `the failed import should be counted: ${JSON.stringify(summary)}`,
+    );
   } finally {
     sweep(dir);
   }
 }
 
+/** A 1 by 1 bitmap, 24 bits a pixel. */
+function solidBmp(): Buffer {
+  const bytes = Buffer.alloc(58);
+  bytes.write('BM', 0, 'ascii');
+  bytes.writeUInt32LE(58, 2);
+  bytes.writeUInt32LE(54, 10);
+  bytes.writeUInt32LE(40, 14);
+  bytes.writeInt32LE(1, 18);
+  bytes.writeInt32LE(1, 22);
+  bytes.writeUInt16LE(1, 26);
+  bytes.writeUInt16LE(24, 28);
+  bytes.writeUInt32LE(4, 34);
+  bytes.writeUInt8(200, 54);
+  return bytes;
+}
+
 /** A glTF document of one textured triangle whose image is [uri], with its buffer inline. */
-function triangleUsing(uri: string): Record<string, unknown> {
+function triangleUsing(uri: string, meshName?: string): Record<string, unknown> {
   const data = Buffer.alloc(60);
   const values = [0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1];
   for (const [index, value] of values.entries()) {
@@ -1039,7 +1218,12 @@ function triangleUsing(uri: string): Record<string, unknown> {
     scene: 0,
     scenes: [{ nodes: [0] }],
     nodes: [{ mesh: 0 }],
-    meshes: [{ primitives: [{ attributes: { POSITION: 0, TEXCOORD_0: 1 }, material: 0 }] }],
+    meshes: [
+      {
+        ...(meshName ? { name: meshName } : {}),
+        primitives: [{ attributes: { POSITION: 0, TEXCOORD_0: 1 }, material: 0 }],
+      },
+    ],
     materials: [{ name: 'Trim', pbrMetallicRoughness: { baseColorTexture: { index: 0 } } }],
     textures: [{ source: 0 }],
     images: [{ uri }],
