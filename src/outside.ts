@@ -27,6 +27,8 @@ export interface OutsideSpec {
     readonly startedAt: number;
     readonly projectPath: string;
   };
+  /** A Windows desktop to start it on, where its windows neither show nor take the focus. */
+  readonly desktop?: string;
 }
 
 /**
@@ -43,6 +45,7 @@ export interface SentSpec {
   readonly args: readonly string[];
   readonly envChanges: Readonly<Record<string, string | null>>;
   readonly run?: OutsideSpec['run'];
+  readonly desktop?: string;
 }
 
 function changesFrom(env: OutsideSpec['env'], base: NodeJS.ProcessEnv): Record<string, string | null> {
@@ -134,6 +137,7 @@ export async function launchOutsideTheTree(
       args: spec.args,
       envChanges: changesFrom(spec.env, process.env),
       ...(spec.run === undefined ? {} : { run: spec.run }),
+      ...(spec.desktop === undefined ? {} : { desktop: spec.desktop }),
     });
     let printed = '';
     let complained = '';

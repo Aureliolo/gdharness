@@ -13,7 +13,11 @@
  */
 
 import { type ChildProcess, spawn } from 'node:child_process';
-import { closeSync, openSync } from 'node:fs';
+import { closeSync, existsSync, mkdtempSync, openSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
+import { onDesktop } from './desktop.js';
 import {
   KEEPER_SCRIPT,
   readLaunched,
@@ -29,17 +33,21 @@ import { recordRunEnded, writeRunRecord } from './run-record.js';
  * its streams go to [param output], the transcript for a run and nowhere otherwise, since a pipe
  * with no reader fills and then blocks the writer. [param hidden] for the editor, which is headless
  * and so opens no window, but whose console an engine built as a console program would show; never
- * for a game, whose window is what it is run for.
+ * for a game, whose window is what it is run for. [param detached] false and [param errors]
+ * dropped only for the helper that starts a process on another desktop: Windows PowerShell will not
+ * run detached, and writes its own progress to its error stream.
  */
-async function startDetached(
+async function startDirectly(
   spec: SentSpec,
   output: number | 'ignore',
   hidden: boolean,
+  detached = true,
+  errors: number | 'ignore' = output,
 ): Promise<{ child: ChildProcess; pid: number } | { error: string }> {
   return await new Promise((resolve) => {
     const child = spawn(spec.command, [...spec.args], {
-      stdio: ['ignore', output, output],
-      detached: true,
+      stdio: ['ignore', output, errors],
+      detached,
       windowsHide: hidden,
       env: withChanges(process.env, spec.envChanges),
     });
@@ -56,9 +64,85 @@ async function startDetached(
   });
 }
 
+/**
+ * [param spec] started on the desktop it names, through `onDesktop`: the child is the process that
+ * waits for it there and exits with its code, and the pid is the target's own, read from the file
+ * that process writes once the target has started.
+ *
+ * Windows PowerShell started detached exits at once and runs nothing, so the helper is this
+ * process's own child, hidden, and in the job object Node gives its children: it goes when this
+ * process does. The job lets its members' children leave it silently, so the target is in no job
+ * and outlives both. So only a keeper starts one, since it waits for as long as the target runs: a
+ * launcher that exited after the pid took the helper with it, and a process it had started could
+ * no longer start one of its own on that desktop, which is what an editor does when it plays a game.
+ */
+async function startOnDesktop(
+  spec: SentSpec & { readonly desktop: string },
+  output: number | 'ignore',
+): Promise<{ child: ChildProcess; pid: number } | { error: string }> {
+  const scratch = mkdtempSync(join(tmpdir(), 'gdharness-desktop-'));
+  const pidFile = join(scratch, 'pid');
+  const errorFile = join(scratch, 'error');
+  try {
+    const wrapper = onDesktop(spec.desktop, spec.command, spec.args, pidFile, errorFile);
+    const started = await startDirectly(
+      { ...spec, command: wrapper.command, args: wrapper.args },
+      output,
+      true,
+      false,
+      'ignore',
+    );
+    if ('error' in started) {
+      return started;
+    }
+    const exited = { now: false };
+    started.child.once('exit', () => {
+      exited.now = true;
+    });
+    // Compiling the helper takes a few seconds the first time, and an engine is quick to start after.
+    for (let waited = 0; waited < DESKTOP_START_MS; waited += 50) {
+      const pid = existsSync(pidFile) ? Number(readFileSync(pidFile, 'utf8').trim()) : Number.NaN;
+      if (Number.isInteger(pid) && pid > 0) {
+        return { child: started.child, pid };
+      }
+      if (exited.now) {
+        const why = existsSync(errorFile)
+          ? readFileSync(errorFile, 'utf8').trim()
+          : 'it exited saying nothing';
+        return { error: `it could not be started on the ${spec.desktop} desktop: ${why}` };
+      }
+      await delay(50);
+    }
+    started.child.kill();
+    return { error: `it was not started on the ${spec.desktop} desktop within ${DESKTOP_START_MS} ms` };
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+/** How long a start on another desktop is given to name the process it started. */
+const DESKTOP_START_MS = 60_000;
+
+/** On the desktop the spec names where Windows has desktops, and directly otherwise. */
+async function startDetached(
+  spec: SentSpec,
+  output: number | 'ignore',
+  hidden: boolean,
+): Promise<{ child: ChildProcess; pid: number } | { error: string }> {
+  const desktop = spec.desktop;
+  return desktop !== undefined && process.platform === 'win32'
+    ? await startOnDesktop({ ...spec, desktop }, output)
+    : await startDirectly(spec, output, hidden);
+}
+
+/** Whether [param spec] goes on a desktop of its own, which only a keeper can hold it on. */
+function onItsOwnDesktop(spec: SentSpec): boolean {
+  return spec.desktop !== undefined && process.platform === 'win32';
+}
+
 async function launch(): Promise<void> {
   const spec = await receivedSpec();
-  if (spec.run === undefined) {
+  if (spec.run === undefined && !onItsOwnDesktop(spec)) {
     const started = await startDetached(spec, 'ignore', true);
     if ('error' in started) {
       process.stdout.write(`error ${started.error}\n`);
@@ -103,36 +187,42 @@ async function launch(): Promise<void> {
 
 async function keep(): Promise<void> {
   const spec = await receivedSpec();
-  if (spec.run === undefined) {
-    process.stdout.write('error a keeper was started without a run\n');
+  const run = spec.run;
+  if (run === undefined && !onItsOwnDesktop(spec)) {
+    process.stdout.write('error a keeper was started without a run or a desktop\n');
     process.exit(1);
   }
-  const run = spec.run;
-  const transcript = openSync(run.transcript, 'a');
+  const transcript = run === undefined ? 'ignore' : openSync(run.transcript, 'a');
   let started: Awaited<ReturnType<typeof startDetached>>;
   try {
-    started = await startDetached(spec, transcript, false);
+    started = await startDetached(spec, transcript, run === undefined);
   } finally {
     // The game holds its own copy from here on.
-    closeSync(transcript);
+    if (transcript !== 'ignore') {
+      closeSync(transcript);
+    }
   }
   if ('error' in started) {
     process.stdout.write(`error ${started.error}\n`);
     process.exit(1);
   }
   const { child, pid } = started;
-  // Before the pid goes back: a game that ends at once would otherwise exit before any record held
-  // its pid, and the exit would have nowhere to go.
-  writeRunRecord({
-    pid,
-    transcript: run.transcript,
-    startedAt: run.startedAt,
-    projectPath: run.projectPath,
-    arguments: spec.args,
-    command: spec.command,
-  });
+  if (run !== undefined) {
+    // Before the pid goes back: a game that ends at once would otherwise exit before any record held
+    // its pid, and the exit would have nowhere to go.
+    writeRunRecord({
+      pid,
+      transcript: run.transcript,
+      startedAt: run.startedAt,
+      projectPath: run.projectPath,
+      arguments: spec.args,
+      command: spec.command,
+    });
+  }
   child.once('exit', (code: number | null, signal: NodeJS.Signals | null) => {
-    recordRunEnded(run.projectPath, pid, { exitCode: code, exitSignal: code === null ? signal : null });
+    if (run !== undefined) {
+      recordRunEnded(run.projectPath, pid, { exitCode: code, exitSignal: code === null ? signal : null });
+    }
     process.exit(0);
   });
   process.stdout.write(`pid ${pid}\n`);

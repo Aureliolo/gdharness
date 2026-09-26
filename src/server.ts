@@ -70,6 +70,7 @@ import {
   handleDAPTool,
   type StoppedAt,
 } from './dap_client.js';
+import { HIDDEN_DESKTOP } from './desktop.js';
 import { dictionary, emptyRecord } from './dictionary.js';
 import {
   bursts,
@@ -4673,6 +4674,9 @@ class GodotServer {
         GDHARNESS_DAP_PORT: String(ports.dap),
         [OPENED_BY_A_SERVER]: '1',
       },
+      // Headless, and on a desktop of its own as well, because the games it plays are its children
+      // and land where it is: on the desktop in use they showed and took the keyboard.
+      desktop: HIDDEN_DESKTOP,
     });
     if ('error' in launched) {
       return { pid: null, error: launched.error };
@@ -4865,6 +4869,9 @@ class GodotServer {
       needsItsOwnProcess(asked.value)
         ? environmentFor({ ...asked.value, runtimeDirectory: runtimeDirectory() })
         : undefined,
+      // A window on a desktop of its own, where it renders and neither shows nor takes the keyboard,
+      // unless the caller asked to see it. A headless run has no window to put anywhere.
+      headless || args['visible'] === true ? undefined : HIDDEN_DESKTOP,
     );
     if ('error' in started) {
       return this.createErrorResponse(`The game could not be started: ${started.error}`, [
@@ -5511,6 +5518,7 @@ class GodotServer {
     cmdArgs: string[],
     projectPath: string,
     env?: NodeJS.ProcessEnv,
+    desktop?: string,
   ): Promise<GodotProcess | { error: string }> {
     const startedAt = Date.now();
     const transcript = openTranscript(startedAt);
@@ -5525,6 +5533,7 @@ class GodotServer {
       args: cmdArgs,
       ...(env === undefined ? {} : { env }),
       run: { transcript: transcript.path, startedAt, projectPath },
+      ...(desktop === undefined ? {} : { desktop }),
     });
     if ('error' in launched) {
       return launched;
