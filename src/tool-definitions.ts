@@ -465,7 +465,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     operations: {
       status: {
         summary:
-          'which resources are outdated or failed, or one resource with resourcePath, judged by content as the editor judges it: a source whose hash differs from the one its import recorded, an import whose output under .godot/imported is gone (missing_outputs), and a glTF scene whose import does not depend on an image it names, because it was built before that image was imported (imported_without), each with its reason',
+          'which resources are outdated or failed, or one resource with resourcePath, judged by content as the editor judges it: a source whose hash differs from the one its import recorded, an import whose output under .godot/imported is gone (missing_outputs), and a glTF scene whose import does not depend on an image it names, because it was built before that image was imported (imported_without; a scene whose import runs an import script is not judged on images), each with its reason',
         requires: [],
       },
       options: { summary: 'the import options of one resource', requires: ['resourcePath'] },
