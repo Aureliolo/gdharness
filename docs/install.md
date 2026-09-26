@@ -229,7 +229,9 @@ Codex CLI: left alone. Its config is machine-wide and may serve
 another project; pass --codex to remove it.
 ```
 
-Writes to `project.godot` go through the engine, so the file keeps its comments and formatting.
+Writes to `project.godot` go through the engine, so the file is written the way the editor writes
+it. That includes what the editor does to it: a comment you added by hand is dropped, and the file
+gets Godot's own header back, as on any save of the project settings.
 
 ## The runtime autoload
 

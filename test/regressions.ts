@@ -174,6 +174,7 @@ import {
   installAddons,
   installedEditorDigest,
   RUNTIME_AUTOLOAD,
+  removeAddons,
   SCRIPT_RUNS_SETTING,
   shippedEditorDigest,
 } from '../src/setup.js';
@@ -17616,6 +17617,36 @@ function testAnUpgradeReadsTheEngineOutOfTheConfigItRewrites(): void {
   }
 }
 
+/**
+ * Taking the addons out removes `addons/` only when that leaves it empty, and only when something
+ * of gdharness was there to take: a project's own addon keeps the directory, and an empty one that
+ * gdharness never filled is not its to remove.
+ */
+function testUninstallLeavesAddonsItDidNotMake(): void {
+  const projectDir = mkdtempSync(join(tmpdir(), 'gdharness-uninstall-'));
+  try {
+    installAddons(projectDir);
+    mkdirSync(join(projectDir, 'addons', 'someone_else'));
+    writeFileSync(join(projectDir, 'addons', 'someone_else', 'plugin.cfg'), '[plugin]\n');
+    const kept = removeAddons(projectDir);
+    assert.equal(kept.length, ADDONS.length, JSON.stringify(kept));
+    assert.deepEqual(
+      readdirSync(join(projectDir, 'addons')),
+      ['someone_else'],
+      'their addon keeps the directory',
+    );
+
+    rmSync(join(projectDir, 'addons', 'someone_else'), { recursive: true });
+    assert.deepEqual(removeAddons(projectDir), [], 'nothing of gdharness was there');
+    assert.ok(
+      existsSync(join(projectDir, 'addons')),
+      'so the empty directory is left where the project had it',
+    );
+  } finally {
+    sweep(projectDir);
+  }
+}
+
 function testCommandLineSetup(): void {
   const godotPath = resolveGodotPath();
   if (!godotPath) {
@@ -17647,6 +17678,7 @@ function testCommandLineSetup(): void {
 
     const setup = cli('setup', projectDir);
     assert.equal(setup.status, 0, `setup:\n${setup.stdout}${setup.stderr}`);
+    assert.match(setup.stdout, /GdharnessRuntime autoload registered at /, setup.stdout);
     for (const addon of ['gdharness_editor', 'gdharness_runtime', 'auto_reload']) {
       assert.ok(existsSync(join(projectDir, 'addons', addon, '.gdharness-version')), `${addon} is installed`);
     }
@@ -17834,7 +17866,13 @@ function testCommandLineSetup(): void {
     const shared = join(projectDir, '.cursor', 'mcp.json');
     mkdirSync(dirname(shared), { recursive: true });
     writeFileSync(shared, JSON.stringify({ mcpServers: { other: { command: 'theirs' } } }), 'utf8');
-    assert.equal(cli('setup', projectDir, '--cursor').status, 0);
+    const setupAgain = cli('setup', projectDir, '--cursor');
+    assert.equal(setupAgain.status, 0, `setup again:\n${setupAgain.stdout}${setupAgain.stderr}`);
+    assert.match(
+      setupAgain.stdout,
+      /GdharnessRuntime autoload already registered at /,
+      'a setup over one already done says so, as the plugins do, rather than reporting a registration',
+    );
     assert.ok(existsSync(join(projectDir, '.agents', 'skills', 'gdharness', 'SKILL.md')), 'the skill is in');
 
     const removed = cli('uninstall', projectDir);
@@ -17842,6 +17880,12 @@ function testCommandLineSetup(): void {
     for (const addon of ['gdharness_editor', 'gdharness_runtime', 'auto_reload']) {
       assert.equal(existsSync(join(projectDir, 'addons', addon)), false, `${addon} is gone`);
     }
+    assert.match(
+      removed.stdout,
+      /removed .*[\\/]addons\r?\n/,
+      'the addons directory setup made is named as removed',
+    );
+    assert.equal(existsSync(join(projectDir, 'addons')), false, 'and is gone, holding nothing else');
     const stripped = readFileSync(join(projectDir, 'project.godot'), 'utf8');
     assert.doesNotMatch(stripped, /GdharnessRuntime/, 'the autoload is gone');
     assert.doesNotMatch(stripped, /gdharness_editor\/plugin\.cfg/, 'and the editor plugin is off');
@@ -20613,6 +20657,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testATestRunCutShortIsNamedForWhatItWasDoing,
   testAnUpgradeReadsTheEngineOutOfTheConfigItRewrites,
   testCommandLineSetup,
+  testUninstallLeavesAddonsItDidNotMake,
   testTheWrittenConfigNamesAProgramThatStarts,
 
   testProjectGodotMultilineValues,
