@@ -1651,13 +1651,29 @@ async function testTheClassCheckKnowsWhichProjectItIsAbout({ call, project }: Ed
  * nobody's window open can reproduce, and the editor is what it has been told. Asserting only that
  * the editor answers would be satisfied by a server that quietly read the file and called it the
  * editor's, which is exactly the ambiguity the argument was added to remove, so the file is changed
- * underneath the editor first and then both are asked. Whether an editor ever picks a change up on
- * its own is the engine's business; what is asserted is that the two answers come from two places,
- * and the editor's is the one it was holding.
+ * underneath the editor first, by hand rather than through a tool, and then both are asked. Whether
+ * an editor ever picks a change up on its own is the engine's business; what is asserted is that
+ * the two answers come from two places, and the editor's is the one it was holding.
+ *
+ * Then the other half: a write through project_settings is taken up by the editor. Written to the
+ * file alone, the editor went on answering the old value and would have saved it back over the new
+ * one, and the answer said nothing.
  */
 async function testASettingReadFromTheEditor({ call, refusal, project }: Editor): Promise<void> {
   const named = 'application/config/description';
   const written = 'what only the file says';
+  const read = async (from?: 'editor'): Promise<string> =>
+    asString(
+      get(
+        await call('project_settings', {
+          projectPath: project,
+          op: 'get',
+          setting: named,
+          ...(from === undefined ? {} : { from }),
+        }),
+        'value',
+      ),
+    );
 
   const before = await call('project_settings', {
     projectPath: project,
@@ -1668,28 +1684,75 @@ async function testASettingReadFromTheEditor({ call, refusal, project }: Editor)
   assert.equal(get(before, 'exists'), true, `the editor should hold the setting: ${text(before)}`);
   assert.equal(asString(get(before, 'value')), '', `and it opened with nothing in it: ${text(before)}`);
 
-  // Headless, so the file changes and the open editor is never told.
-  await call('project_settings', { projectPath: project, op: 'set', setting: named, value: written });
+  // By hand, so the file changes and the open editor is never told.
+  const file = join(project, 'project.godot');
+  const original = readFileSync(file, 'utf8');
   assert.match(
-    readFileSync(join(project, 'project.godot'), 'utf8'),
-    new RegExp(written),
-    'the write should have reached the file',
+    original,
+    /^\[application\]$/m,
+    'the fixture project has an application section to write into',
   );
+  writeFileSync(
+    file,
+    original.replace(/^\[application\]$/m, `[application]\n\nconfig/description="${written}"`),
+  );
+  assert.equal(await read(), written, 'disk reads the file');
+  assert.equal(await read('editor'), '', 'the editor answers with what it is holding');
 
-  const fromDisk = await call('project_settings', { projectPath: project, op: 'get', setting: named });
-  assert.equal(asString(get(fromDisk, 'value')), written, `disk reads the file: ${text(fromDisk)}`);
+  const through = 'written through the tool';
+  const set = await call('project_settings', {
+    projectPath: project,
+    op: 'set',
+    setting: named,
+    value: through,
+  });
+  assert.ok(
+    asArray(get(set, 'editorAdopted')).includes(named),
+    `the editor should take the write: ${text(set)}`,
+  );
+  assert.equal(await read(), through, 'the write reaches the file');
+  assert.equal(await read('editor'), through, 'and the editor holds it too');
 
-  const fromEditor = await call('project_settings', {
+  // An op that writes settings of its own, which the editor takes the same way.
+  const action = await call('project_settings', {
+    projectPath: project,
+    op: 'add_input_action',
+    actionName: 'gdharness_adopted',
+    events: [{ type: 'key', keycode: 'J' }],
+  });
+  assert.ok(asArray(get(action, 'editorAdopted')).includes('input/gdharness_adopted'), text(action));
+  const held = await call('project_settings', {
     projectPath: project,
     op: 'get',
-    setting: named,
+    setting: 'input/gdharness_adopted',
     from: 'editor',
   });
-  assert.equal(
-    asString(get(fromEditor, 'value')),
-    '',
-    `the editor answers with what it is holding: ${text(fromEditor)}`,
-  );
+  assert.equal(get(held, 'exists'), true, `the editor should hold the new action: ${text(held)}`);
+
+  // And a setting a write takes out, which the editor has to let go of rather than save back.
+  writeFileSync(join(project, 'adopted_autoload.gd'), 'extends Node\n');
+  const autoload = 'autoload/AdoptedAutoload';
+  await call('project_settings', {
+    projectPath: project,
+    op: 'add_autoload',
+    name: 'AdoptedAutoload',
+    path: 'res://adopted_autoload.gd',
+  });
+  const registered = await call('project_settings', {
+    projectPath: project,
+    op: 'get',
+    setting: autoload,
+    from: 'editor',
+  });
+  assert.equal(get(registered, 'exists'), true, `the editor should hold the autoload: ${text(registered)}`);
+  await call('project_settings', { projectPath: project, op: 'remove_autoload', name: 'AdoptedAutoload' });
+  const gone = await call('project_settings', {
+    projectPath: project,
+    op: 'get',
+    setting: autoload,
+    from: 'editor',
+  });
+  assert.equal(get(gone, 'exists'), false, `the editor should let the removed autoload go: ${text(gone)}`);
 
   // The prefix form comes back with the type of each, which is the half a name hides: a family of
   // levels can hold a bool, and a level written over it looks like it worked.
