@@ -304,12 +304,19 @@ export function whyNoReport(printed: readonly string[], asked: string): string |
 
 const ESCAPE = String.fromCharCode(0x1b);
 
+const LOCATION = `'[^'\\n]*' in \\S+:\\d+`;
+
 /**
  * A failing value the runner printed as a character diff, with the assertion it belongs to: the
  * value a string equality found, between " but was" and the location line that follows it.
+ *
+ * The value may not run over a location line, which ends every case's report, so the match stays
+ * inside one. An array equality prints its value, then a table of differences, then its location,
+ * so a value matched lazily up to the next quote before a location line ran through the table and
+ * on to the end of the next case's string diff, and read the two as one.
  */
 const PRINTED_ACTUAL = new RegExp(
-  ` but was\\n '([\\s\\S]*?)'((?:${ESCAPE}\\[[0-9;]*m)*)\\tat ('[^'\\n]*' in \\S+:\\d+)`,
+  ` but was\\n '((?:(?!\\tat ${LOCATION})[\\s\\S])*?)'((?:${ESCAPE}\\[[0-9;]*m)*)\\tat (${LOCATION})`,
   'g',
 );
 const COLOUR = new RegExp(`${ESCAPE}\\[([0-9;]*)m`, 'g');
@@ -374,6 +381,10 @@ function readDiff(printed: string): { merged: string; actual: string } {
 export const BOTH_SIDES_ALIKE_NOTE =
   '[gdharness: the expected and the actual printed alike because gdUnit4 drops the marks that tell them apart when it writes its report, and the runner printed no copy of this one, so neither side above is the value the assertion found.]';
 
+/** The sentence a string equality's detail carries when the console had no copy of its diff to read the value from. */
+export const VALUE_NOT_RECOVERED_NOTE =
+  '[gdharness: the value after "but was" may not be the one the assertion found. gdUnit4 writes a failing string into its report as a character diff against the expected one with the marks dropped, which merges the two, and the runner printed no copy of this one to read the value back from.]';
+
 /**
  * [param failed] with each failing string equality's actual value put back, read off [param
  * printed], which is what the runner wrote to its console with the colours left in.
@@ -399,15 +410,17 @@ export function withActualsPrinted<Case extends { readonly detail: string | null
       return entry;
     }
     let detail = entry.detail;
+    let recovered = false;
     for (const diff of diffs) {
       const wrong = ` but was\n '${diff.merged.replaceAll('\r', '')}'\n\tat ${diff.at}`;
       if (detail.includes(wrong)) {
         detail = detail.replace(wrong, () => ` but was\n '${diff.actual}'\n\tat ${diff.at}`);
+        recovered = true;
       }
     }
-    const alike = /Expecting:\n '([\s\S]*)'\n but was\n '\1'\n\tat /.test(detail);
-    if (alike) {
-      detail = `${detail}\n${BOTH_SIDES_ALIKE_NOTE}`;
+    if (!recovered && /Expecting:\n '[\s\S]*'\n but was\n '[\s\S]*'\n\tat /.test(detail)) {
+      const alike = /Expecting:\n '([\s\S]*)'\n but was\n '\1'\n\tat /.test(detail);
+      detail = `${detail}\n${alike ? BOTH_SIDES_ALIKE_NOTE : VALUE_NOT_RECOVERED_NOTE}`;
     }
     return detail === entry.detail ? entry : { ...entry, detail };
   });
