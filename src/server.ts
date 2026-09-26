@@ -1228,6 +1228,34 @@ function changedSettings(
     .sort();
 }
 
+/**
+ * The longest silence a test run cut off at its timeout may have had and still be called running,
+ * whatever the timeout: half of it, and never more than this.
+ */
+const STALLED_AFTER_MS = 30_000;
+
+/**
+ * What a test run killed at [param timeoutMs] is called, from how long it had printed nothing.
+ *
+ * Hung is a claim about the run, that it had stopped, and it sends a reader looking for a deadlock
+ * in the last suite named. A run printing a passing case every few milliseconds up to the kill had
+ * not stopped, and what it wants is a longer timeoutMs or a narrower path. So hung is kept for a
+ * run that had been silent for half the timeout, or for thirty seconds of a long one, and anything
+ * else is a run the limit cut off while it was going.
+ */
+export function timedOutVerdict(timeoutMs: number, silentForMs: number): { verdict: string; hung: boolean } {
+  const quiet = Math.round(silentForMs);
+  return quiet >= Math.min(STALLED_AFTER_MS, timeoutMs / 2)
+    ? {
+        verdict: `hung: killed after ${timeoutMs} ms, having printed nothing for the last ${quiet} ms`,
+        hung: true,
+      }
+    : {
+        verdict: `timed out after ${timeoutMs} ms while still running: it last printed ${quiet} ms before it was killed, so pass a longer timeoutMs or a narrower path`,
+        hung: false,
+      };
+}
+
 /** The path, status and reason of each resource a get_import_status answer lists. */
 function importStatuses(payload: OperationParams): { path: string; status: string; reason?: string }[] {
   const listed = payload['resources'];
@@ -3562,11 +3590,20 @@ class GodotServer {
     // As printed, colours and all, beside the log that strips them: the colours are where gdUnit4
     // marks which characters of a failing string were there, and its report drops them.
     const console: Buffer[] = [];
+    // When it last said anything, on either stream, which is what tells a run the limit cut off
+    // mid-stride from one that had stopped.
+    let lastSaid = Date.now();
     run.process.stdout?.on('data', (data: Buffer) => {
       console.push(data);
+      lastSaid = Date.now();
     });
-    const hung = await new Promise<boolean>((resolve) => {
+    run.process.stderr?.on('data', () => {
+      lastSaid = Date.now();
+    });
+    let silentForMs = 0;
+    const timedOut = await new Promise<boolean>((resolve) => {
       const timer = setTimeout(() => {
+        silentForMs = Date.now() - lastSaid;
         run.process.kill();
         resolve(true);
       }, timeoutMs);
@@ -3626,12 +3663,15 @@ class GodotServer {
     // Before the exit code, because gdUnit4 leaves it at zero for a run that found nothing to do,
     // and `passed` is the one word a skimming reader must never be handed for one of those.
     const said = printed.map((entry) => entry.text);
-    const nothingRan = hung ? null : whyNoReport(said, asked);
-    const verdict = hung
-      ? `hung: killed after ${timeoutMs} ms`
-      : (nothingRan ??
-        (exitCode === null ? undefined : verdicts[exitCode]) ??
-        (run.exitSignal === null ? `exit ${exitCode ?? 'unknown'}` : howItExited(run)));
+    const nothingRan = timedOut ? null : whyNoReport(said, asked);
+    const cutShort = timedOut ? timedOutVerdict(timeoutMs, silentForMs) : null;
+    const hung = cutShort?.hung ?? false;
+    const verdict =
+      cutShort !== null
+        ? cutShort.verdict
+        : (nothingRan ??
+          (exitCode === null ? undefined : verdicts[exitCode]) ??
+          (run.exitSignal === null ? `exit ${exitCode ?? 'unknown'}` : howItExited(run)));
     // Said on every answer from a run whose saves could not be moved, whichever way it ended: a
     // tier that failed still wrote wherever it wrote, and the run that found nothing to do is the
     // one exception, since it never started a game.
@@ -3655,6 +3695,7 @@ class GodotServer {
                 exitCode,
                 exitSignal: run.exitSignal ?? undefined,
                 hung,
+                ...(timedOut ? { timedOut, silentForMs } : {}),
                 arguments: cmdArgs,
                 entries: forAnswer(printed.slice(0, 60)),
                 savesNote,
@@ -3705,8 +3746,9 @@ class GodotServer {
     // along three times in one afternoon, and read its own suite as flaky.
     const notRun = report.suites.reduce((sum, suite) => sum + Math.max(0, suite.discovered - suite.tests), 0);
     return this.jsonTextResponse({
-      passed: !hung && exitCode === 0 && report.failures === 0 && report.errors === 0,
+      passed: !timedOut && exitCode === 0 && report.failures === 0 && report.errors === 0,
       verdict,
+      ...(timedOut ? { timedOut, hung, silentForMs } : {}),
       exitCode,
       exitSignal: run.exitSignal ?? undefined,
       tests: report.tests,

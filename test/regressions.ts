@@ -153,6 +153,7 @@ import {
   runIsUp,
   runtimeVerdict,
   stopVerdict,
+  timedOutVerdict,
   uidsLeftNote,
 } from '../src/server.js';
 import type { GodotProcess } from '../src/server-types.js';
@@ -16778,6 +16779,121 @@ async function testARunOutlivesItsServer(): Promise<void> {
 }
 
 /**
+ * A test run the timeout ends is called hung only when it had stopped printing.
+ *
+ * Hung sends a reader looking for a deadlock in the last suite named, and a run printing a passing
+ * case every few milliseconds up to the kill came back as hung: sixty cases reported PASSED in the
+ * entries of an answer that said it had stopped. The rule is rendered at both sides of its line
+ * first, then held against real runs: a suite that prints steadily past the limit, and one that
+ * goes quiet in its first case.
+ */
+async function testATestRunCutShortIsNamedForWhatItWasDoing(): Promise<void> {
+  const running = timedOutVerdict(25_000, 40);
+  assert.equal(running.hung, false, JSON.stringify(running));
+  assert.match(
+    running.verdict,
+    /^timed out after 25000 ms while still running: it last printed 40 ms before/,
+  );
+  assert.match(running.verdict, /longer timeoutMs or a narrower path/);
+  assert.equal(timedOutVerdict(25_000, 12_499).hung, false, 'just under half the timeout is still running');
+  const stopped = timedOutVerdict(25_000, 12_500);
+  assert.equal(stopped.hung, true, 'half the timeout silent is hung');
+  assert.match(
+    stopped.verdict,
+    /^hung: killed after 25000 ms, having printed nothing for the last 12500 ms$/,
+  );
+  assert.equal(
+    timedOutVerdict(600_000, 29_999).hung,
+    false,
+    'a long timeout waits thirty seconds of silence',
+  );
+  assert.equal(timedOutVerdict(600_000, 30_000).hung, true);
+
+  const godotPath = resolveGodotPath();
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
+    }
+    console.log('test timeout regression skipped (Godot or gdUnit4 not found)');
+    return;
+  }
+  const projectDir = mkdtempSync(join(tmpdir(), 'gdharness-cut-short-'));
+  try {
+    writeFileSync(
+      join(projectDir, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="CutShort"\n',
+    );
+    cpSync(gdunit, join(projectDir, 'addons', 'gdUnit4'), { recursive: true });
+    mkdirSync(join(projectDir, 'steady'));
+    // Four hundred cases of a twentieth of a second, twenty seconds in all, each printed as it goes.
+    writeFileSync(
+      join(projectDir, 'steady', 'steady_test.gd'),
+      [
+        'extends GdUnitTestSuite',
+        ...Array.from({ length: 400 }, (_, index) =>
+          [
+            '',
+            '',
+            `func test_case_${index}() -> void:`,
+            '\tawait get_tree().create_timer(0.05).timeout',
+            '\tassert_bool(true).is_true()',
+          ].join('\n'),
+        ),
+        '',
+      ].join('\n'),
+    );
+    mkdirSync(join(projectDir, 'stuck'));
+    writeFileSync(
+      join(projectDir, 'stuck', 'stuck_test.gd'),
+      [
+        'extends GdUnitTestSuite',
+        '',
+        '',
+        'func test_waits_on_nothing() -> void:',
+        '\tawait get_tree().create_timer(600).timeout',
+        '\tassert_bool(true).is_true()',
+        '',
+      ].join('\n'),
+    );
+    await withStdioServer(async (_call, request) => {
+      const run = async (path: string): Promise<unknown> => {
+        const response = await request(
+          'tools/call',
+          { name: 'project_test', arguments: { projectPath: projectDir, path, timeoutMs: 12_000 } },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+        // The answer is a sentence and then the JSON, or the JSON alone, depending on whether a report was written.
+        const blocks = asArray(get(response, 'result', 'content')).map((block) => String(get(block, 'text')));
+        const json = blocks.find((text) => text.trimStart().startsWith('{')) ?? '{}';
+        return JSON.parse(json) as unknown;
+      };
+      const steady = await run('res://steady');
+      assert.equal(
+        get(steady, 'hung'),
+        false,
+        `a run printing up to the kill is not hung: ${JSON.stringify(steady)}`,
+      );
+      assert.equal(get(steady, 'timedOut'), true, JSON.stringify(steady));
+      assert.match(
+        String(get(steady, 'verdict')),
+        /^timed out after 12000 ms while still running/,
+        JSON.stringify(steady),
+      );
+      const stuck = await run('res://stuck');
+      assert.equal(get(stuck, 'hung'), true, `a run silent at the kill is hung: ${JSON.stringify(stuck)}`);
+      assert.match(
+        String(get(stuck, 'verdict')),
+        /^hung: killed after 12000 ms, having printed nothing/,
+        JSON.stringify(stuck),
+      );
+    });
+  } finally {
+    sweep(projectDir);
+  }
+}
+
+/**
  * project_test against a real gdUnit4: a suite with a pass, a failure and a skip, read back as
  * cases rather than a console. The failing case has to be named with what the assertion said,
  * a project without the runner has to be refused, and nothing of the run may be left behind.
@@ -20291,6 +20407,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAForeignRunSurvivesAStart,
   testARunOutlivesItsServer,
   testGdUnitRunner,
+  testATestRunCutShortIsNamedForWhatItWasDoing,
   testAnUpgradeReadsTheEngineOutOfTheConfigItRewrites,
   testCommandLineSetup,
   testTheWrittenConfigNamesAProgramThatStarts,
