@@ -1909,15 +1909,20 @@ class GodotServer {
    * thrown say so by their type, so anything else arriving here is a state the code does not
    * model. That is worth saying plainly: an exception message handed straight to an agent reads
    * as something it did wrong, and it will spend three turns rephrasing a call that was right the
-   * first time. A {@link Refusal} passes through as the caller's answer, and an `McpError` as
-   * itself, since the protocol has its own place for "no such tool".
+   * first time. A {@link Refusal} is the caller's answer, returned as a refusal like any other: a
+   * throw out of the request handler reached the caller as a JSON-RPC internal error, where a
+   * tool's own refusals do not belong. An `McpError` goes as itself, since the protocol has its
+   * own place for "no such tool".
    */
   private async answered(tool: string, op: string, args: OperationParams): Promise<ToolResponse> {
     try {
       return await this.dispatch(tool, op, args);
     } catch (error) {
-      if (error instanceof McpError || error instanceof Refusal) {
+      if (error instanceof McpError) {
         throw error;
+      }
+      if (error instanceof Refusal) {
+        return this.createErrorResponse(error.message);
       }
       const where = op === '' ? tool : `${tool} op=${op}`;
       console.error(`[SERVER] Unmodelled failure in ${where}:`, error);
