@@ -181,9 +181,10 @@ because the old version keeps answering until they are done:
 1. Reconnect the MCP server so the harness re-spawns it. In Claude Code, `/mcp` and reconnect.
    Restarting the harness is not required.
 2. Restart an open editor if `upgrade` says the editor addons changed: `editor_launch restart`,
-   about seven seconds. An editor gdharness opened is headless and comes back headless, so neither
-   the open nor the restart shows a window. A headless editor you started by hand cannot be
-   restarted this way and has to be started again by hand.
+   about seven seconds. An editor gdharness opened comes back visible, and on Windows shown without
+   taking the focus, or headless and out of sight when the restart is given `hidden: true`. A
+   headless editor you started by hand cannot be restarted this way and has to be started again by
+   hand.
 
 `editor_status` confirms: `addonIsStale` false. `addonVersion` stays at the older number when the
 upgrade left the editor code unchanged, because staleness is decided by the code the editor

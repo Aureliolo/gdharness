@@ -29,6 +29,8 @@ using System.Text;
 public static class GdharnessDesktop {
   const uint GenericAll = 0x10000000;
   const int UseStdHandles = 0x100;
+  const int UseShowWindow = 0x1;
+  const short ShowNoActivate = 4;
   // No console at all, rather than a hidden one: a console's host would sit on the desktop too.
   const uint DetachedProcess = 0x00000008;
   const uint Infinite = 0xFFFFFFFF;
@@ -61,26 +63,90 @@ public static class GdharnessDesktop {
   [DllImport("kernel32.dll")] static extern bool GetExitCodeProcess(IntPtr handle, out uint code);
   [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
 
-  // Starts the command line on the named desktop, both of its streams on this process's output,
-  // writes its pid, and waits for it: the answer is its exit code. The desktop's handle is held until then, since a
-  // desktop goes when the last handle to it does.
-  public static int Run(string desktop, string commandLine, string pidFile) {
-    IntPtr held = CreateDesktopW(desktop, IntPtr.Zero, IntPtr.Zero, 0, GenericAll, IntPtr.Zero);
-    if (held == IntPtr.Zero) {
-      throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateDesktopW " + desktop);
+  delegate bool EachWindow(IntPtr window, IntPtr unused);
+  [DllImport("user32.dll")] static extern bool EnumWindows(EachWindow each, IntPtr unused);
+  [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
+  [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+  [DllImport("user32.dll")] static extern bool LockSetForegroundWindow(uint code);
+  const uint LockForeground = 1;
+  const uint UnlockForeground = 2;
+  const uint TimedOut = 0x102;
+
+  static bool ShowsAWindow(int processId) {
+    bool shown = false;
+    EnumWindows(delegate(IntPtr window, IntPtr unused) {
+      uint owner;
+      GetWindowThreadProcessId(window, out owner);
+      if (owner == (uint)processId && IsWindowVisible(window)) {
+        shown = true;
+        return false;
+      }
+      return true;
+    }, IntPtr.Zero);
+    return shown;
+  }
+
+  // Keeps the foreground where it is while the process starts: its own call to take it fails while
+  // the foreground is locked, and the user's own Alt+Tab or click still moves it. Released once its
+  // window has been showing for a while, since a program takes the foreground as it shows its window
+  // and not afterwards, or when it exits, or after two minutes whatever happens.
+  static void HoldTheForeground(Started started) {
+    DateTime until = DateTime.UtcNow.AddMinutes(2);
+    DateTime? shownAt = null;
+    while (DateTime.UtcNow < until) {
+      if (WaitForSingleObject(started.process, 100) != TimedOut) {
+        return;
+      }
+      if (shownAt == null && ShowsAWindow(started.processId)) {
+        shownAt = DateTime.UtcNow;
+      }
+      if (shownAt != null && DateTime.UtcNow - shownAt.Value > TimeSpan.FromSeconds(10)) {
+        return;
+      }
     }
+  }
+
+  // Starts the command line, both of its streams on this process's output, writes its pid, and
+  // waits for it: the answer is its exit code. On the named desktop when there is one, whose handle
+  // is held until then, since a desktop goes when the last handle to it does, and on this process's
+  // own otherwise. With noActivate its first window is shown without being activated, which is
+  // what a program's first ShowWindow does whatever it asks for when the start names a show state,
+  // and the foreground is held while it starts, since Godot also asks for it outright.
+  public static int Run(string desktop, string commandLine, string pidFile, bool noActivate) {
     StartupInfo startup = new StartupInfo();
     startup.cb = Marshal.SizeOf(typeof(StartupInfo));
-    startup.desktop = desktop;
+    if (desktop.Length > 0) {
+      IntPtr held = CreateDesktopW(desktop, IntPtr.Zero, IntPtr.Zero, 0, GenericAll, IntPtr.Zero);
+      if (held == IntPtr.Zero) {
+        throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateDesktopW " + desktop);
+      }
+      startup.desktop = desktop;
+    }
     startup.flags = UseStdHandles;
+    if (noActivate) {
+      startup.flags |= UseShowWindow;
+      startup.show = ShowNoActivate;
+    }
     startup.input = GetStdHandle(-10);
     startup.output = GetStdHandle(-11);
     startup.error = startup.output;
     Started started;
+    if (noActivate) {
+      LockSetForegroundWindow(LockForeground);
+    }
+    try {
     if (!CreateProcessW(null, new StringBuilder(commandLine), IntPtr.Zero, IntPtr.Zero, true, DetachedProcess, IntPtr.Zero, null, ref startup, out started)) {
       throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateProcessW " + commandLine);
     }
     File.WriteAllText(pidFile, started.processId.ToString());
+    if (noActivate) {
+      HoldTheForeground(started);
+    }
+    } finally {
+      if (noActivate) {
+        LockSetForegroundWindow(UnlockForeground);
+      }
+    }
     WaitForSingleObject(started.process, Infinite);
     uint code;
     GetExitCodeProcess(started.process, out code);
@@ -120,19 +186,21 @@ export function windowsCommandLine(command: string, args: readonly string[]): st
 }
 
 /**
- * The Windows PowerShell invocation that starts [param command] on [param desktop], writes its pid
- * to [param pidFile], waits for it and exits with its code. What stops it before the pid is written
+ * The Windows PowerShell invocation that starts [param command] on [param how]'s desktop, or on the
+ * one in use when it names none, shown without activation when it says so; writes its pid to
+ * [param pidFile], waits for it and exits with its code. What stops it before the pid is written
  * goes to [param errorFile], since its own streams are the ones the process inherits.
  */
-export function onDesktop(
-  desktop: string,
+export function throughHelper(
+  how: { readonly desktop?: string; readonly noActivate?: boolean },
   command: string,
   args: readonly string[],
   pidFile: string,
   errorFile: string,
 ): { command: string; args: string[] } {
   const spec = {
-    desktop,
+    desktop: how.desktop ?? '',
+    noActivate: how.noActivate === true,
     commandLine: windowsCommandLine(command, args),
     pidFile,
     errorFile,
@@ -151,7 +219,7 @@ export function onDesktop(
     '    try { Move-Item -LiteralPath $partial -Destination $assembly } catch { Remove-Item -LiteralPath $partial -ErrorAction SilentlyContinue }',
     '  }',
     '  Add-Type -LiteralPath $assembly',
-    '  $code = [GdharnessDesktop]::Run($spec.desktop, $spec.commandLine, $spec.pidFile)',
+    '  $code = [GdharnessDesktop]::Run($spec.desktop, $spec.commandLine, $spec.pidFile, [bool]$spec.noActivate)',
     '} catch {',
     '  [IO.File]::WriteAllText($spec.errorFile, $_.Exception.Message)',
     '  exit 1',

@@ -2324,7 +2324,7 @@ class GodotServer {
         }
 
       case 'editor_launch':
-        return op === 'restart' ? await this.handleRestartEditor() : await this.handleLaunchEditor(args);
+        return op === 'restart' ? await this.handleRestartEditor(args) : await this.handleLaunchEditor(args);
       case 'editor_run':
         if (op === 'stop') {
           return await this.handleStopProject(args);
@@ -4505,7 +4505,7 @@ class GodotServer {
     }
   }
 
-  private async handleRestartEditor(): Promise<ToolResponse> {
+  private async handleRestartEditor(args: OperationParams): Promise<ToolResponse> {
     const before = this.godotBridge.getStatus();
     if (!before.connected) {
       return this.createErrorResponse('No editor is connected, so there is nothing to restart.', [
@@ -4523,7 +4523,7 @@ class GodotServer {
     const settingsBefore = this.settingKeysOf(before.projectPath);
     const mine = before.openedByAServer === true && before.projectPath !== undefined;
     const asked = mine
-      ? await this.startItAgain(before.projectPath ?? '', before.editorPid)
+      ? await this.startItAgain(before.projectPath ?? '', before.editorPid, args['hidden'] === true)
       : await this.handleViaBridge('restart_editor', {});
     if (asked.isError === true) {
       return asked;
@@ -4619,7 +4619,11 @@ class GodotServer {
    * is. They are this editor's own and nothing else can be holding them once it has gone, which is
    * what the wait below is for.
    */
-  private async startItAgain(projectPath: string, editorPid: number | undefined): Promise<ToolResponse> {
+  private async startItAgain(
+    projectPath: string,
+    editorPid: number | undefined,
+    hidden: boolean,
+  ): Promise<ToolResponse> {
     const engine = await this.engine();
     if (!engine.ok) {
       return engine.response;
@@ -4658,7 +4662,7 @@ class GodotServer {
     // first and nothing covers the second.
     await this.waitForBridge(() => !alive(editorPid), Date.now() + EDITOR_RESTART_TIMEOUT_MS);
 
-    const opened = await this.openAnEditor(engine.value, projectPath, ports);
+    const opened = await this.openAnEditor(engine.value, projectPath, ports, hidden);
     // Settled either way: a launch that failed is answered to the caller who asked, which is not
     // an interruption, and leaving the note would have the next server explain a failure this one
     // already explained.
@@ -4720,7 +4724,7 @@ class GodotServer {
     // Read before the launch settles it, so the answer can say this open finished something
     // rather than started something.
     const unfinished = restartOwed(project.value.path);
-    const opened = await this.openAnEditor(engine.value, project.value.path, ports);
+    const opened = await this.openAnEditor(engine.value, project.value.path, ports, args['hidden'] === true);
     if (opened.error !== null) {
       return this.createErrorResponse(`Could not start the editor: ${opened.error}`);
     }
@@ -4756,6 +4760,7 @@ class GodotServer {
     engine: string,
     projectPath: string,
     ports: EditorPorts,
+    hidden: boolean,
   ): Promise<{ pid: number | null; error: string | null }> {
     // Told rather than left to derive. A game is started by the editor and inherits its
     // environment, not this server's, so an editor opened without TMP or TEMP set announces its
@@ -4770,7 +4775,7 @@ class GodotServer {
     // as this server's child went with it however detached it was.
     const launched = await launchOutsideTheTree({
       command: engine,
-      args: editorArguments(projectPath, ports, editorLogPath(projectPath)),
+      args: editorArguments(projectPath, ports, editorLogPath(projectPath), hidden),
       env: {
         ...process.env,
         GDHARNESS_RUNTIME_DIR: runtimeDirectory(),
@@ -4778,9 +4783,10 @@ class GodotServer {
         GDHARNESS_DAP_PORT: String(ports.dap),
         [OPENED_BY_A_SERVER]: '1',
       },
-      // Headless, and on a desktop of its own as well, because the games it plays are its children
-      // and land where it is: on the desktop in use they showed and took the keyboard.
-      desktop: HIDDEN_DESKTOP,
+      // A hidden editor is headless and on a desktop of its own as well, because the games it plays
+      // are its children and land where it is. A visible one is the user's editor, on the desktop
+      // in use, and is shown without being activated so that opening it takes nobody's keyboard.
+      ...(hidden ? { desktop: HIDDEN_DESKTOP } : { noActivate: true }),
     });
     if ('error' in launched) {
       return { pid: null, error: launched.error };
