@@ -120,6 +120,7 @@ import {
 } from './process-children.js';
 import { cpuSecondsOf } from './process-time.js';
 import { projectStructure, scriptsWithoutUid, searchProject } from './project-scan.js';
+import { forceNextImport } from './reimport.js';
 import { parseProjectGodot, settingKeys, settingsDroppedReport, setupResourceHandlers } from './resources.js';
 import { noteRestartBegun, type RestartNote, restartOwed, restartSettled } from './restart-note.js';
 import {
@@ -1196,6 +1197,29 @@ const SCAN_START_MS = 2_000;
  */
 const SCAN_SETTLED_MS = 500;
 
+/**
+ * How long project_import waits for a reimport by default. Downstream, the editor took 58 s over
+ * 211 changed glTF scenes, so the wait is set well past a project of that size.
+ */
+const REIMPORT_TIMEOUT_MS = 300_000;
+
+/** The path, status and reason of each resource a get_import_status answer lists. */
+function importStatuses(payload: OperationParams): { path: string; status: string; reason?: string }[] {
+  const listed = payload['resources'];
+  if (!Array.isArray(listed)) {
+    return [];
+  }
+  return listed.map((entry) => {
+    const one = asParams(entry);
+    const reason = readString(one, 'reason');
+    return {
+      path: readString(one, 'path') ?? '',
+      status: readString(one, 'status') ?? 'unknown',
+      ...(reason === undefined ? {} : { reason }),
+    };
+  });
+}
+
 /** What to tell a caller whose file, scene, script or resource path landed outside the project. */
 /**
  * How long `editor_run wait` waits by default, and how often it looks.
@@ -2124,7 +2148,10 @@ class GodotServer {
    */
   private async dispatch(tool: string, op: string, args: OperationParams): Promise<ToolResponse> {
     if (ENGINE_PASSES[tool]?.[op] !== undefined) {
-      return await this.handleRefreshUids(args);
+      return op === 'reimport' ? await this.handleReimport(args) : await this.handleRefreshUids(args);
+    }
+    if (tool === 'project_import' && op === 'set_options') {
+      return await this.handleSetImportOptions(args);
     }
     const headless = HEADLESS_OPERATIONS[tool]?.[op];
     if (headless !== undefined) {
@@ -2879,6 +2906,247 @@ class GodotServer {
         scanned,
       ),
     );
+  }
+
+  /**
+   * project_import reimport: reimports what status says needs it, or everything named with force,
+   * and answers from a second status read what the reimport left current.
+   *
+   * Through the editor when one serves the project, so the editor imports on its own thread and
+   * reloads what it holds; an import pass beside it would leave it holding the old resources and
+   * importing them all again on its next scan. Otherwise through the engine's own import pass,
+   * which only reimports what it judges stale, so each resource is first made stale in its eyes.
+   */
+  private async handleReimport(args: OperationParams): Promise<ToolResponse> {
+    const project = this.project(args);
+    if (!project.ok) {
+      return project.response;
+    }
+    const contained = this.containProjectFiles(args);
+    if (!contained.ok) {
+      return contained.response;
+    }
+    const outcome = await this.reimport(
+      project.value.path,
+      readNonEmptyString(contained.value, 'resourcePath'),
+      args['force'] === true,
+      readPositiveNumber(args, 'timeoutMs') ?? REIMPORT_TIMEOUT_MS,
+    );
+    return outcome.ok ? this.jsonTextResponse(outcome.payload) : outcome.response;
+  }
+
+  /**
+   * project_import set_options: the options written to the sidecar, then applied by a reimport
+   * unless the caller said not to. Written alone, they reach the import only when the editor's next
+   * scan finds the sidecar changed.
+   */
+  private async handleSetImportOptions(args: OperationParams): Promise<ToolResponse> {
+    const project = this.project(args);
+    if (!project.ok) {
+      return project.response;
+    }
+    const contained = this.containProjectFiles(args);
+    if (!contained.ok) {
+      return contained.response;
+    }
+    const {
+      op: _op,
+      projectPath: _projectPath,
+      reimport: _reimport,
+      timeoutMs: _timeoutMs,
+      ...params
+    } = contained.value;
+    const written = await this.operation('set_import_options', params, project.value.path);
+    if (!written.ok || args['reimport'] === false) {
+      return this.answer(
+        written.ok
+          ? {
+              ...written,
+              payload: {
+                ...written.payload,
+                note: 'Not reimported: the editor imports it with these options on its next scan, or project_import reimport does now.',
+              },
+            }
+          : written,
+      );
+    }
+    const applied = await this.reimport(
+      project.value.path,
+      readNonEmptyString(contained.value, 'resourcePath'),
+      true,
+      readPositiveNumber(args, 'timeoutMs') ?? REIMPORT_TIMEOUT_MS,
+    );
+    if (!applied.ok) {
+      return applied.response;
+    }
+    return this.jsonTextResponse({ ...written.payload, reimport: applied.payload });
+  }
+
+  private async reimport(
+    projectPath: string,
+    resourcePath: string | undefined,
+    force: boolean,
+    timeoutMs: number,
+  ): Promise<{ ok: true; payload: OperationParams } | { ok: false; response: ToolResponse }> {
+    const ask: OperationParams = resourcePath === undefined ? { includeUpToDate: force } : { resourcePath };
+    const before = await this.operation('get_import_status', ask, projectPath);
+    if (!before.ok) {
+      return { ok: false, response: this.answer(before) };
+    }
+    const listed = importStatuses(before.payload);
+    const missingSource = listed.filter((one) => one.status === 'missing_source').map((one) => one.path);
+    if (resourcePath !== undefined && missingSource.length > 0) {
+      return {
+        ok: false,
+        response: this.createErrorResponse(
+          `${missingSource[0]} is not on disk, so there is nothing to import.`,
+        ),
+      };
+    }
+    const targets = listed
+      .filter((one) => one.status !== 'missing_source' && (force || one.status !== 'up_to_date'))
+      .map((one) => one.path);
+    if (targets.length === 0) {
+      return {
+        ok: true,
+        payload: {
+          reimported: [],
+          notReimported: [],
+          note:
+            resourcePath === undefined
+              ? 'Nothing needed reimporting. Pass force to reimport what is current.'
+              : `${listed[0]?.path ?? resourcePath} is current. Pass force to reimport it anyway.`,
+        },
+      };
+    }
+
+    const open = this.godotBridge.getStatus().projectPath;
+    const viaEditor =
+      this.godotBridge.isConnected() &&
+      open !== undefined &&
+      open !== '' &&
+      isSameDirectory(open, projectPath);
+    const extra: OperationParams = {};
+    if (viaEditor) {
+      const inEditor = await this.reimportInTheEditor(targets, timeoutMs);
+      if (!inEditor.ok) {
+        return inEditor;
+      }
+      if (!inEditor.finished) {
+        return {
+          ok: true,
+          payload: {
+            via: 'editor',
+            stillImporting: true,
+            asked: targets,
+            note: `The editor had not finished after ${timeoutMs} ms. project_import status says what it has done so far; pass a longer timeoutMs to wait it out.`,
+          },
+        };
+      }
+    } else {
+      const engine = await this.engine();
+      if (!engine.ok) {
+        return { ok: false, response: engine.response };
+      }
+      for (const target of targets) {
+        forceNextImport(projectPath, target);
+      }
+      const scanned = await this.untilTheEditorsScanIsWritten(projectPath);
+      const imported = await runImport(engine.value, projectPath);
+      if (!imported.ok) {
+        return { ok: false, response: this.answer(withScanWait(imported, scanned)) };
+      }
+      if (imported.messages.length > 0) {
+        extra['engine_messages'] = imported.messages;
+      }
+    }
+
+    const after = await this.operation(
+      'get_import_status',
+      resourcePath === undefined ? { includeUpToDate: true } : { resourcePath },
+      projectPath,
+    );
+    if (!after.ok) {
+      return { ok: false, response: this.answer(after) };
+    }
+    const now = new Map(importStatuses(after.payload).map((one) => [one.path, one]));
+    const reimported = targets.filter((path) => now.get(path)?.status === 'up_to_date');
+    const notReimported = targets
+      .filter((path) => now.get(path)?.status !== 'up_to_date')
+      .map((path) => ({
+        path,
+        status: now.get(path)?.status ?? 'unknown',
+        ...(now.get(path)?.reason === undefined ? {} : { reason: now.get(path)?.reason }),
+      }));
+    return {
+      ok: true,
+      payload: {
+        via: viaEditor ? 'editor' : 'engine',
+        reimported,
+        notReimported,
+        ...(missingSource.length > 0 ? { missingSource } : {}),
+        ...extra,
+      },
+    };
+  }
+
+  /**
+   * The editor's own reimport of `paths`, waited for. Started by the addon on the frame after it is
+   * asked, because the import runs on the editor's main thread and outlasts the wait on any one
+   * command, so the end is read off the addon's count of reimports it finished. A status question
+   * asked while the editor is importing can go unanswered for the length of the bridge's wait, and
+   * is asked again rather than taken as a failure.
+   */
+  private async reimportInTheEditor(
+    paths: readonly string[],
+    timeoutMs: number,
+  ): Promise<{ ok: true; finished: boolean } | { ok: false; response: ToolResponse }> {
+    const started = Date.now();
+    let completedBefore: number | undefined;
+    for (;;) {
+      while (Date.now() - started < timeoutMs && (await this.editorIsScanningOrImporting())) {
+        await new Promise((settle) => setTimeout(settle, 100));
+      }
+      let answer: OperationParams;
+      try {
+        answer = asParams(await this.godotBridge.invokeTool('reimport_files', { paths: [...paths] }));
+      } catch (error) {
+        const message = errorMessage(error);
+        return {
+          ok: false,
+          response: message.includes('Unknown tool')
+            ? this.createErrorResponse(
+                'The editor is running an addon from before reimport_files, so it cannot be asked to reimport.',
+                [
+                  'editor_launch restart loads the addon this server ships',
+                  'Or close the editor, and project_import reimport runs the engine import instead',
+                ],
+              )
+            : this.createErrorResponse(`The editor answered reimport_files with an error: ${message}`),
+        };
+      }
+      if (answer['started'] !== false) {
+        completedBefore = readNumber(answer, 'reimportsCompletedBefore');
+        break;
+      }
+      if (Date.now() - started >= timeoutMs) {
+        return { ok: true, finished: false };
+      }
+      await new Promise((settle) => setTimeout(settle, 100));
+    }
+    while (Date.now() - started < timeoutMs) {
+      await new Promise((settle) => setTimeout(settle, 250));
+      try {
+        const status = asParams(await this.godotBridge.invokeTool('scan_status', {}));
+        const completed = readNumber(status, 'reimportsCompleted');
+        if (completedBefore !== undefined && completed !== undefined && completed > completedBefore) {
+          return { ok: true, finished: true };
+        }
+      } catch {
+        // Unanswered while the editor imports; the next question is asked all the same.
+      }
+    }
+    return { ok: true, finished: false };
   }
 
   private async operation(

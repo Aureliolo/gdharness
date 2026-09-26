@@ -27,7 +27,6 @@ export const HEADLESS_OPERATIONS: Readonly<Record<string, Readonly<Record<string
     status: 'get_import_status',
     options: 'get_import_options',
     set_options: 'set_import_options',
-    reimport: 'reimport_resource',
     uid: 'get_uid',
     refresh_classes: 'refresh_class_cache',
   }),
@@ -51,7 +50,7 @@ export const HEADLESS_OPERATIONS: Readonly<Record<string, Readonly<Record<string
  * them with the rest.
  */
 export const ENGINE_PASSES: Readonly<Record<string, Readonly<Record<string, string>>>> = dictionary({
-  project_import: dictionary({ refresh_uids: 'import' }),
+  project_import: dictionary({ refresh_uids: 'import', reimport: 'import' }),
 });
 
 /**

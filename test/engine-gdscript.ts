@@ -25,10 +25,10 @@ import {
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { deflateSync } from 'node:zlib';
 import { runOperation as runThroughTheServersOwnPath } from '../src/headless.js';
 import { userDataIn } from '../src/launch.js';
 import { asArray, asNumber, asString, get, lastJsonLine } from './support/json.js';
+import { solidPng } from './support/png.js';
 import { sweep } from './support/sweep.js';
 
 const tried: string[] = [];
@@ -730,7 +730,7 @@ function testOperations(godotPath: string, projectDir: string): void {
     'the option should have been written into the .import file',
   );
   assert.equal(
-    get(operation('reimport_resource', { resource_path: 'art.png' }), 'current_status'),
+    get(operation('get_import_status', { resource_path: 'art.png' }), 'resources', 0, 'status'),
     // A sidecar the engine never wrote has no uid and no recorded hash, and the editor imports it.
     'needs_reimport',
   );
@@ -1237,41 +1237,6 @@ function triangleUsing(uri: string, meshName?: string): Record<string, unknown> 
       { bufferView: 1, componentType: 5126, count: 3, type: 'VEC2' },
     ],
   };
-}
-
-/** A 4 by 4 PNG of one colour. */
-function solidPng(red: number, green: number, blue: number): Buffer {
-  const crc = (bytes: Buffer): number => {
-    let value = 0xffffffff;
-    for (const byte of bytes) {
-      value ^= byte;
-      for (let bit = 0; bit < 8; bit += 1) {
-        value = value & 1 ? (value >>> 1) ^ 0xedb88320 : value >>> 1;
-      }
-    }
-    return (value ^ 0xffffffff) >>> 0;
-  };
-  const chunk = (type: string, body: Buffer): Buffer => {
-    const length = Buffer.alloc(4);
-    length.writeUInt32BE(body.length);
-    const named = Buffer.concat([Buffer.from(type, 'ascii'), body]);
-    const check = Buffer.alloc(4);
-    check.writeUInt32BE(crc(named));
-    return Buffer.concat([length, named, check]);
-  };
-  const header = Buffer.alloc(13);
-  header.writeUInt32BE(4, 0);
-  header.writeUInt32BE(4, 4);
-  header.writeUInt8(8, 8);
-  header.writeUInt8(2, 9);
-  const row = Buffer.from([0, ...Array.from({ length: 4 }, () => [red, green, blue]).flat()]);
-  const pixels = deflateSync(Buffer.concat(Array.from({ length: 4 }, () => row)));
-  return Buffer.concat([
-    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-    chunk('IHDR', header),
-    chunk('IDAT', pixels),
-    chunk('IEND', Buffer.alloc(0)),
-  ]);
 }
 
 function testAGdignoreStopsTheWalk(godotPath: string, projectDir: string): void {

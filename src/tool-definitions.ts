@@ -458,8 +458,18 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
           'set_options: import options keyed as the .import file spells them, {"compress/mode": 1}.',
         additionalProperties: true,
       },
-      reimport: { type: 'boolean', description: 'set_options: reimport afterwards. Default true.' },
+      reimport: {
+        type: 'boolean',
+        description:
+          'set_options: reimport afterwards, answered under reimport as project_import reimport answers. Default true.',
+      },
       force: { type: 'boolean', description: 'reimport: reimport even what is current. Default false.' },
+      timeoutMs: {
+        type: 'integer',
+        minimum: 1,
+        description:
+          'reimport, set_options: how long to wait for the editor to finish reimporting. Default 300000.',
+      },
     },
     requires: ['projectPath'],
     operations: {
@@ -469,9 +479,13 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         requires: [],
       },
       options: { summary: 'the import options of one resource', requires: ['resourcePath'] },
-      set_options: { summary: 'change import options', requires: ['resourcePath', 'options'] },
+      set_options: {
+        summary: 'change import options in the sidecar, then apply them with a reimport of that resource',
+        requires: ['resourcePath', 'options'],
+      },
       reimport: {
-        summary: 'reimport one resource, or everything modified without resourcePath',
+        summary:
+          "reimport what status says is outdated or failed, one resource with resourcePath, or what is current as well with force. Through the open editor when one serves the project, so it reloads what it holds, waiting for it to finish; otherwise through the engine's own import pass. Answered from a second status read: reimported lists what is current now, notReimported what is not, with its status and reason, and via says which of the two did the work. stillImporting is an editor that had not finished within timeoutMs",
         requires: [],
       },
       uid: { summary: 'the UID of one file', requires: ['resourcePath'] },
