@@ -305,6 +305,7 @@ export function whyNoReport(printed: readonly string[], asked: string): string |
 const ESCAPE = String.fromCharCode(0x1b);
 
 const LOCATION = `'[^'\\n]*' in \\S+:\\d+`;
+const IGNORING_CASE = ' \\(ignoring case\\)';
 
 /**
  * A failing value the runner printed as a character diff, with the assertion it belongs to: the
@@ -314,10 +315,21 @@ const LOCATION = `'[^'\\n]*' in \\S+:\\d+`;
  * inside one. An array equality prints its value, then a table of differences, then its location,
  * so a value matched lazily up to the next quote before a location line ran through the table and
  * on to the end of the next case's string diff, and read the two as one.
+ *
+ * `is_equal_ignoring_case` writes " (ignoring case)" after the closing quote, so a match that
+ * wanted the location straight after the quote never ended on one, and its merge stood.
  */
 const PRINTED_ACTUAL = new RegExp(
-  ` but was\\n '((?:(?!\\tat ${LOCATION})[\\s\\S])*?)'((?:${ESCAPE}\\[[0-9;]*m)*)\\tat (${LOCATION})`,
+  ` but was\\n '((?:(?!\\tat ${LOCATION})[\\s\\S])*?)'((?:${ESCAPE}\\[[0-9;]*m)*)(${IGNORING_CASE})?((?:${ESCAPE}\\[[0-9;]*m)*)\\tat (${LOCATION})`,
   'g',
+);
+
+/**
+ * A failing equality between two quoted values as the report writes it, a string's being a merged
+ * diff; the error-message form is `assert_failure`'s `has_message` and its siblings.
+ */
+const QUOTED_EQUALITY = new RegExp(
+  `^Expecting(?: error message)?:\\n '([\\s\\S]*)'\\n but was\\n '([\\s\\S]*)'(?:${IGNORING_CASE})?\\n\\tat `,
 );
 const COLOUR = new RegExp(`${ESCAPE}\\[([0-9;]*)m`, 'g');
 
@@ -386,14 +398,23 @@ export const VALUE_NOT_RECOVERED_NOTE =
   '[gdharness: the value after "but was" may not be the one the assertion found. gdUnit4 writes a failing string into its report as a character diff against the expected one with the marks dropped, which merges the two, and the runner printed no copy of this one to read the value back from.]';
 
 /**
+ * The sentence a detail carries when its value was read back and the two sides still print alike.
+ * gdUnit4 passes the expected string through its BBCode renderer, so "[b]plain[/b]" against "plain"
+ * printed "plain" on both sides, with the tags gone into terminal bold.
+ */
+export const RENDERED_AWAY_NOTE =
+  '[gdharness: the two sides print alike, so what tells them apart is something gdUnit4 does not print. The usual cause is BBCode in the expected string, which gdUnit4 renders as formatting instead of showing; the value after "but was" is the one the assertion found.]';
+
+/**
  * [param failed] with each failing string equality's actual value put back, read off [param
  * printed], which is what the runner wrote to its console with the colours left in.
  *
  * gdUnit4 prints a failing string's value as a character diff against the expected one, marked
  * with background colours, and strips the marks when it writes the JUnit report: what is left is
  * both strings merged, so an empty value reads as the expected string in full, and "abXd" against
- * "abcd" reads "abcXd". The console keeps the marks. A detail the console has no copy of, whose two
- * sides read alike, says so rather than letting either side stand as the value.
+ * "abcd" reads "abcXd". The console keeps the marks. A detail the console has no copy of says its
+ * value may be the merge, and one whose sides still read alike says why, rather than letting
+ * either side stand as the value. A string gdUnit4 masked because it held BBCode is unmasked.
  */
 export function withActualsPrinted<Case extends { readonly detail: string | null }>(
   failed: readonly Case[],
@@ -402,7 +423,8 @@ export function withActualsPrinted<Case extends { readonly detail: string | null
   // A line break reaches a pipe as CRLF on Windows, and the report is written with every carriage
   // return taken out, so the two are compared the way the report spells them.
   const diffs = [...printed.replaceAll('\r\n', '\n').matchAll(PRINTED_ACTUAL)].map((match) => ({
-    at: match[3] ?? '',
+    suffix: match[3] ?? '',
+    at: match[5] ?? '',
     ...readDiff(match[1] ?? ''),
   }));
   return failed.map((entry) => {
@@ -412,19 +434,51 @@ export function withActualsPrinted<Case extends { readonly detail: string | null
     let detail = entry.detail;
     let recovered = false;
     for (const diff of diffs) {
-      const wrong = ` but was\n '${diff.merged.replaceAll('\r', '')}'\n\tat ${diff.at}`;
+      const wrong = ` but was\n '${diff.merged.replaceAll('\r', '')}'${diff.suffix}\n\tat ${diff.at}`;
       if (detail.includes(wrong)) {
-        detail = detail.replace(wrong, () => ` but was\n '${diff.actual}'\n\tat ${diff.at}`);
+        detail = detail.replace(wrong, () => ` but was\n '${diff.actual}'${diff.suffix}\n\tat ${diff.at}`);
         recovered = true;
       }
     }
-    if (!recovered && /Expecting:\n '[\s\S]*'\n but was\n '[\s\S]*'\n\tat /.test(detail)) {
-      const alike = /Expecting:\n '([\s\S]*)'\n but was\n '\1'\n\tat /.test(detail);
-      detail = `${detail}\n${alike ? BOTH_SIDES_ALIKE_NOTE : VALUE_NOT_RECOVERED_NOTE}`;
+    const quoted = QUOTED_EQUALITY.exec(detail);
+    if (quoted !== null) {
+      const alike = quoted[1] === quoted[2];
+      const note = recovered
+        ? alike
+          ? RENDERED_AWAY_NOTE
+          : null
+        : alike
+          ? BOTH_SIDES_ALIKE_NOTE
+          : VALUE_NOT_RECOVERED_NOTE;
+      detail = note === null ? detail : `${detail}\n${note}`;
+    }
+    if (quoted !== null && masked(quoted[1] ?? '', quoted[2] ?? '')) {
+      const end = quoted[0].length - '\n\tat '.length;
+      detail = detail.slice(0, end).replaceAll(MASKED_BRACKET, '[') + detail.slice(end);
     }
     return detail === entry.detail ? entry : { ...entry, detail };
   });
 }
+
+const MASKED_BRACKET = '[lb]';
+
+/**
+ * Whether [param expected] and [param actual] are strings gdUnit4 masked before printing them.
+ *
+ * A string equality whose value reads as BBCode is printed with every "[" written "[lb]", on the
+ * console and in the report, so a line of game text holding "[b]" came back as "[lb]b]". It masks
+ * both sides together, and a value holding "[lb]" itself is BBCode and is masked too, so in a masked
+ * pair every bracket is spelled that way. Nothing else is masked: an array prints its own brackets
+ * bare, and a dictionary, which can hold a literal "[lb]" and nothing else bracketed, is known by
+ * the layout gdUnit4 prints one in.
+ */
+function masked(expected: string, actual: string): boolean {
+  const allSpelled = (value: string): boolean =>
+    !PRINTED_DICTIONARY.test(value) && value.split('[').length === value.split(MASKED_BRACKET).length;
+  return `${expected}${actual}`.includes(MASKED_BRACKET) && allSpelled(expected) && allSpelled(actual);
+}
+
+const PRINTED_DICTIONARY = /^\{\n\t[\s\S]*\n {2}\}$/;
 
 /** One suite that finished with nodes still in the tree, and how many. */
 interface SuiteOrphans {
