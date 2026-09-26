@@ -7418,7 +7418,7 @@ function testTheCureIsWrittenWhole(): void {
   ];
   // What the tree holds today and not a comfortable minimum, so one place going quiet lowers this
   // in the same change and somebody confirms it was meant.
-  assert.equal(offered.length, 30, `the places offering a remedy should all be found, not ${offered.length}`);
+  assert.equal(offered.length, 33, `the places offering a remedy should all be found, not ${offered.length}`);
 
   // Across whitespace, because a rendered file wraps where the source did not and a sentence that
   // breaks at "the" is the same sentence. Change, edit and touch, because the claim is about what
@@ -10302,6 +10302,92 @@ async function testRefreshingUidsMakesTheSidecarAndWritesNoScene(): Promise<void
 }
 
 /**
+ * A project_settings write under an open editor is handed to the editor to take from the file.
+ *
+ * Written to the file alone, the editor went on holding the old value, answered it when asked, and
+ * would save it back over the new one, and the answer said nothing. What the editor is told is read
+ * off the file either side of the write, so it is asked here with a write that changes a setting, a
+ * write that changes nothing, a removal, a bus layout, and an editor too old to be asked. The fake
+ * editor records what it was sent; the editor leg holds what a real one then answers.
+ */
+async function testASettingsWriteIsTakenUpByTheEditor(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('settings adoption regression skipped (Godot not found)');
+    return;
+  }
+  const sent: { tool: string; args: Record<string, unknown> }[] = [];
+  const editor = { stale: false };
+  await withAPlayingEditor(
+    () => (tool, args) => {
+      if (tool.startsWith('adopt_')) {
+        sent.push({ tool, args });
+        if (editor.stale) {
+          return { ok: false, error: `Unknown tool: ${tool}` };
+        }
+      }
+      return { ok: true };
+    },
+    async ({ server, project }) => {
+      const call = async (args: Record<string, unknown>): Promise<unknown> =>
+        parseTextContent(
+          await server.request(
+            'tools/call',
+            { name: 'project_settings', arguments: { projectPath: project, ...args } },
+            ENGINE_CALL_TIMEOUT_MS,
+          ),
+        );
+      const named = 'application/config/description';
+
+      // The engine's first save of a project also writes the features it was saved with, which is a
+      // change to the file like any other, so the setting is looked for among what was taken.
+      const set = await call({ op: 'set', setting: named, value: 'first' });
+      const adopted = asArray(get(set, 'editorAdopted') ?? []);
+      assert.ok(adopted.includes(named), JSON.stringify(set));
+      assert.deepEqual(sent.splice(0), [{ tool: 'adopt_project_settings', args: { settings: adopted } }]);
+
+      // The same value again changes nothing in the file, so there is nothing for the editor to take.
+      const same = await call({ op: 'set', setting: named, value: 'first' });
+      assert.equal(get(same, 'editorAdopted'), undefined, JSON.stringify(same));
+      assert.deepEqual(sent.splice(0), [], 'an unchanged file sends the editor nothing');
+
+      writeFileSync(join(project, 'thing.gd'), 'extends Node\n');
+      const added = await call({ op: 'add_autoload', name: 'Thing', path: 'res://thing.gd' });
+      assert.deepEqual(asArray(get(added, 'editorAdopted') ?? []), ['autoload/Thing'], JSON.stringify(added));
+      const removed = await call({ op: 'remove_autoload', name: 'Thing' });
+      assert.deepEqual(
+        asArray(get(removed, 'editorAdopted') ?? []),
+        ['autoload/Thing'],
+        `a setting the write took out is one the editor has to drop: ${JSON.stringify(removed)}`,
+      );
+      sent.splice(0);
+
+      const bus = await call({ op: 'add_audio_bus', busName: 'Voices' });
+      assert.equal(get(bus, 'editorNote'), undefined, JSON.stringify(bus));
+      assert.deepEqual(
+        sent.splice(0).map((one) => one.tool),
+        ['adopt_audio_bus_layout'],
+        'a bus layout is reloaded rather than read as settings',
+      );
+
+      editor.stale = true;
+      const old = await call({ op: 'set', setting: named, value: 'second' });
+      assert.equal(get(old, 'editorAdopted'), undefined, JSON.stringify(old));
+      assert.match(
+        String(get(old, 'editorNote')),
+        /from before writes were handed to it.*still holds the old values.*editor_launch restart/,
+        JSON.stringify(old),
+      );
+      assert.equal(get(old, 'saved'), true, `the file is written all the same: ${JSON.stringify(old)}`);
+    },
+    { engine },
+  );
+}
+
+/**
  * project_import reimport reimports, without an editor, through the engine's own import pass.
  *
  * It answered "requested" and did nothing, and set_options said reimport_triggered over a sidecar
@@ -11050,7 +11136,10 @@ interface PlayingEditorStage {
 }
 
 /** How a fake editor answers one tool call: the result, at once or after a wait. */
-type EditorToolAnswer = (tool: string) => Record<string, unknown> | Promise<Record<string, unknown>>;
+type EditorToolAnswer = (
+  tool: string,
+  args: Record<string, unknown>,
+) => Record<string, unknown> | Promise<Record<string, unknown>>;
 
 /**
  * The process id the fake editor greets the server with, which its games would announce. This
@@ -11146,8 +11235,17 @@ async function withAPlayingEditor(
         if (!isRecord(message) || message['type'] !== 'tool_invoke') {
           return;
         }
-        void Promise.resolve(answers(String(message['tool']))).then((result) => {
-          socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result }));
+        const asked = isRecord(message['args']) ? message['args'] : {};
+        void Promise.resolve(answers(String(message['tool']), asked)).then((result) => {
+          // As the addon's plugin does: an answer of ok false goes back as a failure carrying its error.
+          const failed = result['ok'] === false;
+          socket.send(
+            JSON.stringify(
+              failed
+                ? { type: 'tool_result', id: message['id'], success: false, error: String(result['error']) }
+                : { type: 'tool_result', id: message['id'], success: true, result },
+            ),
+          );
         });
       });
       socket.send(
@@ -17457,12 +17555,12 @@ function testEveryDispatchedNameExistsOnBothSides(): void {
     'src/godot/addons/gdharness_editor/tool_executor.gd',
     /^\t\t"([a-z_]+)": \[/gm,
     'editor commands',
-    31,
+    36,
   );
   // Most are sent by name at the call; the ones a caller reaches with `from: "editor"` are sent
   // out of a table, so the table is where they are read from rather than the source around it.
   const bridged = new Set([
-    ...namesSent(/(?:[Bb]ridge|invokeTool)\(\s*'([a-z_]+)'/g, 'editor commands', 25),
+    ...namesSent(/(?:[Bb]ridge|invokeTool|editorTakes)\(\s*'([a-z_]+)'/g, 'editor commands', 25),
     ...Object.values(EDITOR_READS).flatMap((ops) => Object.values(ops)),
   ]);
   for (const command of bridged) {
@@ -19961,6 +20059,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStructureReadDescribesTheScriptItRead,
   testRefreshingUidsMakesTheSidecarAndWritesNoScene,
   testAReimportReimportsThroughTheEngine,
+  testASettingsWriteIsTakenUpByTheEditor,
   testWhoIsHoldingAPortIsAskable,
   testWhatTheEditorSavedAwayIsReportedTheSameWay,
   testARestartSaysWhatTheEditorDropped,

@@ -248,7 +248,10 @@ interface Editor {
   /** Calls a tool that must be refused and answers with the sentence it was refused with. */
   refusal: (name: string, args: Record<string, unknown>) => Promise<string>;
   /** Calls a tool and answers with how it went, for waiting on something to come up. */
-  attempt: (name: string, args: Record<string, unknown>) => Promise<{ ok: boolean; text: string }>;
+  attempt: (
+    name: string,
+    args: Record<string, unknown>,
+  ) => Promise<{ ok: boolean; text: string; answer: unknown }>;
   /**
    * Starts a run of the project and answers once its runtime is listening, failing if it is not.
    *
@@ -692,9 +695,24 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
     return textOf(response) ?? '';
   };
 
+  // A refusal is an answer a case may expect and retry past; an error in the protocol is the server
+  // failing to answer at all, which no case expects. It has no result, so it read as a success with
+  // no text, and a caller parsing that text failed on the parse with the server's error unseen.
   const attempt = async (name: string, args: Record<string, unknown>) => {
     const response = await invoke(name, args);
-    return { ok: get(response, 'result', 'isError') !== true, text: textOf(response) ?? '' };
+    const failed = get(response, 'error');
+    assert.equal(
+      failed,
+      undefined,
+      `${name} failed in the protocol rather than answering: ${JSON.stringify(failed)}`,
+    );
+    // `answer` is the first block parsed, as `call` reads it: the text joins every block, and an
+    // answer now and then carries a notice after its own, which the joined text is not JSON with.
+    return {
+      ok: get(response, 'result', 'isError') !== true,
+      text: textOf(response) ?? '',
+      answer: parseTextContent(response),
+    };
   };
 
   const play = async (args: Record<string, unknown> = {}): Promise<unknown> => {
@@ -1651,13 +1669,29 @@ async function testTheClassCheckKnowsWhichProjectItIsAbout({ call, project }: Ed
  * nobody's window open can reproduce, and the editor is what it has been told. Asserting only that
  * the editor answers would be satisfied by a server that quietly read the file and called it the
  * editor's, which is exactly the ambiguity the argument was added to remove, so the file is changed
- * underneath the editor first and then both are asked. Whether an editor ever picks a change up on
- * its own is the engine's business; what is asserted is that the two answers come from two places,
- * and the editor's is the one it was holding.
+ * underneath the editor first, by hand rather than through a tool, and then both are asked. Whether
+ * an editor ever picks a change up on its own is the engine's business; what is asserted is that
+ * the two answers come from two places, and the editor's is the one it was holding.
+ *
+ * Then the other half: a write through project_settings is taken up by the editor. Written to the
+ * file alone, the editor went on answering the old value and would have saved it back over the new
+ * one, and the answer said nothing.
  */
 async function testASettingReadFromTheEditor({ call, refusal, project }: Editor): Promise<void> {
   const named = 'application/config/description';
   const written = 'what only the file says';
+  const read = async (from?: 'editor'): Promise<string> =>
+    asString(
+      get(
+        await call('project_settings', {
+          projectPath: project,
+          op: 'get',
+          setting: named,
+          ...(from === undefined ? {} : { from }),
+        }),
+        'value',
+      ),
+    );
 
   const before = await call('project_settings', {
     projectPath: project,
@@ -1668,28 +1702,75 @@ async function testASettingReadFromTheEditor({ call, refusal, project }: Editor)
   assert.equal(get(before, 'exists'), true, `the editor should hold the setting: ${text(before)}`);
   assert.equal(asString(get(before, 'value')), '', `and it opened with nothing in it: ${text(before)}`);
 
-  // Headless, so the file changes and the open editor is never told.
-  await call('project_settings', { projectPath: project, op: 'set', setting: named, value: written });
+  // By hand, so the file changes and the open editor is never told.
+  const file = join(project, 'project.godot');
+  const original = readFileSync(file, 'utf8');
   assert.match(
-    readFileSync(join(project, 'project.godot'), 'utf8'),
-    new RegExp(written),
-    'the write should have reached the file',
+    original,
+    /^\[application\]$/m,
+    'the fixture project has an application section to write into',
   );
+  writeFileSync(
+    file,
+    original.replace(/^\[application\]$/m, `[application]\n\nconfig/description="${written}"`),
+  );
+  assert.equal(await read(), written, 'disk reads the file');
+  assert.equal(await read('editor'), '', 'the editor answers with what it is holding');
 
-  const fromDisk = await call('project_settings', { projectPath: project, op: 'get', setting: named });
-  assert.equal(asString(get(fromDisk, 'value')), written, `disk reads the file: ${text(fromDisk)}`);
+  const through = 'written through the tool';
+  const set = await call('project_settings', {
+    projectPath: project,
+    op: 'set',
+    setting: named,
+    value: through,
+  });
+  assert.ok(
+    asArray(get(set, 'editorAdopted')).includes(named),
+    `the editor should take the write: ${text(set)}`,
+  );
+  assert.equal(await read(), through, 'the write reaches the file');
+  assert.equal(await read('editor'), through, 'and the editor holds it too');
 
-  const fromEditor = await call('project_settings', {
+  // An op that writes settings of its own, which the editor takes the same way.
+  const action = await call('project_settings', {
+    projectPath: project,
+    op: 'add_input_action',
+    actionName: 'gdharness_adopted',
+    events: [{ type: 'key', keycode: 'J' }],
+  });
+  assert.ok(asArray(get(action, 'editorAdopted')).includes('input/gdharness_adopted'), text(action));
+  const held = await call('project_settings', {
     projectPath: project,
     op: 'get',
-    setting: named,
+    setting: 'input/gdharness_adopted',
     from: 'editor',
   });
-  assert.equal(
-    asString(get(fromEditor, 'value')),
-    '',
-    `the editor answers with what it is holding: ${text(fromEditor)}`,
-  );
+  assert.equal(get(held, 'exists'), true, `the editor should hold the new action: ${text(held)}`);
+
+  // And a setting a write takes out, which the editor has to let go of rather than save back.
+  writeFileSync(join(project, 'adopted_autoload.gd'), 'extends Node\n');
+  const autoload = 'autoload/AdoptedAutoload';
+  await call('project_settings', {
+    projectPath: project,
+    op: 'add_autoload',
+    name: 'AdoptedAutoload',
+    path: 'res://adopted_autoload.gd',
+  });
+  const registered = await call('project_settings', {
+    projectPath: project,
+    op: 'get',
+    setting: autoload,
+    from: 'editor',
+  });
+  assert.equal(get(registered, 'exists'), true, `the editor should hold the autoload: ${text(registered)}`);
+  await call('project_settings', { projectPath: project, op: 'remove_autoload', name: 'AdoptedAutoload' });
+  const gone = await call('project_settings', {
+    projectPath: project,
+    op: 'get',
+    setting: autoload,
+    from: 'editor',
+  });
+  assert.equal(get(gone, 'exists'), false, `the editor should let the removed autoload go: ${text(gone)}`);
 
   // The prefix form comes back with the type of each, which is the half a name hides: a family of
   // levels can hold a bool, and a level written over it looks like it worked.
@@ -2101,7 +2182,7 @@ async function testAHeldGameIsStillHeldForTheReplacement(godotPath: string): Pro
     await second.abandon();
     // The first server still holds it: a second client asking did not let it go.
     const stillSaid = await own.attempt('debug_state', { op: 'stack' });
-    const still = stillSaid.ok ? asArray(JSON.parse(stillSaid.text), 'stackFrames') : [];
+    const still = stillSaid.ok ? asArray(stillSaid.answer, 'stackFrames') : [];
     assert.equal(get(still[0], 'line'), BREAK_LINE, `and asking did not release it: ${stillSaid.text}`);
 
     // Now the client holding it goes, the way a harness reconnect ends a server: stdin ends and the
@@ -2331,7 +2412,7 @@ async function stackWithin(
   while (!reached(frames) && Date.now() < deadline) {
     const stack = await attempt('debug_state', { op: 'stack' });
     said = stack.text;
-    frames = stack.ok ? asArray(JSON.parse(stack.text), 'stackFrames') : [];
+    frames = stack.ok ? asArray(stack.answer, 'stackFrames') : [];
     if (!reached(frames)) await delay(500);
   }
   assert.ok(reached(frames), `${what}, and the adapter answered with: ${said}`);
@@ -3371,7 +3452,7 @@ async function ticksWithin(attempt: Editor['attempt'], project: string, what: st
       property: 'ticks',
     });
     said = asked.text;
-    const value = asked.ok ? get(JSON.parse(asked.text), 'value') : 0;
+    const value = asked.ok ? get(asked.answer, 'value') : 0;
     ticked = typeof value === 'number' ? value : 0;
     if (ticked === 0) await delay(500);
   }
