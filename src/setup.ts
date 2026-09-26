@@ -15,6 +15,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  rmdirSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -185,7 +186,11 @@ export function installedAddonVersion(projectPath: string): string | null {
   return said === '' ? null : said;
 }
 
-/** Each addon taken back out, naming the ones that were there to remove. */
+/**
+ * Each addon taken back out, naming the ones that were there to remove, and `addons/` with them
+ * when that leaves it empty: setup makes the directory in a project that had none, and an uninstall
+ * that left it behind left the project a directory it did not have before.
+ */
 export function removeAddons(projectPath: string): readonly string[] {
   const removed: string[] = [];
   for (const name of ADDONS) {
@@ -194,6 +199,11 @@ export function removeAddons(projectPath: string): readonly string[] {
       rmSync(target, { recursive: true, force: true });
       removed.push(target);
     }
+  }
+  const addons = join(projectPath, 'addons');
+  if (removed.length > 0 && existsSync(addons) && readdirSync(addons).length === 0) {
+    rmdirSync(addons);
+    removed.push(addons);
   }
   return removed;
 }
