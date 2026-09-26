@@ -77,6 +77,7 @@ import {
   theEditorHasComeBack,
 } from '../src/godot-bridge.js';
 import { EDITOR_READS, HEADLESS_OPERATIONS } from '../src/headless-operations.js';
+import { RENDERED_AWAY_NOTE } from '../src/junit.js';
 import {
   editorArguments,
   environmentFor,
@@ -17353,6 +17354,69 @@ async function testGdUnitRunner(): Promise<void> {
         assert.match(
           mixedDetailOf('test_a_array_failure_first'),
           /but was\n '\[0, 55, 110\]'\n\nDifferences found:/,
+        );
+
+        // The other ways a string equality prints: ignoring case, which writes a word after the
+        // value; BBCode in the value, which gdUnit4 masks on both sides; BBCode only in the
+        // expected string, which it renders away; and a dictionary holding the mask, which is not
+        // a string and must be left alone.
+        mkdirSync(join(projectDir, 'shapes'));
+        writeFileSync(
+          join(projectDir, 'shapes', 'shapes_test.gd'),
+          [
+            'extends GdUnitTestSuite',
+            '',
+            '',
+            'func test_ignoring_case() -> void:',
+            '\tassert_str("for every spell").is_equal_ignoring_case("FOR EVERY OSTINATO")',
+            '',
+            '',
+            'func test_bbcode() -> void:',
+            '\tassert_str("a [b]bold[/b] x").is_equal("a [b]bold[/b] y")',
+            '',
+            '',
+            'func test_bbcode_expected_only() -> void:',
+            '\tassert_str("plain").is_equal("[b]plain[/b]")',
+            '',
+            '',
+            'func test_dictionary() -> void:',
+            '\tassert_dict({"[lb]": 1}).is_equal({"[lb]": 2})',
+            '',
+          ].join('\n'),
+        );
+        const shapes: unknown = JSON.parse(
+          await call(
+            'project_test',
+            { projectPath: projectDir, path: 'res://shapes' },
+            ENGINE_CALL_TIMEOUT_MS * 3,
+          ),
+        );
+        const shapeOf = (name: string): string =>
+          text(
+            get(
+              asArray(get(shapes, 'failed')).find((entry) => get(entry, 'name') === name),
+              'detail',
+            ),
+          );
+        assert.ok(
+          shapeOf('test_ignoring_case').includes(
+            " but was\n 'for every spell' (ignoring case)\n\tat 'test_ignoring_case'",
+          ),
+          JSON.stringify(shapeOf('test_ignoring_case')),
+        );
+        assert.ok(
+          shapeOf('test_bbcode').startsWith(
+            "Expecting:\n 'a [b]bold[/b] y'\n but was\n 'a [b]bold[/b] x'\n\tat 'test_bbcode'",
+          ),
+          JSON.stringify(shapeOf('test_bbcode')),
+        );
+        assert.ok(
+          shapeOf('test_bbcode_expected_only').endsWith(`\n${RENDERED_AWAY_NOTE}`),
+          JSON.stringify(shapeOf('test_bbcode_expected_only')),
+        );
+        assert.ok(
+          shapeOf('test_dictionary').includes(`but was\n '{\n\t"[lb]": 1\n  }'\n\tat 'test_dictionary'`),
+          JSON.stringify(shapeOf('test_dictionary')),
         );
       },
       { GODOT_PATH: godotPath },

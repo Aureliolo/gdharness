@@ -10,6 +10,7 @@ import {
   MalformedReportError,
   orphansPrinted,
   parseJUnit,
+  RENDERED_AWAY_NOTE,
   VALUE_NOT_RECOVERED_NOTE,
   whyNoReport,
   withActualsPrinted,
@@ -350,9 +351,134 @@ function readsItsOwnValue(ending: string): void {
   assert.equal(empty?.detail, emptyDetail, 'a value with no marks is left as the report wrote it');
 }
 
+/**
+ * The other shapes a string equality is printed in, read off the console gdUnit4 v6.2.1 printed on
+ * 4.7.2, ended both ways, for these cases:
+ *
+ *     assert_str("for every spell").is_equal_ignoring_case("FOR EVERY OSTINATO")
+ *     assert_str("a [b]bold[/b] x").is_equal("a [b]bold[/b] y")
+ *     assert_str("keep [lb] as is").is_equal("other")
+ *     assert_dict({"[lb]": 1}).is_equal({"[lb]": 2})
+ *     assert_str("plain").is_equal("[b]plain[/b]")
+ *     assert_failure(func() -> void: assert_int(1).is_equal(2)).has_message("Expecting:\n '3'\n but was\n '1'")
+ */
+function testEveryShapeOfAStringEqualityReadsItsValue(): void {
+  for (const ending of ['\n', '\r\n']) {
+    readsEveryShape(ending);
+  }
+}
+
+function readsEveryShape(ending: string): void {
+  const e = String.fromCharCode(0x1b);
+  const printed = [
+    `  ${e}[38;2;250;235;215mres://probe/probe_test.gd${e}[0m${e}[38;2;128;128;128m > ${e}[0m${e}[38;2;250;235;215mtest_ignoring_case_second${e}[0m${e}[38;2;178;34;34m${e}[1m FAILED${e}[0m${e}[38;2;100;149;237m 6ms${e}[0m`,
+    `  ${e}[38;2;0;206;209m${e}[1m${e}[4mReport:${e}[0m`,
+    `  ${e}[38;2;128;128;128m${e}[38;2;255;69;0mExpecting:${e}[0m`,
+    ` '${e}[38;2;30;144;255mFOR EVERY OSTINATO${e}[0m'`,
+    ` but was`,
+    ` '${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[38;2;255;255;255mFOR${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255m${e}[48;2;0;38;0m${e}[38;2;255;255;255mfor${e}[0m${e}[38;2;30;144;255m${e}[48;2;0;38;0m${e}[0m${e}[38;2;30;144;255m ${e}[48;2;38;0;0m${e}[38;2;255;255;255mEVERY${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255m${e}[48;2;0;38;0m${e}[38;2;255;255;255mevery${e}[0m${e}[38;2;30;144;255m${e}[48;2;0;38;0m${e}[0m${e}[38;2;30;144;255m ${e}[48;2;38;0;0m${e}[38;2;255;255;255mOSTINATO${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255m${e}[48;2;0;38;0m${e}[38;2;255;255;255mspell${e}[0m${e}[38;2;30;144;255m${e}[48;2;0;38;0m${e}[0m${e}[38;2;30;144;255m${e}[0m' (ignoring case)${e}[0m${e}[38;2;173;216;230m\tat 'test_ignoring_case_second' in res://probe/probe_test.gd:72${e}[0m${e}[38;2;128;128;128m${e}[0m`,
+    `  ${e}[38;2;250;235;215mres://probe/probe_test.gd${e}[0m${e}[38;2;128;128;128m > ${e}[0m${e}[38;2;250;235;215mtest_bbcode${e}[0m${e}[38;2;178;34;34m${e}[1m FAILED${e}[0m${e}[38;2;100;149;237m 6ms${e}[0m`,
+    `  ${e}[38;2;0;206;209m${e}[1m${e}[4mReport:${e}[0m`,
+    `  ${e}[38;2;128;128;128m${e}[38;2;255;69;0mExpecting:${e}[0m`,
+    ` '${e}[38;2;30;144;255ma [lb]b]bold[lb]/b] y${e}[0m'`,
+    ` but was`,
+    ` '${e}[38;2;30;144;255ma [lb]b]bold[lb]/b] x${e}[0m'${e}[0m${e}[38;2;173;216;230m\tat 'test_bbcode' in res://probe/probe_test.gd:80${e}[0m${e}[38;2;128;128;128m${e}[0m`,
+    `  ${e}[38;2;250;235;215mres://probe/probe_test.gd${e}[0m${e}[38;2;128;128;128m > ${e}[0m${e}[38;2;250;235;215mtest_literal_lb${e}[0m${e}[38;2;178;34;34m${e}[1m FAILED${e}[0m${e}[38;2;100;149;237m 6ms${e}[0m`,
+    `  ${e}[38;2;0;206;209m${e}[1m${e}[4mReport:${e}[0m`,
+    `  ${e}[38;2;128;128;128m${e}[38;2;255;69;0mExpecting:${e}[0m`,
+    ` '${e}[38;2;30;144;255mother${e}[0m'`,
+    ` but was`,
+    ` '${e}[38;2;30;144;255mkeep [lb]lb] as is${e}[0m'${e}[0m${e}[38;2;173;216;230m\tat 'test_literal_lb' in res://probe/probe_test.gd:84${e}[0m${e}[38;2;128;128;128m${e}[0m`,
+    `  ${e}[38;2;250;235;215mres://probe/probe_test.gd${e}[0m${e}[38;2;128;128;128m > ${e}[0m${e}[38;2;250;235;215mtest_dict_lb${e}[0m${e}[38;2;178;34;34m${e}[1m FAILED${e}[0m${e}[38;2;100;149;237m 5ms${e}[0m`,
+    `  ${e}[38;2;0;206;209m${e}[1m${e}[4mReport:${e}[0m`,
+    `  ${e}[38;2;128;128;128m${e}[38;2;255;69;0mExpecting:${e}[0m`,
+    ` '${e}[38;2;30;144;255m{`,
+    `\t"[lb]": 2`,
+    `  }${e}[0m'`,
+    ` but was`,
+    ` '${e}[38;2;30;144;255m{`,
+    `\t"[lb]": 1`,
+    `  }${e}[0m'${e}[0m${e}[38;2;173;216;230m\tat 'test_dict_lb' in res://probe/probe_test.gd:100${e}[0m${e}[38;2;128;128;128m${e}[0m`,
+    `  ${e}[38;2;250;235;215mres://probe/probe_test.gd${e}[0m${e}[38;2;128;128;128m > ${e}[0m${e}[38;2;250;235;215mtest_bbcode_expected_only${e}[0m${e}[38;2;178;34;34m${e}[1m FAILED${e}[0m${e}[38;2;100;149;237m 18ms${e}[0m`,
+    `  ${e}[38;2;0;206;209m${e}[1m${e}[4mReport:${e}[0m`,
+    `  ${e}[38;2;128;128;128m${e}[38;2;255;69;0mExpecting:${e}[0m`,
+    ` '${e}[38;2;30;144;255m${e}[1mplain${e}[0m${e}[38;2;30;144;255m${e}[0m'`,
+    ` but was`,
+    ` '${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[38;2;255;255;255m${e}[1m${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255mplain${e}[48;2;38;0;0m${e}[38;2;255;255;255m${e}[0m${e}[38;2;255;255;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255m${e}[0m'${e}[0m${e}[38;2;173;216;230m\tat 'test_bbcode_expected_only' in res://probe/probe_test.gd:92${e}[0m${e}[38;2;128;128;128m${e}[0m`,
+    `  ${e}[38;2;250;235;215mres://probe/probe_test.gd${e}[0m${e}[38;2;128;128;128m > ${e}[0m${e}[38;2;250;235;215mtest_has_message${e}[0m${e}[38;2;178;34;34m${e}[1m FAILED${e}[0m${e}[38;2;100;149;237m 6ms${e}[0m`,
+    `  ${e}[38;2;0;206;209m${e}[1m${e}[4mReport:${e}[0m`,
+    `  ${e}[38;2;128;128;128m${e}[38;2;255;69;0mExpecting error message:${e}[0m`,
+    ` '${e}[38;2;30;144;255mExpecting:`,
+    ` '3'`,
+    ` but was`,
+    ` '1'${e}[0m'`,
+    ` but was`,
+    ` '${e}[38;2;30;144;255mExpecting:`,
+    ` ${e}[48;2;38;0;0m${e}[38;2;255;255;255m'3'${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255m${e}[48;2;0;38;0m${e}[38;2;255;255;255m2${e}[0m${e}[38;2;30;144;255m${e}[48;2;0;38;0m${e}[0m${e}[38;2;30;144;255m`,
+    ` but was`,
+    ` ${e}[48;2;38;0;0m${e}[38;2;255;255;255m'${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255m1${e}[48;2;38;0;0m${e}[38;2;255;255;255m'${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255m${e}[0m'${e}[0m${e}[38;2;173;216;230m\tat 'test_has_message' in res://probe/probe_test.gd:76${e}[0m${e}[38;2;128;128;128m${e}[0m`,
+  ];
+  const reported = {
+    test_ignoring_case_second:
+      "Expecting:\n 'FOR EVERY OSTINATO'\n but was\n 'FORfor EVERYevery OSTINATOspell' (ignoring case)\n\tat 'test_ignoring_case_second' in res://probe/probe_test.gd:72",
+    test_bbcode:
+      "Expecting:\n 'a [lb]b]bold[lb]/b] y'\n but was\n 'a [lb]b]bold[lb]/b] x'\n\tat 'test_bbcode' in res://probe/probe_test.gd:80",
+    test_literal_lb:
+      "Expecting:\n 'other'\n but was\n 'keep [lb]lb] as is'\n\tat 'test_literal_lb' in res://probe/probe_test.gd:84",
+    test_dict_lb:
+      "Expecting:\n '{\n\t\"[lb]\": 2\n  }'\n but was\n '{\n\t\"[lb]\": 1\n  }'\n\tat 'test_dict_lb' in res://probe/probe_test.gd:100",
+    test_bbcode_expected_only:
+      "Expecting:\n 'plain'\n but was\n 'plain'\n\tat 'test_bbcode_expected_only' in res://probe/probe_test.gd:92",
+    test_has_message:
+      "Expecting error message:\n 'Expecting:\n '3'\n but was\n '1''\n but was\n 'Expecting:\n '3'2\n but was\n '1''\n\tat 'test_has_message' in res://probe/probe_test.gd:76",
+  };
+  const unprintedMessage = `Expecting error message:\n 'abc'\n but was\n 'abXc'\n\tat 'test_unprinted' in res://probe/probe_test.gd:90`;
+  const [ignoring, bbcode, literal, dictionary, renderedAway, message, unprinted] = withActualsPrinted(
+    [...Object.values(reported), unprintedMessage].map((detail) => ({ detail })),
+    printed.join(ending),
+  );
+  const at = (name: string, line: number): string => `\n\tat '${name}' in res://probe/probe_test.gd:${line}`;
+  assert.equal(
+    ignoring?.detail,
+    `Expecting:\n 'FOR EVERY OSTINATO'\n but was\n 'for every spell' (ignoring case)${at('test_ignoring_case_second', 72)}`,
+    `an equality ignoring case reads the value it found, lines ended ${JSON.stringify(ending)}`,
+  );
+  assert.equal(
+    bbcode?.detail,
+    `Expecting:\n 'a [b]bold[/b] y'\n but was\n 'a [b]bold[/b] x'${at('test_bbcode', 80)}`,
+    'a string holding BBCode reads without the mask gdUnit4 put on both sides',
+  );
+  assert.equal(
+    literal?.detail,
+    `Expecting:\n 'other'\n but was\n 'keep [lb] as is'${at('test_literal_lb', 84)}`,
+    'a string holding the mask itself reads as it was written',
+  );
+  assert.equal(
+    dictionary?.detail,
+    reported.test_dict_lb,
+    'a dictionary holding the mask is left as it printed',
+  );
+  assert.equal(
+    renderedAway?.detail,
+    `${reported.test_bbcode_expected_only}\n${RENDERED_AWAY_NOTE}`,
+    'two sides that still read alike once the value is read back say what went unprinted',
+  );
+  assert.equal(
+    message?.detail,
+    `Expecting error message:\n 'Expecting:\n '3'\n but was\n '1''\n but was\n 'Expecting:\n 2\n but was\n 1'${at('test_has_message', 76)}`,
+    'an error message holding " but was" of its own reads the message the failure had',
+  );
+  assert.equal(
+    unprinted?.detail,
+    `${unprintedMessage}\n${VALUE_NOT_RECOVERED_NOTE}`,
+    'an error message the console kept no copy of says its value may be the merge',
+  );
+}
+
 testWhatGdUnitWrites();
 testAFailingStringReadsItsValue();
 testAStringAfterAnArrayReadsItsOwnValue();
+testEveryShapeOfAStringEqualityReadsItsValue();
 testEntitiesAndShapes();
 testMalformedReportsAreRefused();
 testARunThatFoundNothingIsNotAPass();
