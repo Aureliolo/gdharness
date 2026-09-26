@@ -17133,6 +17133,62 @@ async function testGdUnitRunner(): Promise<void> {
             `${name} says the value was ${JSON.stringify(value)}: ${JSON.stringify(detailOf(name))}`,
           );
         }
+
+        // The same after an array equality, whose report ends in a table rather than a quote. The
+        // two sentences share an "s", so their merge reads as a word that neither of them has.
+        mkdirSync(join(projectDir, 'mixed'));
+        writeFileSync(
+          join(projectDir, 'mixed', 'mixed_test.gd'),
+          [
+            'extends GdUnitTestSuite',
+            '',
+            'const WANTED: String = "for every Ostinato you have spoken"',
+            'const FOUND: String = "for every spell you have spoken"',
+            '',
+            '',
+            'func test_a_array_failure_first() -> void:',
+            '\tassert_array([0, 55, 110]).is_equal([0, 75, 150])',
+            '',
+            '',
+            'func test_the_sentence_alone() -> void:',
+            '\tassert_str(FOUND).is_equal(WANTED)',
+            '',
+            '',
+            'func test_a_mismatch_string_first() -> void:',
+            '\tassert_str("wanted deals 25; got deals 15").is_empty()',
+            '',
+            '',
+            'func test_the_sentence_after_others() -> void:',
+            '\tassert_str(FOUND).is_equal(WANTED)',
+            '',
+          ].join('\n'),
+        );
+        const mixed: unknown = JSON.parse(
+          await call(
+            'project_test',
+            { projectPath: projectDir, path: 'res://mixed' },
+            ENGINE_CALL_TIMEOUT_MS * 3,
+          ),
+        );
+        const mixedDetailOf = (name: string): string =>
+          text(
+            get(
+              asArray(get(mixed, 'failed')).find((entry) => get(entry, 'name') === name),
+              'detail',
+            ),
+          );
+        for (const name of ['test_the_sentence_alone', 'test_the_sentence_after_others']) {
+          assert.ok(
+            mixedDetailOf(name).endsWith(
+              ` but was\n 'for every spell you have spoken'\n\tat '${name}' in res://mixed/mixed_test.gd:${name === 'test_the_sentence_alone' ? 12 : 20}`,
+            ),
+            `${name} says the value it found: ${JSON.stringify(mixedDetailOf(name))}`,
+          );
+        }
+        assert.match(
+          mixedDetailOf('test_a_array_failure_first'),
+          /but was\n '\[0, 55, 110\]'\n\nDifferences found:/,
+        );
       },
       { GODOT_PATH: godotPath },
     );
