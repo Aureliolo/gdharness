@@ -16865,7 +16865,10 @@ async function testATestRunCutShortIsNamedForWhatItWasDoing(): Promise<void> {
       const run = async (path: string): Promise<unknown> => {
         const response = await request(
           'tools/call',
-          { name: 'project_test', arguments: { projectPath: projectDir, path, timeoutMs: 12_000 } },
+          {
+            name: 'project_test',
+            arguments: { projectPath: projectDir, path, timeoutMs: 12_000, printed: 'passed' },
+          },
           ENGINE_CALL_TIMEOUT_MS,
         );
         // The answer is a sentence and then the JSON, or the JSON alone, depending on whether a report was written.
@@ -16884,6 +16887,14 @@ async function testATestRunCutShortIsNamedForWhatItWasDoing(): Promise<void> {
         String(get(steady, 'verdict')),
         /^timed out after 12000 ms while still running/,
         JSON.stringify(steady),
+      );
+      // A run killed before its report asked for its lines as well: the answer without a report
+      // carries them too, each holding the words asked for.
+      const passedLines =
+        get(steady, 'printed') === undefined ? [] : asArray(get(steady, 'printed')).map(text);
+      assert.ok(
+        passedLines.length > 10 && passedLines.every((line) => /passed/i.test(line)),
+        `a run cut off before its report answers with the lines asked for: ${JSON.stringify(passedLines.slice(0, 3))}`,
       );
       const stuck = await run('res://stuck');
       assert.equal(get(stuck, 'hung'), true, `a run silent at the kill is hung: ${JSON.stringify(stuck)}`);
@@ -17479,6 +17490,44 @@ async function testGdUnitRunner(): Promise<void> {
           shapeOf('test_dictionary').includes(`but was\n '{\n\t"[lb]": 1\n  }'\n\tat 'test_dictionary'`),
           JSON.stringify(shapeOf('test_dictionary')),
         );
+
+        // A passing suite whose numbers come back through printed, which a probe measuring
+        // something used to have to fail an assertion for.
+        mkdirSync(join(projectDir, 'probe'));
+        writeFileSync(
+          join(projectDir, 'probe', 'probe_test.gd'),
+          [
+            'extends GdUnitTestSuite',
+            '',
+            '',
+            'func test_measures() -> void:',
+            '\tprint("PROBE rounds=%d" % (6 * 7))',
+            '\tprint("an ordinary line")',
+            '\tassert_int(1).is_equal(1)',
+            '',
+          ].join('\n'),
+        );
+        const probed: unknown = JSON.parse(
+          await call(
+            'project_test',
+            { projectPath: projectDir, path: 'res://probe', printed: 'probe rounds' },
+            ENGINE_CALL_TIMEOUT_MS * 3,
+          ),
+        );
+        assert.equal(get(probed, 'passed'), true, JSON.stringify(probed));
+        assert.deepEqual(
+          get(probed, 'printed'),
+          ['PROBE rounds=42'],
+          'a passing run answers with the lines holding the marker, case aside, and no others',
+        );
+        const unasked: unknown = JSON.parse(
+          await call(
+            'project_test',
+            { projectPath: projectDir, path: 'res://probe' },
+            ENGINE_CALL_TIMEOUT_MS * 3,
+          ),
+        );
+        assert.equal(get(unasked, 'printed'), undefined, 'and says nothing of what it printed unless asked');
 
         // A directory where two suites do not load and one does. gdUnit4 stops at discovery and
         // runs none of them, the good one included, which "script errors" alone did not say.
