@@ -126,12 +126,15 @@ import {
   ANNOUNCE_BUDGET_MS,
   announcedSince,
   CONFIRMED_FOR_MS,
+  CONSOLE_BOUNDARY,
   chooseRuntime,
+  consoleBoundaryAt,
   discoverRuntimes,
   errorReportOf,
   JUDGED_AFTER_MS,
   RUNTIME_PROTOCOL,
   type RuntimeEndpoint,
+  reportAlreadyInTranscript,
   runtimeDirectories,
   runtimeDirectory,
   runtimesAnnounced,
@@ -11327,11 +11330,18 @@ const FAKE_EDITOR_PID = process.pid;
  * project by [param options.engine] runs it and announces. [param options.held] is the game the
  * fake editor started, ended before the project is removed: a real engine keeps files open inside
  * it, and a case that failed before its own stop left the directory behind on Windows.
+ * [param options.onAdapter] is handed each connection the server makes to the scripted adapter,
+ * for a fixture that sends events down it.
  */
 async function withAPlayingEditor(
   answer: (where: Pick<PlayingEditorStage, 'adapter' | 'project' | 'runtimeDir'>) => EditorToolAnswer,
   body: (stage: PlayingEditorStage) => Promise<void>,
-  options: { realAddon?: boolean; engine?: string; held?: { game: ChildProcess | null } } = {},
+  options: {
+    realAddon?: boolean;
+    engine?: string;
+    held?: { game: ChildProcess | null };
+    onAdapter?: (socket: Socket) => void;
+  } = {},
 ): Promise<void> {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-played-over-'));
   const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-played-over-rt-'));
@@ -11362,94 +11372,98 @@ async function withAPlayingEditor(
   });
   const editor: { socket: WebSocket | null } = { socket: null };
   try {
-    await withFramedPeer(answerEverything, async (adapter) => {
-      const registered =
-        options.realAddon === true
-          ? '\n[autoload]\n\nGdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n'
-          : '';
-      writeFileSync(
-        join(project, 'project.godot'),
-        '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Played"\n' +
-          `run/main_scene="res://main.tscn"\n${registered}`,
-      );
-      writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
-      // The wait only happens for a project that could announce, which is one with the addon on
-      // disk. A stub, unless the fixture wants the real one run by a real engine.
-      const addon = join(project, 'addons', 'gdharness_runtime');
-      if (options.realAddon === true) {
-        cpSync(join('src', 'godot', 'addons', 'gdharness_runtime'), addon, { recursive: true });
-      } else {
-        mkdirSync(addon, { recursive: true });
-        writeFileSync(join(addon, 'runtime_autoload.gd'), 'extends Node\n');
-      }
-      await server.initialize('regression-test');
-
-      const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
-      editor.socket = socket;
-      await new Promise<void>((resolve, reject) => {
-        socket.once('open', () => {
-          resolve();
-        });
-        socket.once('error', reject);
-      });
-      const answers = answer({ adapter, project, runtimeDir });
-      socket.on('message', (raw: Buffer) => {
-        const message: unknown = JSON.parse(String(raw));
-        if (!isRecord(message) || message['type'] !== 'tool_invoke') {
-          return;
+    await withFramedPeer(
+      answerEverything,
+      async (adapter) => {
+        const registered =
+          options.realAddon === true
+            ? '\n[autoload]\n\nGdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n'
+            : '';
+        writeFileSync(
+          join(project, 'project.godot'),
+          '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Played"\n' +
+            `run/main_scene="res://main.tscn"\n${registered}`,
+        );
+        writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
+        // The wait only happens for a project that could announce, which is one with the addon on
+        // disk. A stub, unless the fixture wants the real one run by a real engine.
+        const addon = join(project, 'addons', 'gdharness_runtime');
+        if (options.realAddon === true) {
+          cpSync(join('src', 'godot', 'addons', 'gdharness_runtime'), addon, { recursive: true });
+        } else {
+          mkdirSync(addon, { recursive: true });
+          writeFileSync(join(addon, 'runtime_autoload.gd'), 'extends Node\n');
         }
-        const asked = isRecord(message['args']) ? message['args'] : {};
-        void Promise.resolve(answers(String(message['tool']), asked)).then((result) => {
-          // As the addon's plugin does: an answer of ok false goes back as a failure carrying its error.
-          const failed = result['ok'] === false;
-          socket.send(
-            JSON.stringify(
-              failed
-                ? { type: 'tool_result', id: message['id'], success: false, error: String(result['error']) }
-                : { type: 'tool_result', id: message['id'], success: true, result },
-            ),
-          );
-        });
-      });
-      socket.send(
-        JSON.stringify({
-          type: 'godot_ready',
-          project_path: project,
-          addon_version: SERVER_VERSION,
-          dap_port: adapter,
-          editor_pid: FAKE_EDITOR_PID,
-        }),
-      );
-      let greeted = false;
-      for (let waited = 0; waited < 10_000 && !greeted; waited += 100) {
-        await delay(100);
-        const seen = parseTextContent(
-          await server.request('tools/call', { name: 'editor_status', arguments: {} }),
-        );
-        greeted = text(get(seen, 'editor', 'projectPath')) === project;
-      }
-      assert.ok(greeted, 'the fake editor should have been greeted, or nothing below is reached');
+        await server.initialize('regression-test');
 
-      // Windowed, said outright: a start on a host with no display is headless unless told
-      // otherwise, and a headless start is spawned rather than played, which is a different case.
-      const start = async (runtimeWaitMs: number): Promise<{ answer: unknown; waitedMs: number }> => {
-        const began = Date.now();
-        // The request outlives the wait it asks for, so a game that boots slowly is reported as
-        // one that has not announced rather than as a request that timed out.
-        const response = await server.request(
-          'tools/call',
-          {
-            name: 'editor_run',
-            arguments: { projectPath: project, op: 'start', headless: false, runtimeWaitMs },
-          },
-          runtimeWaitMs + 30_000,
+        const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+        editor.socket = socket;
+        await new Promise<void>((resolve, reject) => {
+          socket.once('open', () => {
+            resolve();
+          });
+          socket.once('error', reject);
+        });
+        const answers = answer({ adapter, project, runtimeDir });
+        socket.on('message', (raw: Buffer) => {
+          const message: unknown = JSON.parse(String(raw));
+          if (!isRecord(message) || message['type'] !== 'tool_invoke') {
+            return;
+          }
+          const asked = isRecord(message['args']) ? message['args'] : {};
+          void Promise.resolve(answers(String(message['tool']), asked)).then((result) => {
+            // As the addon's plugin does: an answer of ok false goes back as a failure carrying its error.
+            const failed = result['ok'] === false;
+            socket.send(
+              JSON.stringify(
+                failed
+                  ? { type: 'tool_result', id: message['id'], success: false, error: String(result['error']) }
+                  : { type: 'tool_result', id: message['id'], success: true, result },
+              ),
+            );
+          });
+        });
+        socket.send(
+          JSON.stringify({
+            type: 'godot_ready',
+            project_path: project,
+            addon_version: SERVER_VERSION,
+            dap_port: adapter,
+            editor_pid: FAKE_EDITOR_PID,
+          }),
         );
-        // A refusal is plain text, and a fixture reading fields off null learns nothing from it.
-        const answered = parseTextContent(response) ?? { refused: textOf(response) };
-        return { answer: answered, waitedMs: Date.now() - began };
-      };
-      await body({ server, project, runtimeDir, adapter, start });
-    });
+        let greeted = false;
+        for (let waited = 0; waited < 10_000 && !greeted; waited += 100) {
+          await delay(100);
+          const seen = parseTextContent(
+            await server.request('tools/call', { name: 'editor_status', arguments: {} }),
+          );
+          greeted = text(get(seen, 'editor', 'projectPath')) === project;
+        }
+        assert.ok(greeted, 'the fake editor should have been greeted, or nothing below is reached');
+
+        // Windowed, said outright: a start on a host with no display is headless unless told
+        // otherwise, and a headless start is spawned rather than played, which is a different case.
+        const start = async (runtimeWaitMs: number): Promise<{ answer: unknown; waitedMs: number }> => {
+          const began = Date.now();
+          // The request outlives the wait it asks for, so a game that boots slowly is reported as
+          // one that has not announced rather than as a request that timed out.
+          const response = await server.request(
+            'tools/call',
+            {
+              name: 'editor_run',
+              arguments: { projectPath: project, op: 'start', headless: false, runtimeWaitMs },
+            },
+            runtimeWaitMs + 30_000,
+          );
+          // A refusal is plain text, and a fixture reading fields off null learns nothing from it.
+          const answered = parseTextContent(response) ?? { refused: textOf(response) };
+          return { answer: answered, waitedMs: Date.now() - began };
+        };
+        await body({ server, project, runtimeDir, adapter, start });
+      },
+      options.onAdapter,
+    );
   } finally {
     editor.socket?.terminate();
     await server.stop();
@@ -13850,6 +13864,224 @@ async function testAPlayedGamesReportsReachTheOutput(): Promise<void> {
       );
     },
     { realAddon: true, engine, held },
+  );
+}
+
+/**
+ * A played game's console comes out in the order the game made it, and reaches the transcript
+ * without anybody asking.
+ *
+ * The prints came over the debug adapter as they arrived and the errors from the runtime's report
+ * when it was read, which was when somebody asked, so a warning raised in `_ready` was listed after
+ * a print made a second later. Seen through a real editor. The runtime now writes its prints to the
+ * report as well from the line announcing it, and the server takes the console from the report
+ * from that line on.
+ *
+ * The scripted adapter relays the real game's stdout as output events, late, the way the editor's
+ * debugger relays a game's prints: late is what put the two streams out of step. The game prints,
+ * warns, prints a second later, and then raises an error with no print after it, which only a
+ * reading of the report on its own schedule puts in the transcript before somebody asks.
+ */
+async function testAPlayedGamesConsoleKeepsItsOrder(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('played game console order regression skipped (Godot not found)');
+    return;
+  }
+  const held: { game: ChildProcess | null } = { game: null };
+  const adapter: { socket: Socket | null; waiting: string[] } = { socket: null, waiting: [] };
+  const relay = (line: string): void => {
+    setTimeout(() => {
+      if (adapter.socket === null) {
+        adapter.waiting.push(line);
+        return;
+      }
+      adapter.socket.write(
+        frameJsonRpc({
+          seq: 0,
+          type: 'event',
+          event: 'output',
+          body: { category: 'stdout', output: `${line}\n` },
+        }),
+      );
+    }, 300);
+  };
+  await withAPlayingEditor(
+    ({ adapter: port, project, runtimeDir }) =>
+      (tool) => {
+        if (tool === 'play_scene') {
+          const game = spawn(engine, ['--headless', '--path', project], {
+            stdio: ['ignore', 'pipe', 'ignore'],
+            env: {
+              ...process.env,
+              GDHARNESS_RUNTIME_DIR: runtimeDir,
+              GDHARNESS_EDITOR_PID: String(FAKE_EDITOR_PID),
+            },
+          });
+          held.game = game;
+          let partial = '';
+          game.stdout.on('data', (chunk: Buffer) => {
+            const lines = (partial + chunk.toString('utf8')).split(/\r?\n/);
+            partial = lines.pop() ?? '';
+            for (const line of lines.filter((one) => one.length > 0)) {
+              relay(line);
+            }
+          });
+          return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: port };
+        }
+        if (tool === 'playing_status') {
+          return {
+            ok: true,
+            playing: held.game?.exitCode === null,
+            scenePath: 'res://main.tscn',
+            debugPort: port,
+          };
+        }
+        if (tool === 'stop_playing') {
+          held.game?.kill();
+          return { ok: true };
+        }
+        return { ok: true };
+      },
+    async ({ server, project, start }) => {
+      writeFileSync(
+        join(project, 'main.gd'),
+        'extends Node\n\n\nfunc _ready() -> void:\n' +
+          '\tprint("played game up")\n' +
+          '\tpush_warning("a warning between two prints")\n' +
+          '\tawait get_tree().create_timer(1.0).timeout\n' +
+          '\tprint("played game still going")\n' +
+          '\tawait get_tree().create_timer(1.0).timeout\n' +
+          '\tpush_error("an error with no print after it")\n',
+      );
+      writeFileSync(
+        join(project, 'main.tscn'),
+        '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+          '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+      );
+      const started = await start(20_000);
+      assert.equal(get(started.answer, 'runtime', 'listening'), true, JSON.stringify(started.answer));
+      // Asked once for where the transcript is, a second before the error with no print after it.
+      const where = parseTextContent(
+        await server.request('tools/call', { name: 'editor_output', arguments: {} }, ENGINE_CALL_TIMEOUT_MS),
+      );
+      const transcript = text(get(where, 'transcript'));
+
+      // Read straight from the file, with nothing asking the server, which is how a watcher reads it.
+      const deadline = Date.now() + 15_000;
+      const written = (): string => (existsSync(transcript) ? readFileSync(transcript, 'utf8') : '');
+      while (!written().includes('ERROR: an error with no print after it') && Date.now() < deadline) {
+        await delay(100);
+      }
+      const lines = written()
+        .split(/\r?\n/)
+        .filter((line) => line.length > 0);
+      const at = (wanted: string): number => lines.findIndex((line) => line.startsWith(wanted));
+      assert.ok(
+        at('ERROR: an error with no print after it') !== -1,
+        `an error with no print after it reaches the transcript unasked: ${JSON.stringify(lines)}`,
+      );
+      assert.ok(
+        at('played game up') < at('WARNING: a warning between two prints') &&
+          at('WARNING: a warning between two prints') < at('played game still going'),
+        `the warning is between the prints it was raised between: ${JSON.stringify(lines)}`,
+      );
+      for (const once of ['played game up', 'played game still going', CONSOLE_BOUNDARY]) {
+        assert.equal(
+          lines.filter((line) => line.startsWith(once)).length,
+          1,
+          `"${once}" is written once, from one stream: ${JSON.stringify(lines)}`,
+        );
+      }
+      assert.ok(
+        at('Godot Engine') !== -1 && at('Godot Engine') < at(CONSOLE_BOUNDARY),
+        `and the engine's start-up, which only the adapter carries, comes first: ${JSON.stringify(lines)}`,
+      );
+
+      const output = parseTextContent(
+        await server.request('tools/call', { name: 'editor_output', arguments: {} }, ENGINE_CALL_TIMEOUT_MS),
+      );
+      const entries = asArray(get(output, 'entries')).map((entry) => text(get(entry, 'text')));
+      const listed = (wanted: string): number => entries.indexOf(wanted);
+      assert.ok(
+        listed('played game up') !== -1 &&
+          listed('played game up') < listed('a warning between two prints') &&
+          listed('a warning between two prints') < listed('played game still going') &&
+          listed('played game still going') < listed('an error with no print after it'),
+        `editor_output lists them in the order they were made: ${JSON.stringify(entries)}`,
+      );
+      assert.equal(get(output, 'warnings'), 1, JSON.stringify(entries));
+      assert.equal(get(output, 'errors'), 1, JSON.stringify(entries));
+
+      await server.request(
+        'tools/call',
+        { name: 'editor_run', arguments: { op: 'stop' } },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+    },
+    {
+      realAddon: true,
+      engine,
+      held,
+      onAdapter: (socket) => {
+        adapter.socket = socket;
+        for (const line of adapter.waiting.splice(0)) {
+          relay(line);
+        }
+      },
+    },
+  );
+}
+
+/**
+ * Where a picked-up run reads its report from: on from what the server before it already copied
+ * into the transcript, so nothing is written twice and nothing after it is missed.
+ *
+ * The server before took the adapter's lines up to the runtime's boundary line and the report's
+ * bytes from it on, so the transcript ends with the report from the boundary. Every shape the
+ * transcript can be in when a new server picks the run up: past the boundary, short of it, from an
+ * addon that writes errors alone, and one whose end does not match.
+ */
+function testAPickedUpRunReadsItsReportOnFromTheTranscript(): void {
+  const boundary = `${CONSOLE_BOUNDARY}127.0.0.1:5, announced at /tmp/runtime-7.json\n`;
+  const early = 'ERROR: before the runtime\n   at: f (a.gd:1)\n';
+  const after = 'played\nWARNING: warned\n   at: g (b.gd:2)\nplayed again\n';
+  const report = Buffer.from(early + boundary + after);
+  const adapterLines = 'Godot Engine v4.7\n';
+
+  assert.equal(
+    reportAlreadyInTranscript(Buffer.from(adapterLines + early + boundary + after.slice(0, 20)), report),
+    early.length + boundary.length + 20,
+    'past the boundary it reads on from the last byte the server before copied',
+  );
+  assert.equal(
+    reportAlreadyInTranscript(Buffer.from(adapterLines + early + boundary + after), report),
+    report.length,
+    'and with everything copied, from the end',
+  );
+  assert.equal(
+    reportAlreadyInTranscript(Buffer.from(adapterLines + early), report),
+    early.length,
+    'short of the boundary it reads from the boundary, the errors before it already taken',
+  );
+  assert.equal(
+    reportAlreadyInTranscript(Buffer.from(adapterLines + early), Buffer.from(early)),
+    0,
+    'a report of errors alone is read from the start, since an error missed can make a failing run read clean',
+  );
+  assert.equal(
+    reportAlreadyInTranscript(Buffer.from(`${adapterLines}${early}${boundary}something else\n`), report),
+    report.length,
+    'a transcript whose end does not match is not trusted, and only what comes next is read',
+  );
+  assert.equal(consoleBoundaryAt(report), early.length, 'the boundary is found where its line starts');
+  assert.equal(
+    consoleBoundaryAt(Buffer.from(`said ${boundary}`)),
+    -1,
+    'and not inside another line that quotes it',
   );
 }
 
@@ -20691,6 +20923,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testACaptureBeforeTheFirstFrameWaitsForIt,
   testAWrittenLineBreakMatchesATwoLineLabel,
   testAPlayedGamesReportsReachTheOutput,
+  testAPlayedGamesConsoleKeepsItsOrder,
+  testAPickedUpRunReadsItsReportOnFromTheTranscript,
   testACallTakesAnObjectByItsPath,
   testARealBenchTakesItsWorkerWithIt,
   testAStopEndsTheProjectsUnannouncedWorkers,
