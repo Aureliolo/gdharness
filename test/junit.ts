@@ -215,6 +215,23 @@ function testScriptErrorsAreReadOffTheConsole(): void {
     scriptErrorsPrinted(printed),
     'the same scripts read in the same order whichever order the platform listed them in',
   );
+  // A script that failed for a dependency's sake carries no line of its own, which the engine
+  // prints as 0; ostinato's tier had four of them.
+  assert.deepEqual(
+    scriptErrorsPrinted([
+      'Script errors were detected during test discovery!',
+      '  Compile Error: Failed to compile depended scripts.',
+      '\tat res://core/run.gd:0',
+    ]),
+    [
+      {
+        path: 'res://core/run.gd',
+        line: null,
+        message: 'Compile Error: Failed to compile depended scripts.',
+      },
+    ],
+    'line 0 is read as no line',
+  );
 }
 
 function testOrphansAreReadOffTheConsole(): void {

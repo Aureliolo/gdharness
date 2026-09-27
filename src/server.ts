@@ -1243,24 +1243,54 @@ function changedSettings(
  */
 const STALLED_AFTER_MS = 30_000;
 
+/** What the engine says of a script that failed only because one it depends on did. */
+const DEPENDED_FAILED = 'Failed to compile depended scripts';
+
 /**
  * The sentence for a run gdUnit4 stopped at discovery, naming each script it could not load with
  * its first error; every error is under `scriptErrors` beside it. The suites that did load are
  * said not to have run, because a caller reading "script errors" took the rest of the tier as
  * having passed.
+ *
+ * The scripts with an error of their own come first, and those that failed only because a script
+ * they depend on did are named after them as the consequence. One unused parameter, with warnings
+ * treated as errors, took four scripts down with it, and listing all five by path put the only one
+ * worth opening third, between four copies of "Failed to compile depended scripts" at line 0.
  */
 export function scriptErrorsNote(errors: readonly ScriptError[]): string {
-  const first = new Map<string, ScriptError>();
+  const causes = new Map<string, ScriptError>();
   for (const error of errors) {
-    if (!first.has(error.path)) {
-      first.set(error.path, error);
+    if (!error.message.includes(DEPENDED_FAILED) && !causes.has(error.path)) {
+      causes.set(error.path, error);
     }
   }
-  const scripts = [...first.values()]
-    .map((error) => `${error.path}:${error.line} ${error.message}${error.message.endsWith('.') ? '' : '.'}`)
+  const dependents = [...new Set(errors.map((error) => error.path))].filter((path) => !causes.has(path));
+  const scripts = causes.size + dependents.length;
+  const named = [...causes.values()]
+    .map(
+      (error) =>
+        `${error.line === null ? error.path : `${error.path}:${error.line}`} ${error.message}${/[.!?]\)?$/.test(error.message) ? '' : '.'}`,
+    )
     .join(' ');
-  const more = errors.length - first.size;
-  return `No tests ran: gdUnit4 could not load ${first.size === 1 ? 'one script' : `${first.size} scripts`} while looking for suites, and it runs no suite at all when one fails to load. ${scripts}${more > 0 ? ` ${more === 1 ? 'One more error' : `${more} more errors`} in ${first.size === 1 ? 'that script' : 'those scripts'} ${more === 1 ? 'is' : 'are'} under scriptErrors.` : ''}`;
+  const following =
+    dependents.length === 0
+      ? ''
+      : causes.size === 0
+        ? `${dependents.join(', ')} ${dependents.length === 1 ? 'depends' : 'depend'} on a script that did not compile, and gdUnit4 named none with an error of its own: script_diagnostics on one of them finds it.`
+        : `${dependents.length === 1 ? 'One more' : `${dependents.length} more`} failed only because a script ${dependents.length === 1 ? 'it depends' : 'they depend'} on did: ${dependents.join(', ')}.`;
+  const more = errors.filter((error) => !error.message.includes(DEPENDED_FAILED)).length - causes.size;
+  const rest =
+    more > 0
+      ? `${more === 1 ? 'One more error' : `${more} more errors`} in ${causes.size === 1 ? 'that script' : 'those scripts'} ${more === 1 ? 'is' : 'are'} under scriptErrors.`
+      : '';
+  return [
+    `No tests ran: gdUnit4 could not load ${scripts === 1 ? 'one script' : `${scripts} scripts`} while looking for suites, and it runs no suite at all when one fails to load.`,
+    named,
+    following,
+    rest,
+  ]
+    .filter((part) => part !== '')
+    .join(' ');
 }
 
 /**
