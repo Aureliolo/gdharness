@@ -1392,7 +1392,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       choose: {
         summary:
-          "take an item out of a menu, by what it says or by where it is in the list. A menu's items are drawn rather than built, so there is nothing to click: the item takes the focus and Enter presses it, which is the engine's own path and needs no window. Answers with what was chosen and what the button in front of it shows now",
+          "take an item out of a menu, by what it says or by where it is in the list. A menu's items are drawn rather than built, so there is nothing to click: the item takes the focus and Enter presses it, which is the engine's own path and needs no window. Answers with what was chosen, read before the press, what became of the control named (in_tree, removed or freed, since a game can rebuild its screen on the pick), and what the button in front of it shows now when it is still there",
         requires: ['nodePath'],
       },
       action: { summary: 'press an action, or hold it', requires: ['action'] },
