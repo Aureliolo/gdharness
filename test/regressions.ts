@@ -16992,6 +16992,39 @@ async function testGdUnitRunner(): Promise<void> {
     'each script ends its own sentence, whether or not gdUnit4 gave it a period',
   );
 
+  // The shape ostinato's tier met: one unused parameter, with warnings treated as errors, and four
+  // scripts that failed only for depending on it, sorted by path so the cause fell third.
+  const dependedOn = (path: string): { path: string; line: null; message: string } => ({
+    path,
+    line: null,
+    message: 'Compile Error: Failed to compile depended scripts.',
+  });
+  assert.equal(
+    scriptErrorsNote([
+      dependedOn('res://core/ladder.gd'),
+      dependedOn('res://core/pouched.gd'),
+      {
+        path: 'res://core/reward.gd',
+        line: 90,
+        message:
+          'Parse Error: The parameter "last" is never used in the function "from()". (Warning treated as error.)',
+      },
+      dependedOn('res://core/run.gd'),
+      dependedOn('res://tests/run_test.gd'),
+    ]),
+    'No tests ran: gdUnit4 could not load 5 scripts while looking for suites, and it runs no suite at all when one fails to load. res://core/reward.gd:90 Parse Error: The parameter "last" is never used in the function "from()". (Warning treated as error.) 4 more failed only because a script they depend on did: res://core/ladder.gd, res://core/pouched.gd, res://core/run.gd, res://tests/run_test.gd.',
+    'the script with an error of its own comes first, and a line the engine printed as 0 is not given',
+  );
+  assert.match(
+    scriptErrorsNote([dependedOn('res://core/run.gd'), { ...fault(3, 'Parse Error: one.') }]),
+    /a_test\.gd:3 Parse Error: one\. One more failed only because a script it depends on did: res:\/\/core\/run\.gd\.$/,
+  );
+  assert.match(
+    scriptErrorsNote([dependedOn('res://core/run.gd')]),
+    /could not load one script .*\. res:\/\/core\/run\.gd depends on a script that did not compile, and gdUnit4 named none with an error of its own: script_diagnostics on one of them finds it\.$/,
+    'with no cause among them, the sentence says where to look rather than naming nothing',
+  );
+
   const godotPath = resolveGodotPath();
   const gdunit = process.env['GDUNIT4_PATH'];
   if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
