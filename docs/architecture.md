@@ -444,6 +444,18 @@ offset into the played run's transcript, and the transcript into the log, so a r
 an entry with its severity the way one printed by a spawned run is. The report outlives its game
 by an hour, since the last errors are read after the game has gone; the announcement does not.
 
+Two streams read side by side lose their order: the prints arrived over the adapter as they came
+and the errors whenever the report was read, so a warning raised in `_ready` was listed after a
+print made a second later. So the report carries the prints too, from the line announcing the
+runtime (`[gdharness] runtime listening on ...`), which the logger prints as the first thing it
+writes them for. The server takes the adapter's lines up to that line and the report from it on,
+dropping the adapter's copies, so the console after it has the engine's own order. It switches when
+the adapter delivers the line, when there is no adapter to wait for (a run picked up after a
+reconnect, whose server before this one copied the report into the transcript byte for byte, so the
+new one reads on from where that copy ends), or two seconds after the line is in the report. A
+timer reads the report into the transcript four times a second while the run is held, so an error
+with no print after it reaches a watched transcript without anybody asking.
+
 With no editor connected, the server spawns the game itself. It has no debug session, so `debug_*`
 will not answer for it, and its console is read from a file rather than over the adapter, stderr
 included, so nothing more is needed there and the game writes no report.
