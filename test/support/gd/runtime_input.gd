@@ -84,6 +84,7 @@ func _everything() -> void:
 	_check_what_the_keys_typed()
 	await _check_a_dialog(input)
 	await _check_a_click_by_words(input)
+	await _check_a_click_by_words_ranked(input)
 
 	host.queue_free()
 	if failures.is_empty():
@@ -500,7 +501,7 @@ func _check_a_click_by_words(input: InputCommands) -> void:
 	var listed: String = str(unclear.get("message", ""))
 	if (
 		unclear.get("type") != "error"
-		or not listed.contains("2 controls on screen say")
+		or not listed.contains('2 buttons on screen say exactly "Send back"')
 		or not listed.contains('0 %s ("Send back")' % send_left.get_path())
 		or not listed.contains('1 %s ("Send back")' % send_right.get_path())
 	):
@@ -547,3 +548,174 @@ func _check_a_click_by_words(input: InputCommands) -> void:
 	if _presses(secret) != 0:
 		_fail("and the hidden control is not pressed")
 	screen.queue_free()
+	await root.get_tree().process_frame
+
+
+## Several controls saying a word, ranked the way a person picks the one to press: a button over
+## text, the whole of what a control says over a part of it, and nothing covered by a screen drawn
+## over it.
+func _check_a_click_by_words_ranked(input: InputCommands) -> void:
+	# Placed by centre, and a button in the default theme grows to about 31 pixels tall whatever size
+	# it is given: the page covers the top 48 rows, so the hall's two buttons have their centres
+	# under it and the button saying more has its centre below it.
+	var hall: Control = Control.new()
+	hall.size = Vector2(64, 64)
+	root.add_child(hall)
+	var _sentence: Label = _small_label(hall, "Word back", Vector2(2, 2))
+	var hall_back: Button = _small_button(hall, "Back", Vector2(34, 2))
+	var hall_only: Button = _small_button(hall, "Drawer", Vector2(2, 18))
+	var page: Panel = Panel.new()
+	page.name = "Page"
+	page.size = Vector2(64, 48)
+	root.add_child(page)
+	var page_back: Button = _small_button(page, "Back", Vector2(34, 16))
+	var _told: Label = _small_label(page, "is back off a hunt", Vector2(2, 16))
+	var partly: Button = _small_button(root, "Back to hall", Vector2(2, 34))
+	# Drawn over the page's button and the one below it, and neither covers anything: a label lets
+	# the pointer through, and the panel reaches past the strip it is clipped to.
+	var caption: Label = _small_label(root, "Title", Vector2(34, 26))
+	var strip: Control = Control.new()
+	strip.clip_contents = true
+	strip.position = Vector2(0, 54)
+	strip.size = Vector2(64, 10)
+	root.add_child(strip)
+	var beyond_strip: Panel = Panel.new()
+	beyond_strip.position = Vector2(0, -30)
+	beyond_strip.size = Vector2(64, 40)
+	strip.add_child(beyond_strip)
+	await root.get_tree().process_frame
+
+	var back: Dictionary = await input.click({"says": "Back"})
+	var found: Dictionary = back.get("found", {})
+	if back.get("type") != "clicked" or _presses(page_back) != 1 or _presses(hall_back) != 0:
+		_fail(
+			(
+				(
+					"the button saying exactly the word is pressed over a button saying more, labels saying it"
+					+ " in a sentence and a button covered by the page: %s"
+				)
+				% JSON.stringify(back)
+			)
+		)
+	elif (
+		not str(found.get("picked", "")).contains('the one button on screen saying exactly "Back"')
+		or found.get("covered") != 2
+		or found.get("of") != 3
+	):
+		_fail("and says why it was picked and how many were covered: %s" % JSON.stringify(back))
+	if _presses(partly) != 0:
+		_fail("a button saying the word as part of more is passed over for one saying only it")
+
+	var under: Dictionary = await input.click({"says": "Drawer"})
+	var refused: String = str(under.get("message", ""))
+	if (
+		under.get("type") != "error"
+		or not refused.contains("1 control says it under %s, which is drawn over it" % page.get_path())
+		or _presses(hall_only) != 0
+	):
+		_fail("a control the page covers is not on screen and is not pressed: %s" % JSON.stringify(under))
+
+	page.visible = false
+	await root.get_tree().process_frame
+	var uncovered: Dictionary = await input.click({"says": "Back"})
+	if _presses(hall_back) != 1 or uncovered.get("path") != str(hall_back.get_path()):
+		_fail("with the page gone the hall's button is on screen again: %s" % JSON.stringify(uncovered))
+	for each: Node in [hall, page, partly, caption, strip]:
+		each.queue_free()
+	await root.get_tree().process_frame
+
+	# A button scrolled out of its container sits, for now, under whatever is drawn below the
+	# container, and the click scrolls it into view before pressing, so it is not covered.
+	var scroll: ScrollContainer = ScrollContainer.new()
+	scroll.size = Vector2(64, 32)
+	root.add_child(scroll)
+	var column: VBoxContainer = VBoxContainer.new()
+	scroll.add_child(column)
+	var spacer: Control = Control.new()
+	spacer.custom_minimum_size = Vector2(40, 100)
+	column.add_child(spacer)
+	var far: Button = _small_button(column, "Far", Vector2.ZERO)
+	var footer: Panel = Panel.new()
+	footer.position = Vector2(0, 32)
+	footer.size = Vector2(64, 200)
+	root.add_child(footer)
+	await root.get_tree().process_frame
+	var scrolled: Dictionary = await input.click({"says": "Far"})
+	if _presses(far) != 1 or scrolled.get("scrolled_into_view") != true:
+		_fail("a button scrolled out of view is scrolled back and pressed: %s" % JSON.stringify(scrolled))
+	scroll.queue_free()
+	footer.queue_free()
+	await root.get_tree().process_frame
+
+	# A higher canvas layer is drawn over the game, and takes the pointer first, wherever it is in
+	# the tree.
+	var overlay: CanvasLayer = CanvasLayer.new()
+	overlay.layer = 5
+	root.add_child(overlay)
+	var veil: Panel = Panel.new()
+	veil.size = Vector2(64, 64)
+	overlay.add_child(veil)
+	var below: Button = _small_button(root, "Below", Vector2(2, 2))
+	await root.get_tree().process_frame
+	var veiled: Dictionary = await input.click({"says": "Below"})
+	if (
+		_presses(below) != 0
+		or not str(veiled.get("message", "")).contains("under %s, which is drawn over it" % veil.get_path())
+	):
+		_fail("a control under a higher canvas layer is covered by it: %s" % JSON.stringify(veiled))
+	overlay.queue_free()
+	below.queue_free()
+	await root.get_tree().process_frame
+
+	# A window embedded in the game is drawn over all of it and takes the pointer first.
+	var behind: Button = _small_button(root, "Behind", Vector2(2, 2))
+	var dialog: Window = Window.new()
+	dialog.position = Vector2i(0, 0)
+	dialog.size = Vector2i(64, 64)
+	root.add_child(dialog)
+	await root.get_tree().process_frame
+	var windowed: Dictionary = await input.click({"says": "Behind"})
+	if (
+		not dialog.is_embedded()
+		or _presses(behind) != 0
+		or not str(windowed.get("message", "")).contains(
+			"under %s, which is drawn over it" % dialog.get_path()
+		)
+	):
+		_fail("a control under an embedded window is covered by it: %s" % JSON.stringify(windowed))
+	dialog.queue_free()
+	behind.queue_free()
+	await root.get_tree().process_frame
+
+	var exactly: Label = _small_label(root, "Onward", Vector2(2, 2))
+	var onward: Button = _small_button(root, "Onward now", Vector2(34, 2))
+	await root.get_tree().process_frame
+	var over_text: Dictionary = await input.click({"says": "Onward"})
+	var over_found: Dictionary = over_text.get("found", {})
+	var why: String = str(over_found.get("picked", ""))
+	if _presses(onward) != 1 or over_text.get("path") != str(onward.get_path()):
+		_fail(
+			(
+				"a button saying the word as part of more is pressed over a label saying exactly it: %s"
+				% JSON.stringify(over_text)
+			)
+		)
+	elif (
+		why
+		!= 'the one button on screen saying "Onward" as part of more; the other one on screen cannot be pressed'
+	):
+		_fail("and says why, of the one it passed over: %s" % why)
+	exactly.queue_free()
+	onward.queue_free()
+	await root.get_tree().process_frame
+
+
+## A label inside the 64 by 64 viewport a headless game has, clipped to the size of a small button.
+func _small_label(parent: Node, words: String, at: Vector2) -> Label:
+	var label: Label = Label.new()
+	label.text = words
+	label.clip_text = true
+	label.position = at
+	label.size = Vector2(26, 12)
+	parent.add_child(label)
+	return label
