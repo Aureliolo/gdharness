@@ -3752,6 +3752,20 @@ class GodotServer {
     // tier that failed still wrote wherever it wrote, and the run that found nothing to do is the
     // one exception, since it never started a game.
     const savesNote = savesStayPut() && nothingRan === null ? SAVES_NOT_MOVED_NOTE : undefined;
+    // Asked for by name, on a pass as much as a failure: a probe suite measuring something had to
+    // fail an assertion to carry its numbers back, since a passing answer holds nothing it printed.
+    const marker = readNonEmptyString(args, 'printed');
+    const echoed =
+      marker === undefined
+        ? undefined
+        : run.log.select({ severity: 'info', sinceLastCall: false, contains: marker, limit: 200 });
+    const printedLines =
+      echoed === undefined
+        ? {}
+        : {
+            printed: echoed.entries.map((entry) => entry.text),
+            ...(echoed.omitted > 0 ? { printedOmitted: echoed.omitted } : {}),
+          };
 
     if (report === null) {
       const note =
@@ -3777,6 +3791,7 @@ class GodotServer {
                 ...(scriptErrors.length > 0 ? { scriptErrors } : {}),
                 arguments: cmdArgs,
                 entries: forAnswer(printed.slice(0, 60).map(aboveTheRunner)),
+                ...printedLines,
                 savesNote,
                 ...scanned,
               },
@@ -3841,6 +3856,7 @@ class GodotServer {
       warnings: warnings.length > 0 ? warnings : undefined,
       orphans: orphans.total > 0 ? orphans.total : undefined,
       notRun: notRun > 0 ? notRun : undefined,
+      ...printedLines,
       savesNote,
       ...scanned,
       // The word on its own was the whole answer, and it named neither what was warned nor where.
