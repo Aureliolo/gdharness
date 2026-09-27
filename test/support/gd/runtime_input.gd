@@ -624,6 +624,31 @@ func _check_a_click_by_words_ranked(input: InputCommands) -> void:
 		each.queue_free()
 	await root.get_tree().process_frame
 
+	# A cover away from the origin and scaled, so it covers the button only where it is drawn: its own
+	# rectangle at the origin misses the button's centre, and so does the same rectangle placed but
+	# not scaled.
+	var aside: Button = _small_button(root, "Aside", Vector2(34, 2))
+	var side: Panel = Panel.new()
+	side.position = Vector2(32, 0)
+	side.size = Vector2(8, 12)
+	side.scale = Vector2(4, 2)
+	root.add_child(side)
+	await root.get_tree().process_frame
+	var beside: Dictionary = await input.click({"says": "Aside"})
+	if (
+		_presses(aside) != 0
+		or not str(beside.get("message", "")).contains("under %s, which is drawn over it" % side.get_path())
+	):
+		_fail(
+			(
+				"a control under a cover placed and scaled away from the origin is covered: %s"
+				% JSON.stringify(beside)
+			)
+		)
+	aside.queue_free()
+	side.queue_free()
+	await root.get_tree().process_frame
+
 	# A button scrolled out of its container sits, for now, under whatever is drawn below the
 	# container, and the click scrolls it into view before pressing, so it is not covered.
 	var scroll: ScrollContainer = ScrollContainer.new()
