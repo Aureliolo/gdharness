@@ -1170,7 +1170,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       rect: {
         summary:
-          "one node's rectangle or position, in canvas and in window pixels. A 3D node answers with the point to aim at, which is the middle of what it draws rather than the origin it stands on, the rectangle it covers under covers, the camera that drew it, and behind_camera when it is not in front of one",
+          "one node's rectangle or position, in canvas and in window pixels. Canvas is the node's own viewport; window is where it is drawn in the game's window, through any embedded dialog or SubViewport it sits in, which is what runtime_input mouse_click and mouse_motion take. A 3D node answers with the point to aim at, which is the middle of what it draws rather than the origin it stands on, the rectangle it covers under covers, the camera that drew it, and behind_camera when it is not in front of one",
         requires: ['nodePath'],
       },
       property: {
