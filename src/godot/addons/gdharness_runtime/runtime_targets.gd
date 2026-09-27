@@ -64,11 +64,12 @@ static func control_saying(root: Node, root_path: String, wanted: String, which:
 			pending.push_front(children[index])
 
 	var drawn: Array[Node] = _pointer_takers(root)
+	var areas: Array[Rect2] = _areas_of(drawn)
 	var covered: int = 0
 	var cover: Node = null
 	var open: Array[int] = []
 	for index: int in matched.size():
-		var over: Node = _cover_of(matched[index], drawn)
+		var over: Node = _cover_of(matched[index], drawn, areas)
 		if over == null:
 			open.append(index)
 		else:
@@ -224,6 +225,24 @@ static func _pointer_takers(root: Node) -> Array[Node]:
 	return found
 
 
+## The box each of [param drawn] takes up in its viewport: a window's rectangle, and the box around
+## a control's however it is turned or scaled.
+##
+## Worked out once for a click rather than once for each match. A plain word on a screen of prose
+## matches a hundred labels, and asking all four thousand controls of a hall for their transform
+## for each of them took a click by words 80 ms, where the matching alone takes half that.
+static func _areas_of(drawn: Array[Node]) -> Array[Rect2]:
+	var areas: Array[Rect2] = []
+	for each: Node in drawn:
+		var window: Window = each as Window
+		if window != null:
+			areas.append(Rect2(window.position, window.size))
+		else:
+			var control: Control = each
+			areas.append(control.get_global_transform_with_canvas() * Rect2(Vector2.ZERO, control.size))
+	return areas
+
+
 ## What a pointer at [param target]'s centre reaches instead of it, or null when nothing does.
 ##
 ## The engine's own order for which control takes the pointer: an embedded window over everything
@@ -231,20 +250,25 @@ static func _pointer_takers(root: Node) -> Array[Node]:
 ## control holding the target or held by it is part of the same click. A target whose centre its
 ## own container clips away is judged not covered, since the click scrolls it into view first and
 ## what is drawn there now is not what it will land on.
-static func _cover_of(target: Control, drawn: Array[Node]) -> Node:
+##
+## [param areas] holds the box around each of [param drawn], so everything whose box misses the
+## point is passed over before anything costlier is asked of it.
+static func _cover_of(target: Control, drawn: Array[Node], areas: Array[Rect2]) -> Node:
 	var viewport: Viewport = target.get_viewport()
 	var point: Vector2 = target.get_global_transform_with_canvas() * (target.size * 0.5)
 	if _clipped_away(target, point):
 		return null
 	var layer: int = _layer_of(target)
-	for other: Node in drawn:
+	for at: int in drawn.size():
+		if not areas[at].has_point(point):
+			continue
+		var other: Node = drawn[at]
 		var window: Window = other as Window
 		if window != null:
 			if (
 				window.get_parent() != null
 				and window.get_parent().get_viewport() == viewport
 				and not window.is_ancestor_of(target)
-				and Rect2(window.position, window.size).has_point(point)
 			):
 				return window
 			continue
