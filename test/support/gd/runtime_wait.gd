@@ -689,6 +689,14 @@ func _check_until_something_says_it() -> void:
 	if came.get("met") != true or came.get("says") != "spring 2":
 		_fail("a wait should see words arrive on a panel, whatever the case: %s" % str(came))
 
+	# A glob, matched over the whole text as a find and a click match it, rather than as words with
+	# a star in them, which nothing on the screen says.
+	var globbed: Dictionary = await node._execute_command(
+		"wait_until", {"path": "/root/Panel", "says": "spring 2*", "timeout_ms": 500}
+	)
+	if globbed.get("met") != true:
+		_fail("a glob in says is matched as a find matches one: %s" % str(globbed))
+
 	var never: Dictionary = await node._execute_command(
 		"wait_until", {"path": "/root/Panel", "says": "Autumn 4", "timeout_ms": 60}
 	)
