@@ -108,6 +108,55 @@ export function errorReportOf(
 }
 
 /**
+ * The line a game's runtime prints once it is listening, which is also where its report starts to
+ * carry the game's prints as well as its errors: the prints before it reach the server only over
+ * the debug adapter, and everything from it on is in the report in the engine's own order. An
+ * addon older than that prints the line to the adapter alone and never writes it to the report.
+ */
+export const CONSOLE_BOUNDARY = '[gdharness] runtime listening on ';
+
+/** Where in [param bytes] a line starting with the boundary begins, or -1. */
+export function consoleBoundaryAt(bytes: Buffer): number {
+  const wanted = Buffer.from(CONSOLE_BOUNDARY);
+  for (let at = bytes.indexOf(wanted); at !== -1; at = bytes.indexOf(wanted, at + 1)) {
+    if (at === 0 || bytes[at - 1] === 0x0a) {
+      return at;
+    }
+  }
+  return -1;
+}
+
+/**
+ * How much of [param report] a server before this one already wrote into [param transcript], for a
+ * run picked up after a reconnect, so the report is read on from there rather than put in twice.
+ *
+ * That server took the adapter's lines up to the boundary and the report's bytes from it on,
+ * copied as they are, so the transcript ends with the report's bytes from the boundary on and
+ * holds the boundary line once. Before the boundary the report holds only errors, taken as they
+ * came, which that server had read by the time it reached the boundary. A transcript without the
+ * boundary is one whose server never reached it, and has at most the errors before it.
+ *
+ * A report without the boundary is from an addon that writes errors alone, taken by that server
+ * at moments nothing recorded, so it is read again from the start: an error counted twice leaves
+ * the verdict right, and one missed can make a failing run read clean. When the transcript's end
+ * does not match the report from the boundary on, which copying bytes as they are does not
+ * produce, only what the game writes from now on is taken, rather than the whole console twice.
+ */
+export function reportAlreadyInTranscript(transcript: Buffer, report: Buffer): number {
+  const boundary = consoleBoundaryAt(report);
+  if (boundary === -1) {
+    return 0;
+  }
+  const inTranscript = consoleBoundaryAt(transcript);
+  if (inTranscript === -1) {
+    return boundary;
+  }
+  const copied = transcript.subarray(inTranscript);
+  const end = boundary + copied.length;
+  return end <= report.length && report.subarray(boundary, end).equals(copied) ? end : report.length;
+}
+
+/**
  * How long a report outlives its game before the sweep takes it. Long enough for the server that
  * was reading the run to take the last of it after the game has gone, which is when the last
  * errors matter most, and short enough that a machine playing games all day does not keep them.
