@@ -303,8 +303,17 @@ export function shapeOf(text: string): { shape: string; values: string[] } {
  * themselves part of one: the only evidence of cause in the case this was built for was a plugin
  * announcing itself on the line before the wall began, which a severity filter would have thrown
  * away and a fixed count of lines would have missed as soon as the wall was longer.
+ *
+ * [param keep], when given, reports only the groups with a member it accepts. The groups are still
+ * formed over every entry, so a count and the lines above a burst say what the console holds; what
+ * a filtered read leaves out is the shapes it was not asking about. A read for one class's name
+ * came back with twenty shapes that had nothing to do with it, three times over for three reads.
  */
-export function bursts(entries: readonly LogEntry[], before: number): readonly Repeated[] {
+export function bursts(
+  entries: readonly LogEntry[],
+  before: number,
+  keep?: (entry: LogEntry) => boolean,
+): readonly Repeated[] {
   const shapes = new Map<string, { readonly indices: number[]; readonly values: string[][] }>();
   const shaped = entries.map((entry) => shapeOf(entry.text));
   for (const [at, entry] of entries.entries()) {
@@ -330,6 +339,9 @@ export function bursts(entries: readonly LogEntry[], before: number): readonly R
     }
     const entry = entries[first];
     if (entry === undefined) {
+      continue;
+    }
+    if (keep !== undefined && !group.indices.some((at) => entries[at] !== undefined && keep(entries[at]))) {
       continue;
     }
     repeated.push({
