@@ -11,6 +11,7 @@ const Values = preload("runtime_values.gd")
 const Queries = preload("runtime_queries.gd")
 const Read = preload("reading.gd")
 const Menus = preload("runtime_menus.gd")
+const Screen = preload("runtime_screen.gd")
 const Targets = preload("runtime_targets.gd")
 const Words = preload("runtime_words.gd")
 
@@ -411,35 +412,6 @@ func inject_mouse_motion(params: Dictionary) -> Dictionary:
 	}
 
 
-## The viewport a pointer at [param point], in [param viewport]'s own coordinates, arrives through,
-## and where it is there: {"viewport", "point"}.
-##
-## A real pointer arrives at the outermost viewport showing this one and is handed down, so that is
-## where a click is sent. An embedded [Window], a ConfirmationDialog for one, is drawn inside its
-## parent under `gui_embed_subwindows`: pushing into its own viewport delivered nothing, measured,
-## with the pointer reading as over no control at all. A [SubViewport] shown by a
-## [SubViewportContainer] is drawn inside the container, scaled by its shrink when it stretches, and
-## pushing into it read the point as the container's: the click on a dropdown inside one landed on
-## nothing. Walked rather than stepped once, because a dialog can open a dialog and a container can
-## sit inside another viewport. A SubViewport drawn some other way, onto a mesh for one, has no
-## place on the screen to carry the point to, and the click goes to it directly.
-static func _reach(viewport: Viewport, point: Vector2) -> Dictionary:
-	while true:
-		var window: Window = viewport as Window
-		if window != null and window.is_embedded() and window.get_parent() != null:
-			point += Vector2(window.position)
-			viewport = window.get_parent().get_viewport()
-			continue
-		var shown_by: SubViewportContainer = viewport.get_parent() as SubViewportContainer
-		if viewport is SubViewport and shown_by != null:
-			var scaled: Vector2 = point * float(shown_by.stretch_shrink) if shown_by.stretch else point
-			point = shown_by.get_global_transform_with_canvas() * scaled
-			viewport = shown_by.get_viewport()
-			continue
-		break
-	return {"viewport": viewport, "point": point}
-
-
 ## Scrolls whatever is holding [param control] until it is on screen, and answers whether
 ## anything moved.
 ##
@@ -542,7 +514,7 @@ func click(params: Dictionary) -> Dictionary:
 			await _host.get_tree().process_frame
 			local = control.get_global_transform_with_canvas() * (control.size * 0.5)
 
-	var reached: Dictionary = _reach(own, local)
+	var reached: Dictionary = Screen.reach(own, local)
 	var viewport: Viewport = reached["viewport"]
 	var centre: Vector2 = reached["point"]
 	var position: Vector2 = viewport.get_final_transform() * centre
@@ -755,7 +727,7 @@ func choose(params: Dictionary) -> Dictionary:
 ## click meant to open it. Games read that state too, through Input.is_mouse_button_pressed.
 ##
 ## Any other viewport is pushed into directly: Input reaches only the game's window. That is a
-## viewport with no place on the screen, since [method _reach] carries every other one there.
+## viewport with no place on the screen, since `Screen.reach` carries every other one there.
 func _press_button(viewport: Viewport, event: InputEventMouseButton) -> void:
 	if viewport == _host.get_tree().root:
 		Input.parse_input_event(event)
@@ -827,7 +799,7 @@ func _click_in_the_world(node_path: String, item: Node3D, params: Dictionary) ->
 			)
 		}
 
-	var reached: Dictionary = _reach(viewport, aim)
+	var reached: Dictionary = Screen.reach(viewport, aim)
 	var arriving: Viewport = reached["viewport"]
 	var reached_point: Vector2 = reached["point"]
 	var position: Vector2 = arriving.get_final_transform() * reached_point

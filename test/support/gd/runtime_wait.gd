@@ -219,6 +219,24 @@ func _check_a_room_in_a_subviewport() -> void:
 	await process_frame
 	await process_frame
 
+	var label: Label = Label.new()
+	label.text = "Here"
+	label.position = Vector2(10, 10)
+	room.add_child(label)
+	await process_frame
+	var screen: Transform2D = root.get_final_transform()
+	var placed: Dictionary = await node._execute_command("get_rect", {"path": str(body.get_path())})
+	var in_window: Dictionary = placed.get("window", {})
+	var body_at: Vector2 = screen * Vector2(200, 130)
+	if in_window.get("x") != body_at.x or in_window.get("y") != body_at.y:
+		_fail("get_rect gives a body in a SubViewport its place in the window: %s" % str(placed))
+	var framed: Dictionary = await node._execute_command("get_rect", {"path": str(label.get_path())})
+	var framed_window: Dictionary = framed.get("window", {})
+	var framed_at: Dictionary = framed_window.get("position", {})
+	var label_at: Vector2 = screen * Vector2(120, 70)
+	if framed_at.get("x") != label_at.x or framed_at.get("y") != label_at.y:
+		_fail("and a control in one its place in the window, scaled: %s" % str(framed))
+
 	var clicked: Dictionary = await node._execute_command("click", {"path": str(body.get_path())})
 	var at: Dictionary = clicked.get("position", {})
 	if at.get("x") != 200.0 or at.get("y") != 130.0:
@@ -231,6 +249,24 @@ func _check_a_room_in_a_subviewport() -> void:
 			)
 		)
 	frame.free()
+
+	# A dialog embedded in the game's window, so its controls are drawn offset by where it sits.
+	var dialog: Window = Window.new()
+	dialog.position = Vector2i(30, 40)
+	dialog.size = Vector2i(120, 80)
+	root.add_child(dialog)
+	var inside: Label = Label.new()
+	inside.text = "Inside"
+	inside.position = Vector2(5, 5)
+	dialog.add_child(inside)
+	await process_frame
+	var boxed: Dictionary = await node._execute_command("get_rect", {"path": str(inside.get_path())})
+	var boxed_window: Dictionary = boxed.get("window", {})
+	var boxed_at: Dictionary = boxed_window.get("position", {})
+	var inside_at: Vector2 = screen * Vector2(35, 45)
+	if not dialog.is_embedded() or boxed_at.get("x") != inside_at.x or boxed_at.get("y") != inside_at.y:
+		_fail("get_rect gives a control in an embedded dialog its place in the window: %s" % str(boxed))
+	dialog.free()
 
 
 func _check_the_body_is_placed() -> void:
