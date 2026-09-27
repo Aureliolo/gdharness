@@ -152,12 +152,15 @@ import {
   ANNOUNCE_BUDGET_MS,
   announcedSince,
   announcementEnded,
+  CONSOLE_BOUNDARY,
   chooseRuntime,
+  consoleBoundaryAt,
   discoverRuntimes,
   errorReportOf,
   lateAnswer,
   RUNTIME_PROTOCOL,
   type RuntimeEndpoint,
+  reportAlreadyInTranscript,
   runtimeDirectory,
   runtimeRequest,
   runtimesAnnounced,
@@ -1091,6 +1094,17 @@ const BRIDGE_RETRY_MS = 2_000;
  */
 const SUCCESSOR_CHECK_MS = 10_000;
 
+/** How often an editor-played run's report is read into its transcript between prints. */
+const CONSOLE_WATCH_MS = 250;
+
+/**
+ * How long the report's boundary line waits for the adapter to deliver its copy before the report
+ * becomes the console anyway. The editor relays a game's prints once a frame, so the copy arrives
+ * within a frame or two; what this absorbs is an editor under load. A print the adapter delivers
+ * later than this from before the line is dropped, and nothing after the line is lost either way.
+ */
+const BOUNDARY_WAIT_MS = 2000;
+
 /**
  * How long a replacement waits for its predecessor to let go of the configured bridge port before
  * taking another. The predecessor looks for a successor every `SUCCESSOR_CHECK_MS`, and then has
@@ -1568,6 +1582,7 @@ class GodotServer {
   private bridgeStartupError: string | null = null;
   private bridgeRetry: NodeJS.Timeout | null = null;
   private successorWatch: NodeJS.Timeout | null = null;
+  private consoleWatch: NodeJS.Timeout | null = null;
   private lastProjectPath: string | null = null;
   private shutdownInitiated = false;
   /**
@@ -1862,10 +1877,39 @@ class GodotServer {
     }
   }
 
+  /**
+   * Keeps an editor-played run's transcript up with its report while the run is the one held.
+   *
+   * The adapter's lines are written as they arrive, and a drain follows each one, but an error with
+   * no print after it, or anything once the adapter has gone, would otherwise reach the file only
+   * when somebody asked, and a transcript being watched is exactly one nobody is asking about.
+   */
+  private watchThePlayedConsole(): void {
+    if (this.consoleWatch !== null) {
+      return;
+    }
+    const watch = setInterval(() => {
+      const run = this.activeProcess;
+      if (run?.throughEditor !== true || run.transcript === null) {
+        clearInterval(watch);
+        this.consoleWatch = null;
+        return;
+      }
+      this.drainErrorReport(run);
+    }, CONSOLE_WATCH_MS);
+    // Never a reason on its own for the process to stay up.
+    watch.unref();
+    this.consoleWatch = watch;
+  }
+
   private async cleanup(): Promise<void> {
     this.logDebug('Cleaning up resources');
     this.stopTryingTheBridge();
     this.stopWatchingForASuccessor();
+    if (this.consoleWatch !== null) {
+      clearInterval(this.consoleWatch);
+      this.consoleWatch = null;
+    }
     withdrawBridge(this.announcedAt);
     this.announcedAt = null;
     // The run is left running. It is spawned detached and its output goes to a file precisely so
@@ -4257,7 +4301,18 @@ class GodotServer {
    */
   private writeToTranscript(line: string): void {
     const run = this.activeProcess;
-    if (run?.throughEditor !== true || run.transcript === null) {
+    if (run?.throughEditor !== true) {
+      return;
+    }
+    // From the boundary on the report holds this line too, in order with the errors, and it is
+    // already on disk: the game writes it there before the adapter sends it.
+    if (run.consoleFromReport === true || line.startsWith(CONSOLE_BOUNDARY)) {
+      this.drainErrorReport(run, line);
+      if (run.consoleFromReport === true) {
+        return;
+      }
+    }
+    if (run.transcript === null) {
       return;
     }
     try {
@@ -5425,6 +5480,7 @@ class GodotServer {
       seenPlaying: readBoolean(playAnswer, 'playing') === true,
     };
     this.activeProcess = played;
+    this.watchThePlayedConsole();
     writeEditorRunNote({ projectPath, transcript: transcript.path, startedAt });
     sweepTranscripts();
 
@@ -5458,7 +5514,7 @@ class GodotServer {
       runtime: await this.runtimeUp(projectPath, alreadyPlaying, runtimeWaitMs, false),
       message:
         'The editor is playing it, so its debugger holds it: the debug_* tools can reach it, ' +
-        'editor_output reads its console through the debug adapter, and editor_run stop ends it.' +
+        "editor_output reads its console through the debug adapter and the runtime's report of it, and editor_run stop ends it." +
         endedToStartThis(ended),
     });
   }
@@ -5482,18 +5538,23 @@ class GodotServer {
     // the log is filled from the file by the transcript read, which is the same path a run this
     // server spawned takes from its pipe. Draining the buffer here as well would put every line in
     // twice. Without a file, the buffer is the only copy and this is the only thing that empties
-    // it, which is a run picked up after a reconnect whose first server left no note.
+    // it, which is a run picked up after a reconnect whose first server left no note. Emptied and
+    // dropped when the report is the console, which holds the same prints.
     if (game.transcript === null) {
-      for (const line of this.dapClient.getOutput(true)) {
-        game.log.append('stdout', line.endsWith('\n') ? line : `${line}\n`);
+      const heard = this.dapClient.getOutput(true);
+      if (game.consoleFromReport !== true) {
+        for (const line of heard) {
+          game.log.append('stdout', line.endsWith('\n') ? line : `${line}\n`);
+        }
       }
     }
-    // An adapter that has gone is the only source an editor-played run has, and losing it is
-    // silent from here: getOutput answers nothing, which is the same nothing a run between prints
-    // gives. So a long run went on being reported clean with no entries and nothing saying the
-    // console had stopped arriving, while the game's own log had every line. Silence that could
-    // mean two things is recorded as the one it is.
-    if (!this.dapClient.isConnected()) {
+    // An adapter that has gone was the only source of an editor-played run's prints before the
+    // runtime wrote them to its report, and losing it is silent from here: getOutput answers
+    // nothing, which is the same nothing a run between prints gives. So a long run went on being
+    // reported clean with no entries and nothing saying the console had stopped arriving, while
+    // the game's own log had every line. Silence that could mean two things is recorded as the
+    // one it is. A run whose report is its console has lost nothing with the adapter.
+    if (!this.dapClient.isConnected() && game.consoleFromReport !== true) {
       game.consoleLost = true;
     }
     this.recordWhatItBrokeOn(game);
@@ -5511,16 +5572,35 @@ class GodotServer {
    * into the transcript when the run has one, which the transcript read then picks up, and
    * straight into the log when it has none. By offset, since the file is the game's and grows
    * while nobody is reading.
+   *
+   * From the runtime's boundary line on the report carries the prints as well, and becomes the
+   * run's one source; see `consoleFromReport`. The switch waits for the adapter to deliver that
+   * line, [param heard] when it has just done so, because the prints before it arrive only over
+   * the adapter and must be written first. A run with no adapter to wait for switches when the
+   * line is in the report: one picked up after a reconnect, whose boundary went by before this
+   * server, and one whose adapter has gone. So does one whose adapter is connected and has not
+   * delivered the line in `BOUNDARY_WAIT_MS`: waiting on it for good would hold back every error
+   * after the line for as long as the adapter relays nothing.
    */
-  private drainErrorReport(game: GodotProcess): void {
+  private drainErrorReport(game: GodotProcess, heard?: string): void {
+    if (game.errorReport === null) {
+      return;
+    }
     if (game.errorReport === undefined) {
-      const its = this.announcedPidOf(game);
+      const its =
+        this.announcedPidOf(game) ??
+        (heard?.startsWith(CONSOLE_BOUNDARY) === true ? this.announcedPidNamedBy(game, heard) : undefined);
       const found = its === undefined ? null : errorReportOf(its);
       if (found === null) {
+        // Past the boundary with no report to switch to, the adapter's prints are written from
+        // here on, and a report found later would hold them a second time from its boundary on.
+        if (heard?.startsWith(CONSOLE_BOUNDARY) === true) {
+          game.errorReport = null;
+        }
         return;
       }
       game.errorReport = found;
-      game.errorReportOffset = 0;
+      game.errorReportOffset = this.reportTakenBefore(game, found);
     }
     let handle: number;
     try {
@@ -5537,8 +5617,27 @@ class GodotServer {
       }
       const buffer = Buffer.alloc(size - from);
       const read = readSync(handle, buffer, 0, buffer.length, from);
-      game.errorReportOffset = from + read;
-      const reported = buffer.subarray(0, read);
+      let reported = buffer.subarray(0, read);
+      if (game.consoleFromReport !== true) {
+        const boundary = consoleBoundaryAt(reported);
+        if (boundary !== -1) {
+          game.boundaryInReportSince ??= Date.now();
+          if (
+            heard?.startsWith(CONSOLE_BOUNDARY) === true ||
+            game.pickedUpPlaying === true ||
+            this.dapClient?.isConnected() !== true ||
+            Date.now() - game.boundaryInReportSince >= BOUNDARY_WAIT_MS
+          ) {
+            game.consoleFromReport = true;
+          } else {
+            reported = reported.subarray(0, boundary);
+          }
+        }
+      }
+      game.errorReportOffset = from + reported.length;
+      if (reported.length === 0) {
+        return;
+      }
       if (game.transcript !== null) {
         appendFileSync(game.transcript, reported);
       } else {
@@ -5546,6 +5645,43 @@ class GodotServer {
       }
     } finally {
       closeSync(handle);
+    }
+  }
+
+  /**
+   * The announced game the boundary line [param line] names by its announcement, tied to [param
+   * run] when it is one this run's own could be. For a run the usual tie left open, because two
+   * games of the project announced since the play began: the line is the game saying which it is.
+   */
+  private announcedPidNamedBy(run: GodotProcess, line: string): number | undefined {
+    const named = /runtime-(\d+)\.json$/.exec(line.trim())?.[1];
+    if (named === undefined) {
+      return undefined;
+    }
+    const before = run.announcedBefore ?? new Set<number>();
+    const theOne = this.announcedOfTheRunsProject(run, runtimesAnnounced().running).find(
+      (one) =>
+        one.pid === Number(named) && !before.has(one.pid) && this.isTheGameOf(run, one, run.projectPath),
+    );
+    if (theOne !== undefined) {
+      this.tie(run, theOne);
+    }
+    return run.announcedPid;
+  }
+
+  /**
+   * Where to start reading [param report] for [param game]: the start, unless the run was picked
+   * up with the transcript of the server before this one, which already holds part of it.
+   */
+  private reportTakenBefore(game: GodotProcess, report: string): number {
+    if (game.pickedUpPlaying !== true || game.transcript === null) {
+      return 0;
+    }
+    try {
+      return reportAlreadyInTranscript(readFileSync(game.transcript), readFileSync(report));
+    } catch (error) {
+      this.logDebug(`Could not compare a picked-up run's report with its transcript: ${errorMessage(error)}`);
+      return 0;
     }
   }
 
@@ -5570,7 +5706,7 @@ class GodotServer {
       halt?.reason !== 'exception' ||
       halt.text === '' ||
       game.brokeOn === halt.text ||
-      game.errorReport !== undefined
+      typeof game.errorReport === 'string'
     ) {
       return;
     }
@@ -5926,6 +6062,7 @@ class GodotServer {
     // quit for as long as the record lasted, beside a status call taking the editor's word that
     // nothing was playing.
     this.activeProcess = picked;
+    this.watchThePlayedConsole();
   }
 
   /**
@@ -6802,9 +6939,11 @@ class GodotServer {
     // bench an hour ago must not read six lines as six lines printed.
     if (run.pickedUpPlaying === true) {
       notes.push(
-        run.transcript === null
-          ? 'The editor was already playing this when this server reached it, and the server that started it left no transcript, so this is not the run from its start: what it printed before that is only in the editor. It is the run the editor is holding now, which is the one the debug_* tools answer for.'
-          : 'The editor was already playing this when this server reached it, and what it printed before that has been read back from its transcript. It is the run the editor is holding now, which is the one the debug_* tools answer for.',
+        run.transcript !== null
+          ? 'The editor was already playing this when this server reached it, and what it printed before that has been read back from its transcript. It is the run the editor is holding now, which is the one the debug_* tools answer for.'
+          : run.consoleFromReport === true
+            ? "The editor was already playing this when this server reached it, and the server that started it left no transcript, so what is below was read back from the file the game's runtime writes its console to, which begins where the runtime started: the engine's own start-up before that is only in the editor. It is the run the editor is holding now, which is the one the debug_* tools answer for."
+            : 'The editor was already playing this when this server reached it, and the server that started it left no transcript, so this is not the run from its start: what it printed before that is only in the editor. It is the run the editor is holding now, which is the one the debug_* tools answer for.',
       );
     }
     if (run.consoleLost === true) {

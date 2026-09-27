@@ -114,11 +114,13 @@ func _ready() -> void:
 func _exit_tree() -> void:
 	if _errors != null:
 		OS.remove_logger(_errors)
+		_errors.close()
 		_errors = null
 	_cleanup()
 
 
-## The engine's error reports, written to a file for the server, for a game the editor plays.
+## The engine's error reports, written to a file for the server, for a game the editor plays, and
+## its prints as well from the line announcing the runtime on.
 ##
 ## Only for one the editor plays: a game the server starts itself has its stderr in the run's
 ## transcript already, and a game somebody runs from a terminal has it on the terminal. The
@@ -235,7 +237,16 @@ func _start_server() -> void:
 
 	_port = _server.get_local_port()
 	_announce(bind_address)
-	print("[gdharness] runtime listening on %s:%d, announced at %s" % [bind_address, _port, _announcement])
+	var listening: String = (
+		"[gdharness] runtime listening on %s:%d, announced at %s" % [bind_address, _port, _announcement]
+	)
+	# The line the server tells the two streams apart by: it takes the prints before it from the
+	# debug adapter and everything from it on from the file, which has it first. After the
+	# announcement, so a server reading the line finds the file beside it.
+	if _errors != null:
+		_errors.take_the_console(listening)
+	else:
+		print(listening)
 
 
 ## Whether the engine was told to run a script rather than the game.
