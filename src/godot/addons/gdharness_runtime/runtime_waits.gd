@@ -7,7 +7,6 @@ const Paths = preload("runtime_paths.gd")
 const Queries = preload("runtime_queries.gd")
 const Read = preload("reading.gd")
 const Values = preload("runtime_values.gd")
-const Words = preload("runtime_words.gd")
 
 ## The longest one wait may last, whatever the request says: past this the server has long
 ## since given up on the reply.
@@ -284,7 +283,9 @@ func _wait_until_said(node_path: String, said: String, timeout_ms: int, include_
 
 
 ## Whether anything under [param node_path] says [param said], the node itself included, and shown
-## unless hidden ones are wanted too.
+## unless hidden ones are wanted too. Matched as a find and a click match `says`, a glob over the
+## whole text when it has `*` or `?`: read as literal words, a glob a click had just pressed by was
+## waited on for the whole timeout with its label on screen, and answered as words never arriving.
 func _anything_says(node_path: String, said: String, include_hidden: bool) -> bool:
 	var root: Node = _host.get_tree().root.get_node_or_null(node_path)
 	if root == null:
@@ -292,7 +293,7 @@ func _anything_says(node_path: String, said: String, include_hidden: bool) -> bo
 	var pending: Array[Node] = [root]
 	while not pending.is_empty():
 		var node: Node = pending.pop_back()
-		if Words.said_by(node).containsn(said) and (include_hidden or Queries.shown(node)):
+		if Queries.says(node, said) and (include_hidden or Queries.shown(node)):
 			return true
 		pending.append_array(node.get_children(true))
 	return false
