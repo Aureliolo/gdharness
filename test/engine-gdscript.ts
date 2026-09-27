@@ -1591,6 +1591,21 @@ async function main(): Promise<void> {
     console.log('typed gate passed');
     return;
   }
+  // One fixture script by name, for working on the thing it checks without the whole leg.
+  const named = process.argv.indexOf('fixture');
+  if (named !== -1) {
+    const fixture = process.argv[named + 1];
+    if (fixture === undefined) {
+      throw new Error('fixture needs the name of a script in test/support/gd, without .gd');
+    }
+    try {
+      console.log(JSON.stringify(runFixture(godotPath, projectDir, fixture)));
+    } finally {
+      sweep(projectDir);
+    }
+    console.log(`fixture ${fixture} passed`);
+    return;
+  }
   try {
     testTypedGate(godotPath, projectDir);
     runFixture(godotPath, projectDir, 'scene_parse');
