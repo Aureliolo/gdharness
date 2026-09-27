@@ -1302,7 +1302,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['click'],
         description:
-          'click: the words on the control to click, matched the way runtime_inspect find matches says (a plain word is contained in the text, a pattern with * or ? is a glob over it), among the controls on screen, and pressed in the same frame it was found in, so a panel rebuilding between a find and a click cannot free it first. Words on a label inside a button press the button. Several matches are refused with each one listed, and index picks one.',
+          'click: the words on the control to click, matched the way runtime_inspect find matches says (a plain word is contained in the text, a pattern with * or ? is a glob over it), among the controls on screen, and pressed in the same frame it was found in, so a panel rebuilding between a find and a click cannot free it first. Words on a label inside a button press the button. A control with something drawn over its centre that would take the pointer, such as a screen shown over it, is not on screen. The matches are ranked the way a person picks what to press: a button before text that cannot be pressed, then a control whose whole text is the words before one saying them as part of more, and the best one is pressed; found.picked says why. Several matches at the best rank are refused with each one listed, and index picks one.',
       },
       action: {
         type: 'string',
@@ -1345,7 +1345,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'number',
         ops: ['click', 'choose'],
         description:
-          'click: which of several controls saying the words, counting from 0 in the order a refusal lists them. choose: the item to take, by where it is in the list, when text will not do.',
+          'click: which of several controls saying the words, counting from 0 in the order a refusal lists them, best matches first. choose: the item to take, by where it is in the list, when text will not do.',
       },
       shift: { type: 'boolean', ops: ['key'], description: 'key: hold Shift with it. Default false.' },
       ctrl: { type: 'boolean', ops: ['key'], description: 'key: hold Ctrl with it. Default false.' },
