@@ -22,6 +22,10 @@ const FILTERS: PackedStringArray = ["class", "script", "name", "group", "says"]
 ## thousand is a tree somebody pointed this at by mistake.
 const READ_LIMIT: int = 500
 
+## Stands in for a bar written as `\|` while `says` is split into its alternatives: a character from
+## the private use area, which no game's text uses.
+const ESCAPED_BAR: String = ""
+
 var _host: Node
 var _values: Values
 
@@ -255,9 +259,35 @@ static func _is_literal(pattern: String) -> bool:
 ## in one field meaning a glob and in the other meaning those characters. Written as a contains
 ## only, a glob matched nothing at all and an empty answer reads as a control that is not on the
 ## screen: twice in one session here, over a button that was.
+##
+## Several alternatives separated by `|` match when any one of them does, each by those rules: a
+## wait for the end of a turn is a wait for whichever of "won", "lost" or the next turn's words comes
+## first, and read as one glob with the bars in it, it waited out its whole timeout for words no
+## screen says.
 static func _says(said: String, wanted: String) -> bool:
-	var words: String = as_said(wanted)
-	return said.containsn(words) if _is_literal(words) else said.matchn(words)
+	for words: String in alternatives(wanted):
+		if said.containsn(words) if _is_literal(words) else said.matchn(words):
+			return true
+	return false
+
+
+## The alternatives [param wanted] names, each as words on a screen: split at every `|` not written
+## as `\|`, which stays a bar in the words. An empty alternative, a stray bar at either end, is
+## dropped: it names no words, and a find that came back empty widened it to `**` and suggested a
+## pattern that matches every node there is.
+static func alternatives(wanted: String) -> Array[String]:
+	var held: String = as_said(wanted).replace("\\|", ESCAPED_BAR)
+	var found: Array[String] = []
+	for part: String in held.split("|"):
+		var words: String = part.replace(ESCAPED_BAR, "|")
+		if not words.is_empty():
+			found.append(words)
+	return found
+
+
+## Whether [param words], one alternative, is plain words rather than a glob.
+static func is_plain(words: String) -> bool:
+	return _is_literal(words)
 
 
 ## Whether [param node]'s own words are what [param wanted] asks for, by the rules a find uses, so a
@@ -269,10 +299,15 @@ static func says(node: Node, wanted: String) -> bool:
 ## [param wanted], a glob, open at both ends so it matches its words anywhere in a text; "" when
 ## it is not a glob, or already open at both ends, and so has nothing to suggest.
 static func _widened(wanted: String) -> String:
-	if wanted.is_empty() or _is_literal(wanted):
-		return ""
-	var open: String = "*" + wanted.lstrip("*").rstrip("*") + "*"
-	return "" if open == wanted else open
+	var widened: Array[String] = []
+	var changed: bool = false
+	for words: String in alternatives(wanted):
+		var open: String = words
+		if not _is_literal(words):
+			open = "*" + words.lstrip("*").rstrip("*") + "*"
+			changed = changed or open != words
+		widened.append(open.replace("|", "\\|"))
+	return "|".join(widened) if changed else ""
 
 
 ## [param wanted] as words on a screen: a backslash followed by n is a line break.

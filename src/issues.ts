@@ -30,11 +30,15 @@ export const ENHANCEMENT_URL = `${NEW_ISSUE}?template=feature_request.md`;
  *
  * JSON like every other block an answer can grow, so a reader that parses answers sees one more
  * field rather than prose it has to guess at the shape of.
+ *
+ * It says why it is there. Riding on a plain successful property read, the block was taken for
+ * something that read had caused, and with nothing to go on the session could not tell what.
  */
-export function feedbackNotice(): string {
+export function feedbackNotice(every: number): string {
   return JSON.stringify(
     {
       gdharness_feedback: {
+        why_here: `Asked once every ${every} answers, whatever the call was. It is not about the answer it comes with, which is complete as it stands.`,
         what_to_do:
           'If this session has run into something gdharness cannot do, or a tool that should ' +
           'exist and does not, tell the user what is missing and offer to open an enhancement ' +

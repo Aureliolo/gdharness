@@ -778,6 +778,33 @@ func _check_until_something_says_it() -> void:
 	if globbed.get("met") != true:
 		_fail("a glob in says is matched as a find matches one: %s" % str(globbed))
 
+	# Alternatives: any one of them on screen meets the wait, a glob among them included.
+	var either: Dictionary = await node._execute_command(
+		"wait_until", {"path": "/root/Panel", "says": "*won*|spring 2*|lost", "timeout_ms": 500}
+	)
+	if either.get("met") != true:
+		_fail("any one of several alternatives in says meets a wait: %s" % str(either))
+	var barred: Label = Label.new()
+	barred.text = "left|right"
+	button.get_parent().add_child(barred)
+	var literal_bar: Dictionary = await node._execute_command(
+		"wait_until", {"path": "/root/Panel", "says": "t\\|r", "timeout_ms": 500}
+	)
+	if literal_bar.get("met") != true:
+		_fail("a bar written as \\| is a bar in the words: %s" % str(literal_bar))
+	# And not a split: read as two alternatives this would be met by "left" on its own.
+	var not_split: Dictionary = await node._execute_command(
+		"wait_until", {"path": "/root/Panel", "says": "zz\\|left", "timeout_ms": 60}
+	)
+	if not_split.get("met") != false:
+		_fail("a bar written as \\| does not split the words into alternatives: %s" % str(not_split))
+	var only_bars: Dictionary = await node._execute_command(
+		"wait_until", {"path": "/root/Panel", "says": "|", "timeout_ms": 60}
+	)
+	if only_bars.get("met") != false:
+		_fail("says with no alternative in it matches nothing rather than everything: %s" % str(only_bars))
+	barred.free()
+
 	var never: Dictionary = await node._execute_command(
 		"wait_until", {"path": "/root/Panel", "says": "Autumn 4", "timeout_ms": 60}
 	)
