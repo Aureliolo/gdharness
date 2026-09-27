@@ -85,6 +85,7 @@ func _everything() -> void:
 	await _check_a_dialog(input)
 	await _check_a_click_by_words(input)
 	await _check_a_click_by_words_ranked(input)
+	await _check_a_click_opening_a_menu_over_itself(input)
 
 	host.queue_free()
 	if failures.is_empty():
@@ -554,6 +555,47 @@ func _check_a_click_by_words(input: InputCommands) -> void:
 ## Several controls saying a word, ranked the way a person picks the one to press: a button over
 ## text, the whole of what a control says over a part of it, and nothing covered by a screen drawn
 ## over it.
+## A click on a dropdown near the bottom of the screen, whose menu has no room below it and opens
+## over it, under the pointer. A player's click opens the menu and leaves it open with nothing
+## chosen; the release of a click held for one frame landed on the item the menu opened under the
+## pointer and chose it.
+func _check_a_click_opening_a_menu_over_itself(input: InputCommands) -> void:
+	var dropdown: OptionButton = OptionButton.new()
+	dropdown.position = Vector2(2, 30)
+	dropdown.size = Vector2(60, 20)
+	dropdown.add_item("Windowed", 1)
+	dropdown.add_item("Fullscreen", 2)
+	var picked: Array[int] = []
+	var note: Callable = func(index: int) -> void: picked.append(index)
+	Checked.done(dropdown.item_selected.connect(note) as Error, "noting a pick")
+	root.add_child(dropdown)
+	await root.get_tree().process_frame
+
+	var opened: Dictionary = await input.click({"path": str(dropdown.get_path())})
+	var menu: PopupMenu = dropdown.get_popup()
+	var centre: Vector2 = dropdown.get_global_rect().get_center()
+	var over: bool = Rect2(Vector2(menu.position), Vector2(menu.size)).has_point(centre)
+	if not over:
+		_fail(
+			(
+				"the menu should open over the button for this case to mean anything: menu %s, button centre %s"
+				% [Rect2(Vector2(menu.position), Vector2(menu.size)), centre]
+			)
+		)
+	if not picked.is_empty() or dropdown.selected != 0:
+		_fail(
+			(
+				"a click opening a menu over itself chooses nothing: %s, picked %s"
+				% [JSON.stringify(opened), picked]
+			)
+		)
+	if not menu.visible:
+		_fail("and leaves the menu open, as a player's click does: %s" % JSON.stringify(opened))
+	menu.hide()
+	dropdown.queue_free()
+	await root.get_tree().process_frame
+
+
 func _check_a_click_by_words_ranked(input: InputCommands) -> void:
 	# Placed by centre, and a button in the default theme grows to about 31 pixels tall whatever size
 	# it is given: the page covers the top 48 rows, so the hall's two buttons have their centres
