@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 
 import { defectReport } from './issues.js';
 import { runGodotServer } from './server.js';
