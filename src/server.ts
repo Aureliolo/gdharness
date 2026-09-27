@@ -53,6 +53,7 @@ import {
   declaredSince,
   heldButGone,
   missingMemberIn,
+  scriptsNaming,
   staleAnalysisNote,
   staleClassNames,
   type UnseenClass,
@@ -7537,6 +7538,15 @@ class GodotServer {
 
     const checked = busy ? { unseen: [] } : await this.classesTheEditorCannotSee(args);
     const unseen = checked.unseen;
+    // The classes this scan brought in, and the scripts naming them, which the editor compiled
+    // while it could not resolve them and holds that way until each is reloaded.
+    const broughtIn = blind.unseen
+      .map((one) => one.className)
+      .filter((name) => !unseen.some((still) => still.className === name));
+    const dependents =
+      busy || projectPath === '' || broughtIn.length === 0
+        ? null
+        : await this.reloadDependents(projectPath, broughtIn);
     const stillGone = lost.filter((name) => !restored.includes(name));
     const notes: string[] = [];
     if (busy) {
@@ -7556,6 +7566,11 @@ class GodotServer {
         'The scan finished and these classes are still not in the list the editor resolves against, so every use of them reads as an unknown identifier. Its walk skips a file another engine has already imported. Rescan again on its own, which is the measured cure and needs no change to the declaring script, or restart the editor with editor_launch restart.',
       );
     }
+    if (dependents !== null && dependents.notReloaded.length > 0) {
+      notes.push(
+        `The scan brought in ${broughtIn.join(', ')}, and ${dependents.notReloaded.map((one) => one.scriptPath).join(', ')} ${dependents.notReloaded.length === 1 ? 'names one of them and' : 'name them and'} could not be reloaded, so the editor still holds what it compiled while it could not see the class and reports that to the language server. editor_rescan with reloadScript on each, or editor_launch restart.`,
+      );
+    }
     if (stillAtMissingPaths.length > 0) {
       notes.push(
         `The scan wrote the class cache with ${stillAtMissingPaths.join(', ')} at a path that is not on disk, and rebuilding the cache from the files did not take it out. The next engine to read the cache fails on "Could not parse global class" in whichever correct script shares the bare name. Restart the editor with editor_launch restart, then run project_import refresh_classes.`,
@@ -7571,6 +7586,7 @@ class GodotServer {
         unseen.length === 0 &&
         stillGone.length === 0 &&
         stillAtMissingPaths.length === 0 &&
+        (dependents === null || dependents.notReloaded.length === 0) &&
         checked.unchecked === undefined,
       stillWorking: busy,
       waitedMs: Date.now() - started,
@@ -7584,6 +7600,11 @@ class GodotServer {
       reloadedMethods: reloaded.methods,
       reloadProblem: reloaded.problem,
       unseenByEditor: unseen.length > 0 ? unseen : undefined,
+      broughtIn: broughtIn.length > 0 ? broughtIn : undefined,
+      dependentsReloaded:
+        dependents !== null && dependents.reloaded.length > 0 ? dependents.reloaded : undefined,
+      dependentsNotReloaded:
+        dependents !== null && dependents.notReloaded.length > 0 ? dependents.notReloaded : undefined,
       cacheLost: lost.length > 0 ? lost : undefined,
       cacheRestored: restored.length > 0 ? restored : undefined,
       cacheDropped: dropped.length > 0 ? dropped : undefined,
@@ -7591,6 +7612,40 @@ class GodotServer {
       classesUnchecked: checked.unchecked,
       note: notes.length > 0 ? notes.join(' ') : undefined,
     });
+  }
+
+  /**
+   * Reloads in the editor every script naming one of [param classes], which a scan has just brought
+   * into the list the editor resolves against.
+   *
+   * The scan updates what the editor knows about files, not what it has already compiled from them.
+   * A script extending a new base class, compiled while the editor could not see the class, went on
+   * reporting "Could not find base class" to the language server after the rescan had answered
+   * clean, until it was reloaded by hand. Each is reloaded as `reloadScript` reloads one: from the
+   * file, keeping the state of what uses it.
+   */
+  private async reloadDependents(
+    projectPath: string,
+    classes: readonly string[],
+  ): Promise<{ reloaded: string[]; notReloaded: { scriptPath: string; problem: string }[] }> {
+    const reloaded: string[] = [];
+    const notReloaded: { scriptPath: string; problem: string }[] = [];
+    for (const scriptPath of scriptsNaming(projectPath, classes)) {
+      try {
+        const answer = asParams(await this.godotBridge.invokeTool('reload_script', { scriptPath }));
+        if (readArray(answer, 'methods') === undefined) {
+          notReloaded.push({
+            scriptPath,
+            problem: 'the editor would not say what it has after reloading it',
+          });
+        } else {
+          reloaded.push(scriptPath);
+        }
+      } catch (error) {
+        notReloaded.push({ scriptPath, problem: errorMessage(error) });
+      }
+    }
+    return { reloaded, notReloaded };
   }
 
   /**

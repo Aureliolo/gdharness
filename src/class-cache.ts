@@ -36,6 +36,20 @@ const DECLARATION = /^(?:@[a-z_]+(?:\([^)\n]*\))?\s+)*class_name\s+([A-Za-z_][A-
  */
 export function declaredClasses(projectPath: string): Map<string, string> {
   const declared = new Map<string, string>();
+  eachScript(projectPath, (script, source) => {
+    const found = DECLARATION.exec(source);
+    if (found?.[1]) {
+      declared.set(found[1], script);
+    }
+  });
+  return declared;
+}
+
+/**
+ * Every script under the project the engine would import, handed to [param each] as its `res://`
+ * path and its source. A directory holding a `.gdignore` is stepped over, as the engine steps over it.
+ */
+function eachScript(projectPath: string, each: (script: string, source: string) => void): void {
   const visit = (directory: string, prefix: string): void => {
     if (existsSync(join(directory, '.gdignore'))) {
       return;
@@ -48,15 +62,35 @@ export function declaredClasses(projectPath: string): Map<string, string> {
       if (entry.isDirectory()) {
         visit(path, `${prefix}${entry.name}/`);
       } else if (entry.isFile() && entry.name.endsWith('.gd')) {
-        const found = DECLARATION.exec(readFileSync(path, 'utf8'));
-        if (found?.[1]) {
-          declared.set(found[1], `res://${prefix}${entry.name}`);
-        }
+        each(`res://${prefix}${entry.name}`, readFileSync(path, 'utf8'));
       }
     }
   };
   visit(projectPath, '');
-  return declared;
+}
+
+/**
+ * The project's scripts that name any of [param classes], other than the ones declaring them, as
+ * `res://` paths in order.
+ *
+ * What an editor compiled from one of these while it could not resolve the class stays compiled
+ * that way after a scan brings the class in: the scan updates what the editor knows about files,
+ * not what it has already built from them. A script extending a new base class went on reporting
+ * "Could not find base class" after a rescan had picked the class up, until it was reloaded.
+ */
+export function scriptsNaming(projectPath: string, classes: readonly string[]): string[] {
+  const named = new Map(classes.map((name) => [name, '']));
+  const naming: string[] = [];
+  eachScript(projectPath, (script, source) => {
+    const declares = DECLARATION.exec(source)?.[1];
+    if (declares !== undefined && named.has(declares)) {
+      return;
+    }
+    if (classesNamedIn(source, named).length > 0) {
+      naming.push(script);
+    }
+  });
+  return naming.sort();
 }
 
 /** The classes the cache lists, with the path each is recorded at, or null when there is none. */

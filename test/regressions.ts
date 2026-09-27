@@ -7590,7 +7590,7 @@ function testTheCureIsWrittenWhole(): void {
   ];
   // What the tree holds today and not a comfortable minimum, so one place going quiet lowers this
   // in the same change and somebody confirms it was meant.
-  assert.equal(offered.length, 33, `the places offering a remedy should all be found, not ${offered.length}`);
+  assert.equal(offered.length, 34, `the places offering a remedy should all be found, not ${offered.length}`);
 
   // Across whitespace, because a rendered file wraps where the source did not and a sentence that
   // breaks at "the" is the same sentence. Change, edit and touch, because the claim is about what
@@ -20263,6 +20263,141 @@ async function testAStartWaitsOutTheEditorsScan(): Promise<void> {
 }
 
 /**
+ * A rescan that brings a class in reloads the scripts naming it.
+ *
+ * The scan updates what the editor knows about files, not what it has compiled from them, so a
+ * script extending a new base class, compiled while the editor could not see the class, went on
+ * reporting "Could not find base class" after the rescan answered clean. Measured downstream, where
+ * reloading the one script by hand cleared it.
+ *
+ * The fixture editor cannot see the class until it scans. One script extends it and reloads, one
+ * uses it as a type and refuses to reload, one declares it and one only carries a word like it; the
+ * reloads asked for are exactly the two naming it. A second scan brings nothing in and reloads
+ * nothing, so a server reloading on every scan fails there.
+ */
+async function testARescanReloadsWhatNamesAClassItBroughtIn(): Promise<void> {
+  const port = await reservePort();
+  const server = new ServerProcess({
+    env: { GDHARNESS_BRIDGE_PORT: String(port), GODOT_PATH: join(tmpdir(), 'gdharness-no-such-godot') },
+  });
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-brought-in-'));
+  let editor: WebSocket | null = null;
+  try {
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    mkdirSync(join(project, '.godot'), { recursive: true });
+    writeFileSync(join(project, 'base.gd'), 'class_name CharteredRun\nextends Node\n');
+    writeFileSync(join(project, 'charters_test.gd'), 'extends CharteredRun\n');
+    writeFileSync(join(project, 'uses.gd'), 'extends Node\n\nvar run: CharteredRun\n');
+    writeFileSync(join(project, 'other.gd'), 'extends Node\n\nvar chartered := 1\n');
+    const cache = join(project, '.godot', 'global_script_class_cache.cfg');
+    const cached = 'list=[{\n"class": &"CharteredRun",\n"path": "res://base.gd"\n}]\n';
+    writeFileSync(cache, cached);
+
+    await server.initialize('regression-test');
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+    editor = socket;
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', () => {
+        resolve();
+      });
+      socket.once('error', reject);
+    });
+
+    // Blind to the new class until a scan, which is the state a class written while another engine
+    // imported it leaves the editor in. The scan brings it in and writes the cache from the list.
+    let holds: string[] = [];
+    const reloadsAskedFor: string[] = [];
+    socket.on('message', (raw: Buffer) => {
+      const message: unknown = JSON.parse(String(raw));
+      if (!isRecord(message) || message['type'] !== 'tool_invoke') {
+        return;
+      }
+      const tool = String(message['tool']);
+      const args = isRecord(message['args']) ? message['args'] : {};
+      if (tool === 'rescan_filesystem' && args['statusOnly'] !== true) {
+        holds = ['CharteredRun'];
+        writeFileSync(cache, cached);
+      }
+      if (tool === 'reload_script') {
+        const scriptPath = String(args['scriptPath']);
+        reloadsAskedFor.push(scriptPath);
+        const refused = scriptPath === 'res://uses.gd';
+        socket.send(
+          JSON.stringify(
+            refused
+              ? {
+                  type: 'tool_result',
+                  id: message['id'],
+                  success: false,
+                  error: 'the fixture editor refused it',
+                }
+              : { type: 'tool_result', id: message['id'], success: true, result: { ok: true, methods: [] } },
+          ),
+        );
+        return;
+      }
+      const result =
+        tool === 'rescan_filesystem'
+          ? { ok: true, scanning: false, importing: false, pending: false }
+          : { ok: true, classes: holds };
+      socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result }));
+    });
+    socket.send(
+      JSON.stringify({ type: 'godot_ready', project_path: project, addon_version: SERVER_VERSION }),
+    );
+    let knows = false;
+    for (let waited = 0; waited < 10_000 && !knows; waited += 100) {
+      await delay(100);
+      const status = await server.request('tools/call', { name: 'editor_status', arguments: {} });
+      knows = text(get(parseTextContent(status), 'editor', 'projectPath')) === project;
+    }
+    assert.ok(knows, 'the fixture editor should have reached the server, or this proves nothing');
+
+    const scanned = await server.request('tools/call', {
+      name: 'editor_rescan',
+      arguments: { projectPath: project },
+    });
+    const said = textOf(scanned) ?? JSON.stringify(scanned);
+    const answer = parseTextContent(scanned);
+    assert.deepEqual(asArray(get(answer, 'broughtIn') ?? []).map(String), ['CharteredRun'], said);
+    assert.deepEqual(
+      reloadsAskedFor,
+      ['res://charters_test.gd', 'res://uses.gd'],
+      `the scripts naming the class are reloaded, and not the one declaring it or one that does not name it: ${said}`,
+    );
+    assert.deepEqual(
+      asArray(get(answer, 'dependentsReloaded') ?? []).map(String),
+      ['res://charters_test.gd'],
+      said,
+    );
+    const notReloaded = asArray(get(answer, 'dependentsNotReloaded') ?? []);
+    assert.equal(notReloaded.length, 1, said);
+    assert.equal(text(get(notReloaded[0], 'scriptPath')), 'res://uses.gd', said);
+    assert.match(text(get(notReloaded[0], 'problem')), /the fixture editor refused it/, said);
+    assert.equal(get(answer, 'ok'), false, `an editor still holding a stale compile is not ok: ${said}`);
+    assert.match(
+      text(get(answer, 'note')),
+      /res:\/\/uses\.gd names one of them and could not be reloaded/,
+      said,
+    );
+
+    // Nothing brought in the second time, so nothing is reloaded and the scan is clean.
+    const again = await server.request('tools/call', {
+      name: 'editor_rescan',
+      arguments: { projectPath: project },
+    });
+    const second = parseTextContent(again);
+    assert.equal(reloadsAskedFor.length, 2, `a scan bringing nothing in reloads nothing: ${textOf(again)}`);
+    assert.equal(get(second, 'ok'), true, textOf(again) ?? '');
+    assert.equal(get(second, 'broughtIn'), undefined, textOf(again) ?? '');
+  } finally {
+    editor?.terminate();
+    await server.stop();
+    sweep(project);
+  }
+}
+
+/**
  * A repair that could not run is not reported as one.
  *
  * The editor writes the class cache at the end of a scan from the list it is holding, not from the
@@ -20932,6 +21067,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARunsEnvironmentStaysOffCommandLines,
   testAStartWaitsOutTheEditorsScan,
   testARepairThatCouldNotRunIsNotReported,
+  testARescanReloadsWhatNamesAClassItBroughtIn,
   testTheDiagnosticsRemedyKnowsAnEditorThatWritesAShortList,
   testAShortenedCacheIsRebuilt,
   testAClassWhoseScriptCameBackIsNotTheEditorsLoss,
