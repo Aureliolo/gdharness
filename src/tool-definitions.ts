@@ -853,7 +853,12 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       // itself: asking a caller to repeat it is asking for something that cannot disagree and
       // must therefore be right, and taking it while ignoring it is the silent default this
       // schema exists to refuse.
-      projectPath: { ...PROJECT_PATH, ops: ['start', 'check'] },
+      projectPath: {
+        ...PROJECT_PATH,
+        ops: ['start', 'check', 'stop', 'wait'],
+        description:
+          'Absolute path to the project directory, the one holding project.godot. stop, wait: optional, the project whose run is meant; a run of another project is refused rather than touched.',
+      },
       scene: {
         type: 'string',
         ops: ['start', 'check'],
@@ -1127,7 +1132,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['find'],
         description:
-          'find: part of what the node has written on it as drawn, the way the text op reads it, case-insensitively, which is how a button is reached by the word on it rather than by a generated path. Its own text, so a row is found by the label in it, and hidden nodes match. A bare word is a contains; write a glob and it is one, matched against the whole of what the node says, the same as namePattern, and a glob that finds nothing says under note how many nodes it would find open at both ends. A label with a line break is matched with the break in the words, and a backslash followed by n counts as one.',
+          'find: part of what the node has written on it as drawn, the way the text op reads it, case-insensitively, which is how a button is reached by the word on it rather than by a generated path. Its own text, so a row is found by the label in it, and hidden nodes match. A bare word is a contains; write a glob and it is one, matched against the whole of what the node says, the same as namePattern, and a glob that finds nothing says under note how many nodes it would find open at both ends. A label with a line break is matched with the break in the words, and a backslash followed by n counts as one. Alternatives separated by | match when any one of them does, each by these rules ("*won*|*lost*"); write \\| for a bar that is part of the words.',
       },
       limit: {
         type: 'integer',
@@ -1302,7 +1307,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['click'],
         description:
-          'click: the words on the control to click, matched the way runtime_inspect find matches says (a plain word is contained in the text, a pattern with * or ? is a glob over it), among the controls on screen, and pressed in the same frame it was found in, so a panel rebuilding between a find and a click cannot free it first. Words on a label inside a button press the button. A control with something drawn over its centre that would take the pointer, such as a screen shown over it, is not on screen. The matches are ranked the way a person picks what to press: a button before text that cannot be pressed, then a control whose whole text is the words before one saying them as part of more, and the best one is pressed; found.picked says why. Several matches at the best rank are refused with each one listed, and index picks one.',
+          'click: the words on the control to click, matched the way runtime_inspect find matches says (a plain word is contained in the text, a pattern with * or ? is a glob over it, and | separates alternatives), among the controls on screen, and pressed in the same frame it was found in, so a panel rebuilding between a find and a click cannot free it first. Words on a label inside a button press the button. A control with something drawn over its centre that would take the pointer, such as a screen shown over it, is not on screen. The matches are ranked the way a person picks what to press: a button before text that cannot be pressed, then a control whose whole text, or one whole line of it such as the title on a card, is the words before one saying them as part of more, and the best one is pressed; found.picked says why. Several matches at the best rank are refused with each one listed, and index picks one.',
       },
       action: {
         type: 'string',
@@ -1450,7 +1455,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['until'],
         description:
-          'until: wait for these words to appear anywhere under nodePath, or anywhere in the game when no nodePath is given, instead of for a property, which is how a panel that rebuilds its labels is waited on at all: the labels are named afresh each redraw and the panel is what stays put. Matched the way runtime_inspect find matches says: case-insensitive, a plain word anywhere in the text, a pattern with * or ? a glob over the whole of it; on a node the player can see unless includeHidden says otherwise; a label with a line break is matched with the break in the words, and a backslash followed by n counts as one. Instead of, not as well as: a call carrying this and a property is refused, because they ask about different things and answering one of them silently is how a caller watches a screen believing they are watching a property. It looks every frame while a look is cheap and less often on a screen large enough for a look to cost a real share of a frame, so the game keeps its speed; the answer counts the frames the wait spanned and the looks it took.',
+          'until: wait for these words to appear anywhere under nodePath, or anywhere in the game when no nodePath is given, instead of for a property, which is how a panel that rebuilds its labels is waited on at all: the labels are named afresh each redraw and the panel is what stays put. Matched the way runtime_inspect find matches says: case-insensitive, a plain word anywhere in the text, a pattern with * or ? a glob over the whole of it, and alternatives separated by | met by whichever appears first ("*won*|*lost*"); on a node the player can see unless includeHidden says otherwise; a label with a line break is matched with the break in the words, and a backslash followed by n counts as one. Instead of, not as well as: a call carrying this and a property is refused, because they ask about different things and answering one of them silently is how a caller watches a screen believing they are watching a property. It looks every frame while a look is cheap and less often on a screen large enough for a look to cost a real share of a frame, so the game keeps its speed; the answer counts the frames the wait spanned and the looks it took.',
       },
       includeHidden: {
         type: 'boolean',

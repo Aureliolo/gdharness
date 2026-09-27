@@ -142,20 +142,35 @@ static func _rank(target: Control, whole: bool) -> int:
 	return (2 if target is BaseButton else 0) + (1 if whole else 0)
 
 
-## Whether [param said] is the whole of what [param wanted] asks for. A glob is matched against the
-## whole text already, so every match of one is whole.
+## Whether one of [param wanted]'s alternatives is the whole of [param said], or the whole of one of
+## its lines. A glob is matched against the whole text already, so every match of one is whole.
+##
+## A line counts because a card is a title over a description: "WARD" over "wards 3" is the card
+## named WARD, and read as its words run together it said WARD only as part of more, level with
+## "WARDSPITE" over its own description, and a click on WARD was refused as not clear.
 static func _says_exactly(said: String, wanted: String) -> bool:
-	var words: String = Queries.as_said(wanted)
-	if words.contains("*") or words.contains("?"):
-		return true
-	return said.strip_edges().nocasecmp_to(words.strip_edges()) == 0
+	for words: String in Queries.alternatives(wanted):
+		if not Queries.is_plain(words):
+			if said.matchn(words):
+				return true
+			continue
+		var looked_for: String = words.strip_edges()
+		if said.strip_edges().nocasecmp_to(looked_for) == 0:
+			return true
+		for line: String in said.split("\n"):
+			if line.strip_edges().nocasecmp_to(looked_for) == 0:
+				return true
+	return false
 
 
 ## [param count] matches of [param rank], as the start of a sentence.
 static func _described(count: int, rank: int, wanted: String, under: String) -> String:
 	var what: String = "button" if rank >= 2 else "control"
 	var how: String = '"%s"' % wanted
-	if not Queries.as_said(wanted).contains("*") and not Queries.as_said(wanted).contains("?"):
+	var plain: bool = true
+	for words: String in Queries.alternatives(wanted):
+		plain = plain and Queries.is_plain(words)
+	if plain:
 		how = ('exactly "%s"' if rank % 2 == 1 else '"%s" as part of more') % wanted
 	if count == 1:
 		return "the one %s on screen%s saying %s" % [what, under, how]

@@ -2186,7 +2186,7 @@ class GodotServer {
     this.callsSinceFeedback = 0;
     return {
       ...answer,
-      content: [...answer.content, { type: 'text', text: feedbackNotice() }],
+      content: [...answer.content, { type: 'text', text: feedbackNotice(FEEDBACK_NOTICE_EVERY) }],
     };
   }
 
@@ -6635,6 +6635,10 @@ class GodotServer {
     if (!run) {
       return this.createErrorResponse(this.nothingOfOursIsRunning());
     }
+    const elsewhere = this.anotherProjectsRun(run.projectPath, args, 'waited on');
+    if (elsewhere !== null) {
+      return elsewhere;
+    }
     const budgetMs = readPositiveNumber(args, 'timeoutMs') ?? WAIT_FOR_RUN_MS;
     const until = Date.now() + budgetMs;
     // Drained as it goes rather than once at the end: the pipes are what the output is read from,
@@ -7021,6 +7025,29 @@ class GodotServer {
   }
 
   /** editor_run stop: the game is ended and its verdict answered, errors and warnings kept. */
+  /**
+   * The refusal for a stop or a wait whose `projectPath` names a project other than the run's, or
+   * null when it names none or the same one.
+   *
+   * Taken rather than refused outright, since a call copied from the start carries it and the start
+   * requires it: refusing it failed a stop that would have done exactly what was meant. Checked
+   * rather than ignored, because the one thing it can say is which project's run is meant, and a
+   * stop that ended another project's run while being told this one was the worse answer.
+   */
+  private anotherProjectsRun(
+    runsProject: string | null,
+    args: OperationParams,
+    act: string,
+  ): ToolResponse | null {
+    const named = readNonEmptyString(args, 'projectPath');
+    if (named === undefined || runsProject === null || isSameDirectory(runsProject, named)) {
+      return null;
+    }
+    return this.createErrorResponse(
+      `The run this server holds is of ${runsProject}, not ${named}, so nothing was ${act}. A run of ${named} is held by the server that started it, in that project's own session.`,
+    );
+  }
+
   private async handleStopProject(args: OperationParams): Promise<ToolResponse> {
     // Before anything is picked to end. A reconnect leaves the editor-played run unrecorded, and
     // what would otherwise be adopted here is the last run this project spawned: a pid belonging
@@ -7032,10 +7059,14 @@ class GodotServer {
       named !== undefined &&
       (stopped === null || (named !== stopped.pid && named !== this.announcedPidOf(stopped)))
     ) {
-      return await this.stopAnnouncedGame(named, readBoolean(args, 'andChildren') === true);
+      return await this.stopAnnouncedGame(named, readBoolean(args, 'andChildren') === true, args);
     }
     if (!stopped) {
       return this.createErrorResponse(this.nothingOfOursIsRunning());
+    }
+    const elsewhere = this.anotherProjectsRun(stopped.projectPath, args, 'stopped');
+    if (elsewhere !== null) {
+      return elsewhere;
     }
     this.drainEditorOutput(stopped);
     this.drainTranscript(stopped);
@@ -7122,12 +7153,22 @@ class GodotServer {
    * runtime_invoke, which a game held at a breakpoint or hung does not answer, and killing it by
    * hand is not something a caller should have to do to a game the harness launched.
    */
-  private async stopAnnouncedGame(pid: number, andChildren: boolean): Promise<ToolResponse> {
+  private async stopAnnouncedGame(
+    pid: number,
+    andChildren: boolean,
+    args: OperationParams,
+  ): Promise<ToolResponse> {
     const announced = runtimesAnnounced();
     const game = [
       ...this.allAnnouncedForOurProject(announced.running),
       ...this.allAnnouncedForOurProject(announced.unspoken),
     ].find((one) => one.pid === pid);
+    if (game !== undefined) {
+      const elsewhere = this.anotherProjectsRun(game.project.path, args, 'signalled');
+      if (elsewhere !== null) {
+        return elsewhere;
+      }
+    }
     if (game === undefined) {
       return this.createErrorResponse(
         `pid ${pid} is not a game announced for this project, so nothing was signalled. editor_status lists this project's games under runtimes. A game that announces no runtime is ended by the server holding its run, or with andChildren by a stop of the run that started it.`,

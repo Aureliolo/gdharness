@@ -775,6 +775,17 @@ func _check() -> void:
 	# the words not being on screen: the answer says what the glob open at both ends would find.
 	if not str(whole_thing.get("note", "")).contains('"*docket*" would find 1 node'):
 		_fail("a glob that missed words further in says which glob finds them: %s" % str(whole_thing))
+	# Alternatives: either one finds the node, and a glob among them that missed words further in is
+	# widened in the note with the other alternative kept.
+	var either: Dictionary = await node._execute_command("find_nodes", {"says": "turn away|sign THE"})
+	if _paths(either) != ["/root/Level/Docket"]:
+		_fail("says finds what any one of its alternatives finds: %s" % str(either))
+	var either_prefix: Dictionary = await node._execute_command("find_nodes", {"says": "dragon|docket*"})
+	if not str(either_prefix.get("note", "")).contains('"dragon|*docket*" would find 1 node'):
+		_fail("and a missed glob among alternatives is widened in the note: %s" % str(either_prefix))
+	var stray_bar: Dictionary = await node._execute_command("find_nodes", {"says": "dragon|"})
+	if stray_bar.get("count") != 0 or stray_bar.has("note"):
+		_fail("a stray bar names no alternative, and suggests no pattern for one: %s" % str(stray_bar))
 	var said_nowhere: Dictionary = await node._execute_command("find_nodes", {"says": "dragon*"})
 	if said_nowhere.get("count") != 0 or said_nowhere.has("note"):
 		_fail("and a glob whose words are nowhere stays a plain nothing: %s" % str(said_nowhere))
