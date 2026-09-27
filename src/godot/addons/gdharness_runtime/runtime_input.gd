@@ -10,6 +10,7 @@ const Values = preload("runtime_values.gd")
 ## reports are the same place by construction rather than by agreement.
 const Queries = preload("runtime_queries.gd")
 const Read = preload("reading.gd")
+const Targets = preload("runtime_targets.gd")
 const Words = preload("runtime_words.gd")
 
 ## The distance from a capital letter to its small one in Unicode. A keycode holds the capital.
@@ -484,10 +485,25 @@ static func _scroll_into_view(control: Control) -> bool:
 ## A control out of sight inside a ScrollContainer is scrolled to first; the answer says so under
 ## `scrolled_into_view`, because the view having moved is a thing that happened to the screen and
 ## the caller is the only one who can tell whether that matters.
+##
+## `says` names the control by the words on it instead, under `path` when that is given as well,
+## found and pressed in the same frame. A find and then a click by path was two round trips over a
+## generated path copied whole, and a panel that rebuilt itself between them freed the button, so
+## the click landed on nothing.
 func click(params: Dictionary) -> Dictionary:
 	var node_path: String = str(params.get("path", ""))
+	var wanted: String = str(params.get("says", ""))
+	var found: Variant = null
+	if not wanted.is_empty():
+		var picked: Dictionary = Targets.control_saying(
+			_host.get_tree().root, "/root" if node_path.is_empty() else node_path, wanted, params.get("index")
+		)
+		if picked.has("message"):
+			return picked
+		node_path = picked["path"]
+		found = picked["found"]
 	if node_path.is_empty():
-		return {"type": "error", "message": "Node path required"}
+		return {"type": "error", "message": "click needs a path, or says to find the control by its words"}
 
 	var standing: Dictionary = Values.node_at(_host.get_tree().root, node_path)
 	if standing.has("message"):
@@ -582,7 +598,7 @@ func click(params: Dictionary) -> Dictionary:
 	if is_instance_valid(control):
 		afterwards = "in_tree" if control.is_inside_tree() else "removed"
 
-	return {
+	var answer: Dictionary = {
 		"type": "clicked",
 		"path": node_path,
 		"position": _values.serialize(position),
@@ -593,6 +609,9 @@ func click(params: Dictionary) -> Dictionary:
 		"control_afterwards": afterwards,
 		"scrolled_into_view": scrolled,
 	}
+	if found != null:
+		answer["found"] = found
+	return answer
 
 
 ## What to add to a refusal about a point outside the viewport, when the reason is that nobody

@@ -1283,7 +1283,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'runtime_input',
     description:
-      'Input to the running game: a whole click on a Control or a 3D node named by path, an item chosen out of a menu, typing into whatever has the focus, or a raw action, key, mouse button or mouse motion. All of it works headless, where the window is 64 by 64 and the GUI only takes what is inside it.',
+      'Input to the running game: a whole click on a Control or a 3D node named by path or on a control named by the words on it, an item chosen out of a menu, typing into whatever has the focus, or a raw action, key, mouse button or mouse motion. All of it works headless, where the window is 64 by 64 and the GUI only takes what is inside it.',
     parameters: {
       projectPath: RUNNING_PROJECT_PATH,
       pid: RUNNING_PID,
@@ -1291,7 +1291,13 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['click', 'choose'],
         description:
-          'click: the Control to click, at its centre, or the 3D node to click, where it is drawn. choose: the PopupMenu, or the OptionButton or MenuButton in front of one.',
+          'click: the Control to click, at its centre, or the 3D node to click, where it is drawn; with says, where to look for the control instead, default the whole tree. choose: the PopupMenu, or the OptionButton or MenuButton in front of one.',
+      },
+      says: {
+        type: 'string',
+        ops: ['click'],
+        description:
+          'click: the words on the control to click, matched the way runtime_inspect find matches says (a plain word is contained in the text, a pattern with * or ? is a glob over it), among the controls on screen, and pressed in the same frame it was found in, so a panel rebuilding between a find and a click cannot free it first. Words on a label inside a button press the button. Several matches are refused with each one listed, and index picks one.',
       },
       action: {
         type: 'string',
@@ -1332,8 +1338,9 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       index: {
         type: 'number',
-        ops: ['choose'],
-        description: 'choose: the item to take, by where it is in the list, when text will not do.',
+        ops: ['click', 'choose'],
+        description:
+          'click: which of several controls saying the words, counting from 0 in the order a refusal lists them. choose: the item to take, by where it is in the list, when text will not do.',
       },
       shift: { type: 'boolean', ops: ['key'], description: 'key: hold Shift with it. Default false.' },
       ctrl: { type: 'boolean', ops: ['key'], description: 'key: hold Ctrl with it. Default false.' },
@@ -1375,8 +1382,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     operations: {
       click: {
         summary:
-          'press and release on a Control, a frame apart, and answer with what was under the pointer and what became of the control: in_tree, removed or freed. A control out of sight inside a ScrollContainer is scrolled to first, and scrolled_into_view says whether the view moved. A 3D node is clicked where it is drawn, and landed then says the interface did not swallow the press',
-        requires: ['nodePath'],
+          'press and release on a Control, a frame apart, and answer with what was under the pointer and what became of the control: in_tree, removed or freed. The control is named by nodePath, or by says with the words on it, found under nodePath when both are given, and the answer then says under found which match it was. A control out of sight inside a ScrollContainer is scrolled to first, and scrolled_into_view says whether the view moved. A 3D node is clicked where it is drawn, and landed then says the interface did not swallow the press',
+        requires: [],
       },
       choose: {
         summary:
