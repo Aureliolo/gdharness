@@ -175,6 +175,30 @@ try {
   assert.equal(extract.exitCode, 0, extract.stderr.toString());
 
   const packedRoot = path.join(extractionRoot, 'package');
+
+  // Bun reads a file carrying its `// @bun` pragma as Latin-1, so every character past ASCII in one
+  // arrives as two or three. Entry files whose shebang named bun gave cli.js and index.js that
+  // pragma, and under bunx the server answered every `…` in a repeated shape as `â€¦`.
+  const bundles = (await readdir(path.join(packedRoot, 'build'), { recursive: true })).filter((entry) =>
+    entry.endsWith('.js'),
+  );
+  assert.ok(
+    bundles.includes('cli.js') && bundles.includes('index.js'),
+    `the bundles were walked: ${bundles.length}`,
+  );
+  for (const bundle of bundles) {
+    const bytes = await readFile(path.join(packedRoot, 'build', bundle));
+    if (!/^\/\/ @bun/m.test(bytes.subarray(0, 200).toString('latin1'))) {
+      continue;
+    }
+    const beyond = bytes.findIndex((byte) => byte > 0x7f);
+    assert.equal(
+      beyond,
+      -1,
+      `build/${bundle} carries Bun's pragma and a byte past ASCII at ${beyond}, which Bun reads as Latin-1`,
+    );
+  }
+
   const packedPackage: unknown = JSON.parse(await readFile(path.join(packedRoot, 'package.json'), 'utf8'));
   // The marker the MCP registry reads out of the published package to decide this repository owns
   // the name it publishes under. pack-release.ts rebuilds package.json field by field, so one

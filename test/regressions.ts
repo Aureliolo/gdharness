@@ -68,7 +68,7 @@ import {
   theConsoleWasNotCaptured,
   writeEditorLogNote,
 } from '../src/editor-log.js';
-import { forAnswer, GameLog, type LogEntry } from '../src/game-log.js';
+import { answersTo, forAnswer, GameLog, type LogEntry } from '../src/game-log.js';
 import {
   anEditorIsStillComing,
   CONNECT_WINDOW_MS,
@@ -4698,6 +4698,19 @@ function testAWallOfOneMessageCollapsesToItsShape(): void {
   once.finish();
   assert.deepEqual(bursts(once.everything(), 3), []);
 
+  // A read for one phrase carries the shapes holding it and no others. The groups are formed over
+  // the whole console first, so the one kept is counted whole, with the same lines above it.
+  const about = (phrase: string): readonly string[] =>
+    bursts(log.everything(), 3, (entry) => answersTo(entry, 'info', phrase)).map((group) => group.shape);
+  assert.deepEqual(about('Encounter'), [wall.shape], 'a phrase in the first shape keeps that one only');
+  assert.equal(
+    bursts(log.everything(), 3, (entry) => answersTo(entry, 'info', 'Encounter'))[0]?.count,
+    5,
+    'counted over every line, not over the matching ones',
+  );
+  assert.deepEqual(about('Absent'), [other.shape], 'a phrase in a later line of a burst keeps its shape');
+  assert.deepEqual(about('nowhere in this console'), [], 'and a phrase nothing holds keeps none');
+
   // Two slots that go one for one, which is the sentence a reader is trying to arrive at: every
   // name that would not resolve belongs to one directory and every file it is named in belongs to
   // another. Two slots each reading "three distinct" leaves that to be guessed.
@@ -4895,6 +4908,38 @@ async function testALaunchedEditorsConsoleIsReadBeforeItConnects(): Promise<void
         .length,
       1,
       `and it says the editor has not connected: ${early}`,
+    );
+
+    // A filtered read carries the repeated shapes it asked about and no others. Reported from a
+    // read for one class name, which came back with the whole console's twenty shapes on it.
+    writeFileSync(
+      editorLogPath(project),
+      [
+        'Godot Engine v4.7.2.stable.official',
+        ...['Run', 'Ledger', 'Run'].map(
+          (name) => `ERROR: Parse Error: Could not parse global class "${name}"`,
+        ),
+        ...['a.png', 'b.png', 'c.png'].map((file) => `imported "res://art/${file}"`),
+        '',
+      ].join('\n'),
+    );
+    const shapes = async (args: Record<string, unknown>): Promise<string[]> =>
+      asArray(
+        get(
+          jsonOf(await call('editor_output', { op: 'editor', ...args }), 'editor_output op editor'),
+          'repeated',
+        ),
+      ).map((group) => text(get(group, 'shape')));
+    assert.equal((await shapes({})).length, 2, 'an unfiltered read carries every repeated shape');
+    assert.deepEqual(
+      await shapes({ contains: 'Ledger' }),
+      ['Parse Error: Could not parse global class …'],
+      'a read for a phrase carries the shape a line holding it belongs to',
+    );
+    assert.deepEqual(
+      await shapes({ severity: 'error' }),
+      ['Parse Error: Could not parse global class …'],
+      'and a read at a severity leaves out the shapes below it',
     );
   } finally {
     await server.stop();

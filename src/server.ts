@@ -82,7 +82,7 @@ import {
   writeEditorLogNote,
 } from './editor-log.js';
 import { errorMessage, Refusal } from './errors.js';
-import { forAnswer, GameLog, type LogEntry } from './game-log.js';
+import { answersTo, forAnswer, GameLog, type LogEntry } from './game-log.js';
 import {
   anEditorIsStillComing,
   type GodotBridge,
@@ -6619,11 +6619,13 @@ class GodotServer {
         'editor_output with no op answers about the game a run is playing, which is a different log',
       ]);
     }
-    const severity = readString(args, 'severity');
+    const asked = readString(args, 'severity');
+    const severity = asked === 'error' || asked === 'warning' ? asked : 'info';
+    const contains = readNonEmptyString(args, 'contains');
     const selected = console.log.select({
-      severity: severity === 'error' || severity === 'warning' ? severity : 'info',
+      severity,
       sinceLastCall: false,
-      contains: readNonEmptyString(args, 'contains'),
+      contains,
       limit: readPositiveNumber(args, 'limit') ?? 200,
     });
     const everything = console.log.everything();
@@ -6632,7 +6634,13 @@ class GodotServer {
     // hundred groups on top of the two hundred entries. Sorted by count, so the cap takes the
     // small ones, and what it took is said rather than left to be inferred from a short list.
     // Zero is a group with nothing above it, which is an answer; read as positive it carried three.
-    const grouped = bursts(everything, readNonNegativeNumber(args, 'before') ?? 3);
+    // Only the shapes the read asked about, when it asked about something in particular.
+    const filtered = severity !== 'info' || contains !== undefined;
+    const grouped = bursts(
+      everything,
+      readNonNegativeNumber(args, 'before') ?? 3,
+      filtered ? (entry) => answersTo(entry, severity, contains) : undefined,
+    );
     const shown = grouped.slice(0, MOST_GROUPS);
     return this.jsonTextResponse({
       editorPid: editorPid ?? undefined,
