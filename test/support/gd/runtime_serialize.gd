@@ -129,6 +129,13 @@ func _check(values: Values) -> void:
 		_fail("_as_type string to int: %s" % str(values.fitted("7", TYPE_INT)))
 	if values.fitted("true", TYPE_BOOL) != true:
 		_fail("_as_type string to bool: %s" % str(values.fitted("true", TYPE_BOOL)))
+	# A word where a number is wanted comes back as the word, for the caller to refuse, and without
+	# the engine error a loud parse prints into the game's log: the harness fails any fixture whose
+	# output holds one, which is what holds the quiet half.
+	if values.fitted("five", TYPE_INT) != "five":
+		_fail(
+			"a word where an int is wanted comes back as the word: %s" % str(values.fitted("five", TYPE_INT))
+		)
 	if values.fitted("plain", TYPE_STRING) != "plain":
 		_fail("_as_type leaves a string alone: %s" % str(values.fitted("plain", TYPE_STRING)))
 	if values.fitted({"_type": "Vector2", "x": 1, "y": 2}, TYPE_NIL) != Vector2(1, 2):

@@ -86,7 +86,7 @@ func _parse_json_maybe(value: Variant) -> Variant:
 	if typeof(value) != TYPE_STRING:
 		return value
 	var text: String = value
-	var parsed: Variant = JSON.parse_string(text)
+	var parsed: Variant = Read.json_or_null(text)
 	if parsed == null and text != "null":
 		return value
 	return parsed
