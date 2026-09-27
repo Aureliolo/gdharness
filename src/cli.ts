@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 /**
  * The gdharness command line: the MCP server by default, and the commands that own the
  * Godot side of a project, which an agent's tool call is the wrong shape for because they are

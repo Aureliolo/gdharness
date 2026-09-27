@@ -225,16 +225,25 @@ export class GameLog {
         this.seen[severity] = this.entries.length;
       }
     }
-    const matching = this.entries.slice(floor).filter((entry) => {
-      if (!wanted.has(entry.severity)) {
-        return false;
-      }
-      if (needle === undefined) {
-        return true;
-      }
-      return [entry.text, ...entry.detail].some((line) => line.toLowerCase().includes(needle));
-    });
+    const matching = this.entries
+      .slice(floor)
+      .filter((entry) => answersTo(entry, options.severity, options.contains));
     const omitted = Math.max(0, matching.length - options.limit);
     return { entries: matching.slice(omitted), omitted };
   }
+}
+
+/**
+ * Whether [param entry] is one a read at [param severity] and mentioning [param contains] answers
+ * with: at or above the floor, and holding the phrase in its text or its detail, case aside.
+ */
+export function answersTo(entry: LogEntry, severity: Severity, contains: string | undefined): boolean {
+  if (!ADMITTED[severity].has(entry.severity)) {
+    return false;
+  }
+  if (contains === undefined) {
+    return true;
+  }
+  const needle = contains.toLowerCase();
+  return [entry.text, ...entry.detail].some((line) => line.toLowerCase().includes(needle));
 }
