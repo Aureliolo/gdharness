@@ -2490,11 +2490,23 @@ class GodotServer {
         );
       case 'runtime_input':
         if (op === 'click') {
+          if (
+            readNonEmptyString(args, 'nodePath') === undefined &&
+            readNonEmptyString(args, 'says') === undefined
+          ) {
+            return this.createErrorResponse(
+              'runtime_input click needs nodePath, or says with the words on the control to click.',
+            );
+          }
           return await this.handleRuntimeCommand('click', {
             ...whichGame(args),
             path: readNonEmptyString(args, 'nodePath') ?? '',
             button: readString(args, 'button') ?? 'left',
             double: readBoolean(args, 'doubleClick') ?? false,
+            ...(readNonEmptyString(args, 'says') === undefined
+              ? {}
+              : { says: readNonEmptyString(args, 'says') }),
+            ...(args['index'] === undefined ? {} : { index: args['index'] }),
           });
         }
         if (op === 'choose') {
