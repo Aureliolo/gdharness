@@ -121,14 +121,28 @@ export interface GodotProcess {
    */
   gamePid?: number;
   /**
-   * The file the game's runtime addon writes the engine's error reports to, for a run the editor
-   * plays, and how far into it this server has read. The editor's game prints to the editor's
+   * The file the game's runtime addon writes the engine's error reports to, and its prints from
+   * the runtime's start, for a run the editor plays, and how far into it this server has read. The editor's game prints to the editor's
    * stderr, which nobody reads, and the debug adapter relays what the game prints and not what it
    * reports, so a `push_error` in a played game reached neither the log nor the transcript and
-   * the run was answered clean. Found beside the announcement once the run is tied to its game.
+   * the run was answered clean. Found beside the announcement once the run is tied to its game;
+   * null for a run that reached the boundary line with no report to be found, which is not read.
    */
-  errorReport?: string;
+  errorReport?: string | null;
   errorReportOffset?: number;
+  /**
+   * True once the run's console is taken from the report rather than from the debug adapter.
+   *
+   * The two are separate streams reaching the server at separate moments: the adapter's prints as
+   * they arrive and the report's errors when it is read, so a warning raised in `_ready` came out
+   * after a print made a second later. The runtime's report carries the prints too from the line
+   * announcing it on, so from that line the report is the one source and has the engine's order,
+   * and the adapter's copies of the same prints are dropped. Before it the adapter is the only
+   * source of prints, which is the engine's own start-up and whatever ran before the runtime.
+   */
+  consoleFromReport?: boolean;
+  /** When the boundary line was first read in the report, while the adapter had not yet sent it. */
+  boundaryInReportSince?: number;
   /**
    * Why this server ended the run, or null when it did not.
    *
