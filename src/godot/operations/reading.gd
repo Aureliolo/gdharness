@@ -69,3 +69,16 @@ static func as_bool(value: Variant, fallback: bool = false) -> bool:
 		var text: String = value
 		return not text.is_empty()
 	return fallback
+
+
+## [param text] read as JSON, or null when it does not parse, without printing anything.
+##
+## [method JSON.parse_string] prints an engine error for text that does not parse, and that error
+## lands in the log of whatever is running it. A caller sending the word "five" where a number was
+## wanted was refused properly, and the game's own log then held an error it never made, so its
+## verdict read `clean: false`. Text that is not JSON is an answer here, not a fault.
+static func json_or_null(text: String) -> Variant:
+	var json: JSON = JSON.new()
+	if json.parse(text) != OK:
+		return null
+	return json.data
