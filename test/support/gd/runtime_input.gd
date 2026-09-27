@@ -83,6 +83,7 @@ func _everything() -> void:
 	await _type_with_keys(input)
 	_check_what_the_keys_typed()
 	await _check_a_dialog(input)
+	await _check_a_click_by_words(input)
 
 	host.queue_free()
 	if failures.is_empty():
@@ -437,3 +438,112 @@ func _check_a_dialog(input: InputCommands) -> void:
 	if asking.visible:
 		_fail("the Escape key should close a dialog, which is how a player answers one")
 	asking.queue_free()
+
+
+## A button placed inside the 64 by 64 viewport a headless game has, its words clipped so the text
+## does not widen it past the edge, counting its presses under the meta `presses`.
+func _small_button(parent: Node, words: String, at: Vector2) -> Button:
+	var button: Button = Button.new()
+	button.text = words
+	button.clip_text = true
+	button.position = at
+	button.size = Vector2(26, 12)
+	button.set_meta("presses", 0)
+	Checked.done(
+		button.pressed.connect(
+			func() -> void: button.set_meta("presses", Read.as_int(button.get_meta("presses"), 0) + 1)
+		),
+		"counting presses on %s" % words
+	)
+	parent.add_child(button)
+	return button
+
+
+func _presses(button: Button) -> int:
+	return Read.as_int(button.get_meta("presses"), 0)
+
+
+## A click that names its control by the words on it, found and pressed in the same frame: one
+## match, several refused with an index for each and picked by index, narrowed by path, words on a
+## label pressing the button holding it, a glob, and words only a hidden control says.
+func _check_a_click_by_words(input: InputCommands) -> void:
+	var screen: Control = Control.new()
+	screen.size = Vector2(64, 64)
+	root.add_child(screen)
+	var new_guild: Button = _small_button(screen, "New guild", Vector2(2, 2))
+	var left: Control = Control.new()
+	left.name = "Left"
+	screen.add_child(left)
+	var right: Control = Control.new()
+	right.name = "Right"
+	screen.add_child(right)
+	var send_left: Button = _small_button(left, "Send back", Vector2(2, 18))
+	var send_right: Button = _small_button(right, "Send back", Vector2(34, 18))
+	var recruit: Button = _small_button(screen, "", Vector2(2, 34))
+	var words: Label = Label.new()
+	words.text = "Recruit"
+	words.clip_text = true
+	words.size = Vector2(26, 12)
+	recruit.add_child(words)
+	var secret: Button = _small_button(screen, "Secret", Vector2(34, 34))
+	secret.visible = false
+	await root.get_tree().process_frame
+
+	var once: Dictionary = await input.click({"says": "New guild"})
+	var found: Dictionary = once.get("found", {})
+	if once.get("type") != "clicked" or _presses(new_guild) != 1 or once.get("landed") != true:
+		_fail("a click by words presses the one control saying them: %s" % JSON.stringify(once))
+	elif found.get("of") != 1 or found.get("index") != 0 or once.get("path") != str(new_guild.get_path()):
+		_fail("and says which match it pressed: %s" % JSON.stringify(once))
+
+	var unclear: Dictionary = await input.click({"says": "Send back"})
+	var listed: String = str(unclear.get("message", ""))
+	if (
+		unclear.get("type") != "error"
+		or not listed.contains("2 controls on screen say")
+		or not listed.contains('0 %s ("Send back")' % send_left.get_path())
+		or not listed.contains('1 %s ("Send back")' % send_right.get_path())
+	):
+		_fail(
+			"two controls saying the words are refused with an index for each: %s" % JSON.stringify(unclear)
+		)
+	if _presses(send_left) + _presses(send_right) != 0:
+		_fail("and neither is pressed")
+
+	var second: Dictionary = await input.click({"says": "Send back", "index": 1})
+	if _presses(send_right) != 1 or _presses(send_left) != 0:
+		_fail("index 1 presses the second one listed: %s" % JSON.stringify(second))
+	var narrowed: Dictionary = await input.click({"says": "Send back", "path": str(left.get_path())})
+	if _presses(send_left) != 1 or narrowed.get("type") != "clicked":
+		_fail("a path narrows where the words are looked for: %s" % JSON.stringify(narrowed))
+	var beyond: Dictionary = await input.click({"says": "Send back", "index": 2})
+	if (
+		beyond.get("type") != "error"
+		or not str(beyond.get("message", "")).contains("index 2 is not one of the 2")
+	):
+		_fail("an index past the matches is refused: %s" % JSON.stringify(beyond))
+
+	var through: Dictionary = await input.click({"says": "Recruit"})
+	if (
+		_presses(recruit) != 1
+		or through.get("path") != str(recruit.get_path())
+		or through.get("landed") != true
+	):
+		_fail("words on a label press the button holding it: %s" % JSON.stringify(through))
+
+	var globbed: Dictionary = await input.click({"says": "New g*"})
+	if _presses(new_guild) != 2:
+		_fail("a glob in says is matched as a find matches one: %s" % JSON.stringify(globbed))
+
+	var hidden: Dictionary = await input.click({"says": "Secret"})
+	var hidden_said: String = str(hidden.get("message", ""))
+	if hidden.get("type") != "error" or not hidden_said.contains("1 hidden control says it"):
+		_fail(
+			(
+				"words only a hidden control says are refused and the hidden one counted: %s"
+				% JSON.stringify(hidden)
+			)
+		)
+	if _presses(secret) != 0:
+		_fail("and the hidden control is not pressed")
+	screen.queue_free()

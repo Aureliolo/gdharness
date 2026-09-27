@@ -259,6 +259,12 @@ static func _says(said: String, wanted: String) -> bool:
 	return said.containsn(words) if _is_literal(words) else said.matchn(words)
 
 
+## Whether [param node]'s own words are what [param wanted] asks for, by the rules a find uses, so a
+## click that names its control by its words finds the one a find would have answered with.
+static func says(node: Node, wanted: String) -> bool:
+	return _says(Words.said_by(node), wanted)
+
+
 ## [param wanted], a glob, open at both ends so it matches its words anywhere in a text; "" when
 ## it is not a glob, or already open at both ends, and so has nothing to suggest.
 static func _widened(wanted: String) -> String:

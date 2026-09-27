@@ -583,6 +583,17 @@ async function main(): Promise<void> {
         { path: '/root/Menu/Play', button: 'left', double: false },
         'click carries the path, the button and whether it is a double click',
       );
+      const byWords = await payload('runtime_input', { op: 'click', says: 'New guild', index: 1 });
+      assert.deepEqual(
+        get(byWords, 'asked'),
+        { path: '', button: 'left', double: false, says: 'New guild', index: 1 },
+        'a click by words carries them and the index, with no path to narrow the search',
+      );
+      assert.match(
+        textOf(await call('runtime_input', { op: 'click' })) ?? '',
+        /runtime_input click needs nodePath, or says with the words on the control to click/,
+        'a click naming no control is refused before the game is asked',
+      );
 
       const waited = await payload('runtime_wait', {
         op: 'signal',
