@@ -256,7 +256,7 @@ func fitted(value: Variant, type: int) -> Variant:
 
 	if rebuilt is String and type != TYPE_STRING:
 		var text: String = rebuilt
-		var parsed: Variant = JSON.parse_string(text)
+		var parsed: Variant = Read.json_or_null(text)
 		# A string that does not read as the type wanted is handed back as the string it is, so
 		# whoever asked can refuse it. type_convert answers 0 for "not an index" and true for any
 		# text at all, and a caller who sent a word got back a number they never sent: get_child
