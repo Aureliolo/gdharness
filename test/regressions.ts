@@ -17745,6 +17745,26 @@ function testAnUpgradeReadsTheEngineOutOfTheConfigItRewrites(): void {
 }
 
 /**
+ * No shipped script reads JSON through `JSON.parse_string`, which prints an engine error for text
+ * that does not parse into the log of whatever runs it: the game's, the editor's, or an
+ * operation's. A caller's word sent where a number was wanted left the game reading `clean: false`
+ * for an error it never made. Walked rather than listed, so a script added later is covered, and
+ * comments are left out, since the reason is written down in one.
+ */
+function testNoShippedScriptParsesJsonLoudly(): void {
+  const scripts = readdirSync(join('src', 'godot'), { recursive: true })
+    .map(String)
+    .filter((entry) => entry.endsWith('.gd'));
+  assert.ok(scripts.length >= 43, `the shipped scripts were walked: ${scripts.length}`);
+  const loud = scripts.filter((script) =>
+    readFileSync(join('src', 'godot', script), 'utf8')
+      .split('\n')
+      .some((line) => !line.trimStart().startsWith('#') && line.includes('JSON.parse_string(')),
+  );
+  assert.deepEqual(loud, [], 'read JSON through Read.json_or_null, which fails without printing');
+}
+
+/**
  * Taking the addons out removes `addons/` only when that leaves it empty, and only when something
  * of gdharness was there to take: a project's own addon keeps the directory, and an empty one that
  * gdharness never filled is not its to remove.
@@ -20785,6 +20805,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnUpgradeReadsTheEngineOutOfTheConfigItRewrites,
   testCommandLineSetup,
   testUninstallLeavesAddonsItDidNotMake,
+  testNoShippedScriptParsesJsonLoudly,
   testTheWrittenConfigNamesAProgramThatStarts,
 
   testProjectGodotMultilineValues,
