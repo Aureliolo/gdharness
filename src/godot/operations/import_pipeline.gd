@@ -645,7 +645,7 @@ static func _images_of(scene_path: String) -> Array[String]:
 				text = bytes.slice(20, mini(20 + length, bytes.size())).get_string_from_utf8()
 	if text.is_empty():
 		return images
-	var parsed: Variant = JSON.parse_string(text)
+	var parsed: Variant = Read.json_or_null(text)
 	if not parsed is Dictionary:
 		return images
 	var document: Dictionary = parsed
