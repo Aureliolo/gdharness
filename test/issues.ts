@@ -133,13 +133,20 @@ assert.notEqual(
 
 // The feedback block rides on an ordinary answer, so it has to parse as one more field rather
 // than as prose a reader has to guess the shape of.
-const notice: unknown = JSON.parse(feedbackNotice());
+const notice: unknown = JSON.parse(feedbackNotice(250));
 assert.ok(
   typeof notice === 'object' && notice !== null && 'gdharness_feedback' in notice,
   'the feedback notice should be a JSON block under one named key',
 );
-const feedback = (notice as { gdharness_feedback: { what_to_do?: unknown; enhancement_url?: unknown } })
-  .gdharness_feedback;
+const feedback = (
+  notice as { gdharness_feedback: { what_to_do?: unknown; enhancement_url?: unknown; why_here?: unknown } }
+).gdharness_feedback;
+// Why it is on this answer at all, since on a plain success it read as something the call caused.
+assert.match(
+  String(feedback.why_here),
+  /once every 250 answers, whatever the call was\. It is not about the answer it comes with/,
+  'the notice says it is periodic and not about the answer it rides on',
+);
 assert.equal(feedback.enhancement_url, ENHANCEMENT_URL, 'and carry the link to open');
 assert.equal(
   new URL(ENHANCEMENT_URL).searchParams.get('template'),

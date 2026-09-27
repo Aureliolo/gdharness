@@ -718,6 +718,23 @@ func _check_a_click_by_words_ranked(input: InputCommands) -> void:
 		each.queue_free()
 	await root.get_tree().process_frame
 
+	# Cards: a title over a description. The card whose title is exactly the words is the exact match,
+	# over the one whose title only starts with them.
+	var ward: Button = _small_button(root, "WARD\nwards 3", Vector2(2, 2))
+	var spite: Button = _small_button(root, "WARDSPITE\ntwo words", Vector2(34, 2))
+	await root.get_tree().process_frame
+	var titled: Dictionary = await input.click({"says": "WARD"})
+	if _presses(ward) != 1 or _presses(spite) != 0:
+		_fail(
+			(
+				"a card whose title line is exactly the words is pressed over one saying more: %s"
+				% JSON.stringify(titled)
+			)
+		)
+	ward.queue_free()
+	spite.queue_free()
+	await root.get_tree().process_frame
+
 	# A cover away from the origin and scaled, so it covers the button only where it is drawn: its own
 	# rectangle at the origin misses the button's centre, and so does the same rectangle placed but
 	# not scaled.
