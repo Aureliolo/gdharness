@@ -546,6 +546,11 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         description:
           'How long the run may take before it is killed. Default 600000. A run killed at the limit answers timedOut and silentForMs, how long it had printed nothing; it is called hung only when that was half the limit, or thirty seconds of a longer one, and otherwise it was still running and wants a longer timeoutMs or a narrower path.',
       },
+      printed: {
+        type: 'string',
+        description:
+          'Also answer with every line the run printed that contains this, under printed, whether it passed or not: a suite that prints a marker beside the numbers it measured carries them back without failing an assertion to do it. Matched case aside, in the text and the backtrace, at most 200 lines, the newest kept; printedOmitted counts the rest.',
+      },
     },
     requires: ['projectPath'],
   },
