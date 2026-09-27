@@ -127,7 +127,7 @@ func _parse_properties_arg(raw_properties: Variant) -> Dictionary:
 		var text: String = str(raw_properties)
 		if text.strip_edges().is_empty():
 			return {}
-		var parsed: Variant = JSON.parse_string(text)
+		var parsed: Variant = Read.json_or_null(text)
 		if typeof(parsed) == TYPE_DICTIONARY:
 			return parsed
 	return {}

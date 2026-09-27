@@ -243,7 +243,7 @@ func announced_url() -> String:
 	var file: FileAccess = FileAccess.open(ANNOUNCEMENT, FileAccess.READ)
 	if file == null:
 		return ""
-	var said: Variant = JSON.parse_string(file.get_as_text())
+	var said: Variant = Read.json_or_null(file.get_as_text())
 	file.close()
 	if not said is Dictionary:
 		return ""
@@ -481,7 +481,7 @@ func _on_reconnect_timer() -> void:
 
 
 func _handle_message(json_string: String) -> void:
-	var parsed: Variant = JSON.parse_string(json_string)
+	var parsed: Variant = Read.json_or_null(json_string)
 	if not parsed is Dictionary:
 		push_error("[gdharness] The server sent something that is not a message: %s" % json_string)
 		return
