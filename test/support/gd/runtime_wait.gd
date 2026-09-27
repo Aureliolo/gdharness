@@ -186,6 +186,51 @@ func _check_the_room() -> void:
 
 	body.free()
 	eye.free()
+	await _check_a_room_in_a_subviewport()
+
+
+## A room drawn in a SubViewport, half the size of the container showing it and drawn at twice its
+## own size, the container set in from the window's corner. Ten metres over the SubViewport's 100
+## pixels is 10 pixels a metre, so the mesh a metre above a body at the middle is at (50, 40) in the
+## SubViewport and (100 + 2 * 50, 50 + 2 * 40) on the screen. The pointer the SubViewport reads is
+## the proof it arrived there, since nothing on its interface is over the room to say so.
+func _check_a_room_in_a_subviewport() -> void:
+	var frame: SubViewportContainer = SubViewportContainer.new()
+	frame.name = "Frame"
+	frame.stretch = true
+	frame.stretch_shrink = 2
+	frame.position = Vector2(100, 50)
+	frame.size = Vector2(200, 200)
+	root.add_child(frame)
+	var room: SubViewport = SubViewport.new()
+	frame.add_child(room)
+	var eye: Camera3D = Camera3D.new()
+	eye.projection = Camera3D.PROJECTION_ORTHOGONAL
+	eye.size = ROOM_METRES
+	eye.position = Vector3(0.0, 0.0, 10.0)
+	room.add_child(eye)
+	eye.make_current()
+	var body: Node3D = Node3D.new()
+	room.add_child(body)
+	var shape: MeshInstance3D = MeshInstance3D.new()
+	shape.mesh = BoxMesh.new()
+	shape.position = Vector3(0.0, 1.0, 0.0)
+	body.add_child(shape)
+	await process_frame
+	await process_frame
+
+	var clicked: Dictionary = await node._execute_command("click", {"path": str(body.get_path())})
+	var at: Dictionary = clicked.get("position", {})
+	if at.get("x") != 200.0 or at.get("y") != 130.0:
+		_fail("a body in a SubViewport is clicked where it is drawn on the screen: %s" % str(clicked))
+	if room.get_mouse_position() != Vector2(50, 40):
+		_fail(
+			(
+				"and the SubViewport reads the pointer at the body: %s, clicked %s"
+				% [room.get_mouse_position(), str(clicked)]
+			)
+		)
+	frame.free()
 
 
 func _check_the_body_is_placed() -> void:
