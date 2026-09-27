@@ -10,6 +10,7 @@ const Values = preload("runtime_values.gd")
 ## reports are the same place by construction rather than by agreement.
 const Queries = preload("runtime_queries.gd")
 const Read = preload("reading.gd")
+const Menus = preload("runtime_menus.gd")
 const Targets = preload("runtime_targets.gd")
 const Words = preload("runtime_words.gd")
 
@@ -583,20 +584,17 @@ func click(params: Dictionary) -> Dictionary:
 		hovered_path = str(hovered.get_path())
 	var landed: bool = hovered == control or (hovered != null and control.is_ancestor_of(hovered))
 
-	viewport.push_input(_button(position, button, true, double))
+	_press_button(viewport, _button(position, button, true, double))
 	await _host.get_tree().process_frame
-	viewport.push_input(_button(position, button, false, false))
+	_press_button(viewport, _button(position, button, false, false))
 	# The release is what a button acts on, and a queue_free it causes lands at the end of
 	# this frame; the frame passes so the answer describes the control as the click left it.
 	await _host.get_tree().process_frame
 
 	# What became of the control: still in the tree, taken out of it, or freed. A button that
 	# opened another screen is the second or the third, and the caller wants to hear that
-	# rather than guess it from a tree that has changed shape. A freed reference cannot be
-	# handed to anything typed, so the question is asked here.
-	var afterwards: String = "freed"
-	if is_instance_valid(control):
-		afterwards = "in_tree" if control.is_inside_tree() else "removed"
+	# rather than guess it from a tree that has changed shape.
+	var afterwards: String = _afterwards(control)
 
 	var answer: Dictionary = {
 		"type": "clicked",
@@ -655,7 +653,7 @@ func choose(params: Dictionary) -> Dictionary:
 		return standing
 	var node: Node = standing["node"]
 
-	var menu: PopupMenu = _menu_of(node)
+	var menu: PopupMenu = Menus.menu_of(node)
 	if menu == null:
 		return {
 			"type": "error",
@@ -672,15 +670,15 @@ func choose(params: Dictionary) -> Dictionary:
 			"message":
 			(
 				"%s needs the item named, by text or index. It holds: %s"
-				% [node_path, ", ".join(_items_of(menu))]
+				% [node_path, ", ".join(Menus.items_of(menu))]
 			)
 		}
 
-	var index: int = _wanted_item(menu, params)
+	var index: int = Menus.wanted_item(menu, params)
 	if index < 0:
 		return {
 			"type": "error",
-			"message": "%s has no such item. It holds: %s" % [node_path, ", ".join(_items_of(menu))]
+			"message": "%s has no such item. It holds: %s" % [node_path, ", ".join(Menus.items_of(menu))]
 		}
 	if menu.is_item_separator(index):
 		var heading: String = Words.item_says(menu, index).strip_edges()
@@ -705,9 +703,22 @@ func choose(params: Dictionary) -> Dictionary:
 	# Shown first, because a menu nobody has opened has no focus to move and Enter would go to
 	# whatever is behind it. An OptionButton opens its own; a bare PopupMenu is popped where it
 	# already sits, which leaves a menu that was already open where it is.
-	var opened: bool = _open_the_menu(node, menu)
+	var opened: bool = Menus.open_the_menu(node, menu)
 	await _host.get_tree().process_frame
 
+	# Read before the press, because the press can take the menu away: a game that rebuilds its
+	# settings screen on item_selected frees the button and its menu inside the pick, and reading
+	# the item afterwards was an engine error in the game's log and an empty answer to a pick that
+	# had taken.
+	var answer: Dictionary = {
+		"type": "chosen",
+		"path": node_path,
+		"index": index,
+		"text": Words.item_says(menu, index),
+		"id": menu.get_item_id(index),
+		"opened": opened,
+		"menu": str(menu.get_path()),
+	}
 	menu.scroll_to_item(index)
 	menu.set_focused_item(index)
 	# Through Input rather than pushed at the menu, which is how a keyboard reaches an open one: a
@@ -718,96 +729,49 @@ func choose(params: Dictionary) -> Dictionary:
 	Input.parse_input_event(_accept(false))
 	await _host.get_tree().process_frame
 
-	var answer: Dictionary = {
-		"type": "chosen",
-		"path": node_path,
-		"index": index,
-		"text": Words.item_says(menu, index),
-		"id": menu.get_item_id(index),
-		"opened": opened,
-		"menu": str(menu.get_path()),
-	}
+	answer["control_afterwards"] = _afterwards(node)
 	# What the button in front of the menu reads now, which is the answer to "did it take": a menu
-	# item that fired changes the thing holding it, and nothing else about the press says so.
-	var chooser: OptionButton = node as OptionButton
-	if chooser != null:
+	# item that fired changes the thing holding it, and nothing else about the press says so. A
+	# button the pick took away has nothing to read, and that it went is the answer.
+	if answer["control_afterwards"] == "in_tree" and node is OptionButton:
+		var chooser: OptionButton = node
 		answer["selected"] = chooser.get_selected()
 		answer["shows"] = Words.said_by(chooser)
 	return answer
 
 
-## The menu [param node] is, or the one it holds. An [OptionButton] and a [MenuButton] both keep
-## theirs as an internal child, which is a node a caller cannot name and should not have to.
-static func _menu_of(node: Node) -> PopupMenu:
-	var menu: PopupMenu = node as PopupMenu
-	if menu != null:
-		return menu
-	if node.has_method("get_popup"):
-		var held: Variant = node.call("get_popup")
-		if held is PopupMenu:
-			return held
-	return null
-
-
-## Which item was asked for: `text`, matched exactly and then case-insensitively, or `index`.
-## Minus one when neither names one that is there.
+## Sends a click's press or release into [param viewport], through Input when that is the game's
+## own window.
 ##
-## `text` is matched against the words the item shows before the ones it holds. In a game with
-## translations they differ, and the shown ones are what a caller has read off the screen: an item
-## held as `ACT_ENGAGE` and shown as "Hire" refused "Hire" and listed the keys. The held words
-## still count after them, for a caller that has the key from the source.
-static func _wanted_item(menu: PopupMenu, params: Dictionary) -> int:
-	if params.has("index"):
-		var asked: int = Read.as_int(params.get("index", -1), -1)
-		return asked if asked >= 0 and asked < menu.get_item_count() else -1
-	var wanted: String = str(params.get("text", ""))
-	if wanted.is_empty():
-		return -1
-	# The items before the separators, because a heading can carry the same words as an item under
-	# it, and finding the heading first refused the choice the caller meant. A separator is still
-	# looked for after, so a heading asked for by name is refused as one rather than as missing.
-	var order: Array[int] = []
-	for separators: bool in [false, true]:
-		for index: int in menu.get_item_count():
-			if menu.is_item_separator(index) == separators:
-				order.append(index)
-	var shown: Array[String] = []
-	var held: Array[String] = []
-	for index: int in order:
-		shown.append(Words.item_says(menu, index))
-		held.append(menu.get_item_text(index))
-	for words: Array[String] in [shown, held]:
-		for at: int in words.size():
-			if words[at] == wanted:
-				return order[at]
-		for at: int in words.size():
-			if words[at].nocasecmp_to(wanted) == 0:
-				return order[at]
-	return -1
+## Through Input so that Input knows a button is held, which is what a real mouse tells it. A
+## PopupMenu opened by a press asks Input whether a button is down, and when one is, it lets the
+## release that ends that press go by rather than choosing the item under it. Pushed straight into
+## the viewport, the press left Input thinking nothing was held, so a dropdown near the bottom of
+## the screen, whose menu opens over it and under the pointer, had its first item chosen by the
+## click meant to open it. Games read that state too, through Input.is_mouse_button_pressed.
+##
+## Any other viewport is pushed into directly: Input reaches only the game's window, and a point in
+## a SubViewport's own coordinates means something else there.
+func _press_button(viewport: Viewport, event: InputEventMouseButton) -> void:
+	if viewport == _host.get_tree().root:
+		Input.parse_input_event(event)
+		# Delivered now, as a push is, rather than at the next frame: the answer is read a frame
+		# after the release, and a button that frees itself on it has to be gone by then.
+		Input.flush_buffered_events()
+	else:
+		viewport.push_input(event)
 
 
-## What the menu shows, for a refusal that names the choices rather than the miss: a titled
-## separator marked as the heading it is, and one with no title left out, since it shows nothing.
-static func _items_of(menu: PopupMenu) -> Array[String]:
-	var said: Array[String] = []
-	for index: int in menu.get_item_count():
-		var words: String = Words.item_says(menu, index)
-		if not menu.is_item_separator(index):
-			said.append("%d: %s" % [index, words])
-		elif not words.strip_edges().is_empty():
-			said.append("%d: %s (a heading)" % [index, words])
-	return said
-
-
-## Opens the menu if it is not already, and answers whether anything opened.
-static func _open_the_menu(node: Node, menu: PopupMenu) -> bool:
-	if menu.visible:
-		return false
-	if node.has_method("show_popup"):
-		node.call("show_popup")
-		return true
-	menu.popup()
-	return true
+## What became of [param node] once an input it was given has run: still in the tree, taken out
+## of it, or freed. Untyped, because a freed reference handed to a typed parameter is itself the
+## engine error this is here to avoid.
+static func _afterwards(node: Variant) -> String:
+	if not is_instance_valid(node):
+		return "freed"
+	if not node is Node:
+		return "removed"
+	var placed: Node = node
+	return "in_tree" if placed.is_inside_tree() else "removed"
 
 
 func _accept(pressed: bool) -> InputEventKey:
@@ -873,9 +837,9 @@ func _click_in_the_world(node_path: String, item: Node3D, params: Dictionary) ->
 	if hovered != null:
 		hovered_path = str(hovered.get_path())
 
-	viewport.push_input(_button(position, button, true, double))
+	_press_button(viewport, _button(position, button, true, double))
 	await _host.get_tree().process_frame
-	viewport.push_input(_button(position, button, false, false))
+	_press_button(viewport, _button(position, button, false, false))
 	await _host.get_tree().process_frame
 
 	return {

@@ -285,6 +285,39 @@ func _check_a_menu() -> void:
 
 	picker.free()
 	await _check_a_heading_is_not_a_choice()
+	await _check_a_pick_that_frees_the_menu()
+
+
+## A settings screen rebuilt on item_selected frees the button and its menu inside the pick. The
+## answer is read before the press and says the button went; the fixture's run fails on the engine
+## error that reading a freed menu afterwards printed.
+func _check_a_pick_that_frees_the_menu() -> void:
+	var setting: OptionButton = OptionButton.new()
+	setting.name = "Setting"
+	setting.position = Vector2(350, 200)
+	setting.size = Vector2(160, 30)
+	setting.add_item("Windowed", 1)
+	setting.add_item("Fullscreen", 2)
+	var rebuilt: Array[int] = []
+	var rebuild: Callable = func(index: int) -> void:
+		rebuilt.append(index)
+		setting.queue_free()
+	Checked.done(setting.item_selected.connect(rebuild) as Error, "rebuilding the screen on a pick")
+	root.add_child(setting)
+	await process_frame
+
+	var took: Dictionary = await node._execute_command("choose", {"path": "/root/Setting", "index": 1})
+	if (
+		took.get("type") != "chosen"
+		or took.get("text") != "Fullscreen"
+		or took.get("id") != 2
+		or took.get("control_afterwards") != "freed"
+	):
+		_fail("a pick that frees its menu answers with the item and says the button went: %s" % str(took))
+	if took.has("selected") or took.has("shows"):
+		_fail("and reads nothing off a button that is gone: %s" % str(took))
+	if rebuilt != [1]:
+		_fail("and the pick took: %s" % str(rebuilt))
 
 
 ## A titled separator heads the items under it and can carry the same words as one of them. It is
