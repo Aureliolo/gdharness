@@ -595,6 +595,58 @@ func _check_a_click_opening_a_menu_over_itself(input: InputCommands) -> void:
 	dropdown.queue_free()
 	await root.get_tree().process_frame
 
+	# The same dropdown inside a SubViewport shown through a container, which is a viewport of its
+	# own and not the game's window.
+	var frame: SubViewportContainer = SubViewportContainer.new()
+	frame.stretch = true
+	frame.size = Vector2(64, 64)
+	root.add_child(frame)
+	var inner: SubViewport = SubViewport.new()
+	frame.add_child(inner)
+	var nested: OptionButton = OptionButton.new()
+	nested.position = Vector2(2, 30)
+	nested.size = Vector2(60, 20)
+	nested.add_item("Windowed", 1)
+	nested.add_item("Fullscreen", 2)
+	var nested_picked: Array[int] = []
+	var nested_note: Callable = func(index: int) -> void: nested_picked.append(index)
+	Checked.done(nested.item_selected.connect(nested_note) as Error, "noting a nested pick")
+	inner.add_child(nested)
+	await root.get_tree().process_frame
+	await root.get_tree().process_frame
+	var inside: Dictionary = await input.click({"path": str(nested.get_path())})
+	var nested_menu: PopupMenu = nested.get_popup()
+	if not nested_picked.is_empty() or not nested_menu.visible:
+		_fail(
+			(
+				"a dropdown in a SubViewport opens its menu and chooses nothing: %s, picked %s, open %s"
+				% [JSON.stringify(inside), nested_picked, nested_menu.visible]
+			)
+		)
+	nested_menu.hide()
+	frame.queue_free()
+	await root.get_tree().process_frame
+
+	# Shrunk: the SubViewport is half the container's size and drawn at twice its own, so a point in
+	# it lands at twice its coordinates on the screen. Placed where the point read at its own
+	# coordinates misses it.
+	var halved: SubViewportContainer = SubViewportContainer.new()
+	halved.stretch = true
+	halved.stretch_shrink = 2
+	halved.size = Vector2(64, 64)
+	root.add_child(halved)
+	var small: SubViewport = SubViewport.new()
+	halved.add_child(small)
+	var corner: Button = _small_button(small, "", Vector2(20, 20))
+	corner.size = Vector2(8, 8)
+	await root.get_tree().process_frame
+	await root.get_tree().process_frame
+	var pressed: Dictionary = await input.click({"path": str(corner.get_path())})
+	if _presses(corner) != 1 or pressed.get("landed") != true:
+		_fail("a button in a shrunk SubViewport is pressed where it is drawn: %s" % JSON.stringify(pressed))
+	halved.queue_free()
+	await root.get_tree().process_frame
+
 
 func _check_a_click_by_words_ranked(input: InputCommands) -> void:
 	# Placed by centre, and a button in the default theme grows to about 31 pixels tall whatever size

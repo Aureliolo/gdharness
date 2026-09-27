@@ -5,6 +5,7 @@ extends RefCounted
 
 const Paths = preload("runtime_paths.gd")
 const Read = preload("reading.gd")
+const Screen = preload("runtime_screen.gd")
 const Values = preload("runtime_values.gd")
 const Words = preload("runtime_words.gd")
 
@@ -423,21 +424,30 @@ func get_rect(params: Dictionary) -> Dictionary:
 		return standing
 	var node: Node = standing["node"]
 
+	# In the window's pixels, which is what a mouse event names, through every embedded window and
+	# SubViewport between the node and the window: multiplied by its own viewport's transform alone,
+	# a control in a dialog lost the dialog's offset and one in a SubViewport was given its place in
+	# the SubViewport, and a mouse event sent there missed it.
 	if node is Control:
 		var control: Control = node
-		var to_window: Transform2D = control.get_viewport().get_final_transform()
 		var canvas_rect: Rect2 = control.get_global_rect()
 		return {
 			"type": "rect",
 			"path": node_path,
 			"visible": control.is_visible_in_tree(),
 			"canvas": _values.serialize(canvas_rect),
-			"window": _values.serialize(to_window * canvas_rect),
+			"window":
+			_values.serialize(
+				Screen.rect_in_window(
+					control.get_viewport(),
+					control.get_global_transform_with_canvas() * Rect2(Vector2.ZERO, control.size)
+				)
+			),
 		}
 	if node is Node2D:
 		var item: Node2D = node
 		var canvas_position: Vector2 = item.get_global_transform_with_canvas().origin
-		var window_position: Vector2 = item.get_viewport().get_final_transform() * canvas_position
+		var window_position: Vector2 = Screen.in_window(item.get_viewport(), canvas_position)
 		return {
 			"type": "point",
 			"path": node_path,
@@ -470,7 +480,7 @@ func _in_the_frame(node_path: String, item: Node3D) -> Dictionary:
 			"message": "%s is not in a viewport with a current Camera3D, so nothing is drawing it" % node_path
 		}
 
-	var to_window: Transform2D = item.get_viewport().get_final_transform()
+	var drawn_in: Viewport = item.get_viewport()
 	var answer: Dictionary = {
 		"type": "point",
 		"path": node_path,
@@ -481,12 +491,12 @@ func _in_the_frame(node_path: String, item: Node3D) -> Dictionary:
 	if found.has("aim"):
 		var aim: Vector2 = found["aim"]
 		answer["canvas"] = _values.serialize(aim)
-		answer["window"] = _values.serialize(to_window * aim)
+		answer["window"] = _values.serialize(Screen.in_window(drawn_in, aim))
 	if found.has("rect"):
 		var covered: Rect2 = found["rect"]
 		answer["covers"] = {
 			"canvas": _values.serialize(covered),
-			"window": _values.serialize(to_window * covered),
+			"window": _values.serialize(Screen.rect_in_window(drawn_in, covered)),
 		}
 	return answer
 
