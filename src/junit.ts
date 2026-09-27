@@ -305,7 +305,8 @@ export function whyNoReport(printed: readonly string[], asked: string): string |
 /** One error in a script gdUnit4 could not load while looking for suites. */
 export interface ScriptError {
   readonly path: string;
-  readonly line: number;
+  /** Null where the engine printed line 0, which it does for an error that belongs to no line. */
+  readonly line: number | null;
   readonly message: string;
 }
 
@@ -328,7 +329,7 @@ export function scriptErrorsPrinted(printed: readonly string[]): ScriptError[] {
   for (const line of printed.slice(start + 1)) {
     const at = /^\s*at (res:\/\/.+):(\d+)\s*$/.exec(line);
     if (at !== null && message !== null) {
-      found.push({ path: at[1] ?? '', line: Number(at[2]), message });
+      found.push({ path: at[1] ?? '', line: Number(at[2]) === 0 ? null : Number(at[2]), message });
       message = null;
     } else if (at === null && message === null && /^ {2}\S/.test(line)) {
       message = line.trim();
@@ -338,7 +339,7 @@ export function scriptErrorsPrinted(printed: readonly string[]): ScriptError[] {
   }
   // gdUnit4 lists them in the order the filesystem hands it the directory, which Linux and
   // Windows disagree about, so the same project named its broken scripts in two orders.
-  return found.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : a.line - b.line));
+  return found.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : (a.line ?? 0) - (b.line ?? 0)));
 }
 
 const ESCAPE = String.fromCharCode(0x1b);
