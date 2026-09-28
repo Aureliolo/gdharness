@@ -9104,6 +9104,44 @@ function testADiagnosticTheFileContradictsIsNamed(): void {
   assert.equal(declaresMember(game, { kind: 'property', member: 'score', type: 'Game' }), true, 'var too');
   assert.equal(declaresMember(game, { kind: 'property', member: 'ROUNDS', type: 'Game' }), true, 'const too');
 
+  // Everything an instance answers by name, which Godot denies as a missing property on an inferred
+  // type (measured on 4.7.2 for a signal read through a typed variable): a variable under any
+  // annotation, one on the line above, a signal, an enum, and a function read as a Callable.
+  const annotated = [
+    'class_name Hall',
+    'extends Node',
+    '',
+    '@onready var door: Node = $Door',
+    '@export_range(0, 10) var width: int = 3',
+    '@export_group("Stats")',
+    '@export',
+    'var height: int = 2',
+    'signal opened',
+    'enum Wing { EAST, WEST }',
+    '',
+    '',
+    'func ring() -> void:',
+    '\tprint(unlisted)',
+    '',
+  ].join('\n');
+  for (const member of ['door', 'width', 'height', 'opened', 'Wing', 'ring']) {
+    assert.equal(
+      declaresMember(annotated, { kind: 'property', member, type: 'Hall' }),
+      true,
+      `${member} is answered by an instance of Hall`,
+    );
+  }
+  assert.equal(
+    declaresMember(annotated, { kind: 'property', member: 'unlisted', type: 'Hall' }),
+    false,
+    'a name used in a body is not declared by it',
+  );
+  assert.equal(
+    declaresMember(annotated, { kind: 'member', member: 'ring', type: 'Hall' }),
+    false,
+    'and the class itself is not taken to answer an instance function',
+  );
+
   // The direction that must not be got wrong: a member the file does not declare stays unclaimed,
   // because calling a real finding stale is worse than saying nothing about it.
   assert.equal(
@@ -9329,6 +9367,87 @@ function testAStaleEnumMemberIsNamed(): void {
     twoScripts,
     /a call each for res:\/\/core\/charm\.gd and res:\/\/core\/ledger\.gd since it takes one script/,
     `reloadScript takes one script, so two are two calls: ${twoScripts}`,
+  );
+}
+
+/**
+ * A static function the diagnostics deny and the file declares is named once, as called on the
+ * class.
+ *
+ * On the default warnings Godot says only `Static function "nope()" not found in base "Peal"`, which
+ * nothing read; a project met exactly that about `Components.opening()`. Where the unsafe method
+ * access warning is raised to an error, the same call is also denied as a method of the inferred
+ * type, and the two are one member rather than two entries with two remedies. Both wordings are the
+ * engine's, taken from a headless 4.7.2 editor, and both orders are asserted since nothing fixes it.
+ */
+function testAStaleStaticFunctionIsNamed(): void {
+  const staticDenial = 'Static function "opening()" not found in base "Components".';
+  const methodDenial =
+    'The method "opening()" is not present on the inferred type "Components" (but may be present on a subtype). (Warning treated as error.)';
+  assert.deepEqual(missingMemberIn(staticDenial), {
+    kind: 'static method',
+    member: 'opening',
+    type: 'Components',
+  });
+  assert.equal(
+    missingMemberIn('Static function "opening()" not found in base "Components.Inner".'),
+    null,
+    'one on an inner class is not read, since the outer class could declare the same name',
+  );
+
+  const components = [
+    'class_name Components',
+    'extends RefCounted',
+    '',
+    '',
+    'static func opening() -> int:',
+    '\treturn 1',
+    '',
+    '',
+    'func closing() -> int:',
+    '\treturn Components.opening()',
+    '',
+  ].join('\n');
+  const staticMethod = (member: string): MissingMember => ({
+    kind: 'static method',
+    member,
+    type: 'Components',
+  });
+  assert.equal(declaresMember(components, staticMethod('opening')), true, 'a static func is declared');
+  assert.equal(
+    declaresMember(components, staticMethod('closing')),
+    false,
+    'an instance func is not what a call on the class looks for',
+  );
+  assert.equal(declaresMember(components, staticMethod('midgame')), false, 'nor is one never written');
+
+  const classes = new Map([['Components', 'res://components.gd']]);
+  const sourceOf = (path: string): string | null => (path === 'res://components.gd' ? components : null);
+  const expected = [
+    { kind: 'static method', member: 'opening', type: 'Components', declaredIn: 'res://components.gd' },
+  ];
+  assert.deepEqual(
+    contradictedDiagnostics([staticDenial, methodDenial], classes, sourceOf),
+    expected,
+    'the two denials of one call are one entry, read as called on the class',
+  );
+  assert.deepEqual(
+    contradictedDiagnostics([methodDenial, staticDenial], classes, sourceOf),
+    expected,
+    'whichever arrives first',
+  );
+  assert.deepEqual(
+    contradictedDiagnostics([methodDenial], classes, sourceOf),
+    [{ kind: 'method', member: 'opening', type: 'Components', declaredIn: 'res://components.gd' }],
+    'and the method denial alone is still named as it was',
+  );
+
+  const [called] = contradictedDiagnostics([staticDenial], classes, sourceOf);
+  assert.ok(called !== undefined);
+  assert.match(
+    staleAnalysisNote([called], []),
+    /For Components\.opening, run editor_rescan with reloadScript set to res:\/\/components\.gd first\./,
+    'and it is answered with the members of the class, the reload first',
   );
 }
 
@@ -21912,6 +22031,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnAbandonedScratchDirectoryIsSweptAndNothingElse,
   testADiagnosticTheFileContradictsIsNamed,
   testAStaleEnumMemberIsNamed,
+  testAStaleStaticFunctionIsNamed,
   testDiagnosticsNameAStaleEnumMember,
   testAClassTheEditorHasNotLoadedIsToldApartFromOneTheCacheLacks,
   testAClassTheEditorHoldsAfterItsScriptIsGoneIsNamed,
