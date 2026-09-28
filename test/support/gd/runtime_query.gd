@@ -513,6 +513,47 @@ func _check_calling_a_list() -> void:
 ## How long a call or a write took inside the game, measured around it there: the bridge's round
 ## trip is a second or more, so timing from outside measures the bridge. A method and a setter that
 ## take a known time, and a quick call beside them, so a constant or a round trip would fail.
+## A write of the value a property already holds is a write that changed nothing, not one the engine
+## refused. #780: Camera3D.h_offset holding -1.1, stored as -1.10000002384186, was given -1.1 and the
+## answer said the engine kept what it had. Beside it, the refusal it was confused with: a property
+## whose setter ignores every write still refuses a change, and a real change is still made.
+func _check_writing_what_a_property_holds() -> void:
+	var camera: Camera3D = Camera3D.new()
+	camera.name = "Eye"
+	camera.h_offset = -1.1
+	root.add_child(camera)
+	var same: Dictionary = await node._execute_command(
+		"set_property", {"path": "/root/Eye", "property": "h_offset", "value": -1.1}
+	)
+	if same.get("type") != "property_set" or same.get("unchanged") != true:
+		_fail("a float written as the value it holds is unchanged, not refused: %s" % JSON.stringify(same))
+	var moved: Dictionary = await node._execute_command(
+		"set_property", {"path": "/root/Eye", "property": "h_offset", "value": -2.5}
+	)
+	if moved.get("type") != "property_set" or moved.has("unchanged") or moved.get("new_value") != -2.5:
+		_fail("a real change is made and not called unchanged: %s" % JSON.stringify(moved))
+	camera.free()
+
+	var ignoring: GDScript = GDScript.new()
+	ignoring.source_code = "extends Node\n\nvar locked: float = 1.0:\n\tset(_given):\n\t\tpass\n"
+	var _compiled: Error = ignoring.reload()
+	var holder: Node = Node.new()
+	holder.name = "Locked"
+	holder.set_script(ignoring)
+	root.add_child(holder)
+	var refused: Dictionary = await node._execute_command(
+		"set_property", {"path": "/root/Locked", "property": "locked", "value": 2.0}
+	)
+	if refused.get("type") != "error" or not str(refused.get("message", "")).contains("kept what it had"):
+		_fail("a write the setter ignores is still refused: %s" % JSON.stringify(refused))
+	var unasked: Dictionary = await node._execute_command(
+		"set_property", {"path": "/root/Locked", "property": "locked", "value": 1.0}
+	)
+	if unasked.get("type") != "property_set" or unasked.get("unchanged") != true:
+		_fail("and writing what it holds asked nothing of it: %s" % JSON.stringify(unasked))
+	holder.free()
+
+
 func _check_the_time_work_takes() -> void:
 	var slow: Dictionary = await node._execute_command(
 		"call_method", {"path": "/root/Level/Hero", "method": "linger", "args": [30000]}
@@ -823,6 +864,7 @@ func _check() -> void:
 	await _check_reading_through_a_path()
 	await _check_calling_through_a_path()
 	await _check_the_time_work_takes()
+	await _check_writing_what_a_property_holds()
 	await _check_calling_a_step_along_the_path(hero, button)
 	await _check_a_node_path_that_reaches_past_a_node()
 
