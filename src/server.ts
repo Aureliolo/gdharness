@@ -91,7 +91,7 @@ import {
   theEditorHasComeBack,
 } from './godot-bridge.js';
 import { GodotLocator } from './godot-path.js';
-import { extensionRetryNote, type HeadlessOutcome, runImport, runOperation } from './headless.js';
+import { type HeadlessOutcome, runImport, runOperation } from './headless.js';
 import { EDITOR_READS, ENGINE_PASSES, HEADLESS_OPERATIONS } from './headless-operations.js';
 import { DefectsSeen, defectReport, feedbackNotice } from './issues.js';
 import {
@@ -133,7 +133,6 @@ import {
 } from './process-children.js';
 import { cpuSecondsOf } from './process-time.js';
 import { projectStructure, scriptsWithoutUid, searchProject } from './project-scan.js';
-import { forceNextImport } from './reimport.js';
 import { parseProjectGodot, settingKeys, settingsDroppedReport, setupResourceHandlers } from './resources.js';
 import { noteRestartBegun, type RestartNote, restartOwed, restartSettled } from './restart-note.js';
 import {
@@ -3071,9 +3070,7 @@ class GodotServer {
             // Said rather than implied: the op resaved every scene for as long as it existed, so a
             // caller who knows it by its diff needs telling that the diff is the bug and is gone.
             note: uidsLeftNote(after.length),
-            ...(imported.librariesRetried === undefined
-              ? {}
-              : { extensionNote: extensionRetryNote(imported.librariesRetried) }),
+            ...(imported.extensionNote === undefined ? {} : { extensionNote: imported.extensionNote }),
           },
         },
         scanned,
@@ -3291,19 +3288,16 @@ class GodotServer {
       if (!engine.ok) {
         return { ok: false, response: engine.response };
       }
-      for (const target of targets) {
-        forceNextImport(projectPath, target);
-      }
       const scanned = await this.untilTheEditorsScanIsWritten(projectPath);
-      const imported = await runImport(engine.value, projectPath);
+      const imported = await runImport(engine.value, projectPath, { forcing: targets });
       if (!imported.ok) {
         return { ok: false, response: this.answer(withScanWait(imported, scanned)) };
       }
       if (imported.messages.length > 0) {
         extra['engine_messages'] = imported.messages;
       }
-      if (imported.librariesRetried !== undefined) {
-        extra['extensionNote'] = extensionRetryNote(imported.librariesRetried);
+      if (imported.extensionNote !== undefined) {
+        extra['extensionNote'] = imported.extensionNote;
       }
     }
 
@@ -4063,10 +4057,12 @@ class GodotServer {
     if (contradicted.length > 0) {
       // What the stale types are built from, which is the lever rather than a detail: a held copy
       // is refreshed when one of its own dependencies changes and not when it changes itself, so
-      // the useful thing to hand a caller is the list of files worth touching. Named from the
-      // declaring scripts already read above, so this costs nothing further.
+      // the useful thing to hand a caller is the list of files worth touching. Only the methods' and
+      // properties' scripts, which are the ones the lever is offered for.
       const dependsOn = new Set<string>();
-      for (const one of contradicted) {
+      for (const one of contradicted.filter(
+        (entry) => entry.kind === 'method' || entry.kind === 'property',
+      )) {
         const source = cached === null ? null : this.sourceOfClass(projectPath, one.declaredIn);
         if (source === null || cached === null) {
           continue;
@@ -4126,16 +4122,25 @@ class GodotServer {
     });
   }
 
-  /** A declaring script's text, or null when the path will not open. */
-  /** The project's global classes [param scriptPath] names in its file, other than its own. */
+  /**
+   * The project's global classes [param scriptPath] names in its file, other than its own.
+   *
+   * Compared in the `res://` form the cache writes, since reloadScript also takes `core/rules.gd`,
+   * and spelled that way the script's own class would pass for one it names, and a failed reload of
+   * it would be told to reload itself first.
+   */
   private classesAScriptNames(projectPath: string, scriptPath: string): string[] {
-    const source = this.sourceOfClass(projectPath, scriptPath);
+    const resourcePath = scriptPath.startsWith('res://')
+      ? scriptPath
+      : `res://${scriptPath.replace(/^\/+/, '')}`;
+    const source = this.sourceOfClass(projectPath, resourcePath);
     const known = cachedClasses(projectPath) ?? declaredClasses(projectPath);
     return source === null
       ? []
-      : classesNamedIn(source, known).filter((name) => known.get(name) !== scriptPath);
+      : classesNamedIn(source, known).filter((name) => known.get(name) !== resourcePath);
   }
 
+  /** A declaring script's text, or null when the path will not open. */
   private sourceOfClass(projectPath: string, resourcePath: string): string | null {
     const contained = resolveWithinProject(projectPath, resourcePath);
     if (!contained.ok || !existsSync(contained.absolutePath)) {

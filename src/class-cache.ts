@@ -212,10 +212,9 @@ export interface MissingMember {
  * found in base "Peal".`. All three can be checked against the file without re-analysing anything,
  * which is what makes them worth reading out of the text.
  *
- * A base of more than two parts is read as an enum under an inner class, and one that is an inner
- * class rather than an enum finds no enum by that name, so it contradicts nothing. A static function
- * is read only on a class's own base: the declaration is looked for anywhere in the file, so one
- * denied on an inner class could be found on the outer one and claimed wrongly.
+ * Only a class's own base is read, and one enum under it: Godot names an inner class's enum
+ * `Peal::Inner.Kind`, and what is declared under an inner class is not looked for, so nothing past
+ * those two parts could be checked.
  */
 export function missingMemberIn(message: string): MissingMember | null {
   const inferred =
@@ -231,7 +230,7 @@ export function missingMemberIn(message: string): MissingMember | null {
   if (called !== null) {
     return { kind: 'static method', member: called[1] ?? '', type: called[2] ?? '' };
   }
-  const inBase = /Cannot find member "([A-Za-z_]\w*)" in base "([A-Za-z_]\w*)((?:\.[A-Za-z_]\w*)*)"/.exec(
+  const inBase = /Cannot find member "([A-Za-z_]\w*)" in base "([A-Za-z_]\w*)(?:\.([A-Za-z_]\w*))?"/.exec(
     message,
   );
   if (inBase === null) {
@@ -239,8 +238,7 @@ export function missingMemberIn(message: string): MissingMember | null {
   }
   const member = inBase[1] ?? '';
   const type = inBase[2] ?? '';
-  const within = (inBase[3] ?? '').split('.').filter((part) => part !== '');
-  const enumName = within.at(-1);
+  const enumName = inBase[3];
   return enumName === undefined
     ? { kind: 'member', member, type }
     : { kind: 'enum member', member, type, enum: enumName };
@@ -257,40 +255,43 @@ export function missingMemberIn(message: string): MissingMember | null {
  */
 export function declaresMember(source: string, missing: MissingMember): boolean {
   const name = missing.member.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // At the start of a line with nothing before it but annotations: a global class's own members sit
+  // at column 0, and one indented under `class Inner:` belongs to the inner class. `Peal.LIMIT` with
+  // LIMIT declared only in Peal.Inner is denied rightly.
+  const top = String.raw`^(?:@\w+(?:\([^)]*\))?\s+)*`;
+  const declared = (kinds: string): boolean =>
+    new RegExp(String.raw`${top}(?:${kinds})\s+${name}\b`, 'm').test(source);
   if (missing.kind === 'method') {
-    return new RegExp(String.raw`^\s*(?:static\s+)?func\s+${name}\s*\(`, 'm').test(source);
+    return new RegExp(String.raw`${top}(?:static\s+)?func\s+${name}\s*\(`, 'm').test(source);
   }
   if (missing.kind === 'static method') {
-    return new RegExp(String.raw`^\s*static\s+func\s+${name}\s*\(`, 'm').test(source);
+    return new RegExp(String.raw`${top}static\s+func\s+${name}\s*\(`, 'm').test(source);
   }
   if (missing.kind === 'enum member') {
     return enumValues(source, missing.enum ?? '').includes(missing.member);
   }
-  // Anything answered by name: a variable or constant under any annotations, an enum or inner class
-  // by its own name, a signal, and the values of an enum with no name, which land on the class. An
-  // instance also answers a function by name, as a Callable, so a property is found as one too.
+  // What the class itself answers by name: a static variable or function, a constant, an enum or
+  // inner class by its own name, and the values of an enum with no name, which land on the class. A
+  // plain variable or a signal is not among them; Godot denies `Peal.speed` for `var speed`, and is
+  // right to. An instance answers all of those and its variables, signals and functions besides.
   const kinds =
-    missing.kind === 'property' ? 'var|const|enum|class|signal|func' : 'var|const|enum|class|signal';
-  return (
-    new RegExp(String.raw`^\s*(?:static\s+)?(?:@\w+(?:\([^)]*\))?\s+)*(?:${kinds})\s+${name}\b`, 'm').test(
-      source,
-    ) || enumValues(source, null).includes(missing.member)
-  );
+    missing.kind === 'property'
+      ? String.raw`(?:static\s+)?(?:var|func)|const|enum|class|signal`
+      : String.raw`static\s+(?:var|func)|const|enum|class`;
+  return declared(kinds) || enumValues(source, null).includes(missing.member);
 }
 
 /**
- * The values of every enum in [param source] called [param named], or of every enum with no name
- * when it is null. Read from the braces, a line comment at a time, so a value on its own line with
- * a comment after it counts and a word inside the comment does not.
+ * The values of every enum at the top of [param source] called [param named], or of every one with
+ * no name when it is null. Read from the braces, a line comment at a time, so a value on its own line
+ * with a comment after it counts and a word inside the comment does not. An enum inside an inner
+ * class is the inner class's, and is not read.
  */
 function enumValues(source: string, named: string | null): string[] {
   const opening =
     named === null
-      ? /^\s*enum\s*\{([^}]*)\}/gm
-      : new RegExp(
-          String.raw`^\s*enum\s+${named.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\s*\{([^}]*)\}`,
-          'gm',
-        );
+      ? /^enum\s*\{([^}]*)\}/gm
+      : new RegExp(String.raw`^enum\s+${named.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\s*\{([^}]*)\}`, 'gm');
   const values: string[] = [];
   for (const [, body] of source.matchAll(opening)) {
     const uncommented = (body ?? '')
@@ -405,29 +406,37 @@ export interface Contradicted extends MissingMember {
  *
  * One entry per member however many diagnostics deny it. A static function called on the class is
  * denied twice where the unsafe method access warning is raised to an error, once as a static
- * function and once as a method of the inferred type; the static reading is the one kept, because
- * it says the call was made on the class, which decides the remedy.
+ * function and once as a method of the inferred type. The static reading decides for that call
+ * whether or not the file bears it out: it says the call was made on the class, so a file declaring
+ * the function without `static` has the call wrong, and the method reading, which a plain `func`
+ * satisfies, must not claim it.
  */
 export function contradictedDiagnostics(
   messages: readonly string[],
   classes: ReadonlyMap<string, string>,
   sourceOf: (resourcePath: string) => string | null,
 ): Contradicted[] {
+  const keyOf = (missing: MissingMember): string =>
+    [missing.type, missing.enum ?? '', missing.member].join('.');
+  const denials = messages
+    .map((message) => missingMemberIn(message))
+    .filter((missing): missing is MissingMember => missing !== null);
+  const calledOnTheClass = new Set(
+    denials.filter((missing) => missing.kind === 'static method').map((missing) => keyOf(missing)),
+  );
   const read = new Map<string, string | null>();
   const found = new Map<string, Contradicted>();
-  for (const message of messages) {
-    const missing = missingMemberIn(message);
-    const declaredIn = missing === null ? undefined : classes.get(missing.type);
-    if (missing === null || declaredIn === undefined) {
+  for (const missing of denials) {
+    const declaredIn = classes.get(missing.type);
+    const key = keyOf(missing);
+    if (declaredIn === undefined || (missing.kind === 'method' && calledOnTheClass.has(key))) {
       continue;
     }
     if (!read.has(declaredIn)) {
       read.set(declaredIn, sourceOf(declaredIn));
     }
     const source = read.get(declaredIn) ?? null;
-    const key = [missing.type, missing.enum ?? '', missing.member].join('.');
-    const already = found.get(key);
-    if (source !== null && declaresMember(source, missing) && already?.kind !== 'static method') {
+    if (source !== null && declaresMember(source, missing)) {
       found.set(key, { ...missing, declaredIn });
     }
   }
@@ -635,14 +644,14 @@ export function failedReloadNote(failed: FailedReload): string {
   const answered =
     failed.codeName === '' ? `error ${failed.code}` : `error ${failed.code}, ${failed.codeName}`;
   const copy = unchanged
-    ? 'The copy the editor holds is as it was, with the members under heldBeforeReload and heldConstantsBeforeReload.'
+    ? 'Nothing was reloaded: the copy the editor holds is as it was, with the members under heldBeforeReload and heldConstantsBeforeReload.'
     : `The copy the editor holds changed even so${lost.length === 0 ? '' : `, and has lost ${lost.join(', ')}`}: anything diagnosed against it now is answered from what is left, and reloading it once it compiles rebuilds it.`;
   const order =
     failed.names.length === 0
       ? ''
       : ` If they deny a member of ${failed.names.join(' or ')} that its file declares, the editor's copy of that class is behind: reload that class first with reloadScript and then this script, the order that cleared it in the one project that has met this.`;
   return (
-    `${failed.script} did not compile, so nothing was reloaded: Godot answered ${answered}. ${copy} ` +
+    `${failed.script} did not compile: Godot answered ${answered}. ${copy} ` +
     `script_diagnostics on it gives the errors.${order}`
   );
 }

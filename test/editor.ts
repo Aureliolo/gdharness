@@ -2128,7 +2128,7 @@ async function testAnEnumMemberAddedToAHeldTypeIsPickedUp({ call, project }: Edi
   const refused = await call('editor_rescan', { projectPath: project, reloadScript: 'res://tower.gd' });
   assert.match(
     String(get(refused, 'reloadProblem')),
-    /^res:\/\/tower\.gd did not compile, so nothing was reloaded: Godot answered error 43, Parse error\. The copy the editor holds is as it was/,
+    /^res:\/\/tower\.gd did not compile: Godot answered error 43, Parse error\. Nothing was reloaded: the copy the editor holds is as it was/,
     `a refused reload says why in Godot's words and that the copy is intact: ${JSON.stringify(refused)}`,
   );
   assert.deepEqual(
@@ -2181,7 +2181,21 @@ async function testAChangedUidIsReadByTheRescan({ call, project }: Editor): Prom
   assert.match(uidOf('twin_a.gd'), /^uid:\/\/\w+$/, 'the editor writes a UID for a new script');
   writeFileSync(join(project, 'twin_b.gd'), readFileSync(join(project, 'twin_a.gd'), 'utf8'));
   writeFileSync(join(project, 'twin_b.gd.uid'), `${uidOf('twin_a.gd')}\n`);
+  // A project nested inside this one, which the editor passes over: one of its files names the same
+  // UID as twin_a, and another names a UID the editor's table has never held. Neither is this
+  // project's, so neither is a duplicate here or a file to read again.
+  const nested = join(project, 'nested_project');
+  mkdirSync(nested, { recursive: true });
+  writeFileSync(join(nested, 'project.godot'), 'config_version=5\n');
+  writeFileSync(join(nested, 'twin_c.gd'), readFileSync(join(project, 'twin_a.gd'), 'utf8'));
+  writeFileSync(join(nested, 'twin_c.gd.uid'), `${uidOf('twin_a.gd')}\n`);
+  writeFileSync(join(nested, 'own.gd'), 'extends Node\n');
+  writeFileSync(join(nested, 'own.gd.uid'), 'uid://nestedown1234\n');
   const copied = await call('editor_rescan', { projectPath: project });
+  assert.ok(
+    !JSON.stringify(get(copied, 'uidsReread') ?? []).includes('nested_project'),
+    `a nested project's files are not read again: ${JSON.stringify(copied)}`,
+  );
   assert.deepEqual(
     get(copied, 'uidsDuplicatedOnDisk'),
     [['res://twin_a.gd', 'res://twin_b.gd']],
@@ -2228,6 +2242,7 @@ async function testAChangedUidIsReadByTheRescan({ call, project }: Editor): Prom
   for (const name of ['twin_a.gd', 'twin_a.gd.uid', 'twin_b.gd', 'twin_b.gd.uid']) {
     rmSync(join(project, name), { force: true });
   }
+  rmSync(nested, { recursive: true, force: true });
   await call('editor_rescan', { projectPath: project });
 }
 

@@ -684,9 +684,11 @@ func set_property(params: Dictionary) -> Dictionary:
 ## A float arrives as 64 bits and most engine properties keep 32: Camera3D.h_offset given -1.1
 ## reads back as -1.10000002384186, so comparing the two exactly took a write of the value already
 ## held for one the engine refused (#780). Rounding both to 32 bits is exact for a 32-bit property.
-## A 64-bit one can take a write this calls the same, and then reads back changed, which the caller
-## checks before calling the write unchanged. Vectors and colours hold 32-bit parts in the value
-## itself, so they already compare at the property's precision.
+## A 64-bit one can take a write this calls the same and read back changed, and the caller calls a
+## write unchanged only when it reads back as it was. What that cannot tell apart is a 64-bit
+## property whose setter ignored a value differing from the held one below 32 bits: it is answered
+## unchanged rather than refused. Vectors and colours hold 32-bit parts in the value itself, so they
+## already compare at the property's precision.
 static func _held_already(given: Variant, held: Variant) -> bool:
 	if not Values.comparable(given, held):
 		return false
