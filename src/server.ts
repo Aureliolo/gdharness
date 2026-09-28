@@ -7447,6 +7447,10 @@ class GodotServer {
     // How many scans the editor had completed before the one asked for, from an addon that counts
     // them: the scan asked for is over once the count has moved past it.
     let completedBefore: number | undefined;
+    // Files whose `.uid` the editor had not taken in and was told to read again, and files on disk
+    // naming one UID between them, from the call that started the scan.
+    let uidsReread: string[] = [];
+    let uidsDuplicatedOnDisk: string[][] = [];
     for (;;) {
       const busySince = Date.now();
       let wasBusy = false;
@@ -7463,6 +7467,11 @@ class GodotServer {
       }
       const firstAnswer = asParams(JSON.parse(first.content[0]?.text ?? '{}'));
       completedBefore = readNumber(firstAnswer, 'scansCompletedBefore');
+      uidsReread = [...uidsReread, ...(readArray(firstAnswer, 'uidsReread') ?? []).map(String)];
+      const duplicated = readArray(firstAnswer, 'uidsDuplicatedOnDisk');
+      if (duplicated !== undefined) {
+        uidsDuplicatedOnDisk = duplicated.map((group) => (Array.isArray(group) ? group.map(String) : []));
+      }
       if (firstAnswer['started'] !== false || Date.now() - started >= timeoutMs) {
         break;
       }
@@ -7630,6 +7639,11 @@ class GodotServer {
         `The scan brought in ${broughtIn.join(', ')}, and ${dependents.notReloaded.map((one) => one.scriptPath).join(', ')} ${dependents.notReloaded.length === 1 ? 'names one of them and' : 'name them and'} could not be reloaded, so the editor still holds what it compiled while it could not see the class and reports that to the language server. editor_rescan with reloadScript on each, or editor_launch restart.`,
       );
     }
+    for (const group of uidsDuplicatedOnDisk) {
+      notes.push(
+        `${group.join(' and ')} name one UID in their .uid files, so Godot keeps one path for it and every engine warns "UID duplicate detected". Delete the .uid of the one that is a copy and rescan: the editor writes it a UID of its own.`,
+      );
+    }
     if (stillAtMissingPaths.length > 0) {
       notes.push(
         `The scan wrote the class cache with ${stillAtMissingPaths.join(', ')} at a path that is not on disk, and rebuilding the cache from the files did not take it out. The next engine to read the cache fails on "Could not parse global class" in whichever correct script shares the bare name. Restart the editor with editor_launch restart, then run project_import refresh_classes.`,
@@ -7673,6 +7687,8 @@ class GodotServer {
       cacheDropped: dropped.length > 0 ? dropped : undefined,
       cacheAtMissingPaths: stillAtMissingPaths.length > 0 ? stillAtMissingPaths : undefined,
       classesUnchecked: checked.unchecked,
+      uidsReread: uidsReread.length > 0 ? uidsReread : undefined,
+      uidsDuplicatedOnDisk: uidsDuplicatedOnDisk.length > 0 ? uidsDuplicatedOnDisk : undefined,
       note: notes.length > 0 ? notes.join(' ') : undefined,
     });
   }
