@@ -1209,7 +1209,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['set'],
         description:
-          'set: which one to write. Colons write through what a node holds, "_game:run:day", and a number or a key steps into a list or a map on the way, "_game:run:roster:0:name", a negative number counting from the end, and a step written as a call, "get_viewport():gui_embed_subwindows", walks through what a method taking no arguments returned. The answer reads back off the same holder, and a write that leaves the property as it was, because the engine would not take it, is refused and says what the property still holds.',
+          'set: which one to write. Colons write through what a node holds, "_game:run:day", and a number or a key steps into a list or a map on the way, "_game:run:roster:0:name", a negative number counting from the end, and a step written as a call, "get_viewport():gui_embed_subwindows", walks through what a method taking no arguments returned. The answer reads back off the same holder, and a write that leaves the property as it was, because the engine would not take it, is refused and says what the property still holds. A write of the value the property already holds, at its own precision, as a float given in 64 bits to a property keeping 32, is not refused: it answers unchanged: true.',
       },
       value: {
         ops: ['set'],
