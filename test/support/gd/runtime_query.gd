@@ -554,6 +554,41 @@ func _check_writing_what_a_property_holds() -> void:
 	holder.free()
 
 
+## An object slot or parameter emptied with null, whether null arrives as JSON or as the text. #783:
+## `set` of an object property to null was looked up as a node called "null" and refused. Written
+## with an object first, so the slot is known to take one and the null is a change.
+func _check_emptying_an_object_slot() -> void:
+	var holding: GDScript = GDScript.new()
+	holding.source_code = (
+		"extends Node\n\nvar clock: Node = null\n\n\nfunc take(given: Node) -> String:\n"
+		+ '\treturn "none" if given == null else str(given.name)\n'
+	)
+	var _compiled: Error = holding.reload()
+	var holder: Node = Node.new()
+	holder.name = "Holder"
+	holder.set_script(holding)
+	root.add_child(holder)
+
+	for said: Variant in ["null", null]:
+		var held: Dictionary = await node._execute_command(
+			"set_property", {"path": "/root/Holder", "property": "clock", "value": "/root/Level"}
+		)
+		if held.get("type") != "property_set" or holder.get("clock") != root.get_node("Level"):
+			_fail("an object slot takes an object by its path: %s" % JSON.stringify(held))
+		var emptied: Dictionary = await node._execute_command(
+			"set_property", {"path": "/root/Holder", "property": "clock", "value": said}
+		)
+		if emptied.get("type") != "property_set" or holder.get("clock") != null:
+			_fail("an object slot is emptied by %s: %s" % [JSON.stringify(said), JSON.stringify(emptied)])
+
+	var called: Dictionary = await node._execute_command(
+		"call_method", {"path": "/root/Holder", "method": "take", "args": ["null"]}
+	)
+	if called.get("result") != "none":
+		_fail("an object parameter is given null by the text null: %s" % JSON.stringify(called))
+	holder.free()
+
+
 func _check_the_time_work_takes() -> void:
 	var slow: Dictionary = await node._execute_command(
 		"call_method", {"path": "/root/Level/Hero", "method": "linger", "args": [30000]}
@@ -865,6 +900,7 @@ func _check() -> void:
 	await _check_calling_through_a_path()
 	await _check_the_time_work_takes()
 	await _check_writing_what_a_property_holds()
+	await _check_emptying_an_object_slot()
 	await _check_calling_a_step_along_the_path(hero, button)
 	await _check_a_node_path_that_reaches_past_a_node()
 

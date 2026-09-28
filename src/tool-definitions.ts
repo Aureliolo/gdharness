@@ -1215,7 +1215,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         ops: ['set'],
         blank: true,
         description:
-          'set: the value, fitted to the property\'s type. "" writes an empty string. A property typed as or holding an object takes a path naming one the game holds, the way call\'s args do, and holds that instance. A typed list or map, such as Array[int] or Dictionary[String, int], takes a JSON list or object with each element fitted to its element type, and an element that cannot become one is refused by its index or key.',
+          'set: the value, fitted to the property\'s type. "" writes an empty string. A property typed as or holding an object takes a path naming one the game holds, the way call\'s args do, and holds that instance, or null, which the text null also means, to empty it. A typed list or map, such as Array[int] or Dictionary[String, int], takes a JSON list or object with each element fitted to its element type, and an element that cannot become one is refused by its index or key.',
       },
       method: {
         type: 'string',
