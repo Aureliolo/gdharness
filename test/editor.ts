@@ -2021,6 +2021,14 @@ async function testAMethodAddedToAnAnalysedTypeIsPickedUp({ call, project }: Edi
  * moment, so the analyser here is not reading the built copy's enum; ostinato's editor, up for
  * fourteen hours, was reading something that was stale.
  *
+ * What has been tried here and read clean, so the next attempt starts past it, all on a headless
+ * 4.7.2 editor with the declaring script built and held: diagnosing a dependent first and then a new
+ * probe with nothing in between, ostinato's own sequence; a plain rescan between the edit and the
+ * diagnosis; reloading a dependent between them; six rounds of adding a member one at a time in
+ * those orders; and the declaring script failing analysis on a class the editor had not loaded, the
+ * extra ingredient in ostinato's third reproduction. In every one the held copy lagged the file and
+ * the analyser did not.
+ *
  * The second half is the engine's own wording for a member that is genuinely missing, which is
  * what `missingMemberIn` reads: a change of wording would leave every stale enum member unnamed,
  * and the regression that parses these messages would go on passing on the old text.
