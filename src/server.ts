@@ -7537,16 +7537,30 @@ class GodotServer {
     // this settles what it has already built from one of them, and building from a file the scan
     // has not read yet would be recompiling the old source.
     const reloading = readNonEmptyString(args, 'reloadScript');
-    let reloaded: { methods?: string[]; heldBefore?: string[]; problem?: string } = {};
+    let reloaded: {
+      methods?: string[];
+      heldBefore?: string[];
+      constants?: string[];
+      heldConstantsBefore?: string[];
+      problem?: string;
+    } = {};
     if (reloading !== undefined) {
       try {
         const answer = asParams(
           await this.godotBridge.invokeTool('reload_script', { ...args, scriptPath: reloading }),
         );
         const methods = readArray(answer, 'methods');
-        const before = readArray(answer, 'heldBefore');
+        const listed = (field: string): Record<string, string[]> => {
+          const found = readArray(answer, field);
+          return found ? { [field]: found.map(String) } : {};
+        };
         reloaded = methods
-          ? { methods: methods.map(String), ...(before ? { heldBefore: before.map(String) } : {}) }
+          ? {
+              methods: methods.map(String),
+              ...listed('heldBefore'),
+              ...listed('constants'),
+              ...listed('heldConstantsBefore'),
+            }
           : { problem: `the editor would not say what ${reloading} has after reloading it` };
       } catch (error) {
         reloaded = { problem: `${reloading} could not be reloaded: ${errorMessage(error)}` };
@@ -7615,6 +7629,10 @@ class GodotServer {
       // find out; what it holds after says whether the call mended it.
       heldBeforeReload: reloaded.heldBefore,
       reloadedMethods: reloaded.methods,
+      // The same two readings for constants, with an enum's values as `Kind.SHORT`, because an enum
+      // member is held in the copy as a constant and never appears among its methods.
+      heldConstantsBeforeReload: reloaded.heldConstantsBefore,
+      reloadedConstants: reloaded.constants,
       reloadProblem: reloaded.problem,
       unseenByEditor: unseen.length > 0 ? unseen : undefined,
       broughtIn: broughtIn.length > 0 ? broughtIn : undefined,
