@@ -110,6 +110,7 @@ import {
   OPENED_BY_A_SERVER,
   RESERVED_VARIABLE_PREFIX,
   resolveHeadless,
+  resolveSilent,
   runArguments,
   SAVES_NOT_MOVED_NOTE,
   savesStayPut,
@@ -5143,11 +5144,16 @@ class GodotServer {
     });
     const runtimeWaitMs = this.announceBudget(args, project.value.path);
     const editorWouldPlay = !headless || editorPlaysHeadless(project.value.file);
+    // A silent run is spawned for the reason a run with arguments is: silence is an engine flag,
+    // `--audio-driver Dummy`, and the editor takes none for a game it plays. Only a windowed one:
+    // a headless run is silent already, the editor's included.
+    const silent = resolveSilent(args['silent'], process.env) && !headless;
     if (
       this.godotBridge.isConnected() &&
       editorWouldPlay &&
       given.value.length === 0 &&
-      !needsItsOwnProcess(asked.value)
+      !needsItsOwnProcess(asked.value) &&
+      !silent
     ) {
       return await this.playThroughEditor(
         sceneArgument,
@@ -5165,6 +5171,7 @@ class GodotServer {
       headless,
       scene: sceneArgument,
       userArgs: given.value,
+      silent,
     });
     this.logDebug(`Running Godot project: ${engine.value} ${cmdArgs.join(' ')}`);
     const started = await this.launchKeptGame(
@@ -5202,7 +5209,10 @@ class GodotServer {
         : this.godotBridge.isConnected() && editorWouldPlay && needsItsOwnProcess(asked.value)
           ? ' The editor plays a game with its own environment, so a run given one was started ' +
             'here: the debug_* tools answer only for a game the editor is playing.'
-          : '';
+          : this.godotBridge.isConnected() && editorWouldPlay && silent
+            ? ' The editor cannot play a game silent, which takes an engine flag, so this one was ' +
+              `started here${args['silent'] === true ? '' : ', silent because GDHARNESS_SILENT says so'}: the debug_* tools answer only for a game the editor is playing, and silent: false plays it through the editor.`
+            : '';
     const endedForThis = endedToStartThis(ended);
     // A game of this project that was already running and that this server cannot read. It is not
     // in `ended`, because ending a run goes through the sweep that drops these, so the start left

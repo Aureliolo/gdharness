@@ -56,6 +56,23 @@ export interface RunOptions {
   readonly quitAfter?: number | null;
   /** What the game itself is to read, which is everything after `--` on the command line. */
   readonly userArgs?: readonly string[];
+  /** Whether the run makes no sound; a headless one makes none whatever this says. */
+  readonly silent?: boolean;
+}
+
+/**
+ * Whether a run is to make no sound: as [param requested] says, or else as `GDHARNESS_SILENT` in
+ * the server's environment says, where anything but empty, `0` or `false` means yes.
+ *
+ * A windowed run is kept off the desktop somebody is using, and its sound was not: it came out of
+ * the machine's speakers at whatever hour a session ran it, the same intrusion by the other sense.
+ */
+export function resolveSilent(requested: unknown, variables: NodeJS.ProcessEnv): boolean {
+  if (typeof requested === 'boolean') {
+    return requested;
+  }
+  const said = envValue('GDHARNESS_SILENT', variables)?.toLowerCase();
+  return said !== undefined && said !== '0' && said !== 'false';
 }
 
 /**
@@ -77,6 +94,12 @@ export function runArguments(options: RunOptions): string[] {
   const args = options.headless
     ? ['--headless', '--path', options.projectPath]
     : ['--path', options.projectPath];
+  // The Dummy driver rather than a muted bus: every stream plays and every position advances, so
+  // what the game is playing can still be asked, and nothing the game reads about its buses moves.
+  // A headless run has it already.
+  if (options.silent === true && !options.headless) {
+    args.push('--audio-driver', 'Dummy');
+  }
   if (options.quitAfter !== undefined && options.quitAfter !== null) {
     args.push('--quit-after', String(options.quitAfter));
   }
