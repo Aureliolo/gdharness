@@ -640,9 +640,12 @@ func set_property(params: Dictionary) -> Dictionary:
 	# the answer then showed the old value as the new one, shaped as a success: a typed container
 	# refusing a plain list did exactly that. A value the property changed on the way in, a setter
 	# clamping it, still changed it, so only a write that left the property as it was is refused.
+	# And only one that asked for a change: the value the property already held, written again, left
+	# it as it was because nothing was asked of it.
+	var already: bool = _held_already(given, old_value)
 	if (
 		Values.comparable(given, old_value)
-		and given != old_value
+		and not already
 		and Values.comparable(now, old_value)
 		and now == old_value
 	):
@@ -663,7 +666,7 @@ func set_property(params: Dictionary) -> Dictionary:
 			)
 		}
 
-	return {
+	var answer: Dictionary = {
 		"type": "property_set",
 		"path": node_path,
 		"property": property,
@@ -671,6 +674,27 @@ func set_property(params: Dictionary) -> Dictionary:
 		"new_value": _values.serialize(now),
 		"elapsed_usec": elapsed
 	}
+	if already and Values.comparable(now, old_value) and now == old_value:
+		answer["unchanged"] = true
+	return answer
+
+
+## Whether [param given] is the value [param held] already is, at the precision the property keeps.
+##
+## A float arrives as 64 bits and most engine properties keep 32: Camera3D.h_offset given -1.1
+## reads back as -1.10000002384186, so comparing the two exactly took a write of the value already
+## held for one the engine refused (#780). Rounding both to 32 bits is exact for a 32-bit property.
+## A 64-bit one can take a write this calls the same, and then reads back changed, which the caller
+## checks before calling the write unchanged. Vectors and colours hold 32-bit parts in the value
+## itself, so they already compare at the property's precision.
+static func _held_already(given: Variant, held: Variant) -> bool:
+	if not Values.comparable(given, held):
+		return false
+	if given == held:
+		return true
+	if typeof(given) != TYPE_FLOAT or typeof(held) != TYPE_FLOAT:
+		return false
+	return PackedFloat32Array([given])[0] == PackedFloat32Array([held])[0]
 
 
 func call_method(params: Dictionary) -> Dictionary:
