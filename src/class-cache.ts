@@ -187,31 +187,56 @@ export function withAddonClassesCounted(
   return counted;
 }
 
-/** A member a diagnostic says is missing, and the type it says is missing it. */
+/**
+ * A member a diagnostic says is missing, and the global class it says is missing it.
+ *
+ * `method` and `property` are looked for on an instance of the type, `member` on the class itself,
+ * as in `Charm.MAX`, and `enum member` in one of its enums, as in `Charm.Kind.ZZ_PROBE`, where
+ * `enum` names the enum.
+ */
 export interface MissingMember {
   readonly member: string;
   readonly type: string;
-  readonly kind: 'method' | 'property';
+  readonly kind: 'method' | 'property' | 'member' | 'enum member';
+  readonly enum?: string;
 }
 
 /**
- * The member and type in "is not present on the inferred type", or null for any other diagnostic.
+ * The member and type a diagnostic says is missing, or null for any other diagnostic.
  *
- * Godot phrases this one about the *inferred* type, which is the analysed copy the language server
- * is holding rather than the file. That makes it the one diagnostic whose truth can be checked
- * against the file without re-analysing anything, and so the one worth reading out of the text.
+ * Two shapes. "is not present on the inferred type" is about the analysed copy the language server
+ * is holding rather than the file. "Cannot find member ... in base" is what Godot says of a name
+ * looked up on a class, or on an enum of one, measured on 4.7.2 as
+ * `Cannot find member "NEVER" in base "Peal.Kind".` and `Cannot find member "NOWHERE" in base
+ * "Peal".`. Both can be checked against the file without re-analysing anything, which is what makes
+ * them worth reading out of the text.
+ *
+ * A base of more than two parts is read as an enum under an inner class, and one that is an inner
+ * class rather than an enum finds no enum by that name, so it contradicts nothing.
  */
 export function missingMemberIn(message: string): MissingMember | null {
-  const found =
+  const inferred =
     /The (method|property) "([^"(]+)(?:\(\))?" is not present on the inferred type "([^"]+)"/.exec(message);
-  if (found === null) {
+  if (inferred !== null) {
+    return {
+      kind: inferred[1] === 'property' ? 'property' : 'method',
+      member: inferred[2] ?? '',
+      type: inferred[3] ?? '',
+    };
+  }
+  const inBase = /Cannot find member "([A-Za-z_]\w*)" in base "([A-Za-z_]\w*)((?:\.[A-Za-z_]\w*)*)"/.exec(
+    message,
+  );
+  if (inBase === null) {
     return null;
   }
-  return {
-    kind: found[1] === 'property' ? 'property' : 'method',
-    member: found[2] ?? '',
-    type: found[3] ?? '',
-  };
+  const member = inBase[1] ?? '';
+  const type = inBase[2] ?? '';
+  const within = (inBase[3] ?? '').split('.').filter((part) => part !== '');
+  const enumName = within.at(-1);
+  return enumName === undefined
+    ? { kind: 'member', member, type }
+    : { kind: 'enum member', member, type, enum: enumName };
 }
 
 /**
@@ -225,11 +250,54 @@ export function missingMemberIn(message: string): MissingMember | null {
  */
 export function declaresMember(source: string, missing: MissingMember): boolean {
   const name = missing.member.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const declaration =
-    missing.kind === 'method'
-      ? new RegExp(String.raw`^\s*(?:static\s+)?func\s+${name}\s*\(`, 'm')
-      : new RegExp(String.raw`^\s*(?:static\s+)?(?:@export\s+)?(?:var|const)\s+${name}\b`, 'm');
-  return declaration.test(source);
+  if (missing.kind === 'method') {
+    return new RegExp(String.raw`^\s*(?:static\s+)?func\s+${name}\s*\(`, 'm').test(source);
+  }
+  if (missing.kind === 'property') {
+    return new RegExp(String.raw`^\s*(?:static\s+)?(?:@export\s+)?(?:var|const)\s+${name}\b`, 'm').test(
+      source,
+    );
+  }
+  if (missing.kind === 'member') {
+    // Anything a class answers by name: a constant, a static variable, an enum or inner class by
+    // its own name, a signal, and the values of an enum with no name, which land on the class.
+    return (
+      new RegExp(
+        String.raw`^\s*(?:static\s+)?(?:@\w+(?:\([^)]*\))?\s+)*(?:var|const|enum|class|signal)\s+${name}\b`,
+        'm',
+      ).test(source) || enumValues(source, null).includes(missing.member)
+    );
+  }
+  return enumValues(source, missing.enum ?? '').includes(missing.member);
+}
+
+/**
+ * The values of every enum in [param source] called [param named], or of every enum with no name
+ * when it is null. Read from the braces, a line comment at a time, so a value on its own line with
+ * a comment after it counts and a word inside the comment does not.
+ */
+function enumValues(source: string, named: string | null): string[] {
+  const opening =
+    named === null
+      ? /^\s*enum\s*\{([^}]*)\}/gm
+      : new RegExp(
+          String.raw`^\s*enum\s+${named.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\s*\{([^}]*)\}`,
+          'gm',
+        );
+  const values: string[] = [];
+  for (const [, body] of source.matchAll(opening)) {
+    const uncommented = (body ?? '')
+      .split('\n')
+      .map((line) => line.replace(/#.*$/, ''))
+      .join('\n');
+    for (const part of uncommented.split(',')) {
+      const value = /^\s*([A-Za-z_]\w*)/.exec(part)?.[1];
+      if (value !== undefined) {
+        values.push(value);
+      }
+    }
+  }
+  return values;
 }
 
 /**
@@ -361,7 +429,8 @@ export function contradictedDiagnostics(
  *
  * It leads with the scan because that is what has cleared this, in two projects. Neither of them is
  * this one: the diagnostic has never gone stale in this project's own bench, so every figure here is
- * somebody else's reading and is attributed rather than claimed.
+ * somebody else's reading and is attributed rather than claimed. That is for methods and
+ * properties; an enum member or a constant is answered the other way round, in {@link classRemedy}.
  *
  * The count that used to sit here, one clearing in five attempts, is gone because it measured a
  * different tool. Those five were taken against a version where the rescan answered before the scan
@@ -407,10 +476,46 @@ export function staleAnalysisNote(
   if (contradicted.length === 0) {
     return '';
   }
-  // Counted by type and by script rather than by diagnostic. Two members missing from one class is
-  // two entries here and one stale type, which is the shape the second project reproduced first.
+  // Counted by type rather than by diagnostic. Two members missing from one class is two entries
+  // here and one stale type, which is the shape the second project reproduced first.
   const types = new Set(contradicted.map((one) => one.type));
-  const declaring = [...new Set(contradicted.map((one) => one.declaredIn))].sort();
+  const onInstances = contradicted.filter((one) => one.kind === 'method' || one.kind === 'property');
+  const onTheClass = contradicted.filter((one) => one.kind === 'member' || one.kind === 'enum member');
+  return [
+    `The editor is reporting against an older copy of ${types.size === 1 ? 'a type' : 'some types'} ` +
+      'named under contradictedByTheFile. Each member listed is declared in the file the class cache ' +
+      'points at, so those diagnostics are wrong however the code is written.',
+    instanceRemedy(onInstances, dependsOn, onTheClass.length > 0),
+    classRemedy(onTheClass),
+  ]
+    .filter((part) => part !== '')
+    .join(' ');
+}
+
+/** How a contradicted entry is written in Godot's own terms: `Bell.toll`, `Charm.Kind.ZZ_PROBE`. */
+function written(one: Contradicted): string {
+  return [one.type, ...(one.enum === undefined ? [] : [one.enum]), one.member].join('.');
+}
+
+/** The scripts [param entries] are declared in, each once and in order. */
+function declaringScripts(entries: readonly Contradicted[]): string[] {
+  return [...new Set(entries.map((one) => one.declaredIn))].sort();
+}
+
+/**
+ * The remedy for methods and properties the diagnostics deny, which the scan has cleared. Named by
+ * member only when enum members or constants are listed beside them, since those are answered the
+ * other way round.
+ */
+function instanceRemedy(
+  entries: readonly Contradicted[],
+  dependsOn: readonly string[],
+  besideOthers: boolean,
+): string {
+  if (entries.length === 0) {
+    return '';
+  }
+  const declaring = declaringScripts(entries);
   const lever =
     dependsOn.length === 0
       ? ', and the named types depend on no other global class, so that lever is not available here. ' +
@@ -419,9 +524,7 @@ export function staleAnalysisNote(
         'dependencies is where this turns up'
       : `, so changing ${[...dependsOn].sort().join(' or ')} and then rescanning is worth a try`;
   return (
-    `The editor is reporting against an older copy of ${types.size === 1 ? 'a type' : 'some types'} ` +
-    'named under contradictedByTheFile. Each member listed is declared in the file the class cache ' +
-    'points at, so those diagnostics are wrong however the code is written. Run editor_rescan first: ' +
+    `${besideOthers ? `For ${entries.map(written).join(', ')}, run` : 'Run'} editor_rescan first: ` +
     'it costs about half a second, and it has cleared this in every reproduction measured since the ' +
     'scan timing was fixed: both in one project, the scan returning in 243ms and 275ms, and one in ' +
     'another where the same call also rebuilt the copy. ' +
@@ -439,6 +542,31 @@ export function staleAnalysisNote(
     `depends on changes rather than when it changes itself${lever}. editor_launch restart has always ` +
     'worked and costs a window. project_import refresh_classes does not, and answers added: [] while ' +
     'this is happening.'
+  );
+}
+
+/**
+ * The remedy for enum members and constants the diagnostics deny, which runs the other way: the
+ * reload first. The one measurement is ostinato's, of an enum member of a global class, twice on
+ * 1.1.14: the one plain rescan tried left the diagnostic standing, and a reload of the declaring
+ * script cleared it at once both times. It has not reproduced in this project's editor tier, where a member added
+ * to the enum of a type the editor holds resolved with nothing asked, so the reading is attributed
+ * rather than claimed. A constant on the class is looked up the same way and has not been measured,
+ * and the sentence says which one was.
+ */
+function classRemedy(entries: readonly Contradicted[]): string {
+  if (entries.length === 0) {
+    return '';
+  }
+  const declaring = declaringScripts(entries);
+  const reload =
+    declaring.length === 1
+      ? `editor_rescan with reloadScript set to ${declaring[0]}`
+      : `editor_rescan with reloadScript, a call each for ${declaring.join(' and ')} since it takes one script,`;
+  return (
+    `For ${entries.map(written).join(', ')}, run ${reload} first. In the one project that has ` +
+    'reproduced a stale enum member, twice, the reload cleared it at once both times, and the one ' +
+    'plain editor_rescan tried left the diagnostic standing.'
   );
 }
 

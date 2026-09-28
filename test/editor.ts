@@ -97,6 +97,9 @@ const MAIN_GD = [
   // only in the cache is parsed fresh on every request, and a copy that is never held can never
   // go stale.
   'var ringer: Ringer = Ringer.new()',
+  // The same for Peal, so the editor holds a built copy of the type whose enum a case extends.
+  'var peal: Peal.Kind = Peal.Kind.SHORT',
+  'var pealer: Peal = Peal.new()',
   '',
   '## Changed only by the game, so waiting on it is waiting on something real.',
   'var ticks: int = 0',
@@ -232,6 +235,33 @@ const MAIN_GD = [
   'func break_on_purpose() -> void:',
   '\tvar nobody: Node = get_node_or_null("NoSuchNode")',
   '\tstash = nobody.get_index()',
+  '',
+];
+
+/** A global class holding an enum and a constant, which another script reads as `Peal.Kind.X`. */
+const PEAL_GD = [
+  'class_name Peal',
+  'extends RefCounted',
+  '',
+  'enum Kind { SHORT, LONG }',
+  '',
+  'const ROUNDS: int = 2',
+  '',
+  '',
+  'func chime() -> int:',
+  '\treturn ROUNDS',
+  '',
+];
+const TOWER_GD = [
+  'extends Node',
+  '',
+  '',
+  'func kind() -> Peal.Kind:',
+  '\treturn Peal.Kind.LONG',
+  '',
+  '',
+  'func rounds() -> int:',
+  '\treturn Peal.ROUNDS',
   '',
 ];
 
@@ -468,6 +498,9 @@ function createProject(): string {
       '',
     ].join('\n'),
   );
+
+  writeFileSync(join(dir, 'peal.gd'), PEAL_GD.join('\n'));
+  writeFileSync(join(dir, 'tower.gd'), TOWER_GD.join('\n'));
 
   writeFileSync(join(dir, 'main.gd'), MAIN_GD.join('\n'));
   writeFileSync(
@@ -1961,6 +1994,76 @@ async function testAMethodAddedToAnAnalysedTypeIsPickedUp({ call, project }: Edi
     undefined,
     'and there is nothing for the contradiction check to name, because the editor kept up',
   );
+}
+
+/**
+ * An enum member and a constant added to a type the editor holds are resolved without being told,
+ * and ones that exist nowhere are reported in the words the contradiction check reads.
+ *
+ * The enum half of #763, and like the method case above, the half that does not misbehave here.
+ * ostinato reported `Cannot find member "ZZ_PROBE" in base "Charm.Kind"` against a declaring file
+ * that had it, cleared by a reload of that script and not by a plain rescan. An editor this suite
+ * starts resolves the new member even with the declaring script built and held and opened through
+ * the language server, so the fault needs something an editor seconds old does not have. Held as
+ * what the editor does, so a Godot that starts holding the old enum fails this rather than quietly
+ * matching.
+ *
+ * The second half is the engine's own wording for a member that is genuinely missing, which is
+ * what `missingMemberIn` reads: a change of wording would leave every stale enum member unnamed,
+ * and the regression that parses these messages would go on passing on the old text.
+ */
+async function testAnEnumMemberAddedToAHeldTypeIsPickedUp({ call, project }: Editor): Promise<void> {
+  const read = async (): Promise<unknown> => {
+    await delay(2500);
+    return await call('script_diagnostics', { projectPath: project, scriptPath: 'res://tower.gd' });
+  };
+
+  const analysed = await read();
+  assert.equal(get(analysed, 'clean'), true, `the dependent starts clean: ${JSON.stringify(analysed)}`);
+  // Built and held, which is the state the report was in: the reload answers with the methods of
+  // the copy the editor had, and Peal has one.
+  const held = await call('editor_rescan', { projectPath: project, reloadScript: 'res://peal.gd' });
+  assert.ok(
+    asArray(get(held, 'heldBeforeReload')).includes('chime'),
+    `the editor should hold a built copy of Peal: ${JSON.stringify(held)}`,
+  );
+  const opened = await call('script_diagnostics', { projectPath: project, scriptPath: 'res://peal.gd' });
+  assert.equal(get(opened, 'clean'), true, JSON.stringify(opened));
+
+  writeFileSync(
+    join(project, 'peal.gd'),
+    PEAL_GD.join('\n')
+      .replace('LONG }', 'LONG, DOUBLE }')
+      .replace('const ROUNDS: int = 2', 'const ROUNDS: int = 2\nconst CHANGES: int = 5'),
+  );
+  writeFileSync(
+    join(project, 'tower.gd'),
+    TOWER_GD.join('\n').replace('Kind.LONG', 'Kind.DOUBLE').replace('Peal.ROUNDS', 'Peal.CHANGES'),
+  );
+  const grown = await read();
+  assert.equal(
+    get(grown, 'clean'),
+    true,
+    `the new member and constant resolve with nothing asked of the editor: ${JSON.stringify(grown)}`,
+  );
+
+  writeFileSync(
+    join(project, 'tower.gd'),
+    TOWER_GD.join('\n').replace('Kind.LONG', 'Kind.NEVER').replace('Peal.ROUNDS', 'Peal.NOWHERE'),
+  );
+  const missing = await read();
+  assert.deepEqual(
+    asArray(get(missing, 'diagnostics')).map((entry) => get(entry, 'message')),
+    ['Cannot find member "NEVER" in base "Peal.Kind".', 'Cannot find member "NOWHERE" in base "Peal".'],
+    `the engine words a missing enum member and constant as the check reads them: ${JSON.stringify(missing)}`,
+  );
+  assert.equal(
+    get(missing, 'contradictedByTheFile'),
+    undefined,
+    'and a member the file does not declare is not claimed as stale',
+  );
+
+  writeFileSync(join(project, 'tower.gd'), TOWER_GD.join('\n'));
 }
 
 /**
@@ -3568,6 +3671,7 @@ async function main(): Promise<void> {
     ['testLanguageServer', testLanguageServer],
     ['testAClassWrittenUnderTheEditorNeedsARescan', testAClassWrittenUnderTheEditorNeedsARescan],
     ['testAMethodAddedToAnAnalysedTypeIsPickedUp', testAMethodAddedToAnAnalysedTypeIsPickedUp],
+    ['testAnEnumMemberAddedToAHeldTypeIsPickedUp', testAnEnumMemberAddedToAHeldTypeIsPickedUp],
     ['testAPlayedRunsConsoleArrivesOnItsOwn', testAPlayedRunsConsoleArrivesOnItsOwn],
     ['testDebugging', testDebugging],
     ['testRuntime', testRuntime],
