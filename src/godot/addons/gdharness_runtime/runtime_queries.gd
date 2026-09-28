@@ -843,7 +843,12 @@ static func _sort_of(container: Variant) -> String:
 ## call or the write was made on, and handed over as that instance rather than a copy: a method
 ## given a piece of the game's state acts on the piece the game keeps, and a slot written with one
 ## holds the game's own.
+##
+## The text null names no object, which is what an object slot or parameter takes to be emptied. A
+## caller's null arrived as that text in #772 and #783, and was looked up as a node called "null".
 func _object_named(node: Node, node_path: String, given: Variant, declared: String) -> Dictionary:
+	if given is String and str(given).strip_edges() == "null":
+		return {"object": null}
 	var found: Dictionary = Paths.object_at(_host.get_tree().root, node, node_path, given)
 	if found.has("message"):
 		return found
