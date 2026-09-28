@@ -49,6 +49,7 @@ import {
   declaredClasses,
   declaresMember,
   heldButGone,
+  type MissingMember,
   missingMemberIn,
   staleAnalysisNote,
   staleClassNames,
@@ -444,6 +445,7 @@ async function withFakeLanguageServer<T>(
   publishUri: (uri: string) => string | null,
   handler: (port: number) => Promise<T>,
   seen?: JsonRpcMessage[],
+  said: readonly string[] = ['Could not find type "Missing" in the current scope.'],
 ): Promise<T> {
   const sockets = new Set<Socket>();
 
@@ -480,14 +482,12 @@ async function withFakeLanguageServer<T>(
               method: 'textDocument/publishDiagnostics',
               params: {
                 uri,
-                diagnostics: [
-                  {
-                    range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
-                    message: 'Could not find type "Missing" in the current scope.',
-                    severity: 1,
-                    source: 'gdscript',
-                  },
-                ],
+                diagnostics: said.map((message) => ({
+                  range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
+                  message,
+                  severity: 1,
+                  source: 'gdscript',
+                })),
               },
             });
           }
@@ -9162,6 +9162,251 @@ function testADiagnosticTheFileContradictsIsNamed(): void {
     ['res://scripts/game.gd', 'res://scripts/gone.gd'],
     'each script is read once however many diagnostics name it, and one outside the cache is not looked for',
   );
+}
+
+/**
+ * An enum member or a constant the diagnostics deny and the file declares is named too, with the
+ * reload as the remedy.
+ *
+ * Godot says `Cannot find member "X" in base "Class.Enum"` for these, which nothing read, so ostinato
+ * got a red diagnostic about `Ledger.Count.EXCHANGES_DRAWN` against a declaring file that had it, with
+ * no contradictedByTheFile and no staleAnalysis, and the one remedy that cleared it went unnamed.
+ * The messages below are the engine's own wording, taken from a headless 4.7.2 editor asked about a
+ * member and a constant that exist nowhere.
+ *
+ * Both directions again. A value that is only in a comment, only in another enum, or only named in
+ * a body is not a declaration, and a base that is an inner class rather than an enum claims nothing.
+ */
+function testAStaleEnumMemberIsNamed(): void {
+  assert.deepEqual(
+    missingMemberIn('Cannot find member "NEVER" in base "Peal.Kind".'),
+    { kind: 'enum member', member: 'NEVER', type: 'Peal', enum: 'Kind' },
+    'an enum member is read as the class, the enum and the member',
+  );
+  assert.deepEqual(
+    missingMemberIn('Cannot find member "NOWHERE" in base "Peal".'),
+    { kind: 'member', member: 'NOWHERE', type: 'Peal' },
+    'and a name on the class itself as a member of the class',
+  );
+  assert.deepEqual(
+    missingMemberIn('Cannot find member "LOW" in base "Peal.Tower.Pitch".'),
+    { kind: 'enum member', member: 'LOW', type: 'Peal', enum: 'Pitch' },
+    'an enum under an inner class is looked for by its own name in the class file',
+  );
+
+  const charm = [
+    'class_name Charm',
+    'extends RefCounted',
+    '',
+    'enum Kind {',
+    '\tLUCK,  # the old default, SPITE came later',
+    '\tWARD = 4,',
+    '\tZZ_PROBE,',
+    '}',
+    'enum Mood { CALM, SPITE }',
+    'enum { LOOSE_ONE, LOOSE_TWO = 7 }',
+    '',
+    'const MAX_CHARMS: int = 3',
+    'static var made: int = 0',
+    'signal worn',
+    '',
+    '',
+    'class Pouch:',
+    '\tenum Size { SMALL }',
+    '',
+    '',
+    'func strongest() -> Kind:',
+    '\treturn Kind.WARD if MISSING_IN_A_BODY else Kind.LUCK',
+    '',
+  ].join('\n');
+  const enumMember = (enumName: string, member: string): MissingMember => ({
+    kind: 'enum member',
+    member,
+    type: 'Charm',
+    enum: enumName,
+  });
+  const classMember = (member: string): MissingMember => ({ kind: 'member', member, type: 'Charm' });
+
+  assert.equal(
+    declaresMember(charm, enumMember('Kind', 'SPITE')),
+    false,
+    'a word in a comment is not a value',
+  );
+  assert.equal(declaresMember(charm, enumMember('Kind', 'ZZ_PROBE')), true, 'a value on its own line');
+  assert.equal(declaresMember(charm, enumMember('Kind', 'LUCK')), true, 'one with a comment after it');
+  assert.equal(declaresMember(charm, enumMember('Kind', 'WARD')), true, 'one given a number');
+  assert.equal(declaresMember(charm, enumMember('Mood', 'SPITE')), true, 'an enum written on one line');
+  assert.equal(declaresMember(charm, enumMember('Size', 'SMALL')), true, 'an enum inside an inner class');
+  assert.equal(declaresMember(charm, enumMember('Mood', 'LUCK')), false, 'a value of another enum is not');
+  assert.equal(declaresMember(charm, enumMember('Kind', 'EXCHANGES_DRAWN')), false, 'nor one never written');
+  assert.equal(declaresMember(charm, enumMember('Tower', 'LUCK')), false, 'an enum the file lacks has none');
+
+  for (const member of ['MAX_CHARMS', 'made', 'worn', 'Kind', 'Pouch', 'LOOSE_ONE', 'LOOSE_TWO']) {
+    assert.equal(declaresMember(charm, classMember(member)), true, `${member} is answered by the class`);
+  }
+  for (const member of ['MISSING_IN_A_BODY', 'strongest_ever', 'CALM', 'SMALL']) {
+    // CALM and SMALL are values of named enums, which the class does not answer by their own names.
+    assert.equal(declaresMember(charm, classMember(member)), false, `${member} is not declared on the class`);
+  }
+
+  const contradicted = contradictedDiagnostics(
+    [
+      'Cannot find member "ZZ_PROBE" in base "Charm.Kind".',
+      'Cannot find member "MAX_CHARMS" in base "Charm".',
+      'Cannot find member "NEVER" in base "Charm.Kind".',
+      'Cannot find member "ZZ_PROBE" in base "Stranger.Kind".',
+      'The argument 3 of the function "per()" requires the subtype "Charm.Kind" but the supertype "Variant" was provided.',
+    ],
+    new Map([['Charm', 'res://core/charm.gd']]),
+    (path) => (path === 'res://core/charm.gd' ? charm : null),
+  );
+  assert.deepEqual(
+    contradicted,
+    [
+      {
+        kind: 'enum member',
+        member: 'ZZ_PROBE',
+        type: 'Charm',
+        enum: 'Kind',
+        declaredIn: 'res://core/charm.gd',
+      },
+      { kind: 'member', member: 'MAX_CHARMS', type: 'Charm', declaredIn: 'res://core/charm.gd' },
+    ],
+    'the two the file disproves, and not the member it lacks, the class the cache lacks or the follow-on',
+  );
+
+  // The remedy the one reproduction measured, led with, and the scan not sent ahead of it.
+  const alone = staleAnalysisNote(contradicted, []);
+  assert.match(
+    alone,
+    /^The editor is reporting against an older copy of a type named under contradictedByTheFile\./,
+    `one class is one type: ${alone}`,
+  );
+  assert.match(
+    alone,
+    /For Charm\.Kind\.ZZ_PROBE, Charm\.MAX_CHARMS, run editor_rescan with reloadScript set to res:\/\/core\/charm\.gd first\./,
+    `each is named as the source writes it, and the reload of the declaring script comes first: ${alone}`,
+  );
+  assert.match(
+    alone,
+    /the one plain editor_rescan tried left the diagnostic standing/,
+    'and the scan is not',
+  );
+  assert.doesNotMatch(
+    alone,
+    /Run editor_rescan first/,
+    'the scan-first advice is for methods and properties',
+  );
+
+  // Beside a stale method, each gets its own remedy and says which members it is for.
+  const bell: Contradicted = { kind: 'method', member: 'silence', type: 'Bell', declaredIn: 'res://bell.gd' };
+  const [probe] = contradicted;
+  assert.ok(probe !== undefined);
+  const mixed = staleAnalysisNote([bell, probe], ['Rope']);
+  assert.match(mixed, /some types/, `two classes are two types: ${mixed}`);
+  assert.match(mixed, /For Bell\.silence, run editor_rescan first:/, 'the method is sent to the scan');
+  assert.match(mixed, /reloadScript set to res:\/\/bell\.gd recompiles that copy/, 'with its own script');
+  assert.match(
+    mixed,
+    /For Charm\.Kind\.ZZ_PROBE, run editor_rescan with reloadScript set to res:\/\/core\/charm\.gd first\./,
+    'and the enum member to the reload of its own script',
+  );
+
+  const twoScripts = staleAnalysisNote(
+    [
+      probe,
+      {
+        ...probe,
+        type: 'Ledger',
+        enum: 'Count',
+        member: 'EXCHANGES_DRAWN',
+        declaredIn: 'res://core/ledger.gd',
+      },
+    ],
+    [],
+  );
+  assert.match(
+    twoScripts,
+    /a call each for res:\/\/core\/charm\.gd and res:\/\/core\/ledger\.gd since it takes one script/,
+    `reloadScript takes one script, so two are two calls: ${twoScripts}`,
+  );
+}
+
+/**
+ * The same, asked of the server: `script_diagnostics` answers a stale enum member with the member
+ * under contradictedByTheFile and the reload in staleAnalysis. The stand-in language server
+ * publishes the two messages ostinato's reproduction returned, the member and its follow-on, and
+ * the class cache and declaring file are the project's own, so what is checked is the answer a
+ * caller reads rather than the functions that build it.
+ */
+async function testDiagnosticsNameAStaleEnumMember(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-stale-enum-'));
+  try {
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    mkdirSync(join(project, '.godot'), { recursive: true });
+    mkdirSync(join(project, 'core'), { recursive: true });
+    writeFileSync(
+      join(project, 'core', 'charm.gd'),
+      'class_name Charm\nextends RefCounted\n\nenum Kind { LUCK, ZZ_PROBE }\n',
+    );
+    writeFileSync(
+      join(project, 'probe.gd'),
+      'extends Node\n\n\nfunc kind() -> Charm.Kind:\n\treturn Charm.Kind.ZZ_PROBE\n',
+    );
+    writeFileSync(
+      join(project, '.godot', 'global_script_class_cache.cfg'),
+      'list=[{\n"class": &"Charm",\n"path": "res://core/charm.gd"\n}]\n',
+    );
+    await withFakeLanguageServer(
+      (uri) => uri,
+      async (lspPort) => {
+        const server = new ServerProcess({
+          env: {
+            GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+            GDHARNESS_LSP_PORT: String(lspPort),
+            GODOT_PATH: join(tmpdir(), 'gdharness-no-such-godot'),
+          },
+        });
+        try {
+          await server.initialize('regression-test');
+          const answer = parseTextContent(
+            await server.request('tools/call', {
+              name: 'script_diagnostics',
+              arguments: { projectPath: project, scriptPath: 'res://probe.gd' },
+            }),
+          );
+          assert.equal(get(answer, 'errors'), 2, `both diagnostics are passed on: ${JSON.stringify(answer)}`);
+          assert.deepEqual(
+            get(answer, 'contradictedByTheFile'),
+            [
+              {
+                kind: 'enum member',
+                member: 'ZZ_PROBE',
+                type: 'Charm',
+                enum: 'Kind',
+                declaredIn: 'res://core/charm.gd',
+              },
+            ],
+            `the member the file declares is named, and the follow-on is not: ${JSON.stringify(answer)}`,
+          );
+          assert.match(
+            String(get(answer, 'staleAnalysis')),
+            /For Charm\.Kind\.ZZ_PROBE, run editor_rescan with reloadScript set to res:\/\/core\/charm\.gd first\./,
+            'and the remedy is the reload of the script that declares it',
+          );
+        } finally {
+          await server.stop();
+        }
+      },
+      undefined,
+      [
+        'Cannot find member "ZZ_PROBE" in base "Charm.Kind".',
+        'The argument 3 of the function "per()" requires the subtype "Charm.Kind" but the supertype "Variant" was provided.',
+      ],
+    );
+  } finally {
+    sweep(project);
+  }
 }
 
 /**
@@ -21666,6 +21911,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAHeldScratchDirectoryGoesOnceLetGo,
   testAnAbandonedScratchDirectoryIsSweptAndNothingElse,
   testADiagnosticTheFileContradictsIsNamed,
+  testAStaleEnumMemberIsNamed,
+  testDiagnosticsNameAStaleEnumMember,
   testAClassTheEditorHasNotLoadedIsToldApartFromOneTheCacheLacks,
   testAClassTheEditorHoldsAfterItsScriptIsGoneIsNamed,
   testWhatAStaleTypeDependsOnIsNamed,
