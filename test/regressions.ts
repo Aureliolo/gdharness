@@ -9104,6 +9104,44 @@ function testADiagnosticTheFileContradictsIsNamed(): void {
   assert.equal(declaresMember(game, { kind: 'property', member: 'score', type: 'Game' }), true, 'var too');
   assert.equal(declaresMember(game, { kind: 'property', member: 'ROUNDS', type: 'Game' }), true, 'const too');
 
+  // Everything an instance answers by name, which Godot denies as a missing property on an inferred
+  // type (measured on 4.7.2 for a signal read through a typed variable): a variable under any
+  // annotation, one on the line above, a signal, an enum, and a function read as a Callable.
+  const annotated = [
+    'class_name Hall',
+    'extends Node',
+    '',
+    '@onready var door: Node = $Door',
+    '@export_range(0, 10) var width: int = 3',
+    '@export_group("Stats")',
+    '@export',
+    'var height: int = 2',
+    'signal opened',
+    'enum Wing { EAST, WEST }',
+    '',
+    '',
+    'func ring() -> void:',
+    '\tprint(unlisted)',
+    '',
+  ].join('\n');
+  for (const member of ['door', 'width', 'height', 'opened', 'Wing', 'ring']) {
+    assert.equal(
+      declaresMember(annotated, { kind: 'property', member, type: 'Hall' }),
+      true,
+      `${member} is answered by an instance of Hall`,
+    );
+  }
+  assert.equal(
+    declaresMember(annotated, { kind: 'property', member: 'unlisted', type: 'Hall' }),
+    false,
+    'a name used in a body is not declared by it',
+  );
+  assert.equal(
+    declaresMember(annotated, { kind: 'member', member: 'ring', type: 'Hall' }),
+    false,
+    'and the class itself is not taken to answer an instance function',
+  );
+
   // The direction that must not be got wrong: a member the file does not declare stays unclaimed,
   // because calling a real finding stale is worse than saying nothing about it.
   assert.equal(

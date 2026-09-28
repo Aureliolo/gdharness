@@ -263,22 +263,19 @@ export function declaresMember(source: string, missing: MissingMember): boolean 
   if (missing.kind === 'static method') {
     return new RegExp(String.raw`^\s*static\s+func\s+${name}\s*\(`, 'm').test(source);
   }
-  if (missing.kind === 'property') {
-    return new RegExp(String.raw`^\s*(?:static\s+)?(?:@export\s+)?(?:var|const)\s+${name}\b`, 'm').test(
+  if (missing.kind === 'enum member') {
+    return enumValues(source, missing.enum ?? '').includes(missing.member);
+  }
+  // Anything answered by name: a variable or constant under any annotations, an enum or inner class
+  // by its own name, a signal, and the values of an enum with no name, which land on the class. An
+  // instance also answers a function by name, as a Callable, so a property is found as one too.
+  const kinds =
+    missing.kind === 'property' ? 'var|const|enum|class|signal|func' : 'var|const|enum|class|signal';
+  return (
+    new RegExp(String.raw`^\s*(?:static\s+)?(?:@\w+(?:\([^)]*\))?\s+)*(?:${kinds})\s+${name}\b`, 'm').test(
       source,
-    );
-  }
-  if (missing.kind === 'member') {
-    // Anything a class answers by name: a constant, a static variable, an enum or inner class by
-    // its own name, a signal, and the values of an enum with no name, which land on the class.
-    return (
-      new RegExp(
-        String.raw`^\s*(?:static\s+)?(?:@\w+(?:\([^)]*\))?\s+)*(?:var|const|enum|class|signal)\s+${name}\b`,
-        'm',
-      ).test(source) || enumValues(source, null).includes(missing.member)
-    );
-  }
-  return enumValues(source, missing.enum ?? '').includes(missing.member);
+    ) || enumValues(source, null).includes(missing.member)
+  );
 }
 
 /**
