@@ -145,7 +145,11 @@ func wait_until(params: Dictionary) -> Dictionary:
 	# with null until the time ran out. #772 waited a minute for "null" that way and answered met
 	# false with value null beside it.
 	var declared: int = watched["declared"]
-	if declared == TYPE_OBJECT and wanted is String and str(wanted).strip_edges() == "null":
+	# An untyped slot holding null or an object is read the same way, as set reads it: otherwise the
+	# two ops would disagree about one property, and the wait would run out on the text null.
+	var untyped_object: bool = declared == TYPE_NIL and (current == null or typeof(current) == TYPE_OBJECT)
+	var holds_objects: bool = declared == TYPE_OBJECT or untyped_object
+	if holds_objects and wanted is String and str(wanted).strip_edges() == "null":
 		wanted = null
 	var refused: String = _not_comparable(current, wanted, node_path, property)
 	var never_held: bool = typeof(wanted) != TYPE_NIL and typeof(wanted) != TYPE_OBJECT
