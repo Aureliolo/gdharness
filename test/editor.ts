@@ -238,7 +238,10 @@ const MAIN_GD = [
   '',
 ];
 
-/** A global class holding an enum and a constant, which another script reads as `Peal.Kind.X`. */
+/**
+ * A global class holding an enum, a constant and a static function, which another script reads as
+ * `Peal.Kind.X`, `Peal.X` and `Peal.x()`.
+ */
 const PEAL_GD = [
   'class_name Peal',
   'extends RefCounted',
@@ -246,6 +249,10 @@ const PEAL_GD = [
   'enum Kind { SHORT, LONG }',
   '',
   'const ROUNDS: int = 2',
+  '',
+  '',
+  'static func count() -> int:',
+  '\treturn ROUNDS',
   '',
   '',
   'func chime() -> int:',
@@ -262,6 +269,10 @@ const TOWER_GD = [
   '',
   'func rounds() -> int:',
   '\treturn Peal.ROUNDS',
+  '',
+  '',
+  'func counted() -> int:',
+  '\treturn Peal.count()',
   '',
 ];
 
@@ -2071,13 +2082,23 @@ async function testAnEnumMemberAddedToAHeldTypeIsPickedUp({ call, project }: Edi
 
   writeFileSync(
     join(project, 'tower.gd'),
-    TOWER_GD.join('\n').replace('Kind.LONG', 'Kind.NEVER').replace('Peal.ROUNDS', 'Peal.NOWHERE'),
+    TOWER_GD.join('\n')
+      .replace('Kind.LONG', 'Kind.NEVER')
+      .replace('Peal.ROUNDS', 'Peal.NOWHERE')
+      .replace('Peal.count()', 'Peal.nope()'),
   );
   const missing = await read();
   assert.deepEqual(
     asArray(get(missing, 'diagnostics')).map((entry) => get(entry, 'message')),
-    ['Cannot find member "NEVER" in base "Peal.Kind".', 'Cannot find member "NOWHERE" in base "Peal".'],
-    `the engine words a missing enum member and constant as the check reads them: ${JSON.stringify(missing)}`,
+    [
+      'Cannot find member "NEVER" in base "Peal.Kind".',
+      'Cannot find member "NOWHERE" in base "Peal".',
+      'Static function "nope()" not found in base "Peal".',
+      // Only because this project raises the unsafe method access warning to an error; on the
+      // default warnings the line above is the whole of what a caller gets.
+      'The method "nope()" is not present on the inferred type "Peal" (but may be present on a subtype). (Warning treated as error.)',
+    ],
+    `the engine words a missing enum member, constant and static function as the check reads them: ${JSON.stringify(missing)}`,
   );
   assert.equal(
     get(missing, 'contradictedByTheFile'),
