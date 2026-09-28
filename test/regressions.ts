@@ -48,6 +48,8 @@ import {
   contradictedDiagnostics,
   declaredClasses,
   declaresMember,
+  type FailedReload,
+  failedReloadNote,
   heldButGone,
   type MissingMember,
   missingMemberIn,
@@ -9448,6 +9450,64 @@ function testAStaleStaticFunctionIsNamed(): void {
     staleAnalysisNote([called], []),
     /For Components\.opening, run editor_rescan with reloadScript set to res:\/\/components\.gd first\./,
     'and it is answered with the members of the class, the reload first',
+  );
+}
+
+/**
+ * A reload that did not compile says whether the copy the editor holds survived it, and what it
+ * lost when it did not.
+ *
+ * ostinato's reload of `exchange.gd` answered "error 43" and nothing else, and the next reload found
+ * the held copy with one method of the eleven it had held for days, so nobody could tell whether the
+ * failed reload had done it. The branches the editor tier cannot reach are rendered here: a copy
+ * that changed, the file naming no class, and an editor that gave no name for its error.
+ */
+function testAFailedReloadSaysWhatItKept(): void {
+  const exchange: FailedReload = {
+    script: 'res://core/exchange.gd',
+    code: 43,
+    codeName: 'Parse error',
+    heldBefore: ['_pierced', 'settle'],
+    heldAfter: ['settle'],
+    constantsBefore: ['CAP'],
+    constantsAfter: [],
+    names: ['Born', 'Rules'],
+  };
+  const gutted = failedReloadNote(exchange);
+  assert.match(
+    gutted,
+    /^res:\/\/core\/exchange\.gd did not compile, so nothing was reloaded: Godot answered error 43, Parse error\./,
+    gutted,
+  );
+  assert.match(
+    gutted,
+    /The copy the editor holds changed even so, and has lost _pierced, CAP: anything diagnosed against it now is answered from what is left, and reloading it once it compiles rebuilds it\./,
+    'a copy the failure damaged is said to be damaged, with what went',
+  );
+  assert.doesNotMatch(gutted, /is as it was/, 'and is not also said to be intact');
+  assert.match(gutted, /a member of Born or Rules that its file declares/, 'every class the file names');
+
+  const alone = failedReloadNote({
+    ...exchange,
+    heldAfter: exchange.heldBefore,
+    constantsAfter: exchange.constantsBefore,
+    names: [],
+    codeName: '',
+  });
+  assert.equal(
+    alone,
+    'res://core/exchange.gd did not compile, so nothing was reloaded: Godot answered error 43. The copy the editor holds is as it was, with the members under heldBeforeReload and heldConstantsBeforeReload. script_diagnostics on it gives the errors.',
+    'an intact copy, no class to name and no name for the error, each said as nothing more than it is',
+  );
+  // A member the copy gained is still a change, however unlikely: the claim is sameness.
+  assert.match(
+    failedReloadNote({
+      ...exchange,
+      heldAfter: [...exchange.heldBefore, 'extra'],
+      constantsAfter: exchange.constantsBefore,
+    }),
+    /The copy the editor holds changed even so:/,
+    'a copy that changed without losing anything is not called unchanged',
   );
 }
 
@@ -21190,6 +21250,9 @@ async function testARescanReloadsWhatNamesAClassItBroughtIn(): Promise<void> {
     writeFileSync(join(project, 'base.gd'), 'class_name CharteredRun\nextends Node\n');
     writeFileSync(join(project, 'charters_test.gd'), 'extends CharteredRun\n');
     writeFileSync(join(project, 'uses.gd'), 'extends Node\n\nvar run: CharteredRun\n');
+    // Refused the way the editor addon refuses one that does not compile: a call that ran, with
+    // Godot's error and the readings of the copy it kept.
+    writeFileSync(join(project, 'refuses.gd'), 'extends Node\n\nvar run: CharteredRun\n');
     writeFileSync(join(project, 'other.gd'), 'extends Node\n\nvar chartered := 1\n');
     // The name in prose and in text only, which is not a use: reloading on a comment is how the
     // editor addon's own tool executor was reloaded mid-call and took a Linux editor down.
@@ -21232,6 +21295,15 @@ async function testARescanReloadsWhatNamesAClassItBroughtIn(): Promise<void> {
         const scriptPath = String(args['scriptPath']);
         reloadsAskedFor.push(scriptPath);
         const refused = scriptPath === 'res://uses.gd';
+        const uncompiled = {
+          ok: true,
+          failed: 43,
+          failedAs: 'Parse error',
+          heldBefore: ['run_once'],
+          methods: ['run_once'],
+          heldConstantsBefore: ['MAX'],
+          constants: ['MAX'],
+        };
         socket.send(
           JSON.stringify(
             refused
@@ -21241,7 +21313,12 @@ async function testARescanReloadsWhatNamesAClassItBroughtIn(): Promise<void> {
                   success: false,
                   error: 'the fixture editor refused it',
                 }
-              : { type: 'tool_result', id: message['id'], success: true, result: { ok: true, methods: [] } },
+              : {
+                  type: 'tool_result',
+                  id: message['id'],
+                  success: true,
+                  result: scriptPath === 'res://refuses.gd' ? uncompiled : { ok: true, methods: [] },
+                },
           ),
         );
         return;
@@ -21272,7 +21349,7 @@ async function testARescanReloadsWhatNamesAClassItBroughtIn(): Promise<void> {
     assert.deepEqual(asArray(get(answer, 'broughtIn') ?? []).map(String), ['CharteredRun'], said);
     assert.deepEqual(
       reloadsAskedFor,
-      ['res://charters_test.gd', 'res://uses.gd'],
+      ['res://charters_test.gd', 'res://refuses.gd', 'res://uses.gd'],
       `the scripts naming the class are reloaded, and not the one declaring it or one that does not name it: ${said}`,
     );
     assert.deepEqual(
@@ -21283,25 +21360,60 @@ async function testARescanReloadsWhatNamesAClassItBroughtIn(): Promise<void> {
     const notReloaded = asArray(get(answer, 'dependentsNotReloaded') ?? []);
     assert.deepEqual(
       notReloaded.map((one) => text(get(one, 'scriptPath'))),
-      ['res://tooling.gd', 'res://uses.gd'],
+      ['res://refuses.gd', 'res://tooling.gd', 'res://uses.gd'],
       said,
     );
-    assert.match(text(get(notReloaded[0], 'problem')), /a @tool script, which runs inside the editor/, said);
-    assert.match(text(get(notReloaded[1], 'problem')), /the fixture editor refused it/, said);
+    // Answered as a call that ran, and still not a reload: the methods it carries are what the copy
+    // kept, and counting them as reloaded is the mistake this guards.
+    assert.match(
+      text(get(notReloaded[0], 'problem')),
+      /^it did not compile: Godot answered error 43, Parse error$/,
+      said,
+    );
+    assert.match(text(get(notReloaded[1], 'problem')), /a @tool script, which runs inside the editor/, said);
+    assert.match(text(get(notReloaded[2], 'problem')), /the fixture editor refused it/, said);
     assert.equal(get(answer, 'ok'), false, `an editor still holding a stale compile is not ok: ${said}`);
     assert.match(
       text(get(answer, 'note')),
-      /res:\/\/tooling\.gd, res:\/\/uses\.gd name them and could not be reloaded/,
+      /res:\/\/refuses\.gd, res:\/\/tooling\.gd, res:\/\/uses\.gd name them and could not be reloaded/,
       said,
     );
 
+    // The same refusal asked for by name: the readings of the copy it kept, and the class the file
+    // names as the one to reload first.
+    const asked = parseTextContent(
+      await server.request('tools/call', {
+        name: 'editor_rescan',
+        arguments: { projectPath: project, reloadScript: 'res://refuses.gd' },
+      }),
+    );
+    assert.equal(
+      get(asked, 'reloadProblem'),
+      "res://refuses.gd did not compile, so nothing was reloaded: Godot answered error 43, Parse error. The copy the editor holds is as it was, with the members under heldBeforeReload and heldConstantsBeforeReload. script_diagnostics on it gives the errors. If they deny a member of CharteredRun that its file declares, the editor's copy of that class is behind: reload that class first with reloadScript and then this script, the order that cleared it in the one project that has met this.",
+      JSON.stringify(asked),
+    );
+    assert.deepEqual(
+      [
+        get(asked, 'heldBeforeReload'),
+        get(asked, 'heldConstantsBeforeReload'),
+        get(asked, 'reloadedMethods'),
+      ],
+      [['run_once'], ['MAX'], undefined],
+      `the readings of the copy it kept, and nothing claimed as reloaded: ${JSON.stringify(asked)}`,
+    );
+
     // Nothing brought in the second time, so nothing is reloaded and the scan is clean.
+    const reloadsSoFar = reloadsAskedFor.length;
     const again = await server.request('tools/call', {
       name: 'editor_rescan',
       arguments: { projectPath: project },
     });
     const second = parseTextContent(again);
-    assert.equal(reloadsAskedFor.length, 2, `a scan bringing nothing in reloads nothing: ${textOf(again)}`);
+    assert.equal(
+      reloadsAskedFor.length,
+      reloadsSoFar,
+      `a scan bringing nothing in reloads nothing: ${textOf(again)}`,
+    );
     assert.equal(get(second, 'ok'), true, textOf(again) ?? '');
     assert.equal(get(second, 'broughtIn'), undefined, textOf(again) ?? '');
   } finally {
@@ -22032,6 +22144,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testADiagnosticTheFileContradictsIsNamed,
   testAStaleEnumMemberIsNamed,
   testAStaleStaticFunctionIsNamed,
+  testAFailedReloadSaysWhatItKept,
   testDiagnosticsNameAStaleEnumMember,
   testAClassTheEditorHasNotLoadedIsToldApartFromOneTheCacheLacks,
   testAClassTheEditorHoldsAfterItsScriptIsGoneIsNamed,

@@ -2106,7 +2106,42 @@ async function testAnEnumMemberAddedToAHeldTypeIsPickedUp({ call, project }: Edi
     'and a member the file does not declare is not claimed as stale',
   );
 
+  // A reload the editor refuses answers with what the copy held and whether it still holds it. Held
+  // first, so there is a copy to keep; then a parse error in the file. Measured on 4.7.2, the copy
+  // is left as it was, which is the state the answer has to be able to say.
   writeFileSync(join(project, 'tower.gd'), TOWER_GD.join('\n'));
+  const towerHeld = await call('editor_rescan', { projectPath: project, reloadScript: 'res://tower.gd' });
+  assert.deepEqual(
+    get(towerHeld, 'reloadedMethods'),
+    ['counted', 'kind', 'rounds'],
+    JSON.stringify(towerHeld),
+  );
+  writeFileSync(join(project, 'tower.gd'), `${TOWER_GD.join('\n')}\n\nfunc broken( -> int:\n\treturn 1\n`);
+  const refused = await call('editor_rescan', { projectPath: project, reloadScript: 'res://tower.gd' });
+  assert.match(
+    String(get(refused, 'reloadProblem')),
+    /^res:\/\/tower\.gd did not compile, so nothing was reloaded: Godot answered error 43, Parse error\. The copy the editor holds is as it was/,
+    `a refused reload says why in Godot's words and that the copy is intact: ${JSON.stringify(refused)}`,
+  );
+  assert.deepEqual(
+    get(refused, 'heldBeforeReload'),
+    ['counted', 'kind', 'rounds'],
+    'with the reading of the copy it kept',
+  );
+  assert.match(
+    String(get(refused, 'reloadProblem')),
+    /a member of Peal that its file declares/,
+    'and the class it names',
+  );
+  assert.equal(get(refused, 'reloadedMethods'), undefined, 'and nothing claimed as reloaded');
+
+  writeFileSync(join(project, 'tower.gd'), TOWER_GD.join('\n'));
+  const mended = await call('editor_rescan', { projectPath: project, reloadScript: 'res://tower.gd' });
+  assert.deepEqual(
+    [get(mended, 'heldBeforeReload'), get(mended, 'reloadedMethods'), get(mended, 'reloadProblem')],
+    [['counted', 'kind', 'rounds'], ['counted', 'kind', 'rounds'], undefined],
+    `and once the file compiles the same copy reloads whole: ${JSON.stringify(mended)}`,
+  );
 }
 
 /**
