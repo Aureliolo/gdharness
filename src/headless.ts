@@ -100,8 +100,48 @@ function reason(stdout: string, stderr: string): string {
   return stdout.trim().split(/\r?\n/).at(-1) ?? 'no output at all';
 }
 
+/** One import pass's outcome, and the extension libraries a first pass could not load, if any. */
+export type ImportOutcome = (
+  | { readonly ok: true; readonly messages: readonly LogEntry[] }
+  | { readonly ok: false; readonly message: string; readonly messages: readonly LogEntry[] }
+) & { readonly librariesRetried?: readonly string[] };
+
 /**
- * The engine's own import pass over a project, which is what mints a missing `.uid`.
+ * The GDExtension libraries an engine could not load because it could not make its own copy of
+ * them, read from what it printed.
+ *
+ * On Windows an engine running with the editor hint, which an import pass is, loads each extension
+ * from a `~` copy made beside the library, and the running editor holds its own copy at that path.
+ * Measured on 4.7.2 with GodotSteam: an import started beside a headless editor printed "Error
+ * copying library" and ran without the extension, and the same import run again loaded it, because
+ * the failed attempt had moved the editor's copy aside as a `~RF….TMP` file.
+ */
+export function librariesNotCopied(messages: readonly LogEntry[]): string[] {
+  const found = new Set<string>();
+  for (const entry of messages) {
+    const library = /Error copying library: (.+)$/.exec(entry.text)?.[1]?.trim();
+    if (library !== undefined && library !== '') {
+      found.add(library);
+    }
+  }
+  return [...found];
+}
+
+/** What a caller is told when an import pass was run a second time for [param libraries]. */
+export function extensionRetryNote(libraries: readonly string[]): string {
+  return (
+    `The first import could not load ${libraries.join(' and ')}: on Windows an engine running as the editor ` +
+    'loads a GDExtension from a ~ copy beside the library, and the editor open on this project holds its own ' +
+    'copy there, so the first engine started beside it cannot make one. That failed attempt moves the ' +
+    "editor's copy aside, so the import was run again and loaded the extension, and the messages are from " +
+    "that second run. The editor's copy is left beside the library as a ~RF….TMP file, which can be deleted " +
+    'once the editor has exited.'
+  );
+}
+
+/**
+ * The engine's own import pass over a project, which is what mints a missing `.uid`, run a second
+ * time when the first could not copy an extension library: see {@link librariesNotCopied}.
  *
  * Not an operation: there is no script and no answer to parse, only the exit status and whatever
  * the engine complained about. It is here rather than in the server because it is the same engine
@@ -112,9 +152,17 @@ function reason(stdout: string, stderr: string): string {
 export async function runImport(
   godotPath: string,
   projectPath: string,
-): Promise<
-  { ok: true; messages: readonly LogEntry[] } | { ok: false; message: string; messages: readonly LogEntry[] }
-> {
+  once: (godotPath: string, projectPath: string) => Promise<ImportOutcome> = importOnce,
+): Promise<ImportOutcome> {
+  const first = await once(godotPath, projectPath);
+  const collided = librariesNotCopied(first.messages);
+  if (collided.length === 0) {
+    return first;
+  }
+  return { ...(await once(godotPath, projectPath)), librariesRetried: collided };
+}
+
+async function importOnce(godotPath: string, projectPath: string): Promise<ImportOutcome> {
   const logDir = scratchDirectory('import');
   try {
     const { stderr } = await run(
