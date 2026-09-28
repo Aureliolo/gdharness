@@ -87,6 +87,7 @@ import {
   envValue,
   OPENED_BY_A_SERVER,
   resolveHeadless,
+  resolveSilent,
   runArguments,
   SAVES_NOT_MOVED_NOTE,
   savesStayPut,
@@ -2871,7 +2872,7 @@ async function testAnArgumentMeantForAnotherOpIsRefused(): Promise<void> {
     );
     assert.match(
       await call('editor_run', { op: 'start', projectPath: '/p', frames: 3 }),
-      /start takes: projectPath, scene, args, headless, visible, savesIn, env, runtimeWaitMs/,
+      /start takes: projectPath, scene, args, headless, visible, silent, savesIn, env, runtimeWaitMs/,
       'and the refusal says what start takes instead',
     );
     assert.match(
@@ -8439,6 +8440,34 @@ function testRunArgumentsLeaveTheLocalDebuggerOff(): void {
     '--path',
     '/p',
   ]);
+  // A silent windowed run names the Dummy audio driver among the engine's own options, before the
+  // scene and the separator, where the engine reads it rather than handing it to the game. A
+  // headless run is silent already and names nothing more.
+  assert.deepEqual(
+    runArguments({ projectPath: '/p', headless: false, scene: 'a.tscn', userArgs: ['--x'], silent: true }),
+    ['--path', '/p', '--audio-driver', 'Dummy', 'res://a.tscn', '--', '--x'],
+  );
+  assert.deepEqual(runArguments({ projectPath: '/p', headless: true, scene: null, silent: true }), [
+    '--headless',
+    '--path',
+    '/p',
+  ]);
+}
+
+/**
+ * Whether a run is silent: as asked, or as the server's environment says when it was not asked,
+ * where `0` and `false` say no as an empty value does.
+ */
+function testSilenceFollowsTheAskThenTheEnvironment(): void {
+  assert.equal(resolveSilent(true, {}), true, 'asked for');
+  assert.equal(resolveSilent(false, { GDHARNESS_SILENT: '1' }), false, 'asked against the default');
+  assert.equal(resolveSilent(undefined, {}), false, 'neither');
+  for (const yes of ['1', 'true', 'yes', 'TRUE']) {
+    assert.equal(resolveSilent(undefined, { GDHARNESS_SILENT: yes }), true, `GDHARNESS_SILENT=${yes}`);
+  }
+  for (const no of ['', '0', 'false', 'False']) {
+    assert.equal(resolveSilent(undefined, { GDHARNESS_SILENT: no }), false, `GDHARNESS_SILENT=${no}`);
+  }
 }
 
 /**
@@ -11649,7 +11678,8 @@ const FAKE_EDITOR_PID = process.pid;
  * it, and a case that failed before its own stop left the directory behind on Windows.
  * [param options.onAdapter] is handed each connection the server makes to the scripted adapter,
  * for a fixture that sends events down it. [param options.editorPid] is the process the editor
- * says it is, this one unless a fixture wants the adapter to be somebody else's.
+ * says it is, this one unless a fixture wants the adapter to be somebody else's. [param options.env]
+ * is added to the server's environment, for a fixture about a default the environment sets.
  */
 async function withAPlayingEditor(
   answer: (where: Pick<PlayingEditorStage, 'adapter' | 'project' | 'runtimeDir'>) => EditorToolAnswer,
@@ -11660,6 +11690,7 @@ async function withAPlayingEditor(
     held?: { game: ChildProcess | null };
     onAdapter?: (socket: Socket) => void;
     editorPid?: number;
+    env?: Readonly<Record<string, string>>;
   } = {},
 ): Promise<void> {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-played-over-'));
@@ -11687,6 +11718,7 @@ async function withAPlayingEditor(
       // how long one took: without it a start that sat nine seconds on a played game left
       // nothing behind to say where the time went.
       DEBUG: 'true',
+      ...options.env,
     },
   });
   const editor: { socket: WebSocket | null } = { socket: null };
@@ -12341,6 +12373,83 @@ async function testAPlayThroughAnotherProcesssAdapterIsRefusedEachTime(): Promis
     },
     { editorPid: other },
   );
+}
+
+/**
+ * A silent windowed run is started by this server with the Dummy audio driver, and the answer says
+ * why it did not go through the editor.
+ *
+ * A windowed run is kept off the desktop somebody is using, and its sound came out of the machine's
+ * speakers all the same. Silence is an engine flag, and the editor takes none for a game it plays,
+ * so a silent run is spawned the way a run with arguments is, losing the debugger, which the answer
+ * has to say rather than leave to be found. Asked for, set as the server's default, and the default
+ * turned down for one start, each against a connected editor that would otherwise play it.
+ */
+async function testASilentRunIsStartedHereAndSaysWhy(): Promise<void> {
+  const cases = [
+    { how: 'asked for', env: {}, silent: true as boolean | undefined, spawned: true, byDefault: false },
+    { how: 'by default', env: { GDHARNESS_SILENT: '1' }, silent: undefined, spawned: true, byDefault: true },
+    { how: 'turned down', env: { GDHARNESS_SILENT: '1' }, silent: false, spawned: false, byDefault: false },
+  ];
+  for (const one of cases) {
+    let plays = 0;
+    await withAPlayingEditor(
+      ({ adapter }) =>
+        (tool) => {
+          if (tool === 'play_scene') {
+            plays += 1;
+            return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
+          }
+          if (tool === 'playing_status') {
+            return { ok: true, playing: plays > 0, scenePath: '', debugPort: adapter };
+          }
+          return { ok: true };
+        },
+      async ({ server, project }) => {
+        const response = await server.request(
+          'tools/call',
+          {
+            name: 'editor_run',
+            arguments: {
+              projectPath: project,
+              op: 'start',
+              headless: false,
+              runtimeWaitMs: 500,
+              ...(one.silent === undefined ? {} : { silent: one.silent }),
+            },
+          },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+        const answer = parseTextContent(response);
+        const said = JSON.stringify(answer);
+        if (one.spawned) {
+          assert.equal(get(answer, 'through'), 'gdharness', `${one.how}: started here: ${said}`);
+          const argv = asArray(get(answer, 'arguments')).map(text);
+          assert.deepEqual(
+            argv.slice(argv.indexOf('--audio-driver'), argv.indexOf('--audio-driver') + 2),
+            ['--audio-driver', 'Dummy'],
+            `${one.how}: with the Dummy audio driver: ${said}`,
+          );
+          assert.match(
+            text(get(answer, 'message')),
+            /The editor cannot play a game silent, which takes an engine flag, so this one was started here/,
+            `${one.how}: and says why: ${said}`,
+          );
+          assert.equal(
+            text(get(answer, 'message')).includes('silent because GDHARNESS_SILENT says so'),
+            one.byDefault,
+            `${one.how}: naming the default only when it was the default: ${said}`,
+          );
+          assert.equal(plays, 0, `${one.how}: and the editor is not asked to play`);
+        } else {
+          assert.equal(get(answer, 'through'), 'editor', `${one.how}: played through the editor: ${said}`);
+          assert.equal(plays, 1, `${one.how}: the editor is asked to play`);
+        }
+        await server.request('tools/call', { name: 'editor_run', arguments: { op: 'stop' } });
+      },
+      { env: one.env },
+    );
+  }
 }
 
 async function testAPlayedStartStopsWaitingForAGameThatIsOver(): Promise<void> {
@@ -21490,6 +21599,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testOneServerOneProjectRegression,
   testSceneToolsVectorRegression,
   testRunArgumentsLeaveTheLocalDebuggerOff,
+  testSilenceFollowsTheAskThenTheEnvironment,
+  testASilentRunIsStartedHereAndSaysWhy,
   testHeadlessFollowsTheDisplay,
   testStaleClassesAreReadFromDisk,
   testTheProjectWalksAgreeAboutWhatIsInIt,
