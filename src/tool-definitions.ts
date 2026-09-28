@@ -1456,7 +1456,11 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         description:
           'until: the property name, or a colon path through what the node holds, "_game:run:day", read the way runtime_inspect property reads one, a step written as a call included. Walked again on every frame, so a holder the game replaces while the wait is on is followed.',
       },
-      value: { ops: ['until'], description: "until: the value to wait for, fitted to the property's type." },
+      value: {
+        ops: ['until'],
+        description:
+          "until: the value to wait for, fitted to the property's type. On a property declared to hold an object, null, which the text null also means; any other value is refused, since the property can never hold it.",
+      },
       says: {
         type: 'string',
         ops: ['until'],

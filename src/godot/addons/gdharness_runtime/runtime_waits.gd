@@ -140,7 +140,23 @@ func wait_until(params: Dictionary) -> Dictionary:
 
 	var current: Variant = watched["value"]
 	var wanted: Variant = _values.fitted(params["value"], typeof(current))
+	# Read against what the property is declared as, not only against what it holds this frame: an
+	# object property holding null holds nothing typed, so any value was taken as it came and compared
+	# with null until the time ran out. #772 waited a minute for "null" that way and answered met
+	# false with value null beside it.
+	var declared: int = watched["declared"]
+	if declared == TYPE_OBJECT and wanted is String and str(wanted).strip_edges() == "null":
+		wanted = null
 	var refused: String = _not_comparable(current, wanted, node_path, property)
+	var never_held: bool = typeof(wanted) != TYPE_NIL and typeof(wanted) != TYPE_OBJECT
+	if refused.is_empty() and declared == TYPE_OBJECT and never_held:
+		refused = (
+			(
+				"%s.%s is declared to hold an object and the value to wait for is %s, which it can"
+				+ " never hold: wait for null, or for the object's own value on a property of it."
+			)
+			% [node_path, property, type_string(typeof(wanted))]
+		)
 	if not refused.is_empty():
 		return {"type": "error", "message": refused}
 
@@ -224,7 +240,19 @@ static func _watched(node: Node, node_path: String, property: String) -> Diction
 	var missing: String = Paths.nothing_under(holder, named, str(reached["called"]))
 	if not missing.is_empty():
 		return {"type": "error", "message": missing}
-	return {"value": Paths.read_under(holder, named)}
+	return {"value": Paths.read_under(holder, named), "declared": _declared_type(holder, named)}
+
+
+## The type [param named] is declared with on [param holder], or TYPE_NIL for anything that declares
+## none: an untyped property, a step into a list or map, or a call.
+static func _declared_type(holder: Variant, named: String) -> int:
+	if typeof(holder) != TYPE_OBJECT or not Paths.method_of(named).is_empty():
+		return TYPE_NIL
+	var object: Object = holder
+	for entry: Dictionary in object.get_property_list():
+		if str(entry.get("name", "")) == named:
+			return Read.as_int(entry.get("type", TYPE_NIL), TYPE_NIL)
+	return TYPE_NIL
 
 
 ## Waits until something under [param node_path] has [param said] written on it.

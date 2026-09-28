@@ -743,7 +743,93 @@ func _check_until() -> void:
 	if no_value.get("type") != "error":
 		_fail("wait_until without a value is refused: %s" % str(no_value))
 
+	await _check_until_a_reference_is_let_go()
 	await _check_until_something_says_it()
+
+
+## A reference waited on until it is let go of, every way a game lets go: the property set to null,
+## and the object it points at freed now or at the end of the frame while the property still holds
+## it. All three meet, measured on 4.7.2, and are held here so they go on doing so.
+##
+## Then #772: a wait for null on an object property that already held null, with the value arriving
+## as the text "null", ran the whole timeout and answered met false with value null beside it,
+## because the value was fitted to what the property held, which was nothing typed. Fitted to what
+## the property is declared as, the text is null and meets at once, and a value no object property
+## can hold is refused before any waiting whether the property holds an object or null.
+func _check_until_a_reference_is_let_go() -> void:
+	var walking: GDScript = GDScript.new()
+	walking.source_code = "extends Node3D\n\nvar steps: int = 0\n"
+	var _walker_compiled: Error = walking.reload()
+	var written: FileAccess = FileAccess.open("res://probe_walker.gd", FileAccess.WRITE)
+	var _stored: bool = written.store_string(walking.source_code)
+	written.close()
+	var holding: GDScript = GDScript.new()
+	var declaring: String = 'extends Node3D\n\nconst Walker = preload("res://probe_walker.gd")\n\n'
+	holding.source_code = declaring + "var quarrel: Walker = null\n"
+	var compiled: Error = holding.reload()
+	if compiled != OK:
+		_fail("the holder script should compile: %s" % error_string(compiled))
+		return
+	var holder: Node3D = Node3D.new()
+	holder.name = "Holder"
+	holder.set_script(holding)
+	root.add_child(holder)
+
+	var walker_script: GDScript = load("res://probe_walker.gd")
+	for way: String in ["nulled", "freed", "queued"]:
+		var target: Node3D = Node3D.new()
+		target.set_script(walker_script)
+		root.add_child(target)
+		holder.set("quarrel", target)
+		var let_go: Callable = func() -> void:
+			await process_frame
+			await process_frame
+			if way == "nulled":
+				holder.set("quarrel", null)
+				target.free()
+			elif way == "freed":
+				target.free()
+			else:
+				target.queue_free()
+		let_go.call()
+		var met: Dictionary = await node._execute_command(
+			"wait_until", {"path": "/root/Holder", "property": "quarrel", "value": null, "timeout_ms": 1000}
+		)
+		if met.get("met") != true or met.get("value") != null or Read.as_int(met.get("frames"), -1) > 5:
+			_fail("a reference %s meets a wait for null within frames: %s" % [way, JSON.stringify(met)])
+
+	holder.set("quarrel", null)
+	var as_text: Dictionary = await node._execute_command(
+		"wait_until", {"path": "/root/Holder", "property": "quarrel", "value": "null", "timeout_ms": 1000}
+	)
+	if as_text.get("met") != true or Read.as_int(as_text.get("frames"), -1) != 0:
+		_fail("the text null on a null object property meets at once: %s" % JSON.stringify(as_text))
+
+	var number: Dictionary = await node._execute_command(
+		"wait_until", {"path": "/root/Holder", "property": "quarrel", "value": 5, "timeout_ms": 1000}
+	)
+	var said: String = str(number.get("message", ""))
+	if number.get("type") != "error" or not said.contains("declared to hold an object"):
+		_fail("a value no object property can hold is refused while it holds null: %s" % said)
+
+	# The positive beside the refusal: the same property takes a wait while it holds an object, and
+	# the text null is waited for rather than refused as a string.
+	var standing: Node3D = Node3D.new()
+	standing.set_script(walker_script)
+	root.add_child(standing)
+	holder.set("quarrel", standing)
+	var let_go_later: Callable = func() -> void:
+		await process_frame
+		holder.set("quarrel", null)
+	let_go_later.call()
+	var text_on_object: Dictionary = await node._execute_command(
+		"wait_until", {"path": "/root/Holder", "property": "quarrel", "value": "null", "timeout_ms": 1000}
+	)
+	if text_on_object.get("met") != true:
+		_fail("the text null is waited for on an object property: %s" % JSON.stringify(text_on_object))
+	standing.free()
+	holder.free()
+	var _removed: Error = DirAccess.remove_absolute(ProjectSettings.globalize_path("res://probe_walker.gd"))
 
 
 ## Waiting on a screen rather than on a node, which is the only way a panel that rebuilds its own
