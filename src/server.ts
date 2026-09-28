@@ -91,7 +91,7 @@ import {
   theEditorHasComeBack,
 } from './godot-bridge.js';
 import { GodotLocator } from './godot-path.js';
-import { type HeadlessOutcome, runImport, runOperation } from './headless.js';
+import { extensionRetryNote, type HeadlessOutcome, runImport, runOperation } from './headless.js';
 import { EDITOR_READS, ENGINE_PASSES, HEADLESS_OPERATIONS } from './headless-operations.js';
 import { DefectsSeen, defectReport, feedbackNotice } from './issues.js';
 import {
@@ -3071,6 +3071,9 @@ class GodotServer {
             // Said rather than implied: the op resaved every scene for as long as it existed, so a
             // caller who knows it by its diff needs telling that the diff is the bug and is gone.
             note: uidsLeftNote(after.length),
+            ...(imported.librariesRetried === undefined
+              ? {}
+              : { extensionNote: extensionRetryNote(imported.librariesRetried) }),
           },
         },
         scanned,
@@ -3298,6 +3301,9 @@ class GodotServer {
       }
       if (imported.messages.length > 0) {
         extra['engine_messages'] = imported.messages;
+      }
+      if (imported.librariesRetried !== undefined) {
+        extra['extensionNote'] = extensionRetryNote(imported.librariesRetried);
       }
     }
 
