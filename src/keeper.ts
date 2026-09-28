@@ -13,8 +13,7 @@
  */
 
 import { type ChildProcess, spawn } from 'node:child_process';
-import { closeSync, existsSync, mkdtempSync, openSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { closeSync, existsSync, openSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { throughHelper } from './desktop.js';
@@ -27,6 +26,7 @@ import {
   withChanges,
 } from './outside.js';
 import { recordRunEnded, writeRunRecord } from './run-record.js';
+import { discard, scratchDirectory } from './scratch.js';
 
 /**
  * The target started detached, so it is in no job object and no process group of this process;
@@ -81,7 +81,7 @@ async function startThroughHelper(
   spec: SentSpec,
   output: number | 'ignore',
 ): Promise<{ child: ChildProcess; pid: number } | { error: string }> {
-  const scratch = mkdtempSync(join(tmpdir(), 'gdharness-desktop-'));
+  const scratch = scratchDirectory('desktop');
   const pidFile = join(scratch, 'pid');
   const errorFile = join(scratch, 'error');
   const where = spec.desktop === undefined ? 'without activation' : `on the ${spec.desktop} desktop`;
@@ -118,7 +118,7 @@ async function startThroughHelper(
     started.child.kill();
     return { error: `it was not started ${where} within ${DESKTOP_START_MS} ms` };
   } finally {
-    rmSync(scratch, { recursive: true, force: true });
+    discard(scratch);
   }
 }
 

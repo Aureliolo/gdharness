@@ -504,7 +504,7 @@ async function upgrade(): Promise<void> {
       : '  1. The open editor is still running the addons it loaded at startup. Restart it with the\n' +
           '     editor_launch restart tool, which closes and reopens the window.',
   );
-  const serving = serverServing(projectPath);
+  const serving = await serverServing(projectPath);
   console.log(
     harnessNote(
       { moved, written, byHand },

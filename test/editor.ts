@@ -33,10 +33,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
+import { alive } from '../src/alive.js';
 import { GodotDAPClient } from '../src/dap_client.js';
-import { alive } from '../src/server.js';
 import { SERVER_VERSION } from '../src/server-version.js';
 import { RUNTIME_AUTOLOAD } from '../src/setup.js';
+import { endEnginesUnder } from './support/engines.js';
 import { asArray, asNumber, asObject, asString, get, text } from './support/json.js';
 import { parseTextContent, textOf } from './support/json-rpc.js';
 import { solidPng } from './support/png.js';
@@ -510,73 +511,6 @@ function createProject(): string {
   return dir;
 }
 
-/**
- * Ends every engine whose command line names this project, whoever started it.
- *
- * Asked of the operating system rather than tracked, because the processes worth ending here are
- * the ones nothing has a handle to: an editor a restart brought up, or a game the editor played.
- * Nothing outside the fixture's own temporary directory can match.
- */
-async function endEnginesUnder(project: string): Promise<void> {
-  // Every process, matched on its command line alone. Filtering by `Name='godot.exe'` first meant
-  // this found nothing at all wherever the engine is not called that, which is every machine using
-  // the pinned build: it is `Godot_v4.7.2-stable_win64.exe` on Windows. Nineteen fixture projects
-  // and eleven engines were left running on this machine before anybody looked. The path is the
-  // discriminator anyway, and it is a temporary directory this fixture made, so nothing else can
-  // match it; a name filter can only subtract from that.
-  const listing =
-    process.platform === 'win32'
-      ? spawnSync(
-          'powershell',
-          [
-            '-NoProfile',
-            '-Command',
-            'Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId) $($_.CommandLine)" }',
-          ],
-          { encoding: 'utf8', timeout: 30_000 },
-        )
-      : spawnSync('ps', ['-eo', 'pid=,args='], { encoding: 'utf8', timeout: 30_000 });
-
-  // A listing that did not happen is the failure this had for months, and it looks exactly like a
-  // machine with nothing to clean up. Said out loud, because the cost of it lands on the next run
-  // and on whoever is using the machine, not on this one.
-  if (listing.status !== 0 || listing.stdout.trim() === '') {
-    console.warn(
-      `could not list processes to clean up engines under ${project}: ${listing.status ?? listing.error?.message ?? 'no output'}`,
-    );
-    return;
-  }
-
-  const wanted = project.replaceAll('\\', '/').toLowerCase();
-  const ended: number[] = [];
-  for (const line of listing.stdout.split('\n')) {
-    const [, pid, rest] = /^\s*(\d+)\s+(.*)$/.exec(line.trim()) ?? [];
-    if (pid === undefined || rest === undefined) continue;
-    if (!rest.replaceAll('\\', '/').toLowerCase().includes(wanted)) continue;
-    try {
-      process.kill(Number(pid));
-      ended.push(Number(pid));
-      console.log(`ended engine ${pid}, which was still holding the fixture project`);
-    } catch {
-      // Gone between the listing and here, which is the outcome this is for.
-    }
-  }
-
-  // Waited for, for the same reason the editor with a handle is: a signal is not an exit, and an
-  // editor on its way out still holds the debug adapter port it bound. The next case reserves a
-  // port, is handed that number because nothing has released it yet, and is refused by the guard
-  // that asks who is really listening. Cases here are written on the understanding that one editor
-  // is up at a time, and that only holds if ending one finishes before the next starts.
-  const deadline = Date.now() + 10_000;
-  while (ended.some((pid) => alive(pid)) && Date.now() < deadline) {
-    await delay(100);
-  }
-  const holding = ended.filter((pid) => alive(pid));
-  if (holding.length > 0) {
-    console.warn(`engines ${holding.join(', ')} were signalled and are still up; the next case may collide`);
-  }
-}
-
 /** Waits for a killed engine to actually be gone, which is not the same moment. */
 async function exited(child: ChildProcess): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) {
@@ -815,7 +749,9 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
     // that process with one nothing here has a handle to, and a restart that failed part way
     // leaves an editor running on somebody's desktop: that happened, on a real machine, and the
     // only reason it was noticed is that it put a window up.
-    await endEnginesUnder(project);
+    for (const { pid } of await endEnginesUnder(project)) {
+      console.log(`ended engine ${pid}, which was still holding the fixture project`);
+    }
     // Reported rather than thrown: a directory still held is worth saying, and an exception from
     // here would replace whatever the cases were failing on, which is the thing worth reading.
     const held = await removeWhenFree(project);
@@ -1586,6 +1522,16 @@ async function testARescanDropsAClassWhoseScriptIsGone({ call, project }: Editor
   assert.ok(
     readFileSync(cache, 'utf8').includes('"Pace"'),
     `the editor should hold Pace first: ${text(picked)}`,
+  );
+  // The scan brings Pace and Settings in, and a comment in the editor addon's tool executor begins
+  // with the word Settings. Reloading that script while it was serving the call took a Linux editor
+  // down, so the addons' own scripts are never among what a rescan reloads.
+  assert.deepEqual(
+    asArray(get(picked, 'dependentsReloaded') ?? [])
+      .map((one) => asString(one))
+      .filter((path) => path.startsWith('res://addons/gdharness_')),
+    [],
+    `a rescan reloads none of the addons' own scripts: ${text(picked)}`,
   );
 
   // Renamed on disk, the way a project does it: the file, the class in it, and the sidecar.

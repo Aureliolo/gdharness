@@ -8,14 +8,13 @@
  */
 
 import { execFile } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { callSignal } from './call-signal.js';
 import { emptyRecord } from './dictionary.js';
 import { GameLog, type LogEntry } from './game-log.js';
-import { discard } from './scratch.js';
+import { discard, scratchDirectory } from './scratch.js';
 import type { OperationParams } from './server-types.js';
 
 // execFile, not exec: no shell means no quoting, and no quoting means no way to escape out of
@@ -116,7 +115,7 @@ export async function runImport(
 ): Promise<
   { ok: true; messages: readonly LogEntry[] } | { ok: false; message: string; messages: readonly LogEntry[] }
 > {
-  const logDir = mkdtempSync(join(tmpdir(), 'gdharness-import-'));
+  const logDir = scratchDirectory('import');
   try {
     const { stderr } = await run(
       godotPath,
@@ -151,7 +150,7 @@ export async function runOperation(
 ): Promise<HeadlessOutcome> {
   // Parameters go via a file rather than the command line: a JSON blob on argv runs into
   // Windows command-line parsing of \t, \r and \" whatever the quoting.
-  const paramsDir = mkdtempSync(join(tmpdir(), 'gdharness-params-'));
+  const paramsDir = scratchDirectory('params');
   const paramsFile = join(paramsDir, `${operation}.json`);
   writeFileSync(paramsFile, JSON.stringify(snakeCased(params)), 'utf8');
   const args = [

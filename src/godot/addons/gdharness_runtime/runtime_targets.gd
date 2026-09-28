@@ -4,6 +4,7 @@ extends RefCounted
 
 const Queries = preload("runtime_queries.gd")
 const Read = preload("reading.gd")
+const Says = preload("runtime_says.gd")
 const Values = preload("runtime_values.gd")
 const Words = preload("runtime_words.gd")
 
@@ -43,7 +44,7 @@ static func control_saying(root: Node, root_path: String, wanted: String, which:
 	var pending: Array[Node] = [reached["node"]]
 	while not pending.is_empty():
 		var node: Node = pending.pop_front()
-		if node is Control and Queries.says(node, wanted):
+		if node is Control and Says.says(node, wanted):
 			if not Queries.shown(node):
 				hidden += 1
 			else:
@@ -149,8 +150,8 @@ static func _rank(target: Control, whole: bool) -> int:
 ## named WARD, and read as its words run together it said WARD only as part of more, level with
 ## "WARDSPITE" over its own description, and a click on WARD was refused as not clear.
 static func _says_exactly(said: String, wanted: String) -> bool:
-	for words: String in Queries.alternatives(wanted):
-		if not Queries.is_plain(words):
+	for words: String in Says.alternatives(wanted):
+		if not Says.is_plain(words):
 			if said.matchn(words):
 				return true
 			continue
@@ -168,8 +169,8 @@ static func _described(count: int, rank: int, wanted: String, under: String) -> 
 	var what: String = "button" if rank >= 2 else "control"
 	var how: String = '"%s"' % wanted
 	var plain: bool = true
-	for words: String in Queries.alternatives(wanted):
-		plain = plain and Queries.is_plain(words)
+	for words: String in Says.alternatives(wanted):
+		plain = plain and Says.is_plain(words)
 	if plain:
 		how = ('exactly "%s"' if rank % 2 == 1 else '"%s" as part of more') % wanted
 	if count == 1:
@@ -262,9 +263,12 @@ static func _areas_of(drawn: Array[Node]) -> Array[Rect2]:
 ##
 ## The engine's own order for which control takes the pointer: an embedded window over everything
 ## in the viewport that holds it, then the higher canvas layer, then the later in the tree. A
-## control holding the target or held by it is part of the same click. A target whose centre its
-## own container clips away is judged not covered, since the click scrolls it into view first and
-## what is drawn there now is not what it will land on.
+## control holding the target or held by it is part of the same click.
+##
+## A target whose centre its own container clips away is judged where the click will put it, since
+## the click scrolls it into view first: what is drawn over its place now is not what it will land
+## under. Judged not covered at all instead, a button below the fold of a roster that a full-screen
+## page covered was picked over the ones in view, scrolled up under the page and pressed there.
 ##
 ## [param areas] holds the box around each of [param drawn], so everything whose box misses the
 ## point is passed over before anything costlier is asked of it.
@@ -272,7 +276,7 @@ static func _cover_of(target: Control, drawn: Array[Node], areas: Array[Rect2]) 
 	var viewport: Viewport = target.get_viewport()
 	var point: Vector2 = target.get_global_transform_with_canvas() * (target.size * 0.5)
 	if _clipped_away(target, point):
-		return null
+		point = _where_it_lands(target, point)
 	var layer: int = _layer_of(target)
 	for at: int in drawn.size():
 		if not areas[at].has_point(point):
@@ -309,6 +313,29 @@ static func _holds(control: Control, point: Vector2) -> bool:
 	# The rectangle, which is the engine's own answer unless a script overrides `_has_point`; the
 	# engine does not offer the overridden answer to scripts.
 	return Rect2(Vector2.ZERO, control.size).has_point(placed.affine_inverse() * point)
+
+
+## Where [param target]'s centre, now at [param point], will be once the click has scrolled it into
+## view: moved as little as puts the whole of it inside each container clipping it, innermost first,
+## which is how a scroll container brings a control into view. A target larger than a container is
+## centred in it.
+static func _where_it_lands(target: Control, point: Vector2) -> Vector2:
+	var drawn: Transform2D = target.get_global_transform_with_canvas()
+	var half: Vector2 = (drawn * Rect2(Vector2.ZERO, target.size)).size * 0.5
+	var landed: Vector2 = point
+	var walk: Node = target.get_parent()
+	while walk != null:
+		var holder: Control = walk as Control
+		if holder != null and holder.clip_contents:
+			var shown: Rect2 = holder.get_global_transform_with_canvas() * Rect2(Vector2.ZERO, holder.size)
+			var low: Vector2 = shown.position + half
+			var high: Vector2 = shown.end - half
+			landed = Vector2(
+				shown.get_center().x if low.x > high.x else clampf(landed.x, low.x, high.x),
+				shown.get_center().y if low.y > high.y else clampf(landed.y, low.y, high.y)
+			)
+		walk = walk.get_parent()
+	return landed
 
 
 ## Whether a container clipping what it holds cuts [param point] off from [param control].

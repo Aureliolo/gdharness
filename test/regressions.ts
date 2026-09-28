@@ -4,6 +4,7 @@ import { type ChildProcess, execFile, type SpawnSyncReturns, spawn, spawnSync } 
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import {
+  chmodSync,
   cpSync,
   existsSync,
   mkdirSync,
@@ -22,11 +23,13 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
+import { promisify } from 'node:util';
 import { inflateSync } from 'node:zlib';
 import { WebSocket } from 'ws';
 import { serviceDidNotAnswer } from '../scripts/audit-production.js';
 import { pullRequestNumbers, shipsToUsers } from '../scripts/release-notes.js';
 import { sharedCopies } from '../scripts/sync-shared-gd.js';
+import { alive } from '../src/alive.js';
 import {
   bootNotePath,
   halfAsLongAgain,
@@ -96,6 +99,7 @@ import {
   ancestorsIn,
   childrenOf,
   descendantsIn,
+  listingFailure,
   parseProcessTable,
   processTree,
   readCommandLine,
@@ -140,11 +144,17 @@ import {
   runtimesAnnounced,
   STARTED_AFTER_ANNOUNCING_MS,
   strangersAmong,
+  untilJudged,
 } from '../src/runtime-client.js';
-import { discardWith } from '../src/scratch.js';
+import {
+  discard,
+  discardWith,
+  scratchDirectory,
+  sweepAbandonedScratch,
+  untilDiscarded,
+} from '../src/scratch.js';
 import {
   aboveTheRunner,
-  alive,
   captureDestinationRefusal,
   endedPreviousRun,
   endedToStartThis,
@@ -194,11 +204,12 @@ import {
 } from '../src/tool-definitions.js';
 import { namedType, renderToolsMarkdown } from '../src/tool-reference.js';
 import { CACHE_MS, cacheFile, isNewer, registryFor, UpdateCheck } from '../src/update-check.js';
+import { askWindows } from '../src/windows-ask.js';
 import { asArray, asNumber, get, text } from './support/json.js';
 import { isRecord, type JsonRpcMessage, parseTextContent, textOf } from './support/json-rpc.js';
 import { solidPng } from './support/png.js';
 import { reservePort, ServerProcess } from './support/server.js';
-import { reportUnswept, sweep, sweepingFor } from './support/sweep.js';
+import { endEnginesLeft, leftBehindBy, reportUnswept, sweep, sweepingFor } from './support/sweep.js';
 
 async function withOccupiedBridgePort<T>(run: () => Promise<T>): Promise<T> {
   const blocker = createServer();
@@ -4399,12 +4410,13 @@ function testAGameThatAnnouncedAndWentIsSaidSo(): void {
  * again once it has aged, a verdict is kept while the file is the same one, and a stranger stays
  * one without being asked again.
  */
-function testAnAnnouncementIsItsOwnProcess(): void {
+async function testAnAnnouncementIsItsOwnProcess(): Promise<void> {
   const now = Date.now();
   const asked: number[][] = [];
   const began = new Map<number, number>();
-  const startTimes = (pids: readonly number[]): Map<number, number> => {
+  const startTimes = async (pids: readonly number[]): Promise<Map<number, number>> => {
     asked.push([...pids]);
+    await delay(0);
     return new Map([...pids].filter((pid) => began.has(pid)).map((pid) => [pid, began.get(pid) ?? 0]));
   };
   const file = (pid: number): string => join('announced', `runtime-${pid}.json`);
@@ -4427,6 +4439,14 @@ function testAnAnnouncementIsItsOwnProcess(): void {
   began.set(103, twoMinutesAgo + STARTED_AFTER_ANNOUNCING_MS - 500);
   began.set(105, now - 1_000);
 
+  // The look answers from what is decided, which is nothing yet, and does not wait for the question:
+  // on Windows it is a query, and every discovery of the running games used to sit on it.
+  assert.deepEqual(
+    [...strangersAmong(candidates, now, startTimes)],
+    [],
+    'the first look believes every announcement while the question is out',
+  );
+  await untilJudged();
   const strangers = strangersAmong(candidates, now, startTimes);
   assert.deepEqual(
     [...strangers],
@@ -4447,6 +4467,8 @@ function testAnAnnouncementIsItsOwnProcess(): void {
   // Once the confirmation has aged, the confirmed ones are asked again and the stranger is not: a
   // number that was somebody else's does not become the game's by waiting. The fresh one has aged
   // into the question by now, and is judged the moment it is.
+  strangersAmong(candidates, now + CONFIRMED_FOR_MS + 1_000, startTimes);
+  await untilJudged();
   const later = strangersAmong(candidates, now + CONFIRMED_FOR_MS + 1_000, startTimes);
   assert.deepEqual(
     [...later],
@@ -4464,8 +4486,18 @@ function testAnAnnouncementIsItsOwnProcess(): void {
   // that took the number back is asked about afresh, and it is the game.
   began.set(101, now - 30_000);
   const rewritten = [{ file: file(101), pid: 101, writtenAt: now - 20_000 }];
+  const afterwards = now + CONFIRMED_FOR_MS + 2_000;
+  // Not a stranger while its own question is out: the old file's verdict is not the new file's, and
+  // the sweep deletes a stranger's announcement, which the game that took its number back would not
+  // write again.
   assert.deepEqual(
-    [...strangersAmong(rewritten, now + CONFIRMED_FOR_MS + 2_000, startTimes)],
+    [...strangersAmong(rewritten, afterwards, startTimes)],
+    [],
+    "a rewritten announcement is not judged by the old file's verdict",
+  );
+  await untilJudged();
+  assert.deepEqual(
+    [...strangersAmong(rewritten, afterwards, startTimes)],
     [],
     'an announcement written after the verdict is judged afresh, and a process older than it is its game',
   );
@@ -4482,7 +4514,7 @@ function testAnAnnouncementIsItsOwnProcess(): void {
  * announcement is older than the process itself is swept as a game that has gone, and the same
  * process announced afresh is listed, so the sweep is what dropped it and not the file.
  */
-function testAStaleAnnouncementWhoseNumberCameRoundIsSwept(): void {
+async function testAStaleAnnouncementWhoseNumberCameRoundIsSwept(): Promise<void> {
   const before = Date.now();
   const newcomer = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
   const root = mkdtempSync(join(tmpdir(), 'gdharness-came-round-'));
@@ -4492,7 +4524,7 @@ function testAStaleAnnouncementWhoseNumberCameRoundIsSwept(): void {
     const ended: SpawnSyncReturns<string> = spawnSync(process.execPath, ['--eval', ''], { encoding: 'utf8' });
     assert.ok(ended.pid > 0, 'and one that has gone, to be left out of the answer');
 
-    const said = startTimesOf([pid, process.pid, ended.pid]);
+    const said = await startTimesOf([pid, process.pid, ended.pid]);
     const at = said.get(pid);
     assert.ok(at !== undefined, `the platform says when pid ${pid} started: ${JSON.stringify([...said])}`);
     assert.ok(
@@ -4524,6 +4556,13 @@ function testAStaleAnnouncementWhoseNumberCameRoundIsSwept(): void {
     announce();
     const anHourAgo = new Date(Date.now() - 60 * 60 * 1000);
     utimesSync(announcement, anHourAgo, anHourAgo);
+    // Believed on the look that asks, and swept on the first look after the answer.
+    assert.equal(
+      runtimesAnnounced([directory]).running.length,
+      1,
+      'the look that asks answers before the question is back',
+    );
+    await untilJudged();
     const swept = runtimesAnnounced([directory]);
     assert.deepEqual(
       swept.running,
@@ -5857,12 +5896,15 @@ async function testAGameNoNoteNamesIsStoppedByItsNumber(): Promise<void> {
       ENGINE_CALL_TIMEOUT_MS,
     );
     const startedAnswer = parseTextContent(started);
-    game = asNumber(get(startedAnswer, 'pid'));
     assert.equal(
       get(get(startedAnswer, 'runtime'), 'listening'),
       true,
       `the game should have announced its runtime: ${textOf(started)}`,
     );
+    // The number the game announced, which is the engine. The run's own number is the process the
+    // server launched, and under the Windows console build that is a wrapper whose child is the
+    // engine: taken from the run, this case expected a number the next server has no way to know.
+    game = asNumber(get(startedAnswer, 'runtime', 'pid'));
     const serverPid = first.child.pid;
     assert.ok(serverPid !== undefined, 'the server should have a pid');
     await killTheTree(serverPid);
@@ -7590,7 +7632,7 @@ function testTheCureIsWrittenWhole(): void {
   ];
   // What the tree holds today and not a comfortable minimum, so one place going quiet lowers this
   // in the same change and somebody confirms it was meant.
-  assert.equal(offered.length, 33, `the places offering a remedy should all be found, not ${offered.length}`);
+  assert.equal(offered.length, 35, `the places offering a remedy should all be found, not ${offered.length}`);
 
   // Across whitespace, because a rendered file wraps where the source did not and a sentence that
   // breaks at "the" is the same sentence. Change, edit and touch, because the claim is about what
@@ -9091,6 +9133,148 @@ function testADiagnosticTheFileContradictsIsNamed(): void {
     ['res://scripts/game.gd', 'res://scripts/gone.gd'],
     'each script is read once however many diagnostics name it, and one outside the cache is not looked for',
   );
+}
+
+/**
+ * A process listing that failed says which way it failed.
+ *
+ * The record kept only the error's message, "Command failed:" and the command, which a listing
+ * killed at its budget and one the system refused both produce. A suite failed on a loaded machine
+ * with that and nothing else, and the cause could not be named from it. Real failures of each kind
+ * are rendered here: a child killed at a short budget, one exiting with a code and a line on stderr,
+ * and on Windows the helper that asks PowerShell running out of time and being refused.
+ */
+async function testAListingFailureSaysWhichFailureItWas(): Promise<void> {
+  const run = promisify(execFile);
+  const failureOf = async (args: string[], timeout: number): Promise<unknown> => {
+    try {
+      await run(process.execPath, args, { timeout, windowsHide: true });
+    } catch (error) {
+      return error;
+    }
+    throw new Error(`the child should have failed: ${args.join(' ')}`);
+  };
+  const executable = basename(process.execPath);
+  const killed = listingFailure(await failureOf(['-e', 'setTimeout(() => {}, 10000)'], 200));
+  assert.match(
+    killed,
+    new RegExp(`^${executable.replace('.', '\\.')} was killed after the \\d+ms budget`),
+    `a listing killed at its budget names what was asked and says so: ${killed}`,
+  );
+  const refused = listingFailure(
+    await failureOf(['-e', 'console.error("the query was refused"); process.exit(3)'], 10_000),
+  );
+  assert.match(
+    refused,
+    /exited with 3; stderr: the query was refused$/,
+    `one that failed says how: ${refused}`,
+  );
+  assert.doesNotMatch(refused, /killed/, `and is not called a timeout: ${refused}`);
+
+  if (process.platform === 'win32') {
+    const outOfTime = await askWindows('Start-Sleep -Seconds 5', 300).catch((error: unknown) => error);
+    assert.equal(
+      listingFailure(outOfTime),
+      'PowerShell did not answer within 300ms',
+      `a question that outlasts its budget says so: ${String(outOfTime)}`,
+    );
+    const turnedDown = await askWindows('throw "not this one"', 15_000).catch((error: unknown) => error);
+    assert.equal(
+      listingFailure(turnedDown),
+      'PowerShell refused the question: not this one',
+      `one PowerShell refuses says what it said: ${String(turnedDown)}`,
+    );
+    // And the helper answers after both, the timed-out one having been ended and replaced.
+    assert.equal((await askWindows('"still here"', 15_000)).trim(), 'still here');
+
+    // A budget is the question's own, counted from when it is sent. Behind a question that takes a
+    // second and a half, one given a second is still answered, and the slow one is not taken down
+    // by it: counted from when it was asked, the quick one ran out in the queue and ended the helper
+    // with the slow one in it.
+    const [slow, quick] = await Promise.allSettled([
+      askWindows('Start-Sleep -Milliseconds 1500; "slow"', 15_000),
+      askWindows('"quick"', 1_000),
+    ]);
+    assert.deepEqual(
+      [slow, quick].map((one) => (one.status === 'fulfilled' ? one.value.trim() : String(one.reason))),
+      ['slow', 'quick'],
+      'each question has its budget from when it is sent',
+    );
+  }
+}
+
+/**
+ * The PowerShell that answers questions about processes goes with the process that asked, however
+ * that process goes, and keeps nothing alive by itself.
+ *
+ * It is one long-lived process per server, which is what makes a listing take a fraction of a second
+ * on a machine where starting PowerShell took past fifteen. A process that outlives the server is a
+ * process on somebody's machine that nothing will end, so both ways out are held: a server killed
+ * without warning, which runs no code on the way, and one with nothing left to do, which must be let
+ * go rather than held open by its helper. Each under the runtime it would ship on.
+ */
+async function testThePowerShellHelperGoesWithItsProcess(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('PowerShell helper regression skipped (only Windows asks PowerShell)');
+    return;
+  }
+  const helperModule = pathToFileURL(resolve('src', 'windows-ask.ts')).href;
+  // Two questions at once, the second waiting on the first: Bun counts a pipe's refs, and a helper
+  // held once per question and let go once at the end kept a finished process running.
+  const asking = `import(${JSON.stringify(helperModule)}).then(async ({ askWindows }) => { const [pid] = await Promise.all([askWindows("$PID", 60000), askWindows("$PID", 60000)]); console.log("helper " + pid.trim()); if (process.argv.includes("stay")) setInterval(() => {}, 1000); })`;
+  for (const [runtime, command] of [
+    ['bun', process.execPath],
+    ['node', 'node'],
+  ] as const) {
+    const flags = runtime === 'node' ? ['--experimental-strip-types', '--no-warnings'] : [];
+    const helperOf = (child: ChildProcess): Promise<number> =>
+      new Promise((resolvePid, reject) => {
+        let said = '';
+        child.stdout?.on('data', (chunk: Buffer) => {
+          said += String(chunk);
+          const found = /helper (\d+)/.exec(said);
+          if (found?.[1] !== undefined) {
+            resolvePid(Number(found[1]));
+          }
+        });
+        child.once('exit', () => {
+          reject(new Error(`${runtime} exited before naming its helper: ${said}`));
+        });
+      });
+    const goneWithin = async (pid: number, ms: number): Promise<boolean> => {
+      for (let waited = 0; waited < ms && alive(pid); waited += 100) {
+        await delay(100);
+      }
+      return !alive(pid);
+    };
+
+    // Killed without warning.
+    const killed = spawn(command, [...flags, '-e', asking, 'stay'], { stdio: ['ignore', 'pipe', 'inherit'] });
+    const killedHelper = await helperOf(killed);
+    assert.ok(alive(killedHelper), `${runtime}: the helper is running while its process is`);
+    killed.kill();
+    assert.ok(
+      await goneWithin(killedHelper, 10_000),
+      `${runtime}: the helper ${killedHelper} goes when its process is killed`,
+    );
+
+    // Nothing left to do.
+    const idle = spawn(command, [...flags, '-e', asking], { stdio: ['ignore', 'pipe', 'inherit'] });
+    const idleHelper = await helperOf(idle);
+    const exited = await Promise.race([
+      new Promise<boolean>((resolveExit) => {
+        idle.once('exit', () => {
+          resolveExit(true);
+        });
+      }),
+      delay(15_000).then(() => false),
+    ]);
+    if (!exited) {
+      idle.kill();
+    }
+    assert.ok(exited, `${runtime}: a process with nothing left to do exits although its helper is up`);
+    assert.ok(await goneWithin(idleHelper, 10_000), `${runtime}: and the helper ${idleHelper} goes with it`);
+  }
 }
 
 /**
@@ -10737,6 +10921,122 @@ function testACleanupThatCannotFinishStillFinishes(): void {
 }
 
 /**
+ * A scratch directory something is still holding goes once it is let go of.
+ *
+ * The removal counted on `rmSync` retrying, and neither runtime does: given twenty retries a quarter
+ * of a second apart, both refused within a millisecond. Every test run an engine was still letting go
+ * of left its user data directory behind, fourteen of them from one downstream project's ordinary runs
+ * and thirty-nine from the fixture for a run cut short.
+ *
+ * Held for real, the way an engine holds one on each platform: on Windows a process with a file open
+ * and shared with nobody, which is how Godot opens its log; elsewhere an open file does not stop a
+ * removal, so the parent is made read-only instead. The first attempt has to be refused, or the case
+ * has shown nothing about what comes after it.
+ */
+async function testAHeldScratchDirectoryGoesOnceLetGo(): Promise<void> {
+  if (process.platform !== 'win32' && process.getuid?.() === 0) {
+    console.log('held scratch directory regression skipped (root removes what it likes)');
+    return;
+  }
+  const parent = mkdtempSync(join(tmpdir(), 'gdharness-held-scratch-'));
+  const held = join(parent, 'scratch');
+  mkdirSync(held);
+  const file = join(held, 'godot.log');
+  writeFileSync(file, 'x');
+  let holder: ChildProcess | null = null;
+  try {
+    if (process.platform === 'win32') {
+      holder = spawn(
+        'powershell',
+        [
+          '-NoProfile',
+          '-Command',
+          `$f = [System.IO.File]::Open('${file}', 'Open', 'Read', 'None'); [Console]::Out.WriteLine('holding'); Start-Sleep -Milliseconds 1500; $f.Close()`,
+        ],
+        { stdio: ['ignore', 'pipe', 'ignore'] },
+      );
+      const holding = holder;
+      await new Promise<void>((resolve, reject) => {
+        holding.stdout?.once('data', () => {
+          resolve();
+        });
+        holding.once('exit', () => {
+          reject(new Error('the process meant to hold the file exited before it held it'));
+        });
+      });
+    } else {
+      chmodSync(parent, 0o555);
+      setTimeout(() => {
+        chmodSync(parent, 0o755);
+      }, 1500);
+    }
+
+    const left = discard(held);
+    assert.equal(
+      left.length,
+      1,
+      `the first attempt should be refused while the directory is held: ${JSON.stringify(left)}`,
+    );
+    await untilDiscarded(10_000);
+    assert.equal(existsSync(held), false, 'and the directory should be gone once it is let go of');
+  } finally {
+    if (process.platform !== 'win32') {
+      chmodSync(parent, 0o755);
+    }
+    await endGame(holder);
+    sweep(parent);
+  }
+}
+
+/**
+ * A scratch directory whose process is gone is swept by the next server, and nothing else is.
+ *
+ * Every try a process makes ends with it, and servers are ended by being killed, so a directory held
+ * past them stayed for good. The temporary directory is shared with every other server on the
+ * machine, so the sweep is checked against the closest things that are not abandoned: a directory
+ * of a process that is still running, one of a kind the server does not make, one named before
+ * directories carried their process, and the helper's cached library beside them.
+ */
+async function testAnAbandonedScratchDirectoryIsSweptAndNothingElse(): Promise<void> {
+  const parent = mkdtempSync(join(tmpdir(), 'gdharness-abandoned-scratch-'));
+  try {
+    const exited = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+    await new Promise((resolve) => exited.once('exit', resolve));
+    const gone = exited.pid ?? 0;
+    assert.equal(alive(gone), false, 'the owner stood in for has to have gone');
+    const running = process.ppid;
+    assert.equal(alive(running), true, 'and the live owner has to be running');
+
+    const abandoned = join(parent, `gdharness-tests-${gone}-aB3dE9`);
+    const kept = [
+      `gdharness-tests-${running}-aB3dE9`,
+      `gdharness-played-over-${gone}-aB3dE9`,
+      'gdharness-tests-aB3dE9',
+    ].map((name) => join(parent, name));
+    for (const path of [abandoned, ...kept]) {
+      mkdirSync(join(path, 'Godot'), { recursive: true });
+    }
+    const library = join(parent, 'gdharness-desktop-1c0454b3e7c20635.dll');
+    writeFileSync(library, 'x');
+
+    sweepAbandonedScratch(parent);
+    assert.equal(existsSync(abandoned), false, 'the directory whose process is gone is swept');
+    for (const path of [...kept, library]) {
+      assert.equal(existsSync(path), true, `and ${basename(path)} is left where it is`);
+    }
+
+    const made = scratchDirectory('tests');
+    try {
+      assert.match(basename(made), new RegExp(`^gdharness-tests-${process.pid}-[A-Za-z0-9]{6}$`));
+    } finally {
+      discard(made);
+    }
+  } finally {
+    sweep(parent);
+  }
+}
+
+/**
  * Who is listening on a port, which is what says a debug adapter is the connected editor's.
  *
  * Godot gives every editor the same debug adapter port by default, and the addon reports the port
@@ -10776,7 +11076,7 @@ async function testWhoIsHoldingAPortIsAskable(): Promise<void> {
   assert.equal(listeningPidInNetstat(table, 600), null, 'and a port that is a prefix of one is not it');
 
   const port = await reservePort();
-  assert.equal(listeningPid(port), null, 'a port nobody is listening on has no holder to name');
+  assert.equal(await listeningPid(port), null, 'a port nobody is listening on has no holder to name');
 
   const held = createServer();
   try {
@@ -10787,12 +11087,12 @@ async function testWhoIsHoldingAPortIsAskable(): Promise<void> {
       });
     });
     const askedAt = Date.now();
-    const holder = listeningPid(port);
+    const holder = await listeningPid(port);
     const took = Date.now() - askedAt;
     // Null is allowed: a platform that will not say is a case this has to have, and reading it as
     // "somebody else" would refuse every working setup on that platform. Windows says, through
-    // netstat, and the time it takes is printed, since the ask sits on the play path in a call
-    // that holds every other request: PowerShell's answer took a second here and nine on a runner.
+    // netstat, and the time it takes is printed, since the ask sits on the first play through each
+    // adapter connection: PowerShell's answer took a second here and nine on a runner.
     if (process.platform === 'win32') {
       assert.equal(holder, process.pid, `Windows names the holder of a port, through netstat: ${holder}`);
     } else if (holder !== null) {
@@ -11348,7 +11648,8 @@ const FAKE_EDITOR_PID = process.pid;
  * fake editor started, ended before the project is removed: a real engine keeps files open inside
  * it, and a case that failed before its own stop left the directory behind on Windows.
  * [param options.onAdapter] is handed each connection the server makes to the scripted adapter,
- * for a fixture that sends events down it.
+ * for a fixture that sends events down it. [param options.editorPid] is the process the editor
+ * says it is, this one unless a fixture wants the adapter to be somebody else's.
  */
 async function withAPlayingEditor(
   answer: (where: Pick<PlayingEditorStage, 'adapter' | 'project' | 'runtimeDir'>) => EditorToolAnswer,
@@ -11358,6 +11659,7 @@ async function withAPlayingEditor(
     engine?: string;
     held?: { game: ChildProcess | null };
     onAdapter?: (socket: Socket) => void;
+    editorPid?: number;
   } = {},
 ): Promise<void> {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-played-over-'));
@@ -11446,7 +11748,7 @@ async function withAPlayingEditor(
             project_path: project,
             addon_version: SERVER_VERSION,
             dap_port: adapter,
-            editor_pid: FAKE_EDITOR_PID,
+            editor_pid: options.editorPid ?? FAKE_EDITOR_PID,
           }),
         );
         let greeted = false;
@@ -12002,6 +12304,45 @@ async function testAWordsWaitLeavesTheGameItsSpeed(): Promise<void> {
   );
 }
 
+/**
+ * A play through a debug adapter another process holds is refused, every time it is asked.
+ *
+ * The owner of the adapter's port is asked once per connection, and a pass is what is remembered.
+ * A refusal must not be: the editor here says it is a process that does not hold the port, so each
+ * start has to ask and refuse again, name both processes, and never have the editor play.
+ */
+async function testAPlayThroughAnotherProcesssAdapterIsRefusedEachTime(): Promise<void> {
+  const other = process.ppid;
+  let plays = 0;
+  await withAPlayingEditor(
+    ({ adapter }) =>
+      (tool) => {
+        if (tool === 'play_scene') {
+          plays += 1;
+          return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
+        }
+        if (tool === 'playing_status') {
+          return { ok: true, playing: false, scenePath: '', debugPort: adapter };
+        }
+        return { ok: true };
+      },
+    async ({ start }) => {
+      for (const attempt of [1, 2]) {
+        const refused = await start(1_000);
+        assert.match(
+          text(get(refused.answer, 'refused')),
+          new RegExp(
+            `belongs to process ${process.pid}, and the editor on this server's bridge is process ${other}\\.`,
+          ),
+          `start ${attempt} should be refused: ${JSON.stringify(refused.answer)}`,
+        );
+      }
+      assert.equal(plays, 0, 'and the editor is never asked to play');
+    },
+    { editorPid: other },
+  );
+}
+
 async function testAPlayedStartStopsWaitingForAGameThatIsOver(): Promise<void> {
   let playing = false;
   let diesOnBoot = false;
@@ -12081,7 +12422,7 @@ async function testAPlayedStartStopsWaitingForAGameThatIsOver(): Promise<void> {
       console.log(`played start over: the start answered after ${over.waitedMs}ms`);
       for (const line of server.stderr.split('\n')) {
         if (
-          /announce wait ended|playing_status did not|playing_status answered after|Tool (stop_playing|play_scene)/.test(
+          /announce wait ended|playing_status did not|playing_status answered after|Tool (stop_playing|play_scene)|running game was|debug adapter was connected|holds debug adapter port|Breakpoints were sent/.test(
             line,
           )
         ) {
@@ -12091,6 +12432,16 @@ async function testAPlayedStartStopsWaitingForAGameThatIsOver(): Promise<void> {
       assert.ok(
         over.waitedMs < 5_000,
         `and the answer does not wait out the budget: ${over.waitedMs}ms of 10000\nthe server said:\n${server.stderr.slice(-4000)}`,
+      );
+      // Two plays through one adapter connection, and who holds its port asked once: the answer
+      // cannot change while the connection lasts, and asking starts a process, which is what a
+      // loaded machine is slowest at. Once rather than never, which would be a check that had
+      // stopped being made.
+      assert.equal(
+        server.stderr.split('\n').filter((line) => line.includes('Asked who holds debug adapter port'))
+          .length,
+        1,
+        `the port's holder is asked once per connection:\n${server.stderr.slice(-4000)}`,
       );
       // With an adapter that answers everything, so the refusal can only come from the editor's
       // word: attached and read, the adapter would say the game is running with no stack.
@@ -15334,7 +15685,7 @@ async function testACommandLineOutsideAsciiIsListedWhole(): Promise<void> {
       listed.includes(named),
       `the process tree lists the argument as it is: ${JSON.stringify(listed)}`,
     );
-    const recorded = runningAs(probe.pid);
+    const recorded = await runningAs(probe.pid);
     assert.ok(recorded !== null, 'the run record reads the process at all');
     assert.equal(
       recorded.kind,
@@ -15364,7 +15715,10 @@ async function testChildrenAreListedWhileTheParentLives(): Promise<void> {
   try {
     assert.ok(typeof probe.pid === 'number');
     const listed = await childrenOf(process.pid);
-    assert.ok(listed !== undefined, "this platform has to list a process's children");
+    assert.ok(
+      listed !== undefined,
+      `this platform has to list a process's children, and did not: ${whyTheProcessTreeFailed() ?? 'no reason recorded'}`,
+    );
     assert.ok(listed.includes(probe.pid), `the child just spawned is listed: ${JSON.stringify(listed)}`);
     // Windows keeps a dead parent's number on its orphans, so its listing has to say when each
     // process began or a link cannot be told from a number that came round: required of the
@@ -16388,11 +16742,11 @@ async function testAPidIsNotAnIdentity(): Promise<void> {
     // that is not there. Waited for rather than assumed, and the wait is named in its own failure
     // so the next reader is told the platform never answered rather than that the record was wrong.
     const until = Date.now() + 10_000;
-    while (runningAs(pid) === null && Date.now() < until) {
+    while ((await runningAs(pid)) === null && Date.now() < until) {
       await delay(100);
     }
     assert.ok(
-      runningAs(pid) !== null,
+      (await runningAs(pid)) !== null,
       `this platform never answered about pid ${pid}, so nothing below is askable`,
     );
 
@@ -16401,20 +16755,24 @@ async function testAPidIsNotAnIdentity(): Promise<void> {
     // in and would pass unchanged on a platform that never produces one: the guard would be quietly
     // Windows-only and every other machine would go on signalling a worker engine. A platform that
     // genuinely cannot say is a thing to find out about rather than to degrade into silently.
-    const began = runningAs(pid)?.startedAt;
+    const began = (await runningAs(pid))?.startedAt;
     assert.ok(
       began !== undefined && Date.now() - began >= 0 && Date.now() - began < 120_000,
       `this platform should say when pid ${pid} started; it said ${String(began)}`,
     );
 
-    assert.equal(stillTheRecordedRun(record), true, 'the process the record describes is the one running');
     assert.equal(
-      couldStillBeTheRecordedRun(record),
+      await stillTheRecordedRun(record),
+      true,
+      'the process the record describes is the one running',
+    );
+    assert.equal(
+      await couldStillBeTheRecordedRun(record),
       true,
       'and it is one to go on calling running, which is the weaker question',
     );
     assert.equal(
-      stillTheRecordedRun({ ...record, command: join('nowhere', 'godot.exe') }),
+      await stillTheRecordedRun({ ...record, command: join('nowhere', 'godot.exe') }),
       false,
       'a pid running something else is not this run, however alive it is',
     );
@@ -16422,15 +16780,15 @@ async function testAPidIsNotAnIdentity(): Promise<void> {
     // is named by tasklist and no further, and CI has runners where the interpreter that reads a
     // command line does not answer at all: asserting the project is discriminated there is
     // asserting something the platform cannot do, which is how this failed on a docs-only change.
-    if (runningAs(pid)?.kind === 'commandLine') {
+    if ((await runningAs(pid))?.kind === 'commandLine') {
       assert.equal(
-        stillTheRecordedRun({ ...record, projectPath: join(tmpdir(), 'another-project') }),
+        await stillTheRecordedRun({ ...record, projectPath: join(tmpdir(), 'another-project') }),
         false,
         'nor is the same engine on another project, which shares this record directory',
       );
     }
     assert.equal(
-      stillTheRecordedRun({ ...record, pid: 999_999_999 }),
+      await stillTheRecordedRun({ ...record, pid: 999_999_999 }),
       false,
       'and a pid nobody holds is nothing to signal',
     );
@@ -16469,7 +16827,7 @@ async function testAPidIsNotAnIdentity(): Promise<void> {
 
   // The dead pid, asked after the process is gone rather than about a number that was never
   // anything: this is the state a stale record is actually in.
-  assert.equal(stillTheRecordedRun(record), false, 'a run that has ended is not still the run');
+  assert.equal(await stillTheRecordedRun(record), false, 'a run that has ended is not still the run');
 }
 
 /**
@@ -17118,6 +17476,7 @@ async function testATestRunCutShortIsNamedForWhatItWasDoing(): Promise<void> {
     return;
   }
   const projectDir = mkdtempSync(join(tmpdir(), 'gdharness-cut-short-'));
+  const began = Date.now();
   try {
     writeFileSync(
       join(projectDir, 'project.godot'),
@@ -17197,10 +17556,44 @@ async function testATestRunCutShortIsNamedForWhatItWasDoing(): Promise<void> {
         /^hung: killed after 12000 ms, having printed nothing/,
         JSON.stringify(stuck),
       );
+      // Both runs were killed, which is when an engine still holds its log as the removal comes.
+      assert.deepEqual(
+        await userDataLeftBy('CutShort', began),
+        [],
+        'a run cut short leaves no user data directory behind',
+      );
     });
   } finally {
     sweep(projectDir);
   }
+}
+
+/**
+ * The user data directories a test run of the project named [param project] made since [param since]
+ * and left in the system temporary directory, once the server has had time to try them again.
+ *
+ * Found by the project inside rather than by the prefix, because other servers on the machine run
+ * tests of their own into directories named the same way.
+ */
+async function userDataLeftBy(project: string, since: number): Promise<string[]> {
+  const left = (): string[] =>
+    readdirSync(tmpdir())
+      .filter((name) => name.startsWith('gdharness-tests-'))
+      .map((name) => join(tmpdir(), name))
+      .filter((path) =>
+        ['Godot', 'godot'].some((engine) => existsSync(join(path, engine, 'app_userdata', project))),
+      )
+      .filter((path) => {
+        try {
+          return statSync(path).mtimeMs >= since - 1000;
+        } catch {
+          return false;
+        }
+      });
+  for (let waited = 0; waited < 5_000 && left().length > 0; waited += 250) {
+    await delay(250);
+  }
+  return left();
 }
 
 /**
@@ -17341,6 +17734,7 @@ async function testGdUnitRunner(): Promise<void> {
   }
 
   const projectDir = mkdtempSync(join(tmpdir(), 'gdharness-gdunit-'));
+  const began = Date.now();
   try {
     writeFileSync(
       join(projectDir, 'project.godot'),
@@ -17546,6 +17940,11 @@ async function testGdUnitRunner(): Promise<void> {
           existsSync(join(projectDir, '.godot', 'gdharness-reports')),
           false,
           `the reports directory goes with the last report in it: ${readdirSync(join(projectDir, '.godot')).join(', ')}`,
+        );
+        assert.deepEqual(
+          await userDataLeftBy('GdUnitRegression', began),
+          [],
+          'and so does the user data directory each run was given',
         );
         // Nothing stopped early in the runs above, and the answer says so by leaving the field
         // out. Asserted here so the presence of it below means something.
@@ -19998,16 +20397,25 @@ async function testAStartWaitsOutTheEditorsScan(): Promise<void> {
       socket.once('error', reject);
     });
 
-    // What the fixture editor says about its scan, set by each case below.
+    // What the fixture editor says about its scan, set by each case below, and how long it takes to
+    // say it: an answer read the moment it is written, a moment after it was asked for.
     let scanning: () => boolean = () => false;
     let finishedAt = Date.now() - 60_000;
+    let answersAfterMs = 0;
+    // When the server first asked about the scan in the call under way, which is on its own clock
+    // rather than this one's: a request takes a while to reach it, a loaded machine a while longer.
+    const scanAsked: { first: number | null } = { first: null };
     socket.on('message', (raw: Buffer) => {
       const message: unknown = JSON.parse(String(raw));
       if (!isRecord(message) || message['type'] !== 'tool_invoke') {
         return;
       }
-      const result =
-        String(message['tool']) === 'scan_status'
+      const isScanStatus = String(message['tool']) === 'scan_status';
+      if (isScanStatus && scanAsked.first === null) {
+        scanAsked.first = Date.now();
+      }
+      const reply = (): void => {
+        const result = isScanStatus
           ? {
               ok: true,
               scanning: scanning(),
@@ -20016,7 +20424,13 @@ async function testAStartWaitsOutTheEditorsScan(): Promise<void> {
               sinceScanFinishedMs: Date.now() - finishedAt,
             }
           : { ok: true, classes: [] };
-      socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result }));
+        socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result }));
+      };
+      if (isScanStatus && answersAfterMs > 0) {
+        setTimeout(reply, answersAfterMs);
+      } else {
+        reply();
+      }
     });
     socket.send(
       JSON.stringify({ type: 'godot_ready', project_path: project, addon_version: SERVER_VERSION }),
@@ -20028,6 +20442,23 @@ async function testAStartWaitsOutTheEditorsScan(): Promise<void> {
       knows = text(get(parseTextContent(status), 'editor', 'projectPath')) === project;
     }
     assert.ok(knows, 'the fixture editor should have reached the server, or this proves nothing');
+
+    // The editor's write, [param afterMs] after the server's first question about the scan in the
+    // call made next. Timed from here instead, a request slow to arrive had the server wait correctly
+    // up to the write and still report less than the step asked for: 1336ms against 1400, twice in a
+    // day on a loaded machine.
+    const editorWritesAfter = (afterMs: number, content: string): Promise<void> => {
+      scanAsked.first = null;
+      return (async (): Promise<void> => {
+        let asked = scanAsked.first;
+        while (asked === null) {
+          await delay(10);
+          asked = scanAsked.first;
+        }
+        await delay(Math.max(0, asked + afterMs - Date.now()));
+        writeFileSync(cache, content);
+      })();
+    };
 
     const check = async (): Promise<{ answer: unknown; said: string }> => {
       const response = await server.request(
@@ -20043,9 +20474,7 @@ async function testAStartWaitsOutTheEditorsScan(): Promise<void> {
     const scanEnds = Date.now() + 1_000;
     scanning = () => Date.now() < scanEnds;
     finishedAt = scanEnds;
-    const writing = delay(2_500).then(() => {
-      writeFileSync(cache, WRITTEN_AFTER_THE_SCAN);
-    });
+    const writing = editorWritesAfter(2_500, WRITTEN_AFTER_THE_SCAN);
     const waited = await check();
     await writing;
     assert.match(
@@ -20098,9 +20527,7 @@ async function testAStartWaitsOutTheEditorsScan(): Promise<void> {
     const rebuildScanEnds = Date.now() + 1_000;
     scanning = () => Date.now() < rebuildScanEnds;
     finishedAt = rebuildScanEnds;
-    const editorWrites = delay(2_500).then(() => {
-      writeFileSync(cache, WRITTEN_AFTER_THE_SCAN);
-    });
+    const editorWrites = editorWritesAfter(2_500, WRITTEN_AFTER_THE_SCAN);
     const rebuilt = await server.request(
       'tools/call',
       { name: 'project_import', arguments: { projectPath: project, op: 'refresh_classes' } },
@@ -20123,9 +20550,7 @@ async function testAStartWaitsOutTheEditorsScan(): Promise<void> {
     const listScanEnds = Date.now() + 1_000;
     scanning = () => Date.now() < listScanEnds;
     finishedAt = listScanEnds;
-    const listWrite = delay(1_500).then(() => {
-      writeFileSync(cache, WRITTEN_AFTER_THE_SCAN);
-    });
+    const listWrite = editorWritesAfter(1_500, WRITTEN_AFTER_THE_SCAN);
     const listed = await server.request(
       'tools/call',
       { name: 'project_export', arguments: { projectPath: project, op: 'list' } },
@@ -20153,18 +20578,23 @@ async function testAStartWaitsOutTheEditorsScan(): Promise<void> {
       { name: 'project_import', arguments: { projectPath: project, op: 'refresh_classes' } },
       ENGINE_CALL_TIMEOUT_MS,
     );
+    // With the editor slow to answer, as a loaded machine makes it: a second and a half for each
+    // question. The end of the scan was placed from when the question went, so a second and a half
+    // too early, and the cache the rebuild above had just written landed after that estimate and
+    // passed for the editor's write. The loss below was then compared against the file the editor
+    // was about to replace, and went unreported.
     const droppingScanEnds = Date.now() + 1_000;
     scanning = () => Date.now() < droppingScanEnds;
     finishedAt = droppingScanEnds;
-    const dropping = delay(2_500).then(() => {
-      writeFileSync(cache, EMPTY);
-    });
+    answersAfterMs = 1_500;
+    const dropping = editorWritesAfter(2_500, EMPTY);
     const afterTheDrop = await server.request(
       'tools/call',
       { name: 'project_import', arguments: { projectPath: project, op: 'refresh_classes' } },
       ENGINE_CALL_TIMEOUT_MS,
     );
     await dropping;
+    answersAfterMs = 0;
     assert.deepEqual(
       get(parseTextContent(afterTheDrop), 'lostSinceLastRebuild'),
       ['Keeper'],
@@ -20184,9 +20614,7 @@ async function testAStartWaitsOutTheEditorsScan(): Promise<void> {
     const importScanEnds = Date.now() + 1_000;
     scanning = () => Date.now() < importScanEnds;
     finishedAt = importScanEnds;
-    const importWrite = delay(1_500).then(() => {
-      writeFileSync(cache, WRITTEN_AFTER_THE_SCAN);
-    });
+    const importWrite = editorWritesAfter(1_500, WRITTEN_AFTER_THE_SCAN);
     const imported = await server.request(
       'tools/call',
       { name: 'project_import', arguments: { projectPath: project, op: 'refresh_uids' } },
@@ -20213,9 +20641,7 @@ async function testAStartWaitsOutTheEditorsScan(): Promise<void> {
       const testScanEnds = Date.now() + 1_000;
       scanning = () => Date.now() < testScanEnds;
       finishedAt = testScanEnds;
-      const testWrite = delay(1_500).then(() => {
-        writeFileSync(cache, WRITTEN_AFTER_THE_SCAN);
-      });
+      const testWrite = editorWritesAfter(1_500, WRITTEN_AFTER_THE_SCAN);
       const tested = await server.request(
         'tools/call',
         { name: 'project_test', arguments: { projectPath: project } },
@@ -20255,6 +20681,156 @@ async function testAStartWaitsOutTheEditorsScan(): Promise<void> {
       `and the start says it went ahead during it: ${endless.said}`,
     );
     assert.match(endless.said, /cache read: before it/, `the game still booted: ${endless.said}`);
+  } finally {
+    editor?.terminate();
+    await server.stop();
+    sweep(project);
+  }
+}
+
+/**
+ * A rescan that brings a class in reloads the scripts naming it.
+ *
+ * The scan updates what the editor knows about files, not what it has compiled from them, so a
+ * script extending a new base class, compiled while the editor could not see the class, went on
+ * reporting "Could not find base class" after the rescan answered clean. Measured downstream, where
+ * reloading the one script by hand cleared it.
+ *
+ * The fixture editor cannot see the class until it scans. One script extends it and reloads, one
+ * uses it as a type and refuses to reload, one declares it, one only carries a word like it, one
+ * names it in a comment and in strings only, and a @tool script uses it; the reloads asked for are
+ * exactly the two plain scripts using it in code, and the @tool one is named as left alone. A
+ * comment naming a class once had the editor addon's own tool executor reloaded mid-call, and the
+ * Linux editor died of it. A second scan brings nothing in and reloads nothing, so a server
+ * reloading on every scan fails there.
+ */
+async function testARescanReloadsWhatNamesAClassItBroughtIn(): Promise<void> {
+  const port = await reservePort();
+  const server = new ServerProcess({
+    env: { GDHARNESS_BRIDGE_PORT: String(port), GODOT_PATH: join(tmpdir(), 'gdharness-no-such-godot') },
+  });
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-brought-in-'));
+  let editor: WebSocket | null = null;
+  try {
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    mkdirSync(join(project, '.godot'), { recursive: true });
+    writeFileSync(join(project, 'base.gd'), 'class_name CharteredRun\nextends Node\n');
+    writeFileSync(join(project, 'charters_test.gd'), 'extends CharteredRun\n');
+    writeFileSync(join(project, 'uses.gd'), 'extends Node\n\nvar run: CharteredRun\n');
+    writeFileSync(join(project, 'other.gd'), 'extends Node\n\nvar chartered := 1\n');
+    // The name in prose and in text only, which is not a use: reloading on a comment is how the
+    // editor addon's own tool executor was reloaded mid-call and took a Linux editor down.
+    writeFileSync(
+      join(project, 'note.gd'),
+      'extends Node\n# CharteredRun is described here\nvar label := "CharteredRun"\nvar doc := """\nCharteredRun\n"""\n',
+    );
+    // A use in a @tool script, which runs inside the editor and is left for a restart.
+    writeFileSync(join(project, 'tooling.gd'), '@tool\nextends Node\n\nvar run: CharteredRun\n');
+    const cache = join(project, '.godot', 'global_script_class_cache.cfg');
+    const cached = 'list=[{\n"class": &"CharteredRun",\n"path": "res://base.gd"\n}]\n';
+    writeFileSync(cache, cached);
+
+    await server.initialize('regression-test');
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+    editor = socket;
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', () => {
+        resolve();
+      });
+      socket.once('error', reject);
+    });
+
+    // Blind to the new class until a scan, which is the state a class written while another engine
+    // imported it leaves the editor in. The scan brings it in and writes the cache from the list.
+    let holds: string[] = [];
+    const reloadsAskedFor: string[] = [];
+    socket.on('message', (raw: Buffer) => {
+      const message: unknown = JSON.parse(String(raw));
+      if (!isRecord(message) || message['type'] !== 'tool_invoke') {
+        return;
+      }
+      const tool = String(message['tool']);
+      const args = isRecord(message['args']) ? message['args'] : {};
+      if (tool === 'rescan_filesystem' && args['statusOnly'] !== true) {
+        holds = ['CharteredRun'];
+        writeFileSync(cache, cached);
+      }
+      if (tool === 'reload_script') {
+        const scriptPath = String(args['scriptPath']);
+        reloadsAskedFor.push(scriptPath);
+        const refused = scriptPath === 'res://uses.gd';
+        socket.send(
+          JSON.stringify(
+            refused
+              ? {
+                  type: 'tool_result',
+                  id: message['id'],
+                  success: false,
+                  error: 'the fixture editor refused it',
+                }
+              : { type: 'tool_result', id: message['id'], success: true, result: { ok: true, methods: [] } },
+          ),
+        );
+        return;
+      }
+      const result =
+        tool === 'rescan_filesystem'
+          ? { ok: true, scanning: false, importing: false, pending: false }
+          : { ok: true, classes: holds };
+      socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result }));
+    });
+    socket.send(
+      JSON.stringify({ type: 'godot_ready', project_path: project, addon_version: SERVER_VERSION }),
+    );
+    let knows = false;
+    for (let waited = 0; waited < 10_000 && !knows; waited += 100) {
+      await delay(100);
+      const status = await server.request('tools/call', { name: 'editor_status', arguments: {} });
+      knows = text(get(parseTextContent(status), 'editor', 'projectPath')) === project;
+    }
+    assert.ok(knows, 'the fixture editor should have reached the server, or this proves nothing');
+
+    const scanned = await server.request('tools/call', {
+      name: 'editor_rescan',
+      arguments: { projectPath: project },
+    });
+    const said = textOf(scanned) ?? JSON.stringify(scanned);
+    const answer = parseTextContent(scanned);
+    assert.deepEqual(asArray(get(answer, 'broughtIn') ?? []).map(String), ['CharteredRun'], said);
+    assert.deepEqual(
+      reloadsAskedFor,
+      ['res://charters_test.gd', 'res://uses.gd'],
+      `the scripts naming the class are reloaded, and not the one declaring it or one that does not name it: ${said}`,
+    );
+    assert.deepEqual(
+      asArray(get(answer, 'dependentsReloaded') ?? []).map(String),
+      ['res://charters_test.gd'],
+      said,
+    );
+    const notReloaded = asArray(get(answer, 'dependentsNotReloaded') ?? []);
+    assert.deepEqual(
+      notReloaded.map((one) => text(get(one, 'scriptPath'))),
+      ['res://tooling.gd', 'res://uses.gd'],
+      said,
+    );
+    assert.match(text(get(notReloaded[0], 'problem')), /a @tool script, which runs inside the editor/, said);
+    assert.match(text(get(notReloaded[1], 'problem')), /the fixture editor refused it/, said);
+    assert.equal(get(answer, 'ok'), false, `an editor still holding a stale compile is not ok: ${said}`);
+    assert.match(
+      text(get(answer, 'note')),
+      /res:\/\/tooling\.gd, res:\/\/uses\.gd name them and could not be reloaded/,
+      said,
+    );
+
+    // Nothing brought in the second time, so nothing is reloaded and the scan is clean.
+    const again = await server.request('tools/call', {
+      name: 'editor_rescan',
+      arguments: { projectPath: project },
+    });
+    const second = parseTextContent(again);
+    assert.equal(reloadsAskedFor.length, 2, `a scan bringing nothing in reloads nothing: ${textOf(again)}`);
+    assert.equal(get(second, 'ok'), true, textOf(again) ?? '');
+    assert.equal(get(second, 'broughtIn'), undefined, textOf(again) ?? '');
   } finally {
     editor?.terminate();
     await server.stop();
@@ -20932,6 +21508,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARunsEnvironmentStaysOffCommandLines,
   testAStartWaitsOutTheEditorsScan,
   testARepairThatCouldNotRunIsNotReported,
+  testARescanReloadsWhatNamesAClassItBroughtIn,
   testTheDiagnosticsRemedyKnowsAnEditorThatWritesAShortList,
   testAShortenedCacheIsRebuilt,
   testAClassWhoseScriptCameBackIsNotTheEditorsLoss,
@@ -20940,6 +21517,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARuntimeCallToAHeldGameIsRefusedAtOnce,
   testAnEditorOnAnotherVersionIsStillAskedWhatItIsPlaying,
   testAGameTheEditorHasStoppedPlayingIsNotStillActive,
+  testAPlayThroughAnotherProcesssAdapterIsRefusedEachTime,
   testAPlayedStartStopsWaitingForAGameThatIsOver,
   testAStoppedRunIsStillTheOneAnswered,
   testAStoppedSpawnedRunGivesWayToAPlay,
@@ -20974,11 +21552,15 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStopTakesTheWrappedEnginesAnnouncementDown,
   testASettingTheEditorDroppedIsNamed,
   testACleanupThatCannotFinishStillFinishes,
+  testAHeldScratchDirectoryGoesOnceLetGo,
+  testAnAbandonedScratchDirectoryIsSweptAndNothingElse,
   testADiagnosticTheFileContradictsIsNamed,
   testAClassTheEditorHasNotLoadedIsToldApartFromOneTheCacheLacks,
   testAClassTheEditorHoldsAfterItsScriptIsGoneIsNamed,
   testWhatAStaleTypeDependsOnIsNamed,
   testTheProjectPathSentenceNamesEveryCallThatTakesNone,
+  testAListingFailureSaysWhichFailureItWas,
+  testThePowerShellHelperGoesWithItsProcess,
   testEveryArgumentInTheReferenceIsDescribed,
   testTheReferencePrintsEveryShapeOfType,
   testTheSkillNamesEverySettingTheAddonsRead,
@@ -21131,17 +21713,37 @@ async function main(): Promise<void> {
   }
 
   const failed: string[] = [];
+  // An engine a fixture left running fails it, passed or not: it takes a core from every fixture
+  // after it, and a frame rate case run beside one read the machine rather than the code. Looked for
+  // at once after a failure or a directory left behind, since those are how it shows, and once more
+  // over the whole run, since on Linux and macOS a held directory is removed all the same.
+  const leftRunning = (engines: { pid: number; under: string; during: string | null }[]): void => {
+    for (const { pid, under, during } of engines) {
+      const name = during ?? 'a fixture';
+      console.error(`${name} left engine ${pid} running under ${under}; it has been ended`);
+      if (!failed.includes(name)) {
+        failed.push(name);
+      }
+    }
+  };
   for (const test of chosen) {
     sweepingFor(test.name);
+    let passed = true;
     try {
       await test();
     } catch (error) {
+      passed = false;
       failed.push(test.name);
       console.error(`\n${test.name} failed\n${error instanceof Error ? error.stack : String(error)}\n`);
     }
+    if (!passed || leftBehindBy(test.name)) {
+      leftRunning(await endEnginesLeft(test.name));
+    }
   }
+  sweepingFor(null);
+  leftRunning(await endEnginesLeft());
 
-  reportUnswept();
+  await reportUnswept();
 
   if (failed.length > 0) {
     console.error(`${failed.length} of ${chosen.length} regressions failed:`);
