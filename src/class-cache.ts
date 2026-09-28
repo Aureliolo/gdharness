@@ -587,6 +587,59 @@ function classRemedy(entries: readonly Contradicted[]): string {
   );
 }
 
+/** A reload the editor refused, and what the copy it holds had before and has now. */
+export interface FailedReload {
+  readonly script: string;
+  readonly code: number;
+  /** Godot's own name for [member code], empty when the editor gave none. */
+  readonly codeName: string;
+  readonly heldBefore: readonly string[];
+  readonly heldAfter: readonly string[];
+  readonly constantsBefore: readonly string[];
+  readonly constantsAfter: readonly string[];
+  /** The project's global classes the script's file names, other than its own. */
+  readonly names: readonly string[];
+}
+
+/**
+ * What to tell a caller whose reload did not compile.
+ *
+ * It used to be "answered error 43" and nothing else. ostinato met one on a script whose held copy
+ * had, straight after, one method of the eleven it had held for days, and could not tell whether the
+ * failed reload had done that, because the answer carried no reading of the copy. So the note says
+ * which it is from the two readings: measured on 4.7.2, a reload refused on a parse error and on an
+ * analysis error leaves the copy exactly as it was, and when it does not, the note names what went.
+ *
+ * The advice on order is ostinato's: the script failed while a class it names was behind in the
+ * editor, and reloading that class first and then the script cleared it. Named by the classes the
+ * file names, since only the caller can read the errors and see which of them the diagnostics deny.
+ */
+export function failedReloadNote(failed: FailedReload): string {
+  const missing = (before: readonly string[], after: readonly string[]): string[] =>
+    before.filter((name) => !after.includes(name));
+  const lost = [
+    ...missing(failed.heldBefore, failed.heldAfter),
+    ...missing(failed.constantsBefore, failed.constantsAfter),
+  ];
+  const unchanged =
+    lost.length === 0 &&
+    missing(failed.heldAfter, failed.heldBefore).length === 0 &&
+    missing(failed.constantsAfter, failed.constantsBefore).length === 0;
+  const answered =
+    failed.codeName === '' ? `error ${failed.code}` : `error ${failed.code}, ${failed.codeName}`;
+  const copy = unchanged
+    ? 'The copy the editor holds is as it was, with the members under heldBeforeReload and heldConstantsBeforeReload.'
+    : `The copy the editor holds changed even so${lost.length === 0 ? '' : `, and has lost ${lost.join(', ')}`}: anything diagnosed against it now is answered from what is left, and reloading it once it compiles rebuilds it.`;
+  const order =
+    failed.names.length === 0
+      ? ''
+      : ` If they deny a member of ${failed.names.join(' or ')} that its file declares, the editor's copy of that class is behind: reload that class first with reloadScript and then this script, the order that cleared it in the one project that has met this.`;
+  return (
+    `${failed.script} did not compile, so nothing was reloaded: Godot answered ${answered}. ${copy} ` +
+    `script_diagnostics on it gives the errors.${order}`
+  );
+}
+
 /**
  * What to tell a caller whose diagnostics name a class the cache has not got.
  *

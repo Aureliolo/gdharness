@@ -50,6 +50,7 @@ import {
   contradictedDiagnostics,
   declaredClasses,
   declaredSince,
+  failedReloadNote,
   heldButGone,
   missingMemberIn,
   scriptsNaming,
@@ -4120,6 +4121,15 @@ class GodotServer {
   }
 
   /** A declaring script's text, or null when the path will not open. */
+  /** The project's global classes [param scriptPath] names in its file, other than its own. */
+  private classesAScriptNames(projectPath: string, scriptPath: string): string[] {
+    const source = this.sourceOfClass(projectPath, scriptPath);
+    const known = cachedClasses(projectPath) ?? declaredClasses(projectPath);
+    return source === null
+      ? []
+      : classesNamedIn(source, known).filter((name) => known.get(name) !== scriptPath);
+  }
+
   private sourceOfClass(projectPath: string, resourcePath: string): string | null {
     const contained = resolveWithinProject(projectPath, resourcePath);
     if (!contained.ok || !existsSync(contained.absolutePath)) {
@@ -7554,14 +7564,32 @@ class GodotServer {
           const found = readArray(answer, field);
           return found ? { [field]: found.map(String) } : {};
         };
-        reloaded = methods
-          ? {
-              methods: methods.map(String),
-              ...listed('heldBefore'),
-              ...listed('constants'),
-              ...listed('heldConstantsBefore'),
-            }
-          : { problem: `the editor would not say what ${reloading} has after reloading it` };
+        const failed = answer['failed'];
+        if (typeof failed === 'number' && failed !== 0) {
+          reloaded = {
+            ...listed('heldBefore'),
+            ...listed('heldConstantsBefore'),
+            problem: failedReloadNote({
+              script: reloading,
+              code: failed,
+              codeName: readString(answer, 'failedAs') ?? '',
+              heldBefore: listed('heldBefore')['heldBefore'] ?? [],
+              heldAfter: methods?.map(String) ?? [],
+              constantsBefore: listed('heldConstantsBefore')['heldConstantsBefore'] ?? [],
+              constantsAfter: listed('constants')['constants'] ?? [],
+              names: projectPath === '' ? [] : this.classesAScriptNames(projectPath, reloading),
+            }),
+          };
+        } else {
+          reloaded = methods
+            ? {
+                methods: methods.map(String),
+                ...listed('heldBefore'),
+                ...listed('constants'),
+                ...listed('heldConstantsBefore'),
+              }
+            : { problem: `the editor would not say what ${reloading} has after reloading it` };
+        }
       } catch (error) {
         reloaded = { problem: `${reloading} could not be reloaded: ${errorMessage(error)}` };
       }
@@ -7678,7 +7706,13 @@ class GodotServer {
       }
       try {
         const answer = asParams(await this.godotBridge.invokeTool('reload_script', { scriptPath }));
-        if (readArray(answer, 'methods') === undefined) {
+        const failed = answer['failed'];
+        if (typeof failed === 'number' && failed !== 0) {
+          notReloaded.push({
+            scriptPath,
+            problem: `it did not compile: Godot answered error ${failed}${readString(answer, 'failedAs') ? `, ${readString(answer, 'failedAs')}` : ''}`,
+          });
+        } else if (readArray(answer, 'methods') === undefined) {
           notReloaded.push({
             scriptPath,
             problem: 'the editor would not say what it has after reloading it',
