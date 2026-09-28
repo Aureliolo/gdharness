@@ -14,6 +14,7 @@ import { promisify } from 'node:util';
 import { callSignal } from './call-signal.js';
 import { emptyRecord } from './dictionary.js';
 import { GameLog, type LogEntry } from './game-log.js';
+import { forceNextImport } from './reimport.js';
 import { discard, scratchDirectory } from './scratch.js';
 import type { OperationParams } from './server-types.js';
 
@@ -104,7 +105,13 @@ function reason(stdout: string, stderr: string): string {
 export type ImportOutcome = (
   | { readonly ok: true; readonly messages: readonly LogEntry[] }
   | { readonly ok: false; readonly message: string; readonly messages: readonly LogEntry[] }
-) & { readonly librariesRetried?: readonly string[] };
+) & {
+  readonly librariesRetried?: readonly string[];
+  /** Of those, the ones the second pass could not load either. */
+  readonly librariesNotLoaded?: readonly string[];
+  /** What a caller is told about the second pass, present whenever there was one. */
+  readonly extensionNote?: string;
+};
 
 /**
  * The GDExtension libraries an engine could not load because it could not make its own copy of
@@ -128,14 +135,17 @@ export function librariesNotCopied(messages: readonly LogEntry[]): string[] {
 }
 
 /** What a caller is told when an import pass was run a second time for [param libraries]. */
-export function extensionRetryNote(libraries: readonly string[]): string {
+function extensionRetryNote(libraries: readonly string[], stillNotLoaded: readonly string[] = []): string {
+  const second =
+    stillNotLoaded.length === 0
+      ? 'so the import was run again and loaded the extension, and the messages are from that second run.'
+      : `so the import was run again, and it still could not load ${stillNotLoaded.join(' and ')}: this answer is from an import without ${stillNotLoaded.length === 1 ? 'it' : 'them'}, and its messages say what the engine hit.`;
   return (
     `The first import could not load ${libraries.join(' and ')}: on Windows an engine running as the editor ` +
     'loads a GDExtension from a ~ copy beside the library, and the editor open on this project holds its own ' +
     'copy there, so the first engine started beside it cannot make one. That failed attempt moves the ' +
-    "editor's copy aside, so the import was run again and loaded the extension, and the messages are from " +
-    "that second run. The editor's copy is left beside the library as a ~RF….TMP file, which can be deleted " +
-    'once the editor has exited.'
+    `editor's copy aside, ${second} The editor's copy is left beside the library as a ~RF….TMP file, which ` +
+    'can be deleted once the editor has exited.'
   );
 }
 
@@ -152,14 +162,36 @@ export function extensionRetryNote(libraries: readonly string[]): string {
 export async function runImport(
   godotPath: string,
   projectPath: string,
-  once: (godotPath: string, projectPath: string) => Promise<ImportOutcome> = importOnce,
+  options: {
+    /**
+     * `res://` paths every pass reimports whatever the engine would judge of them. Armed before the
+     * second pass as well as the first: the first imported them without the extension, and a
+     * resource it has imported reads as up to date to the second, which would then pass it over.
+     */
+    readonly forcing?: readonly string[];
+    readonly once?: (godotPath: string, projectPath: string) => Promise<ImportOutcome>;
+  } = {},
 ): Promise<ImportOutcome> {
-  const first = await once(godotPath, projectPath);
+  const once = options.once ?? importOnce;
+  const pass = (): Promise<ImportOutcome> => {
+    for (const target of options.forcing ?? []) {
+      forceNextImport(projectPath, target);
+    }
+    return once(godotPath, projectPath);
+  };
+  const first = await pass();
   const collided = librariesNotCopied(first.messages);
   if (collided.length === 0) {
     return first;
   }
-  return { ...(await once(godotPath, projectPath)), librariesRetried: collided };
+  const second = await pass();
+  const still = librariesNotCopied(second.messages);
+  return {
+    ...second,
+    librariesRetried: collided,
+    ...(still.length === 0 ? {} : { librariesNotLoaded: still }),
+    extensionNote: extensionRetryNote(collided, still),
+  };
 }
 
 async function importOnce(godotPath: string, projectPath: string): Promise<ImportOutcome> {

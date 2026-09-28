@@ -765,7 +765,7 @@ func _check_until_a_reference_is_let_go() -> void:
 	written.close()
 	var holding: GDScript = GDScript.new()
 	var declaring: String = 'extends Node3D\n\nconst Walker = preload("res://probe_walker.gd")\n\n'
-	holding.source_code = declaring + "var quarrel: Walker = null\n"
+	holding.source_code = declaring + "var quarrel: Walker = null\nvar loose: Variant = null\n"
 	var compiled: Error = holding.reload()
 	if compiled != OK:
 		_fail("the holder script should compile: %s" % error_string(compiled))
@@ -804,6 +804,13 @@ func _check_until_a_reference_is_let_go() -> void:
 	)
 	if as_text.get("met") != true or Read.as_int(as_text.get("frames"), -1) != 0:
 		_fail("the text null on a null object property meets at once: %s" % JSON.stringify(as_text))
+	# And on an untyped slot holding null, which declares no type to read against: set already read
+	# the text as null there, and the wait ran out on it.
+	var untyped: Dictionary = await node._execute_command(
+		"wait_until", {"path": "/root/Holder", "property": "loose", "value": "null", "timeout_ms": 1000}
+	)
+	if untyped.get("met") != true or Read.as_int(untyped.get("frames"), -1) != 0:
+		_fail("the text null on an untyped slot holding null meets at once: %s" % JSON.stringify(untyped))
 
 	var number: Dictionary = await node._execute_command(
 		"wait_until", {"path": "/root/Holder", "property": "quarrel", "value": 5, "timeout_ms": 1000}

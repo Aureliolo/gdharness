@@ -1459,7 +1459,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       value: {
         ops: ['until'],
         description:
-          "until: the value to wait for, fitted to the property's type. On a property declared to hold an object, null, which the text null also means; any other value is refused, since the property can never hold it.",
+          "until: the value to wait for, fitted to the property's type. On a property holding an object, whether declared to or untyped and holding one or null, the text null means null. One declared to hold an object refuses any value other than null, since it can never hold it.",
       },
       says: {
         type: 'string',
