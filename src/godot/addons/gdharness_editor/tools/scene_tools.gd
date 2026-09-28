@@ -734,11 +734,16 @@ func _reread_changed_uids(filesystem: EditorFileSystem) -> Dictionary:
 	return {"reread": reread, "duplicated": duplicated}
 
 
-## Every `.uid` under [param directory], skipping what the editor skips: hidden directories and any
-## holding a `.gdignore`.
+## Every `.uid` under [param directory], skipping what the editor skips: hidden directories, any
+## holding a `.gdignore`, and any below the project's own that holds a `project.godot` of its own,
+## which the editor passes over as another project. A nested project's UIDs are never in the editor's
+## table, so without that last one its files would be read again on every rescan, and one holding a
+## copy of an outer file's `.uid` named as a duplicate on disk.
 func _uid_files(directory: String, found: Array[String]) -> void:
 	var listing: DirAccess = DirAccess.open(directory)
 	if listing == null or FileAccess.file_exists(directory.path_join(".gdignore")):
+		return
+	if directory != "res://" and FileAccess.file_exists(directory.path_join("project.godot")):
 		return
 	for child: String in listing.get_directories():
 		if not child.begins_with("."):

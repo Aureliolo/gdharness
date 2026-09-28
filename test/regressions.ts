@@ -82,7 +82,7 @@ import {
   mayYetConnect,
   theEditorHasComeBack,
 } from '../src/godot-bridge.js';
-import { extensionRetryNote, type ImportOutcome, librariesNotCopied, runImport } from '../src/headless.js';
+import { type ImportOutcome, librariesNotCopied, runImport } from '../src/headless.js';
 import { EDITOR_READS, HEADLESS_OPERATIONS } from '../src/headless-operations.js';
 import { RENDERED_AWAY_NOTE } from '../src/junit.js';
 import {
@@ -9229,11 +9229,10 @@ function testAStaleEnumMemberIsNamed(): void {
     { kind: 'member', member: 'NOWHERE', type: 'Peal' },
     'and a name on the class itself as a member of the class',
   );
-  assert.deepEqual(
-    missingMemberIn('Cannot find member "LOW" in base "Peal.Tower.Pitch".'),
-    { kind: 'enum member', member: 'LOW', type: 'Peal', enum: 'Pitch' },
-    'an enum under an inner class is looked for by its own name in the class file',
-  );
+  // Godot names an inner class's enum `Peal::Inner.Kind`, measured on 4.7.2, and what an inner
+  // class declares is not looked for, so neither that nor a longer dotted base is read.
+  assert.equal(missingMemberIn('Cannot find member "LOW" in base "Peal::Tower.Pitch".'), null);
+  assert.equal(missingMemberIn('Cannot find member "LOW" in base "Peal.Tower.Pitch".'), null);
 
   const charm = [
     'class_name Charm',
@@ -9277,18 +9276,81 @@ function testAStaleEnumMemberIsNamed(): void {
   assert.equal(declaresMember(charm, enumMember('Kind', 'LUCK')), true, 'one with a comment after it');
   assert.equal(declaresMember(charm, enumMember('Kind', 'WARD')), true, 'one given a number');
   assert.equal(declaresMember(charm, enumMember('Mood', 'SPITE')), true, 'an enum written on one line');
-  assert.equal(declaresMember(charm, enumMember('Size', 'SMALL')), true, 'an enum inside an inner class');
+  assert.equal(
+    declaresMember(charm, enumMember('Size', 'SMALL')),
+    false,
+    'an enum inside an inner class is the inner class’s, not Charm’s',
+  );
   assert.equal(declaresMember(charm, enumMember('Mood', 'LUCK')), false, 'a value of another enum is not');
   assert.equal(declaresMember(charm, enumMember('Kind', 'EXCHANGES_DRAWN')), false, 'nor one never written');
   assert.equal(declaresMember(charm, enumMember('Tower', 'LUCK')), false, 'an enum the file lacks has none');
 
-  for (const member of ['MAX_CHARMS', 'made', 'worn', 'Kind', 'Pouch', 'LOOSE_ONE', 'LOOSE_TWO']) {
+  for (const member of ['MAX_CHARMS', 'made', 'Kind', 'Pouch', 'LOOSE_ONE', 'LOOSE_TWO']) {
     assert.equal(declaresMember(charm, classMember(member)), true, `${member} is answered by the class`);
   }
-  for (const member of ['MISSING_IN_A_BODY', 'strongest_ever', 'CALM', 'SMALL']) {
-    // CALM and SMALL are values of named enums, which the class does not answer by their own names.
+  for (const member of ['MISSING_IN_A_BODY', 'strongest_ever', 'CALM', 'SMALL', 'worn']) {
+    // CALM and SMALL are values of named enums, which the class does not answer by their own names,
+    // and worn is a signal, which the class is not asked for: Godot denies `Charm.worn`, rightly.
     assert.equal(declaresMember(charm, classMember(member)), false, `${member} is not declared on the class`);
   }
+
+  // The class is asked only for what it holds itself, and only at its own top level. Each of these is
+  // Godot 4.7.2's correct answer about a current file, so none may be called stale: a plain var and a
+  // signal read off the class, and a constant, a static function and enums declared only in an inner
+  // class, one sharing the name of a top-level enum whose values are different and one with no name.
+  const peal = [
+    'class_name Peal',
+    'extends RefCounted',
+    '',
+    'signal rang',
+    'var speed: int = 1',
+    'enum Kind { Z }',
+    'enum { OPEN }',
+    '',
+    '',
+    'class Inner:',
+    '\tconst LIMIT = 3',
+    '\tenum Kind { A, B }',
+    '\tenum Mode { ON }',
+    '\tenum { STRAY }',
+    '\tstatic func build() -> int:',
+    '\t\treturn 2',
+    '',
+  ].join('\n');
+  const onPeal = (kind: MissingMember['kind'], member: string, inEnum?: string): MissingMember => ({
+    kind,
+    member,
+    type: 'Peal',
+    ...(inEnum === undefined ? {} : { enum: inEnum }),
+  });
+  for (const [what, missing] of [
+    ['a plain var read off the class', onPeal('member', 'speed')],
+    ['a signal read off the class', onPeal('member', 'rang')],
+    ['a constant of an inner class', onPeal('member', 'LIMIT')],
+    ['an enum of an inner class by its name', onPeal('member', 'Mode')],
+    ['a static function of an inner class', onPeal('static method', 'build')],
+    ['a value of the inner class’s enum of the same name', onPeal('enum member', 'A', 'Kind')],
+    ['a value of an unnamed enum in an inner class', onPeal('member', 'STRAY')],
+  ] as const) {
+    assert.equal(declaresMember(peal, missing), false, `${what} is not declared by Peal`);
+  }
+  // The positives beside them: the same file's own top-level members still count.
+  assert.equal(
+    declaresMember(peal, onPeal('enum member', 'Z', 'Kind')),
+    true,
+    'Peal’s own enum value counts',
+  );
+  assert.equal(
+    declaresMember(peal, onPeal('member', 'OPEN')),
+    true,
+    'and a value of its unnamed enum, which lands on the class',
+  );
+  assert.equal(declaresMember(peal, onPeal('property', 'speed')), true, 'and its var, read off an instance');
+  assert.equal(
+    declaresMember(peal, onPeal('property', 'rang')),
+    true,
+    'and its signal, read off an instance',
+  );
 
   const contradicted = contradictedDiagnostics(
     [
@@ -9456,6 +9518,23 @@ function testAStaleStaticFunctionIsNamed(): void {
     [{ kind: 'method', member: 'opening', type: 'Components', declaredIn: 'res://components.gd' }],
     'and the method denial alone is still named as it was',
   );
+  // A call on the class whose file declares the function without `static`: Godot's fresh answer is
+  // "Cannot call non-static function", so the code is wrong. The static reading, refuted by the
+  // file, still decides for that call, and the method reading a plain func satisfies does not claim it.
+  const closingOnTheClass = [
+    'Static function "closing()" not found in base "Components".',
+    'The method "closing()" is not present on the inferred type "Components" (but may be present on a subtype). (Warning treated as error.)',
+  ];
+  assert.deepEqual(
+    contradictedDiagnostics(closingOnTheClass, classes, sourceOf),
+    [],
+    'a call on the class to an instance function is not called stale by either reading',
+  );
+  assert.deepEqual(
+    contradictedDiagnostics([...closingOnTheClass].reverse(), classes, sourceOf),
+    [],
+    'whichever reading arrives first',
+  );
 
   const [called] = contradictedDiagnostics([staticDenial], classes, sourceOf);
   assert.ok(called !== undefined);
@@ -9489,9 +9568,12 @@ function testAFailedReloadSaysWhatItKept(): void {
   const gutted = failedReloadNote(exchange);
   assert.match(
     gutted,
-    /^res:\/\/core\/exchange\.gd did not compile, so nothing was reloaded: Godot answered error 43, Parse error\./,
+    /^res:\/\/core\/exchange\.gd did not compile: Godot answered error 43, Parse error\./,
     gutted,
   );
+  // A copy that changed is not also said to have had nothing reloaded, which the note once opened
+  // with before saying the copy had changed.
+  assert.doesNotMatch(gutted, /[Nn]othing was reloaded/, 'a changed copy is not said to be untouched');
   assert.match(
     gutted,
     /The copy the editor holds changed even so, and has lost _pierced, CAP: anything diagnosed against it now is answered from what is left, and reloading it once it compiles rebuilds it\./,
@@ -9509,7 +9591,7 @@ function testAFailedReloadSaysWhatItKept(): void {
   });
   assert.equal(
     alone,
-    'res://core/exchange.gd did not compile, so nothing was reloaded: Godot answered error 43. The copy the editor holds is as it was, with the members under heldBeforeReload and heldConstantsBeforeReload. script_diagnostics on it gives the errors.',
+    'res://core/exchange.gd did not compile: Godot answered error 43. Nothing was reloaded: the copy the editor holds is as it was, with the members under heldBeforeReload and heldConstantsBeforeReload. script_diagnostics on it gives the errors.',
     'an intact copy, no class to name and no name for the error, each said as nothing more than it is',
   );
   // A member the copy gained is still a change, however unlikely: the claim is sameness.
@@ -9537,9 +9619,16 @@ async function testDiagnosticsNameAStaleEnumMember(): Promise<void> {
     writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
     mkdirSync(join(project, '.godot'), { recursive: true });
     mkdirSync(join(project, 'core'), { recursive: true });
+    // Charm depends on Rope and Bell on nothing, so a lever offered for Bell's stale method must not
+    // name Rope, which only the enum member's script depends on.
     writeFileSync(
       join(project, 'core', 'charm.gd'),
-      'class_name Charm\nextends RefCounted\n\nenum Kind { LUCK, ZZ_PROBE }\n',
+      'class_name Charm\nextends RefCounted\n\nenum Kind { LUCK, ZZ_PROBE }\n\nvar rope: Rope = null\n',
+    );
+    writeFileSync(join(project, 'core', 'rope.gd'), 'class_name Rope\nextends RefCounted\n');
+    writeFileSync(
+      join(project, 'core', 'bell.gd'),
+      'class_name Bell\nextends Node\n\n\nfunc toll() -> int:\n\treturn 1\n',
     );
     writeFileSync(
       join(project, 'probe.gd'),
@@ -9547,7 +9636,11 @@ async function testDiagnosticsNameAStaleEnumMember(): Promise<void> {
     );
     writeFileSync(
       join(project, '.godot', 'global_script_class_cache.cfg'),
-      'list=[{\n"class": &"Charm",\n"path": "res://core/charm.gd"\n}]\n',
+      [
+        'list=[{\n"class": &"Charm",\n"path": "res://core/charm.gd"\n}, ',
+        '{\n"class": &"Rope",\n"path": "res://core/rope.gd"\n}, ',
+        '{\n"class": &"Bell",\n"path": "res://core/bell.gd"\n}]\n',
+      ].join(''),
     );
     await withFakeLanguageServer(
       (uri) => uri,
@@ -9567,7 +9660,7 @@ async function testDiagnosticsNameAStaleEnumMember(): Promise<void> {
               arguments: { projectPath: project, scriptPath: 'res://probe.gd' },
             }),
           );
-          assert.equal(get(answer, 'errors'), 2, `both diagnostics are passed on: ${JSON.stringify(answer)}`);
+          assert.equal(get(answer, 'errors'), 3, `every diagnostic is passed on: ${JSON.stringify(answer)}`);
           assert.deepEqual(
             get(answer, 'contradictedByTheFile'),
             [
@@ -9578,14 +9671,18 @@ async function testDiagnosticsNameAStaleEnumMember(): Promise<void> {
                 enum: 'Kind',
                 declaredIn: 'res://core/charm.gd',
               },
+              { kind: 'method', member: 'toll', type: 'Bell', declaredIn: 'res://core/bell.gd' },
             ],
-            `the member the file declares is named, and the follow-on is not: ${JSON.stringify(answer)}`,
+            `the members the files declare are named, and the follow-on is not: ${JSON.stringify(answer)}`,
           );
+          const said = String(get(answer, 'staleAnalysis'));
           assert.match(
-            String(get(answer, 'staleAnalysis')),
+            said,
             /For Charm\.Kind\.ZZ_PROBE, run editor_rescan with reloadScript set to res:\/\/core\/charm\.gd first\./,
             'and the remedy is the reload of the script that declares it',
           );
+          assert.match(said, /depend on no other global class/, `Bell's lever is its own: ${said}`);
+          assert.doesNotMatch(said, /changing Rope/, `and does not borrow Charm's dependency: ${said}`);
         } finally {
           await server.stop();
         }
@@ -9594,6 +9691,7 @@ async function testDiagnosticsNameAStaleEnumMember(): Promise<void> {
       [
         'Cannot find member "ZZ_PROBE" in base "Charm.Kind".',
         'The argument 3 of the function "per()" requires the subtype "Charm.Kind" but the supertype "Variant" was provided.',
+        'The method "toll()" is not present on the inferred type "Bell".',
       ],
     );
   } finally {
@@ -9641,30 +9739,89 @@ async function testAnImportThatCouldNotCopyAnExtensionRunsAgain(): Promise<void>
   };
   const clean: ImportOutcome = { ok: true, messages: [] };
 
-  const retried = await runImport('godot', 'project', stand([{ ok: true, messages: collided }, clean]));
-  assert.equal(passes.length, 2, 'a pass that could not copy the library is run again');
-  assert.deepEqual(
-    retried,
-    { ok: true, messages: [], librariesRetried: [library] },
-    'and the answer is the second pass, naming the library the first could not load',
-  );
+  // A resource the caller forces is armed before every pass: the first imported it without the
+  // extension, and it reads as up to date to the second otherwise. Read from the sidecar each pass
+  // meets, which the stand-in leaves as a failed import does, with `valid=false` in it.
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-import-retry-'));
+  const sidecar = join(project, 'good.png.import');
+  const importedWithoutIt = (): void => {
+    writeFileSync(sidecar, 'valid=false\n[remap]\n');
+  };
+  const armed: boolean[] = [];
+  const reading = (outcomes: ImportOutcome[]) => (): Promise<ImportOutcome> => {
+    armed.push(!readFileSync(sidecar, 'utf8').includes('valid=false'));
+    importedWithoutIt();
+    return stand(outcomes)();
+  };
+  try {
+    importedWithoutIt();
+    const retried = await runImport('godot', project, {
+      once: reading([{ ok: true, messages: collided }, clean]),
+      forcing: ['res://good.png'],
+    });
+    assert.equal(passes.length, 2, 'a pass that could not copy the library is run again');
+    assert.deepEqual(armed, [true, true], 'with the forced resource armed again before it');
+    const { extensionNote: loadedNote, ...answer } = retried;
+    assert.deepEqual(
+      answer,
+      { ok: true, messages: [], librariesRetried: [library] },
+      'and the answer is the second pass, naming the library the first could not load',
+    );
+    assert.match(loadedNote ?? '', /the import was run again and loaded the extension/, String(loadedNote));
+
+    passes.length = 0;
+    armed.length = 0;
+    const single = await runImport('godot', project, { once: reading([clean]), forcing: ['res://good.png'] });
+    assert.deepEqual(
+      [passes.length, single.librariesRetried, armed],
+      [1, undefined, [true]],
+      'a clean pass runs once, armed once',
+    );
+  } finally {
+    sweep(project);
+  }
 
   // The measured first pass also crashed on its way out, so a failed pass is run again as well.
   passes.length = 0;
-  const afterACrash = await runImport(
-    'godot',
-    'project',
-    stand([{ ok: false, message: 'the import pass failed (exit 139)', messages: collided }, clean]),
-  );
+  const afterACrash = await runImport('godot', 'project', {
+    once: stand([{ ok: false, message: 'the import pass failed (exit 139)', messages: collided }, clean]),
+  });
   assert.deepEqual([passes.length, afterACrash.ok, afterACrash.librariesRetried], [2, true, [library]]);
 
+  // A second pass that could not copy it either is said to have run without it, not to have loaded it.
   passes.length = 0;
-  const once = await runImport('godot', 'project', stand([clean]));
-  assert.deepEqual([passes.length, once.librariesRetried], [1, undefined], 'a clean pass runs once');
+  const twice = await runImport('godot', 'project', {
+    once: stand([
+      { ok: true, messages: collided },
+      { ok: true, messages: collided },
+    ]),
+  });
+  assert.deepEqual(
+    [twice.librariesRetried, twice.librariesNotLoaded],
+    [[library], [library]],
+    'the library the second pass could not load either is named',
+  );
+  const failedTwice = twice.extensionNote ?? '';
+  assert.match(failedTwice, /still could not load .*this answer is from an import without it/, failedTwice);
+  assert.doesNotMatch(failedTwice, /loaded the extension/, 'and not said to have loaded it');
 
-  const note = extensionRetryNote(['a.dll', 'b.dll']);
-  assert.match(note, /^The first import could not load a\.dll and b\.dll: on Windows/, note);
-  assert.match(note, /the import was run again and loaded the extension/, note);
+  const quiet = await runImport('godot', 'project', { once: stand([clean]) });
+  assert.equal(quiet.extensionNote, undefined, 'and a clean pass has no note');
+
+  const pair = new GameLog();
+  pair.append('stderr', 'ERROR: Error copying library: a.dll\nERROR: Error copying library: b.dll\n');
+  pair.finish();
+  const both = await runImport('godot', 'project', {
+    once: stand([
+      { ok: true, messages: pair.select({ severity: 'warning', sinceLastCall: false, limit: 200 }).entries },
+      clean,
+    ]),
+  });
+  assert.match(
+    both.extensionNote ?? '',
+    /^The first import could not load a\.dll and b\.dll: on Windows/,
+    String(both.extensionNote),
+  );
 }
 
 /**
@@ -21396,7 +21553,11 @@ async function testARescanReloadsWhatNamesAClassItBroughtIn(): Promise<void> {
                   type: 'tool_result',
                   id: message['id'],
                   success: true,
-                  result: scriptPath === 'res://refuses.gd' ? uncompiled : { ok: true, methods: [] },
+                  // base.gd refused as asked for without res://, the spelling reloadScript also takes.
+                  result:
+                    scriptPath === 'res://refuses.gd' || scriptPath === 'base.gd'
+                      ? uncompiled
+                      : { ok: true, methods: [] },
                 },
           ),
         );
@@ -21468,7 +21629,7 @@ async function testARescanReloadsWhatNamesAClassItBroughtIn(): Promise<void> {
     );
     assert.equal(
       get(asked, 'reloadProblem'),
-      "res://refuses.gd did not compile, so nothing was reloaded: Godot answered error 43, Parse error. The copy the editor holds is as it was, with the members under heldBeforeReload and heldConstantsBeforeReload. script_diagnostics on it gives the errors. If they deny a member of CharteredRun that its file declares, the editor's copy of that class is behind: reload that class first with reloadScript and then this script, the order that cleared it in the one project that has met this.",
+      "res://refuses.gd did not compile: Godot answered error 43, Parse error. Nothing was reloaded: the copy the editor holds is as it was, with the members under heldBeforeReload and heldConstantsBeforeReload. script_diagnostics on it gives the errors. If they deny a member of CharteredRun that its file declares, the editor's copy of that class is behind: reload that class first with reloadScript and then this script, the order that cleared it in the one project that has met this.",
       JSON.stringify(asked),
     );
     assert.deepEqual(
@@ -21514,6 +21675,24 @@ async function testARescanReloadsWhatNamesAClassItBroughtIn(): Promise<void> {
       [get(reloadedByName, 'ok'), get(reloadedByName, 'reloadProblem')],
       [true, undefined],
       `and one that reloaded is ok: ${JSON.stringify(reloadedByName)}`,
+    );
+    // The declaring script asked for without res://. Its file names only its own class, which is not
+    // one to reload first: spelled this way it passed for one, and the script was told to reload itself.
+    const ownClass = parseTextContent(
+      await server.request('tools/call', {
+        name: 'editor_rescan',
+        arguments: { projectPath: project, reloadScript: 'base.gd' },
+      }),
+    );
+    assert.match(
+      String(get(ownClass, 'reloadProblem')),
+      /^base\.gd did not compile/,
+      JSON.stringify(ownClass),
+    );
+    assert.doesNotMatch(
+      String(get(ownClass, 'reloadProblem')),
+      /If they deny a member of CharteredRun/,
+      `a script is not told to reload its own class first: ${JSON.stringify(ownClass)}`,
     );
 
     // Nothing brought in the second time, so nothing is reloaded and the scan is clean.
