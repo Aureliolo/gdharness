@@ -9371,6 +9371,18 @@ function testAStaleEnumMemberIsNamed(): void {
     /a call each for res:\/\/core\/charm\.gd and res:\/\/core\/ledger\.gd since it takes one script/,
     `reloadScript takes one script, so two are two calls: ${twoScripts}`,
   );
+  // One at a time, because a reload can cover the next: ostinato's reload of rules.gd brought in a
+  // class and reloaded gear.gd with it, and the separate call the note asked for was wasted.
+  assert.match(
+    twoScripts,
+    /Take them one at a time: .* a script listed there needs no call of its own\./,
+    `and says a script already reloaded under dependentsReloaded needs no call: ${twoScripts}`,
+  );
+  assert.doesNotMatch(
+    staleAnalysisNote([probe], []),
+    /one at a time/,
+    'which is said only when there is more than one script to reload',
+  );
 }
 
 /**
