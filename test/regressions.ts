@@ -82,6 +82,7 @@ import {
   mayYetConnect,
   theEditorHasComeBack,
 } from '../src/godot-bridge.js';
+import { extensionRetryNote, type ImportOutcome, librariesNotCopied, runImport } from '../src/headless.js';
 import { EDITOR_READS, HEADLESS_OPERATIONS } from '../src/headless-operations.js';
 import { RENDERED_AWAY_NOTE } from '../src/junit.js';
 import {
@@ -9586,6 +9587,72 @@ async function testDiagnosticsNameAStaleEnumMember(): Promise<void> {
   } finally {
     sweep(project);
   }
+}
+
+/**
+ * An import pass that could not copy a GDExtension library runs a second time, and says so.
+ *
+ * #776: `refresh_uids` straight after an editor restart printed four GodotSteam errors and ran
+ * without the extension, and the same call a minute later was clean. Measured on 4.7.2 with a
+ * headless editor on a copy of that addon: the first import started beside the editor fails the
+ * same way, whenever it is started, and the next one loads the extension, because the failed
+ * attempt moves the editor's `~` copy of the library aside. It needs Windows and a real extension,
+ * which no CI leg has, so the engine is stood in for with the measured output, and what is held is
+ * the decision: a collision is read from those exact lines, the pass is run once more, the answer is
+ * the second run's with the libraries named, and a pass without the lines runs once.
+ */
+async function testAnImportThatCouldNotCopyAnExtensionRunsAgain(): Promise<void> {
+  const library =
+    'C:/Users/Aurelio/AppData/Local/Temp/gdharness-steam-probe/addons/godotsteam/win64/libgodotsteam.windows.template_debug.x86_64.dll';
+  const measured = [
+    `ERROR: Failed to open 'C:/Users/Aurelio/AppData/Local/Temp/gdharness-steam-probe/addons/godotsteam/win64/~libgodotsteam.windows.template_debug.x86_64.dll'.`,
+    '   at: copy (core/io/dir_access.cpp:429)',
+    `ERROR: Error copying library: ${library}`,
+    '   at: open_dynamic_library (platform/windows/os_windows.cpp:502)',
+    "ERROR: Can't open GDExtension dynamic library: 'res://addons/godotsteam/godotsteam.gdextension'.",
+    "ERROR: Error loading extension: 'res://addons/godotsteam/godotsteam.gdextension'.",
+    '',
+  ].join('\n');
+  const log = new GameLog();
+  log.append('stderr', measured);
+  log.finish();
+  const collided = log.select({ severity: 'warning', sinceLastCall: false, limit: 200 }).entries;
+  assert.deepEqual(librariesNotCopied(collided), [library], 'the library is read from the engine’s own line');
+  assert.deepEqual(librariesNotCopied([]), [], 'and nothing is read from a clean pass');
+
+  const passes: string[] = [];
+  const stand = (outcomes: ImportOutcome[]) => (): Promise<ImportOutcome> => {
+    passes.push('pass');
+    const next = outcomes.shift();
+    assert.ok(next !== undefined, 'no more passes were expected');
+    return Promise.resolve(next);
+  };
+  const clean: ImportOutcome = { ok: true, messages: [] };
+
+  const retried = await runImport('godot', 'project', stand([{ ok: true, messages: collided }, clean]));
+  assert.equal(passes.length, 2, 'a pass that could not copy the library is run again');
+  assert.deepEqual(
+    retried,
+    { ok: true, messages: [], librariesRetried: [library] },
+    'and the answer is the second pass, naming the library the first could not load',
+  );
+
+  // The measured first pass also crashed on its way out, so a failed pass is run again as well.
+  passes.length = 0;
+  const afterACrash = await runImport(
+    'godot',
+    'project',
+    stand([{ ok: false, message: 'the import pass failed (exit 139)', messages: collided }, clean]),
+  );
+  assert.deepEqual([passes.length, afterACrash.ok, afterACrash.librariesRetried], [2, true, [library]]);
+
+  passes.length = 0;
+  const once = await runImport('godot', 'project', stand([clean]));
+  assert.deepEqual([passes.length, once.librariesRetried], [1, undefined], 'a clean pass runs once');
+
+  const note = extensionRetryNote(['a.dll', 'b.dll']);
+  assert.match(note, /^The first import could not load a\.dll and b\.dll: on Windows/, note);
+  assert.match(note, /the import was run again and loaded the extension/, note);
 }
 
 /**
@@ -22177,6 +22244,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAHeldScratchDirectoryGoesOnceLetGo,
   testAnAbandonedScratchDirectoryIsSweptAndNothingElse,
   testADiagnosticTheFileContradictsIsNamed,
+  testAnImportThatCouldNotCopyAnExtensionRunsAgain,
   testAStaleEnumMemberIsNamed,
   testAStaleStaticFunctionIsNamed,
   testAFailedReloadSaysWhatItKept,
