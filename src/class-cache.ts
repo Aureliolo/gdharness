@@ -563,10 +563,10 @@ function instanceRemedy(
 
 /**
  * The remedy for what the diagnostics deny on the class itself, enum members, constants and static
- * functions, which runs the other way: the
- * reload first. The one measurement is ostinato's, of an enum member of a global class, twice on
- * 1.1.14: the one plain rescan tried left the diagnostic standing, and a reload of the declaring
- * script cleared it at once both times. It has not reproduced in this project's editor tier, where a member added
+ * functions, which runs the other way: the reload first. The one measurement is ostinato's, of enum
+ * members of global classes, twice on 1.1.14 and once on 1.1.19: the one plain rescan tried left the
+ * diagnostic standing, and a reload of the declaring script cleared it at once each time. It has not
+ * reproduced in this project's editor tier, where a member added
  * to the enum of a type the editor holds resolved with nothing asked, so the reading is attributed
  * rather than claimed. A constant or a static function on the class is looked up on the class the
  * same way and has not been measured, and the sentence says which one was.
@@ -580,10 +580,17 @@ function classRemedy(entries: readonly Contradicted[]): string {
     declaring.length === 1
       ? `editor_rescan with reloadScript set to ${declaring[0]}`
       : `editor_rescan with reloadScript, a call each for ${declaring.join(' and ')} since it takes one script,`;
+  // One at a time because a reload can cover the next: a rescan that brings in a class reloads
+  // every script naming it, and ostinato's reload of rules.gd brought in Usurp and reloaded gear.gd,
+  // the other script this note had sent it to.
+  const oneAtATime =
+    declaring.length === 1
+      ? ''
+      : ' Take them one at a time: a rescan that brings in a class also reloads every script naming it and lists them under dependentsReloaded, so a script listed there needs no call of its own.';
   return (
-    `For ${entries.map(written).join(', ')}, run ${reload} first. In the one project that has ` +
-    'reproduced a stale enum member, twice, the reload cleared it at once both times, and the one ' +
-    'plain editor_rescan tried left the diagnostic standing.'
+    `For ${entries.map(written).join(', ')}, run ${reload} first.${oneAtATime} In the one project ` +
+    'that has reproduced a stale enum member, three times, the reload cleared it at once each time, ' +
+    'and the one plain editor_rescan tried left the diagnostic standing.'
   );
 }
 
