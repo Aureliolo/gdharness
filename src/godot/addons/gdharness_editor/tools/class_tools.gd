@@ -64,6 +64,7 @@ func reload_script(args: Dictionary) -> Dictionary:
 	# than the one that mends it. Without it a caller cannot tell a copy that was already current
 	# from one this call repaired, and those are different facts about their editor.
 	var held: Array[String] = _method_names(script)
+	var held_constants: Array[String] = _constant_names(script)
 
 	# The source is read off disk and put back before reloading, which is the whole of the fix and
 	# is not obvious. `reload` recompiles from the object's own `source_code`, not from the file, so
@@ -80,13 +81,38 @@ func reload_script(args: Dictionary) -> Dictionary:
 	if failed != OK:
 		return {"ok": false, "error": "Reloading " + path + " answered error " + str(failed)}
 
-	return {"ok": true, "script": path, "heldBefore": held, "methods": _method_names(script)}
+	return {
+		"ok": true,
+		"script": path,
+		"heldBefore": held,
+		"methods": _method_names(script),
+		"heldConstantsBefore": held_constants,
+		"constants": _constant_names(script),
+	}
 
 
 func _method_names(script: GDScript) -> Array[String]:
 	var names: Array[String] = []
 	for entry: Dictionary in script.get_script_method_list():
 		names.append(str(entry.get("name", "")))
+	names.sort()
+	return names
+
+
+## The script's own constants, and the keys of each one that is a Dictionary as `Kind.SHORT`, which
+## is how the copy holds a named enum: a stale enum member is denied as a member of the enum rather
+## than of the class. A constant Dictionary that is not an enum is listed the same way, since the
+## map does not tell the two apart.
+func _constant_names(script: GDScript) -> Array[String]:
+	var names: Array[String] = []
+	var constants: Dictionary = script.get_script_constant_map()
+	for named: Variant in constants:
+		var value: Variant = constants[named]
+		names.append(str(named))
+		if value is Dictionary:
+			var values: Dictionary = value
+			for member: Variant in values:
+				names.append("%s.%s" % [named, member])
 	names.sort()
 	return names
 
