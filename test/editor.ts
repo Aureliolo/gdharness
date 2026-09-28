@@ -2006,7 +2006,9 @@ async function testAMethodAddedToAnAnalysedTypeIsPickedUp({ call, project }: Edi
  * starts resolves the new member even with the declaring script built and held and opened through
  * the language server, so the fault needs something an editor seconds old does not have. Held as
  * what the editor does, so a Godot that starts holding the old enum fails this rather than quietly
- * matching.
+ * matching. The reload's constants show the built copy still without the new member at that same
+ * moment, so the analyser here is not reading the built copy's enum; ostinato's editor, up for
+ * fourteen hours, was reading something that was stale.
  *
  * The second half is the engine's own wording for a member that is genuinely missing, which is
  * what `missingMemberIn` reads: a change of wording would leave every stale enum member unnamed,
@@ -2027,6 +2029,11 @@ async function testAnEnumMemberAddedToAHeldTypeIsPickedUp({ call, project }: Edi
     asArray(get(held, 'heldBeforeReload')).includes('chime'),
     `the editor should hold a built copy of Peal: ${JSON.stringify(held)}`,
   );
+  assert.deepEqual(
+    get(held, 'reloadedConstants'),
+    ['Kind', 'Kind.LONG', 'Kind.SHORT', 'ROUNDS'],
+    `and the reload names its constants, the enum's values under the enum: ${JSON.stringify(held)}`,
+  );
   const opened = await call('script_diagnostics', { projectPath: project, scriptPath: 'res://peal.gd' });
   assert.equal(get(opened, 'clean'), true, JSON.stringify(opened));
 
@@ -2045,6 +2052,21 @@ async function testAnEnumMemberAddedToAHeldTypeIsPickedUp({ call, project }: Edi
     get(grown, 'clean'),
     true,
     `the new member and constant resolve with nothing asked of the editor: ${JSON.stringify(grown)}`,
+  );
+  // The same divergence the method case holds, taken in the same window: the analyser resolved the
+  // new member while the copy the editor built still has the enum it was built with. So a stale
+  // built copy alone does not deny the member here, and ostinato's editor had something more.
+  const regrown = await call('editor_rescan', { projectPath: project, reloadScript: 'res://peal.gd' });
+  const constants = (field: string): unknown[] => asArray(get(regrown, field));
+  assert.ok(
+    !constants('heldConstantsBeforeReload').includes('Kind.DOUBLE') &&
+      !constants('heldConstantsBeforeReload').includes('CHANGES'),
+    `the built copy should still be the one built before the change: ${JSON.stringify(regrown)}`,
+  );
+  assert.ok(
+    constants('reloadedConstants').includes('Kind.DOUBLE') &&
+      constants('reloadedConstants').includes('CHANGES'),
+    `and the reload should recompile it with the new member and constant: ${JSON.stringify(regrown)}`,
   );
 
   writeFileSync(
