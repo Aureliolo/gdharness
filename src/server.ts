@@ -7660,6 +7660,8 @@ class GodotServer {
         stillGone.length === 0 &&
         stillAtMissingPaths.length === 0 &&
         (dependents === null || dependents.notReloaded.length === 0) &&
+        // The script asked for by name is the stronger case of a dependent that would not reload.
+        reloaded.problem === undefined &&
         checked.unchecked === undefined,
       stillWorking: busy,
       waitedMs: Date.now() - started,

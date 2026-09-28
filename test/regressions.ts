@@ -21401,6 +21401,41 @@ async function testARescanReloadsWhatNamesAClassItBroughtIn(): Promise<void> {
       [['run_once'], ['MAX'], undefined],
       `the readings of the copy it kept, and nothing claimed as reloaded: ${JSON.stringify(asked)}`,
     );
+    // #775: a reload asked for by name that did not happen is not ok, whichever way it failed, and
+    // one that did happen still is. uses.gd is refused the way a script that is not there is: as a
+    // failed call with its reason.
+    assert.equal(
+      get(asked, 'ok'),
+      false,
+      `a named reload that did not compile is not ok: ${JSON.stringify(asked)}`,
+    );
+    const refusedByName = parseTextContent(
+      await server.request('tools/call', {
+        name: 'editor_rescan',
+        arguments: { projectPath: project, reloadScript: 'res://uses.gd' },
+      }),
+    );
+    assert.match(
+      String(get(refusedByName, 'reloadProblem')),
+      /the fixture editor refused it/,
+      JSON.stringify(refusedByName),
+    );
+    assert.equal(
+      get(refusedByName, 'ok'),
+      false,
+      `nor is one the editor refused: ${JSON.stringify(refusedByName)}`,
+    );
+    const reloadedByName = parseTextContent(
+      await server.request('tools/call', {
+        name: 'editor_rescan',
+        arguments: { projectPath: project, reloadScript: 'res://charters_test.gd' },
+      }),
+    );
+    assert.deepEqual(
+      [get(reloadedByName, 'ok'), get(reloadedByName, 'reloadProblem')],
+      [true, undefined],
+      `and one that reloaded is ok: ${JSON.stringify(reloadedByName)}`,
+    );
 
     // Nothing brought in the second time, so nothing is reloaded and the scan is clean.
     const reloadsSoFar = reloadsAskedFor.length;
