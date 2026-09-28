@@ -353,6 +353,14 @@ func _read_point(params: Dictionary, x_key: String, y_key: String, pair_key: Str
 	return "%s must be Vector2 or [x, y]" % pair_key
 
 
+## Clicks a mouse button at a position, and lets go of it again unless asked to hold it.
+##
+## The whole click by default, for the reason [method inject_action] is the whole press, and
+## because much of a UI acts on the release: a rich label opens its link then, so a click on one
+## answered input_injected and opened nothing, while the same op on the wheel was already whole.
+##
+## `pressed` is how a caller asks for one half, the way a drag is made: true holds the button down,
+## false lets go of one being held.
 func inject_mouse_click(params: Dictionary) -> Dictionary:
 	var point: Variant = _read_point(params, "x", "y", "position")
 	if point is String:
@@ -361,32 +369,37 @@ func inject_mouse_click(params: Dictionary) -> Dictionary:
 	var button: int = _resolve_mouse_button(params.get("button", MOUSE_BUTTON_LEFT))
 	if button < 0:
 		return _no_such_button(params.get("button"))
-	var pressed: bool = Read.as_bool(params.get("pressed", true), true)
+	var held: bool = Read.as_bool(params.get("pressed", true), true)
 	var double: bool = Read.as_bool(params.get("doubleClick", false))
-
-	# A button pressed somewhere puts the pointer there: the motion after a held press measures
-	# its drag from the press, which is where a real pointer would be.
-	var _moved: Vector2 = _arrive(position)
-	Input.parse_input_event(_button(position, button, pressed, double))
 	# A wheel step is a press and a release together, as a mouse sends one: there is no holding a
 	# wheel. A lone wheel press left the viewport's mouse focus on the control that took it, with
 	# the wheel's bit in the focus mask, and every click after it landed on that control rather
 	# than under the pointer, landing true and doing nothing, until a release was sent by hand.
-	var notch: bool = pressed and _mask_of(button) == 0
+	var notch: bool = held and _mask_of(button) == 0
+	var whole: bool = notch or not params.has("pressed")
+
+	# A button pressed somewhere puts the pointer there: the motion after a held press measures
+	# its drag from the press, which is where a real pointer would be.
+	var _moved: Vector2 = _arrive(position)
+	Input.parse_input_event(_button(position, button, whole or held, double))
 	if notch:
 		Input.parse_input_event(_button(position, button, false, false))
+	elif whole:
+		# A frame between the halves, as inject_action has, so a control that acts on the press and
+		# one that acts on the release each get a frame to do it in.
+		await _host.get_tree().process_frame
+		Input.parse_input_event(_button(position, button, false, false))
+		await _host.get_tree().process_frame
 
-	var answer: Dictionary = {
+	return {
 		"type": "input_injected",
 		"input_type": "mouse_click",
 		"position": [position.x, position.y],
 		"button": button,
-		"pressed": pressed,
+		"pressed": held and not whole,
+		"whole": whole,
 		"double": double
 	}
-	if notch:
-		answer["released"] = true
-	return answer
 
 
 ## Moves the pointer to a position, with the movement the event carries taken from where the

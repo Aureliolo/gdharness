@@ -76,8 +76,9 @@ func _everything() -> void:
 	_typing = input
 
 	await _check_keys(input)
-	_check_mouse(input)
+	await _check_mouse(input)
 	await _check_a_wheel_step(input)
+	await _check_a_whole_click(input)
 	await _check_actions(input)
 	_check_typing(input)
 	await _type_with_keys(input)
@@ -167,21 +168,15 @@ func _check_keys(input: InputCommands) -> void:
 
 func _check_mouse(input: InputCommands) -> void:
 	# The tool schema sends flat x and y; the older nested form still has to work.
-	var flat: Dictionary = input.inject_mouse_click({"x": 10, "y": 20, "button": "right"})
+	var flat: Dictionary = await input.inject_mouse_click({"x": 10, "y": 20, "button": "right"})
 	if flat.get("position", []) != [10.0, 20.0] or flat.get("button", 0) != MOUSE_BUTTON_RIGHT:
 		_fail("flat click: %s" % JSON.stringify(flat))
 
-	var nested: Dictionary = input.inject_mouse_click({"position": [1, 2], "button": 3})
+	var nested: Dictionary = await input.inject_mouse_click({"position": [1, 2], "button": 3})
 	if nested.get("position", []) != [1.0, 2.0] or nested.get("button", 0) != MOUSE_BUTTON_MIDDLE:
 		_fail("nested click: %s" % JSON.stringify(nested))
-	# Released, because a button left down holds the viewport's mouse focus on whatever took it,
-	# and the wheel check after this one is about exactly that.
-	var _right_up: Dictionary = input.inject_mouse_click(
-		{"x": 10, "y": 20, "button": "right", "pressed": false}
-	)
-	var _middle_up: Dictionary = input.inject_mouse_click({"x": 1, "y": 2, "button": 3, "pressed": false})
 
-	var short: Dictionary = input.inject_mouse_click({"position": [1]})
+	var short: Dictionary = await input.inject_mouse_click({"position": [1]})
 	if short.get("type", "") != "error":
 		_fail("a one-element position should be refused: %s" % JSON.stringify(short))
 
@@ -200,13 +195,13 @@ func _check_mouse(input: InputCommands) -> void:
 
 	# A spelling nobody recognises used to come back as the left button, so a right click asked for
 	# by the wrong word went left and said it went left.
-	var unknown: Dictionary = input.inject_mouse_click({"x": 1, "y": 1, "button": "scroll_up"})
+	var unknown: Dictionary = await input.inject_mouse_click({"x": 1, "y": 1, "button": "scroll_up"})
 	if unknown.get("type", "") != "error":
 		_fail("a button name that is not one should be refused: %s" % JSON.stringify(unknown))
 	# And a number that is not a button: 0 is MOUSE_BUTTON_NONE, which no event carries, and past
 	# the two extra buttons there is nothing to press.
 	for number: int in [0, 10, -3]:
-		var none: Dictionary = input.inject_mouse_click({"x": 1, "y": 1, "button": number})
+		var none: Dictionary = await input.inject_mouse_click({"x": 1, "y": 1, "button": number})
 		if none.get("type", "") != "error":
 			_fail("button %d is not a button and should be refused: %s" % [number, JSON.stringify(none)])
 
@@ -231,10 +226,12 @@ func _check_a_wheel_step(input: InputCommands) -> void:
 	root.add_child(other)
 	await process_frame
 
-	var notch: Dictionary = input.inject_mouse_click({"x": 50, "y": 50, "button": "wheel_down"})
+	var notch: Dictionary = await input.inject_mouse_click(
+		{"x": 50, "y": 50, "button": "wheel_down", "pressed": true}
+	)
 	await process_frame
-	if notch.get("released") != true:
-		_fail("a wheel click says it was released as well as pressed: %s" % JSON.stringify(notch))
+	if notch.get("whole") != true or notch.get("pressed") != false:
+		_fail("a wheel click held down is still a whole step: %s" % JSON.stringify(notch))
 	if (
 		taker.presses.get(MOUSE_BUTTON_WHEEL_DOWN, 0) != 1
 		or taker.releases.get(MOUSE_BUTTON_WHEEL_DOWN, 0) != 1
@@ -246,9 +243,7 @@ func _check_a_wheel_step(input: InputCommands) -> void:
 			)
 		)
 
-	var _down: Dictionary = input.inject_mouse_click({"x": 250, "y": 50})
-	var _up: Dictionary = input.inject_mouse_click({"x": 250, "y": 50, "pressed": false})
-	await process_frame
+	var _clicked: Dictionary = await input.inject_mouse_click({"x": 250, "y": 50})
 	if other.presses.get(MOUSE_BUTTON_LEFT, 0) != 1 or taker.presses.get(MOUSE_BUTTON_LEFT, 0) != 0:
 		_fail(
 			(
@@ -262,6 +257,55 @@ func _check_a_wheel_step(input: InputCommands) -> void:
 
 	taker.queue_free()
 	other.queue_free()
+
+
+## A mouse_click with no `pressed` is the whole click, which is what a control acting on the release
+## needs: a Button presses on it by default, and a rich label opens a link on it. The press alone
+## answered input_injected and pressed neither. The held press and its release are the positive
+## that the halves still come apart when asked for.
+func _check_a_whole_click(input: InputCommands) -> void:
+	var button: Button = _small_button(root, "Go", Vector2(4, 4))
+	var link: RichTextLabel = RichTextLabel.new()
+	link.bbcode_enabled = true
+	link.text = "[url=onward]Onward[/url]"
+	link.position = Vector2(0, 24)
+	link.size = Vector2(64, 30)
+	var opened: Array[String] = []
+	Checked.done(
+		link.meta_clicked.connect(func(meta: Variant) -> void: opened.append(str(meta))),
+		"counting the links opened"
+	)
+	root.add_child(link)
+	await process_frame
+
+	var whole: Dictionary = await input.inject_mouse_click({"x": 17, "y": 10})
+	if whole.get("whole") != true or whole.get("pressed") != false or _presses(button) != 1:
+		_fail(
+			(
+				"a click with no pressed presses a button that acts on the release: presses %d, %s"
+				% [_presses(button), JSON.stringify(whole)]
+			)
+		)
+	if Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT):
+		_fail("a whole click leaves the button up")
+
+	var _on_link: Dictionary = await input.inject_mouse_click({"x": 8, "y": 34})
+	if opened != ["onward"]:
+		_fail("a click on a rich label's link opens it: %s" % JSON.stringify(opened))
+
+	var down: Dictionary = await input.inject_mouse_click({"x": 17, "y": 10, "pressed": true})
+	await process_frame
+	if down.get("whole") != false or down.get("pressed") != true or _presses(button) != 1:
+		_fail("a held press is only the press: presses %d, %s" % [_presses(button), JSON.stringify(down)])
+	if not Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT):
+		_fail("a held press leaves the button down")
+	var _up: Dictionary = await input.inject_mouse_click({"x": 17, "y": 10, "pressed": false})
+	await process_frame
+	if _presses(button) != 2:
+		_fail("the release after a held press finishes the click: presses %d" % _presses(button))
+
+	button.queue_free()
+	link.queue_free()
 
 
 ## What a field ends up holding, which is the only thing that says a key typed anything. Every
