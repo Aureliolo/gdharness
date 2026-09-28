@@ -74,16 +74,22 @@ func reload_script(args: Dictionary) -> Dictionary:
 	var reader: FileAccess = FileAccess.open(path, FileAccess.READ)
 	if reader == null:
 		return {"ok": false, "error": "Could not read " + path + ": " + str(FileAccess.get_open_error())}
+	var previous: String = script.source_code
 	script.source_code = reader.get_as_text()
 	reader.close()
 
+	# A reload that fails is still answered as a call that ran, because the readings are what a
+	# caller needs then: a failure travels back as its message alone, and a project met one and
+	# could not tell whether the copy had been damaged by it or before it. The old text goes back
+	# into the object, so what it holds and the source it says it was built from still agree.
 	var failed: Error = script.reload(true)
 	if failed != OK:
-		return {"ok": false, "error": "Reloading " + path + " answered error " + str(failed)}
-
+		script.source_code = previous
 	return {
 		"ok": true,
 		"script": path,
+		"failed": failed,
+		"failedAs": error_string(failed) if failed != OK else "",
 		"heldBefore": held,
 		"methods": _method_names(script),
 		"heldConstantsBefore": held_constants,
