@@ -190,29 +190,32 @@ export function withAddonClassesCounted(
 /**
  * A member a diagnostic says is missing, and the global class it says is missing it.
  *
- * `method` and `property` are looked for on an instance of the type, `member` on the class itself,
- * as in `Charm.MAX`, and `enum member` in one of its enums, as in `Charm.Kind.ZZ_PROBE`, where
- * `enum` names the enum.
+ * `method` and `property` are looked for on an instance of the type, `member` and `static method`
+ * on the class itself, as in `Charm.MAX` and `Charm.make()`, and `enum member` in one of its enums,
+ * as in `Charm.Kind.ZZ_PROBE`, where `enum` names the enum.
  */
 export interface MissingMember {
   readonly member: string;
   readonly type: string;
-  readonly kind: 'method' | 'property' | 'member' | 'enum member';
+  readonly kind: 'method' | 'property' | 'member' | 'static method' | 'enum member';
   readonly enum?: string;
 }
 
 /**
  * The member and type a diagnostic says is missing, or null for any other diagnostic.
  *
- * Two shapes. "is not present on the inferred type" is about the analysed copy the language server
+ * Three shapes. "is not present on the inferred type" is about the analysed copy the language server
  * is holding rather than the file. "Cannot find member ... in base" is what Godot says of a name
- * looked up on a class, or on an enum of one, measured on 4.7.2 as
- * `Cannot find member "NEVER" in base "Peal.Kind".` and `Cannot find member "NOWHERE" in base
- * "Peal".`. Both can be checked against the file without re-analysing anything, which is what makes
- * them worth reading out of the text.
+ * looked up on a class, or on an enum of one, and "Static function ... not found in base" of a
+ * function called on the class, measured on 4.7.2 as `Cannot find member "NEVER" in base
+ * "Peal.Kind".`, `Cannot find member "NOWHERE" in base "Peal".` and `Static function "nope()" not
+ * found in base "Peal".`. All three can be checked against the file without re-analysing anything,
+ * which is what makes them worth reading out of the text.
  *
  * A base of more than two parts is read as an enum under an inner class, and one that is an inner
- * class rather than an enum finds no enum by that name, so it contradicts nothing.
+ * class rather than an enum finds no enum by that name, so it contradicts nothing. A static function
+ * is read only on a class's own base: the declaration is looked for anywhere in the file, so one
+ * denied on an inner class could be found on the outer one and claimed wrongly.
  */
 export function missingMemberIn(message: string): MissingMember | null {
   const inferred =
@@ -223,6 +226,10 @@ export function missingMemberIn(message: string): MissingMember | null {
       member: inferred[2] ?? '',
       type: inferred[3] ?? '',
     };
+  }
+  const called = /Static function "([A-Za-z_]\w*)\(\)" not found in base "([A-Za-z_]\w*)"/.exec(message);
+  if (called !== null) {
+    return { kind: 'static method', member: called[1] ?? '', type: called[2] ?? '' };
   }
   const inBase = /Cannot find member "([A-Za-z_]\w*)" in base "([A-Za-z_]\w*)((?:\.[A-Za-z_]\w*)*)"/.exec(
     message,
@@ -252,6 +259,9 @@ export function declaresMember(source: string, missing: MissingMember): boolean 
   const name = missing.member.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   if (missing.kind === 'method') {
     return new RegExp(String.raw`^\s*(?:static\s+)?func\s+${name}\s*\(`, 'm').test(source);
+  }
+  if (missing.kind === 'static method') {
+    return new RegExp(String.raw`^\s*static\s+func\s+${name}\s*\(`, 'm').test(source);
   }
   if (missing.kind === 'property') {
     return new RegExp(String.raw`^\s*(?:static\s+)?(?:@export\s+)?(?:var|const)\s+${name}\b`, 'm').test(
@@ -395,6 +405,11 @@ export interface Contradicted extends MissingMember {
  * A type the cache does not list is passed over rather than searched for. The cache is what the
  * editor itself resolved the name against, so a name missing from it is a different fault with its
  * own answer already, and guessing at the file here would put this one on top of it.
+ *
+ * One entry per member however many diagnostics deny it. A static function called on the class is
+ * denied twice where the unsafe method access warning is raised to an error, once as a static
+ * function and once as a method of the inferred type; the static reading is the one kept, because
+ * it says the call was made on the class, which decides the remedy.
  */
 export function contradictedDiagnostics(
   messages: readonly string[],
@@ -402,7 +417,7 @@ export function contradictedDiagnostics(
   sourceOf: (resourcePath: string) => string | null,
 ): Contradicted[] {
   const read = new Map<string, string | null>();
-  const found: Contradicted[] = [];
+  const found = new Map<string, Contradicted>();
   for (const message of messages) {
     const missing = missingMemberIn(message);
     const declaredIn = missing === null ? undefined : classes.get(missing.type);
@@ -413,11 +428,13 @@ export function contradictedDiagnostics(
       read.set(declaredIn, sourceOf(declaredIn));
     }
     const source = read.get(declaredIn) ?? null;
-    if (source !== null && declaresMember(source, missing)) {
-      found.push({ ...missing, declaredIn });
+    const key = [missing.type, missing.enum ?? '', missing.member].join('.');
+    const already = found.get(key);
+    if (source !== null && declaresMember(source, missing) && already?.kind !== 'static method') {
+      found.set(key, { ...missing, declaredIn });
     }
   }
-  return found;
+  return [...found.values()];
 }
 
 /**
@@ -480,7 +497,9 @@ export function staleAnalysisNote(
   // here and one stale type, which is the shape the second project reproduced first.
   const types = new Set(contradicted.map((one) => one.type));
   const onInstances = contradicted.filter((one) => one.kind === 'method' || one.kind === 'property');
-  const onTheClass = contradicted.filter((one) => one.kind === 'member' || one.kind === 'enum member');
+  const onTheClass = contradicted.filter(
+    (one) => one.kind === 'member' || one.kind === 'static method' || one.kind === 'enum member',
+  );
   return [
     `The editor is reporting against an older copy of ${types.size === 1 ? 'a type' : 'some types'} ` +
       'named under contradictedByTheFile. Each member listed is declared in the file the class cache ' +
@@ -504,7 +523,7 @@ function declaringScripts(entries: readonly Contradicted[]): string[] {
 
 /**
  * The remedy for methods and properties the diagnostics deny, which the scan has cleared. Named by
- * member only when enum members or constants are listed beside them, since those are answered the
+ * member only when members of the class itself are listed beside them, since those are answered the
  * other way round.
  */
 function instanceRemedy(
@@ -546,13 +565,14 @@ function instanceRemedy(
 }
 
 /**
- * The remedy for enum members and constants the diagnostics deny, which runs the other way: the
+ * The remedy for what the diagnostics deny on the class itself, enum members, constants and static
+ * functions, which runs the other way: the
  * reload first. The one measurement is ostinato's, of an enum member of a global class, twice on
  * 1.1.14: the one plain rescan tried left the diagnostic standing, and a reload of the declaring
  * script cleared it at once both times. It has not reproduced in this project's editor tier, where a member added
  * to the enum of a type the editor holds resolved with nothing asked, so the reading is attributed
- * rather than claimed. A constant on the class is looked up the same way and has not been measured,
- * and the sentence says which one was.
+ * rather than claimed. A constant or a static function on the class is looked up on the class the
+ * same way and has not been measured, and the sentence says which one was.
  */
 function classRemedy(entries: readonly Contradicted[]): string {
   if (entries.length === 0) {

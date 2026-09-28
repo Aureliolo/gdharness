@@ -9333,6 +9333,87 @@ function testAStaleEnumMemberIsNamed(): void {
 }
 
 /**
+ * A static function the diagnostics deny and the file declares is named once, as called on the
+ * class.
+ *
+ * On the default warnings Godot says only `Static function "nope()" not found in base "Peal"`, which
+ * nothing read; a project met exactly that about `Components.opening()`. Where the unsafe method
+ * access warning is raised to an error, the same call is also denied as a method of the inferred
+ * type, and the two are one member rather than two entries with two remedies. Both wordings are the
+ * engine's, taken from a headless 4.7.2 editor, and both orders are asserted since nothing fixes it.
+ */
+function testAStaleStaticFunctionIsNamed(): void {
+  const staticDenial = 'Static function "opening()" not found in base "Components".';
+  const methodDenial =
+    'The method "opening()" is not present on the inferred type "Components" (but may be present on a subtype). (Warning treated as error.)';
+  assert.deepEqual(missingMemberIn(staticDenial), {
+    kind: 'static method',
+    member: 'opening',
+    type: 'Components',
+  });
+  assert.equal(
+    missingMemberIn('Static function "opening()" not found in base "Components.Inner".'),
+    null,
+    'one on an inner class is not read, since the outer class could declare the same name',
+  );
+
+  const components = [
+    'class_name Components',
+    'extends RefCounted',
+    '',
+    '',
+    'static func opening() -> int:',
+    '\treturn 1',
+    '',
+    '',
+    'func closing() -> int:',
+    '\treturn Components.opening()',
+    '',
+  ].join('\n');
+  const staticMethod = (member: string): MissingMember => ({
+    kind: 'static method',
+    member,
+    type: 'Components',
+  });
+  assert.equal(declaresMember(components, staticMethod('opening')), true, 'a static func is declared');
+  assert.equal(
+    declaresMember(components, staticMethod('closing')),
+    false,
+    'an instance func is not what a call on the class looks for',
+  );
+  assert.equal(declaresMember(components, staticMethod('midgame')), false, 'nor is one never written');
+
+  const classes = new Map([['Components', 'res://components.gd']]);
+  const sourceOf = (path: string): string | null => (path === 'res://components.gd' ? components : null);
+  const expected = [
+    { kind: 'static method', member: 'opening', type: 'Components', declaredIn: 'res://components.gd' },
+  ];
+  assert.deepEqual(
+    contradictedDiagnostics([staticDenial, methodDenial], classes, sourceOf),
+    expected,
+    'the two denials of one call are one entry, read as called on the class',
+  );
+  assert.deepEqual(
+    contradictedDiagnostics([methodDenial, staticDenial], classes, sourceOf),
+    expected,
+    'whichever arrives first',
+  );
+  assert.deepEqual(
+    contradictedDiagnostics([methodDenial], classes, sourceOf),
+    [{ kind: 'method', member: 'opening', type: 'Components', declaredIn: 'res://components.gd' }],
+    'and the method denial alone is still named as it was',
+  );
+
+  const [called] = contradictedDiagnostics([staticDenial], classes, sourceOf);
+  assert.ok(called !== undefined);
+  assert.match(
+    staleAnalysisNote([called], []),
+    /For Components\.opening, run editor_rescan with reloadScript set to res:\/\/components\.gd first\./,
+    'and it is answered with the members of the class, the reload first',
+  );
+}
+
+/**
  * The same, asked of the server: `script_diagnostics` answers a stale enum member with the member
  * under contradictedByTheFile and the reload in staleAnalysis. The stand-in language server
  * publishes the two messages ostinato's reproduction returned, the member and its follow-on, and
@@ -21912,6 +21993,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnAbandonedScratchDirectoryIsSweptAndNothingElse,
   testADiagnosticTheFileContradictsIsNamed,
   testAStaleEnumMemberIsNamed,
+  testAStaleStaticFunctionIsNamed,
   testDiagnosticsNameAStaleEnumMember,
   testAClassTheEditorHasNotLoadedIsToldApartFromOneTheCacheLacks,
   testAClassTheEditorHoldsAfterItsScriptIsGoneIsNamed,
