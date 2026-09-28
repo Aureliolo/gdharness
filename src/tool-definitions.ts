@@ -878,6 +878,12 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         description:
           'start: on Windows, show the window on the desktop in use. By default a windowed run this server starts goes on a desktop of its own, where it renders and runtime_capture works but the window never shows and never takes the keyboard. A game a visible editor plays opens on the desktop in use, and one a hidden editor (editor_launch hidden: true) plays goes on its desktop. Elsewhere than Windows the window shows either way. Default false.',
       },
+      silent: {
+        type: 'boolean',
+        ops: ['start'],
+        description:
+          "start: run the game with no sound out of the machine, by starting the engine with --audio-driver Dummy: every stream still plays and every playback position still advances, so what is playing can still be asked. The editor takes no engine flags for a game it plays, so a silent windowed run is started by this server, and the debug_* tools do not answer for it. A headless run, check's included, is silent already. Default false, or true when GDHARNESS_SILENT is set in the server's environment to anything but 0 or false; silent: false then plays through the editor as before.",
+      },
       savesIn: {
         type: 'string',
         ops: ['start', 'check'],

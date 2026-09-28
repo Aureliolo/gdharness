@@ -163,6 +163,12 @@ autoload rather than an editor plugin, so an export instantiates it. See
 
 `gdharness doctor` exits 1 on any problem and names it.
 
+A windowed game this server starts goes on a desktop of its own on Windows, out of sight, but its
+sound still comes out of the machine. `silent: true` on `editor_run` start runs it with no sound,
+and `GDHARNESS_SILENT=1` in the server's environment makes that the default. The editor takes no
+engine flags for a game it plays, so a silent run is started by the server and the `debug_*` tools
+do not reach it; `silent: false` plays through the editor as before.
+
 ## Updating
 
 The server asks the npm registry every ten minutes, in the background, while it is being used, and
