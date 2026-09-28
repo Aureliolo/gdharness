@@ -779,6 +779,32 @@ func _check_a_click_by_words_ranked(input: InputCommands) -> void:
 	var scrolled: Dictionary = await input.click({"says": "Far"})
 	if _presses(far) != 1 or scrolled.get("scrolled_into_view") != true:
 		_fail("a button scrolled out of view is scrolled back and pressed: %s" % JSON.stringify(scrolled))
+
+	# The same container under a page drawn over all of it: the button in view is covered, and so is
+	# the one below the fold, since wherever the click scrolls it to is under the page too. Judged
+	# where it sat, below the container and so clipped away, it was not covered at all, and the click
+	# scrolled it up under the page and pressed there.
+	var near: Button = _small_button(column, "Far", Vector2.ZERO)
+	column.move_child(near, 0)
+	var over_all: Panel = Panel.new()
+	over_all.size = Vector2(64, 64)
+	root.add_child(over_all)
+	scroll.scroll_vertical = 0
+	await root.get_tree().process_frame
+	var paged: Dictionary = await input.click({"says": "Far"})
+	if (
+		paged.get("type") != "error"
+		or not str(paged.get("message", "")).contains("2 controls say it under what is drawn over them")
+		or _presses(far) != 1
+		or _presses(near) != 0
+	):
+		_fail(
+			(
+				"a button below the fold of a container a page covers is covered, as the one in view is: %s"
+				% JSON.stringify(paged)
+			)
+		)
+	over_all.queue_free()
 	scroll.queue_free()
 	footer.queue_free()
 	await root.get_tree().process_frame

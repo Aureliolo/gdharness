@@ -5,6 +5,7 @@ extends RefCounted
 
 const Paths = preload("runtime_paths.gd")
 const Read = preload("reading.gd")
+const Says = preload("runtime_says.gd")
 const Screen = preload("runtime_screen.gd")
 const Values = preload("runtime_values.gd")
 const Words = preload("runtime_words.gd")
@@ -21,10 +22,6 @@ const FILTERS: PackedStringArray = ["class", "script", "name", "group", "says"]
 ## The most lines one read answers with, unless asked for fewer. A screen is a few dozen; a
 ## thousand is a tree somebody pointed this at by mistake.
 const READ_LIMIT: int = 500
-
-## Stands in for a bar written as `\|` while `says` is split into its alternatives: a character from
-## the private use area, which no game's text uses.
-const ESCAPED_BAR: String = ""
 
 var _host: Node
 var _values: Values
@@ -107,13 +104,13 @@ func find_nodes(params: Dictionary) -> Dictionary:
 	var truncated: bool = false
 	# Counted while the tree is already being walked, for the answer below: how many nodes this
 	# find would have matched if the name had been read the way it was probably meant.
-	var literal: bool = _is_literal(wanted["name"])
+	var literal: bool = Says.is_plain(wanted["name"])
 	var nearly: int = 0
 	# The same for the words: a glob is matched against the whole text, and one written as a prefix
 	# by habit, "Taken together*", missed the label whose sentence those words are in the middle of.
 	# Nothing found then read as the words not being on screen, which is the wrong conclusion when
 	# checking that a change to the text landed.
-	var widened_says: String = _widened(wanted["says"])
+	var widened_says: String = Says.widened(wanted["says"])
 	var widened: Dictionary[String, String] = {}
 	for filter: String in wanted:
 		widened[filter] = widened_says if filter == "says" else wanted[filter]
@@ -245,81 +242,6 @@ static func _named(node: Node, pattern: String) -> bool:
 	return pattern.is_empty() or str(node.name).matchn(pattern)
 
 
-## Whether [param pattern] is a name written as a whole word rather than as a glob, which is how a
-## caller writes one when they mean "contains". [method String.matchn] answers nothing to it, and
-## nothing is also what a name that is simply not there answers.
-static func _is_literal(pattern: String) -> bool:
-	return not pattern.is_empty() and not pattern.contains("*") and not pattern.contains("?")
-
-
-## Whether [param said] is what a find asked for in [param wanted].
-##
-## A plain word is a contains, which is what somebody looking for the row about a person means. A
-## pattern is a glob, because [code]namePattern[/code] beside it is one and nobody writes `*Still*`
-## in one field meaning a glob and in the other meaning those characters. Written as a contains
-## only, a glob matched nothing at all and an empty answer reads as a control that is not on the
-## screen: twice in one session here, over a button that was.
-##
-## Several alternatives separated by `|` match when any one of them does, each by those rules: a
-## wait for the end of a turn is a wait for whichever of "won", "lost" or the next turn's words comes
-## first, and read as one glob with the bars in it, it waited out its whole timeout for words no
-## screen says.
-static func _says(said: String, wanted: String) -> bool:
-	for words: String in alternatives(wanted):
-		if said.containsn(words) if _is_literal(words) else said.matchn(words):
-			return true
-	return false
-
-
-## The alternatives [param wanted] names, each as words on a screen: split at every `|` not written
-## as `\|`, which stays a bar in the words. An empty alternative, a stray bar at either end, is
-## dropped: it names no words, and a find that came back empty widened it to `**` and suggested a
-## pattern that matches every node there is.
-static func alternatives(wanted: String) -> Array[String]:
-	var held: String = as_said(wanted).replace("\\|", ESCAPED_BAR)
-	var found: Array[String] = []
-	for part: String in held.split("|"):
-		var words: String = part.replace(ESCAPED_BAR, "|")
-		if not words.is_empty():
-			found.append(words)
-	return found
-
-
-## Whether [param words], one alternative, is plain words rather than a glob.
-static func is_plain(words: String) -> bool:
-	return _is_literal(words)
-
-
-## Whether [param node]'s own words are what [param wanted] asks for, by the rules a find uses, so a
-## click that names its control by its words finds the one a find would have answered with.
-static func says(node: Node, wanted: String) -> bool:
-	return _says(Words.said_by(node), wanted)
-
-
-## [param wanted], a glob, open at both ends so it matches its words anywhere in a text; "" when
-## it is not a glob, or already open at both ends, and so has nothing to suggest.
-static func _widened(wanted: String) -> String:
-	var widened: Array[String] = []
-	var changed: bool = false
-	for words: String in alternatives(wanted):
-		var open: String = words
-		if not _is_literal(words):
-			open = "*" + words.lstrip("*").rstrip("*") + "*"
-			changed = changed or open != words
-		widened.append(open.replace("|", "\\|"))
-	return "|".join(widened) if changed else ""
-
-
-## [param wanted] as words on a screen: a backslash followed by n is a line break.
-##
-## A button with two lines on it was asked for with the break written as the two characters, the
-## way it is typed into a JSON string one escape short, and was answered as not there: 0 found,
-## which reads as a control that is not on the screen. Nothing on a screen says a backslash and
-## an n, so the two characters mean the break to everybody who writes them.
-static func as_said(wanted: String) -> String:
-	return wanted.replace("\\n", "\n")
-
-
 ## Every filter but the name, so a find that came back empty can say how many nodes the name was
 ## the only thing standing between it and.
 func _matches_apart_from_name(node: Node, wanted: Dictionary[String, String]) -> bool:
@@ -328,7 +250,7 @@ func _matches_apart_from_name(node: Node, wanted: Dictionary[String, String]) ->
 	# What this node says, rather than everything said underneath it. A row is then found by the
 	# label in it, and the path answered is that label's, which is where the words a caller is
 	# looking at actually are: matching every container above it would answer with the screen.
-	if not wanted["says"].is_empty() and not _says(Words.said_by(node), wanted["says"]):
+	if not wanted["says"].is_empty() and not Says.says(node, wanted["says"]):
 		return false
 	var script: Variant = node.get_script()
 	if not wanted["script"].is_empty():
@@ -362,10 +284,6 @@ static func _script_is(attached: Script, wanted: String) -> bool:
 	return false
 
 
-## Where a node is on screen: a Control's rectangle, a Node2D's position, or the place a 3D node
-## is drawn in, in both the canvas coordinates the node reports and the window pixels input
-## arrives in. The two differ whenever the project stretches its viewport, which is what made a
-## rect unusable for a click.
 ## Every line of text under a node, in the order somebody reads the screen.
 ##
 ## The question a caller asks most often, and the one that cost the most to answer: reading a panel
@@ -449,6 +367,10 @@ static func _drawn(node: Node) -> bool:
 	return window == null or window.visible
 
 
+## Where a node is on screen: a Control's rectangle, a Node2D's position, or the place a 3D node
+## is drawn in, in both the canvas coordinates the node reports and the window pixels input
+## arrives in. The two differ whenever the project stretches its viewport, which is what made a
+## rect unusable for a click.
 func get_rect(params: Dictionary) -> Dictionary:
 	var node_path: String = str(params.get("path", ""))
 	if node_path.is_empty():

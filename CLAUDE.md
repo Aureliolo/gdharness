@@ -158,8 +158,8 @@ the build, release and installer scripts. `docs/architecture.md` describes how t
 - Assert a platform-supplied property whose absence would be silent. Start time is read three ways
   on three platforms and every judging case hands it in, so a platform that never produced one would
   have passed everything. One case asks a real process and requires an answer.
-- A best-effort reading that says when it fails is different. Processor time uses a PowerShell call
-  with a two-second budget, which a loaded Windows runner exceeds. Assert that the question went to
+- A best-effort reading that says when it fails is different. Processor time is a PowerShell query
+  with a budget that a loaded Windows runner can exceed. Assert that the question went to
   the right process (the number, or the note that the platform did not answer), and identify the
   process by a field the platform does not supply.
 - A stand-in for a real process has behaviour of its own. Node children on Windows sit in the
