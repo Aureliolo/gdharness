@@ -39,6 +39,11 @@ var _values: Values
 var _pointer: Vector2 = Vector2.ZERO
 var _pointer_placed: bool = false
 
+## When the pointer last arrived, and how long it took over the arrival before that, in seconds: what
+## turns a motion's distance into the speed a real one carries.
+var _pointer_at_usec: int = 0
+var _arrival_seconds: float = 1.0 / 60.0
+
 
 func _init(host: Node, values: Values) -> void:
 	_host = host
@@ -46,9 +51,15 @@ func _init(host: Node, values: Values) -> void:
 
 
 ## The movement a pointer arriving at [param position] carries, which is the distance from where
-## the last injected event put it, and none at all for the first. The arrival is recorded.
+## the last injected event put it, and none at all for the first. The arrival is recorded, with how
+## long it took: at least a frame, since two motions sent in one frame did not cross the screen in
+## no time at all.
 func _arrive(position: Vector2) -> Vector2:
+	var now: int = Time.get_ticks_usec()
 	var relative: Vector2 = position - _pointer if _pointer_placed else Vector2.ZERO
+	var took: float = float(now - _pointer_at_usec) / 1_000_000.0 if _pointer_placed else 0.0
+	_arrival_seconds = maxf(took, 1.0 / 60.0)
+	_pointer_at_usec = now
 	_pointer = position
 	_pointer_placed = true
 	return relative
@@ -839,12 +850,19 @@ func _click_in_the_world(node_path: String, item: Node3D, params: Dictionary) ->
 ## The buttons a real pointer event carries are the ones held as it happens, and Input keeps that
 ## from every button event it is given, injected ones included, so a motion between a held click
 ## and its release is a drag to a control that reads the mask rather than remembering the click.
+##
+## And the speed, the distance over the time the pointer took, which only the platform fills in. A
+## menu ignores a motion with none, so that one opening under a resting pointer lights nothing: a
+## motion over an open drop-down's item answered as injected and the menu highlighted nothing. A
+## motion that goes nowhere still has none, as a resting pointer does.
 func _motion(position: Vector2, relative: Vector2) -> InputEventMouseMotion:
 	var event: InputEventMouseMotion = InputEventMouseMotion.new()
 	event.position = position
 	event.global_position = position
 	event.relative = relative
 	event.screen_relative = relative
+	event.velocity = relative / _arrival_seconds
+	event.screen_velocity = event.velocity
 	event.button_mask = Input.get_mouse_button_mask()
 	return event
 

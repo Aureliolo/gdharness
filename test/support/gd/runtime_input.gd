@@ -591,6 +591,21 @@ func _check_a_click_opening_a_menu_over_itself(input: InputCommands) -> void:
 		)
 	if not menu.visible:
 		_fail("and leaves the menu open, as a player's click does: %s" % JSON.stringify(opened))
+
+	# A motion over the second item, in the lower quarter of a menu of two, is the pointer over it:
+	# the menu is an embedded window, so the root viewport has to hand the motion on, and the item
+	# under it is the one the menu draws hovered and holds as focused.
+	var over_second: Vector2 = Vector2(menu.position) + Vector2(menu.size) * Vector2(0.5, 0.75)
+	var moved: Dictionary = input.inject_mouse_motion({"x": over_second.x, "y": over_second.y})
+	await root.get_tree().process_frame
+	await root.get_tree().process_frame
+	if menu.get_focused_item() != 1:
+		_fail(
+			(
+				"a motion over an open menu's second item is over it, as a real pointer is: focused %d after %s"
+				% [menu.get_focused_item(), JSON.stringify(moved)]
+			)
+		)
 	menu.hide()
 	dropdown.queue_free()
 	await root.get_tree().process_frame
