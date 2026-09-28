@@ -2145,6 +2145,85 @@ async function testAnEnumMemberAddedToAHeldTypeIsPickedUp({ call, project }: Edi
 }
 
 /**
+ * A script whose `.uid` alone changed is read again by the next rescan, so the editor's cache stops
+ * naming the old UID and no engine reading it warns of a duplicate.
+ *
+ * #771: a script began as a copy of another with its `.uid`, and the copy was then given a fresh
+ * one. The editor re-reads a file when the file changes and not when only its `.uid` does, so it
+ * kept the copied UID for both, and every headless engine reading its cache printed "UID duplicate
+ * detected". The same steps here: the editor writes a UID for a new script, the script and its
+ * `.uid` are copied and scanned, and the copy's `.uid` is rewritten. The duplicate warning a
+ * headless engine prints is the effect asserted, beside the files the rescan says it re-read.
+ *
+ * The other half is two files on disk naming one UID, which reading again cannot settle, so it is
+ * named, and the cure it is named with is taken here: the copy's `.uid` deleted and a rescan.
+ */
+async function testAChangedUidIsReadByTheRescan({ call, project }: Editor): Promise<void> {
+  const uidOf = (name: string): string => readFileSync(join(project, `${name}.uid`), 'utf8').trim();
+  const duplicateWarnings = async (): Promise<string[]> =>
+    asArray(
+      get(await call('project_import', { projectPath: project, op: 'refresh_uids' }), 'engine_messages') ??
+        [],
+    )
+      .map((entry) => String(get(entry, 'text')))
+      .filter((line) => line.includes('UID duplicate detected'));
+
+  writeFileSync(join(project, 'twin_a.gd'), 'extends Node\n\n\nfunc twin() -> int:\n\treturn 1\n');
+  await call('editor_rescan', { projectPath: project });
+  assert.match(uidOf('twin_a.gd'), /^uid:\/\/\w+$/, 'the editor writes a UID for a new script');
+  writeFileSync(join(project, 'twin_b.gd'), readFileSync(join(project, 'twin_a.gd'), 'utf8'));
+  writeFileSync(join(project, 'twin_b.gd.uid'), `${uidOf('twin_a.gd')}\n`);
+  const copied = await call('editor_rescan', { projectPath: project });
+  assert.deepEqual(
+    get(copied, 'uidsDuplicatedOnDisk'),
+    [['res://twin_a.gd', 'res://twin_b.gd']],
+    `two files naming one UID on disk are named: ${JSON.stringify(copied)}`,
+  );
+  assert.match(
+    String(get(copied, 'note')),
+    /twin_a\.gd and res:\/\/twin_b\.gd name one UID/,
+    JSON.stringify(copied),
+  );
+
+  // The copy given a fresh UID of its own, which only its `.uid` says.
+  writeFileSync(join(project, 'twin_b.gd.uid'), 'uid://twinuid12345\n');
+  const reread = await call('editor_rescan', { projectPath: project });
+  assert.ok(
+    asArray(get(reread, 'uidsReread')).includes('res://twin_b.gd'),
+    `the rescan reads the copy again: ${JSON.stringify(reread)}`,
+  );
+  assert.deepEqual(
+    await duplicateWarnings(),
+    [],
+    'and an engine reading the editor cache afterwards finds no duplicate',
+  );
+  const settled = await call('editor_rescan', { projectPath: project });
+  assert.equal(
+    get(settled, 'uidsReread'),
+    undefined,
+    `nothing is read again once it agrees: ${JSON.stringify(settled)}`,
+  );
+
+  // A duplicate on disk and its cure: the copy's `.uid` deleted, and the editor writes a fresh one.
+  writeFileSync(join(project, 'twin_b.gd.uid'), `${uidOf('twin_a.gd')}\n`);
+  await call('editor_rescan', { projectPath: project });
+  rmSync(join(project, 'twin_b.gd.uid'));
+  const cured = await call('editor_rescan', { projectPath: project });
+  assert.notEqual(
+    uidOf('twin_b.gd'),
+    uidOf('twin_a.gd'),
+    `the editor wrote the copy a UID of its own: ${JSON.stringify(cured)}`,
+  );
+  assert.equal(get(cured, 'uidsDuplicatedOnDisk'), undefined, JSON.stringify(cured));
+  assert.deepEqual(await duplicateWarnings(), [], 'and the duplicate is gone');
+
+  for (const name of ['twin_a.gd', 'twin_a.gd.uid', 'twin_b.gd', 'twin_b.gd.uid']) {
+    rmSync(join(project, name), { force: true });
+  }
+  await call('editor_rescan', { projectPath: project });
+}
+
+/**
  * A game the editor is playing survives the server being replaced under it.
  *
  * The case that used to stand for this, `testARunOutlivesItsServer` in the regression tier, starts
@@ -3750,6 +3829,7 @@ async function main(): Promise<void> {
     ['testAClassWrittenUnderTheEditorNeedsARescan', testAClassWrittenUnderTheEditorNeedsARescan],
     ['testAMethodAddedToAnAnalysedTypeIsPickedUp', testAMethodAddedToAnAnalysedTypeIsPickedUp],
     ['testAnEnumMemberAddedToAHeldTypeIsPickedUp', testAnEnumMemberAddedToAHeldTypeIsPickedUp],
+    ['testAChangedUidIsReadByTheRescan', testAChangedUidIsReadByTheRescan],
     ['testAPlayedRunsConsoleArrivesOnItsOwn', testAPlayedRunsConsoleArrivesOnItsOwn],
     ['testDebugging', testDebugging],
     ['testRuntime', testRuntime],

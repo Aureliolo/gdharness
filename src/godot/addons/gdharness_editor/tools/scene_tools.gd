@@ -665,7 +665,9 @@ func rescan_filesystem(args: Dictionary) -> Dictionary:
 	var busy: bool = filesystem.is_scanning() or filesystem.is_importing()
 	var started: bool = false
 	var completed_before: int = _scans_completed
+	var uids: Dictionary = {"reread": [], "duplicated": []}
 	if not Read.as_bool(args.get("statusOnly", false)) and not busy:
+		uids = _reread_changed_uids(filesystem)
 		filesystem.scan()
 		# Whether the scan ran, read off the editor rather than assumed. `scan()` returns without
 		# a word while the thread of the scan before is still to be joined, which is a frame or
@@ -687,7 +689,63 @@ func rescan_filesystem(args: Dictionary) -> Dictionary:
 		"importing": filesystem.is_importing(),
 		"scansCompletedBefore": completed_before,
 		"scansCompleted": _scans_completed,
+		"uidsReread": uids["reread"],
+		"uidsDuplicatedOnDisk": uids["duplicated"],
 	}
+
+
+## Has the editor read again every file whose `.uid` names a UID the editor does not hold for it.
+##
+## The scan re-reads a file when the file changes and not when only the `.uid` beside it does, so a
+## script copied with its `.uid` and then given a fresh one keeps the copied UID in the editor, and
+## every headless engine reading the editor's cache warns of a duplicate. Measured on 4.7.2: a scan
+## after the `.uid` was rewritten left both scripts on one UID in the cache. What the editor holds
+## is read off its UID table, which maps each UID to one path, so a `.uid` whose UID is missing from
+## the table or mapped to another file is one the editor has not taken in.
+##
+## Two files on disk naming one UID are left alone and named: reading them again cannot settle
+## which of them owns it, and doing it on every scan would only move the UID between them.
+func _reread_changed_uids(filesystem: EditorFileSystem) -> Dictionary:
+	var sidecars: Array[String] = []
+	_uid_files("res://", sidecars)
+	var claimed: Dictionary = {}
+	for sidecar: String in sidecars:
+		var id: int = ResourceUID.text_to_id(FileAccess.get_file_as_string(sidecar).strip_edges())
+		var path: String = sidecar.trim_suffix(".uid")
+		if id == ResourceUID.INVALID_ID or not FileAccess.file_exists(path):
+			continue
+		var paths: Array = claimed.get_or_add(id, [])
+		paths.append(path)
+	var reread: Array[String] = []
+	var duplicated: Array[Array] = []
+	for id: int in claimed:
+		var paths: Array = claimed[id]
+		if paths.size() > 1:
+			paths.sort()
+			duplicated.append(paths)
+			continue
+		var path: String = str(paths[0])
+		if ResourceUID.has_id(id) and ResourceUID.get_id_path(id) == path:
+			continue
+		filesystem.update_file(path)
+		reread.append(path)
+	reread.sort()
+	duplicated.sort()
+	return {"reread": reread, "duplicated": duplicated}
+
+
+## Every `.uid` under [param directory], skipping what the editor skips: hidden directories and any
+## holding a `.gdignore`.
+func _uid_files(directory: String, found: Array[String]) -> void:
+	var listing: DirAccess = DirAccess.open(directory)
+	if listing == null or FileAccess.file_exists(directory.path_join(".gdignore")):
+		return
+	for child: String in listing.get_directories():
+		if not child.begins_with("."):
+			_uid_files(directory.path_join(child), found)
+	for file: String in listing.get_files():
+		if file.ends_with(".uid"):
+			found.append(directory.path_join(file))
 
 
 ## Whether the editor is scanning, and how long ago its last scan finished, without asking for one.
