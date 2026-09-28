@@ -1,28 +1,18 @@
-import { execFile, execFileSync, spawnSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { basename } from 'node:path';
 import { promisify } from 'node:util';
+import { askWindows, WindowsAskFailure } from './windows-ask.js';
 
 const run = promisify(execFile);
 
 /**
- * What every PowerShell command that prints text begins with. Windows PowerShell writes a pipe
- * in the console's code page, so a command line with a character outside ASCII arrived here, read
- * as UTF-8, with that character replaced: `Müller` read as `M�ller`, and no comparison against
- * the project path or the engine path could match it. Measured on this machine, where a process
- * carries a 0x81 in its command line right now.
- */
-export const POWERSHELL_UTF8 = '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; ';
-
-/**
  * When each of [param pids] started, as milliseconds, for the ones the platform will say.
  *
- * One question for all of them, because the Windows answer is an interpreter start of half a
- * second and a bench that fans out announces a game per worker: asked one at a time, a sweep of
- * thirty announcements would sit for fifteen seconds before answering about any of them. A pid
- * left out of the answer is one the platform would not say about, which is not the same as one
- * that has gone and is never read as it. Synchronous, because the sweep that asks is.
+ * One question for all of them, because a bench that fans out announces a game per worker, and on
+ * Windows each question is a query of its own. A pid left out of the answer is one the platform
+ * would not say about, which is not the same as one that has gone and is never read as it.
  */
-export function startTimesOf(pids: readonly number[]): Map<number, number> {
+export async function startTimesOf(pids: readonly number[]): Promise<Map<number, number>> {
   const began = new Map<number, number>();
   if (pids.length === 0) {
     return began;
@@ -30,15 +20,9 @@ export function startTimesOf(pids: readonly number[]): Map<number, number> {
   try {
     if (process.platform === 'win32') {
       const filter = pids.map((pid) => `ProcessId=${pid}`).join(' OR ');
-      const said = execFileSync(
-        'powershell',
-        [
-          '-NoProfile',
-          '-NonInteractive',
-          '-Command',
-          `Get-CimInstance Win32_Process -Filter "${filter}" | ForEach-Object { "$($_.ProcessId) $(([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds())" }`,
-        ],
-        { encoding: 'utf8', timeout: ASK_TIMEOUT_MS, windowsHide: true },
+      const said = await askWindows(
+        `Get-CimInstance Win32_Process -Filter "${filter}" | ForEach-Object { "$($_.ProcessId) $(([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds())" }`,
+        ASK_TIMEOUT_MS,
       );
       for (const line of said.split('\n')) {
         const found = /^\s*(\d+)\s+(\d+)\s*$/.exec(line);
@@ -51,11 +35,10 @@ export function startTimesOf(pids: readonly number[]): Map<number, number> {
     // Read whatever ps printed rather than its exit status: a pid among these that has gone makes
     // ps exit non-zero after printing the rest, and the rest is the answer. In the C locale, since
     // lstart is a date in words and the words are the ones Date.parse reads.
-    const said = spawnSync('ps', ['-p', pids.join(','), '-o', 'pid=,lstart='], {
-      encoding: 'utf8',
-      timeout: ASK_TIMEOUT_MS,
-      env: { ...process.env, LC_ALL: 'C' },
-    }).stdout;
+    const said = await printedBy('ps', ['-p', pids.join(','), '-o', 'pid=,lstart='], {
+      ...process.env,
+      LC_ALL: 'C',
+    });
     for (const line of said.split('\n')) {
       const found = /^\s*(\d+)\s+(.+)$/.exec(line);
       const at = Date.parse(found?.[2]?.trim() ?? '');
@@ -67,6 +50,15 @@ export function startTimesOf(pids: readonly number[]): Map<number, number> {
     // The platform would not say, which the empty map is.
   }
   return began;
+}
+
+/** What [param command] printed to stdout, whatever it exited with. */
+function printedBy(command: string, args: readonly string[], env: NodeJS.ProcessEnv): Promise<string> {
+  return new Promise((resolve) => {
+    execFile(command, [...args], { encoding: 'utf8', timeout: ASK_TIMEOUT_MS, env }, (_error, stdout) => {
+      resolve(stdout);
+    });
+  });
 }
 
 /**
@@ -93,24 +85,58 @@ export type ProcessTree = ReadonlyMap<number, ListedProcess>;
  * Asked of the operating system rather than of the announcements, because being a game of the
  * project is what a stranger's bench also is, and being under this run's process is the property a
  * stranger's bench cannot have. One ask rather than one per process, because a bench with thirty
- * workers is thirty children and on Windows every ask is a PowerShell start. Undefined when the
+ * workers is thirty children and on Windows every ask is a query of its own. Undefined when the
  * platform will not say, which the caller reports rather than reads as an empty machine.
  */
 export async function processTree(): Promise<ProcessTree | undefined> {
   try {
     const tree =
       process.platform === 'win32'
-        ? parseProcessTable(await askWindows(), true)
+        ? parseProcessTable(await listWindows(), true)
         : parseProcessTable(await askPosix());
     lastListingFailure = undefined;
     return tree;
   } catch (error) {
-    lastListingFailure = error instanceof Error ? error.message : String(error);
+    lastListingFailure = listingFailure(error);
     return undefined;
   }
 }
 
 let lastListingFailure: string | undefined;
+
+/**
+ * What stopped a listing, as one clause naming what was asked and how it failed: not answered in
+ * time, the helper gone, refused, killed at the budget, ended by a signal, or exited with a code and
+ * a line on stderr. The error's own message was "Command failed:" and the command, which a timeout
+ * and a query the system refused both produce, so a failure on a busy machine could not be put down
+ * to either.
+ */
+export function listingFailure(error: unknown): string {
+  if (error instanceof WindowsAskFailure) {
+    return error.message;
+  }
+  if (!(error instanceof Error)) {
+    return String(error);
+  }
+  const failed = error as Error & {
+    cmd?: string;
+    killed?: boolean;
+    signal?: string | null;
+    code?: string | number | null;
+    stderr?: unknown;
+  };
+  const how =
+    failed.killed === true
+      ? `was killed after the ${ASK_TIMEOUT_MS}ms budget${failed.signal ? ` (${failed.signal})` : ''}`
+      : failed.signal
+        ? `was ended by ${failed.signal}`
+        : failed.code !== undefined && failed.code !== null
+          ? `exited with ${failed.code}`
+          : 'failed';
+  const said = typeof failed.stderr === 'string' ? failed.stderr.trim() : '';
+  const asked = basename((failed.cmd ?? '').split(' ')[0] ?? '') || 'the listing';
+  return `${asked} ${how}${said === '' ? ', with nothing on stderr' : `; stderr: ${said.slice(0, 400)}`}`;
+}
 
 /**
  * Why the last [method processTree] came back empty, or undefined when it did not. Kept because an
@@ -318,22 +344,14 @@ function commandWords(command: string): string[] {
   return words;
 }
 
-async function askWindows(): Promise<string> {
-  const { stdout } = await run(
-    'powershell.exe',
-    [
-      '-NoProfile',
-      '-NonInteractive',
-      '-Command',
-      // The start beside the parent link, because the link alone is not to be believed on
-      // Windows: see `linked`. Zero for the few processes the system will not date.
-      // Only the four properties read below: the whole object takes the query about twice as long,
-      // and on a loaded runner the listing ran past its budget and the tree was not read at all.
-      `${POWERSHELL_UTF8}Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,CreationDate,CommandLine | ForEach-Object { $began = 0; if ($_.CreationDate) { $began = ([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds() }; "$($_.ProcessId) $($_.ParentProcessId) $began $($_.CommandLine)" }`,
-    ],
-    { timeout: ASK_TIMEOUT_MS, windowsHide: true, maxBuffer: 16 * 1024 * 1024 },
+function listWindows(): Promise<string> {
+  return askWindows(
+    // The start beside the parent link, because the link alone is not to be believed on Windows:
+    // see `linked`. Zero for the few processes the system will not date. Only the four properties
+    // read below: the whole object takes the query about twice as long.
+    'Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,CreationDate,CommandLine | ForEach-Object { $began = 0; if ($_.CreationDate) { $began = ([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds() }; "$($_.ProcessId) $($_.ParentProcessId) $began $($_.CommandLine)" }',
+    ASK_TIMEOUT_MS,
   );
-  return stdout;
 }
 
 async function askPosix(): Promise<string> {

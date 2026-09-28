@@ -6,6 +6,7 @@ extends RefCounted
 const Paths = preload("runtime_paths.gd")
 const Queries = preload("runtime_queries.gd")
 const Read = preload("reading.gd")
+const Says = preload("runtime_says.gd")
 const Values = preload("runtime_values.gd")
 
 ## The longest one wait may last, whatever the request says: past this the server has long
@@ -249,7 +250,6 @@ static func _watched(node: Node, node_path: String, property: String) -> Diction
 ## caller sees what it cost.
 func _wait_until_said(node_path: String, said: String, timeout_ms: int, include_hidden: bool) -> Dictionary:
 	var started: int = Time.get_ticks_msec()
-	var words: String = Queries.as_said(said)
 	var frames: int = 0
 	var looks: int = 0
 	var next_look: int = 0
@@ -257,7 +257,7 @@ func _wait_until_said(node_path: String, said: String, timeout_ms: int, include_
 	while true:
 		if Time.get_ticks_usec() >= next_look:
 			var looking: int = Time.get_ticks_usec()
-			found = _anything_says(node_path, words, include_hidden)
+			found = _anything_says(node_path, said, include_hidden)
 			looks += 1
 			next_look = Time.get_ticks_usec() + (Time.get_ticks_usec() - looking) * LOOKS_APART
 		if found or Time.get_ticks_msec() - started >= timeout_ms:
@@ -267,7 +267,7 @@ func _wait_until_said(node_path: String, said: String, timeout_ms: int, include_
 	# One more look at the end, so words that arrived between two paced looks are not answered as
 	# never having come.
 	if not found:
-		found = _anything_says(node_path, words, include_hidden)
+		found = _anything_says(node_path, said, include_hidden)
 		looks += 1
 
 	return {
@@ -293,7 +293,7 @@ func _anything_says(node_path: String, said: String, include_hidden: bool) -> bo
 	var pending: Array[Node] = [root]
 	while not pending.is_empty():
 		var node: Node = pending.pop_back()
-		if Queries.says(node, said) and (include_hidden or Queries.shown(node)):
+		if Says.says(node, said) and (include_hidden or Queries.shown(node)):
 			return true
 		pending.append_array(node.get_children(true))
 	return false

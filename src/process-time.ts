@@ -1,14 +1,15 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { askWindows } from './windows-ask.js';
 
 const run = promisify(execFile);
 
 /**
  * Long enough for the operating system to answer about one process on a machine that is busy,
- * short enough not to hold a call that asked for the reading on purpose. On Windows the answer
- * is a PowerShell start, which a loaded machine, a bench with thirty workers grinding or a
- * shared runner, holds past two seconds: the reading was being given up on exactly when it was
- * wanted, since a machine under load is the one whose run somebody is watching for a stall.
+ * short enough not to hold a call that asked for the reading on purpose. A loaded machine, a bench
+ * with thirty workers grinding or a shared runner, held a PowerShell start past two seconds: the
+ * reading was being given up on exactly when it was wanted, since a machine under load is the one
+ * whose run somebody is watching for a stall.
  */
 const ASK_TIMEOUT_MS = 6_000;
 
@@ -25,19 +26,15 @@ const ASK_TIMEOUT_MS = 6_000;
  */
 export async function cpuSecondsOf(pid: number): Promise<number | undefined> {
   try {
-    return process.platform === 'win32' ? await askWindows(pid) : await askPosix(pid);
+    return process.platform === 'win32' ? await secondsOnWindows(pid) : await askPosix(pid);
   } catch {
     return undefined;
   }
 }
 
-async function askWindows(pid: number): Promise<number | undefined> {
-  const { stdout } = await run(
-    'powershell.exe',
-    ['-NoProfile', '-NonInteractive', '-Command', `(Get-Process -Id ${pid}).CPU`],
-    { timeout: ASK_TIMEOUT_MS, windowsHide: true },
-  );
-  const seconds = Number(stdout.trim().replace(',', '.'));
+async function secondsOnWindows(pid: number): Promise<number | undefined> {
+  const said = await askWindows(`(Get-Process -Id ${pid}).CPU`, ASK_TIMEOUT_MS);
+  const seconds = Number(said.trim().replace(',', '.'));
   return Number.isFinite(seconds) ? seconds : undefined;
 }
 

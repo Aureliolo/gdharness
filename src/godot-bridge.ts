@@ -223,6 +223,16 @@ export function theEditorHasComeBack(
   );
 }
 
+/**
+ * Whether an editor could still reach this bridge, counting one the server started itself.
+ *
+ * Two reasons and either is enough. The bridge may be young, which covers an editor that was
+ * already running and has to notice the port. Or the server launched one and that process is still
+ * alive without having dialled in, which covers the import: an editor loads no plugin until the
+ * project is imported, and on a large project that is minutes rather than the half-minute the window
+ * allows. Measured downstream at nine minutes, over which the answer read "an editor that is not
+ * there" about an editor the same server had just started.
+ */
 export function anEditorIsStillComing(
   listeningSince: Date | undefined,
   launchedEditorIsAlive: boolean,

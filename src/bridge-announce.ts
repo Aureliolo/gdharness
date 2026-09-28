@@ -89,12 +89,12 @@ export function serverBehind(
  * rather than the version its config held before, which is only the running one if a reconnect
  * happened in between.
  */
-export function serverServing(projectPath: string): AnnouncedServer | null {
+export async function serverServing(projectPath: string): Promise<AnnouncedServer | null> {
   const announcement = readAnnouncement(announcementPath(projectPath));
   if (announcement === null) {
     return null;
   }
-  return serverBehind(announcement, startTimesOf([announcement.pid]).get(announcement.pid));
+  return serverBehind(announcement, (await startTimesOf([announcement.pid])).get(announcement.pid));
 }
 
 /** Whether the announcement at [param path] is the one this process wrote. */

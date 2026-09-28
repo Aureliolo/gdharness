@@ -829,6 +829,15 @@ export class GodotDAPClient {
     return this.connected;
   }
 
+  /**
+   * The connection held now, as something only it is equal to, or null with none. A connection is to
+   * the process that accepted it for as long as it lasts, so what was learned about the far end of
+   * one holds until this changes.
+   */
+  connection(): object | null {
+    return this.connected ? this.socket : null;
+  }
+
   /** Whether a game is sitting still, which is the only state the stack is real in. */
   isStopped(): boolean {
     return this.halt !== null;
