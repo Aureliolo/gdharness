@@ -11,11 +11,13 @@ on:
 permissions:
   contents: read
 
-# One deployment at a time, and never a cancelled one: a half-published site is worse than an
-# old one, so a superseded run waits rather than being killed.
+# One group per branch, so a pull request's required `site` check is only ever superseded by that
+# pull request's next push. A group shared by every branch keeps one run waiting, and a third run
+# arriving cancels the one waiting: a merge to main and two pull requests brought up to date at once
+# cancelled one pull request's check and blocked its merge.
 concurrency:
-  group: pages
-  cancel-in-progress: false
+  group: docs-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # On a pull request this is the whole job: the site has to build, and the build refuses a page
@@ -52,6 +54,12 @@ jobs:
     needs: site
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+
+    # One deployment at a time, and never a cancelled one: a half-published site is worse than an
+    # old one, so a deployment in progress is never killed and a newer one waits its turn.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
 
     # Only this job can publish, and only through the OIDC token Pages mints for it: nothing
     # here holds a credential that outlives the run.
