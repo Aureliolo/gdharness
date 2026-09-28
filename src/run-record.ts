@@ -23,7 +23,7 @@
  * first had already printed stop being anywhere.
  */
 
-import { execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   mkdirSync,
@@ -36,9 +36,13 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
+import { promisify } from 'node:util';
 import { isSameDirectory } from './paths.js';
-import { type CommandLineRead, POWERSHELL_UTF8, readCommandLine } from './process-children.js';
+import { type CommandLineRead, readCommandLine } from './process-children.js';
 import { runtimeDirectories, runtimeDirectory, STARTED_AFTER_ANNOUNCING_MS } from './runtime-client.js';
+import { askWindows } from './windows-ask.js';
+
+const execFileAsync = promisify(execFile);
 
 /** What a run leaves behind so another server can find it. */
 export interface RunRecord {
@@ -315,15 +319,15 @@ function recordAt(path: string): RunRecord | null {
  * Null is the operating system declining to answer, which is not the same as nothing running
  * there and must never be read as one.
  */
-export function runningAs(pid: number): RunningAs | null {
+export async function runningAs(pid: number): Promise<RunningAs | null> {
   if (process.platform === 'win32') {
-    const answer = windowsCommandLine(pid);
+    const answer = await windowsCommandLine(pid);
     if (answer !== null) {
       // The creation time is the first line and the command line is the rest, because the query
       // that reads one reads the other for free and this runs before every signal.
       const [, ...rest] = answer.split('\n');
       const line = rest.join('\n').trim();
-      const began = startedAt(pid, answer);
+      const began = await startedAt(pid, answer);
       if (line !== '') {
         return { kind: 'commandLine', text: line, ...(began === null ? {} : { startedAt: began }) };
       }
@@ -332,20 +336,19 @@ export function runningAs(pid: number): RunningAs | null {
     // user, or one this server cannot open, keeps its command line and hands back nothing at all.
     // tasklist still names the executable, and that is the difference between a weaker check and
     // no check, so it is asked before this gives up.
-    const image = windowsImage(pid);
+    const image = await windowsImage(pid);
     return image === null ? null : { kind: 'image', text: image };
   }
   try {
-    const began = startedAt(pid, null);
+    const began = await startedAt(pid, null);
     const when = began === null ? {} : { startedAt: began };
     if (process.platform === 'linux') {
       const raw = readFileSync(`/proc/${pid}/cmdline`, 'utf8').replaceAll('\0', ' ').trim();
       return raw === '' ? null : { kind: 'commandLine', text: raw, ...when };
     }
-    const args = execFileSync('ps', ['-p', String(pid), '-o', 'args='], {
-      encoding: 'utf8',
-      timeout: 15_000,
-    }).trim();
+    const args = (
+      await execFileAsync('ps', ['-p', String(pid), '-o', 'args='], { encoding: 'utf8', timeout: 15_000 })
+    ).stdout.trim();
     return args === '' ? null : { kind: 'commandLine', text: args, ...when };
   } catch {
     return null;
@@ -369,18 +372,16 @@ export function runningAs(pid: number): RunningAs | null {
  * never grounds to refuse.
  *
  * Asked of `netstat` on Windows rather than of PowerShell's Get-NetTCPConnection, which loads a
- * module before it answers: a second on this machine and nine on a loaded runner, all of it
- * spent inside a synchronous call that holds every other request while it runs. A start through
- * the editor asks this once, before the play, and a fixture read that second as the announce wait
- * sitting out its budget. netstat answers in tens of milliseconds and is on every Windows.
+ * module before it answers: a second on this machine and nine on a loaded runner. netstat answers
+ * in tens of milliseconds and is on every Windows. Asked without holding the server all the same,
+ * since starting a process is what a loaded machine is slowest at: run synchronously, it held every
+ * other request for as long as it took.
  */
-export function listeningPid(port: number): number | null {
+export async function listeningPid(port: number): Promise<number | null> {
   try {
     if (process.platform === 'win32') {
-      return listeningPidInNetstat(
-        execFileSync('netstat', ['-ano'], { encoding: 'utf8', timeout: 15_000 }),
-        port,
-      );
+      const { stdout } = await execFileAsync('netstat', ['-ano'], { encoding: 'utf8', timeout: 15_000 });
+      return listeningPidInNetstat(stdout, port);
     }
     // `lsof` is on macOS by default and usual on Linux; `ss` is the modern Linux answer and is not
     // on macOS. Both are asked rather than one picked by platform, because what decides is which is
@@ -390,7 +391,9 @@ export function listeningPid(port: number): number | null {
       ['ss', ['-ltnpH', `sport = :${port}`], /pid=(\d+)/],
     ] as const) {
       try {
-        const said = execFileSync(command, [...args], { encoding: 'utf8', timeout: 15_000 }).trim();
+        const said = (
+          await execFileAsync(command, [...args], { encoding: 'utf8', timeout: 15_000 })
+        ).stdout.trim();
         const found = pattern.exec(said);
         if (found?.[1] !== undefined) {
           return Number(found[1]);
@@ -427,21 +430,16 @@ export function listeningPidInNetstat(printed: string, port: number): number | n
 /**
  * The whole command line of a Windows process, or null when Windows will not give it.
  *
- * Windows keeps a command line out of reach of anything but a query, so this is the one platform
- * that starts an interpreter to answer. Half a second, on a path that runs once when a run is
- * picked up and once before one is ended.
+ * Windows keeps a command line out of reach of anything but a query, on a path that runs once when
+ * a run is picked up and once before one is ended.
  */
-function windowsCommandLine(pid: number): string | null {
+async function windowsCommandLine(pid: number): Promise<string | null> {
   try {
-    const answer = execFileSync(
-      'powershell',
-      [
-        '-NoProfile',
-        '-NonInteractive',
-        '-Command',
-        `${POWERSHELL_UTF8}$p = Get-CimInstance Win32_Process -Filter "ProcessId=${pid}"; if ($p) { $p.CreationDate.ToUniversalTime().ToString("o"); $p.CommandLine }`,
-      ],
-      { encoding: 'utf8', timeout: 15_000, windowsHide: true },
+    const answer = (
+      await askWindows(
+        `$p = Get-CimInstance Win32_Process -Filter "ProcessId=${pid}"; if ($p) { $p.CreationDate.ToUniversalTime().ToString("o"); $p.CommandLine }`,
+        15_000,
+      )
     ).trim();
     return answer === '' ? null : answer;
   } catch {
@@ -458,18 +456,17 @@ function windowsCommandLine(pid: number): string | null {
  * dozens of processes sharing all of them; what it does not have is a second process that started
  * when this run did.
  */
-function startedAt(pid: number, windowsAnswer: string | null): number | null {
+async function startedAt(pid: number, windowsAnswer: string | null): Promise<number | null> {
   if (process.platform === 'win32') {
-    // The first line of the answer above, asked in the same call: a second interpreter launch costs
-    // half a second on a path that runs before every signal.
+    // The first line of the answer above, asked in the same question, on a path that runs before
+    // every signal.
     const when = Date.parse(windowsAnswer?.split('\n')[0]?.trim() ?? '');
     return Number.isNaN(when) ? null : when;
   }
   try {
-    const said = execFileSync('ps', ['-p', String(pid), '-o', 'lstart='], {
-      encoding: 'utf8',
-      timeout: 15_000,
-    }).trim();
+    const said = (
+      await execFileAsync('ps', ['-p', String(pid), '-o', 'lstart='], { encoding: 'utf8', timeout: 15_000 })
+    ).stdout.trim();
     const when = Date.parse(said);
     return said === '' || Number.isNaN(when) ? null : when;
   } catch {
@@ -478,9 +475,9 @@ function startedAt(pid: number, windowsAnswer: string | null): number | null {
 }
 
 /** The executable's name alone, from the one tool every Windows has. */
-function windowsImage(pid: number): string | null {
+async function windowsImage(pid: number): Promise<string | null> {
   try {
-    const csv = execFileSync('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'], {
+    const { stdout: csv } = await execFileAsync('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'], {
       encoding: 'utf8',
       timeout: 15_000,
       windowsHide: true,
@@ -507,8 +504,8 @@ function windowsImage(pid: number): string | null {
  * False when the operating system will not say. Not knowing is not the same as knowing it is
  * ours, and the caller that acts on this is the one that kills.
  */
-export function stillTheRecordedRun(record: RunRecord): boolean {
-  return judgeRun(record, runningAs(record.pid), 'confirmed');
+export async function stillTheRecordedRun(record: RunRecord): Promise<boolean> {
+  return judgeRun(record, await runningAs(record.pid), 'confirmed');
 }
 
 /**
@@ -520,8 +517,8 @@ export function stillTheRecordedRun(record: RunRecord): boolean {
  * running; it is not enough to signal one, and reporting a live bench as finished because an
  * interpreter would not answer is its own wrong answer.
  */
-export function couldStillBeTheRecordedRun(record: RunRecord): boolean {
-  return judgeRun(record, runningAs(record.pid), 'possible');
+export async function couldStillBeTheRecordedRun(record: RunRecord): Promise<boolean> {
+  return judgeRun(record, await runningAs(record.pid), 'possible');
 }
 
 /** What the operating system will say about a process, and how much of it. */
@@ -616,12 +613,12 @@ export function judgeRun(
 }
 
 /** Whether [param pid] is still the game that announced itself for [param projectPath]: see `judgeAnnouncedGame`. */
-export function stillTheAnnouncedGame(
+export async function stillTheAnnouncedGame(
   pid: number,
   projectPath: string,
   announcedAt: number,
-): CommandLineRead | null {
-  return judgeAnnouncedGame(runningAs(pid), projectPath, announcedAt);
+): Promise<CommandLineRead | null> {
+  return judgeAnnouncedGame(await runningAs(pid), projectPath, announcedAt);
 }
 
 /**

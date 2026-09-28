@@ -17,6 +17,7 @@ import { createConnection } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { alive } from './alive.js';
 import { envValue } from './launch.js';
 import { isSameDirectory, realPathOr } from './paths.js';
 import { startTimesOf } from './process-children.js';
@@ -162,17 +163,6 @@ export function reportAlreadyInTranscript(transcript: Buffer, report: Buffer): n
  * errors matter most, and short enough that a machine playing games all day does not keep them.
  */
 const ERROR_REPORT_KEEP_MS = 60 * 60 * 1000;
-
-/** Whether a process with this id exists. Signal 0 delivers nothing and only checks. */
-function processAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    // Alive but owned by another user, which is still alive.
-    return (error as NodeJS.ErrnoException).code === 'EPERM';
-  }
-}
 
 /**
  * What one announcement turned out to be: a game to talk to, a game speaking a protocol this
@@ -367,17 +357,15 @@ export const STARTED_AFTER_ANNOUNCING_MS = 2_000;
  * Confirmed once, the number is the game's until the game goes, and the sweep takes the file the
  * moment the number answers to nobody. A game that goes and has its number taken between two
  * sweeps is the gap this bounds: a stale yes lasts at most this long, and asking the operating
- * system costs an interpreter start on Windows, so it is not asked on every look.
+ * system is a query on Windows, so it is not asked on every look.
  */
 export const CONFIRMED_FOR_MS = 60_000;
 
 /**
  * How old an announcement has to be before the process behind it is asked about at all.
  *
- * The question costs an interpreter start on Windows, and the sweep that asks it is the one the
- * start's wait runs every fifty milliseconds while a game boots: asked of a fresh announcement it
- * held that wait for half a second at the moment the game announced, and a fixture that needs the
- * announcement found inside seven hundred milliseconds read the delay as the fault it guards. A
+ * The question is a query on Windows, and the sweep that asks it is the one the start's wait runs
+ * every fifty milliseconds while a game boots, so a game that has just announced is not worth it. A
  * number taken over inside a minute of the game announcing needs the game to have died and the
  * number to have come round again within that minute, and the sweep after the minute asks anyway,
  * so what this costs is a stale yes of at most a minute on a run that short.
@@ -393,6 +381,14 @@ interface Verdict {
 
 const verdicts = new Map<string, Verdict>();
 
+/** The judgement being made now, if one is; see [method strangersAmong]. */
+let judging: Promise<void> | null = null;
+
+/** Resolves once the judgement being made, if any, has landed. */
+export async function untilJudged(): Promise<void> {
+  await judging;
+}
+
 /**
  * Whether each announced process is the game that wrote its announcement, from when it started.
  *
@@ -400,11 +396,16 @@ const verdicts = new Map<string, Verdict>();
  * question for all of them. A platform that will not say leaves the announcement believed, which
  * is what it was before anything asked. [param startTimes] is the operating system's answer, an
  * argument so a case can supply the disagreement rather than wait to meet one.
+ *
+ * Answered from what has been decided so far, with the question asked in the background: on Windows
+ * it is a query, and every discovery of the running games waited on it, the start between ending
+ * one game and playing the next among them. An announcement not yet judged is believed until the
+ * answer lands, as a fresh one already is; [method untilJudged] waits for it.
  */
 export function strangersAmong(
   candidates: readonly { file: string; pid: number; writtenAt: number }[],
   now: number,
-  startTimes: (pids: readonly number[]) => Map<number, number> = startTimesOf,
+  startTimes: (pids: readonly number[]) => Promise<Map<number, number>> = startTimesOf,
 ): Set<string> {
   const toJudge = candidates.filter((one) => {
     if (now - one.writtenAt < JUDGED_AFTER_MS) {
@@ -417,16 +418,32 @@ export function strangersAmong(
       (!known.stranger && now - known.judgedAt > CONFIRMED_FOR_MS)
     );
   });
-  if (toJudge.length > 0) {
-    const began = startTimes(toJudge.map((one) => one.pid));
-    for (const one of toJudge) {
-      const at = began.get(one.pid);
-      const stranger = at !== undefined && at - one.writtenAt > STARTED_AFTER_ANNOUNCING_MS;
-      verdicts.set(one.file, { writtenAt: one.writtenAt, judgedAt: now, stranger });
-    }
+  if (toJudge.length > 0 && judging === null) {
+    judging = startTimes(toJudge.map((one) => one.pid))
+      .then((began) => {
+        for (const one of toJudge) {
+          const at = began.get(one.pid);
+          const stranger = at !== undefined && at - one.writtenAt > STARTED_AFTER_ANNOUNCING_MS;
+          verdicts.set(one.file, { writtenAt: one.writtenAt, judgedAt: now, stranger });
+        }
+      })
+      .catch(() => {
+        // The platform would not say, which leaves each announcement believed and asked about again.
+      })
+      .finally(() => {
+        judging = null;
+      });
   }
+  // A verdict counts for the file as it was when judged. A file written again is a new announcement,
+  // and the old one's verdict on it, until the new one lands, would sweep a game that took its number
+  // back: the sweep deletes a stranger's announcement, and the game does not write it again.
   return new Set(
-    candidates.filter((one) => verdicts.get(one.file)?.stranger === true).map((one) => one.file),
+    candidates
+      .filter((one) => {
+        const known = verdicts.get(one.file);
+        return known?.stranger === true && known.writtenAt === one.writtenAt;
+      })
+      .map((one) => one.file),
   );
 }
 
@@ -436,7 +453,7 @@ function announcedIn(directory: string): Announced[] {
   }
   const found: Announced[] = [];
   const candidates: { file: string; pid: number; writtenAt: number }[] = [];
-  const entries: { file: string; pid: number; alive: boolean }[] = [];
+  const entries: { file: string; pid: number; running: boolean }[] = [];
   for (const entry of readdirSync(directory)) {
     const report = ERROR_REPORT_PATTERN.exec(entry);
     if (report) {
@@ -449,9 +466,9 @@ function announcedIn(directory: string): Announced[] {
     }
     const file = join(directory, entry);
     const pid = Number.parseInt(match[1] ?? '', 10);
-    const alive = processAlive(pid);
-    entries.push({ file, pid, alive });
-    if (alive) {
+    const running = alive(pid);
+    entries.push({ file, pid, running });
+    if (running) {
       try {
         candidates.push({ file, pid, writtenAt: statSync(file).mtimeMs });
       } catch {
@@ -460,10 +477,10 @@ function announcedIn(directory: string): Announced[] {
     }
   }
   const strangers = strangersAmong(candidates, Date.now());
-  for (const { file, pid, alive } of entries) {
+  for (const { file, pid, running } of entries) {
     // A number answering to a signal is not the game unless the process behind it is the one that
     // wrote the file; one that is not is swept as a game that has gone, which is what it is.
-    const gone = !alive || strangers.has(file);
+    const gone = !running || strangers.has(file);
     const announced: Announced = gone ? { kind: 'rubbish' } : parseAnnouncement(file, pid);
     if (announced.kind === 'rubbish') {
       // A file that will not parse under a live number is one being written: the game opens it
@@ -535,7 +552,7 @@ export async function announcementEnded(
     return;
   }
   const until = Date.now() + ENDED_WITHIN_MS;
-  while (processAlive(pid)) {
+  while (alive(pid)) {
     const left = until - Date.now();
     if (left <= 0) {
       return;
@@ -561,7 +578,7 @@ export async function announcementEnded(
  * read from, and the server reading the run may not look until after the game has gone.
  */
 function sweepErrorReport(path: string, pid: number, now = Date.now()): void {
-  if (processAlive(pid)) {
+  if (alive(pid)) {
     return;
   }
   try {

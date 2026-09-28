@@ -69,28 +69,70 @@ function eachScript(projectPath: string, each: (script: string, source: string) 
   visit(projectPath, '');
 }
 
+/** A script naming a class, and whether it is a `@tool` script, which runs inside the editor. */
+export interface NamingScript {
+  readonly script: string;
+  readonly tool: boolean;
+}
+
 /**
- * The project's scripts that name any of [param classes], other than the ones declaring them, as
- * `res://` paths in order.
+ * The project's scripts whose code names any of [param classes], other than the ones declaring
+ * them, in order of path.
  *
  * What an editor compiled from one of these while it could not resolve the class stays compiled
  * that way after a scan brings the class in: the scan updates what the editor knows about files,
  * not what it has already built from them. A script extending a new base class went on reporting
  * "Could not find base class" after a rescan had picked the class up, until it was reloaded.
+ *
+ * Code only, with comments and strings taken out, because what is found here gets reloaded: a
+ * comment in the editor addon's tool executor that began with the word "Settings" had that script
+ * reloaded while it was running the call, and the editor died of it on Linux.
  */
-export function scriptsNaming(projectPath: string, classes: readonly string[]): string[] {
+export function scriptsNaming(projectPath: string, classes: readonly string[]): NamingScript[] {
   const named = new Map(classes.map((name) => [name, '']));
-  const naming: string[] = [];
+  const naming: NamingScript[] = [];
   eachScript(projectPath, (script, source) => {
     const declares = DECLARATION.exec(source)?.[1];
     if (declares !== undefined && named.has(declares)) {
       return;
     }
-    if (classesNamedIn(source, named).length > 0) {
-      naming.push(script);
+    const code = codeOf(source);
+    if (classesNamedIn(code, named).length > 0) {
+      naming.push({ script, tool: /^\s*@tool\b/m.test(code) });
     }
   });
-  return naming.sort();
+  return naming.sort((a, b) => a.script.localeCompare(b.script));
+}
+
+/**
+ * [param source] with its comments and string literals blanked out, line breaks kept: what is left
+ * is the code, where a name is a use of the class rather than a word in prose or in text.
+ */
+function codeOf(source: string): string {
+  let code = '';
+  let at = 0;
+  while (at < source.length) {
+    const here = source[at] ?? '';
+    if (here === '#') {
+      const end = source.indexOf('\n', at);
+      at = end === -1 ? source.length : end;
+      continue;
+    }
+    if (here === '"' || here === "'") {
+      const fence = source.startsWith(here.repeat(3), at) ? here.repeat(3) : here;
+      let end = at + fence.length;
+      while (end < source.length && !source.startsWith(fence, end)) {
+        end += source[end] === '\\' ? 2 : 1;
+      }
+      const literal = source.slice(at, Math.min(end + fence.length, source.length));
+      code += literal.replace(/[^\n]/g, ' ');
+      at = end + fence.length;
+      continue;
+    }
+    code += here;
+    at += 1;
+  }
+  return code;
 }
 
 /** The classes the cache lists, with the path each is recorded at, or null when there is none. */
