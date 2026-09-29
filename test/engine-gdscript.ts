@@ -853,6 +853,34 @@ function testOperations(godotPath: string, projectDir: string): void {
     2,
     'the option should have been written into the .import file',
   );
+
+  // An option holding an engine type is read tagged and written back as that type. Straight into
+  // JSON it came back as the text "(1, 2, 3)", and writing that back put a string in the sidecar.
+  const sidecarFile = join(projectDir, 'art.png.import');
+  writeFileSync(
+    sidecarFile,
+    readFileSync(sidecarFile, 'utf8').replace('[params]\n', '[params]\n\nextent=Vector3(1, 2, 3)\n'),
+  );
+  const extent = get(operation('get_import_options', { resource_path: 'art.png' }), 'params', 'extent');
+  assert.deepEqual(extent, { _type: 'Vector3', x: 1, y: 2, z: 3 }, JSON.stringify(extent));
+  operation('set_import_options', {
+    resource_path: 'art.png',
+    options: { extent: { ...(extent as object), z: 6 } },
+  });
+  assert.match(readFileSync(sidecarFile, 'utf8'), /^extent=Vector3\(1, 2, 6\)$/m, 'written back as a vector');
+  const kept = readFileSync(sidecarFile, 'utf8');
+  const wrong = runRefusedOperation(godotPath, projectDir, 'set_import_options', {
+    resource_path: 'art.png',
+    options: { extent: '(4, 5, 6)', 'compress/mode': 2.5 },
+  });
+  assert.equal(wrong.answer, null, 'an option given something it cannot hold is refused');
+  assert.match(
+    wrong.stderr,
+    /Nothing was written: extent holds a Vector3, and "\(4, 5, 6\)" is not one; compress\/mode holds an int, and 2\.5 is not one/,
+    wrong.stderr,
+  );
+  assert.equal(readFileSync(sidecarFile, 'utf8'), kept, 'and the sidecar is left as it was');
+
   assert.equal(
     get(operation('get_import_status', { resource_path: 'art.png' }), 'resources', 0, 'status'),
     // A sidecar the engine never wrote has no uid and no recorded hash, and the editor imports it.

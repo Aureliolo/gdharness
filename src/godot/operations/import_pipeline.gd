@@ -1,6 +1,7 @@
 extends RefCounted
 
 const Read = preload("reading.gd")
+const Serialisation = preload("serialisation.gd")
 const FileWalk = preload("file_walk.gd")
 const Log = preload("logger.gd")
 
@@ -50,6 +51,7 @@ const EDITOR_CACHE_PREFIX: String = "filesystem_cache"
 
 var _log: Log
 var _files: FileWalk = FileWalk.new()
+var _values: Serialisation = Serialisation.new()
 var _sidecar_md5s: Variant = null
 
 
@@ -127,11 +129,14 @@ func get_import_options(params: Dictionary) -> Dictionary:
 		"resource_path": resource_path, "import_file": import_file_path, "remap": {}, "deps": {}, "params": {}
 	}
 
+	# Through the serialiser, as every other read answers: an engine type written straight into
+	# JSON is its own text, so a Vector3 option came back as "(1, 1, 1)", and writing that back put
+	# a string in the sidecar where the importer reads a vector.
 	for section: String in ["remap", "deps", "params"]:
 		if config.has_section(section):
 			var values: Dictionary = result[section]
 			for key: String in config.get_section_keys(section):
-				values[key] = config.get_value(section, key)
+				values[key] = _values.serialize_value(config.get_value(section, key))
 
 	return result
 
@@ -157,13 +162,37 @@ func set_import_options(params: Dictionary) -> Dictionary:
 	if err != OK:
 		return _log.failure("Failed to parse import file: " + str(err))
 
-	var updated_keys: Array[String] = []
+	# Every option checked before any is written, so a refused one leaves the sidecar as it was.
+	var fitted_values: Dictionary = {}
+	var refused: Array[String] = []
 	for key: Variant in options:
 		var name: String = str(key)
-		var value: Variant = _as_option(options[key], config.get_value("params", name, null))
-		config.set_value("params", name, value)
+		var held: Variant = config.get_value("params", name, null)
+		var given: Variant = _values.deserialize_value(options[key])
+		var value: Variant = _as_option(_values.fitted(options[key], typeof(held)), held)
+		# A number the option cannot hold whole is refused rather than truncated: 2.5 fitted to an
+		# enum option became 2, which is another setting.
+		var lossy: bool = (
+			(given is int or given is float)
+			and (value is int or value is float)
+			and type_convert(value, typeof(given)) != given
+		)
+		if held != null and (lossy or not Serialisation.acceptable(value, typeof(held))):
+			var held_type: String = type_string(typeof(held))
+			var article: String = "an" if held_type.to_lower()[0] in "aeiou" else "a"
+			refused.append(
+				"%s holds %s %s, and %s is not one" % [name, article, held_type, JSON.stringify(options[key])]
+			)
+			continue
+		fitted_values[name] = value
+	if not refused.is_empty():
+		return _log.failure("Nothing was written: " + "; ".join(refused))
+
+	var updated_keys: Array[String] = []
+	for name: String in fitted_values:
+		config.set_value("params", name, fitted_values[name])
 		updated_keys.append(name)
-		_log.debug("Set " + name + " = " + str(value))
+		_log.debug("Set " + name + " = " + str(fitted_values[name]))
 
 	err = config.save(import_file_path)
 	if err != OK:
