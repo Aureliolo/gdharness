@@ -113,7 +113,7 @@ import {
   whyTheProcessTreeFailed,
 } from '../src/process-children.js';
 import { secondsFromClock } from '../src/process-time.js';
-import { projectStructure, searchProject } from '../src/project-scan.js';
+import { projectStructure, type SearchOptions, searchProject } from '../src/project-scan.js';
 import { parseProjectGodot, settingKeys, settingsDroppedReport } from '../src/resources.js';
 import { noteRestartBegun, restartNotePath, restartOwed, restartSettled } from '../src/restart-note.js';
 import {
@@ -3873,6 +3873,64 @@ function testTheProjectWalksAgreeAboutWhatIsInIt(): void {
     );
     assert.equal(found.summary.files_searched, 1, 'and should not have opened the other two');
     assert.equal(projectStructure(sandbox).scripts, 1, 'the count should agree with the search');
+  } finally {
+    sweep(sandbox);
+  }
+}
+
+/**
+ * A search with no fileTypes reads every text file, and says what it found as it found it.
+ *
+ * Found in review, four ways a search said less than was there. The default was a list of eight
+ * extensions described as every text file, so project.godot and C# were never read and an autoload
+ * registered only in project.godot came back used nowhere. A lookahead matched the empty string,
+ * which was read as no match. `$` met only the end of a CRLF line's `\r`. And a search whose matches
+ * came to the limit exactly was called truncated.
+ */
+function testASearchReadsWhatItSaysItReads(): void {
+  const sandbox = mkdtempSync(join(tmpdir(), 'gdharness-search-'));
+  const search = (query: string, more: Partial<SearchOptions> = {}): ReturnType<typeof searchProject> =>
+    searchProject(sandbox, { query, regex: false, caseSensitive: false, maxResults: 100, ...more });
+  try {
+    writeFileSync(join(sandbox, 'project.godot'), '[autoload]\n\nGameState="*res://state.gd"\n');
+    writeFileSync(join(sandbox, 'Hero.cs'), 'public partial class Hero : Node { } // GameState\n');
+    // The word in it, after a NUL, so reading a binary file as text would find it.
+    writeFileSync(
+      join(sandbox, 'icon.png'),
+      Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00]), Buffer.from('GameState')]),
+    );
+    writeFileSync(join(sandbox, 'crlf.gd'), 'func _ready():\r\n\tpass # urgent TODO\r\n');
+
+    const everywhere = search('GameState');
+    assert.deepEqual(
+      everywhere.results.map((entry) => entry.file).sort(),
+      ['res://Hero.cs', 'res://project.godot'],
+      `every text file is read, and a binary one is not: ${JSON.stringify(everywhere)}`,
+    );
+    assert.deepEqual(
+      search('GameState', { fileTypes: ['cs'] }).results.map((entry) => entry.file),
+      ['res://Hero.cs'],
+      'fileTypes still narrows it',
+    );
+
+    const both = search('(?=.*TODO)(?=.*urgent)', { regex: true });
+    assert.deepEqual(
+      both.results.map((entry) => entry.file),
+      ['res://crlf.gd'],
+      `a lookahead that matches the empty string is a match: ${JSON.stringify(both)}`,
+    );
+    const ending = search('\\):$', { regex: true });
+    assert.deepEqual(
+      ending.results.map((entry) => entry.file),
+      ['res://crlf.gd'],
+      `$ meets the end of a CRLF line: ${JSON.stringify(ending)}`,
+    );
+
+    const exactly = search('GameState', { maxResults: 2 });
+    assert.equal(exactly.summary.total_matches, 2);
+    assert.equal(exactly.summary.truncated, false, 'matches that come to the limit exactly are all of them');
+    const cut = search('GameState', { maxResults: 1 });
+    assert.equal(cut.summary.truncated, true, 'and one more than the limit is cut');
   } finally {
     sweep(sandbox);
   }
@@ -19529,7 +19587,13 @@ async function testTheResourcesReadOnlyTheProject(): Promise<void> {
         assert.doesNotMatch(linked, /the secret/, `a link out of the project is not followed: ${linked}`);
         assert.match(linked, /leads outside the project through a link/, linked);
 
-        await call('project_search', { projectPath: theirs, query: 'extends' });
+        // The search with no fileTypes, through the server: every text file, project.godot included.
+        const searched = await call('project_search', { projectPath: theirs, query: 'config_version' });
+        assert.match(
+          searched,
+          /res:\/\/project\.godot/,
+          `a search with no fileTypes reads project.godot: ${searched}`,
+        );
         assert.match(
           await read(request, 'godot://script/main.gd'),
           /# ours/,
@@ -23984,6 +24048,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testHeadlessFollowsTheDisplay,
   testStaleClassesAreReadFromDisk,
   testTheProjectWalksAgreeAboutWhatIsInIt,
+  testASearchReadsWhatItSaysItReads,
   testClassesAnEditorIsNotHolding,
   testAScanThatHasNotStartedIsNotFinished,
   testARescanWaitsOutTheEditorsImport,

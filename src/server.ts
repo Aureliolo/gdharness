@@ -3716,6 +3716,12 @@ class GodotServer {
     return this.jsonTextResponse(info);
   }
 
+  /** The extensions a search is limited to, when the call names any. */
+  private fileTypes(args: OperationParams): { fileTypes?: readonly string[] } {
+    const named = readStringArray(args, 'fileTypes');
+    return named === undefined ? {} : { fileTypes: named };
+  }
+
   private handleSearchProject(args: OperationParams): ToolResponse {
     const project = this.project(args);
     if (!project.ok) {
@@ -3725,16 +3731,7 @@ class GodotServer {
       return this.jsonTextResponse(
         searchProject(project.value.path, {
           query: readString(args, 'query') ?? '',
-          fileTypes: readStringArray(args, 'fileTypes') ?? [
-            'gd',
-            'tscn',
-            'tres',
-            'gdshader',
-            'cfg',
-            'md',
-            'txt',
-            'json',
-          ],
+          ...this.fileTypes(args),
           regex: readBoolean(args, 'regex') ?? false,
           caseSensitive: readBoolean(args, 'caseSensitive') ?? false,
           maxResults: readPositiveNumber(args, 'maxResults') ?? 100,

@@ -108,7 +108,8 @@ export function scriptsWithoutUid(projectPath: string): string[] {
 
 export interface SearchOptions {
   readonly query: string;
-  readonly fileTypes: readonly string[];
+  /** Extensions to search, or undefined for every text file. */
+  readonly fileTypes?: readonly string[];
   readonly regex: boolean;
   readonly caseSensitive: boolean;
   readonly maxResults: number;
@@ -131,11 +132,17 @@ export interface SearchResult {
   };
 }
 
+/** Whether [param bytes] are a binary file's: a NUL in the first eight thousand, as git judges. */
+function isBinary(bytes: Buffer): boolean {
+  return bytes.subarray(0, 8000).includes(0);
+}
+
 /** Where the query occurs in the project's text files, as res:// paths with line numbers. */
 export function searchProject(projectPath: string, options: SearchOptions): SearchResult {
-  const extensions = new Set(
-    options.fileTypes.map((ext) => ext.replace(/^\./, '').toLowerCase()).filter(Boolean),
-  );
+  const extensions =
+    options.fileTypes === undefined
+      ? null
+      : new Set(options.fileTypes.map((ext) => ext.replace(/^\./, '').toLowerCase()).filter(Boolean));
   const result: SearchResult = {
     query: options.query,
     results: [],
@@ -143,13 +150,9 @@ export function searchProject(projectPath: string, options: SearchOptions): Sear
   };
   const regex = options.regex ? new RegExp(options.query, options.caseSensitive ? '' : 'i') : null;
   const needle = options.caseSensitive ? options.query : options.query.toLowerCase();
-  const full = (): boolean => {
-    if (result.summary.total_matches >= options.maxResults) {
-      result.summary.truncated = true;
-      return true;
-    }
-    return false;
-  };
+  // Truncated only once a match past the limit has been seen: a search whose matches came to the
+  // limit exactly was called cut, and raising the limit gave the same list.
+  const full = (): boolean => result.summary.truncated;
 
   const visit = (directory: string): void => {
     if (steppedOver(directory)) {
@@ -168,25 +171,36 @@ export function searchProject(projectPath: string, options: SearchOptions): Sear
         continue;
       }
       const extension = entry.name.includes('.') ? (entry.name.split('.').pop()?.toLowerCase() ?? '') : '';
-      if (!entry.isFile() || !extensions.has(extension)) {
+      if (!entry.isFile() || (extensions !== null && !extensions.has(extension))) {
+        continue;
+      }
+      const bytes = readFileSync(entryPath);
+      // Every text file by default, told by its content rather than a list of extensions: the list
+      // left out project.godot and C#, so an autoload registered only in project.godot was answered
+      // as used nowhere.
+      if (extensions === null && isBinary(bytes)) {
         continue;
       }
 
       result.summary.files_searched += 1;
       const matches: SearchMatch[] = [];
-      for (const [index, line] of readFileSync(entryPath, 'utf8').split('\n').entries()) {
-        if (full()) {
+      // Split on either ending, so `$` in a pattern meets the end of a line in a CRLF checkout.
+      for (const [index, line] of bytes.toString('utf8').split(/\r?\n/).entries()) {
+        // Found or not, rather than by what it matched: a lookahead matches the empty string.
+        const found = regex
+          ? regex.exec(line)
+          : (options.caseSensitive ? line : line.toLowerCase()).includes(needle)
+            ? [options.query]
+            : null;
+        if (found === null) {
+          continue;
+        }
+        if (result.summary.total_matches >= options.maxResults) {
+          result.summary.truncated = true;
           break;
         }
-        const match = regex
-          ? regex.exec(line)?.[0]
-          : (options.caseSensitive ? line : line.toLowerCase()).includes(needle)
-            ? options.query
-            : '';
-        if (match) {
-          matches.push({ line: index + 1, content: line.trim(), match });
-          result.summary.total_matches += 1;
-        }
+        matches.push({ line: index + 1, content: line.trim(), match: found[0] ?? '' });
+        result.summary.total_matches += 1;
       }
       if (matches.length > 0) {
         const relativePath = entryPath.slice(projectPath.length + 1).replace(/\\/g, '/');
