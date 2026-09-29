@@ -528,7 +528,8 @@ export function endedWithoutACode(run: {
  * How a stop went: the run is gone; it was signalled and was still there when the wait ran out; or
  * nothing was signalled, because its pid no longer answers as the process the run was started as.
  */
-type Ending = 'gone' | 'lingering' | 'refused';
+/** `unreached` is a played run whose editor could not be asked to stop it. */
+type Ending = 'gone' | 'lingering' | 'refused' | 'unreached';
 
 /** What a stop answers about the run it was asked to end, apart from what that run had started. */
 export interface StopVerdict {
@@ -560,6 +561,14 @@ export function stopVerdict(stop: {
       endedPid: stop.endedPid,
       clean: stop.errors === 0,
       note: 'This run was over before the stop, so nothing was ended here: editor_output has what it printed and how it ended. Anything that game started for itself, with OS.create_process or otherwise, is a separate process and may still be running.',
+      withChildren: false,
+    };
+  }
+  if (stop.ending === 'unreached') {
+    return {
+      stopped: false,
+      notSignalled: stop.endedPid,
+      note: 'Nothing was ended: the editor could not be asked to stop the scene it is playing, so the game may still be running. editor_status says whether the editor is connected and playing.',
       withChildren: false,
     };
   }
@@ -606,7 +615,7 @@ interface EndedRun {
  * caller reading this field is reading whether the run it had is over.
  */
 export function endedPreviousRun(ended: EndedRun | null): number | true | undefined {
-  if (ended === null || ended.ending === 'refused') {
+  if (ended === null || ended.ending === 'refused' || ended.ending === 'unreached') {
     return undefined;
   }
   return ended.pid ?? true;
@@ -793,6 +802,9 @@ export function endedToStartThis(ended: EndedRun | null): string {
     ended.pid === null ? 'The game the editor was playing' : `The run that was going, pid ${ended.pid},`;
   if (ended.ending === 'refused') {
     return ` ${which} was not ended: that pid no longer answers as the process the run was started as, so nothing was signalled. If it is still the game, it is running beside this one and you have to end it yourself; if it is not, it belongs to something else.`;
+  }
+  if (ended.ending === 'unreached') {
+    return ` ${which} was not ended here: the editor could not be asked to stop it. The editor stops a play before starting the next, so it is not running beside this one if this start reached the editor.`;
   }
   const after =
     ended.ending === 'lingering'
@@ -5901,6 +5913,23 @@ class GodotServer {
   }
 
   /**
+   * Whether the editor reports its play over within the stop's wait. An answer that does not come
+   * is waited past rather than taken as either.
+   */
+  private async untilTheEditorStopsPlaying(withinMs = STOP_WAIT_MS): Promise<boolean> {
+    const deadline = Date.now() + withinMs;
+    for (;;) {
+      if ((await this.editorPlayingState())?.playing === false) {
+        return true;
+      }
+      if (Date.now() >= deadline) {
+        return false;
+      }
+      await delay(100);
+    }
+  }
+
+  /**
    * Ends whatever is running, whichever way it was started, and says so on the run it ended.
    *
    * The run is kept rather than dropped, so what it printed and how it ended are still what
@@ -5935,8 +5964,24 @@ class GodotServer {
     // Read before anything is signalled, since the announcement goes with the game.
     const announced = this.announcedPidOf(running);
     if (running.throughEditor) {
-      await this.handleViaBridge('stop_playing', {});
-      return (await untilGone(announced === undefined ? [] : [announced])) ? 'gone' : 'lingering';
+      // The editor's answer read rather than thrown away: a bridge that was down, or a stop that
+      // failed, was answered "stopped" about a game still playing, and the run then read as ended
+      // here for the rest of its life.
+      const asked = await this.handleViaBridge('stop_playing', {});
+      if (asked.isError === true) {
+        running.endedHere = null;
+        running.log.record(
+          'warning',
+          `This run was not ended here: the editor could not be asked to stop it (${asked.content[0]?.text ?? 'no reason given'}).`,
+        );
+        return 'unreached';
+      }
+      // A game that announced no process is judged over by the editor saying so. Waiting on an empty
+      // list of processes answered "gone" at once, whatever the editor was doing.
+      if (announced === undefined) {
+        return (await this.untilTheEditorStopsPlaying()) ? 'gone' : 'lingering';
+      }
+      return (await untilGone([announced])) ? 'gone' : 'lingering';
     }
     if (running.pid === null) {
       return 'gone';
@@ -7296,7 +7341,7 @@ class GodotServer {
       readBoolean(args, 'andChildren') === true && wasRunning ? await this.whatTheRunStarted(stopped) : null;
     this.logDebug('Stopping the running game');
     const ending = await this.endActiveGame('editor_run stop', wasRunning);
-    const refused = ending === 'refused';
+    const refused = ending === 'refused' || ending === 'unreached';
     // Nothing under a pid that is not the run's is the run's to end either.
     const ended = children === null || refused ? null : endChildrenAmong(children);
     // The announcement of the game just ended goes with it, here rather than on the next sweep,

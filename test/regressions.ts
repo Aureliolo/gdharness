@@ -12747,6 +12747,69 @@ async function endGame(game: ChildProcess | null | undefined): Promise<void> {
  * a play the editor never reported as playing, which is what an editor still scanning answers, is
  * over once stopped rather than a play still on its way for the rest of the grace.
  */
+/**
+ * A stop is a stop only when the editor took it.
+ *
+ * The editor's answer to stop_playing was thrown away, and a game that had announced no process was
+ * judged gone by waiting on an empty list, which is true at once. So a stop the editor never
+ * received answered `stopped: true` about a game still playing, and the run read as ended here for
+ * the rest of its life; and one the editor took and went on playing through answered the same.
+ */
+async function testAStopTheEditorDidNotTakeIsNotAStop(): Promise<void> {
+  const editor = { playing: false, refuses: false, keepsPlaying: false };
+  await withAPlayingEditor(
+    ({ adapter }) =>
+      (tool) => {
+        if (tool === 'play_scene') {
+          editor.playing = true;
+          return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
+        }
+        if (tool === 'stop_playing') {
+          if (editor.refuses) {
+            return { ok: false, error: 'the editor was busy' };
+          }
+          editor.playing = editor.keepsPlaying;
+          return { ok: true, wasPlaying: true, playing: editor.playing };
+        }
+        if (tool === 'playing_status') {
+          return { ok: true, playing: editor.playing, scenePath: 'res://main.tscn', debugPort: adapter };
+        }
+        return { ok: true };
+      },
+    async ({ server, start }) => {
+      // Past the stop's own ten-second wait, which the lingering stop sits out.
+      const call = async (name: string, args: Record<string, unknown>): Promise<unknown> => {
+        const response = await server.request('tools/call', { name, arguments: args }, 30_000);
+        return parseTextContent(response) ?? textOf(response);
+      };
+      await start(300);
+
+      editor.refuses = true;
+      const refused = await call('editor_run', { op: 'stop' });
+      assert.equal(get(refused, 'stopped'), false, JSON.stringify(refused));
+      assert.match(
+        text(get(refused, 'note')),
+        /the editor could not be asked to stop/,
+        JSON.stringify(refused),
+      );
+      const still = await call('editor_output', {});
+      assert.equal(get(still, 'running'), true, `the run is still going: ${JSON.stringify(still)}`);
+      assert.equal(get(still, 'endedBy'), undefined, `and was not ended here: ${JSON.stringify(still)}`);
+
+      // Taken, and the editor goes on playing: said to be lingering, not gone.
+      editor.refuses = false;
+      editor.keepsPlaying = true;
+      const lingering = await call('editor_run', { op: 'stop' });
+      assert.equal(get(lingering, 'stopped'), true, JSON.stringify(lingering));
+      assert.match(
+        text(get(lingering, 'note')),
+        /had not exited 10 seconds after being told to/,
+        JSON.stringify(lingering),
+      );
+    },
+  );
+}
+
 async function testAStoppedRunIsStillTheOneAnswered(): Promise<void> {
   let playing = false;
   let answersThePlay = true;
@@ -22920,6 +22983,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAGameTheEditorHasStoppedPlayingIsNotStillActive,
   testAPlayThroughAnotherProcesssAdapterIsRefusedEachTime,
   testAPlayedStartStopsWaitingForAGameThatIsOver,
+  testAStopTheEditorDidNotTakeIsNotAStop,
   testAStoppedRunIsStillTheOneAnswered,
   testAStoppedSpawnedRunGivesWayToAPlay,
   testAKilledRunHasNoExitCode,
