@@ -11048,6 +11048,53 @@ async function testAStructureReadDescribesTheScriptItRead(): Promise<void> {
         '',
       ].join('\n'),
     );
+    // What a member is: a declaration at the left margin, outside every string. A base named by a
+    // path relative to the script, which only resolves against the script's own directory, and a
+    // Node2D at the top of it, so `_draw` is virtual only when the relative path was followed.
+    mkdirSync(join(project, 'sub'));
+    writeFileSync(
+      join(project, 'sub', 'sub_base.gd'),
+      ['extends Node2D', '', '', 'func helper_in_base() -> void:', '\tpass', ''].join('\n'),
+    );
+    writeFileSync(
+      join(project, 'sub', 'scoped.gd'),
+      [
+        'extends "sub_base.gd"',
+        '',
+        // Closed on the line it opens on, then a declaration: toggling on any triple quote lost
+        // this one, the next, and inverted the rest of the file.
+        'const HELP: String = """Usage: one line"""',
+        'const AFTER: int = 2',
+        '',
+        'var member: int = 1',
+        '',
+        '',
+        'func _ready() -> void:',
+        '\tvar local_speed: int = 5',
+        '\tconst LOCAL_K: int = 2',
+        '\tprint(local_speed + LOCAL_K)',
+        '\tvar doc: String = """',
+        'var not_a_member: int = 3',
+        // A hash inside the string before the quotes that close it, which a comment reading of the
+        // line would cut off, leaving the string open to the end of the file.
+        'text with a hash # before the close"""',
+        '\tprint(doc)',
+        '',
+        '',
+        'func _draw() -> void:',
+        '\tpass',
+        '',
+        '',
+        'class Inner:',
+        '\textends Resource',
+        '\tsignal inner_fired',
+        '\tvar inner_held: int = 1',
+        '',
+        '\tfunc inner_method() -> void:',
+        '\t\tinner_fired.emit()',
+        '',
+      ].join('\n'),
+    );
 
     const server = new ServerProcess({ env: { GODOT_PATH: godotPath } });
     try {
@@ -11315,6 +11362,49 @@ async function testAStructureReadDescribesTheScriptItRead(): Promise<void> {
         ],
         `and its own members are still all there: ${JSON.stringify(atTheTop)}`,
       );
+
+      const scoped = await call('script_info', {
+        projectPath: project,
+        op: 'structure',
+        scriptPath: 'res://sub/scoped.gd',
+        includeInherited: true,
+      });
+      const members = (list: string): unknown[] =>
+        asArray(get(scoped, list) ?? []).map((each) => [get(each, 'name'), get(each, 'line')]);
+      assert.deepEqual(
+        {
+          extends: get(scoped, 'extends'),
+          constants: members('constants'),
+          variables: members('variables'),
+          signals: members('signals'),
+          inner: get(scoped, 'inner_classes'),
+        },
+        {
+          extends: '"sub_base.gd"',
+          constants: [
+            ['HELP', 3],
+            ['AFTER', 4],
+          ],
+          variables: [['member', 6]],
+          signals: [],
+          inner: ['Inner'],
+        },
+        `a member is a declaration at the margin, outside every string: ${JSON.stringify(scoped)}`,
+      );
+      assert.deepEqual(
+        asArray(get(scoped, 'functions')).map((each) => [
+          get(each, 'name'),
+          get(each, 'is_virtual'),
+          get(each, 'inherited_from') ?? null,
+        ]),
+        [
+          ['_ready', true, null],
+          ['_draw', true, null],
+          ['helper_in_base', false, 'res://sub/sub_base.gd'],
+        ],
+        `and a relative base is followed, to its members and to the Node2D above it: ${JSON.stringify(scoped)}`,
+      );
+      assert.deepEqual(get(scoped, 'inherits_from'), ['res://sub/sub_base.gd'], JSON.stringify(scoped));
     } finally {
       await server.stop();
     }
