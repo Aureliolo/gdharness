@@ -858,6 +858,46 @@ function testOperations(godotPath: string, projectDir: string): void {
     'needs_reimport',
   );
 
+  // A file with no sidecar has not been imported only if the engine imports that kind of file.
+  // A scene was answered as needing an import, and asking for its options as not imported yet.
+  const statusOf = (path: string): unknown[] => {
+    const one = get(operation('get_import_status', { resource_path: path }), 'resources', 0);
+    return [get(one, 'status'), get(one, 'reason')];
+  };
+  assert.deepEqual(statusOf('fixture_scene.tscn'), [
+    'not_imported',
+    'the engine loads .tscn files as they are, without importing them',
+  ]);
+  mkdirSync(join(projectDir, 'kept_out'), { recursive: true });
+  writeFileSync(join(projectDir, 'kept_out', '.gdignore'), '');
+  writeFileSync(join(projectDir, 'kept_out', 'raw.png'), '');
+  writeFileSync(join(projectDir, 'fresh.png'), '');
+  writeFileSync(join(projectDir, 'model.blend'), '');
+  try {
+    assert.deepEqual(statusOf('kept_out/raw.png'), [
+      'not_imported',
+      'a .gdignore in res://kept_out keeps the engine from importing anything under it',
+    ]);
+    assert.deepEqual(statusOf('fresh.png'), ['needs_reimport', 'it has not been imported']);
+    assert.match(
+      String(statusOf('model.blend')[1]),
+      /^no importer built into the engine takes \.blend files/,
+    );
+  } finally {
+    rmSync(join(projectDir, 'kept_out'), { recursive: true, force: true });
+    rmSync(join(projectDir, 'fresh.png'), { force: true });
+    rmSync(join(projectDir, 'model.blend'), { force: true });
+  }
+  const sceneOptions = runRefusedOperation(godotPath, projectDir, 'get_import_options', {
+    resource_path: 'fixture_scene.tscn',
+  });
+  assert.equal(sceneOptions.answer, null);
+  assert.match(
+    sceneOptions.stderr,
+    /res:\/\/fixture_scene\.tscn has no import options: the engine loads \.tscn files as they are/,
+    sceneOptions.stderr,
+  );
+
   const presets = operation('list_export_presets', {});
   assert.equal(get(presets, 'presets_file_exists'), false, 'the fixture project configures no exports');
   assert.match(asString(get(presets, 'note')), /export_presets\.cfg/);

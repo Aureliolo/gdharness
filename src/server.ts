@@ -3254,8 +3254,22 @@ class GodotServer {
         ),
       };
     }
+    const never = listed.find((one) => one.status === 'not_imported');
+    if (resourcePath !== undefined && never !== undefined) {
+      return {
+        ok: false,
+        response: this.createErrorResponse(
+          `${never.path} is not something the engine imports: ${never.reason ?? 'it has no importer'}.`,
+        ),
+      };
+    }
     const targets = listed
-      .filter((one) => one.status !== 'missing_source' && (force || one.status !== 'up_to_date'))
+      .filter(
+        (one) =>
+          one.status !== 'missing_source' &&
+          one.status !== 'not_imported' &&
+          (force || one.status !== 'up_to_date'),
+      )
       .map((one) => one.path);
     if (targets.length === 0) {
       return {
@@ -7891,7 +7905,8 @@ class GodotServer {
       return this.answer(created);
     }
     const rebuilt = await this.rebuildClassCache(project.value.path);
-    const registered = cachedClasses(project.value.path)?.get(declared) === readString(created.payload, 'full_path');
+    const registered =
+      cachedClasses(project.value.path)?.get(declared) === readString(created.payload, 'full_path');
     const answered = this.answer({
       ...created,
       payload: {
@@ -7906,7 +7921,9 @@ class GodotServer {
             }),
       },
     });
-    return this.godotBridge.isConnected() ? await this.alsoSayWhatTheEditorCannotSee(answered, args) : answered;
+    return this.godotBridge.isConnected()
+      ? await this.alsoSayWhatTheEditorCannotSee(answered, args)
+      : answered;
   }
 
   private async alsoSayWhatTheEditorCannotSee(

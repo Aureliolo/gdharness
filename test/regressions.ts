@@ -11690,6 +11690,23 @@ async function testAReimportReimportsThroughTheEngine(): Promise<void> {
       assert.match(kept, /^compress\/mode=1$/m, `the import should keep the option it was given:\n${kept}`);
       const current = await call({ op: 'status', resourcePath: 'good.png' });
       assert.equal(get(current, 'resources', 0, 'status'), 'up_to_date', JSON.stringify(current));
+
+      // A scene is loaded as it is and never imported. Asked for by name, it ran a pass and came
+      // back as not reimported, which reads as its import failing.
+      writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
+      const scene = await server.request(
+        'tools/call',
+        {
+          name: 'project_import',
+          arguments: { projectPath: project, op: 'reimport', resourcePath: 'main.tscn' },
+        },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+      assert.match(
+        textOf(scene) ?? '',
+        /res:\/\/main\.tscn is not something the engine imports: the engine loads \.tscn files as they are/,
+        String(textOf(scene)),
+      );
     } finally {
       await server.stop();
     }

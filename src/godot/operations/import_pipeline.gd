@@ -63,7 +63,7 @@ func get_import_status(params: Dictionary) -> Dictionary:
 
 	var resources: Array[Dictionary] = []
 	var summary: Dictionary = {
-		"total": 0, "needs_reimport": 0, "failed": 0, "up_to_date": 0, "missing_source": 0
+		"total": 0, "needs_reimport": 0, "failed": 0, "up_to_date": 0, "missing_source": 0, "not_imported": 0
 	}
 
 	if not resource_path.is_empty():
@@ -107,8 +107,7 @@ func get_import_options(params: Dictionary) -> Dictionary:
 	var import_file_path: String = resource_path + ".import"
 
 	if not FileAccess.file_exists(import_file_path):
-		_log.error("Import file does not exist: " + import_file_path)
-		return _log.failure("This resource may not have been imported yet")
+		return _log.failure(_no_sidecar(resource_path))
 
 	var config: ConfigFile = ConfigFile.new()
 	var err: Error = config.load(import_file_path)
@@ -142,8 +141,7 @@ func set_import_options(params: Dictionary) -> Dictionary:
 	var import_file_path: String = resource_path + ".import"
 
 	if not FileAccess.file_exists(import_file_path):
-		_log.error("Import file does not exist: " + import_file_path)
-		return _log.failure("This resource may not have been imported yet")
+		return _log.failure(_no_sidecar(resource_path))
 
 	var config: ConfigFile = ConfigFile.new()
 	var err: Error = config.load(import_file_path)
@@ -389,10 +387,14 @@ func _import_status_of(resource_path: String, import_file_path: String) -> Dicti
 
 	var import_file_exists: bool = FileAccess.file_exists(import_file_path)
 	if not import_file_exists:
+		# A file with no sidecar has not been imported only if it is something the engine imports.
+		# A scene answered as needing an import, and a reimport of it ran a pass and then reported
+		# the scene as not reimported, which reads as the import failing.
+		var never: String = _never_imported(resource_path)
 		return {
 			"path": resource_path,
-			"status": "needs_reimport",
-			"reason": "it has not been imported",
+			"status": "needs_reimport" if never.is_empty() else "not_imported",
+			"reason": "it has not been imported" if never.is_empty() else never,
 			"import_file_exists": false,
 			"source_exists": true
 		}
@@ -414,6 +416,41 @@ func _import_status_of(resource_path: String, import_file_path: String) -> Dicti
 		stale = _import_staleness(resource_path, sidecar)
 	status.merge(stale, true)
 	return status
+
+
+# Why [param resource_path] has no import file, with what to do about it where anything can be done.
+func _no_sidecar(resource_path: String) -> String:
+	if not FileAccess.file_exists(resource_path):
+		return resource_path + " is not on disk"
+	var never: String = _never_imported(resource_path)
+	if not never.is_empty():
+		return resource_path + " has no import options: " + never
+	return (
+		resource_path
+		+ " has not been imported yet, so it has no import file: project_import reimport imports it"
+	)
+
+
+# Why the engine will never import [param resource_path], or empty when it would.
+func _never_imported(resource_path: String) -> String:
+	var folder: String = resource_path.get_base_dir()
+	while folder.begins_with("res://"):
+		if _files.is_stepped_over(folder if folder.ends_with("/") else folder + "/"):
+			return "a .gdignore in " + folder + " keeps the engine from importing anything under it"
+		if folder == "res://":
+			break
+		folder = folder.get_base_dir()
+	var extension: String = resource_path.get_extension().to_lower()
+	if extension in IMPORTABLE_EXTENSIONS:
+		return ""
+	# Loadable without a sidecar is what a scene, a script or a saved resource is: read as it is.
+	if ResourceLoader.exists(resource_path):
+		return "the engine loads ." + extension + " files as they are, without importing them"
+	return (
+		"no importer built into the engine takes ."
+		+ extension
+		+ " files; one added by a plugin or an extension is known only to the editor, whose scan imports them"
+	)
 
 
 static func _stale(reason: String) -> Dictionary:
