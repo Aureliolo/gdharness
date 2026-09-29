@@ -5950,7 +5950,7 @@ function testAStopThatSignalsNothingSaysSo(): void {
     endedPid: 4242,
     throughEditor: false,
     exitSignal: null,
-    errors: 0,
+    clean: true,
   });
   assert.equal(refused.stopped, false, 'a stop that signalled nothing did not stop anything');
   assert.equal(refused.notSignalled, 4242, 'and names the pid it left alone');
@@ -5969,7 +5969,7 @@ function testAStopThatSignalsNothingSaysSo(): void {
     endedPid: 4242,
     throughEditor: false,
     exitSignal: 'SIGTERM',
-    errors: 1,
+    clean: false,
   });
   assert.equal(gone.stopped, true, 'a run the signal ended is stopped');
   assert.equal(gone.endedPid, 4242, 'under the pid it was ended by');
@@ -5984,7 +5984,7 @@ function testAStopThatSignalsNothingSaysSo(): void {
     endedPid: 4242,
     throughEditor: false,
     exitSignal: null,
-    errors: 0,
+    clean: true,
   });
   assert.equal(lingering.stopped, true, 'a run that was signalled was stopped, as far as a stop can');
   assert.match(lingering.note, /It had not exited \d+ seconds after being told to/, lingering.note);
@@ -5995,7 +5995,7 @@ function testAStopThatSignalsNothingSaysSo(): void {
     endedPid: 4242,
     throughEditor: false,
     exitSignal: null,
-    errors: 0,
+    clean: true,
   });
   assert.match(over.note, /^This run was over before the stop/, over.note);
   assert.equal(over.withChildren, false, 'a run already over says nothing about what it started');
@@ -6006,7 +6006,7 @@ function testAStopThatSignalsNothingSaysSo(): void {
     endedPid: null,
     throughEditor: true,
     exitSignal: null,
-    errors: 0,
+    clean: true,
   });
   assert.match(
     played.note,
@@ -7906,8 +7906,8 @@ function testAGameIsFoundThroughALinkToItsProject(): Promise<void> {
   );
   return announcedSince(linked, new Set(), { budgetMs: 2_000, directories: [directory] })
     .then((found) => {
-      assert.equal(found?.port, 51_250, 'the game is found by the path the caller named');
-      const chosen = chooseRuntime([found], linked);
+      assert.equal(found[0]?.port, 51_250, 'the game is found by the path the caller named');
+      const chosen = chooseRuntime(found, linked);
       assert.ok('endpoint' in chosen, `and chosen for that path: ${JSON.stringify(chosen)}`);
     })
     .finally(() => {
@@ -7944,21 +7944,50 @@ async function testAStartWaitsForTheGameToAnnounceItself(): Promise<void> {
     }, 120);
     try {
       const found = await announcedSince(root, before, { budgetMs: 4_000, directories: [directory] });
-      assert.equal(found?.port, 51_241, 'the wait ends on the game that was not there before');
+      assert.deepEqual(
+        found.map((one) => one.port),
+        [51_241],
+        'the wait ends on the game that was not there before',
+      );
     } finally {
       clearTimeout(late);
+    }
+
+    // Two in one look, as a game and a worker it started can be: both are handed back, since which
+    // is the game is for the caller to tell, and the directory's order says nothing about it.
+    const pair = [0, 1].map(() =>
+      spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }),
+    );
+    try {
+      const pids = pair.map((one) => one.pid ?? 0);
+      for (const [index, pid] of pids.entries()) {
+        announce(pid, 51_242 + index);
+      }
+      const both = await announcedSince(root, new Set([process.pid, process.ppid]), {
+        budgetMs: 4_000,
+        directories: [directory],
+      });
+      assert.deepEqual(
+        both.map((one) => one.pid).sort((one, other) => one - other),
+        [...pids].sort((one, other) => one - other),
+        'two games announced in one look are both handed back',
+      );
+    } finally {
+      for (const one of pair) {
+        one.kill();
+      }
     }
 
     const elsewhere = await announcedSince(join(root, 'elsewhere'), new Set(), {
       budgetMs: 60,
       directories: [directory],
     });
-    assert.equal(elsewhere, null, 'a game from another project is not the one being waited for');
+    assert.deepEqual(elsewhere, [], 'a game from another project is not the one being waited for');
 
     const started = Date.now();
     const seen = new Set([process.pid, process.ppid]);
     const nothing = await announcedSince(root, seen, { budgetMs: 120, directories: [directory] });
-    assert.equal(nothing, null, 'and a game that never announces is given up on');
+    assert.deepEqual(nothing, [], 'and a game that never announces is given up on');
     assert.ok(Date.now() - started >= 100, 'after the budget rather than at once');
 
     // A game held at a breakpoint cannot announce until it is let go, so the wait ends rather
@@ -7969,7 +7998,7 @@ async function testAStartWaitsForTheGameToAnnounceItself(): Promise<void> {
       directories: [directory],
       giveUp: () => true,
     });
-    assert.equal(held, null, 'a game that has stopped is not waited for');
+    assert.deepEqual(held, [], 'a game that has stopped is not waited for');
     assert.ok(Date.now() - gaveUp < 1_000, 'and the wait ends at once rather than at the budget');
   } finally {
     sweep(root);
@@ -13866,15 +13895,24 @@ async function testASilentRunIsStartedHereAndSaysWhy(): Promise<void> {
   ];
   for (const one of cases) {
     let plays = 0;
+    // Ended by a stop, as a real editor's play is: a stand-in still playing after stop_playing is
+    // an editor that did not take the stop, and the stop at the end of each case waits that out.
+    let playing = false;
     await withAPlayingEditor(
       ({ adapter }) =>
         (tool) => {
           if (tool === 'play_scene') {
             plays += 1;
+            playing = true;
             return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
           }
+          if (tool === 'stop_playing') {
+            const was = playing;
+            playing = false;
+            return { ok: true, wasPlaying: was, playing: false };
+          }
           if (tool === 'playing_status') {
-            return { ok: true, playing: plays > 0, scenePath: '', debugPort: adapter };
+            return { ok: true, playing, scenePath: '', debugPort: adapter };
           }
           return { ok: true };
         },
@@ -13922,6 +13960,221 @@ async function testASilentRunIsStartedHereAndSaysWhy(): Promise<void> {
       },
       { env: one.env },
     );
+  }
+}
+
+/**
+ * A played run whose errors reach nothing here gives no verdict on them.
+ *
+ * The editor's debugger relays what a game prints and not what it reports, so a played game's
+ * `push_error` and the engine's own errors arrive only through the runtime addon's report. With no
+ * report found (a project without the addon, or a game that never announced) the run was answered
+ * `clean: true` and `errors: 0`, which a gate reads as a run that raised nothing. `consoleLost`
+ * already left `clean` out for a source that stopped arriving; this is a source that never did.
+ * The report-found side, where `clean` is said, is held by the played-report case above with a real
+ * engine.
+ */
+async function testAPlayedRunWithNoReportGivesNoVerdict(): Promise<void> {
+  let playing = false;
+  await withAPlayingEditor(
+    ({ adapter }) =>
+      (tool) => {
+        if (tool === 'play_scene') {
+          playing = true;
+          return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
+        }
+        if (tool === 'stop_playing') {
+          const was = playing;
+          playing = false;
+          return { ok: true, wasPlaying: was, playing: false };
+        }
+        if (tool === 'playing_status') {
+          return { ok: true, playing, scenePath: '', debugPort: adapter };
+        }
+        return { ok: true };
+      },
+    async ({ server, project }) => {
+      const started = parseTextContent(
+        await server.request(
+          'tools/call',
+          {
+            name: 'editor_run',
+            arguments: { projectPath: project, op: 'start', headless: false, runtimeWaitMs: 500 },
+          },
+          ENGINE_CALL_TIMEOUT_MS,
+        ),
+      );
+      assert.equal(
+        get(started, 'through'),
+        'editor',
+        `played through the editor: ${JSON.stringify(started)}`,
+      );
+
+      const output = parseTextContent(
+        await server.request('tools/call', { name: 'editor_output', arguments: {} }),
+      );
+      const said = JSON.stringify(output);
+      assert.equal(get(output, 'errors'), 0, `what was heard is still counted: ${said}`);
+      assert.equal(get(output, 'clean'), undefined, `and no verdict is given on what was not: ${said}`);
+      assert.equal(get(output, 'errorsUnread'), true, `said as a field of its own: ${said}`);
+      assert.match(said, /no report from its game's runtime addon has been found/, said);
+
+      const stopped = parseTextContent(
+        await server.request(
+          'tools/call',
+          { name: 'editor_run', arguments: { op: 'stop' } },
+          ENGINE_CALL_TIMEOUT_MS,
+        ),
+      );
+      assert.equal(get(stopped, 'stopped'), true, `the stop ends it: ${JSON.stringify(stopped)}`);
+      assert.equal(
+        get(stopped, 'clean'),
+        undefined,
+        `and gives no verdict either: ${JSON.stringify(stopped)}`,
+      );
+      assert.equal(get(stopped, 'errorsUnread'), true, JSON.stringify(stopped));
+    },
+  );
+}
+
+/**
+ * A played game whose worker announces too is still the run's, and its errors are read.
+ *
+ * A played run's report is found by the game it is tied to, and the announcements tied it only
+ * when one game of the project could be the run's. A worker the game starts that loads the runtime
+ * inherits the editor's mark and announces it as well. Inside the start's wait the first
+ * announcement in the directory's order was taken, which was the worker's as often as the game's;
+ * after the wait there were two, nothing was tied, and the run answered with its errors unread.
+ * The process tree tells them apart: the worker has the game between it and the editor. The
+ * stand-in editor is this process, so a game it spawns is under it in the tree, and the game spawns
+ * the worker. Two rounds, one announcing inside the start's wait and one after it, since the tie is
+ * made in each.
+ */
+async function testAPlayedGameIsToldFromItsWorkers(): Promise<void> {
+  const rounds = [
+    { round: 'inside the wait', inside: true, read: 'editor_output' },
+    { round: 'after the start', inside: false, read: 'editor_output' },
+    { round: 'after the start, read by the stop', inside: false, read: 'stop' },
+  ] as const;
+  for (const { round, inside, read } of rounds) {
+    const spawned: number[] = [];
+    const held: { game: ChildProcess | null } = { game: null };
+    let playing = false;
+    let announce: (() => void) | null = null;
+    try {
+      await withAPlayingEditor(
+        ({ adapter, project, runtimeDir }) =>
+          (tool) => {
+            if (tool === 'play_scene') {
+              playing = true;
+              const game = spawn(
+                process.execPath,
+                [
+                  '-e',
+                  "const w = require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }); console.log(w.pid); setInterval(() => {}, 1000);",
+                ],
+                { stdio: ['ignore', 'pipe', 'ignore'] },
+              );
+              held.game = game;
+              game.stdout.once('data', (chunk: Buffer) => {
+                const worker = Number(String(chunk).trim());
+                announce = () => {
+                  for (const pid of [game.pid ?? 0, worker]) {
+                    spawned.push(pid);
+                    writeFileSync(
+                      join(runtimeDir, `runtime-${pid}.json`),
+                      JSON.stringify({
+                        protocol: RUNTIME_PROTOCOL,
+                        pid,
+                        port: 51_997,
+                        address: '127.0.0.1',
+                        project: { name: 'Played', path: project },
+                        editor_pid: FAKE_EDITOR_PID,
+                      }),
+                      'utf8',
+                    );
+                  }
+                  writeFileSync(
+                    join(runtimeDir, `runtime-${game.pid ?? 0}.log`),
+                    'ERROR: the game raised this\n',
+                  );
+                };
+                if (inside) {
+                  announce();
+                }
+              });
+              return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
+            }
+            if (tool === 'stop_playing') {
+              const was = playing;
+              playing = false;
+              return { ok: true, wasPlaying: was, playing: false };
+            }
+            if (tool === 'playing_status') {
+              return { ok: true, playing, scenePath: '', debugPort: adapter };
+            }
+            return { ok: true };
+          },
+        async ({ server, project }) => {
+          await server.request(
+            'tools/call',
+            {
+              name: 'editor_run',
+              arguments: {
+                projectPath: project,
+                op: 'start',
+                headless: false,
+                runtimeWaitMs: inside ? 5_000 : 200,
+              },
+            },
+            ENGINE_CALL_TIMEOUT_MS,
+          );
+          if (!inside) {
+            assert.ok(
+              await cameTrue(() => announce !== null, 10_000),
+              `${round}: the game should start its worker`,
+            );
+            announce?.();
+          }
+          assert.ok(
+            await cameTrue(() => spawned.length === 2, 10_000),
+            `${round}: the game and its worker should announce`,
+          );
+
+          const output = parseTextContent(
+            await server.request(
+              'tools/call',
+              read === 'stop'
+                ? { name: 'editor_run', arguments: { op: 'stop' } }
+                : { name: 'editor_output', arguments: {} },
+              ENGINE_CALL_TIMEOUT_MS,
+            ),
+          );
+          const said = JSON.stringify(output);
+          assert.equal(
+            get(output, read === 'stop' ? 'endedPid' : 'pid'),
+            spawned[0],
+            `${round}: the run is tied to the game ${spawned[0]}, not its worker ${spawned[1]}: ${said}`,
+          );
+          assert.equal(
+            get(output, 'errors'),
+            1,
+            `${round}: and the error in the game's report is read: ${said}`,
+          );
+          assert.equal(get(output, 'clean'), false, `${round}: so the verdict is given: ${said}`);
+          assert.equal(get(output, 'errorsUnread'), undefined, said);
+        },
+        { held },
+      );
+    } finally {
+      for (const pid of spawned) {
+        try {
+          process.kill(pid);
+        } catch {
+          // Gone already, with the game or on its own.
+        }
+      }
+    }
   }
 }
 
@@ -23429,6 +23682,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testRunArgumentsLeaveTheLocalDebuggerOff,
   testSilenceFollowsTheAskThenTheEnvironment,
   testASilentRunIsStartedHereAndSaysWhy,
+  testAPlayedRunWithNoReportGivesNoVerdict,
+  testAPlayedGameIsToldFromItsWorkers,
   testHeadlessFollowsTheDisplay,
   testStaleClassesAreReadFromDisk,
   testTheProjectWalksAgreeAboutWhatIsInIt,

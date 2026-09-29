@@ -609,7 +609,8 @@ export interface WaitingForRuntime {
 }
 
 /**
- * The game from [projectPath] that announced itself while this waited, or nothing.
+ * The games from [projectPath] that had announced themselves by the look that first found one while
+ * this waited, or none.
  *
  * Starting a game and being able to talk to it are two moments, and everything treated them as
  * one. The editor answers `play_scene` as soon as it has asked the engine to play; the engine
@@ -624,25 +625,28 @@ export async function announcedSince(
   projectPath: string,
   before: ReadonlySet<number>,
   waiting: WaitingForRuntime = {},
-): Promise<RuntimeEndpoint | null> {
+): Promise<readonly RuntimeEndpoint[]> {
   const directories = waiting.directories ?? runtimeDirectories();
   const until = Date.now() + Math.max(waiting.budgetMs ?? ANNOUNCE_BUDGET_MS, 0);
   for (;;) {
     // Through links, because the engine announces the path it resolved and a caller names the
     // one they typed: on macOS the temporary directory is a link into /private, and a project
     // under it announced a path this compared unequal to, so its game was never found.
-    const fresh = discoverRuntimes(directories).find(
+    //
+    // Every one found in the look rather than the first: a game and a worker it started both
+    // announce, and the first in the directory's order was taken as the game whichever it was.
+    const fresh = discoverRuntimes(directories).filter(
       (endpoint) =>
         !before.has(endpoint.pid) &&
         isSameDirectory(endpoint.project.path, projectPath) &&
         (waiting.accept?.(endpoint) ?? true),
     );
-    if (fresh !== undefined) {
+    if (fresh.length > 0) {
       return fresh;
     }
     const left = until - Date.now();
     if (left <= 0 || waiting.giveUp?.() === true) {
-      return null;
+      return [];
     }
     await delay(Math.min(LOOK_EVERY_MS, left));
   }

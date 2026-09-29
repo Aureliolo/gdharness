@@ -449,6 +449,12 @@ offset into the played run's transcript, and the transcript into the log, so a r
 an entry with its severity the way one printed by a spawned run is. The report outlives its game
 by an hour, since the last errors are read after the game has gone; the announcement does not.
 
+The report is found by the game the run is tied to. A worker the game starts that loads the
+runtime inherits the editor's mark and announces too, so where several games of the project have
+announced, the process tree decides: the run's game is the one with no other of them between it
+and the editor. A played run with no report found answers `errorsUnread` and no `clean`, since a
+count of what the adapter relayed says nothing about what the game raised.
+
 Two streams read side by side lose their order: the prints arrived over the adapter as they came
 and the errors whenever the report was read, so a warning raised in `_ready` was listed after a
 print made a second later. So the report carries the prints too, from the line announcing the

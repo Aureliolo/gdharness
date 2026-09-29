@@ -363,6 +363,29 @@ function howItExited(run: Pick<GodotProcess, 'exitCode' | 'exitSignal'>): string
 }
 
 /**
+ * Whether a played run's errors reach nothing here: the editor's debugger relays what a game prints
+ * and not what it reports, so its `push_error` and the engine's own errors arrive only through the
+ * report the runtime addon writes, and none was found for it.
+ */
+function errorsUnread(run: GodotProcess): boolean {
+  return run.throughEditor && typeof run.errorReport !== 'string';
+}
+
+/**
+ * Whether a run was clean, or undefined when what it raised could not all be heard.
+ *
+ * Clean is the field a gate reads, and a count of what arrived says nothing about a source that
+ * never arrived or stopped arriving: a played game with no runtime report was answered clean with
+ * every error it raised unread.
+ */
+function cleanVerdict(run: GodotProcess): boolean | undefined {
+  if (run.consoleLost === true || errorsUnread(run)) {
+    return undefined;
+  }
+  return run.log.count('error') === 0;
+}
+
+/**
  * Whether a run is still going.
  *
  * Three states rather than two: going, finished with a code somebody collected, and found already
@@ -545,7 +568,7 @@ export interface StopVerdict {
   readonly stopped: boolean;
   readonly endedPid?: number | null;
   readonly notSignalled?: number | null;
-  readonly clean?: boolean;
+  readonly clean?: boolean | undefined;
   readonly note: string;
   /** Whether the note goes on to say what became of the processes the run had started. */
   readonly withChildren: boolean;
@@ -562,13 +585,13 @@ export function stopVerdict(stop: {
   readonly endedPid: number | null;
   readonly throughEditor: boolean;
   readonly exitSignal: string | null;
-  readonly errors: number;
+  readonly clean: boolean | undefined;
 }): StopVerdict {
   if (!stop.wasRunning) {
     return {
       stopped: true,
       endedPid: stop.endedPid,
-      clean: stop.errors === 0,
+      clean: stop.clean,
       note: 'This run was over before the stop, so nothing was ended here: editor_output has what it printed and how it ended. Anything that game started for itself, with OS.create_process or otherwise, is a separate process and may still be running.',
       withChildren: false,
     };
@@ -592,7 +615,7 @@ export function stopVerdict(stop: {
   return {
     stopped: true,
     endedPid: stop.endedPid,
-    clean: stop.errors === 0,
+    clean: stop.clean,
     note: `${
       stop.throughEditor
         ? stop.endedPid === null
@@ -5505,7 +5528,7 @@ class GodotServer {
     // Read through a call rather than directly, since the variable is written from the closure
     // below and the type checker reads it as never changing.
     const lastSaid = (): string => (editorSaysGoing ? 'playing' : 'not playing');
-    const endpoint = await announcedSince(projectPath, before, {
+    const fresh = await announcedSince(projectPath, before, {
       budgetMs,
       // Not a game of this project that somebody else started: for a run the editor plays, one
       // naming another editor as the one that played it, or none where the project's games name
@@ -5555,7 +5578,7 @@ class GodotServer {
         : `editor asked ${editorAsks === 1 ? 'once' : `${editorAsks} times`}, last said ${lastSaid()}`;
     this.logDebug(
       `announce wait ended after ${Date.now() - waitBegan}ms: ${
-        endpoint === null ? 'nothing announced' : `pid ${endpoint.pid} announced`
+        fresh.length === 0 ? 'nothing announced' : `pid ${fresh.map((one) => one.pid).join(', ')} announced`
       }, ${asked}`,
     );
     // Kept on the run: a number the game gave for itself, which is what the announcement was
@@ -5566,8 +5589,16 @@ class GodotServer {
     // this server's own game found nothing under the run's. Only when it is this run's:
     // `announcedSince` excludes everything that was already announced before the start.
     const going = await this.currentRun();
+    const endpoint = await this.theRunsAmong(going, fresh);
     if (endpoint !== null && going !== null && going.announcedPid === undefined) {
       this.tie(going, endpoint);
+    }
+    if (endpoint === null && fresh.length > 1) {
+      return {
+        listening: true,
+        pids: fresh.map((one) => one.pid),
+        note: `${fresh.length} games of this project announced at once and none could be told from the process tree as this run's own game rather than one it started, so none is taken as its runtime. editor_status lists them under runtimes.`,
+      };
     }
     return runtimeVerdict(endpoint, {
       addon: true,
@@ -6468,6 +6499,56 @@ class GodotServer {
   }
 
   /**
+   * Which of the games that announced at once is [param run]'s, or null when none can be told.
+   *
+   * One is the run's by being the only one. Several are told apart by the process tree, where the
+   * run's game is the one with no other of them between it and the run, which is how a worker the
+   * game started is passed over.
+   */
+  private async theRunsAmong(
+    run: GodotProcess | null,
+    fresh: readonly RuntimeEndpoint[],
+  ): Promise<RuntimeEndpoint | null> {
+    if (fresh.length === 1) {
+      return fresh[0] ?? null;
+    }
+    if (fresh.length === 0 || run === null) {
+      return null;
+    }
+    const pid = run.announcedPid ?? (await this.tiedThroughTheTree(run, fresh));
+    return fresh.find((one) => one.pid === pid) ?? null;
+  }
+
+  /**
+   * Ties a played run to its game through the process tree, so the report its errors are in is read.
+   *
+   * Its report is found by the game it is tied to, and the announcements alone tie only when one
+   * game of the project could be the run's. A played game whose workers load the runtime leaves
+   * several, since they inherit the editor's mark from its environment, and the run went on with
+   * its errors unread. The tree tells the game from its workers, which have it between them and the editor.
+   * Read once for each set of announced games, since the tree lists every process on the machine
+   * and takes seconds to read on a loaded one.
+   */
+  private async tieThePlayedGame(run: GodotProcess): Promise<void> {
+    if (!run.throughEditor || run.errorReport !== undefined || run.announcedPid !== undefined) {
+      return;
+    }
+    const announced = runtimesAnnounced().running;
+    if (this.announcedPidOf(run, announced) !== undefined || !stillRunning(run)) {
+      return;
+    }
+    const among = this.announcedOfTheRunsProject(run, announced)
+      .map((one) => one.pid)
+      .sort((one, other) => one - other)
+      .join(',');
+    if (among === '' || run.treeReadFor === among) {
+      return;
+    }
+    run.treeReadFor = among;
+    await this.tiedThroughTheTree(run, announced);
+  }
+
+  /**
    * `announcedPidOf` continued through the process tree: the run's own game when nothing else
    * could tie it, at the cost of asking the operating system for the tree, which lists every process
    * on the machine. Asked only when there is something to decide between, and the tie sticks.
@@ -7141,6 +7222,7 @@ class GodotServer {
     if (!run) {
       return this.createErrorResponse(this.nothingOfOursIsRunning());
     }
+    await this.tieThePlayedGame(run);
     this.drainEditorOutput(run);
     this.drainTranscript(run);
     // A run picked up alive and since ended, caught here rather than left reading as running. The
@@ -7250,6 +7332,11 @@ class GodotServer {
             : 'The editor was already playing this when this server reached it, and the server that started it left no transcript, so this is not the run from its start: what it printed before that is only in the editor. It is the run the editor is holding now, which is the one the debug_* tools answer for.',
       );
     }
+    if (errorsUnread(run)) {
+      notes.push(
+        "The editor plays this run and no report from its game's runtime addon has been found, so what the game raised with push_error and the engine's own errors are not counted here: the editor's debugger relays what a game prints and not what it reports. errors counts what was heard, and clean is left out rather than said. A game with the runtime addon writes that report once it announces itself.",
+      );
+    }
     if (run.consoleLost === true) {
       const back = this.dapClient?.isConnected() === true;
       notes.push(
@@ -7285,13 +7372,11 @@ class GodotServer {
       pid: run.pid ?? announced ?? run.announcedPid ?? null,
       errors: run.log.count('error'),
       warnings: run.log.count('warning'),
-      // Undefined rather than true once the console has gone, because clean is a claim about the
-      // run and this is a count of what was heard. A verdict read off a source that stopped
-      // arriving is the wrong answer said confidently, and clean is the field a gate reads.
-      clean: run.consoleLost === true ? undefined : run.log.count('error') === 0,
+      clean: cleanVerdict(run),
       // Said as its own field as well as in the note, so a caller checking one value has one to
       // check: absent means the console was arriving throughout.
       consoleLost: run.consoleLost === true ? true : undefined,
+      errorsUnread: errorsUnread(run) ? true : undefined,
       // Three answers and not two. Null is a game this session knows is running; an object is one
       // it knows is held, whether the adapter said so or the runtime did; and absent with
       // heldUnknown beside it is a session that connected after a stop, asked, and could not find
@@ -7368,6 +7453,7 @@ class GodotServer {
     if (elsewhere !== null) {
       return elsewhere;
     }
+    await this.tieThePlayedGame(stopped);
     this.drainEditorOutput(stopped);
     this.drainTranscript(stopped);
     // Read before the stop, since a game that goes on the stop is one that was running.
@@ -7407,7 +7493,7 @@ class GodotServer {
       endedPid,
       throughEditor: stopped.throughEditor,
       exitSignal: stopped.exitSignal,
-      errors: stopped.log.count('error'),
+      clean: cleanVerdict(stopped),
     });
     return this.jsonTextResponse({
       stopped: verdict.stopped,
@@ -7435,6 +7521,7 @@ class GodotServer {
       errors: stopped.log.count('error'),
       warnings: stopped.log.count('warning'),
       clean: verdict.clean,
+      errorsUnread: errorsUnread(stopped) ? true : undefined,
       note: verdict.withChildren
         ? `${verdict.note} ${aboutTheChildren(ended, stopped.throughEditor)}`
         : verdict.note,
@@ -8480,12 +8567,17 @@ class GodotServer {
       const seconds = Math.round((Date.now() - run.startedAt) / 1000);
       return `The game this server started (${which}) has been running for ${seconds}s and has not announced its runtime, so there is nothing to talk to. A game that keeps the runtime off, as a project's own loader can for some scenes, never announces; editor_output says what it has printed.`;
     }
-    const endpoint = await announcedSince(project, new Set(already.map((one) => one.pid)), {
+    const fresh = await announcedSince(project, new Set(already.map((one) => one.pid)), {
       budgetMs: Math.min(budgetMs, remaining),
       // The run held, which this call took above: another call replacing it mid-wait replaces this.
       accept: (one) => this.isTheGameOf(this.activeProcess, one, project),
       giveUp: () => this.activeProcess !== run || this.dapClient?.isStopped() === true || !stillRunning(run),
     });
+    const endpoint = await this.theRunsAmong(run, fresh);
+    if (fresh.length > 0 && endpoint === null) {
+      // Several, and the tree told none of them as the run's: the choice after this names them.
+      return null;
+    }
     if (endpoint !== null) {
       // Through a call because the wait above can overlap another call tying the same run, and a
       // second tie would note a second, later boot time for it.
