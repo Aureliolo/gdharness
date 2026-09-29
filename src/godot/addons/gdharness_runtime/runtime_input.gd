@@ -1,7 +1,8 @@
 extends RefCounted
 
 ## Input handed to the running game as if a player had given it: actions, keys, the mouse, and
-## a whole click on a Control or a 3D node found by path.
+## a whole click on a Control or a 3D node found by path. Typing and choosing from a menu, which
+## reach the game the way a keyboard does, are in runtime_typing.gd.
 
 const Values = preload("runtime_values.gd")
 
@@ -10,17 +11,11 @@ const Values = preload("runtime_values.gd")
 ## reports are the same place by construction rather than by agreement.
 const Queries = preload("runtime_queries.gd")
 const Read = preload("reading.gd")
-const Menus = preload("runtime_menus.gd")
 const Screen = preload("runtime_screen.gd")
 const Targets = preload("runtime_targets.gd")
-const Words = preload("runtime_words.gd")
 
 ## The distance from a capital letter to its small one in Unicode. A keycode holds the capital.
 const TO_SMALL: int = 32
-
-## The two characters a field reads as keys rather than as text.
-const NEWLINE: int = 10
-const TAB: int = 9
 
 ## What a game started without a window gets whatever the project settings say, and the usual
 ## reason a control is out of reach. Only worth telling somebody when it is what they have.
@@ -176,154 +171,6 @@ func inject_key(params: Dictionary) -> Dictionary:
 	}
 
 
-## Types [param text] wherever the focus is, one key event per character.
-##
-## A key on its own cannot do this and should not try: which character a key produces is the
-## keyboard layout's business, and shift over a digit is an exclamation mark on one layout and
-## something else on the next. Given the character instead there is nothing to guess, so a field
-## can be filled with anything a player could type, this project's own two typefaces included.
-##
-## A newline and a tab are the two characters a field reads as keys rather than as text, so they
-## are sent as those keys and carry no character of their own: typing a name and submitting it is
-## one call rather than two.
-##
-## Pushed into the viewport for the reason [method click] is, and it matters more here: the focus
-## is what decides where a character lands, so a caller that clicked a field and then typed would
-## otherwise have both waiting in the same queue with nothing said about the order.
-##
-## [code]replace[/code] is for a field that already says something, which is most of them: typing
-## lands at the caret, so a spin box reading 2.1 typed "0.3" at reads 2.10.3 and parses back to
-## 2.1, and the answer said four characters had gone in. What the field holds afterwards is read
-## back now rather than echoed from the request, so a call that typed somewhere unhelpful says so.
-func inject_text(params: Dictionary) -> Dictionary:
-	var text: String = str(params.get("text", ""))
-	var over: bool = Read.as_bool(params.get("replace", false))
-	if text.is_empty() and not over:
-		return {"type": "error", "message": "text needs something to type, or replace to empty a field"}
-
-	var viewport: Viewport = _host.get_tree().root
-	var focused: Control = viewport.gui_get_focus_owner()
-	var shut: String = _shut_to_typing(focused)
-	if not shut.is_empty():
-		return {"type": "error", "message": shut}
-
-	var replaced: bool = over and _select_everything(focused)
-	# Emptying a field is a real thing to ask for and the one shape of filling one in that types no
-	# characters. The selection is standing, so the key a player presses over one is what clears it.
-	if replaced and text.is_empty():
-		_press(viewport, _held_down(KEY_DELETE))
-	for index: int in text.length():
-		_press(viewport, _typed(text.unicode_at(index)))
-
-	# Where it went, which is the one thing a caller cannot see from here. Null is a game reading
-	# keys for itself with nothing focused, which is a real thing to be typing at.
-	var into: Variant = null
-	if focused != null:
-		into = str(focused.get_path())
-
-	return {
-		"type": "input_injected",
-		"input_type": "text",
-		"text": text,
-		"characters": text.length(),
-		"into": into,
-		"replaced": replaced,
-		"holds": _what_it_holds(focused),
-	}
-
-
-## Selects everything in [param focused] so the next character typed writes over it, and answers
-## whether there was a field to select in.
-##
-## Through the control rather than through a Ctrl+A, which is the one part of filling a field that
-## cannot honestly be sent as a key: the shortcut is Cmd+A on macOS and is an [InputMap] action a
-## project is free to unbind, and a caller asking for the field to be replaced would then be typing
-## on the end of what was there. The replacement itself is still every character a player types.
-static func _select_everything(focused: Control) -> bool:
-	var field: LineEdit = focused as LineEdit
-	if field != null:
-		field.select_all()
-		return true
-	var box: TextEdit = focused as TextEdit
-	if box == null:
-		return false
-	box.select_all()
-	return true
-
-
-## What the field says now, or null where the focus is not a field at all.
-##
-## A spin box rewrites its own text out of the number it parsed, so this is the only thing that
-## says whether what was typed became what the field means. A secret field answers with its mask,
-## which still says how many characters it took.
-static func _what_it_holds(focused: Control) -> Variant:
-	var field: LineEdit = focused as LineEdit
-	if field != null:
-		return Words.masked(field) if field.secret else field.text
-	var box: TextEdit = focused as TextEdit
-	if box == null:
-		return null
-	return box.text
-
-
-## Why nothing typed would reach [param focused], or "" when it would.
-##
-## Having the focus is not the same as being edited. Since Godot 4.4 a field is focused and shut
-## until something opens it, which is what a click does and what submitting undoes: press Enter in
-## a box and it keeps the focus and drops every key that arrives afterwards. Typing into one
-## answered that the characters had gone in and put nothing anywhere, which is the shape a refusal
-## exists to prevent. Measured on a spin box in a real game: `has_focus` true, `is_editing` false,
-## three characters reported and the field unchanged.
-##
-## Only a [LineEdit] is refused: it is the one control the engine will say this about, since
-## [TextEdit] has no editing state of its own. A game reading keys for itself is typed at with
-## nothing focused at all, and that is not this tool's business to judge.
-static func _shut_to_typing(focused: Control) -> String:
-	var field: LineEdit = focused as LineEdit
-	if field == null or field.is_editing():
-		return ""
-	return (
-		"%s has the focus and is not being edited, so nothing typed lands in it. Click it first."
-		% focused.get_path()
-	)
-
-
-## The key press that produces [param glyph], as a keyboard would send it.
-## A whole press: down, then the release, so nothing is left held down behind the caller.
-static func _press(viewport: Viewport, down: InputEventKey) -> void:
-	viewport.push_input(down)
-	var up: InputEventKey = down.duplicate()
-	up.pressed = false
-	viewport.push_input(up)
-
-
-## A key held down by its keycode, for the ones that stand for an edit rather than a character.
-static func _held_down(code: Key) -> InputEventKey:
-	var event: InputEventKey = InputEventKey.new()
-	event.pressed = true
-	event.keycode = code
-	event.physical_keycode = code
-	event.key_label = code
-	return event
-
-
-func _typed(glyph: int) -> InputEventKey:
-	var event: InputEventKey = InputEventKey.new()
-	event.pressed = true
-	if glyph == NEWLINE:
-		event.keycode = KEY_ENTER
-	elif glyph == TAB:
-		event.keycode = KEY_TAB
-	else:
-		var capital: int = String.chr(glyph).to_upper().unicode_at(0)
-		event.keycode = capital as Key
-		event.shift_pressed = capital != glyph
-		event.unicode = glyph
-	event.physical_keycode = event.keycode
-	event.key_label = event.keycode
-	return event
-
-
 ## The character a key produces, or nothing for a key that produces none.
 ##
 ## Godot's keycodes below [constant KEY_SPECIAL] are the Unicode code points of the keys that
@@ -436,18 +283,15 @@ func inject_mouse_motion(params: Dictionary) -> Dictionary:
 	}
 
 
-## Scrolls whatever is holding [param control] until it is on screen, and answers whether
-## anything moved.
-##
-## Innermost container first and outwards, because ensuring visibility inside an inner one moves
-## the control within the outer one, so the outer has to be asked after the inner has finished
-## moving it. A control with no ScrollContainer over it moves nothing and answers false, which is
-## what keeps the refusal below saying the right thing about a control that is simply off screen.
 ## Whether [param centre] is somewhere a click can reach it: inside the viewport, and inside every
 ## ScrollContainer between the control and the root, each of which clips what it holds.
 static func _in_sight(control: Control, viewport: Viewport, centre: Vector2) -> bool:
-	if not viewport.get_visible_rect().has_point(centre):
-		return false
+	return viewport.get_visible_rect().has_point(centre) and _clipped_by(control, centre) == null
+
+
+## The ScrollContainer between [param control] and the root that clips [param centre] away from it,
+## or null when none does.
+static func _clipped_by(control: Control, centre: Vector2) -> ScrollContainer:
 	var walking: Node = control.get_parent()
 	while walking != null:
 		var holder: ScrollContainer = walking as ScrollContainer
@@ -456,20 +300,35 @@ static func _in_sight(control: Control, viewport: Viewport, centre: Vector2) -> 
 		if holder != null:
 			var seen: Rect2 = holder.get_global_transform_with_canvas() * Rect2(Vector2.ZERO, holder.size)
 			if not seen.has_point(centre):
-				return false
+				return holder
 		walking = walking.get_parent()
-	return true
+	return null
 
 
-static func _scroll_into_view(control: Control) -> bool:
+## Scrolls whatever is holding [param control] until it is on screen, and answers whether the view
+## moved.
+##
+## Innermost container first and outwards, a frame apart. A container moves what it holds on the
+## next layout pass rather than inside the call, and the next one out works out where the control is
+## from where it is drawn, so asked in the same frame it scrolled to where the control had been.
+## Moved means a scroll value changed: a container asked to show what it already shows moves
+## nothing, and answering true for it said the view had moved when it had not.
+func _scroll_into_view(control: Control) -> bool:
 	var moved: bool = false
-	var walking: Node = control.get_parent()
+	var walking: Variant = control.get_parent()
 	while walking != null:
-		var holder: ScrollContainer = walking as ScrollContainer
+		var step: Node = walking
+		var holder: ScrollContainer = step as ScrollContainer
 		if holder != null:
+			var before: Vector2i = Vector2i(holder.scroll_horizontal, holder.scroll_vertical)
 			holder.ensure_control_visible(control)
-			moved = true
-		walking = walking.get_parent()
+			if Vector2i(holder.scroll_horizontal, holder.scroll_vertical) != before:
+				moved = true
+				await _host.get_tree().process_frame
+				# A panel that rebuilds itself can go in the frame this waited.
+				if not is_instance_valid(control) or not is_instance_valid(holder):
+					return moved
+		walking = step.get_parent()
 	return moved
 
 
@@ -514,8 +373,9 @@ func click(params: Dictionary) -> Dictionary:
 			"message": "%s is a %s, not a Control or a Node3D" % [node_path, node.get_class()]
 		}
 	var control: Control = node
-	if not control.is_visible_in_tree():
-		return {"type": "error", "message": "%s is not visible, so nothing can click it" % node_path}
+	var unmoved: String = _takes_no_click(control, node_path)
+	if not unmoved.is_empty():
+		return {"type": "error", "message": unmoved}
 
 	# In the control's own viewport first, which is the space its scrolling happens in.
 	var own: Viewport = control.get_viewport()
@@ -532,33 +392,30 @@ func click(params: Dictionary) -> Dictionary:
 	# scrolled past: the button was at y 69 and its container started at y 166.
 	var scrolled: bool = false
 	if not _in_sight(control, own, local):
-		scrolled = _scroll_into_view(control)
-		if scrolled:
-			# A container moves its child on the next layout pass rather than inside the call.
-			await _host.get_tree().process_frame
-			local = control.get_global_transform_with_canvas() * (control.size * 0.5)
+		scrolled = await _scroll_into_view(control)
+		var left: String = Values.afterwards(control)
+		if left != "in_tree":
+			return {
+				"type": "error",
+				"message":
+				(
+					"%s was %s while it was being scrolled into view, so nothing was clicked"
+					% [node_path, "freed" if left == "freed" else "taken out of the tree"]
+				)
+			}
+		local = control.get_global_transform_with_canvas() * (control.size * 0.5)
 
 	var reached: Dictionary = Screen.reach(own, local)
 	var viewport: Viewport = reached["viewport"]
 	var centre: Vector2 = reached["point"]
 	var position: Vector2 = viewport.get_final_transform() * centre
-	# The GUI only delivers to what is inside the viewport, so a centre outside it would be a
-	# click that silently reached nothing. A game with no window has a 64 by 64 viewport
-	# whatever the project settings say, which is the usual reason to be here and is not
-	# something the caller can read off the rect on its own. Its own viewport as well, since a
-	# control outside its SubViewport is drawn nowhere.
-	if not viewport.get_visible_rect().has_point(centre) or not own.get_visible_rect().has_point(local):
-		var why: String = _no_window_note(viewport)
-		if scrolled:
-			why = ". It was scrolled as far as what holds it goes and is still out there"
-		return {
-			"type": "error",
-			"message":
-			(
-				"%s has its centre at %s, outside the viewport %s, so nothing can click it%s"
-				% [node_path, centre, viewport.get_visible_rect(), why]
-			)
-		}
+	# The GUI only delivers to what is inside the viewport, so a centre outside it would be a click
+	# that silently reached nothing: outside the viewport it is drawn in, outside the one that shows
+	# that on the screen, or clipped away by a ScrollContainer that would not scroll it into view.
+	# Each is said of the viewport or container at fault, with its own rect and the point in it.
+	var out_there: String = _out_of_reach(control, node_path, local, reached, scrolled)
+	if not out_there.is_empty():
+		return {"type": "error", "message": out_there}
 	var button: int = _resolve_mouse_button(params.get("button", MOUSE_BUTTON_LEFT))
 	if button < 0:
 		return _no_such_button(params.get("button"))
@@ -594,7 +451,7 @@ func click(params: Dictionary) -> Dictionary:
 	# What became of the control: still in the tree, taken out of it, or freed. A button that
 	# opened another screen is the second or the third, and the caller wants to hear that
 	# rather than guess it from a tree that has changed shape.
-	var afterwards: String = _afterwards(control)
+	var afterwards: String = Values.afterwards(control)
 
 	var answer: Dictionary = {
 		"type": "clicked",
@@ -612,13 +469,70 @@ func click(params: Dictionary) -> Dictionary:
 	return answer
 
 
+## Why [param control] would take no click a player gave it, or "" when it would.
+##
+## The last two answered landed, since the pointer reaches the control, while the press did nothing,
+## measured on 4.7.2: a disabled button keeps its mouse filter and ignores the press, and a control
+## that does not process while the game is paused is hovered and never handed the event.
+func _takes_no_click(control: Control, node_path: String) -> String:
+	if not control.is_visible_in_tree():
+		return "%s is not visible, so nothing can click it" % node_path
+	var button: BaseButton = control as BaseButton
+	if button != null and button.disabled:
+		return "%s is disabled, so clicking it presses nothing" % node_path
+	if not control.can_process():
+		if _host.get_tree().paused:
+			return (
+				"the game is paused and %s does not process while it is, so clicking it does nothing"
+				% node_path
+			)
+		return "%s has its processing disabled, so clicking it does nothing" % node_path
+	return ""
+
+
+## Why a click at [param control]'s centre would reach nothing, or "" when it would reach it: the
+## centre outside the viewport it is drawn in, at [param local]; outside the viewport showing that
+## one on the screen, which [param reached] holds with the centre there; or clipped away by a
+## ScrollContainer holding it. A refusal names the viewport or container at fault and the point in
+## that one's own space, since naming another printed a point inside the rect it was said to be
+## outside. The note on a game with no window goes only on the viewport that is the window's.
+func _out_of_reach(
+	control: Control, node_path: String, local: Vector2, reached: Dictionary, scrolled: bool
+) -> String:
+	var after: String = (
+		". It was scrolled as far as what holds it goes and is still out there" if scrolled else ""
+	)
+	for place: Array in [[control.get_viewport(), local], [reached["viewport"], reached["point"]]]:
+		var viewport: Viewport = place[0]
+		var point: Vector2 = place[1]
+		if viewport.get_visible_rect().has_point(point):
+			continue
+		var which: String = "" if viewport == _host.get_tree().root else " of %s" % viewport.get_path()
+		return (
+			"%s has its centre at %s, outside the viewport%s %s, so nothing can click it%s%s"
+			% [node_path, point, which, viewport.get_visible_rect(), after, _no_window_note(viewport)]
+		)
+	var holder: ScrollContainer = _clipped_by(control, local)
+	if holder == null:
+		return ""
+	return (
+		"%s has its centre at %s, outside the part of %s that shows it, so nothing can click it%s"
+		% [
+			node_path,
+			local,
+			holder.get_path(),
+			after if scrolled else ". It could not be scrolled into view",
+		]
+	)
+
+
 ## What to add to a refusal about a point outside the viewport, when the reason is that nobody
 ## gave this game a window. The rect on its own does not say it, and it is the usual reason.
 ##
 ## The size is only claimed where it is true: the rect is printed beside this, so naming 64 by 64
 ## over a viewport somebody has resized says two different things in one sentence.
 func _no_window_note(viewport: Viewport) -> String:
-	if _host.get_tree().root.can_draw():
+	if viewport != _host.get_tree().root or _host.get_tree().root.can_draw():
 		return ""
 	if viewport.get_visible_rect().size == HEADLESS_VIEWPORT:
 		return (
@@ -626,118 +540,6 @@ func _no_window_note(viewport: Viewport) -> String:
 			+ "the project settings say: run it with a window to reach this control"
 		)
 	return ". This game has no window: run it with a window to reach this control"
-
-
-## Chooses an item out of a menu, by what it says or by where it is in the list.
-##
-## A menu's items are drawn rather than built, so there is no node under the pointer to aim at and
-## no rectangle to ask for: [PopupMenu] exposes their text, their ids and which one has the focus,
-## and nothing about where any of them is. So a click cannot reach one, and a whole click on the
-## [OptionButton] in front of it opens the menu on the press and closes it again on the release.
-## Every language picker, every filter and every dropdown in a game was unreachable, and the way
-## past it was to call `select` and emit `item_selected`, which sets a number and runs none of the
-## engine's own path.
-##
-## Chosen the way a keyboard chooses: the item takes the focus and then Enter presses it, which is
-## the same route through [PopupMenu] a pointer takes and which needs no geometry, so it works in a
-## game with no window as well.
-##
-## [param path] may be the menu or the button in front of it. Naming the button is what a caller
-## has, since the menu is an internal child with a generated name that changes between runs.
-func choose(params: Dictionary) -> Dictionary:
-	var node_path: String = str(params.get("path", ""))
-	if node_path.is_empty():
-		return {"type": "error", "message": "Node path required"}
-	var standing: Dictionary = Values.node_at(_host.get_tree().root, node_path)
-	if standing.has("message"):
-		return standing
-	var node: Node = standing["node"]
-
-	var menu: PopupMenu = Menus.menu_of(node)
-	if menu == null:
-		return {
-			"type": "error",
-			"message":
-			(
-				"%s is a %s, which is neither a PopupMenu nor something holding one"
-				% [node_path, node.get_class()]
-			)
-		}
-
-	if not params.has("index") and str(params.get("text", "")).is_empty():
-		return {
-			"type": "error",
-			"message":
-			(
-				"%s needs the item named, by text or index. It holds: %s"
-				% [node_path, ", ".join(Menus.items_of(menu))]
-			)
-		}
-
-	var index: int = Menus.wanted_item(menu, params)
-	if index < 0:
-		return {
-			"type": "error",
-			"message": "%s has no such item. It holds: %s" % [node_path, ", ".join(Menus.items_of(menu))]
-		}
-	if menu.is_item_separator(index):
-		var heading: String = Words.item_says(menu, index).strip_edges()
-		return {
-			"type": "error",
-			"message":
-			(
-				"%s item %d is a separator, not a choice" % [node_path, index]
-				if heading.is_empty()
-				else (
-					"%s item %d, %s, is a separator heading the items below it, not a choice"
-					% [node_path, index, heading]
-				)
-			)
-		}
-	if menu.is_item_disabled(index):
-		return {
-			"type": "error",
-			"message": "%s item %d, %s, is disabled" % [node_path, index, Words.item_says(menu, index)]
-		}
-
-	# Shown first, because a menu nobody has opened has no focus to move and Enter would go to
-	# whatever is behind it. An OptionButton opens its own; a bare PopupMenu is popped where it
-	# already sits, which leaves a menu that was already open where it is.
-	var opened: bool = Menus.open_the_menu(node, menu)
-	await _host.get_tree().process_frame
-
-	# Read before the press, because the press can take the menu away: a game that rebuilds its
-	# settings screen on item_selected frees the button and its menu inside the pick, and reading
-	# the item afterwards was an engine error in the game's log and an empty answer to a pick that
-	# had taken.
-	var answer: Dictionary = {
-		"type": "chosen",
-		"path": node_path,
-		"index": index,
-		"text": Words.item_says(menu, index),
-		"id": menu.get_item_id(index),
-		"opened": opened,
-		"menu": str(menu.get_path()),
-	}
-	menu.scroll_to_item(index)
-	menu.set_focused_item(index)
-	# Through Input rather than pushed at the menu, which is how a keyboard reaches an open one: a
-	# popup is a Window, it takes the focus when it opens, and Input delivers to whichever window
-	# has it. Pushed straight at the menu the event arrived and nothing happened.
-	Input.parse_input_event(_accept(true))
-	await _host.get_tree().process_frame
-	Input.parse_input_event(_accept(false))
-	await _host.get_tree().process_frame
-
-	answer["control_afterwards"] = _afterwards(node)
-	# What the button in front of the menu reads now, which is the answer to "did it take": a menu
-	# item that fired changes the thing holding it, and nothing else about the press says so. A
-	# button the pick took away has nothing to read, and that it went is the answer.
-	if answer["control_afterwards"] == "in_tree" and node is OptionButton:
-		var chooser: OptionButton = node
-		answer["selected"] = chooser.get_selected()
-		answer["shows"] = Words.said_by(chooser)
-	return answer
 
 
 ## Sends a click's press or release into [param viewport], through Input when that is the game's
@@ -760,27 +562,6 @@ func _press_button(viewport: Viewport, event: InputEventMouseButton) -> void:
 		Input.flush_buffered_events()
 	else:
 		viewport.push_input(event)
-
-
-## What became of [param node] once an input it was given has run: still in the tree, taken out
-## of it, or freed. Untyped, because a freed reference handed to a typed parameter is itself the
-## engine error this is here to avoid.
-static func _afterwards(node: Variant) -> String:
-	if not is_instance_valid(node):
-		return "freed"
-	if not node is Node:
-		return "removed"
-	var placed: Node = node
-	return "in_tree" if placed.is_inside_tree() else "removed"
-
-
-func _accept(pressed: bool) -> InputEventKey:
-	var event: InputEventKey = InputEventKey.new()
-	event.keycode = KEY_ENTER
-	event.physical_keycode = KEY_ENTER
-	event.key_label = KEY_ENTER
-	event.pressed = pressed
-	return event
 
 
 ## A whole click aimed at where a 3D node is drawn, for a game that picks with a ray out of the
@@ -823,9 +604,21 @@ func _click_in_the_world(node_path: String, item: Node3D, params: Dictionary) ->
 			)
 		}
 
-	var reached: Dictionary = Screen.reach(viewport, aim)
-	var arriving: Viewport = reached["viewport"]
-	var reached_point: Vector2 = reached["point"]
+	var out: Array[Dictionary] = Screen.steps_out(viewport, aim)
+	var arriving: Viewport = out.back()["viewport"]
+	var reached_point: Vector2 = out.back()["point"]
+	# Checked where the pointer arrives as well as where the node is drawn: a room in a SubViewport
+	# larger than the container or the window showing it has points inside the SubViewport that are
+	# outside everything on the screen, and a click at one reached nothing.
+	if arriving != viewport and not arriving.get_visible_rect().has_point(reached_point):
+		return {
+			"type": "error",
+			"message":
+			(
+				"%s is drawn at %s, which is %s on the screen, outside the viewport %s, so nothing can click it%s"
+				% [node_path, aim, reached_point, arriving.get_visible_rect(), _no_window_note(arriving)]
+			)
+		}
 	var position: Vector2 = arriving.get_final_transform() * reached_point
 	var button: int = _resolve_mouse_button(params.get("button", MOUSE_BUTTON_LEFT))
 	if button < 0:
@@ -835,10 +628,8 @@ func _click_in_the_world(node_path: String, item: Node3D, params: Dictionary) ->
 	arriving.push_input(_motion(position, _arrive(position)))
 	# Read before the press, for the reason the Control click reads it: what the caller needs to
 	# know is whether a panel is sitting over the room, and the press is what would change it.
-	var hovered: Control = viewport.gui_get_hovered_control()
-	var hovered_path: Variant = null
-	if hovered != null:
-		hovered_path = str(hovered.get_path())
+	var through: Dictionary = _through_the_interface(out)
+	var hovered_path: Variant = through["hovered"]
 
 	_press_button(arriving, _button(position, button, true, double))
 	await _host.get_tree().process_frame
@@ -855,9 +646,64 @@ func _click_in_the_world(node_path: String, item: Node3D, params: Dictionary) ->
 		# The interface did not take it, so it reached the game's own input. As close to "it
 		# landed" as anything outside the game can get, and said in the same word the Control
 		# click says it in.
-		"landed": hovered == null,
+		"landed": through["landed"],
 		"camera": found["camera"],
 	}
+
+
+## Whether a pointer on its way out through [param out], the steps [method Screen.steps_out]
+## answers, gets past the interface in every viewport, as {"landed", "hovered"}: the path of the
+## control that took it, or of the one under it that let it by, or null.
+##
+## In the viewport the node is drawn in, a control under the pointer takes it unless it and every
+## control holding it let the pointer pass. In each viewport outside that one, the pointer has to be
+## over what shows the one inside: the SubViewportContainer, with nothing drawn over it, or inside
+## the embedded window. Read in the first viewport alone, a click beside a container that is smaller
+## than what it shows, or under a panel drawn over the container, answered landed.
+static func _through_the_interface(out: Array[Dictionary]) -> Dictionary:
+	var first_under: Variant = null
+	for step: Dictionary in out:
+		var viewport: Viewport = step["viewport"]
+		var through: Variant = step["through"]
+		var hovered: Control = viewport.gui_get_hovered_control()
+		if through is Window:
+			var window: Window = through
+			var point: Vector2 = step["point"]
+			if not Rect2(window.position, window.size).has_point(point):
+				return {"landed": false, "hovered": _path_or_null(hovered)}
+			continue
+		if through is SubViewportContainer:
+			if hovered != through:
+				return {"landed": false, "hovered": _path_or_null(hovered)}
+			continue
+		if hovered != null and not _passes_on(hovered):
+			return {"landed": false, "hovered": str(hovered.get_path())}
+		if hovered != null and first_under == null:
+			first_under = str(hovered.get_path())
+	return {"landed": true, "hovered": first_under}
+
+
+## Whether a pointer over [param control] goes on past the interface: a control that lets it pass
+## hands it to the one holding it, and one that stops it takes it, up to a control drawn on its own
+## or something that is not a control. Measured on 4.7.2: a HUD over the room letting the pointer
+## pass answered not landed while the game's own input took the press. A script on a control that
+## lets it pass can still take the event for itself, which nothing outside it can see.
+static func _passes_on(control: Control) -> bool:
+	var walk: Node = control
+	while walk is Control:
+		var at: Control = walk
+		if at.get_mouse_filter_with_override() == Control.MOUSE_FILTER_STOP:
+			return false
+		if at.top_level:
+			break
+		walk = at.get_parent()
+	return true
+
+
+static func _path_or_null(node: Node) -> Variant:
+	if node == null:
+		return null
+	return str(node.get_path())
 
 
 ## The buttons a real pointer event carries are the ones held as it happens, and Input keeps that
