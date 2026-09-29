@@ -188,6 +188,12 @@ interface TestSuite {
   readonly discovered: number;
   readonly failures: number;
   readonly errors: number;
+  /**
+   * Failures and errors the suite counts that none of its cases carry: a `before()` or `after()`
+   * that failed, which gdUnit4 adds to the suite's own attributes and writes nowhere else.
+   */
+  readonly hookFailures: number;
+  readonly hookErrors: number;
   readonly skipped: number;
   readonly time: number;
   readonly cases: readonly TestCase[];
@@ -197,6 +203,9 @@ export interface TestReport {
   readonly tests: number;
   readonly failures: number;
   readonly errors: number;
+  /** Summed over the suites, apart from the cases' own. */
+  readonly hookFailures: number;
+  readonly hookErrors: number;
   readonly skipped: number;
   readonly time: number;
   readonly suites: readonly TestSuite[];
@@ -253,13 +262,20 @@ export function parseJUnit(xml: string): TestReport {
     const cases = suite.children
       .filter((child) => child.name === 'testcase')
       .map((element) => caseOf(suite, element));
+    const failures = cases.filter((entry) => entry.status === 'failed').length;
+    const errors = cases.filter((entry) => entry.status === 'error').length;
     return {
       name: suite.attributes['name'] ?? '',
       path: pathOf(suite),
       tests: cases.length,
       discovered: count(suite.attributes, 'tests'),
-      failures: cases.filter((entry) => entry.status === 'failed').length,
-      errors: cases.filter((entry) => entry.status === 'error').length,
+      failures,
+      errors,
+      // Measured with gdUnit4 on 4.7.2: a `before()` whose assertion failed left both cases passing
+      // and wrote `failures="1"` on the suite alone, so a count taken from the cases said nothing
+      // failed beside an exit code saying something had.
+      hookFailures: Math.max(0, count(suite.attributes, 'failures') - failures),
+      hookErrors: Math.max(0, count(suite.attributes, 'errors') - errors),
       skipped: cases.filter((entry) => entry.status === 'skipped').length,
       time: count(suite.attributes, 'time'),
       cases,
@@ -272,10 +288,36 @@ export function parseJUnit(xml: string): TestReport {
     tests: all.length,
     failures: all.filter((entry) => entry.status === 'failed').length,
     errors: all.filter((entry) => entry.status === 'error').length,
+    hookFailures: suites.reduce((sum, suite) => sum + suite.hookFailures, 0),
+    hookErrors: suites.reduce((sum, suite) => sum + suite.hookErrors, 0),
     skipped: all.filter((entry) => entry.status === 'skipped').length,
     time: suites.reduce((sum, suite) => sum + suite.time, 0),
     suites,
   };
+}
+
+/** A hook's failure as the runner printed it, which is the only place its message is. */
+export interface HookFailure {
+  /** The hook, `before` or `after`. */
+  readonly hook: string;
+  /** The suite's script. */
+  readonly path: string;
+  readonly line: number;
+  readonly message: string;
+}
+
+// Printed under the suite's `finalize()` report, on one line with the location once colours are off:
+// `  Expecting: 'true' but is 'false'	at 'before' in res://test/hooked_test.gd:5`.
+const HOOK_FAILURE = /^\s*(.*?)\s*\tat '(before|after)' in (res:\/\/.+?):(\d+)\s*$/;
+
+/** Every hook failure [param printed] names, in the order printed. */
+export function hookFailuresPrinted(printed: readonly string[]): HookFailure[] {
+  return printed.flatMap((line) => {
+    const found = HOOK_FAILURE.exec(line);
+    return found === null
+      ? []
+      : [{ hook: found[2] ?? '', path: found[3] ?? '', line: Number(found[4]), message: found[1] ?? '' }];
+  });
 }
 
 /** What gdUnit4 prints when it was pointed at something, and there was nothing there to run. */

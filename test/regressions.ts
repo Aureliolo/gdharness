@@ -19030,6 +19030,71 @@ async function testGdUnitRunner(): Promise<void> {
         }
         rmSync(join(projectDir, 'test', 'hollow_test.gd'));
 
+        writeFileSync(
+          join(projectDir, 'test', 'hooked_test.gd'),
+          'extends GdUnitTestSuite\n\n\nfunc before() -> void:\n\tassert_bool(false).is_true()\n\n\nfunc test_after_a_failed_hook() -> void:\n\tassert_int(1).is_equal(1)\n',
+        );
+        writeFileSync(
+          join(projectDir, 'test', 'crashing_test.gd'),
+          'extends GdUnitTestSuite\n\n\nfunc test_crashes() -> void:\n\tvar nothing: Node = null\n\tprint(nothing.get_name())\n\tassert_int(1).is_equal(1)\n',
+        );
+        // A before() that failed: gdUnit4 counts it on the suite and on no case, so it was answered as
+        // no failure and a passed suite beside exit 100. And a runtime error inside a case, which
+        // gdUnit4 does report as that case's error, held so it stays so.
+        const asked = async (suite: string): Promise<unknown> => {
+          const answer = JSON.parse(
+            await call('project_test', { projectPath: projectDir, path: `test/${suite}.gd` }, ENGINE_CALL_TIMEOUT_MS * 3),
+          ) as unknown;
+          rmSync(join(projectDir, 'test', `${suite}.gd`));
+          return answer;
+        };
+        const hooked = await asked('hooked_test');
+        assert.deepEqual(
+          [get(hooked, 'passed'), get(hooked, 'suitesPassed'), get(hooked, 'suites', 0, 'hookFailures')],
+          [false, 0, 1],
+          JSON.stringify(hooked, null, 2),
+        );
+        assert.deepEqual(
+          get(hooked, 'hookFailures'),
+          [
+            {
+              suite: 'hooked_test',
+              hook: 'before',
+              path: 'res://test/hooked_test.gd',
+              line: 5,
+              message: "Expecting: 'true' but is 'false'",
+            },
+          ],
+          JSON.stringify(hooked, null, 2),
+        );
+        // Orphans left early in a run that prints a great deal after: counted off what was printed,
+        // they were lost with everything before the newest two hundred lines.
+        mkdirSync(join(projectDir, 'test', 'long'));
+        writeFileSync(
+          join(projectDir, 'test', 'long', 'a_leaves_test.gd'),
+          'extends GdUnitTestSuite\n\n\nfunc test_leaves_a_node() -> void:\n\tvar kept: Node = Node.new()\n\tassert_object(kept).is_not_null()\n',
+        );
+        writeFileSync(
+          join(projectDir, 'test', 'long', 'z_talks_test.gd'),
+          'extends GdUnitTestSuite\n\n\nfunc test_talks() -> void:\n\tfor index: int in range(300):\n\t\tprint("line ", index)\n\tassert_int(1).is_equal(1)\n',
+        );
+        const long = JSON.parse(
+          await call('project_test', { projectPath: projectDir, path: 'test/long' }, ENGINE_CALL_TIMEOUT_MS * 3),
+        ) as unknown;
+        rmSync(join(projectDir, 'test', 'long'), { recursive: true, force: true });
+        assert.deepEqual(
+          asArray(get(long, 'warnings') ?? []).map((warning) => get(warning, 'path')),
+          ['res://test/long/a_leaves_test.gd'],
+          JSON.stringify(long, null, 2),
+        );
+
+        const crashed = await asked('crashing_test');
+        assert.deepEqual(
+          [get(crashed, 'passed'), get(crashed, 'errors'), get(crashed, 'failed', 0, 'status')],
+          [false, 1, 'error'],
+          JSON.stringify(crashed, null, 2),
+        );
+
         // Nothing stopped early in the runs above, and the answer says so by leaving the field
         // out. Asserted here so the presence of it below means something.
         assert.equal(get(run, 'notRun'), undefined, JSON.stringify(run, null, 2));

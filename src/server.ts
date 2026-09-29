@@ -99,6 +99,7 @@ import { engineExtras, type HeadlessOutcome, runImport, runOperation } from './h
 import { EDITOR_READS, ENGINE_PASSES, HEADLESS_OPERATIONS } from './headless-operations.js';
 import { DefectsSeen, defectReport, feedbackNotice } from './issues.js';
 import {
+  hookFailuresPrinted,
   orphansPrinted,
   parseJUnit,
   type ScriptError,
@@ -3921,8 +3922,32 @@ class GodotServer {
     // kilobytes of names and timings around the one line saying it passed. Counted instead, so the
     // answer is the size of what went wrong.
     const unclean = report.suites.filter(
-      (suite) => suite.failures > 0 || suite.errors > 0 || suite.skipped > 0 || orphansIn(suite.path) > 0,
+      (suite) =>
+        suite.failures > 0 ||
+        suite.errors > 0 ||
+        suite.hookFailures > 0 ||
+        suite.hookErrors > 0 ||
+        suite.skipped > 0 ||
+        orphansIn(suite.path) > 0,
     );
+    // A hook that failed is counted on its suite and named nowhere in the report, so it is read off
+    // what the run printed. It was answered as no failure at all, and the suite as passed.
+    const hooksPrinted = hookFailuresPrinted(said);
+    const hookFailures = report.suites
+      .filter((suite) => suite.hookFailures + suite.hookErrors > 0)
+      .flatMap((suite) => {
+        const printedHere = hooksPrinted.filter((hook) => hook.path === suite.path);
+        return printedHere.length > 0
+          ? printedHere.map((hook) => ({ suite: suite.name, ...hook }))
+          : [
+              {
+                suite: suite.name,
+                path: suite.path,
+                message:
+                  'gdUnit4 counted a failure in this suite that none of its cases carry, which is what a failed before() or after() leaves, and printed no line saying which.',
+              },
+            ];
+      });
     // gdUnit4 stops a suite at its first failing case unless told otherwise, which is what
     // `failFast` asks for. The counts are then of what ran, and the cases after the failure are
     // neither passes nor failures. Unsaid, that reads as a tier where each run finds one more
@@ -3938,7 +3963,8 @@ class GodotServer {
         nothingRan === null &&
         report.tests > 0 &&
         report.failures === 0 &&
-        report.errors === 0,
+        report.errors === 0 &&
+        hookFailures.length === 0,
       verdict,
       ...(timedOut ? { timedOut, hung, silentForMs } : {}),
       exitCode,
@@ -3949,6 +3975,7 @@ class GodotServer {
       skipped: report.skipped,
       time: report.time,
       failed,
+      hookFailures: hookFailures.length > 0 ? hookFailures : undefined,
       // Alongside `failed` rather than folded into it: a suite that left nodes behind failed
       // nothing, and an agent reading `failed` for what to fix must not find a passing test in it.
       warnings: warnings.length > 0 ? warnings : undefined,
@@ -3975,6 +4002,8 @@ class GodotServer {
         notRun: suite.discovered > suite.tests ? suite.discovered - suite.tests : undefined,
         failures: suite.failures,
         errors: suite.errors,
+        hookFailures:
+          suite.hookFailures + suite.hookErrors > 0 ? suite.hookFailures + suite.hookErrors : undefined,
         skipped: suite.skipped,
         orphans: orphansIn(suite.path) > 0 ? orphansIn(suite.path) : undefined,
         time: suite.time,

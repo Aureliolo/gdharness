@@ -7,6 +7,7 @@
 import assert from 'node:assert/strict';
 import {
   BOTH_SIDES_ALIKE_NOTE,
+  hookFailuresPrinted,
   MalformedReportError,
   orphansPrinted,
   parseJUnit,
@@ -135,6 +136,43 @@ function testARunThatFoundNothingIsNotAPass(): void {
       'res://my tests',
     ),
     'nothing at res://my tests',
+  );
+}
+
+/**
+ * A before() that failed, as gdUnit4 wrote it on 4.7.2: the suite counts the failure, neither case
+ * carries it, and the console names it under the suite's finalize().
+ */
+function testAFailedHookIsCountedAndNamed(): void {
+  const report = parseJUnit(`<?xml version="1.0" encoding="UTF-8" ?>
+<testsuites id="2026-09-29" name="report_1" tests="2" failures="1" skipped="0" flaky="0" time="0.000">
+\t<testsuite id="0" name="hooked_test" package="test" timestamp="2026-09-29T03:05:42" hostname="localhost" tests="2" failures="1" errors="0" skipped="0" flaky="0" time="0.044">
+\t\t<testcase name="test_after_a_failed_hook" classname="hooked_test" time="0.009">
+\t\t</testcase>
+\t\t<testcase name="test_another" classname="hooked_test" time="0.009">
+\t\t</testcase>
+\t</testsuite>
+</testsuites>`);
+  assert.deepEqual(
+    [report.failures, report.hookFailures, report.suites[0]?.hookFailures, report.suites[0]?.hookErrors],
+    [0, 1, 1, 0],
+    'the failure no case carries is the hook',
+  );
+  assert.deepEqual(
+    hookFailuresPrinted([
+      '  hooked_test > finalize()  Report:',
+      "  Expecting: 'true' but is 'false'\tat 'before' in res://test/hooked_test.gd:5",
+      "  Expecting: 5 but is 4\tat 'test_sums' in res://test/sums_test.gd:9",
+    ]),
+    [
+      {
+        hook: 'before',
+        path: 'res://test/hooked_test.gd',
+        line: 5,
+        message: "Expecting: 'true' but is 'false'",
+      },
+    ],
+    'and the printed line names it, where a case failing is not a hook',
   );
 }
 
@@ -612,6 +650,7 @@ testWhatGdUnitWrites();
 testAFailingStringReadsItsValue();
 testOneLineFailingTwiceKeepsEachValue();
 testASuiteWithASpaceInItsPathKeepsItsOrphans();
+testAFailedHookIsCountedAndNamed();
 testAStringAfterAnArrayReadsItsOwnValue();
 testEveryShapeOfAStringEqualityReadsItsValue();
 testEntitiesAndShapes();
