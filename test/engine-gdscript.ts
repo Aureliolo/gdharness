@@ -979,6 +979,15 @@ function testOperations(godotPath: string, projectDir: string): void {
       [true, 2],
       `and it is listed, enabled: ${JSON.stringify(both)}`,
     );
+    assert.equal(get(both, 'enabled_but_missing'), undefined, 'every enabled plugin is there');
+    // An entry whose folder has gone is one the editor fails to load at every start.
+    rmSync(join(projectDir, 'addons', 'pack'), { recursive: true, force: true });
+    const gone = operation('list_plugins', {});
+    assert.deepEqual(
+      get(gone, 'enabled_but_missing'),
+      ['res://addons/pack/sub/plugin.cfg'],
+      `an enabled plugin with no plugin.cfg is named: ${JSON.stringify(gone)}`,
+    );
     operation('disable_plugin', { plugin_name: 'gdharness_editor' });
     operation('disable_plugin', { plugin_name: 'pack/sub' });
     assert.equal(readFileSync(projectFile, 'utf8'), beforePlugin, 'and both come out again');
