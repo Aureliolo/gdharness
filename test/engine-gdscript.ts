@@ -28,7 +28,7 @@ import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { runOperation as runThroughTheServersOwnPath } from '../src/headless.js';
 import { userDataIn } from '../src/launch.js';
-import { asArray, asNumber, asString, get, lastJsonLine } from './support/json.js';
+import { asArray, asNumber, asObject, asString, get, lastJsonLine } from './support/json.js';
 import { solidPng } from './support/png.js';
 import { sweep } from './support/sweep.js';
 
@@ -958,6 +958,49 @@ function testOperations(godotPath: string, projectDir: string): void {
   const health = operation('get_project_health', {});
   assert.match(asString(get(health, 'grade')), /^[A-F]$/);
   assert.ok(asNumber(get(health, 'checks', 'scripts', 'total_scripts')) > 0, 'the project has scripts in it');
+  // A category passes when it found nothing, and what it found is listed as an issue: every one said
+  // passed beside its own failures, and issues was always empty.
+  for (const [category, check] of Object.entries(asObject(get(health, 'checks')))) {
+    const details = asArray(get(check, 'details'));
+    assert.equal(get(check, 'passed'), details.length === 0, `${category}: ${JSON.stringify(check)}`);
+    for (const detail of details) {
+      assert.ok(
+        asArray(get(health, 'issues')).some(
+          (issue) => get(issue, 'check') === category && get(issue, 'detail') === detail,
+        ),
+        `${category}'s ${JSON.stringify(detail)} should be an issue: ${JSON.stringify(get(health, 'issues'))}`,
+      );
+    }
+  }
+
+  // A main scene named by a UID nothing resolves is said to be that, not a file that does not exist.
+  operation('set_project_setting', { setting: 'application/run/main_scene', value: 'uid://b0gusb0gusb0g' });
+  try {
+    const unresolved = operation('get_project_health', { categories: ['config'] });
+    assert.equal(get(unresolved, 'checks', 'config', 'passed'), false, JSON.stringify(unresolved));
+    assert.ok(
+      asArray(get(unresolved, 'checks', 'config', 'details')).includes(
+        "Main scene uid://b0gusb0gusb0g does not resolve: no file in the project's uid cache has it, so the file has gone or the project has not been imported yet (project_import refresh_uids imports it)",
+      ),
+      JSON.stringify(unresolved),
+    );
+  } finally {
+    operation('set_project_setting', {
+      setting: 'application/run/main_scene',
+      value: 'res://fixture_scene.tscn',
+    });
+  }
+
+  // A preset asked about is looked for, rather than logged and passed over.
+  const presetless = operation('validate_project', { preset: 'Nope' });
+  assert.equal(get(presetless, 'valid'), false, JSON.stringify(presetless));
+  assert.ok(asArray(get(presetless, 'checks_performed')).includes('export_preset'));
+  assert.ok(
+    asArray(get(presetless, 'issues')).some(
+      (issue) => get(issue, 'message') === 'No export preset is named Nope: the project has none',
+    ),
+    JSON.stringify(presetless),
+  );
 
   // The chain the dependency walk was pointed at is also what refers to leaf.gd, and each
   // reference says how: middle.gd preloads it.

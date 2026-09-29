@@ -218,6 +218,19 @@ static func _as_option(given: Variant, held: Variant) -> Variant:
 	return given
 
 
+# The names of the project's export presets, in the order export_presets.cfg holds them.
+static func _preset_names() -> Array[String]:
+	var names: Array[String] = []
+	var config: ConfigFile = ConfigFile.new()
+	if config.load("res://export_presets.cfg") != OK:
+		return names
+	var index: int = 0
+	while config.has_section("preset." + str(index)):
+		names.append(str(config.get_value("preset." + str(index), "name", "")))
+		index += 1
+	return names
+
+
 # List export presets
 func list_export_presets(_params: Dictionary) -> Dictionary:
 	_log.info("Listing export presets")
@@ -297,12 +310,12 @@ func validate_project(params: Dictionary) -> Dictionary:
 				include_suggestions
 			)
 		)
-	elif not FileAccess.file_exists(main_scene):
+	elif not FileWalk.missing_reason(main_scene).is_empty():
 		issues.append(
 			_finding(
 				"error",
 				"main_scene",
-				"Main scene file does not exist: " + main_scene,
+				"Main scene " + FileWalk.missing_reason(main_scene),
 				"Update the main scene setting or create the missing scene file",
 				include_suggestions
 			)
@@ -319,6 +332,30 @@ func validate_project(params: Dictionary) -> Dictionary:
 				include_suggestions
 			)
 		)
+
+	# The preset asked about is looked for rather than only logged: validating "for" a preset that
+	# does not exist answered valid, as though it had been checked.
+	if not preset_name.is_empty():
+		checks_performed.append("export_preset")
+		var named: Array[String] = _preset_names()
+		if preset_name not in named:
+			issues.append(
+				_finding(
+					"error",
+					"export_preset",
+					(
+						"No export preset is named "
+						+ preset_name
+						+ (
+							": the project has none"
+							if named.is_empty()
+							else ": the presets are " + ", ".join(named)
+						)
+					),
+					"Pass one of the preset names, or add the preset in the editor: Project > Export",
+					include_suggestions
+				)
+			)
 
 	checks_performed.append("icon")
 	var icon_path: String = str(ProjectSettings.get_setting("application/config/icon", ""))
@@ -363,11 +400,8 @@ func validate_project(params: Dictionary) -> Dictionary:
 
 	# A hundred scripts is enough to say whether the project is tidy without a large one
 	# turning validation into a full read of its source tree.
-	for script_path: String in script_files:
+	for script_path: String in script_files.slice(0, 100):
 		scripts_checked += 1
-		if scripts_checked > 100:
-			break
-
 		var file: FileAccess = FileAccess.open(script_path, FileAccess.READ)
 		if file:
 			var content: String = file.get_as_text()
@@ -395,6 +429,8 @@ func validate_project(params: Dictionary) -> Dictionary:
 		"warnings": warnings,
 		"checks_performed": checks_performed,
 		"scripts_checked": scripts_checked,
+		# Said beside the count, so a project of four hundred scripts is not read as checked whole.
+		"scripts_total": script_files.size(),
 		"issue_count": issues.size(),
 		"warning_count": warnings.size()
 	}

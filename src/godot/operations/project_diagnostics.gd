@@ -25,11 +25,9 @@ func get_project_health(params: Dictionary) -> Dictionary:
 
 	# 1. Project Structure Check
 	if "structure" in check_categories:
-		var passed: bool = true
 		var details: Array[String] = []
 
 		if not FileAccess.file_exists("res://project.godot"):
-			passed = false
 			details.append("Missing project.godot file")
 			deductions += 30
 
@@ -43,7 +41,7 @@ func get_project_health(params: Dictionary) -> Dictionary:
 			details.append("Consider organizing with directories: " + ", ".join(missing_dirs))
 			deductions += 2 * missing_dirs.size()
 
-		checks["structure"] = {"name": "Project Structure", "passed": passed, "details": details}
+		checks["structure"] = {"name": "Project Structure", "passed": details.is_empty(), "details": details}
 
 	# 2. Resource Check
 	if "resources" in check_categories:
@@ -64,7 +62,10 @@ func get_project_health(params: Dictionary) -> Dictionary:
 			deductions += missing_imports
 
 		checks["resources"] = {
-			"name": "Resources", "passed": true, "details": details, "total_resources": resources.size()
+			"name": "Resources",
+			"passed": details.is_empty(),
+			"details": details,
+			"total_resources": resources.size()
 		}
 
 	# 3. Scripts Check
@@ -95,7 +96,10 @@ func get_project_health(params: Dictionary) -> Dictionary:
 			deductions += empty_functions
 
 		checks["scripts"] = {
-			"name": "Scripts", "passed": true, "details": details, "total_scripts": script_files.size()
+			"name": "Scripts",
+			"passed": details.is_empty(),
+			"details": details,
+			"total_scripts": script_files.size()
 		}
 
 	# 4. Scenes Check
@@ -108,7 +112,10 @@ func get_project_health(params: Dictionary) -> Dictionary:
 			deductions += 5
 
 		checks["scenes"] = {
-			"name": "Scenes", "passed": true, "details": details, "total_scenes": scene_files.size()
+			"name": "Scenes",
+			"passed": details.is_empty(),
+			"details": details,
+			"total_scenes": scene_files.size()
 		}
 
 	# 5. Configuration Check
@@ -119,8 +126,8 @@ func get_project_health(params: Dictionary) -> Dictionary:
 		if main_scene.is_empty():
 			details.append("No main scene configured")
 			deductions += 10
-		elif not FileAccess.file_exists(main_scene):
-			details.append("Main scene file does not exist: " + main_scene)
+		elif not FileWalk.missing_reason(main_scene).is_empty():
+			details.append("Main scene " + FileWalk.missing_reason(main_scene))
 			deductions += 15
 
 		var project_name: String = str(ProjectSettings.get_setting("application/config/name", ""))
@@ -132,7 +139,7 @@ func get_project_health(params: Dictionary) -> Dictionary:
 			details.append("No export presets configured")
 			deductions += 3
 
-		checks["config"] = {"name": "Configuration", "passed": true, "details": details}
+		checks["config"] = {"name": "Configuration", "passed": details.is_empty(), "details": details}
 
 	var score: int = maxi(0, 100 - deductions)
 
@@ -154,6 +161,14 @@ func get_project_health(params: Dictionary) -> Dictionary:
 		if not FileAccess.file_exists("res://export_presets.cfg"):
 			recommendations.append("Configure export presets for your target platforms")
 
+	# Every detail costs points, so each is an issue; `issues` was always empty beside them, and a
+	# category said passed next to the failure it had just found.
+	var issues: Array[Dictionary] = []
+	for category: String in checks:
+		var check: Dictionary = checks[category]
+		var found: Array[String] = check["details"]
+		for detail: String in found:
+			issues.append({"check": category, "detail": detail})
 	return {
-		"score": score, "grade": grade, "checks": checks, "issues": [], "recommendations": recommendations
+		"score": score, "grade": grade, "checks": checks, "issues": issues, "recommendations": recommendations
 	}
