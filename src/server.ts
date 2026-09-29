@@ -92,6 +92,7 @@ import {
   anEditorIsStillComing,
   type GodotBridge,
   getDefaultBridge,
+  hasSaidWhoItIs,
   theEditorHasComeBack,
 } from './godot-bridge.js';
 import { GodotLocator } from './godot-path.js';
@@ -254,6 +255,13 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  * look at, usually a dialog, and saying so beats holding the caller's call open in silence.
  */
 const EDITOR_RESTART_TIMEOUT_MS = 90_000;
+
+/**
+ * How long a restart waits for a connected editor's greeting. It follows the socket by a frame, so
+ * seconds cover an editor that is busy; one still silent after that is stuck, and the caller is
+ * told rather than held.
+ */
+const GREETING_WAIT_MS = 10_000;
 
 /**
  * Whether the restart a note records can still be in progress.
@@ -4540,7 +4548,7 @@ class GodotServer {
    */
   private breakpointsAtRisk(): { breakpointsAtRisk?: string } {
     const status = this.godotBridge.getStatus();
-    if (!status.connected || status.syncsBreakpoints === true) {
+    if (!hasSaidWhoItIs(status) || status.syncsBreakpoints === true) {
       return {};
     }
     return {
@@ -4644,14 +4652,19 @@ class GodotServer {
     // The addon an editor loaded at startup, against the one this server ships. An install
     // replaces the files under a running editor without changing what it is serving, and the
     // only other sign of that is a tool answering as the old version did.
+    const greeted = hasSaidWhoItIs(status);
     const stale =
-      status.connected &&
+      greeted &&
       editorIsStale(status.addonVersion, SERVER_VERSION, status.addonDigest, shippedEditorDigest());
     const unfinished = this.restartLeftUnfinished(status.connected);
     return {
       ...status,
       serverVersion: SERVER_VERSION,
-      addonIsStale: status.connected ? stale : undefined,
+      addonIsStale: greeted ? stale : undefined,
+      greeting:
+        status.connected && !greeted
+          ? 'The editor has connected and has not yet said who it is: its project, pid, addon version and ports arrive with its greeting a moment after the socket opens, later while it imports. Ask again for them.'
+          : undefined,
       bridgeAvailable: this.bridgeStartupError === null,
       // Whether a `connected: false` is final. The editor dials in rather than being dialled, and
       // it backs off between tries, so for the first half-minute of a bridge's life "nothing has
@@ -4726,7 +4739,7 @@ class GodotServer {
             this.editorCodeOnDisk(),
           )
         : undefined,
-      addonNote: status.connected
+      addonNote: greeted
         ? sameCodeNote(status.addonVersion, SERVER_VERSION, status.addonDigest, shippedEditorDigest())
         : undefined,
       ...this.breakpointsAtRisk(),
@@ -4995,6 +5008,25 @@ class GodotServer {
         'editor_launch opens one on a project',
         'editor_status says whether the bridge is up and what has reached it',
       ]);
+    }
+    if (!hasSaidWhoItIs(before)) {
+      // Who opened it decides which way it is restarted, and that arrives with the greeting: read
+      // before it, an editor a server opened was taken for one opened by hand and asked to restart
+      // itself, which brings it back without its ports.
+      const settled = await this.waitForBridge(
+        () => hasSaidWhoItIs(this.godotBridge.getStatus()) || !this.godotBridge.isConnected(),
+        Date.now() + GREETING_WAIT_MS,
+      );
+      if (!settled) {
+        return this.createErrorResponse(
+          `The editor has connected and has not said who it is within ${GREETING_WAIT_MS / 1000}s, so whether this server or the editor itself restarts it cannot be told.`,
+          [
+            'editor_status says when it has, under greeting while it has not',
+            'Then ask for the restart again',
+          ],
+        );
+      }
+      return this.handleRestartEditor(args);
     }
     const mine = before.openedByAServer === true && before.projectPath !== undefined;
     // An editor opened by hand restarts itself and comes back as it was, so hidden was accepted and
@@ -7295,30 +7327,28 @@ class GodotServer {
    */
   private async handleEditorConsole(args: OperationParams): Promise<ToolResponse> {
     const status = this.godotBridge.getStatus();
-    const projectPath = status.projectPath ?? this.ownProject ?? undefined;
-    if (projectPath === undefined) {
-      return this.createErrorResponse('No editor is connected, so there is no console to read.', [
-        'editor_status says whether one is connected and whether it may yet be',
-        'editor_launch opens one, and an editor opened here has its console captured',
-      ]);
-    }
     // Before the editor dials in, what is known about it is what this server launched. Its console
     // is already being written by then, and startup is what the console is for, so an editor still
     // connecting was answered "not opened by gdharness" at exactly the moment its wall of parse
-    // errors was going past. Once it has connected, its own report of who opened it decides.
-    const launched = status.connected ? null : (this.launchedEditor?.pid ?? null);
-    if (!status.connected && launched === null) {
+    // errors was going past. Once it has greeted, its own report of who opened it decides; before
+    // the greeting counts as before connecting, since the pid and the opener arrive with it.
+    const greeted = hasSaidWhoItIs(status);
+    const launched = greeted ? null : (this.launchedEditor?.pid ?? null);
+    if (!greeted && launched === null && status.connected) {
+      return this.createErrorResponse(
+        'The editor has connected and has not yet said who it is, so whose console to read cannot be told yet.',
+        ['Ask again in a moment; editor_status shows greeting until it has'],
+      );
+    }
+    const projectPath = status.projectPath ?? this.ownProject ?? undefined;
+    if (projectPath === undefined || (!greeted && launched === null)) {
       return this.createErrorResponse('No editor is connected, so there is no console to read.', [
         'editor_status says whether one is connected and whether it may yet be',
         'editor_launch opens one, and an editor opened here has its console captured',
       ]);
     }
-    const editorPid = status.connected ? (status.editorPid ?? null) : launched;
-    const console = editorConsole(
-      projectPath,
-      editorPid,
-      status.connected ? status.openedByAServer === true : true,
-    );
+    const editorPid = greeted ? (status.editorPid ?? null) : launched;
+    const console = editorConsole(projectPath, editorPid, greeted ? status.openedByAServer === true : true);
     if ('kind' in console) {
       return this.createErrorResponse(theConsoleWasNotCaptured(console, projectPath), [
         'editor_launch restart replaces this editor with one whose console is captured',

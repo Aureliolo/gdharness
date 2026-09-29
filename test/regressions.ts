@@ -3039,6 +3039,159 @@ async function testAnEditorAServerOpenedIsStartedAgain(): Promise<void> {
 }
 
 /**
+ * An editor that has connected and not yet greeted is described as that, and nothing is read off it.
+ *
+ * The socket opens a frame before the greeting, longer on an editor that is importing, and every
+ * field the greeting carries is undefined in between. Read in the gap, the version compared as
+ * stale and a healthy editor was sent to a restart; the opener read as "by hand", so a restart
+ * asked the editor to restart itself, which brings back an editor a server opened without its
+ * ports; and the console was refused as not ours. The fake editor holds its greeting while each is
+ * asked, then greets as an editor a server opened while the restart waits.
+ */
+async function testAnEditorIsReadOnceItHasSaidWhoItIs(): Promise<void> {
+  const port = await reservePort();
+  const server = new ServerProcess({
+    env: { GDHARNESS_BRIDGE_PORT: String(port), GODOT_PATH: join(tmpdir(), 'gdharness-no-such-engine') },
+  });
+  let editor: WebSocket | null = null;
+  try {
+    await server.initialize('regression-test');
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+    editor = socket;
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', () => {
+        resolve();
+      });
+      socket.once('error', reject);
+    });
+    const asked: string[] = [];
+    socket.on('message', (data: Buffer) => {
+      const message = JSON.parse(data.toString('utf8')) as { type?: string; tool?: string };
+      if (message.type === 'tool_invoke' && typeof message.tool === 'string') {
+        asked.push(message.tool);
+      }
+    });
+    const call = async (name: string, args: Record<string, unknown>, ms = 20_000): Promise<string> =>
+      textOf(await server.request('tools/call', { name, arguments: args }, ms)) ?? '';
+
+    let gap: unknown = null;
+    for (let waited = 0; waited < 10_000; waited += 100) {
+      const now = get(
+        parseTextContent(await server.request('tools/call', { name: 'editor_status', arguments: {} })),
+        'editor',
+      );
+      if (get(now, 'connected') === true) {
+        gap = now;
+        break;
+      }
+      await delay(100);
+    }
+    assert.ok(gap !== null, 'the socket should count as connected before any greeting');
+    assert.match(text(get(gap, 'greeting')), /has not yet said who it is/, JSON.stringify(gap));
+    assert.equal(
+      get(gap, 'addonIsStale'),
+      undefined,
+      `nothing is said about its addon yet: ${JSON.stringify(gap)}`,
+    );
+    assert.equal(get(gap, 'staleNote'), undefined, JSON.stringify(gap));
+    assert.equal(get(gap, 'breakpointsAtRisk'), undefined, JSON.stringify(gap));
+    assert.match(
+      await call('editor_output', { op: 'editor' }),
+      /has connected and has not yet said who it is/,
+      'the console is not refused as another',
+    );
+
+    // Asked in the gap, and greeted while it waits: the answer is the path an editor a server opened
+    // takes, which stops at the engine here, and the editor is never asked to restart itself.
+    // A restart that goes the other way waits for an editor to come back, which this one never
+    // does, so the answer is cut short rather than left to fail as a timeout.
+    const restart = call('editor_launch', { op: 'restart' }).catch(
+      () => 'no answer: it waited for a comeback',
+    );
+    await delay(500);
+    socket.send(
+      JSON.stringify({
+        type: 'godot_ready',
+        project_path: process.cwd(),
+        addon_version: SERVER_VERSION,
+        editor_pid: process.pid,
+        opened_by_a_server: true,
+      }),
+    );
+    const answered = await restart;
+    assert.match(
+      answered,
+      /GODOT_PATH is set to .*gdharness-no-such-engine, which does not exist/,
+      `the restart waited for the greeting and took the server's path: ${answered}`,
+    );
+    assert.equal(asked.includes('restart_editor'), false, 'and the editor was not asked to restart itself');
+
+    const greeted = get(
+      parseTextContent(await server.request('tools/call', { name: 'editor_status', arguments: {} })),
+      'editor',
+    );
+    assert.equal(get(greeted, 'greeting'), undefined, `greeted, the note goes: ${JSON.stringify(greeted)}`);
+    assert.equal(get(greeted, 'addonIsStale'), false, `and the addon is judged: ${JSON.stringify(greeted)}`);
+  } finally {
+    editor?.terminate();
+    await server.stop();
+  }
+
+  // An editor that never greets holds a restart only as long as the greeting wait, and is refused
+  // with what to do rather than restarted on a guess.
+  const silentPort = await reservePort();
+  const silentServer = new ServerProcess({
+    env: {
+      GDHARNESS_BRIDGE_PORT: String(silentPort),
+      GODOT_PATH: join(tmpdir(), 'gdharness-no-such-engine'),
+    },
+  });
+  let silent: WebSocket | null = null;
+  try {
+    await silentServer.initialize('regression-test');
+    const socket = new WebSocket(`ws://127.0.0.1:${silentPort}/godot`);
+    silent = socket;
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', () => {
+        resolve();
+      });
+      socket.once('error', reject);
+    });
+    const asked: string[] = [];
+    socket.on('message', (data: Buffer) => {
+      const message = JSON.parse(data.toString('utf8')) as { type?: string; tool?: string };
+      if (message.type === 'tool_invoke' && typeof message.tool === 'string') {
+        asked.push(message.tool);
+      }
+    });
+    let connected = false;
+    for (let waited = 0; waited < 10_000 && !connected; waited += 100) {
+      await delay(100);
+      const now = parseTextContent(
+        await silentServer.request('tools/call', { name: 'editor_status', arguments: {} }),
+      );
+      connected = get(now, 'editor', 'connected') === true;
+    }
+    assert.ok(connected, 'the silent editor should count as connected');
+    const refused =
+      textOf(
+        await silentServer
+          .request('tools/call', { name: 'editor_launch', arguments: { op: 'restart' } }, 30_000)
+          .catch(() => null),
+      ) ?? 'no answer: it waited for a comeback';
+    assert.match(refused, /has not said who it is within 10s/, refused);
+    assert.deepEqual(
+      asked.filter((tool) => tool === 'restart_editor' || tool === 'quit_editor'),
+      [],
+      `and the editor was neither asked to restart nor to go: ${asked.join(', ')}`,
+    );
+  } finally {
+    silent?.terminate();
+    await silentServer.stop();
+  }
+}
+
+/**
  * A server told to go ends, with an editor still holding the bridge.
  *
  * Written to catch a hang and it found none, which is worth saying plainly: `http.Server.close`
@@ -24511,6 +24664,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEditorStatusPortConflict,
   testTheBridgeTakesThePortWhenItIsFreed,
   testAnEditorAServerOpenedIsStartedAgain,
+  testAnEditorIsReadOnceItHasSaidWhoItIs,
   testAServerEndsWithAnEditorStillOnTheBridge,
   testABadPortIsReported,
   testAnEditorPortMovesOnlyWhenItIsHeld,

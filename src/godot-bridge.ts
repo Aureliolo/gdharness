@@ -188,19 +188,6 @@ export function mayYetConnect(listeningSince: Date | undefined, now: number = Da
 }
 
 /**
- * The same question, counting an editor this server started that has not dialled in yet.
- *
- * The window above is measured from the bridge taking its port, which is the right reference for an
- * editor that was already running and has to notice, and no reference at all for one started
- * afterwards: a launch on a server that has been up longer than the window reads as final the
- * moment it returns. An editor imports the project before it loads any plugin, so on a large one
- * the gap between launching and dialling in is minutes. Measured downstream at nine, over which
- * this answered "an editor that is not there" about the editor the same server had just started.
- *
- * Either reason is enough and a live launched process outlasts the window by design, since what it
- * reports is a process somebody can watch rather than a guess about timing.
- */
-/**
  * Whether the editor a restart asked for has come back *and* said who it is.
  *
  * A connection is not an answer. The socket connects first and the addon's version, the editor's
@@ -218,9 +205,19 @@ export function theEditorHasComeBack(
   status: { connected: boolean; connectedAt?: Date | undefined; addonVersion?: string | undefined },
   startedAt: number,
 ): boolean {
-  return (
-    status.connected && (status.connectedAt?.getTime() ?? 0) > startedAt && status.addonVersion !== undefined
-  );
+  return hasSaidWhoItIs(status) && (status.connectedAt?.getTime() ?? 0) > startedAt;
+}
+
+/**
+ * Whether the connected editor has greeted, so what it reports about itself can be read.
+ *
+ * Until then its project, pid, version, ports and who opened it are all undefined, and each reads
+ * as a wrong answer rather than no answer: an undefined version as a stale addon, an undefined
+ * opener as an editor opened by hand. The gap is a frame on a busy editor and longer on one that
+ * is importing or sits unfocused.
+ */
+export function hasSaidWhoItIs(status: { connected: boolean; addonVersion?: string | undefined }): boolean {
+  return status.connected && status.addonVersion !== undefined;
 }
 
 /**
