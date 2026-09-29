@@ -2306,9 +2306,7 @@ class GodotServer {
   private editorCodeOnDisk(): string | null | undefined {
     const status = this.godotBridge.getStatus();
     const project = (status.connected ? status.projectPath : undefined) ?? this.ownProject;
-    return project === null || project === undefined || project === ''
-      ? undefined
-      : installedEditorDigest(project);
+    return project === null || project === '' ? undefined : installedEditorDigest(project);
   }
 
   /** What the project's own MCP config asks for, when it is not what is answering. */
