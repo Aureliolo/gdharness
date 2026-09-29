@@ -37,6 +37,7 @@ import {
 } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
+import { errorMessage } from './errors.js';
 import { isSameDirectory } from './paths.js';
 import { type CommandLineRead, readCommandLine } from './process-children.js';
 import { runtimeDirectories, runtimeDirectory, STARTED_AFTER_ANNOUNCING_MS } from './runtime-client.js';
@@ -371,7 +372,8 @@ function recordAt(path: string): RunRecord | null {
  */
 export async function runningAs(pid: number): Promise<RunningAs | null> {
   if (process.platform === 'win32') {
-    const answer = await windowsCommandLine(pid);
+    const read = await readWindowsCommandLine(pid);
+    const answer = 'answer' in read ? read.answer : null;
     if (answer !== null) {
       // The creation time is the first line and the command line is the rest, because the query
       // that reads one reads the other for free and this runs before every signal.
@@ -387,7 +389,13 @@ export async function runningAs(pid: number): Promise<RunningAs | null> {
     // tasklist still names the executable, and that is the difference between a weaker check and
     // no check, so it is asked before this gives up.
     const image = await windowsImage(pid);
-    return image === null ? null : { kind: 'image', text: image };
+    return image === null
+      ? null
+      : {
+          kind: 'image',
+          text: image,
+          unread: 'unread' in read ? read.unread : 'Windows gave an empty command line',
+        };
   }
   try {
     const began = await startedAt(pid, null);
@@ -478,23 +486,32 @@ export function listeningPidInNetstat(printed: string, port: number): number | n
 }
 
 /**
- * The whole command line of a Windows process, or null when Windows will not give it.
+ * The start and whole command line of a Windows process, or why Windows did not give them.
  *
  * Windows keeps a command line out of reach of anything but a query, on a path that runs once when
  * a run is picked up and once before one is ended.
+ *
+ * Asked again, with longer, when PowerShell does not answer. The helper that answers is started by
+ * the first question and ended by a timeout, so on a loaded machine one question can spend its whole
+ * budget on an interpreter starting. The stop before a kill then had the executable's name alone and
+ * refused to end its own game, measured on the Windows engine leg twice. An empty answer is not
+ * asked again: that is Windows answering, for a process gone or not this user's to read.
  */
-async function windowsCommandLine(pid: number): Promise<string | null> {
-  try {
-    const answer = (
-      await askWindows(
-        `$p = Get-CimInstance Win32_Process -Filter "ProcessId=${pid}"; if ($p) { $p.CreationDate.ToUniversalTime().ToString("o"); $p.CommandLine }`,
-        15_000,
-      )
-    ).trim();
-    return answer === '' ? null : answer;
-  } catch {
-    return null;
+export async function readWindowsCommandLine(
+  pid: number,
+  ask: (script: string, withinMs: number) => Promise<string> = askWindows,
+): Promise<{ answer: string } | { unread: string }> {
+  const query = `$p = Get-CimInstance Win32_Process -Filter "ProcessId=${pid}"; if ($p) { $p.CreationDate.ToUniversalTime().ToString("o"); $p.CommandLine }`;
+  let unread = '';
+  for (const withinMs of [15_000, 45_000]) {
+    try {
+      const answer = (await ask(query, withinMs)).trim();
+      return answer === '' ? { unread: 'Windows gave no command line for it' } : { answer };
+    } catch (error) {
+      unread = errorMessage(error);
+    }
   }
+  return { unread };
 }
 
 /**
@@ -582,6 +599,8 @@ export interface RunningAs {
   readonly text: string;
   /** Milliseconds, where the platform will give it. Absent is not zero and not now. */
   readonly startedAt?: number;
+  /** Why the command line was not read, for an answer that is the executable's name alone. */
+  readonly unread?: string;
 }
 
 /**
@@ -683,7 +702,7 @@ export function whyNotTheRun(
     }
     return needed === 'possible'
       ? null
-      : 'the operating system named only its executable and not its command line, which is not enough to signal it on';
+      : `the operating system named only its executable and not its command line (${running.unread ?? 'no reason given'}), which is not enough to signal it on`;
   }
   const project = process.platform === 'win32' ? record.projectPath.toLowerCase() : record.projectPath;
   return said.includes(project) ? null : `that process's command line does not name ${record.projectPath}`;
