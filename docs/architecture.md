@@ -600,9 +600,19 @@ purpose.
 ## Headless operations
 
 One engine per call: `godot --headless --log-file <temp> --path <project> --script <operations.gd>
-<operation> @file:<params.json>`. Arguments are camelCase in the tool call and snake_case in the
-file the engine reads. The answer is the last JSON object printed on stdout. Anything on stderr
-comes back under `engine_messages`.
+<operation> @file:<params.json> <answer.json>`. Arguments are camelCase in the tool call and
+snake_case in the file the engine reads. The answer is the JSON object the script writes to the
+answer file. The engine's warnings and errors, and the script's own `[ERROR]` lines, come back under
+`engine_messages`.
+
+The answer goes to a file because the project's autoloads run after the operation and print to the
+same stdout. When the answer was the last JSON line printed, an autoload printing a dictionary in
+`_process` replaced it. With a file, a run that wrote no answer has failed whatever its exit code
+was. A run that wrote one and then exited badly (an autoload quitting with a code, say) still
+answers, with `engine_after_answer` saying how it ended, because the write it reports has happened.
+An error raised inside the operations script itself refuses the answer: the engine hands the
+faulting function's caller a default value and exits 0, so the answer is missing whatever that
+function would have given.
 
 `--log-file` keeps that engine out of the project's `user://logs/`. Godot renames `godot.log` when
 a process starts, so on a project with file logging on, one of these boots rotated a running
@@ -645,6 +655,14 @@ list kept here: every type is carried out through JSON and built back, and a typ
 fails rather than being skipped. What JSON does carry exactly is left alone, which is why a plugin
 list is still `["res://addons/x/plugin.cfg"]` rather than a wrapper around one; `type_convert`
 restores the exact packed type wherever the receiver knows which one it wanted.
+
+Infinity and NaN are the numbers JSON cannot carry. The engine writes infinity as `1e99999` and NaN
+as `null`; the server reads the first as `Infinity` and writes both back out as `null`, so a
+property holding `INF` was answered as holding nothing. Each is tagged as
+`{"_type": "float", "value": "inf"}` (or `"-inf"`, `"nan"`), bare or as a component of a vector,
+colour or rectangle, and a write accepts the same tag. The fixture holds the wire text itself to
+having neither spelling, because a round trip through the engine's own JSON reads `1e99999` back as
+infinity and passes on the wire that loses it.
 
 The other direction, a value arriving to be written, is `property_values.gd` on the editor side. It
 reads the serialiser's tags, so every shape a read answers with is a shape a write accepts, and adds

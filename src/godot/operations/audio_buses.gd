@@ -20,17 +20,28 @@ func create_audio_bus(params: Dictionary) -> Dictionary:
 	var parent_idx: int = Read.as_int(params.get("parent_bus_index", 0))
 	if parent_idx < 0 or parent_idx >= AudioServer.bus_count:
 		return _log.failure("No bus at index " + str(parent_idx))
+	# Sends are by name, so a second bus with one would leave every send to it meaning either.
+	var existing: int = AudioServer.get_bus_index(bus_name)
+	if existing != -1:
+		return _log.failure("A bus named " + bus_name + " already exists, at index " + str(existing))
 
-	AudioServer.add_bus(parent_idx + 1)
-	var new_idx: int = AudioServer.bus_count - 1
+	# Right after the bus it sends to, because a bus can only send to one before it. The engine
+	# inserts there and moves every later bus down one, so the new bus is at that index: taking the
+	# last index named and rewired whichever bus had been last, and answered with it.
+	var new_idx: int = parent_idx + 1
+	AudioServer.add_bus(new_idx)
 	AudioServer.set_bus_name(new_idx, bus_name)
-	if parent_idx > 0:
-		AudioServer.set_bus_send(new_idx, AudioServer.get_bus_name(parent_idx))
+	AudioServer.set_bus_send(new_idx, AudioServer.get_bus_name(parent_idx))
 
 	var layout: String = _save_layout()
 	if layout.is_empty():
 		return {}
-	return {"bus": _bus(new_idx), "layout": layout}
+	# Every bus, because the ones after the new one have moved and a caller holding their old
+	# indices would address the wrong bus next.
+	var buses: Array[Dictionary] = []
+	for i: int in range(AudioServer.bus_count):
+		buses.append(_bus(i))
+	return {"bus": _bus(new_idx), "buses": buses, "layout": layout}
 
 
 func get_audio_buses(_params: Dictionary) -> Dictionary:
@@ -52,17 +63,42 @@ func set_audio_bus_effect(params: Dictionary) -> Dictionary:
 	if effect == null:
 		return _log.failure("Unknown effect type: " + effect_type)
 
-	# The slot has to exist before an effect can be placed at that index.
-	while AudioServer.get_bus_effect_count(bus_idx) <= effect_idx:
-		AudioServer.add_bus_effect(bus_idx, AudioEffectAmplify.new())
-
+	# The slot holds this effect afterwards: the one there is replaced, and one past the last is
+	# added. The engine's add inserts, so the effect in the slot was pushed along rather than
+	# replaced, and a slot past the end was reached by padding the bus with Amplify effects nobody
+	# asked for.
+	var count: int = AudioServer.get_bus_effect_count(bus_idx)
+	if effect_idx < 0 or effect_idx > count:
+		return _log.failure(
+			(
+				"Bus "
+				+ str(bus_idx)
+				+ " has "
+				+ str(count)
+				+ (" effect" if count == 1 else " effects")
+				+ ", so effect_index can be 0 to "
+				+ str(count)
+				+ ", where "
+				+ str(count)
+				+ " adds one after the last"
+			)
+		)
+	var replaced: String = ""
+	if effect_idx < count:
+		replaced = AudioServer.get_bus_effect(bus_idx, effect_idx).get_class()
+		AudioServer.remove_bus_effect(bus_idx, effect_idx)
 	AudioServer.add_bus_effect(bus_idx, effect, effect_idx)
 	AudioServer.set_bus_effect_enabled(bus_idx, effect_idx, enabled)
 
 	var layout: String = _save_layout()
 	if layout.is_empty():
 		return {}
-	return {"bus": _bus(bus_idx), "effect_index": effect_idx, "effect_type": effect_type, "layout": layout}
+	var answer: Dictionary = {
+		"bus": _bus(bus_idx), "effect_index": effect_idx, "effect_type": effect.get_class(), "layout": layout
+	}
+	if not replaced.is_empty():
+		answer["replaced"] = replaced
+	return answer
 
 
 func set_audio_bus_volume(params: Dictionary) -> Dictionary:

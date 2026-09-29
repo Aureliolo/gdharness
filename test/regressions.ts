@@ -74,6 +74,7 @@ import {
   theConsoleWasNotCaptured,
   writeEditorLogNote,
 } from '../src/editor-log.js';
+import { type EngineRun, howItEnded, runEngine } from '../src/engine-run.js';
 import { answersTo, forAnswer, GameLog, type LogEntry } from '../src/game-log.js';
 import {
   anEditorIsStillComing,
@@ -164,21 +165,23 @@ import {
   endedPreviousRun,
   endedToStartThis,
   endedWithoutACode,
-  endingOf,
+  exportAnswer,
   leftRunningNote,
   noCodeWillCome,
+  notRunNote,
   PLAY_STARTS_WITHIN_MS,
   PROJECT_FILE_ARGUMENTS,
   patienceForFrames,
   previousRunLeft,
   runIsUp,
   runtimeVerdict,
+  scanWaitAnswer,
   scriptErrorsNote,
   stopVerdict,
   timedOutVerdict,
   uidsLeftNote,
 } from '../src/server.js';
-import type { GodotProcess } from '../src/server-types.js';
+import type { GodotProcess, ToolResponse } from '../src/server-types.js';
 import {
   addonMismatch,
   editorIsStale,
@@ -3096,6 +3099,18 @@ function testProjectPathsAreContained(): void {
       /empty|null byte|scheme|absolute|outside the project|project directory itself/,
       `${JSON.stringify(candidate)} should be refused with a reason that says why`,
     );
+  }
+
+  // A UID names a file in this project, so it is not refused as somewhere else: it is refused because
+  // where it is on disk is the engine's to say, and the remedy is the path.
+  for (const uid of ['uid://bsrmp7ti1112c', 'res://uid://bsrmp7ti1112c']) {
+    const answer = resolveWithinProject(root, uid);
+    assert.ok(!answer.ok, `${uid} should not be contained without the engine`);
+    assert.match(
+      answer.reason,
+      /is a UID, and a file is judged here by where it is on disk.*Give the file's res:\/\/ path/,
+    );
+    assert.doesNotMatch(answer.reason, /somewhere other than this project/);
   }
 
   // The other half, or the fixture above passes against a function that refuses everything.
@@ -10809,6 +10824,26 @@ async function testAnAnnotatedDeclarationIsStillADeclaration(): Promise<void> {
         asArray(get(reread, 'signals') ?? []).length >= 1,
         `and the signal is in it: ${JSON.stringify(reread)}`,
       );
+
+      // A class created is a class to whatever starts next, which reads the list and not the file.
+      // The answer said registered on the strength of the argument while nothing wrote the list.
+      const created = await call('script_edit', {
+        projectPath: project,
+        op: 'create',
+        scriptPath: 'res://made/listed.gd',
+        className: 'Listed',
+        extends: 'Node2D',
+      });
+      assert.deepEqual(
+        [get(created, 'registered'), get(created, 'class_name'), get(created, 'extends')],
+        [true, 'Listed', 'Node2D'],
+        `the class is registered: ${JSON.stringify(created)}`,
+      );
+      assert.equal(
+        cachedClasses(project)?.get('Listed'),
+        'res://made/listed.gd',
+        'because the class list on disk now holds it',
+      );
     } finally {
       await server.stop();
     }
@@ -11024,6 +11059,53 @@ async function testAStructureReadDescribesTheScriptItRead(): Promise<void> {
         '',
         'func after() -> void:',
         '\tpass',
+        '',
+      ].join('\n'),
+    );
+    // What a member is: a declaration at the left margin, outside every string. A base named by a
+    // path relative to the script, which only resolves against the script's own directory, and a
+    // Node2D at the top of it, so `_draw` is virtual only when the relative path was followed.
+    mkdirSync(join(project, 'sub'));
+    writeFileSync(
+      join(project, 'sub', 'sub_base.gd'),
+      ['extends Node2D', '', '', 'func helper_in_base() -> void:', '\tpass', ''].join('\n'),
+    );
+    writeFileSync(
+      join(project, 'sub', 'scoped.gd'),
+      [
+        'extends "sub_base.gd"',
+        '',
+        // Closed on the line it opens on, then a declaration: toggling on any triple quote lost
+        // this one, the next, and inverted the rest of the file.
+        'const HELP: String = """Usage: one line"""',
+        'const AFTER: int = 2',
+        '',
+        'var member: int = 1',
+        '',
+        '',
+        'func _ready() -> void:',
+        '\tvar local_speed: int = 5',
+        '\tconst LOCAL_K: int = 2',
+        '\tprint(local_speed + LOCAL_K)',
+        '\tvar doc: String = """',
+        'var not_a_member: int = 3',
+        // A hash inside the string before the quotes that close it, which a comment reading of the
+        // line would cut off, leaving the string open to the end of the file.
+        'text with a hash # before the close"""',
+        '\tprint(doc)',
+        '',
+        '',
+        'func _draw() -> void:',
+        '\tpass',
+        '',
+        '',
+        'class Inner:',
+        '\textends Resource',
+        '\tsignal inner_fired',
+        '\tvar inner_held: int = 1',
+        '',
+        '\tfunc inner_method() -> void:',
+        '\t\tinner_fired.emit()',
         '',
       ].join('\n'),
     );
@@ -11294,6 +11376,49 @@ async function testAStructureReadDescribesTheScriptItRead(): Promise<void> {
         ],
         `and its own members are still all there: ${JSON.stringify(atTheTop)}`,
       );
+
+      const scoped = await call('script_info', {
+        projectPath: project,
+        op: 'structure',
+        scriptPath: 'res://sub/scoped.gd',
+        includeInherited: true,
+      });
+      const members = (list: string): unknown[] =>
+        asArray(get(scoped, list) ?? []).map((each) => [get(each, 'name'), get(each, 'line')]);
+      assert.deepEqual(
+        {
+          extends: get(scoped, 'extends'),
+          constants: members('constants'),
+          variables: members('variables'),
+          signals: members('signals'),
+          inner: get(scoped, 'inner_classes'),
+        },
+        {
+          extends: '"sub_base.gd"',
+          constants: [
+            ['HELP', 3],
+            ['AFTER', 4],
+          ],
+          variables: [['member', 6]],
+          signals: [],
+          inner: ['Inner'],
+        },
+        `a member is a declaration at the margin, outside every string: ${JSON.stringify(scoped)}`,
+      );
+      assert.deepEqual(
+        asArray(get(scoped, 'functions')).map((each) => [
+          get(each, 'name'),
+          get(each, 'is_virtual'),
+          get(each, 'inherited_from') ?? null,
+        ]),
+        [
+          ['_ready', true, null],
+          ['_draw', true, null],
+          ['helper_in_base', false, 'res://sub/sub_base.gd'],
+        ],
+        `and a relative base is followed, to its members and to the Node2D above it: ${JSON.stringify(scoped)}`,
+      );
+      assert.deepEqual(get(scoped, 'inherits_from'), ['res://sub/sub_base.gd'], JSON.stringify(scoped));
     } finally {
       await server.stop();
     }
@@ -11390,6 +11515,55 @@ async function testRefreshingUidsMakesTheSidecarAndWritesNoScene(): Promise<void
  * write that changes nothing, a removal, a bus layout, and an editor too old to be asked. The fake
  * editor records what it was sent; the editor leg holds what a real one then answers.
  */
+async function testOptionsWrittenAreSaidWhenTheirReimportFails(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('options-written regression skipped (Godot not found)');
+    return;
+  }
+  await withAPlayingEditor(
+    () => (tool) => (tool === 'reimport_files' ? { ok: false, error: 'the disk is full' } : { ok: true }),
+    async ({ server, project }) => {
+      writeFileSync(join(project, 'art.png'), solidPng(40, 160, 40));
+      writeFileSync(
+        join(project, 'art.png.import'),
+        '[remap]\n\nimporter="texture"\n\n[params]\n\ncompress/mode=0\n',
+      );
+      const set = await server.request(
+        'tools/call',
+        {
+          name: 'project_import',
+          arguments: {
+            projectPath: project,
+            op: 'set_options',
+            resourcePath: 'art.png',
+            options: { 'compress/mode': 1 },
+          },
+        },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+      const said = String(textOf(set));
+      assert.equal(get(set, 'result', 'isError'), true, said);
+      // The write happened whatever the reimport did, and the refusal alone read as the whole call
+      // failing, so a caller would set the options again or take them as not kept.
+      assert.match(
+        said,
+        /^compress\/mode was written to the import file, and the reimport that applies them failed, so the resource is still imported the old way[\s\S]*The editor answered reimport_files with an error: the disk is full/,
+        said,
+      );
+      assert.match(
+        readFileSync(join(project, 'art.png.import'), 'utf8'),
+        /^compress\/mode=1$/m,
+        'and it was written',
+      );
+    },
+    { engine },
+  );
+}
+
 async function testASettingsWriteIsTakenUpByTheEditor(): Promise<void> {
   const engine = resolveGodotPath();
   if (!engine) {
@@ -11579,6 +11753,23 @@ async function testAReimportReimportsThroughTheEngine(): Promise<void> {
       assert.match(kept, /^compress\/mode=1$/m, `the import should keep the option it was given:\n${kept}`);
       const current = await call({ op: 'status', resourcePath: 'good.png' });
       assert.equal(get(current, 'resources', 0, 'status'), 'up_to_date', JSON.stringify(current));
+
+      // A scene is loaded as it is and never imported. Asked for by name, it ran a pass and came
+      // back as not reimported, which reads as its import failing.
+      writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
+      const scene = await server.request(
+        'tools/call',
+        {
+          name: 'project_import',
+          arguments: { projectPath: project, op: 'reimport', resourcePath: 'main.tscn' },
+        },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+      assert.match(
+        textOf(scene) ?? '',
+        /res:\/\/main\.tscn is not something the engine imports: the engine loads \.tscn files as they are/,
+        String(textOf(scene)),
+      );
     } finally {
       await server.stop();
     }
@@ -12862,35 +13053,130 @@ async function testAKilledRunHasNoExitCode(): Promise<void> {
 }
 
 /**
- * An engine run through execFile that failed says how it ended, read off the error Node gave.
+ * An engine run says how it ended, and a run that talks a lot is not ended for it.
  *
- * A timeout kills with a signal and leaves no code, and a process that prints past the buffer is
- * killed with Node's reason as a string code. Both were answered as exit code -1. The errors are
- * the real ones, from real processes, because their shape is what is being read.
+ * A timeout kills with a signal and leaves no code, and a program that never started has none
+ * either; both were once answered as exit code -1, which is also a code a program can exit with.
+ * The output case is the one execFile got wrong: it killed a process printing past a mebibyte and
+ * reported Node's reason as the process failing, which is what a healthy import pass over a large
+ * project does. The processes are real ones, because how they end is what is being read.
  */
-async function testAFailedEngineRunSaysHowItEnded(): Promise<void> {
-  const failing = (args: string[], options: { timeout?: number; maxBuffer?: number }): Promise<unknown> =>
-    new Promise((resolve) => {
-      execFile(process.execPath, args, options, (error) => {
-        resolve(error);
-      });
-    });
-  const stays = 'setTimeout(() => {}, 20000)';
+/**
+ * Cases a run counted and never ran are put down to failFast only when failFast was set: a run
+ * without it was told to leave it out, which it already had.
+ */
+function testNotRunIsPutDownToFailFastOnlyWhenSet(): void {
+  assert.equal(notRunNote(0, true), undefined);
+  assert.match(
+    notRunNote(3, true) ?? '',
+    /stopped at the first failure.*3 cases never ran.*Leave failFast out/,
+  );
+  const without = notRunNote(1, false) ?? '';
+  assert.match(
+    without,
+    /^1 case counted in its suite never ran.*failFast was not set, so it was not that/,
+    without,
+  );
+  assert.doesNotMatch(without, /Leave failFast out/, without);
+}
+
+/**
+ * An export is exported when this run wrote its file. The file an earlier export left read as this
+ * one's, so an export that exited cleanly having written nothing was answered as exported.
+ */
+function testAnExportIsJudgedByTheFileItWrote(): void {
+  const clean = (): EngineRun => {
+    const log = new GameLog();
+    log.finish();
+    return { log, exitCode: 0, exitSignal: null, failure: null };
+  };
+  const asked = { preset: 'Linux', outputPath: 'builds/game.x86_64', debug: false };
+  const said = (response: ToolResponse): unknown[] => [
+    response.isError === true,
+    String(response.content[0]?.text).split('\n')[0],
+  ];
+
   assert.deepEqual(
-    endingOf((await failing(['-e', stays], { timeout: 300 })) as object),
-    { exitCode: null, exitSignal: 'SIGTERM', failure: null },
-    'a run past its timeout was killed and has no code',
+    said(exportAnswer(clean(), asked, 1000, 1000)),
+    [
+      true,
+      "Export with preset 'Linux' did not produce builds/game.x86_64. The builds/game.x86_64 there is from before this export, which did not write it.",
+    ],
+    'an untouched file from before is not this export',
+  );
+  assert.equal(get(parseTextContent({ result: exportAnswer(clean(), asked, 1000, 2000) }), 'exported'), true);
+  assert.equal(get(parseTextContent({ result: exportAnswer(clean(), asked, null, 5) }), 'exported'), true);
+  assert.deepEqual(
+    said(exportAnswer(clean(), asked, null, null)),
+    [true, "Export with preset 'Linux' did not produce builds/game.x86_64."],
+    'and with no file at all there is nothing from before to mention',
+  );
+}
+
+/**
+ * The note on a scan still running names what started and where its complaints are.
+ *
+ * A headless operation's answer once carried the game's note: it spoke of a game that never
+ * existed and sent the caller to editor_output, which holds nothing from that engine, while the
+ * engine's own complaints were in the same answer under engine_messages.
+ */
+function testTheScanNoteNamesWhatStarted(): void {
+  const running = { waitedMs: 30_000, stillScanning: true };
+  const game = scanWaitAnswer(running).scanNote ?? '';
+  assert.match(game, /this game started during the scan/, game);
+  assert.match(game, /If editor_output shows "Could not find type"/, game);
+
+  const engine = scanWaitAnswer(running, 'engine').scanNote ?? '';
+  assert.match(engine, /the engine answering this started during the scan/, engine);
+  assert.match(engine, /If engine_messages shows "Could not find type"/, engine);
+  assert.match(engine, /a class cache it wrote can be written over when the scan finishes/, engine);
+  assert.doesNotMatch(engine, /\bgame\b|editor_output/, engine);
+
+  assert.deepEqual(
+    scanWaitAnswer({ waitedMs: 1_200, stillScanning: false }, 'engine'),
+    { waitedForEditorScanMs: 1_200, scanNote: undefined },
+    'a scan that finished in time is a wait and no note',
+  );
+}
+
+async function testAnEngineRunSaysHowItEnded(): Promise<void> {
+  const node = (script: string, options?: Parameters<typeof runEngine>[2]): Promise<EngineRun> =>
+    runEngine(process.execPath, ['-e', script], options);
+
+  const late = await node('setTimeout(() => {}, 20000)', { timeout: { ms: 300, said: 'a moment' } });
+  assert.deepEqual(
+    [late.exitCode, late.exitSignal, late.failure, howItEnded(late)],
+    [null, 'SIGTERM', 'it ran past its a moment', 'ended by SIGTERM, because it ran past its a moment'],
+    'a run past its timeout was killed, has no code, and says why',
+  );
+
+  const lines = 40000;
+  const talkative = await node(
+    `for (let i = 0; i < ${lines}; i++) console.log("line " + i + " " + "x".repeat(40)); console.error("ERROR: last words");`,
   );
   assert.deepEqual(
-    endingOf((await failing(['-e', `console.log("x".repeat(100)); ${stays}`], { maxBuffer: 10 })) as object),
-    { exitCode: null, exitSignal: null, failure: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' },
-    'a run that printed past the buffer was ended by Node, which says why',
+    [talkative.exitCode, talkative.failure],
+    [0, null],
+    `two mebibytes of output is not a failure: ${howItEnded(talkative)}`,
   );
+  assert.equal(talkative.log.all.length, lines + 1, 'and every line reached the log, the last included');
+  assert.equal(talkative.log.all.at(-1)?.text, 'last words', 'stderr is read as the engine writes it');
+
+  const three = await node('process.exit(3)');
   assert.deepEqual(
-    endingOf((await failing(['-e', 'process.exit(3)'], {})) as object),
-    { exitCode: 3, exitSignal: null, failure: null },
+    [three.exitCode, three.exitSignal, three.failure, howItEnded(three)],
+    [3, null, null, 'exit code 3'],
     'a code the process exited with is its own',
   );
+
+  // Raced against a deadline, because Node emits no `exit` for a start that failed, and a run
+  // settled on it would wait for good rather than fail.
+  const missing = await Promise.race([
+    runEngine(join(tmpdir(), 'gdharness-no-such-engine'), []),
+    delay(10_000).then(() => assert.fail('a run that never started should still settle')),
+  ]);
+  assert.equal(missing.exitCode, null, 'a program that never started has no exit code');
+  assert.match(missing.failure ?? '', /^it could not be started: /, String(missing.failure));
 }
 
 /**
@@ -18740,6 +19026,103 @@ async function testGdUnitRunner(): Promise<void> {
           [],
           'and so does the user data directory each run was given',
         );
+
+        // Nothing ran, two ways: every suite ignored, and a suite with no cases in it. Measured with the
+        // pinned gdUnit4 on 4.7.2, neither writes a report, so both reach the no-report answer; the
+        // one with a report of no cases is refused as passed by the same rule should a runner write it.
+        writeFileSync(join(projectDir, 'test', 'hollow_test.gd'), 'extends GdUnitTestSuite\n');
+        for (const [how, asked] of [
+          [
+            'every suite ignored',
+            { ignore: ['sums_test', 'summary_lies_test', 'quiet_test', 'hollow_test'] },
+          ],
+          ['a suite with no cases', { path: 'test/hollow_test.gd' }],
+        ] as const) {
+          const none = await call(
+            'project_test',
+            { projectPath: projectDir, ...asked },
+            ENGINE_CALL_TIMEOUT_MS * 3,
+          );
+          const noneAnswer: unknown = JSON.parse(none.slice(none.indexOf('{')));
+          assert.match(none, /^No tests ran: no test cases found at /, none);
+          assert.equal(get(noneAnswer, 'passed'), false, `${how} did not pass: ${none}`);
+          assert.equal(get(noneAnswer, 'tests'), 0, none);
+        }
+        rmSync(join(projectDir, 'test', 'hollow_test.gd'));
+
+        writeFileSync(
+          join(projectDir, 'test', 'hooked_test.gd'),
+          'extends GdUnitTestSuite\n\n\nfunc before() -> void:\n\tassert_bool(false).is_true()\n\n\nfunc test_after_a_failed_hook() -> void:\n\tassert_int(1).is_equal(1)\n',
+        );
+        writeFileSync(
+          join(projectDir, 'test', 'crashing_test.gd'),
+          'extends GdUnitTestSuite\n\n\nfunc test_crashes() -> void:\n\tvar nothing: Node = null\n\tprint(nothing.get_name())\n\tassert_int(1).is_equal(1)\n',
+        );
+        // A before() that failed: gdUnit4 counts it on the suite and on no case, so it was answered as
+        // no failure and a passed suite beside exit 100. And a runtime error inside a case, which
+        // gdUnit4 does report as that case's error, held so it stays so.
+        const asked = async (suite: string): Promise<unknown> => {
+          const answer = JSON.parse(
+            await call(
+              'project_test',
+              { projectPath: projectDir, path: `test/${suite}.gd` },
+              ENGINE_CALL_TIMEOUT_MS * 3,
+            ),
+          ) as unknown;
+          rmSync(join(projectDir, 'test', `${suite}.gd`));
+          return answer;
+        };
+        const hooked = await asked('hooked_test');
+        assert.deepEqual(
+          [get(hooked, 'passed'), get(hooked, 'suitesPassed'), get(hooked, 'suites', 0, 'hookFailures')],
+          [false, 0, 1],
+          JSON.stringify(hooked, null, 2),
+        );
+        assert.deepEqual(
+          get(hooked, 'hookFailures'),
+          [
+            {
+              suite: 'hooked_test',
+              hook: 'before',
+              path: 'res://test/hooked_test.gd',
+              line: 5,
+              message: "Expecting: 'true' but is 'false'",
+            },
+          ],
+          JSON.stringify(hooked, null, 2),
+        );
+        // Orphans left early in a run that prints a great deal after: counted off what was printed,
+        // they were lost with everything before the newest two hundred lines.
+        mkdirSync(join(projectDir, 'test', 'long'));
+        writeFileSync(
+          join(projectDir, 'test', 'long', 'a_leaves_test.gd'),
+          'extends GdUnitTestSuite\n\n\nfunc test_leaves_a_node() -> void:\n\tvar kept: Node = Node.new()\n\tassert_object(kept).is_not_null()\n',
+        );
+        writeFileSync(
+          join(projectDir, 'test', 'long', 'z_talks_test.gd'),
+          'extends GdUnitTestSuite\n\n\nfunc test_talks() -> void:\n\tfor index: int in range(300):\n\t\tprint("line ", index)\n\tassert_int(1).is_equal(1)\n',
+        );
+        const long = JSON.parse(
+          await call(
+            'project_test',
+            { projectPath: projectDir, path: 'test/long' },
+            ENGINE_CALL_TIMEOUT_MS * 3,
+          ),
+        ) as unknown;
+        rmSync(join(projectDir, 'test', 'long'), { recursive: true, force: true });
+        assert.deepEqual(
+          asArray(get(long, 'warnings') ?? []).map((warning) => get(warning, 'path')),
+          ['res://test/long/a_leaves_test.gd'],
+          JSON.stringify(long, null, 2),
+        );
+
+        const crashed = await asked('crashing_test');
+        assert.deepEqual(
+          [get(crashed, 'passed'), get(crashed, 'errors'), get(crashed, 'failed', 0, 'status')],
+          [false, 1, 'error'],
+          JSON.stringify(crashed, null, 2),
+        );
+
         // Nothing stopped early in the runs above, and the answer says so by leaving the field
         // out. Asserted here so the presence of it below means something.
         assert.equal(get(run, 'notRun'), undefined, JSON.stringify(run, null, 2));
@@ -21461,20 +21844,36 @@ async function testAStartWaitsOutTheEditorsScan(): Promise<void> {
       console.log('the test run case of the scan regression skipped (GDUNIT4_PATH not set)');
     }
 
-    // A scan that does not end: started anyway, and said.
+    // A scan that does not end: started anyway, and said. A headless operation waits beside the
+    // game, in the same thirty seconds, because its note names another engine and another log.
     cacheBeforeTheScan();
     scanning = () => true;
-    const endless = await check();
+    const [endless, operation] = await Promise.all([
+      check(),
+      server.request(
+        'tools/call',
+        {
+          name: 'project_settings',
+          arguments: { projectPath: project, op: 'get', setting: 'application/config/name' },
+        },
+        ENGINE_CALL_TIMEOUT_MS,
+      ),
+    ]);
     assert.ok(
       asNumber(get(endless.answer, 'waitedForEditorScanMs')) >= 30_000,
       `a scan that does not end is waited for as long as the budget: ${endless.said}`,
     );
     assert.match(
       text(get(endless.answer, 'scanNote')),
-      /still scanning the project after 30 seconds/,
+      /still scanning the project after 30 seconds, so this game started during the scan/,
       `and the start says it went ahead during it: ${endless.said}`,
     );
     assert.match(endless.said, /cache read: before it/, `the game still booted: ${endless.said}`);
+    assert.match(
+      text(get(parseTextContent(operation), 'scanNote')),
+      /still scanning the project after 30 seconds, so the engine answering this started during the scan.*If engine_messages shows/,
+      `an operation says it went ahead too, and where its own complaints are: ${textOf(operation)}`,
+    );
   } finally {
     editor?.terminate();
     await server.stop();
@@ -22495,7 +22894,10 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStoppedRunIsStillTheOneAnswered,
   testAStoppedSpawnedRunGivesWayToAPlay,
   testAKilledRunHasNoExitCode,
-  testAFailedEngineRunSaysHowItEnded,
+  testAnEngineRunSaysHowItEnded,
+  testTheScanNoteNamesWhatStarted,
+  testAnExportIsJudgedByTheFileItWrote,
+  testNotRunIsPutDownToFailFastOnlyWhenSet,
   testAWordsWaitLeavesTheGameItsSpeed,
   testTheAnnounceWaitIsNotHeldByASlowEditor,
   testTheWaitSizedToABootIsSaid,
@@ -22550,6 +22952,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testRefreshingUidsMakesTheSidecarAndWritesNoScene,
   testAReimportReimportsThroughTheEngine,
   testASettingsWriteIsTakenUpByTheEditor,
+  testOptionsWrittenAreSaidWhenTheirReimportFails,
   testWhoIsHoldingAPortIsAskable,
   testWhatTheEditorSavedAwayIsReportedTheSameWay,
   testARestartSaysWhatTheEditorDropped,
