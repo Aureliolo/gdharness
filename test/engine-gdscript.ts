@@ -28,6 +28,7 @@ import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { runOperation as runThroughTheServersOwnPath } from '../src/headless.js';
 import { userDataIn } from '../src/launch.js';
+import { TOOL_SPECS } from '../src/tool-definitions.js';
 import { asArray, asNumber, asObject, asString, get, lastJsonLine } from './support/json.js';
 import { solidPng } from './support/png.js';
 import { sweep } from './support/sweep.js';
@@ -1293,6 +1294,35 @@ function testOperations(godotPath: string, projectDir: string): void {
     'the filter should exclude something',
   );
 
+  // Every category the schema offers is one the operation knows. The schema offered physics3d and
+  // ui, which were refused, and physics answered the 3D bodies alone.
+  const offered = asArray(
+    get(
+      TOOL_SPECS.find((spec) => spec.name === 'editor_classes'),
+      'parameters',
+      'category',
+      'enum',
+    ),
+  ).map((one) => String(one));
+  assert.ok(offered.length >= 12, `the schema's categories: ${offered.join(', ')}`);
+  for (const category of offered) {
+    const found = operation('query_classes', { category });
+    assert.ok(
+      asNumber(get(found, 'filtered_count')) > 0,
+      `${category} answers classes: ${JSON.stringify(found)}`,
+    );
+  }
+  const bodies = asArray(get(operation('query_classes', { category: 'physics' }), 'classes'));
+  assert.ok(
+    bodies.includes('CharacterBody2D') && bodies.includes('CharacterBody3D'),
+    `physics is both families: ${bodies.join(', ')}`,
+  );
+  const threeD = asArray(get(operation('query_classes', { category: 'physics3d' }), 'classes'));
+  assert.ok(
+    threeD.includes('CharacterBody3D') && !threeD.includes('CharacterBody2D'),
+    `physics3d is the 3D bodies: ${threeD.join(', ')}`,
+  );
+
   const classInfo = operation('query_class_info', { class_name: 'Camera2D' });
   assert.equal(get(classInfo, 'parent_class'), 'Node2D');
   assert.ok(asNumber(get(classInfo, 'methods_count')) > 0);
@@ -2310,6 +2340,33 @@ function testTheOperationsSurviveEveryWarning(godotPath: string): void {
 }
 
 /** The cases after the fixtures, in the order the leg runs them, by the name `case` takes. */
+/**
+ * A scene saved binary counts as a scene in the health check.
+ *
+ * It looked for `.tscn` alone, so a project saving its scenes as `.scn` was told it had none and
+ * lost five points for it. The file is taken away again, since it is empty and a later case walking
+ * the project's scenes would try to load it.
+ */
+function testBinaryScenesAreScenes(godotPath: string, projectDir: string): void {
+  const counted = (): number =>
+    asNumber(
+      get(
+        runOperation(godotPath, projectDir, 'get_project_health', { categories: ['scenes'] }),
+        'checks',
+        'scenes',
+        'total_scenes',
+      ),
+    );
+  const before = counted();
+  const binary = join(projectDir, 'only_binary.scn');
+  writeFileSync(binary, '');
+  try {
+    assert.equal(counted(), before + 1, 'a binary scene is counted as a scene');
+  } finally {
+    rmSync(binary);
+  }
+}
+
 const CASES: Readonly<Record<string, (godotPath: string, projectDir: string) => void | Promise<void>>> = {
   dependencyWalk: testDependencyWalk,
   operations: testOperations,
@@ -2335,6 +2392,7 @@ const CASES: Readonly<Record<string, (godotPath: string, projectDir: string) => 
     testTheOperationsSurviveEveryWarning(godotPath);
   },
   answer: (godotPath) => testTheAnswerIsTheOperations(godotPath),
+  binaryScenes: testBinaryScenesAreScenes,
 };
 
 async function main(): Promise<void> {
@@ -2427,6 +2485,8 @@ async function main(): Promise<void> {
     runFixture(godotPath, projectDir, 'runtime_click');
     runFixture(godotPath, projectDir, 'runtime_words');
     runFixture(godotPath, projectDir, 'runtime_wait');
+    runFixture(godotPath, projectDir, 'runtime_signal');
+    runFixture(godotPath, projectDir, 'runtime_calls');
     runFixture(godotPath, projectDir, 'runtime_capture');
     // An editor opened before its server has to keep asking. The wait is read back rather than
     // trusted: a client that connected before the fixture started listening would otherwise

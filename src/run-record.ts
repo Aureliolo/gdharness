@@ -52,6 +52,16 @@ export interface RunRecord {
   readonly transcript: string;
   readonly startedAt: number;
   readonly projectPath: string;
+  /**
+   * The project the server that started the run serves, which can be another than the run's.
+   *
+   * A server serving one project can start a run of another by naming its projectPath. Its
+   * successor after a reconnect serves the same project, and found the note under the run's
+   * project, not its own, so it refused the run as another server's while the runtime tools still
+   * reached the game. Absent from a note written before this was kept, and for a server that names
+   * no project.
+   */
+  readonly servedBy?: string;
   readonly arguments: readonly string[];
   /**
    * The engine this run was started with, so the pid can be shown to still mean this run.
@@ -332,6 +342,9 @@ function recordAt(path: string): RunRecord | null {
     transcript,
     startedAt,
     projectPath: typeof fields['projectPath'] === 'string' ? fields['projectPath'] : '',
+    ...(typeof fields['servedBy'] === 'string' && fields['servedBy'] !== ''
+      ? { servedBy: fields['servedBy'] }
+      : {}),
     arguments: Array.isArray(args) ? args.filter((value): value is string => typeof value === 'string') : [],
     ...(typeof fields['command'] === 'string' ? { command: fields['command'] } : {}),
     ...(typeof fields['exitCode'] === 'number' ? { exitCode: fields['exitCode'] } : {}),

@@ -99,7 +99,7 @@ import {
   userDataIn,
 } from '../src/launch.js';
 import { GodotLSPClient } from '../src/lsp_client.js';
-import { isWithinRoot, resolveWithinProject } from '../src/paths.js';
+import { isSameDirectory, isWithinRoot, resolveWithinProject } from '../src/paths.js';
 import { freePort } from '../src/ports.js';
 import {
   ancestorsIn,
@@ -113,7 +113,7 @@ import {
   whyTheProcessTreeFailed,
 } from '../src/process-children.js';
 import { secondsFromClock } from '../src/process-time.js';
-import { projectStructure, searchProject } from '../src/project-scan.js';
+import { projectStructure, type SearchOptions, searchProject } from '../src/project-scan.js';
 import { parseProjectGodot, settingKeys, settingsDroppedReport } from '../src/resources.js';
 import { noteRestartBegun, restartNotePath, restartOwed, restartSettled } from '../src/restart-note.js';
 import {
@@ -213,6 +213,7 @@ import {
 import { namedType, renderToolsMarkdown } from '../src/tool-reference.js';
 import { CACHE_MS, cacheFile, isNewer, registryFor, UpdateCheck } from '../src/update-check.js';
 import { askWindows } from '../src/windows-ask.js';
+import { withHome } from './support/cli-home.js';
 import { asArray, asNumber, get, text } from './support/json.js';
 import { isRecord, type JsonRpcMessage, parseTextContent, textOf } from './support/json-rpc.js';
 import { solidPng } from './support/png.js';
@@ -2354,8 +2355,45 @@ async function testAProjectUpgradedUnderTheServerIsSaid(): Promise<void> {
     assert.match(said ?? '', /reconnect/i, 'and say what replaces it');
   } finally {
     await server.stop();
+  }
+
+  // The other direction: addons older than the server, as a checkout has when a teammate moved the
+  // pin in a committed config and not the addons. Reconnecting spawns this same server again and an
+  // editor restart loads the same old code, and those were the two remedies given.
+  writeFileSync(join(addon, '.gdharness-version'), '0.0.1\n');
+  const behind = new ServerProcess({ env: { GDHARNESS_PROJECT: project } });
+  try {
+    await behind.initialize('regression-test');
+    const said = textOf(await behind.request('tools/call', { name: 'editor_status', arguments: {} })) ?? '';
+    assert.match(said, /"projectIs": "0\.0\.1"/, said);
+    assert.match(said, /project_addons_behind_this_server/, `the older direction is its own notice: ${said}`);
+    assert.match(said, /gdharness upgrade in the project/, `naming the remedy that works: ${said}`);
+    assert.doesNotMatch(said, /project_upgraded_under_this_server/, said);
+  } finally {
+    await behind.stop();
     sweep(project);
   }
+}
+
+/**
+ * The editor's stale note names the remedy that works for the code a restart would load.
+ *
+ * An editor older than the server was always told to restart. When the project's own addons are as
+ * old as the editor's, a restart loads them again and its own answer says to restart again; what
+ * works is gdharness upgrade in the project first.
+ */
+function testAStaleNoteKnowsWhatARestartLoads(): void {
+  const onDiskOld = addonMismatch('1.1.0', '1.1.5', 'old-digest', 'new-digest', 'old-digest');
+  assert.match(
+    onDiskOld ?? '',
+    /gdharness upgrade in the project installs the 1\.1\.5 addons/,
+    String(onDiskOld),
+  );
+  const onDiskNew = addonMismatch('1.1.0', '1.1.5', 'old-digest', 'new-digest', 'new-digest');
+  assert.match(onDiskNew ?? '', /Restart it with editor_launch restart/, String(onDiskNew));
+  assert.doesNotMatch(onDiskNew ?? '', /gdharness upgrade/, String(onDiskNew));
+  const noProject = addonMismatch('1.1.0', '1.1.5', 'old-digest', 'new-digest');
+  assert.match(noProject ?? '', /Restart it with editor_launch restart/, String(noProject));
 }
 
 /**
@@ -2497,8 +2535,10 @@ async function testARestartLeftHalfDoneIsSaid(): Promise<void> {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-half-restart-'));
   const port = await reservePort();
   let editor: WebSocket | null = null;
+  // The engine is a stand-in that exits at once, so a launch guard that fails to refuse starts
+  // nothing that outlives the case.
   const server = new ServerProcess({
-    env: { GDHARNESS_PROJECT: project, GDHARNESS_BRIDGE_PORT: String(port) },
+    env: { GDHARNESS_PROJECT: project, GDHARNESS_BRIDGE_PORT: String(port), GODOT_PATH: process.execPath },
   });
   const uninformed = new ServerProcess({ env: { GDHARNESS_PROJECT: project } });
   try {
@@ -2531,6 +2571,91 @@ async function testARestartLeftHalfDoneIsSaid(): Promise<void> {
     assert.equal(get(interrupted, 'quitAt'), '2026-09-20T19:39:30.000Z', 'and when');
     assert.equal(get(interrupted, 'byServerPid'), 4242, 'and which server began it');
     assert.match(text(get(interrupted, 'note')), /editor_launch open/, 'and what finishes it');
+
+    const editorOf = async (): Promise<unknown> =>
+      get(
+        parseTextContent(await server.request('tools/call', { name: 'editor_status', arguments: {} })),
+        'editor',
+      );
+    const launch = async (projectPath: string): Promise<string> =>
+      textOf(
+        await server.request('tools/call', { name: 'editor_launch', arguments: { op: 'open', projectPath } }),
+      ) ?? '';
+    const begun = (byPid: number, quitAt: string): void => {
+      noteRestartBegun({
+        projectPath: project,
+        editorPid: 27040,
+        ports: { lsp: 6005, dap: 6006 },
+        quitAt,
+        byPid,
+      });
+    };
+
+    // A writer that answers is not enough: no restart lasts days, so a pid answering under a note
+    // that old is a process that reused the number, and the restart it names is over.
+    begun(process.pid, '2026-09-20T19:39:30.000Z');
+    const reused = await editorOf();
+    assert.equal(get(reused, 'restartInterrupted', 'byServerPid'), process.pid, JSON.stringify(reused));
+    assert.equal(get(reused, 'restartUnderway'), undefined, JSON.stringify(reused));
+    assert.equal(get(reused, 'mayYetConnect'), false, JSON.stringify(reused));
+
+    // Nor is a young note: the server that wrote this one has gone, so nothing will launch.
+    const ended = spawnSync(process.execPath, ['-e', ''], { encoding: 'utf8' }).pid;
+    assert.ok(ended > 0 && !alive(ended), 'the fixture needs a pid that has gone');
+    begun(ended, new Date().toISOString());
+    const orphaned = await editorOf();
+    assert.equal(get(orphaned, 'restartInterrupted', 'byServerPid'), ended, JSON.stringify(orphaned));
+    assert.equal(get(orphaned, 'restartUnderway'), undefined, JSON.stringify(orphaned));
+    assert.equal(get(orphaned, 'mayYetConnect'), false, JSON.stringify(orphaned));
+
+    // Young and its writer here, which is what a status asked in the gap of a restart reads: the
+    // editor is coming, from the restart, and another launch would be a second editor beside it.
+    begun(process.pid, new Date().toISOString());
+    const coming = await editorOf();
+    assert.equal(
+      get(coming, 'restartInterrupted'),
+      undefined,
+      `nothing was interrupted: ${JSON.stringify(coming)}`,
+    );
+    assert.equal(get(coming, 'mayYetConnect'), true, `an editor is coming: ${JSON.stringify(coming)}`);
+    assert.equal(get(coming, 'restartUnderway', 'byServerPid'), process.pid, JSON.stringify(coming));
+    assert.match(
+      text(get(coming, 'restartUnderway', 'note')),
+      /under way.*Wait for it/s,
+      JSON.stringify(coming),
+    );
+
+    // A launch that could never connect is refused before anything starts, each for its own reason.
+    // Each half of the addon check gets the shape only it refuses: enabled with nothing on disk,
+    // which is a project whose addons folder was cleaned, then on disk and not enabled.
+    const settings = readFileSync(join(project, 'project.godot'), 'utf8');
+    const enabled = `${settings}\n[editor_plugins]\nenabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n`;
+    writeFileSync(join(project, 'project.godot'), enabled);
+    assert.match(
+      await launch(project),
+      /gdharness editor addon is not installed/,
+      'enabled and not installed',
+    );
+    writeFileSync(join(project, 'project.godot'), settings);
+    mkdirSync(join(project, 'addons', 'gdharness_editor'), { recursive: true });
+    assert.match(await launch(project), /gdharness editor addon is not enabled/, 'installed and not enabled');
+    writeFileSync(join(project, 'project.godot'), enabled);
+    assert.match(
+      await launch(project),
+      /restart of this project's editor is under way/,
+      'a restart under way',
+    );
+    assert.ok(existsSync(restartNotePath(project)), 'and the refused launch leaves the restart note alone');
+    // Another project that has everything this one has, so its only fault is not being this one.
+    const other = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-other-project-'));
+    try {
+      mkdirSync(join(other, 'addons', 'gdharness_editor'), { recursive: true });
+      writeFileSync(join(other, 'project.godot'), readFileSync(join(project, 'project.godot'), 'utf8'));
+      const elsewhere = await launch(other);
+      assert.match(elsewhere, /This server serves .*would dial that project's own server/s, elsewhere);
+    } finally {
+      sweep(other);
+    }
 
     // The contrast, from a server just as young with no note to read: its `true` is the window,
     // and is the right answer there.
@@ -2788,20 +2913,6 @@ function testBothEndsAgreeAboutTheAnnouncement(): void {
 }
 
 /**
- * A server told to go ends, with an editor still holding the bridge.
- *
- * Written to catch a hang and it found none, which is worth saying plainly: `http.Server.close`
- * calls back only once every connection has gone, and an editor on the bridge is an upgraded
- * socket, so a close that waited on it would never settle and the process would sit there
- * holding the port for good. It settles. Two abandoned servers were found holding 6505 in one
- * day and neither of them was this.
- *
- * So it stays as what it turned out to be: the thing nobody had pinned. Its stdin is closed and
- * nothing else, because that is what a harness going away looks like and it is the only shutdown
- * nobody finishes for us. Every other fixture here kills the server outright, so none of them
- * says anything about the path a real harness takes.
- */
-/**
  * An editor a server opened is restarted by starting it again; one opened by hand restarts itself.
  *
  * Godot consumes the arguments an editor was started with and hands none of them back, so an editor
@@ -2874,6 +2985,29 @@ async function testAnEditorAServerOpenedIsStartedAgain(): Promise<void> {
       assert.ok(greeted, 'the server should read the greeting the editor sent');
       assert.equal(greeted['openedByAServer'], opened, 'and take the editor at its word about it');
 
+      // An editor restarting itself comes back as it was, so hidden cannot be honoured there. It
+      // was accepted and the window came back.
+      if (!opened) {
+        // A restart that goes ahead waits for the editor to come back, which this one never does,
+        // so the wait is cut short and read as no answer rather than left to fail as a timeout.
+        const hidden =
+          textOf(
+            await server
+              .request(
+                'tools/call',
+                { name: 'editor_launch', arguments: { op: 'restart', hidden: true } },
+                5_000,
+              )
+              .catch(() => null),
+          ) ?? 'no answer: the restart went ahead';
+        assert.match(
+          hidden,
+          /opened by hand, and restarts itself as it was, so it cannot come back hidden/,
+          hidden,
+        );
+        assert.equal(asked.includes('restart_editor'), false, 'and the editor was asked nothing');
+      }
+
       const restart = server
         .request('tools/call', { name: 'editor_launch', arguments: { op: 'restart' } }, 20_000)
         .catch(() => null);
@@ -2904,6 +3038,262 @@ async function testAnEditorAServerOpenedIsStartedAgain(): Promise<void> {
   }
 }
 
+/**
+ * An editor that has connected and not yet greeted is described as that, and nothing is read off it.
+ *
+ * The socket opens a frame before the greeting, longer on an editor that is importing, and every
+ * field the greeting carries is undefined in between. Read in the gap, the version compared as
+ * stale and a healthy editor was sent to a restart; the opener read as "by hand", so a restart
+ * asked the editor to restart itself, which brings back an editor a server opened without its
+ * ports; and the console was refused as not ours. The fake editor holds its greeting while each is
+ * asked, then greets as an editor a server opened while the restart waits.
+ */
+async function testAnEditorIsReadOnceItHasSaidWhoItIs(): Promise<void> {
+  const port = await reservePort();
+  const server = new ServerProcess({
+    env: { GDHARNESS_BRIDGE_PORT: String(port), GODOT_PATH: join(tmpdir(), 'gdharness-no-such-engine') },
+  });
+  let editor: WebSocket | null = null;
+  try {
+    await server.initialize('regression-test');
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+    editor = socket;
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', () => {
+        resolve();
+      });
+      socket.once('error', reject);
+    });
+    const asked: string[] = [];
+    socket.on('message', (data: Buffer) => {
+      const message = JSON.parse(data.toString('utf8')) as { type?: string; tool?: string };
+      if (message.type === 'tool_invoke' && typeof message.tool === 'string') {
+        asked.push(message.tool);
+      }
+    });
+    const call = async (name: string, args: Record<string, unknown>, ms = 20_000): Promise<string> =>
+      textOf(await server.request('tools/call', { name, arguments: args }, ms)) ?? '';
+
+    let gap: unknown = null;
+    for (let waited = 0; waited < 10_000; waited += 100) {
+      const now = get(
+        parseTextContent(await server.request('tools/call', { name: 'editor_status', arguments: {} })),
+        'editor',
+      );
+      if (get(now, 'connected') === true) {
+        gap = now;
+        break;
+      }
+      await delay(100);
+    }
+    assert.ok(gap !== null, 'the socket should count as connected before any greeting');
+    assert.match(text(get(gap, 'greeting')), /has not yet said who it is/, JSON.stringify(gap));
+    assert.equal(
+      get(gap, 'addonIsStale'),
+      undefined,
+      `nothing is said about its addon yet: ${JSON.stringify(gap)}`,
+    );
+    assert.equal(get(gap, 'staleNote'), undefined, JSON.stringify(gap));
+    assert.equal(get(gap, 'breakpointsAtRisk'), undefined, JSON.stringify(gap));
+    assert.match(
+      await call('editor_output', { op: 'editor' }),
+      /has connected and has not yet said who it is/,
+      'the console is not refused as another',
+    );
+
+    // Asked in the gap, and greeted while it waits: the answer is the path an editor a server opened
+    // takes, which stops at the engine here, and the editor is never asked to restart itself.
+    // A restart that goes the other way waits for an editor to come back, which this one never
+    // does, so the answer is cut short rather than left to fail as a timeout.
+    const restart = call('editor_launch', { op: 'restart' }).catch(
+      () => 'no answer: it waited for a comeback',
+    );
+    await delay(500);
+    socket.send(
+      JSON.stringify({
+        type: 'godot_ready',
+        project_path: process.cwd(),
+        addon_version: SERVER_VERSION,
+        editor_pid: process.pid,
+        opened_by_a_server: true,
+      }),
+    );
+    const answered = await restart;
+    assert.match(
+      answered,
+      /GODOT_PATH is set to .*gdharness-no-such-engine, which does not exist/,
+      `the restart waited for the greeting and took the server's path: ${answered}`,
+    );
+    assert.equal(asked.includes('restart_editor'), false, 'and the editor was not asked to restart itself');
+
+    const greeted = get(
+      parseTextContent(await server.request('tools/call', { name: 'editor_status', arguments: {} })),
+      'editor',
+    );
+    assert.equal(get(greeted, 'greeting'), undefined, `greeted, the note goes: ${JSON.stringify(greeted)}`);
+    assert.equal(get(greeted, 'addonIsStale'), false, `and the addon is judged: ${JSON.stringify(greeted)}`);
+  } finally {
+    editor?.terminate();
+    await server.stop();
+  }
+
+  // An editor that never greets holds a restart only as long as the greeting wait, and is refused
+  // with what to do rather than restarted on a guess.
+  const silentPort = await reservePort();
+  const silentServer = new ServerProcess({
+    env: {
+      GDHARNESS_BRIDGE_PORT: String(silentPort),
+      GODOT_PATH: join(tmpdir(), 'gdharness-no-such-engine'),
+    },
+  });
+  let silent: WebSocket | null = null;
+  try {
+    await silentServer.initialize('regression-test');
+    const socket = new WebSocket(`ws://127.0.0.1:${silentPort}/godot`);
+    silent = socket;
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', () => {
+        resolve();
+      });
+      socket.once('error', reject);
+    });
+    const asked: string[] = [];
+    socket.on('message', (data: Buffer) => {
+      const message = JSON.parse(data.toString('utf8')) as { type?: string; tool?: string };
+      if (message.type === 'tool_invoke' && typeof message.tool === 'string') {
+        asked.push(message.tool);
+      }
+    });
+    let connected = false;
+    for (let waited = 0; waited < 10_000 && !connected; waited += 100) {
+      await delay(100);
+      const now = parseTextContent(
+        await silentServer.request('tools/call', { name: 'editor_status', arguments: {} }),
+      );
+      connected = get(now, 'editor', 'connected') === true;
+    }
+    assert.ok(connected, 'the silent editor should count as connected');
+    const refused =
+      textOf(
+        await silentServer
+          .request('tools/call', { name: 'editor_launch', arguments: { op: 'restart' } }, 30_000)
+          .catch(() => null),
+      ) ?? 'no answer: it waited for a comeback';
+    assert.match(refused, /has not said who it is within 10s/, refused);
+    assert.deepEqual(
+      asked.filter((tool) => tool === 'restart_editor' || tool === 'quit_editor'),
+      [],
+      `and the editor was neither asked to restart nor to go: ${asked.join(', ')}`,
+    );
+  } finally {
+    silent?.terminate();
+    await silentServer.stop();
+  }
+}
+
+/**
+ * A restart whose old editor does not go in time starts no replacement.
+ *
+ * The result of the wait for the old editor to exit was ignored, so a save that ran long, or a tool
+ * script holding up the exit, had the replacement launched onto ports the old one still held. It
+ * bound neither, reported both, and the answer said restarted. The editor here answers the quit and
+ * its pid is a live stand-in that never exits; the timeout is shortened so the case waits seconds.
+ */
+async function testARestartWaitsForTheOldEditorToGo(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slow-exit-'));
+  writeFileSync(
+    join(project, 'project.godot'),
+    '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="SlowExit"\n',
+  );
+  // Detached so it is nobody's job object and outlives nothing by accident; ended in the finally.
+  const lingering = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'], {
+    detached: true,
+    stdio: 'ignore',
+  });
+  const port = await reservePort();
+  const server = new ServerProcess({
+    env: {
+      GDHARNESS_BRIDGE_PORT: String(port),
+      GDHARNESS_PROJECT: project,
+      GODOT_PATH: process.execPath,
+      GDHARNESS_EDITOR_RESTART_TIMEOUT_MS: '2000',
+    },
+  });
+  let editor: WebSocket | null = null;
+  try {
+    const pid = lingering.pid ?? 0;
+    assert.ok(pid > 0 && alive(pid), 'the fixture needs a live process for the old editor');
+    await server.initialize('regression-test');
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+    editor = socket;
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', () => {
+        resolve();
+      });
+      socket.once('error', reject);
+    });
+    const asked: string[] = [];
+    socket.on('message', (raw: Buffer) => {
+      const message: unknown = JSON.parse(String(raw));
+      if (isRecord(message) && message['type'] === 'tool_invoke') {
+        asked.push(String(message['tool']));
+        socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result: {} }));
+      }
+    });
+    socket.send(
+      JSON.stringify({
+        type: 'godot_ready',
+        project_path: project,
+        addon_version: SERVER_VERSION,
+        editor_pid: pid,
+        opened_by_a_server: true,
+      }),
+    );
+    let greeted = false;
+    for (let waited = 0; waited < 10_000 && !greeted; waited += 100) {
+      await delay(100);
+      const now = parseTextContent(
+        await server.request('tools/call', { name: 'editor_status', arguments: {} }),
+      );
+      greeted = get(now, 'editor', 'editorPid') === pid;
+    }
+    assert.ok(greeted, 'the fake editor should have been greeted');
+
+    const answer =
+      textOf(
+        await server
+          .request('tools/call', { name: 'editor_launch', arguments: { op: 'restart' } }, 30_000)
+          .catch(() => null),
+      ) ?? 'no answer';
+    assert.ok(asked.includes('quit_editor'), `the editor was asked to go: ${asked.join(', ')}`);
+    assert.match(
+      answer,
+      new RegExp(`pid ${pid} is still running after 2s, so no replacement was started`),
+      `a restart whose old editor stays is not carried on with: ${answer}`,
+    );
+    assert.equal(existsSync(restartNotePath(project)), false, 'and the restart, answered, owes nothing');
+  } finally {
+    editor?.terminate();
+    await server.stop();
+    lingering.kill();
+    sweep(project);
+  }
+}
+
+/**
+ * A server told to go ends, with an editor still holding the bridge.
+ *
+ * Written to catch a hang and it found none, which is worth saying plainly: `http.Server.close`
+ * calls back only once every connection has gone, and an editor on the bridge is an upgraded
+ * socket, so a close that waited on it would never settle and the process would sit there
+ * holding the port for good. It settles. Two abandoned servers were found holding 6505 in one
+ * day and neither of them was this.
+ *
+ * So it stays as what it turned out to be: the thing nobody had pinned. Its stdin is closed and
+ * nothing else, because that is what a harness going away looks like and it is the only shutdown
+ * nobody finishes for us. Every other fixture here kills the server outright, so none of them
+ * says anything about the path a real harness takes.
+ */
 async function testAServerEndsWithAnEditorStillOnTheBridge(): Promise<void> {
   const port = await reservePort();
   const server = new ServerProcess({ env: { GDHARNESS_BRIDGE_PORT: String(port) } });
@@ -3363,7 +3753,8 @@ async function testAnArgumentMeantForAnotherOpIsRefused(): Promise<void> {
     const outside: [string, Record<string, unknown>, string][] = [
       ['runtime_inspect', { op: 'tree', depth: -1 }, 'depth of 0 or more, not -1'],
       ['runtime_inspect', { op: 'tree', depth: 1.5 }, 'depth as integer, not 1.5'],
-      ['runtime_inspect', { op: 'find', className: 'Label', limit: 0 }, 'limit of 1 or more, not 0'],
+      ['runtime_inspect', { op: 'find', className: 'Label', limit: 0 }, 'limit from 1 to 5000, not 0'],
+      ['runtime_inspect', { op: 'text', limit: 5001 }, 'limit from 1 to 5000, not 5001'],
       ['runtime_wait', { op: 'frames', frames: 601 }, 'frames from 1 to 600, not 601'],
       ['runtime_input', { op: 'action', action: 'jump', strength: 1.5 }, 'strength from 0 to 1, not 1.5'],
     ];
@@ -3373,6 +3764,7 @@ async function testAnArgumentMeantForAnotherOpIsRefused(): Promise<void> {
     }
     for (const [tool, args] of [
       ['runtime_inspect', { op: 'tree', depth: 0 }],
+      ['runtime_inspect', { op: 'text', limit: 5000 }],
       ['runtime_wait', { op: 'frames', frames: 600 }],
       ['runtime_input', { op: 'action', action: 'jump', strength: 0 }],
     ] as const) {
@@ -3835,6 +4227,75 @@ function testTheProjectWalksAgreeAboutWhatIsInIt(): void {
     );
     assert.equal(found.summary.files_searched, 1, 'and should not have opened the other two');
     assert.equal(projectStructure(sandbox).scripts, 1, 'the count should agree with the search');
+
+    // What the structure counts as scenes and assets, which was text scenes and a short list of
+    // images, fonts and sound: a project saving binary scenes had none, and its models were other.
+    for (const file of ['level.tscn', 'baked.scn', 'ship.glb', 'intro.ogv', 'water.gdshader', 'notes.txt']) {
+      writeFileSync(join(sandbox, file), '');
+    }
+    assert.deepEqual(
+      projectStructure(sandbox),
+      { scenes: 2, scripts: 1, assets: 3, other: 1 },
+      'binary scenes are scenes, and models, video and shaders are assets',
+    );
+  } finally {
+    sweep(sandbox);
+  }
+}
+
+/**
+ * A search with no fileTypes reads every text file, and says what it found as it found it.
+ *
+ * Found in review, four ways a search said less than was there. The default was a list of eight
+ * extensions described as every text file, so project.godot and C# were never read and an autoload
+ * registered only in project.godot came back used nowhere. A lookahead matched the empty string,
+ * which was read as no match. `$` met only the end of a CRLF line's `\r`. And a search whose matches
+ * came to the limit exactly was called truncated.
+ */
+function testASearchReadsWhatItSaysItReads(): void {
+  const sandbox = mkdtempSync(join(tmpdir(), 'gdharness-search-'));
+  const search = (query: string, more: Partial<SearchOptions> = {}): ReturnType<typeof searchProject> =>
+    searchProject(sandbox, { query, regex: false, caseSensitive: false, maxResults: 100, ...more });
+  try {
+    writeFileSync(join(sandbox, 'project.godot'), '[autoload]\n\nGameState="*res://state.gd"\n');
+    writeFileSync(join(sandbox, 'Hero.cs'), 'public partial class Hero : Node { } // GameState\n');
+    // The word in it, after a NUL, so reading a binary file as text would find it.
+    writeFileSync(
+      join(sandbox, 'icon.png'),
+      Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00]), Buffer.from('GameState')]),
+    );
+    writeFileSync(join(sandbox, 'crlf.gd'), 'func _ready():\r\n\tpass # urgent TODO\r\n');
+
+    const everywhere = search('GameState');
+    assert.deepEqual(
+      everywhere.results.map((entry) => entry.file).sort(),
+      ['res://Hero.cs', 'res://project.godot'],
+      `every text file is read, and a binary one is not: ${JSON.stringify(everywhere)}`,
+    );
+    assert.deepEqual(
+      search('GameState', { fileTypes: ['cs'] }).results.map((entry) => entry.file),
+      ['res://Hero.cs'],
+      'fileTypes still narrows it',
+    );
+
+    const both = search('(?=.*TODO)(?=.*urgent)', { regex: true });
+    assert.deepEqual(
+      both.results.map((entry) => entry.file),
+      ['res://crlf.gd'],
+      `a lookahead that matches the empty string is a match: ${JSON.stringify(both)}`,
+    );
+    const ending = search('\\):$', { regex: true });
+    assert.deepEqual(
+      ending.results.map((entry) => entry.file),
+      ['res://crlf.gd'],
+      `$ meets the end of a CRLF line: ${JSON.stringify(ending)}`,
+    );
+
+    const exactly = search('GameState', { maxResults: 2 });
+    assert.equal(exactly.summary.total_matches, 2);
+    assert.equal(exactly.summary.truncated, false, 'matches that come to the limit exactly are all of them');
+    const cut = search('GameState', { maxResults: 1 });
+    assert.equal(cut.summary.truncated, true, 'and one more than the limit is cut');
   } finally {
     sweep(sandbox);
   }
@@ -3953,6 +4414,7 @@ function testProjectDefaultsToTheWorkingDirectory(): void {
       encoding: 'utf8',
       cwd,
       timeout: 60000,
+      env: withHome(process.env, join(sandbox, 'home')),
     });
     return { status: run.status, output: `${run.stdout}${run.stderr}` };
   };
@@ -3974,7 +4436,7 @@ function testProjectDefaultsToTheWorkingDirectory(): void {
     const flagged = spawnSync(
       process.execPath,
       [join(process.cwd(), 'build', 'cli.js'), 'doctor', '--json'],
-      { encoding: 'utf8', cwd: project, timeout: 60000 },
+      { encoding: 'utf8', cwd: project, timeout: 60000, env: withHome(process.env, join(sandbox, 'home')) },
     );
     // Parsing at all is half the assertion: a flag taken as the path refuses with a sentence.
     // The directory it settled on is compared by name rather than in full, because the spelling
@@ -4003,6 +4465,7 @@ function testProjectDefaultsToTheWorkingDirectory(): void {
         encoding: 'utf8',
         cwd: project,
         timeout: 60000,
+        env: withHome(process.env, join(sandbox, 'home')),
       });
       assert.match(
         `${refused.stdout}${refused.stderr}`,
@@ -4251,6 +4714,7 @@ function testAnAutoloadGitWillNotCarry(): void {
       encoding: 'utf8',
       cwd: where,
       timeout: 60000,
+      env: withHome(process.env, join(project, '.home')),
     });
     return asArray(get(JSON.parse(run.stdout), 'problems'))
       .map(text)
@@ -4333,6 +4797,7 @@ function testAnAutoloadNamingAFileThatIsNotThere(): void {
       encoding: 'utf8',
       cwd: project,
       timeout: 60000,
+      env: withHome(process.env, join(project, '.home')),
     });
   try {
     mkdirSync(join(project, '.godot'), { recursive: true });
@@ -5334,6 +5799,114 @@ function testAnUncapturedConsoleSaysWhichEditorItIs(): void {
 }
 
 /**
+ * An editor started by another editor reports the ports it serves, not the ones in its environment.
+ *
+ * Godot's own restart and the project manager start the new editor as the old one's child, so it
+ * has the old environment, the ports and the marker a server put there included, and none of the
+ * arguments: the engine consumes `--lsp-port`, `--dap-port` and `--log-file` and hands none back,
+ * measured on 4.7.2. It reported the moved ports, which it never bound, and that a server had
+ * opened it. What gives it away is the variable the addon sets to its own pid as it loads, still
+ * naming the editor before it. A real headless editor is started twice here: as a server starts
+ * one, and with what it would inherit, with its settings kept out of the machine's.
+ */
+async function testAnEditorStartedByAnEditorSaysSo(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('editor started by an editor regression skipped (Godot not found)');
+    return;
+  }
+  for (const how of ['by a server', 'by an editor'] as const) {
+    const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-inherited-'));
+    const home = join(project, '.home');
+    mkdirSync(home, { recursive: true });
+    const [bridgePort, lspPort, dapPort] = [await reservePort(), await reservePort(), await reservePort()];
+    // The editor's own settings, runtime directory and user data, so nothing here is written into
+    // the machine's editor settings, which the addon writes one setting to as it loads.
+    const own = {
+      HOME: home,
+      USERPROFILE: home,
+      APPDATA: home,
+      LOCALAPPDATA: home,
+      XDG_CONFIG_HOME: home,
+      XDG_DATA_HOME: home,
+      XDG_CACHE_HOME: home,
+      GDHARNESS_RUNTIME_DIR: join(home, 'runtime'),
+    };
+    const server = new ServerProcess({
+      env: { GDHARNESS_BRIDGE_PORT: String(bridgePort), GDHARNESS_PROJECT: project, ...own },
+    });
+    let editor: ChildProcess | null = null;
+    try {
+      installAddons(project);
+      writeFileSync(
+        join(project, 'project.godot'),
+        'config_version=5\n\n[application]\n\nconfig/name="Inherited"\n\n[editor_plugins]\n\n' +
+          'enabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n',
+      );
+      await server.initialize('regression-test');
+      const inherited = how === 'by an editor';
+      editor = spawn(
+        godotPath,
+        [
+          '--editor',
+          '--headless',
+          '--path',
+          project,
+          // What a server passes and a Godot restart does not.
+          ...(inherited ? [] : ['--lsp-port', String(lspPort), '--dap-port', String(dapPort)]),
+        ],
+        {
+          env: {
+            ...process.env,
+            ...own,
+            GDHARNESS_BRIDGE_PORT: String(bridgePort),
+            GDHARNESS_LSP_PORT: String(lspPort),
+            GDHARNESS_DAP_PORT: String(dapPort),
+            GDHARNESS_OPENED_BY_A_SERVER: '1',
+            // Set by the addon of the editor before it, which a child started by that editor has.
+            ...(inherited ? { GDHARNESS_EDITOR_PID: String(process.pid) } : {}),
+          },
+          stdio: 'ignore',
+        },
+      );
+      let greeted: unknown = null;
+      for (let waited = 0; waited < 60_000 && greeted === null; waited += 250) {
+        await delay(250);
+        const now = get(
+          parseTextContent(await server.request('tools/call', { name: 'editor_status', arguments: {} })),
+          'editor',
+        );
+        if (typeof get(now, 'projectPath') === 'string') {
+          greeted = now;
+        }
+      }
+      assert.ok(greeted !== null, `the ${how} editor should have greeted`);
+      const said = JSON.stringify(greeted);
+      assert.equal(get(greeted, 'editorPid'), editor.pid, `it is the editor started here: ${said}`);
+      if (inherited) {
+        assert.equal(get(greeted, 'startedByAnEditor'), true, `it says another editor started it: ${said}`);
+        assert.equal(get(greeted, 'openedByAServer'), false, `and not that a server did: ${said}`);
+        assert.notEqual(get(greeted, 'lspPort'), lspPort, `nor the port it never bound: ${said}`);
+        assert.notEqual(get(greeted, 'dapPort'), dapPort, said);
+        assert.match(text(get(greeted, 'startedByAnEditorNote')), /Another editor started this one/, said);
+      } else {
+        assert.equal(get(greeted, 'startedByAnEditor'), false, said);
+        assert.equal(get(greeted, 'openedByAServer'), true, said);
+        assert.equal(get(greeted, 'lspPort'), lspPort, `a server's editor serves what it was given: ${said}`);
+        assert.equal(get(greeted, 'dapPort'), dapPort, said);
+      }
+    } finally {
+      editor?.kill();
+      await server.stop();
+      sweep(project);
+    }
+  }
+}
+
+/**
  * The console of an editor this server launched is read before that editor has connected.
  *
  * Reported downstream: `editor_output op: "editor"`, asked while an editor gdharness had just
@@ -5353,9 +5926,13 @@ async function testALaunchedEditorsConsoleIsReadBeforeItConnects(): Promise<void
   const call = async (name: string, args: Record<string, unknown>): Promise<string> =>
     textOf(await server.request('tools/call', { name, arguments: args })) ?? '';
   try {
+    // The addon is there and enabled, because a launch on a project without it is refused: that
+    // editor would never connect, and there would be nothing for it to be connecting.
+    mkdirSync(join(project, 'addons', 'gdharness_editor'), { recursive: true });
     writeFileSync(
       join(project, 'project.godot'),
-      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Early"\n',
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Early"\n\n' +
+        '[editor_plugins]\nenabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n',
     );
     await server.initialize('regression-test');
 
@@ -6295,13 +6872,15 @@ async function testAGameNoNoteNamesIsStoppedByItsNumber(): Promise<void> {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-by-number-'));
   const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-by-number-runtime-'));
   const env = { GODOT_PATH: godotPath, GDHARNESS_PROJECT: project, GDHARNESS_RUNTIME_DIR: runtime };
-  const first = new ServerProcess({ env });
-  let second: ServerProcess | null = null;
-  let game = 0;
   // Something alive whose number is not a game of this project, to be refused.
   const bystander = spawn(process.execPath, ['--eval', 'setTimeout(() => {}, 120_000)', project], {
     stdio: 'ignore',
   });
+  // The first server is started as one started from an editor's terminal would be, with that
+  // editor's pid in its environment. A game it starts is not that editor's, and announced as its.
+  const first = new ServerProcess({ env: { ...env, GDHARNESS_EDITOR_PID: String(bystander.pid ?? 0) } });
+  let second: ServerProcess | null = null;
+  let game = 0;
   try {
     writeFileSync(
       join(project, 'project.godot'),
@@ -6336,6 +6915,17 @@ async function testAGameNoNoteNamesIsStoppedByItsNumber(): Promise<void> {
     // server launched, and under the Windows console build that is a wrapper whose child is the
     // engine: taken from the run, this case expected a number the next server has no way to know.
     game = asNumber(get(startedAnswer, 'runtime', 'pid'));
+    const announced: unknown = JSON.parse(readFileSync(join(runtime, `runtime-${game}.json`), 'utf8'));
+    assert.equal(
+      get(announced, 'pid'),
+      game,
+      `the announcement read is the game's: ${JSON.stringify(announced)}`,
+    );
+    assert.equal(
+      get(announced, 'editor_pid'),
+      undefined,
+      `a game this server started names no editor: ${JSON.stringify(announced)}`,
+    );
     const serverPid = first.child.pid;
     assert.ok(serverPid !== undefined, 'the server should have a pid');
     await killTheTree(serverPid);
@@ -7560,6 +8150,93 @@ async function testARefusalDoesNotDenyTheRuntimeItCanSee(): Promise<void> {
 }
 
 /**
+ * A game that binds every interface is reached on loopback.
+ *
+ * The announcement names the address the game bound, and a project may set that to every interface.
+ * Dialled as written, `*` is no host and Windows refuses `0.0.0.0`, so a listening game was answered
+ * "may still be starting", which waiting never changes. Each wildcard gets a fake game bound the way
+ * it says, and the status has to reach it. `::` needs IPv6, which some runners lack; that variant
+ * says so and is left out there, while the other two hold everywhere.
+ */
+async function testAGameOnEveryInterfaceIsReached(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-every-interface-'));
+  writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+  for (const [announced, bound] of [
+    ['*', '0.0.0.0'],
+    ['0.0.0.0', '0.0.0.0'],
+    ['::', '::'],
+  ] as const) {
+    const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-every-interface-rt-'));
+    const answering = createServer((socket) => {
+      socket.setEncoding('utf8');
+      socket.write(`${JSON.stringify({ type: 'welcome', protocol: RUNTIME_PROTOCOL })}\n`);
+      let buffered = '';
+      socket.on('data', (chunk: string) => {
+        buffered += chunk;
+        for (let at = buffered.indexOf('\n'); at !== -1; at = buffered.indexOf('\n')) {
+          const asked = JSON.parse(buffered.slice(0, at)) as { id: number };
+          buffered = buffered.slice(at + 1);
+          socket.write(`${JSON.stringify({ id: asked.id, type: 'pong' })}\n`);
+        }
+      });
+      socket.on('error', () => {});
+    });
+    const holder = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+    const server = new ServerProcess({
+      env: { GDHARNESS_PROJECT: project, GDHARNESS_RUNTIME_DIR: runtimeDir },
+    });
+    try {
+      const up = await new Promise<Error | null>((ready) => {
+        answering.once('error', ready);
+        answering.listen(0, bound, () => {
+          ready(null);
+        });
+      });
+      if (up !== null) {
+        assert.equal(announced, '::', `binding ${bound} should work on every runner: ${up.message}`);
+        console.log(
+          `every interface regression: ${bound} left out, since this machine cannot bind it (${up.message})`,
+        );
+        continue;
+      }
+      const pid = holder.pid ?? 0;
+      writeFileSync(
+        join(runtimeDir, `runtime-${pid}.json`),
+        JSON.stringify({
+          protocol: RUNTIME_PROTOCOL,
+          pid,
+          port: portOf(answering),
+          address: announced,
+          project: { name: basename(project), path: project },
+        }),
+        'utf8',
+      );
+      await server.initialize('regression-test');
+      const status = parseTextContent(
+        await server.request('tools/call', { name: 'editor_status', arguments: {} }),
+      );
+      const listed = asArray(get(status, 'game', 'runtimes'));
+      assert.equal(get(listed[0], 'pid'), pid, JSON.stringify(status));
+      assert.equal(
+        get(listed[0], 'reachable'),
+        true,
+        `a game announced at ${announced} is reached: ${JSON.stringify(get(status, 'game'))}`,
+      );
+    } finally {
+      await server.stop();
+      holder.kill();
+      await new Promise<void>((closed) => {
+        answering.close(() => {
+          closed();
+        });
+      });
+      sweep(runtimeDir);
+    }
+  }
+  sweep(project);
+}
+
+/**
  * runtimeConnected is about this server's project, and another project's game is listed as such.
  *
  * Reported from ostinato, whose server's editor_status said runtimeConnected true while the only
@@ -8092,7 +8769,7 @@ function testTheCureIsWrittenWhole(): void {
   ];
   // What the tree holds today and not a comfortable minimum, so one place going quiet lowers this
   // in the same change and somebody confirms it was meant.
-  assert.equal(offered.length, 40, `the places offering a remedy should all be found, not ${offered.length}`);
+  assert.equal(offered.length, 43, `the places offering a remedy should all be found, not ${offered.length}`);
 
   // Across whitespace, because a rendered file wraps where the source did not and a sentence that
   // breaks at "the" is the same sentence. Change, edit and touch, because the claim is about what
@@ -8485,8 +9162,12 @@ function testStalenessIsTheEditorCodeNotTheVersion(): void {
  * digest that is not the shipped one is the positive: the same server calls that one stale.
  */
 async function testAnEditorOnTheShippedCodeIsNotCalledStale(): Promise<void> {
-  const statusFor = async (addonDigest: string): Promise<unknown> => {
+  const statusFor = async (addonDigest: string, onDisk?: string): Promise<unknown> => {
     const project = mkdtempSync(join(tmpdir(), 'gdharness-digest-editor-'));
+    if (onDisk !== undefined) {
+      mkdirSync(join(project, 'addons', 'gdharness_editor'), { recursive: true });
+      writeFileSync(join(project, 'addons', 'gdharness_editor', '.gdharness-digest'), `${onDisk}\n`);
+    }
     const port = await reservePort();
     let editor: WebSocket | null = null;
     const server = new ServerProcess({ env: { GDHARNESS_BRIDGE_PORT: String(port) } });
@@ -8557,6 +9238,25 @@ async function testAnEditorOnTheShippedCodeIsNotCalledStale(): Promise<void> {
   const behind = await statusFor('0'.repeat(64));
   assert.equal(get(behind, 'editor', 'addonIsStale'), true, `other code is stale: ${JSON.stringify(behind)}`);
   assert.match(text(get(behind, 'editor', 'staleNote')), /editor_launch restart/, JSON.stringify(behind));
+  // What a restart would load decides the remedy. With the project's addons as old as the editor's,
+  // a restart loads them again, and the note sent callers round that loop.
+  const oldOnDisk = await statusFor('0'.repeat(64), '0'.repeat(64));
+  assert.match(
+    text(get(oldOnDisk, 'editor', 'staleNote')),
+    /gdharness upgrade in the project/,
+    `old addons on disk are named as what a restart would load: ${JSON.stringify(oldOnDisk)}`,
+  );
+  const newOnDisk = await statusFor('0'.repeat(64), shipped);
+  assert.match(
+    text(get(newOnDisk, 'editor', 'staleNote')),
+    /editor_launch restart/,
+    JSON.stringify(newOnDisk),
+  );
+  assert.doesNotMatch(
+    text(get(newOnDisk, 'editor', 'staleNote')),
+    /gdharness upgrade/,
+    `addons on disk that match this server need only the restart: ${JSON.stringify(newOnDisk)}`,
+  );
   assert.equal(
     get(behind, 'editor', 'addonNote'),
     undefined,
@@ -9411,6 +10111,106 @@ function testWhatTheEditorSavedAwayIsReportedTheSameWay(): void {
       /project_settings set puts one back/,
       'and does not offer the remedy for a key it cannot name',
     );
+  }
+}
+
+/**
+ * What a launched editor's import saved away is read as that editor greets, and only for it.
+ *
+ * The reading taken before the launch was compared with the file at the first status call after
+ * any editor connected, however much later, so a key removed in between by somebody else (a
+ * project_settings write, `gdharness runtime off`, a person) was credited to the import, with the
+ * remedy to put it back. The editor here is a stand-in: the launch starts a process that exits,
+ * and a socket greets under its pid after the file has lost the key the import would take.
+ */
+async function testWhatALaunchedEditorDroppedIsReadAsItArrives(): Promise<void> {
+  for (const whose of ['launched', 'another'] as const) {
+    const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-launch-dropped-'));
+    const port = await reservePort();
+    const server = new ServerProcess({
+      env: { GDHARNESS_BRIDGE_PORT: String(port), GDHARNESS_PROJECT: project, GODOT_PATH: process.execPath },
+    });
+    let editor: WebSocket | null = null;
+    try {
+      mkdirSync(join(project, 'addons', 'gdharness_editor'), { recursive: true });
+      const settings = join(project, 'project.godot');
+      const plugins =
+        '[editor_plugins]\n\nenabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n';
+      writeFileSync(
+        settings,
+        `config_version=5\n\n[debug]\n\ngdscript/warnings/return_value_discarded=0\ngdscript/warnings/unsafe_call_argument=2\n\n${plugins}`,
+      );
+      await server.initialize('regression-test');
+      const call = async (name: string, args: Record<string, unknown>): Promise<string> =>
+        textOf(await server.request('tools/call', { name, arguments: args })) ?? '';
+      const opened = await call('editor_launch', { op: 'open', projectPath: project });
+      const pid = asNumber(get(jsonOf(opened, 'editor_launch open'), 'pid'));
+
+      // The import's save, which takes the key sitting at its default.
+      writeFileSync(
+        settings,
+        `config_version=5\n\n[debug]\n\ngdscript/warnings/unsafe_call_argument=2\n\n${plugins}`,
+      );
+      const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+      editor = socket;
+      await new Promise<void>((resolve, reject) => {
+        socket.once('open', () => {
+          resolve();
+        });
+        socket.once('error', reject);
+      });
+      socket.on('message', (raw: Buffer) => {
+        const message: unknown = JSON.parse(String(raw));
+        if (isRecord(message) && message['type'] === 'tool_invoke') {
+          socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result: {} }));
+        }
+      });
+      socket.send(
+        JSON.stringify({
+          type: 'godot_ready',
+          project_path: project,
+          addon_version: SERVER_VERSION,
+          editor_pid: whose === 'launched' ? pid : pid + 1,
+        }),
+      );
+      // Read off the server's own log rather than a status call, because the first status call is
+      // where the answer is given and asking it here would be asking the question early.
+      for (let waited = 0; waited < 10_000 && !server.stderr.includes('Godot ready:'); waited += 50) {
+        await delay(50);
+      }
+      assert.ok(server.stderr.includes('Godot ready:'), 'the server should have taken the greeting');
+
+      // Somebody else's removal, after the editor arrived and before anybody asked.
+      writeFileSync(settings, `config_version=5\n\n${plugins}`);
+      const status = parseTextContent(
+        await server.request('tools/call', { name: 'editor_status', arguments: {} }),
+      );
+      const said = JSON.stringify(get(status, 'editor'));
+      const dropped = asArray(get(status, 'editor', 'settingsDropped') ?? []).map((one) =>
+        get(one, 'setting'),
+      );
+      if (whose === 'another') {
+        assert.deepEqual(
+          dropped,
+          [],
+          `an editor the launch did not start saved nothing it knows of: ${said}`,
+        );
+        continue;
+      }
+      assert.deepEqual(
+        dropped,
+        ['debug/gdscript/warnings/return_value_discarded'],
+        `the import's key is named and the later removal is not: ${said}`,
+      );
+      const again = parseTextContent(
+        await server.request('tools/call', { name: 'editor_status', arguments: {} }),
+      );
+      assert.equal(get(again, 'editor', 'settingsDropped'), undefined, 'and it is said once');
+    } finally {
+      editor?.terminate();
+      await server.stop();
+      sweep(project);
+    }
   }
 }
 
@@ -15692,6 +16492,203 @@ async function testACaptureBeforeTheFirstFrameWaitsForIt(): Promise<void> {
   );
 }
 
+/**
+ * A capture of a SubViewport the game no longer redraws is the viewport now, not its last frame.
+ *
+ * A SubViewport set to update once, disabled, or updating only while a hidden container shows it
+ * keeps the texture it last drew. The capture read that texture and answered it as the viewport as
+ * it is. The game here draws its SubViewport red once and then turns the rectangle in it blue
+ * without drawing again, so an answer of red is the stale frame.
+ *
+ * Windowed, since nothing is drawn without a window. On Windows the server starts it on a desktop
+ * of its own, where it renders and shows nothing, so it runs here as well as on CI.
+ */
+async function testASubViewportCaptureIsDrawnNow(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('subviewport capture regression skipped (Godot not found)');
+    return;
+  }
+  const refused = process.platform === 'win32' ? null : windowedRunRefused();
+  if (refused !== null) {
+    console.log(`subviewport capture regression skipped (${refused})`);
+    return;
+  }
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-subviewport-'));
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-subviewport-rt-'));
+  cpSync(join('src', 'godot', 'addons', 'gdharness_runtime'), join(project, 'addons', 'gdharness_runtime'), {
+    recursive: true,
+  });
+  writeFileSync(
+    join(project, 'project.godot'),
+    '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Sub"\nrun/main_scene="res://main.tscn"\n\n' +
+      '[autoload]\n\nGdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n\n' +
+      '[rendering]\n\nrenderer/rendering_method="gl_compatibility"\n',
+  );
+  writeFileSync(
+    join(project, 'main.gd'),
+    'extends Node\n\n\nfunc _ready() -> void:\n\tawait get_tree().create_timer(1.0).timeout\n' +
+      '\t($Sub/Colour as ColorRect).color = Color(0, 0, 1)\n\tprint("turned blue")\n',
+  );
+  writeFileSync(
+    join(project, 'main.tscn'),
+    '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+      '[node name="Main" type="Node"]\nscript = ExtResource("1")\n\n' +
+      '[node name="Sub" type="SubViewport" parent="."]\nsize = Vector2i(4, 4)\nrender_target_update_mode = 1\n\n' +
+      '[node name="Colour" type="ColorRect" parent="Sub"]\noffset_right = 4.0\noffset_bottom = 4.0\ncolor = Color(1, 0, 0, 1)\n',
+  );
+  const server = new ServerProcess({
+    env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+  });
+  try {
+    await server.initialize('regression-test');
+    const started = parseTextContent(
+      await server.request(
+        'tools/call',
+        {
+          name: 'editor_run',
+          arguments: { projectPath: project, op: 'start', headless: false, runtimeWaitMs: WINDOWED_BOOT_MS },
+        },
+        WINDOWED_BOOT_MS + ENGINE_CALL_TIMEOUT_MS,
+      ),
+    );
+    assert.equal(get(started, 'runtime', 'listening'), true, JSON.stringify(started));
+    let printed = '';
+    for (let waited = 0; waited < 30_000 && !printed.includes('turned blue'); waited += 250) {
+      await delay(250);
+      printed = textOf(await server.request('tools/call', { name: 'editor_output', arguments: {} })) ?? '';
+    }
+    assert.match(printed, /turned blue/, `the game should turn the rectangle blue: ${printed}`);
+
+    const answered = await server.request(
+      'tools/call',
+      {
+        name: 'runtime_capture',
+        arguments: { op: 'viewport', viewportPath: '/root/Main/Sub', width: 1, height: 1 },
+      },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    const image = asArray(get(answered, 'result', 'content')).find((chunk) => get(chunk, 'type') === 'image');
+    assert.ok(image !== undefined, `the capture should answer an image: ${JSON.stringify(answered)}`);
+    const pixel = [...onePixelOf(Buffer.from(String(get(image, 'data')), 'base64'))];
+    assert.ok(
+      (pixel[2] ?? 0) > 200 && (pixel[0] ?? 255) < 50,
+      `the SubViewport as it is now, blue, not the red it last drew: ${pixel.join(',')}`,
+    );
+  } finally {
+    await server.request(
+      'tools/call',
+      { name: 'editor_run', arguments: { op: 'stop' } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    await server.stop();
+    sweep(project, runtimeDir);
+  }
+}
+
+/**
+ * A screenshot holds the game's windows that the root viewport does not draw.
+ *
+ * With subwindows not embedded, a dialog or a popup is an operating-system window with a render
+ * target of its own, and the capture of the root viewport showed the screen without it. The game
+ * here fills its screen blue and opens a borderless red window over the right half of it, so a
+ * picture brought down to one pixel is half red only when the window is in it, where it sits.
+ *
+ * Windowed, since nothing is drawn without a window; on Windows on a desktop of its own.
+ */
+async function testAScreenshotHoldsTheGamesOwnWindows(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('native window capture regression skipped (Godot not found)');
+    return;
+  }
+  const refused = process.platform === 'win32' ? null : windowedRunRefused();
+  if (refused !== null) {
+    console.log(`native window capture regression skipped (${refused})`);
+    return;
+  }
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-native-window-'));
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-native-window-rt-'));
+  cpSync(join('src', 'godot', 'addons', 'gdharness_runtime'), join(project, 'addons', 'gdharness_runtime'), {
+    recursive: true,
+  });
+  writeFileSync(
+    join(project, 'project.godot'),
+    '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Native"\nrun/main_scene="res://main.tscn"\n\n' +
+      '[autoload]\n\nGdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n\n' +
+      '[display]\n\nwindow/size/viewport_width=200\nwindow/size/viewport_height=200\n' +
+      'window/subwindows/embed_subwindows=false\n\n' +
+      '[rendering]\n\nrenderer/rendering_method="gl_compatibility"\n',
+  );
+  writeFileSync(
+    join(project, 'main.gd'),
+    'extends Node\n\n\nfunc _ready() -> void:\n\tvar over: Window = $Over\n' +
+      '\tover.position = get_window().position + Vector2i(100, 0)\n\tover.show()\n\tprint("window open")\n',
+  );
+  writeFileSync(
+    join(project, 'main.tscn'),
+    '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+      '[node name="Main" type="Node"]\nscript = ExtResource("1")\n\n' +
+      '[node name="Screen" type="ColorRect" parent="."]\noffset_right = 200.0\noffset_bottom = 200.0\ncolor = Color(0, 0, 1, 1)\n\n' +
+      '[node name="Over" type="Window" parent="."]\nsize = Vector2i(100, 200)\nvisible = false\nborderless = true\nunfocusable = true\n\n' +
+      '[node name="Red" type="ColorRect" parent="Over"]\noffset_right = 100.0\noffset_bottom = 200.0\ncolor = Color(1, 0, 0, 1)\n',
+  );
+  const server = new ServerProcess({
+    env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+  });
+  try {
+    await server.initialize('regression-test');
+    const started = parseTextContent(
+      await server.request(
+        'tools/call',
+        {
+          name: 'editor_run',
+          arguments: { projectPath: project, op: 'start', headless: false, runtimeWaitMs: WINDOWED_BOOT_MS },
+        },
+        WINDOWED_BOOT_MS + ENGINE_CALL_TIMEOUT_MS,
+      ),
+    );
+    assert.equal(get(started, 'runtime', 'listening'), true, JSON.stringify(started));
+    let printed = '';
+    for (let waited = 0; waited < 30_000 && !printed.includes('window open'); waited += 250) {
+      await delay(250);
+      printed = textOf(await server.request('tools/call', { name: 'editor_output', arguments: {} })) ?? '';
+    }
+    assert.match(printed, /window open/, `the game should open its window: ${printed}`);
+    await server.request('tools/call', { name: 'runtime_wait', arguments: { op: 'frames', frames: 5 } });
+
+    const answered = await server.request(
+      'tools/call',
+      { name: 'runtime_capture', arguments: { op: 'screenshot', width: 1, height: 1 } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    const image = asArray(get(answered, 'result', 'content')).find((chunk) => get(chunk, 'type') === 'image');
+    assert.ok(image !== undefined, `the capture should answer an image: ${JSON.stringify(answered)}`);
+    const pixel = [...onePixelOf(Buffer.from(String(get(image, 'data')), 'base64'))];
+    // Half and half, because the window lies over the right half: all blue is the window left out,
+    // and anything else is it laid in the wrong place.
+    const even = (value: number | undefined): boolean => value !== undefined && value > 100 && value < 160;
+    assert.ok(
+      even(pixel[0]) && even(pixel[2]),
+      `the screen with the game's red window over its right half: ${pixel.join(',')}`,
+    );
+  } finally {
+    await server.request(
+      'tools/call',
+      { name: 'editor_run', arguments: { op: 'stop' } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    await server.stop();
+    sweep(project, runtimeDir);
+  }
+}
+
 /** The red, green and blue of a one-pixel PNG. */
 function onePixelOf(png: Buffer): Buffer {
   const chunks: Buffer[] = [];
@@ -19322,6 +20319,188 @@ async function testARunOutlivesItsServer(): Promise<void> {
 }
 
 /**
+ * A run of another project, started by naming its projectPath, is still the run of the server that
+ * replaces the one that started it.
+ *
+ * Reported by ostinato on 1.1.21: its server, serving one project, started a run of a worktree
+ * beside it by naming the worktree's path. The harness replaced the server a few seconds later, and
+ * the successor refused editor_output and editor_run stop as "not this server's to answer for or to
+ * end" while runtime_invoke reached the same game. The note was kept under the run's project, and
+ * the successor looked under its own. A server serving a third project is still refused, which is
+ * the refusal that keeps one project's server from ending another's bench.
+ */
+async function testARunOfAnotherProjectOutlivesItsServer(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('run-of-another-project regression skipped (Godot not found)');
+    return;
+  }
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-beside-runtime-'));
+  const serves = mkdtempSync(join(tmpdir(), 'gdharness-beside-serves-'));
+  const beside = mkdtempSync(join(tmpdir(), 'gdharness-beside-run-'));
+  const elsewhere = mkdtempSync(join(tmpdir(), 'gdharness-beside-elsewhere-'));
+  const godot =
+    '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Beside"\nrun/main_scene="res://main.tscn"\n';
+  for (const directory of [serves, beside, elsewhere]) {
+    writeFileSync(join(directory, 'project.godot'), godot);
+  }
+  writeFileSync(
+    join(beside, 'main.gd'),
+    'extends Node\n\nvar rows := 0\n\n\nfunc _process(_delta: float) -> void:\n\trows += 1\n\tif rows % 30 == 0:\n\t\tprint("row %d" % [rows / 30])\n',
+  );
+  writeFileSync(
+    join(beside, 'main.tscn'),
+    '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+  );
+  const env = { GODOT_PATH: godotPath, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: serves };
+  let gamePid: number | null = null;
+  try {
+    const first = new ServerProcess({ env });
+    try {
+      await first.initialize('regression-test');
+      const started: unknown = parseTextContent(
+        await first.request(
+          'tools/call',
+          { name: 'editor_run', arguments: { projectPath: beside, op: 'start', headless: true } },
+          ENGINE_CALL_TIMEOUT_MS,
+        ),
+      );
+      assert.equal(get(started, 'started'), true, JSON.stringify(started));
+      gamePid = asNumber(get(started, 'pid'), 'the run needs a process of its own');
+    } finally {
+      first.child.stdin?.end();
+    }
+    await new Promise<void>((gone) => {
+      if (first.exited) {
+        gone();
+        return;
+      }
+      first.child.once('exit', () => {
+        gone();
+      });
+      setTimeout(() => {
+        first.child.kill();
+        gone();
+      }, 15_000);
+    });
+    assert.ok(alive(gamePid), 'the run outlives the server that started it');
+
+    await withStdioServer(
+      async (call) => {
+        const answered = await call('editor_output', { limit: 50 }, ENGINE_CALL_TIMEOUT_MS);
+        assert.match(
+          answered,
+          /not this server's to answer for or to end/,
+          `a third project's server: ${answered}`,
+        );
+      },
+      { ...env, GDHARNESS_PROJECT: elsewhere },
+    );
+
+    await withStdioServer(async (call) => {
+      const answered = await call('editor_output', { limit: 50 }, ENGINE_CALL_TIMEOUT_MS);
+      assert.doesNotMatch(answered, /not this server's/, `the successor answers for its run: ${answered}`);
+      const output: unknown = JSON.parse(answered);
+      assert.equal(get(output, 'running'), true, answered);
+      assert.equal(get(output, 'pid'), gamePid, answered);
+
+      const stopped: unknown = JSON.parse(await call('editor_run', { op: 'stop' }, ENGINE_CALL_TIMEOUT_MS));
+      assert.equal(get(stopped, 'stopped'), true, `and ends it: ${JSON.stringify(stopped)}`);
+    }, env);
+
+    await delay(1000);
+    assert.equal(alive(gamePid), false, 'the stop ended the game');
+    gamePid = null;
+  } finally {
+    if (gamePid !== null && alive(gamePid)) {
+      try {
+        process.kill(gamePid);
+      } catch {
+        // Nothing left to clean up.
+      }
+    }
+    sweep(serves, beside, elsewhere, runtimeDir);
+  }
+}
+
+/**
+ * The godot:// resources read inside the project this server serves, and nowhere else.
+ *
+ * Three ways they read elsewhere, found in review. The containment check was lexical, so a link in
+ * the project (a junction here, which needs no privileges on Windows) was followed to whatever it
+ * named. The root was the projectPath of the last call, checked for nothing, so a call naming the
+ * root of a drive made every file under it readable. And a call naming another project's game
+ * moved the root there, so a server set up for one project answered from another.
+ */
+async function testTheResourcesReadOnlyTheProject(): Promise<void> {
+  const root = mkdtempSync(join(realpathSync.native(tmpdir()), 'gdharness-resources-'));
+  const ours = join(root, 'ours');
+  const theirs = join(root, 'theirs');
+  const outside = join(root, 'outside');
+  for (const directory of [ours, theirs, outside]) {
+    mkdirSync(directory);
+  }
+  writeFileSync(join(ours, 'project.godot'), 'config_version=5\n');
+  writeFileSync(join(theirs, 'project.godot'), 'config_version=5\n');
+  writeFileSync(join(ours, 'main.gd'), 'extends Node # ours\n');
+  writeFileSync(join(theirs, 'main.gd'), 'extends Node # theirs\n');
+  writeFileSync(join(outside, 'secret.gd'), 'the secret\n');
+  symlinkSync(outside, join(ours, 'vendor'), 'junction');
+  const read = async (request: RawRequest, uri: string): Promise<string> => {
+    const answer = await request('resources/read', { uri });
+    return answer.error?.message ?? text(get(answer.result, 'contents', 0, 'text'));
+  };
+  try {
+    await withStdioServer(
+      async (call, request) => {
+        assert.match(await read(request, 'godot://script/main.gd'), /# ours/, 'the project is read');
+        const linked = await read(request, 'godot://script/vendor/secret.gd');
+        assert.doesNotMatch(linked, /the secret/, `a link out of the project is not followed: ${linked}`);
+        assert.match(linked, /leads outside the project through a link/, linked);
+
+        // The search with no fileTypes, through the server: every text file, project.godot included.
+        const searched = await call('project_search', { projectPath: theirs, query: 'config_version' });
+        assert.match(
+          searched,
+          /res:\/\/project\.godot/,
+          `a search with no fileTypes reads project.godot: ${searched}`,
+        );
+        assert.match(
+          await read(request, 'godot://script/main.gd'),
+          /# ours/,
+          "a call naming another project leaves the server's own as the one read",
+        );
+      },
+      { GDHARNESS_PROJECT: ours, GODOT_PATH: process.execPath },
+    );
+
+    await withStdioServer(
+      async (call, request) => {
+        await call('project_search', { projectPath: theirs, query: 'extends' });
+        assert.match(
+          await read(request, 'godot://script/main.gd'),
+          /# theirs/,
+          'a server with no project of its own reads the last project named',
+        );
+        await call('project_search', { projectPath: root, query: 'extends' });
+        const underRoot = await read(request, 'godot://script/outside/secret.gd');
+        assert.doesNotMatch(
+          underRoot,
+          /the secret/,
+          `a directory with no project.godot is no root: ${underRoot}`,
+        );
+      },
+      { GODOT_PATH: process.execPath },
+    );
+  } finally {
+    sweep(root);
+  }
+}
+
+/**
  * A test run the timeout ends is called hung only when it had stopped printing.
  *
  * Hung sends a reader looking for a deadlock in the last suite named, and a run printing a passing
@@ -19897,6 +21076,18 @@ async function testGdUnitRunner(): Promise<void> {
           ],
           JSON.stringify(hooked, null, 2),
         );
+        // #800: a case failing two assertions, in a suite with no hooks. gdUnit4 counts each failed
+        // assertion on the suite, and the second was answered as a failed before().
+        writeFileSync(
+          join(projectDir, 'test', 'twice_test.gd'),
+          'extends GdUnitTestSuite\n\n\nfunc test_two_assertions_fail() -> void:\n\tassert_bool(false).is_true()\n\tassert_bool(false).is_true()\n',
+        );
+        const twice = await asked('twice_test');
+        assert.deepEqual(
+          [get(twice, 'failures'), get(twice, 'suites', 0, 'hookFailures'), get(twice, 'hookFailures')],
+          [1, undefined, undefined],
+          `a case failing twice is one failure and no hook: ${JSON.stringify(twice, null, 2)}`,
+        );
         // Orphans left early in a run that prints a great deal after: counted off what was printed,
         // they were lost with everything before the newest two hundred lines.
         mkdirSync(join(projectDir, 'test', 'long'));
@@ -20309,7 +21500,7 @@ function testAnUpgradeReadsTheEngineOutOfTheConfigItRewrites(): void {
     const run = spawnSync(process.execPath, ['build/cli.js', ...cliArgs], {
       encoding: 'utf8',
       timeout: 180000,
-      env: blind,
+      env: withHome(blind, join(projectDir, '.home')),
     });
     return { status: run.status, output: `${run.stdout}${run.stderr}` };
   };
@@ -20335,6 +21526,10 @@ function testAnUpgradeReadsTheEngineOutOfTheConfigItRewrites(): void {
         2,
       )}\n`,
     );
+    const nothing = cli('upgrade', projectDir);
+    assert.notEqual(nothing.status, 0, `with no addons there is nothing to upgrade: ${nothing.output}`);
+    assert.match(nothing.output, /gdharness is not installed in .*gdharness setup/s, nothing.output);
+
     // Installed, so upgrade has something to upgrade from, and written without the search too.
     const first = cli('setup', projectDir, '--no-connect');
     assert.equal(first.status, 0, `setup should find the engine in the config: ${first.output}`);
@@ -20342,6 +21537,13 @@ function testAnUpgradeReadsTheEngineOutOfTheConfigItRewrites(): void {
     const digestMarker = join(projectDir, 'addons', 'gdharness_editor', '.gdharness-digest');
     assert.ok(existsSync(digestMarker), 'setup should have written the digest it is removed from here');
     rmSync(digestMarker);
+    // And a copy with no version marker, which a checkout that drops dot-files leaves, is still an
+    // install to upgrade. It was told gdharness was not installed.
+    for (const addon of ['gdharness_editor', 'gdharness_runtime', 'auto_reload']) {
+      const marker = join(projectDir, 'addons', addon, '.gdharness-version');
+      assert.ok(existsSync(marker), `setup should have written the marker removed here for ${addon}`);
+      rmSync(marker);
+    }
 
     const upgraded = cli('upgrade', projectDir);
     assert.equal(
@@ -20349,6 +21551,7 @@ function testAnUpgradeReadsTheEngineOutOfTheConfigItRewrites(): void {
       0,
       `upgrade should not refuse for a path it is holding: ${upgraded.output}`,
     );
+    assert.match(upgraded.output, /an unmarked copy -> /, upgraded.output);
     assert.match(upgraded.output, /replaced .*gdharness_editor/, upgraded.output);
     assert.match(upgraded.output, /Restart it with the\s+editor_launch restart/, upgraded.output);
     assert.ok(existsSync(digestMarker), 'and the upgrade writes the digest back');
@@ -20440,7 +21643,7 @@ function testCommandLineSetup(): void {
     const run = spawnSync(process.execPath, ['build/cli.js', ...cliArgs], {
       encoding: 'utf8',
       timeout: 180000,
-      env: { ...process.env, GODOT_PATH: godotPath },
+      env: withHome({ ...process.env, GODOT_PATH: godotPath }, join(projectDir, '.home')),
     });
     return { status: run.status, stdout: run.stdout, stderr: run.stderr };
   };
@@ -20531,9 +21734,56 @@ function testCommandLineSetup(): void {
       ),
     );
 
+    // A machine-wide config whose entry serves another project, beside a server of somebody else's.
+    // An upgrade here re-pointed it at this project, and an uninstall removed it while printing
+    // that it had been left alone.
+    const windsurf = join(projectDir, '.home', '.codeium', 'windsurf', 'mcp_config.json');
+    const elsewhere = join(projectDir, '.home', 'another-project');
+    mkdirSync(dirname(windsurf), { recursive: true });
+    const machineWide = `${JSON.stringify(
+      {
+        mcpServers: {
+          other: { command: 'theirs' },
+          gdharness: {
+            command: 'npx',
+            args: ['-y', 'gdharness@1.0.0'],
+            env: { GDHARNESS_PROJECT: elsewhere },
+          },
+        },
+      },
+      null,
+      2,
+    )}\n`;
+    writeFileSync(windsurf, machineWide);
+
     const beforeUpgrade = skillDirs();
     const upgraded = cli('upgrade', projectDir);
     assert.equal(upgraded.status, 0, `upgrade:\n${upgraded.stdout}${upgraded.stderr}`);
+    assert.equal(
+      readFileSync(windsurf, 'utf8'),
+      machineWide,
+      'a machine-wide entry serving another project is left alone',
+    );
+    assert.ok(
+      upgraded.stdout.includes(
+        `Windsurf: left alone. Its config is machine-wide and serves ${elsewhere}; pass --windsurf`,
+      ),
+      `and the upgrade says which project it serves: ${upgraded.stdout}`,
+    );
+
+    // Named, it is pointed at this project, and the other server in the file stays.
+    const pointed = cli('upgrade', projectDir, '--windsurf');
+    assert.equal(pointed.status, 0, `upgrade --windsurf:\n${pointed.stdout}${pointed.stderr}`);
+    const repointed: unknown = JSON.parse(readFileSync(windsurf, 'utf8'));
+    assert.ok(
+      isSameDirectory(
+        text(get(repointed, 'mcpServers', 'gdharness', 'env', 'GDHARNESS_PROJECT')),
+        projectDir,
+      ),
+      `named, the entry serves this project: ${JSON.stringify(repointed)}`,
+    );
+    assert.deepEqual(get(repointed, 'mcpServers', 'other'), { command: 'theirs' });
+    const pointedAt = readFileSync(windsurf, 'utf8');
     // Setup and upgrade from one build install the same editor code, so there is nothing to
     // restart the editor for, and saying there was sent a project to a restart that changed nothing.
     assert.match(upgraded.stdout, /Nothing for the editor/, upgraded.stdout);
@@ -20655,6 +21905,12 @@ function testCommandLineSetup(): void {
 
     const removed = cli('uninstall', projectDir);
     assert.equal(removed.status, 0, `uninstall:\n${removed.stdout}${removed.stderr}`);
+    assert.equal(
+      readFileSync(windsurf, 'utf8'),
+      pointedAt,
+      'an uninstall leaves a machine-wide config as it was, even one serving this project',
+    );
+    assert.match(removed.stdout, /Windsurf: left alone\. Its config is machine-wide/, removed.stdout);
     for (const addon of ['gdharness_editor', 'gdharness_runtime', 'auto_reload']) {
       assert.equal(existsSync(join(projectDir, 'addons', addon)), false, `${addon} is gone`);
     }
@@ -20679,6 +21935,49 @@ function testCommandLineSetup(): void {
     assert.equal(again.status, 0, `a second uninstall:\n${again.stdout}${again.stderr}`);
     assert.match(again.stdout, /Nothing of gdharness was in this project/, 'and says so plainly');
     assert.doesNotMatch(again.stdout, /autoload removed/, 'rather than reporting work it did not do');
+
+    // A project that brings the runtime up through a loader of its own, under its own name, and
+    // has no entry of ours. Uninstall read any loader as ours and asked the engine to remove
+    // GdharnessRuntime, which was not there, so it failed at that line on every run and never
+    // reached the addons.
+    const reinstalled = cli('setup', projectDir);
+    assert.equal(
+      reinstalled.status,
+      0,
+      `setup for the loader case:\n${reinstalled.stdout}${reinstalled.stderr}`,
+    );
+    mkdirSync(guard, { recursive: true });
+    writeFileSync(join(guard, 'gdharness_loader.gd'), 'extends Node\n');
+    writeFileSync(
+      project,
+      readFileSync(project, 'utf8').replace(
+        /GdharnessRuntime="\*res:\/\/addons\/gdharness_runtime\/runtime_autoload\.gd"/,
+        'GdharnessLoader="*res://boot/gdharness_loader.gd"',
+      ),
+    );
+    assert.match(
+      readFileSync(project, 'utf8'),
+      /GdharnessLoader=/,
+      'the fixture has the loader and not our entry',
+    );
+    const throughALoader = cli('uninstall', projectDir);
+    assert.equal(
+      throughALoader.status,
+      0,
+      `uninstall beside a loader:\n${throughALoader.stdout}${throughALoader.stderr}`,
+    );
+    assert.equal(existsSync(join(projectDir, 'addons')), false, 'the addons are removed');
+    assert.doesNotMatch(throughALoader.stdout, /GdharnessRuntime autoload removed/, throughALoader.stdout);
+    assert.match(
+      readFileSync(project, 'utf8'),
+      /GdharnessLoader="\*res:\/\/boot\/gdharness_loader\.gd"/,
+      "the loader is the project's line and stays",
+    );
+    assert.match(
+      throughALoader.stdout,
+      /GdharnessLoader names res:\/\/boot\/gdharness_loader\.gd, .*left in place; the addon it brings up is gone now/,
+      `and the answer says it stayed, and what it now brings up: ${throughALoader.stdout}`,
+    );
   } finally {
     sweep(projectDir);
   }
@@ -20733,7 +22032,7 @@ function testTheWrittenConfigNamesAProgramThatStarts(): void {
     const setup = spawnSync(process.execPath, ['build/cli.js', 'setup', projectDir, '--claude-code'], {
       encoding: 'utf8',
       timeout: 180000,
-      env: { ...process.env, GODOT_PATH: godotPath },
+      env: withHome({ ...process.env, GODOT_PATH: godotPath }, join(projectDir, '.home')),
     });
     assert.equal(setup.status, 0, `setup --claude-code:\n${setup.stdout}${setup.stderr}`);
 
@@ -23083,6 +24382,12 @@ async function testARepairThatCouldNotRunIsNotReported(): Promise<void> {
     // The editor is holding one of the two classes the cache holds, which is the state that costs
     // the other one. Told to hold both, the same editor is one a scan takes nothing from.
     let holds = ['Hero'];
+    // What the editor holds once it has scanned, when the scan changes it: the engine registers a
+    // script's class by removing whatever it held for that path first, so a renamed class_name is
+    // replaced rather than kept.
+    let holdsAfterScan: string[] | null = null;
+    const declaredAt: Record<string, string> = { Page: 'res://squire.gd' };
+    let stillScanning = false;
     socket.on('message', (raw: Buffer) => {
       const message: unknown = JSON.parse(String(raw));
       if (!isRecord(message) || message['type'] !== 'tool_invoke') {
@@ -23095,17 +24400,24 @@ async function testARepairThatCouldNotRunIsNotReported(): Promise<void> {
       // from the list this editor is holding, which is the whole of what the real one does to it.
       if (tool === 'rescan_filesystem' && args['statusOnly'] !== true) {
         scans += 1;
+        holds = holdsAfterScan ?? holds;
         // At the path the script is at, as the editor writes it: an entry at a path that is not on
         // disk is a ghost the scan takes out, and a stand-in that spelt the path with a capital was
         // one on the Linux leg alone.
         const entries = holds.map(
-          (name) => `{\n"class": &"${name}",\n"path": "res://${name.toLowerCase()}.gd"\n}`,
+          (name) =>
+            `{\n"class": &"${name}",\n"path": "${declaredAt[name] ?? `res://${name.toLowerCase()}.gd`}"\n}`,
         );
         writeFileSync(cache, `list=[${entries.join(', ')}]\n`);
       }
       const result =
         tool === 'rescan_filesystem'
-          ? { ok: true, scanning: false, importing: false, pending: false }
+          ? {
+              ok: true,
+              scanning: stillScanning && args['statusOnly'] === true,
+              importing: false,
+              pending: false,
+            }
           : { ok: true, classes: holds };
       socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result }));
     });
@@ -23149,6 +24461,37 @@ async function testARepairThatCouldNotRunIsNotReported(): Promise<void> {
     assert.equal(get(answer, 'ok'), true, `a scan that takes nothing is clean: ${textOf(kept)}`);
     assert.equal(get(answer, 'cacheLost'), undefined, `with nothing lost: ${textOf(kept)}`);
     assert.equal(scans, 2, `and it was asked for again: ${textOf(kept)}`);
+
+    // A class the caller renamed on disk leaves the cache on the scan, which is the scan being
+    // right. It was read as a loss: the call failed, the note said every engine would report the
+    // class unknown, and the editor was marked as one whose scans lose classes, which turned the
+    // later remedies into restarts for the rest of its life.
+    writeFileSync(join(project, 'squire.gd'), 'class_name Page\nextends Node\n');
+    holdsAfterScan = ['Hero', 'Page'];
+    const renamed = await server.request('tools/call', {
+      name: 'editor_rescan',
+      arguments: { projectPath: project },
+    });
+    const afterRename = parseTextContent(renamed);
+    assert.equal(scans, 3, `the scan ran: ${textOf(renamed)}`);
+    assert.match(readFileSync(cache, 'utf8'), /&"Page"/, 'and wrote the renamed class');
+    assert.equal(get(afterRename, 'cacheLost'), undefined, `a renamed class is not lost: ${textOf(renamed)}`);
+    assert.equal(get(afterRename, 'ok'), true, `and the scan is clean: ${textOf(renamed)}`);
+    assert.equal(get(afterRename, 'note'), undefined, `with nothing to tell: ${textOf(renamed)}`);
+
+    // A scan still running when the budget ends has checked nothing afterwards, so it has brought
+    // nothing in. Every class the editor could not see before was named as brought in, which a
+    // caller reading that field alone takes for classes that now resolve.
+    holdsAfterScan = null;
+    holds = ['Hero'];
+    stillScanning = true;
+    const unfinished = await server.request('tools/call', {
+      name: 'editor_rescan',
+      arguments: { projectPath: project, timeoutMs: 1500 },
+    });
+    const cut = parseTextContent(unfinished);
+    assert.equal(get(cut, 'stillWorking'), true, `the scan was still going: ${textOf(unfinished)}`);
+    assert.equal(get(cut, 'broughtIn'), undefined, `and brought nothing in yet: ${textOf(unfinished)}`);
   } finally {
     editor?.terminate();
     await server.stop();
@@ -23674,6 +25017,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASupersededServerStandsDown,
   testAPredecessorThatKeepsThePortIsNotWaitedOnForEver,
   testAProjectUpgradedUnderTheServerIsSaid,
+  testAStaleNoteKnowsWhatARestartLoads,
   testEveryDispatchedNameExistsOnBothSides,
   testEveryEngineParameterCanBeSent,
   testEveryToolParameterIsRead,
@@ -23689,6 +25033,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testHeadlessFollowsTheDisplay,
   testStaleClassesAreReadFromDisk,
   testTheProjectWalksAgreeAboutWhatIsInIt,
+  testASearchReadsWhatItSaysItReads,
   testClassesAnEditorIsNotHolding,
   testAScanThatHasNotStartedIsNotFinished,
   testARescanWaitsOutTheEditorsImport,
@@ -23737,6 +25082,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnInjectedMotionCarriesHowFarThePointerMoved,
   testAKeyDoesNotChooseFromAnOpenedMenu,
   testACaptureBeforeTheFirstFrameWaitsForIt,
+  testASubViewportCaptureIsDrawnNow,
+  testAScreenshotHoldsTheGamesOwnWindows,
   testAWrittenLineBreakMatchesATwoLineLabel,
   testAPlayedGamesReportsReachTheOutput,
   testAPlayedGamesConsoleKeepsItsOrder,
@@ -23782,6 +25129,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testWhoIsHoldingAPortIsAskable,
   testWhatTheEditorSavedAwayIsReportedTheSameWay,
   testARestartSaysWhatTheEditorDropped,
+  testWhatALaunchedEditorDroppedIsReadAsItArrives,
   testProjectDefaultsToTheWorkingDirectory,
   testAnEngineThatDoesNotAnswerIsNamed,
   testAnAutoloadGitWillNotCarry,
@@ -23797,6 +25145,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARestartWaitsForTheEditorToSayWhoItIs,
   testTheStaleHalfIsNamedCorrectly,
   testALaunchedEditorsConsoleIsReadBeforeItConnects,
+  testAnEditorStartedByAnEditorSaysSo,
   testStalenessIsTheEditorCodeNotTheVersion,
   testAnEditorOnTheShippedCodeIsNotCalledStale,
   testAGameIsFoundWhereverItAnnounced,
@@ -23816,6 +25165,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStartSaysWhatItLeftRunning,
   testATestServerWritesWhereNoRealRunIs,
   testRuntimeConnectedIsAboutThisProjectsGames,
+  testAGameOnEveryInterfaceIsReached,
   testAStartStopsWaitingForAGameThatIsOver,
   testAStartWaitsForTheGameToAnnounceItself,
   testAGameIsFoundThroughALinkToItsProject,
@@ -23840,6 +25190,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARunEndedWithoutACodeSaysWhy,
   testAForeignRunSurvivesAStart,
   testARunOutlivesItsServer,
+  testARunOfAnotherProjectOutlivesItsServer,
+  testTheResourcesReadOnlyTheProject,
   testGdUnitRunner,
   testATestRunCutShortIsNamedForWhatItWasDoing,
   testAnUpgradeReadsTheEngineOutOfTheConfigItRewrites,
@@ -23868,6 +25220,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEditorStatusPortConflict,
   testTheBridgeTakesThePortWhenItIsFreed,
   testAnEditorAServerOpenedIsStartedAgain,
+  testAnEditorIsReadOnceItHasSaidWhoItIs,
+  testARestartWaitsForTheOldEditorToGo,
   testAServerEndsWithAnEditorStillOnTheBridge,
   testABadPortIsReported,
   testAnEditorPortMovesOnlyWhenItIsHeld,

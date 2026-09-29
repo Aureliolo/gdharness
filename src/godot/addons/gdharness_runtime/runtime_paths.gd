@@ -67,6 +67,9 @@ const PACKED: Array[int] = [
 ## The calls an empty list has nothing to answer, which the engine reports as an error when asked.
 const NEEDS_AN_ELEMENT: Array[String] = ["front", "back", "pick_random"]
 
+## Said after every call a path refuses for doing something rather than reading.
+const READS_ONLY: String = ", and a path, which a wait reads every frame, only calls methods that read"
+
 
 ## What [param reaching] names something on, which is the node itself until the name has a colon
 ## in it, and the last name along that path.
@@ -203,7 +206,7 @@ static func can_read(holder: Variant, named: String) -> bool:
 		var object: Object = holder
 		var method: String = method_of(named)
 		if not method.is_empty():
-			return _arguments_required(object, method) == 0
+			return call_refused(object, method, "").is_empty()
 		return _has_property(object, named)
 	return false
 
@@ -243,6 +246,62 @@ static func _arguments_required(object: Object, method: String) -> int:
 		var defaults: Array = entry.get("default_args", [])
 		return params.size() - defaults.size()
 	return -1
+
+
+## Why a path may not call [param method] on [param object], said about [param called_as], or ""
+## when it may.
+##
+## A path is read, and a wait reads it every frame, so a call in one has to be a read. The engine
+## marks its own reading methods const and `queue_free()`, `free()` and `set_name()` not, measured on
+## 4.7.2. A game's methods carry no such mark, so one declared `-> void` is taken at its word, as
+## doing something and answering nothing, and one left untyped is trusted. Without this a find
+## with property "queue_free()" freed every node it matched, and a wait on "advance_day()" called
+## it once a frame and then reported the state it had driven the game to.
+static func call_refused(object: Object, method: String, called_as: String) -> String:
+	var required: int = _arguments_required(object, method)
+	if required == -1:
+		return "%s has no method %s" % [called_as, method]
+	if required > 0:
+		return (
+			"%s.%s takes %d argument%s, and a path can only call a method that takes none"
+			% [called_as, method, required, "" if required == 1 else "s"]
+		)
+	var scripted: Dictionary = _script_method(object, method)
+	if not scripted.is_empty():
+		var returned: Dictionary = scripted.get("return", {})
+		var usage: int = returned.get("usage", 0)
+		var type: int = returned.get("type", TYPE_NIL)
+		if type == TYPE_NIL and usage & PROPERTY_USAGE_NIL_IS_VARIANT == 0:
+			return (
+				"%s.%s is declared -> void, so it does something rather than answering%s"
+				% [called_as, method, READS_ONLY]
+			)
+		return ""
+	if _native_flags(object, method) & METHOD_FLAG_CONST == 0:
+		return "%s.%s changes what it is called on rather than reading it%s" % [called_as, method, READS_ONLY]
+	return ""
+
+
+## The entry a script attached to [param object] declares for [param method], or an empty one when
+## the method is the engine's.
+static func _script_method(object: Object, method: String) -> Dictionary:
+	var attached: Variant = object.get_script()
+	if not attached is Script:
+		return {}
+	var script: Script = attached
+	for entry: Dictionary in script.get_script_method_list():
+		if str(entry.get("name", "")) == method:
+			return entry
+	return {}
+
+
+## The flags the engine declares [param method] with on [param object].
+static func _native_flags(object: Object, method: String) -> int:
+	for entry: Dictionary in object.get_method_list():
+		if str(entry.get("name", "")) == method:
+			var flags: int = entry.get("flags", 0)
+			return flags
+	return 0
 
 
 ## Put [param value] where [param named] points. Only ever called once [method can_read] agrees,
@@ -343,13 +402,7 @@ static func nothing_there(holder: Variant, named: String, called_as: String) -> 
 	var object: Object = holder
 	var method: String = method_of(named)
 	if not method.is_empty():
-		var required: int = _arguments_required(object, method)
-		if required == -1:
-			return "%s has no method %s" % [called_as, method]
-		return (
-			"%s.%s takes %d argument%s, and a path can only call a method that takes none"
-			% [called_as, method, required, "" if required == 1 else "s"]
-		)
+		return call_refused(object, method, called_as)
 	# A method spelled as a property is the likeliest thing behind a name the object has no property
 	# for, and the caller is one pair of brackets away from what they meant.
 	if object.has_method(named):

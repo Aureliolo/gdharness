@@ -169,6 +169,13 @@ export function editorArguments(
 export const OPENED_BY_A_SERVER = 'GDHARNESS_OPENED_BY_A_SERVER';
 
 /**
+ * What the editor addon sets to its own pid as it loads, so the games it plays can say which editor
+ * played them and an editor started by another editor can tell. Kept in step with
+ * `EDITOR_PID_VARIABLE` in bridge_client.gd.
+ */
+export const EDITOR_PID_VARIABLE = 'GDHARNESS_EDITOR_PID';
+
+/**
  * An environment whose `user://` is `home`, so an engine writes its saves nowhere anybody keeps
  * theirs.
  *
