@@ -168,6 +168,7 @@ import {
   exportAnswer,
   leftRunningNote,
   noCodeWillCome,
+  notRunNote,
   PLAY_STARTS_WITHIN_MS,
   PROJECT_FILE_ARGUMENTS,
   patienceForFrames,
@@ -13061,6 +13062,18 @@ async function testAKilledRunHasNoExitCode(): Promise<void> {
  * project does. The processes are real ones, because how they end is what is being read.
  */
 /**
+ * Cases a run counted and never ran are put down to failFast only when failFast was set: a run
+ * without it was told to leave it out, which it already had.
+ */
+function testNotRunIsPutDownToFailFastOnlyWhenSet(): void {
+  assert.equal(notRunNote(0, true), undefined);
+  assert.match(notRunNote(3, true) ?? '', /stopped at the first failure.*3 cases never ran.*Leave failFast out/);
+  const without = notRunNote(1, false) ?? '';
+  assert.match(without, /^1 case counted in its suite never ran.*failFast was not set, so it was not that/, without);
+  assert.doesNotMatch(without, /Leave failFast out/, without);
+}
+
+/**
  * An export is exported when this run wrote its file. The file an earlier export left read as this
  * one's, so an export that exited cleanly having written nothing was answered as exported.
  */
@@ -22869,6 +22882,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEngineRunSaysHowItEnded,
   testTheScanNoteNamesWhatStarted,
   testAnExportIsJudgedByTheFileItWrote,
+  testNotRunIsPutDownToFailFastOnlyWhenSet,
   testAWordsWaitLeavesTheGameItsSpeed,
   testTheAnnounceWaitIsNotHeldByASlowEditor,
   testTheWaitSizedToABootIsSaid,

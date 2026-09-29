@@ -1145,6 +1145,22 @@ function withScanWait(outcome: HeadlessOutcome, scanned: ScanWait): HeadlessOutc
 }
 
 /**
+ * What a test run says about [param notRun] cases its suites counted and never ran.
+ *
+ * failFast is the usual reason and the only one with a remedy to give, so it is named only when it
+ * was set: a run without it was told to leave it out, which it already had.
+ */
+export function notRunNote(notRun: number, failFast: boolean): string | undefined {
+  if (notRun <= 0) {
+    return undefined;
+  }
+  const cases = `${notRun} case${notRun === 1 ? '' : 's'}`;
+  return failFast
+    ? `This run stopped at the first failure in each suite it failed in, so ${cases} never ran and count as neither passed nor failed. Leave failFast out to run every case.`
+    : `${cases} counted in ${notRun === 1 ? 'its suite' : 'their suites'} never ran and count as neither passed nor failed. failFast was not set, so it was not that: the suites below with notRun are the ones to read.`;
+}
+
+/**
  * What project_export answers for [param ending], given when its output file was last written
  * before the export and after it, null where there was none.
  *
@@ -3988,11 +4004,7 @@ class GodotServer {
       note:
         verdict.startsWith('warnings') && warnings.length === 0
           ? 'gdUnit4 exits 101 for orphan nodes when nothing failed, and this run printed no count of them: orphan reporting may be off in the project settings.'
-          : notRun > 0
-            ? readBoolean(args, 'failFast') === true
-              ? `This run stopped at the first failure in each suite it failed in, so ${notRun} case${notRun === 1 ? '' : 's'} never ran and count as neither passed nor failed. Leave failFast out to run every case.`
-              : `${notRun} case${notRun === 1 ? '' : 's'} counted in ${notRun === 1 ? 'its suite' : 'their suites'} never ran and count as neither passed nor failed. failFast was not set, so it was not that: the suites below with notRun are the ones to read.`
-            : undefined,
+          : notRunNote(notRun, readBoolean(args, 'failFast') === true),
       suites: unclean.map((suite) => ({
         name: suite.name,
         path: suite.path,
