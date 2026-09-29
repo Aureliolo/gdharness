@@ -544,8 +544,13 @@ func _check_writing_what_a_property_holds() -> void:
 	var refused: Dictionary = await node._execute_command(
 		"set_property", {"path": "/root/Locked", "property": "locked", "value": 2.0}
 	)
-	if refused.get("type") != "error" or not str(refused.get("message", "")).contains("kept what it had"):
+	# Refused by what was seen: the setter ran, so a sentence saying the engine would not write the
+	# property names a cause that did not happen.
+	var seen: String = str(refused.get("message", ""))
+	if refused.get("type") != "error" or not seen.contains("reads 1.0 afterwards, as it did before"):
 		_fail("a write the setter ignores is still refused: %s" % JSON.stringify(refused))
+	if seen.contains("will not write"):
+		_fail("and not put down to the engine: %s" % seen)
 	var unasked: Dictionary = await node._execute_command(
 		"set_property", {"path": "/root/Locked", "property": "locked", "value": 1.0}
 	)

@@ -7636,7 +7636,7 @@ function testTheCureIsWrittenWhole(): void {
   ];
   // What the tree holds today and not a comfortable minimum, so one place going quiet lowers this
   // in the same change and somebody confirms it was meant.
-  assert.equal(offered.length, 35, `the places offering a remedy should all be found, not ${offered.length}`);
+  assert.equal(offered.length, 40, `the places offering a remedy should all be found, not ${offered.length}`);
 
   // Across whitespace, because a rendered file wraps where the source did not and a sentence that
   // breaks at "the" is the same sentence. Change, edit and touch, because the claim is about what
@@ -9552,7 +9552,10 @@ function testAStaleStaticFunctionIsNamed(): void {
  * ostinato's reload of `exchange.gd` answered "error 43" and nothing else, and the next reload found
  * the held copy with one method of the eleven it had held for days, so nobody could tell whether the
  * failed reload had done it. The branches the editor tier cannot reach are rendered here: a copy
- * that changed, the file naming no class, and an editor that gave no name for its error.
+ * that changed, the file naming no class, an editor that gave no name for its error, a copy the
+ * editor could not compile again from its old text, and an addon that does not say whether it did.
+ * Only the copy compiled again is said to be as it was: a failed compile leaves it unusable while
+ * its member lists read as before, so the lists alone cannot say so.
  */
 function testAFailedReloadSaysWhatItKept(): void {
   const exchange: FailedReload = {
@@ -9564,6 +9567,8 @@ function testAFailedReloadSaysWhatItKept(): void {
     constantsBefore: ['CAP'],
     constantsAfter: [],
     names: ['Born', 'Rules'],
+    restored: true,
+    restoredAs: '',
   };
   const gutted = failedReloadNote(exchange);
   assert.match(
@@ -9576,7 +9581,7 @@ function testAFailedReloadSaysWhatItKept(): void {
   assert.doesNotMatch(gutted, /[Nn]othing was reloaded/, 'a changed copy is not said to be untouched');
   assert.match(
     gutted,
-    /The copy the editor holds changed even so, and has lost _pierced, CAP: anything diagnosed against it now is answered from what is left, and reloading it once it compiles rebuilds it\./,
+    /The copy the editor holds was compiled again from the text it was built from and changed even so, and has lost _pierced, CAP: anything diagnosed against it now is answered from what is left, and reloading it once it compiles rebuilds it\./,
     'a copy the failure damaged is said to be damaged, with what went',
   );
   assert.doesNotMatch(gutted, /is as it was/, 'and is not also said to be intact');
@@ -9591,7 +9596,7 @@ function testAFailedReloadSaysWhatItKept(): void {
   });
   assert.equal(
     alone,
-    'res://core/exchange.gd did not compile: Godot answered error 43. Nothing was reloaded: the copy the editor holds is as it was, with the members under heldBeforeReload and heldConstantsBeforeReload. script_diagnostics on it gives the errors.',
+    'res://core/exchange.gd did not compile: Godot answered error 43. The copy the editor holds was compiled again from the text it was built from, which puts it back as it was, with the members under heldBeforeReload and heldConstantsBeforeReload. script_diagnostics on it gives the errors.',
     'an intact copy, no class to name and no name for the error, each said as nothing more than it is',
   );
   // A member the copy gained is still a change, however unlikely: the claim is sameness.
@@ -9601,9 +9606,28 @@ function testAFailedReloadSaysWhatItKept(): void {
       heldAfter: [...exchange.heldBefore, 'extra'],
       constantsAfter: exchange.constantsBefore,
     }),
-    /The copy the editor holds changed even so:/,
+    /and changed even so:/,
     'a copy that changed without losing anything is not called unchanged',
   );
+
+  // The same members either side and still not as it was: the old text would not compile either,
+  // or the addon does not say whether it compiled it.
+  const same = { ...exchange, heldAfter: exchange.heldBefore, constantsAfter: exchange.constantsBefore };
+  const stuck = failedReloadNote({ ...same, restored: false, restoredAs: 'Parse error' });
+  assert.match(
+    stuck,
+    /A failed compile leaves the copy the editor holds unusable, measured on 4\.7\.2: the editor can make no instance of it, and one it already made has lost its methods, while its member lists read as before\. The editor compiled it again from the text it was built from, and that failed too \(Parse error\), so it stays that way until the script compiles: reload it then, or restart the editor with editor_launch restart\./,
+    stuck,
+  );
+  const unsaid = failedReloadNote({ ...same, restored: null });
+  assert.match(
+    unsaid,
+    /This editor's addon does not put it back, so it stays that way until the script compiles/,
+    unsaid,
+  );
+  for (const note of [stuck, unsaid]) {
+    assert.doesNotMatch(note, /as it was/, `a copy not compiled again is not said to be as it was: ${note}`);
+  }
 }
 
 /**
@@ -15442,12 +15466,13 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
       assert.ok(mapped.written, `a map is fitted to Dictionary[String, int]: ${mapped.said}`);
       assert.match(mapped.said, /"new_value":\s*\{\s*"wins":\s*3\s*\}/, mapped.said);
 
-      // A write the engine will not take is refused rather than answered as done.
+      // A write that leaves the property as it was is refused rather than answered as done, and said
+      // as what was seen: a setter keeping the value and the engine refusing it look the same.
       const kept = await set('locked', 9);
       assert.equal(kept.written, false, `a property that ignores the write is refused: ${kept.said}`);
       assert.match(
         kept.said,
-        /^\/root\/Main\.locked was given 9 and still holds 5: the engine kept what it had/,
+        /^\/root\/Main\.locked was given 9 and reads 5 afterwards, as it did before: the write left it as it was/,
         kept.said,
       );
 
@@ -21496,8 +21521,13 @@ async function testARescanReloadsWhatNamesAClassItBroughtIn(): Promise<void> {
       join(project, 'note.gd'),
       'extends Node\n# CharteredRun is described here\nvar label := "CharteredRun"\nvar doc := """\nCharteredRun\n"""\n',
     );
-    // A use in a @tool script, which runs inside the editor and is left for a restart.
+    // A use in a @tool script, which runs inside the editor and is left for a restart, and one whose
+    // @tool shares its line with another annotation, which is a tool script all the same.
     writeFileSync(join(project, 'tooling.gd'), '@tool\nextends Node\n\nvar run: CharteredRun\n');
+    writeFileSync(
+      join(project, 'marked.gd'),
+      '@icon("res://icon.svg") @tool\nextends Node\n\nvar run: CharteredRun\n',
+    );
     const cache = join(project, '.godot', 'global_script_class_cache.cfg');
     const cached = 'list=[{\n"class": &"CharteredRun",\n"path": "res://base.gd"\n}]\n';
     writeFileSync(cache, cached);
@@ -21535,6 +21565,7 @@ async function testARescanReloadsWhatNamesAClassItBroughtIn(): Promise<void> {
           ok: true,
           failed: 43,
           failedAs: 'Parse error',
+          restored: true,
           heldBefore: ['run_once'],
           methods: ['run_once'],
           heldConstantsBefore: ['MAX'],
@@ -21554,10 +21585,14 @@ async function testARescanReloadsWhatNamesAClassItBroughtIn(): Promise<void> {
                   id: message['id'],
                   success: true,
                   // base.gd refused as asked for without res://, the spelling reloadScript also takes.
+                  // And one in another case than the file, answered under the spelling on disk as
+                  // the editor addon answers it.
                   result:
                     scriptPath === 'res://refuses.gd' || scriptPath === 'base.gd'
                       ? uncompiled
-                      : { ok: true, methods: [] },
+                      : scriptPath === 'res://Charters_Test.gd'
+                        ? { ok: true, script: 'res://charters_test.gd', methods: ['run_once'] }
+                        : { ok: true, methods: [] },
                 },
           ),
         );
@@ -21598,24 +21633,46 @@ async function testARescanReloadsWhatNamesAClassItBroughtIn(): Promise<void> {
       said,
     );
     const notReloaded = asArray(get(answer, 'dependentsNotReloaded') ?? []);
+    const problemOf = (script: string): string =>
+      text(get(notReloaded.find((one) => get(one, 'scriptPath') === script) ?? {}, 'problem'));
     assert.deepEqual(
-      notReloaded.map((one) => text(get(one, 'scriptPath'))),
-      ['res://refuses.gd', 'res://tooling.gd', 'res://uses.gd'],
+      notReloaded.map((one) => [text(get(one, 'scriptPath')), get(one, 'tool') ?? false]),
+      [
+        ['res://marked.gd', true],
+        ['res://refuses.gd', false],
+        ['res://tooling.gd', true],
+        ['res://uses.gd', false],
+      ],
       said,
     );
     // Answered as a call that ran, and still not a reload: the methods it carries are what the copy
     // kept, and counting them as reloaded is the mistake this guards.
     assert.match(
-      text(get(notReloaded[0], 'problem')),
+      problemOf('res://refuses.gd'),
       /^it did not compile: Godot answered error 43, Parse error$/,
       said,
     );
-    assert.match(text(get(notReloaded[1], 'problem')), /a @tool script, which runs inside the editor/, said);
-    assert.match(text(get(notReloaded[2], 'problem')), /the fixture editor refused it/, said);
+    for (const tool of ['res://marked.gd', 'res://tooling.gd']) {
+      assert.match(problemOf(tool), /a @tool script, which runs inside the editor/, said);
+    }
+    assert.match(problemOf('res://uses.gd'), /the fixture editor refused it/, said);
     assert.equal(get(answer, 'ok'), false, `an editor still holding a stale compile is not ok: ${said}`);
+    // Each with the remedy that fits it: reloadScript for the two it tried, which refuses a @tool
+    // script and so is never offered for one.
+    const note = text(get(answer, 'note'));
     assert.match(
-      text(get(answer, 'note')),
-      /res:\/\/refuses\.gd, res:\/\/tooling\.gd, res:\/\/uses\.gd name them and could not be reloaded/,
+      note,
+      /res:\/\/refuses\.gd, res:\/\/uses\.gd, res:\/\/marked\.gd, res:\/\/tooling\.gd name them and could not be reloaded/,
+      said,
+    );
+    assert.match(
+      note,
+      /For res:\/\/refuses\.gd, res:\/\/uses\.gd: editor_rescan with reloadScript on each, or editor_launch restart\./,
+      said,
+    );
+    assert.match(
+      note,
+      /For res:\/\/marked\.gd, res:\/\/tooling\.gd, @tool scripts, which run inside the editor and are not reloaded from inside a call: editor_launch restart\./,
       said,
     );
 
@@ -21629,7 +21686,7 @@ async function testARescanReloadsWhatNamesAClassItBroughtIn(): Promise<void> {
     );
     assert.equal(
       get(asked, 'reloadProblem'),
-      "res://refuses.gd did not compile: Godot answered error 43, Parse error. Nothing was reloaded: the copy the editor holds is as it was, with the members under heldBeforeReload and heldConstantsBeforeReload. script_diagnostics on it gives the errors. If they deny a member of CharteredRun that its file declares, the editor's copy of that class is behind: reload that class first with reloadScript and then this script, the order that cleared it in the one project that has met this.",
+      "res://refuses.gd did not compile: Godot answered error 43, Parse error. The copy the editor holds was compiled again from the text it was built from, which puts it back as it was, with the members under heldBeforeReload and heldConstantsBeforeReload. script_diagnostics on it gives the errors. If they deny a member of CharteredRun that its file declares, the editor's copy of that class is behind: reload that class first with reloadScript and then this script, the order that cleared it in the one project that has met this.",
       JSON.stringify(asked),
     );
     assert.deepEqual(
@@ -21676,6 +21733,18 @@ async function testARescanReloadsWhatNamesAClassItBroughtIn(): Promise<void> {
       [true, undefined],
       `and one that reloaded is ok: ${JSON.stringify(reloadedByName)}`,
     );
+    assert.equal(get(reloadedByName, 'reloadedAs'), undefined, JSON.stringify(reloadedByName));
+    const recased = parseTextContent(
+      await server.request('tools/call', {
+        name: 'editor_rescan',
+        arguments: { projectPath: project, reloadScript: 'res://Charters_Test.gd' },
+      }),
+    );
+    assert.deepEqual(
+      [get(recased, 'reloadedAs'), get(recased, 'reloadedMethods')],
+      ['res://charters_test.gd', ['run_once']],
+      `a path in another case says which spelling was reloaded: ${JSON.stringify(recased)}`,
+    );
     // The declaring script asked for without res://. Its file names only its own class, which is not
     // one to reload first: spelled this way it passed for one, and the script was told to reload itself.
     const ownClass = parseTextContent(
@@ -21686,9 +21755,33 @@ async function testARescanReloadsWhatNamesAClassItBroughtIn(): Promise<void> {
     );
     assert.match(
       String(get(ownClass, 'reloadProblem')),
-      /^base\.gd did not compile/,
+      /^res:\/\/base\.gd did not compile/,
       JSON.stringify(ownClass),
     );
+    assert.equal(
+      get(ownClass, 'reloadedAs'),
+      undefined,
+      `a path given without res:// is not a different spelling: ${JSON.stringify(ownClass)}`,
+    );
+
+    // A @tool script asked for by name is refused before the editor is asked, as the dependents are,
+    // the one-line annotation included.
+    for (const tool of ['res://tooling.gd', 'res://marked.gd']) {
+      const before = reloadsAskedFor.length;
+      const refusedTool = parseTextContent(
+        await server.request('tools/call', {
+          name: 'editor_rescan',
+          arguments: { projectPath: project, reloadScript: tool },
+        }),
+      );
+      assert.equal(
+        get(refusedTool, 'reloadProblem'),
+        `${tool} is a @tool script, which runs inside the editor, so it is not reloaded from inside a call: editor_launch restart recompiles it.`,
+        JSON.stringify(refusedTool),
+      );
+      assert.equal(reloadsAskedFor.length, before, `and the editor is not asked to reload ${tool}`);
+      assert.equal(get(refusedTool, 'ok'), false, JSON.stringify(refusedTool));
+    }
     assert.doesNotMatch(
       String(get(ownClass, 'reloadProblem')),
       /If they deny a member of CharteredRun/,

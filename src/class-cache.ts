@@ -28,6 +28,19 @@ import { join } from 'node:path';
 const DECLARATION = /^(?:@[a-z_]+(?:\([^)\n]*\))?\s+)*class_name\s+([A-Za-z_][A-Za-z0-9_]*)/m;
 
 /**
+ * A `@tool` annotation, alone on its line or among the annotations sharing one, the way
+ * [DECLARATION] reads them: `@icon("res://i.svg") @tool class_name Foo` is a tool script. Read at
+ * the start of the line alone, that one would pass for an ordinary script and be reloaded from
+ * inside a call, which is what the test exists to prevent.
+ */
+const TOOL = /^[ \t]*(?:@[a-z_]+(?:\([^)\n]*\))?[ \t]+)*@tool\b/m;
+
+/** Whether [param source] is a `@tool` script, which runs inside the editor. Read from its code. */
+export function isToolScript(source: string): boolean {
+  return TOOL.test(codeOf(source));
+}
+
+/**
  * Every `class_name` declared under the project, with the script that declares it.
  *
  * A directory holding a `.gdignore` is stepped over, because the engine steps over it: nothing
@@ -98,7 +111,7 @@ export function scriptsNaming(projectPath: string, classes: readonly string[]): 
     }
     const code = codeOf(source);
     if (classesNamedIn(code, named).length > 0) {
-      naming.push({ script, tool: /^\s*@tool\b/m.test(code) });
+      naming.push({ script, tool: TOOL.test(code) });
     }
   });
   return naming.sort((a, b) => a.script.localeCompare(b.script));
@@ -603,6 +616,38 @@ function classRemedy(entries: readonly Contradicted[]): string {
   );
 }
 
+/** A script naming a class a scan brought in that was not reloaded, and why. */
+export interface NotReloaded {
+  readonly scriptPath: string;
+  readonly problem: string;
+  /** Left alone for being a `@tool` script, rather than tried and refused. */
+  readonly tool?: true;
+}
+
+/**
+ * What a caller is told about the scripts naming a class the scan brought in that were not
+ * reloaded, each with the remedy that fits it. One that was tried and refused is tried again with
+ * `reloadScript`; a `@tool` script is not, because `reloadScript` refuses one for the same reason
+ * the rescan left it alone, so sending the caller there would only earn the refusal.
+ */
+export function notReloadedNote(broughtIn: readonly string[], notReloaded: readonly NotReloaded[]): string {
+  const tried = notReloaded.filter((one) => one.tool !== true).map((one) => one.scriptPath);
+  const tools = notReloaded.filter((one) => one.tool === true).map((one) => one.scriptPath);
+  const all = [...tried, ...tools];
+  const remedies: string[] = [];
+  if (tried.length > 0) {
+    remedies.push(
+      `For ${tried.join(', ')}: editor_rescan with reloadScript on ${tried.length === 1 ? 'it' : 'each'}, or editor_launch restart.`,
+    );
+  }
+  if (tools.length > 0) {
+    remedies.push(
+      `For ${tools.join(', ')}, ${tools.length === 1 ? 'a @tool script' : '@tool scripts'}, which ${tools.length === 1 ? 'runs' : 'run'} inside the editor and ${tools.length === 1 ? 'is' : 'are'} not reloaded from inside a call: editor_launch restart.`,
+    );
+  }
+  return `The scan brought in ${broughtIn.join(', ')}, and ${all.join(', ')} ${all.length === 1 ? 'names one of them and' : 'name them and'} could not be reloaded, so the editor still holds what it compiled while it could not see the class and reports that to the language server. ${remedies.join(' ')}`;
+}
+
 /** A reload the editor refused, and what the copy it holds had before and has now. */
 export interface FailedReload {
   readonly script: string;
@@ -615,16 +660,26 @@ export interface FailedReload {
   readonly constantsAfter: readonly string[];
   /** The project's global classes the script's file names, other than its own. */
   readonly names: readonly string[];
+  /**
+   * Whether the editor compiled the copy again from the text it held before, which is what makes it
+   * usable again, or null from an addon that does not say.
+   */
+  readonly restored: boolean | null;
+  /** Godot's own name for why that compile failed too, when it did. */
+  readonly restoredAs: string;
 }
 
 /**
  * What to tell a caller whose reload did not compile.
  *
- * It used to be "answered error 43" and nothing else. ostinato met one on a script whose held copy
- * had, straight after, one method of the eleven it had held for days, and could not tell whether the
- * failed reload had done that, because the answer carried no reading of the copy. So the note says
- * which it is from the two readings: measured on 4.7.2, a reload refused on a parse error and on an
- * analysis error leaves the copy exactly as it was, and when it does not, the note names what went.
+ * ostinato met one on a script whose held copy had, straight after, one method of the eleven it had
+ * held for days, and could not tell whether the failed reload had done that. So the note reads the
+ * copy's members before and after, and names what went.
+ *
+ * The members are not the whole of it. A failed reload leaves the copy unusable while its member
+ * lists read as before, measured on 4.7.2: the editor can make no instance of it, and one it already
+ * made has lost its methods. The addon compiles the text the copy was built from again, which puts
+ * it back, and says whether that worked; the note says the copy is as it was only when it did.
  *
  * The advice on order is ostinato's: the script failed while a class it names was behind in the
  * editor, and reloading that class first and then the script cleared it. Named by the classes the
@@ -643,9 +698,19 @@ export function failedReloadNote(failed: FailedReload): string {
     missing(failed.constantsAfter, failed.constantsBefore).length === 0;
   const answered =
     failed.codeName === '' ? `error ${failed.code}` : `error ${failed.code}, ${failed.codeName}`;
-  const copy = unchanged
-    ? 'Nothing was reloaded: the copy the editor holds is as it was, with the members under heldBeforeReload and heldConstantsBeforeReload.'
-    : `The copy the editor holds changed even so${lost.length === 0 ? '' : `, and has lost ${lost.join(', ')}`}: anything diagnosed against it now is answered from what is left, and reloading it once it compiles rebuilds it.`;
+  const unusable =
+    'A failed compile leaves the copy the editor holds unusable, measured on 4.7.2: the editor can make no instance of it, and one it already made has lost its methods, while its member lists read as before.';
+  let copy: string;
+  if (failed.restored === null) {
+    copy = `${unusable} This editor's addon does not put it back, so it stays that way until the script compiles: reload it then, or restart the editor with editor_launch restart.`;
+  } else if (!failed.restored) {
+    copy = `${unusable} The editor compiled it again from the text it was built from, and that failed too${failed.restoredAs === '' ? '' : ` (${failed.restoredAs})`}, so it stays that way until the script compiles: reload it then, or restart the editor with editor_launch restart.`;
+  } else if (unchanged) {
+    copy =
+      'The copy the editor holds was compiled again from the text it was built from, which puts it back as it was, with the members under heldBeforeReload and heldConstantsBeforeReload.';
+  } else {
+    copy = `The copy the editor holds was compiled again from the text it was built from and changed even so${lost.length === 0 ? '' : `, and has lost ${lost.join(', ')}`}: anything diagnosed against it now is answered from what is left, and reloading it once it compiles rebuilds it.`;
+  }
   const order =
     failed.names.length === 0
       ? ''
