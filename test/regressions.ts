@@ -99,7 +99,7 @@ import {
   userDataIn,
 } from '../src/launch.js';
 import { GodotLSPClient } from '../src/lsp_client.js';
-import { isWithinRoot, resolveWithinProject } from '../src/paths.js';
+import { isSameDirectory, isWithinRoot, resolveWithinProject } from '../src/paths.js';
 import { freePort } from '../src/ports.js';
 import {
   ancestorsIn,
@@ -213,6 +213,7 @@ import {
 import { namedType, renderToolsMarkdown } from '../src/tool-reference.js';
 import { CACHE_MS, cacheFile, isNewer, registryFor, UpdateCheck } from '../src/update-check.js';
 import { askWindows } from '../src/windows-ask.js';
+import { withHome } from './support/cli-home.js';
 import { asArray, asNumber, get, text } from './support/json.js';
 import { isRecord, type JsonRpcMessage, parseTextContent, textOf } from './support/json-rpc.js';
 import { solidPng } from './support/png.js';
@@ -3953,6 +3954,7 @@ function testProjectDefaultsToTheWorkingDirectory(): void {
       encoding: 'utf8',
       cwd,
       timeout: 60000,
+      env: withHome(process.env, join(sandbox, 'home')),
     });
     return { status: run.status, output: `${run.stdout}${run.stderr}` };
   };
@@ -3974,7 +3976,7 @@ function testProjectDefaultsToTheWorkingDirectory(): void {
     const flagged = spawnSync(
       process.execPath,
       [join(process.cwd(), 'build', 'cli.js'), 'doctor', '--json'],
-      { encoding: 'utf8', cwd: project, timeout: 60000 },
+      { encoding: 'utf8', cwd: project, timeout: 60000, env: withHome(process.env, join(sandbox, 'home')) },
     );
     // Parsing at all is half the assertion: a flag taken as the path refuses with a sentence.
     // The directory it settled on is compared by name rather than in full, because the spelling
@@ -4003,6 +4005,7 @@ function testProjectDefaultsToTheWorkingDirectory(): void {
         encoding: 'utf8',
         cwd: project,
         timeout: 60000,
+        env: withHome(process.env, join(sandbox, 'home')),
       });
       assert.match(
         `${refused.stdout}${refused.stderr}`,
@@ -4251,6 +4254,7 @@ function testAnAutoloadGitWillNotCarry(): void {
       encoding: 'utf8',
       cwd: where,
       timeout: 60000,
+      env: withHome(process.env, join(project, '.home')),
     });
     return asArray(get(JSON.parse(run.stdout), 'problems'))
       .map(text)
@@ -4333,6 +4337,7 @@ function testAnAutoloadNamingAFileThatIsNotThere(): void {
       encoding: 'utf8',
       cwd: project,
       timeout: 60000,
+      env: withHome(process.env, join(project, '.home')),
     });
   try {
     mkdirSync(join(project, '.godot'), { recursive: true });
@@ -20485,7 +20490,7 @@ function testAnUpgradeReadsTheEngineOutOfTheConfigItRewrites(): void {
     const run = spawnSync(process.execPath, ['build/cli.js', ...cliArgs], {
       encoding: 'utf8',
       timeout: 180000,
-      env: blind,
+      env: withHome(blind, join(projectDir, '.home')),
     });
     return { status: run.status, output: `${run.stdout}${run.stderr}` };
   };
@@ -20616,7 +20621,7 @@ function testCommandLineSetup(): void {
     const run = spawnSync(process.execPath, ['build/cli.js', ...cliArgs], {
       encoding: 'utf8',
       timeout: 180000,
-      env: { ...process.env, GODOT_PATH: godotPath },
+      env: withHome({ ...process.env, GODOT_PATH: godotPath }, join(projectDir, '.home')),
     });
     return { status: run.status, stdout: run.stdout, stderr: run.stderr };
   };
@@ -20707,9 +20712,56 @@ function testCommandLineSetup(): void {
       ),
     );
 
+    // A machine-wide config whose entry serves another project, beside a server of somebody else's.
+    // An upgrade here re-pointed it at this project, and an uninstall removed it while printing
+    // that it had been left alone.
+    const windsurf = join(projectDir, '.home', '.codeium', 'windsurf', 'mcp_config.json');
+    const elsewhere = join(projectDir, '.home', 'another-project');
+    mkdirSync(dirname(windsurf), { recursive: true });
+    const machineWide = `${JSON.stringify(
+      {
+        mcpServers: {
+          other: { command: 'theirs' },
+          gdharness: {
+            command: 'npx',
+            args: ['-y', 'gdharness@1.0.0'],
+            env: { GDHARNESS_PROJECT: elsewhere },
+          },
+        },
+      },
+      null,
+      2,
+    )}\n`;
+    writeFileSync(windsurf, machineWide);
+
     const beforeUpgrade = skillDirs();
     const upgraded = cli('upgrade', projectDir);
     assert.equal(upgraded.status, 0, `upgrade:\n${upgraded.stdout}${upgraded.stderr}`);
+    assert.equal(
+      readFileSync(windsurf, 'utf8'),
+      machineWide,
+      'a machine-wide entry serving another project is left alone',
+    );
+    assert.ok(
+      upgraded.stdout.includes(
+        `Windsurf: left alone. Its config is machine-wide and serves ${elsewhere}; pass --windsurf`,
+      ),
+      `and the upgrade says which project it serves: ${upgraded.stdout}`,
+    );
+
+    // Named, it is pointed at this project, and the other server in the file stays.
+    const pointed = cli('upgrade', projectDir, '--windsurf');
+    assert.equal(pointed.status, 0, `upgrade --windsurf:\n${pointed.stdout}${pointed.stderr}`);
+    const repointed: unknown = JSON.parse(readFileSync(windsurf, 'utf8'));
+    assert.ok(
+      isSameDirectory(
+        text(get(repointed, 'mcpServers', 'gdharness', 'env', 'GDHARNESS_PROJECT')),
+        projectDir,
+      ),
+      `named, the entry serves this project: ${JSON.stringify(repointed)}`,
+    );
+    assert.deepEqual(get(repointed, 'mcpServers', 'other'), { command: 'theirs' });
+    const pointedAt = readFileSync(windsurf, 'utf8');
     // Setup and upgrade from one build install the same editor code, so there is nothing to
     // restart the editor for, and saying there was sent a project to a restart that changed nothing.
     assert.match(upgraded.stdout, /Nothing for the editor/, upgraded.stdout);
@@ -20831,6 +20883,12 @@ function testCommandLineSetup(): void {
 
     const removed = cli('uninstall', projectDir);
     assert.equal(removed.status, 0, `uninstall:\n${removed.stdout}${removed.stderr}`);
+    assert.equal(
+      readFileSync(windsurf, 'utf8'),
+      pointedAt,
+      'an uninstall leaves a machine-wide config as it was, even one serving this project',
+    );
+    assert.match(removed.stdout, /Windsurf: left alone\. Its config is machine-wide/, removed.stdout);
     for (const addon of ['gdharness_editor', 'gdharness_runtime', 'auto_reload']) {
       assert.equal(existsSync(join(projectDir, 'addons', addon)), false, `${addon} is gone`);
     }
@@ -20909,7 +20967,7 @@ function testTheWrittenConfigNamesAProgramThatStarts(): void {
     const setup = spawnSync(process.execPath, ['build/cli.js', 'setup', projectDir, '--claude-code'], {
       encoding: 'utf8',
       timeout: 180000,
-      env: { ...process.env, GODOT_PATH: godotPath },
+      env: withHome({ ...process.env, GODOT_PATH: godotPath }, join(projectDir, '.home')),
     });
     assert.equal(setup.status, 0, `setup --claude-code:\n${setup.stdout}${setup.stderr}`);
 
