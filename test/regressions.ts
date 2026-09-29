@@ -13178,7 +13178,19 @@ async function testAnEngineRunSaysHowItEnded(): Promise<void> {
     `two mebibytes of output is not a failure: ${howItEnded(talkative)}`,
   );
   assert.equal(talkative.log.all.length, lines + 1, 'and every line reached the log, the last included');
-  assert.equal(talkative.log.all.at(-1)?.text, 'last words', 'stderr is read as the engine writes it');
+  // By stream rather than by position: the two pipes are read apart, and on the Windows leg the
+  // stderr line landed before the end of stdout, so which comes last in the log is not defined.
+  const bySource = (source: string) => talkative.log.all.filter((entry) => entry.source === source);
+  assert.deepEqual(
+    bySource('stderr').map((entry) => [entry.severity, entry.text]),
+    [['error', 'last words']],
+    'stderr is read as the engine writes it',
+  );
+  assert.equal(
+    bySource('stdout').at(-1)?.text,
+    `line ${lines - 1} ${'x'.repeat(40)}`,
+    'and stdout to its end',
+  );
 
   const three = await node('process.exit(3)');
   assert.deepEqual(
