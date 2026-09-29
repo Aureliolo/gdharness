@@ -412,7 +412,9 @@ func _import_status_of(resource_path: String, import_file_path: String) -> Dicti
 	}
 
 	# The checks are the ones EditorFileSystem::_test_for_reimport makes, in its order, so a resource
-	# reads as needing an import exactly when the editor's next scan would import it.
+	# reads as needing an import when the editor's next scan would import it. The importer's own two
+	# cannot be asked here, where no importer is loaded, so they are made from what was measured of
+	# the built-in ones; an importer a plugin adds is judged by its files alone.
 	var sidecar: ConfigFile = ConfigFile.new()
 	var stale: Dictionary = (
 		_stale("its import file cannot be read")
