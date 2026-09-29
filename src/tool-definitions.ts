@@ -505,7 +505,11 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
           "reimport what status says is outdated or failed, one resource with resourcePath, or what is current as well with force. Through the open editor when one serves the project, so it reloads what it holds, waiting for it to finish; otherwise through the engine's own import pass. Answered from a second status read: reimported lists what is current now, notReimported what is not, with its status and reason, and via says which of the two did the work. stillImporting is an editor that had not finished within timeoutMs",
         requires: [],
       },
-      uid: { summary: 'the UID of one file', requires: ['resourcePath'] },
+      uid: {
+        summary:
+          "the UID of one file and where it was read: a script's or shader's .uid file, an imported file's .import, or a scene's or resource's own header",
+        requires: ['resourcePath'],
+      },
       refresh_uids: {
         summary:
           'import the project so every script and shader has its .uid sidecar, and name under uidsCreated the ones this made and under stillWithoutUid the ones the engine would not import: it writes no scene and no script, so a project whose sidecars are all present is left untouched',
