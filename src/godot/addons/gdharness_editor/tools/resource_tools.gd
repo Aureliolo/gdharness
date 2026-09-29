@@ -399,7 +399,12 @@ func _atlas(entry: Variant, index: int) -> Array:
 	for y: int in grid.y:
 		for x: int in grid.x:
 			var cell: Vector2i = Vector2i(x, y)
-			if image != null and _blank(image, atlas.get_tile_texture_region(cell)):
+			# Worked out here: the atlas answers a region only for a tile it already has.
+			var region: Rect2i = Rect2i(
+				atlas.margins + cell * (atlas.texture_region_size + atlas.separation),
+				atlas.texture_region_size
+			)
+			if image != null and _blank(image, region):
 				continue
 			atlas.create_tile(cell)
 	return [true, atlas]

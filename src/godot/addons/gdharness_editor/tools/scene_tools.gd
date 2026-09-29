@@ -555,28 +555,12 @@ func save_scene(args: Dictionary) -> Dictionary:
 	for open: Node in EditorInterface.get_open_scene_roots():
 		if open.scene_file_path == scene_path:
 			open_root = open
-	if open_root == null and target_path == scene_path:
-		if not FileAccess.file_exists(scene_path):
-			return {"ok": false, "error": "Scene not found: " + scene_path}
-		return {
-			"ok": true,
-			"scenePath": scene_path,
-			"saved": false,
-			"note":
-			(
-				(
-					"%s is not open in the editor, so the file is the scene: every scene tool writes it as "
-					+ "it goes, and there was nothing else to save."
-				)
-				% scene_path
-			)
-		}
 	if open_root != null and target_path == scene_path:
 		return _save_open_scene(scene_path)
 
-	# A copy under a new path: of the editor's scene when it is open, since that is what a save
-	# means, and of the file otherwise. The editor's scene is packed where it is, as the editor's own
-	# save packs it; packing leaves the nodes as they were.
+	# Of the editor's scene when it is open, since that is what a save means, and of the file as it
+	# loads otherwise. The editor's scene is packed where it is, as the editor's own save packs it;
+	# packing leaves the nodes as they were.
 	var written: Dictionary = {}
 	if open_root != null:
 		var packed: PackedScene = PackedScene.new()
@@ -598,7 +582,6 @@ func save_scene(args: Dictionary) -> Dictionary:
 		"ok": true,
 		"scenePath": scene_path,
 		"savedPath": target_path,
-		"saved": true,
 		"from": "editor" if open_root != null else "file"
 	}
 
@@ -623,7 +606,6 @@ func _save_open_scene(scene_path: String) -> Dictionary:
 		"ok": true,
 		"scenePath": scene_path,
 		"savedPath": scene_path,
-		"saved": true,
 		"from": "editor",
 		"unsavedInEditor": SceneFile.unsaved(scene_path)
 	}

@@ -113,7 +113,9 @@ func cannot_hold(
 		for index: int in items.size():
 			if not Serialisation.acceptable(items[index], element):
 				var shape: String = "%s.%s is %s and item %d of the list given is %s, not %s."
-				var named: Array = [holder, property, held, index, shown(items[index]), type_string(element)]
+				var named: Array = [
+					holder, property, held, index, type_string(typeof(items[index])), type_string(element)
+				]
 				return shape % named + cost
 	if expected_type == TYPE_DICTIONARY and elements.size() == 2 and value is Dictionary:
 		var entries: Dictionary = value

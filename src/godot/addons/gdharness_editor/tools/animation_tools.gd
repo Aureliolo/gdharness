@@ -92,7 +92,9 @@ func _homes(scene: SceneFile, held: Array) -> Array:
 	for entry: Array in held:
 		var resource: Resource = entry[0]
 		var at: String = resource.resource_path
-		if at.is_empty() or at.get_slice("::", 0) == scene.path:
+		# Built into the scene, or into a file saved beside it here: an animation inside a library
+		# kept in its own .tres goes with the library.
+		if at.is_empty() or at.get_slice("::", 0) == scene.path or homes.has(at.get_slice("::", 0)):
 			continue
 		if (
 			not at.contains("::")
@@ -105,10 +107,10 @@ func _homes(scene: SceneFile, held: Array) -> Array:
 			false,
 			(
 				(
-					"The %s is kept in %s, not in %s, and an edit here would not be saved there. Edit that "
-					+ "file, or give the node a %s of its own in this scene."
+					"The %s is kept in %s, not in %s, and an edit here would not be saved there. Edit it "
+					+ "where it is kept instead."
 				)
-				% [entry[1], at.get_slice("::", 0), scene.path, entry[1]]
+				% [entry[1], at.get_slice("::", 0), scene.path]
 			)
 		]
 	return [true, homes]

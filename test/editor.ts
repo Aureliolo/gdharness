@@ -40,7 +40,7 @@ import { RUNTIME_AUTOLOAD } from '../src/setup.js';
 import { endEnginesUnder } from './support/engines.js';
 import { asArray, asNumber, asObject, asString, get, text } from './support/json.js';
 import { parseTextContent, textOf } from './support/json-rpc.js';
-import { solidPng } from './support/png.js';
+import { pixelPng, solidPng } from './support/png.js';
 import { reservePort, ServerProcess } from './support/server.js';
 import { sweep } from './support/sweep.js';
 
@@ -349,6 +349,169 @@ function resolveGodotPath(): string | null {
 }
 
 /**
+ * An editor plugin standing in for a person at the editor, for the cases that need the editor
+ * itself to hold something: a scene loaded and kept, a scene open in a tab, or a scene open with
+ * edits nobody has saved. No tool does any of these, which is the point: they are what the user
+ * does beside the tools. A case writes a request and reads the answer the hook writes back.
+ */
+const HOOKS_GD = [
+  '@tool',
+  'extends EditorPlugin',
+  '',
+  'const REQUEST: String = "res://.hook/request.json"',
+  'const ANSWER: String = "res://.hook/answer.json"',
+  '',
+  'var _held: Array[Resource] = []',
+  '',
+  '',
+  'func _process(_delta: float) -> void:',
+  '\tif not FileAccess.file_exists(REQUEST):',
+  '\t\treturn',
+  '\tvar request: Variant = JSON.parse_string(FileAccess.get_file_as_string(REQUEST))',
+  '\tvar removed: Error = DirAccess.remove_absolute(ProjectSettings.globalize_path(REQUEST))',
+  '\tvar answer: Dictionary = {"removed": removed == OK}',
+  '\tif request is Dictionary:',
+  '\t\tvar fields: Dictionary = request',
+  '\t\tanswer.merge(_answer(fields))',
+  '\tvar file: FileAccess = FileAccess.open(ANSWER, FileAccess.WRITE)',
+  '\tif file != null:',
+  '\t\tvar stored: bool = file.store_string(JSON.stringify(answer))',
+  '\t\tanswer["stored"] = stored',
+  '\t\tfile.close()',
+  '',
+  '',
+  'func _answer(fields: Dictionary) -> Dictionary:',
+  '\tvar path: String = str(fields.get("path", ""))',
+  '\tmatch str(fields.get("op", "")):',
+  '\t\t"hold":',
+  '\t\t\t_held.append(load(path))',
+  '\t\t\treturn {"cached": ResourceLoader.has_cached(path)}',
+  '\t\t"open":',
+  '\t\t\tEditorInterface.open_scene_from_path(path)',
+  '\t\t"edit":',
+  '\t\t\tEditorInterface.open_scene_from_path(path)',
+  '\t\t\tvar root: Node = EditorInterface.get_edited_scene_root()',
+  '\t\t\tvar added: Node = Node.new()',
+  '\t\t\tadded.name = str(fields.get("node", "Edited"))',
+  '\t\t\troot.add_child(added)',
+  '\t\t\tadded.owner = root',
+  '\t\t\tEditorInterface.mark_scene_as_unsaved()',
+  '\treturn _report(path)',
+  '',
+  '',
+  'func _report(path: String) -> Dictionary:',
+  '\tvar children: Array[String] = []',
+  '\tfor root: Node in EditorInterface.get_open_scene_roots():',
+  '\t\tif root.scene_file_path == path:',
+  '\t\t\tfor child: Node in root.get_children():',
+  '\t\t\t\tchildren.append(str(child.name))',
+  '\tvar current: Node = EditorInterface.get_edited_scene_root()',
+  '\treturn {',
+  '\t\t"open": EditorInterface.get_open_scenes(),',
+  '\t\t"unsaved": EditorInterface.get_unsaved_scenes(),',
+  '\t\t"current": current.scene_file_path if current != null else "",',
+  '\t\t"children": children,',
+  '\t}',
+  '',
+];
+
+/**
+ * Scenes and resources for the cases on how a scene is written: one inheriting another, one
+ * instancing another, one the editor holds, and an animation library kept in a file of its own.
+ * Written as text because what is in them is the fixture, and no tool makes an inherited scene.
+ */
+const SCENE_FILES: Record<string, string[]> = {
+  'layers/base.tscn': [
+    '[gd_scene format=3]',
+    '',
+    '[node name="Base" type="Node2D"]',
+    '',
+    '[node name="Given" type="Node2D" parent="."]',
+    'position = Vector2(7, 7)',
+    '',
+  ],
+  'layers/inherited.tscn': [
+    '[gd_scene format=3]',
+    '',
+    '[ext_resource type="PackedScene" path="res://layers/base.tscn" id="1_base"]',
+    '',
+    '[node name="Base" instance=ExtResource("1_base")]',
+    'position = Vector2(100, 0)',
+    '',
+  ],
+  'layers/part.tscn': [
+    '[gd_scene format=3]',
+    '',
+    '[node name="Part" type="Node2D"]',
+    'position = Vector2(5, 5)',
+    '',
+    '[node name="Inner" type="Node2D" parent="."]',
+    '',
+  ],
+  'layers/host.tscn': [
+    '[gd_scene format=3]',
+    '',
+    '[ext_resource type="PackedScene" path="res://layers/part.tscn" id="1_part"]',
+    '',
+    '[node name="Host" type="Node"]',
+    '',
+    '[node name="Part" parent="." instance=ExtResource("1_part")]',
+    '',
+    '[node name="Panel" type="Node2D" parent="."]',
+    '',
+    '[node name="Leaf" type="Node2D" parent="Panel"]',
+    '',
+  ],
+  'layers/held.tscn': ['[gd_scene format=3]', '', '[node name="Held" type="Node2D"]', ''],
+  'layers/tab.tscn': ['[gd_scene format=3]', '', '[node name="Tab" type="Node2D"]', ''],
+  'layers/edited.tscn': ['[gd_scene format=3]', '', '[node name="Edited" type="Node2D"]', ''],
+  'layers/pointer.gd': [
+    'extends Node',
+    '',
+    '@export var target: Node',
+    '@export var spawns: Dictionary = {}',
+    '@export var ids: Array[int] = []',
+    '@export var speed: int = 3',
+    '',
+  ],
+  'tiles/map.tscn': [
+    '[gd_scene format=3]',
+    '',
+    '[node name="Map" type="Node2D"]',
+    '',
+    '[node name="Ground" type="TileMapLayer" parent="."]',
+    '',
+  ],
+  'moves/library.tres': [
+    '[gd_resource type="AnimationLibrary" load_steps=2 format=3]',
+    '',
+    '[sub_resource type="Animation" id="Animation_idle"]',
+    'resource_name = "idle"',
+    '',
+    '[resource]',
+    '_data = {',
+    '&"idle": SubResource("Animation_idle")',
+    '}',
+    '',
+  ],
+  'moves/player.tscn': [
+    '[gd_scene load_steps=2 format=3]',
+    '',
+    '[ext_resource type="AnimationLibrary" path="res://moves/library.tres" id="1_library"]',
+    '',
+    '[node name="Root" type="Node2D"]',
+    '',
+    '[node name="Sprite" type="Sprite2D" parent="."]',
+    '',
+    '[node name="Player" type="AnimationPlayer" parent="."]',
+    'libraries = {',
+    '&"moves": ExtResource("1_library")',
+    '}',
+    '',
+  ],
+};
+
+/**
  * A project the editor can open, with the addon in it and the unsafe warnings raised to errors.
  *
  * Strict is the baseline the README promises, and these are the settings that make an editor
@@ -394,7 +557,7 @@ function createProject(): string {
       'gdscript/warnings/static_called_on_instance=2',
       '',
       '[editor_plugins]',
-      'enabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")',
+      'enabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg", "res://addons/fixture_hooks/plugin.cfg")',
       '',
       // The runtime addon, registered the way an install registers it. A game the editor plays
       // then serves the runtime tools, which is the only way to drive them against a real one:
@@ -535,6 +698,32 @@ function createProject(): string {
     ].join('\n'),
   );
 
+  mkdirSync(join(dir, 'addons', 'fixture_hooks'), { recursive: true });
+  writeFileSync(
+    join(dir, 'addons', 'fixture_hooks', 'plugin.cfg'),
+    [
+      '[plugin]',
+      '',
+      'name="fixture_hooks"',
+      'description=""',
+      'author=""',
+      'version="1"',
+      'script="plugin.gd"',
+      '',
+    ].join('\n'),
+  );
+  writeFileSync(join(dir, 'addons', 'fixture_hooks', 'plugin.gd'), HOOKS_GD.join('\n'));
+  for (const [name, lines] of Object.entries(SCENE_FILES)) {
+    mkdirSync(join(dir, name, '..'), { recursive: true });
+    writeFileSync(join(dir, name), lines.join('\n'));
+  }
+  // Two tiles' worth of atlas, the second clear, so a tile set built from it has one tile to make:
+  // imported by the editor's first scan, which a texture has to be before anything can load it.
+  writeFileSync(
+    join(dir, 'tiles', 'atlas.png'),
+    pixelPng(8, 4, (x) => (x < 4 ? [200, 60, 60, 255] : [0, 0, 0, 0])),
+  );
+
   // An AnimationTree whose root is a state machine. The state ops need one and nothing makes
   // one: a tool that writes a node cannot build the resource that goes inside it.
   writeFileSync(
@@ -593,6 +782,40 @@ async function removeWhenFree(directory: string): Promise<string | null> {
 /** A file the engine wrote, which is the only answer it cannot fake. */
 function fileText(project: string, name: string): string {
   return readFileSync(join(project, name), 'utf8');
+}
+
+/**
+ * Has the fixture hook in the editor act as a person at the editor would, and waits for what it
+ * says the editor holds afterwards. The answer can be read part-written, so a parse that fails is
+ * read again.
+ */
+async function hook(project: string, request: Record<string, unknown>): Promise<unknown> {
+  const directory = join(project, '.hook');
+  mkdirSync(directory, { recursive: true });
+  const answer = join(directory, 'answer.json');
+  rmSync(answer, { force: true });
+  writeFileSync(join(directory, 'request.json'), JSON.stringify(request));
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    if (existsSync(answer)) {
+      try {
+        const parsed: unknown = JSON.parse(readFileSync(answer, 'utf8'));
+        rmSync(answer, { force: true });
+        return parsed;
+      } catch {
+        // Still being written.
+      }
+    }
+    await delay(100);
+  }
+  throw new Error(`the fixture hook never answered ${JSON.stringify(request)}`);
+}
+
+/** The lines under a node's header in a scene file, up to the next section. */
+function nodeBody(scene: string, name: string): string {
+  const found = new RegExp(`\\[node name="${name}"[^\\n]*\\n([\\s\\S]*?)(?=\\r?\\n\\[|$)`).exec(scene);
+  assert.ok(found, `the scene has no node ${name}:\n${scene}`);
+  return (found[1] ?? '').trim();
 }
 
 /** Every name in a document symbol answer, nested ones included. */
@@ -1325,9 +1548,527 @@ async function testResourcesOnNodes({ call, refusal, project }: Editor): Promise
   assert.match(written, /transitions = \[/, 'and the transition with it');
 }
 
+/**
+ * A write keeps what the scene takes from other scenes, and refuses what only another scene can
+ * change.
+ *
+ * The tools edit a copy of the file, and a copy instantiated without an edit state keeps no record
+ * of which nodes came from where. Measured on 4.7.2: an add to an inherited scene saved it as a
+ * standalone copy of its base, and an add to a scene instancing another froze the instance root's
+ * own position into it as an override. And pack saves only what the scene owns, so a property set
+ * on a node inside an instance, or the node deleted or moved, was answered as done and was not in
+ * the file; the move left two of it.
+ */
+async function testAWriteKeepsWhatTheSceneComesFrom({ call, refusal, project }: Editor): Promise<void> {
+  const inherited = { projectPath: project, scenePath: 'res://layers/inherited.tscn' };
+  await call('scene_node', { ...inherited, op: 'add', nodeType: 'Node2D', nodeName: 'Added' });
+  const child = fileText(project, 'layers/inherited.tscn');
+  assert.match(child, /\[node name="Base" [^\]]*instance=ExtResource/, `the scene still inherits: ${child}`);
+  assert.doesNotMatch(child, /name="Given"/, `and holds no copy of the node its base gives it: ${child}`);
+  assert.match(child, /\[node name="Added" type="Node2D" parent="\."/, `while the add is in it: ${child}`);
+
+  const host = { projectPath: project, scenePath: 'res://layers/host.tscn' };
+  await call('scene_node', { ...host, op: 'add', nodeType: 'Node', nodeName: 'Extra' });
+  const hosting = fileText(project, 'layers/host.tscn');
+  assert.equal(nodeBody(hosting, 'Part'), '', `the instance should carry no overrides: ${hosting}`);
+  assert.doesNotMatch(hosting, /\[node name="Part" type=/, `nor be saved as a node of its own: ${hosting}`);
+
+  const before = fileText(project, 'layers/host.tscn');
+  const foreign = /Part\/Inner belongs to the scene instanced at Part \(res:\/\/layers\/part\.tscn\)/;
+  const inside = { ...host, nodePath: 'Part/Inner' };
+  assert.match(
+    await refusal('scene_node', { ...inside, op: 'set', properties: { position: { x: 9, y: 9 } } }),
+    foreign,
+  );
+  assert.match(await refusal('scene_node', { ...inside, op: 'delete' }), foreign);
+  assert.match(await refusal('scene_node', { ...inside, op: 'reparent', newParentPath: '.' }), foreign);
+  assert.match(
+    await refusal('scene_signal', {
+      ...host,
+      op: 'connect',
+      sourceNodePath: 'Part/Inner',
+      signalName: 'ready',
+      targetNodePath: '.',
+      methodName: 'queue_free',
+    }),
+    foreign,
+  );
+  assert.match(
+    await refusal('scene_node', { ...inherited, op: 'delete', nodePath: 'Given' }),
+    /Given comes from the scene res:\/\/layers\/inherited\.tscn inherits from/,
+  );
+  assert.match(
+    await refusal('scene_node', { ...host, op: 'reparent', nodePath: 'Panel', newParentPath: 'Panel/Leaf' }),
+    /Panel cannot go under Panel\/Leaf, which is itself or inside it/,
+  );
+  assert.equal(fileText(project, 'layers/host.tscn'), before, 'and no refusal should have touched the file');
+
+  // What a scene may change about an instance it holds: the instance root, saved as its override.
+  await call('scene_node', {
+    ...host,
+    op: 'set',
+    nodePath: 'Part',
+    properties: { position: { x: 1, y: 2 } },
+  });
+  assert.equal(nodeBody(fileText(project, 'layers/host.tscn'), 'Part'), 'position = Vector2(1, 2)');
+}
+
+/**
+ * A scene something in the editor holds is written from its file.
+ *
+ * `load` answers from the resource cache, and a write saved a new PackedScene without touching the
+ * cached one, so while anything held the scene every write started from the copy before the last
+ * write and saved over it. The hook holds it here the way a preload in a compiled script does.
+ */
+async function testAHeldSceneIsWrittenFromItsFile({ call, project }: Editor): Promise<void> {
+  const held = await hook(project, { op: 'hold', path: 'res://layers/held.tscn' });
+  assert.equal(get(held, 'cached'), true, `the editor should hold the scene: ${JSON.stringify(held)}`);
+
+  const scene = { projectPath: project, scenePath: 'res://layers/held.tscn' };
+  await call('scene_node', { ...scene, op: 'add', nodeType: 'Node2D', nodeName: 'First' });
+  await call('scene_node', { ...scene, op: 'add', nodeType: 'Node2D', nodeName: 'Second' });
+  const written = fileText(project, 'layers/held.tscn');
+  assert.match(written, /name="First"/, `the second write should keep the first: ${written}`);
+  assert.match(written, /name="Second"/, `and add its own: ${written}`);
+  assert.deepEqual(nodePaths(get(await call('scene_tree', scene), 'tree')), ['.', 'First', 'Second']);
+}
+
+/**
+ * The editor's own copy of a scene is neither overwritten nor left behind.
+ *
+ * Measured on 4.7.2: reloading a scene from its file drops the edits the editor holds without a
+ * prompt, background tab or not, and every write reloaded the scene it wrote. A save loaded the
+ * file and wrote it back, so it saved the disk version and the reload then discarded the edits it
+ * had been asked to save. And only the current tab was reloaded, so a scene open behind it kept
+ * its old copy for the editor to save over the write later.
+ */
+async function testAnEditInTheEditorIsKept({ call, refusal, project }: Editor): Promise<void> {
+  const path = 'res://layers/edited.tscn';
+  const edited = { projectPath: project, scenePath: path };
+  const opened = await hook(project, { op: 'edit', path, node: 'ByHand' });
+  assert.deepEqual(get(opened, 'unsaved'), [path], `the edit should be unsaved: ${JSON.stringify(opened)}`);
+
+  const before = fileText(project, 'layers/edited.tscn');
+  assert.match(
+    await refusal('scene_node', { ...edited, op: 'add', nodeType: 'Node', nodeName: 'ByTool' }),
+    /res:\/\/layers\/edited\.tscn has unsaved changes in the editor/,
+  );
+  assert.equal(fileText(project, 'layers/edited.tscn'), before, 'the refusal should leave the file');
+  const kept = await hook(project, { op: 'report', path });
+  assert.deepEqual(get(kept, 'children'), ['ByHand'], `and the edit in the editor: ${JSON.stringify(kept)}`);
+
+  const saved = await call('scene_create', { ...edited, op: 'save' });
+  assert.equal(
+    get(saved, 'from'),
+    'editor',
+    `a save should be of the editor's copy: ${JSON.stringify(saved)}`,
+  );
+  assert.equal(get(saved, 'unsavedInEditor'), false, 'and leave nothing unsaved');
+  assert.match(fileText(project, 'layers/edited.tscn'), /name="ByHand"/, 'so the file holds the edit');
+
+  // A write reaches the scene's tab when it is not the one in front.
+  await call('scene_node', { ...edited, op: 'add', nodeType: 'Node', nodeName: 'ByTool' });
+  await hook(project, { op: 'open', path: 'res://layers/tab.tscn' });
+  await call('scene_node', { ...edited, op: 'add', nodeType: 'Node', nodeName: 'Behind' });
+  const behind = await hook(project, { op: 'report', path });
+  assert.deepEqual(
+    get(behind, 'children'),
+    ['ByHand', 'ByTool', 'Behind'],
+    `the tab behind should show the write: ${JSON.stringify(behind)}`,
+  );
+  assert.equal(get(behind, 'current'), 'res://layers/tab.tscn', 'without being brought to the front');
+
+  // And a save of a scene in a tab behind: saved, and the tab in front left in front.
+  await hook(project, { op: 'edit', path, node: 'Late' });
+  await hook(project, { op: 'open', path: 'res://layers/tab.tscn' });
+  await call('scene_create', { ...edited, op: 'save' });
+  assert.match(fileText(project, 'layers/edited.tscn'), /name="Late"/, 'the save should write the edit');
+  const after = await hook(project, { op: 'report', path });
+  assert.equal(
+    get(after, 'current'),
+    'res://layers/tab.tscn',
+    `the tab in front stays: ${JSON.stringify(after)}`,
+  );
+  assert.deepEqual(get(after, 'unsaved'), [], 'with nothing left unsaved');
+
+  // The main scene back in front, as the cases after this one found the editor.
+  await hook(project, { op: 'open', path: 'res://main.tscn' });
+}
+
+/**
+ * A property is written as what the engine holds after setting it, or refused.
+ *
+ * Object.set reports nothing. Measured on 4.7.2: a Timer given a wait_time of 0 holds 1, a Sprite2D
+ * given a Material for its texture holds nothing, and a ProgressBar given a value above its maximum
+ * clamps it before a larger max_value given in the same call arrives. Each was answered as set. A
+ * name the engine renames, a heading in the inspector taken for a property, a typed array given
+ * fractions and a dictionary given tagged values were all answered as set and saved as something
+ * else.
+ */
+async function testASetIsReadBack({ call, refusal, project }: Editor): Promise<void> {
+  const scene = { projectPath: project, scenePath: 'res://checks.tscn' };
+  const set = (nodePath: string, properties: Record<string, unknown>) => ({
+    ...scene,
+    op: 'set',
+    nodePath,
+    properties,
+  });
+  await call('scene_create', { ...scene, rootNodeType: 'Node2D' });
+  await call('scene_node', { ...scene, op: 'add', nodeType: 'Timer', nodeName: 'Clock' });
+
+  assert.match(
+    await refusal('scene_node', set('Clock', { wait_time: 0 })),
+    /Timer\.wait_time was given 0(\.0)? and holds 1(\.0)? after it was set/,
+  );
+  await call('scene_node', {
+    ...scene,
+    op: 'add',
+    nodeType: 'ProgressBar',
+    nodeName: 'Bar',
+    properties: { value: 150, max_value: 200 },
+  });
+  assert.match(
+    nodeBody(fileText(project, 'checks.tscn'), 'Bar'),
+    /value = 150\.0/,
+    'the value set before its maximum',
+  );
+
+  assert.match(
+    await refusal('scene_node', { ...scene, op: 'add', nodeType: 'Node', nodeName: 'Clock' }),
+    /\. already has a child named Clock/,
+  );
+  assert.match(
+    await refusal('scene_node', { ...scene, op: 'add', nodeType: 'Node', nodeName: 'a.b' }),
+    /a\.b is not a name a node can have; Godot would save it as a_b/,
+  );
+  assert.match(await refusal('scene_node', set('Bar', { name: 'Clock' })), /already has a child named Clock/);
+  assert.equal(get(await call('scene_node', set('Bar', { name: 'Gauge' })), 'nodePath'), 'Gauge');
+
+  assert.match(
+    await refusal('scene_node', set('.', { Visibility: false })),
+    /Node2D has no property Visibility/,
+  );
+  await call('scene_node', { ...scene, op: 'add', nodeType: 'AudioStreamPlayer', nodeName: 'Speaker' });
+  assert.match(
+    await refusal('scene_node', set('Speaker', { playing: true })),
+    /AudioStreamPlayer\.playing was given true and holds false/,
+  );
+
+  await call('resource_edit', {
+    projectPath: project,
+    resourcePath: 'res://checks_steel.tres',
+    op: 'create',
+    resourceType: 'StandardMaterial3D',
+  });
+  await call('scene_node', { ...scene, op: 'add', nodeType: 'Sprite2D', nodeName: 'Picture' });
+  assert.match(
+    await refusal('scene_node', set('Picture', { texture: 'res://checks_steel.tres' })),
+    /texture holds Texture2D, and the value given is a StandardMaterial3D/,
+  );
+  assert.match(
+    await refusal('scene_node', set('Picture', { texture: { _type: 'Resource', class: 'Texture2D' } })),
+    /The Texture2D given has no path/,
+  );
+  assert.match(
+    await refusal(
+      'scene_node',
+      set('Picture', { texture: { _type: 'Resource', path: 'res://missing.png' } }),
+    ),
+    /No resource at res:\/\/missing\.png/,
+  );
+  assert.match(
+    await refusal(
+      'scene_node',
+      set('Picture', { texture: { _type: 'Resource', path: 'user://outside.png' } }),
+    ),
+    /takes a res:\/\/ or uid:\/\/ path, not user:\/\/outside\.png/,
+  );
+
+  // A script's exports, which in the editor sit behind a placeholder that takes whatever it is given.
+  await call('scene_node', {
+    ...scene,
+    op: 'add',
+    nodeType: 'Node',
+    nodeName: 'Pointer',
+    properties: { script: 'res://layers/pointer.gd' },
+  });
+  assert.equal(
+    get(await call('scene_node', { ...scene, op: 'get', nodePath: 'Pointer' }), 'properties', 'speed'),
+    undefined,
+    'an export at its declared default is not a change',
+  );
+  await call('scene_node', set('Pointer', { target: '../Picture' }));
+  assert.match(nodeBody(fileText(project, 'checks.tscn'), 'Pointer'), /target = NodePath\("\.\.\/Picture"\)/);
+  assert.deepEqual(
+    get(await call('scene_node', { ...scene, op: 'get', nodePath: 'Pointer' }), 'properties', 'target'),
+    { _type: 'NodePath', path: '../Picture' },
+    'and a node read back is the path to it',
+  );
+  assert.match(
+    await refusal('scene_node', set('Pointer', { target: 'res://checks_steel.tres' })),
+    /target holds a node, and takes the path to it/,
+  );
+  await call('scene_node', set('Pointer', { spawns: { a: { _type: 'Vector2', x: 1, y: 2 } } }));
+  assert.match(nodeBody(fileText(project, 'checks.tscn'), 'Pointer'), /"a": Vector2\(1, 2\)/);
+  assert.match(await refusal('scene_node', set('Pointer', { ids: [1.5, 2] })), /holds whole numbers/);
+  await call('scene_node', set('Pointer', { ids: [1, 2] }));
+  assert.match(nodeBody(fileText(project, 'checks.tscn'), 'Pointer'), /ids = Array\[int\]\(\[1, 2\]\)/);
+}
+
+/**
+ * The connections a scene file holds, and only those.
+ *
+ * A Container connects signals of each child to itself as the child is added, so every UI scene
+ * listed connections its file does not hold. A connection asked for with new flags kept its old
+ * ones and answered with the new, and a disconnect of a connection that was never there answered
+ * as done.
+ */
+async function testSignalsAreTheFilesOwn({ call, refusal, project }: Editor): Promise<void> {
+  const scene = { projectPath: project, scenePath: 'res://signals.tscn' };
+  await call('scene_create', { ...scene, rootNodeType: 'HBoxContainer' });
+  await call('scene_node', { ...scene, op: 'add', nodeType: 'Button', nodeName: 'Go' });
+  await call('scene_node', { ...scene, op: 'add', nodeType: 'Node', nodeName: 'Sink' });
+  const listed = await call('scene_signal', { ...scene, op: 'list' });
+  assert.deepEqual(get(listed, 'connections'), [], `nothing is connected yet: ${JSON.stringify(listed)}`);
+
+  const ends = { ...scene, sourceNodePath: 'Go', signalName: 'pressed', targetNodePath: 'Sink' };
+  const made = await call('scene_signal', { ...ends, op: 'connect', methodName: 'queue_free' });
+  assert.equal(get(made, 'flags'), 2, 'a connection a scene holds is a persistent one');
+  assert.equal(get(made, 'methodFound'), true);
+  const deferred = await call('scene_signal', { ...ends, op: 'connect', methodName: 'queue_free', flags: 1 });
+  assert.equal(get(deferred, 'flags'), 3, 'and connecting it again with new flags gives it those');
+  assert.match(
+    fileText(project, 'signals.tscn'),
+    /\[connection signal="pressed" from="Go" to="Sink" method="queue_free" flags=3\]/,
+  );
+  const typo = await call('scene_signal', { ...ends, op: 'connect', methodName: 'queue_frees' });
+  assert.equal(get(typo, 'methodFound'), false, 'a method the target lacks is said to be missing');
+  await call('scene_signal', { ...ends, op: 'disconnect', methodName: 'queue_frees' });
+
+  const involving = await call('scene_signal', { ...scene, op: 'list', nodePath: 'Sink' });
+  assert.equal(asArray(get(involving, 'connections')).length, 1, 'a node is involved in what reaches it');
+  assert.match(
+    await refusal('scene_signal', { ...scene, op: 'list', nodePath: 'Nobody' }),
+    /Node not found: Nobody/,
+  );
+  assert.match(
+    await refusal('scene_signal', { ...ends, op: 'disconnect', methodName: 'missing' }),
+    /has no connection from Go\.pressed to Sink\.missing/,
+  );
+  await call('scene_signal', { ...ends, op: 'disconnect', methodName: 'queue_free' });
+  assert.doesNotMatch(fileText(project, 'signals.tscn'), /\[connection/, 'and a disconnect removes it');
+}
+
+/**
+ * Animation edits land in the file that keeps them.
+ *
+ * A library in a .tres of its own was edited in memory and only the scene saved; an animation in a
+ * named library was not found; a keyframe was read without the property it keys, so a pair of
+ * numbers keyed on a position was stored as a list; a keyframe with no time went in at 0. And a
+ * state or a transition the state machine refused was answered as added.
+ */
+async function testAnimationEditsLandWhereKept({ call, refusal, project }: Editor): Promise<void> {
+  const scene = { projectPath: project, scenePath: 'res://moves/player.tscn', playerNodePath: 'Player' };
+  await call('scene_animation', { ...scene, op: 'create', animationName: 'moves/walk' });
+  assert.match(
+    fileText(project, 'moves/library.tres'),
+    /&"walk"/,
+    'the library file should hold the new animation',
+  );
+
+  const track = (keyframes: unknown[], property = 'position') => ({
+    ...scene,
+    op: 'add_track',
+    animationName: 'moves/idle',
+    track: { type: 'property', nodePath: 'Sprite', property, keyframes },
+  });
+  const added = await call(
+    'scene_animation',
+    track([
+      { time: 0, value: [1, 2] },
+      { time: 0.5, value: { x: 3, y: 4 } },
+    ]),
+  );
+  assert.equal(get(added, 'keys'), 2);
+  const library = fileText(project, 'moves/library.tres');
+  assert.match(library, /NodePath\("Sprite:position"\)/, `the track is in the library file: ${library}`);
+  assert.match(library, /Vector2\(1, 2\), Vector2\(3, 4\)/, `each key a Vector2: ${library}`);
+
+  assert.match(await refusal('scene_animation', track([{ value: [1, 2] }])), /keyframes\[0\] has no time/);
+  assert.match(await refusal('scene_animation', track([], 'colour')), /Sprite2D has no property colour/);
+  assert.match(
+    await refusal('scene_animation', {
+      ...track([]),
+      track: { type: 'property', nodePath: 'Nowhere', property: 'position' },
+    }),
+    /No node at Nowhere from the player's root node/,
+  );
+
+  const states = { projectPath: project, scenePath: 'res://states.tscn', animTreePath: 'Tree' };
+  assert.match(
+    await refusal('scene_animation', {
+      ...states,
+      op: 'add_state',
+      stateName: 'Start',
+      animationName: 'any',
+    }),
+    /already has a state named Start/,
+  );
+  const waiting = await call('scene_animation', {
+    ...states,
+    op: 'add_state',
+    stateName: 'Waiting',
+    animationName: 'any',
+  });
+  assert.equal(
+    get(waiting, 'animationFound'),
+    false,
+    'a tree with no player cannot say the animation is there',
+  );
+  assert.match(
+    await refusal('scene_animation', {
+      ...states,
+      op: 'connect_states',
+      fromState: 'Waiting',
+      toState: 'Wiating',
+    }),
+    /has no state named Wiating/,
+  );
+  assert.match(
+    await refusal('scene_animation', {
+      ...states,
+      op: 'connect_states',
+      fromState: 'End',
+      toState: 'Waiting',
+    }),
+    /No transition can leave End/,
+  );
+}
+
+/**
+ * A tile set has tiles, and a painted cell names one.
+ *
+ * The atlas was given a texture and no tiles, so every cell painted from it drew nothing; a texture
+ * that did not load was skipped and an empty set saved; and a cell naming a tile the source lacks
+ * was counted as placed.
+ */
+async function testTilesDrawWhatTheyName({ call, refusal, project }: Editor): Promise<void> {
+  // The atlas is imported by the editor's first scan, which can still be running when a case run on
+  // its own starts; a rescan waits for it.
+  await call('editor_rescan', { projectPath: project });
+  const tileset = { projectPath: project, resourcePath: 'res://tiles/set.tres', op: 'create_tileset' };
+  const made = await call('resource_edit', {
+    ...tileset,
+    sources: [{ texture: 'res://tiles/atlas.png', tileSize: { x: 4, y: 4 } }],
+  });
+  assert.deepEqual(
+    get(made, 'sources'),
+    [{ sourceId: 0, texture: 'res://tiles/atlas.png', tiles: 1 }],
+    'one tile, for the one cell of the atlas that is not clear',
+  );
+  assert.match(
+    await refusal('resource_edit', {
+      ...tileset,
+      sources: [{ texture: 'res://tiles/atlas.png', tileSize: { x: 4, y: 4 } }],
+    }),
+    /res:\/\/tiles\/set\.tres already exists/,
+  );
+  assert.match(
+    await refusal('resource_edit', {
+      ...tileset,
+      resourcePath: 'res://tiles/other.tres',
+      sources: [{ texture: 'res://tiles/nothing.png', tileSize: { x: 4, y: 4 } }],
+    }),
+    /no texture at res:\/\/tiles\/nothing\.png/,
+  );
+
+  const map = { projectPath: project, scenePath: 'res://tiles/map.tscn' };
+  await call('scene_node', {
+    ...map,
+    op: 'set',
+    nodePath: 'Ground',
+    properties: { tile_set: 'res://tiles/set.tres' },
+  });
+  const cell = (atlasCoords: unknown) => ({
+    ...map,
+    op: 'set_tilemap_cells',
+    nodePath: 'Ground',
+    cells: [{ coords: { x: 0, y: 0 }, sourceId: 0, atlasCoords }],
+  });
+  assert.equal(
+    get(await call('scene_node', cell({ x: 0, y: 0 })), 'placed'),
+    1,
+    'a TileMapLayer takes cells',
+  );
+  assert.match(nodeBody(fileText(project, 'tiles/map.tscn'), 'Ground'), /tile_map_data = PackedByteArray/);
+  assert.match(await refusal('scene_node', cell({ x: 1, y: 0 })), /Source 0 has no tile at \(1, 0\)/);
+  assert.match(
+    await refusal('scene_node', { ...cell({ x: 0, y: 0 }), layer: 1 }),
+    /TileMapLayer, which is one layer/,
+  );
+}
+
+/**
+ * A create does not replace what is there, and makes what it was asked for or nothing.
+ *
+ * A scene or resource created over a file replaced it whole; a class that is not a node went into
+ * a Node variable and came back as "Invalid tool result"; a script that did not load was skipped
+ * and a plain resource saved; and an imported file was edited in the editor's cache and then
+ * refused, leaving the edited copy behind.
+ */
+async function testACreateMakesWhatWasAsked({ call, refusal, project }: Editor): Promise<void> {
+  const scene = { projectPath: project, scenePath: 'res://once.tscn' };
+  await call('scene_create', { ...scene, rootNodeType: 'Node2D' });
+  assert.match(
+    await refusal('scene_create', { ...scene, rootNodeType: 'Node' }),
+    /res:\/\/once\.tscn already exists/,
+  );
+  assert.match(fileText(project, 'once.tscn'), /type="Node2D"/, 'and the scene there is the one made first');
+  assert.match(
+    await refusal('scene_create', {
+      projectPath: project,
+      scenePath: 'res://twice.tscn',
+      rootNodeType: 'Resource',
+    }),
+    /rootNodeType must be a node class, and Resource is not one/,
+  );
+  assert.match(
+    await refusal('scene_node', { ...scene, op: 'add', nodeType: 'Timer2', nodeName: 'Late' }),
+    /nodeType must be a node class, and Timer2 is not one/,
+  );
+  assert.match(
+    await refusal('scene_node', { ...scene, op: 'duplicate', nodePath: '.', newName: 'Again' }),
+    /cannot be copied into its own scene/,
+  );
+
+  const resource = {
+    projectPath: project,
+    resourcePath: 'res://once.tres',
+    op: 'create',
+    resourceType: 'Resource',
+  };
+  assert.match(
+    await refusal('resource_edit', { ...resource, script: 'res://nothing.gd' }),
+    /No script loads from res:\/\/nothing\.gd/,
+  );
+  await call('resource_edit', resource);
+  assert.match(await refusal('resource_edit', resource), /res:\/\/once\.tres already exists/);
+  assert.match(
+    await refusal('resource_edit', {
+      projectPath: project,
+      resourcePath: 'res://tiles/atlas.png',
+      op: 'modify',
+      properties: { resource_name: 'renamed' },
+    }),
+    /res:\/\/tiles\/atlas\.png is imported/,
+  );
+}
+
 /** editor_rescan is how a file written from outside the editor becomes loadable. */
 async function testEditorRescan({ call, project }: Editor): Promise<void> {
-  writeFileSync(join(project, 'late.gd'), 'extends Node\n');
+  // A resource script, since it goes on a resource below: a script extending Node cannot be on one,
+  // and saving the pair wrote a resource that fails to load.
+  writeFileSync(join(project, 'late.gd'), 'extends Resource\n');
   await call('editor_rescan', { projectPath: project });
 
   // How long ago the scan finished comes from the addon alone, and a start that could not read it
@@ -3841,6 +4582,14 @@ async function main(): Promise<void> {
     ['testSceneAnimation', testSceneAnimation],
     ['testResources', testResources],
     ['testResourcesOnNodes', testResourcesOnNodes],
+    ['testAWriteKeepsWhatTheSceneComesFrom', testAWriteKeepsWhatTheSceneComesFrom],
+    ['testAHeldSceneIsWrittenFromItsFile', testAHeldSceneIsWrittenFromItsFile],
+    ['testAnEditInTheEditorIsKept', testAnEditInTheEditorIsKept],
+    ['testASetIsReadBack', testASetIsReadBack],
+    ['testSignalsAreTheFilesOwn', testSignalsAreTheFilesOwn],
+    ['testAnimationEditsLandWhereKept', testAnimationEditsLandWhereKept],
+    ['testTilesDrawWhatTheyName', testTilesDrawWhatTheyName],
+    ['testACreateMakesWhatWasAsked', testACreateMakesWhatWasAsked],
     ['testEditorRescan', testEditorRescan],
     ['testAReimportGoesThroughTheEditor', testAReimportGoesThroughTheEditor],
     ['testAClassTheEditorCannotSee', testAClassTheEditorCannotSee],
