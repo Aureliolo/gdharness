@@ -682,6 +682,39 @@ object does not declare is refused rather than ignored. The running game asks th
 argument before `callv` and of a value before a wait compares it, through `acceptable` beside the
 serialiser, so the two sides cannot answer it differently.
 
+A value that passes is still read back once set, because a setter can refuse or change it and say so
+only in the editor's log: a `Timer` given a `wait_time` of 0 holds 1, a `Sprite2D` given a material
+for its texture holds nothing. Each property set in a call is set once more after the rest, so a
+`ProgressBar` given `value` before a larger `max_value` is not left clamped to the old maximum, and
+then anything still holding something other than what was sent is refused with what it holds. The
+element types of a typed `Array` or `Dictionary` export come from the property's declaration, since
+in the editor a script's exports sit behind a placeholder that stores whatever it is given.
+
+The scene tools never touch the editor's open scene. Each one works on a copy of the file, through
+`scene_file.gd`, which does for that copy what the editor does for its own:
+
+- It reads the file past the resource cache. The cached `PackedScene` is the one a preload or an
+  exported scene holds, and a write saves a new one without touching it, so each write started from
+  the copy before the last write and saved over it.
+- It instantiates with the editor's edit state. Without one the copy keeps no record of which nodes
+  came from another scene, and the pack wrote an inherited scene out as a standalone copy of its base
+  and froze each instanced scene's root properties into the scene instancing it.
+- It refuses to change what the scene does not own: a node inside an instanced scene (unless its
+  children are editable here), and the removal or renaming of a node a base scene gives. The pack
+  saves only what the scene owns, so these were answered as done and were not in the file.
+- It packs the copy and instantiates the pack before writing anything, and each tool checks its change
+  in that result, which is what loading the file will give. A property the node took but the file does
+  not keep, such as a variable a `@tool` script does not export, is refused there.
+- It refuses to write a scene the editor holds unsaved changes to, since the editor reloads a scene
+  written under it and the reload drops those changes without a prompt. After a write it replaces the
+  cached copy in place, so whatever holds the scene sees the change, and reloads every tab showing the
+  scene, not only the one in front.
+
+`scene_create save` of a scene open in the editor saves the editor's copy through the editor's own
+save, bringing its tab to the front for the save and putting back the tab that was there.
+`resource_edit` reads the file back after saving a resource, and puts the old file back when a
+property set did not survive the save.
+
 `--path` also makes that project's GDScript warning levels the ones the operations script is
 compiled under, although the file lives in gdharness's own package and not in the project at all.
 Godot's escape hatch does not reach it: `debug/gdscript/warnings/directory_rules` exempts paths
