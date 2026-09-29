@@ -249,12 +249,17 @@ const run = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 /**
- * Long enough for an editor to save, close, start again and rescan a large project.
+ * How long a restart waits for the old editor to go, and then for the new one to come back.
  *
- * Not longer: an editor that has not come back by now is stuck on something a person has to
- * look at, usually a dialog, and saying so beats holding the caller's call open in silence.
+ * Ninety seconds is long enough for an editor to save, close, start again and rescan a large
+ * project, and not longer: an editor that has not come back by then is stuck on something a person
+ * has to look at, usually a dialog, and saying so beats holding the caller's call open in silence.
+ * A project whose import runs past it sets GDHARNESS_EDITOR_RESTART_TIMEOUT_MS.
  */
-const EDITOR_RESTART_TIMEOUT_MS = 90_000;
+function editorRestartTimeoutMs(): number {
+  const override = Number.parseInt(envValue('GDHARNESS_EDITOR_RESTART_TIMEOUT_MS') ?? '', 10);
+  return Number.isInteger(override) && override > 0 ? override : 90_000;
+}
 
 /**
  * How long a restart waits for a connected editor's greeting. It follows the socket by a frame, so
@@ -272,7 +277,7 @@ const GREETING_WAIT_MS = 10_000;
  * long as that process lived.
  */
 function restartUnderway(note: RestartNote, now = Date.now()): boolean {
-  return alive(note.byPid) && now - Date.parse(note.quitAt) < EDITOR_RESTART_TIMEOUT_MS + 30_000;
+  return alive(note.byPid) && now - Date.parse(note.quitAt) < editorRestartTimeoutMs() + 30_000;
 }
 
 /**
@@ -5063,12 +5068,12 @@ class GodotServer {
     const began = Date.now();
     const back = await this.waitForBridge(
       () => theEditorHasComeBack(this.godotBridge.getStatus(), startedAt),
-      began + EDITOR_RESTART_TIMEOUT_MS,
+      began + editorRestartTimeoutMs(),
     );
 
     if (!back) {
       return this.createErrorResponse(
-        `The editor was asked to restart and has not come back within ${EDITOR_RESTART_TIMEOUT_MS / 1000}s.`,
+        `The editor was asked to restart and has not come back within ${editorRestartTimeoutMs() / 1000}s.`,
         [
           'It may be asking what to do about an unsaved scene: look at the editor window',
           'An addon that no longer parses stops the editor reaching this server',
@@ -5193,7 +5198,19 @@ class GodotServer {
     // says gone about the editor actually on the bridge, and opens the replacement while that one
     // still holds the ports, which is the thing this wait exists to prevent. A deadline covers the
     // first and nothing covers the second.
-    await this.waitForBridge(() => !alive(editorPid), Date.now() + EDITOR_RESTART_TIMEOUT_MS);
+    const gone = await this.waitForBridge(() => !alive(editorPid), Date.now() + editorRestartTimeoutMs());
+    if (!gone) {
+      // Not launched past the deadline: the replacement would come up on ports the old editor still
+      // holds and bind neither, while reporting both, and the answer was "restarted".
+      restartSettled(projectPath);
+      return this.createErrorResponse(
+        `The editor was asked to go and pid ${editorPid ?? 'unknown'} is still running after ${editorRestartTimeoutMs() / 1000}s, so no replacement was started: it would find the language server and debug adapter ports still held.`,
+        [
+          'It may be asking what to do about unsaved changes, or a script may be holding up its exit',
+          `editor_launch open starts one on ${projectPath} once it has gone`,
+        ],
+      );
+    }
 
     const opened = await this.openAnEditor(engine.value, projectPath, ports, hidden);
     // Settled either way: a launch that failed is answered to the caller who asked, which is not

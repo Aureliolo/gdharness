@@ -3192,6 +3192,95 @@ async function testAnEditorIsReadOnceItHasSaidWhoItIs(): Promise<void> {
 }
 
 /**
+ * A restart whose old editor does not go in time starts no replacement.
+ *
+ * The result of the wait for the old editor to exit was ignored, so a save that ran long, or a tool
+ * script holding up the exit, had the replacement launched onto ports the old one still held. It
+ * bound neither, reported both, and the answer said restarted. The editor here answers the quit and
+ * its pid is a live stand-in that never exits; the timeout is shortened so the case waits seconds.
+ */
+async function testARestartWaitsForTheOldEditorToGo(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slow-exit-'));
+  writeFileSync(
+    join(project, 'project.godot'),
+    '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="SlowExit"\n',
+  );
+  // Detached so it is nobody's job object and outlives nothing by accident; ended in the finally.
+  const lingering = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'], {
+    detached: true,
+    stdio: 'ignore',
+  });
+  const port = await reservePort();
+  const server = new ServerProcess({
+    env: {
+      GDHARNESS_BRIDGE_PORT: String(port),
+      GDHARNESS_PROJECT: project,
+      GODOT_PATH: process.execPath,
+      GDHARNESS_EDITOR_RESTART_TIMEOUT_MS: '2000',
+    },
+  });
+  let editor: WebSocket | null = null;
+  try {
+    const pid = lingering.pid ?? 0;
+    assert.ok(pid > 0 && alive(pid), 'the fixture needs a live process for the old editor');
+    await server.initialize('regression-test');
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+    editor = socket;
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', () => {
+        resolve();
+      });
+      socket.once('error', reject);
+    });
+    const asked: string[] = [];
+    socket.on('message', (raw: Buffer) => {
+      const message: unknown = JSON.parse(String(raw));
+      if (isRecord(message) && message['type'] === 'tool_invoke') {
+        asked.push(String(message['tool']));
+        socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result: {} }));
+      }
+    });
+    socket.send(
+      JSON.stringify({
+        type: 'godot_ready',
+        project_path: project,
+        addon_version: SERVER_VERSION,
+        editor_pid: pid,
+        opened_by_a_server: true,
+      }),
+    );
+    let greeted = false;
+    for (let waited = 0; waited < 10_000 && !greeted; waited += 100) {
+      await delay(100);
+      const now = parseTextContent(
+        await server.request('tools/call', { name: 'editor_status', arguments: {} }),
+      );
+      greeted = get(now, 'editor', 'editorPid') === pid;
+    }
+    assert.ok(greeted, 'the fake editor should have been greeted');
+
+    const answer =
+      textOf(
+        await server
+          .request('tools/call', { name: 'editor_launch', arguments: { op: 'restart' } }, 30_000)
+          .catch(() => null),
+      ) ?? 'no answer';
+    assert.ok(asked.includes('quit_editor'), `the editor was asked to go: ${asked.join(', ')}`);
+    assert.match(
+      answer,
+      new RegExp(`pid ${pid} is still running after 2s, so no replacement was started`),
+      `a restart whose old editor stays is not carried on with: ${answer}`,
+    );
+    assert.equal(existsSync(restartNotePath(project)), false, 'and the restart, answered, owes nothing');
+  } finally {
+    editor?.terminate();
+    await server.stop();
+    lingering.kill();
+    sweep(project);
+  }
+}
+
+/**
  * A server told to go ends, with an editor still holding the bridge.
  *
  * Written to catch a hang and it found none, which is worth saying plainly: `http.Server.close`
@@ -24665,6 +24754,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheBridgeTakesThePortWhenItIsFreed,
   testAnEditorAServerOpenedIsStartedAgain,
   testAnEditorIsReadOnceItHasSaidWhoItIs,
+  testARestartWaitsForTheOldEditorToGo,
   testAServerEndsWithAnEditorStillOnTheBridge,
   testABadPortIsReported,
   testAnEditorPortMovesOnlyWhenItIsHeld,
