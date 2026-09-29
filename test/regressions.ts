@@ -3099,6 +3099,18 @@ function testProjectPathsAreContained(): void {
     );
   }
 
+  // A UID names a file in this project, so it is not refused as somewhere else: it is refused because
+  // where it is on disk is the engine's to say, and the remedy is the path.
+  for (const uid of ['uid://bsrmp7ti1112c', 'res://uid://bsrmp7ti1112c']) {
+    const answer = resolveWithinProject(root, uid);
+    assert.ok(!answer.ok, `${uid} should not be contained without the engine`);
+    assert.match(
+      answer.reason,
+      /is a UID, and a file is judged here by where it is on disk.*Give the file's res:\/\/ path/,
+    );
+    assert.doesNotMatch(answer.reason, /somewhere other than this project/);
+  }
+
   // The other half, or the fixture above passes against a function that refuses everything.
   const accepted: [string, string][] = [
     ['scenes/main.tscn', 'scenes/main.tscn'],
