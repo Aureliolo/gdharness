@@ -232,12 +232,42 @@ function runScript(
  * printed next. The engine says so on stderr and nothing else does, which makes that line the
  * only thing separating a fixture that passed from one that never executed.
  */
-function assertNoEngineErrors(label: string, output: string): void {
+function assertNoEngineErrors(label: string, output: string, expected: readonly RegExp[] = []): void {
   const errors = output
     .split('\n')
-    .filter((line) => /^(USER )?(SCRIPT ERROR|ERROR|WARNING):/.test(line.trim()));
-  assert.equal(errors.length, 0, `${label} hit engine errors or warnings:\n${errors.join('\n')}`);
+    .map((line) => line.trim())
+    .filter((line) => /^(USER )?(SCRIPT ERROR|ERROR|WARNING):/.test(line));
+  const unexpected = errors.filter((line) => !expected.some((pattern) => pattern.test(line)));
+  assert.equal(unexpected.length, 0, `${label} hit engine errors or warnings:\n${unexpected.join('\n')}`);
+  // An error the fixture provokes on purpose is part of what it checks, so one that stops appearing
+  // means the check stopped reaching the engine rather than that the engine improved.
+  for (const pattern of expected) {
+    assert.ok(
+      errors.some((line) => pattern.test(line)),
+      `${label} should have made the engine report ${pattern}:\n${errors.join('\n')}`,
+    );
+  }
 }
+
+/**
+ * The engine errors a fixture provokes on purpose, by fixture. Each has to appear, and nothing else
+ * may. Here rather than at the call, so running one fixture by name expects what the leg expects.
+ */
+const PROVOKED: Readonly<Record<string, readonly RegExp[]>> = {
+  // The call refused for its argument and the method reporting on its way through, both of which
+  // the fixture asserts reach the answer, and the typed list and map built with an element of another
+  // script to show the container coming back shorter is caught.
+  runtime_change: [
+    /^ERROR: Error calling method from 'callv': 'Node::take': Cannot convert argument 1 from Object to Object\.$/,
+    /^ERROR: noisy said so$/,
+    /^ERROR: Attempted to assign an object into a TypedArray, that does not inherit from 'GDScript'\.$/,
+    /^ERROR: Unable to convert array index 0 from "Object" to "Object"\.$/,
+    /^ERROR: Attempted to assign an object into a TypedDictionary\.Value, that does not inherit from 'GDScript'\.$/,
+    /^ERROR: Unable to convert value at key "a" from "Object" to "Object"\.$/,
+  ],
+  // The parse error the refused reload is refused for.
+  reload_script: [/^SCRIPT ERROR: Parse Error: Expected parameter name\.$/],
+};
 
 /** Runs one of the fixture scripts in test/support/gd and returns the JSON it reported. */
 function runFixture(godotPath: string, projectDir: string, name: string): unknown {
@@ -252,7 +282,7 @@ function runFixture(godotPath: string, projectDir: string, name: string): unknow
   if (run.status !== 0) {
     throw new Error(`${name} failed (${run.status ?? run.signal}):\n${output.trim()}`);
   }
-  assertNoEngineErrors(name, output);
+  assertNoEngineErrors(name, output, PROVOKED[name]);
   const payload = lastJsonLine(run.stdout, name);
   assert.equal(get(payload, 'ok'), true, `${name} should report success JSON`);
   return payload;
@@ -268,8 +298,8 @@ function runFixture(godotPath: string, projectDir: string, name: string): unknow
 function testTypedGate(godotPath: string, projectDir: string): void {
   const shipped = shippedScripts();
   const fixtures = fixtureScripts();
-  assert.ok(shipped.length >= 15, `the package ships GDScript: ${shipped.length} files`);
-  assert.ok(fixtures.length >= 17, `the fixtures are GDScript: ${fixtures.length} files`);
+  assert.ok(shipped.length >= 48, `the package ships GDScript: ${shipped.length} files`);
+  assert.ok(fixtures.length >= 19, `the fixtures are GDScript: ${fixtures.length} files`);
   // The fixtures run under these settings on the engine leg and nowhere else, so a fixture that
   // discarded a return value passed every local check and failed there.
   const fixturesDir = join(projectDir, 'fixtures');
@@ -1624,6 +1654,8 @@ async function main(): Promise<void> {
     runFixture(godotPath, projectDir, 'runtime_serialize');
     runFixture(godotPath, projectDir, 'runtime_input');
     runFixture(godotPath, projectDir, 'runtime_query');
+    runFixture(godotPath, projectDir, 'runtime_change');
+    runFixture(godotPath, projectDir, 'reload_script');
     runFixture(godotPath, projectDir, 'runtime_words');
     runFixture(godotPath, projectDir, 'runtime_wait');
     runFixture(godotPath, projectDir, 'runtime_capture');
