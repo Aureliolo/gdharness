@@ -209,6 +209,17 @@ static func _not_comparable(current: Variant, wanted: Variant, node_path: String
 	var types: Array[String] = [
 		node_path, property, type_string(typeof(current)), type_string(typeof(wanted))
 	]
+	# A value that cannot become what the property holds is said as that, which names the remedy,
+	# before the comparison it would also fail; an object on either side is said as the comparison.
+	var objects: bool = typeof(current) == TYPE_OBJECT or typeof(wanted) == TYPE_OBJECT
+	if not objects and not Values.acceptable(wanted, typeof(current)):
+		return (
+			(
+				"%s.%s holds %s and the value to wait for is %s, which cannot become one:"
+				+ " waiting on it would answer about a state nobody asked for."
+			)
+			% types
+		)
 	if not Values.comparable(current, wanted):
 		return (
 			(
