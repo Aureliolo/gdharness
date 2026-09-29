@@ -721,6 +721,46 @@ async function testDiagnosticsTimeoutIsNotAnEmptyResult(): Promise<void> {
 }
 
 /**
+ * Two asks about one file at once are two answers.
+ *
+ * The second ask replaced the first's diagnostics waiter, clearing its timer and settling nothing,
+ * so the first call waited with no deadline for a publish that had gone to the second, and the
+ * second found the document the first had opened and sent a change to it. The stand-in publishes
+ * on an open only, so without the asks taking turns one of the two is left unanswered. Raced
+ * against a deadline so a hang fails here rather than stalling the suite.
+ */
+async function testTwoAsksAboutOneFileAreBothAnswered(): Promise<void> {
+  const seen: JsonRpcMessage[] = [];
+  await withFakeLanguageServer(
+    (uri) => uri,
+    async (port) => {
+      const client = new GodotLSPClient(port, '127.0.0.1');
+      const script = join(tmpdir(), 'gdharness-lsp-twice', 'twice.gd');
+      const both = Promise.allSettled([
+        client.getDiagnostics(script, 'extends Node\n'),
+        client.getDiagnostics(script, 'extends Node\n'),
+      ]);
+      const settled = await Promise.race([both, delay(8000).then(() => 'still waiting' as const)]);
+      await client.disconnect();
+      if (settled === 'still waiting') {
+        assert.fail('both asks are answered, and one was still waiting');
+      }
+      assert.deepEqual(
+        settled.map((ask) => (ask.status === 'fulfilled' ? ask.value.length : String(ask.reason))),
+        [1, 1],
+        'both asks are answered, each with the diagnostics published for it',
+      );
+    },
+    seen,
+  );
+  assert.deepEqual(
+    seen.map((message) => message.method).filter((method) => String(method).startsWith('textDocument/')),
+    ['textDocument/didOpen', 'textDocument/didClose', 'textDocument/didOpen', 'textDocument/didClose'],
+    'one after the other, each opening the file and giving it back',
+  );
+}
+
+/**
  * A language server belongs to one project, its editor's, and an editor of another project can hold
  * the port this server asks.
  *
@@ -23331,6 +23371,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testDiagnosticsSurviveAnotherSpellingOfTheSamePath,
   testDiagnosticsTimeoutIsNotAnEmptyResult,
   testTheLanguageServerOfAnotherProjectIsRefused,
+  testTwoAsksAboutOneFileAreBothAnswered,
   testLspFramesBodiesByBytes,
   testLspReassemblesBodySplitMidCharacter,
   testDapFramesBodiesByBytes,

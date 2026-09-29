@@ -92,6 +92,8 @@ export class GodotLSPClient {
   private servedWorkspace: string | null = null;
   private diagnosticsWaiters = new Map<string, DiagnosticsWaiter>();
   private documentVersions = new Map<string, number>();
+  /** The last ask queued on each file, which the next one waits behind; see [withDocument]. */
+  private documentTurns = new Map<string, Promise<void>>();
 
   constructor(port = portFromEnv('GDHARNESS_LSP_PORT', DEFAULT_LSP_PORT), host = '127.0.0.1') {
     this.port = port;
@@ -522,54 +524,80 @@ export class GodotLSPClient {
     return result;
   }
 
+  /**
+   * Run [work] on one file with no other ask about that file in flight.
+   *
+   * An ask is an open, an answer and a close, and two at once on one file share all three: the
+   * second found the first's document open and sent a change, the first closed the document under
+   * the second, and the second's diagnostics waiter replaced the first's, which was left with no
+   * timer and nothing that would ever settle it. A parallel sweep naming a file twice, or a retry
+   * sent before the first answer, is enough.
+   */
+  private async withDocument<T>(filePath: string, work: () => Promise<T>): Promise<T> {
+    const key = diagnosticsKey(this.toFileUri(filePath));
+    const before = this.documentTurns.get(key) ?? Promise.resolve();
+    let done = (): void => {};
+    const mine = new Promise<void>((finished) => {
+      done = finished;
+    });
+    const turn = before.then(() => mine);
+    this.documentTurns.set(key, turn);
+    await before;
+    try {
+      return await work();
+    } finally {
+      done();
+      if (this.documentTurns.get(key) === turn) {
+        this.documentTurns.delete(key);
+      }
+    }
+  }
+
   async getDiagnostics(filePath: string, content: string): Promise<unknown[]> {
     await this.ensureConnected();
     await this.ensureInitializedForFile(filePath);
 
-    const key = diagnosticsKey(this.toFileUri(filePath));
+    return this.withDocument(filePath, async () => {
+      const key = diagnosticsKey(this.toFileUri(filePath));
 
-    const diagnosticsPromise = new Promise<unknown[]>((resolveDiagnostics, rejectDiagnostics) => {
-      const existing = this.diagnosticsWaiters.get(key);
-      if (existing) {
-        clearTimeout(existing.timer);
-      }
+      const diagnosticsPromise = new Promise<unknown[]>((resolveDiagnostics, rejectDiagnostics) => {
+        const timer = setTimeout(() => {
+          this.diagnosticsWaiters.delete(key);
+          // Not an empty array. Godot publishes an empty diagnostics list for a file that
+          // really is clean, so resolving [] here makes a broken language server look
+          // exactly like healthy code, and the caller has no way to tell the two apart.
+          rejectDiagnostics(
+            new Error(
+              `Godot published no diagnostics for ${key} within ${DIAGNOSTICS_TIMEOUT_MS}ms. ` +
+                'The language server may not be running, or may not have this file in its workspace.',
+            ),
+          );
+        }, DIAGNOSTICS_TIMEOUT_MS);
 
-      const timer = setTimeout(() => {
-        this.diagnosticsWaiters.delete(key);
-        // Not an empty array. Godot publishes an empty diagnostics list for a file that
-        // really is clean, so resolving [] here makes a broken language server look
-        // exactly like healthy code, and the caller has no way to tell the two apart.
-        rejectDiagnostics(
-          new Error(
-            `Godot published no diagnostics for ${key} within ${DIAGNOSTICS_TIMEOUT_MS}ms. ` +
-              'The language server may not be running, or may not have this file in its workspace.',
-          ),
-        );
-      }, DIAGNOSTICS_TIMEOUT_MS);
-
-      this.diagnosticsWaiters.set(key, {
-        resolve: resolveDiagnostics,
-        reject: rejectDiagnostics,
-        timer,
+        this.diagnosticsWaiters.set(key, {
+          resolve: resolveDiagnostics,
+          reject: rejectDiagnostics,
+          timer,
+        });
       });
-    });
 
-    let opened: string | null = null;
-    try {
-      opened = this.syncDocument(filePath, content);
-      return await diagnosticsPromise;
-    } catch (error) {
-      const waiter = this.diagnosticsWaiters.get(key);
-      if (waiter) {
-        clearTimeout(waiter.timer);
-        this.diagnosticsWaiters.delete(key);
+      let opened: string | null = null;
+      try {
+        opened = this.syncDocument(filePath, content);
+        return await diagnosticsPromise;
+      } catch (error) {
+        const waiter = this.diagnosticsWaiters.get(key);
+        if (waiter) {
+          clearTimeout(waiter.timer);
+          this.diagnosticsWaiters.delete(key);
+        }
+        throw error;
+      } finally {
+        if (opened !== null) {
+          this.closeDocument(opened);
+        }
       }
-      throw error;
-    } finally {
-      if (opened !== null) {
-        this.closeDocument(opened);
-      }
-    }
+    });
   }
 
   async getCompletions(
@@ -581,16 +609,17 @@ export class GodotLSPClient {
     await this.ensureConnected();
     await this.ensureInitializedForFile(filePath);
 
-    const uri = this.syncDocument(filePath, content);
-    let result: unknown;
-    try {
-      result = await this.sendRequest('textDocument/completion', {
-        textDocument: { uri },
-        position: { line, character },
-      });
-    } finally {
-      this.closeDocument(uri);
-    }
+    const result = await this.withDocument(filePath, async () => {
+      const uri = this.syncDocument(filePath, content);
+      try {
+        return await this.sendRequest('textDocument/completion', {
+          textDocument: { uri },
+          position: { line, character },
+        });
+      } finally {
+        this.closeDocument(uri);
+      }
+    });
 
     if (Array.isArray(result)) {
       return result as unknown[];
@@ -610,30 +639,33 @@ export class GodotLSPClient {
     await this.ensureConnected();
     await this.ensureInitializedForFile(filePath);
 
-    const uri = this.syncDocument(filePath, content);
-    try {
-      return await this.sendRequest('textDocument/hover', {
-        textDocument: { uri },
-        position: { line, character },
-      });
-    } finally {
-      this.closeDocument(uri);
-    }
+    return this.withDocument(filePath, async () => {
+      const uri = this.syncDocument(filePath, content);
+      try {
+        return await this.sendRequest('textDocument/hover', {
+          textDocument: { uri },
+          position: { line, character },
+        });
+      } finally {
+        this.closeDocument(uri);
+      }
+    });
   }
 
   async getDocumentSymbols(filePath: string, content: string): Promise<unknown[]> {
     await this.ensureConnected();
     await this.ensureInitializedForFile(filePath);
 
-    const uri = this.syncDocument(filePath, content);
-    let result: unknown;
-    try {
-      result = await this.sendRequest('textDocument/documentSymbol', {
-        textDocument: { uri },
-      });
-    } finally {
-      this.closeDocument(uri);
-    }
+    const result = await this.withDocument(filePath, async () => {
+      const uri = this.syncDocument(filePath, content);
+      try {
+        return await this.sendRequest('textDocument/documentSymbol', {
+          textDocument: { uri },
+        });
+      } finally {
+        this.closeDocument(uri);
+      }
+    });
 
     return Array.isArray(result) ? (result as unknown[]) : [];
   }
