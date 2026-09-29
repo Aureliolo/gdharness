@@ -8099,8 +8099,14 @@ class GodotServer {
     }
 
     const after = projectPath === '' || busy ? null : cachedClasses(projectPath);
+    // Only what the files still declare. A class the caller renamed or removed leaves the cache on
+    // the scan, which is the scan being right, and counting it failed the call, told the caller
+    // every engine would report it unknown, and marked the editor as one whose scans lose classes.
+    const declaredNow = before === null || after === null ? null : declaredClasses(projectPath);
     const lost =
-      before === null || after === null ? [] : [...before.keys()].filter((name) => !after.has(name));
+      before === null || after === null || declaredNow === null
+        ? []
+        : [...before.keys()].filter((name) => !after.has(name) && declaredNow.has(name));
     if (lost.length > 0) {
       this.noteAShortListEditor(projectPath);
     }
@@ -8200,9 +8206,13 @@ class GodotServer {
     const unseen = checked.unseen;
     // The classes this scan brought in, and the scripts naming them, which the editor compiled
     // while it could not resolve them and holds that way until each is reloaded.
-    const broughtIn = blind.unseen
-      .map((one) => one.className)
-      .filter((name) => !unseen.some((still) => still.className === name));
+    // Nothing while the scan is still going, since nothing was checked after it: every class unseen
+    // before was named here, as if it now resolved.
+    const broughtIn = busy
+      ? []
+      : blind.unseen
+          .map((one) => one.className)
+          .filter((name) => !unseen.some((still) => still.className === name));
     const dependents =
       busy || projectPath === '' || broughtIn.length === 0
         ? null

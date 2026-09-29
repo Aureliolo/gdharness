@@ -23963,6 +23963,12 @@ async function testARepairThatCouldNotRunIsNotReported(): Promise<void> {
     // The editor is holding one of the two classes the cache holds, which is the state that costs
     // the other one. Told to hold both, the same editor is one a scan takes nothing from.
     let holds = ['Hero'];
+    // What the editor holds once it has scanned, when the scan changes it: the engine registers a
+    // script's class by removing whatever it held for that path first, so a renamed class_name is
+    // replaced rather than kept.
+    let holdsAfterScan: string[] | null = null;
+    const declaredAt: Record<string, string> = { Page: 'res://squire.gd' };
+    let stillScanning = false;
     socket.on('message', (raw: Buffer) => {
       const message: unknown = JSON.parse(String(raw));
       if (!isRecord(message) || message['type'] !== 'tool_invoke') {
@@ -23975,17 +23981,24 @@ async function testARepairThatCouldNotRunIsNotReported(): Promise<void> {
       // from the list this editor is holding, which is the whole of what the real one does to it.
       if (tool === 'rescan_filesystem' && args['statusOnly'] !== true) {
         scans += 1;
+        holds = holdsAfterScan ?? holds;
         // At the path the script is at, as the editor writes it: an entry at a path that is not on
         // disk is a ghost the scan takes out, and a stand-in that spelt the path with a capital was
         // one on the Linux leg alone.
         const entries = holds.map(
-          (name) => `{\n"class": &"${name}",\n"path": "res://${name.toLowerCase()}.gd"\n}`,
+          (name) =>
+            `{\n"class": &"${name}",\n"path": "${declaredAt[name] ?? `res://${name.toLowerCase()}.gd`}"\n}`,
         );
         writeFileSync(cache, `list=[${entries.join(', ')}]\n`);
       }
       const result =
         tool === 'rescan_filesystem'
-          ? { ok: true, scanning: false, importing: false, pending: false }
+          ? {
+              ok: true,
+              scanning: stillScanning && args['statusOnly'] === true,
+              importing: false,
+              pending: false,
+            }
           : { ok: true, classes: holds };
       socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result }));
     });
@@ -24029,6 +24042,37 @@ async function testARepairThatCouldNotRunIsNotReported(): Promise<void> {
     assert.equal(get(answer, 'ok'), true, `a scan that takes nothing is clean: ${textOf(kept)}`);
     assert.equal(get(answer, 'cacheLost'), undefined, `with nothing lost: ${textOf(kept)}`);
     assert.equal(scans, 2, `and it was asked for again: ${textOf(kept)}`);
+
+    // A class the caller renamed on disk leaves the cache on the scan, which is the scan being
+    // right. It was read as a loss: the call failed, the note said every engine would report the
+    // class unknown, and the editor was marked as one whose scans lose classes, which turned the
+    // later remedies into restarts for the rest of its life.
+    writeFileSync(join(project, 'squire.gd'), 'class_name Page\nextends Node\n');
+    holdsAfterScan = ['Hero', 'Page'];
+    const renamed = await server.request('tools/call', {
+      name: 'editor_rescan',
+      arguments: { projectPath: project },
+    });
+    const afterRename = parseTextContent(renamed);
+    assert.equal(scans, 3, `the scan ran: ${textOf(renamed)}`);
+    assert.match(readFileSync(cache, 'utf8'), /&"Page"/, 'and wrote the renamed class');
+    assert.equal(get(afterRename, 'cacheLost'), undefined, `a renamed class is not lost: ${textOf(renamed)}`);
+    assert.equal(get(afterRename, 'ok'), true, `and the scan is clean: ${textOf(renamed)}`);
+    assert.equal(get(afterRename, 'note'), undefined, `with nothing to tell: ${textOf(renamed)}`);
+
+    // A scan still running when the budget ends has checked nothing afterwards, so it has brought
+    // nothing in. Every class the editor could not see before was named as brought in, which a
+    // caller reading that field alone takes for classes that now resolve.
+    holdsAfterScan = null;
+    holds = ['Hero'];
+    stillScanning = true;
+    const unfinished = await server.request('tools/call', {
+      name: 'editor_rescan',
+      arguments: { projectPath: project, timeoutMs: 1500 },
+    });
+    const cut = parseTextContent(unfinished);
+    assert.equal(get(cut, 'stillWorking'), true, `the scan was still going: ${textOf(unfinished)}`);
+    assert.equal(get(cut, 'broughtIn'), undefined, `and brought nothing in yet: ${textOf(unfinished)}`);
   } finally {
     editor?.terminate();
     await server.stop();
