@@ -793,8 +793,29 @@ function testOperations(godotPath: string, projectDir: string): void {
   keptWhole(beforeAutoload, readFileSync(projectFile, 'utf8'), 'adding an autoload');
   const hero = named(get(operation('list_autoloads', {}), 'autoloads'), 'Hero');
   assert.ok(hero, 'the autoload that was just added should be listed');
-  assert.equal(get(hero, 'enabled'), true, 'the leading asterisk means enabled');
-  assert.equal(get(hero, 'file_exists'), true);
+  assert.deepEqual(
+    [get(hero, 'enabled'), get(hero, 'global'), get(hero, 'file_exists')],
+    [true, true, true],
+    'the leading asterisk makes the name global',
+  );
+  // Without the asterisk it still loads, which is why it is listed as enabled and not global.
+  const quiet = operation('add_autoload', { name: 'Quiet', path: 'made/hero.gd', global: false });
+  assert.deepEqual([get(quiet, 'enabled'), get(quiet, 'global')], [true, false], JSON.stringify(quiet));
+  assert.match(
+    readFileSync(projectFile, 'utf8'),
+    /^Quiet="res:\/\/made\/hero\.gd"$/m,
+    'written with no asterisk',
+  );
+  const listedQuiet = named(get(operation('list_autoloads', {}), 'autoloads'), 'Quiet');
+  assert.deepEqual([get(listedQuiet, 'enabled'), get(listedQuiet, 'global')], [true, false]);
+  assert.equal(get(operation('remove_autoload', { name: 'Quiet' }), 'removed'), true);
+  const disabled = runRefusedOperation(godotPath, projectDir, 'add_autoload', {
+    name: 'Off',
+    path: 'made/hero.gd',
+    enabled: false,
+  });
+  assert.equal(disabled.answer, null, 'an autoload cannot be added disabled, since it would load anyway');
+  assert.match(disabled.stderr, /global: false keeps its name out of the global scope/, disabled.stderr);
   assert.equal(get(operation('remove_autoload', { name: 'Hero' }), 'removed'), true);
   assert.equal(
     readFileSync(projectFile, 'utf8'),

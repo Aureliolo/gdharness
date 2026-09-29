@@ -361,7 +361,16 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       name: { type: 'string', description: 'Autoload name.' },
       path: { type: 'string', description: 'Autoload script or scene inside the project.' },
-      enabled: { type: 'boolean', description: 'Autoloads: register enabled. Default true.' },
+      enabled: {
+        type: 'boolean',
+        description:
+          'Autoloads: Godot 4 loads every autoload in the list, so false is refused. Use global: false to keep the name out of the global scope, or remove_autoload to stop it loading.',
+      },
+      global: {
+        type: 'boolean',
+        description:
+          'Autoloads: make the name a global variable, the * in project.godot and the editor\'s "Global Variable" column. Default true. The autoload loads either way.',
+      },
       scenePath: SCENE_PATH,
       actionName: { type: 'string', description: 'Input action name, such as "jump".' },
       events: INPUT_EVENTS,

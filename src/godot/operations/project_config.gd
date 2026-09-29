@@ -139,7 +139,19 @@ func _converts_faithfully(value: Variant, to: int) -> bool:
 func add_autoload(params: Dictionary) -> Dictionary:
 	var name: String = str(params.get("name", ""))
 	var path: String = str(params.get("path", ""))
-	var enabled: bool = Read.as_bool(params.get("enabled", true), true)
+	var global: bool = Read.as_bool(params.get("global", true), true)
+
+	# There is no disabled autoload in Godot 4: every entry in the list is loaded under the root at
+	# every start. `enabled: false` used to write the entry without its asterisk and answer that it
+	# was disabled, and the autoload ran all the same.
+	if not Read.as_bool(params.get("enabled", true), true):
+		return _log.failure(
+			(
+				"An autoload cannot be added disabled: Godot loads every autoload in the list at every"
+				+ " start. global: false keeps its name out of the global scope and still loads it;"
+				+ " remove_autoload is what stops it loading"
+			)
+		)
 
 	if not path.begins_with("res://"):
 		path = "res://" + path
@@ -154,14 +166,21 @@ func add_autoload(params: Dictionary) -> Dictionary:
 	var setting: String = "autoload/" + name
 	var was_updated: bool = ProjectSettings.has_setting(setting)
 
-	# An asterisk in front of the path makes the autoload a global name as well. Without it the
-	# node still comes up under the root; only the name stops resolving.
-	ProjectSettings.set_setting(setting, ("*" if enabled else "") + path)
+	# An asterisk in front of the path makes the autoload's name a global variable, the editor's
+	# "Global Variable" column. Without it the node still comes up under the root; only the name
+	# stops resolving.
+	ProjectSettings.set_setting(setting, ("*" if global else "") + path)
 	var err: Error = ProjectSettings.save()
 	if err != OK:
 		return _log.failure("Failed to save project.godot: " + error_string(err))
 
-	return {"name": name, "path": path, "enabled": enabled, "action": "updated" if was_updated else "added"}
+	return {
+		"name": name,
+		"path": path,
+		"enabled": true,
+		"global": global,
+		"action": "updated" if was_updated else "added",
+	}
 
 
 # Remove an autoload singleton
@@ -196,10 +215,13 @@ func list_autoloads(_params: Dictionary) -> Dictionary:
 		var value: String = str(ProjectSettings.get_setting(setting))
 		var path: String = value.trim_prefix("*")
 
+		# Enabled whatever the asterisk says, because every autoload listed is loaded; the asterisk
+		# is whether its name is a global variable.
 		var autoload_info: Dictionary = {
 			"name": setting.trim_prefix("autoload/"),
 			"path": path,
-			"enabled": value.begins_with("*"),
+			"enabled": true,
+			"global": value.begins_with("*"),
 			"file_exists": FileAccess.file_exists(path),
 		}
 		autoloads.append(autoload_info)
