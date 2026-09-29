@@ -1858,6 +1858,26 @@ function testAFamilyOfSettingsAnswersWithItsTypes(godotPath: string, projectDir:
 }
 
 /**
+ * Validation reads at most a hundred scripts, and says so with the count it read and the count there
+ * are. It counted the one past the limit before stopping and answered 101.
+ */
+function testValidationSaysHowMuchItRead(godotPath: string): void {
+  const dir = createProject(godotPath);
+  try {
+    mkdirSync(join(dir, 'many'));
+    for (let index = 0; index < 60; index++) {
+      writeFileSync(join(dir, 'many', `s${index}.gd`), 'extends Node\n');
+    }
+    const validated = runOperation(godotPath, dir, 'validate_project', {});
+    const total = asNumber(get(validated, 'scripts_total'));
+    assert.ok(total > 100, `the project should hold more than the limit: ${total}`);
+    assert.equal(get(validated, 'scripts_checked'), 100, JSON.stringify(validated));
+  } finally {
+    sweep(dir);
+  }
+}
+
+/**
  * An import is judged stale when the importer would judge it so, before any of its files is looked at.
  *
  * Both states have every file current: an importer that now writes a newer format, which every scene
@@ -2093,6 +2113,9 @@ const CASES: Readonly<Record<string, (godotPath: string, projectDir: string) => 
   importJudged: testAnImportIsJudgedByWhatItWasBuiltFrom,
   importerFirst: (godotPath) => {
     testTheImporterIsAskedFirst(godotPath);
+  },
+  validationCounts: (godotPath) => {
+    testValidationSaysHowMuchItRead(godotPath);
   },
   runningLog: (godotPath) => testAnOperationLeavesARunningLogAlone(godotPath),
   refusals: testRefusals,
