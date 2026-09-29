@@ -1,11 +1,11 @@
-import { realpathSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { readFile, realpath } from 'node:fs/promises';
 import { createConnection, type Socket } from 'node:net';
-import { dirname, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Refusal } from './errors.js';
 import { FrameReader, frame, OversizedStreamError } from './framing.js';
-import { isWithinRoot, resolveWithinProject } from './paths.js';
+import { isSameDirectory, isWithinRoot, resolveWithinProject } from './paths.js';
 import { portFromEnv } from './ports.js';
 
 /** What an editor serves the language server on when nothing has moved it. */
@@ -26,6 +26,19 @@ interface DiagnosticsWaiter {
 type JsonRecord = Record<string, unknown>;
 
 const DIAGNOSTICS_TIMEOUT_MS = 5000;
+
+/** A call refused for what it was asked, which no language server could answer either. */
+class ArgumentRefusal extends Refusal {}
+
+/** A language server that belongs to an editor of another project than the one asked about. */
+class AnotherProjectsServer extends Refusal {
+  readonly serves: string;
+
+  constructor(port: number, serves: string, asked: string) {
+    super(`The language server on port ${port} belongs to the editor of ${serves}, not ${asked}.`);
+    this.serves = serves;
+  }
+}
 
 /**
  * Normalise a file URI so the same file always produces the same key.
@@ -75,8 +88,12 @@ export class GodotLSPClient {
   private connectPromise: Promise<void> | null = null;
   private initialized = false;
   private rootPath: string | null = null;
+  /** The project the server named as its own while answering the last initialize, or null. */
+  private servedWorkspace: string | null = null;
   private diagnosticsWaiters = new Map<string, DiagnosticsWaiter>();
   private documentVersions = new Map<string, number>();
+  /** The last ask queued on each file, which the next one waits behind; see [withDocument]. */
+  private documentTurns = new Map<string, Promise<void>>();
 
   constructor(port = portFromEnv('GDHARNESS_LSP_PORT', DEFAULT_LSP_PORT), host = '127.0.0.1') {
     this.port = port;
@@ -287,6 +304,11 @@ export class GodotLSPClient {
       }
     }
 
+    if (message['method'] === 'gdscript_client/changeWorkspace') {
+      const path = (message['params'] as JsonRecord | undefined)?.['path'];
+      this.servedWorkspace = typeof path === 'string' ? path : null;
+    }
+
     if (message['method'] === 'textDocument/publishDiagnostics') {
       const params = message['params'];
       const paramsObject = params && typeof params === 'object' ? (params as JsonRecord) : null;
@@ -447,12 +469,18 @@ export class GodotLSPClient {
     }
   }
 
+  /** Only what the server says in answer to the next initialize is about that initialize. */
+  private forgetServedWorkspace(): void {
+    this.servedWorkspace = null;
+  }
+
   async initialize(rootPath: string): Promise<unknown> {
     await this.ensureConnected();
 
     const resolvedRootPath = resolve(rootPath);
     const rootUri = pathToFileURL(resolvedRootPath).href;
 
+    this.forgetServedWorkspace();
     const result = await this.sendRequest('initialize', {
       processId: process.pid,
       rootPath: resolvedRootPath,
@@ -479,6 +507,15 @@ export class GodotLSPClient {
       ],
     });
 
+    // Godot serves one project, its editor's, and answers an initialize naming any other root by
+    // telling the client to change to its own, ahead of the answer. Whatever it said after that
+    // about this project's scripts would be read against the other project's `res://` and its
+    // classes, and look like findings in this one.
+    const served = this.servedWorkspace;
+    if (served !== null && !isSameDirectory(served, resolvedRootPath)) {
+      throw new AnotherProjectsServer(this.port, served, resolvedRootPath);
+    }
+
     this.sendNotification('initialized', {});
 
     this.initialized = true;
@@ -487,54 +524,80 @@ export class GodotLSPClient {
     return result;
   }
 
+  /**
+   * Run [work] on one file with no other ask about that file in flight.
+   *
+   * An ask is an open, an answer and a close, and two at once on one file share all three: the
+   * second found the first's document open and sent a change, the first closed the document under
+   * the second, and the second's diagnostics waiter replaced the first's, which was left with no
+   * timer and nothing that would ever settle it. A parallel sweep naming a file twice, or a retry
+   * sent before the first answer, is enough.
+   */
+  private async withDocument<T>(filePath: string, work: () => Promise<T>): Promise<T> {
+    const key = diagnosticsKey(this.toFileUri(filePath));
+    const before = this.documentTurns.get(key) ?? Promise.resolve();
+    let done = (): void => {};
+    const mine = new Promise<void>((finished) => {
+      done = finished;
+    });
+    const turn = before.then(() => mine);
+    this.documentTurns.set(key, turn);
+    await before;
+    try {
+      return await work();
+    } finally {
+      done();
+      if (this.documentTurns.get(key) === turn) {
+        this.documentTurns.delete(key);
+      }
+    }
+  }
+
   async getDiagnostics(filePath: string, content: string): Promise<unknown[]> {
     await this.ensureConnected();
     await this.ensureInitializedForFile(filePath);
 
-    const key = diagnosticsKey(this.toFileUri(filePath));
+    return this.withDocument(filePath, async () => {
+      const key = diagnosticsKey(this.toFileUri(filePath));
 
-    const diagnosticsPromise = new Promise<unknown[]>((resolveDiagnostics, rejectDiagnostics) => {
-      const existing = this.diagnosticsWaiters.get(key);
-      if (existing) {
-        clearTimeout(existing.timer);
-      }
+      const diagnosticsPromise = new Promise<unknown[]>((resolveDiagnostics, rejectDiagnostics) => {
+        const timer = setTimeout(() => {
+          this.diagnosticsWaiters.delete(key);
+          // Not an empty array. Godot publishes an empty diagnostics list for a file that
+          // really is clean, so resolving [] here makes a broken language server look
+          // exactly like healthy code, and the caller has no way to tell the two apart.
+          rejectDiagnostics(
+            new Error(
+              `Godot published no diagnostics for ${key} within ${DIAGNOSTICS_TIMEOUT_MS}ms. ` +
+                'The language server may not be running, or may not have this file in its workspace.',
+            ),
+          );
+        }, DIAGNOSTICS_TIMEOUT_MS);
 
-      const timer = setTimeout(() => {
-        this.diagnosticsWaiters.delete(key);
-        // Not an empty array. Godot publishes an empty diagnostics list for a file that
-        // really is clean, so resolving [] here makes a broken language server look
-        // exactly like healthy code, and the caller has no way to tell the two apart.
-        rejectDiagnostics(
-          new Error(
-            `Godot published no diagnostics for ${key} within ${DIAGNOSTICS_TIMEOUT_MS}ms. ` +
-              'The language server may not be running, or may not have this file in its workspace.',
-          ),
-        );
-      }, DIAGNOSTICS_TIMEOUT_MS);
-
-      this.diagnosticsWaiters.set(key, {
-        resolve: resolveDiagnostics,
-        reject: rejectDiagnostics,
-        timer,
+        this.diagnosticsWaiters.set(key, {
+          resolve: resolveDiagnostics,
+          reject: rejectDiagnostics,
+          timer,
+        });
       });
-    });
 
-    let opened: string | null = null;
-    try {
-      opened = this.syncDocument(filePath, content);
-      return await diagnosticsPromise;
-    } catch (error) {
-      const waiter = this.diagnosticsWaiters.get(key);
-      if (waiter) {
-        clearTimeout(waiter.timer);
-        this.diagnosticsWaiters.delete(key);
+      let opened: string | null = null;
+      try {
+        opened = this.syncDocument(filePath, content);
+        return await diagnosticsPromise;
+      } catch (error) {
+        const waiter = this.diagnosticsWaiters.get(key);
+        if (waiter) {
+          clearTimeout(waiter.timer);
+          this.diagnosticsWaiters.delete(key);
+        }
+        throw error;
+      } finally {
+        if (opened !== null) {
+          this.closeDocument(opened);
+        }
       }
-      throw error;
-    } finally {
-      if (opened !== null) {
-        this.closeDocument(opened);
-      }
-    }
+    });
   }
 
   async getCompletions(
@@ -546,16 +609,17 @@ export class GodotLSPClient {
     await this.ensureConnected();
     await this.ensureInitializedForFile(filePath);
 
-    const uri = this.syncDocument(filePath, content);
-    let result: unknown;
-    try {
-      result = await this.sendRequest('textDocument/completion', {
-        textDocument: { uri },
-        position: { line, character },
-      });
-    } finally {
-      this.closeDocument(uri);
-    }
+    const result = await this.withDocument(filePath, async () => {
+      const uri = this.syncDocument(filePath, content);
+      try {
+        return await this.sendRequest('textDocument/completion', {
+          textDocument: { uri },
+          position: { line, character },
+        });
+      } finally {
+        this.closeDocument(uri);
+      }
+    });
 
     if (Array.isArray(result)) {
       return result as unknown[];
@@ -575,30 +639,33 @@ export class GodotLSPClient {
     await this.ensureConnected();
     await this.ensureInitializedForFile(filePath);
 
-    const uri = this.syncDocument(filePath, content);
-    try {
-      return await this.sendRequest('textDocument/hover', {
-        textDocument: { uri },
-        position: { line, character },
-      });
-    } finally {
-      this.closeDocument(uri);
-    }
+    return this.withDocument(filePath, async () => {
+      const uri = this.syncDocument(filePath, content);
+      try {
+        return await this.sendRequest('textDocument/hover', {
+          textDocument: { uri },
+          position: { line, character },
+        });
+      } finally {
+        this.closeDocument(uri);
+      }
+    });
   }
 
   async getDocumentSymbols(filePath: string, content: string): Promise<unknown[]> {
     await this.ensureConnected();
     await this.ensureInitializedForFile(filePath);
 
-    const uri = this.syncDocument(filePath, content);
-    let result: unknown;
-    try {
-      result = await this.sendRequest('textDocument/documentSymbol', {
-        textDocument: { uri },
-      });
-    } finally {
-      this.closeDocument(uri);
-    }
+    const result = await this.withDocument(filePath, async () => {
+      const uri = this.syncDocument(filePath, content);
+      try {
+        return await this.sendRequest('textDocument/documentSymbol', {
+          textDocument: { uri },
+        });
+      } finally {
+        this.closeDocument(uri);
+      }
+    });
 
     return Array.isArray(result) ? (result as unknown[]) : [];
   }
@@ -647,7 +714,12 @@ async function resolveLSPPaths(
   try {
     projectPath = await realpath(requestedProjectPath);
   } catch {
-    throw new Refusal(`Project path does not exist: ${requestedProjectPath}`);
+    throw new ArgumentRefusal(`Project path does not exist: ${requestedProjectPath}`);
+  }
+  if (!existsSync(join(projectPath, 'project.godot'))) {
+    throw new ArgumentRefusal(
+      `Not a Godot project: ${projectPath}. Point projectPath at the directory holding project.godot.`,
+    );
   }
 
   // The project's own reader rather than a plain resolve, so `res://scripts/a.gd` names the same
@@ -655,18 +727,18 @@ async function resolveLSPPaths(
   // resolving it literally made a path with `res:` in the middle and reported the file missing.
   const contained = resolveWithinProject(projectPath, scriptPathValue);
   if (!contained.ok) {
-    throw new Refusal(contained.reason);
+    throw new ArgumentRefusal(contained.reason);
   }
 
   let scriptPath: string;
   try {
     scriptPath = await realpath(contained.absolutePath);
   } catch {
-    throw new Refusal(`Script file does not exist: ${contained.absolutePath}`);
+    throw new ArgumentRefusal(`Script file does not exist: ${contained.absolutePath}`);
   }
 
   if (!isWithinRoot(projectPath, scriptPath)) {
-    throw new Refusal('scriptPath resolves outside the project root boundary.');
+    throw new ArgumentRefusal('scriptPath resolves outside the project root boundary.');
   }
 
   return { projectPath, scriptPath };
@@ -679,7 +751,7 @@ export async function handleLSPTool(
 ): Promise<{ content: { type: string; text: string }[] }> {
   try {
     if (!args || typeof args !== 'object') {
-      throw new Refusal('Tool arguments must be an object.');
+      throw new ArgumentRefusal('Tool arguments must be an object.');
     }
 
     const parsedArgs = args as JsonRecord;
@@ -687,11 +759,11 @@ export async function handleLSPTool(
     const scriptPathValue = parsedArgs['scriptPath'];
 
     if (typeof projectPathValue !== 'string' || projectPathValue.length === 0) {
-      throw new Refusal('Missing required argument: projectPath');
+      throw new ArgumentRefusal('Missing required argument: projectPath');
     }
 
     if (typeof scriptPathValue !== 'string' || scriptPathValue.length === 0) {
-      throw new Refusal('Missing required argument: scriptPath');
+      throw new ArgumentRefusal('Missing required argument: scriptPath');
     }
 
     const { projectPath, scriptPath } = await resolveLSPPaths(projectPathValue, scriptPathValue);
@@ -710,7 +782,7 @@ export async function handleLSPTool(
         const character = Number(parsedArgs['character']);
 
         if (!Number.isFinite(line) || !Number.isFinite(character)) {
-          throw new Refusal('Arguments line and character must be numbers.');
+          throw new ArgumentRefusal('Arguments line and character must be numbers.');
         }
 
         const completions = await client.getCompletions(scriptPath, content, line, character);
@@ -722,7 +794,7 @@ export async function handleLSPTool(
         const character = Number(parsedArgs['character']);
 
         if (!Number.isFinite(line) || !Number.isFinite(character)) {
-          throw new Refusal('Arguments line and character must be numbers.');
+          throw new ArgumentRefusal('Arguments line and character must be numbers.');
         }
 
         const hover = await client.getHover(scriptPath, content, line, character);
@@ -740,6 +812,8 @@ export async function handleLSPTool(
   } catch (error) {
     return asToolResponse({
       error: normalizeLSPError(error, client.port),
+      ...(error instanceof AnotherProjectsServer ? { serves: error.serves } : {}),
+      ...(error instanceof ArgumentRefusal ? { refusedArguments: true } : {}),
     });
   }
 }

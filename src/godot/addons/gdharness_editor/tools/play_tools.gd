@@ -19,32 +19,75 @@ const LOOPBACK: String = "127.0.0.1"
 
 var _editor_plugin: EditorPlugin = null
 
+## Which play this is, counted up for every one the editor starts, whoever starts it. What a server
+## writes about a play is kept on disk after it, and the editor saying it is playing does not say
+## which play: a server picking a play back up read the console of an earlier one as this one's.
+var _play: int = 0
+var _was_playing: bool = false
+## A play asked for here that the editor has not begun yet, as an editor still scanning answers.
+## Counted when it was asked for, so its beginning later is not counted again as a play of its own.
+var _awaited: bool = false
+
 
 func set_editor_plugin(plugin: EditorPlugin) -> void:
 	_editor_plugin = plugin
 
 
+func _process(_delta: float) -> void:
+	var playing: bool = EditorInterface.is_playing_scene()
+	if playing and not _was_playing:
+		if _awaited:
+			_awaited = false
+		else:
+			_play += 1
+	_was_playing = playing
+
+
 func play_scene(args: Dictionary) -> Dictionary:
 	var scene_path: String = str(args.get("scenePath", ""))
+
+	var full_path: String = ""
+	if scene_path.is_empty():
+		# The editor puts up a dialog for a main scene that is not there and plays nothing, and the
+		# play was answered as started.
+		var main: String = str(ProjectSettings.get_setting("application/run/main_scene", ""))
+		if main.is_empty():
+			return {"ok": false, "error": "The project has no main scene to play."}
+		if not ResourceLoader.exists(main, "PackedScene"):
+			return {
+				"ok": false,
+				"error":
+				(
+					"The main scene, %s, is not there, so the editor would ask for another rather than play."
+					% main
+				)
+			}
+	else:
+		full_path = scene_path if scene_path.begins_with("res://") else "res://" + scene_path
+		if not ResourceLoader.exists(full_path, "PackedScene"):
+			return {"ok": false, "error": "No scene at " + full_path}
 
 	if EditorInterface.is_playing_scene():
 		EditorInterface.stop_playing_scene()
 
 	var debugger: int = _a_port_for_the_debugger()
 
-	if scene_path.is_empty():
+	if full_path.is_empty():
 		EditorInterface.play_main_scene()
 	else:
-		var full_path: String = scene_path if scene_path.begins_with("res://") else "res://" + scene_path
-		if not ResourceLoader.exists(full_path, "PackedScene"):
-			return {"ok": false, "error": "No scene at " + full_path}
 		EditorInterface.play_custom_scene(full_path)
+
+	_play += 1
+	_was_playing = EditorInterface.is_playing_scene()
+	_awaited = not _was_playing
 
 	return {
 		"ok": true,
-		"playing": EditorInterface.is_playing_scene(),
+		"playing": _was_playing,
 		"scenePath": EditorInterface.get_playing_scene(),
-		"debugPort": debugger
+		"debugPort": debugger,
+		"play": _play,
+		"editorPid": OS.get_process_id(),
 	}
 
 
@@ -198,5 +241,7 @@ func playing_status(_args: Dictionary) -> Dictionary:
 		"ok": true,
 		"playing": playing,
 		"scenePath": EditorInterface.get_playing_scene() if playing else "",
-		"debugPort": debugger
+		"debugPort": debugger,
+		"play": _play,
+		"editorPid": OS.get_process_id(),
 	}
