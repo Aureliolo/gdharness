@@ -386,6 +386,8 @@ const HOOKS_GD = [
   '\t\t"hold":',
   '\t\t\t_held.append(load(path))',
   '\t\t\treturn {"cached": ResourceLoader.has_cached(path)}',
+  '\t\t"held":',
+  '\t\t\treturn {"children": _held_children(path)}',
   '\t\t"open":',
   '\t\t\tEditorInterface.open_scene_from_path(path)',
   '\t\t"edit":',
@@ -397,6 +399,19 @@ const HOOKS_GD = [
   '\t\t\tadded.owner = root',
   '\t\t\tEditorInterface.mark_scene_as_unsaved()',
   '\treturn _report(path)',
+  '',
+  '',
+  'func _held_children(path: String) -> Array[String]:',
+  '\tvar names: Array[String] = []',
+  '\tfor resource: Resource in _held:',
+  '\t\tvar scene: PackedScene = resource as PackedScene',
+  '\t\tif scene == null or resource.resource_path != path:',
+  '\t\t\tcontinue',
+  '\t\tvar root: Node = scene.instantiate()',
+  '\t\tfor child: Node in root.get_children():',
+  '\t\t\tnames.append(str(child.name))',
+  '\t\troot.free()',
+  '\treturn names',
   '',
   '',
   'func _report(path: String) -> Dictionary:',
@@ -1635,6 +1650,25 @@ async function testAHeldSceneIsWrittenFromItsFile({ call, project }: Editor): Pr
   assert.match(written, /name="First"/, `the second write should keep the first: ${written}`);
   assert.match(written, /name="Second"/, `and add its own: ${written}`);
   assert.deepEqual(nodePaths(get(await call('scene_tree', scene), 'tree')), ['.', 'First', 'Second']);
+
+  // The copy the editor holds is brought up to the file, so whatever holds it sees the writes.
+  const holding = await hook(project, { op: 'held', path: 'res://layers/held.tscn' });
+  assert.deepEqual(
+    get(holding, 'children'),
+    ['First', 'Second'],
+    `the held copy: ${JSON.stringify(holding)}`,
+  );
+
+  // And a file changed under the editor, which leaves the held copy behind it, is written from the
+  // file rather than from that copy.
+  writeFileSync(
+    join(project, 'layers', 'held.tscn'),
+    `${written}\n[node name="Outside" type="Node2D" parent="."]\n`,
+  );
+  await call('scene_node', { ...scene, op: 'add', nodeType: 'Node2D', nodeName: 'Third' });
+  const after = fileText(project, 'layers/held.tscn');
+  assert.match(after, /name="Outside"/, `a write should keep what was changed on disk: ${after}`);
+  assert.match(after, /name="Third"/, `and add its own: ${after}`);
 }
 
 /**
