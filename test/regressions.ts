@@ -9895,6 +9895,106 @@ function testWhatTheEditorSavedAwayIsReportedTheSameWay(): void {
   }
 }
 
+/**
+ * What a launched editor's import saved away is read as that editor greets, and only for it.
+ *
+ * The reading taken before the launch was compared with the file at the first status call after
+ * any editor connected, however much later, so a key removed in between by somebody else (a
+ * project_settings write, `gdharness runtime off`, a person) was credited to the import, with the
+ * remedy to put it back. The editor here is a stand-in: the launch starts a process that exits,
+ * and a socket greets under its pid after the file has lost the key the import would take.
+ */
+async function testWhatALaunchedEditorDroppedIsReadAsItArrives(): Promise<void> {
+  for (const whose of ['launched', 'another'] as const) {
+    const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-launch-dropped-'));
+    const port = await reservePort();
+    const server = new ServerProcess({
+      env: { GDHARNESS_BRIDGE_PORT: String(port), GDHARNESS_PROJECT: project, GODOT_PATH: process.execPath },
+    });
+    let editor: WebSocket | null = null;
+    try {
+      mkdirSync(join(project, 'addons', 'gdharness_editor'), { recursive: true });
+      const settings = join(project, 'project.godot');
+      const plugins =
+        '[editor_plugins]\n\nenabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n';
+      writeFileSync(
+        settings,
+        `config_version=5\n\n[debug]\n\ngdscript/warnings/return_value_discarded=0\ngdscript/warnings/unsafe_call_argument=2\n\n${plugins}`,
+      );
+      await server.initialize('regression-test');
+      const call = async (name: string, args: Record<string, unknown>): Promise<string> =>
+        textOf(await server.request('tools/call', { name, arguments: args })) ?? '';
+      const opened = await call('editor_launch', { op: 'open', projectPath: project });
+      const pid = asNumber(get(jsonOf(opened, 'editor_launch open'), 'pid'));
+
+      // The import's save, which takes the key sitting at its default.
+      writeFileSync(
+        settings,
+        `config_version=5\n\n[debug]\n\ngdscript/warnings/unsafe_call_argument=2\n\n${plugins}`,
+      );
+      const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+      editor = socket;
+      await new Promise<void>((resolve, reject) => {
+        socket.once('open', () => {
+          resolve();
+        });
+        socket.once('error', reject);
+      });
+      socket.on('message', (raw: Buffer) => {
+        const message: unknown = JSON.parse(String(raw));
+        if (isRecord(message) && message['type'] === 'tool_invoke') {
+          socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result: {} }));
+        }
+      });
+      socket.send(
+        JSON.stringify({
+          type: 'godot_ready',
+          project_path: project,
+          addon_version: SERVER_VERSION,
+          editor_pid: whose === 'launched' ? pid : pid + 1,
+        }),
+      );
+      // Read off the server's own log rather than a status call, because the first status call is
+      // where the answer is given and asking it here would be asking the question early.
+      for (let waited = 0; waited < 10_000 && !server.stderr.includes('Godot ready:'); waited += 50) {
+        await delay(50);
+      }
+      assert.ok(server.stderr.includes('Godot ready:'), 'the server should have taken the greeting');
+
+      // Somebody else's removal, after the editor arrived and before anybody asked.
+      writeFileSync(settings, `config_version=5\n\n${plugins}`);
+      const status = parseTextContent(
+        await server.request('tools/call', { name: 'editor_status', arguments: {} }),
+      );
+      const said = JSON.stringify(get(status, 'editor'));
+      const dropped = asArray(get(status, 'editor', 'settingsDropped') ?? []).map((one) =>
+        get(one, 'setting'),
+      );
+      if (whose === 'another') {
+        assert.deepEqual(
+          dropped,
+          [],
+          `an editor the launch did not start saved nothing it knows of: ${said}`,
+        );
+        continue;
+      }
+      assert.deepEqual(
+        dropped,
+        ['debug/gdscript/warnings/return_value_discarded'],
+        `the import's key is named and the later removal is not: ${said}`,
+      );
+      const again = parseTextContent(
+        await server.request('tools/call', { name: 'editor_status', arguments: {} }),
+      );
+      assert.equal(get(again, 'editor', 'settingsDropped'), undefined, 'and it is said once');
+    } finally {
+      editor?.terminate();
+      await server.stop();
+      sweep(project);
+    }
+  }
+}
+
 async function testARestartSaysWhatTheEditorDropped(): Promise<void> {
   const port = await reservePort();
   const server = new ServerProcess({ env: { GDHARNESS_BRIDGE_PORT: String(port) } });
@@ -24709,6 +24809,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testWhoIsHoldingAPortIsAskable,
   testWhatTheEditorSavedAwayIsReportedTheSameWay,
   testARestartSaysWhatTheEditorDropped,
+  testWhatALaunchedEditorDroppedIsReadAsItArrives,
   testProjectDefaultsToTheWorkingDirectory,
   testAnEngineThatDoesNotAnswerIsNamed,
   testAnAutoloadGitWillNotCarry,

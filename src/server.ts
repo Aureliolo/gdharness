@@ -1741,6 +1741,9 @@ class GodotServer {
    */
   private launchedFrom: { projectPath: string; before: Map<string, unknown> | null } | null = null;
 
+  /** What the launched editor's import saved away, compared as it greeted and not yet reported. */
+  private launchedDropped: OperationParams | null = null;
+
   /**
    * The project this server was set up for, from the config `setup` wrote, or null.
    *
@@ -1758,6 +1761,9 @@ class GodotServer {
   constructor() {
     this.ownProject = envValue('GDHARNESS_PROJECT') ?? null;
     this.godotBridge = getDefaultBridge(this.ownProject);
+    this.godotBridge.on('godot_connected', () => {
+      this.settleTheLaunchReading();
+    });
     this.mcp = new McpServer(
       { name: 'gdharness', version: SERVER_VERSION },
       { capabilities: { tools: {}, resources: {} } },
@@ -5108,6 +5114,37 @@ class GodotServer {
   }
 
   /**
+   * The comparison for an editor this server opened, made as that editor greets.
+   *
+   * At the greeting rather than at the next status call. The editor saves project.godot during its
+   * import, before it loads the addon that greets, so what it dropped is gone by then, and a key
+   * removed afterwards is somebody else's doing: a project_settings write, `gdharness runtime off`,
+   * a person. Compared at the next status call, however much later, every one of those was credited
+   * to the import, and the note told the caller to put back a setting removed on purpose. Only the
+   * editor this server launched: another arriving first saved nothing this reading knows about.
+   * Cleared either way, since a reading kept past its answer is compared against later edits.
+   */
+  private settleTheLaunchReading(): void {
+    const watched = this.launchedFrom;
+    const status = this.godotBridge.getStatus();
+    if (watched === null || !hasSaidWhoItIs(status)) {
+      return;
+    }
+    this.launchedFrom = null;
+    if (status.editorPid === undefined || status.editorPid !== this.launchedEditor?.pid) {
+      return;
+    }
+    this.launchedDropped = this.whatTheEditorDropped(watched.before, this.settingKeysOf(watched.projectPath));
+  }
+
+  /** The comparison made as the launched editor greeted, answered once. */
+  private whatTheLaunchedEditorDropped(): OperationParams {
+    const dropped = this.launchedDropped ?? {};
+    this.launchedDropped = null;
+    return dropped;
+  }
+
+  /**
    * The settings an editor saved away, as the fields that report them.
    *
    * One home for the comparison and the sentence, because the same thing happens on an `open` and
@@ -5120,21 +5157,6 @@ class GodotServer {
    * keeping that setting alive, and what it is worth depends on how few steps there are between
    * reading it and putting the value back.
    */
-  /**
-   * The same report for an editor this server opened, made once the editor is there.
-   *
-   * Cleared whether or not anything was dropped, because the question is answered either way and a
-   * reading kept past its answer would be compared against a file somebody has since edited.
-   */
-  private whatTheLaunchedEditorDropped(): OperationParams {
-    const watched = this.launchedFrom;
-    if (watched === null) {
-      return {};
-    }
-    this.launchedFrom = null;
-    return this.whatTheEditorDropped(watched.before, this.settingKeysOf(watched.projectPath));
-  }
-
   private whatTheEditorDropped(
     before: Map<string, unknown> | null,
     after: Map<string, unknown> | null,
