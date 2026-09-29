@@ -8139,6 +8139,93 @@ async function testARefusalDoesNotDenyTheRuntimeItCanSee(): Promise<void> {
 }
 
 /**
+ * A game that binds every interface is reached on loopback.
+ *
+ * The announcement names the address the game bound, and a project may set that to every interface.
+ * Dialled as written, `*` is no host and Windows refuses `0.0.0.0`, so a listening game was answered
+ * "may still be starting", which waiting never changes. Each wildcard gets a fake game bound the way
+ * it says, and the status has to reach it. `::` needs IPv6, which some runners lack; that variant
+ * says so and is left out there, while the other two hold everywhere.
+ */
+async function testAGameOnEveryInterfaceIsReached(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-every-interface-'));
+  writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+  for (const [announced, bound] of [
+    ['*', '0.0.0.0'],
+    ['0.0.0.0', '0.0.0.0'],
+    ['::', '::'],
+  ] as const) {
+    const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-every-interface-rt-'));
+    const answering = createServer((socket) => {
+      socket.setEncoding('utf8');
+      socket.write(`${JSON.stringify({ type: 'welcome', protocol: RUNTIME_PROTOCOL })}\n`);
+      let buffered = '';
+      socket.on('data', (chunk: string) => {
+        buffered += chunk;
+        for (let at = buffered.indexOf('\n'); at !== -1; at = buffered.indexOf('\n')) {
+          const asked = JSON.parse(buffered.slice(0, at)) as { id: number };
+          buffered = buffered.slice(at + 1);
+          socket.write(`${JSON.stringify({ id: asked.id, type: 'pong' })}\n`);
+        }
+      });
+      socket.on('error', () => {});
+    });
+    const holder = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+    const server = new ServerProcess({
+      env: { GDHARNESS_PROJECT: project, GDHARNESS_RUNTIME_DIR: runtimeDir },
+    });
+    try {
+      const up = await new Promise<Error | null>((ready) => {
+        answering.once('error', ready);
+        answering.listen(0, bound, () => {
+          ready(null);
+        });
+      });
+      if (up !== null) {
+        assert.equal(announced, '::', `binding ${bound} should work on every runner: ${up.message}`);
+        console.log(
+          `every interface regression: ${bound} left out, since this machine cannot bind it (${up.message})`,
+        );
+        continue;
+      }
+      const pid = holder.pid ?? 0;
+      writeFileSync(
+        join(runtimeDir, `runtime-${pid}.json`),
+        JSON.stringify({
+          protocol: RUNTIME_PROTOCOL,
+          pid,
+          port: portOf(answering),
+          address: announced,
+          project: { name: basename(project), path: project },
+        }),
+        'utf8',
+      );
+      await server.initialize('regression-test');
+      const status = parseTextContent(
+        await server.request('tools/call', { name: 'editor_status', arguments: {} }),
+      );
+      const listed = asArray(get(status, 'game', 'runtimes'));
+      assert.equal(get(listed[0], 'pid'), pid, JSON.stringify(status));
+      assert.equal(
+        get(listed[0], 'reachable'),
+        true,
+        `a game announced at ${announced} is reached: ${JSON.stringify(get(status, 'game'))}`,
+      );
+    } finally {
+      await server.stop();
+      holder.kill();
+      await new Promise<void>((closed) => {
+        answering.close(() => {
+          closed();
+        });
+      });
+      sweep(runtimeDir);
+    }
+  }
+  sweep(project);
+}
+
+/**
  * runtimeConnected is about this server's project, and another project's game is listed as such.
  *
  * Reported from ostinato, whose server's editor_status said runtimeConnected true while the only
@@ -24966,6 +25053,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStartSaysWhatItLeftRunning,
   testATestServerWritesWhereNoRealRunIs,
   testRuntimeConnectedIsAboutThisProjectsGames,
+  testAGameOnEveryInterfaceIsReached,
   testAStartStopsWaitingForAGameThatIsOver,
   testAStartWaitsForTheGameToAnnounceItself,
   testAGameIsFoundThroughALinkToItsProject,
