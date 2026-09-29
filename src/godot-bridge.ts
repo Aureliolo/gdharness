@@ -69,6 +69,8 @@ interface GodotReadyMessage {
   syncs_breakpoints?: boolean;
   /** Whether a gdharness server started this editor, which decides who may start it again. */
   opened_by_a_server?: boolean;
+  /** Whether another editor started this one, and so none of the arguments it was given reached it. */
+  started_by_an_editor?: boolean;
 }
 
 type IncomingMessage = ToolResultMessage | PongMessage | GodotReadyMessage;
@@ -130,6 +132,13 @@ interface GodotConnectionInfo {
    */
   openedByAServer?: boolean | undefined;
   /**
+   * Whether another editor started this one: Godot's own restart, or the project manager opening a
+   * project. Such an editor has the environment and none of the arguments of the one before it, so
+   * it serves the ports its editor settings name, writes no console a server asked for, and is not
+   * the editor any server opened. Undefined for an addon too old to say.
+   */
+  startedByAnEditor?: boolean | undefined;
+  /**
    * Whether the editor keeps its breakpoints when a debug session opens.
    *
    * Godot clears every breakpoint in the script editor on a session's `initialize` unless
@@ -153,6 +162,7 @@ interface BridgeStatus {
   dapPort?: number | undefined;
   debugPort?: number | undefined;
   openedByAServer?: boolean | undefined;
+  startedByAnEditor?: boolean | undefined;
   syncsBreakpoints?: boolean | undefined;
   pendingRequests: number;
   queuedResources: number;
@@ -449,6 +459,7 @@ export class GodotBridge extends EventEmitter {
       dapPort: this.connectionInfo?.dapPort,
       debugPort: this.connectionInfo?.debugPort,
       openedByAServer: this.connectionInfo?.openedByAServer,
+      startedByAnEditor: this.connectionInfo?.startedByAnEditor,
       syncsBreakpoints: this.connectionInfo?.syncsBreakpoints,
       pendingRequests: this.pendingRequests.size,
       queuedResources: this.resourceQueues.size,
@@ -629,6 +640,8 @@ export class GodotBridge extends EventEmitter {
           this.connectionInfo.dapPort = servedPort(message.dap_port);
           this.connectionInfo.debugPort = servedPort(message.debug_port);
           this.connectionInfo.openedByAServer = message.opened_by_a_server === true;
+          this.connectionInfo.startedByAnEditor =
+            typeof message.started_by_an_editor === 'boolean' ? message.started_by_an_editor : undefined;
           // Left undefined rather than read as false for an addon that does not say, since the
           // two call for different advice: one is an editor to restart, the other a setting.
           this.connectionInfo.syncsBreakpoints =

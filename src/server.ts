@@ -110,6 +110,7 @@ import {
   withActualsPrinted,
 } from './junit.js';
 import {
+  EDITOR_PID_VARIABLE,
   type EditorPorts,
   editorArguments,
   environmentFor,
@@ -4753,6 +4754,10 @@ class GodotServer {
       addonNote: greeted
         ? sameCodeNote(status.addonVersion, SERVER_VERSION, status.addonDigest, shippedEditorDigest())
         : undefined,
+      startedByAnEditorNote:
+        status.startedByAnEditor === true
+          ? "Another editor started this one: Godot's own restart, or the project manager opening a project. None of the arguments a server gave the editor before it reached this one, so it serves the ports its editor settings name (and none at all while another editor holds those, when the script and debug tools reach that editor instead), its console is not captured, and it restarts itself. Close it and use editor_launch open to have an editor this server started."
+          : undefined,
       ...this.breakpointsAtRisk(),
       retryingBridge: this.bridgeRetry === null ? undefined : true,
       // Where the editor was told to look, when this server knows which project to tell. Worth
@@ -9141,6 +9146,10 @@ class GodotServer {
 }
 
 export async function runGodotServer(): Promise<void> {
+  // A server is never an editor, so this variable in its environment is another editor's: one whose
+  // terminal started the harness. Everything this server starts would inherit it, a game then
+  // announcing itself as that editor's and an editor reading itself as started by it.
+  delete process.env[EDITOR_PID_VARIABLE];
   const server = new GodotServer();
   await server.run();
 }

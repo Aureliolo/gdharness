@@ -5788,6 +5788,114 @@ function testAnUncapturedConsoleSaysWhichEditorItIs(): void {
 }
 
 /**
+ * An editor started by another editor reports the ports it serves, not the ones in its environment.
+ *
+ * Godot's own restart and the project manager start the new editor as the old one's child, so it
+ * has the old environment, the ports and the marker a server put there included, and none of the
+ * arguments: the engine consumes `--lsp-port`, `--dap-port` and `--log-file` and hands none back,
+ * measured on 4.7.2. It reported the moved ports, which it never bound, and that a server had
+ * opened it. What gives it away is the variable the addon sets to its own pid as it loads, still
+ * naming the editor before it. A real headless editor is started twice here: as a server starts
+ * one, and with what it would inherit, with its settings kept out of the machine's.
+ */
+async function testAnEditorStartedByAnEditorSaysSo(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('editor started by an editor regression skipped (Godot not found)');
+    return;
+  }
+  for (const how of ['by a server', 'by an editor'] as const) {
+    const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-inherited-'));
+    const home = join(project, '.home');
+    mkdirSync(home, { recursive: true });
+    const [bridgePort, lspPort, dapPort] = [await reservePort(), await reservePort(), await reservePort()];
+    // The editor's own settings, runtime directory and user data, so nothing here is written into
+    // the machine's editor settings, which the addon writes one setting to as it loads.
+    const own = {
+      HOME: home,
+      USERPROFILE: home,
+      APPDATA: home,
+      LOCALAPPDATA: home,
+      XDG_CONFIG_HOME: home,
+      XDG_DATA_HOME: home,
+      XDG_CACHE_HOME: home,
+      GDHARNESS_RUNTIME_DIR: join(home, 'runtime'),
+    };
+    const server = new ServerProcess({
+      env: { GDHARNESS_BRIDGE_PORT: String(bridgePort), GDHARNESS_PROJECT: project, ...own },
+    });
+    let editor: ChildProcess | null = null;
+    try {
+      installAddons(project);
+      writeFileSync(
+        join(project, 'project.godot'),
+        'config_version=5\n\n[application]\n\nconfig/name="Inherited"\n\n[editor_plugins]\n\n' +
+          'enabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n',
+      );
+      await server.initialize('regression-test');
+      const inherited = how === 'by an editor';
+      editor = spawn(
+        godotPath,
+        [
+          '--editor',
+          '--headless',
+          '--path',
+          project,
+          // What a server passes and a Godot restart does not.
+          ...(inherited ? [] : ['--lsp-port', String(lspPort), '--dap-port', String(dapPort)]),
+        ],
+        {
+          env: {
+            ...process.env,
+            ...own,
+            GDHARNESS_BRIDGE_PORT: String(bridgePort),
+            GDHARNESS_LSP_PORT: String(lspPort),
+            GDHARNESS_DAP_PORT: String(dapPort),
+            GDHARNESS_OPENED_BY_A_SERVER: '1',
+            // Set by the addon of the editor before it, which a child started by that editor has.
+            ...(inherited ? { GDHARNESS_EDITOR_PID: String(process.pid) } : {}),
+          },
+          stdio: 'ignore',
+        },
+      );
+      let greeted: unknown = null;
+      for (let waited = 0; waited < 60_000 && greeted === null; waited += 250) {
+        await delay(250);
+        const now = get(
+          parseTextContent(await server.request('tools/call', { name: 'editor_status', arguments: {} })),
+          'editor',
+        );
+        if (typeof get(now, 'projectPath') === 'string') {
+          greeted = now;
+        }
+      }
+      assert.ok(greeted !== null, `the ${how} editor should have greeted`);
+      const said = JSON.stringify(greeted);
+      assert.equal(get(greeted, 'editorPid'), editor.pid, `it is the editor started here: ${said}`);
+      if (inherited) {
+        assert.equal(get(greeted, 'startedByAnEditor'), true, `it says another editor started it: ${said}`);
+        assert.equal(get(greeted, 'openedByAServer'), false, `and not that a server did: ${said}`);
+        assert.notEqual(get(greeted, 'lspPort'), lspPort, `nor the port it never bound: ${said}`);
+        assert.notEqual(get(greeted, 'dapPort'), dapPort, said);
+        assert.match(text(get(greeted, 'startedByAnEditorNote')), /Another editor started this one/, said);
+      } else {
+        assert.equal(get(greeted, 'startedByAnEditor'), false, said);
+        assert.equal(get(greeted, 'openedByAServer'), true, said);
+        assert.equal(get(greeted, 'lspPort'), lspPort, `a server's editor serves what it was given: ${said}`);
+        assert.equal(get(greeted, 'dapPort'), dapPort, said);
+      }
+    } finally {
+      editor?.kill();
+      await server.stop();
+      sweep(project);
+    }
+  }
+}
+
+/**
  * The console of an editor this server launched is read before that editor has connected.
  *
  * Reported downstream: `editor_output op: "editor"`, asked while an editor gdharness had just
@@ -6753,13 +6861,15 @@ async function testAGameNoNoteNamesIsStoppedByItsNumber(): Promise<void> {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-by-number-'));
   const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-by-number-runtime-'));
   const env = { GODOT_PATH: godotPath, GDHARNESS_PROJECT: project, GDHARNESS_RUNTIME_DIR: runtime };
-  const first = new ServerProcess({ env });
-  let second: ServerProcess | null = null;
-  let game = 0;
   // Something alive whose number is not a game of this project, to be refused.
   const bystander = spawn(process.execPath, ['--eval', 'setTimeout(() => {}, 120_000)', project], {
     stdio: 'ignore',
   });
+  // The first server is started as one started from an editor's terminal would be, with that
+  // editor's pid in its environment. A game it starts is not that editor's, and announced as its.
+  const first = new ServerProcess({ env: { ...env, GDHARNESS_EDITOR_PID: String(bystander.pid ?? 0) } });
+  let second: ServerProcess | null = null;
+  let game = 0;
   try {
     writeFileSync(
       join(project, 'project.godot'),
@@ -6794,6 +6904,17 @@ async function testAGameNoNoteNamesIsStoppedByItsNumber(): Promise<void> {
     // server launched, and under the Windows console build that is a wrapper whose child is the
     // engine: taken from the run, this case expected a number the next server has no way to know.
     game = asNumber(get(startedAnswer, 'runtime', 'pid'));
+    const announced: unknown = JSON.parse(readFileSync(join(runtime, `runtime-${game}.json`), 'utf8'));
+    assert.equal(
+      get(announced, 'pid'),
+      game,
+      `the announcement read is the game's: ${JSON.stringify(announced)}`,
+    );
+    assert.equal(
+      get(announced, 'editor_pid'),
+      undefined,
+      `a game this server started names no editor: ${JSON.stringify(announced)}`,
+    );
     const serverPid = first.child.pid;
     assert.ok(serverPid !== undefined, 'the server should have a pid');
     await killTheTree(serverPid);
@@ -24825,6 +24946,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARestartWaitsForTheEditorToSayWhoItIs,
   testTheStaleHalfIsNamedCorrectly,
   testALaunchedEditorsConsoleIsReadBeforeItConnects,
+  testAnEditorStartedByAnEditorSaysSo,
   testStalenessIsTheEditorCodeNotTheVersion,
   testAnEditorOnTheShippedCodeIsNotCalledStale,
   testAGameIsFoundWhereverItAnnounced,
