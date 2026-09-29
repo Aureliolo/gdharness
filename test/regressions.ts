@@ -129,6 +129,7 @@ import {
   runRecordPath,
   stillTheRecordedRun,
   sweepTranscripts,
+  whyNotTheRun,
   writeEditorRunNote,
   writeRunRecord,
 } from '../src/run-record.js';
@@ -6835,6 +6836,15 @@ async function testAnotherProjectsRunLeavesOursStoppable(): Promise<void> {
     theirRunStarts();
     const ours = runRecordPath(project, runtime);
     assert.ok(existsSync(ours), `the run should have left its note at ${ours}`);
+    // When its pid came back, which the judging cases all hand in: a keeper that stopped writing it
+    // would leave every stop of a slow launch refusing its own game, and pass all of them.
+    const note: unknown = JSON.parse(readFileSync(ours, 'utf8'));
+    const asked = asNumber(get(note, 'startedAt'));
+    const by = asNumber(get(note, 'startedBy'));
+    assert.ok(
+      by >= asked && by <= Date.now(),
+      `the note says when the pid came back: ${JSON.stringify(note)}`,
+    );
     rmSync(ours);
     await stop(second, secondGame, 'the server that started it');
     assert.equal(
@@ -19900,6 +19910,33 @@ function testTheEditorHoldingAProjectIsNotARunOfIt(): void {
     judgeRun(record, asked(worker), 'confirmed'),
     true,
     'and a platform that gives no start time is no worse off than before it was asked',
+  );
+
+  // A slow launch. startedAt is when the start was asked for, and a windowed run on Windows goes
+  // through a helper compiled on first use, so on a loaded runner the engine began more than the
+  // window after it, and its own stop refused it and left it running. The pid comes back only once
+  // the engine has started, so the moment it did is what a process's own start is held against.
+  const slow = { ...record, startedBy: record.startedAt + 14_000 };
+  const launchedLate = { ...asked(worker), startedAt: record.startedAt + 13_500 };
+  assert.equal(
+    judgeRun(record, launchedLate, 'confirmed'),
+    false,
+    'measured from the ask alone, an engine a slow launch started late reads as another process',
+  );
+  assert.equal(
+    judgeRun(slow, launchedLate, 'confirmed'),
+    true,
+    'and measured from when its pid came back it is the run, so its own stop ends it',
+  );
+  assert.equal(
+    judgeRun(slow, { ...asked(worker), startedAt: slow.startedBy + 30_000 }, 'confirmed'),
+    false,
+    'while a process that took the number after the run is still not the run',
+  );
+  assert.match(
+    whyNotTheRun(record, launchedLate, 'confirmed') ?? '',
+    /^that process started 14 seconds after the run had$/,
+    'and a refusal on the start says that is the property that disagreed',
   );
 
   // The flag as a whole word. A project whose own directory spells one is still a project, and

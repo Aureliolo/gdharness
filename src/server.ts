@@ -155,8 +155,8 @@ import {
   readRunRecord,
   runningAs,
   stillTheAnnouncedGame,
-  stillTheRecordedRun,
   sweepTranscripts,
+  whyNotStillTheRecordedRun,
   writeEditorRunNote,
 } from './run-record.js';
 import {
@@ -6292,16 +6292,18 @@ class GodotServer {
       pid: running.pid,
       transcript: running.transcript ?? '',
       startedAt: running.startedAt,
+      ...(running.startedBy === undefined ? {} : { startedBy: running.startedBy }),
       projectPath: running.projectPath ?? '',
       arguments: [],
       ...(running.command === undefined ? {} : { command: running.command }),
     };
-    if (!(await stillTheRecordedRun(startedAs))) {
+    const why = await whyNotStillTheRecordedRun(startedAs);
+    if (why !== null) {
       clearTheRecord();
       running.endedHere = null;
       running.log.record(
         'warning',
-        `This run was not ended here: pid ${running.pid} no longer answers as the process the run was started as, so nothing was signalled. If that process is still the game, end it yourself; if it is not, it belongs to something else.`,
+        `This run was not ended here: pid ${running.pid} no longer answers as the process the run was started as (${why}), so nothing was signalled. If that process is still the game, end it yourself; if it is not, it belongs to something else.`,
       );
       return 'refused';
     }
@@ -6485,6 +6487,7 @@ class GodotServer {
     if ('error' in launched) {
       return launched;
     }
+    const startedBy = Date.now();
     sweepTranscripts();
     return {
       pid: launched.pid,
@@ -6493,6 +6496,7 @@ class GodotServer {
       readOffset: 0,
       projectPath,
       startedAt,
+      startedBy,
       command: godotPath,
       exitCode: null,
       exitSignal: null,
@@ -6946,6 +6950,7 @@ class GodotServer {
       readOffset: 0,
       projectPath: record.projectPath === '' ? null : record.projectPath,
       startedAt: record.startedAt,
+      ...(record.startedBy === undefined ? {} : { startedBy: record.startedBy }),
       ...(record.command === undefined ? {} : { command: record.command }),
       exitCode: null,
       exitSignal: null,
