@@ -1345,6 +1345,86 @@ async function testAStepAnswersWhereItLanded(): Promise<void> {
 }
 
 /**
+ * The adapter's console says what it no longer holds.
+ *
+ * The client keeps the adapter's last thousand lines, and a read on behalf of editor_output empties
+ * it into the run's log. `debug_state output` answered the buffer's count as the console's, so a
+ * run that had printed more answered its newest thousand as everything, and one read after a drain
+ * answered what had come since, often nothing. The stand-in prints 1005 lines, then one more after a
+ * draining read.
+ */
+async function testTheAdaptersConsoleSaysWhatItNoLongerHolds(): Promise<void> {
+  let peer: Socket | null = null;
+  const print = (lines: readonly string[]): void => {
+    peer?.write(
+      frameJsonRpc({
+        seq: 1,
+        type: 'event',
+        event: 'output',
+        body: { category: 'stdout', output: lines.join('\n') },
+      }),
+    );
+  };
+  const respond: FramedPeerHandler = (message, socket) => {
+    socket.write(
+      frameJsonRpc({
+        seq: 2,
+        type: 'response',
+        request_seq: message['seq'],
+        command: message['command'],
+        success: true,
+        body: {},
+      }),
+    );
+  };
+  const read = async (client: GodotDAPClient): Promise<unknown> =>
+    JSON.parse(
+      textOf({ jsonrpc: '2.0', result: await handleDAPTool(client, 'dap_get_output', {}) }) ?? '{}',
+    ) as unknown;
+
+  await withFramedPeer(
+    respond,
+    async (port) => {
+      const client = new GodotDAPClient(port, '127.0.0.1');
+      try {
+        await client.initialize();
+        const quiet = await read(client);
+        assert.equal(
+          get(quiet, 'notShown'),
+          undefined,
+          `nothing printed is nothing missing: ${JSON.stringify(quiet)}`,
+        );
+
+        print(Array.from({ length: 1005 }, (_, index) => `line ${index}`));
+        assert.ok(await cameTrue(() => client.getOutput().length === 1000), 'the lines should arrive');
+        const full = await read(client);
+        assert.equal(get(full, 'lines'), 1000);
+        assert.equal(get(full, 'output', 0), 'line 5', 'the buffer holds the newest lines');
+        assert.equal(
+          get(full, 'notShown'),
+          5,
+          `and counts the ones it dropped: ${String(get(full, 'note'))}`,
+        );
+        assert.match(String(get(full, 'note')), /5 fell out of this buffer, which keeps the last 1000\./);
+
+        client.getOutput(true);
+        print(['after']);
+        assert.ok(await cameTrue(() => client.getOutput().length === 1), 'the next line should arrive');
+        const drained = await read(client);
+        assert.deepEqual(get(drained, 'output'), ['after']);
+        assert.equal(get(drained, 'notShown'), 1005, `a drain is counted too: ${JSON.stringify(drained)}`);
+        assert.match(String(get(drained, 'note')), /1000 were moved into the run's log by an earlier read/);
+      } finally {
+        await client.abandon();
+      }
+    },
+    (socket) => {
+      peer = socket;
+    },
+  );
+}
+
+/**
  * Letting go of the debug adapter sends it nothing.
  *
  * Godot stops the game it is playing when this session sends the protocol's `disconnect`, and it
@@ -23515,6 +23595,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testLettingGoOfTheAdapterSendsItNothing,
   testAVariablesReadSaysWhatItCouldNotRead,
   testAStepAnswersWhereItLanded,
+  testTheAdaptersConsoleSaysWhatItNoLongerHolds,
   testAStopIsKnownToTheConnectionItWasSentTo,
   testAStopThatLandsWhileAttachAsksIsTheAnswer,
   testAContinueByAnotherClientIsKnownHere,

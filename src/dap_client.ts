@@ -117,6 +117,10 @@ export class GodotDAPClient {
   /** Called with each console line as the adapter delivers it, for a reader that cannot poll. */
   private onOutput: ((line: string) => void) | null = null;
   private maxOutputLines = 1000;
+  /** Lines pushed out of the buffer by newer ones, which nothing here holds any more. */
+  private outputDropped = 0;
+  /** Lines taken out of the buffer by a draining read, into the run's log. */
+  private outputTaken = 0;
   private initialized = false;
   private attached = false;
   private lastThreadId = 1;
@@ -388,6 +392,7 @@ export class GodotDAPClient {
       }
 
       if (this.outputBuffer.length > this.maxOutputLines) {
+        this.outputDropped += this.outputBuffer.length - this.maxOutputLines;
         this.outputBuffer = this.outputBuffer.slice(this.outputBuffer.length - this.maxOutputLines);
       }
       return;
@@ -590,9 +595,37 @@ export class GodotDAPClient {
   getOutput(clear = false): string[] {
     const lines = [...this.outputBuffer];
     if (clear) {
+      this.outputTaken += lines.length;
       this.outputBuffer = [];
     }
     return lines;
+  }
+
+  /**
+   * The buffered console, with what is missing from it said.
+   *
+   * The buffer is the adapter's last lines and is emptied by a draining read, so a count of what
+   * it holds read as the whole console: a run that had printed more than it keeps answered the
+   * newest lines as all of them, and one read after editor_output had drained it answered none.
+   */
+  outputSoFar(): { lines: number; output: string[]; notShown?: number; note?: string } {
+    const output = this.getOutput(false);
+    const notShown = this.outputDropped + this.outputTaken;
+    if (notShown === 0) {
+      return { lines: output.length, output };
+    }
+    const where = [
+      this.outputDropped > 0
+        ? `${this.outputDropped} fell out of this buffer, which keeps the last ${this.maxOutputLines}`
+        : '',
+      this.outputTaken > 0 ? `${this.outputTaken} were moved into the run's log by an earlier read` : '',
+    ].filter((part) => part !== '');
+    return {
+      lines: output.length,
+      output,
+      notShown,
+      note: `${notShown} earlier ${notShown === 1 ? 'line is' : 'lines are'} not in this answer: ${where.join(', and ')}. editor_output reads what the server kept of the run's console.`,
+    };
   }
 
   /**
@@ -958,9 +991,8 @@ export async function handleDAPTool(
       // JSON like every other answer: a caller that reads one tool with a parser should not
       // have to read this one with a regex.
       case 'dap_get_output': {
-        const output = client.getOutput(false);
         return {
-          content: [{ type: 'text', text: JSON.stringify({ lines: output.length, output }, null, 2) }],
+          content: [{ type: 'text', text: JSON.stringify(client.outputSoFar(), null, 2) }],
         };
       }
 

@@ -1567,7 +1567,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'debug_state',
     description:
-      "Where the debugged game is stopped: the stack trace, what is in scope at a frame with the values, or the debug adapter's console output so far. A stop is reported by the editor's adapter only to the sessions connected when it happened, so a server that connected afterwards, which is every server after a reconnect, is shown a thread and no frames about a game still sitting at its breakpoint. That server asks the runtime instead: a held game accepts a connection and never answers, and the refusal then says held rather than running, and that the stack cannot be read from here. debug_control continue lets it go, and the next stop is one this session is told about, with its stack.",
+      "Where the debugged game is stopped: the stack trace, what is in scope at a frame with the values, or the debug adapter's console output so far, its last thousand lines, with any earlier ones counted under notShown. A stop is reported by the editor's adapter only to the sessions connected when it happened, so a server that connected afterwards, which is every server after a reconnect, is shown a thread and no frames about a game still sitting at its breakpoint. That server asks the runtime instead: a held game accepts a connection and never answers, and the refusal then says held rather than running, and that the stack cannot be read from here. debug_control continue lets it go, and the next stop is one this session is told about, with its stack.",
     parameters: {
       frameId: {
         type: 'number',
