@@ -222,6 +222,7 @@ async function keep(): Promise<void> {
       pid,
       transcript: run.transcript,
       startedAt: run.startedAt,
+      startedBy: Date.now(),
       projectPath: run.projectPath,
       ...(run.servedBy === undefined ? {} : { servedBy: run.servedBy }),
       arguments: spec.args,

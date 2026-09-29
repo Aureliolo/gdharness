@@ -51,6 +51,15 @@ export interface RunRecord {
   /** The file both its streams are written to, in the order the lines landed. */
   readonly transcript: string;
   readonly startedAt: number;
+  /**
+   * When the pid was handed back, by which time the game had started, however long the launch took.
+   *
+   * What a process's own start is held against, since `startedAt` is when the start was asked for.
+   * A windowed run on Windows goes through a helper compiled on first use, and on a loaded runner the
+   * engine began more than the window after that: its own stop then refused it as a process started
+   * too late to be the run, and left it running. Absent from a note written before this was kept.
+   */
+  readonly startedBy?: number;
   readonly projectPath: string;
   /**
    * The project the server that started the run serves, which can be another than the run's.
@@ -341,6 +350,7 @@ function recordAt(path: string): RunRecord | null {
     pid,
     transcript,
     startedAt,
+    ...(typeof fields['startedBy'] === 'number' ? { startedBy: fields['startedBy'] } : {}),
     projectPath: typeof fields['projectPath'] === 'string' ? fields['projectPath'] : '',
     ...(typeof fields['servedBy'] === 'string' && fields['servedBy'] !== ''
       ? { servedBy: fields['servedBy'] }
@@ -545,7 +555,12 @@ async function windowsImage(pid: number): Promise<string | null> {
  * ours, and the caller that acts on this is the one that kills.
  */
 export async function stillTheRecordedRun(record: RunRecord): Promise<boolean> {
-  return judgeRun(record, await runningAs(record.pid), 'confirmed');
+  return (await whyNotStillTheRecordedRun(record)) === null;
+}
+
+/** Why the process under the record's pid cannot be confirmed as the run, or null when it can. */
+export async function whyNotStillTheRecordedRun(record: RunRecord): Promise<string | null> {
+  return whyNotTheRun(record, await runningAs(record.pid), 'confirmed');
 }
 
 /**
@@ -597,8 +612,23 @@ export function judgeRun(
   running: RunningAs | null,
   needed: 'confirmed' | 'possible',
 ): boolean {
+  return whyNotTheRun(record, running, needed) === null;
+}
+
+/**
+ * The same comparison, saying which property disagreed, or null when none did.
+ *
+ * A refusal that named every property it compares could not say which one it was: a stop on a
+ * Windows runner refused its own game, and nothing told a start too late for the run from a command
+ * line the platform would not give.
+ */
+export function whyNotTheRun(
+  record: RunRecord,
+  running: RunningAs | null,
+  needed: 'confirmed' | 'possible',
+): string | null {
   if (running === null) {
-    return false;
+    return 'the operating system would not describe that process';
   }
   // When the process started, which is the one thing a recycled number cannot carry over. Every
   // other property a record holds belongs to the engine and the project, and a machine running a
@@ -619,14 +649,16 @@ export function judgeRun(
   // The cost is a clock stepped backwards by more than the window between the note being written
   // and the process being asked about, which would read a live run as finished. Remote against an
   // adjustment of that size, and the alternative is a stale yes on every fan-out.
-  if (running.startedAt !== undefined && running.startedAt - record.startedAt > SAME_RUN_WINDOW_MS) {
-    return false;
+  const after =
+    running.startedAt === undefined ? 0 : running.startedAt - (record.startedBy ?? record.startedAt);
+  if (after > SAME_RUN_WINDOW_MS) {
+    return `that process started ${Math.round(after / 1000)} seconds after the run had`;
   }
   const engine = record.command === undefined ? null : basename(record.command);
   const said = process.platform === 'win32' ? running.text.toLowerCase() : running.text;
   const wanted = engine === null || process.platform !== 'win32' ? engine : engine.toLowerCase();
   if (wanted !== null && !said.includes(wanted)) {
-    return false;
+    return `that process is not ${engine ?? 'the engine'}, which the run was started with`;
   }
   // An editor is not a run, and nothing else here separates the two: the editor holding a project
   // and a game of that project are the same binary pointed at the same directory, which is all
@@ -638,18 +670,23 @@ export function judgeRun(
   // too weak to kill on. Read as the engine reads them, so a game given `-e` as one of its own
   // arguments is not taken for an editor and left running by every stop.
   if (running.kind === 'commandLine' && readCommandLine(running.text).editor) {
-    return false;
+    return 'that process is an editor';
   }
   if (record.projectPath === '') {
     // An older record names no project to compare, so the executable is the whole of what there
     // is to go on either way. A record written by this version answers both.
-    return wanted !== null;
+    return wanted !== null ? null : 'the record names neither the project nor the engine';
   }
   if (running.kind === 'image') {
-    return needed === 'possible' && wanted !== null;
+    if (wanted === null) {
+      return 'the operating system named only its executable, and the record names no engine';
+    }
+    return needed === 'possible'
+      ? null
+      : 'the operating system named only its executable and not its command line, which is not enough to signal it on';
   }
   const project = process.platform === 'win32' ? record.projectPath.toLowerCase() : record.projectPath;
-  return said.includes(project);
+  return said.includes(project) ? null : `that process's command line does not name ${record.projectPath}`;
 }
 
 /** Whether [param pid] is still the game that announced itself for [param projectPath]: see `judgeAnnouncedGame`. */
