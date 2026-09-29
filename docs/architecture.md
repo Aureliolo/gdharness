@@ -546,6 +546,8 @@ read as the engine reads its own, up to the `--` after which the game's begin, s
 the one that kills. Held against what the server holds rather than against the note, because the
 note can be gone while the run goes on. A stop that signalled nothing answers `stopped: false` and
 names the number under `notSignalled`, since a caller reads `stopped`, not the warning beside it.
+For the same reason a game told to end that is still running when the stop's wait is over answers
+`stopped: false`, with the number under `stillGoing`.
 
 A game no note names, left by a server before a reconnect or started some other way, is ended by
 `editor_run stop` with its `pid`, and only when it announced itself for this project and its whole
