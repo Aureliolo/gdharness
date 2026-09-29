@@ -3581,12 +3581,15 @@ async function testDebugging({ call, refusal, attempt, play, project }: Editor):
   assert.match(text(get(total, 'value')), /\b4\b/, 'and should read as the 4 the line above worked out');
 
   // One line, run. The game is held either way, so what says the step happened is where it is
-  // held now: a step that did nothing leaves it on the line it was already on.
-  await call('debug_control', { op: 'step_over' });
-  await stackWithin(
-    attempt,
-    `stepping should leave the game held past line ${BREAK_LINE}`,
-    (stack) => stack.length > 0 && asNumber(get(stack[0], 'line')) > BREAK_LINE,
+  // held now: a step that did nothing leaves it on the line it was already on. Read from the
+  // step's own answer, which is where a caller reads it: the adapter answers the request before
+  // the step lands, and a stack read on that answer alone was the frames from before it.
+  const over = await call('debug_control', { op: 'step_over' });
+  assert.equal(get(over, 'heldAgain'), true, `the step should stop the game again: ${JSON.stringify(over)}`);
+  const overStack = asArray(get(over, 'stack'), 'stack');
+  assert.ok(
+    overStack.length > 0 && asNumber(get(overStack[0], 'line')) > BREAK_LINE,
+    `the step's answer should have the game held past line ${BREAK_LINE}: ${JSON.stringify(over)}`,
   );
 
   // Into the call on that line. Judged by the function the top frame is in, which is the only
@@ -3595,11 +3598,12 @@ async function testDebugging({ call, refusal, attempt, play, project }: Editor):
   // There is no step_out to come back with: Godot's adapter parser implements req_next and
   // req_stepIn and nothing for stepOut, so the request is never answered. Stepping over from
   // inside the function runs it to its end and returns to the caller, which is the way back.
-  await call('debug_control', { op: 'step_into' });
-  const inside = await stackWithin(
-    attempt,
-    'step_into should leave the game inside the function that line calls',
-    (stack) => stack.length > 0 && text(get(stack[0], 'name')) === '_twice',
+  const into = await call('debug_control', { op: 'step_into' });
+  const inside = asArray(get(into, 'stack'), 'stack');
+  assert.equal(
+    inside.length > 0 ? text(get(inside[0], 'name')) : '',
+    '_twice',
+    `step_into's answer should have the game inside the function that line calls: ${JSON.stringify(into)}`,
   );
   assert.ok(inside.length > 1, 'with the caller still under it on the stack');
 

@@ -20,6 +20,14 @@ const DAP_REQUEST_TIMEOUT_MS = 10_000;
 const SCOPES_TIMEOUT_MS = 20_000;
 
 /**
+ * How long a step is given to stop the game again before it is answered as running.
+ *
+ * A step over a line runs everything the line calls, so it is as long as the line is; this is the
+ * wait before saying so, not a limit on the step.
+ */
+const STEP_LANDS_WITHIN_MS = 10_000;
+
+/**
  * What one poll for a frame's variables waits.
  *
  * Short, because the adapter answers nothing at all while the dump is in flight, and a poll that
@@ -121,6 +129,8 @@ export class GodotDAPClient {
   private halt: StoppedAt | null = null;
   /** Whether `halt` is an answer or a default. See [holdIsKnown]. */
   private holdKnown = false;
+  /** How many stops this connection has been told of, so a step can wait for the one it causes. */
+  private stops = 0;
   /** The breakpoints set through this side, by file: sent again before every play and kept. */
   private breakpoints = new Map<string, Set<number>>();
   /**
@@ -137,15 +147,18 @@ export class GodotDAPClient {
 
   /** How long a frame's scopes and values are waited for; see [SCOPES_TIMEOUT_MS]. */
   readonly scopesPatienceMs: number;
+  /** How long a step is given to stop the game again; see [STEP_LANDS_WITHIN_MS]. */
+  readonly stepPatienceMs: number;
 
   constructor(
     port = portFromEnv('GDHARNESS_DAP_PORT', DEFAULT_DAP_PORT),
     host = '127.0.0.1',
-    scopesPatienceMs = SCOPES_TIMEOUT_MS,
+    patience: { scopesMs?: number; stepMs?: number } = {},
   ) {
     this.port = port;
     this.host = host;
-    this.scopesPatienceMs = scopesPatienceMs;
+    this.scopesPatienceMs = patience.scopesMs ?? SCOPES_TIMEOUT_MS;
+    this.stepPatienceMs = patience.stepMs ?? STEP_LANDS_WITHIN_MS;
     this.pendingRequests = new Map();
   }
 
@@ -392,6 +405,7 @@ export class GodotDAPClient {
         text: said(body, 'text'),
       };
       this.holdKnown = true;
+      this.stops += 1;
       return;
     }
 
@@ -731,21 +745,29 @@ export class GodotDAPClient {
     this.holdKnown = true;
   }
 
-  async stepOver(threadId?: number): Promise<void> {
-    await this.attach();
-    const resolvedThreadId = await this.resolveThreadId(threadId);
-    await this.sendRequest('next', { threadId: resolvedThreadId });
-  }
-
   /**
+   * Steps, and answers whether the game stopped again within [stepPatienceMs].
+   *
+   * The adapter answers the request at once and the step happens after: the editor lets the game
+   * go and the game stops again, each told to this connection as an event. A stack read on the
+   * answer alone was a read of whatever the adapter held at that moment, the frames before the step
+   * or none between the two, so it waits for the stop the step causes. Counted from before the
+   * request, since the stop can arrive ahead of the answer.
+   *
    * There is no stepOut beside this. Godot's debug adapter parser implements req_next and
    * req_stepIn and nothing for stepOut, so the request is never answered and the call waits out
    * its timeout. Measured on 4.7.2, then read in the engine's own source.
    */
-  async stepInto(threadId?: number): Promise<void> {
+  async step(command: 'next' | 'stepIn'): Promise<boolean> {
     await this.attach();
-    const resolvedThreadId = await this.resolveThreadId(threadId);
-    await this.sendRequest('stepIn', { threadId: resolvedThreadId });
+    const resolvedThreadId = await this.resolveThreadId();
+    const before = this.stops;
+    await this.sendRequest(command, { threadId: resolvedThreadId });
+    const deadline = Date.now() + this.stepPatienceMs;
+    while (this.stops === before && this.connected && Date.now() < deadline) {
+      await delay(50);
+    }
+    return this.stops !== before;
   }
 
   async getStackTrace(threadId?: number): Promise<DAPArrayItem[]> {
@@ -965,8 +987,7 @@ export async function handleDAPTool(
       }
 
       // JSON like every other answer, and with the stack after the step rather than a sentence
-      // about it: where the game is now is the thing the next call is decided on, and a step that
-      // ran off the end of the program has an empty one.
+      // about it: where the game is now is the thing the next call is decided on.
       case 'dap_continue': {
         await client.continue();
         return { content: [{ type: 'text', text: JSON.stringify({ continued: true }, null, 2) }] };
@@ -974,19 +995,15 @@ export async function handleDAPTool(
 
       case 'dap_step_over':
       case 'dap_step_into': {
-        if (toolName === 'dap_step_into') {
-          await client.stepInto();
-        } else {
-          await client.stepOver();
-        }
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify({ stepped: true, stack: await client.getStackTrace() }, null, 2),
-            },
-          ],
-        };
+        const heldAgain = await client.step(toolName === 'dap_step_into' ? 'stepIn' : 'next');
+        const answer = heldAgain
+          ? { stepped: true, heldAgain, stack: await client.getStackTrace() }
+          : {
+              stepped: true,
+              heldAgain,
+              note: `The game had not stopped again ${client.stepPatienceMs / 1000}s after the step: the step is still running, it went on without stopping anywhere, or the game was not held when it was asked. debug_state stack answers once it stops.`,
+            };
+        return { content: [{ type: 'text', text: JSON.stringify(answer, null, 2) }] };
       }
 
       case 'dap_get_stack_trace': {

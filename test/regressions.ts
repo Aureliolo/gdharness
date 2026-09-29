@@ -1226,7 +1226,7 @@ async function testAVariablesReadSaysWhatItCouldNotRead(): Promise<void> {
     { name: 'Members', variablesReference: 2 },
   ];
   await withFramedPeer(adapter(both), async (port) => {
-    const client = new GodotDAPClient(port, '127.0.0.1', 1500);
+    const client = new GodotDAPClient(port, '127.0.0.1', { scopesMs: 1500 });
     try {
       const read = await handleDAPTool(client, 'dap_get_variables', {});
       const answer = JSON.parse(textOf({ jsonrpc: '2.0', result: read }) ?? '{}') as unknown;
@@ -1252,12 +1252,92 @@ async function testAVariablesReadSaysWhatItCouldNotRead(): Promise<void> {
   });
 
   await withFramedPeer(adapter([]), async (port) => {
-    const client = new GodotDAPClient(port, '127.0.0.1', 1500);
+    const client = new GodotDAPClient(port, '127.0.0.1', { scopesMs: 1500 });
     try {
       const read = await handleDAPTool(client, 'dap_get_variables', {});
       const said = textOf({ jsonrpc: '2.0', result: read }) ?? '';
       assert.equal(read.isError, true, `scopes that never came are not an empty frame: ${said}`);
       assert.match(said, /The scopes of frame 0 did not arrive from the game within 1\.5s/, said);
+    } finally {
+      await client.abandon();
+    }
+  });
+}
+
+/**
+ * A step answers where the game stopped after it, and says so when it has not stopped.
+ *
+ * Godot's adapter answers `next` at once and the step lands after, told as a `stopped` event. A
+ * stack read on the answer alone was a read of the frames before the step: measured in the editor
+ * tier, where it answered the line the step left. The stand-in answers the same way, moving its
+ * line only when it sends the stop, and in the last step never stops again, which is the branch
+ * the engine case does not reach.
+ */
+async function testAStepAnswersWhereItLanded(): Promise<void> {
+  let line = 30;
+  const adapter: FramedPeerHandler = (message, socket) => {
+    const command = String(message['command']);
+    const body =
+      command === 'threads'
+        ? { threads: [{ id: 1, name: 'Main' }] }
+        : command === 'stackTrace'
+          ? { stackFrames: [{ id: 0, name: '_ready', line }] }
+          : {};
+    const stop = (): void => {
+      socket.write(
+        frameJsonRpc({ seq: 2, type: 'event', event: 'stopped', body: { reason: 'step', threadId: 1 } }),
+      );
+    };
+    // The first step stops after its answer; the second before it, which nothing in the protocol
+    // rules out.
+    if (command === 'next' && line === 31) {
+      line = 32;
+      stop();
+    }
+    socket.write(
+      frameJsonRpc({ seq: 1, type: 'response', request_seq: message['seq'], command, success: true, body }),
+    );
+    if (command === 'next' && line === 30) {
+      setTimeout(() => {
+        line = 31;
+        stop();
+      }, 300);
+    }
+  };
+
+  await withFramedPeer(adapter, async (port) => {
+    const client = new GodotDAPClient(port, '127.0.0.1', { stepMs: 1000 });
+    try {
+      const over = await handleDAPTool(client, 'dap_step_over', {});
+      const landed = JSON.parse(textOf({ jsonrpc: '2.0', result: over }) ?? '{}') as unknown;
+      assert.equal(
+        get(landed, 'heldAgain'),
+        true,
+        `the step stopped the game again: ${JSON.stringify(landed)}`,
+      );
+      assert.equal(
+        get(landed, 'stack', 0, 'line'),
+        31,
+        `and its answer is the line it landed on: ${JSON.stringify(landed)}`,
+      );
+
+      const early = await handleDAPTool(client, 'dap_step_over', {});
+      const ahead = JSON.parse(textOf({ jsonrpc: '2.0', result: early }) ?? '{}') as unknown;
+      assert.equal(
+        get(ahead, 'stack', 0, 'line'),
+        32,
+        `a stop told ahead of the step's answer is the step's: ${JSON.stringify(ahead)}`,
+      );
+
+      const into = await handleDAPTool(client, 'dap_step_into', {});
+      const running = JSON.parse(textOf({ jsonrpc: '2.0', result: into }) ?? '{}') as unknown;
+      assert.equal(
+        get(running, 'heldAgain'),
+        false,
+        `a step with no stop after it: ${JSON.stringify(running)}`,
+      );
+      assert.equal(get(running, 'stack'), undefined, 'answers no stack, which would be the one from before');
+      assert.match(String(get(running, 'note')), /had not stopped again 1s after the step/);
     } finally {
       await client.abandon();
     }
@@ -23434,6 +23514,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testProjectGodotMultilineValues,
   testLettingGoOfTheAdapterSendsItNothing,
   testAVariablesReadSaysWhatItCouldNotRead,
+  testAStepAnswersWhereItLanded,
   testAStopIsKnownToTheConnectionItWasSentTo,
   testAStopThatLandsWhileAttachAsksIsTheAnswer,
   testAContinueByAnotherClientIsKnownHere,

@@ -1555,7 +1555,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'debug_control',
     description:
-      "Continues or steps the debugged game through the editor's debug adapter, answering with the stack where it ended up. There is no pause and no step_out: Godot's adapter answers a pause by reporting the game stopped and leaving it running, and implements no stepOut at all, so hold the game where you want it with a breakpoint and step over or into from there.",
+      "Continues or steps the debugged game through the editor's debug adapter. A step waits for the game to stop again and answers with the stack where it ended up; one that has not stopped the game again within ten seconds answers heldAgain false and no stack. There is no pause and no step_out: Godot's adapter answers a pause by reporting the game stopped and leaving it running, and implements no stepOut at all, so hold the game where you want it with a breakpoint and step over or into from there.",
     parameters: {},
     requires: [],
     operations: {
