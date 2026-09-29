@@ -656,6 +656,14 @@ fails rather than being skipped. What JSON does carry exactly is left alone, whi
 list is still `["res://addons/x/plugin.cfg"]` rather than a wrapper around one; `type_convert`
 restores the exact packed type wherever the receiver knows which one it wanted.
 
+Infinity and NaN are the numbers JSON cannot carry. The engine writes infinity as `1e99999` and NaN
+as `null`; the server reads the first as `Infinity` and writes both back out as `null`, so a
+property holding `INF` was answered as holding nothing. Each is tagged as
+`{"_type": "float", "value": "inf"}` (or `"-inf"`, `"nan"`), bare or as a component of a vector,
+colour or rectangle, and a write accepts the same tag. The fixture holds the wire text itself to
+having neither spelling, because a round trip through the engine's own JSON reads `1e99999` back as
+infinity and passes on the wire that loses it.
+
 The other direction, a value arriving to be written, is `property_values.gd` on the editor side. It
 reads the serialiser's tags, so every shape a read answers with is a shape a write accepts, and adds
 the part only a property knows: the type wanted, so a dictionary shaped like a vector, or a bare pair

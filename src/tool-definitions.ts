@@ -357,7 +357,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       value: {
         blank: true,
         description:
-          'The value to write. Engine types may be tagged, {"_type": "Vector2", "x": 1, "y": 2}. "" writes an empty string.',
+          'The value to write. Engine types may be tagged, {"_type": "Vector2", "x": 1, "y": 2}, and infinity as {"_type": "float", "value": "inf"}, the form a read answers with. "" writes an empty string.',
       },
       name: { type: 'string', description: 'Autoload name.' },
       path: { type: 'string', description: 'Autoload script or scene inside the project.' },
