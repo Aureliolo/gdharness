@@ -10810,6 +10810,26 @@ async function testAnAnnotatedDeclarationIsStillADeclaration(): Promise<void> {
         asArray(get(reread, 'signals') ?? []).length >= 1,
         `and the signal is in it: ${JSON.stringify(reread)}`,
       );
+
+      // A class created is a class to whatever starts next, which reads the list and not the file.
+      // The answer said registered on the strength of the argument while nothing wrote the list.
+      const created = await call('script_edit', {
+        projectPath: project,
+        op: 'create',
+        scriptPath: 'res://made/listed.gd',
+        className: 'Listed',
+        extends: 'Node2D',
+      });
+      assert.deepEqual(
+        [get(created, 'registered'), get(created, 'class_name'), get(created, 'extends')],
+        [true, 'Listed', 'Node2D'],
+        `the class is registered: ${JSON.stringify(created)}`,
+      );
+      assert.equal(
+        cachedClasses(project)?.get('Listed'),
+        'res://made/listed.gd',
+        'because the class list on disk now holds it',
+      );
     } finally {
       await server.stop();
     }
