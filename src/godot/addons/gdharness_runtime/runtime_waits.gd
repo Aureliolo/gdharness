@@ -3,6 +3,7 @@ extends RefCounted
 ## The commands that take time: they let the game run and answer when what was waited for has
 ## happened, or when the time ran out, so the caller never sleeps for a guessed length.
 
+const Changes = preload("runtime_changes.gd")
 const Paths = preload("runtime_paths.gd")
 const Queries = preload("runtime_queries.gd")
 const Read = preload("reading.gd")
@@ -149,7 +150,7 @@ func wait_until(params: Dictionary) -> Dictionary:
 	# two ops would disagree about one property, and the wait would run out on the text null.
 	var untyped_object: bool = declared == TYPE_NIL and (current == null or typeof(current) == TYPE_OBJECT)
 	var holds_objects: bool = declared == TYPE_OBJECT or untyped_object
-	if holds_objects and wanted is String and str(wanted).strip_edges() == "null":
+	if holds_objects and Changes.names_no_object(wanted):
 		wanted = null
 	var refused: String = _not_comparable(current, wanted, node_path, property)
 	var never_held: bool = typeof(wanted) != TYPE_NIL and typeof(wanted) != TYPE_OBJECT
@@ -247,16 +248,15 @@ static func _watched(node: Node, node_path: String, property: String) -> Diction
 	return {"value": Paths.read_under(holder, named), "declared": _declared_type(holder, named)}
 
 
-## The type [param named] is declared with on [param holder], or TYPE_NIL for anything that declares
-## none: an untyped property, a step into a list or map, or a call.
+## The type [param named] is declared with on [param holder], read the way a set reads it, so the two
+## refuse the same values: a property's declaration, or a typed list's or map's element type. Read
+## off properties alone, an element of an Array[Node] holding null declares nothing, and a wait for 5
+## on it runs out the timeout while a set of 5 on it is refused at once. TYPE_NIL for anything
+## declaring none, and for a call, whose answer nothing declares.
 static func _declared_type(holder: Variant, named: String) -> int:
-	if typeof(holder) != TYPE_OBJECT or not Paths.method_of(named).is_empty():
+	if not Paths.method_of(named).is_empty():
 		return TYPE_NIL
-	var object: Object = holder
-	for entry: Dictionary in object.get_property_list():
-		if str(entry.get("name", "")) == named:
-			return Read.as_int(entry.get("type", TYPE_NIL), TYPE_NIL)
-	return TYPE_NIL
+	return Values.slot_declared(holder, named)["type"]
 
 
 ## Waits until something under [param node_path] has [param said] written on it.

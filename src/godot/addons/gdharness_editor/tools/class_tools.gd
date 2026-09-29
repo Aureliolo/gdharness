@@ -49,9 +49,10 @@ func set_editor_plugin(plugin: EditorPlugin) -> void:
 ## returned OK and compiled nothing is exactly the failure worth catching, and the members it now
 ## has are the only thing that can tell those apart.
 func reload_script(args: Dictionary) -> Dictionary:
-	var path: String = str(args.get("scriptPath", ""))
-	if path.is_empty():
+	var asked: String = str(args.get("scriptPath", ""))
+	if asked.is_empty():
 		return {"ok": false, "error": "scriptPath is required"}
+	var path: String = _spelled_as_on_disk(asked)
 	if not ResourceLoader.exists(path):
 		return {"ok": false, "error": "No script at " + path}
 
@@ -80,21 +81,58 @@ func reload_script(args: Dictionary) -> Dictionary:
 
 	# A reload that fails is still answered as a call that ran, because the readings are what a
 	# caller needs then: a failure travels back as its message alone, and a project met one and
-	# could not tell whether the copy had been damaged by it or before it. The old text goes back
-	# into the object, so what it holds and the source it says it was built from still agree.
+	# could not tell whether the copy had been damaged by it or before it.
+	#
+	# And the old text is compiled again. A failed reload leaves the object unusable while its member
+	# lists read as before, measured on 4.7.2: it can make no instance, and an instance it already made
+	# has lost its methods, and the old text put back uncompiled leaves it that way. Compiling the text
+	# it was built from puts it back, and whether that worked is said, since the text may no longer
+	# compile against what it names.
 	var failed: Error = script.reload(true)
-	if failed != OK:
-		script.source_code = previous
-	return {
+	var answer: Dictionary = {
 		"ok": true,
 		"script": path,
 		"failed": failed,
 		"failedAs": error_string(failed) if failed != OK else "",
 		"heldBefore": held,
-		"methods": _method_names(script),
 		"heldConstantsBefore": held_constants,
-		"constants": _constant_names(script),
 	}
+	if failed != OK:
+		script.source_code = previous
+		var restored: Error = script.reload(true)
+		answer["restored"] = restored == OK
+		if restored != OK:
+			answer["restoredAs"] = error_string(restored)
+	answer["methods"] = _method_names(script)
+	answer["constants"] = _constant_names(script)
+	return answer
+
+
+## [param path] as the files on disk spell it, a step at a time, or as given where a step is not
+## there. On a filesystem that ignores case, `res://Core/Rules.gd` opens the file at
+## `res://core/rules.gd`, but the editor holds its copy under the spelling on disk, and a load by
+## another spelling misses that copy and compiles a new one: reloading that answers with a fresh
+## compile's members and leaves the copy the editor holds as it was.
+static func _spelled_as_on_disk(path: String) -> String:
+	var local: String = ProjectSettings.localize_path(path)
+	if not local.begins_with("res://"):
+		return local
+	var spelled: String = "res://"
+	for step: String in local.trim_prefix("res://").split("/", false):
+		var listing: DirAccess = DirAccess.open(spelled)
+		if listing == null:
+			return local
+		var found: String = ""
+		for entry: String in listing.get_directories() + listing.get_files():
+			if entry == step:
+				found = entry
+				break
+			if found.is_empty() and entry.nocasecmp_to(step) == 0:
+				found = entry
+		if found.is_empty():
+			return local
+		spelled = spelled.path_join(found)
+	return spelled
 
 
 func _method_names(script: GDScript) -> Array[String]:
