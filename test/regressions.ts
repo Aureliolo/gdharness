@@ -19430,6 +19430,74 @@ async function testARunOfAnotherProjectOutlivesItsServer(): Promise<void> {
 }
 
 /**
+ * The godot:// resources read inside the project this server serves, and nowhere else.
+ *
+ * Three ways they read elsewhere, found in review. The containment check was lexical, so a link in
+ * the project (a junction here, which needs no privileges on Windows) was followed to whatever it
+ * named. The root was the projectPath of the last call, checked for nothing, so a call naming the
+ * root of a drive made every file under it readable. And a call naming another project's game
+ * moved the root there, so a server set up for one project answered from another.
+ */
+async function testTheResourcesReadOnlyTheProject(): Promise<void> {
+  const root = mkdtempSync(join(realpathSync.native(tmpdir()), 'gdharness-resources-'));
+  const ours = join(root, 'ours');
+  const theirs = join(root, 'theirs');
+  const outside = join(root, 'outside');
+  for (const directory of [ours, theirs, outside]) {
+    mkdirSync(directory);
+  }
+  writeFileSync(join(ours, 'project.godot'), 'config_version=5\n');
+  writeFileSync(join(theirs, 'project.godot'), 'config_version=5\n');
+  writeFileSync(join(ours, 'main.gd'), 'extends Node # ours\n');
+  writeFileSync(join(theirs, 'main.gd'), 'extends Node # theirs\n');
+  writeFileSync(join(outside, 'secret.gd'), 'the secret\n');
+  symlinkSync(outside, join(ours, 'vendor'), 'junction');
+  const read = async (request: RawRequest, uri: string): Promise<string> => {
+    const answer = await request('resources/read', { uri });
+    return answer.error?.message ?? text(get(answer.result, 'contents', 0, 'text'));
+  };
+  try {
+    await withStdioServer(
+      async (call, request) => {
+        assert.match(await read(request, 'godot://script/main.gd'), /# ours/, 'the project is read');
+        const linked = await read(request, 'godot://script/vendor/secret.gd');
+        assert.doesNotMatch(linked, /the secret/, `a link out of the project is not followed: ${linked}`);
+        assert.match(linked, /leads outside the project through a link/, linked);
+
+        await call('project_search', { projectPath: theirs, query: 'extends' });
+        assert.match(
+          await read(request, 'godot://script/main.gd'),
+          /# ours/,
+          "a call naming another project leaves the server's own as the one read",
+        );
+      },
+      { GDHARNESS_PROJECT: ours, GODOT_PATH: process.execPath },
+    );
+
+    await withStdioServer(
+      async (call, request) => {
+        await call('project_search', { projectPath: theirs, query: 'extends' });
+        assert.match(
+          await read(request, 'godot://script/main.gd'),
+          /# theirs/,
+          'a server with no project of its own reads the last project named',
+        );
+        await call('project_search', { projectPath: root, query: 'extends' });
+        const underRoot = await read(request, 'godot://script/outside/secret.gd');
+        assert.doesNotMatch(
+          underRoot,
+          /the secret/,
+          `a directory with no project.godot is no root: ${underRoot}`,
+        );
+      },
+      { GODOT_PATH: process.execPath },
+    );
+  } finally {
+    sweep(root);
+  }
+}
+
+/**
  * A test run the timeout ends is called hung only when it had stopped printing.
  *
  * Hung sends a reader looking for a deadlock in the last suite named, and a run printing a passing
@@ -23949,6 +24017,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAForeignRunSurvivesAStart,
   testARunOutlivesItsServer,
   testARunOfAnotherProjectOutlivesItsServer,
+  testTheResourcesReadOnlyTheProject,
   testGdUnitRunner,
   testATestRunCutShortIsNamedForWhatItWasDoing,
   testAnUpgradeReadsTheEngineOutOfTheConfigItRewrites,

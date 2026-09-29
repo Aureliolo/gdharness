@@ -1732,7 +1732,9 @@ class GodotServer {
       { capabilities: { tools: {}, resources: {} } },
     );
     this.setupToolHandlers();
-    setupResourceHandlers(this.mcp, () => this.lastProjectPath);
+    // The project this server serves first, so a call naming another project's game does not move
+    // what the resources read; the last project named only for a server that can name none.
+    setupResourceHandlers(this.mcp, () => this.ourProject() ?? this.lastProjectPath);
     this.mcp.server.onerror = (error) => {
       console.error('[MCP Error]', error);
     };
@@ -2125,8 +2127,11 @@ class GodotServer {
       if (!checked.ok) {
         return checked.response;
       }
-      if (typeof args['projectPath'] === 'string') {
-        this.lastProjectPath = args['projectPath'];
+      // Only a project, since it becomes the root the godot:// resources are read under: any
+      // directory named here, the root of a drive included, was taken as one.
+      const named = args['projectPath'];
+      if (typeof named === 'string' && existsSync(join(named, 'project.godot'))) {
+        this.lastProjectPath = named;
       }
       // Started here and not waited for: whatever it learns lands on a later call, and a
       // registry that never answers costs this one nothing.
