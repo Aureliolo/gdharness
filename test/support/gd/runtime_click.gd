@@ -54,6 +54,7 @@ func _everything() -> void:
 	await _check_the_world_behind_the_interface()
 	await _check_words_nobody_can_click()
 	await _check_a_dialog_over_a_dialog()
+	await _check_a_dialog_under_a_clipping_container()
 
 	host.queue_free()
 	if failures.is_empty():
@@ -479,6 +480,116 @@ func _check_words_nobody_can_click() -> void:
 		_fail("and the one on screen is clicked without a tie: %s" % JSON.stringify(near))
 	for named: String in ["Far", "Fold", "Near"]:
 		root.get_node(named).queue_free()
+	await process_frame
+
+
+## A dialog a clipping container holds is its own viewport, and the container is not around it.
+##
+## The dialog is a window embedded in the root, so its buttons are placed in the dialog's space and
+## drawn wherever the dialog is. With a clipping control above the dialog, a click by the dialog's
+## words judged each button against that control's box in the root's space, found it outside, and
+## refused it as off the screen. The container here scrolls as well, and a click inside the dialog
+## must not scroll it.
+func _check_a_dialog_under_a_clipping_container() -> void:
+	var holder: ScrollContainer = ScrollContainer.new()
+	holder.name = "Holder"
+	holder.position = Vector2(50, 50)
+	holder.size = Vector2(10, 10)
+	root.add_child(holder)
+	var inside: Control = Control.new()
+	inside.name = "Inside"
+	inside.custom_minimum_size = Vector2(10, 100)
+	holder.add_child(inside)
+	var asking: AcceptDialog = AcceptDialog.new()
+	asking.name = "Asking"
+	inside.add_child(asking)
+	_put("Leave", Vector2(4, 4), asking, "Leave it")
+	asking.popup(Rect2i(0, 0, 40, 40))
+	await process_frame
+	await process_frame
+	var clicked: Dictionary = await input.click({"says": "Leave it"})
+	if clicked.get("path") != "/root/Holder/Inside/Asking/Leave" or _presses("Leave") != 1:
+		_fail("a dialog's button is clicked wherever the dialog sits: %s" % JSON.stringify(clicked))
+	if holder.scroll_vertical != 0:
+		_fail("and the container the dialog sits under is not scrolled: %d" % holder.scroll_vertical)
+
+	# Below the fold of a list the dialog holds, where the click has to work out where scrolling
+	# will bring it, by the dialog's own containers alone.
+	var list: ScrollContainer = ScrollContainer.new()
+	list.name = "List"
+	list.position = Vector2(2, 16)
+	list.size = Vector2(30, 14)
+	asking.add_child(list)
+	var column: VBoxContainer = VBoxContainer.new()
+	column.name = "Column"
+	list.add_child(column)
+	var spacer: Control = Control.new()
+	spacer.custom_minimum_size = Vector2(10, 40)
+	column.add_child(spacer)
+	_put("Further", Vector2.ZERO, column, "Further")
+	# Scrolled already, so a scroll it was wrongly asked for would move it: at the top, asking it to
+	# show something above and left of it changes nothing and would hide the fault.
+	holder.scroll_vertical = 40
+	await process_frame
+	await process_frame
+	var further: Dictionary = await input.click({"says": "Further"})
+	if further.get("path") != "/root/Holder/Inside/Asking/List/Column/Further" or _presses("Further") != 1:
+		_fail("a button below the dialog's own fold is clicked: %s" % JSON.stringify(further))
+	if list.scroll_vertical == 0 or holder.scroll_vertical != 40:
+		var scrolls: Array[int] = [list.scroll_vertical, holder.scroll_vertical]
+		_fail("by scrolling the dialog's list and not the container outside: %d, %d" % scrolls)
+	asking.hide()
+	holder.queue_free()
+	await process_frame
+
+	# The engine's own confirmation, borderless and centred, pressed by its words through its own
+	# buttons: the shape the report described, which clicks with nothing clipping above it too.
+	var page: Control = Control.new()
+	page.name = "Page"
+	page.size = Vector2(64, 64)
+	root.add_child(page)
+	var confirm: ConfirmationDialog = ConfirmationDialog.new()
+	confirm.name = "Confirm"
+	confirm.borderless = true
+	confirm.ok_button_text = "Go ahead"
+	confirm.cancel_button_text = "Leave it"
+	var small: Theme = Theme.new()
+	small.default_font_size = 4
+	confirm.theme = small
+	page.add_child(confirm)
+	confirm.popup_centered(Vector2i(40, 30))
+	await process_frame
+	await process_frame
+	var cancelled: Array[int] = [0]
+	var count_cancel: Callable = func() -> void: cancelled[0] += 1
+	Checked.done(confirm.canceled.connect(count_cancel) as Error, "counting the confirmation's cancel")
+	var left: Dictionary = await input.click({"says": "Leave it"})
+	if cancelled[0] != 1:
+		_fail("the confirmation's own cancel is pressed by its words: %s" % JSON.stringify(left))
+	page.queue_free()
+	await process_frame
+
+	# Words in a dialog a button holds are the dialog's: a label there is not a way to press the
+	# button the dialog was added under, which is in another viewport.
+	var outer: Button = _button("Outer", Vector2(50, 2), root, "")
+	var note: AcceptDialog = AcceptDialog.new()
+	note.name = "Note"
+	outer.add_child(note)
+	var words: Label = Label.new()
+	words.name = "Words"
+	words.text = "Answer me"
+	words.mouse_filter = Control.MOUSE_FILTER_STOP
+	words.position = Vector2(4, 4)
+	words.size = Vector2(20, 10)
+	note.add_child(words)
+	note.popup(Rect2i(0, 0, 40, 40))
+	await process_frame
+	await process_frame
+	var answered: Dictionary = await input.click({"says": "Answer me"})
+	if answered.get("path") != "/root/Outer/Note/Words" or _presses("Outer") != 0:
+		_fail("words in a dialog a button holds do not press that button: %s" % JSON.stringify(answered))
+	note.hide()
+	outer.queue_free()
 	await process_frame
 
 

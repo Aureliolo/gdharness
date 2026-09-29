@@ -229,7 +229,7 @@ static func _covered_note(covered: int, cover: Node) -> String:
 ## its words means.
 static func _pressed_through(control: Control) -> Control:
 	var walk: Node = control
-	while walk != null:
+	while walk != null and not (walk is Viewport):
 		if walk is BaseButton:
 			var pressed: BaseButton = walk
 			return pressed
@@ -376,7 +376,7 @@ static func _where_it_lands(target: Control, point: Vector2) -> Vector2:
 	var half: Vector2 = (drawn * Rect2(Vector2.ZERO, target.size)).size * 0.5
 	var landed: Vector2 = point
 	var walk: Node = target.get_parent()
-	while walk != null:
+	while walk != null and not (walk is Viewport):
 		var holder: ScrollContainer = walk as ScrollContainer
 		if holder != null:
 			var shown: Rect2 = holder.get_global_transform_with_canvas() * Rect2(Vector2.ZERO, holder.size)
@@ -405,9 +405,13 @@ static func _off_screen(target: Control) -> bool:
 
 
 ## Whether a container clipping what it holds cuts [param point] off from [param control].
+##
+## Only up to the viewport [param control] is in. A dialog is a window, and the containers the game
+## added it under are in another space: judged against a clipping one of those, every button of a
+## confirmation was refused as off the screen while it sat in plain view.
 static func _clipped_away(control: Control, point: Vector2) -> bool:
 	var walk: Node = control.get_parent()
-	while walk != null:
+	while walk != null and not (walk is Viewport):
 		var holder: Control = walk as Control
 		if holder != null and holder.clip_contents and not _holds(holder, point):
 			return true
