@@ -14,7 +14,6 @@ const Words = preload("runtime_words.gd")
 ## The most nodes one find answers with, unless asked for fewer: enough for any real query and
 ## far short of the tree dump a query exists to avoid.
 const FIND_LIMIT: int = 100
-const FIND_LIMIT_CEILING: int = 1000
 
 ## What a find can be narrowed by, which is also what it refuses to answer without. Named once so
 ## the refusal lists the same set the walk reads.
@@ -23,6 +22,11 @@ const FILTERS: PackedStringArray = ["class", "script", "name", "group", "says"]
 ## The most lines one read answers with, unless asked for fewer. A screen is a few dozen; a
 ## thousand is a tree somebody pointed this at by mistake.
 const READ_LIMIT: int = 500
+
+## The most either can be asked for. A limit above it is refused rather than cut to it: the ceiling
+## was the default for a read, so the remedy its own answer gave, raising the limit, changed nothing
+## and said nothing, and a caller told to raise a number that stays put concludes the screen moved.
+const LIMIT_CEILING: int = 5000
 
 var _host: Node
 var _values: Values
@@ -88,7 +92,11 @@ func find_nodes(params: Dictionary) -> Dictionary:
 		wanted[filter] = str(params.get(filter, ""))
 	var wanted_property: String = str(params.get("property", ""))
 	var include_hidden: bool = Read.as_bool(params.get("include_hidden", true), true)
-	var limit: int = clampi(Read.as_int(params.get("limit", FIND_LIMIT), FIND_LIMIT), 1, FIND_LIMIT_CEILING)
+	var limit: int = Read.as_int(params.get("limit", FIND_LIMIT), FIND_LIMIT)
+	if limit < 1 or limit > LIMIT_CEILING:
+		return {
+			"type": "error", "message": "limit is from 1 to %d, and %d was asked for" % [LIMIT_CEILING, limit]
+		}
 
 	if not _anything_asked(wanted):
 		return {"type": "error", "message": "find_nodes needs at least one of " + ", ".join(FILTERS)}
@@ -339,7 +347,11 @@ static func _script_is(attached: Script, wanted: String) -> bool:
 func read_text(params: Dictionary) -> Dictionary:
 	var root_path: String = str(params.get("root", "/root"))
 	var include_hidden: bool = Read.as_bool(params.get("include_hidden", false))
-	var limit: int = clampi(Read.as_int(params.get("limit", READ_LIMIT), READ_LIMIT), 1, READ_LIMIT)
+	var limit: int = Read.as_int(params.get("limit", READ_LIMIT), READ_LIMIT)
+	if limit < 1 or limit > LIMIT_CEILING:
+		return {
+			"type": "error", "message": "limit is from 1 to %d, and %d was asked for" % [LIMIT_CEILING, limit]
+		}
 
 	var reached: Dictionary = Values.node_at(_host.get_tree().root, root_path)
 	if reached.has("message"):

@@ -1179,15 +1179,16 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       limit: {
         type: 'integer',
         minimum: 1,
+        maximum: 5000,
         ops: ['find', 'text'],
         description:
-          'find: the most nodes to answer with, default 100. text: the most lines, default 500, with omitted saying how many lines that left behind. A screen whose dialog sits under a long list is a screen read with omitted greater than zero, so raise this or point root at the dialog rather than reading the answer as what is on screen.',
+          'find: the most nodes to answer with, default 100. text: the most lines, default 500, with omitted saying how many lines that left behind. At most 5000 for either. A screen whose dialog sits under a long list is a screen read with omitted greater than zero, so raise this or point root at the dialog rather than reading the answer as what is on screen.',
       },
       includeHidden: {
         type: 'boolean',
         ops: ['text', 'find'],
         description:
-          'text: read hidden nodes as well, for checking that something is not showing. Default false. find: default true, since a find means the node whether or not it is drawn; false answers with what the player can actually see, which is how a panel that keeps a label for every line and hides the ones that do not is read. A node counts as hidden when anything above it is, and how many matches were left out comes back under hidden.',
+          'text: read hidden nodes as well, for checking that something is not showing. Default false. find: default true, since a find means the node whether or not it is drawn; false answers with what the player can actually see, which is how a panel that keeps a label for every line and hides the ones that do not is read. A node counts as hidden when the engine would not draw it: a hidden Control, Node2D or Node3D above it hides it, a plain Node in between breaks that chain as it does for the engine, and a hidden canvas layer or window hides everything in it. How many matches were left out comes back under hidden.',
       },
       metrics: {
         type: 'array',

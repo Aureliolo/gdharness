@@ -27,6 +27,7 @@ func _run() -> void:
 	await _check_reading_rich_text()
 	await _check_reading_lists()
 	await _check_reading_as_drawn()
+	await _check_a_long_screen()
 	node._cleanup()
 	# Not checked: it is gone either way by the time the fixture tears itself down.
 	var _took_directory: Error = DirAccess.remove_absolute(directory)
@@ -42,6 +43,35 @@ func _run() -> void:
 
 func _fail(message: String) -> void:
 	failures.append(message)
+
+
+## A limit can be raised past the default and is refused past the ceiling. The ceiling was the
+## default for a read and 1000 for a find, so a longer screen answered that many whatever limit was
+## asked for, with nothing saying the ask had been cut.
+func _check_a_long_screen() -> void:
+	var long: VBoxContainer = VBoxContainer.new()
+	long.name = "Long"
+	root.add_child(long)
+	for index: int in range(1200):
+		var line: Label = Label.new()
+		line.text = "line %d" % index
+		long.add_child(line)
+	await process_frame
+	var all: Dictionary = await node._execute_command("read_text", {"root": "/root/Long", "limit": 1200})
+	if all.get("count") != 1200 or all.get("omitted") != 0:
+		_fail("a limit above the default reads that many lines: %s" % str(all.get("count")))
+	var many: Dictionary = await node._execute_command(
+		"find_nodes", {"class": "Label", "root": "/root/Long", "limit": 1500}
+	)
+	if many.get("count") != 1200:
+		_fail("and a find past the old ceiling answers every match: %s" % str(many.get("count")))
+	for command: String in ["read_text", "find_nodes"]:
+		var too_many: Dictionary = await node._execute_command(
+			command, {"class": "Label", "root": "/root/Long", "limit": 6000}
+		)
+		if too_many.get("type") != "error" or not str(too_many.get("message", "")).contains("5000"):
+			_fail("%s past the ceiling is refused, naming it: %s" % [command, str(too_many)])
+	long.queue_free()
 
 
 ## A RichTextLabel reads as its words, not its markup. Its text is the BBCode when it reads BBCode,
