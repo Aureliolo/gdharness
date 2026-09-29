@@ -11,7 +11,9 @@ One of the two runtimes, not both: `npx` ships with Node, `bunx` with Bun, and t
 under either.
 
 `setup` finds Godot itself, in the usual install locations. Set `GODOT_PATH` to the binary if
-yours is somewhere else, and it will write that path into the config it generates.
+yours is somewhere else, and it will write that path into the config it generates. Without either,
+`upgrade` and the other commands use the engine the project's own config names, and in a git
+worktree with no config of its own, the one the main checkout's config names.
 
 ## Hand it to your agent
 

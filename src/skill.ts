@@ -51,7 +51,8 @@ that is running, and the project on disk. ${TOOL_SPECS.length} tools, named \`do
   (an older \`addonVersion\` on the same code is not stale), and \`staleNote\` says which half is behind: an editor that
   needs restarting, or a server that needs reconnecting in your harness. Every answer that came
   from the editor carries the same two when they differ, so a stale addon cannot answer quietly:
-  believe a restart over a diagnostic that arrived with them.
+  believe a restart over a diagnostic that arrived with them. A game's runtime addon is judged
+  the same way, under each entry in \`runtimes\` and on every \`runtime_*\` answer from it.
 - Start the game with \`editor_run start\`, never by spawning an engine. The editor plays it, so
   its debugger holds it, which is what gives the \`debug_*\` tools something to talk to. Its answer
   says under \`runtime\` whether the game can be talked to yet; when it cannot, \`mayYetAnnounce\`

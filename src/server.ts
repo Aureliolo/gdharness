@@ -192,6 +192,8 @@ import {
   editorIsStale,
   GODOT_DEBUG_MODE_DEFAULT,
   markIfStale,
+  runtimeAddonUnknown,
+  runtimeMismatch,
   SERVER_VERSION,
   sameCodeNote,
 } from './server-version.js';
@@ -199,8 +201,10 @@ import {
   inspectProject,
   installedAddonVersion,
   installedEditorDigest,
+  installedRuntimeDigest,
   RUNTIME_AUTOLOAD,
   shippedEditorDigest,
+  shippedRuntimeDigest,
 } from './setup.js';
 import {
   asParams,
@@ -2355,6 +2359,19 @@ class GodotServer {
     const status = this.godotBridge.getStatus();
     const project = (status.connected ? status.projectPath : undefined) ?? this.ownProject;
     return project === null || project === '' ? undefined : installedEditorDigest(project);
+  }
+
+  /** What to do about the runtime addon [param endpoint] loaded, or undefined when it is this server's. */
+  private runtimeStaleNote(endpoint: RuntimeEndpoint): string | undefined {
+    const project = endpoint.project.path;
+    return runtimeMismatch(
+      endpoint.pid,
+      endpoint.addon,
+      SERVER_VERSION,
+      shippedRuntimeDigest(),
+      project === '' ? undefined : installedRuntimeDigest(project),
+      project,
+    );
   }
 
   /** What the project's own MCP config asks for, when it is not what is answering. */
@@ -4911,6 +4928,8 @@ class GodotServer {
                 ok: false as const,
                 message: `The game is held by the editor's debugger, ${describeHalt(held)}, and answers no runtime call while it is. debug_control continue lets it go.`,
               };
+        const staleNote = this.runtimeStaleNote(endpoint);
+        const unknown = runtimeAddonUnknown(endpoint.addon);
         return {
           pid: endpoint.pid,
           port: endpoint.port,
@@ -4924,6 +4943,12 @@ class GodotServer {
           // whatever that game started for itself, carries the editor's process id; a game
           // another server started carries none. Absent when the game announced none.
           editorPid: endpoint.editorPid,
+          // The runtime addon the game loaded, null when the game could not say, which a runtime
+          // from before games reported it cannot and a copy with no markers cannot either.
+          addonVersion:
+            endpoint.addon === undefined || endpoint.addon.version === '' ? null : endpoint.addon.version,
+          ...(unknown ? {} : { addonIsStale: staleNote !== undefined }),
+          ...(staleNote === undefined ? {} : { staleNote }),
           reachable: reply.ok,
           problem: reply.ok ? null : reply.message,
         };
@@ -8964,6 +8989,12 @@ class GodotServer {
     }
     const screenshotDir = expectsScreenshot ? scratchDirectory('runtime-screenshot') : null;
     const screenshotPath = screenshotDir ? join(screenshotDir, 'capture.png') : null;
+    // On every answer, the refusals most of all: a command an older runtime does not know, or
+    // answers the old way, is where a stale addon shows, and nothing else in the answer says so.
+    const staleNote = this.runtimeStaleNote(choice.endpoint);
+    const stale = staleNote === undefined ? {} : { addonIsStale: true, staleNote };
+    const refused = (message: string): ToolResponse =>
+      this.createErrorResponse(staleNote === undefined ? message : `${message}\n\n${staleNote}`);
     try {
       const reply = await runtimeRequest(
         choice.endpoint,
@@ -8983,25 +9014,24 @@ class GodotServer {
           waitedMs: timeoutMs,
           note: reply.message,
           ...answeredBy,
+          ...stale,
         });
       }
       if (!reply.ok) {
-        return this.createErrorResponse(reply.message);
+        return refused(reply.message);
       }
 
       const { id: _id, ...payload } = reply.payload;
       if (!expectsScreenshot) {
-        return this.jsonTextResponse({ ...payload, ...answeredBy });
+        return this.jsonTextResponse({ ...payload, ...answeredBy, ...stale });
       }
 
       const returnedPath = readString(payload, 'path');
       if (readString(payload, 'type') !== 'screenshot_file' || !returnedPath || !screenshotPath) {
-        return this.createErrorResponse(`The game answered a capture with ${JSON.stringify(payload)}`);
+        return refused(`The game answered a capture with ${JSON.stringify(payload)}`);
       }
       if (normalize(returnedPath) !== normalize(screenshotPath)) {
-        return this.createErrorResponse(
-          `Rejected screenshot file path outside the managed capture path: '${returnedPath}'`,
-        );
+        return refused(`Rejected screenshot file path outside the managed capture path: '${returnedPath}'`);
       }
       const dimensions = `${readNumber(payload, 'width') ?? 0}x${readNumber(payload, 'height') ?? 0} ${
         readString(payload, 'format') ?? 'unknown'
@@ -9020,7 +9050,7 @@ class GodotServer {
         content: [
           {
             type: 'text',
-            text: `Screenshot captured: ${dimensions}${chosenAmongSeveral ? ` from pid ${own}, the game this server holds` : ''}${saveTo === null ? '' : `. Saved to ${saveTo}`}`,
+            text: `Screenshot captured: ${dimensions}${chosenAmongSeveral ? ` from pid ${own}, the game this server holds` : ''}${saveTo === null ? '' : `. Saved to ${saveTo}`}${staleNote === undefined ? '' : `\n\n${staleNote}`}`,
           },
           { type: 'image', data: readFileSync(screenshotPath).toString('base64'), mimeType: 'image/png' },
         ],

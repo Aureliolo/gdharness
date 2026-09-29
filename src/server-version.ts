@@ -110,6 +110,59 @@ export function addonMismatch(
   return `${both} ${restart}`;
 }
 
+/** A game that reports its runtime addon and could not read the markers that say what it is. */
+export function runtimeAddonUnknown(
+  addon: { readonly version: string; readonly digest: string } | undefined,
+): boolean {
+  return addon?.version === '' && addon.digest === '';
+}
+
+/**
+ * What to do about a game running a runtime addon other than this server's, or undefined when it
+ * runs this server's or cannot say what it runs.
+ *
+ * The same question as `addonMismatch` asks of the editor, for the addon inside a game. A second
+ * checkout of a project, a git worktree, carried a runtime addon three releases behind its server
+ * and nothing said so: every runtime answer came from the old code, and the protocol, which is
+ * all that was compared, had not moved. [param addon] is absent for a runtime from before games
+ * said what they loaded, and every one of those is behind. [param onDisk] is the digest the game's
+ * own project holds, which is what the game loads the next time it starts.
+ */
+export function runtimeMismatch(
+  pid: number,
+  addon: { readonly version: string; readonly digest: string } | undefined,
+  serverVersion: string,
+  shippedDigest: string | undefined,
+  onDisk: string | null | undefined,
+  projectPath: string,
+): string | undefined {
+  if (runtimeAddonUnknown(addon)) {
+    return undefined;
+  }
+  if (addon !== undefined && !editorIsStale(addon.version, serverVersion, addon.digest, shippedDigest)) {
+    return undefined;
+  }
+  const game = `The game (pid ${pid})`;
+  if (addon !== undefined && addon.version !== '' && isNewer(addon.version, serverVersion)) {
+    return `${game} is running the ${addon.version} runtime addon while this server ships ${serverVersion}. This server is the older half: reconnect it in your harness so it spawns ${addon.version}.`;
+  }
+  let loaded: string;
+  if (addon === undefined) {
+    loaded = `a runtime addon from before games reported theirs, while this server ships ${serverVersion}`;
+  } else if (addon.version === serverVersion) {
+    loaded = `a different build of the ${serverVersion} runtime addon from the one this server ships`;
+  } else if (addon.version === '') {
+    loaded = `a runtime addon with no version marker, while this server ships ${serverVersion}`;
+  } else {
+    loaded = `the ${addon.version} runtime addon, while this server ships ${serverVersion}`;
+  }
+  const remedy =
+    onDisk !== undefined && onDisk !== shippedDigest
+      ? `The project's own runtime addon is not this server's either, so starting the game again loads the same code: gdharness upgrade in ${projectPath} installs the ${serverVersion} addons, and the game picks them up when it next starts.`
+      : `The project holds this server's runtime addon, so the game picks it up when it next starts.`;
+  return `${game} is running ${loaded}, and its answers come from that code. ${remedy}`;
+}
+
 /**
  * An answer from the editor, marked when the addon that produced it is not this server's.
  *
