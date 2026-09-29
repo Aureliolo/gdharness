@@ -165,6 +165,7 @@ import {
   endedPreviousRun,
   endedToStartThis,
   endedWithoutACode,
+  exportAnswer,
   leftRunningNote,
   noCodeWillCome,
   PLAY_STARTS_WITHIN_MS,
@@ -179,7 +180,7 @@ import {
   timedOutVerdict,
   uidsLeftNote,
 } from '../src/server.js';
-import type { GodotProcess } from '../src/server-types.js';
+import type { GodotProcess, ToolResponse } from '../src/server-types.js';
 import {
   addonMismatch,
   editorIsStale,
@@ -13060,6 +13061,39 @@ async function testAKilledRunHasNoExitCode(): Promise<void> {
  * project does. The processes are real ones, because how they end is what is being read.
  */
 /**
+ * An export is exported when this run wrote its file. The file an earlier export left read as this
+ * one's, so an export that exited cleanly having written nothing was answered as exported.
+ */
+function testAnExportIsJudgedByTheFileItWrote(): void {
+  const clean = (): EngineRun => {
+    const log = new GameLog();
+    log.finish();
+    return { log, exitCode: 0, exitSignal: null, failure: null };
+  };
+  const asked = { preset: 'Linux', outputPath: 'builds/game.x86_64', debug: false };
+  const said = (response: ToolResponse): unknown[] => [
+    response.isError === true,
+    String(response.content[0]?.text).split('\n')[0],
+  ];
+
+  assert.deepEqual(
+    said(exportAnswer(clean(), asked, 1000, 1000)),
+    [
+      true,
+      "Export with preset 'Linux' did not produce builds/game.x86_64. The builds/game.x86_64 there is from before this export, which did not write it.",
+    ],
+    'an untouched file from before is not this export',
+  );
+  assert.equal(get(parseTextContent({ result: exportAnswer(clean(), asked, 1000, 2000) }), 'exported'), true);
+  assert.equal(get(parseTextContent({ result: exportAnswer(clean(), asked, null, 5) }), 'exported'), true);
+  assert.deepEqual(
+    said(exportAnswer(clean(), asked, null, null)),
+    [true, "Export with preset 'Linux' did not produce builds/game.x86_64."],
+    'and with no file at all there is nothing from before to mention',
+  );
+}
+
+/**
  * The note on a scan still running names what started and where its complaints are.
  *
  * A headless operation's answer once carried the game's note: it spoke of a game that never
@@ -22745,6 +22779,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAKilledRunHasNoExitCode,
   testAnEngineRunSaysHowItEnded,
   testTheScanNoteNamesWhatStarted,
+  testAnExportIsJudgedByTheFileItWrote,
   testAWordsWaitLeavesTheGameItsSpeed,
   testTheAnnounceWaitIsNotHeldByASlowEditor,
   testTheWaitSizedToABootIsSaid,

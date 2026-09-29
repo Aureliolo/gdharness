@@ -1141,6 +1141,56 @@ function withScanWait(outcome: HeadlessOutcome, scanned: ScanWait): HeadlessOutc
 }
 
 /**
+ * What project_export answers for [param ending], given when its output file was last written
+ * before the export and after it, null where there was none.
+ *
+ * Exported means this run wrote the file. A file an earlier export left there read as this one's, so
+ * an export that exited cleanly having written nothing was answered as having exported.
+ */
+export function exportAnswer(
+  ending: EngineRun,
+  asked: { readonly preset: string; readonly outputPath: string; readonly debug: boolean },
+  before: number | null,
+  after: number | null,
+): ToolResponse {
+  const { log } = ending;
+  const written = after !== null && after !== before;
+  const problems = log.select({ severity: 'warning', sinceLastCall: false, limit: 200 });
+  const verdict = {
+    exported: ending.exitCode === 0 && ending.failure === null && log.count('error') === 0 && written,
+    ...asked,
+    exitCode: ending.exitCode,
+    exitSignal: ending.exitSignal ?? undefined,
+    failure: ending.failure ?? undefined,
+    errors: log.count('error'),
+    warnings: log.count('warning'),
+    entries: forAnswer(problems.entries),
+    ...(problems.omitted === 0 ? {} : { entriesOmitted: problems.omitted }),
+  };
+  if (verdict.exported) {
+    return { content: [{ type: 'text', text: JSON.stringify(verdict, null, 2) }] };
+  }
+  const stale =
+    !written && after !== null
+      ? ` The ${asked.outputPath} there is from before this export, which did not write it.`
+      : '';
+  const why =
+    ending.exitSignal === null
+      ? stale
+      : ` The engine was ${howItEnded(ending)}, so it has no exit code.${stale}`;
+  return {
+    content: [
+      {
+        type: 'text',
+        text: `Export with preset '${asked.preset}' did not produce ${asked.outputPath}.${why}`,
+      },
+      { type: 'text', text: JSON.stringify(verdict, null, 2) },
+    ],
+    isError: true,
+  };
+}
+
+/**
  * What a caller is told about the wait for the editor's scan before [param started] began.
  *
  * Apart for a game and a headless engine because the two are read in different places: a game's
@@ -3598,6 +3648,11 @@ class GodotServer {
     ];
     this.logDebug(`Exporting: ${engine.value} ${exportArgs.join(' ')}`);
 
+    // The file this run writes, told from one an earlier export left there: an export that exited
+    // cleanly and wrote nothing read as exported from the last one's file.
+    const writtenAt = (): number | null =>
+      existsSync(output.absolutePath) ? statSync(output.absolutePath).mtimeMs : null;
+    const before = writtenAt();
     let ending: EngineRun;
     try {
       // An export of a real project is slow, so it gets five minutes rather than no limit.
@@ -3610,41 +3665,7 @@ class GodotServer {
         `Export could not be run: ${ending.failure ?? 'the engine gave no exit status'}`,
       );
     }
-    const { log } = ending;
-
-    const problems = log.select({ severity: 'warning', sinceLastCall: false, limit: 200 });
-    const verdict = {
-      exported:
-        ending.exitCode === 0 &&
-        ending.failure === null &&
-        log.count('error') === 0 &&
-        existsSync(output.absolutePath),
-      preset,
-      outputPath: output.relativePath,
-      debug,
-      exitCode: ending.exitCode,
-      exitSignal: ending.exitSignal ?? undefined,
-      failure: ending.failure ?? undefined,
-      errors: log.count('error'),
-      warnings: log.count('warning'),
-      entries: forAnswer(problems.entries),
-      ...(problems.omitted === 0 ? {} : { entriesOmitted: problems.omitted }),
-    };
-    if (!verdict.exported) {
-      const why =
-        ending.exitSignal === null ? '' : ` The engine was ${howItEnded(ending)}, so it has no exit code.`;
-      return {
-        content: [
-          {
-            type: 'text',
-            text: `Export with preset '${preset}' did not produce ${output.relativePath}.${why}`,
-          },
-          { type: 'text', text: JSON.stringify(verdict, null, 2) },
-        ],
-        isError: true,
-      };
-    }
-    return this.jsonTextResponse(verdict);
+    return exportAnswer(ending, { preset, outputPath: output.relativePath, debug }, before, writtenAt());
   }
 
   /**
