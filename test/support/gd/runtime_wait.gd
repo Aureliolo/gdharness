@@ -1,8 +1,9 @@
 extends SceneTree
 
-## The commands that take time: a click that presses and releases a frame apart, and the
-## waits for frames, a signal and a property. They need the main loop running, so the checks
-## start on the first frame rather than in _init, and the fixture quits when they are done.
+## The commands that take time: a click that presses and releases a frame apart, and the waits for
+## frames and a property; the wait for a signal is runtime_signal.gd. They need the main loop
+## running, so the checks start on the first frame rather than in _init, and the fixture quits
+## when they are done.
 
 const Checked = preload("checked.gd")
 const Read = preload("res://addons/gdharness_runtime/reading.gd")
@@ -61,7 +62,6 @@ func _run() -> void:
 	await _check_a_menu()
 	await _check_a_translated_menu()
 	await _check_frames()
-	await _check_signal()
 	await _check_until()
 
 	node._cleanup()
@@ -680,43 +680,6 @@ func _check_frames() -> void:
 	var none: Dictionary = await node._execute_command("wait_frames", {"frames": 0})
 	if none.get("type") != "error":
 		_fail("a wait of no frames should be refused: %s" % str(none))
-
-
-func _check_signal() -> void:
-	var timer: Timer = Timer.new()
-	timer.name = "Fuse"
-	timer.one_shot = true
-	timer.wait_time = 0.05
-	root.add_child(timer)
-	timer.start()
-	var fired: Dictionary = await node._execute_command(
-		"wait_signal", {"path": "/root/Fuse", "signal": "timeout"}
-	)
-	if fired.get("fired") != true:
-		_fail("a signal that fires should be reported as fired: %s" % str(fired))
-
-	var expired: Dictionary = await node._execute_command(
-		"wait_signal", {"path": "/root/Fuse", "signal": "timeout", "timeout_ms": 60}
-	)
-	if expired.get("fired") != false or Read.as_int(expired.get("elapsed_ms", 0)) < 60:
-		_fail(
-			"a signal that never fires should be reported as not fired after the timeout: %s" % str(expired)
-		)
-	if not timer.timeout.get_connections().is_empty():
-		_fail("the catcher should be disconnected once the wait gives up")
-
-	var with_args: Dictionary = await node._execute_command(
-		"wait_signal", {"path": "/root/Panel/Go", "signal": "toggled", "timeout_ms": 500}
-	)
-	if with_args.get("fired") != false:
-		_fail("toggled should not fire on its own: %s" % str(with_args))
-
-	var unknown: Dictionary = await node._execute_command(
-		"wait_signal", {"path": "/root/Fuse", "signal": "nonesuch"}
-	)
-	if unknown.get("type") != "error":
-		_fail("a signal the node does not have is refused: %s" % str(unknown))
-	timer.free()
 
 
 func _check_until() -> void:

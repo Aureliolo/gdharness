@@ -69,7 +69,6 @@ func wait_signal(params: Dictionary) -> Dictionary:
 		return {"type": "error", "message": "%s has no signal %s" % [node_path, signal_name]}
 
 	var catcher: SignalCatcher = SignalCatcher.new()
-	catcher.arity = _signal_arity(node, signal_name)
 	var callable: Callable = catcher._on_fired
 	var listening: Error = node.connect(signal_name, callable, CONNECT_ONE_SHOT)
 	if listening != OK:
@@ -376,26 +375,15 @@ func _anything_says(node_path: String, said: String, include_hidden: bool) -> bo
 	return false
 
 
-func _signal_arity(node: Node, signal_name: String) -> int:
-	for entry: Dictionary in node.get_signal_list():
-		if entry.get("name", "") == signal_name:
-			var declared: Array = entry.get("args", [])
-			return declared.size()
-	return 0
-
-
 ## Remembers that a signal fired and what it carried, for a wait that polls rather than
-## awaits the signal directly, so the wait can also give up. The handler accepts up to five
-## arguments, which covers every signal the engine declares, and records as many as the signal
-## has.
+## awaits the signal directly, so the wait can also give up. Takes any number of arguments: a
+## handler of five fixed ones covered the engine's signals, and a game's own signal with six was
+## never delivered to it, so the wait ran out and said the signal had not fired.
 class SignalCatcher:
 	extends RefCounted
 	var fired: bool = false
-	var arity: int = 0
 	var args: Array = []
 
-	func _on_fired(
-		a: Variant = null, b: Variant = null, c: Variant = null, d: Variant = null, e: Variant = null
-	) -> void:
+	func _on_fired(...carried: Array) -> void:
 		fired = true
-		args = [a, b, c, d, e].slice(0, mini(arity, 5))
+		args = carried
