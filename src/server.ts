@@ -86,6 +86,7 @@ import {
   writeEditorLogNote,
 } from './editor-log.js';
 import { errorMessage, Refusal } from './errors.js';
+import { type EngineRun, howItEnded, runEngine } from './engine-run.js';
 import { answersTo, forAnswer, GameLog, type LogEntry } from './game-log.js';
 import {
   anEditorIsStillComing,
@@ -94,7 +95,7 @@ import {
   theEditorHasComeBack,
 } from './godot-bridge.js';
 import { GodotLocator } from './godot-path.js';
-import { type HeadlessOutcome, runImport, runOperation } from './headless.js';
+import { engineExtras, type HeadlessOutcome, runImport, runOperation } from './headless.js';
 import { EDITOR_READS, ENGINE_PASSES, HEADLESS_OPERATIONS } from './headless-operations.js';
 import { DefectsSeen, defectReport, feedbackNotice } from './issues.js';
 import {
@@ -349,26 +350,6 @@ function describeHalt(halt: StoppedAt): string {
 /** Whether the process has exited, with a code or to a signal. */
 function exited(run: Pick<GodotProcess, 'exitCode' | 'exitSignal'>): boolean {
   return run.exitCode !== null || run.exitSignal !== null;
-}
-
-/**
- * How an engine run through execFile ended, read off the error it failed with.
- *
- * Three shapes: a number is the process's own exit code; a signal is a process killed with no code,
- * which is what execFile does at its timeout; and a string is Node's reason for having killed it,
- * such as more output than the buffer holds. All three were once answered as exit code -1, which is
- * also a code a program can exit with.
- */
-export function endingOf(failed: { readonly code?: unknown; readonly signal?: unknown }): {
-  exitCode: number | null;
-  exitSignal: string | null;
-  failure: string | null;
-} {
-  return {
-    exitCode: typeof failed.code === 'number' ? failed.code : null,
-    exitSignal: typeof failed.signal === 'string' ? failed.signal : null,
-    failure: typeof failed.code === 'string' ? failed.code : null,
-  };
 }
 
 /** How a process that has exited ended, for a sentence. */
@@ -3069,6 +3050,7 @@ class GodotServer {
         {
           ok: true,
           messages: imported.messages,
+          ...(imported.messagesOmitted === undefined ? {} : { messagesOmitted: imported.messagesOmitted }),
           payload: {
             uidsCreated: given,
             stillWithoutUid: after,
@@ -3298,9 +3280,7 @@ class GodotServer {
       if (!imported.ok) {
         return { ok: false, response: this.answer(withScanWait(imported, scanned)) };
       }
-      if (imported.messages.length > 0) {
-        extra['engine_messages'] = imported.messages;
-      }
+      Object.assign(extra, engineExtras(imported));
       if (imported.extensionNote !== undefined) {
         extra['extensionNote'] = imported.extensionNote;
       }
@@ -3425,21 +3405,15 @@ class GodotServer {
   }
 
   private answer(outcome: HeadlessOutcome): ToolResponse {
+    const extras = engineExtras(outcome);
     if (!outcome.ok) {
       const response = this.createErrorResponse(outcome.message);
-      if (outcome.messages.length > 0) {
-        response.content.push({
-          type: 'text',
-          text: JSON.stringify({ engine_messages: outcome.messages }, null, 2),
-        });
+      if (Object.keys(extras).length > 0) {
+        response.content.push({ type: 'text', text: JSON.stringify(extras, null, 2) });
       }
       return response;
     }
-    return this.jsonTextResponse(
-      outcome.messages.length > 0
-        ? { ...outcome.payload, engine_messages: outcome.messages }
-        : outcome.payload,
-    );
+    return this.jsonTextResponse({ ...outcome.payload, ...extras });
   }
 
   // -------------------------------------------------------------------------------------------
@@ -3487,10 +3461,8 @@ class GodotServer {
       }
       const outcome = await this.operation(spec.operation, spec.params(args, detailed), project.value.path);
       info[section] = outcome.ok
-        ? outcome.messages.length > 0
-          ? { ...outcome.payload, engine_messages: outcome.messages }
-          : outcome.payload
-        : { error: outcome.message, engine_messages: outcome.messages };
+        ? { ...outcome.payload, ...engineExtras(outcome) }
+        : { error: outcome.message, ...engineExtras(outcome) };
     }
     return this.jsonTextResponse(info);
   }
@@ -3576,35 +3548,25 @@ class GodotServer {
     ];
     this.logDebug(`Exporting: ${engine.value} ${exportArgs.join(' ')}`);
 
-    const log = new GameLog();
-    let ending: ReturnType<typeof endingOf> = { exitCode: 0, exitSignal: null, failure: null };
+    let ending: EngineRun;
     try {
-      // An export of a real project is slow, so it gets five minutes rather than the default. And
-      // room to talk: execFile kills a process that prints past its buffer, a mebibyte by default,
-      // and what an export prints grows with the project.
-      const { stdout, stderr } = await run(engine.value, exportArgs, {
-        timeout: 300000,
-        maxBuffer: 64 * 1024 * 1024,
-        signal: callSignal(),
-      });
-      log.append('stdout', stdout);
-      log.append('stderr', stderr);
-    } catch (error) {
-      if (!(error instanceof Error && 'stdout' in error && 'stderr' in error)) {
-        return this.createErrorResponse(`Export could not be run: ${errorMessage(error)}`);
-      }
-      const failed = error as Error & { stdout: string; stderr: string; code?: unknown; signal?: unknown };
-      log.append('stdout', failed.stdout);
-      log.append('stderr', failed.stderr);
-      ending = endingOf(failed);
+      // An export of a real project is slow, so it gets five minutes rather than no limit.
+      ending = await runEngine(engine.value, exportArgs, { timeout: { ms: 300000, said: 'five minutes' } });
     } finally {
       discard(exportLogs);
     }
-    log.finish();
+    if (ending.exitSignal === null && ending.exitCode === null) {
+      return this.createErrorResponse(`Export could not be run: ${ending.failure ?? 'the engine gave no exit status'}`);
+    }
+    const { log } = ending;
 
     const problems = log.select({ severity: 'warning', sinceLastCall: false, limit: 200 });
     const verdict = {
-      exported: ending.exitCode === 0 && log.count('error') === 0 && existsSync(output.absolutePath),
+      exported:
+        ending.exitCode === 0 &&
+        ending.failure === null &&
+        log.count('error') === 0 &&
+        existsSync(output.absolutePath),
       preset,
       outputPath: output.relativePath,
       debug,
@@ -3614,14 +3576,10 @@ class GodotServer {
       errors: log.count('error'),
       warnings: log.count('warning'),
       entries: forAnswer(problems.entries),
+      ...(problems.omitted === 0 ? {} : { entriesOmitted: problems.omitted }),
     };
     if (!verdict.exported) {
-      const why =
-        ending.exitSignal === null
-          ? ending.failure === null
-            ? ''
-            : ` The engine was ended by Node (${ending.failure}), so it has no exit code.`
-          : ` The engine was ended by ${ending.exitSignal}, so it has no exit code: the export ran past its five minutes or the call was cancelled.`;
+      const why = ending.exitSignal === null ? '' : ` The engine was ${howItEnded(ending)}, so it has no exit code.`;
       return {
         content: [
           {

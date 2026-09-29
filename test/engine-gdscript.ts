@@ -359,18 +359,10 @@ function testDependencyWalk(godotPath: string, projectDir: string): void {
     'extends Node\n\nconst Ouro = preload("res://chain/ouro.gd")\n',
   );
 
-  const paramsPath = join(projectDir, 'deps.json');
-  writeFileSync(paramsPath, JSON.stringify({ resource_path: 'res://chain/top.gd', depth: 5 }));
-
-  const run = runScript(godotPath, projectDir, join(projectDir, 'operations', 'godot_operations.gd'), [
-    'get_dependencies',
-    `@file:${paramsPath}`,
-  ]);
-  if (run.status !== 0) {
-    throw new Error(`get_dependencies failed:\n${`${run.stdout}\n${run.stderr}`.trim()}`);
-  }
-
-  const payload = lastJsonLine(run.stdout, 'get_dependencies');
+  const payload = runOperation(godotPath, projectDir, 'get_dependencies', {
+    resource_path: 'res://chain/top.gd',
+    depth: 5,
+  });
 
   const top = asArray(get(payload, 'dependencies', 'res://chain/top.gd'), 'the walk result');
 
@@ -391,16 +383,9 @@ function testDependencyWalk(godotPath: string, projectDir: string): void {
   );
 
   // A cycle has to be reported rather than walked forever.
-  writeFileSync(paramsPath, JSON.stringify({ resource_path: 'res://chain/ouro.gd' }));
-  const cyclic = runScript(godotPath, projectDir, join(projectDir, 'operations', 'godot_operations.gd'), [
-    'get_dependencies',
-    `@file:${paramsPath}`,
-  ]);
-  if (cyclic.status !== 0) {
-    throw new Error(`get_dependencies on a cycle failed:\n${`${cyclic.stdout}\n${cyclic.stderr}`.trim()}`);
-  }
-
-  const cyclicPayload = lastJsonLine(cyclic.stdout, 'get_dependencies on a cycle');
+  const cyclicPayload = runOperation(godotPath, projectDir, 'get_dependencies', {
+    resource_path: 'res://chain/ouro.gd',
+  });
   assert.ok(
     asArray(get(cyclicPayload, 'circular_references')).length > 0,
     'the walk should report the cycle it found rather than silently stopping',
@@ -417,24 +402,18 @@ function testDependencyWalk(godotPath: string, projectDir: string): void {
     join(projectDir, 'chain', 'shipping.gd'),
     'extends Node\n\nconst Helper = preload("res://addons/fixture/helper.gd")\n\n\nfunc _cache() -> Variant:\n\treturn load("res://.godot/fixture_cache.gd")\n',
   );
-  writeFileSync(paramsPath, JSON.stringify({ resource_path: 'res://chain/shipping.gd', depth: 3 }));
-  const shipping = runScript(godotPath, projectDir, join(projectDir, 'operations', 'godot_operations.gd'), [
-    'get_dependencies',
-    `@file:${paramsPath}`,
-  ]);
-  rmSync(join(projectDir, 'chain', 'shipping.gd'));
-  if (shipping.status !== 0) {
-    throw new Error(
-      `get_dependencies through addons failed:\n${`${shipping.stdout}\n${shipping.stderr}`.trim()}`,
-    );
+  let shipping: unknown;
+  try {
+    shipping = runOperation(godotPath, projectDir, 'get_dependencies', {
+      resource_path: 'res://chain/shipping.gd',
+      depth: 3,
+    });
+  } finally {
+    rmSync(join(projectDir, 'chain', 'shipping.gd'));
   }
-  const shippingDeps = asArray(
-    get(
-      lastJsonLine(shipping.stdout, 'get_dependencies through addons'),
-      'dependencies',
-      'res://chain/shipping.gd',
-    ),
-  ).map((dep) => get(dep, 'path'));
+  const shippingDeps = asArray(get(shipping, 'dependencies', 'res://chain/shipping.gd')).map((dep) =>
+    get(dep, 'path'),
+  );
   assert.ok(
     shippingDeps.includes('res://addons/fixture/helper.gd'),
     `addons are walked: ${shippingDeps.join(', ')}`,
@@ -458,11 +437,7 @@ function runOperation(
   params: unknown,
   scriptPath?: string,
 ): unknown {
-  const paramsPath = join(projectDir, 'operation-params.json');
-  writeFileSync(paramsPath, JSON.stringify(params));
-
-  const script = scriptPath ?? join(projectDir, 'operations', 'godot_operations.gd');
-  const run = runScript(godotPath, projectDir, script, [operation, `@file:${paramsPath}`]);
+  const run = runOperationScript(godotPath, projectDir, operation, params, scriptPath);
   const output = `${run.stdout}\n${run.stderr}`;
 
   if (run.status !== 0) {
@@ -473,31 +448,52 @@ function runOperation(
   // and the server hands every such line on to the caller. So an operation that passes here is
   // one that answers cleanly.
   assert.equal(run.stderr.trim(), '', `${operation} succeeded but wrote to stderr:\n${run.stderr.trim()}`);
-
-  return lastJsonLine(run.stdout, operation);
+  assert.ok(run.answer !== null, `${operation} wrote no answer:\n${output.trim()}`);
+  return run.answer;
 }
 
-interface RefusedRun {
+interface OperationRun {
   status: number | null;
+  signal: NodeJS.Signals | null;
   stdout: string;
   stderr: string;
+  /** What the operation wrote to its answer file, or null when it wrote none. */
+  answer: unknown;
 }
 
-/** The exit status and combined output of an operation that is expected to refuse. */
+/**
+ * One operation run the way the server runs it, whatever it answers.
+ *
+ * `scriptPath` defaults to the copy inside the project. The server runs the one in its own
+ * package instead, from outside the project entirely, which is what testInstalledLayout passes.
+ */
+function runOperationScript(
+  godotPath: string,
+  projectDir: string,
+  operation: string,
+  params: unknown,
+  scriptPath?: string,
+): OperationRun {
+  const paramsPath = join(projectDir, 'operation-params.json');
+  const answerPath = join(projectDir, 'operation-answer.json');
+  writeFileSync(paramsPath, JSON.stringify(params));
+  rmSync(answerPath, { force: true });
+
+  const script = scriptPath ?? join(projectDir, 'operations', 'godot_operations.gd');
+  const run = runScript(godotPath, projectDir, script, [operation, `@file:${paramsPath}`, answerPath]);
+  const answer = existsSync(answerPath) ? (JSON.parse(readFileSync(answerPath, 'utf8')) as unknown) : null;
+  rmSync(answerPath, { force: true });
+  return { status: run.status, signal: run.signal, stdout: run.stdout, stderr: run.stderr, answer };
+}
+
+/** The exit status, output and answer of an operation that is expected to refuse. */
 function runRefusedOperation(
   godotPath: string,
   projectDir: string,
   operation: string,
   params: unknown,
-): RefusedRun {
-  const paramsPath = join(projectDir, 'operation-params.json');
-  writeFileSync(paramsPath, JSON.stringify(params));
-
-  const run = runScript(godotPath, projectDir, join(projectDir, 'operations', 'godot_operations.gd'), [
-    operation,
-    `@file:${paramsPath}`,
-  ]);
-  return { status: run.status, stdout: run.stdout, stderr: run.stderr };
+): OperationRun {
+  return runOperationScript(godotPath, projectDir, operation, params);
 }
 
 /** A scene with one node of each shape the scene operations are asked to work on. */
@@ -591,11 +587,7 @@ function testOperations(godotPath: string, projectDir: string): void {
     content: 'func _ready() -> void:\n\tvar loose = 1\n',
   });
   assert.equal(broken.status, 0, 'a script that was written is a success, whatever it says');
-  assert.equal(
-    get(lastJsonLine(broken.stdout, 'create_script'), 'parses'),
-    false,
-    'a script the engine refuses is reported as not parsing',
-  );
+  assert.equal(get(broken.answer, 'parses'), false, 'a script the engine refuses is reported as not parsing');
   assert.match(broken.stderr, /loose/, 'the reason is on stderr, where the server reads it from');
   // Gone again before the resave below walks the project, which would trip over it.
   rmSync(join(projectDir, 'made', 'broken.gd'));
@@ -1493,7 +1485,7 @@ function testRefusals(godotPath: string, projectDir: string): void {
   });
   assert.notEqual(missing.status, 0, 'a missing script should fail the run');
   assert.match(missing.stderr, /\[ERROR\].*does not exist/, 'the reason should be on stderr');
-  assert.doesNotMatch(missing.stdout, /^\{/m, 'a failed operation should print no payload');
+  assert.equal(missing.answer, null, 'a failed operation should write no answer');
 
   const unknown = runRefusedOperation(godotPath, projectDir, 'no_such_operation', {});
   assert.notEqual(unknown.status, 0, 'an unknown operation should fail the run');
@@ -1558,6 +1550,109 @@ function testAFamilyOfSettingsAnswersWithItsTypes(godotPath: string, projectDir:
   assert.equal(asNumber(get(none, 'count')), 0);
 }
 
+/**
+ * The answer is what the operation wrote, whatever the project prints and however the engine ends.
+ *
+ * Through the server's own path, because the reading is the server's. The project's autoloads run
+ * after the operation has answered: one printing a dictionary in `_process` was the last JSON line
+ * out and was taken as the answer, and one quitting with a code afterwards turned a write that had
+ * happened into a failure a caller would retry. The third project is the operations script faulting
+ * part-way, which the engine survives by handing the caller a default value and exiting 0.
+ */
+async function testTheAnswerIsTheOperations(godotPath: string): Promise<void> {
+  const dir = mkdtempSync(join(tmpdir(), 'gdharness-answer-'));
+  const operations = mkdtempSync(join(tmpdir(), 'gdharness-faulty-operations-'));
+  try {
+    writeFileSync(
+      join(dir, 'project.godot'),
+      [
+        'config_version=5',
+        '',
+        '[application]',
+        'config/name="Answered"',
+        '',
+        '[autoload]',
+        'Loud="*res://loud.gd"',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(dir, 'loud.gd'),
+      [
+        'extends Node',
+        '',
+        '',
+        'func _ready() -> void:',
+        '\tprint({"setting_path": "not the operation", "value": "loud _ready"})',
+        '\tif FileAccess.file_exists("res://quit_after"):',
+        '\t\tget_tree().quit(3)',
+        '',
+        '',
+        'func _process(_delta: float) -> void:',
+        '\tprint({"setting_path": "not the operation", "value": "loud _process"})',
+        '',
+      ].join('\n'),
+    );
+    const engine = { godotPath, script: resolve('src/godot/operations/godot_operations.gd'), debug: false };
+
+    const read = await runThroughTheServersOwnPath(
+      engine,
+      'get_project_setting',
+      { setting: 'application/config/name' },
+      dir,
+    );
+    assert.ok(read.ok, `the read should answer: ${read.ok ? '' : read.message}`);
+    assert.deepEqual(
+      [get(read.payload, 'setting_path'), get(read.payload, 'value'), read.afterAnswer],
+      ['application/config/name', 'Answered', undefined],
+      `the answer is the operation's, not the autoload's: ${JSON.stringify(read.payload)}`,
+    );
+
+    writeFileSync(join(dir, 'quit_after'), '');
+    const written = await runThroughTheServersOwnPath(
+      engine,
+      'set_project_setting',
+      { setting: 'application/config/description', value: 'written before the quit' },
+      dir,
+    );
+    assert.ok(written.ok, `a write that happened is answered as one: ${written.ok ? '' : written.message}`);
+    assert.match(
+      written.afterAnswer ?? '',
+      /wrote this answer, and then the engine did not exit cleanly \(exit code 3\)/,
+      String(written.afterAnswer),
+    );
+    assert.match(
+      readFileSync(join(dir, 'project.godot'), 'utf8'),
+      /^config\/description="written before the quit"$/m,
+      'and the write it answered for is on disk',
+    );
+    rmSync(join(dir, 'quit_after'));
+
+    // One helper made to raise part-way through building the answer, in a copy of the scripts.
+    cpSync(resolve('src/godot/operations'), operations, { recursive: true });
+    const config = join(operations, 'project_config.gd');
+    const source = readFileSync(config, 'utf8');
+    const faulted = source.replace('"setting_path": setting_path,', '"setting_path": _faulty(),');
+    assert.notEqual(faulted, source, 'the fault should have gone in where the answer is built');
+    writeFileSync(config, `${faulted}\n\nfunc _faulty() -> String:\n\tvar none: Array = []\n\treturn none[1]\n`);
+    const partial = await runThroughTheServersOwnPath(
+      { ...engine, script: join(operations, 'godot_operations.gd') },
+      'get_project_setting',
+      { setting: 'application/config/name' },
+      dir,
+    );
+    assert.ok(!partial.ok, `an answer the script faulted while building is refused: ${JSON.stringify(partial)}`);
+    assert.match(
+      partial.message,
+      /^get_project_setting hit an error in the operations script, so its answer is left out: .*Out of bounds get index '1'.* \(_faulty \(.*project_config\.gd:\d+\)\)$/,
+      partial.message,
+    );
+  } finally {
+    sweep(dir);
+    sweep(operations);
+  }
+}
+
 function testTheOperationsSurviveEveryWarning(godotPath: string): void {
   const dir = mkdtempSync(join(tmpdir(), 'gdharness-strict-'));
   try {
@@ -1587,6 +1682,20 @@ function testTheOperationsSurviveEveryWarning(godotPath: string): void {
     sweep(dir);
   }
 }
+
+/** The cases after the fixtures, in the order the leg runs them, by the name `case` takes. */
+const CASES: Readonly<Record<string, (godotPath: string, projectDir: string) => void | Promise<void>>> = {
+  dependencyWalk: testDependencyWalk,
+  operations: testOperations,
+  gdignore: testAGdignoreStopsTheWalk,
+  importJudged: testAnImportIsJudgedByWhatItWasBuiltFrom,
+  runningLog: (godotPath) => testAnOperationLeavesARunningLogAlone(godotPath),
+  refusals: testRefusals,
+  installedLayout: testInstalledLayout,
+  settingsFamily: testAFamilyOfSettingsAnswersWithItsTypes,
+  everyWarning: (godotPath) => testTheOperationsSurviveEveryWarning(godotPath),
+  answer: (godotPath) => testTheAnswerIsTheOperations(godotPath),
+};
 
 async function main(): Promise<void> {
   const godotPath = resolveGodotPath();
@@ -1619,6 +1728,25 @@ async function main(): Promise<void> {
       sweep(projectDir);
     }
     console.log('typed gate passed');
+    return;
+  }
+  // Cases by name, in the order given, for the same reason as one fixture below. Several, because
+  // some read what an earlier one left in the project: operations reads the chain dependencyWalk writes.
+  const one = process.argv.indexOf('case');
+  if (one !== -1) {
+    const names = process.argv.slice(one + 1);
+    const unknown = names.filter((name) => CASES[name] === undefined);
+    if (names.length === 0 || unknown.length > 0) {
+      throw new Error(`case needs names from: ${Object.keys(CASES).join(', ')}`);
+    }
+    try {
+      for (const name of names) {
+        await CASES[name]?.(godotPath, projectDir);
+      }
+    } finally {
+      sweep(projectDir);
+    }
+    console.log(`cases ${names.join(', ')} passed`);
     return;
   }
   // One fixture script by name, for working on the thing it checks without the whole leg.
@@ -1688,15 +1816,9 @@ async function main(): Promise<void> {
       'the engine and the server should agree on the temporary directory',
     );
     runFixture(godotPath, projectDir, 'input_action');
-    testDependencyWalk(godotPath, projectDir);
-    testOperations(godotPath, projectDir);
-    testAGdignoreStopsTheWalk(godotPath, projectDir);
-    testAnImportIsJudgedByWhatItWasBuiltFrom(godotPath, projectDir);
-    await testAnOperationLeavesARunningLogAlone(godotPath);
-    testRefusals(godotPath, projectDir);
-    testInstalledLayout(godotPath, projectDir);
-    testAFamilyOfSettingsAnswersWithItsTypes(godotPath, projectDir);
-    testTheOperationsSurviveEveryWarning(godotPath);
+    for (const run of Object.values(CASES)) {
+      await run(godotPath, projectDir);
+    }
   } finally {
     sweep(projectDir);
   }

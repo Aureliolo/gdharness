@@ -1,26 +1,20 @@
 /**
  * A headless operation: the engine run on a project with the operations script, one JSON object
- * on stdout as the answer.
+ * written to a file as the answer.
  *
  * Every tool that needs no editor and no running game goes through here, so the contract with
- * the script lives in one place: parameters cross as snake_case in a file, a failure is a
- * non-zero exit with the reason on stderr, and an answer is the last JSON line printed.
+ * the script lives in one place: parameters cross as snake_case in a file, the answer comes back in
+ * another, and a run that wrote no answer failed, with the reason in what it printed.
  */
 
-import { execFile } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { promisify } from 'node:util';
-import { callSignal } from './call-signal.js';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { emptyRecord } from './dictionary.js';
-import { GameLog, type LogEntry } from './game-log.js';
+import { type EngineRun, howItEnded, runEngine } from './engine-run.js';
+import type { GameLog, LogEntry } from './game-log.js';
 import { forceNextImport } from './reimport.js';
 import { discard, scratchDirectory } from './scratch.js';
 import type { OperationParams } from './server-types.js';
-
-// execFile, not exec: no shell means no quoting, and no quoting means no way to escape out of
-// it. Every argument is an array element, so a path full of backslashes or spaces is a path.
-const run = promisify(execFile);
 
 export interface HeadlessEngine {
   readonly godotPath: string;
@@ -30,14 +24,21 @@ export interface HeadlessEngine {
   readonly debug: boolean;
 }
 
+/** The problems a run reported, as many as an answer carries, and how many older ones it left out. */
+interface Reported {
+  /** What the engine and the script reported on the way, as problems rather than lines. */
+  readonly messages: readonly LogEntry[];
+  readonly messagesOmitted?: number;
+}
+
 export type HeadlessOutcome =
-  | {
+  | (Reported & {
       readonly ok: true;
       readonly payload: OperationParams;
-      /** What the engine put on stderr on the way, as problems rather than lines. */
-      readonly messages: readonly LogEntry[];
-    }
-  | { readonly ok: false; readonly message: string; readonly messages: readonly LogEntry[] };
+      /** How the engine ended when it did not exit cleanly after writing its answer. */
+      readonly afterAnswer?: string;
+    })
+  | (Reported & { readonly ok: false; readonly message: string });
 
 /**
  * The script reads its parameters in snake_case, the tools take them in camelCase. Only the
@@ -53,58 +54,100 @@ function snakeCased(params: OperationParams): OperationParams {
   return result;
 }
 
-/** The last line of stdout that parses as a JSON object, which is where the script's answer is. */
-function lastJsonObject(stdout: string): OperationParams | null {
-  const lines = stdout
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line.startsWith('{'));
-  for (const line of lines.reverse()) {
-    try {
-      const parsed: unknown = JSON.parse(line);
-      if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
-        return parsed as OperationParams;
-      }
-    } catch {
-      // A line that begins with a brace and is not JSON is something printed, not the answer.
-    }
-  }
-  return null;
+/**
+ * What an answer carries of [param outcome] besides its payload: the problems reported on the way,
+ * how many older ones were left out, and an engine that did not exit cleanly after answering.
+ */
+export function engineExtras(
+  outcome: Reported & { readonly afterAnswer?: string | undefined },
+): Record<string, unknown> {
+  return {
+    ...(outcome.messages.length > 0 ? { engine_messages: outcome.messages } : {}),
+    ...(outcome.messagesOmitted === undefined ? {} : { engine_messages_omitted: outcome.messagesOmitted }),
+    ...(outcome.afterAnswer === undefined ? {} : { engine_after_answer: outcome.afterAnswer }),
+  };
 }
 
-function problems(stderr: string): LogEntry[] {
-  const log = new GameLog();
-  log.append('stderr', stderr);
-  log.finish();
-  return log.select({ severity: 'warning', sinceLastCall: false, limit: 200 }).entries;
+/** How the operations script marks its own errors, which are otherwise ordinary lines to the engine. */
+const OWN_ERROR = '[ERROR] ';
+
+/** At most this many of the newest problems ride on an answer; the rest are counted. */
+const MESSAGES_KEPT = 200;
+
+/** Of the engine's errors, how many a reason names before counting the rest. */
+const ERRORS_NAMED = 3;
+
+/**
+ * Every problem [param log] holds: the engine's warnings and errors, and the script's own `[ERROR]`
+ * lines as errors. Those are the script refusing, or giving up on part of what it was asked, and read
+ * as ordinary lines they were dropped from an answer that went on to say it had succeeded.
+ */
+function problemsIn(log: GameLog): LogEntry[] {
+  return log.everything().flatMap((entry): LogEntry[] => {
+    if (entry.severity !== 'info') {
+      return [entry];
+    }
+    if (entry.source === 'stderr' && entry.text.startsWith(OWN_ERROR)) {
+      return [{ ...entry, severity: 'error', text: entry.text.slice(OWN_ERROR.length) }];
+    }
+    return [];
+  });
+}
+
+function reported(problems: readonly LogEntry[]): Reported {
+  const omitted = Math.max(0, problems.length - MESSAGES_KEPT);
+  return omitted === 0
+    ? { messages: problems }
+    : { messages: problems.slice(omitted), messagesOmitted: omitted };
 }
 
 /**
- * The reason a run failed, as the script or the engine gave it. The script writes its own
- * refusals as `[ERROR] ...`; anything else on stderr is the engine's, and stdout's last words
- * are the fallback for a run that said nothing there either.
+ * The reason a run failed, as the script or the engine gave it. The script's own refusals come
+ * first, then the engine's first errors, which are the cause more often than what they set off, and
+ * stdout's last words are the fallback for a run that reported nothing.
  */
-function reason(stdout: string, stderr: string): string {
-  const own = stderr
-    .split(/\r?\n/)
-    .filter((line) => line.startsWith('[ERROR] '))
-    .map((line) => line.slice('[ERROR] '.length));
+function reason(log: GameLog, problems: readonly LogEntry[]): string {
+  const own = log
+    .everything()
+    .filter((entry) => entry.source === 'stderr' && entry.severity === 'info' && entry.text.startsWith(OWN_ERROR));
   if (own.length > 0) {
-    return own.join('; ');
+    return own.map((entry) => entry.text.slice(OWN_ERROR.length)).join('; ');
   }
-  const engine = problems(stderr)
-    .filter((entry) => entry.severity === 'error')
-    .map((entry) => entry.text);
-  if (engine.length > 0) {
-    return engine.join('; ');
+  const errors = problems.filter((entry) => entry.severity === 'error').map((entry) => entry.text);
+  if (errors.length > 0) {
+    const rest = errors.length - ERRORS_NAMED;
+    return rest > 0
+      ? `${errors.slice(0, ERRORS_NAMED).join('; ')}; and ${rest} more error${rest === 1 ? '' : 's'}`
+      : errors.join('; ');
   }
-  return stdout.trim().split(/\r?\n/).at(-1) ?? 'no output at all';
+  const printed = log.everything().filter((entry) => entry.source === 'stdout');
+  return printed.at(-1)?.text ?? 'no output at all';
+}
+
+/**
+ * The first runtime error raised inside the operations script itself, if any.
+ *
+ * The engine aborts only the function that raised it and hands its caller a default value, so an
+ * operation that hit one still writes an answer and exits 0, with part of the answer missing or
+ * empty. Read from the error's own location, not its backtrace: a project script that fails while
+ * an operation calls it has operation frames further down, and that failure is the project's.
+ */
+function scriptFault(problems: readonly LogEntry[], script: string): LogEntry | undefined {
+  const directory = `${dirname(script).replaceAll('\\', '/').toLowerCase()}/`;
+  return problems.find((entry) => {
+    const at = entry.detail.find((line) => line.startsWith('at: '));
+    return (
+      entry.severity === 'error' &&
+      at !== undefined &&
+      at.replaceAll('\\', '/').toLowerCase().includes(`(${directory}`)
+    );
+  });
 }
 
 /** One import pass's outcome, and the extension libraries a first pass could not load, if any. */
 export type ImportOutcome = (
-  | { readonly ok: true; readonly messages: readonly LogEntry[] }
-  | { readonly ok: false; readonly message: string; readonly messages: readonly LogEntry[] }
+  | (Reported & { readonly ok: true })
+  | (Reported & { readonly ok: false; readonly message: string })
 ) & {
   readonly librariesRetried?: readonly string[];
   /** Of those, the ones the second pass could not load either. */
@@ -196,30 +239,28 @@ export async function runImport(
 
 async function importOnce(godotPath: string, projectPath: string): Promise<ImportOutcome> {
   const logDir = scratchDirectory('import');
+  let ran: EngineRun;
   try {
-    const { stderr } = await run(
-      godotPath,
-      ['--headless', '--log-file', join(logDir, 'engine.log'), '--path', projectPath, '--import'],
-      { signal: callSignal() },
-    );
-    return { ok: true, messages: problems(stderr) };
-  } catch (error) {
-    if (error instanceof Error && 'stdout' in error && 'stderr' in error) {
-      const failed = error as Error & { stdout: string; stderr: string; code?: number | string };
-      return {
-        ok: false,
-        message: `the import pass failed (exit ${failed.code ?? 'unknown'}): ${reason(failed.stdout, failed.stderr)}`,
-        messages: problems(failed.stderr),
-      };
-    }
-    return {
-      ok: false,
-      message: `the import pass could not be run: ${error instanceof Error ? error.message : String(error)}`,
-      messages: [],
-    };
+    ran = await runEngine(godotPath, [
+      '--headless',
+      '--log-file',
+      join(logDir, 'engine.log'),
+      '--path',
+      projectPath,
+      '--import',
+    ]);
   } finally {
     discard(logDir);
   }
+  const problems = problemsIn(ran.log);
+  if (ran.exitCode === 0 && ran.failure === null) {
+    return { ok: true, ...reported(problems) };
+  }
+  return {
+    ok: false,
+    message: `the import pass failed (${howItEnded(ran)}): ${reason(ran.log, problems)}`,
+    ...reported(problems),
+  };
 }
 
 export async function runOperation(
@@ -232,6 +273,7 @@ export async function runOperation(
   // Windows command-line parsing of \t, \r and \" whatever the quoting.
   const paramsDir = scratchDirectory('params');
   const paramsFile = join(paramsDir, `${operation}.json`);
+  const answerFile = join(paramsDir, 'answer.json');
   writeFileSync(paramsFile, JSON.stringify(snakeCased(params)), 'utf8');
   const args = [
     '--headless',
@@ -249,41 +291,74 @@ export async function runOperation(
     engine.script,
     operation,
     `@file:${paramsFile}`,
+    answerFile,
     ...(engine.debug ? ['--debug-godot'] : []),
   ];
 
-  let stdout: string;
-  let stderr: string;
+  let ran: EngineRun;
+  let answer: ReturnType<typeof answerIn>;
   try {
-    // Ended with the call when the caller cancels it, rather than left to finish for nobody.
-    ({ stdout, stderr } = await run(engine.godotPath, args, { signal: callSignal() }));
-  } catch (error) {
-    if (error instanceof Error && 'stdout' in error && 'stderr' in error) {
-      const failed = error as Error & { stdout: string; stderr: string; code?: number | string };
-      return {
-        ok: false,
-        message: `${operation} failed (exit ${failed.code ?? 'unknown'}): ${reason(failed.stdout, failed.stderr)}`,
-        messages: problems(failed.stderr),
-      };
-    }
-    return {
-      ok: false,
-      message: `${operation} could not be run: ${error instanceof Error ? error.message : String(error)}`,
-      messages: [],
-    };
+    ran = await runEngine(engine.godotPath, args);
+    answer = answerIn(answerFile);
   } finally {
     discard(paramsDir);
   }
+  const problems = problemsIn(ran.log);
 
-  // A run that exited cleanly but printed no answer is an engine that never reached the
-  // script, and handing on whatever it did print is how that reads as a tool that succeeded.
-  const payload = lastJsonObject(stdout);
-  if (payload === null) {
+  if (answer.kind === 'unreadable') {
     return {
       ok: false,
-      message: `${operation} produced no result: ${reason(stdout, stderr)}`,
-      messages: problems(stderr),
+      message: `${operation} wrote an answer that could not be read (${answer.why})`,
+      ...reported(problems),
     };
   }
-  return { ok: true, payload, messages: problems(stderr) };
+  // No answer is an operation that refused or an engine that never reached the script, whatever
+  // the exit status says.
+  if (answer.kind === 'none') {
+    const ending = ran.exitCode === 0 && ran.failure === null ? 'produced no result' : `failed (${howItEnded(ran)})`;
+    return { ok: false, message: `${operation} ${ending}: ${reason(ran.log, problems)}`, ...reported(problems) };
+  }
+  const fault = scriptFault(problems, engine.script);
+  if (fault !== undefined) {
+    return {
+      ok: false,
+      message:
+        `${operation} hit an error in the operations script, so its answer is left out: part of it was ` +
+        `never computed. ${fault.text} (${fault.detail[0]?.slice('at: '.length) ?? 'no location given'})`,
+      ...reported(problems),
+    };
+  }
+  // The answer is written before the engine shuts down and the project's autoloads run, so a
+  // failure after it did not undo it: a setting it answered as saved is saved.
+  const afterAnswer =
+    ran.exitCode === 0 && ran.failure === null
+      ? undefined
+      : `The operation finished and wrote this answer, and then the engine did not exit cleanly (${howItEnded(ran)}). Anything it reported on the way out is under engine_messages.`;
+  return {
+    ok: true,
+    payload: answer.payload,
+    ...reported(problems),
+    ...(afterAnswer === undefined ? {} : { afterAnswer }),
+  };
+}
+
+/** The answer the script wrote, null when it wrote none, or why what it wrote is not one. */
+function answerIn(
+  file: string,
+):
+  | { readonly kind: 'none' }
+  | { readonly kind: 'answer'; readonly payload: OperationParams }
+  | { readonly kind: 'unreadable'; readonly why: string } {
+  if (!existsSync(file)) {
+    return { kind: 'none' };
+  }
+  const text = readFileSync(file, 'utf8');
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+      ? { kind: 'answer', payload: parsed as OperationParams }
+      : { kind: 'unreadable', why: `it is JSON but not an object: ${text.slice(0, 200)}` };
+  } catch (error) {
+    return { kind: 'unreadable', why: `${error instanceof Error ? error.message : String(error)}: ${text.slice(0, 200)}` };
+  }
 }

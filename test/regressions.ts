@@ -74,6 +74,7 @@ import {
   theConsoleWasNotCaptured,
   writeEditorLogNote,
 } from '../src/editor-log.js';
+import { type EngineRun, howItEnded, runEngine } from '../src/engine-run.js';
 import { answersTo, forAnswer, GameLog, type LogEntry } from '../src/game-log.js';
 import {
   anEditorIsStillComing,
@@ -164,7 +165,6 @@ import {
   endedPreviousRun,
   endedToStartThis,
   endedWithoutACode,
-  endingOf,
   leftRunningNote,
   noCodeWillCome,
   PLAY_STARTS_WITHIN_MS,
@@ -12862,35 +12862,47 @@ async function testAKilledRunHasNoExitCode(): Promise<void> {
 }
 
 /**
- * An engine run through execFile that failed says how it ended, read off the error Node gave.
+ * An engine run says how it ended, and a run that talks a lot is not ended for it.
  *
- * A timeout kills with a signal and leaves no code, and a process that prints past the buffer is
- * killed with Node's reason as a string code. Both were answered as exit code -1. The errors are
- * the real ones, from real processes, because their shape is what is being read.
+ * A timeout kills with a signal and leaves no code, and a program that never started has none
+ * either; both were once answered as exit code -1, which is also a code a program can exit with.
+ * The output case is the one execFile got wrong: it killed a process printing past a mebibyte and
+ * reported Node's reason as the process failing, which is what a healthy import pass over a large
+ * project does. The processes are real ones, because how they end is what is being read.
  */
-async function testAFailedEngineRunSaysHowItEnded(): Promise<void> {
-  const failing = (args: string[], options: { timeout?: number; maxBuffer?: number }): Promise<unknown> =>
-    new Promise((resolve) => {
-      execFile(process.execPath, args, options, (error) => {
-        resolve(error);
-      });
-    });
-  const stays = 'setTimeout(() => {}, 20000)';
+async function testAnEngineRunSaysHowItEnded(): Promise<void> {
+  const node = (script: string, options?: Parameters<typeof runEngine>[2]): Promise<EngineRun> =>
+    runEngine(process.execPath, ['-e', script], options);
+
+  const late = await node('setTimeout(() => {}, 20000)', { timeout: { ms: 300, said: 'a moment' } });
   assert.deepEqual(
-    endingOf((await failing(['-e', stays], { timeout: 300 })) as object),
-    { exitCode: null, exitSignal: 'SIGTERM', failure: null },
-    'a run past its timeout was killed and has no code',
+    [late.exitCode, late.exitSignal, late.failure, howItEnded(late)],
+    [null, 'SIGTERM', 'it ran past its a moment', 'ended by SIGTERM, because it ran past its a moment'],
+    'a run past its timeout was killed, has no code, and says why',
+  );
+
+  const lines = 40000;
+  const talkative = await node(
+    `for (let i = 0; i < ${lines}; i++) console.log("line " + i + " " + "x".repeat(40)); console.error("ERROR: last words");`,
   );
   assert.deepEqual(
-    endingOf((await failing(['-e', `console.log("x".repeat(100)); ${stays}`], { maxBuffer: 10 })) as object),
-    { exitCode: null, exitSignal: null, failure: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' },
-    'a run that printed past the buffer was ended by Node, which says why',
+    [talkative.exitCode, talkative.failure],
+    [0, null],
+    `two mebibytes of output is not a failure: ${howItEnded(talkative)}`,
   );
+  assert.equal(talkative.log.all.length, lines + 1, 'and every line reached the log, the last included');
+  assert.equal(talkative.log.all.at(-1)?.text, 'last words', 'stderr is read as the engine writes it');
+
+  const three = await node('process.exit(3)');
   assert.deepEqual(
-    endingOf((await failing(['-e', 'process.exit(3)'], {})) as object),
-    { exitCode: 3, exitSignal: null, failure: null },
+    [three.exitCode, three.exitSignal, three.failure, howItEnded(three)],
+    [3, null, null, 'exit code 3'],
     'a code the process exited with is its own',
   );
+
+  const missing = await runEngine(join(tmpdir(), 'gdharness-no-such-engine'), []);
+  assert.equal(missing.exitCode, null, 'a program that never started has no exit code');
+  assert.match(missing.failure ?? '', /^it could not be started: /, String(missing.failure));
 }
 
 /**
@@ -22495,7 +22507,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStoppedRunIsStillTheOneAnswered,
   testAStoppedSpawnedRunGivesWayToAPlay,
   testAKilledRunHasNoExitCode,
-  testAFailedEngineRunSaysHowItEnded,
+  testAnEngineRunSaysHowItEnded,
   testAWordsWaitLeavesTheGameItsSpeed,
   testTheAnnounceWaitIsNotHeldByASlowEditor,
   testTheWaitSizedToABootIsSaid,

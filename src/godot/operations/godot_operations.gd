@@ -2,8 +2,13 @@
 extends SceneTree
 
 # The command line the server runs is `godot --headless --path <project> --script <this>
-# <operation> @file:<params.json>`, and one JSON object on stdout is the answer. Everything an
-# operation does lives in a sibling module; this file is the command table and the wire format.
+# <operation> @file:<params.json> <answer.json>`, and the one JSON object written to the answer
+# file is the answer. Everything an operation does lives in a sibling module; this file is the
+# command table and the wire format.
+#
+# A file rather than a line on stdout, because the project's autoloads run after `_init` and print
+# into the same stream: an autoload printing a dictionary in `_process` was the last JSON line out
+# and was taken as the answer. Nothing the project prints can reach the file.
 #
 # Each module is preloaded by a path relative to this script rather than a res:// one, because
 # the operations directory ships inside the server package and is handed to the engine as an
@@ -39,8 +44,11 @@ func _init() -> void:
 		return
 
 	var params_index: int = script_index + 3
-	if args.size() <= params_index:
-		_log.error("Usage: godot --headless --script godot_operations.gd <operation> <json_params>")
+	var answer_index: int = script_index + 4
+	if args.size() <= answer_index:
+		_log.error(
+			"Usage: godot --headless --script godot_operations.gd <operation> @file:<params.json> <answer.json>"
+		)
 		_log.error("Not enough command-line arguments provided.")
 		quit(1)
 		return
@@ -65,7 +73,20 @@ func _init() -> void:
 		quit(1)
 		return
 
-	print(JSON.stringify(payload))
+	var answer_path: String = args[answer_index]
+	var answer: FileAccess = FileAccess.open(answer_path, FileAccess.WRITE)
+	if answer == null:
+		_log.error(
+			"Could not write the answer to " + answer_path + ": " + error_string(FileAccess.get_open_error())
+		)
+		quit(1)
+		return
+	var written: bool = answer.store_string(JSON.stringify(payload))
+	answer.close()
+	if not written:
+		_log.error("Could not write the answer to " + answer_path)
+		quit(1)
+		return
 	quit()
 
 
