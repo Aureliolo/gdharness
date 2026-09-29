@@ -44,6 +44,11 @@ const EDITOR_PID_VARIABLE: String = "GDHARNESS_EDITOR_PID"
 ## `errorReportPath` in src/runtime-client.ts.
 const ERROR_REPORT_NAME: String = "runtime-%d.log"
 
+## Written beside this addon by setup and upgrade. Kept in step with `VERSION_MARKER` and
+## `DIGEST_MARKER` in src/setup.ts.
+const VERSION_MARKER: String = "res://addons/gdharness_runtime/.gdharness-version"
+const DIGEST_MARKER: String = "res://addons/gdharness_runtime/.gdharness-digest"
+
 var values: Values = Values.new()
 
 # The modules are members and not locals of _init, because a Callable holds its object by id
@@ -76,6 +81,11 @@ var _announcement: String = ""
 var _errors: ErrorReport
 ## Every command, by the name a request uses, as the module method that answers it.
 var _commands: Dictionary = {}
+## The addon this game loaded, read once at start: an upgrade rewrites the markers under a running
+## game, whose code stays what it loaded, and reading them later would call that code current.
+## Empty when the markers cannot be read, as in a copy made by hand.
+var _loaded_version: String = _read_marker(VERSION_MARKER)
+var _loaded_digest: String = _read_marker(DIGEST_MARKER)
 
 
 func _init() -> void:
@@ -336,11 +346,24 @@ func _identity(bind_address: String) -> Dictionary:
 			"path": ProjectSettings.globalize_path("res://").rstrip("/")
 		},
 		"godot": Engine.get_version_info().get("string", ""),
+		"addon_version": _loaded_version,
+		"addon_digest": _loaded_digest,
 	}
 	var played_by: String = OS.get_environment(EDITOR_PID_VARIABLE)
 	if played_by.is_valid_int():
 		identity["editor_pid"] = played_by.to_int()
 	return identity
+
+
+static func _read_marker(path: String) -> String:
+	if not FileAccess.file_exists(path):
+		return ""
+	var file: FileAccess = FileAccess.open(path, FileAccess.READ)
+	if file == null:
+		return ""
+	var text: String = file.get_as_text().strip_edges()
+	file.close()
+	return text
 
 
 func _send_welcome(client: StreamPeerTCP) -> void:

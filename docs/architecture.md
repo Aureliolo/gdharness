@@ -60,6 +60,16 @@ from a stale addon that were not errors and vanished on restart. Read the versio
 `serverVersion` rather than from the pin when it matters, because the pin describes the next
 server and the process answering is whatever the harness spawned at the last reconnect.
 
+A game says which runtime addon it loaded, read from the same two markers in
+`addons/gdharness_runtime` when it starts, and `editor_status` judges each entry under `runtimes`
+the same way, with `addonVersion`, `addonIsStale` and `staleNote`. Every `runtime_*` answer from a
+stale game carries the last two. "Live on the next `editor_run`" holds for the project that was
+upgraded: a second checkout of it, such as a git worktree, has its own `addons/`, and one was found
+running a runtime three releases behind its server with nothing saying so, because the protocol
+number, which was all that was compared, had not moved. `staleNote` names the fix by what the game's
+own project holds: `gdharness upgrade` there when its addon is not this server's either, a restart of
+the game when it is, and a reconnect when the game is the newer half.
+
 The runner is named by its path rather than as `npx` or `bunx`. A harness spawns what the config
 names, through PATH, and a runner's name is not always on it: a Bun installed under a project
 ships a `bun` and no `bunx` beside it, so an entry saying `bunx` starts nothing. Writing a path
