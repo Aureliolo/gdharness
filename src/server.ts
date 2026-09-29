@@ -52,7 +52,10 @@ import {
   declaredSince,
   failedReloadNote,
   heldButGone,
+  isToolScript,
   missingMemberIn,
+  type NotReloaded,
+  notReloadedNote,
   scriptsNaming,
   staleAnalysisNote,
   staleClassNames,
@@ -7573,8 +7576,17 @@ class GodotServer {
       constants?: string[];
       heldConstantsBefore?: string[];
       problem?: string;
+      as?: string;
     } = {};
-    if (reloading !== undefined) {
+    // A @tool script is refused for the reason reloadDependents gives: it runs inside the editor, and
+    // reloading one from inside a call the editor is serving can take the editor down.
+    const reloadingSource =
+      reloading === undefined || projectPath === '' ? null : this.sourceOfClass(projectPath, reloading);
+    if (reloading !== undefined && reloadingSource !== null && isToolScript(reloadingSource)) {
+      reloaded = {
+        problem: `${reloading} is a @tool script, which runs inside the editor, so it is not reloaded from inside a call: editor_launch restart recompiles it.`,
+      };
+    } else if (reloading !== undefined) {
       try {
         const answer = asParams(
           await this.godotBridge.invokeTool('reload_script', { ...args, scriptPath: reloading }),
@@ -7584,31 +7596,42 @@ class GodotServer {
           const found = readArray(answer, field);
           return found ? { [field]: found.map(String) } : {};
         };
+        // The script as the files on disk spell it, which the addon reloads by: the editor holds its
+        // copy under that spelling, and on a filesystem ignoring case another one opens the same file
+        // and reaches a fresh copy instead. Said when it differs from what was asked.
+        const asResource = (path: string): string =>
+          path.startsWith('res://') ? path : `res://${path.replace(/^\/+/, '')}`;
+        const script = asResource(readString(answer, 'script') ?? reloading);
+        const spelling = script === asResource(reloading) ? {} : { as: script };
         const failed = answer['failed'];
         if (typeof failed === 'number' && failed !== 0) {
           reloaded = {
+            ...spelling,
             ...listed('heldBefore'),
             ...listed('heldConstantsBefore'),
             problem: failedReloadNote({
-              script: reloading,
+              script,
               code: failed,
               codeName: readString(answer, 'failedAs') ?? '',
               heldBefore: listed('heldBefore')['heldBefore'] ?? [],
               heldAfter: methods?.map(String) ?? [],
               constantsBefore: listed('heldConstantsBefore')['heldConstantsBefore'] ?? [],
               constantsAfter: listed('constants')['constants'] ?? [],
-              names: projectPath === '' ? [] : this.classesAScriptNames(projectPath, reloading),
+              names: projectPath === '' ? [] : this.classesAScriptNames(projectPath, script),
+              restored: typeof answer['restored'] === 'boolean' ? answer['restored'] : null,
+              restoredAs: readString(answer, 'restoredAs') ?? '',
             }),
           };
         } else {
           reloaded = methods
             ? {
+                ...spelling,
                 methods: methods.map(String),
                 ...listed('heldBefore'),
                 ...listed('constants'),
                 ...listed('heldConstantsBefore'),
               }
-            : { problem: `the editor would not say what ${reloading} has after reloading it` };
+            : { problem: `the editor would not say what ${script} has after reloading it` };
         }
       } catch (error) {
         reloaded = { problem: `${reloading} could not be reloaded: ${errorMessage(error)}` };
@@ -7646,9 +7669,7 @@ class GodotServer {
       );
     }
     if (dependents !== null && dependents.notReloaded.length > 0) {
-      notes.push(
-        `The scan brought in ${broughtIn.join(', ')}, and ${dependents.notReloaded.map((one) => one.scriptPath).join(', ')} ${dependents.notReloaded.length === 1 ? 'names one of them and' : 'name them and'} could not be reloaded, so the editor still holds what it compiled while it could not see the class and reports that to the language server. editor_rescan with reloadScript on each, or editor_launch restart.`,
-      );
+      notes.push(notReloadedNote(broughtIn, dependents.notReloaded));
     }
     for (const group of uidsDuplicatedOnDisk) {
       notes.push(
@@ -7682,6 +7703,7 @@ class GodotServer {
       // Both readings, because they answer different questions. What the copy held before says
       // whether this editor had the fault at all, which is the thing a caller cannot otherwise
       // find out; what it holds after says whether the call mended it.
+      reloadedAs: reloaded.as,
       heldBeforeReload: reloaded.heldBefore,
       reloadedMethods: reloaded.methods,
       // The same two readings for constants, with an enum's values as `Kind.SHORT`, because an enum
@@ -7719,9 +7741,9 @@ class GodotServer {
   private async reloadDependents(
     projectPath: string,
     classes: readonly string[],
-  ): Promise<{ reloaded: string[]; notReloaded: { scriptPath: string; problem: string }[] }> {
+  ): Promise<{ reloaded: string[]; notReloaded: NotReloaded[] }> {
     const reloaded: string[] = [];
-    const notReloaded: { scriptPath: string; problem: string }[] = [];
+    const notReloaded: NotReloaded[] = [];
     for (const { script: scriptPath, tool } of scriptsNaming(projectPath, classes)) {
       // A @tool script is running in the editor, and reloading one from inside a call the editor is
       // serving can take the editor down: it did on Linux, reloading the addon's own tool executor.
@@ -7730,6 +7752,7 @@ class GodotServer {
           scriptPath,
           problem:
             'a @tool script, which runs inside the editor, so it is not reloaded from here; editor_launch restart recompiles it',
+          tool: true,
         });
         continue;
       }
@@ -7737,9 +7760,16 @@ class GodotServer {
         const answer = asParams(await this.godotBridge.invokeTool('reload_script', { scriptPath }));
         const failed = answer['failed'];
         if (typeof failed === 'number' && failed !== 0) {
+          // What the failed compile left, for the reason failedReloadNote gives.
+          const left =
+            answer['restored'] === true
+              ? ''
+              : answer['restored'] === false
+                ? '; compiling it again from the text it was built from failed too, so the editor holds it unusable until it compiles'
+                : '; a failed compile leaves the copy the editor holds unusable until it compiles, and this editor does not put it back';
           notReloaded.push({
             scriptPath,
-            problem: `it did not compile: Godot answered error ${failed}${readString(answer, 'failedAs') ? `, ${readString(answer, 'failedAs')}` : ''}`,
+            problem: `it did not compile: Godot answered error ${failed}${readString(answer, 'failedAs') ? `, ${readString(answer, 'failedAs')}` : ''}${left}`,
           });
         } else if (readArray(answer, 'methods') === undefined) {
           notReloaded.push({

@@ -198,7 +198,7 @@ static func can_read(holder: Variant, named: String) -> bool:
 		var map: Dictionary = holder
 		if not method_of(named).is_empty():
 			return method_of(named) in MAP_CALLS
-		return map.has(named) or map.has(StringName(named))
+		return not _key_in(map, named).is_empty()
 	if holder is Object:
 		var object: Object = holder
 		var method: String = method_of(named)
@@ -206,6 +206,23 @@ static func can_read(holder: Variant, named: String) -> bool:
 			return _arguments_required(object, method) == 0
 		return _has_property(object, named)
 	return false
+
+
+## The key of [param map] a step names, in a list of one, or an empty list when it names none.
+##
+## A step is text, and a map is keyed by whatever the game put in it: text, a StringName, or a
+## number, which a map of units by id is. Keyed by 3, "3" is not a key of it, measured on 4.7.2, so a
+## step that reads as a number is tried as one after the two spellings of text.
+static func _key_in(map: Dictionary, named: String) -> Array:
+	var spellings: Array = [named, StringName(named)]
+	if named.is_valid_int():
+		spellings.append(int(named))
+	if named.is_valid_float():
+		spellings.append(float(named))
+	for key: Variant in spellings:
+		if map.has(key):
+			return [key]
+	return []
 
 
 ## The method a step written as a call names, "get_viewport()" being get_viewport, or "" for a
@@ -243,10 +260,7 @@ static func write(holder: Variant, named: String, value: Variant) -> void:
 		var map: Dictionary = holder
 		# Written back under the key it was found under, since a map keyed by StringName and one
 		# keyed by String both read the same way and a write to the wrong one adds a second entry.
-		if map.has(named):
-			map[named] = value
-		else:
-			map[StringName(named)] = value
+		map[_key_in(map, named)[0]] = value
 		return
 	var object: Object = holder
 	object.set(named, value)
@@ -265,9 +279,7 @@ static func read_under(holder: Variant, named: String) -> Variant:
 		return list[_index_in(named, len(holder))]
 	if holder is Dictionary:
 		var map: Dictionary = holder
-		if map.has(named):
-			return map[named]
-		return map[StringName(named)]
+		return map[_key_in(map, named)[0]]
 	var object: Object = holder
 	var method: String = method_of(named)
 	if not method.is_empty():
@@ -311,6 +323,14 @@ static func nothing_there(holder: Variant, named: String, called_as: String) -> 
 			return container_calls_refused(called_as, "a map", container_call)
 		var map: Dictionary = holder
 		var keys: Array = map.keys()
+		# A key reading as the step and still not reached is one of a type a step cannot spell, and
+		# saying the map has no key 3 while listing 3 among its keys contradicts itself.
+		for key: Variant in keys:
+			if str(key) == named:
+				return (
+					"%s has a key that reads %s, but it is %s, which a path step cannot name"
+					% [called_as, named, type_string(typeof(key))]
+				)
 		# Eight of them, because a map keyed by something unexpected is told by the first few and a
 		# map of two hundred would bury the sentence saying which key was missing.
 		var some: Array[String] = []

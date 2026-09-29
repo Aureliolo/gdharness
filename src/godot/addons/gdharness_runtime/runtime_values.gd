@@ -94,12 +94,17 @@ func parameter_class(object: Object, method: String, index: int) -> String:
 
 
 ## What the slot [param named] on [param holder] declares it holds, as `{"type": int, "class":
-## String}`: a property's declaration, or the element type of a typed list or the value type of a
-## typed map. TYPE_NIL when nothing is declared.
+## String, "script": Script or null}`: a property's declaration, or the element type of a typed list
+## or the value type of a typed map. TYPE_NIL when nothing is declared, which is also what a
+## property declared as Variant or left untyped reads as: either way it takes anything.
 ##
 ## Asked rather than read off the value in the slot, because an object slot can be empty: a
 ## property typed `Gear` holding null reads as TYPE_NIL, and anything written into it passed the
 ## check and was then dropped by the engine, which answered with the slot still null.
+##
+## The script only for a typed container, the one place the engine hands it over. A property typed
+## as a script class with no `class_name` is declared under the engine class the script extends,
+## measured on 4.7.2: `var quarrel: Walker` with Walker a preloaded Node3D script lists as Node3D.
 static func slot_declared(holder: Variant, named: String) -> Dictionary:
 	if holder is Array:
 		var items: Array = holder
@@ -107,6 +112,7 @@ static func slot_declared(holder: Variant, named: String) -> Dictionary:
 			return {
 				"type": items.get_typed_builtin(),
 				"class": _typed_class(items.get_typed_script(), items.get_typed_class_name()),
+				"script": _script_or_null(items.get_typed_script()),
 			}
 	elif holder is Dictionary:
 		var map: Dictionary = holder
@@ -114,6 +120,7 @@ static func slot_declared(holder: Variant, named: String) -> Dictionary:
 			return {
 				"type": map.get_typed_value_builtin(),
 				"class": _typed_class(map.get_typed_value_script(), map.get_typed_value_class_name()),
+				"script": _script_or_null(map.get_typed_value_script()),
 			}
 	elif holder is Object:
 		var object: Object = holder
@@ -122,8 +129,13 @@ static func slot_declared(holder: Variant, named: String) -> Dictionary:
 				return {
 					"type": Read.as_int(entry.get("type", TYPE_NIL), TYPE_NIL),
 					"class": str(entry.get("class_name", "")),
+					"script": null,
 				}
-	return {"type": TYPE_NIL, "class": ""}
+	return {"type": TYPE_NIL, "class": "", "script": null}
+
+
+static func _script_or_null(typed: Variant) -> Script:
+	return typed if typed is Script else null
 
 
 ## The class a typed container names: its script's global name where it has one, since the engine
@@ -138,7 +150,20 @@ static func _typed_class(script: Variant, engine_class: StringName) -> String:
 
 ## Whether [param object] is a [param declared]: an engine class, or a script class by its global
 ## name anywhere along the script's inheritance.
-static func is_a(object: Object, declared: String) -> bool:
+##
+## Against [param declared_script] itself when there is one. A script with no global name is named by
+## the engine class it extends, so an object of that class with another script, or none, passes the
+## name, and a typed list built with it drops the element: measured on 4.7.2, an Array[Walker] given
+## a plain Node3D comes out empty, the engine's errors going to the game's output alone.
+static func is_a(object: Object, declared: String, declared_script: Script = null) -> bool:
+	if declared_script != null:
+		var own: Variant = object.get_script()
+		while own is Script:
+			if own == declared_script:
+				return true
+			var along: Script = own
+			own = along.get_base_script()
+		return false
 	if object.is_class(declared):
 		return true
 	var script: Variant = object.get_script()
@@ -150,14 +175,27 @@ static func is_a(object: Object, declared: String) -> bool:
 	return false
 
 
-## What [param object] is, by its script class where it has one.
+## What [param object] is, by its script class where it has one, and by its script's file where
+## that has no global name, since the engine class alone is what a refusal about the script has
+## just said it matched.
 static func class_of(object: Object) -> String:
 	var script: Variant = object.get_script()
 	if script is Script:
 		var current: Script = script
 		if not current.get_global_name().is_empty():
 			return str(current.get_global_name())
+		return "%s with the script %s" % [object.get_class(), script_named(current)]
 	return object.get_class()
+
+
+## How a refusal names [param script]: its global name, or its file. A class declared inside another
+## script has neither, measured on 4.7.2, so it is called an inner class and no more.
+static func script_named(script: Script) -> String:
+	if not script.get_global_name().is_empty():
+		return str(script.get_global_name())
+	if not script.resource_path.is_empty():
+		return script.resource_path
+	return "an inner class"
 
 
 ## A value from the wire fitted to the type a property or parameter declares.
@@ -224,9 +262,13 @@ static func _element_type(named: String) -> Dictionary:
 ## A typed container refuses a plain one, and the engine says nothing about it: an Array[int]
 ## property written with the list JSON carries kept what it held, and the answer showed the write
 ## as done. Each element is fitted the way a single value is, and an object element is named by
-## its path through [param resolve], which is called with the path and the class declared and
-## answers the way an object argument does. Anything that is not a typed container comes back as
-## it was given.
+## its path through [param resolve], which is called with the path, the class declared and the
+## script declared, and answers the way an object argument does. Anything that is not a typed
+## container comes back as it was given.
+##
+## The container built is counted against what went into it. The engine drops an element it will
+## not take and says so only in the game's output, so a list that came out shorter is refused here
+## rather than written, which would empty the game's own.
 func typed_like(given: Variant, like: Variant, resolve: Callable) -> Dictionary:
 	if like is Array and given is Array:
 		var template: Array = like
@@ -239,20 +281,18 @@ func typed_like(given: Variant, like: Variant, resolve: Callable) -> Dictionary:
 				items[index],
 				template.get_typed_builtin(),
 				_typed_class(template.get_typed_script(), template.get_typed_class_name()),
+				_script_or_null(template.get_typed_script()),
 				resolve
 			)
 			if element.has("message"):
 				return {"message": "element %d %s" % [index, element["message"]]}
 			built.append(element["value"])
-		return {
-			"value":
-			Array(
-				built,
-				template.get_typed_builtin(),
-				template.get_typed_class_name(),
-				template.get_typed_script()
-			)
-		}
+		var typed: Array = Array(
+			built, template.get_typed_builtin(), template.get_typed_class_name(), template.get_typed_script()
+		)
+		if typed.size() != built.size():
+			return {"message": "the engine would not take its elements as what the list holds"}
+		return {"value": typed}
 	if like is Dictionary and given is Dictionary:
 		var map_like: Dictionary = like
 		if not map_like.is_typed():
@@ -264,6 +304,7 @@ func typed_like(given: Variant, like: Variant, resolve: Callable) -> Dictionary:
 				key,
 				map_like.get_typed_key_builtin(),
 				_typed_class(map_like.get_typed_key_script(), map_like.get_typed_key_class_name()),
+				_script_or_null(map_like.get_typed_key_script()),
 				resolve
 			)
 			if key_fitted.has("message"):
@@ -272,33 +313,37 @@ func typed_like(given: Variant, like: Variant, resolve: Callable) -> Dictionary:
 				entries[key],
 				map_like.get_typed_value_builtin(),
 				_typed_class(map_like.get_typed_value_script(), map_like.get_typed_value_class_name()),
+				_script_or_null(map_like.get_typed_value_script()),
 				resolve
 			)
 			if value_fitted.has("message"):
 				return {"message": "the value under %s %s" % [str(key), value_fitted["message"]]}
 			rebuilt[key_fitted["value"]] = value_fitted["value"]
-		return {
-			"value":
-			Dictionary(
-				rebuilt,
-				map_like.get_typed_key_builtin(),
-				map_like.get_typed_key_class_name(),
-				map_like.get_typed_key_script(),
-				map_like.get_typed_value_builtin(),
-				map_like.get_typed_value_class_name(),
-				map_like.get_typed_value_script()
-			)
-		}
+		var typed_map: Dictionary = Dictionary(
+			rebuilt,
+			map_like.get_typed_key_builtin(),
+			map_like.get_typed_key_class_name(),
+			map_like.get_typed_key_script(),
+			map_like.get_typed_value_builtin(),
+			map_like.get_typed_value_class_name(),
+			map_like.get_typed_value_script()
+		)
+		if typed_map.size() != rebuilt.size():
+			return {"message": "the engine would not take its entries as what the map holds"}
+		return {"value": typed_map}
 	return {"value": given}
 
 
 ## One element fitted to a container's element type, as `{"value"}` or `{"message"}` saying what it
 ## was and what goes there. The message is the part after "element N".
-func _element(item: Variant, builtin: int, declared: String, resolve: Callable) -> Dictionary:
+##
+## An object element given as a record goes to [param resolve] as a path would, which says how an
+## object is named, rather than being refused as a map that cannot become the class.
+func _element(item: Variant, builtin: int, declared: String, script: Script, resolve: Callable) -> Dictionary:
 	if builtin == TYPE_NIL:
 		return {"value": item}
-	if builtin == TYPE_OBJECT and item is String:
-		var named: Dictionary = resolve.call(item, declared)
+	if builtin == TYPE_OBJECT and (item is String or item is Dictionary):
+		var named: Dictionary = resolve.call(item, declared, script)
 		if named.has("message"):
 			return {"message": str(named["message"])}
 		return {"value": named["object"]}
@@ -306,6 +351,8 @@ func _element(item: Variant, builtin: int, declared: String, resolve: Callable) 
 	if not acceptable(fitted_item, builtin):
 		# The value as it was sent rather than its engine type: JSON numbers arrive as floats, so a 7
 		# the caller wrote was named "float".
-		var wanted: String = declared if builtin == TYPE_OBJECT else type_string(builtin)
+		var wanted: String = type_string(builtin)
+		if builtin == TYPE_OBJECT:
+			wanted = declared if script == null else script_named(script)
 		return {"message": "is %s, which cannot become %s" % [JSON.stringify(serialize(item)), wanted]}
 	return {"value": fitted_item}

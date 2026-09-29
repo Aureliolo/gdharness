@@ -2115,8 +2115,9 @@ async function testAnEnumMemberAddedToAHeldTypeIsPickedUp({ call, project }: Edi
   );
 
   // A reload the editor refuses answers with what the copy held and whether it still holds it. Held
-  // first, so there is a copy to keep; then a parse error in the file. Measured on 4.7.2, the copy
-  // is left as it was, which is the state the answer has to be able to say.
+  // first, so there is a copy to keep; then a parse error in the file. The failed compile leaves the
+  // copy unusable, and the addon compiles it again from the text it was built from, which is what
+  // lets the answer say it is as it was.
   writeFileSync(join(project, 'tower.gd'), TOWER_GD.join('\n'));
   const towerHeld = await call('editor_rescan', { projectPath: project, reloadScript: 'res://tower.gd' });
   assert.deepEqual(
@@ -2128,7 +2129,7 @@ async function testAnEnumMemberAddedToAHeldTypeIsPickedUp({ call, project }: Edi
   const refused = await call('editor_rescan', { projectPath: project, reloadScript: 'res://tower.gd' });
   assert.match(
     String(get(refused, 'reloadProblem')),
-    /^res:\/\/tower\.gd did not compile: Godot answered error 43, Parse error\. Nothing was reloaded: the copy the editor holds is as it was/,
+    /^res:\/\/tower\.gd did not compile: Godot answered error 43, Parse error\. The copy the editor holds was compiled again from the text it was built from, which puts it back as it was/,
     `a refused reload says why in Godot's words and that the copy is intact: ${JSON.stringify(refused)}`,
   );
   assert.deepEqual(

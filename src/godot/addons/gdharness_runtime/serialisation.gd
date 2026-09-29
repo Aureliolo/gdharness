@@ -193,16 +193,19 @@ func deserialize_value(value: Variant) -> Variant:
 ## nothing anywhere naming the argument that did it. A wrong argument costs a refusal, never the
 ## session's game.
 ##
-## Only an object is special. Every other pair the engine answers, false where they differ, and
-## refusing those would refuse calls that work: an int against a float is the same number to a
-## caller waiting for 1 on a property holding 1.0.
+## Measured on 4.7.2 over every pair of built-in types: two values of different types compare only
+## as an int against a float, a String against a StringName, or anything against null. Every other
+## pair is that error, a word against a number as much as an object against a word, and so is a bool
+## against an int and a NodePath against a String. An int against a float is kept because it is the
+## same number to a caller waiting for 1 on a property holding 1.0.
 static func comparable(one: Variant, other: Variant) -> bool:
 	var left: int = typeof(one)
 	var right: int = typeof(other)
-	if left != TYPE_OBJECT and right != TYPE_OBJECT:
+	if left == right or left == TYPE_NIL or right == TYPE_NIL:
 		return true
-	# An object compares with another object and with null. Anything else is the error above.
-	return (left == TYPE_OBJECT or left == TYPE_NIL) and (right == TYPE_OBJECT or right == TYPE_NIL)
+	var numbers: Array[int] = [TYPE_INT, TYPE_FLOAT]
+	var texts: Array[int] = [TYPE_STRING, TYPE_STRING_NAME]
+	return (left in numbers and right in numbers) or (left in texts and right in texts)
 
 
 ## Whether [param value] can be given to something declared as [param type] without damage.

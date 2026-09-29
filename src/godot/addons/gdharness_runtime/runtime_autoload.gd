@@ -11,6 +11,7 @@ extends Node
 ## id and the reply carries it back.
 
 const Capture = preload("runtime_capture.gd")
+const Changes = preload("runtime_changes.gd")
 const ErrorReport = preload("error_report.gd")
 const InputCommands = preload("runtime_input.gd")
 const Queries = preload("runtime_queries.gd")
@@ -48,6 +49,7 @@ var values: Values = Values.new()
 # rather than by reference, and a module referenced only by the Callables in the command table
 # would be freed on the way out of _init, leaving every command "unknown".
 var _queries: Queries = Queries.new(self, values)
+var _changes: Changes = Changes.new(self, values)
 var _input: InputCommands = InputCommands.new(self, values)
 var _capture: Capture = Capture.new(self)
 var _waits: Waits = Waits.new(self, values)
@@ -82,8 +84,8 @@ func _init() -> void:
 		"read_text": _queries.read_text,
 		"get_rect": _queries.get_rect,
 		"get_property": _queries.get_property,
-		"set_property": _queries.set_property,
-		"call_method": _queries.call_method,
+		"set_property": _changes.set_property,
+		"call_method": _changes.call_method,
 		"get_metrics": _queries.get_metrics,
 		"capture_screenshot": _capture.capture_screenshot,
 		"capture_viewport": _capture.capture_viewport,
