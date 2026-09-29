@@ -282,6 +282,11 @@ not. It passes the same two in the environment, which is how the addon knows a s
 `editor_status` reports where the connected editor says it serves, and the server follows that
 rather than the default.
 
+The language server says which project it serves, so what holds a port is checked there rather than
+assumed. Godot answers an `initialize` whose root is not its own project by telling the client to
+change to its project, ahead of the answer, and the script tools refuse on that, naming both
+projects.
+
 **Nothing is written into those settings, because they are shared.** The engine consumes the two
 options and hands neither back, so an editor that restarts itself comes up without them. Writing
 them into the settings made the restart work, and made a port chosen for one project the number in

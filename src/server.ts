@@ -143,12 +143,12 @@ import { noteRestartBegun, type RestartNote, restartOwed, restartSettled } from 
 import {
   clearRunRecord,
   couldStillBeTheRecordedRun,
+  type EditorPlay,
   everyRunRecord,
   listeningPid,
+  noteIsAbout,
   openTranscript,
   type RunRecord,
-  type EditorPlay,
-  noteIsAbout,
   readEditorRunNote,
   readRunRecord,
   runningAs,
@@ -409,7 +409,7 @@ function stillRunning(run: GodotProcess | null): boolean {
 export const PLAY_STARTS_WITHIN_MS = 30_000;
 
 /** Which play an editor's answer is about, or null from an addon that does not number them. */
-export function playOf(answer: OperationParams): EditorPlay | null {
+function playOf(answer: OperationParams): EditorPlay | null {
   const play = readNumber(answer, 'play');
   const editorPid = readNumber(answer, 'editorPid');
   return play === undefined || editorPid === undefined ? null : { play, editorPid };
@@ -4114,14 +4114,22 @@ class GodotServer {
     const answer = await this.handleLSP('lsp_get_diagnostics', args);
     const payload = asParams(JSON.parse(answer.content[0]?.text ?? '{}'));
     if (payload['error'] !== undefined) {
-      const reason = payload['error'];
-      return this.createErrorResponse(
-        `Diagnostics unavailable: ${typeof reason === 'string' ? reason : JSON.stringify(reason)}`,
-        [
-          `Ensure the Godot editor is running with its language server enabled, on port ${this.editorServes('lspPort', 'GDHARNESS_LSP_PORT', DEFAULT_LSP_PORT)}`,
-          'GDHARNESS_LSP_PORT points this server at another one',
-        ],
-      );
+      const reason =
+        typeof payload['error'] === 'string' ? payload['error'] : JSON.stringify(payload['error']);
+      if (payload['refusedArguments'] === true) {
+        return this.createErrorResponse(reason);
+      }
+      if (typeof payload['serves'] === 'string') {
+        return this.createErrorResponse(`Diagnostics unavailable: ${reason}`, [
+          'editor_status names the editor on the bridge and the port it says it serves',
+          "editor_launch opens this project's own editor, on a language server port of its own",
+          'GDHARNESS_LSP_PORT points this server at the right one',
+        ]);
+      }
+      return this.createErrorResponse(`Diagnostics unavailable: ${reason}`, [
+        `Ensure the Godot editor is running with its language server enabled, on port ${this.editorServes('lspPort', 'GDHARNESS_LSP_PORT', DEFAULT_LSP_PORT)}`,
+        'GDHARNESS_LSP_PORT points this server at another one',
+      ]);
     }
 
     const diagnostics = readArray(payload, 'diagnostics') ?? [];

@@ -452,6 +452,7 @@ async function withFakeLanguageServer<T>(
   handler: (port: number) => Promise<T>,
   seen?: JsonRpcMessage[],
   said: readonly string[] = ['Could not find type "Missing" in the current scope.'],
+  serves?: () => string,
 ): Promise<T> {
   const sockets = new Set<Socket>();
 
@@ -479,6 +480,22 @@ async function withFakeLanguageServer<T>(
         seen?.push(message);
 
         if (message.method === 'initialize') {
+          // Godot's own comparison, measured on 4.7.2: a root that is not its project's, as a string
+          // with the separators turned and the case folded, gets told to change to its project,
+          // ahead of the answer.
+          const root = String(get(message.params, 'rootPath')).replaceAll('\\', '/').toLowerCase();
+          const own = serves?.();
+          if (own !== undefined && root !== own.toLowerCase()) {
+            send({
+              jsonrpc: '2.0',
+              method: 'window/showMessage',
+              params: {
+                type: 2,
+                message: 'The GDScript Language Server might not work correctly with other projects.',
+              },
+            });
+            send({ jsonrpc: '2.0', method: 'gdscript_client/changeWorkspace', params: { path: own } });
+          }
           send({ jsonrpc: '2.0', id: message.id, result: { capabilities: {} } });
         } else if (message.method === 'textDocument/didOpen') {
           const uri = publishUri(String(get(message.params, 'textDocument', 'uri')));
@@ -701,6 +718,111 @@ async function testDiagnosticsTimeoutIsNotAnEmptyResult(): Promise<void> {
       await client.disconnect();
     },
   );
+}
+
+/**
+ * A language server belongs to one project, its editor's, and an editor of another project can hold
+ * the port this server asks.
+ *
+ * Godot answers an initialize naming a root that is not its project by telling the client to
+ * change to its own project, ahead of the answer; measured on 4.7.2 against a headless editor.
+ * The client went on and asked about this project's script, which that editor would read against
+ * its own `res://` and classes. The stand-in names its project the way Godot does, so the answer
+ * for the right project is also asserted, spelled differently enough that the stand-in sends the
+ * change there too, and a directory that is no project is refused before anything is asked.
+ */
+async function testTheLanguageServerOfAnotherProjectIsRefused(): Promise<void> {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lsp-project-'));
+  const ours = join(root, 'ours');
+  const theirs = join(root, 'theirs');
+  const bare = join(root, 'bare');
+  for (const directory of [ours, theirs, bare]) {
+    mkdirSync(directory);
+    writeFileSync(join(directory, 'hero.gd'), 'extends Node\n');
+  }
+  writeFileSync(join(ours, 'project.godot'), 'config_version=5\n');
+  writeFileSync(join(theirs, 'project.godot'), 'config_version=5\n');
+  const godotSpelling = (directory: string): string => directory.replaceAll('\\', '/');
+
+  let serving = godotSpelling(theirs);
+  const seen: JsonRpcMessage[] = [];
+  try {
+    await withFakeLanguageServer(
+      (uri) => uri,
+      async (lspPort) => {
+        const server = new ServerProcess({
+          env: {
+            GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+            GDHARNESS_LSP_PORT: String(lspPort),
+            GODOT_PATH: join(tmpdir(), 'gdharness-no-such-godot'),
+          },
+        });
+        const diagnose = async (projectPath: string): Promise<JsonRpcMessage> =>
+          server.request('tools/call', {
+            name: 'script_diagnostics',
+            arguments: { projectPath, scriptPath: 'res://hero.gd' },
+          });
+        try {
+          await server.initialize('regression-test');
+
+          const refused = await diagnose(ours);
+          const said = textOf(refused) ?? '';
+          assert.equal(get(refused.result, 'isError'), true, `another project's server is refused: ${said}`);
+          assert.ok(
+            said.includes(`belongs to the editor of ${serving}, not ${ours}`),
+            `naming the project it serves and the one asked about: ${said}`,
+          );
+          assert.match(said, /editor_launch opens this project's own editor/, `with what to do: ${said}`);
+          assert.equal(
+            seen.filter((message) => message.method === 'textDocument/didOpen').length,
+            0,
+            "and this project's script was not handed to it",
+          );
+
+          // Straight after the refusal, on the same connection, where Godot sends nothing at all:
+          // what the other project's server said is about that initialize and no later one.
+          serving = godotSpelling(ours);
+          const same = await diagnose(ours);
+          assert.equal(
+            get(parseTextContent(same), 'errors'),
+            1,
+            `this project's own server answers: ${textOf(same)}`,
+          );
+
+          serving = `${godotSpelling(ours)}/`;
+          const answered = await diagnose(ours);
+          assert.equal(
+            get(parseTextContent(answered), 'errors'),
+            1,
+            `and does however it spells the path: ${textOf(answered)}`,
+          );
+          assert.ok(
+            seen.some((message) => message.method === 'textDocument/didOpen'),
+            'with the script handed to it',
+          );
+
+          const notAProject = textOf(await diagnose(bare)) ?? '';
+          assert.match(
+            notAProject,
+            /Not a Godot project: .*bare/,
+            `a directory with no project.godot: ${notAProject}`,
+          );
+          assert.doesNotMatch(
+            notAProject,
+            /Ensure the Godot editor/,
+            `which no editor would change: ${notAProject}`,
+          );
+        } finally {
+          await server.stop();
+        }
+      },
+      seen,
+      undefined,
+      () => serving,
+    );
+  } finally {
+    sweep(root);
+  }
 }
 
 /**
@@ -23208,6 +23330,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testDiagnosticsLeaveNoDocumentOpen,
   testDiagnosticsSurviveAnotherSpellingOfTheSamePath,
   testDiagnosticsTimeoutIsNotAnEmptyResult,
+  testTheLanguageServerOfAnotherProjectIsRefused,
   testLspFramesBodiesByBytes,
   testLspReassemblesBodySplitMidCharacter,
   testDapFramesBodiesByBytes,
