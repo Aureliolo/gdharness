@@ -34,6 +34,19 @@ func get_project_setting(params: Dictionary) -> Dictionary:
 		result["value"] = null
 		result["message"] = "Setting does not exist"
 
+	# The value under this name is not the one every build reads: `name.windows` replaces it on
+	# Windows, `name.editor` in the editor. Read alone, a caller saw the plain value and not the one
+	# their game showed.
+	var overrides: Dictionary = {}
+	for info: Dictionary in ProjectSettings.get_property_list():
+		var name: String = str(info.get("name", ""))
+		if name.begins_with(setting_path + "."):
+			overrides[name.substr(setting_path.length() + 1)] = _values.serialize_value(
+				ProjectSettings.get_setting(name)
+			)
+	if not overrides.is_empty():
+		result["overrides"] = overrides
+
 	return result
 
 

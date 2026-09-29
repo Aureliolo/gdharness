@@ -2039,6 +2039,33 @@ function testEveryUseIsFound(godotPath: string): void {
 }
 
 /**
+ * A setting is answered with the feature overrides that replace it, since the value under its own
+ * name is not the one a Windows build or the editor reads. Measured on 4.7.2: `get_setting` answers
+ * the plain value in a headless run, so the answer was right and the one a game showed was elsewhere.
+ */
+function testASettingSaysWhatReplacesIt(godotPath: string): void {
+  const dir = createProject(godotPath);
+  try {
+    writeFileSync(
+      join(dir, 'project.godot'),
+      `${readFileSync(join(dir, 'project.godot'), 'utf8')}\n[application]\n\nconfig/description="plain"\nconfig/description.windows="on windows"\nconfig/description.editor="in the editor"\n`,
+    );
+    const read = runOperation(godotPath, dir, 'get_project_setting', {
+      setting: 'application/config/description',
+    });
+    assert.deepEqual(
+      [get(read, 'value'), get(read, 'overrides')],
+      ['plain', { windows: 'on windows', editor: 'in the editor' }],
+      JSON.stringify(read),
+    );
+    const bare = runOperation(godotPath, dir, 'get_project_setting', { setting: 'application/config/name' });
+    assert.equal(get(bare, 'overrides'), undefined, 'and a setting with none carries none');
+  } finally {
+    sweep(dir);
+  }
+}
+
+/**
  * Validation reads at most a hundred scripts, and says so with the count it read and the count there
  * are. It counted the one past the limit before stopping and answered 101.
  */
@@ -2300,6 +2327,9 @@ const CASES: Readonly<Record<string, (godotPath: string, projectDir: string) => 
   },
   everyUse: (godotPath) => {
     testEveryUseIsFound(godotPath);
+  },
+  overrides: (godotPath) => {
+    testASettingSaysWhatReplacesIt(godotPath);
   },
   runningLog: (godotPath) => testAnOperationLeavesARunningLogAlone(godotPath),
   refusals: testRefusals,
