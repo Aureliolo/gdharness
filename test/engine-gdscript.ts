@@ -959,6 +959,33 @@ function testOperations(godotPath: string, projectDir: string): void {
     'enabling then disabling a plugin should give project.godot back byte for byte',
   );
 
+  // A plugin one folder down is a plugin to the editor, which loads it from the path in the list.
+  // Read through a pattern for one folder, it was never listed, and enabling any other plugin wrote
+  // the list back without it.
+  const nested = join(projectDir, 'addons', 'pack', 'sub');
+  mkdirSync(nested, { recursive: true });
+  writeFileSync(join(nested, 'plugin.cfg'), '[plugin]\n\nname="Nested"\nscript="nested.gd"\n');
+  try {
+    assert.equal(get(operation('enable_plugin', { plugin_name: 'pack/sub' }), 'action'), 'enabled');
+    const another = operation('enable_plugin', { plugin_name: 'gdharness_editor' });
+    assert.deepEqual(
+      get(another, 'enabled_plugins'),
+      ['pack/sub', 'gdharness_editor'],
+      `enabling another keeps the nested one: ${JSON.stringify(another)}`,
+    );
+    const both = operation('list_plugins', {});
+    assert.deepEqual(
+      [get(named(get(both, 'plugins'), 'pack/sub'), 'enabled'), get(both, 'enabled_count')],
+      [true, 2],
+      `and it is listed, enabled: ${JSON.stringify(both)}`,
+    );
+    operation('disable_plugin', { plugin_name: 'gdharness_editor' });
+    operation('disable_plugin', { plugin_name: 'pack/sub' });
+    assert.equal(readFileSync(projectFile, 'utf8'), beforePlugin, 'and both come out again');
+  } finally {
+    rmSync(join(projectDir, 'addons', 'pack'), { recursive: true, force: true });
+  }
+
   // Input actions, which are stored as an engine expression rather than as JSON.
   const beforeAction = readFileSync(projectFile, 'utf8');
   const action = operation('add_input_action', {
