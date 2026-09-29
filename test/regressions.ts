@@ -11574,7 +11574,7 @@ async function testASettingsWriteIsTakenUpByTheEditor(): Promise<void> {
     return;
   }
   const sent: { tool: string; args: Record<string, unknown> }[] = [];
-  const editor = { stale: false };
+  const editor = { stale: false, passOver: [] as string[] };
   await withAPlayingEditor(
     () => (tool, args) => {
       if (tool.startsWith('adopt_')) {
@@ -11582,6 +11582,16 @@ async function testASettingsWriteIsTakenUpByTheEditor(): Promise<void> {
         if (editor.stale) {
           return { ok: false, error: `Unknown tool: ${tool}` };
         }
+      }
+      // What the addon answers: each name it could place in a section, which is every name with one,
+      // less any the case has it pass over.
+      if (tool === 'adopt_project_settings') {
+        return {
+          ok: true,
+          adopted: asArray(args['settings'] ?? []).filter(
+            (name) => String(name).includes('/') && !editor.passOver.includes(String(name)),
+          ),
+        };
       }
       return { ok: true };
     },
@@ -11617,6 +11627,14 @@ async function testASettingsWriteIsTakenUpByTheEditor(): Promise<void> {
         ['autoload/Thing'],
         `a setting the write took out is one the editor has to drop: ${JSON.stringify(removed)}`,
       );
+      sent.splice(0);
+
+      // The answer is what the editor says it took, which is not always what it was sent.
+      editor.passOver = [named];
+      const partly = await call({ op: 'set', setting: named, value: 'passed over' });
+      assert.ok(!asArray(get(partly, 'editorAdopted') ?? []).includes(named), JSON.stringify(partly));
+      assert.deepEqual(asArray(get(partly, 'editorPassedOver') ?? []), [named], JSON.stringify(partly));
+      editor.passOver = [];
       sent.splice(0);
 
       const bus = await call({ op: 'add_audio_bus', busName: 'Voices' });

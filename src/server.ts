@@ -3264,18 +3264,36 @@ class GodotServer {
     if (changed.length === 0) {
       return written;
     }
-    const taken = await this.editorTakes('adopt_project_settings', { settings: changed });
+    const adopting: OperationParams = {};
+    const taken = await this.editorTakes('adopt_project_settings', { settings: changed }, adopting);
+    if (taken['editorNote'] !== undefined) {
+      return this.jsonTextResponse({ ...answer, ...taken });
+    }
+    // What the editor says it took, not the list it was sent: the answer echoed the list, and the
+    // addon passes over a name it cannot place in a section.
+    const adopted = Array.isArray(adopting['adopted']) ? adopting['adopted'].map(String) : [];
+    const passedOver = changed.filter((name) => !adopted.includes(name));
     return this.jsonTextResponse({
       ...answer,
-      ...taken,
-      ...(taken['editorNote'] === undefined ? { editorAdopted: changed } : {}),
+      editorAdopted: adopted,
+      ...(passedOver.length > 0 ? { editorPassedOver: passedOver } : {}),
     });
   }
 
-  /** The editor asked to take up what a write changed, and what to add to the answer about it. */
-  private async editorTakes(command: string, args: OperationParams): Promise<OperationParams> {
+  /**
+   * The editor asked to take up what a write changed, and what to add to the answer about it. What
+   * the editor answered is copied into [answered].
+   */
+  private async editorTakes(
+    command: string,
+    args: OperationParams,
+    answered: OperationParams = {},
+  ): Promise<OperationParams> {
     try {
-      await this.godotBridge.invokeTool(command, args);
+      const result = await this.godotBridge.invokeTool(command, args);
+      if (typeof result === 'object' && result !== null) {
+        Object.assign(answered, result);
+      }
       return {};
     } catch (error) {
       const message = errorMessage(error);
