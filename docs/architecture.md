@@ -510,8 +510,17 @@ is the one process that can wait on the game; the server that started the run an
 picks it up read the exit from there alike. A process still there is reported as running, with
 everything printed while nobody was reading; one that is gone is answered with its output and the
 code the keeper wrote, or with `endedUnwatched` when the keeper went first and nothing wrote one,
-because a guessed zero reads as a run that finished its work. `editor_run stop` ends it by pid,
-reads the exit the keeper writes for it, and takes the note away. One run is one process: what the
+because a guessed zero reads as a run that finished its work. `editor_run stop` asks the keeper to
+end it, reads the exit the keeper writes for it, and takes the note away. The keeper listens on a
+named pipe, or a socket in a directory only its user can enter, whose address is in the note, so a
+server that picked the run up asks it the same way. It ends the game through the process handle it
+holds, or through the one the Windows helper holds for a game on the hidden desktop, and a handle
+cannot reach a later process given the same pid. Ending by pid needs proof that the pid is still
+the run first, which on Windows is a PowerShell query and `tasklist`: a windowed game rendering in
+software on a runner with no GPU loaded the machine until neither started in time, and the stop
+refused its own game three times in a day. The pid and that proof remain for a keeper that does not
+answer. Whatever the keeper says, the stop waits on the process itself before it calls the run
+ended. One run is one process: what the
 game started for itself is not signalled and the answer says so, unless the stop is asked for
 `andChildren`, and then every process under the run's, to any depth,
 that is a game of the project goes with it, listed before the run is ended because ending it is
