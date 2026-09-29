@@ -1495,7 +1495,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       value: {
         ops: ['until'],
         description:
-          "until: the value to wait for, fitted to the property's type. On a property holding an object, whether declared to or untyped and holding one or null, the text null means null. One declared to hold an object refuses any value other than null, since it can never hold it.",
+          "until: the value to wait for, fitted to the property's type and compared at the precision the property keeps, so -1.1 meets a 32-bit float holding -1.10000002. A value the property would have to cut is refused: a fraction on a whole number, a number other than 0 or 1 on a bool. On a property holding an object, whether declared to or untyped and holding one or null, the text null means null. One declared to hold an object refuses any value other than null, since it can never hold it.",
       },
       says: {
         type: 'string',

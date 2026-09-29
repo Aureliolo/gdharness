@@ -153,6 +153,8 @@ func wait_until(params: Dictionary) -> Dictionary:
 	if holds_objects and Changes.names_no_object(wanted):
 		wanted = null
 	var refused: String = _not_comparable(current, wanted, node_path, property)
+	if refused.is_empty():
+		refused = _cut_to_fit(params["value"], typeof(current), node_path, property)
 	var never_held: bool = typeof(wanted) != TYPE_NIL and typeof(wanted) != TYPE_OBJECT
 	if refused.is_empty() and declared == TYPE_OBJECT and never_held:
 		refused = (
@@ -169,9 +171,12 @@ func wait_until(params: Dictionary) -> Dictionary:
 	var frames: int = 0
 	# The type is checked every time round, not only at the top: a property that holds an object a
 	# frame later is the same error arriving late.
+	# At the precision the property keeps, as set compares: a float arrives as 64 bits and most
+	# engine properties keep 32, so h_offset waited on as -1.1 read -1.10000002384186 every frame and
+	# the wait ran out on a value the game had reached.
 	while (
 		Values.comparable(current, wanted)
-		and current != wanted
+		and not Changes.held_already(wanted, current)
 		and Time.get_ticks_msec() - started < timeout_ms
 	):
 		await _host.get_tree().process_frame
@@ -187,11 +192,40 @@ func wait_until(params: Dictionary) -> Dictionary:
 		"type": "condition",
 		"path": node_path,
 		"property": property,
-		"met": Values.comparable(current, wanted) and current == wanted,
+		"met": Changes.held_already(wanted, current),
 		"value": _values.serialize(current),
 		"elapsed_ms": Time.get_ticks_msec() - started,
 		"frames": frames,
 	}
+
+
+## Why [param given] would have to be cut to be waited on a whole number or a truth, or "" when not.
+##
+## A number arrives from JSON as a float, so one is converted to what the property holds, and the
+## conversion truncates: 3.5 waited on an int became 3 and 0.2 on a bool became true, and a property
+## already holding that answered met at once, about a state nobody asked for.
+static func _cut_to_fit(given: Variant, type: int, node_path: String, property: String) -> String:
+	if type != TYPE_INT and type != TYPE_BOOL:
+		return ""
+	var number: Variant = given
+	if given is String:
+		var text: String = given
+		number = Read.json_or_null(text)
+	if typeof(number) != TYPE_FLOAT and typeof(number) != TYPE_INT:
+		return ""
+	var value: float = Read.as_float(number)
+	var whole: bool = value == floorf(value)
+	if type == TYPE_INT and whole:
+		return ""
+	if type == TYPE_BOOL and whole and (value == 0.0 or value == 1.0):
+		return ""
+	return (
+		(
+			"%s.%s holds %s and the value to wait for is %s, which it would have to be cut to fit:"
+			+ " waiting on it would answer about a state nobody asked for."
+		)
+		% [node_path, property, type_string(type), str(given)]
+	)
 
 
 ## Why [param wanted] cannot be waited for against [param current], or "" when it can.

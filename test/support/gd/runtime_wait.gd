@@ -743,8 +743,51 @@ func _check_until() -> void:
 	if no_value.get("type") != "error":
 		_fail("wait_until without a value is refused: %s" % str(no_value))
 
+	await _check_until_at_the_precision_kept()
 	await _check_until_a_reference_is_let_go()
 	await _check_until_something_says_it()
+
+
+## Compared at the precision kept: h_offset set to -1.1 holds -1.10000002384186, and an exact wait
+## ran out on it. A value the property would have to cut is refused: 3.5 on an int became 3 and met.
+func _check_until_at_the_precision_kept() -> void:
+	var lens: Camera3D = Camera3D.new()
+	lens.name = "Lens"
+	root.add_child(lens)
+	var shifted: Callable = func() -> void:
+		await process_frame
+		lens.h_offset = -1.1
+	shifted.call()
+	var met: Dictionary = await node._execute_command(
+		"wait_until", {"path": "/root/Lens", "property": "h_offset", "value": -1.1, "timeout_ms": 1000}
+	)
+	if met.get("met") != true:
+		_fail("a 32-bit float meets the value it was given: %s" % JSON.stringify(met))
+
+	var lines: Label = Label.new()
+	lines.name = "Lines"
+	lines.max_lines_visible = 3
+	root.add_child(lines)
+	var whole: Dictionary = await node._execute_command(
+		"wait_until",
+		{"path": "/root/Lines", "property": "max_lines_visible", "value": 3.0, "timeout_ms": 200}
+	)
+	if whole.get("met") != true:
+		_fail("a whole number arriving as a float meets an int: %s" % JSON.stringify(whole))
+	for cut: Variant in [3.5, "3.5"]:
+		var refused: Dictionary = await node._execute_command(
+			"wait_until",
+			{"path": "/root/Lines", "property": "max_lines_visible", "value": cut, "timeout_ms": 200}
+		)
+		if refused.get("type") != "error" or not str(refused.get("message", "")).contains("cut to fit"):
+			_fail("%s waited on an int is refused, not cut to 3: %s" % [str(cut), JSON.stringify(refused)])
+	var truth: Dictionary = await node._execute_command(
+		"wait_until", {"path": "/root/Lines", "property": "visible", "value": 0.2, "timeout_ms": 200}
+	)
+	if truth.get("type") != "error":
+		_fail("0.2 waited on a bool is refused, not read as true: %s" % JSON.stringify(truth))
+	lens.queue_free()
+	lines.queue_free()
 
 
 ## A reference waited on until it is let go of, every way a game lets go: the property set to null,
