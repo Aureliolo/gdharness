@@ -6245,7 +6245,7 @@ class GodotServer {
       command: godotPath,
       args: cmdArgs,
       ...(env === undefined ? {} : { env }),
-      run: { transcript: transcript.path, startedAt, projectPath },
+      run: { transcript: transcript.path, startedAt, projectPath, ...this.servedBy() },
       ...(desktop === undefined ? {} : { desktop }),
     });
     if ('error' in launched) {
@@ -6693,8 +6693,16 @@ class GodotServer {
    */
   private async adoptRecordedRun(): Promise<GodotProcess | null> {
     const project = this.ourProject();
-    const record = project === null ? null : readRunRecord(project);
-    if (record === null || !this.couldBeOurs(record.projectPath)) {
+    // The newer of the two, since each is left behind once its run is over.
+    const found = project === null ? [] : [readRunRecord(project), this.startedForUs(project)];
+    const record = found.reduce<RunRecord | null>(
+      (newest, one) => (one !== null && (newest === null || one.startedAt > newest.startedAt) ? one : newest),
+      null,
+    );
+    if (
+      record === null ||
+      !(this.couldBeOurs(record.projectPath) || this.couldBeOurs(record.servedBy ?? ''))
+    ) {
       return null;
     }
     const adopted: GodotProcess = {
@@ -6733,6 +6741,29 @@ class GodotServer {
     }
     this.activeProcess = adopted;
     return adopted;
+  }
+
+  /**
+   * The project this server serves, for the note of a run it starts, or nothing when it names none.
+   */
+  private servedBy(): { servedBy?: string } {
+    const mine = this.ourProject();
+    return mine === null ? {} : { servedBy: mine };
+  }
+
+  /**
+   * The newest run left on disk of another project that a server serving [param project] started,
+   * or null. Kept under the run's own project, so a successor looking under its own found nothing.
+   */
+  private startedForUs(project: string): RunRecord | null {
+    return (
+      everyRunRecord().find(
+        (one) =>
+          one.servedBy !== undefined &&
+          isSameDirectory(one.servedBy, project) &&
+          !(one.projectPath !== '' && isSameDirectory(one.projectPath, project)),
+      ) ?? null
+    );
   }
 
   /**

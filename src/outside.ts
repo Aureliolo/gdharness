@@ -26,6 +26,8 @@ export interface OutsideSpec {
     readonly transcript: string;
     readonly startedAt: number;
     readonly projectPath: string;
+    /** The project the server that started the run serves, where it names one. */
+    readonly servedBy?: string;
   };
   /** A Windows desktop to start it on, where its windows neither show nor take the focus. */
   readonly desktop?: string;

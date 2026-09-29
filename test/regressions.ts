@@ -19322,6 +19322,114 @@ async function testARunOutlivesItsServer(): Promise<void> {
 }
 
 /**
+ * A run of another project, started by naming its projectPath, is still the run of the server that
+ * replaces the one that started it.
+ *
+ * Reported by ostinato on 1.1.21: its server, serving one project, started a run of a worktree
+ * beside it by naming the worktree's path. The harness replaced the server a few seconds later, and
+ * the successor refused editor_output and editor_run stop as "not this server's to answer for or to
+ * end" while runtime_invoke reached the same game. The note was kept under the run's project, and
+ * the successor looked under its own. A server serving a third project is still refused, which is
+ * the refusal that keeps one project's server from ending another's bench.
+ */
+async function testARunOfAnotherProjectOutlivesItsServer(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('run-of-another-project regression skipped (Godot not found)');
+    return;
+  }
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-beside-runtime-'));
+  const serves = mkdtempSync(join(tmpdir(), 'gdharness-beside-serves-'));
+  const beside = mkdtempSync(join(tmpdir(), 'gdharness-beside-run-'));
+  const elsewhere = mkdtempSync(join(tmpdir(), 'gdharness-beside-elsewhere-'));
+  const godot =
+    '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Beside"\nrun/main_scene="res://main.tscn"\n';
+  for (const directory of [serves, beside, elsewhere]) {
+    writeFileSync(join(directory, 'project.godot'), godot);
+  }
+  writeFileSync(
+    join(beside, 'main.gd'),
+    'extends Node\n\nvar rows := 0\n\n\nfunc _process(_delta: float) -> void:\n\trows += 1\n\tif rows % 30 == 0:\n\t\tprint("row %d" % [rows / 30])\n',
+  );
+  writeFileSync(
+    join(beside, 'main.tscn'),
+    '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+  );
+  const env = { GODOT_PATH: godotPath, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: serves };
+  let gamePid: number | null = null;
+  try {
+    const first = new ServerProcess({ env });
+    try {
+      await first.initialize('regression-test');
+      const started: unknown = parseTextContent(
+        await first.request(
+          'tools/call',
+          { name: 'editor_run', arguments: { projectPath: beside, op: 'start', headless: true } },
+          ENGINE_CALL_TIMEOUT_MS,
+        ),
+      );
+      assert.equal(get(started, 'started'), true, JSON.stringify(started));
+      gamePid = asNumber(get(started, 'pid'), 'the run needs a process of its own');
+    } finally {
+      first.child.stdin?.end();
+    }
+    await new Promise<void>((gone) => {
+      if (first.exited) {
+        gone();
+        return;
+      }
+      first.child.once('exit', () => {
+        gone();
+      });
+      setTimeout(() => {
+        first.child.kill();
+        gone();
+      }, 15_000);
+    });
+    assert.ok(alive(gamePid), 'the run outlives the server that started it');
+
+    await withStdioServer(
+      async (call) => {
+        const answered = await call('editor_output', { limit: 50 }, ENGINE_CALL_TIMEOUT_MS);
+        assert.match(
+          answered,
+          /not this server's to answer for or to end/,
+          `a third project's server: ${answered}`,
+        );
+      },
+      { ...env, GDHARNESS_PROJECT: elsewhere },
+    );
+
+    await withStdioServer(async (call) => {
+      const answered = await call('editor_output', { limit: 50 }, ENGINE_CALL_TIMEOUT_MS);
+      assert.doesNotMatch(answered, /not this server's/, `the successor answers for its run: ${answered}`);
+      const output: unknown = JSON.parse(answered);
+      assert.equal(get(output, 'running'), true, answered);
+      assert.equal(get(output, 'pid'), gamePid, answered);
+
+      const stopped: unknown = JSON.parse(await call('editor_run', { op: 'stop' }, ENGINE_CALL_TIMEOUT_MS));
+      assert.equal(get(stopped, 'stopped'), true, `and ends it: ${JSON.stringify(stopped)}`);
+    }, env);
+
+    await delay(1000);
+    assert.equal(alive(gamePid), false, 'the stop ended the game');
+    gamePid = null;
+  } finally {
+    if (gamePid !== null && alive(gamePid)) {
+      try {
+        process.kill(gamePid);
+      } catch {
+        // Nothing left to clean up.
+      }
+    }
+    sweep(serves, beside, elsewhere, runtimeDir);
+  }
+}
+
+/**
  * A test run the timeout ends is called hung only when it had stopped printing.
  *
  * Hung sends a reader looking for a deadlock in the last suite named, and a run printing a passing
@@ -23840,6 +23948,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARunEndedWithoutACodeSaysWhy,
   testAForeignRunSurvivesAStart,
   testARunOutlivesItsServer,
+  testARunOfAnotherProjectOutlivesItsServer,
   testGdUnitRunner,
   testATestRunCutShortIsNamedForWhatItWasDoing,
   testAnUpgradeReadsTheEngineOutOfTheConfigItRewrites,
