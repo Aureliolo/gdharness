@@ -612,7 +612,11 @@ function testOperations(godotPath: string, projectDir: string): void {
     content: whole,
   });
   assert.equal(doubled.answer, null, 'content with a header argument beside it is refused');
-  assert.match(doubled.stderr, /content is the whole file, so extends cannot be given with it/, doubled.stderr);
+  assert.match(
+    doubled.stderr,
+    /content is the whole file, so extends cannot be given with it/,
+    doubled.stderr,
+  );
   assert.ok(!existsSync(join(projectDir, 'made', 'doubled.gd')), 'and nothing is written');
 
   // What gets written has to parse where an untyped declaration is an error, which the
@@ -633,11 +637,17 @@ function testOperations(godotPath: string, projectDir: string): void {
   // Each line answered is where the declaration is in the file written.
   const onTheirLines = (answer: unknown): void => {
     const written = readFileSync(join(projectDir, 'made', 'hero.gd'), 'utf8').split('\n');
-    const keywords: Record<string, string> = { add_function: 'func', add_variable: 'var', add_signal: 'signal' };
+    const keywords: Record<string, string> = {
+      add_function: 'func',
+      add_variable: 'var',
+      add_signal: 'signal',
+    };
     for (const applied of asArray(get(answer, 'modifications_applied'))) {
       assert.match(
         written[asNumber(get(applied, 'line')) - 1] ?? '',
-        new RegExp(`^${keywords[asString(get(applied, 'type'))] ?? '?'} ${asString(get(applied, 'name'))}\\b`),
+        new RegExp(
+          `^${keywords[asString(get(applied, 'type'))] ?? '?'} ${asString(get(applied, 'name'))}\\b`,
+        ),
         `${JSON.stringify(applied)} should name the line its declaration is on`,
       );
     }
@@ -672,7 +682,11 @@ function testOperations(godotPath: string, projectDir: string): void {
     /Nothing was changed: modification 2 has no name; modification 3 is named 'not a name', which GDScript does not accept as a name/,
     refused.stderr,
   );
-  assert.equal(readFileSync(join(projectDir, 'made', 'hero.gd'), 'utf8'), modifiedSource, 'and nothing is written');
+  assert.equal(
+    readFileSync(join(projectDir, 'made', 'hero.gd'), 'utf8'),
+    modifiedSource,
+    'and nothing is written',
+  );
   assert.match(modifiedSource, /var speed: float = 4\.0/, 'the variable should carry its type and default');
   assert.match(
     modifiedSource,
@@ -963,12 +977,55 @@ function testOperations(godotPath: string, projectDir: string): void {
   const buses = operation('get_audio_buses', {});
   assert.ok(named(get(buses, 'buses'), 'Master'), 'every project has a Master bus');
   assert.ok(named(get(buses, 'buses'), 'Fixture'), 'the layout was written, so a fresh process sees the bus');
+  // A second bus sending to Master goes in right after it, ahead of the first. Taking the last index
+  // as the new one renamed the first bus and answered with it.
+  const second = operation('create_audio_bus', { bus_name: 'Second' });
+  const layoutNames = (answer: unknown): unknown[] =>
+    asArray(get(answer, 'buses')).map((bus) => [get(bus, 'index'), get(bus, 'name'), get(bus, 'send')]);
+  assert.deepEqual(
+    [get(second, 'bus', 'index'), get(second, 'bus', 'name'), get(second, 'bus', 'send')],
+    [1, 'Second', 'Master'],
+    `the new bus is where it went: ${JSON.stringify(second)}`,
+  );
+  assert.deepEqual(
+    layoutNames(operation('get_audio_buses', {})),
+    [
+      [0, 'Master', ''],
+      [1, 'Second', 'Master'],
+      [2, 'Fixture', 'Master'],
+    ],
+    'and the bus that was there keeps its name, one further along',
+  );
+  const twice = runRefusedOperation(godotPath, projectDir, 'create_audio_bus', { bus_name: 'Fixture' });
+  assert.equal(twice.answer, null, 'a name a bus already has is refused');
+  assert.match(twice.stderr, /A bus named Fixture already exists, at index 2/, twice.stderr);
+
+  // Set means the slot holds this effect afterwards: added at the end, replaced where one is.
+  const effects = (answer: unknown): unknown[] =>
+    asArray(get(answer, 'bus', 'effects')).map((effect) => get(effect, 'type'));
   const reverb = operation('set_audio_bus_effect', {
-    bus_index: asNumber(get(fixtureBus, 'bus', 'index')),
+    bus_index: 2,
     effect_index: 0,
     effect_type: 'AudioEffectReverb',
   });
-  assert.equal(get(reverb, 'bus', 'effects', 0, 'type'), 'AudioEffectReverb', JSON.stringify(reverb));
+  assert.deepEqual(effects(reverb), ['AudioEffectReverb'], `no padding: ${JSON.stringify(reverb)}`);
+  const chorus = operation('set_audio_bus_effect', { bus_index: 2, effect_index: 0, effect_type: 'Chorus' });
+  assert.deepEqual(
+    [effects(chorus), get(chorus, 'replaced'), get(chorus, 'effect_type')],
+    [['AudioEffectChorus'], 'AudioEffectReverb', 'AudioEffectChorus'],
+    `the effect in the slot is replaced, not pushed along: ${JSON.stringify(chorus)}`,
+  );
+  const beyond = runRefusedOperation(godotPath, projectDir, 'set_audio_bus_effect', {
+    bus_index: 2,
+    effect_index: 3,
+    effect_type: 'Reverb',
+  });
+  assert.equal(beyond.answer, null, 'a slot past the one after the last is refused');
+  assert.match(
+    beyond.stderr,
+    /Bus 2 has 1 effect, so effect_index can be 0 to 1, where 1 adds one after the last/,
+    beyond.stderr,
+  );
 
   // ClassDB, which is the one source of answers that does not touch the project at all.
   const classes = operation('query_classes', { filter: 'camera', category: 'node' });
