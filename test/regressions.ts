@@ -452,6 +452,7 @@ async function withFakeLanguageServer<T>(
   handler: (port: number) => Promise<T>,
   seen?: JsonRpcMessage[],
   said: readonly string[] = ['Could not find type "Missing" in the current scope.'],
+  serves?: () => string,
 ): Promise<T> {
   const sockets = new Set<Socket>();
 
@@ -479,6 +480,22 @@ async function withFakeLanguageServer<T>(
         seen?.push(message);
 
         if (message.method === 'initialize') {
+          // Godot's own comparison, measured on 4.7.2: a root that is not its project's, as a string
+          // with the separators turned and the case folded, gets told to change to its project,
+          // ahead of the answer.
+          const root = String(get(message.params, 'rootPath')).replaceAll('\\', '/').toLowerCase();
+          const own = serves?.();
+          if (own !== undefined && root !== own.toLowerCase()) {
+            send({
+              jsonrpc: '2.0',
+              method: 'window/showMessage',
+              params: {
+                type: 2,
+                message: 'The GDScript Language Server might not work correctly with other projects.',
+              },
+            });
+            send({ jsonrpc: '2.0', method: 'gdscript_client/changeWorkspace', params: { path: own } });
+          }
           send({ jsonrpc: '2.0', id: message.id, result: { capabilities: {} } });
         } else if (message.method === 'textDocument/didOpen') {
           const uri = publishUri(String(get(message.params, 'textDocument', 'uri')));
@@ -701,6 +718,153 @@ async function testDiagnosticsTimeoutIsNotAnEmptyResult(): Promise<void> {
       await client.disconnect();
     },
   );
+}
+
+/**
+ * Two asks about one file at once are two answers.
+ *
+ * The second ask replaced the first's diagnostics waiter, clearing its timer and settling nothing,
+ * so the first call waited with no deadline for a publish that had gone to the second, and the
+ * second found the document the first had opened and sent a change to it. The stand-in publishes
+ * on an open only, so without the asks taking turns one of the two is left unanswered. Raced
+ * against a deadline so a hang fails here rather than stalling the suite.
+ */
+async function testTwoAsksAboutOneFileAreBothAnswered(): Promise<void> {
+  const seen: JsonRpcMessage[] = [];
+  await withFakeLanguageServer(
+    (uri) => uri,
+    async (port) => {
+      const client = new GodotLSPClient(port, '127.0.0.1');
+      const script = join(tmpdir(), 'gdharness-lsp-twice', 'twice.gd');
+      const both = Promise.allSettled([
+        client.getDiagnostics(script, 'extends Node\n'),
+        client.getDiagnostics(script, 'extends Node\n'),
+      ]);
+      const settled = await Promise.race([both, delay(8000).then(() => 'still waiting' as const)]);
+      await client.disconnect();
+      if (settled === 'still waiting') {
+        assert.fail('both asks are answered, and one was still waiting');
+      }
+      assert.deepEqual(
+        settled.map((ask) => (ask.status === 'fulfilled' ? ask.value.length : String(ask.reason))),
+        [1, 1],
+        'both asks are answered, each with the diagnostics published for it',
+      );
+    },
+    seen,
+  );
+  assert.deepEqual(
+    seen.map((message) => message.method).filter((method) => String(method).startsWith('textDocument/')),
+    ['textDocument/didOpen', 'textDocument/didClose', 'textDocument/didOpen', 'textDocument/didClose'],
+    'one after the other, each opening the file and giving it back',
+  );
+}
+
+/**
+ * A language server belongs to one project, its editor's, and an editor of another project can hold
+ * the port this server asks.
+ *
+ * Godot answers an initialize naming a root that is not its project by telling the client to
+ * change to its own project, ahead of the answer; measured on 4.7.2 against a headless editor.
+ * The client went on and asked about this project's script, which that editor would read against
+ * its own `res://` and classes. The stand-in names its project the way Godot does, so the answer
+ * for the right project is also asserted, spelled differently enough that the stand-in sends the
+ * change there too, and a directory that is no project is refused before anything is asked.
+ */
+async function testTheLanguageServerOfAnotherProjectIsRefused(): Promise<void> {
+  // The long name, which is the one the refusal gives: a runner's TEMP holds the 8.3 name, and the
+  // server reads the project path through the filesystem.
+  const root = mkdtempSync(join(realpathSync.native(tmpdir()), 'gdharness-lsp-project-'));
+  const ours = join(root, 'ours');
+  const theirs = join(root, 'theirs');
+  const bare = join(root, 'bare');
+  for (const directory of [ours, theirs, bare]) {
+    mkdirSync(directory);
+    writeFileSync(join(directory, 'hero.gd'), 'extends Node\n');
+  }
+  writeFileSync(join(ours, 'project.godot'), 'config_version=5\n');
+  writeFileSync(join(theirs, 'project.godot'), 'config_version=5\n');
+  const godotSpelling = (directory: string): string => directory.replaceAll('\\', '/');
+
+  let serving = godotSpelling(theirs);
+  const seen: JsonRpcMessage[] = [];
+  try {
+    await withFakeLanguageServer(
+      (uri) => uri,
+      async (lspPort) => {
+        const server = new ServerProcess({
+          env: {
+            GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+            GDHARNESS_LSP_PORT: String(lspPort),
+            GODOT_PATH: join(tmpdir(), 'gdharness-no-such-godot'),
+          },
+        });
+        const diagnose = async (projectPath: string): Promise<JsonRpcMessage> =>
+          server.request('tools/call', {
+            name: 'script_diagnostics',
+            arguments: { projectPath, scriptPath: 'res://hero.gd' },
+          });
+        try {
+          await server.initialize('regression-test');
+
+          const refused = await diagnose(ours);
+          const said = textOf(refused) ?? '';
+          assert.equal(get(refused.result, 'isError'), true, `another project's server is refused: ${said}`);
+          assert.ok(
+            said.includes(`belongs to the editor of ${serving}, not ${ours}`),
+            `naming the project it serves and the one asked about: ${said}`,
+          );
+          assert.match(said, /editor_launch opens this project's own editor/, `with what to do: ${said}`);
+          assert.equal(
+            seen.filter((message) => message.method === 'textDocument/didOpen').length,
+            0,
+            "and this project's script was not handed to it",
+          );
+
+          // Straight after the refusal, on the same connection, where Godot sends nothing at all:
+          // what the other project's server said is about that initialize and no later one.
+          serving = godotSpelling(ours);
+          const same = await diagnose(ours);
+          assert.equal(
+            get(parseTextContent(same), 'errors'),
+            1,
+            `this project's own server answers: ${textOf(same)}`,
+          );
+
+          serving = `${godotSpelling(ours)}/`;
+          const answered = await diagnose(ours);
+          assert.equal(
+            get(parseTextContent(answered), 'errors'),
+            1,
+            `and does however it spells the path: ${textOf(answered)}`,
+          );
+          assert.ok(
+            seen.some((message) => message.method === 'textDocument/didOpen'),
+            'with the script handed to it',
+          );
+
+          const notAProject = textOf(await diagnose(bare)) ?? '';
+          assert.match(
+            notAProject,
+            /Not a Godot project: .*bare/,
+            `a directory with no project.godot: ${notAProject}`,
+          );
+          assert.doesNotMatch(
+            notAProject,
+            /Ensure the Godot editor/,
+            `which no editor would change: ${notAProject}`,
+          );
+        } finally {
+          await server.stop();
+        }
+      },
+      seen,
+      undefined,
+      () => serving,
+    );
+  } finally {
+    sweep(root);
+  }
 }
 
 /**
@@ -1012,6 +1176,254 @@ async function testFramingCeilingFailsLoudly(): Promise<void> {
       'a DAP adapter announcing more than the ceiling should fail the request, naming the size',
     );
   });
+}
+
+/**
+ * A variables read says what it could not read, rather than answering it empty.
+ *
+ * The values of a scope come from the stopped game through the editor, and the adapter refuses
+ * their reference as "unknown" until they have arrived. A wait that ran out answered `[]`, which is
+ * what a scope with nothing in it says, and a frame id the stack no longer holds answered no scopes
+ * at all as a success. The stand-in holds back the values of one scope for good, answers a frame
+ * that is not in its stack, and in a second session never sends scopes.
+ */
+async function testAVariablesReadSaysWhatItCouldNotRead(): Promise<void> {
+  const adapter =
+    (scopes: readonly Record<string, unknown>[]): FramedPeerHandler =>
+    (message, socket) => {
+      const command = String(message['command']);
+      const answer = (success: boolean, body: Record<string, unknown>): void => {
+        socket.write(
+          frameJsonRpc({
+            seq: 1,
+            type: 'response',
+            request_seq: message['seq'],
+            command,
+            success,
+            ...(success ? { body } : { message: 'unknown' }),
+          }),
+        );
+      };
+      const reference = get(message['arguments'], 'variablesReference');
+      if (command === 'threads') {
+        answer(true, { threads: [{ id: 1, name: 'Main' }] });
+      } else if (command === 'stackTrace') {
+        answer(true, {
+          stackFrames: [
+            { id: 0, name: '_ready', line: 3 },
+            { id: 1, name: '_enter', line: 9 },
+          ],
+        });
+      } else if (command === 'scopes') {
+        answer(true, { scopes });
+      } else if (command === 'variables') {
+        answer(reference === 1, reference === 1 ? { variables: [{ name: 'health', value: '3' }] } : {});
+      } else {
+        answer(true, {});
+      }
+    };
+
+  const both = [
+    { name: 'Locals', variablesReference: 1 },
+    { name: 'Members', variablesReference: 2 },
+  ];
+  await withFramedPeer(adapter(both), async (port) => {
+    const client = new GodotDAPClient(port, '127.0.0.1', { scopesMs: 1500 });
+    try {
+      const read = await handleDAPTool(client, 'dap_get_variables', {});
+      const answer = JSON.parse(textOf({ jsonrpc: '2.0', result: read }) ?? '{}') as unknown;
+      assert.deepEqual(
+        get(answer, 'scopes'),
+        [
+          { name: 'Locals', variables: [{ name: 'health', value: '3' }] },
+          { name: 'Members', variables: null },
+        ],
+        `the values that came are answered, and the ones that did not are not given as none: ${JSON.stringify(answer)}`,
+      );
+      assert.deepEqual(get(answer, 'valuesMissing'), ['Members'], 'naming the scope that went unanswered');
+      assert.match(String(get(answer, 'note')), /unknown rather than empty/);
+
+      const gone = await handleDAPTool(client, 'dap_get_variables', { frameId: 7 });
+      const said = textOf({ jsonrpc: '2.0', result: gone }) ?? '';
+      assert.equal(gone.isError, true, `a frame the stack does not hold is refused: ${said}`);
+      assert.match(said, /has no frame 7; its frames are 0, 1\./, `naming the frames it does hold: ${said}`);
+      assert.doesNotMatch(said, /editor_run/, `without sending the caller to start a game: ${said}`);
+    } finally {
+      await client.abandon();
+    }
+  });
+
+  await withFramedPeer(adapter([]), async (port) => {
+    const client = new GodotDAPClient(port, '127.0.0.1', { scopesMs: 1500 });
+    try {
+      const read = await handleDAPTool(client, 'dap_get_variables', {});
+      const said = textOf({ jsonrpc: '2.0', result: read }) ?? '';
+      assert.equal(read.isError, true, `scopes that never came are not an empty frame: ${said}`);
+      assert.match(said, /The scopes of frame 0 did not arrive from the game within 1\.5s/, said);
+    } finally {
+      await client.abandon();
+    }
+  });
+}
+
+/**
+ * A step answers where the game stopped after it, and says so when it has not stopped.
+ *
+ * Godot's adapter answers `next` at once and the step lands after, told as a `stopped` event. A
+ * stack read on the answer alone was a read of the frames before the step: measured in the editor
+ * tier, where it answered the line the step left. The stand-in answers the same way, moving its
+ * line only when it sends the stop, and in the last step never stops again, which is the branch
+ * the engine case does not reach.
+ */
+async function testAStepAnswersWhereItLanded(): Promise<void> {
+  let line = 30;
+  const adapter: FramedPeerHandler = (message, socket) => {
+    const command = String(message['command']);
+    const body =
+      command === 'threads'
+        ? { threads: [{ id: 1, name: 'Main' }] }
+        : command === 'stackTrace'
+          ? { stackFrames: [{ id: 0, name: '_ready', line }] }
+          : {};
+    const stop = (): void => {
+      socket.write(
+        frameJsonRpc({ seq: 2, type: 'event', event: 'stopped', body: { reason: 'step', threadId: 1 } }),
+      );
+    };
+    // The first step stops after its answer; the second before it, which nothing in the protocol
+    // rules out.
+    if (command === 'next' && line === 31) {
+      line = 32;
+      stop();
+    }
+    socket.write(
+      frameJsonRpc({ seq: 1, type: 'response', request_seq: message['seq'], command, success: true, body }),
+    );
+    if (command === 'next' && line === 30) {
+      setTimeout(() => {
+        line = 31;
+        stop();
+      }, 300);
+    }
+  };
+
+  await withFramedPeer(adapter, async (port) => {
+    const client = new GodotDAPClient(port, '127.0.0.1', { stepMs: 1000 });
+    try {
+      const over = await handleDAPTool(client, 'dap_step_over', {});
+      const landed = JSON.parse(textOf({ jsonrpc: '2.0', result: over }) ?? '{}') as unknown;
+      assert.equal(
+        get(landed, 'heldAgain'),
+        true,
+        `the step stopped the game again: ${JSON.stringify(landed)}`,
+      );
+      assert.equal(
+        get(landed, 'stack', 0, 'line'),
+        31,
+        `and its answer is the line it landed on: ${JSON.stringify(landed)}`,
+      );
+
+      const early = await handleDAPTool(client, 'dap_step_over', {});
+      const ahead = JSON.parse(textOf({ jsonrpc: '2.0', result: early }) ?? '{}') as unknown;
+      assert.equal(
+        get(ahead, 'stack', 0, 'line'),
+        32,
+        `a stop told ahead of the step's answer is the step's: ${JSON.stringify(ahead)}`,
+      );
+
+      const into = await handleDAPTool(client, 'dap_step_into', {});
+      const running = JSON.parse(textOf({ jsonrpc: '2.0', result: into }) ?? '{}') as unknown;
+      assert.equal(
+        get(running, 'heldAgain'),
+        false,
+        `a step with no stop after it: ${JSON.stringify(running)}`,
+      );
+      assert.equal(get(running, 'stack'), undefined, 'answers no stack, which would be the one from before');
+      assert.match(String(get(running, 'note')), /had not stopped again 1s after the step/);
+    } finally {
+      await client.abandon();
+    }
+  });
+}
+
+/**
+ * The adapter's console says what it no longer holds.
+ *
+ * The client keeps the adapter's last thousand lines, and a read on behalf of editor_output empties
+ * it into the run's log. `debug_state output` answered the buffer's count as the console's, so a
+ * run that had printed more answered its newest thousand as everything, and one read after a drain
+ * answered what had come since, often nothing. The stand-in prints 1005 lines, then one more after a
+ * draining read.
+ */
+async function testTheAdaptersConsoleSaysWhatItNoLongerHolds(): Promise<void> {
+  let peer: Socket | null = null;
+  const print = (lines: readonly string[]): void => {
+    peer?.write(
+      frameJsonRpc({
+        seq: 1,
+        type: 'event',
+        event: 'output',
+        body: { category: 'stdout', output: lines.join('\n') },
+      }),
+    );
+  };
+  const respond: FramedPeerHandler = (message, socket) => {
+    socket.write(
+      frameJsonRpc({
+        seq: 2,
+        type: 'response',
+        request_seq: message['seq'],
+        command: message['command'],
+        success: true,
+        body: {},
+      }),
+    );
+  };
+  const read = async (client: GodotDAPClient): Promise<unknown> =>
+    JSON.parse(
+      textOf({ jsonrpc: '2.0', result: await handleDAPTool(client, 'dap_get_output', {}) }) ?? '{}',
+    ) as unknown;
+
+  await withFramedPeer(
+    respond,
+    async (port) => {
+      const client = new GodotDAPClient(port, '127.0.0.1');
+      try {
+        await client.initialize();
+        const quiet = await read(client);
+        assert.equal(
+          get(quiet, 'notShown'),
+          undefined,
+          `nothing printed is nothing missing: ${JSON.stringify(quiet)}`,
+        );
+
+        print(Array.from({ length: 1005 }, (_, index) => `line ${index}`));
+        assert.ok(await cameTrue(() => client.getOutput().length === 1000), 'the lines should arrive');
+        const full = await read(client);
+        assert.equal(get(full, 'lines'), 1000);
+        assert.equal(get(full, 'output', 0), 'line 5', 'the buffer holds the newest lines');
+        assert.equal(
+          get(full, 'notShown'),
+          5,
+          `and counts the ones it dropped: ${String(get(full, 'note'))}`,
+        );
+        assert.match(String(get(full, 'note')), /5 fell out of this buffer, which keeps the last 1000\./);
+
+        client.getOutput(true);
+        print(['after']);
+        assert.ok(await cameTrue(() => client.getOutput().length === 1), 'the next line should arrive');
+        const drained = await read(client);
+        assert.deepEqual(get(drained, 'output'), ['after']);
+        assert.equal(get(drained, 'notShown'), 1005, `a drain is counted too: ${JSON.stringify(drained)}`);
+        assert.match(String(get(drained, 'note')), /1000 were moved into the run's log by an earlier read/);
+      } finally {
+        await client.abandon();
+      }
+    },
+    (socket) => {
+      peer = socket;
+    },
+  );
 }
 
 /**
@@ -5540,7 +5952,7 @@ function testAStopThatSignalsNothingSaysSo(): void {
     endedPid: 4242,
     throughEditor: false,
     exitSignal: null,
-    errors: 0,
+    clean: true,
   });
   assert.equal(refused.stopped, false, 'a stop that signalled nothing did not stop anything');
   assert.equal(refused.notSignalled, 4242, 'and names the pid it left alone');
@@ -5559,7 +5971,7 @@ function testAStopThatSignalsNothingSaysSo(): void {
     endedPid: 4242,
     throughEditor: false,
     exitSignal: 'SIGTERM',
-    errors: 1,
+    clean: false,
   });
   assert.equal(gone.stopped, true, 'a run the signal ended is stopped');
   assert.equal(gone.endedPid, 4242, 'under the pid it was ended by');
@@ -5574,7 +5986,7 @@ function testAStopThatSignalsNothingSaysSo(): void {
     endedPid: 4242,
     throughEditor: false,
     exitSignal: null,
-    errors: 0,
+    clean: true,
   });
   assert.equal(lingering.stopped, true, 'a run that was signalled was stopped, as far as a stop can');
   assert.match(lingering.note, /It had not exited \d+ seconds after being told to/, lingering.note);
@@ -5585,7 +5997,7 @@ function testAStopThatSignalsNothingSaysSo(): void {
     endedPid: 4242,
     throughEditor: false,
     exitSignal: null,
-    errors: 0,
+    clean: true,
   });
   assert.match(over.note, /^This run was over before the stop/, over.note);
   assert.equal(over.withChildren, false, 'a run already over says nothing about what it started');
@@ -5596,7 +6008,7 @@ function testAStopThatSignalsNothingSaysSo(): void {
     endedPid: null,
     throughEditor: true,
     exitSignal: null,
-    errors: 0,
+    clean: true,
   });
   assert.match(
     played.note,
@@ -7496,8 +7908,8 @@ function testAGameIsFoundThroughALinkToItsProject(): Promise<void> {
   );
   return announcedSince(linked, new Set(), { budgetMs: 2_000, directories: [directory] })
     .then((found) => {
-      assert.equal(found?.port, 51_250, 'the game is found by the path the caller named');
-      const chosen = chooseRuntime([found], linked);
+      assert.equal(found[0]?.port, 51_250, 'the game is found by the path the caller named');
+      const chosen = chooseRuntime(found, linked);
       assert.ok('endpoint' in chosen, `and chosen for that path: ${JSON.stringify(chosen)}`);
     })
     .finally(() => {
@@ -7534,21 +7946,50 @@ async function testAStartWaitsForTheGameToAnnounceItself(): Promise<void> {
     }, 120);
     try {
       const found = await announcedSince(root, before, { budgetMs: 4_000, directories: [directory] });
-      assert.equal(found?.port, 51_241, 'the wait ends on the game that was not there before');
+      assert.deepEqual(
+        found.map((one) => one.port),
+        [51_241],
+        'the wait ends on the game that was not there before',
+      );
     } finally {
       clearTimeout(late);
+    }
+
+    // Two in one look, as a game and a worker it started can be: both are handed back, since which
+    // is the game is for the caller to tell, and the directory's order says nothing about it.
+    const pair = [0, 1].map(() =>
+      spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }),
+    );
+    try {
+      const pids = pair.map((one) => one.pid ?? 0);
+      for (const [index, pid] of pids.entries()) {
+        announce(pid, 51_242 + index);
+      }
+      const both = await announcedSince(root, new Set([process.pid, process.ppid]), {
+        budgetMs: 4_000,
+        directories: [directory],
+      });
+      assert.deepEqual(
+        both.map((one) => one.pid).sort((one, other) => one - other),
+        [...pids].sort((one, other) => one - other),
+        'two games announced in one look are both handed back',
+      );
+    } finally {
+      for (const one of pair) {
+        one.kill();
+      }
     }
 
     const elsewhere = await announcedSince(join(root, 'elsewhere'), new Set(), {
       budgetMs: 60,
       directories: [directory],
     });
-    assert.equal(elsewhere, null, 'a game from another project is not the one being waited for');
+    assert.deepEqual(elsewhere, [], 'a game from another project is not the one being waited for');
 
     const started = Date.now();
     const seen = new Set([process.pid, process.ppid]);
     const nothing = await announcedSince(root, seen, { budgetMs: 120, directories: [directory] });
-    assert.equal(nothing, null, 'and a game that never announces is given up on');
+    assert.deepEqual(nothing, [], 'and a game that never announces is given up on');
     assert.ok(Date.now() - started >= 100, 'after the budget rather than at once');
 
     // A game held at a breakpoint cannot announce until it is let go, so the wait ends rather
@@ -7559,7 +8000,7 @@ async function testAStartWaitsForTheGameToAnnounceItself(): Promise<void> {
       directories: [directory],
       giveUp: () => true,
     });
-    assert.equal(held, null, 'a game that has stopped is not waited for');
+    assert.deepEqual(held, [], 'a game that has stopped is not waited for');
     assert.ok(Date.now() - gaveUp < 1_000, 'and the wait ends at once rather than at the budget');
   } finally {
     sweep(root);
@@ -12747,6 +13188,69 @@ async function endGame(game: ChildProcess | null | undefined): Promise<void> {
  * a play the editor never reported as playing, which is what an editor still scanning answers, is
  * over once stopped rather than a play still on its way for the rest of the grace.
  */
+/**
+ * A stop is a stop only when the editor took it.
+ *
+ * The editor's answer to stop_playing was thrown away, and a game that had announced no process was
+ * judged gone by waiting on an empty list, which is true at once. So a stop the editor never
+ * received answered `stopped: true` about a game still playing, and the run read as ended here for
+ * the rest of its life; and one the editor took and went on playing through answered the same.
+ */
+async function testAStopTheEditorDidNotTakeIsNotAStop(): Promise<void> {
+  const editor = { playing: false, refuses: false, keepsPlaying: false };
+  await withAPlayingEditor(
+    ({ adapter }) =>
+      (tool) => {
+        if (tool === 'play_scene') {
+          editor.playing = true;
+          return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
+        }
+        if (tool === 'stop_playing') {
+          if (editor.refuses) {
+            return { ok: false, error: 'the editor was busy' };
+          }
+          editor.playing = editor.keepsPlaying;
+          return { ok: true, wasPlaying: true, playing: editor.playing };
+        }
+        if (tool === 'playing_status') {
+          return { ok: true, playing: editor.playing, scenePath: 'res://main.tscn', debugPort: adapter };
+        }
+        return { ok: true };
+      },
+    async ({ server, start }) => {
+      // Past the stop's own ten-second wait, which the lingering stop sits out.
+      const call = async (name: string, args: Record<string, unknown>): Promise<unknown> => {
+        const response = await server.request('tools/call', { name, arguments: args }, 30_000);
+        return parseTextContent(response) ?? textOf(response);
+      };
+      await start(300);
+
+      editor.refuses = true;
+      const refused = await call('editor_run', { op: 'stop' });
+      assert.equal(get(refused, 'stopped'), false, JSON.stringify(refused));
+      assert.match(
+        text(get(refused, 'note')),
+        /the editor could not be asked to stop/,
+        JSON.stringify(refused),
+      );
+      const still = await call('editor_output', {});
+      assert.equal(get(still, 'running'), true, `the run is still going: ${JSON.stringify(still)}`);
+      assert.equal(get(still, 'endedBy'), undefined, `and was not ended here: ${JSON.stringify(still)}`);
+
+      // Taken, and the editor goes on playing: said to be lingering, not gone.
+      editor.refuses = false;
+      editor.keepsPlaying = true;
+      const lingering = await call('editor_run', { op: 'stop' });
+      assert.equal(get(lingering, 'stopped'), true, JSON.stringify(lingering));
+      assert.match(
+        text(get(lingering, 'note')),
+        /had not exited 10 seconds after being told to/,
+        JSON.stringify(lingering),
+      );
+    },
+  );
+}
+
 async function testAStoppedRunIsStillTheOneAnswered(): Promise<void> {
   let playing = false;
   let answersThePlay = true;
@@ -13393,15 +13897,24 @@ async function testASilentRunIsStartedHereAndSaysWhy(): Promise<void> {
   ];
   for (const one of cases) {
     let plays = 0;
+    // Ended by a stop, as a real editor's play is: a stand-in still playing after stop_playing is
+    // an editor that did not take the stop, and the stop at the end of each case waits that out.
+    let playing = false;
     await withAPlayingEditor(
       ({ adapter }) =>
         (tool) => {
           if (tool === 'play_scene') {
             plays += 1;
+            playing = true;
             return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
           }
+          if (tool === 'stop_playing') {
+            const was = playing;
+            playing = false;
+            return { ok: true, wasPlaying: was, playing: false };
+          }
           if (tool === 'playing_status') {
-            return { ok: true, playing: plays > 0, scenePath: '', debugPort: adapter };
+            return { ok: true, playing, scenePath: '', debugPort: adapter };
           }
           return { ok: true };
         },
@@ -13449,6 +13962,221 @@ async function testASilentRunIsStartedHereAndSaysWhy(): Promise<void> {
       },
       { env: one.env },
     );
+  }
+}
+
+/**
+ * A played run whose errors reach nothing here gives no verdict on them.
+ *
+ * The editor's debugger relays what a game prints and not what it reports, so a played game's
+ * `push_error` and the engine's own errors arrive only through the runtime addon's report. With no
+ * report found (a project without the addon, or a game that never announced) the run was answered
+ * `clean: true` and `errors: 0`, which a gate reads as a run that raised nothing. `consoleLost`
+ * already left `clean` out for a source that stopped arriving; this is a source that never did.
+ * The report-found side, where `clean` is said, is held by the played-report case above with a real
+ * engine.
+ */
+async function testAPlayedRunWithNoReportGivesNoVerdict(): Promise<void> {
+  let playing = false;
+  await withAPlayingEditor(
+    ({ adapter }) =>
+      (tool) => {
+        if (tool === 'play_scene') {
+          playing = true;
+          return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
+        }
+        if (tool === 'stop_playing') {
+          const was = playing;
+          playing = false;
+          return { ok: true, wasPlaying: was, playing: false };
+        }
+        if (tool === 'playing_status') {
+          return { ok: true, playing, scenePath: '', debugPort: adapter };
+        }
+        return { ok: true };
+      },
+    async ({ server, project }) => {
+      const started = parseTextContent(
+        await server.request(
+          'tools/call',
+          {
+            name: 'editor_run',
+            arguments: { projectPath: project, op: 'start', headless: false, runtimeWaitMs: 500 },
+          },
+          ENGINE_CALL_TIMEOUT_MS,
+        ),
+      );
+      assert.equal(
+        get(started, 'through'),
+        'editor',
+        `played through the editor: ${JSON.stringify(started)}`,
+      );
+
+      const output = parseTextContent(
+        await server.request('tools/call', { name: 'editor_output', arguments: {} }),
+      );
+      const said = JSON.stringify(output);
+      assert.equal(get(output, 'errors'), 0, `what was heard is still counted: ${said}`);
+      assert.equal(get(output, 'clean'), undefined, `and no verdict is given on what was not: ${said}`);
+      assert.equal(get(output, 'errorsUnread'), true, `said as a field of its own: ${said}`);
+      assert.match(said, /no report from its game's runtime addon has been found/, said);
+
+      const stopped = parseTextContent(
+        await server.request(
+          'tools/call',
+          { name: 'editor_run', arguments: { op: 'stop' } },
+          ENGINE_CALL_TIMEOUT_MS,
+        ),
+      );
+      assert.equal(get(stopped, 'stopped'), true, `the stop ends it: ${JSON.stringify(stopped)}`);
+      assert.equal(
+        get(stopped, 'clean'),
+        undefined,
+        `and gives no verdict either: ${JSON.stringify(stopped)}`,
+      );
+      assert.equal(get(stopped, 'errorsUnread'), true, JSON.stringify(stopped));
+    },
+  );
+}
+
+/**
+ * A played game whose worker announces too is still the run's, and its errors are read.
+ *
+ * A played run's report is found by the game it is tied to, and the announcements tied it only
+ * when one game of the project could be the run's. A worker the game starts that loads the runtime
+ * inherits the editor's mark and announces it as well. Inside the start's wait the first
+ * announcement in the directory's order was taken, which was the worker's as often as the game's;
+ * after the wait there were two, nothing was tied, and the run answered with its errors unread.
+ * The process tree tells them apart: the worker has the game between it and the editor. The
+ * stand-in editor is this process, so a game it spawns is under it in the tree, and the game spawns
+ * the worker. Two rounds, one announcing inside the start's wait and one after it, since the tie is
+ * made in each.
+ */
+async function testAPlayedGameIsToldFromItsWorkers(): Promise<void> {
+  const rounds = [
+    { round: 'inside the wait', inside: true, read: 'editor_output' },
+    { round: 'after the start', inside: false, read: 'editor_output' },
+    { round: 'after the start, read by the stop', inside: false, read: 'stop' },
+  ] as const;
+  for (const { round, inside, read } of rounds) {
+    const spawned: number[] = [];
+    const held: { game: ChildProcess | null } = { game: null };
+    let playing = false;
+    let announce: (() => void) | null = null;
+    try {
+      await withAPlayingEditor(
+        ({ adapter, project, runtimeDir }) =>
+          (tool) => {
+            if (tool === 'play_scene') {
+              playing = true;
+              const game = spawn(
+                process.execPath,
+                [
+                  '-e',
+                  "const w = require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }); console.log(w.pid); setInterval(() => {}, 1000);",
+                ],
+                { stdio: ['ignore', 'pipe', 'ignore'] },
+              );
+              held.game = game;
+              game.stdout.once('data', (chunk: Buffer) => {
+                const worker = Number(String(chunk).trim());
+                announce = () => {
+                  for (const pid of [game.pid ?? 0, worker]) {
+                    spawned.push(pid);
+                    writeFileSync(
+                      join(runtimeDir, `runtime-${pid}.json`),
+                      JSON.stringify({
+                        protocol: RUNTIME_PROTOCOL,
+                        pid,
+                        port: 51_997,
+                        address: '127.0.0.1',
+                        project: { name: 'Played', path: project },
+                        editor_pid: FAKE_EDITOR_PID,
+                      }),
+                      'utf8',
+                    );
+                  }
+                  writeFileSync(
+                    join(runtimeDir, `runtime-${game.pid ?? 0}.log`),
+                    'ERROR: the game raised this\n',
+                  );
+                };
+                if (inside) {
+                  announce();
+                }
+              });
+              return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
+            }
+            if (tool === 'stop_playing') {
+              const was = playing;
+              playing = false;
+              return { ok: true, wasPlaying: was, playing: false };
+            }
+            if (tool === 'playing_status') {
+              return { ok: true, playing, scenePath: '', debugPort: adapter };
+            }
+            return { ok: true };
+          },
+        async ({ server, project }) => {
+          await server.request(
+            'tools/call',
+            {
+              name: 'editor_run',
+              arguments: {
+                projectPath: project,
+                op: 'start',
+                headless: false,
+                runtimeWaitMs: inside ? 5_000 : 200,
+              },
+            },
+            ENGINE_CALL_TIMEOUT_MS,
+          );
+          if (!inside) {
+            assert.ok(
+              await cameTrue(() => announce !== null, 10_000),
+              `${round}: the game should start its worker`,
+            );
+            announce?.();
+          }
+          assert.ok(
+            await cameTrue(() => spawned.length === 2, 10_000),
+            `${round}: the game and its worker should announce`,
+          );
+
+          const output = parseTextContent(
+            await server.request(
+              'tools/call',
+              read === 'stop'
+                ? { name: 'editor_run', arguments: { op: 'stop' } }
+                : { name: 'editor_output', arguments: {} },
+              ENGINE_CALL_TIMEOUT_MS,
+            ),
+          );
+          const said = JSON.stringify(output);
+          assert.equal(
+            get(output, read === 'stop' ? 'endedPid' : 'pid'),
+            spawned[0],
+            `${round}: the run is tied to the game ${spawned[0]}, not its worker ${spawned[1]}: ${said}`,
+          );
+          assert.equal(
+            get(output, 'errors'),
+            1,
+            `${round}: and the error in the game's report is read: ${said}`,
+          );
+          assert.equal(get(output, 'clean'), false, `${round}: so the verdict is given: ${said}`);
+          assert.equal(get(output, 'errorsUnread'), undefined, said);
+        },
+        { held },
+      );
+    } finally {
+      for (const pid of spawned) {
+        try {
+          process.kill(pid);
+        } catch {
+          // Gone already, with the game or on its own.
+        }
+      }
+    }
   }
 }
 
@@ -17235,6 +17963,33 @@ async function testAStopTakesTheWrappedEnginesAnnouncementDown(): Promise<void> 
 }
 
 async function testTheEditorsRunIsTheOneAnsweredFor(): Promise<void> {
+  await pickUpAPlayedRun({ play: 3, editorPid: 4242 }, { play: 3, editorPid: 4242 });
+}
+
+/**
+ * A note from an earlier play is not read as this one's.
+ *
+ * The note naming a played run's transcript stays on disk after the play, and it was opened on the
+ * editor saying it was playing, which does not say which play: a later play picked up after a
+ * reconnect was given the earlier play's console and start time, with the new lines appended to
+ * the same file. The editor numbers its plays now, and a note about another play, or from another
+ * editor, is left alone.
+ */
+async function testANoteFromAnEarlierPlayIsNotThisOnes(): Promise<void> {
+  await pickUpAPlayedRun({ play: 3, editorPid: 4242 }, { play: 4, editorPid: 4242 });
+  await pickUpAPlayedRun({ play: 3, editorPid: 4242 }, { play: 3, editorPid: 5151 });
+}
+
+/**
+ * A server picking up a run the editor is playing, with a note on disk about play [noted] and an
+ * editor saying it is in play [playing]. The note's transcript is read back only when the two are
+ * the same play of the same editor.
+ */
+async function pickUpAPlayedRun(
+  noted: { play: number; editorPid: number },
+  playing: { play: number; editorPid: number },
+): Promise<void> {
+  const same = noted.play === playing.play && noted.editorPid === playing.editorPid;
   const port = await reservePort();
   // Reserved and then left alone, so nothing is listening on it: the adapter this run's console
   // would arrive over is the thing the second half of this case is about not being there.
@@ -17272,7 +18027,12 @@ async function testTheEditorsRunIsTheOneAnsweredFor(): Promise<void> {
         arguments: ['--headless'],
         command: process.execPath,
       });
-      writeEditorRunNote({ projectPath: project, transcript: played, startedAt: Date.now() - 60_000 });
+      writeEditorRunNote({
+        projectPath: project,
+        transcript: played,
+        startedAt: Date.now() - 60_000,
+        play: noted,
+      });
     } finally {
       if (had === undefined) {
         delete process.env['GDHARNESS_RUNTIME_DIR'];
@@ -17299,7 +18059,13 @@ async function testTheEditorsRunIsTheOneAnsweredFor(): Promise<void> {
       const tool = String(message['tool']);
       const result =
         tool === 'playing_status'
-          ? { ok: true, playing: true, scenePath: 'res://tests/bench_shortlist.tscn', debugPort: adapter }
+          ? {
+              ok: true,
+              playing: true,
+              scenePath: 'res://tests/bench_shortlist.tscn',
+              debugPort: adapter,
+              ...playing,
+            }
           : { ok: true };
       socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result }));
     });
@@ -17330,8 +18096,18 @@ async function testTheEditorsRunIsTheOneAnsweredFor(): Promise<void> {
     const answer = parseTextContent(output);
     assert.equal(get(answer, 'through'), 'editor', `the run answered for is the editor's: ${said}`);
     assert.equal(get(answer, 'pid'), null, `with no pid from the other run: ${said}`);
-    assert.equal(get(answer, 'transcript'), played, `the transcript is its own, not the other's: ${said}`);
     assert.doesNotMatch(said, /wrong table/, `nor a line of its output: ${said}`);
+    if (!same) {
+      assert.notEqual(
+        get(answer, 'transcript'),
+        played,
+        `a note about another play is not this one's: ${said}`,
+      );
+      assert.doesNotMatch(said, /31 of 31 workers started/, `nor is that play's output: ${said}`);
+      assert.doesNotMatch(text(get(answer, 'note')), /read back from its transcript/, said);
+      return;
+    }
+    assert.equal(get(answer, 'transcript'), played, `the transcript is its own, not the other's: ${said}`);
     // And the run it is about is the one whose output comes back: an editor-played run writes a
     // transcript of its own, so a reconnect reads back what it printed rather than starting the
     // log again from where the new server arrived.
@@ -20977,7 +21753,8 @@ async function testTheEditorAnswersOnlyForItsOwnProject(): Promise<void> {
   const port = await reservePort();
   const server = new ServerProcess({ env: { GDHARNESS_BRIDGE_PORT: String(port) } });
   const open = join(tmpdir(), 'gdharness-editor-has-this');
-  const elsewhere = join(tmpdir(), 'gdharness-editor-has-not');
+  // Made rather than only named, since the start below needs a project there to reach the check.
+  const elsewhere = mkdtempSync(join(tmpdir(), 'gdharness-editor-has-not-'));
   let editor: WebSocket | null = null;
   try {
     await server.initialize('regression-test');
@@ -21029,6 +21806,21 @@ async function testTheEditorAnswersOnlyForItsOwnProject(): Promise<void> {
       'and the editor was never asked about a project it cannot see',
     );
 
+    // A start for the other project, which played the editor's own main scene under that project's
+    // name, after picking up and ending whatever the editor was playing.
+    writeFileSync(
+      join(elsewhere, 'project.godot'),
+      'config_version=5\n\n[application]\n\nrun/main_scene="res://main.tscn"\n',
+    );
+    asked.length = 0;
+    const start = await server.request('tools/call', {
+      name: 'editor_run',
+      arguments: { projectPath: elsewhere },
+    });
+    const startRefused = textOf(start) ?? JSON.stringify(start);
+    assert.match(startRefused, /the editor on this bridge has/, `a start is refused too: ${startRefused}`);
+    assert.deepEqual(asked, [], `and the editor is not asked anything about its play: ${asked.join(', ')}`);
+
     // Beside it, the project the editor does have: the same call reaches the editor and comes back
     // with the editor's own answer. Without this the fixture is satisfied by a bridge that refuses
     // everything, which is what a broken one does.
@@ -21049,6 +21841,7 @@ async function testTheEditorAnswersOnlyForItsOwnProject(): Promise<void> {
   } finally {
     editor?.terminate();
     await server.stop();
+    sweep(elsewhere);
   }
 }
 
@@ -22891,6 +23684,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testRunArgumentsLeaveTheLocalDebuggerOff,
   testSilenceFollowsTheAskThenTheEnvironment,
   testASilentRunIsStartedHereAndSaysWhy,
+  testAPlayedRunWithNoReportGivesNoVerdict,
+  testAPlayedGameIsToldFromItsWorkers,
   testHeadlessFollowsTheDisplay,
   testStaleClassesAreReadFromDisk,
   testTheProjectWalksAgreeAboutWhatIsInIt,
@@ -22914,12 +23709,14 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAShortenedCacheIsRebuilt,
   testAClassWhoseScriptCameBackIsNotTheEditorsLoss,
   testTheEditorsRunIsTheOneAnsweredFor,
+  testANoteFromAnEarlierPlayIsNotThisOnes,
   testAStatusCallIsNotHeldByAHeldGame,
   testARuntimeCallToAHeldGameIsRefusedAtOnce,
   testAnEditorOnAnotherVersionIsStillAskedWhatItIsPlaying,
   testAGameTheEditorHasStoppedPlayingIsNotStillActive,
   testAPlayThroughAnotherProcesssAdapterIsRefusedEachTime,
   testAPlayedStartStopsWaitingForAGameThatIsOver,
+  testAStopTheEditorDidNotTakeIsNotAStop,
   testAStoppedRunIsStillTheOneAnswered,
   testAStoppedSpawnedRunGivesWayToAPlay,
   testAKilledRunHasNoExitCode,
@@ -23053,6 +23850,9 @@ const TESTS: (() => void | Promise<void>)[] = [
 
   testProjectGodotMultilineValues,
   testLettingGoOfTheAdapterSendsItNothing,
+  testAVariablesReadSaysWhatItCouldNotRead,
+  testAStepAnswersWhereItLanded,
+  testTheAdaptersConsoleSaysWhatItNoLongerHolds,
   testAStopIsKnownToTheConnectionItWasSentTo,
   testAStopThatLandsWhileAttachAsksIsTheAnswer,
   testAContinueByAnotherClientIsKnownHere,
@@ -23078,6 +23878,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testDiagnosticsLeaveNoDocumentOpen,
   testDiagnosticsSurviveAnotherSpellingOfTheSamePath,
   testDiagnosticsTimeoutIsNotAnEmptyResult,
+  testTheLanguageServerOfAnotherProjectIsRefused,
+  testTwoAsksAboutOneFileAreBothAnswered,
   testLspFramesBodiesByBytes,
   testLspReassemblesBodySplitMidCharacter,
   testDapFramesBodiesByBytes,

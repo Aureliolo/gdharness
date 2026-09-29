@@ -34,6 +34,7 @@ import { join } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { alive } from '../src/alive.js';
+import { readBreakpointNote } from '../src/breakpoint-note.js';
 import { GodotDAPClient } from '../src/dap_client.js';
 import { SERVER_VERSION } from '../src/server-version.js';
 import { RUNTIME_AUTOLOAD } from '../src/setup.js';
@@ -388,6 +389,9 @@ const HOOKS_GD = [
   '\t\t\treturn {"cached": ResourceLoader.has_cached(path)}',
   '\t\t"held":',
   '\t\t\treturn {"children": _held_children(path)}',
+  '\t\t"play":',
+  '\t\t\tEditorInterface.play_main_scene()',
+  '\t\t\treturn {"playing": EditorInterface.is_playing_scene()}',
   '\t\t"open":',
   '\t\t\tEditorInterface.open_scene_from_path(path)',
   '\t\t"edit":',
@@ -3578,12 +3582,15 @@ async function testDebugging({ call, refusal, attempt, play, project }: Editor):
   assert.match(text(get(total, 'value')), /\b4\b/, 'and should read as the 4 the line above worked out');
 
   // One line, run. The game is held either way, so what says the step happened is where it is
-  // held now: a step that did nothing leaves it on the line it was already on.
-  await call('debug_control', { op: 'step_over' });
-  await stackWithin(
-    attempt,
-    `stepping should leave the game held past line ${BREAK_LINE}`,
-    (stack) => stack.length > 0 && asNumber(get(stack[0], 'line')) > BREAK_LINE,
+  // held now: a step that did nothing leaves it on the line it was already on. Read from the
+  // step's own answer, which is where a caller reads it: the adapter answers the request before
+  // the step lands, and a stack read on that answer alone was the frames from before it.
+  const over = await call('debug_control', { op: 'step_over' });
+  assert.equal(get(over, 'heldAgain'), true, `the step should stop the game again: ${JSON.stringify(over)}`);
+  const overStack = asArray(get(over, 'stack'), 'stack');
+  assert.ok(
+    overStack.length > 0 && asNumber(get(overStack[0], 'line')) > BREAK_LINE,
+    `the step's answer should have the game held past line ${BREAK_LINE}: ${JSON.stringify(over)}`,
   );
 
   // Into the call on that line. Judged by the function the top frame is in, which is the only
@@ -3592,11 +3599,12 @@ async function testDebugging({ call, refusal, attempt, play, project }: Editor):
   // There is no step_out to come back with: Godot's adapter parser implements req_next and
   // req_stepIn and nothing for stepOut, so the request is never answered. Stepping over from
   // inside the function runs it to its end and returns to the caller, which is the way back.
-  await call('debug_control', { op: 'step_into' });
-  const inside = await stackWithin(
-    attempt,
-    'step_into should leave the game inside the function that line calls',
-    (stack) => stack.length > 0 && text(get(stack[0], 'name')) === '_twice',
+  const into = await call('debug_control', { op: 'step_into' });
+  const inside = asArray(get(into, 'stack'), 'stack');
+  assert.equal(
+    inside.length > 0 ? text(get(inside[0], 'name')) : '',
+    '_twice',
+    `step_into's answer should have the game inside the function that line calls: ${JSON.stringify(into)}`,
   );
   assert.ok(inside.length > 1, 'with the caller still under it on the stack');
 
@@ -4126,6 +4134,62 @@ async function testRuntime({ call, refusal, attempt, project, lspPort, dapPort }
  * started with. The edit is proved to have landed where the tools look before the game is asked
  * again, because a write that never reached disk would leave the game unchanged too.
  */
+/**
+ * A play is its own, and one that cannot start is not answered as started.
+ *
+ * The note naming a played run's transcript stays after the play, and a server picking up a later
+ * play opened it on the editor saying it was playing, which does not say which play: the later play
+ * was given the earlier one's console and start time. The editor numbers its plays now. And a main
+ * scene that is not there got a dialog in the editor and no play, answered as `started: true`.
+ */
+async function testAPlayIsItsOwn({ call, attempt, refusal, play, project }: Editor): Promise<void> {
+  await attempt('editor_run', { op: 'stop' });
+  await play();
+  const first = await call('editor_output', {});
+  const transcript = get(first, 'transcript');
+  assert.equal(typeof transcript, 'string', `a played run writes a transcript: ${JSON.stringify(first)}`);
+  await call('editor_run', { op: 'stop' });
+
+  // A play started in the editor by somebody else, which the server picks up.
+  const started = await hook(project, { op: 'play' });
+  assert.equal(
+    get(started, 'playing'),
+    true,
+    `the hook should have started a play: ${JSON.stringify(started)}`,
+  );
+  try {
+    const picked = await call('editor_output', {});
+    assert.equal(get(picked, 'through'), 'editor', JSON.stringify(picked));
+    assert.notEqual(
+      get(picked, 'transcript'),
+      transcript,
+      `the play picked up is not given the earlier play's transcript: ${JSON.stringify(picked)}`,
+    );
+  } finally {
+    await attempt('editor_run', { op: 'stop' });
+  }
+
+  await call('project_settings', {
+    projectPath: project,
+    op: 'set',
+    setting: 'application/run/main_scene',
+    value: 'res://gone.tscn',
+  });
+  try {
+    assert.match(
+      await refusal('editor_run', { projectPath: project }),
+      /The main scene, res:\/\/gone\.tscn, is not there/,
+    );
+  } finally {
+    await call('project_settings', {
+      projectPath: project,
+      op: 'set',
+      setting: 'application/run/main_scene',
+      value: 'res://main.tscn',
+    });
+  }
+}
+
 async function testAnEditDoesNotReachTheRunningGame({ call, attempt, play, project }: Editor): Promise<void> {
   await attempt('editor_run', { op: 'stop' });
   const game = { projectPath: project };
@@ -4616,6 +4680,81 @@ async function testABreakpointHoldsForEveryPlay({
   );
   await onlooker.abandon();
 
+  // The adapter echoes a set back as an event naming the file its own way, which on Windows is
+  // with forward slashes where this server names it with backslashes. Read as two files, the
+  // echo of a line set here was listed as one the user had set in the gutter.
+  const again = await call('debug_breakpoint', { ...main, op: 'set', line: BREAK_LINE });
+  assert.deepEqual(get(again, 'held'), one, `a second set holds the same line: ${text(again)}`);
+  assert.deepEqual(
+    get(again, 'setInEditor'),
+    [],
+    `and the line set here is not the editor's own as well: ${text(again)}`,
+  );
+
+  // A second session stands in for the gutter: a line it sets reaches this server as the editor's
+  // own, named the adapter's way, and has to survive a set from here, which sends the file's whole
+  // list. Then it clicks off the line this server holds, which has to leave the held set.
+  const gutterLine = BREAK_LINE - 1;
+  const gutter = new GodotDAPClient(dapPort);
+  const watcher = new GodotDAPClient(dapPort);
+  const watched = (): boolean =>
+    watcher
+      .breakpointsInEditor()
+      .some((file) => file.lines.includes(gutterLine) && file.scriptPath.endsWith('main.gd'));
+  try {
+    await gutter.initialize();
+    await watcher.initialize();
+    // The file as the adapter names it, taken from its own answer: a path it cannot map into its
+    // project is set on nothing, and macOS reaches the temporary directory through /var where the
+    // engine has it under /private/var.
+    const godotsPath = text(get(again, 'breakpoints', 0, 'source', 'path'));
+    await gutter.setBreakpoint(godotsPath, gutterLine);
+    // A set from here sends the file's whole list, so one sent before this server's session has
+    // heard of the gutter's line clears it, and every read of what it has heard is such a set. So
+    // the wait is on a third session, which the adapter tells at the same moment, with a margin
+    // for the two sockets to be read, before the one set from here.
+    const heard = Date.now() + 5000;
+    while (!watched() && Date.now() < heard) {
+      await delay(50);
+    }
+    assert.ok(
+      watched(),
+      `the adapter tells every session of the gutter's line: ${JSON.stringify(watcher.breakpointsInEditor())}`,
+    );
+    await delay(1000);
+    const theirs = [{ scriptPath: 'res://main.gd', lines: [gutterLine] }];
+    const listed = await call('debug_breakpoint', { ...main, op: 'set', line: BREAK_LINE });
+    assert.deepEqual(
+      get(listed, 'setInEditor'),
+      theirs,
+      `the gutter's line is listed as the editor's own: ${text(listed)}`,
+    );
+    // Told to the watcher as a removal if the set from here had left it out.
+    await delay(1000);
+    assert.ok(
+      watched(),
+      `and a set from here left it in place: ${JSON.stringify(watcher.breakpointsInEditor())}`,
+    );
+
+    await gutter.removeBreakpoint(godotsPath, BREAK_LINE);
+    const offAt = Date.now() + 5000;
+    while (readBreakpointNote(project).length > 0 && Date.now() < offAt) {
+      await delay(100);
+    }
+    assert.deepEqual(
+      readBreakpointNote(project),
+      [],
+      'a line of ours clicked off in the gutter is no longer held',
+    );
+    await gutter.removeBreakpoint(godotsPath, gutterLine);
+  } finally {
+    await gutter.abandon();
+    await watcher.abandon();
+  }
+  const back = await call('debug_breakpoint', { ...main, op: 'set', line: BREAK_LINE });
+  assert.deepEqual(get(back, 'held'), one, `set again for the plays: ${text(back)}`);
+  assert.deepEqual(get(back, 'setInEditor'), [], `with the gutter's line gone: ${text(back)}`);
+
   const first = await play({ headless: true });
   assert.deepEqual(
     get(first, 'breakpoints'),
@@ -4737,6 +4876,7 @@ async function main(): Promise<void> {
     ['testAPlayedRunsConsoleArrivesOnItsOwn', testAPlayedRunsConsoleArrivesOnItsOwn],
     ['testDebugging', testDebugging],
     ['testRuntime', testRuntime],
+    ['testAPlayIsItsOwn', testAPlayIsItsOwn],
     ['testAnEditDoesNotReachTheRunningGame', testAnEditDoesNotReachTheRunningGame],
     ['testTheDebuggerGetsAPortOfItsOwn', testTheDebuggerGetsAPortOfItsOwn],
     ['testTheGameIsHandedItsOwnArguments', testTheGameIsHandedItsOwnArguments],

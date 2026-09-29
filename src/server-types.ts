@@ -131,6 +131,8 @@ export interface GodotProcess {
    */
   errorReport?: string | null;
   errorReportOffset?: number;
+  /** The announced games the process tree was last read to tie this run among; see [tieThePlayedGame]. */
+  treeReadFor?: string;
   /**
    * True once the run's console is taken from the report rather than from the debug adapter.
    *

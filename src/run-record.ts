@@ -153,13 +153,32 @@ export function writeRunRecord(record: RunRecord): void {
  * to is held by the editor, which is on the bridge and answers whether it is still playing, so
  * there is no pid here to be believed and none to act on.
  *
- * Overwritten by each play and left behind afterwards, the way a transcript is. A note for a run
- * that is over is read by nobody: the editor has to say it is playing before this is opened at all.
+ * Overwritten by each play and left behind afterwards, the way a transcript is. Which play it is
+ * about is written into it, as the editor numbers them: the editor saying it is playing does not say
+ * which play, and a note read on that alone gave a later play the console and start time of an
+ * earlier one.
  */
 export interface EditorRunNote {
   readonly projectPath: string;
   readonly transcript: string;
   readonly startedAt: number;
+  readonly play?: EditorPlay;
+}
+
+/** One play of one editor: its count of plays, and the editor's process. */
+export interface EditorPlay {
+  readonly play: number;
+  readonly editorPid: number;
+}
+
+/** Whether [note] is about [playing], the play the editor says it is in now. */
+export function noteIsAbout(note: EditorRunNote, playing: EditorPlay | null): boolean {
+  return (
+    note.play !== undefined &&
+    playing !== null &&
+    note.play.play === playing.play &&
+    note.play.editorPid === playing.editorPid
+  );
 }
 
 /** Per project, for the same reason the run note is. */
@@ -202,7 +221,15 @@ function editorNoteAt(path: string): EditorRunNote | null {
   if (typeof projectPath !== 'string' || typeof transcript !== 'string' || typeof startedAt !== 'number') {
     return null;
   }
-  return { projectPath, transcript, startedAt };
+  const play = fields['play'];
+  const which =
+    typeof play === 'object' &&
+    play !== null &&
+    typeof (play as Record<string, unknown>)['play'] === 'number' &&
+    typeof (play as Record<string, unknown>)['editorPid'] === 'number'
+      ? (play as EditorPlay)
+      : undefined;
+  return { projectPath, transcript, startedAt, ...(which === undefined ? {} : { play: which }) };
 }
 
 /**

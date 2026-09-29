@@ -282,6 +282,11 @@ not. It passes the same two in the environment, which is how the addon knows a s
 `editor_status` reports where the connected editor says it serves, and the server follows that
 rather than the default.
 
+The language server says which project it serves, so what holds a port is checked there rather than
+assumed. Godot answers an `initialize` whose root is not its own project by telling the client to
+change to its project, ahead of the answer, and the script tools refuse on that, naming both
+projects.
+
 **Nothing is written into those settings, because they are shared.** The engine consumes the two
 options and hands neither back, so an editor that restarts itself comes up without them. Writing
 them into the settings made the restart work, and made a port chosen for one project the number in
@@ -443,6 +448,12 @@ the engine itself prints, with the `at:` line and the backtrace. The server read
 offset into the played run's transcript, and the transcript into the log, so a reported error is
 an entry with its severity the way one printed by a spawned run is. The report outlives its game
 by an hour, since the last errors are read after the game has gone; the announcement does not.
+
+The report is found by the game the run is tied to. A worker the game starts that loads the
+runtime inherits the editor's mark and announces too, so where several games of the project have
+announced, the process tree decides: the run's game is the one with no other of them between it
+and the editor. A played run with no report found answers `errorsUnread` and no `clean`, since a
+count of what the adapter relayed says nothing about what the game raised.
 
 Two streams read side by side lose their order: the prints arrived over the adapter as they came
 and the errors whenever the report was read, so a warning raised in `_ready` was listed after a
