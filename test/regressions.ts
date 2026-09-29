@@ -16589,6 +16589,106 @@ async function testASubViewportCaptureIsDrawnNow(): Promise<void> {
   }
 }
 
+/**
+ * A screenshot holds the game's windows that the root viewport does not draw.
+ *
+ * With subwindows not embedded, a dialog or a popup is an operating-system window with a render
+ * target of its own, and the capture of the root viewport showed the screen without it. The game
+ * here fills its screen blue and opens a borderless red window over the right half of it, so a
+ * picture brought down to one pixel is half red only when the window is in it, where it sits.
+ *
+ * Windowed, since nothing is drawn without a window; on Windows on a desktop of its own.
+ */
+async function testAScreenshotHoldsTheGamesOwnWindows(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('native window capture regression skipped (Godot not found)');
+    return;
+  }
+  const refused = process.platform === 'win32' ? null : windowedRunRefused();
+  if (refused !== null) {
+    console.log(`native window capture regression skipped (${refused})`);
+    return;
+  }
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-native-window-'));
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-native-window-rt-'));
+  cpSync(join('src', 'godot', 'addons', 'gdharness_runtime'), join(project, 'addons', 'gdharness_runtime'), {
+    recursive: true,
+  });
+  writeFileSync(
+    join(project, 'project.godot'),
+    '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Native"\nrun/main_scene="res://main.tscn"\n\n' +
+      '[autoload]\n\nGdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n\n' +
+      '[display]\n\nwindow/size/viewport_width=200\nwindow/size/viewport_height=200\n' +
+      'window/subwindows/embed_subwindows=false\n\n' +
+      '[rendering]\n\nrenderer/rendering_method="gl_compatibility"\n',
+  );
+  writeFileSync(
+    join(project, 'main.gd'),
+    'extends Node\n\n\nfunc _ready() -> void:\n\tvar over: Window = $Over\n' +
+      '\tover.position = get_window().position + Vector2i(100, 0)\n\tover.show()\n\tprint("window open")\n',
+  );
+  writeFileSync(
+    join(project, 'main.tscn'),
+    '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+      '[node name="Main" type="Node"]\nscript = ExtResource("1")\n\n' +
+      '[node name="Screen" type="ColorRect" parent="."]\noffset_right = 200.0\noffset_bottom = 200.0\ncolor = Color(0, 0, 1, 1)\n\n' +
+      '[node name="Over" type="Window" parent="."]\nsize = Vector2i(100, 200)\nvisible = false\nborderless = true\nunfocusable = true\n\n' +
+      '[node name="Red" type="ColorRect" parent="Over"]\noffset_right = 100.0\noffset_bottom = 200.0\ncolor = Color(1, 0, 0, 1)\n',
+  );
+  const server = new ServerProcess({
+    env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+  });
+  try {
+    await server.initialize('regression-test');
+    const started = parseTextContent(
+      await server.request(
+        'tools/call',
+        {
+          name: 'editor_run',
+          arguments: { projectPath: project, op: 'start', headless: false, runtimeWaitMs: WINDOWED_BOOT_MS },
+        },
+        WINDOWED_BOOT_MS + ENGINE_CALL_TIMEOUT_MS,
+      ),
+    );
+    assert.equal(get(started, 'runtime', 'listening'), true, JSON.stringify(started));
+    let printed = '';
+    for (let waited = 0; waited < 30_000 && !printed.includes('window open'); waited += 250) {
+      await delay(250);
+      printed = textOf(await server.request('tools/call', { name: 'editor_output', arguments: {} })) ?? '';
+    }
+    assert.match(printed, /window open/, `the game should open its window: ${printed}`);
+    await server.request('tools/call', { name: 'runtime_wait', arguments: { op: 'frames', frames: 5 } });
+
+    const answered = await server.request(
+      'tools/call',
+      { name: 'runtime_capture', arguments: { op: 'screenshot', width: 1, height: 1 } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    const image = asArray(get(answered, 'result', 'content')).find((chunk) => get(chunk, 'type') === 'image');
+    assert.ok(image !== undefined, `the capture should answer an image: ${JSON.stringify(answered)}`);
+    const pixel = [...onePixelOf(Buffer.from(String(get(image, 'data')), 'base64'))];
+    // Half and half, because the window lies over the right half: all blue is the window left out,
+    // and anything else is it laid in the wrong place.
+    const even = (value: number | undefined): boolean => value !== undefined && value > 100 && value < 160;
+    assert.ok(
+      even(pixel[0]) && even(pixel[2]),
+      `the screen with the game's red window over its right half: ${pixel.join(',')}`,
+    );
+  } finally {
+    await server.request(
+      'tools/call',
+      { name: 'editor_run', arguments: { op: 'stop' } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    await server.stop();
+    sweep(project, runtimeDir);
+  }
+}
+
 /** The red, green and blue of a one-pixel PNG. */
 function onePixelOf(png: Buffer): Buffer {
   const chunks: Buffer[] = [];
@@ -24983,6 +25083,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAKeyDoesNotChooseFromAnOpenedMenu,
   testACaptureBeforeTheFirstFrameWaitsForIt,
   testASubViewportCaptureIsDrawnNow,
+  testAScreenshotHoldsTheGamesOwnWindows,
   testAWrittenLineBreakMatchesATwoLineLabel,
   testAPlayedGamesReportsReachTheOutput,
   testAPlayedGamesConsoleKeepsItsOrder,
