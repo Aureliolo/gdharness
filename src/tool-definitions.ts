@@ -373,9 +373,17 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       pluginName: { type: 'string', description: 'Folder name under addons/.' },
       busName: { type: 'string', description: 'Audio bus name.' },
-      parentBusIndex: { type: 'number', description: 'Audio buses: the bus to send to. Default 0, Master.' },
+      parentBusIndex: {
+        type: 'number',
+        description:
+          'Audio buses: the bus to send to. Default 0, Master. The new bus goes right after it, so every later bus moves one along, and the answer lists them all.',
+      },
       busIndex: { type: 'number', description: 'Audio bus index.' },
-      effectIndex: { type: 'number', description: 'Slot on the bus for the effect.' },
+      effectIndex: {
+        type: 'number',
+        description:
+          'Slot on the bus for the effect: the effect there is replaced, and one past the last adds one. Any other slot is refused.',
+      },
       effectType: { type: 'string', description: 'Effect class, such as "AudioEffectReverb".' },
       volumeDb: { type: 'number', description: 'Bus volume in decibels.' },
     },
@@ -396,7 +404,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       disable_plugin: { summary: 'disable an addon', requires: ['pluginName'] },
       add_audio_bus: { summary: 'add an audio bus', requires: ['busName'] },
       set_audio_bus_effect: {
-        summary: 'add or configure an effect on a bus',
+        summary: 'put an effect in a slot on a bus',
         requires: ['busIndex', 'effectIndex', 'effectType'],
       },
       set_audio_bus_volume: { summary: 'set a bus volume', requires: ['busIndex', 'volumeDb'] },
@@ -722,7 +730,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       extends: { type: 'string', description: 'create: the base class. Default Node. Not with content.' },
       content: {
         type: 'string',
-        description: 'create: the whole file, written as given, instead of a template, className and extends.',
+        description:
+          'create: the whole file, written as given, instead of a template, className and extends.',
       },
       template: {
         type: 'string',
