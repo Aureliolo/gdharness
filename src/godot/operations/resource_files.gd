@@ -32,7 +32,7 @@ func get_uid(params: Dictionary) -> Dictionary:
 		return _log.failure("File does not exist: " + file_path)
 
 	var answer: Dictionary = {"file": file_path, "absolute_path": absolute_path}
-	var found: Dictionary = _uid_of(file_path)
+	var found: Dictionary = uid_of(file_path)
 	if found.is_empty():
 		answer["exists"] = false
 		answer["message"] = _why_none(file_path)
@@ -43,7 +43,7 @@ func get_uid(params: Dictionary) -> Dictionary:
 
 
 # The UID and where it was read, or empty when the file has none anywhere the engine keeps one.
-func _uid_of(file_path: String) -> Dictionary:
+static func uid_of(file_path: String) -> Dictionary:
 	var sidecar: String = file_path + ".uid"
 	if FileAccess.file_exists(sidecar):
 		var text: String = FileAccess.get_file_as_string(sidecar).strip_edges()

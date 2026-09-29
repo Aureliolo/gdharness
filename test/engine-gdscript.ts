@@ -1904,6 +1904,111 @@ function testAFamilyOfSettingsAnswersWithItsTypes(godotPath: string, projectDir:
 }
 
 /**
+ * A reverse search finds every way the engine is told to load a file, and nothing that only shares
+ * its name.
+ *
+ * An autoload, the main scene and a plugin's script are named only in project.godot and plugin.cfg,
+ * and each was answered as used by nothing, which is the answer a file is deleted on. A relative
+ * preload and a scene named by its UID were missed, a node and a string sharing a class's name were
+ * counted as uses of it, and the forward walk passed over relative paths and handed a list cut short
+ * deep in the walk to a nearer reach of the same file.
+ */
+function testEveryUseIsFound(godotPath: string): void {
+  const dir = createProject(godotPath);
+  const operation = (name: string, params: unknown): unknown => runOperation(godotPath, dir, name, params);
+  const kinds = (path: string): unknown =>
+    get(operation('find_resource_usages', { resource_path: path }), 'summary', 'by_kind');
+  try {
+    mkdirSync(join(dir, 'auto'));
+    writeFileSync(join(dir, 'auto', 'autoload.gd'), 'extends Node\n');
+    writeFileSync(
+      join(dir, 'main.tscn'),
+      '[gd_scene format=3 uid="uid://c4c550daekhi1"]\n\n[node name="Main" type="Node"]\n',
+    );
+    writeFileSync(
+      join(dir, 'project.godot'),
+      `${readFileSync(join(dir, 'project.godot'), 'utf8')}\n[autoload]\n\nAuto="*res://auto/autoload.gd"\n\n[application]\n\nrun/main_scene="uid://c4c550daekhi1"\n`,
+    );
+    mkdirSync(join(dir, 'addons', 'probe'), { recursive: true });
+    writeFileSync(
+      join(dir, 'addons', 'probe', 'plugin.cfg'),
+      '[plugin]\n\nname="Probe"\nscript="plugin.gd"\n',
+    );
+    writeFileSync(join(dir, 'addons', 'probe', 'plugin.gd'), '@tool\nextends EditorPlugin\n');
+    assert.deepEqual(
+      kinds('auto/autoload.gd'),
+      { project_setting: 1 },
+      'an autoload is used by project.godot',
+    );
+    assert.deepEqual(kinds('main.tscn'), { project_setting: 1 }, 'and the main scene, named by its UID');
+    assert.deepEqual(
+      kinds('addons/probe/plugin.gd'),
+      { plugin: 1 },
+      'and a plugin script, relative to plugin.cfg',
+    );
+
+    mkdirSync(join(dir, 'sub'));
+    writeFileSync(join(dir, 'sub', 'b.gd'), 'extends Node\n');
+    writeFileSync(join(dir, 'sub', 'a.gd'), 'extends Node\n\nconst B = preload("b.gd")\n');
+    assert.deepEqual(kinds('sub/b.gd'), { preload: 1 }, 'a relative preload names its sibling');
+    const forward = asArray(
+      get(operation('get_dependencies', { resource_path: 'sub/a.gd' }), 'dependencies', 'res://sub/a.gd'),
+    );
+    assert.deepEqual(
+      forward.map((dep) => get(dep, 'path')),
+      ['res://sub/b.gd'],
+      'and the forward walk follows it',
+    );
+
+    // A class used by name in code, and only there: a node and a string with the same word are not uses.
+    writeFileSync(join(dir, 'enemy.gd'), 'class_name Enemy\nextends Node2D\n');
+    writeFileSync(
+      join(dir, 'spawner.gd'),
+      'extends Node\n\nvar held: Enemy\n\n\nfunc say() -> void:\n\tprint("Enemy")  # an Enemy\n',
+    );
+    writeFileSync(join(dir, 'arena.tscn'), '[gd_scene format=3]\n\n[node name="Enemy" type="Node2D"]\n');
+    assert.deepEqual(
+      kinds('enemy.gd'),
+      { class_name: 1, comment: 1 },
+      'the declaration uses it; the string and node do not',
+    );
+
+    // Five deep and a shortcut to the middle: at depth three the middle is first reached two down,
+    // where its list stops short, and then again one down, where it does not.
+    for (const [name, next] of [
+      ['a', ['b', 'c']],
+      ['b', ['c']],
+      ['c', ['d']],
+      ['d', ['e']],
+      ['e', []],
+    ] as const) {
+      writeFileSync(
+        join(dir, 'sub', `chain_${name}.gd`),
+        `extends Node\n\n${next.map((one) => `const ${one.toUpperCase()} = preload("res://sub/chain_${one}.gd")\n`).join('')}`,
+      );
+    }
+    const walked = asArray(
+      get(
+        operation('get_dependencies', { resource_path: 'sub/chain_a.gd', depth: 3 }),
+        'dependencies',
+        'res://sub/chain_a.gd',
+      ),
+    );
+    const shortcut = walked.find((dep) => get(dep, 'path') === 'res://sub/chain_c.gd');
+    assert.deepEqual(
+      asArray(get(shortcut, 'dependencies')).map((dep) => [
+        get(dep, 'path'),
+        asArray(get(dep, 'dependencies') ?? []).map((one) => get(one, 'path')),
+      ]),
+      [['res://sub/chain_d.gd', ['res://sub/chain_e.gd']]],
+      `one down, the middle has its whole list: ${JSON.stringify(walked)}`,
+    );
+  } finally {
+    sweep(dir);
+  }
+}
+
+/**
  * Validation reads at most a hundred scripts, and says so with the count it read and the count there
  * are. It counted the one past the limit before stopping and answered 101.
  */
@@ -2162,6 +2267,9 @@ const CASES: Readonly<Record<string, (godotPath: string, projectDir: string) => 
   },
   validationCounts: (godotPath) => {
     testValidationSaysHowMuchItRead(godotPath);
+  },
+  everyUse: (godotPath) => {
+    testEveryUseIsFound(godotPath);
   },
   runningLog: (godotPath) => testAnOperationLeavesARunningLogAlone(godotPath),
   refusals: testRefusals,
