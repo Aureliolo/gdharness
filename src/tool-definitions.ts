@@ -454,7 +454,12 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'boolean',
         description: "forward: include the engine's own res://. resources. Default false.",
       },
-      fileTypes: { type: 'array', items: { type: 'string' }, description: 'reverse: extensions to look in.' },
+      fileTypes: {
+        type: 'array',
+        items: { type: 'string' },
+        description:
+          'reverse: extensions to look in, plus "godot" for project.godot, "cfg" for plugin.cfg and export_presets.cfg, and "import" for import sidecars. Default all of tscn, tres, gd, gdshader, godot, cfg and import, since an autoload, the main scene and a plugin script are named only in the settings files.',
+      },
     },
     requires: ['projectPath', 'resourcePath'],
   },
