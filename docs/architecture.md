@@ -664,6 +664,12 @@ colour or rectangle, and a write accepts the same tag. The fixture holds the wir
 having neither spelling, because a round trip through the engine's own JSON reads `1e99999` back as
 infinity and passes on the wire that loses it.
 
+JSON keys are text, so a dictionary keyed by anything else is answered as its entries,
+`{"_type": "Dictionary", "entries": [[1, "a"]]}`, and a write accepts the same. Answered as text, an
+int key came back as `"1"`, and a dictionary read and written back had words for its keys. A
+whole-number key is built back as an int, since JSON gives every number as a float and a dictionary
+keys `1.0` apart from `1`.
+
 The other direction, a value arriving to be written, is `property_values.gd` on the editor side. It
 reads the serialiser's tags, so every shape a read answers with is a shape a write accepts, and adds
 the part only a property knows: the type wanted, so a dictionary shaped like a vector, or a bare pair
