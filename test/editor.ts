@@ -4698,7 +4698,10 @@ async function testABreakpointHoldsForEveryPlay({
   const gutter = new GodotDAPClient(dapPort);
   try {
     await gutter.initialize();
-    const godotsPath = join(project, 'main.gd').replaceAll('\\', '/');
+    // The file as the adapter names it, taken from its own answer: a path it cannot map into its
+    // project is set on nothing, and macOS reaches the temporary directory through /var where the
+    // engine has it under /private/var.
+    const godotsPath = text(get(again, 'breakpoints', 0, 'source', 'path'));
     await gutter.setBreakpoint(godotsPath, gutterLine);
     const theirs = [{ scriptPath: 'res://main.gd', lines: [gutterLine] }];
     let seen: unknown;

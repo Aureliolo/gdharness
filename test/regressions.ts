@@ -772,7 +772,9 @@ async function testTwoAsksAboutOneFileAreBothAnswered(): Promise<void> {
  * change there too, and a directory that is no project is refused before anything is asked.
  */
 async function testTheLanguageServerOfAnotherProjectIsRefused(): Promise<void> {
-  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lsp-project-'));
+  // The long name, which is the one the refusal gives: a runner's TEMP holds the 8.3 name, and the
+  // server reads the project path through the filesystem.
+  const root = mkdtempSync(join(realpathSync.native(tmpdir()), 'gdharness-lsp-project-'));
   const ours = join(root, 'ours');
   const theirs = join(root, 'theirs');
   const bare = join(root, 'bare');
