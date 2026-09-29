@@ -20299,6 +20299,18 @@ async function testGdUnitRunner(): Promise<void> {
           ],
           JSON.stringify(hooked, null, 2),
         );
+        // #800: a case failing two assertions, in a suite with no hooks. gdUnit4 counts each failed
+        // assertion on the suite, and the second was answered as a failed before().
+        writeFileSync(
+          join(projectDir, 'test', 'twice_test.gd'),
+          'extends GdUnitTestSuite\n\n\nfunc test_two_assertions_fail() -> void:\n\tassert_bool(false).is_true()\n\tassert_bool(false).is_true()\n',
+        );
+        const twice = await asked('twice_test');
+        assert.deepEqual(
+          [get(twice, 'failures'), get(twice, 'suites', 0, 'hookFailures'), get(twice, 'hookFailures')],
+          [1, undefined, undefined],
+          `a case failing twice is one failure and no hook: ${JSON.stringify(twice, null, 2)}`,
+        );
         // Orphans left early in a run that prints a great deal after: counted off what was printed,
         // they were lost with everything before the newest two hundred lines.
         mkdirSync(join(projectDir, 'test', 'long'));

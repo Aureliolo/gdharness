@@ -176,6 +176,47 @@ function testAFailedHookIsCountedAndNamed(): void {
   );
 }
 
+/**
+ * A case failing more than one assertion is not a hook failing (#800).
+ *
+ * gdUnit4 goes on past a failed assertion and counts each on the suite, so a suite of one case
+ * failing twice wrote failures="2", and the hook count, taken as the suite's failures less its
+ * failed cases, called the second assertion a failed before(). The report below is the one gdUnit4
+ * wrote on 4.7.2 for three suites: that one, the same beside a failed before(), and a failed
+ * before() alone.
+ */
+function testASecondFailedAssertionIsNotAHook(): void {
+  const report = parseJUnit(`<?xml version="1.0" encoding="UTF-8" ?>
+<testsuites id="2026-09-29" name="report_1" tests="3" failures="6" skipped="0" flaky="0" time="0.000">
+\t<testsuite id="0" name="both_test" package="test" tests="1" failures="3" errors="0" skipped="0" flaky="0" time="0.040">
+\t\t<testcase name="test_two_assertions_fail" classname="both_test" time="0.009">
+\t\t\t<failure message="FAILED: res://test/both_test.gd:9" type="FAILURE"><![CDATA[Expecting: 'true' but is 'false']]></failure>
+\t\t\t<failure message="FAILED: res://test/both_test.gd:10" type="FAILURE"><![CDATA[Expecting: 'true' but is 'false']]></failure>
+\t\t</testcase>
+\t</testsuite>
+\t<testsuite id="2" name="hooked_test" package="test" tests="1" failures="1" errors="0" skipped="0" flaky="0" time="0.030">
+\t\t<testcase name="test_passes" classname="hooked_test" time="0.009">
+\t\t</testcase>
+\t</testsuite>
+\t<testsuite id="3" name="twice_test" package="test" tests="1" failures="2" errors="0" skipped="0" flaky="0" time="0.030">
+\t\t<testcase name="test_two_assertions_fail" classname="twice_test" time="0.009">
+\t\t\t<failure message="FAILED: res://test/twice_test.gd:5" type="FAILURE"><![CDATA[Expecting: 'true' but is 'false']]></failure>
+\t\t\t<failure message="FAILED: res://test/twice_test.gd:6" type="FAILURE"><![CDATA[Expecting: 'true' but is 'false']]></failure>
+\t\t</testcase>
+\t</testsuite>
+</testsuites>`);
+  assert.deepEqual(
+    report.suites.map((suite) => [suite.name, suite.failures, suite.hookFailures]),
+    [
+      ['both_test', 1, 1],
+      ['hooked_test', 0, 1],
+      ['twice_test', 1, 0],
+    ],
+    'a failed hook is counted once whatever its cases failed, and a case failing twice is no hook',
+  );
+  assert.equal(report.hookFailures, 2);
+}
+
 function testASuiteWithASpaceInItsPathKeepsItsOrphans(): void {
   const found = orphansPrinted([
     'Run Test Suite: res://my tests/docket_test.gd',
@@ -651,6 +692,7 @@ testAFailingStringReadsItsValue();
 testOneLineFailingTwiceKeepsEachValue();
 testASuiteWithASpaceInItsPathKeepsItsOrphans();
 testAFailedHookIsCountedAndNamed();
+testASecondFailedAssertionIsNotAHook();
 testAStringAfterAnArrayReadsItsOwnValue();
 testEveryShapeOfAStringEqualityReadsItsValue();
 testEntitiesAndShapes();
