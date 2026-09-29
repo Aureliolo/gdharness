@@ -7,6 +7,7 @@
 import assert from 'node:assert/strict';
 import {
   BOTH_SIDES_ALIKE_NOTE,
+  hookFailuresPrinted,
   MalformedReportError,
   orphansPrinted,
   parseJUnit,
@@ -127,6 +128,64 @@ function testARunThatFoundNothingIsNotAPass(): void {
     whyNoReport(NOTHING_THERE, 'res://anything'),
     'nothing at res://test',
     'the path the runner named beats the one it was asked for',
+  );
+  // A directory with a space in its name is named whole: the path was read up to the first space.
+  assert.equal(
+    whyNoReport(
+      ['Given directory or file does not exists: res://my tests', 'No test cases found, abort test run!'],
+      'res://my tests',
+    ),
+    'nothing at res://my tests',
+  );
+}
+
+/**
+ * A before() that failed, as gdUnit4 wrote it on 4.7.2: the suite counts the failure, neither case
+ * carries it, and the console names it under the suite's finalize().
+ */
+function testAFailedHookIsCountedAndNamed(): void {
+  const report = parseJUnit(`<?xml version="1.0" encoding="UTF-8" ?>
+<testsuites id="2026-09-29" name="report_1" tests="2" failures="1" skipped="0" flaky="0" time="0.000">
+\t<testsuite id="0" name="hooked_test" package="test" timestamp="2026-09-29T03:05:42" hostname="localhost" tests="2" failures="1" errors="0" skipped="0" flaky="0" time="0.044">
+\t\t<testcase name="test_after_a_failed_hook" classname="hooked_test" time="0.009">
+\t\t</testcase>
+\t\t<testcase name="test_another" classname="hooked_test" time="0.009">
+\t\t</testcase>
+\t</testsuite>
+</testsuites>`);
+  assert.deepEqual(
+    [report.failures, report.hookFailures, report.suites[0]?.hookFailures, report.suites[0]?.hookErrors],
+    [0, 1, 1, 0],
+    'the failure no case carries is the hook',
+  );
+  assert.deepEqual(
+    hookFailuresPrinted([
+      '  hooked_test > finalize()  Report:',
+      "  Expecting: 'true' but is 'false'\tat 'before' in res://test/hooked_test.gd:5",
+      "  Expecting: 5 but is 4\tat 'test_sums' in res://test/sums_test.gd:9",
+    ]),
+    [
+      {
+        hook: 'before',
+        path: 'res://test/hooked_test.gd',
+        line: 5,
+        message: "Expecting: 'true' but is 'false'",
+      },
+    ],
+    'and the printed line names it, where a case failing is not a hook',
+  );
+}
+
+function testASuiteWithASpaceInItsPathKeepsItsOrphans(): void {
+  const found = orphansPrinted([
+    'Run Test Suite: res://my tests/docket_test.gd',
+    'Statistics: 3 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 2 orphans |	WARNING',
+    'Overall Summary: 3 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 2 orphans |',
+  ]);
+  assert.deepEqual(
+    found.suites,
+    [{ path: 'res://my tests/docket_test.gd', orphans: 2 }],
+    JSON.stringify(found),
   );
 }
 
@@ -339,6 +398,36 @@ function readsItsValue(ending: string): void {
       `'abcXd'\n\tat 'test_unprinted_apart' in res://test/words_test.gd:18\n${VALUE_NOT_RECOVERED_NOTE}`,
     ),
     `a detail the console kept no copy of, whose sides differ, says its value may be the merge: ${apart?.detail}`,
+  );
+}
+
+/**
+ * One assertion line failing twice, as a parameterized test does: one function name, one line, and a
+ * different value each time. Expected "abc", found "" and then "a", which merge alike, so a diff
+ * offered to every failure it matched gave both the first one's value.
+ */
+function testOneLineFailingTwiceKeepsEachValue(): void {
+  const e = String.fromCharCode(0x1b);
+  const at = `${e}[0m${e}[38;2;173;216;230m\tat 'test_each' in res://test/each_test.gd:7${e}[0m`;
+  const printed = [
+    ` but was`,
+    ` '${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[38;2;255;255;255mabc${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255m${e}[0m'${at}`,
+    ` but was`,
+    ` '${e}[38;2;30;144;255ma${e}[48;2;38;0;0m${e}[38;2;255;255;255mbc${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255m${e}[0m'${at}`,
+  ].join('\n');
+  const reported = {
+    detail: "Expecting:\n 'abc'\n but was\n 'abc'\n\tat 'test_each' in res://test/each_test.gd:7",
+  };
+  const [first, second] = withActualsPrinted([reported, reported], printed);
+  assert.match(
+    first?.detail ?? '',
+    / but was\n ''\n\tat 'test_each'/,
+    `the first found nothing: ${first?.detail}`,
+  );
+  assert.match(
+    second?.detail ?? '',
+    / but was\n 'a'\n\tat 'test_each'/,
+    `the second found "a": ${second?.detail}`,
   );
 }
 
@@ -559,6 +648,9 @@ function readsEveryShape(ending: string): void {
 
 testWhatGdUnitWrites();
 testAFailingStringReadsItsValue();
+testOneLineFailingTwiceKeepsEachValue();
+testASuiteWithASpaceInItsPathKeepsItsOrphans();
+testAFailedHookIsCountedAndNamed();
 testAStringAfterAnArrayReadsItsOwnValue();
 testEveryShapeOfAStringEqualityReadsItsValue();
 testEntitiesAndShapes();

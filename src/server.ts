@@ -85,6 +85,7 @@ import {
   theConsoleWasNotCaptured,
   writeEditorLogNote,
 } from './editor-log.js';
+import { type EngineRun, howItEnded, runEngine } from './engine-run.js';
 import { errorMessage, Refusal } from './errors.js';
 import { answersTo, forAnswer, GameLog, type LogEntry } from './game-log.js';
 import {
@@ -94,10 +95,11 @@ import {
   theEditorHasComeBack,
 } from './godot-bridge.js';
 import { GodotLocator } from './godot-path.js';
-import { type HeadlessOutcome, runImport, runOperation } from './headless.js';
+import { engineExtras, type HeadlessOutcome, runImport, runOperation } from './headless.js';
 import { EDITOR_READS, ENGINE_PASSES, HEADLESS_OPERATIONS } from './headless-operations.js';
 import { DefectsSeen, defectReport, feedbackNotice } from './issues.js';
 import {
+  hookFailuresPrinted,
   orphansPrinted,
   parseJUnit,
   type ScriptError,
@@ -349,26 +351,6 @@ function describeHalt(halt: StoppedAt): string {
 /** Whether the process has exited, with a code or to a signal. */
 function exited(run: Pick<GodotProcess, 'exitCode' | 'exitSignal'>): boolean {
   return run.exitCode !== null || run.exitSignal !== null;
-}
-
-/**
- * How an engine run through execFile ended, read off the error it failed with.
- *
- * Three shapes: a number is the process's own exit code; a signal is a process killed with no code,
- * which is what execFile does at its timeout; and a string is Node's reason for having killed it,
- * such as more output than the buffer holds. All three were once answered as exit code -1, which is
- * also a code a program can exit with.
- */
-export function endingOf(failed: { readonly code?: unknown; readonly signal?: unknown }): {
-  exitCode: number | null;
-  exitSignal: string | null;
-  failure: string | null;
-} {
-  return {
-    exitCode: typeof failed.code === 'number' ? failed.code : null,
-    exitSignal: typeof failed.signal === 'string' ? failed.signal : null,
-    failure: typeof failed.code === 'string' ? failed.code : null,
-  };
 }
 
 /** How a process that has exited ended, for a sentence. */
@@ -1123,6 +1105,9 @@ const CACHE_WRITE_MS = 2_000;
  */
 const SCAN_WAIT_MS = 30_000;
 
+/** How long past its exit a run's output is waited for when something else still holds its pipes. */
+const STREAMS_GRACE_MS = 2_000;
+
 /** What a start waited for before the game was launched: an editor scan and its cache write. */
 interface ScanWait {
   readonly waitedMs: number;
@@ -1150,7 +1135,7 @@ function withScanWait(outcome: HeadlessOutcome, scanned: ScanWait): HeadlessOutc
   if (scanned.waitedMs === 0) {
     return outcome;
   }
-  const said = scanWaitAnswer(scanned);
+  const said = scanWaitAnswer(scanned, 'engine');
   if (outcome.ok) {
     return { ...outcome, payload: { ...outcome.payload, ...said } };
   }
@@ -1159,21 +1144,103 @@ function withScanWait(outcome: HeadlessOutcome, scanned: ScanWait): HeadlessOutc
     : { ...outcome, message: `${outcome.message} ${said.scanNote}` };
 }
 
-function scanWaitAnswer(scanned: ScanWait): {
+/**
+ * What a test run says about [param notRun] cases its suites counted and never ran.
+ *
+ * failFast is the usual reason and the only one with a remedy to give, so it is named only when it
+ * was set: a run without it was told to leave it out, which it already had.
+ */
+export function notRunNote(notRun: number, failFast: boolean): string | undefined {
+  if (notRun <= 0) {
+    return undefined;
+  }
+  const cases = `${notRun} case${notRun === 1 ? '' : 's'}`;
+  return failFast
+    ? `This run stopped at the first failure in each suite it failed in, so ${cases} never ran and count as neither passed nor failed. Leave failFast out to run every case.`
+    : `${cases} counted in ${notRun === 1 ? 'its suite' : 'their suites'} never ran and count as neither passed nor failed. failFast was not set, so it was not that: the suites below with notRun are the ones to read.`;
+}
+
+/**
+ * What project_export answers for [param ending], given when its output file was last written
+ * before the export and after it, null where there was none.
+ *
+ * Exported means this run wrote the file. A file an earlier export left there read as this one's, so
+ * an export that exited cleanly having written nothing was answered as having exported.
+ */
+export function exportAnswer(
+  ending: EngineRun,
+  asked: { readonly preset: string; readonly outputPath: string; readonly debug: boolean },
+  before: number | null,
+  after: number | null,
+): ToolResponse {
+  const { log } = ending;
+  const written = after !== null && after !== before;
+  const problems = log.select({ severity: 'warning', sinceLastCall: false, limit: 200 });
+  const verdict = {
+    exported: ending.exitCode === 0 && ending.failure === null && log.count('error') === 0 && written,
+    ...asked,
+    exitCode: ending.exitCode,
+    exitSignal: ending.exitSignal ?? undefined,
+    failure: ending.failure ?? undefined,
+    errors: log.count('error'),
+    warnings: log.count('warning'),
+    entries: forAnswer(problems.entries),
+    ...(problems.omitted === 0 ? {} : { entriesOmitted: problems.omitted }),
+  };
+  if (verdict.exported) {
+    return { content: [{ type: 'text', text: JSON.stringify(verdict, null, 2) }] };
+  }
+  const stale =
+    !written && after !== null
+      ? ` The ${asked.outputPath} there is from before this export, which did not write it.`
+      : '';
+  const why =
+    ending.exitSignal === null
+      ? stale
+      : ` The engine was ${howItEnded(ending)}, so it has no exit code.${stale}`;
+  return {
+    content: [
+      {
+        type: 'text',
+        text: `Export with preset '${asked.preset}' did not produce ${asked.outputPath}.${why}`,
+      },
+      { type: 'text', text: JSON.stringify(verdict, null, 2) },
+    ],
+    isError: true,
+  };
+}
+
+/**
+ * What a caller is told about the wait for the editor's scan before [param started] began.
+ *
+ * Apart for a game and a headless engine because the two are read in different places: a game's
+ * complaints are in `editor_output`, and a headless engine's come back with the answer under
+ * `engine_messages`. And a headless engine can write the class cache, which a scan still running
+ * writes over when it finishes.
+ */
+export function scanWaitAnswer(
+  scanned: ScanWait,
+  started: 'game' | 'engine' = 'game',
+): {
   waitedForEditorScanMs?: number;
   scanNote?: string | undefined;
 } {
   if (scanned.waitedMs === 0) {
     return {};
   }
+  const still = `The editor was still scanning the project after ${SCAN_WAIT_MS / 1000} seconds, so`;
   return {
     waitedForEditorScanMs: scanned.waitedMs,
-    scanNote: scanned.stillScanning
-      ? `The editor was still scanning the project after ${SCAN_WAIT_MS / 1000} seconds, so this ` +
-        'game started during the scan and may have read a class cache being rewritten. If ' +
-        'editor_output shows "Could not find type" for a class that is declared, editor_rescan ' +
-        'waits for the scan to finish, and a start after it reads the finished cache.'
-      : undefined,
+    scanNote: !scanned.stillScanning
+      ? undefined
+      : started === 'game'
+        ? `${still} this game started during the scan and may have read a class cache being rewritten. If ` +
+          'editor_output shows "Could not find type" for a class that is declared, editor_rescan ' +
+          'waits for the scan to finish, and a start after it reads the finished cache.'
+        : `${still} the engine answering this started during the scan and may have read a class cache being ` +
+          'rewritten, and a class cache it wrote can be written over when the scan finishes. If ' +
+          'engine_messages shows "Could not find type" for a class that is declared, editor_rescan waits ' +
+          'for the scan to finish, and the same call after it reads the finished cache.',
   };
 }
 
@@ -2337,6 +2404,9 @@ class GodotServer {
         const contained = this.containProjectFiles(asks);
         return contained.ok ? await this.handleViaBridge(editorSide, contained.value) : contained.response;
       }
+      if (headless === 'create_script') {
+        return await this.handleCreateScript(answerable);
+      }
       if (headless !== 'refresh_class_cache') {
         return await this.headless(headless, answerable);
       }
@@ -3069,6 +3139,7 @@ class GodotServer {
         {
           ok: true,
           messages: imported.messages,
+          ...(imported.messagesOmitted === undefined ? {} : { messagesOmitted: imported.messagesOmitted }),
           payload: {
             uidsCreated: given,
             stillWithoutUid: after,
@@ -3227,7 +3298,24 @@ class GodotServer {
       readPositiveNumber(args, 'timeoutMs') ?? REIMPORT_TIMEOUT_MS,
     );
     if (!applied.ok) {
-      return applied.response;
+      // The options are in the sidecar whatever the reimport did, and the refusal alone read as the
+      // whole call failing, so a caller would set them again or conclude they had not been kept.
+      const listed = written.payload['updated_options'];
+      const updated = Array.isArray(listed) ? listed.map(String) : [];
+      const which =
+        updated.length === 0
+          ? 'The options were'
+          : `${updated.join(', ')} ${updated.length === 1 ? 'was' : 'were'}`;
+      return {
+        ...applied.response,
+        content: [
+          {
+            type: 'text',
+            text: `${which} written to the import file, and the reimport that applies them failed, so the resource is still imported the old way until the editor's next scan or project_import reimport imports it. Why the reimport failed:`,
+          },
+          ...applied.response.content,
+        ],
+      };
     }
     return this.jsonTextResponse({ ...written.payload, reimport: applied.payload });
   }
@@ -3253,8 +3341,22 @@ class GodotServer {
         ),
       };
     }
+    const never = listed.find((one) => one.status === 'not_imported');
+    if (resourcePath !== undefined && never !== undefined) {
+      return {
+        ok: false,
+        response: this.createErrorResponse(
+          `${never.path} is not something the engine imports: ${never.reason ?? 'it has no importer'}.`,
+        ),
+      };
+    }
     const targets = listed
-      .filter((one) => one.status !== 'missing_source' && (force || one.status !== 'up_to_date'))
+      .filter(
+        (one) =>
+          one.status !== 'missing_source' &&
+          one.status !== 'not_imported' &&
+          (force || one.status !== 'up_to_date'),
+      )
       .map((one) => one.path);
     if (targets.length === 0) {
       return {
@@ -3298,9 +3400,7 @@ class GodotServer {
       if (!imported.ok) {
         return { ok: false, response: this.answer(withScanWait(imported, scanned)) };
       }
-      if (imported.messages.length > 0) {
-        extra['engine_messages'] = imported.messages;
-      }
+      Object.assign(extra, engineExtras(imported));
       if (imported.extensionNote !== undefined) {
         extra['extensionNote'] = imported.extensionNote;
       }
@@ -3425,21 +3525,15 @@ class GodotServer {
   }
 
   private answer(outcome: HeadlessOutcome): ToolResponse {
+    const extras = engineExtras(outcome);
     if (!outcome.ok) {
       const response = this.createErrorResponse(outcome.message);
-      if (outcome.messages.length > 0) {
-        response.content.push({
-          type: 'text',
-          text: JSON.stringify({ engine_messages: outcome.messages }, null, 2),
-        });
+      if (Object.keys(extras).length > 0) {
+        response.content.push({ type: 'text', text: JSON.stringify(extras, null, 2) });
       }
       return response;
     }
-    return this.jsonTextResponse(
-      outcome.messages.length > 0
-        ? { ...outcome.payload, engine_messages: outcome.messages }
-        : outcome.payload,
-    );
+    return this.jsonTextResponse({ ...outcome.payload, ...extras });
   }
 
   // -------------------------------------------------------------------------------------------
@@ -3487,10 +3581,8 @@ class GodotServer {
       }
       const outcome = await this.operation(spec.operation, spec.params(args, detailed), project.value.path);
       info[section] = outcome.ok
-        ? outcome.messages.length > 0
-          ? { ...outcome.payload, engine_messages: outcome.messages }
-          : outcome.payload
-        : { error: outcome.message, engine_messages: outcome.messages };
+        ? { ...outcome.payload, ...engineExtras(outcome) }
+        : { error: outcome.message, ...engineExtras(outcome) };
     }
     return this.jsonTextResponse(info);
   }
@@ -3576,64 +3668,24 @@ class GodotServer {
     ];
     this.logDebug(`Exporting: ${engine.value} ${exportArgs.join(' ')}`);
 
-    const log = new GameLog();
-    let ending: ReturnType<typeof endingOf> = { exitCode: 0, exitSignal: null, failure: null };
+    // The file this run writes, told from one an earlier export left there: an export that exited
+    // cleanly and wrote nothing read as exported from the last one's file.
+    const writtenAt = (): number | null =>
+      existsSync(output.absolutePath) ? statSync(output.absolutePath).mtimeMs : null;
+    const before = writtenAt();
+    let ending: EngineRun;
     try {
-      // An export of a real project is slow, so it gets five minutes rather than the default. And
-      // room to talk: execFile kills a process that prints past its buffer, a mebibyte by default,
-      // and what an export prints grows with the project.
-      const { stdout, stderr } = await run(engine.value, exportArgs, {
-        timeout: 300000,
-        maxBuffer: 64 * 1024 * 1024,
-        signal: callSignal(),
-      });
-      log.append('stdout', stdout);
-      log.append('stderr', stderr);
-    } catch (error) {
-      if (!(error instanceof Error && 'stdout' in error && 'stderr' in error)) {
-        return this.createErrorResponse(`Export could not be run: ${errorMessage(error)}`);
-      }
-      const failed = error as Error & { stdout: string; stderr: string; code?: unknown; signal?: unknown };
-      log.append('stdout', failed.stdout);
-      log.append('stderr', failed.stderr);
-      ending = endingOf(failed);
+      // An export of a real project is slow, so it gets five minutes rather than no limit.
+      ending = await runEngine(engine.value, exportArgs, { timeout: { ms: 300000, said: 'five minutes' } });
     } finally {
       discard(exportLogs);
     }
-    log.finish();
-
-    const problems = log.select({ severity: 'warning', sinceLastCall: false, limit: 200 });
-    const verdict = {
-      exported: ending.exitCode === 0 && log.count('error') === 0 && existsSync(output.absolutePath),
-      preset,
-      outputPath: output.relativePath,
-      debug,
-      exitCode: ending.exitCode,
-      exitSignal: ending.exitSignal ?? undefined,
-      failure: ending.failure ?? undefined,
-      errors: log.count('error'),
-      warnings: log.count('warning'),
-      entries: forAnswer(problems.entries),
-    };
-    if (!verdict.exported) {
-      const why =
-        ending.exitSignal === null
-          ? ending.failure === null
-            ? ''
-            : ` The engine was ended by Node (${ending.failure}), so it has no exit code.`
-          : ` The engine was ended by ${ending.exitSignal}, so it has no exit code: the export ran past its five minutes or the call was cancelled.`;
-      return {
-        content: [
-          {
-            type: 'text',
-            text: `Export with preset '${preset}' did not produce ${output.relativePath}.${why}`,
-          },
-          { type: 'text', text: JSON.stringify(verdict, null, 2) },
-        ],
-        isError: true,
-      };
+    if (ending.exitSignal === null && ending.exitCode === null) {
+      return this.createErrorResponse(
+        `Export could not be run: ${ending.failure ?? 'the engine gave no exit status'}`,
+      );
     }
-    return this.jsonTextResponse(verdict);
+    return exportAnswer(ending, { preset, outputPath: output.relativePath, debug }, before, writtenAt());
   }
 
   /**
@@ -3733,6 +3785,7 @@ class GodotServer {
     if (timedOut && run.process.pid !== undefined) {
       await untilGone([run.process.pid]);
     }
+    await run.settled;
 
     const reportsDir = join(project.value.path, '.godot', ...ours.split('/'));
     let report: TestReport | null = null;
@@ -3776,7 +3829,13 @@ class GodotServer {
       105: 'script errors',
     };
     const exitCode = run.exitCode;
-    const printed = run.log.select({ severity: 'info', sinceLastCall: false, limit: 200 }).entries;
+    // All of it, because the counts are read off it: the newest two hundred lines lost an early
+    // suite's orphans, and with them the warning, on any tier that printed a line per case.
+    const printed = run.log.select({
+      severity: 'info',
+      sinceLastCall: false,
+      limit: Number.POSITIVE_INFINITY,
+    }).entries;
     // Before the exit code, because gdUnit4 leaves it at zero for a run that found nothing to do,
     // and `passed` is the one word a skimming reader must never be handed for one of those.
     const said = printed.map((entry) => entry.text);
@@ -3819,7 +3878,9 @@ class GodotServer {
           ? `No tests ran: ${verdict}.${elsewhereIn(project.value.path, asked)}`
           : scriptErrors.length > 0
             ? scriptErrorsNote(scriptErrors)
-            : `The test run wrote no report (${verdict}${reportProblem ? `; ${reportProblem}` : ''}).`;
+            : reportProblem !== null
+              ? `The test run's report could not be read (${reportProblem}); the engine's own verdict was ${verdict}.`
+              : `The test run wrote no report (${verdict}).`;
       return {
         content: [
           { type: 'text', text: note },
@@ -3877,8 +3938,32 @@ class GodotServer {
     // kilobytes of names and timings around the one line saying it passed. Counted instead, so the
     // answer is the size of what went wrong.
     const unclean = report.suites.filter(
-      (suite) => suite.failures > 0 || suite.errors > 0 || suite.skipped > 0 || orphansIn(suite.path) > 0,
+      (suite) =>
+        suite.failures > 0 ||
+        suite.errors > 0 ||
+        suite.hookFailures > 0 ||
+        suite.hookErrors > 0 ||
+        suite.skipped > 0 ||
+        orphansIn(suite.path) > 0,
     );
+    // A hook that failed is counted on its suite and named nowhere in the report, so it is read off
+    // what the run printed. It was answered as no failure at all, and the suite as passed.
+    const hooksPrinted = hookFailuresPrinted(said);
+    const hookFailures = report.suites
+      .filter((suite) => suite.hookFailures + suite.hookErrors > 0)
+      .flatMap((suite) => {
+        const printedHere = hooksPrinted.filter((hook) => hook.path === suite.path);
+        return printedHere.length > 0
+          ? printedHere.map((hook) => ({ suite: suite.name, ...hook }))
+          : [
+              {
+                suite: suite.name,
+                path: suite.path,
+                message:
+                  'gdUnit4 counted a failure in this suite that none of its cases carry, which is what a failed before() or after() leaves, and printed no line saying which.',
+              },
+            ];
+      });
     // gdUnit4 stops a suite at its first failing case unless told otherwise, which is what
     // `failFast` asks for. The counts are then of what ran, and the cases after the failure are
     // neither passes nor failures. Unsaid, that reads as a tier where each run finds one more
@@ -3886,7 +3971,16 @@ class GodotServer {
     // along three times in one afternoon, and read its own suite as flaky.
     const notRun = report.suites.reduce((sum, suite) => sum + Math.max(0, suite.discovered - suite.tests), 0);
     return this.jsonTextResponse({
-      passed: !timedOut && exitCode === 0 && report.failures === 0 && report.errors === 0,
+      // A report with no cases in it is a run where nothing ran, which exits 0 and was answered
+      // passed beside a verdict saying no test cases were found.
+      passed:
+        !timedOut &&
+        exitCode === 0 &&
+        nothingRan === null &&
+        report.tests > 0 &&
+        report.failures === 0 &&
+        report.errors === 0 &&
+        hookFailures.length === 0,
       verdict,
       ...(timedOut ? { timedOut, hung, silentForMs } : {}),
       exitCode,
@@ -3897,6 +3991,7 @@ class GodotServer {
       skipped: report.skipped,
       time: report.time,
       failed,
+      hookFailures: hookFailures.length > 0 ? hookFailures : undefined,
       // Alongside `failed` rather than folded into it: a suite that left nodes behind failed
       // nothing, and an agent reading `failed` for what to fix must not find a passing test in it.
       warnings: warnings.length > 0 ? warnings : undefined,
@@ -3909,9 +4004,7 @@ class GodotServer {
       note:
         verdict.startsWith('warnings') && warnings.length === 0
           ? 'gdUnit4 exits 101 for orphan nodes when nothing failed, and this run printed no count of them: orphan reporting may be off in the project settings.'
-          : notRun > 0
-            ? `This run stopped at the first failure in each suite it failed in, so ${notRun} case${notRun === 1 ? '' : 's'} never ran and count as neither passed nor failed. Leave failFast out to run every case.`
-            : undefined,
+          : notRunNote(notRun, readBoolean(args, 'failFast') === true),
       suites: unclean.map((suite) => ({
         name: suite.name,
         path: suite.path,
@@ -3921,6 +4014,8 @@ class GodotServer {
         notRun: suite.discovered > suite.tests ? suite.discovered - suite.tests : undefined,
         failures: suite.failures,
         errors: suite.errors,
+        hookFailures:
+          suite.hookFailures + suite.hookErrors > 0 ? suite.hookFailures + suite.hookErrors : undefined,
         skipped: suite.skipped,
         orphans: orphansIn(suite.path) > 0 ? orphansIn(suite.path) : undefined,
         time: suite.time,
@@ -5872,7 +5967,11 @@ class GodotServer {
    * asked, so a server that goes away mid-run takes the only reader with it; outliving it would
    * leave an engine nobody is reading and nobody will ever end.
    */
-  private spawnGame(godotPath: string, cmdArgs: string[], env?: NodeJS.ProcessEnv): SpawnedGame {
+  private spawnGame(
+    godotPath: string,
+    cmdArgs: string[],
+    env?: NodeJS.ProcessEnv,
+  ): SpawnedGame & { readonly settled: Promise<void> } {
     const child = spawn(godotPath, cmdArgs, { stdio: ['ignore', 'pipe', 'pipe'], ...(env ? { env } : {}) });
     // The same reasoning at the other end of the call: a caller who cancelled is no longer the
     // reader this run is held for, so it is ended with the call rather than at its own timeout.
@@ -5915,7 +6014,6 @@ class GodotServer {
     });
     child.on('exit', (code: number | null, signal: NodeJS.Signals | null) => {
       this.logDebug(`Godot process exited with code ${code ?? 'none'}, signal ${signal ?? 'none'}`);
-      log.finish();
       started.exitCode = code;
       started.exitSignal = code === null ? signal : null;
     });
@@ -5924,7 +6022,33 @@ class GodotServer {
       log.append('stderr', `${err.message}\n`);
       started.exitCode = -1;
     });
-    return started;
+    // The log is whole once both streams have closed, which Node does not promise by `exit`: the
+    // last lines can still be in the pipe, and they are the summary, the last case's failure, or
+    // the error a boot ended on. Two seconds past the exit at most, because a child the engine
+    // started and left running holds the pipe open for as long as it lives.
+    const settled = new Promise<void>((resolve) => {
+      let open = 2;
+      const done = (): void => {
+        log.finish();
+        resolve();
+      };
+      const closed = (): void => {
+        open -= 1;
+        if (open === 0) {
+          done();
+        }
+      };
+      child.stdout.once('close', closed);
+      child.stderr.once('close', closed);
+      child.once('exit', () => {
+        setTimeout(done, STREAMS_GRACE_MS).unref();
+      });
+      child.once('error', () => {
+        done();
+      });
+    });
+    // The same object the handlers above write the exit into, not a copy of it.
+    return Object.assign(started, { settled });
   }
 
   /**
@@ -6645,6 +6769,7 @@ class GodotServer {
         resolve(false);
       });
     });
+    await boot.settled;
 
     const errors = boot.log.count('error');
     const warnings = boot.log.count('warning');
@@ -7888,6 +8013,50 @@ class GodotServer {
    * true and reads as "nothing was wrong", which is how two projects were sent away from the one
    * call that could have told them. A refusal is left alone: it has its own thing to say.
    */
+  /**
+   * script_edit create, and the class it declares put in the class list.
+   *
+   * The engine resolves a `class_name` from the list, not from the file, so a script written with
+   * one is not a class to anything that starts next until the list is rebuilt. The answer said
+   * `registered: true` on the strength of the argument alone, and nothing had written the list.
+   */
+  private async handleCreateScript(args: OperationParams): Promise<ToolResponse> {
+    const project = this.project(args);
+    if (!project.ok) {
+      return project.response;
+    }
+    const contained = this.containProjectFiles(args);
+    if (!contained.ok) {
+      return contained.response;
+    }
+    const { op: _op, projectPath: _projectPath, ...params } = contained.value;
+    const created = await this.operation('create_script', params, project.value.path);
+    const declared = created.ok ? (readString(created.payload, 'class_name') ?? '') : '';
+    if (!created.ok || declared === '') {
+      return this.answer(created);
+    }
+    const rebuilt = await this.rebuildClassCache(project.value.path);
+    const registered =
+      cachedClasses(project.value.path)?.get(declared) === readString(created.payload, 'full_path');
+    const answered = this.answer({
+      ...created,
+      payload: {
+        ...created.payload,
+        registered,
+        ...(registered
+          ? {}
+          : {
+              registrationNote: rebuilt.ok
+                ? `The class list was rebuilt and does not hold ${declared} at this script, so nothing started next resolves it by name. project_import refresh_classes says what the list holds and why.`
+                : `The class list could not be rebuilt, so nothing started next resolves ${declared} by name: ${rebuilt.message}`,
+            }),
+      },
+    });
+    return this.godotBridge.isConnected()
+      ? await this.alsoSayWhatTheEditorCannotSee(answered, args)
+      : answered;
+  }
+
   private async alsoSayWhatTheEditorCannotSee(
     answered: ToolResponse,
     args: OperationParams,

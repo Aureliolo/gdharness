@@ -21,7 +21,8 @@ func _init(p_log: Log) -> void:
 
 
 func refresh_class_cache(_params: Dictionary) -> Dictionary:
-	var before: Dictionary = _entries_by_class(_read_cache())
+	var cached: Array = _read_cache()
+	var before: Dictionary = _entries_by_class(cached)
 
 	var entries: Array = []
 	var skipped: Array[Dictionary] = []
@@ -29,6 +30,18 @@ func refresh_class_cache(_params: Dictionary) -> Dictionary:
 		var entry: Dictionary = _entry_for(path, skipped)
 		if not entry.is_empty():
 			entries.append(entry)
+	# Another language's classes are kept while their files are there. Only GDScript is read here and
+	# the list is written whole, so a C# project's global classes were dropped from it and answered as
+	# removed, and nothing started next could resolve them.
+	var carried: Array[String] = []
+	for entry: Variant in cached:
+		if not entry is Dictionary:
+			continue
+		var listed: Dictionary = entry
+		var language: String = str(listed.get("language", "GDScript"))
+		if language != "GDScript" and FileAccess.file_exists(str(listed.get("path", ""))):
+			entries.append(listed)
+			carried.append(str(listed.get("class", "")))
 	# By name as text: StringName's own order is by identity, not by spelling.
 	entries.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return str(a["class"]) < str(b["class"]))
 
@@ -56,7 +69,7 @@ func refresh_class_cache(_params: Dictionary) -> Dictionary:
 		if not after.has(name):
 			removed.append(name)
 
-	return {
+	var answer: Dictionary = {
 		"path": CACHE_PATH,
 		"classes": entries.size(),
 		"added": added,
@@ -64,6 +77,9 @@ func refresh_class_cache(_params: Dictionary) -> Dictionary:
 		"changed": changed,
 		"skipped": skipped,
 	}
+	if not carried.is_empty():
+		answer["carried"] = carried
+	return answer
 
 
 # The cache entry for one script, or empty for a script with no class_name.
