@@ -558,7 +558,11 @@ function testOperations(godotPath: string, projectDir: string): void {
     extends: 'Node2D',
     template: 'state_machine',
   });
-  assert.equal(get(created, 'registered'), true, 'a script given a class_name is registered');
+  assert.deepEqual(
+    [get(created, 'class_name'), get(created, 'extends')],
+    ['FixtureHero', 'Node2D'],
+    'the class and base are read off the script the engine parsed',
+  );
   assert.equal(get(created, 'full_path'), 'res://made/hero.gd');
   assert.equal(get(created, 'parses'), true, 'the answer says the engine accepted what was written');
   const heroSource = readFileSync(join(projectDir, 'made', 'hero.gd'), 'utf8');
@@ -592,6 +596,25 @@ function testOperations(godotPath: string, projectDir: string): void {
   // Gone again before the resave below walks the project, which would trip over it.
   rmSync(join(projectDir, 'made', 'broken.gd'));
 
+  // Content is the whole file: written as sent, header and all, and read back from what was parsed.
+  const whole = 'class_name FixtureWhole\nextends Sprite2D\n\n\nfunc _ready() -> void:\n\tpass\n';
+  const wrote = operation('create_script', { script_path: 'made/whole.gd', content: whole });
+  assert.equal(readFileSync(join(projectDir, 'made', 'whole.gd'), 'utf8'), whole, 'the file is the content');
+  assert.deepEqual(
+    [get(wrote, 'parses'), get(wrote, 'class_name'), get(wrote, 'extends')],
+    [true, 'FixtureWhole', 'Sprite2D'],
+    `and the answer is what the engine read in it: ${JSON.stringify(wrote)}`,
+  );
+  rmSync(join(projectDir, 'made', 'whole.gd'));
+  const doubled = runRefusedOperation(godotPath, projectDir, 'create_script', {
+    script_path: 'made/doubled.gd',
+    extends: 'Node2D',
+    content: whole,
+  });
+  assert.equal(doubled.answer, null, 'content with a header argument beside it is refused');
+  assert.match(doubled.stderr, /content is the whole file, so extends cannot be given with it/, doubled.stderr);
+  assert.ok(!existsSync(join(projectDir, 'made', 'doubled.gd')), 'and nothing is written');
+
   // What gets written has to parse where an untyped declaration is an error, which the
   // autoload check further down proves by booting the project with this script as one.
   const modified = operation('modify_script', {
@@ -606,7 +629,50 @@ function testOperations(godotPath: string, projectDir: string): void {
     ],
   });
   assert.equal(get(modified, 'total_modifications'), 6, 'every modification should be applied');
+  assert.equal(get(modified, 'parses'), true, 'and what they made parses under every warning');
+  // Each line answered is where the declaration is in the file written.
+  const onTheirLines = (answer: unknown): void => {
+    const written = readFileSync(join(projectDir, 'made', 'hero.gd'), 'utf8').split('\n');
+    const keywords: Record<string, string> = { add_function: 'func', add_variable: 'var', add_signal: 'signal' };
+    for (const applied of asArray(get(answer, 'modifications_applied'))) {
+      assert.match(
+        written[asNumber(get(applied, 'line')) - 1] ?? '',
+        new RegExp(`^${keywords[asString(get(applied, 'type'))] ?? '?'} ${asString(get(applied, 'name'))}\\b`),
+        `${JSON.stringify(applied)} should name the line its declaration is on`,
+      );
+    }
+  };
+  onTheirLines(modified);
+  // The function first and the others above it after, so a number taken at the moment of placing
+  // is two short for the function, and the variable moves when the signal goes in above it.
+  onTheirLines(
+    operation('modify_script', {
+      script_path: 'made/hero.gd',
+      modifications: [
+        { type: 'add_function', name: 'placed_first', body: 'placed_third.emit()' },
+        { type: 'add_variable', name: 'placed_second', varType: 'int' },
+        { type: 'add_signal', name: 'placed_third' },
+      ],
+    }),
+  );
   const modifiedSource = readFileSync(join(projectDir, 'made', 'hero.gd'), 'utf8');
+
+  // One addition that cannot be made refuses the call, and the file is left as it was.
+  const refused = runRefusedOperation(godotPath, projectDir, 'modify_script', {
+    script_path: 'made/hero.gd',
+    modifications: [
+      { type: 'add_variable', name: 'fine', varType: 'int' },
+      { type: 'add_variable', name: '' },
+      { type: 'add_signal', name: 'not a name' },
+    ],
+  });
+  assert.equal(refused.answer, null, 'a call with an addition it cannot make answers nothing');
+  assert.match(
+    refused.stderr,
+    /Nothing was changed: modification 2 has no name; modification 3 is named 'not a name', which GDScript does not accept as a name/,
+    refused.stderr,
+  );
+  assert.equal(readFileSync(join(projectDir, 'made', 'hero.gd'), 'utf8'), modifiedSource, 'and nothing is written');
   assert.match(modifiedSource, /var speed: float = 4\.0/, 'the variable should carry its type and default');
   assert.match(
     modifiedSource,

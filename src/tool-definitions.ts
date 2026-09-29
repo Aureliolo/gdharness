@@ -714,13 +714,16 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'script_edit',
     description:
-      "Creates a GDScript file, or adds functions, variables and signals to one. Every declaration written carries a type. create loads what it wrote under the project's own warning settings and answers with parses; the engine's reasons for a refusal come back under engine_messages.",
+      "Creates a GDScript file, or adds functions, variables and signals to one. Every declaration written carries a type. Both load what they wrote under the project's own warning settings and answer with parses; the engine's reasons for a refusal come back under engine_messages. create answers with the extends and class_name the engine read, and a script declaring a class_name is put in the project's class list, with registered saying whether it is there. modify makes every addition or none, and answers with the line each one is on in the file written.",
     parameters: {
       projectPath: PROJECT_PATH,
       scriptPath: SCRIPT_PATH,
-      className: { type: 'string', description: 'create: a class_name for the script.' },
-      extends: { type: 'string', description: 'create: the base class. Default Node.' },
-      content: { type: 'string', description: 'create: the whole file, instead of a template.' },
+      className: { type: 'string', description: 'create: a class_name for the script. Not with content.' },
+      extends: { type: 'string', description: 'create: the base class. Default Node. Not with content.' },
+      content: {
+        type: 'string',
+        description: 'create: the whole file, written as given, instead of a template, className and extends.',
+      },
       template: {
         type: 'string',
         enum: ['singleton', 'state_machine', 'component', 'resource'],

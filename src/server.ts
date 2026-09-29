@@ -2334,6 +2334,9 @@ class GodotServer {
         const contained = this.containProjectFiles(asks);
         return contained.ok ? await this.handleViaBridge(editorSide, contained.value) : contained.response;
       }
+      if (headless === 'create_script') {
+        return await this.handleCreateScript(answerable);
+      }
       if (headless !== 'refresh_class_cache') {
         return await this.headless(headless, answerable);
       }
@@ -7865,6 +7868,47 @@ class GodotServer {
    * true and reads as "nothing was wrong", which is how two projects were sent away from the one
    * call that could have told them. A refusal is left alone: it has its own thing to say.
    */
+  /**
+   * script_edit create, and the class it declares put in the class list.
+   *
+   * The engine resolves a `class_name` from the list, not from the file, so a script written with
+   * one is not a class to anything that starts next until the list is rebuilt. The answer said
+   * `registered: true` on the strength of the argument alone, and nothing had written the list.
+   */
+  private async handleCreateScript(args: OperationParams): Promise<ToolResponse> {
+    const project = this.project(args);
+    if (!project.ok) {
+      return project.response;
+    }
+    const contained = this.containProjectFiles(args);
+    if (!contained.ok) {
+      return contained.response;
+    }
+    const { op: _op, projectPath: _projectPath, ...params } = contained.value;
+    const created = await this.operation('create_script', params, project.value.path);
+    const declared = created.ok ? (readString(created.payload, 'class_name') ?? '') : '';
+    if (!created.ok || declared === '') {
+      return this.answer(created);
+    }
+    const rebuilt = await this.rebuildClassCache(project.value.path);
+    const registered = cachedClasses(project.value.path)?.get(declared) === readString(created.payload, 'full_path');
+    const answered = this.answer({
+      ...created,
+      payload: {
+        ...created.payload,
+        registered,
+        ...(registered
+          ? {}
+          : {
+              registrationNote: rebuilt.ok
+                ? `The class list was rebuilt and does not hold ${declared} at this script, so nothing started next resolves it by name. project_import refresh_classes says what the list holds and why.`
+                : `The class list could not be rebuilt, so nothing started next resolves ${declared} by name: ${rebuilt.message}`,
+            }),
+      },
+    });
+    return this.godotBridge.isConnected() ? await this.alsoSayWhatTheEditorCannotSee(answered, args) : answered;
+  }
+
   private async alsoSayWhatTheEditorCannotSee(
     answered: ToolResponse,
     args: OperationParams,
