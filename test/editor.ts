@@ -499,7 +499,7 @@ const SCENE_FILES: Record<string, string[]> = {
   ],
   // A variable that is not exported: set and read back like any property on a @tool script, and
   // kept by no file, which only reading the saved form can tell.
-  'layers/tool_node.gd': ['@tool', 'extends Node', '', 'var hidden: int = 0', ''],
+  'layers/tool_node.gd': ['@tool', 'extends Node', '', '@export var target: Node', 'var hidden: int = 0', ''],
   'layers/tool_resource.gd': ['@tool', 'extends Resource', '', 'var hidden: int = 0', ''],
   'moves/library.tres': [
     '[gd_resource type="AnimationLibrary" load_steps=2 format=3]',
@@ -1861,6 +1861,10 @@ async function testASetIsReadBack({ call, refusal, project }: Editor): Promise<v
     nodeName: 'Tooled',
     properties: { script: 'res://layers/tool_node.gd' },
   });
+  // A running script holds a node in a Node export, which a path is not: set to the path, it
+  // stayed empty. The scene still saves the path to the node.
+  await call('scene_node', set('Tooled', { target: '../Picture' }));
+  assert.match(nodeBody(fileText(project, 'checks.tscn'), 'Tooled'), /target = NodePath\("\.\.\/Picture"\)/);
   const before = fileText(project, 'checks.tscn');
   assert.match(
     await refusal('scene_node', set('Tooled', { hidden: 5 })),
