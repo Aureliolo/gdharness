@@ -1059,6 +1059,34 @@ function testOperations(godotPath: string, projectDir: string): void {
   assert.equal(get(known, 'classes', 'FixtureHero', 'path'), 'res://made/hero.gd');
   assert.equal(get(known, 'classes', 'Stale'), undefined, 'the stale entry is gone');
 
+  // Another language's classes are kept while their files are there: the rebuild reads GDScript
+  // only and writes the list whole, so a C# project's global classes were dropped and called removed.
+  const cacheFile = join(projectDir, '.godot', 'global_script_class_cache.cfg');
+  const csharp = (name: string, path: string): string =>
+    `{\n"base": &"Node",\n"class": &"${name}",\n"icon": "",\n"is_abstract": false,\n"is_tool": false,\n"language": &"C#",\n"path": "${path}"\n}`;
+  writeFileSync(join(projectDir, 'made', 'Foe.cs'), 'public partial class Foe : Godot.Node {}\n');
+  writeFileSync(
+    cacheFile,
+    `list=[${csharp('Foe', 'res://made/Foe.cs')}, ${csharp('Lost', 'res://made/Lost.cs')}]\n`,
+  );
+  try {
+    const kept = operation('refresh_class_cache', {});
+    assert.deepEqual(get(kept, 'carried'), ['Foe'], JSON.stringify(kept));
+    assert.deepEqual(get(kept, 'removed'), ['Lost'], 'one whose file has gone is dropped');
+    assert.match(
+      readFileSync(cacheFile, 'utf8'),
+      /"class": &"Foe"[\s\S]*"language": &"C#"/,
+      'and the kept one is in the file',
+    );
+  } finally {
+    rmSync(join(projectDir, 'made', 'Foe.cs'));
+    assert.equal(
+      get(operation('refresh_class_cache', {}), 'carried'),
+      undefined,
+      'and gone again with its file',
+    );
+  }
+
   // A script the engine has never imported has no .uid beside it, and the answer says which of the
   // two it is rather than returning an empty string for both. This used to sit next to a call to
   // resave_resources, which walked the project writing every scene and script back: the assertion
