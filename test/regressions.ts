@@ -2913,20 +2913,6 @@ function testBothEndsAgreeAboutTheAnnouncement(): void {
 }
 
 /**
- * A server told to go ends, with an editor still holding the bridge.
- *
- * Written to catch a hang and it found none, which is worth saying plainly: `http.Server.close`
- * calls back only once every connection has gone, and an editor on the bridge is an upgraded
- * socket, so a close that waited on it would never settle and the process would sit there
- * holding the port for good. It settles. Two abandoned servers were found holding 6505 in one
- * day and neither of them was this.
- *
- * So it stays as what it turned out to be: the thing nobody had pinned. Its stdin is closed and
- * nothing else, because that is what a harness going away looks like and it is the only shutdown
- * nobody finishes for us. Every other fixture here kills the server outright, so none of them
- * says anything about the path a real harness takes.
- */
-/**
  * An editor a server opened is restarted by starting it again; one opened by hand restarts itself.
  *
  * Godot consumes the arguments an editor was started with and hands none of them back, so an editor
@@ -2999,6 +2985,29 @@ async function testAnEditorAServerOpenedIsStartedAgain(): Promise<void> {
       assert.ok(greeted, 'the server should read the greeting the editor sent');
       assert.equal(greeted['openedByAServer'], opened, 'and take the editor at its word about it');
 
+      // An editor restarting itself comes back as it was, so hidden cannot be honoured there. It
+      // was accepted and the window came back.
+      if (!opened) {
+        // A restart that goes ahead waits for the editor to come back, which this one never does,
+        // so the wait is cut short and read as no answer rather than left to fail as a timeout.
+        const hidden =
+          textOf(
+            await server
+              .request(
+                'tools/call',
+                { name: 'editor_launch', arguments: { op: 'restart', hidden: true } },
+                5_000,
+              )
+              .catch(() => null),
+          ) ?? 'no answer: the restart went ahead';
+        assert.match(
+          hidden,
+          /opened by hand, and restarts itself as it was, so it cannot come back hidden/,
+          hidden,
+        );
+        assert.equal(asked.includes('restart_editor'), false, 'and the editor was asked nothing');
+      }
+
       const restart = server
         .request('tools/call', { name: 'editor_launch', arguments: { op: 'restart' } }, 20_000)
         .catch(() => null);
@@ -3029,6 +3038,20 @@ async function testAnEditorAServerOpenedIsStartedAgain(): Promise<void> {
   }
 }
 
+/**
+ * A server told to go ends, with an editor still holding the bridge.
+ *
+ * Written to catch a hang and it found none, which is worth saying plainly: `http.Server.close`
+ * calls back only once every connection has gone, and an editor on the bridge is an upgraded
+ * socket, so a close that waited on it would never settle and the process would sit there
+ * holding the port for good. It settles. Two abandoned servers were found holding 6505 in one
+ * day and neither of them was this.
+ *
+ * So it stays as what it turned out to be: the thing nobody had pinned. Its stdin is closed and
+ * nothing else, because that is what a harness going away looks like and it is the only shutdown
+ * nobody finishes for us. Every other fixture here kills the server outright, so none of them
+ * says anything about the path a real harness takes.
+ */
 async function testAServerEndsWithAnEditorStillOnTheBridge(): Promise<void> {
   const port = await reservePort();
   const server = new ServerProcess({ env: { GDHARNESS_BRIDGE_PORT: String(port) } });

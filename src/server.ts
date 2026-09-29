@@ -4960,14 +4960,6 @@ class GodotServer {
   }
 
   /**
-   * editor_launch restart: the editor restarts itself, and this waits to see it come back.
-   *
-   * Installing over a running editor leaves it serving the code it read at startup, so an
-   * upgrade is not in effect until somebody restarts it, and the only sign is a tool behaving
-   * like the old version. The answer is the version that reconnected rather than the one that
-   * was asked for: what matters is which addon the editor is holding now.
-   */
-  /**
    * What project.godot names right now, or null when it could not be read.
    *
    * Null rather than an empty map, because the two are opposite answers to the question this feeds.
@@ -4988,6 +4980,14 @@ class GodotServer {
     }
   }
 
+  /**
+   * editor_launch restart: the editor restarts itself, and this waits to see it come back.
+   *
+   * Installing over a running editor leaves it serving the code it read at startup, so an
+   * upgrade is not in effect until somebody restarts it, and the only sign is a tool behaving
+   * like the old version. The answer is the version that reconnected rather than the one that
+   * was asked for: what matters is which addon the editor is holding now.
+   */
   private async handleRestartEditor(args: OperationParams): Promise<ToolResponse> {
     const before = this.godotBridge.getStatus();
     if (!before.connected) {
@@ -4995,6 +4995,19 @@ class GodotServer {
         'editor_launch opens one on a project',
         'editor_status says whether the bridge is up and what has reached it',
       ]);
+    }
+    const mine = before.openedByAServer === true && before.projectPath !== undefined;
+    // An editor opened by hand restarts itself and comes back as it was, so hidden was accepted and
+    // the window came back. Not taken over and started here instead: whoever opened it chose the
+    // engine and the arguments, and this server knows neither.
+    if (!mine && args['hidden'] === true) {
+      return this.createErrorResponse(
+        'This editor was opened by hand, and restarts itself as it was, so it cannot come back hidden.',
+        [
+          'Close it, then editor_launch open with hidden: true starts a hidden one this server can restart',
+          'editor_launch restart without hidden restarts it as it is',
+        ],
+      );
     }
 
     // What project.godot says before the editor is asked to go, because saving it on the way out
@@ -5004,7 +5017,6 @@ class GodotServer {
     // hands the choice back to the engine. Measured downstream: one restart took
     // `gdscript/warnings/return_value_discarded=0` out and changed nothing else.
     const settingsBefore = this.settingKeysOf(before.projectPath);
-    const mine = before.openedByAServer === true && before.projectPath !== undefined;
     const asked = mine
       ? await this.startItAgain(before.projectPath ?? '', before.editorPid, args['hidden'] === true)
       : await this.handleViaBridge('restart_editor', {});

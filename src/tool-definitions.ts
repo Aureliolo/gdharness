@@ -869,7 +869,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'boolean',
         ops: ['open', 'restart'],
         description:
-          'Open the editor headless and, on Windows, on a desktop of its own, so no window of it or of the games it plays appears. Default false: one visible editor, shown without taking the focus.',
+          'Open the editor headless and, on Windows, on a desktop of its own, so no window of it or of the games it plays appears. Default false: one visible editor, shown without taking the focus. On restart only for an editor a server opened; one opened by hand comes back as it was, so hidden is refused there.',
       },
     },
     requires: [],
