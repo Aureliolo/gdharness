@@ -109,6 +109,7 @@ const BUILDERS: Dictionary = {
 	"NodePath": "_build_node_path",
 	"PackedByteArray": "_build_bytes",
 	"float": "_build_float",
+	"Dictionary": "_build_dictionary",
 }
 
 # What each tag has to carry before it is built. A tag naming a type whose keys are not there is a
@@ -135,6 +136,7 @@ const REQUIRED: Dictionary = {
 	"NodePath": [["path"]],
 	"PackedByteArray": [["base64"]],
 	"float": [["value"]],
+	"Dictionary": [["entries"]],
 }
 
 
@@ -239,7 +241,23 @@ func deserialize_value(value: Variant) -> Variant:
 		return fields
 	if tag == "float" and str(fields["value"]) not in ["inf", "-inf", "nan"]:
 		return fields
+	if tag == "Dictionary" and not pairs(fields["entries"]):
+		return fields
 	return call(builder, fields)
+
+
+## Whether [param entries] is a list of [key, value] pairs, as a Dictionary tag carries them.
+static func pairs(entries: Variant) -> bool:
+	if not entries is Array:
+		return false
+	var listed: Array = entries
+	for entry: Variant in listed:
+		if not entry is Array:
+			return false
+		var pair: Array = entry
+		if pair.size() != 2:
+			return false
+	return true
 
 
 ## Whether two values can be compared without the comparison itself failing.
@@ -461,7 +479,16 @@ func _serialize_signal(value: Signal) -> Dictionary:
 	return described
 
 
+## A dictionary keyed by text as itself, and any other as its entries. JSON keys are text, so an
+## int or Vector2 key was answered as its text, and a dictionary read and written back had its keys
+## replaced by words: `{1: "a"}` came back as `{"1": "a"}`.
 func _serialize_dictionary(value: Dictionary) -> Dictionary:
+	var texts: bool = value.keys().all(func(key: Variant) -> bool: return key is String or key is StringName)
+	if not texts:
+		var entries: Array = []
+		for key: Variant in value:
+			entries.append([serialize_value(key), serialize_value(value[key])])
+		return {"_type": "Dictionary", "entries": entries}
 	var serialised: Dictionary = {}
 	for key: Variant in value:
 		serialised[str(key)] = serialize_value(value[key])
@@ -684,6 +711,23 @@ func _build_bytes(fields: Dictionary) -> PackedByteArray:
 
 func _build_float(fields: Dictionary) -> float:
 	return Read.as_float(fields)
+
+
+## The entries of a dictionary whose keys are not all text. JSON carries every number as a float,
+## and a dictionary keys 1.0 apart from 1, so a whole-number key is built as an int: the key a
+## game uses far more often, and one JSON cannot tell from the float.
+func _build_dictionary(fields: Dictionary) -> Dictionary:
+	var built: Dictionary = {}
+	var entries: Array = fields["entries"]
+	for entry: Variant in entries:
+		var pair: Array = entry
+		var key: Variant = deserialize_value(pair[0])
+		if key is float:
+			var number: float = key
+			if is_finite(number) and number == floorf(number):
+				key = int(number)
+		built[key] = deserialize_value(pair[1])
+	return built
 
 
 ## One component of a compound value, as the type its constructor wants.

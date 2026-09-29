@@ -1431,22 +1431,27 @@ export const PROJECT_FILE_ARGUMENTS = [
 ];
 
 /**
- * The first value in `properties` that walks out of the project, if there is one.
+ * The first resource path in [value] that walks out of the project, at any depth, if there is one.
  *
- * A `..` segment in something that is also shaped like a path is the whole test: a caption reading
- * "and/or" has no `..`, and a resource path has no reason to hold one. Anything subtler than that
- * would have to know which properties take a Resource, which only the engine does.
+ * At any depth because a Resource tag inside a dictionary, a list or a keyframe reaches the
+ * engine's loader as much as a bare path does. Only a res:// or uid:// path is judged: a node path
+ * climbs with `..` as a matter of course ("../Player" is a sibling), and was refused as leaving the
+ * project; anything else given to a property holding a Resource is refused by the addon, which
+ * knows which properties those are.
  */
-function escapingPropertyValue(properties: unknown): string | undefined {
-  if (typeof properties !== 'object' || properties === null) {
+function escapingPropertyValue(value: unknown): string | undefined {
+  if (typeof value === 'string') {
+    return /^(res|uid):\/\//.test(value) && value.split(/[/\\]/).includes('..')
+      ? JSON.stringify(value)
+      : undefined;
+  }
+  if (typeof value !== 'object' || value === null) {
     return undefined;
   }
-  for (const value of Object.values(properties as Record<string, unknown>)) {
-    if (typeof value !== 'string' || !value.includes('/')) {
-      continue;
-    }
-    if (value.split(/[/\\]/).includes('..')) {
-      return JSON.stringify(value);
+  for (const item of Object.values(value)) {
+    const found = escapingPropertyValue(item);
+    if (found !== undefined) {
+      return found;
     }
   }
   return undefined;
@@ -3051,7 +3056,7 @@ class GodotServer {
     // what is judged here is the one thing a path can do that a caption cannot: leave the
     // project. The engine refuses anything that is not a res:// or uid:// path once it knows the
     // type, and the two together keep `properties` inside the same boundary as scenePath.
-    const escaping = escapingPropertyValue(args['properties']);
+    const escaping = escapingPropertyValue([args['properties'], args['track']]);
     if (escaping !== undefined) {
       return {
         ok: false,
@@ -3060,6 +3065,28 @@ class GodotServer {
           PATH_SOLUTIONS,
         ),
       };
+    }
+    // The textures a tile set is built from are project files like any argument above, one level
+    // down, where no argument name announces them: `../../x.png` became `res://../../x.png`.
+    const sources = args['sources'];
+    if (Array.isArray(sources)) {
+      const resolved: unknown[] = [];
+      for (const source of sources) {
+        const texture: unknown =
+          typeof source === 'object' && source !== null
+            ? (source as Record<string, unknown>)['texture']
+            : undefined;
+        if (typeof texture !== 'string') {
+          resolved.push(source);
+          continue;
+        }
+        const location = resolveWithinProject(projectPath, texture);
+        if (!location.ok) {
+          return { ok: false, response: this.createErrorResponse(location.reason, PATH_SOLUTIONS) };
+        }
+        resolved.push({ ...(source as Record<string, unknown>), texture: `res://${location.relativePath}` });
+      }
+      contained['sources'] = resolved;
     }
 
     const pluginName = readNonEmptyString(args, 'pluginName');
@@ -3237,18 +3264,36 @@ class GodotServer {
     if (changed.length === 0) {
       return written;
     }
-    const taken = await this.editorTakes('adopt_project_settings', { settings: changed });
+    const adopting: OperationParams = {};
+    const taken = await this.editorTakes('adopt_project_settings', { settings: changed }, adopting);
+    if (taken['editorNote'] !== undefined) {
+      return this.jsonTextResponse({ ...answer, ...taken });
+    }
+    // What the editor says it took, not the list it was sent: the answer echoed the list, and the
+    // addon passes over a name it cannot place in a section.
+    const adopted = Array.isArray(adopting['adopted']) ? adopting['adopted'].map(String) : [];
+    const passedOver = changed.filter((name) => !adopted.includes(name));
     return this.jsonTextResponse({
       ...answer,
-      ...taken,
-      ...(taken['editorNote'] === undefined ? { editorAdopted: changed } : {}),
+      editorAdopted: adopted,
+      ...(passedOver.length > 0 ? { editorPassedOver: passedOver } : {}),
     });
   }
 
-  /** The editor asked to take up what a write changed, and what to add to the answer about it. */
-  private async editorTakes(command: string, args: OperationParams): Promise<OperationParams> {
+  /**
+   * The editor asked to take up what a write changed, and what to add to the answer about it. What
+   * the editor answered is copied into [answered].
+   */
+  private async editorTakes(
+    command: string,
+    args: OperationParams,
+    answered: OperationParams = {},
+  ): Promise<OperationParams> {
     try {
-      await this.godotBridge.invokeTool(command, args);
+      const result = await this.godotBridge.invokeTool(command, args);
+      if (typeof result === 'object' && result !== null) {
+        Object.assign(answered, result);
+      }
       return {};
     } catch (error) {
       const message = errorMessage(error);

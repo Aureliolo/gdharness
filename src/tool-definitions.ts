@@ -186,7 +186,7 @@ const NODE_PATH: JsonSchema = {
 const PROPERTIES: JsonSchema = {
   type: 'object',
   description:
-    'Properties to set, keyed by Godot property name. Vectors, colours and the like may be written as {"x": 1, "y": 2} or tagged {"_type": "Vector2", "x": 1, "y": 2}, which is the form a read answers with, so a value read off one node can be written straight to another.',
+    'Properties to set, keyed by Godot property name. Vectors, colours and the like may be written as {"x": 1, "y": 2} or tagged {"_type": "Vector2", "x": 1, "y": 2}, which is the form a read answers with, so a value read off one node can be written straight to another. A property holding a node takes the path to it from the node being set, such as "../Player". Each value is read back once set, and one the engine changed or refused is refused with what it holds.',
   additionalProperties: true,
 };
 const XY: JsonSchema = {
@@ -587,11 +587,11 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'scene_create',
     description:
-      'Creates a scene file, saves one, or saves a copy under a new path. Needs the editor connected.',
+      "Creates a scene file where none is, saves one, or saves a copy under a new path. A save of a scene open in the editor saves the editor's copy, unsaved changes included. Needs the editor connected.",
     parameters: {
       projectPath: PROJECT_PATH,
       scenePath: SCENE_PATH,
-      rootNodeType: { type: 'string', description: 'create: the root node class. Default Node2D.' },
+      rootNodeType: { type: 'string', description: 'create: the root node class. Default Node.' },
       newPath: { type: 'string', description: 'save_as: where the copy goes.' },
     },
     requires: ['projectPath', 'scenePath'],
@@ -617,7 +617,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'scene_node',
     description:
-      'One node in a scene file: add, read, set, duplicate, reparent or delete it, or paint TileMap cells. Any ClassDB node type can be added, so a NavigationRegion2D, an AnimationTree or a Camera3D is an add with that nodeType and its properties. A property holding a Resource takes the res:// path of one, so a texture, a material or a theme is a set like any other. Needs the editor connected.',
+      'One node in a scene file: add, read, set, duplicate, reparent or delete it, or paint TileMap cells. Any ClassDB node type can be added, so a NavigationRegion2D, an AnimationTree or a Camera3D is an add with that nodeType and its properties. A property holding a Resource takes the res:// path of one, so a texture, a material or a theme is a set like any other. A write is refused while the editor holds unsaved changes to the scene, and for a node that belongs to a scene this one instances or inherits. Needs the editor connected.',
     parameters: {
       projectPath: PROJECT_PATH,
       scenePath: SCENE_PATH,
@@ -635,7 +635,10 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'boolean',
         description: 'get: include properties still at their default. Default false.',
       },
-      layer: { type: 'number', description: 'set_tilemap_cells: the TileMap layer. Default 0.' },
+      layer: {
+        type: 'number',
+        description: 'set_tilemap_cells: the layer of a TileMap. Default 0. A TileMapLayer is one layer.',
+      },
       cells: TILEMAP_CELLS,
     },
     requires: ['projectPath', 'scenePath'],
@@ -646,7 +649,10 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       duplicate: { summary: 'copy a node and its children', requires: ['nodePath', 'newName'] },
       reparent: { summary: 'move a node under another parent', requires: ['nodePath', 'newParentPath'] },
       delete: { summary: 'remove a node and its children', requires: ['nodePath'] },
-      set_tilemap_cells: { summary: 'place tiles in a TileMap', requires: ['nodePath', 'cells'] },
+      set_tilemap_cells: {
+        summary: 'place tiles in a TileMapLayer or TileMap',
+        requires: ['nodePath', 'cells'],
+      },
     },
   },
   {
