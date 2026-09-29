@@ -155,6 +155,11 @@ func set_import_options(params: Dictionary) -> Dictionary:
 
 	if not FileAccess.file_exists(import_file_path):
 		return _log.failure(_no_sidecar(resource_path))
+	# A sidecar left behind by a source that has gone takes options that nothing will ever apply.
+	if not FileAccess.file_exists(resource_path):
+		return _log.failure(
+			resource_path + " is not on disk, so there is nothing its import options apply to"
+		)
 
 	var config: ConfigFile = ConfigFile.new()
 	var err: Error = config.load(import_file_path)

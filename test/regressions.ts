@@ -11501,6 +11501,55 @@ async function testRefreshingUidsMakesTheSidecarAndWritesNoScene(): Promise<void
  * write that changes nothing, a removal, a bus layout, and an editor too old to be asked. The fake
  * editor records what it was sent; the editor leg holds what a real one then answers.
  */
+async function testOptionsWrittenAreSaidWhenTheirReimportFails(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('options-written regression skipped (Godot not found)');
+    return;
+  }
+  await withAPlayingEditor(
+    () => (tool) => (tool === 'reimport_files' ? { ok: false, error: 'the disk is full' } : { ok: true }),
+    async ({ server, project }) => {
+      writeFileSync(join(project, 'art.png'), solidPng(40, 160, 40));
+      writeFileSync(
+        join(project, 'art.png.import'),
+        '[remap]\n\nimporter="texture"\n\n[params]\n\ncompress/mode=0\n',
+      );
+      const set = await server.request(
+        'tools/call',
+        {
+          name: 'project_import',
+          arguments: {
+            projectPath: project,
+            op: 'set_options',
+            resourcePath: 'art.png',
+            options: { 'compress/mode': 1 },
+          },
+        },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+      const said = String(textOf(set));
+      assert.equal(get(set, 'result', 'isError'), true, said);
+      // The write happened whatever the reimport did, and the refusal alone read as the whole call
+      // failing, so a caller would set the options again or take them as not kept.
+      assert.match(
+        said,
+        /^compress\/mode was written to the import file, and the reimport that applies them failed, so the resource is still imported the old way[\s\S]*The editor answered reimport_files with an error: the disk is full/,
+        said,
+      );
+      assert.match(
+        readFileSync(join(project, 'art.png.import'), 'utf8'),
+        /^compress\/mode=1$/m,
+        'and it was written',
+      );
+    },
+    { engine },
+  );
+}
+
 async function testASettingsWriteIsTakenUpByTheEditor(): Promise<void> {
   const engine = resolveGodotPath();
   if (!engine) {
@@ -22738,6 +22787,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testRefreshingUidsMakesTheSidecarAndWritesNoScene,
   testAReimportReimportsThroughTheEngine,
   testASettingsWriteIsTakenUpByTheEditor,
+  testOptionsWrittenAreSaidWhenTheirReimportFails,
   testWhoIsHoldingAPortIsAskable,
   testWhatTheEditorSavedAwayIsReportedTheSameWay,
   testARestartSaysWhatTheEditorDropped,

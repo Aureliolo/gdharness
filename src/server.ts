@@ -3228,7 +3228,24 @@ class GodotServer {
       readPositiveNumber(args, 'timeoutMs') ?? REIMPORT_TIMEOUT_MS,
     );
     if (!applied.ok) {
-      return applied.response;
+      // The options are in the sidecar whatever the reimport did, and the refusal alone read as the
+      // whole call failing, so a caller would set them again or conclude they had not been kept.
+      const listed = written.payload['updated_options'];
+      const updated = Array.isArray(listed) ? listed.map(String) : [];
+      const which =
+        updated.length === 0
+          ? 'The options were'
+          : `${updated.join(', ')} ${updated.length === 1 ? 'was' : 'were'}`;
+      return {
+        ...applied.response,
+        content: [
+          {
+            type: 'text',
+            text: `${which} written to the import file, and the reimport that applies them failed, so the resource is still imported the old way until the editor's next scan or project_import reimport imports it. Why the reimport failed:`,
+          },
+          ...applied.response.content,
+        ],
+      };
     }
     return this.jsonTextResponse({ ...written.payload, reimport: applied.payload });
   }

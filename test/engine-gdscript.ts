@@ -880,6 +880,21 @@ function testOperations(godotPath: string, projectDir: string): void {
     wrong.stderr,
   );
   assert.equal(readFileSync(sidecarFile, 'utf8'), kept, 'and the sidecar is left as it was');
+  // A sidecar whose source has gone takes options nothing will ever apply.
+  writeFileSync(
+    join(projectDir, 'gone.png.import'),
+    '[remap]\n\nimporter="texture"\n\n[params]\n\ncompress/mode=0\n',
+  );
+  const orphan = runRefusedOperation(godotPath, projectDir, 'set_import_options', {
+    resource_path: 'gone.png',
+    options: { 'compress/mode': 1 },
+  });
+  rmSync(join(projectDir, 'gone.png.import'));
+  assert.equal(orphan.answer, null, 'options for a source that is gone are refused');
+  assert.match(
+    orphan.stderr,
+    /res:\/\/gone\.png is not on disk, so there is nothing its import options apply to/,
+  );
 
   assert.equal(
     get(operation('get_import_status', { resource_path: 'art.png' }), 'resources', 0, 'status'),
