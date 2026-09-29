@@ -19,6 +19,7 @@ func _init() -> void:
 	_check_serialize()
 	_check_deserialize()
 	_check_every_type()
+	_check_non_finite()
 
 	if failures.is_empty():
 		print(JSON.stringify({"ok": true}))
@@ -203,6 +204,39 @@ func _check_every_type() -> void:
 					]
 				)
 			)
+
+
+## Infinity and NaN, bare and inside the shapes that carry floats as components. The walk above goes
+## through the engine's own JSON, which reads 1e99999 back as infinity, so it passes on the very wire
+## that loses them: the server reads 1e99999 as Infinity and writes it, and NaN, out as null. So the
+## wire is held to having neither, and then to building back.
+func _check_non_finite() -> void:
+	var cases: Array = [
+		INF,
+		-INF,
+		NAN,
+		Vector2(INF, 1),
+		Rect2(0, 0, INF, 1),
+		Color(NAN, 0, 0, 1),
+		PackedFloat32Array([1.0, -INF]),
+		PackedFloat64Array([NAN]),
+		[INF, 2.5],
+		{"far": -INF},
+	]
+	for original: Variant in cases:
+		var wire: String = JSON.stringify(values.serialize_value(original))
+		if "1e99999" in wire or "null" in wire:
+			_fail("%s crossed as %s, which the server reads as null" % [var_to_str(original), wire])
+			continue
+		var rebuilt: Variant = type_convert(
+			values.deserialize_value(JSON.parse_string(wire)), typeof(original)
+		)
+		if var_to_str(rebuilt) != var_to_str(original):
+			_fail("%s crossed as %s and came back %s" % [var_to_str(original), wire, var_to_str(rebuilt)])
+	# A tag naming no such number is left as it arrived rather than read as 0.
+	var unnamed: Variant = values.deserialize_value({"_type": "float", "value": "lots"})
+	if not unnamed is Dictionary:
+		_fail("a float tag naming no number was built into %s" % var_to_str(unnamed))
 
 
 ## The types that describe rather than rebuild: an object, a bound method, a signal and a resource

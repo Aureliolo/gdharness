@@ -52,6 +52,23 @@ static func as_float(value: Variant, fallback: float = 0.0) -> float:
 	if value is String:
 		var text: String = value
 		return text.to_float()
+	if value is Dictionary:
+		var tagged: Dictionary = value
+		if str(tagged.get("_type", "")) == "float":
+			return non_finite(str(tagged.get("value", "")), fallback)
+	return fallback
+
+
+## The float a non-finite tag names, "inf", "-inf" or "nan", or [param fallback] for anything else.
+## JSON has no spelling for these, so the serialiser tags them rather than let them arrive as null.
+static func non_finite(word: String, fallback: float = 0.0) -> float:
+	match word:
+		"inf":
+			return INF
+		"-inf":
+			return -INF
+		"nan":
+			return NAN
 	return fallback
 
 
