@@ -28,6 +28,7 @@ import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { runOperation as runThroughTheServersOwnPath } from '../src/headless.js';
 import { userDataIn } from '../src/launch.js';
+import { TOOL_SPECS } from '../src/tool-definitions.js';
 import { asArray, asNumber, asObject, asString, get, lastJsonLine } from './support/json.js';
 import { solidPng } from './support/png.js';
 import { sweep } from './support/sweep.js';
@@ -1291,6 +1292,35 @@ function testOperations(godotPath: string, projectDir: string): void {
   assert.ok(
     asNumber(get(classes, 'filtered_count')) < asNumber(get(classes, 'total_classes')),
     'the filter should exclude something',
+  );
+
+  // Every category the schema offers is one the operation knows. The schema offered physics3d and
+  // ui, which were refused, and physics answered the 3D bodies alone.
+  const offered = asArray(
+    get(
+      TOOL_SPECS.find((spec) => spec.name === 'editor_classes'),
+      'parameters',
+      'category',
+      'enum',
+    ),
+  ).map((one) => String(one));
+  assert.ok(offered.length >= 12, `the schema's categories: ${offered.join(', ')}`);
+  for (const category of offered) {
+    const found = operation('query_classes', { category });
+    assert.ok(
+      asNumber(get(found, 'filtered_count')) > 0,
+      `${category} answers classes: ${JSON.stringify(found)}`,
+    );
+  }
+  const bodies = asArray(get(operation('query_classes', { category: 'physics' }), 'classes'));
+  assert.ok(
+    bodies.includes('CharacterBody2D') && bodies.includes('CharacterBody3D'),
+    `physics is both families: ${bodies.join(', ')}`,
+  );
+  const threeD = asArray(get(operation('query_classes', { category: 'physics3d' }), 'classes'));
+  assert.ok(
+    threeD.includes('CharacterBody3D') && !threeD.includes('CharacterBody2D'),
+    `physics3d is the 3D bodies: ${threeD.join(', ')}`,
   );
 
   const classInfo = operation('query_class_info', { class_name: 'Camera2D' });

@@ -1089,6 +1089,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
           'physics2d',
           'physics3d',
           'audio',
+          'visual',
           'animation',
           'ui',
         ],
