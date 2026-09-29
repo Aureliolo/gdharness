@@ -295,7 +295,7 @@ static func _comment_of(line: String) -> String:
 func _path_reference_kind(line: String, file_path: String) -> String:
 	match file_path.get_file():
 		"project.godot":
-			return "project_setting"
+			return "setting"
 		"plugin.cfg":
 			return "plugin"
 		"export_presets.cfg":

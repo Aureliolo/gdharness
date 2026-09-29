@@ -1965,12 +1965,8 @@ function testEveryUseIsFound(godotPath: string): void {
       '[plugin]\n\nname="Probe"\nscript="plugin.gd"\n',
     );
     writeFileSync(join(dir, 'addons', 'probe', 'plugin.gd'), '@tool\nextends EditorPlugin\n');
-    assert.deepEqual(
-      kinds('auto/autoload.gd'),
-      { project_setting: 1 },
-      'an autoload is used by project.godot',
-    );
-    assert.deepEqual(kinds('main.tscn'), { project_setting: 1 }, 'and the main scene, named by its UID');
+    assert.deepEqual(kinds('auto/autoload.gd'), { setting: 1 }, 'an autoload is used by project.godot');
+    assert.deepEqual(kinds('main.tscn'), { setting: 1 }, 'and the main scene, named by its UID');
     assert.deepEqual(
       kinds('addons/probe/plugin.gd'),
       { plugin: 1 },

@@ -13067,9 +13067,16 @@ async function testAKilledRunHasNoExitCode(): Promise<void> {
  */
 function testNotRunIsPutDownToFailFastOnlyWhenSet(): void {
   assert.equal(notRunNote(0, true), undefined);
-  assert.match(notRunNote(3, true) ?? '', /stopped at the first failure.*3 cases never ran.*Leave failFast out/);
+  assert.match(
+    notRunNote(3, true) ?? '',
+    /stopped at the first failure.*3 cases never ran.*Leave failFast out/,
+  );
   const without = notRunNote(1, false) ?? '';
-  assert.match(without, /^1 case counted in its suite never ran.*failFast was not set, so it was not that/, without);
+  assert.match(
+    without,
+    /^1 case counted in its suite never ran.*failFast was not set, so it was not that/,
+    without,
+  );
   assert.doesNotMatch(without, /Leave failFast out/, without);
 }
 
@@ -19056,7 +19063,11 @@ async function testGdUnitRunner(): Promise<void> {
         // gdUnit4 does report as that case's error, held so it stays so.
         const asked = async (suite: string): Promise<unknown> => {
           const answer = JSON.parse(
-            await call('project_test', { projectPath: projectDir, path: `test/${suite}.gd` }, ENGINE_CALL_TIMEOUT_MS * 3),
+            await call(
+              'project_test',
+              { projectPath: projectDir, path: `test/${suite}.gd` },
+              ENGINE_CALL_TIMEOUT_MS * 3,
+            ),
           ) as unknown;
           rmSync(join(projectDir, 'test', `${suite}.gd`));
           return answer;
@@ -19092,7 +19103,11 @@ async function testGdUnitRunner(): Promise<void> {
           'extends GdUnitTestSuite\n\n\nfunc test_talks() -> void:\n\tfor index: int in range(300):\n\t\tprint("line ", index)\n\tassert_int(1).is_equal(1)\n',
         );
         const long = JSON.parse(
-          await call('project_test', { projectPath: projectDir, path: 'test/long' }, ENGINE_CALL_TIMEOUT_MS * 3),
+          await call(
+            'project_test',
+            { projectPath: projectDir, path: 'test/long' },
+            ENGINE_CALL_TIMEOUT_MS * 3,
+          ),
         ) as unknown;
         rmSync(join(projectDir, 'test', 'long'), { recursive: true, force: true });
         assert.deepEqual(
