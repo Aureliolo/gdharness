@@ -1073,6 +1073,52 @@ function testOperations(godotPath: string, projectDir: string): void {
     /refresh_uids/,
     'and it names the op that makes one, since that is the next thing the caller wants',
   );
+  // Every other kind keeps its UID somewhere else, and refresh_uids makes none of them: a scene in its
+  // header and an imported file in its import file. All were answered as having no .uid, with
+  // refresh_uids named as what would make one.
+  writeFileSync(
+    join(projectDir, 'uid_scene.tscn'),
+    '[gd_scene format=3 uid="uid://c4c550daekhi1"]\n\n[node name="S" type="Node"]\n',
+  );
+  writeFileSync(join(projectDir, 'bare_scene.tscn'), '[gd_scene format=3]\n\n[node name="B" type="Node"]\n');
+  writeFileSync(join(projectDir, 'uid_art.png'), solidPng(10, 10, 10));
+  writeFileSync(
+    join(projectDir, 'uid_art.png.import'),
+    '[remap]\n\nimporter="texture"\nuid="uid://bsrmp7ti1112c"\n',
+  );
+  writeFileSync(join(projectDir, 'raw_art.png'), solidPng(10, 10, 10));
+  try {
+    const uidOf = (path: string): unknown[] => {
+      const answer = operation('get_uid', { resource_path: path });
+      return [
+        get(answer, 'exists'),
+        get(answer, 'uid') ?? null,
+        get(answer, 'from') ?? get(answer, 'message'),
+      ];
+    };
+    assert.deepEqual(uidOf('uid_scene.tscn'), [true, 'uid://c4c550daekhi1', "the file's header"]);
+    assert.deepEqual(uidOf('uid_art.png'), [true, 'uid://bsrmp7ti1112c', 'res://uid_art.png.import']);
+    assert.deepEqual(uidOf('bare_scene.tscn'), [
+      false,
+      null,
+      'Its header carries no uid. The editor writes one when it saves the file; refresh_uids does not, and a headless save does not either.',
+    ]);
+    assert.deepEqual(uidOf('raw_art.png'), [
+      false,
+      null,
+      'It has not been imported, and the import is what gives it a UID: project_import reimport imports it.',
+    ]);
+  } finally {
+    for (const file of [
+      'uid_scene.tscn',
+      'bare_scene.tscn',
+      'uid_art.png',
+      'uid_art.png.import',
+      'raw_art.png',
+    ]) {
+      rmSync(join(projectDir, file), { force: true });
+    }
+  }
 
   // Plugins: the shipped addons are installed and none is enabled until one is asked for.
   // The enabled list in project.godot is an engine expression the editor reads, so what was
