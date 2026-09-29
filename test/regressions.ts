@@ -21088,7 +21088,8 @@ async function testTheEditorAnswersOnlyForItsOwnProject(): Promise<void> {
   const port = await reservePort();
   const server = new ServerProcess({ env: { GDHARNESS_BRIDGE_PORT: String(port) } });
   const open = join(tmpdir(), 'gdharness-editor-has-this');
-  const elsewhere = join(tmpdir(), 'gdharness-editor-has-not');
+  // Made rather than only named, since the start below needs a project there to reach the check.
+  const elsewhere = mkdtempSync(join(tmpdir(), 'gdharness-editor-has-not-'));
   let editor: WebSocket | null = null;
   try {
     await server.initialize('regression-test');
@@ -21140,6 +21141,21 @@ async function testTheEditorAnswersOnlyForItsOwnProject(): Promise<void> {
       'and the editor was never asked about a project it cannot see',
     );
 
+    // A start for the other project, which played the editor's own main scene under that project's
+    // name, after picking up and ending whatever the editor was playing.
+    writeFileSync(
+      join(elsewhere, 'project.godot'),
+      'config_version=5\n\n[application]\n\nrun/main_scene="res://main.tscn"\n',
+    );
+    asked.length = 0;
+    const start = await server.request('tools/call', {
+      name: 'editor_run',
+      arguments: { projectPath: elsewhere },
+    });
+    const startRefused = textOf(start) ?? JSON.stringify(start);
+    assert.match(startRefused, /the editor on this bridge has/, `a start is refused too: ${startRefused}`);
+    assert.deepEqual(asked, [], `and the editor is not asked anything about its play: ${asked.join(', ')}`);
+
     // Beside it, the project the editor does have: the same call reaches the editor and comes back
     // with the editor's own answer. Without this the fixture is satisfied by a bridge that refuses
     // everything, which is what a broken one does.
@@ -21160,6 +21176,7 @@ async function testTheEditorAnswersOnlyForItsOwnProject(): Promise<void> {
   } finally {
     editor?.terminate();
     await server.stop();
+    sweep(elsewhere);
   }
 }
 

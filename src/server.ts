@@ -5216,6 +5216,20 @@ class GodotServer {
     if (!project.ok) {
       return project.response;
     }
+    // Refused before the run the editor holds is picked up or ended: that editor has another
+    // project open, and a start for this one picked up and ended its play, then had it play its
+    // own main scene under this project's name. The same rule as every other bridge call. A boot
+    // check is its own engine and never reaches the editor.
+    const open = this.godotBridge.isConnected() ? this.godotBridge.getStatus().projectPath : undefined;
+    if (op !== 'check' && open !== undefined && open !== '' && !isSameDirectory(open, project.value.path)) {
+      return this.createErrorResponse(
+        `This start names ${project.value.path}, and the editor on this bridge has ${open} open.`,
+        [
+          "editor_status names the project this server's editor is showing",
+          'One server serves one editor: start a second server for the other project',
+        ],
+      );
+    }
     // Before the engine is looked for, so that a scene the server will not run is refused as
     // such rather than as a missing Godot.
     const scene = readNonEmptyString(args, 'scene');
