@@ -388,6 +388,9 @@ const HOOKS_GD = [
   '\t\t\treturn {"cached": ResourceLoader.has_cached(path)}',
   '\t\t"held":',
   '\t\t\treturn {"children": _held_children(path)}',
+  '\t\t"play":',
+  '\t\t\tEditorInterface.play_main_scene()',
+  '\t\t\treturn {"playing": EditorInterface.is_playing_scene()}',
   '\t\t"open":',
   '\t\t\tEditorInterface.open_scene_from_path(path)',
   '\t\t"edit":',
@@ -4126,6 +4129,62 @@ async function testRuntime({ call, refusal, attempt, project, lspPort, dapPort }
  * started with. The edit is proved to have landed where the tools look before the game is asked
  * again, because a write that never reached disk would leave the game unchanged too.
  */
+/**
+ * A play is its own, and one that cannot start is not answered as started.
+ *
+ * The note naming a played run's transcript stays after the play, and a server picking up a later
+ * play opened it on the editor saying it was playing, which does not say which play: the later play
+ * was given the earlier one's console and start time. The editor numbers its plays now. And a main
+ * scene that is not there got a dialog in the editor and no play, answered as `started: true`.
+ */
+async function testAPlayIsItsOwn({ call, attempt, refusal, play, project }: Editor): Promise<void> {
+  await attempt('editor_run', { op: 'stop' });
+  await play();
+  const first = await call('editor_output', {});
+  const transcript = get(first, 'transcript');
+  assert.equal(typeof transcript, 'string', `a played run writes a transcript: ${JSON.stringify(first)}`);
+  await call('editor_run', { op: 'stop' });
+
+  // A play started in the editor by somebody else, which the server picks up.
+  const started = await hook(project, { op: 'play' });
+  assert.equal(
+    get(started, 'playing'),
+    true,
+    `the hook should have started a play: ${JSON.stringify(started)}`,
+  );
+  try {
+    const picked = await call('editor_output', {});
+    assert.equal(get(picked, 'through'), 'editor', JSON.stringify(picked));
+    assert.notEqual(
+      get(picked, 'transcript'),
+      transcript,
+      `the play picked up is not given the earlier play's transcript: ${JSON.stringify(picked)}`,
+    );
+  } finally {
+    await attempt('editor_run', { op: 'stop' });
+  }
+
+  await call('project_settings', {
+    projectPath: project,
+    op: 'set',
+    setting: 'application/run/main_scene',
+    value: 'res://gone.tscn',
+  });
+  try {
+    assert.match(
+      await refusal('editor_run', { projectPath: project }),
+      /The main scene, res:\/\/gone\.tscn, is not there/,
+    );
+  } finally {
+    await call('project_settings', {
+      projectPath: project,
+      op: 'set',
+      setting: 'application/run/main_scene',
+      value: 'res://main.tscn',
+    });
+  }
+}
+
 async function testAnEditDoesNotReachTheRunningGame({ call, attempt, play, project }: Editor): Promise<void> {
   await attempt('editor_run', { op: 'stop' });
   const game = { projectPath: project };
@@ -4737,6 +4796,7 @@ async function main(): Promise<void> {
     ['testAPlayedRunsConsoleArrivesOnItsOwn', testAPlayedRunsConsoleArrivesOnItsOwn],
     ['testDebugging', testDebugging],
     ['testRuntime', testRuntime],
+    ['testAPlayIsItsOwn', testAPlayIsItsOwn],
     ['testAnEditDoesNotReachTheRunningGame', testAnEditDoesNotReachTheRunningGame],
     ['testTheDebuggerGetsAPortOfItsOwn', testTheDebuggerGetsAPortOfItsOwn],
     ['testTheGameIsHandedItsOwnArguments', testTheGameIsHandedItsOwnArguments],

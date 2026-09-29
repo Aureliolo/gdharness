@@ -17298,6 +17298,33 @@ async function testAStopTakesTheWrappedEnginesAnnouncementDown(): Promise<void> 
 }
 
 async function testTheEditorsRunIsTheOneAnsweredFor(): Promise<void> {
+  await pickUpAPlayedRun({ play: 3, editorPid: 4242 }, { play: 3, editorPid: 4242 });
+}
+
+/**
+ * A note from an earlier play is not read as this one's.
+ *
+ * The note naming a played run's transcript stays on disk after the play, and it was opened on the
+ * editor saying it was playing, which does not say which play: a later play picked up after a
+ * reconnect was given the earlier play's console and start time, with the new lines appended to
+ * the same file. The editor numbers its plays now, and a note about another play, or from another
+ * editor, is left alone.
+ */
+async function testANoteFromAnEarlierPlayIsNotThisOnes(): Promise<void> {
+  await pickUpAPlayedRun({ play: 3, editorPid: 4242 }, { play: 4, editorPid: 4242 });
+  await pickUpAPlayedRun({ play: 3, editorPid: 4242 }, { play: 3, editorPid: 5151 });
+}
+
+/**
+ * A server picking up a run the editor is playing, with a note on disk about play [noted] and an
+ * editor saying it is in play [playing]. The note's transcript is read back only when the two are
+ * the same play of the same editor.
+ */
+async function pickUpAPlayedRun(
+  noted: { play: number; editorPid: number },
+  playing: { play: number; editorPid: number },
+): Promise<void> {
+  const same = noted.play === playing.play && noted.editorPid === playing.editorPid;
   const port = await reservePort();
   // Reserved and then left alone, so nothing is listening on it: the adapter this run's console
   // would arrive over is the thing the second half of this case is about not being there.
@@ -17335,7 +17362,12 @@ async function testTheEditorsRunIsTheOneAnsweredFor(): Promise<void> {
         arguments: ['--headless'],
         command: process.execPath,
       });
-      writeEditorRunNote({ projectPath: project, transcript: played, startedAt: Date.now() - 60_000 });
+      writeEditorRunNote({
+        projectPath: project,
+        transcript: played,
+        startedAt: Date.now() - 60_000,
+        play: noted,
+      });
     } finally {
       if (had === undefined) {
         delete process.env['GDHARNESS_RUNTIME_DIR'];
@@ -17362,7 +17394,13 @@ async function testTheEditorsRunIsTheOneAnsweredFor(): Promise<void> {
       const tool = String(message['tool']);
       const result =
         tool === 'playing_status'
-          ? { ok: true, playing: true, scenePath: 'res://tests/bench_shortlist.tscn', debugPort: adapter }
+          ? {
+              ok: true,
+              playing: true,
+              scenePath: 'res://tests/bench_shortlist.tscn',
+              debugPort: adapter,
+              ...playing,
+            }
           : { ok: true };
       socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result }));
     });
@@ -17393,8 +17431,18 @@ async function testTheEditorsRunIsTheOneAnsweredFor(): Promise<void> {
     const answer = parseTextContent(output);
     assert.equal(get(answer, 'through'), 'editor', `the run answered for is the editor's: ${said}`);
     assert.equal(get(answer, 'pid'), null, `with no pid from the other run: ${said}`);
-    assert.equal(get(answer, 'transcript'), played, `the transcript is its own, not the other's: ${said}`);
     assert.doesNotMatch(said, /wrong table/, `nor a line of its output: ${said}`);
+    if (!same) {
+      assert.notEqual(
+        get(answer, 'transcript'),
+        played,
+        `a note about another play is not this one's: ${said}`,
+      );
+      assert.doesNotMatch(said, /31 of 31 workers started/, `nor is that play's output: ${said}`);
+      assert.doesNotMatch(text(get(answer, 'note')), /read back from its transcript/, said);
+      return;
+    }
+    assert.equal(get(answer, 'transcript'), played, `the transcript is its own, not the other's: ${said}`);
     // And the run it is about is the one whose output comes back: an editor-played run writes a
     // transcript of its own, so a reconnect reads back what it printed rather than starting the
     // log again from where the new server arrived.
@@ -22977,6 +23025,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAShortenedCacheIsRebuilt,
   testAClassWhoseScriptCameBackIsNotTheEditorsLoss,
   testTheEditorsRunIsTheOneAnsweredFor,
+  testANoteFromAnEarlierPlayIsNotThisOnes,
   testAStatusCallIsNotHeldByAHeldGame,
   testARuntimeCallToAHeldGameIsRefusedAtOnce,
   testAnEditorOnAnotherVersionIsStillAskedWhatItIsPlaying,

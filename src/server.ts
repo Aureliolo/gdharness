@@ -147,6 +147,8 @@ import {
   listeningPid,
   openTranscript,
   type RunRecord,
+  type EditorPlay,
+  noteIsAbout,
   readEditorRunNote,
   readRunRecord,
   runningAs,
@@ -405,6 +407,13 @@ function stillRunning(run: GodotProcess | null): boolean {
  * started a game within it is not going to, and its word stands from then on.
  */
 export const PLAY_STARTS_WITHIN_MS = 30_000;
+
+/** Which play an editor's answer is about, or null from an addon that does not number them. */
+export function playOf(answer: OperationParams): EditorPlay | null {
+  const play = readNumber(answer, 'play');
+  const editorPid = readNumber(answer, 'editorPid');
+  return play === undefined || editorPid === undefined ? null : { play, editorPid };
+}
 
 /**
  * Whether a run is still up, taking the editor's word for the runs it is playing.
@@ -4654,6 +4663,7 @@ class GodotServer {
     playing: boolean;
     scene: string;
     debugPort: number | undefined;
+    play: EditorPlay | null;
   } | null> {
     const status = this.godotBridge.getStatus();
     // Asked of any connected editor, including one running an addon from another version. It used
@@ -4693,6 +4703,7 @@ class GodotServer {
         playing: readBoolean(asParams(answer), 'playing') ?? false,
         scene: readString(asParams(answer), 'scenePath') ?? '',
         debugPort: readNumber(asParams(answer), 'debugPort'),
+        play: playOf(asParams(answer)),
       };
     } catch {
       // The editor is there but did not answer this one, which the connection fields already
@@ -5679,7 +5690,13 @@ class GodotServer {
     };
     this.activeProcess = played;
     this.watchThePlayedConsole();
-    writeEditorRunNote({ projectPath, transcript: transcript.path, startedAt });
+    const which = playOf(playAnswer);
+    writeEditorRunNote({
+      projectPath,
+      transcript: transcript.path,
+      startedAt,
+      ...(which === null ? {} : { play: which }),
+    });
     sweepTranscripts();
 
     return this.jsonTextResponse({
@@ -6300,7 +6317,11 @@ class GodotServer {
     // note from another project's run would put its output under this one's heading, which is the
     // fault this whole method exists to end.
     const project = this.godotBridge.getStatus().projectPath ?? null;
-    const note = project === null ? null : readEditorRunNote(project);
+    // And only when it is about the play in progress: the note stays after its play, and one from an
+    // earlier play gave this one that play's console and start time. A note that cannot say which
+    // play it is about is not used, since nothing then separates it from any other.
+    const recorded = project === null ? null : readEditorRunNote(project);
+    const note = recorded !== null && noteIsAbout(recorded, playing.play) ? recorded : null;
     const picked: GodotProcess = {
       pid: null,
       log: new GameLog(),
