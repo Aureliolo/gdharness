@@ -453,8 +453,10 @@ async function upgrade(): Promise<void> {
   const projectPath = projectArgument(1);
   const version = getLocalVersion();
   const before = inspectProject(projectPath);
-  const installed = before.addons.find((addon) => addon.installed)?.version ?? null;
-  if (installed === null) {
+  // Present and unmarked is still installed: a copy made by hand, or a checkout that dropped
+  // dot-files, carries no version marker, and was told gdharness was not installed at all.
+  const present = before.addons.find((addon) => addon.installed);
+  if (present === undefined) {
     // The path only where it is not the directory you are in, so the command the message hands
     // back is one that can be copied rather than a line carrying its own path twice.
     const where = projectPath === process.cwd() ? '' : ` ${projectPath}`;
@@ -465,7 +467,11 @@ async function upgrade(): Promise<void> {
   // After the engine is found, not before. A refusal under a line saying which version this is
   // going to reads as a run that got partway and stopped, and this one changes nothing at all.
   const godot = await engine(projectPath);
-  console.log(installed === version ? `already ${version}; reinstalling` : `${installed} -> ${version}`);
+  console.log(
+    present.version === version
+      ? `already ${version}; reinstalling`
+      : `${present.version ?? 'an unmarked copy'} -> ${version}`,
+  );
 
   // Read before the copy replaces it. A copy from before digests has none, and then nothing says
   // the code is the same, so the restart is asked for as it always was.

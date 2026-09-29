@@ -20842,6 +20842,10 @@ function testAnUpgradeReadsTheEngineOutOfTheConfigItRewrites(): void {
         2,
       )}\n`,
     );
+    const nothing = cli('upgrade', projectDir);
+    assert.notEqual(nothing.status, 0, `with no addons there is nothing to upgrade: ${nothing.output}`);
+    assert.match(nothing.output, /gdharness is not installed in .*gdharness setup/s, nothing.output);
+
     // Installed, so upgrade has something to upgrade from, and written without the search too.
     const first = cli('setup', projectDir, '--no-connect');
     assert.equal(first.status, 0, `setup should find the engine in the config: ${first.output}`);
@@ -20849,6 +20853,13 @@ function testAnUpgradeReadsTheEngineOutOfTheConfigItRewrites(): void {
     const digestMarker = join(projectDir, 'addons', 'gdharness_editor', '.gdharness-digest');
     assert.ok(existsSync(digestMarker), 'setup should have written the digest it is removed from here');
     rmSync(digestMarker);
+    // And a copy with no version marker, which a checkout that drops dot-files leaves, is still an
+    // install to upgrade. It was told gdharness was not installed.
+    for (const addon of ['gdharness_editor', 'gdharness_runtime', 'auto_reload']) {
+      const marker = join(projectDir, 'addons', addon, '.gdharness-version');
+      assert.ok(existsSync(marker), `setup should have written the marker removed here for ${addon}`);
+      rmSync(marker);
+    }
 
     const upgraded = cli('upgrade', projectDir);
     assert.equal(
@@ -20856,6 +20867,7 @@ function testAnUpgradeReadsTheEngineOutOfTheConfigItRewrites(): void {
       0,
       `upgrade should not refuse for a path it is holding: ${upgraded.output}`,
     );
+    assert.match(upgraded.output, /an unmarked copy -> /, upgraded.output);
     assert.match(upgraded.output, /replaced .*gdharness_editor/, upgraded.output);
     assert.match(upgraded.output, /Restart it with the\s+editor_launch restart/, upgraded.output);
     assert.ok(existsSync(digestMarker), 'and the upgrade writes the digest back');
