@@ -72,6 +72,11 @@ export interface RunRecord {
    * no project.
    */
   readonly servedBy?: string;
+  /**
+   * Where the keeper holding the game listens for a stop: see `keeper-channel.ts`. Absent from a note
+   * written before keepers listened, and for a keeper that could not.
+   */
+  readonly keeper?: string;
   readonly arguments: readonly string[];
   /**
    * The engine this run was started with, so the pid can be shown to still mean this run.
@@ -356,6 +361,7 @@ function recordAt(path: string): RunRecord | null {
     ...(typeof fields['servedBy'] === 'string' && fields['servedBy'] !== ''
       ? { servedBy: fields['servedBy'] }
       : {}),
+    ...(typeof fields['keeper'] === 'string' && fields['keeper'] !== '' ? { keeper: fields['keeper'] } : {}),
     arguments: Array.isArray(args) ? args.filter((value): value is string => typeof value === 'string') : [],
     ...(typeof fields['command'] === 'string' ? { command: fields['command'] } : {}),
     ...(typeof fields['exitCode'] === 'number' ? { exitCode: fields['exitCode'] } : {}),
@@ -389,13 +395,10 @@ export async function runningAs(pid: number): Promise<RunningAs | null> {
     // tasklist still names the executable, and that is the difference between a weaker check and
     // no check, so it is asked before this gives up.
     const image = await windowsImage(pid);
-    return image === null
-      ? null
-      : {
-          kind: 'image',
-          text: image,
-          unread: 'unread' in read ? read.unread : 'Windows gave an empty command line',
-        };
+    const unread = 'unread' in read ? read.unread : 'Windows gave an empty command line';
+    return 'image' in image
+      ? { kind: 'image', text: image.image, unread }
+      : { kind: 'none', text: '', unread: `${unread}; tasklist ${image.why}` };
   }
   try {
     const began = await startedAt(pid, null);
@@ -541,17 +544,19 @@ async function startedAt(pid: number, windowsAnswer: string | null): Promise<num
   }
 }
 
-/** The executable's name alone, from the one tool every Windows has. */
-async function windowsImage(pid: number): Promise<string | null> {
+/** The executable's name alone, from the one tool every Windows has, or why it did not give one. */
+async function windowsImage(pid: number): Promise<{ image: string } | { why: string }> {
   try {
     const { stdout: csv } = await execFileAsync('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'], {
       encoding: 'utf8',
       timeout: 15_000,
       windowsHide: true,
     });
-    return /^"([^"]+)"/.exec(csv.trim())?.[1] ?? null;
-  } catch {
-    return null;
+    const image = /^"([^"]+)"/.exec(csv.trim())?.[1];
+    return image === undefined ? { why: 'named no process under that number' } : { image };
+  } catch (error) {
+    const failed = error as NodeJS.ErrnoException & { killed?: boolean };
+    return { why: failed.killed === true ? 'did not answer within 15000 ms' : errorMessage(error) };
   }
 }
 
@@ -595,11 +600,12 @@ export async function couldStillBeTheRecordedRun(record: RunRecord): Promise<boo
 
 /** What the operating system will say about a process, and how much of it. */
 export interface RunningAs {
-  readonly kind: 'image' | 'commandLine';
+  /** `none` is Windows naming nothing at all, with why under `unread`. */
+  readonly kind: 'image' | 'commandLine' | 'none';
   readonly text: string;
   /** Milliseconds, where the platform will give it. Absent is not zero and not now. */
   readonly startedAt?: number;
-  /** Why the command line was not read, for an answer that is the executable's name alone. */
+  /** Why the command line was not read, for an answer that is the executable's name alone or less. */
   readonly unread?: string;
 }
 
@@ -648,6 +654,9 @@ export function whyNotTheRun(
 ): string | null {
   if (running === null) {
     return 'the operating system would not describe that process';
+  }
+  if (running.kind === 'none') {
+    return `the operating system would not describe that process (${running.unread ?? 'no reason given'})`;
   }
   // When the process started, which is the one thing a recycled number cannot carry over. Every
   // other property a record holds belongs to the engine and the project, and a machine running a

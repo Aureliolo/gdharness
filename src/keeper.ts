@@ -13,10 +13,12 @@
  */
 
 import { type ChildProcess, spawn } from 'node:child_process';
-import { closeSync, existsSync, openSync, readFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { throughHelper } from './desktop.js';
+import { type KeeperListening, listenForAStop } from './keeper-channel.js';
 import {
   KEEPER_SCRIPT,
   readLaunched,
@@ -80,13 +82,19 @@ async function startDirectly(
 async function startThroughHelper(
   spec: SentSpec,
   output: number | 'ignore',
+  stopFile: string,
 ): Promise<{ child: ChildProcess; pid: number } | { error: string }> {
   const scratch = scratchDirectory('desktop');
   const pidFile = join(scratch, 'pid');
   const errorFile = join(scratch, 'error');
   const where = spec.desktop === undefined ? 'without activation' : `on the ${spec.desktop} desktop`;
   try {
-    const wrapper = throughHelper(spec, spec.command, spec.args, pidFile, errorFile);
+    const wrapper = throughHelper(spec, spec.command, spec.args, {
+      spec: join(scratch, 'spec.json'),
+      pid: pidFile,
+      error: errorFile,
+      stop: stopFile,
+    });
     const started = await startDirectly(
       { ...spec, command: wrapper.command, args: wrapper.args },
       output,
@@ -127,16 +135,22 @@ const DESKTOP_START_MS = 60_000;
 
 /**
  * Through the helper where Windows is asked for a desktop or a start without activation, which Node
- * cannot name when it starts a process, and directly otherwise.
+ * cannot name when it starts a process, and directly otherwise. [param stopFile] is where a helper
+ * is told to end what it started, and is empty for a start nothing will be asked to end.
  */
 async function startDetached(
   spec: SentSpec,
   output: number | 'ignore',
   hidden: boolean,
+  stopFile = '',
 ): Promise<{ child: ChildProcess; pid: number } | { error: string }> {
-  return process.platform === 'win32' && (spec.desktop !== undefined || spec.noActivate === true)
-    ? await startThroughHelper(spec, output)
+  return throughTheHelper(spec)
+    ? await startThroughHelper(spec, output, stopFile)
     : await startDirectly(spec, output, hidden);
+}
+
+function throughTheHelper(spec: SentSpec): boolean {
+  return process.platform === 'win32' && (spec.desktop !== undefined || spec.noActivate === true);
 }
 
 /**
@@ -145,7 +159,7 @@ async function startDetached(
  * holds the foreground while it starts.
  */
 function needsItsHelperKept(spec: SentSpec): boolean {
-  return process.platform === 'win32' && (spec.desktop !== undefined || spec.noActivate === true);
+  return throughTheHelper(spec);
 }
 
 async function launch(): Promise<void> {
@@ -186,9 +200,10 @@ async function launch(): Promise<void> {
     process.exit(0);
   });
   keeper.once('close', () => {
-    process.stdout.write(
-      `error the keeper ended before it said anything${complained ? `: ${complained.trim()}` : ''}\n`,
-    );
+    // On one line, since one line is all that is read back: a runtime's error prints its source
+    // before its message, and what came back was the line `536 | }` and nothing that said why.
+    const why = complained.trim().split(/\r?\n/).filter(Boolean).join(' | ');
+    process.stdout.write(`error the keeper ended before it said anything${why ? `: ${why}` : ''}\n`);
     process.exit(0);
   });
 }
@@ -201,9 +216,13 @@ async function keep(): Promise<void> {
     process.exit(1);
   }
   const transcript = run === undefined ? 'ignore' : openSync(run.transcript, 'a');
+  // Private to this keeper, for the file a helper watches for its stop.
+  const own =
+    run !== undefined && throughTheHelper(spec) ? mkdtempSync(join(tmpdir(), 'gdharness-stop-')) : null;
+  const stopFile = own === null ? '' : join(own, 'stop');
   let started: Awaited<ReturnType<typeof startDetached>>;
   try {
-    started = await startDetached(spec, transcript, run === undefined);
+    started = await startDetached(spec, transcript, run === undefined, stopFile);
   } finally {
     // The game holds its own copy from here on.
     if (transcript !== 'ignore') {
@@ -215,26 +234,51 @@ async function keep(): Promise<void> {
     process.exit(1);
   }
   const { child, pid } = started;
-  if (run !== undefined) {
-    // Before the pid goes back: a game that ends at once would otherwise exit before any record held
-    // its pid, and the exit would have nowhere to go.
-    writeRunRecord({
-      pid,
-      transcript: run.transcript,
-      startedAt: run.startedAt,
-      startedBy: Date.now(),
-      projectPath: run.projectPath,
-      ...(run.servedBy === undefined ? {} : { servedBy: run.servedBy }),
-      arguments: spec.args,
-      command: spec.command,
-    });
+  const record =
+    run === undefined
+      ? null
+      : {
+          pid,
+          transcript: run.transcript,
+          startedAt: run.startedAt,
+          startedBy: Date.now(),
+          projectPath: run.projectPath,
+          ...(run.servedBy === undefined ? {} : { servedBy: run.servedBy }),
+          arguments: spec.args,
+          command: spec.command,
+        };
+  if (record !== null) {
+    // Before the pid goes back, and in the same turn as the exit is listened for: a game that ends at
+    // once would otherwise exit before any record held its pid, and the exit would have nowhere to go.
+    writeRunRecord(record);
   }
+  let listening: KeeperListening | null = null;
+  // This process ends here, so nothing below runs for a game that has exited.
   child.once('exit', (code: number | null, signal: NodeJS.Signals | null) => {
     if (run !== undefined) {
       recordRunEnded(run.projectPath, pid, { exitCode: code, exitSignal: code === null ? signal : null });
     }
+    listening?.close();
+    if (own !== null) {
+      rmSync(own, { recursive: true, force: true });
+    }
     process.exit(0);
   });
+  if (record !== null) {
+    // Through what this process holds rather than through the pid: the game's own handle, or the
+    // helper's, which ends the game through the handle it holds. Neither can reach a later process
+    // given the same number.
+    listening = await listenForAStop(() => {
+      if (stopFile !== '') {
+        writeFileSync(stopFile, '');
+        return 'signalled';
+      }
+      return child.kill() ? 'signalled' : 'gone';
+    });
+    if (listening !== null) {
+      writeRunRecord({ ...record, keeper: listening.address });
+    }
+  }
   process.stdout.write(`pid ${pid}\n`);
   // Nobody reads this once the launcher has gone, and a write to a pipe with no reader is an error.
   process.stdout.end();

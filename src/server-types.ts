@@ -40,6 +40,8 @@ export interface GodotProcess {
    * too late to be the run, and left it running. Absent from a note written before this was kept.
    */
   startedBy?: number;
+  /** Where the keeper holding a spawned run listens for a stop, as its note says. */
+  keeper?: string;
   /**
    * The engine a spawned run was started with, which with its project and start is what says its
    * pid still means it before anything is signalled: see `judgeRun`. Absent for a played run, and

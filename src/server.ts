@@ -109,6 +109,7 @@ import {
   whyNoReport,
   withActualsPrinted,
 } from './junit.js';
+import { askTheKeeperToStop } from './keeper-channel.js';
 import {
   EDITOR_PID_VARIABLE,
   type EditorPorts,
@@ -524,6 +525,13 @@ export function noCodeWillCome(run: Pick<GodotProcess, 'exitCode' | 'exitSignal'
  * immediate on Windows and a SIGTERM elsewhere, which Godot answers by quitting.
  */
 const STOP_WAIT_MS = 10_000;
+
+/**
+ * How long a keeper is given to answer a stop. It is already running and does no more than end what
+ * it holds, so a keeper silent past this is one that is not going to answer, and the stop goes on
+ * without it.
+ */
+const KEEPER_ANSWER_MS = 15_000;
 
 /**
  * How long a run's keeper is given to write the exit of a game already seen to have gone.
@@ -6305,6 +6313,13 @@ class GodotServer {
     if (running.pid === null) {
       return 'gone';
     }
+    if (running.keeper !== undefined) {
+      const ended = await this.endThroughTheKeeper(running, running.pid, running.keeper);
+      if (ended !== null) {
+        clearTheRecord();
+        return ended;
+      }
+    }
     // A spawned run, held by its keeper rather than by this server, so the number is all there is
     // to end it with, whichever server started it. A number is not an identity, though. The operating system hands
     // a pid out again as soon as it is free, so signalling on the strength of it is how a stop
@@ -6338,7 +6353,10 @@ class GodotServer {
     // that process said it was, turns "it just stopped" into something somebody can check against
     // the record it was made from.
     const signalled = await runningAs(running.pid);
-    const described = signalled === null ? 'nothing it would name' : `${signalled.kind}: ${signalled.text}`;
+    const described =
+      signalled === null || signalled.kind === 'none'
+        ? 'nothing it would name'
+        : `${signalled.kind}: ${signalled.text}`;
     let landed = true;
     // Why the operating system would not take the signal, when it was not that the process had gone:
     // every failure read as gone, so a refused signal was logged as a game already over.
@@ -6376,6 +6394,40 @@ class GodotServer {
           : landed
             ? `gdharness ended pid ${running.pid}, which the operating system described as ${described}.`
             : `gdharness signalled pid ${running.pid} and it was already gone; the operating system had described it as ${described}.`,
+    );
+    return gone ? 'gone' : 'lingering';
+  }
+
+  /**
+   * [param run] ended by the keeper holding it, or null when the keeper could not be asked, which
+   * leaves the stop to proving the pid is still the run and signalling it.
+   *
+   * Asked first because the keeper needs no proof, and the proof is what failed: on Windows it is a
+   * PowerShell query and `tasklist`, and a machine loaded by the game itself started neither in time.
+   * The keeper is already running and ends the game through the handle it holds. Whatever answers,
+   * the process itself is waited on, so an answer cannot make a running game read as ended.
+   */
+  private async endThroughTheKeeper(run: GodotProcess, pid: number, keeper: string): Promise<Ending | null> {
+    const asked = await askTheKeeperToStop(keeper, KEEPER_ANSWER_MS);
+    if (typeof asked !== 'string') {
+      this.logDebug(`The keeper of pid ${pid} could not be asked to end it (${asked.unreached})`);
+      return null;
+    }
+    const gone = await untilGone([pid]);
+    if (gone) {
+      await this.untilTheExitIsRecorded(run);
+    }
+    if (asked === 'signalled' && gone) {
+      run.exitCode = null;
+      run.exitSignal = 'SIGTERM';
+    }
+    run.log.record(
+      gone ? 'info' : 'warning',
+      !gone
+        ? `gdharness had the keeper holding pid ${pid} end it, and it was still running ${STOP_WAIT_MS / 1000} seconds later.`
+        : asked === 'signalled'
+          ? `gdharness ended pid ${pid} through the keeper holding it.`
+          : `gdharness asked the keeper holding pid ${pid} to end it, and it had already gone.`,
     );
     return gone ? 'gone' : 'lingering';
   }
@@ -6514,6 +6566,9 @@ class GodotServer {
     }
     const startedBy = Date.now();
     sweepTranscripts();
+    // Written by the keeper before it handed the pid back.
+    const noted = readRunRecord(projectPath);
+    const keeper = noted?.pid === launched.pid ? noted.keeper : undefined;
     return {
       pid: launched.pid,
       log: new GameLog(),
@@ -6522,6 +6577,7 @@ class GodotServer {
       projectPath,
       startedAt,
       startedBy,
+      ...(keeper === undefined ? {} : { keeper }),
       command: godotPath,
       exitCode: null,
       exitSignal: null,
@@ -6976,6 +7032,7 @@ class GodotServer {
       projectPath: record.projectPath === '' ? null : record.projectPath,
       startedAt: record.startedAt,
       ...(record.startedBy === undefined ? {} : { startedBy: record.startedBy }),
+      ...(record.keeper === undefined ? {} : { keeper: record.keeper }),
       ...(record.command === undefined ? {} : { command: record.command }),
       exitCode: null,
       exitSignal: null,
