@@ -46,9 +46,7 @@ func _init() -> void:
 	var params_index: int = script_index + 3
 	var answer_index: int = script_index + 4
 	if args.size() <= answer_index:
-		_log.error(
-			"Usage: godot --headless --script godot_operations.gd <operation> @file:<params.json> <answer.json>"
-		)
+		_log.error("Usage: godot_operations.gd <operation> @file:<params.json> <answer.json>")
 		_log.error("Not enough command-line arguments provided.")
 		quit(1)
 		return

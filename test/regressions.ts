@@ -173,6 +173,7 @@ import {
   previousRunLeft,
   runIsUp,
   runtimeVerdict,
+  scanWaitAnswer,
   scriptErrorsNote,
   stopVerdict,
   timedOutVerdict,
@@ -12870,6 +12871,32 @@ async function testAKilledRunHasNoExitCode(): Promise<void> {
  * reported Node's reason as the process failing, which is what a healthy import pass over a large
  * project does. The processes are real ones, because how they end is what is being read.
  */
+/**
+ * The note on a scan still running names what started and where its complaints are.
+ *
+ * A headless operation's answer once carried the game's note: it spoke of a game that never
+ * existed and sent the caller to editor_output, which holds nothing from that engine, while the
+ * engine's own complaints were in the same answer under engine_messages.
+ */
+function testTheScanNoteNamesWhatStarted(): void {
+  const running = { waitedMs: 30_000, stillScanning: true };
+  const game = scanWaitAnswer(running).scanNote ?? '';
+  assert.match(game, /this game started during the scan/, game);
+  assert.match(game, /If editor_output shows "Could not find type"/, game);
+
+  const engine = scanWaitAnswer(running, 'engine').scanNote ?? '';
+  assert.match(engine, /the engine answering this started during the scan/, engine);
+  assert.match(engine, /If engine_messages shows "Could not find type"/, engine);
+  assert.match(engine, /a class cache it wrote can be written over when the scan finishes/, engine);
+  assert.doesNotMatch(engine, /\bgame\b|editor_output/, engine);
+
+  assert.deepEqual(
+    scanWaitAnswer({ waitedMs: 1_200, stillScanning: false }, 'engine'),
+    { waitedForEditorScanMs: 1_200, scanNote: undefined },
+    'a scan that finished in time is a wait and no note',
+  );
+}
+
 async function testAnEngineRunSaysHowItEnded(): Promise<void> {
   const node = (script: string, options?: Parameters<typeof runEngine>[2]): Promise<EngineRun> =>
     runEngine(process.execPath, ['-e', script], options);
@@ -12900,7 +12927,12 @@ async function testAnEngineRunSaysHowItEnded(): Promise<void> {
     'a code the process exited with is its own',
   );
 
-  const missing = await runEngine(join(tmpdir(), 'gdharness-no-such-engine'), []);
+  // Raced against a deadline, because Node emits no `exit` for a start that failed, and a run
+  // settled on it would wait for good rather than fail.
+  const missing = await Promise.race([
+    runEngine(join(tmpdir(), 'gdharness-no-such-engine'), []),
+    delay(10_000).then(() => assert.fail('a run that never started should still settle')),
+  ]);
   assert.equal(missing.exitCode, null, 'a program that never started has no exit code');
   assert.match(missing.failure ?? '', /^it could not be started: /, String(missing.failure));
 }
@@ -21473,20 +21505,36 @@ async function testAStartWaitsOutTheEditorsScan(): Promise<void> {
       console.log('the test run case of the scan regression skipped (GDUNIT4_PATH not set)');
     }
 
-    // A scan that does not end: started anyway, and said.
+    // A scan that does not end: started anyway, and said. A headless operation waits beside the
+    // game, in the same thirty seconds, because its note names another engine and another log.
     cacheBeforeTheScan();
     scanning = () => true;
-    const endless = await check();
+    const [endless, operation] = await Promise.all([
+      check(),
+      server.request(
+        'tools/call',
+        {
+          name: 'project_settings',
+          arguments: { projectPath: project, op: 'get', setting: 'application/config/name' },
+        },
+        ENGINE_CALL_TIMEOUT_MS,
+      ),
+    ]);
     assert.ok(
       asNumber(get(endless.answer, 'waitedForEditorScanMs')) >= 30_000,
       `a scan that does not end is waited for as long as the budget: ${endless.said}`,
     );
     assert.match(
       text(get(endless.answer, 'scanNote')),
-      /still scanning the project after 30 seconds/,
+      /still scanning the project after 30 seconds, so this game started during the scan/,
       `and the start says it went ahead during it: ${endless.said}`,
     );
     assert.match(endless.said, /cache read: before it/, `the game still booted: ${endless.said}`);
+    assert.match(
+      text(get(parseTextContent(operation), 'scanNote')),
+      /still scanning the project after 30 seconds, so the engine answering this started during the scan.*If engine_messages shows/,
+      `an operation says it went ahead too, and where its own complaints are: ${textOf(operation)}`,
+    );
   } finally {
     editor?.terminate();
     await server.stop();
@@ -22508,6 +22556,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStoppedSpawnedRunGivesWayToAPlay,
   testAKilledRunHasNoExitCode,
   testAnEngineRunSaysHowItEnded,
+  testTheScanNoteNamesWhatStarted,
   testAWordsWaitLeavesTheGameItsSpeed,
   testTheAnnounceWaitIsNotHeldByASlowEditor,
   testTheWaitSizedToABootIsSaid,

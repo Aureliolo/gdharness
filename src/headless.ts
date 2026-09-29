@@ -7,7 +7,7 @@
  * another, and a run that wrote no answer failed, with the reason in what it printed.
  */
 
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { emptyRecord } from './dictionary.js';
 import { type EngineRun, howItEnded, runEngine } from './engine-run.js';
@@ -109,7 +109,9 @@ function reported(problems: readonly LogEntry[]): Reported {
 function reason(log: GameLog, problems: readonly LogEntry[]): string {
   const own = log
     .everything()
-    .filter((entry) => entry.source === 'stderr' && entry.severity === 'info' && entry.text.startsWith(OWN_ERROR));
+    .filter(
+      (entry) => entry.source === 'stderr' && entry.severity === 'info' && entry.text.startsWith(OWN_ERROR),
+    );
   if (own.length > 0) {
     return own.map((entry) => entry.text.slice(OWN_ERROR.length)).join('; ');
   }
@@ -133,15 +135,29 @@ function reason(log: GameLog, problems: readonly LogEntry[]): string {
  * an operation calls it has operation frames further down, and that failure is the project's.
  */
 function scriptFault(problems: readonly LogEntry[], script: string): LogEntry | undefined {
-  const directory = `${dirname(script).replaceAll('\\', '/').toLowerCase()}/`;
+  const spelled = (path: string): string => `(${path.replaceAll('\\', '/').toLowerCase()}/`;
+  // Both spellings, because the engine may print the resolved one: a temporary directory on macOS
+  // is reached through the /var link to /private/var.
+  const directories = [...new Set([spelled(dirname(script)), spelled(resolvedOr(dirname(script)))])];
   return problems.find((entry) => {
-    const at = entry.detail.find((line) => line.startsWith('at: '));
+    const at = entry.detail
+      .find((line) => line.startsWith('at: '))
+      ?.replaceAll('\\', '/')
+      .toLowerCase();
     return (
       entry.severity === 'error' &&
       at !== undefined &&
-      at.replaceAll('\\', '/').toLowerCase().includes(`(${directory}`)
+      directories.some((directory) => at.includes(directory))
     );
   });
+}
+
+function resolvedOr(path: string): string {
+  try {
+    return realpathSync.native(path);
+  } catch {
+    return path;
+  }
 }
 
 /** One import pass's outcome, and the extension libraries a first pass could not load, if any. */
@@ -315,8 +331,13 @@ export async function runOperation(
   // No answer is an operation that refused or an engine that never reached the script, whatever
   // the exit status says.
   if (answer.kind === 'none') {
-    const ending = ran.exitCode === 0 && ran.failure === null ? 'produced no result' : `failed (${howItEnded(ran)})`;
-    return { ok: false, message: `${operation} ${ending}: ${reason(ran.log, problems)}`, ...reported(problems) };
+    const ending =
+      ran.exitCode === 0 && ran.failure === null ? 'produced no result' : `failed (${howItEnded(ran)})`;
+    return {
+      ok: false,
+      message: `${operation} ${ending}: ${reason(ran.log, problems)}`,
+      ...reported(problems),
+    };
   }
   const fault = scriptFault(problems, engine.script);
   if (fault !== undefined) {
@@ -359,6 +380,9 @@ function answerIn(
       ? { kind: 'answer', payload: parsed as OperationParams }
       : { kind: 'unreadable', why: `it is JSON but not an object: ${text.slice(0, 200)}` };
   } catch (error) {
-    return { kind: 'unreadable', why: `${error instanceof Error ? error.message : String(error)}: ${text.slice(0, 200)}` };
+    return {
+      kind: 'unreadable',
+      why: `${error instanceof Error ? error.message : String(error)}: ${text.slice(0, 200)}`,
+    };
   }
 }

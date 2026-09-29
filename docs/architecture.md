@@ -600,9 +600,19 @@ purpose.
 ## Headless operations
 
 One engine per call: `godot --headless --log-file <temp> --path <project> --script <operations.gd>
-<operation> @file:<params.json>`. Arguments are camelCase in the tool call and snake_case in the
-file the engine reads. The answer is the last JSON object printed on stdout. Anything on stderr
-comes back under `engine_messages`.
+<operation> @file:<params.json> <answer.json>`. Arguments are camelCase in the tool call and
+snake_case in the file the engine reads. The answer is the JSON object the script writes to the
+answer file. The engine's warnings and errors, and the script's own `[ERROR]` lines, come back under
+`engine_messages`.
+
+The answer goes to a file because the project's autoloads run after the operation and print to the
+same stdout. When the answer was the last JSON line printed, an autoload printing a dictionary in
+`_process` replaced it. With a file, a run that wrote no answer has failed whatever its exit code
+was. A run that wrote one and then exited badly (an autoload quitting with a code, say) still
+answers, with `engine_after_answer` saying how it ended, because the write it reports has happened.
+An error raised inside the operations script itself refuses the answer: the engine hands the
+faulting function's caller a default value and exits 0, so the answer is missing whatever that
+function would have given.
 
 `--log-file` keeps that engine out of the project's `user://logs/`. Godot renames `godot.log` when
 a process starts, so on a project with file logging on, one of these boots rotated a running

@@ -1634,14 +1634,20 @@ async function testTheAnswerIsTheOperations(godotPath: string): Promise<void> {
     const source = readFileSync(config, 'utf8');
     const faulted = source.replace('"setting_path": setting_path,', '"setting_path": _faulty(),');
     assert.notEqual(faulted, source, 'the fault should have gone in where the answer is built');
-    writeFileSync(config, `${faulted}\n\nfunc _faulty() -> String:\n\tvar none: Array = []\n\treturn none[1]\n`);
+    writeFileSync(
+      config,
+      `${faulted}\n\nfunc _faulty() -> String:\n\tvar none: Array = []\n\treturn none[1]\n`,
+    );
     const partial = await runThroughTheServersOwnPath(
       { ...engine, script: join(operations, 'godot_operations.gd') },
       'get_project_setting',
       { setting: 'application/config/name' },
       dir,
     );
-    assert.ok(!partial.ok, `an answer the script faulted while building is refused: ${JSON.stringify(partial)}`);
+    assert.ok(
+      !partial.ok,
+      `an answer the script faulted while building is refused: ${JSON.stringify(partial)}`,
+    );
     assert.match(
       partial.message,
       /^get_project_setting hit an error in the operations script, so its answer is left out: .*Out of bounds get index '1'.* \(_faulty \(.*project_config\.gd:\d+\)\)$/,
@@ -1693,7 +1699,9 @@ const CASES: Readonly<Record<string, (godotPath: string, projectDir: string) => 
   refusals: testRefusals,
   installedLayout: testInstalledLayout,
   settingsFamily: testAFamilyOfSettingsAnswersWithItsTypes,
-  everyWarning: (godotPath) => testTheOperationsSurviveEveryWarning(godotPath),
+  everyWarning: (godotPath) => {
+    testTheOperationsSurviveEveryWarning(godotPath);
+  },
   answer: (godotPath) => testTheAnswerIsTheOperations(godotPath),
 };
 

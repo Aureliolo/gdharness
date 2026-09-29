@@ -38,8 +38,12 @@ export function runEngine(
       windowsHide: true,
       ...(signal === undefined ? {} : { signal }),
     });
-    child.stdout.on('data', (chunk: Buffer) => log.append('stdout', chunk));
-    child.stderr.on('data', (chunk: Buffer) => log.append('stderr', chunk));
+    child.stdout.on('data', (chunk: Buffer) => {
+      log.append('stdout', chunk);
+    });
+    child.stderr.on('data', (chunk: Buffer) => {
+      log.append('stderr', chunk);
+    });
     const { timeout } = options;
     const timer =
       timeout === undefined
@@ -49,7 +53,8 @@ export function runEngine(
             child.kill();
           }, timeout.ms);
     child.on('error', (error) => {
-      failure ??= error.name === 'AbortError' ? 'the call was cancelled' : `it could not be started: ${error.message}`;
+      failure ??=
+        error.name === 'AbortError' ? 'the call was cancelled' : `it could not be started: ${error.message}`;
     });
     child.on('close', (code, closedBy) => {
       clearTimeout(timer);

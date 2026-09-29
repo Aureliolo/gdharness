@@ -85,8 +85,8 @@ import {
   theConsoleWasNotCaptured,
   writeEditorLogNote,
 } from './editor-log.js';
-import { errorMessage, Refusal } from './errors.js';
 import { type EngineRun, howItEnded, runEngine } from './engine-run.js';
+import { errorMessage, Refusal } from './errors.js';
 import { answersTo, forAnswer, GameLog, type LogEntry } from './game-log.js';
 import {
   anEditorIsStillComing,
@@ -1131,7 +1131,7 @@ function withScanWait(outcome: HeadlessOutcome, scanned: ScanWait): HeadlessOutc
   if (scanned.waitedMs === 0) {
     return outcome;
   }
-  const said = scanWaitAnswer(scanned);
+  const said = scanWaitAnswer(scanned, 'engine');
   if (outcome.ok) {
     return { ...outcome, payload: { ...outcome.payload, ...said } };
   }
@@ -1140,21 +1140,37 @@ function withScanWait(outcome: HeadlessOutcome, scanned: ScanWait): HeadlessOutc
     : { ...outcome, message: `${outcome.message} ${said.scanNote}` };
 }
 
-function scanWaitAnswer(scanned: ScanWait): {
+/**
+ * What a caller is told about the wait for the editor's scan before [param started] began.
+ *
+ * Apart for a game and a headless engine because the two are read in different places: a game's
+ * complaints are in `editor_output`, and a headless engine's come back with the answer under
+ * `engine_messages`. And a headless engine can write the class cache, which a scan still running
+ * writes over when it finishes.
+ */
+export function scanWaitAnswer(
+  scanned: ScanWait,
+  started: 'game' | 'engine' = 'game',
+): {
   waitedForEditorScanMs?: number;
   scanNote?: string | undefined;
 } {
   if (scanned.waitedMs === 0) {
     return {};
   }
+  const still = `The editor was still scanning the project after ${SCAN_WAIT_MS / 1000} seconds, so`;
   return {
     waitedForEditorScanMs: scanned.waitedMs,
-    scanNote: scanned.stillScanning
-      ? `The editor was still scanning the project after ${SCAN_WAIT_MS / 1000} seconds, so this ` +
-        'game started during the scan and may have read a class cache being rewritten. If ' +
-        'editor_output shows "Could not find type" for a class that is declared, editor_rescan ' +
-        'waits for the scan to finish, and a start after it reads the finished cache.'
-      : undefined,
+    scanNote: !scanned.stillScanning
+      ? undefined
+      : started === 'game'
+        ? `${still} this game started during the scan and may have read a class cache being rewritten. If ` +
+          'editor_output shows "Could not find type" for a class that is declared, editor_rescan ' +
+          'waits for the scan to finish, and a start after it reads the finished cache.'
+        : `${still} the engine answering this started during the scan and may have read a class cache being ` +
+          'rewritten, and a class cache it wrote can be written over when the scan finishes. If ' +
+          'engine_messages shows "Could not find type" for a class that is declared, editor_rescan waits ' +
+          'for the scan to finish, and the same call after it reads the finished cache.',
   };
 }
 
@@ -3556,7 +3572,9 @@ class GodotServer {
       discard(exportLogs);
     }
     if (ending.exitSignal === null && ending.exitCode === null) {
-      return this.createErrorResponse(`Export could not be run: ${ending.failure ?? 'the engine gave no exit status'}`);
+      return this.createErrorResponse(
+        `Export could not be run: ${ending.failure ?? 'the engine gave no exit status'}`,
+      );
     }
     const { log } = ending;
 
@@ -3579,7 +3597,8 @@ class GodotServer {
       ...(problems.omitted === 0 ? {} : { entriesOmitted: problems.omitted }),
     };
     if (!verdict.exported) {
-      const why = ending.exitSignal === null ? '' : ` The engine was ${howItEnded(ending)}, so it has no exit code.`;
+      const why =
+        ending.exitSignal === null ? '' : ` The engine was ${howItEnded(ending)}, so it has no exit code.`;
       return {
         content: [
           {
