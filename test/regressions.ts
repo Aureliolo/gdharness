@@ -21239,6 +21239,49 @@ function testCommandLineSetup(): void {
     assert.equal(again.status, 0, `a second uninstall:\n${again.stdout}${again.stderr}`);
     assert.match(again.stdout, /Nothing of gdharness was in this project/, 'and says so plainly');
     assert.doesNotMatch(again.stdout, /autoload removed/, 'rather than reporting work it did not do');
+
+    // A project that brings the runtime up through a loader of its own, under its own name, and
+    // has no entry of ours. Uninstall read any loader as ours and asked the engine to remove
+    // GdharnessRuntime, which was not there, so it failed at that line on every run and never
+    // reached the addons.
+    const reinstalled = cli('setup', projectDir);
+    assert.equal(
+      reinstalled.status,
+      0,
+      `setup for the loader case:\n${reinstalled.stdout}${reinstalled.stderr}`,
+    );
+    mkdirSync(guard, { recursive: true });
+    writeFileSync(join(guard, 'gdharness_loader.gd'), 'extends Node\n');
+    writeFileSync(
+      project,
+      readFileSync(project, 'utf8').replace(
+        /GdharnessRuntime="\*res:\/\/addons\/gdharness_runtime\/runtime_autoload\.gd"/,
+        'GdharnessLoader="*res://boot/gdharness_loader.gd"',
+      ),
+    );
+    assert.match(
+      readFileSync(project, 'utf8'),
+      /GdharnessLoader=/,
+      'the fixture has the loader and not our entry',
+    );
+    const throughALoader = cli('uninstall', projectDir);
+    assert.equal(
+      throughALoader.status,
+      0,
+      `uninstall beside a loader:\n${throughALoader.stdout}${throughALoader.stderr}`,
+    );
+    assert.equal(existsSync(join(projectDir, 'addons')), false, 'the addons are removed');
+    assert.doesNotMatch(throughALoader.stdout, /GdharnessRuntime autoload removed/, throughALoader.stdout);
+    assert.match(
+      readFileSync(project, 'utf8'),
+      /GdharnessLoader="\*res:\/\/boot\/gdharness_loader\.gd"/,
+      "the loader is the project's line and stays",
+    );
+    assert.match(
+      throughALoader.stdout,
+      /GdharnessLoader names res:\/\/boot\/gdharness_loader\.gd, .*left in place; the addon it brings up is gone now/,
+      `and the answer says it stayed, and what it now brings up: ${throughALoader.stdout}`,
+    );
   } finally {
     sweep(projectDir);
   }

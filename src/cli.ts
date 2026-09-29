@@ -409,9 +409,18 @@ async function uninstall(): Promise<void> {
     said(outcome, `disabling ${name}`);
     console.log(`${name}: ${outcome.ok ? String(outcome.payload['action']) : 'failed'}`);
   }
-  if (before.runtimeAutoload) {
+  // Our entry and not any loader: runtimeAutoload is true for a loader under a name of the
+  // project's, and asking the engine to remove GdharnessRuntime from such a project failed here on
+  // every run, after the harness entries had gone and before the addons did.
+  if (before.runtimeAutoloadPath !== null) {
     said(await setRuntime(godot, projectPath, false), 'removing the runtime autoload');
     console.log(`${RUNTIME_AUTOLOAD.name} autoload removed`);
+  }
+  const loader = before.runtimeLoaderAutoload;
+  if (loader !== null && loader.name !== RUNTIME_AUTOLOAD.name) {
+    console.log(
+      `${loader.name} names res://${loader.path}, which brings the runtime up its own way. That line is this project's, so it is left in place; the addon it brings up is gone now, so take the entry out unless that file does nothing without it.`,
+    );
   }
 
   const addons = removeAddons(projectPath);
@@ -419,7 +428,7 @@ async function uninstall(): Promise<void> {
     console.log(`removed ${path}`);
   }
 
-  const anything = addons.length > 0 || before.runtimeAutoload || enabled.length > 0;
+  const anything = addons.length > 0 || before.runtimeAutoloadPath !== null || enabled.length > 0;
   console.log(
     anything
       ? '\nReconnect your harness so it stops spawning a server that is no longer installed.'
