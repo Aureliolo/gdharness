@@ -28,6 +28,7 @@ func _run() -> void:
 	await _check_reading_lists()
 	await _check_reading_as_drawn()
 	await _check_a_long_screen()
+	await _check_a_near_miss_counts_what_would_be_found()
 	node._cleanup()
 	# Not checked: it is gone either way by the time the fixture tears itself down.
 	var _took_directory: Error = DirAccess.remove_absolute(directory)
@@ -72,6 +73,44 @@ func _check_a_long_screen() -> void:
 		if too_many.get("type") != "error" or not str(too_many.get("message", "")).contains("5000"):
 			_fail("%s past the ceiling is refused, naming it: %s" % [command, str(too_many)])
 	long.queue_free()
+
+
+## The notes on a find that missed name a query that would find something, so they count what that
+## query would answer. Under includeHidden false they counted hidden nodes too, and the query they
+## named, asked the same way, found none.
+func _check_a_near_miss_counts_what_would_be_found() -> void:
+	var shut: Control = Control.new()
+	shut.name = "Shut"
+	shut.visible = false
+	root.add_child(shut)
+	for index: int in range(2):
+		var enemy: Label = Label.new()
+		enemy.name = "Enemy%d" % index
+		enemy.text = "the dragon wakes"
+		shut.add_child(enemy)
+	await process_frame
+
+	var by_name: Dictionary = await node._execute_command(
+		"find_nodes", {"name": "Enemy", "include_hidden": false}
+	)
+	var said: String = str(by_name.get("note", ""))
+	if not said.contains(
+		'2 hidden node names contain "Enemy", which "*Enemy*" with includeHidden true would find'
+	):
+		_fail("a near miss on hidden nodes names the query that finds them: %s" % str(by_name))
+	var by_words: Dictionary = await node._execute_command(
+		"find_nodes", {"says": "dragon*", "include_hidden": false}
+	)
+	if not str(by_words.get("note", "")).contains(
+		'"*dragon*" with includeHidden true would find 2 hidden nodes'
+	):
+		_fail("and so does one on the words they hold: %s" % str(by_words))
+	var shown_too: Dictionary = await node._execute_command("find_nodes", {"name": "Enemy"})
+	if not str(shown_too.get("note", "")).contains(
+		'2 node names contain "Enemy", which "*Enemy*" would find'
+	):
+		_fail("counted as findable where hidden nodes are found: %s" % str(shown_too))
+	shut.queue_free()
 
 
 ## A RichTextLabel reads as its words, not its markup. Its text is the BBCode when it reads BBCode,

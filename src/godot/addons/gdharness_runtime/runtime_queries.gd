@@ -124,6 +124,10 @@ func find_nodes(params: Dictionary) -> Dictionary:
 	for filter: String in wanted:
 		widened[filter] = widened_says if filter == "says" else wanted[filter]
 	var nearly_said: int = 0
+	# The near misses the same find would leave out as hidden, kept apart: the note says what a
+	# query would find, and counting these in it named a query that, asked, found none of them.
+	var nearly_hidden: int = 0
+	var nearly_said_hidden: int = 0
 	var hidden: int = 0
 	while not pending.is_empty():
 		var node: Node = pending.pop_front()
@@ -137,13 +141,19 @@ func find_nodes(params: Dictionary) -> Dictionary:
 			else:
 				found.append(_found(node, wanted_property))
 		elif rest and literal and str(node.name).containsn(wanted["name"]):
-			nearly += 1
+			if include_hidden or shown(node):
+				nearly += 1
+			else:
+				nearly_hidden += 1
 		elif (
 			not widened_says.is_empty()
 			and _named(node, wanted["name"])
 			and _matches_apart_from_name(node, widened)
 		):
-			nearly_said += 1
+			if include_hidden or shown(node):
+				nearly_said += 1
+			else:
+				nearly_said_hidden += 1
 		# Internal children included, which they were not. A ConfirmationDialog builds its Yes and
 		# its No as internal nodes, and a ScrollContainer its bars, so a find over a screen for
 		# every Button came back without the two buttons the player is being asked to press:
@@ -159,21 +169,39 @@ func find_nodes(params: Dictionary) -> Dictionary:
 	# Nothing found is the one answer that cannot be told apart from having asked the wrong
 	# question, and a name written without a wildcard is the way an agent writes "contains".
 	# Said only when it changes the answer, so a genuine nothing stays a plain nothing.
-	if found.is_empty() and nearly > 0:
-		var holding: String = "names contain" if nearly > 1 else "name contains"
-		notes.append(
-			(
-				'name is matched as a glob against the whole name; %d node %s "%s", which "*%s*" would find'
-				% [nearly, holding, wanted["name"], wanted["name"]]
-			)
-		)
-	if found.is_empty() and nearly_said > 0:
+	if found.is_empty() and nearly + nearly_hidden > 0:
+		var named_near: int = nearly if nearly > 0 else nearly_hidden
+		var holding: String = "names contain" if named_near > 1 else "name contains"
 		(
 			notes
 			. append(
 				(
-					'says with a wildcard is matched as a glob against a node\'s whole text; "%s" would find %d node%s'
-					% [widened_says, nearly_said, "" if nearly_said == 1 else "s"]
+					'name is matched as a glob against the whole name; %d %snode %s "%s", which "*%s*"%s would find'
+					% [
+						named_near,
+						"" if nearly > 0 else "hidden ",
+						holding,
+						wanted["name"],
+						wanted["name"],
+						"" if nearly > 0 else " with includeHidden true",
+					]
+				)
+			)
+		)
+	if found.is_empty() and nearly_said + nearly_said_hidden > 0:
+		var said_near: int = nearly_said if nearly_said > 0 else nearly_said_hidden
+		(
+			notes
+			. append(
+				(
+					'says with a wildcard is matched as a glob against a node\'s whole text; "%s"%s would find %d %snode%s'
+					% [
+						widened_says,
+						"" if nearly_said > 0 else " with includeHidden true",
+						said_near,
+						"" if nearly_said > 0 else "hidden ",
+						"" if said_near == 1 else "s",
+					]
 				)
 			)
 		)
