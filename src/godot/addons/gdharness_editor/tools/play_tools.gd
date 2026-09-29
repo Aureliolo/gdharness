@@ -138,7 +138,7 @@ static func _save_everything() -> Dictionary:
 	var left: PackedStringArray = EditorInterface.get_unsaved_scenes()
 	if left.is_empty():
 		return {}
-	var named: PackedStringArray = []
+	var named: Array[String] = []
 	for scene: String in left:
 		named.append(scene if not scene.is_empty() else "a scene that has never been saved")
 	return {
@@ -150,7 +150,7 @@ static func _save_everything() -> Dictionary:
 				+ "or close %s in the editor first."
 			)
 			% [
-				", ".join(named),
+				", ".join(PackedStringArray(named)),
 				"has" if named.size() == 1 else "have",
 				"it" if named.size() == 1 else "them"
 			]
