@@ -4227,6 +4227,17 @@ function testTheProjectWalksAgreeAboutWhatIsInIt(): void {
     );
     assert.equal(found.summary.files_searched, 1, 'and should not have opened the other two');
     assert.equal(projectStructure(sandbox).scripts, 1, 'the count should agree with the search');
+
+    // What the structure counts as scenes and assets, which was text scenes and a short list of
+    // images, fonts and sound: a project saving binary scenes had none, and its models were other.
+    for (const file of ['level.tscn', 'baked.scn', 'ship.glb', 'intro.ogv', 'water.gdshader', 'notes.txt']) {
+      writeFileSync(join(sandbox, file), '');
+    }
+    assert.deepEqual(
+      projectStructure(sandbox),
+      { scenes: 2, scripts: 1, assets: 3, other: 1 },
+      'binary scenes are scenes, and models, video and shaders are assets',
+    );
   } finally {
     sweep(sandbox);
   }

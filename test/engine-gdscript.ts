@@ -2340,6 +2340,33 @@ function testTheOperationsSurviveEveryWarning(godotPath: string): void {
 }
 
 /** The cases after the fixtures, in the order the leg runs them, by the name `case` takes. */
+/**
+ * A scene saved binary counts as a scene in the health check.
+ *
+ * It looked for `.tscn` alone, so a project saving its scenes as `.scn` was told it had none and
+ * lost five points for it. The file is taken away again, since it is empty and a later case walking
+ * the project's scenes would try to load it.
+ */
+function testBinaryScenesAreScenes(godotPath: string, projectDir: string): void {
+  const counted = (): number =>
+    asNumber(
+      get(
+        runOperation(godotPath, projectDir, 'get_project_health', { categories: ['scenes'] }),
+        'checks',
+        'scenes',
+        'total_scenes',
+      ),
+    );
+  const before = counted();
+  const binary = join(projectDir, 'only_binary.scn');
+  writeFileSync(binary, '');
+  try {
+    assert.equal(counted(), before + 1, 'a binary scene is counted as a scene');
+  } finally {
+    rmSync(binary);
+  }
+}
+
 const CASES: Readonly<Record<string, (godotPath: string, projectDir: string) => void | Promise<void>>> = {
   dependencyWalk: testDependencyWalk,
   operations: testOperations,
@@ -2365,6 +2392,7 @@ const CASES: Readonly<Record<string, (godotPath: string, projectDir: string) => 
     testTheOperationsSurviveEveryWarning(godotPath);
   },
   answer: (godotPath) => testTheAnswerIsTheOperations(godotPath),
+  binaryScenes: testBinaryScenesAreScenes,
 };
 
 async function main(): Promise<void> {

@@ -35,7 +35,40 @@ export interface ProjectStructure {
   other: number;
 }
 
-const ASSET_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'webp', 'svg', 'ttf', 'otf', 'wav', 'mp3', 'ogg']);
+/** Text scenes and the binary ones a project may save instead. */
+const SCENE_EXTENSIONS = new Set(['tscn', 'scn']);
+
+/** What a project imports as media: images, fonts, sound, models, video and shaders. */
+const ASSET_EXTENSIONS = new Set([
+  'png',
+  'jpg',
+  'jpeg',
+  'webp',
+  'svg',
+  'bmp',
+  'tga',
+  'exr',
+  'hdr',
+  'ktx',
+  'dds',
+  'ttf',
+  'otf',
+  'woff',
+  'woff2',
+  'fnt',
+  'wav',
+  'mp3',
+  'ogg',
+  'glb',
+  'gltf',
+  'obj',
+  'fbx',
+  'blend',
+  'dae',
+  'ogv',
+  'gdshader',
+  'shader',
+]);
 
 export function projectStructure(projectPath: string): ProjectStructure {
   const structure: ProjectStructure = { scenes: 0, scripts: 0, assets: 0, other: 0 };
@@ -51,7 +84,7 @@ export function projectStructure(projectPath: string): ProjectStructure {
         visit(join(directory, entry.name));
       } else if (entry.isFile()) {
         const extension = entry.name.split('.').pop()?.toLowerCase() ?? '';
-        if (extension === 'tscn') {
+        if (SCENE_EXTENSIONS.has(extension)) {
           structure.scenes += 1;
         } else if (extension === 'gd' || extension === 'cs') {
           structure.scripts += 1;
