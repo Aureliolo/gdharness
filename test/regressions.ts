@@ -20599,15 +20599,14 @@ function testTheCopiedHelperReadsTheSameEverywhere(): void {
   const copies = sharedCopies();
   assert.ok(copies.length >= 4, `only ${copies.length} copies were listed, so this proved little`);
 
+  // Line endings as the repository keeps them, LF: gdformat on Windows writes CRLF, and a copy the
+  // formatter touched while the original was checked out again read as drifted with nothing changed.
+  const committed = (path: string): string => readFileSync(path, 'utf8').replaceAll('\r\n', '\n');
   for (const { original, copy } of copies) {
-    const wanted = readFileSync(original, 'utf8');
+    const wanted = committed(original);
     assert.match(wanted, /^(?:static )?func /m, `${original} should hold the code this compares`);
     assert.ok(wanted.split('\n').length >= 30, `${original} is ${wanted.split('\n').length} lines`);
-    assert.equal(
-      readFileSync(copy, 'utf8'),
-      wanted,
-      `${copy} has drifted from ${original}: run bun run sync:gd`,
-    );
+    assert.equal(committed(copy), wanted, `${copy} has drifted from ${original}: run bun run sync:gd`);
     assert.ok(existsSync(`${copy}.uid`), `${copy} ships without the .uid that names it`);
   }
 }
