@@ -35,6 +35,19 @@ const STEP_LANDS_WITHIN_MS = 10_000;
  */
 const VARIABLES_POLL_TIMEOUT_MS = 2_000;
 
+/**
+ * One file however it is spelled, for keying breakpoints.
+ *
+ * Godot's adapter names a file in its events as `globalize_path` does, which on Windows is with
+ * forward slashes, and this side names it as the filesystem does, with backslashes. Kept as two
+ * files, the echo of a line set here was listed as one the user set in the gutter, the gutter's
+ * own lines were left out of the list the adapter takes as the whole file and cleared, and a line
+ * clicked off in the gutter went on being held. Windows compares paths without case as well.
+ */
+function fileKey(path: string): string {
+  return process.platform === 'win32' ? path.replaceAll('\\', '/').toLowerCase() : path;
+}
+
 /** A read of a held game refused for what it found, which starting a game would not change. */
 class ReadRefusal extends Refusal {}
 
@@ -135,8 +148,10 @@ export class GodotDAPClient {
   private holdKnown = false;
   /** How many stops this connection has been told of, so a step can wait for the one it causes. */
   private stops = 0;
-  /** The breakpoints set through this side, by file: sent again before every play and kept. */
+  /** The breakpoints set through this side, by [fileKey]: sent again before every play and kept. */
   private breakpoints = new Map<string, Set<number>>();
+  /** How each file is named when it is sent or answered: the spelling this side gave, or else the adapter's. */
+  private spelled = new Map<string, string>();
   /**
    * Every breakpoint the editor has told this connection about, by file, including the ones above.
    *
@@ -440,20 +455,24 @@ export class GodotDAPClient {
       if (typeof path !== 'string' || typeof line !== 'number') {
         return;
       }
+      const key = fileKey(path);
+      if (!this.spelled.has(key)) {
+        this.spelled.set(key, path);
+      }
       if (said(body, 'reason') === 'removed') {
-        this.inEditor.get(path)?.delete(line);
-        const held = this.breakpoints.get(path);
+        this.inEditor.get(key)?.delete(line);
+        const held = this.breakpoints.get(key);
         if (held?.delete(line) === true) {
           if (held.size === 0) {
-            this.breakpoints.delete(path);
+            this.breakpoints.delete(key);
           }
           this.onBreakpointsChanged?.(this.breakpointsHeld());
         }
         return;
       }
-      const known = this.inEditor.get(path) ?? new Set<number>();
+      const known = this.inEditor.get(key) ?? new Set<number>();
       known.add(line);
-      this.inEditor.set(path, known);
+      this.inEditor.set(key, known);
       return;
     }
 
@@ -636,7 +655,7 @@ export class GodotDAPClient {
    * one on a game already past it.
    */
   async setBreakpoint(filePath: string, line: number): Promise<DAPBody> {
-    const wanted = new Set(this.breakpoints.get(filePath) ?? []);
+    const wanted = new Set(this.breakpoints.get(fileKey(filePath)) ?? []);
     wanted.add(line);
     return await this.sendBreakpoints(filePath, wanted);
   }
@@ -646,7 +665,7 @@ export class GodotDAPClient {
    * a caller asking for a line to be clear is asking about the line and not about provenance.
    */
   async removeBreakpoint(filePath: string, line: number): Promise<DAPBody> {
-    const wanted = new Set(this.breakpoints.get(filePath) ?? []);
+    const wanted = new Set(this.breakpoints.get(fileKey(filePath)) ?? []);
     wanted.delete(line);
     return await this.sendBreakpoints(filePath, wanted, line);
   }
@@ -666,7 +685,9 @@ export class GodotDAPClient {
   ): Promise<DAPBody> {
     await this.ensureConnected();
     await this.initialize();
-    const lines = new Set([...mine, ...(this.inEditor.get(filePath) ?? [])]);
+    const key = fileKey(filePath);
+    this.spelled.set(key, filePath);
+    const lines = new Set([...mine, ...(this.inEditor.get(key) ?? [])]);
     if (clearing !== undefined) {
       lines.delete(clearing);
     }
@@ -676,16 +697,16 @@ export class GodotDAPClient {
       breakpoints: sorted.map((breakpointLine) => ({ line: breakpointLine })),
     });
     if (mine.size === 0) {
-      this.breakpoints.delete(filePath);
+      this.breakpoints.delete(key);
     } else {
-      this.breakpoints.set(filePath, new Set(mine));
+      this.breakpoints.set(key, new Set(mine));
     }
     // What the editor now has in this file, as sent; the adapter echoes each toggle back as an
     // event as well, and a read between the answer and the echo should not say otherwise.
     if (lines.size === 0) {
-      this.inEditor.delete(filePath);
+      this.inEditor.delete(key);
     } else {
-      this.inEditor.set(filePath, lines);
+      this.inEditor.set(key, lines);
     }
     return answer;
   }
@@ -701,13 +722,13 @@ export class GodotDAPClient {
   /** The breakpoints the editor has told this connection of that this side did not set. */
   breakpointsInEditor(): HeldBreakpoint[] {
     const theirs: HeldBreakpoint[] = [];
-    for (const [scriptPath, lines] of this.inEditor) {
-      const mine = this.breakpoints.get(scriptPath);
+    for (const [key, lines] of this.inEditor) {
+      const mine = this.breakpoints.get(key);
       const rest = Array.from(lines)
         .filter((line) => !mine?.has(line))
         .sort((a, b) => a - b);
       if (rest.length > 0) {
-        theirs.push({ scriptPath, lines: rest });
+        theirs.push({ scriptPath: this.spelled.get(key) ?? key, lines: rest });
       }
     }
     return theirs;
@@ -726,12 +747,13 @@ export class GodotDAPClient {
   async reapplyBreakpoints(): Promise<{ applied: HeldBreakpoint[]; refused: RefusedBreakpoint[] }> {
     const applied: HeldBreakpoint[] = [];
     const refused: RefusedBreakpoint[] = [];
-    for (const [filePath, lines] of Array.from(this.breakpoints)) {
+    for (const [key, lines] of Array.from(this.breakpoints)) {
+      const filePath = this.spelled.get(key) ?? key;
       try {
         await this.sendBreakpoints(filePath, lines);
         applied.push({ scriptPath: filePath, lines: Array.from(lines).sort((a, b) => a - b) });
       } catch (error) {
-        this.breakpoints.delete(filePath);
+        this.breakpoints.delete(key);
         refused.push({
           scriptPath: filePath,
           reason: error instanceof Error ? error.message : String(error),
@@ -746,8 +768,8 @@ export class GodotDAPClient {
 
   /** What this session holds, file by file, in the order the files were first named. */
   breakpointsHeld(): HeldBreakpoint[] {
-    return Array.from(this.breakpoints, ([scriptPath, lines]) => ({
-      scriptPath,
+    return Array.from(this.breakpoints, ([key, lines]) => ({
+      scriptPath: this.spelled.get(key) ?? key,
       lines: Array.from(lines).sort((a, b) => a - b),
     }));
   }
@@ -758,12 +780,14 @@ export class GodotDAPClient {
    */
   holdBreakpoints(held: readonly HeldBreakpoint[]): void {
     for (const { scriptPath, lines } of held) {
-      const fileBreakpoints = this.breakpoints.get(scriptPath) ?? new Set<number>();
+      const key = fileKey(scriptPath);
+      const fileBreakpoints = this.breakpoints.get(key) ?? new Set<number>();
       for (const line of lines) {
         fileBreakpoints.add(line);
       }
       if (fileBreakpoints.size > 0) {
-        this.breakpoints.set(scriptPath, fileBreakpoints);
+        this.breakpoints.set(key, fileBreakpoints);
+        this.spelled.set(key, scriptPath);
       }
     }
   }

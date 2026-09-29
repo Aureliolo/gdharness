@@ -34,6 +34,7 @@ import { join } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { alive } from '../src/alive.js';
+import { readBreakpointNote } from '../src/breakpoint-note.js';
 import { GodotDAPClient } from '../src/dap_client.js';
 import { SERVER_VERSION } from '../src/server-version.js';
 import { RUNTIME_AUTOLOAD } from '../src/setup.js';
@@ -4678,6 +4679,59 @@ async function testABreakpointHoldsForEveryPlay({
     `a session opening is told the breakpoint rather than clearing it: ${JSON.stringify(onlooker.breakpointsInEditor())}`,
   );
   await onlooker.abandon();
+
+  // The adapter echoes a set back as an event naming the file its own way, which on Windows is
+  // with forward slashes where this server names it with backslashes. Read as two files, the
+  // echo of a line set here was listed as one the user had set in the gutter.
+  const again = await call('debug_breakpoint', { ...main, op: 'set', line: BREAK_LINE });
+  assert.deepEqual(get(again, 'held'), one, `a second set holds the same line: ${text(again)}`);
+  assert.deepEqual(
+    get(again, 'setInEditor'),
+    [],
+    `and the line set here is not the editor's own as well: ${text(again)}`,
+  );
+
+  // A second session stands in for the gutter: a line it sets reaches this server as the editor's
+  // own, named the adapter's way, and has to survive a set from here, which sends the file's whole
+  // list. Then it clicks off the line this server holds, which has to leave the held set.
+  const gutterLine = BREAK_LINE - 1;
+  const gutter = new GodotDAPClient(dapPort);
+  try {
+    await gutter.initialize();
+    const godotsPath = join(project, 'main.gd').replaceAll('\\', '/');
+    await gutter.setBreakpoint(godotsPath, gutterLine);
+    const theirs = [{ scriptPath: 'res://main.gd', lines: [gutterLine] }];
+    let seen: unknown;
+    const patient = Date.now() + 5000;
+    do {
+      seen = get(await call('debug_breakpoint', { ...main, op: 'set', line: BREAK_LINE }), 'setInEditor');
+      if (JSON.stringify(seen) !== JSON.stringify(theirs)) await delay(100);
+    } while (JSON.stringify(seen) !== JSON.stringify(theirs) && Date.now() < patient);
+    assert.deepEqual(seen, theirs, "the gutter's line is listed as the editor's own");
+    assert.ok(
+      gutter
+        .breakpointsInEditor()
+        .some((file) => file.lines.includes(gutterLine) && file.scriptPath.endsWith('main.gd')),
+      `and a set from here left it in place: ${JSON.stringify(gutter.breakpointsInEditor())}`,
+    );
+
+    await gutter.removeBreakpoint(godotsPath, BREAK_LINE);
+    const offAt = Date.now() + 5000;
+    while (readBreakpointNote(project).length > 0 && Date.now() < offAt) {
+      await delay(100);
+    }
+    assert.deepEqual(
+      readBreakpointNote(project),
+      [],
+      'a line of ours clicked off in the gutter is no longer held',
+    );
+    await gutter.removeBreakpoint(godotsPath, gutterLine);
+  } finally {
+    await gutter.abandon();
+  }
+  const back = await call('debug_breakpoint', { ...main, op: 'set', line: BREAK_LINE });
+  assert.deepEqual(get(back, 'held'), one, `set again for the plays: ${text(back)}`);
+  assert.deepEqual(get(back, 'setInEditor'), [], `with the gutter's line gone: ${text(back)}`);
 
   const first = await play({ headless: true });
   assert.deepEqual(
