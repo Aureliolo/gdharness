@@ -974,7 +974,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       stop: {
         summary:
-          'end the run and answer with what it printed last, naming the process ended under endedPid: for a run the editor plays, the number its game announced under, read at the stop rather than remembered, and the operating system hands a freed number to the next process, so it can equal the game before it. A game that started processes of its own keeps them unless andChildren says to end those too. stopped is false, with the number under notSignalled, when that number no longer answers as the process the run was started as and nothing was signalled',
+          'end the run and answer with what it printed last, naming the process ended under endedPid: for a run the editor plays, the number its game announced under, read at the stop rather than remembered, and the operating system hands a freed number to the next process, so it can equal the game before it. A game that started processes of its own keeps them unless andChildren says to end those too. stopped is false, with the number under notSignalled, when that number no longer answers as the process the run was started as and nothing was signalled, and false with the number under stillGoing when what was told to end was still running ten seconds later',
         requires: [],
       },
       check: {

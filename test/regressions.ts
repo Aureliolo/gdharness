@@ -6565,8 +6565,15 @@ function testAStopThatSignalsNothingSaysSo(): void {
     exitSignal: null,
     clean: true,
   });
-  assert.equal(lingering.stopped, true, 'a run that was signalled was stopped, as far as a stop can');
-  assert.match(lingering.note, /It had not exited \d+ seconds after being told to/, lingering.note);
+  assert.equal(lingering.stopped, false, 'a run still going after the wait has not stopped');
+  assert.equal(lingering.stillGoing, 4242, 'and the process still going is named');
+  assert.equal(lingering.endedPid, undefined, 'and not as ended');
+  assert.equal(lingering.clean, undefined, 'with no verdict on a run that is not over');
+  assert.match(
+    lingering.note,
+    /^pid 4242 was told to end and was still running \d+ seconds later/,
+    lingering.note,
+  );
 
   const over = stopVerdict({
     wasRunning: false,
@@ -6607,9 +6614,11 @@ function testAStopThatSignalsNothingSaysSo(): void {
   assert.equal(previousRunLeft(ended), undefined, 'and leaves nothing going');
   assert.match(endedToStartThis(ended), /pid 4242, was ended to start this one/, endedToStartThis(ended));
   const slow = { pid: 4242, ending: 'lingering' } as const;
+  assert.equal(endedPreviousRun(slow), undefined, 'a run still going after the wait was not ended');
+  assert.equal(previousRunLeft(slow), 4242, 'and is named as left going beside the new one');
   assert.match(
     endedToStartThis(slow),
-    /had not exited \d+ seconds after being told to/,
+    /pid 4242, was told to end to start this one and was still running \d+ seconds later, so it is running beside this one/,
     endedToStartThis(slow),
   );
   const unnumbered = { pid: null, ending: 'refused' } as const;
@@ -14037,14 +14046,14 @@ async function testAStopTheEditorDidNotTakeIsNotAStop(): Promise<void> {
       assert.equal(get(still, 'running'), true, `the run is still going: ${JSON.stringify(still)}`);
       assert.equal(get(still, 'endedBy'), undefined, `and was not ended here: ${JSON.stringify(still)}`);
 
-      // Taken, and the editor goes on playing: said to be lingering, not gone.
+      // Taken, and the editor goes on playing: not stopped, since the game has not stopped.
       editor.refuses = false;
       editor.keepsPlaying = true;
       const lingering = await call('editor_run', { op: 'stop' });
-      assert.equal(get(lingering, 'stopped'), true, JSON.stringify(lingering));
+      assert.equal(get(lingering, 'stopped'), false, JSON.stringify(lingering));
       assert.match(
         text(get(lingering, 'note')),
-        /had not exited 10 seconds after being told to/,
+        /was still playing it 10 seconds later, so it has not stopped/,
         JSON.stringify(lingering),
       );
     },
@@ -16543,6 +16552,7 @@ async function testASubViewportCaptureIsDrawnNow(): Promise<void> {
   const server = new ServerProcess({
     env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
   });
+  let stopped = false;
   try {
     await server.initialize('regression-test');
     const started = parseTextContent(
@@ -16578,12 +16588,16 @@ async function testASubViewportCaptureIsDrawnNow(): Promise<void> {
       (pixel[2] ?? 0) > 200 && (pixel[0] ?? 255) < 50,
       `the SubViewport as it is now, blue, not the red it last drew: ${pixel.join(',')}`,
     );
+    await stopItsRun(server);
+    stopped = true;
   } finally {
-    await server.request(
-      'tools/call',
-      { name: 'editor_run', arguments: { op: 'stop' } },
-      ENGINE_CALL_TIMEOUT_MS,
-    );
+    if (!stopped) {
+      await server.request(
+        'tools/call',
+        { name: 'editor_run', arguments: { op: 'stop' } },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+    }
     await server.stop();
     sweep(project, runtimeDir);
   }
@@ -16642,6 +16656,7 @@ async function testAScreenshotHoldsTheGamesOwnWindows(): Promise<void> {
   const server = new ServerProcess({
     env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
   });
+  let stopped = false;
   try {
     await server.initialize('regression-test');
     const started = parseTextContent(
@@ -16678,15 +16693,64 @@ async function testAScreenshotHoldsTheGamesOwnWindows(): Promise<void> {
       even(pixel[0]) && even(pixel[2]),
       `the screen with the game's red window over its right half: ${pixel.join(',')}`,
     );
+    await stopItsRun(server);
+    stopped = true;
   } finally {
-    await server.request(
-      'tools/call',
-      { name: 'editor_run', arguments: { op: 'stop' } },
-      ENGINE_CALL_TIMEOUT_MS,
-    );
+    if (!stopped) {
+      await server.request(
+        'tools/call',
+        { name: 'editor_run', arguments: { op: 'stop' } },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+    }
     await server.stop();
     sweep(project, runtimeDir);
   }
+}
+
+/**
+ * Ends the run a windowed case started, and holds what the stop answered.
+ *
+ * A stop that did not end the game left it running past the case, and the runner could say only
+ * that an engine was left behind: what the stop had answered, which says why, was thrown away.
+ */
+async function stopItsRun(server: ServerProcess): Promise<void> {
+  const answered = await server.request(
+    'tools/call',
+    { name: 'editor_run', arguments: { op: 'stop' } },
+    ENGINE_CALL_TIMEOUT_MS,
+  );
+  const said = textOf(answered) ?? JSON.stringify(answered);
+  let stopped: unknown;
+  let stillGoing: unknown;
+  try {
+    const parsed = parseTextContent(answered);
+    stopped = get(parsed, 'stopped');
+    stillGoing = get(parsed, 'stillGoing');
+  } catch {
+    stopped = undefined;
+  }
+  if (stopped === true) {
+    return;
+  }
+  // How long the game outlived the stop, and what the stop logged doing it, since the one time this
+  // failed on a runner the answer was all there was and it did not say which of the two it was: a
+  // signal that never landed, or an engine slow to die.
+  let outlived = 'no process was named';
+  if (typeof stillGoing === 'number') {
+    const asked = Date.now();
+    while (alive(stillGoing) && Date.now() - asked < 60_000) {
+      await delay(250);
+    }
+    outlived = alive(stillGoing)
+      ? `pid ${stillGoing} was still running a minute after the stop answered`
+      : `pid ${stillGoing} went ${Date.now() - asked} ms after the stop answered`;
+  }
+  const logged = (textOf(await server.request('tools/call', { name: 'editor_output', arguments: {} })) ?? '')
+    .split('\n')
+    .filter((line) => line.includes('"text": "gdharness'))
+    .join(' | ');
+  assert.fail(`the stop should end the game this case started: ${said}\n${outlived}\nlogged: ${logged}`);
 }
 
 /** The red, green and blue of a one-pixel PNG. */
