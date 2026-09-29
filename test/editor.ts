@@ -369,11 +369,15 @@ const HOOKS_GD = [
   '\tif not FileAccess.file_exists(REQUEST):',
   '\t\treturn',
   '\tvar request: Variant = JSON.parse_string(FileAccess.get_file_as_string(REQUEST))',
+  '\t# Left for the next frame rather than consumed: one read while it was being written was answered',
+  '\t# with nothing done, and the case went on as if its edit had been made.',
+  '\tif not request is Dictionary:',
+  '\t\treturn',
   '\tvar removed: Error = DirAccess.remove_absolute(ProjectSettings.globalize_path(REQUEST))',
   '\tvar answer: Dictionary = {"removed": removed == OK}',
-  '\tif request is Dictionary:',
-  '\t\tvar fields: Dictionary = request',
-  '\t\tanswer.merge(_answer(fields))',
+  '\tvar fields: Dictionary = request',
+  '\tanswer.merge(_answer(fields))',
+  '\tanswer["op"] = str(fields.get("op", ""))',
   '\tvar file: FileAccess = FileAccess.open(ANSWER, FileAccess.WRITE)',
   '\tif file != null:',
   '\t\tvar stored: bool = file.store_string(JSON.stringify(answer))',
@@ -817,17 +821,32 @@ async function hook(project: string, request: Record<string, unknown>): Promise<
   mkdirSync(directory, { recursive: true });
   const answer = join(directory, 'answer.json');
   rmSync(answer, { force: true });
-  writeFileSync(join(directory, 'request.json'), JSON.stringify(request));
+  // Written beside and renamed into place, so the editor never reads half of it. It polls every
+  // frame, and a read that caught the file mid-write on macOS answered with nothing done: the case
+  // then saved a scene without the edit it had asked for and failed on the save.
+  const pending = join(directory, 'request.json.part');
+  writeFileSync(pending, JSON.stringify(request));
+  renameSync(pending, join(directory, 'request.json'));
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
     if (existsSync(answer)) {
+      let parsed: unknown;
       try {
-        const parsed: unknown = JSON.parse(readFileSync(answer, 'utf8'));
-        rmSync(answer, { force: true });
-        return parsed;
+        parsed = JSON.parse(readFileSync(answer, 'utf8'));
       } catch {
         // Still being written.
+        await delay(100);
+        continue;
       }
+      rmSync(answer, { force: true });
+      // The op the editor carried out, which an answer to a request it could not read does not
+      // name: a case going on from that answer goes on from an edit that was never made.
+      assert.equal(
+        get(parsed, 'op'),
+        request['op'],
+        `the fixture hook did not carry out ${JSON.stringify(request)}: ${JSON.stringify(parsed)}`,
+      );
+      return parsed;
     }
     await delay(100);
   }

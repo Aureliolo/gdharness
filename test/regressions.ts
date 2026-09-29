@@ -124,6 +124,7 @@ import {
   listeningPid,
   listeningPidInNetstat,
   readRunRecord,
+  readWindowsCommandLine,
   recordRunEnded,
   runningAs,
   runRecordPath,
@@ -19824,6 +19825,53 @@ async function testAPidIsNotAnIdentity(): Promise<void> {
  * between two strings the operating system can give, and a fixture that needed a real editor to be
  * running could only ever be skipped on the machines that lack one.
  */
+/**
+ * A command line PowerShell did not give in time is asked for again, with longer.
+ *
+ * The stop before a kill reads the process's command line through one PowerShell helper, which is
+ * started by the first question and ended by a timeout. On a loaded Windows runner the question
+ * spent its budget on the interpreter starting, the stop had the executable's name alone, and it
+ * refused to end its own game, twice on the engine leg. The asker is handed in, so the timeout is a
+ * case rather than a machine to be on.
+ */
+async function testACommandLineNotGivenInTimeIsAskedAgain(): Promise<void> {
+  const answer = '2026-09-29T13:50:00.0000000Z\nGodot.exe --path C:/game res://main.tscn';
+  const budgets: number[] = [];
+  const slowThenAnswering = (_script: string, withinMs: number): Promise<string> => {
+    budgets.push(withinMs);
+    return budgets.length === 1
+      ? Promise.reject(new Error(`PowerShell did not answer within ${withinMs}ms`))
+      : Promise.resolve(answer);
+  };
+  assert.deepEqual(
+    await readWindowsCommandLine(4242, slowThenAnswering),
+    { answer },
+    'a question that ran out of time is asked again and its answer taken',
+  );
+  assert.ok(
+    budgets.length === 2 && (budgets[1] ?? 0) > (budgets[0] ?? 0),
+    `the second with longer, since the first showed the machine is slow: ${budgets.join(', ')}`,
+  );
+
+  const never = (_script: string, withinMs: number): Promise<string> =>
+    Promise.reject(new Error(`PowerShell did not answer within ${withinMs}ms`));
+  assert.deepEqual(
+    await readWindowsCommandLine(4242, never),
+    { unread: 'PowerShell did not answer within 45000ms' },
+    'and when neither answers, why is kept for the refusal to say',
+  );
+
+  let asked = 0;
+  const empty = (): Promise<string> => {
+    asked += 1;
+    return Promise.resolve('');
+  };
+  assert.deepEqual(await readWindowsCommandLine(4242, empty), {
+    unread: 'Windows gave no command line for it',
+  });
+  assert.equal(asked, 1, 'an empty answer is Windows answering, so it is not asked again');
+}
+
 function testTheEditorHoldingAProjectIsNotARunOfIt(): void {
   const project = join(tmpdir(), 'gdharness-editor-vs-run');
   const engine = join(tmpdir(), 'engines', 'Godot_v4.5-stable_win64.exe');
@@ -19937,6 +19985,18 @@ function testTheEditorHoldingAProjectIsNotARunOfIt(): void {
     whyNotTheRun(record, launchedLate, 'confirmed') ?? '',
     /^that process started 14 seconds after the run had$/,
     'and a refusal on the start says that is the property that disagreed',
+  );
+
+  // A refusal on an executable-only answer says why the command line was missing, which is what
+  // told a PowerShell out of time from a process Windows would not describe.
+  assert.match(
+    whyNotTheRun(
+      record,
+      { kind: 'image', text: engine, unread: 'PowerShell did not answer within 15000ms' },
+      'confirmed',
+    ) ?? '',
+    /named only its executable and not its command line \(PowerShell did not answer within 15000ms\)/,
+    'the refusal carries why the command line was not read',
   );
 
   // The flag as a whole word. A project whose own directory spells one is still a project, and
@@ -21210,6 +21270,34 @@ async function testGdUnitRunner(): Promise<void> {
           [get(twice, 'failures'), get(twice, 'suites', 0, 'hookFailures'), get(twice, 'hookFailures')],
           [1, undefined, undefined],
           `a case failing twice is one failure and no hook: ${JSON.stringify(twice, null, 2)}`,
+        );
+        // The same failing suite, run again and again. Reported downstream on 1.1.22 as a hook count
+        // that changed between runs of one suite, which would be an earlier run's report being read
+        // as well as #800's arithmetic; the answer has to be this run's alone, and the same each time.
+        writeFileSync(
+          join(projectDir, 'test', 'thrice_test.gd'),
+          'extends GdUnitTestSuite\n\n\nfunc test_three_assertions_fail() -> void:\n\tassert_bool(false).is_true()\n\tassert_bool(false).is_true()\n\tassert_bool(false).is_true()\n',
+        );
+        const runs: unknown[] = [];
+        for (let run = 0; run < 4; run += 1) {
+          const answer = JSON.parse(
+            await call(
+              'project_test',
+              { projectPath: projectDir, path: 'test/thrice_test.gd' },
+              ENGINE_CALL_TIMEOUT_MS * 3,
+            ),
+          ) as unknown;
+          runs.push([
+            get(answer, 'failures'),
+            get(answer, 'suites', 0, 'hookFailures'),
+            get(answer, 'hookFailures'),
+          ]);
+        }
+        rmSync(join(projectDir, 'test', 'thrice_test.gd'));
+        assert.deepEqual(
+          runs,
+          Array.from({ length: 4 }, () => [1, undefined, undefined]),
+          `one case failing three times is one failure and no hook, on every run: ${JSON.stringify(runs)}`,
         );
         // Orphans left early in a run that prints a great deal after: counted off what was printed,
         // they were lost with everything before the newest two hundred lines.
@@ -25308,6 +25396,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnAnnouncedGameIsJudgedBeforeItIsEnded,
   testAPidIsNotAnIdentity,
   testTheEditorHoldingAProjectIsNotARunOfIt,
+  testACommandLineNotGivenInTimeIsAskedAgain,
   testARunEndedUnwatchedIsStillReadable,
   testARecordedEndingIsReadBack,
   testARunEndedWithoutACodeSaysWhy,
