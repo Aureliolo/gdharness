@@ -15815,6 +15815,103 @@ async function testACaptureBeforeTheFirstFrameWaitsForIt(): Promise<void> {
   );
 }
 
+/**
+ * A capture of a SubViewport the game no longer redraws is the viewport now, not its last frame.
+ *
+ * A SubViewport set to update once, disabled, or updating only while a hidden container shows it
+ * keeps the texture it last drew. The capture read that texture and answered it as the viewport as
+ * it is. The game here draws its SubViewport red once and then turns the rectangle in it blue
+ * without drawing again, so an answer of red is the stale frame.
+ *
+ * Windowed, since nothing is drawn without a window. On Windows the server starts it on a desktop
+ * of its own, where it renders and shows nothing, so it runs here as well as on CI.
+ */
+async function testASubViewportCaptureIsDrawnNow(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('subviewport capture regression skipped (Godot not found)');
+    return;
+  }
+  const refused = process.platform === 'win32' ? null : windowedRunRefused();
+  if (refused !== null) {
+    console.log(`subviewport capture regression skipped (${refused})`);
+    return;
+  }
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-subviewport-'));
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-subviewport-rt-'));
+  cpSync(join('src', 'godot', 'addons', 'gdharness_runtime'), join(project, 'addons', 'gdharness_runtime'), {
+    recursive: true,
+  });
+  writeFileSync(
+    join(project, 'project.godot'),
+    '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Sub"\nrun/main_scene="res://main.tscn"\n\n' +
+      '[autoload]\n\nGdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n\n' +
+      '[rendering]\n\nrenderer/rendering_method="gl_compatibility"\n',
+  );
+  writeFileSync(
+    join(project, 'main.gd'),
+    'extends Node\n\n\nfunc _ready() -> void:\n\tawait get_tree().create_timer(1.0).timeout\n' +
+      '\t($Sub/Colour as ColorRect).color = Color(0, 0, 1)\n\tprint("turned blue")\n',
+  );
+  writeFileSync(
+    join(project, 'main.tscn'),
+    '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+      '[node name="Main" type="Node"]\nscript = ExtResource("1")\n\n' +
+      '[node name="Sub" type="SubViewport" parent="."]\nsize = Vector2i(4, 4)\nrender_target_update_mode = 1\n\n' +
+      '[node name="Colour" type="ColorRect" parent="Sub"]\noffset_right = 4.0\noffset_bottom = 4.0\ncolor = Color(1, 0, 0, 1)\n',
+  );
+  const server = new ServerProcess({
+    env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+  });
+  try {
+    await server.initialize('regression-test');
+    const started = parseTextContent(
+      await server.request(
+        'tools/call',
+        {
+          name: 'editor_run',
+          arguments: { projectPath: project, op: 'start', headless: false, runtimeWaitMs: WINDOWED_BOOT_MS },
+        },
+        WINDOWED_BOOT_MS + ENGINE_CALL_TIMEOUT_MS,
+      ),
+    );
+    assert.equal(get(started, 'runtime', 'listening'), true, JSON.stringify(started));
+    let printed = '';
+    for (let waited = 0; waited < 30_000 && !printed.includes('turned blue'); waited += 250) {
+      await delay(250);
+      printed = textOf(await server.request('tools/call', { name: 'editor_output', arguments: {} })) ?? '';
+    }
+    assert.match(printed, /turned blue/, `the game should turn the rectangle blue: ${printed}`);
+
+    const answered = await server.request(
+      'tools/call',
+      {
+        name: 'runtime_capture',
+        arguments: { op: 'viewport', viewportPath: '/root/Main/Sub', width: 1, height: 1 },
+      },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    const image = asArray(get(answered, 'result', 'content')).find((chunk) => get(chunk, 'type') === 'image');
+    assert.ok(image !== undefined, `the capture should answer an image: ${JSON.stringify(answered)}`);
+    const pixel = [...onePixelOf(Buffer.from(String(get(image, 'data')), 'base64'))];
+    assert.ok(
+      (pixel[2] ?? 0) > 200 && (pixel[0] ?? 255) < 50,
+      `the SubViewport as it is now, blue, not the red it last drew: ${pixel.join(',')}`,
+    );
+  } finally {
+    await server.request(
+      'tools/call',
+      { name: 'editor_run', arguments: { op: 'stop' } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    await server.stop();
+    sweep(project, runtimeDir);
+  }
+}
+
 /** The red, green and blue of a one-pixel PNG. */
 function onePixelOf(png: Buffer): Buffer {
   const chunks: Buffer[] = [];
@@ -24097,6 +24194,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnInjectedMotionCarriesHowFarThePointerMoved,
   testAKeyDoesNotChooseFromAnOpenedMenu,
   testACaptureBeforeTheFirstFrameWaitsForIt,
+  testASubViewportCaptureIsDrawnNow,
   testAWrittenLineBreakMatchesATwoLineLabel,
   testAPlayedGamesReportsReachTheOutput,
   testAPlayedGamesConsoleKeepsItsOrder,

@@ -28,7 +28,23 @@ func capture_viewport(params: Dictionary) -> Dictionary:
 	if not node is Viewport:
 		return {"type": "error", "message": "Node is not a Viewport: " + viewport_path}
 	var viewport: Viewport = node
-	return await _capture(viewport, params)
+	if not viewport is SubViewport:
+		return await _capture(viewport, params)
+	# Drawn now rather than taken as it stands. A SubViewport the game does not redraw every frame
+	# (disabled, a spent update-once, or update-when-visible behind a hidden container) keeps the
+	# last frame it drew, and that frame was answered as the viewport now. One update is asked for
+	# and the game's own mode put back after it.
+	var sub: SubViewport = viewport
+	var mode: SubViewport.UpdateMode = sub.render_target_update_mode
+	# Nothing is drawn without a window, so the frame waited for below may never come; the capture
+	# refuses that state itself.
+	if mode == SubViewport.UPDATE_ALWAYS or not _host.get_tree().root.can_draw():
+		return await _capture(viewport, params)
+	sub.render_target_update_mode = SubViewport.UPDATE_ONCE
+	await RenderingServer.frame_post_draw
+	var answer: Dictionary = await _capture(viewport, params)
+	sub.render_target_update_mode = mode
+	return answer
 
 
 ## The server names the file, so a game cannot point it at a path of its own choosing; a call
