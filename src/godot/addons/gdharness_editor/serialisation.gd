@@ -53,6 +53,9 @@ const LIST_TYPES: Array[int] = [
 # type it wanted.
 const SERIALISERS: Dictionary = {
 	TYPE_NIL: "_serialize_nil",
+	TYPE_FLOAT: "_serialize_float",
+	TYPE_PACKED_FLOAT32_ARRAY: "_serialize_floats",
+	TYPE_PACKED_FLOAT64_ARRAY: "_serialize_floats",
 	TYPE_VECTOR2: "_serialize_vector2",
 	TYPE_VECTOR2I: "_serialize_vector2i",
 	TYPE_VECTOR3: "_serialize_vector3",
@@ -105,6 +108,7 @@ const BUILDERS: Dictionary = {
 	"Color": "_build_color",
 	"NodePath": "_build_node_path",
 	"PackedByteArray": "_build_bytes",
+	"float": "_build_float",
 }
 
 # What each tag has to carry before it is built. A tag naming a type whose keys are not there is a
@@ -130,6 +134,7 @@ const REQUIRED: Dictionary = {
 	"Color": [["r", "g", "b"]],
 	"NodePath": [["path"]],
 	"PackedByteArray": [["base64"]],
+	"float": [["value"]],
 }
 
 
@@ -145,7 +150,58 @@ func serialize_value(value: Variant) -> Variant:
 	if typeof(value) == TYPE_OBJECT and not is_instance_valid(value):
 		return null
 	var serialiser: String = SERIALISERS.get(typeof(value), "")
-	return call(serialiser, value) if not serialiser.is_empty() else value
+	if serialiser.is_empty():
+		return value
+	var carried: Variant = call(serialiser, value)
+	# The fixed shapes carry their components as bare floats, so an infinite one in a Vector2 is
+	# tagged here; containers reach their members through this function already.
+	return carried if typeof(value) in [TYPE_ARRAY, TYPE_DICTIONARY] else _finite(carried)
+
+
+# [param carried] with every non-finite float in it tagged. JSON has no spelling for infinity or
+# NaN: the engine writes 1e99999 and null, and the server, reading 1e99999 as Infinity, writes it
+# back out as null, so a property holding INF was answered as holding nothing.
+func _finite(carried: Variant) -> Variant:
+	if carried is float:
+		var number: float = carried
+		return _serialize_float(number)
+	if carried is Dictionary:
+		var fields: Dictionary = carried
+		var tagged: Dictionary = {}
+		for key: Variant in fields:
+			tagged[key] = _finite(fields[key])
+		return tagged
+	if carried is Array:
+		var items: Array = carried
+		var tagged_items: Array = []
+		for item: Variant in items:
+			tagged_items.append(_finite(item))
+		return tagged_items
+	return carried
+
+
+func _serialize_float(value: float) -> Variant:
+	if is_finite(value):
+		return value
+	return {"_type": "float", "value": "nan" if is_nan(value) else ("inf" if value > 0 else "-inf")}
+
+
+# A packed float array stays the JSON list it is unless something in it has no JSON spelling.
+func _serialize_floats(value: Variant) -> Variant:
+	var numbers: Array = []
+	if value is PackedFloat32Array:
+		var single: PackedFloat32Array = value
+		numbers = Array(single)
+	else:
+		var double: PackedFloat64Array = value
+		numbers = Array(double)
+	for number: float in numbers:
+		if not is_finite(number):
+			var items: Array = []
+			for each: float in numbers:
+				items.append(_serialize_float(each))
+			return items
+	return value
 
 
 # Rebuilds a Godot value from the shape serialize_value gave it.
@@ -180,6 +236,8 @@ func deserialize_value(value: Variant) -> Variant:
 	var builder: String = BUILDERS.get(tag, "")
 	var needed: Array = REQUIRED.get(tag, [])
 	if builder.is_empty() or not _carries(fields, needed):
+		return fields
+	if tag == "float" and str(fields["value"]) not in ["inf", "-inf", "nan"]:
 		return fields
 	return call(builder, fields)
 
@@ -622,6 +680,10 @@ func _build_node_path(fields: Dictionary) -> NodePath:
 
 func _build_bytes(fields: Dictionary) -> PackedByteArray:
 	return Marshalls.base64_to_raw(str(fields.get("base64", "")))
+
+
+func _build_float(fields: Dictionary) -> float:
+	return Read.as_float(fields)
 
 
 ## One component of a compound value, as the type its constructor wants.

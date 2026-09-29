@@ -266,7 +266,7 @@ export async function setRuntime(
     ? await runOperation(
         engine,
         'add_autoload',
-        { name: RUNTIME_AUTOLOAD.name, path: `res://${RUNTIME_AUTOLOAD.path}`, enabled: true },
+        { name: RUNTIME_AUTOLOAD.name, path: `res://${RUNTIME_AUTOLOAD.path}`, global: true },
         projectPath,
       )
     : await runOperation(engine, 'remove_autoload', { name: RUNTIME_AUTOLOAD.name }, projectPath);

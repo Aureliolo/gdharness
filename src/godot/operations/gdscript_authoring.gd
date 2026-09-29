@@ -23,6 +23,24 @@ func create_gdscript(params: Dictionary) -> Dictionary:
 
 	_log.info("Creating GDScript: " + script_path)
 
+	# Content is the whole file, so a header written above it would be a second one: a content that
+	# starts with its own `extends` did not parse, and one without it was not the file that was sent.
+	if not content.is_empty():
+		var alongside: Array[String] = []
+		for name: String in ["class_name", "extends", "template"]:
+			if not str(params.get(name, "")).is_empty():
+				alongside.append(name)
+		if not alongside.is_empty():
+			return _log.failure(
+				(
+					"content is the whole file, so "
+					+ " and ".join(alongside)
+					+ " cannot be given with it: write "
+					+ ("them" if alongside.size() > 1 else "it")
+					+ " into content instead"
+				)
+			)
+
 	var full_script_path: String = script_path
 	if not full_script_path.begins_with("res://"):
 		full_script_path = "res://" + full_script_path
@@ -41,20 +59,16 @@ func create_gdscript(params: Dictionary) -> Dictionary:
 		if error != OK:
 			return _log.failure("Failed to create directory: " + script_dir + ", error: " + str(error))
 
-	var script_content: String = ""
-
-	if not cls_name_param.is_empty():
-		script_content += "class_name " + cls_name_param + "\n"
-
-	script_content += "extends " + extends_class + "\n\n"
-
-	if not template.is_empty():
-		script_content += _script_template(template)
-	elif not content.is_empty():
-		script_content += content
-	else:
-		script_content += "func _ready() -> void:\n"
-		script_content += "\tpass\n"
+	var script_content: String = content
+	if content.is_empty():
+		if not cls_name_param.is_empty():
+			script_content += "class_name " + cls_name_param + "\n"
+		script_content += "extends " + extends_class + "\n\n"
+		if not template.is_empty():
+			script_content += _script_template(template)
+		else:
+			script_content += "func _ready() -> void:\n"
+			script_content += "\tpass\n"
 
 	var file: FileAccess = FileAccess.open(full_script_path, FileAccess.WRITE)
 	if not file:
@@ -65,21 +79,20 @@ func create_gdscript(params: Dictionary) -> Dictionary:
 	if not stored:
 		return _log.failure("Failed to write to script file: " + full_script_path)
 
-	# Whether the engine accepts what was written, parsed under this project's own warning
-	# settings: a script that does not load is a script the caller wants to hear about now,
-	# and the reason is on stderr, which comes back with the answer.
 	var written: Script = ResourceLoader.load(full_script_path, "Script", ResourceLoader.CACHE_MODE_IGNORE)
-
-	return {
+	var answer: Dictionary = {
 		"success": true,
 		"script_path": script_path,
 		"full_path": full_script_path,
 		"absolute_path": ProjectSettings.globalize_path(full_script_path),
-		"registered": not cls_name_param.is_empty(),
-		"extends": extends_class,
 		"template_used": template if not template.is_empty() else "none",
-		"parses": written != null and written.can_instantiate(),
+		"parses": _parses(written),
 	}
+	# Read off the file as the engine parsed it rather than off the arguments, which content leaves out.
+	if written != null:
+		answer["extends"] = _base_named(written)
+		answer["class_name"] = str(written.get_global_name())
+	return answer
 
 
 # Modify an existing GDScript file by adding functions, variables, or signals
@@ -103,34 +116,40 @@ func modify_gdscript(params: Dictionary) -> Dictionary:
 	var original_content: String = file.get_as_text()
 	file.close()
 
+	# All of them checked before any is made, so a call is made whole or not at all: one skipped for a
+	# missing name used to leave the rest written and the answer saying success over an empty list.
+	var problems: Array[String] = _modification_problems(modifications)
+	if not problems.is_empty():
+		return _log.failure("Nothing was changed: " + "; ".join(problems))
+
 	var lines: Array[String] = []
 	lines.assign(original_content.split("\n"))
-	var modifications_applied: Array[Dictionary] = []
+	# Each placed line as a zero-based index that moves down whenever a later insertion lands above
+	# it, so the numbers answered are where the lines are in the file written, not where each went
+	# at the moment it was placed.
+	var placed: Array[Dictionary] = []
 
 	for mod: Variant in modifications:
-		if not mod is Dictionary:
-			_log.error("Modification must be an object")
-			continue
 		var fields: Dictionary = mod
 		var mod_type: String = str(fields.get("type", ""))
-		var mod_name: String = str(fields.get("name", ""))
-
-		if mod_name.is_empty():
-			_log.error("Modification missing 'name' field")
-			continue
-
+		var at: int = -1
 		match mod_type:
 			"add_variable":
-				var line: int = _add_variable(lines, fields)
-				modifications_applied.append({"type": "add_variable", "name": mod_name, "line": line})
+				at = _add_variable(lines, fields, placed)
 			"add_signal":
-				var line: int = _add_signal(lines, fields)
-				modifications_applied.append({"type": "add_signal", "name": mod_name, "line": line})
+				at = _add_signal(lines, fields, placed)
 			"add_function":
-				var line: int = _add_function(lines, fields)
-				modifications_applied.append({"type": "add_function", "name": mod_name, "line": line})
-			_:
-				_log.error("Unknown modification type: " + mod_type)
+				at = _add_function(lines, fields, placed)
+		if at == -1:
+			return _log.failure(
+				"Nothing was changed: " + mod_type + " " + str(fields.get("name")) + " could not be placed"
+			)
+		placed.append({"type": mod_type, "name": str(fields.get("name")), "index": at})
+
+	var modifications_applied: Array[Dictionary] = []
+	for entry: Dictionary in placed:
+		var index: int = entry["index"]
+		modifications_applied.append({"type": entry["type"], "name": entry["name"], "line": index + 1})
 
 	file = FileAccess.open(full_script_path, FileAccess.WRITE)
 	if not file:
@@ -141,17 +160,75 @@ func modify_gdscript(params: Dictionary) -> Dictionary:
 	if not rewrote:
 		return _log.failure("Failed to write to script file: " + full_script_path)
 
+	var made: Script = ResourceLoader.load(full_script_path, "Script", ResourceLoader.CACHE_MODE_IGNORE)
 	return {
 		"success": true,
 		"script_path": script_path,
 		"modifications_applied": modifications_applied,
-		"total_modifications": modifications_applied.size()
+		"total_modifications": modifications_applied.size(),
+		"parses": _parses(made),
 	}
 
 
-# Inserts the declaration and answers with its one-based line number, or 0 for one that could not
-# be placed, which is a number no line has.
-func _add_variable(lines: Array[String], mod: Dictionary) -> int:
+# Every reason [param modifications] cannot be made as asked, each naming the entry by position.
+static func _modification_problems(modifications: Array) -> Array[String]:
+	var problems: Array[String] = []
+	if modifications.is_empty():
+		problems.append("modifications is empty")
+	for index: int in range(modifications.size()):
+		var mod: Variant = modifications[index]
+		var which: String = "modification " + str(index + 1)
+		if not mod is Dictionary:
+			problems.append(which + " is not an object")
+			continue
+		var fields: Dictionary = mod
+		var mod_type: String = str(fields.get("type", ""))
+		var mod_name: String = str(fields.get("name", ""))
+		if mod_type not in ["add_variable", "add_signal", "add_function"]:
+			problems.append(
+				which + " has type '" + mod_type + "', not add_variable, add_signal or add_function"
+			)
+		if mod_name.is_empty():
+			problems.append(which + " has no name")
+		elif not mod_name.is_valid_unicode_identifier():
+			problems.append(which + " is named '" + mod_name + "', which GDScript does not accept as a name")
+	return problems
+
+
+# Inserts [param new_lines] at [param at] and moves every placed line at or below it down by as many.
+static func _insert(
+	lines: Array[String], at: int, new_lines: Array[String], placed: Array[Dictionary]
+) -> bool:
+	for i: int in range(new_lines.size() - 1, -1, -1):
+		if lines.insert(at, new_lines[i]) != OK:
+			push_error("gdharness: could not place a line at " + str(at))
+			return false
+	for entry: Dictionary in placed:
+		var index: int = entry["index"]
+		if index >= at:
+			entry["index"] = index + new_lines.size()
+	return true
+
+
+# Whether the engine accepts [param script], parsed under this project's own warning settings: a
+# script that does not load is one the caller wants to hear about now, and the reason is on stderr,
+# which comes back with the answer. A script that fails to parse still loads, as one that cannot be
+# instantiated; an abstract one that parses can be, on 4.7.
+static func _parses(script: Script) -> bool:
+	return script != null and script.can_instantiate()
+
+
+# What [param script] extends: the base script by class name or path, or the native class.
+static func _base_named(script: Script) -> String:
+	var base: Script = script.get_base_script()
+	if base == null:
+		return str(script.get_instance_base_type())
+	var named: String = str(base.get_global_name())
+	return named if not named.is_empty() else base.resource_path
+
+
+# Inserts the declaration and answers with its zero-based index, or -1 for one that could not be placed.
+func _add_variable(lines: Array[String], mod: Dictionary, placed: Array[Dictionary]) -> int:
 	var var_name: String = str(mod.get("name", ""))
 	var var_type: String = str(mod.get("varType", ""))
 	var default_value: String = str(mod.get("defaultValue", ""))
@@ -186,10 +263,7 @@ func _add_variable(lines: Array[String], mod: Dictionary) -> int:
 		var_line += ": Variant"
 
 	var insert_line: int = _variable_insertion_point(lines)
-	if lines.insert(insert_line, var_line) != OK:
-		push_error("gdharness: could not place a declaration at line " + str(insert_line))
-		return 0
-	return insert_line + 1
+	return insert_line if _insert(lines, insert_line, [var_line], placed) else -1
 
 
 # The type name a constant expression evaluates to, or Variant when it is not one: a call
@@ -208,7 +282,7 @@ func _type_of_literal(expression: String) -> String:
 	return type_string(typeof(value))
 
 
-func _add_signal(lines: Array[String], mod: Dictionary) -> int:
+func _add_signal(lines: Array[String], mod: Dictionary, placed: Array[Dictionary]) -> int:
 	var signal_name: String = str(mod.get("name", ""))
 	var signal_params: String = str(mod.get("params", ""))
 
@@ -217,13 +291,11 @@ func _add_signal(lines: Array[String], mod: Dictionary) -> int:
 		signal_line += "(" + signal_params + ")"
 
 	var insert_line: int = _signal_insertion_point(lines)
-	if lines.insert(insert_line, signal_line) != OK:
-		push_error("gdharness: could not place a signal at line " + str(insert_line))
-		return 0
-	return insert_line + 1
+	return insert_line if _insert(lines, insert_line, [signal_line], placed) else -1
 
 
-func _add_function(lines: Array[String], mod: Dictionary) -> int:
+# Answers with the zero-based index of the `func` line, below the blank line that separates it.
+func _add_function(lines: Array[String], mod: Dictionary, placed: Array[Dictionary]) -> int:
 	var func_name: String = str(mod.get("name", ""))
 	var func_params: String = str(mod.get("params", ""))
 	# A function that names no return type returns nothing, and says so, for the same reason
@@ -248,12 +320,7 @@ func _add_function(lines: Array[String], mod: Dictionary) -> int:
 	if insert_line < lines.size():
 		func_lines.append("")
 
-	for i: int in range(func_lines.size() - 1, -1, -1):
-		if lines.insert(insert_line, func_lines[i]) != OK:
-			push_error("gdharness: could not place a function at line " + str(insert_line))
-			return 0
-
-	return insert_line + 1
+	return insert_line + 1 if _insert(lines, insert_line, func_lines, placed) else -1
 
 
 func _variable_insertion_point(lines: Array[String]) -> int:

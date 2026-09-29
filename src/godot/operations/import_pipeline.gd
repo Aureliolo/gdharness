@@ -1,6 +1,7 @@
 extends RefCounted
 
 const Read = preload("reading.gd")
+const Serialisation = preload("serialisation.gd")
 const FileWalk = preload("file_walk.gd")
 const Log = preload("logger.gd")
 
@@ -37,11 +38,20 @@ const IMPORTABLE_EXTENSIONS: Array[String] = [
 	"obj",
 	"dae",
 ]
+## The format version each importer writes as `importer_version` where it is above 0, which the
+## editor reimports anything older than. Read off sidecars 4.7.2 writes: scene and animation_library
+## write 1, and the texture importers write none. A case imports one fresh and compares, so an engine
+## that raises one fails it rather than leaving this behind.
+const IMPORTER_VERSIONS: Dictionary[String, int] = {"scene": 1, "animation_library": 1}
+## The VRAM compression formats a project can ask for, each behind its
+## `rendering/textures/vram_compression/import_<format>` setting.
+const VRAM_FORMATS: Array[String] = ["s3tc_bptc", "etc2_astc"]
 const EDITOR_DIRECTORY: String = "res://.godot/editor"
 const EDITOR_CACHE_PREFIX: String = "filesystem_cache"
 
 var _log: Log
 var _files: FileWalk = FileWalk.new()
+var _values: Serialisation = Serialisation.new()
 var _sidecar_md5s: Variant = null
 
 
@@ -63,7 +73,7 @@ func get_import_status(params: Dictionary) -> Dictionary:
 
 	var resources: Array[Dictionary] = []
 	var summary: Dictionary = {
-		"total": 0, "needs_reimport": 0, "failed": 0, "up_to_date": 0, "missing_source": 0
+		"total": 0, "needs_reimport": 0, "failed": 0, "up_to_date": 0, "missing_source": 0, "not_imported": 0
 	}
 
 	if not resource_path.is_empty():
@@ -107,8 +117,7 @@ func get_import_options(params: Dictionary) -> Dictionary:
 	var import_file_path: String = resource_path + ".import"
 
 	if not FileAccess.file_exists(import_file_path):
-		_log.error("Import file does not exist: " + import_file_path)
-		return _log.failure("This resource may not have been imported yet")
+		return _log.failure(_no_sidecar(resource_path))
 
 	var config: ConfigFile = ConfigFile.new()
 	var err: Error = config.load(import_file_path)
@@ -120,11 +129,14 @@ func get_import_options(params: Dictionary) -> Dictionary:
 		"resource_path": resource_path, "import_file": import_file_path, "remap": {}, "deps": {}, "params": {}
 	}
 
+	# Through the serialiser, as every other read answers: an engine type written straight into
+	# JSON is its own text, so a Vector3 option came back as "(1, 1, 1)", and writing that back put
+	# a string in the sidecar where the importer reads a vector.
 	for section: String in ["remap", "deps", "params"]:
 		if config.has_section(section):
 			var values: Dictionary = result[section]
 			for key: String in config.get_section_keys(section):
-				values[key] = config.get_value(section, key)
+				values[key] = _values.serialize_value(config.get_value(section, key))
 
 	return result
 
@@ -142,8 +154,12 @@ func set_import_options(params: Dictionary) -> Dictionary:
 	var import_file_path: String = resource_path + ".import"
 
 	if not FileAccess.file_exists(import_file_path):
-		_log.error("Import file does not exist: " + import_file_path)
-		return _log.failure("This resource may not have been imported yet")
+		return _log.failure(_no_sidecar(resource_path))
+	# A sidecar left behind by a source that has gone takes options that nothing will ever apply.
+	if not FileAccess.file_exists(resource_path):
+		return _log.failure(
+			resource_path + " is not on disk, so there is nothing its import options apply to"
+		)
 
 	var config: ConfigFile = ConfigFile.new()
 	var err: Error = config.load(import_file_path)
@@ -151,13 +167,37 @@ func set_import_options(params: Dictionary) -> Dictionary:
 	if err != OK:
 		return _log.failure("Failed to parse import file: " + str(err))
 
-	var updated_keys: Array[String] = []
+	# Every option checked before any is written, so a refused one leaves the sidecar as it was.
+	var fitted_values: Dictionary = {}
+	var refused: Array[String] = []
 	for key: Variant in options:
 		var name: String = str(key)
-		var value: Variant = _as_option(options[key], config.get_value("params", name, null))
-		config.set_value("params", name, value)
+		var held: Variant = config.get_value("params", name, null)
+		var given: Variant = _values.deserialize_value(options[key])
+		var value: Variant = _as_option(_values.fitted(options[key], typeof(held)), held)
+		# A number the option cannot hold whole is refused rather than truncated: 2.5 fitted to an
+		# enum option became 2, which is another setting.
+		var lossy: bool = (
+			(given is int or given is float)
+			and (value is int or value is float)
+			and type_convert(value, typeof(given)) != given
+		)
+		if held != null and (lossy or not Serialisation.acceptable(value, typeof(held))):
+			var held_type: String = type_string(typeof(held))
+			var article: String = "an" if held_type.to_lower()[0] in "aeiou" else "a"
+			refused.append(
+				"%s holds %s %s, and %s is not one" % [name, article, held_type, JSON.stringify(options[key])]
+			)
+			continue
+		fitted_values[name] = value
+	if not refused.is_empty():
+		return _log.failure("Nothing was written: " + "; ".join(refused))
+
+	var updated_keys: Array[String] = []
+	for name: String in fitted_values:
+		config.set_value("params", name, fitted_values[name])
 		updated_keys.append(name)
-		_log.debug("Set " + name + " = " + str(value))
+		_log.debug("Set " + name + " = " + str(fitted_values[name]))
 
 	err = config.save(import_file_path)
 	if err != OK:
@@ -176,6 +216,19 @@ static func _as_option(given: Variant, held: Variant) -> Variant:
 		if number == floorf(number):
 			return int(number)
 	return given
+
+
+# The names of the project's export presets, in the order export_presets.cfg holds them.
+static func _preset_names() -> Array[String]:
+	var names: Array[String] = []
+	var config: ConfigFile = ConfigFile.new()
+	if config.load("res://export_presets.cfg") != OK:
+		return names
+	var index: int = 0
+	while config.has_section("preset." + str(index)):
+		names.append(str(config.get_value("preset." + str(index), "name", "")))
+		index += 1
+	return names
 
 
 # List export presets
@@ -257,12 +310,12 @@ func validate_project(params: Dictionary) -> Dictionary:
 				include_suggestions
 			)
 		)
-	elif not FileAccess.file_exists(main_scene):
+	elif not FileWalk.missing_reason(main_scene).is_empty():
 		issues.append(
 			_finding(
 				"error",
 				"main_scene",
-				"Main scene file does not exist: " + main_scene,
+				"Main scene " + FileWalk.missing_reason(main_scene),
 				"Update the main scene setting or create the missing scene file",
 				include_suggestions
 			)
@@ -279,6 +332,30 @@ func validate_project(params: Dictionary) -> Dictionary:
 				include_suggestions
 			)
 		)
+
+	# The preset asked about is looked for rather than only logged: validating "for" a preset that
+	# does not exist answered valid, as though it had been checked.
+	if not preset_name.is_empty():
+		checks_performed.append("export_preset")
+		var named: Array[String] = _preset_names()
+		if preset_name not in named:
+			issues.append(
+				_finding(
+					"error",
+					"export_preset",
+					(
+						"No export preset is named "
+						+ preset_name
+						+ (
+							": the project has none"
+							if named.is_empty()
+							else ": the presets are " + ", ".join(named)
+						)
+					),
+					"Pass one of the preset names, or add the preset in the editor: Project > Export",
+					include_suggestions
+				)
+			)
 
 	checks_performed.append("icon")
 	var icon_path: String = str(ProjectSettings.get_setting("application/config/icon", ""))
@@ -323,11 +400,8 @@ func validate_project(params: Dictionary) -> Dictionary:
 
 	# A hundred scripts is enough to say whether the project is tidy without a large one
 	# turning validation into a full read of its source tree.
-	for script_path: String in script_files:
+	for script_path: String in script_files.slice(0, 100):
 		scripts_checked += 1
-		if scripts_checked > 100:
-			break
-
 		var file: FileAccess = FileAccess.open(script_path, FileAccess.READ)
 		if file:
 			var content: String = file.get_as_text()
@@ -355,6 +429,8 @@ func validate_project(params: Dictionary) -> Dictionary:
 		"warnings": warnings,
 		"checks_performed": checks_performed,
 		"scripts_checked": scripts_checked,
+		# Said beside the count, so a project of four hundred scripts is not read as checked whole.
+		"scripts_total": script_files.size(),
 		"issue_count": issues.size(),
 		"warning_count": warnings.size()
 	}
@@ -389,10 +465,14 @@ func _import_status_of(resource_path: String, import_file_path: String) -> Dicti
 
 	var import_file_exists: bool = FileAccess.file_exists(import_file_path)
 	if not import_file_exists:
+		# A file with no sidecar has not been imported only if it is something the engine imports.
+		# A scene answered as needing an import, and a reimport of it ran a pass and then reported
+		# the scene as not reimported, which reads as the import failing.
+		var never: String = _never_imported(resource_path)
 		return {
 			"path": resource_path,
-			"status": "needs_reimport",
-			"reason": "it has not been imported",
+			"status": "needs_reimport" if never.is_empty() else "not_imported",
+			"reason": "it has not been imported" if never.is_empty() else never,
 			"import_file_exists": false,
 			"source_exists": true
 		}
@@ -402,7 +482,9 @@ func _import_status_of(resource_path: String, import_file_path: String) -> Dicti
 	}
 
 	# The checks are the ones EditorFileSystem::_test_for_reimport makes, in its order, so a resource
-	# reads as needing an import exactly when the editor's next scan would import it.
+	# reads as needing an import when the editor's next scan would import it. The importer's own two
+	# cannot be asked here, where no importer is loaded, so they are made from what was measured of
+	# the built-in ones; an importer a plugin adds is judged by its files alone.
 	var sidecar: ConfigFile = ConfigFile.new()
 	var stale: Dictionary = (
 		_stale("its import file cannot be read")
@@ -414,6 +496,41 @@ func _import_status_of(resource_path: String, import_file_path: String) -> Dicti
 		stale = _import_staleness(resource_path, sidecar)
 	status.merge(stale, true)
 	return status
+
+
+# Why [param resource_path] has no import file, with what to do about it where anything can be done.
+func _no_sidecar(resource_path: String) -> String:
+	if not FileAccess.file_exists(resource_path):
+		return resource_path + " is not on disk"
+	var never: String = _never_imported(resource_path)
+	if not never.is_empty():
+		return resource_path + " has no import options: " + never
+	return (
+		resource_path
+		+ " has not been imported yet, so it has no import file: project_import reimport imports it"
+	)
+
+
+# Why the engine will never import [param resource_path], or empty when it would.
+func _never_imported(resource_path: String) -> String:
+	var folder: String = resource_path.get_base_dir()
+	while folder.begins_with("res://"):
+		if _files.is_stepped_over(folder if folder.ends_with("/") else folder + "/"):
+			return "a .gdignore in " + folder + " keeps the engine from importing anything under it"
+		if folder == "res://":
+			break
+		folder = folder.get_base_dir()
+	var extension: String = resource_path.get_extension().to_lower()
+	if extension in IMPORTABLE_EXTENSIONS:
+		return ""
+	# Loadable without a sidecar is what a scene, a script or a saved resource is: read as it is.
+	if ResourceLoader.exists(resource_path):
+		return "the engine loads ." + extension + " files as they are, without importing them"
+	return (
+		"no importer built into the engine takes ."
+		+ extension
+		+ " files; one added by a plugin or an extension is known only to the editor, whose scan imports them"
+	)
 
 
 static func _stale(reason: String) -> Dictionary:
@@ -443,6 +560,27 @@ func _sidecar_staleness(resource_path: String, import_file_path: String, sidecar
 ## Whether the import itself is still the one its sidecar and source describe: an answer for a
 ## stale resource, empty for a current one.
 static func _import_staleness(resource_path: String, sidecar: ConfigFile) -> Dictionary:
+	# The importer is asked first, as the editor asks it: whether it still writes this format, and
+	# whether the settings the import was made under still hold. Both are true of an import whose
+	# files are all current, so they were answered as up to date while the editor's next scan
+	# imported them again: every scene after an engine upgrade raised the importer's version, and
+	# every VRAM texture once the project asked for another compression format.
+	var importer: String = str(sidecar.get_value("remap", "importer", ""))
+	var version: int = Read.as_int(sidecar.get_value("remap", "importer_version", 0))
+	var current: int = Read.as_int(IMPORTER_VERSIONS.get(importer, 0))
+	if current > version:
+		return _stale(
+			(
+				"it was imported at version %d of the %s importer, and this engine imports at version %d"
+				% [version, importer, current]
+			)
+		)
+	var lacking: Array[String] = _vram_formats_lacking(sidecar.get_value("remap", "metadata", {}))
+	if not lacking.is_empty():
+		return _stale(
+			"the project now asks for " + ", ".join(lacking) + " textures, and this import did not write them"
+		)
+
 	if not sidecar.has_section_key("remap", "uid"):
 		return _stale("its import file has no uid, which the import writes")
 
@@ -503,6 +641,28 @@ static func _import_staleness(resource_path: String, sidecar: ConfigFile) -> Dic
 	var built: Dictionary = _stale("it was imported without images it uses, which were not imported yet")
 	built["imported_without"] = without
 	return built
+
+
+## The VRAM formats the project asks textures to be imported in that an import recorded in
+## [param metadata] did not write, as the texture importers judge whether their settings still hold.
+## Measured on 4.7.2 for the texture and texture array importers: turning a format on reimports every
+## VRAM texture without it, and turning one off reimports nothing.
+static func _vram_formats_lacking(metadata: Variant) -> Array[String]:
+	var lacking: Array[String] = []
+	if not metadata is Dictionary:
+		return lacking
+	var meta: Dictionary = metadata
+	if not Read.as_bool(meta.get("vram_texture", false)):
+		return lacking
+	var written: Variant = meta.get("imported_formats", [])
+	var formats: Array = written if written is Array else []
+	for format: String in VRAM_FORMATS:
+		var asked: bool = Read.as_bool(
+			ProjectSettings.get_setting("rendering/textures/vram_compression/import_" + format, false)
+		)
+		if asked and format not in formats:
+			lacking.append(format)
+	return lacking
 
 
 ## The hashes [param resource_path]'s last import recorded, [code]source_md5[/code] of its source

@@ -19,6 +19,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
@@ -27,7 +28,7 @@ import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { runOperation as runThroughTheServersOwnPath } from '../src/headless.js';
 import { userDataIn } from '../src/launch.js';
-import { asArray, asNumber, asString, get, lastJsonLine } from './support/json.js';
+import { asArray, asNumber, asObject, asString, get, lastJsonLine } from './support/json.js';
 import { solidPng } from './support/png.js';
 import { sweep } from './support/sweep.js';
 
@@ -359,18 +360,10 @@ function testDependencyWalk(godotPath: string, projectDir: string): void {
     'extends Node\n\nconst Ouro = preload("res://chain/ouro.gd")\n',
   );
 
-  const paramsPath = join(projectDir, 'deps.json');
-  writeFileSync(paramsPath, JSON.stringify({ resource_path: 'res://chain/top.gd', depth: 5 }));
-
-  const run = runScript(godotPath, projectDir, join(projectDir, 'operations', 'godot_operations.gd'), [
-    'get_dependencies',
-    `@file:${paramsPath}`,
-  ]);
-  if (run.status !== 0) {
-    throw new Error(`get_dependencies failed:\n${`${run.stdout}\n${run.stderr}`.trim()}`);
-  }
-
-  const payload = lastJsonLine(run.stdout, 'get_dependencies');
+  const payload = runOperation(godotPath, projectDir, 'get_dependencies', {
+    resource_path: 'res://chain/top.gd',
+    depth: 5,
+  });
 
   const top = asArray(get(payload, 'dependencies', 'res://chain/top.gd'), 'the walk result');
 
@@ -391,16 +384,9 @@ function testDependencyWalk(godotPath: string, projectDir: string): void {
   );
 
   // A cycle has to be reported rather than walked forever.
-  writeFileSync(paramsPath, JSON.stringify({ resource_path: 'res://chain/ouro.gd' }));
-  const cyclic = runScript(godotPath, projectDir, join(projectDir, 'operations', 'godot_operations.gd'), [
-    'get_dependencies',
-    `@file:${paramsPath}`,
-  ]);
-  if (cyclic.status !== 0) {
-    throw new Error(`get_dependencies on a cycle failed:\n${`${cyclic.stdout}\n${cyclic.stderr}`.trim()}`);
-  }
-
-  const cyclicPayload = lastJsonLine(cyclic.stdout, 'get_dependencies on a cycle');
+  const cyclicPayload = runOperation(godotPath, projectDir, 'get_dependencies', {
+    resource_path: 'res://chain/ouro.gd',
+  });
   assert.ok(
     asArray(get(cyclicPayload, 'circular_references')).length > 0,
     'the walk should report the cycle it found rather than silently stopping',
@@ -417,24 +403,18 @@ function testDependencyWalk(godotPath: string, projectDir: string): void {
     join(projectDir, 'chain', 'shipping.gd'),
     'extends Node\n\nconst Helper = preload("res://addons/fixture/helper.gd")\n\n\nfunc _cache() -> Variant:\n\treturn load("res://.godot/fixture_cache.gd")\n',
   );
-  writeFileSync(paramsPath, JSON.stringify({ resource_path: 'res://chain/shipping.gd', depth: 3 }));
-  const shipping = runScript(godotPath, projectDir, join(projectDir, 'operations', 'godot_operations.gd'), [
-    'get_dependencies',
-    `@file:${paramsPath}`,
-  ]);
-  rmSync(join(projectDir, 'chain', 'shipping.gd'));
-  if (shipping.status !== 0) {
-    throw new Error(
-      `get_dependencies through addons failed:\n${`${shipping.stdout}\n${shipping.stderr}`.trim()}`,
-    );
+  let shipping: unknown;
+  try {
+    shipping = runOperation(godotPath, projectDir, 'get_dependencies', {
+      resource_path: 'res://chain/shipping.gd',
+      depth: 3,
+    });
+  } finally {
+    rmSync(join(projectDir, 'chain', 'shipping.gd'));
   }
-  const shippingDeps = asArray(
-    get(
-      lastJsonLine(shipping.stdout, 'get_dependencies through addons'),
-      'dependencies',
-      'res://chain/shipping.gd',
-    ),
-  ).map((dep) => get(dep, 'path'));
+  const shippingDeps = asArray(get(shipping, 'dependencies', 'res://chain/shipping.gd')).map((dep) =>
+    get(dep, 'path'),
+  );
   assert.ok(
     shippingDeps.includes('res://addons/fixture/helper.gd'),
     `addons are walked: ${shippingDeps.join(', ')}`,
@@ -458,11 +438,7 @@ function runOperation(
   params: unknown,
   scriptPath?: string,
 ): unknown {
-  const paramsPath = join(projectDir, 'operation-params.json');
-  writeFileSync(paramsPath, JSON.stringify(params));
-
-  const script = scriptPath ?? join(projectDir, 'operations', 'godot_operations.gd');
-  const run = runScript(godotPath, projectDir, script, [operation, `@file:${paramsPath}`]);
+  const run = runOperationScript(godotPath, projectDir, operation, params, scriptPath);
   const output = `${run.stdout}\n${run.stderr}`;
 
   if (run.status !== 0) {
@@ -473,31 +449,52 @@ function runOperation(
   // and the server hands every such line on to the caller. So an operation that passes here is
   // one that answers cleanly.
   assert.equal(run.stderr.trim(), '', `${operation} succeeded but wrote to stderr:\n${run.stderr.trim()}`);
-
-  return lastJsonLine(run.stdout, operation);
+  assert.ok(run.answer !== null, `${operation} wrote no answer:\n${output.trim()}`);
+  return run.answer;
 }
 
-interface RefusedRun {
+interface OperationRun {
   status: number | null;
+  signal: NodeJS.Signals | null;
   stdout: string;
   stderr: string;
+  /** What the operation wrote to its answer file, or null when it wrote none. */
+  answer: unknown;
 }
 
-/** The exit status and combined output of an operation that is expected to refuse. */
+/**
+ * One operation run the way the server runs it, whatever it answers.
+ *
+ * `scriptPath` defaults to the copy inside the project. The server runs the one in its own
+ * package instead, from outside the project entirely, which is what testInstalledLayout passes.
+ */
+function runOperationScript(
+  godotPath: string,
+  projectDir: string,
+  operation: string,
+  params: unknown,
+  scriptPath?: string,
+): OperationRun {
+  const paramsPath = join(projectDir, 'operation-params.json');
+  const answerPath = join(projectDir, 'operation-answer.json');
+  writeFileSync(paramsPath, JSON.stringify(params));
+  rmSync(answerPath, { force: true });
+
+  const script = scriptPath ?? join(projectDir, 'operations', 'godot_operations.gd');
+  const run = runScript(godotPath, projectDir, script, [operation, `@file:${paramsPath}`, answerPath]);
+  const answer = existsSync(answerPath) ? (JSON.parse(readFileSync(answerPath, 'utf8')) as unknown) : null;
+  rmSync(answerPath, { force: true });
+  return { status: run.status, signal: run.signal, stdout: run.stdout, stderr: run.stderr, answer };
+}
+
+/** The exit status, output and answer of an operation that is expected to refuse. */
 function runRefusedOperation(
   godotPath: string,
   projectDir: string,
   operation: string,
   params: unknown,
-): RefusedRun {
-  const paramsPath = join(projectDir, 'operation-params.json');
-  writeFileSync(paramsPath, JSON.stringify(params));
-
-  const run = runScript(godotPath, projectDir, join(projectDir, 'operations', 'godot_operations.gd'), [
-    operation,
-    `@file:${paramsPath}`,
-  ]);
-  return { status: run.status, stdout: run.stdout, stderr: run.stderr };
+): OperationRun {
+  return runOperationScript(godotPath, projectDir, operation, params);
 }
 
 /** A scene with one node of each shape the scene operations are asked to work on. */
@@ -562,7 +559,11 @@ function testOperations(godotPath: string, projectDir: string): void {
     extends: 'Node2D',
     template: 'state_machine',
   });
-  assert.equal(get(created, 'registered'), true, 'a script given a class_name is registered');
+  assert.deepEqual(
+    [get(created, 'class_name'), get(created, 'extends')],
+    ['FixtureHero', 'Node2D'],
+    'the class and base are read off the script the engine parsed',
+  );
   assert.equal(get(created, 'full_path'), 'res://made/hero.gd');
   assert.equal(get(created, 'parses'), true, 'the answer says the engine accepted what was written');
   const heroSource = readFileSync(join(projectDir, 'made', 'hero.gd'), 'utf8');
@@ -591,14 +592,33 @@ function testOperations(godotPath: string, projectDir: string): void {
     content: 'func _ready() -> void:\n\tvar loose = 1\n',
   });
   assert.equal(broken.status, 0, 'a script that was written is a success, whatever it says');
-  assert.equal(
-    get(lastJsonLine(broken.stdout, 'create_script'), 'parses'),
-    false,
-    'a script the engine refuses is reported as not parsing',
-  );
+  assert.equal(get(broken.answer, 'parses'), false, 'a script the engine refuses is reported as not parsing');
   assert.match(broken.stderr, /loose/, 'the reason is on stderr, where the server reads it from');
   // Gone again before the resave below walks the project, which would trip over it.
   rmSync(join(projectDir, 'made', 'broken.gd'));
+
+  // Content is the whole file: written as sent, header and all, and read back from what was parsed.
+  const whole = 'class_name FixtureWhole\nextends Sprite2D\n\n\nfunc _ready() -> void:\n\tpass\n';
+  const wrote = operation('create_script', { script_path: 'made/whole.gd', content: whole });
+  assert.equal(readFileSync(join(projectDir, 'made', 'whole.gd'), 'utf8'), whole, 'the file is the content');
+  assert.deepEqual(
+    [get(wrote, 'parses'), get(wrote, 'class_name'), get(wrote, 'extends')],
+    [true, 'FixtureWhole', 'Sprite2D'],
+    `and the answer is what the engine read in it: ${JSON.stringify(wrote)}`,
+  );
+  rmSync(join(projectDir, 'made', 'whole.gd'));
+  const doubled = runRefusedOperation(godotPath, projectDir, 'create_script', {
+    script_path: 'made/doubled.gd',
+    extends: 'Node2D',
+    content: whole,
+  });
+  assert.equal(doubled.answer, null, 'content with a header argument beside it is refused');
+  assert.match(
+    doubled.stderr,
+    /content is the whole file, so extends cannot be given with it/,
+    doubled.stderr,
+  );
+  assert.ok(!existsSync(join(projectDir, 'made', 'doubled.gd')), 'and nothing is written');
 
   // What gets written has to parse where an untyped declaration is an error, which the
   // autoload check further down proves by booting the project with this script as one.
@@ -614,7 +634,60 @@ function testOperations(godotPath: string, projectDir: string): void {
     ],
   });
   assert.equal(get(modified, 'total_modifications'), 6, 'every modification should be applied');
+  assert.equal(get(modified, 'parses'), true, 'and what they made parses under every warning');
+  // Each line answered is where the declaration is in the file written.
+  const onTheirLines = (answer: unknown): void => {
+    const written = readFileSync(join(projectDir, 'made', 'hero.gd'), 'utf8').split('\n');
+    const keywords: Record<string, string> = {
+      add_function: 'func',
+      add_variable: 'var',
+      add_signal: 'signal',
+    };
+    for (const applied of asArray(get(answer, 'modifications_applied'))) {
+      assert.match(
+        written[asNumber(get(applied, 'line')) - 1] ?? '',
+        new RegExp(
+          `^${keywords[asString(get(applied, 'type'))] ?? '?'} ${asString(get(applied, 'name'))}\\b`,
+        ),
+        `${JSON.stringify(applied)} should name the line its declaration is on`,
+      );
+    }
+  };
+  onTheirLines(modified);
+  // The function first and the others above it after, so a number taken at the moment of placing
+  // is two short for the function, and the variable moves when the signal goes in above it.
+  onTheirLines(
+    operation('modify_script', {
+      script_path: 'made/hero.gd',
+      modifications: [
+        { type: 'add_function', name: 'placed_first', body: 'placed_third.emit()' },
+        { type: 'add_variable', name: 'placed_second', varType: 'int' },
+        { type: 'add_signal', name: 'placed_third' },
+      ],
+    }),
+  );
   const modifiedSource = readFileSync(join(projectDir, 'made', 'hero.gd'), 'utf8');
+
+  // One addition that cannot be made refuses the call, and the file is left as it was.
+  const refused = runRefusedOperation(godotPath, projectDir, 'modify_script', {
+    script_path: 'made/hero.gd',
+    modifications: [
+      { type: 'add_variable', name: 'fine', varType: 'int' },
+      { type: 'add_variable', name: '' },
+      { type: 'add_signal', name: 'not a name' },
+    ],
+  });
+  assert.equal(refused.answer, null, 'a call with an addition it cannot make answers nothing');
+  assert.match(
+    refused.stderr,
+    /Nothing was changed: modification 2 has no name; modification 3 is named 'not a name', which GDScript does not accept as a name/,
+    refused.stderr,
+  );
+  assert.equal(
+    readFileSync(join(projectDir, 'made', 'hero.gd'), 'utf8'),
+    modifiedSource,
+    'and nothing is written',
+  );
   assert.match(modifiedSource, /var speed: float = 4\.0/, 'the variable should carry its type and default');
   assert.match(
     modifiedSource,
@@ -721,8 +794,29 @@ function testOperations(godotPath: string, projectDir: string): void {
   keptWhole(beforeAutoload, readFileSync(projectFile, 'utf8'), 'adding an autoload');
   const hero = named(get(operation('list_autoloads', {}), 'autoloads'), 'Hero');
   assert.ok(hero, 'the autoload that was just added should be listed');
-  assert.equal(get(hero, 'enabled'), true, 'the leading asterisk means enabled');
-  assert.equal(get(hero, 'file_exists'), true);
+  assert.deepEqual(
+    [get(hero, 'enabled'), get(hero, 'global'), get(hero, 'file_exists')],
+    [true, true, true],
+    'the leading asterisk makes the name global',
+  );
+  // Without the asterisk it still loads, which is why it is listed as enabled and not global.
+  const quiet = operation('add_autoload', { name: 'Quiet', path: 'made/hero.gd', global: false });
+  assert.deepEqual([get(quiet, 'enabled'), get(quiet, 'global')], [true, false], JSON.stringify(quiet));
+  assert.match(
+    readFileSync(projectFile, 'utf8'),
+    /^Quiet="res:\/\/made\/hero\.gd"$/m,
+    'written with no asterisk',
+  );
+  const listedQuiet = named(get(operation('list_autoloads', {}), 'autoloads'), 'Quiet');
+  assert.deepEqual([get(listedQuiet, 'enabled'), get(listedQuiet, 'global')], [true, false]);
+  assert.equal(get(operation('remove_autoload', { name: 'Quiet' }), 'removed'), true);
+  const disabled = runRefusedOperation(godotPath, projectDir, 'add_autoload', {
+    name: 'Off',
+    path: 'made/hero.gd',
+    enabled: false,
+  });
+  assert.equal(disabled.answer, null, 'an autoload cannot be added disabled, since it would load anyway');
+  assert.match(disabled.stderr, /global: false keeps its name out of the global scope/, disabled.stderr);
   assert.equal(get(operation('remove_autoload', { name: 'Hero' }), 'removed'), true);
   assert.equal(
     readFileSync(projectFile, 'utf8'),
@@ -759,10 +853,93 @@ function testOperations(godotPath: string, projectDir: string): void {
     2,
     'the option should have been written into the .import file',
   );
+
+  // An option holding an engine type is read tagged and written back as that type. Straight into
+  // JSON it came back as the text "(1, 2, 3)", and writing that back put a string in the sidecar.
+  const sidecarFile = join(projectDir, 'art.png.import');
+  writeFileSync(
+    sidecarFile,
+    readFileSync(sidecarFile, 'utf8').replace('[params]\n', '[params]\n\nextent=Vector3(1, 2, 3)\n'),
+  );
+  const extent = get(operation('get_import_options', { resource_path: 'art.png' }), 'params', 'extent');
+  assert.deepEqual(extent, { _type: 'Vector3', x: 1, y: 2, z: 3 }, JSON.stringify(extent));
+  operation('set_import_options', {
+    resource_path: 'art.png',
+    options: { extent: { ...(extent as object), z: 6 } },
+  });
+  assert.match(readFileSync(sidecarFile, 'utf8'), /^extent=Vector3\(1, 2, 6\)$/m, 'written back as a vector');
+  const kept = readFileSync(sidecarFile, 'utf8');
+  const wrong = runRefusedOperation(godotPath, projectDir, 'set_import_options', {
+    resource_path: 'art.png',
+    options: { extent: '(4, 5, 6)', 'compress/mode': 2.5 },
+  });
+  assert.equal(wrong.answer, null, 'an option given something it cannot hold is refused');
+  assert.match(
+    wrong.stderr,
+    /Nothing was written: extent holds a Vector3, and "\(4, 5, 6\)" is not one; compress\/mode holds an int, and 2\.5 is not one/,
+    wrong.stderr,
+  );
+  assert.equal(readFileSync(sidecarFile, 'utf8'), kept, 'and the sidecar is left as it was');
+  // A sidecar whose source has gone takes options nothing will ever apply.
+  writeFileSync(
+    join(projectDir, 'gone.png.import'),
+    '[remap]\n\nimporter="texture"\n\n[params]\n\ncompress/mode=0\n',
+  );
+  const orphan = runRefusedOperation(godotPath, projectDir, 'set_import_options', {
+    resource_path: 'gone.png',
+    options: { 'compress/mode': 1 },
+  });
+  rmSync(join(projectDir, 'gone.png.import'));
+  assert.equal(orphan.answer, null, 'options for a source that is gone are refused');
+  assert.match(
+    orphan.stderr,
+    /res:\/\/gone\.png is not on disk, so there is nothing its import options apply to/,
+  );
+
   assert.equal(
     get(operation('get_import_status', { resource_path: 'art.png' }), 'resources', 0, 'status'),
     // A sidecar the engine never wrote has no uid and no recorded hash, and the editor imports it.
     'needs_reimport',
+  );
+
+  // A file with no sidecar has not been imported only if the engine imports that kind of file.
+  // A scene was answered as needing an import, and asking for its options as not imported yet.
+  const statusOf = (path: string): unknown[] => {
+    const one = get(operation('get_import_status', { resource_path: path }), 'resources', 0);
+    return [get(one, 'status'), get(one, 'reason')];
+  };
+  assert.deepEqual(statusOf('fixture_scene.tscn'), [
+    'not_imported',
+    'the engine loads .tscn files as they are, without importing them',
+  ]);
+  mkdirSync(join(projectDir, 'kept_out'), { recursive: true });
+  writeFileSync(join(projectDir, 'kept_out', '.gdignore'), '');
+  writeFileSync(join(projectDir, 'kept_out', 'raw.png'), '');
+  writeFileSync(join(projectDir, 'fresh.png'), '');
+  writeFileSync(join(projectDir, 'model.blend'), '');
+  try {
+    assert.deepEqual(statusOf('kept_out/raw.png'), [
+      'not_imported',
+      'a .gdignore in res://kept_out keeps the engine from importing anything under it',
+    ]);
+    assert.deepEqual(statusOf('fresh.png'), ['needs_reimport', 'it has not been imported']);
+    assert.match(
+      String(statusOf('model.blend')[1]),
+      /^no importer built into the engine takes \.blend files/,
+    );
+  } finally {
+    rmSync(join(projectDir, 'kept_out'), { recursive: true, force: true });
+    rmSync(join(projectDir, 'fresh.png'), { force: true });
+    rmSync(join(projectDir, 'model.blend'), { force: true });
+  }
+  const sceneOptions = runRefusedOperation(godotPath, projectDir, 'get_import_options', {
+    resource_path: 'fixture_scene.tscn',
+  });
+  assert.equal(sceneOptions.answer, null);
+  assert.match(
+    sceneOptions.stderr,
+    /res:\/\/fixture_scene\.tscn has no import options: the engine loads \.tscn files as they are/,
+    sceneOptions.stderr,
   );
 
   const presets = operation('list_export_presets', {});
@@ -781,6 +958,49 @@ function testOperations(godotPath: string, projectDir: string): void {
   const health = operation('get_project_health', {});
   assert.match(asString(get(health, 'grade')), /^[A-F]$/);
   assert.ok(asNumber(get(health, 'checks', 'scripts', 'total_scripts')) > 0, 'the project has scripts in it');
+  // A category passes when it found nothing, and what it found is listed as an issue: every one said
+  // passed beside its own failures, and issues was always empty.
+  for (const [category, check] of Object.entries(asObject(get(health, 'checks')))) {
+    const details = asArray(get(check, 'details'));
+    assert.equal(get(check, 'passed'), details.length === 0, `${category}: ${JSON.stringify(check)}`);
+    for (const detail of details) {
+      assert.ok(
+        asArray(get(health, 'issues')).some(
+          (issue) => get(issue, 'check') === category && get(issue, 'detail') === detail,
+        ),
+        `${category}'s ${JSON.stringify(detail)} should be an issue: ${JSON.stringify(get(health, 'issues'))}`,
+      );
+    }
+  }
+
+  // A main scene named by a UID nothing resolves is said to be that, not a file that does not exist.
+  operation('set_project_setting', { setting: 'application/run/main_scene', value: 'uid://b0gusb0gusb0g' });
+  try {
+    const unresolved = operation('get_project_health', { categories: ['config'] });
+    assert.equal(get(unresolved, 'checks', 'config', 'passed'), false, JSON.stringify(unresolved));
+    assert.ok(
+      asArray(get(unresolved, 'checks', 'config', 'details')).includes(
+        "Main scene uid://b0gusb0gusb0g does not resolve: no file in the project's uid cache has it, so the file has gone or the project has not been imported yet (project_import refresh_uids imports it)",
+      ),
+      JSON.stringify(unresolved),
+    );
+  } finally {
+    operation('set_project_setting', {
+      setting: 'application/run/main_scene',
+      value: 'res://fixture_scene.tscn',
+    });
+  }
+
+  // A preset asked about is looked for, rather than logged and passed over.
+  const presetless = operation('validate_project', { preset: 'Nope' });
+  assert.equal(get(presetless, 'valid'), false, JSON.stringify(presetless));
+  assert.ok(asArray(get(presetless, 'checks_performed')).includes('export_preset'));
+  assert.ok(
+    asArray(get(presetless, 'issues')).some(
+      (issue) => get(issue, 'message') === 'No export preset is named Nope: the project has none',
+    ),
+    JSON.stringify(presetless),
+  );
 
   // The chain the dependency walk was pointed at is also what refers to leaf.gd, and each
   // reference says how: middle.gd preloads it.
@@ -839,6 +1059,34 @@ function testOperations(godotPath: string, projectDir: string): void {
   assert.equal(get(known, 'classes', 'FixtureHero', 'path'), 'res://made/hero.gd');
   assert.equal(get(known, 'classes', 'Stale'), undefined, 'the stale entry is gone');
 
+  // Another language's classes are kept while their files are there: the rebuild reads GDScript
+  // only and writes the list whole, so a C# project's global classes were dropped and called removed.
+  const cacheFile = join(projectDir, '.godot', 'global_script_class_cache.cfg');
+  const csharp = (name: string, path: string): string =>
+    `{\n"base": &"Node",\n"class": &"${name}",\n"icon": "",\n"is_abstract": false,\n"is_tool": false,\n"language": &"C#",\n"path": "${path}"\n}`;
+  writeFileSync(join(projectDir, 'made', 'Foe.cs'), 'public partial class Foe : Godot.Node {}\n');
+  writeFileSync(
+    cacheFile,
+    `list=[${csharp('Foe', 'res://made/Foe.cs')}, ${csharp('Lost', 'res://made/Lost.cs')}]\n`,
+  );
+  try {
+    const kept = operation('refresh_class_cache', {});
+    assert.deepEqual(get(kept, 'carried'), ['Foe'], JSON.stringify(kept));
+    assert.deepEqual(get(kept, 'removed'), ['Lost'], 'one whose file has gone is dropped');
+    assert.match(
+      readFileSync(cacheFile, 'utf8'),
+      /"class": &"Foe"[\s\S]*"language": &"C#"/,
+      'and the kept one is in the file',
+    );
+  } finally {
+    rmSync(join(projectDir, 'made', 'Foe.cs'));
+    assert.equal(
+      get(operation('refresh_class_cache', {}), 'carried'),
+      undefined,
+      'and gone again with its file',
+    );
+  }
+
   // A script the engine has never imported has no .uid beside it, and the answer says which of the
   // two it is rather than returning an empty string for both. This used to sit next to a call to
   // resave_resources, which walked the project writing every scene and script back: the assertion
@@ -853,6 +1101,52 @@ function testOperations(godotPath: string, projectDir: string): void {
     /refresh_uids/,
     'and it names the op that makes one, since that is the next thing the caller wants',
   );
+  // Every other kind keeps its UID somewhere else, and refresh_uids makes none of them: a scene in its
+  // header and an imported file in its import file. All were answered as having no .uid, with
+  // refresh_uids named as what would make one.
+  writeFileSync(
+    join(projectDir, 'uid_scene.tscn'),
+    '[gd_scene format=3 uid="uid://c4c550daekhi1"]\n\n[node name="S" type="Node"]\n',
+  );
+  writeFileSync(join(projectDir, 'bare_scene.tscn'), '[gd_scene format=3]\n\n[node name="B" type="Node"]\n');
+  writeFileSync(join(projectDir, 'uid_art.png'), solidPng(10, 10, 10));
+  writeFileSync(
+    join(projectDir, 'uid_art.png.import'),
+    '[remap]\n\nimporter="texture"\nuid="uid://bsrmp7ti1112c"\n',
+  );
+  writeFileSync(join(projectDir, 'raw_art.png'), solidPng(10, 10, 10));
+  try {
+    const uidOf = (path: string): unknown[] => {
+      const answer = operation('get_uid', { resource_path: path });
+      return [
+        get(answer, 'exists'),
+        get(answer, 'uid') ?? null,
+        get(answer, 'from') ?? get(answer, 'message'),
+      ];
+    };
+    assert.deepEqual(uidOf('uid_scene.tscn'), [true, 'uid://c4c550daekhi1', "the file's header"]);
+    assert.deepEqual(uidOf('uid_art.png'), [true, 'uid://bsrmp7ti1112c', 'res://uid_art.png.import']);
+    assert.deepEqual(uidOf('bare_scene.tscn'), [
+      false,
+      null,
+      'Its header carries no uid. The editor writes one when it saves the file; refresh_uids does not, and a headless save does not either.',
+    ]);
+    assert.deepEqual(uidOf('raw_art.png'), [
+      false,
+      null,
+      'It has not been imported, and the import is what gives it a UID: project_import reimport imports it.',
+    ]);
+  } finally {
+    for (const file of [
+      'uid_scene.tscn',
+      'bare_scene.tscn',
+      'uid_art.png',
+      'uid_art.png.import',
+      'raw_art.png',
+    ]) {
+      rmSync(join(projectDir, file), { force: true });
+    }
+  }
 
   // Plugins: the shipped addons are installed and none is enabled until one is asked for.
   // The enabled list in project.godot is an engine expression the editor reads, so what was
@@ -887,6 +1181,42 @@ function testOperations(godotPath: string, projectDir: string): void {
     'enabling then disabling a plugin should give project.godot back byte for byte',
   );
 
+  // A plugin one folder down is a plugin to the editor, which loads it from the path in the list.
+  // Read through a pattern for one folder, it was never listed, and enabling any other plugin wrote
+  // the list back without it.
+  const nested = join(projectDir, 'addons', 'pack', 'sub');
+  mkdirSync(nested, { recursive: true });
+  writeFileSync(join(nested, 'plugin.cfg'), '[plugin]\n\nname="Nested"\nscript="nested.gd"\n');
+  try {
+    assert.equal(get(operation('enable_plugin', { plugin_name: 'pack/sub' }), 'action'), 'enabled');
+    const another = operation('enable_plugin', { plugin_name: 'gdharness_editor' });
+    assert.deepEqual(
+      get(another, 'enabled_plugins'),
+      ['pack/sub', 'gdharness_editor'],
+      `enabling another keeps the nested one: ${JSON.stringify(another)}`,
+    );
+    const both = operation('list_plugins', {});
+    assert.deepEqual(
+      [get(named(get(both, 'plugins'), 'pack/sub'), 'enabled'), get(both, 'enabled_count')],
+      [true, 2],
+      `and it is listed, enabled: ${JSON.stringify(both)}`,
+    );
+    assert.equal(get(both, 'enabled_but_missing'), undefined, 'every enabled plugin is there');
+    // An entry whose folder has gone is one the editor fails to load at every start.
+    rmSync(join(projectDir, 'addons', 'pack'), { recursive: true, force: true });
+    const gone = operation('list_plugins', {});
+    assert.deepEqual(
+      get(gone, 'enabled_but_missing'),
+      ['res://addons/pack/sub/plugin.cfg'],
+      `an enabled plugin with no plugin.cfg is named: ${JSON.stringify(gone)}`,
+    );
+    operation('disable_plugin', { plugin_name: 'gdharness_editor' });
+    operation('disable_plugin', { plugin_name: 'pack/sub' });
+    assert.equal(readFileSync(projectFile, 'utf8'), beforePlugin, 'and both come out again');
+  } finally {
+    rmSync(join(projectDir, 'addons', 'pack'), { recursive: true, force: true });
+  }
+
   // Input actions, which are stored as an engine expression rather than as JSON.
   const beforeAction = readFileSync(projectFile, 'utf8');
   const action = operation('add_input_action', {
@@ -905,12 +1235,55 @@ function testOperations(godotPath: string, projectDir: string): void {
   const buses = operation('get_audio_buses', {});
   assert.ok(named(get(buses, 'buses'), 'Master'), 'every project has a Master bus');
   assert.ok(named(get(buses, 'buses'), 'Fixture'), 'the layout was written, so a fresh process sees the bus');
+  // A second bus sending to Master goes in right after it, ahead of the first. Taking the last index
+  // as the new one renamed the first bus and answered with it.
+  const second = operation('create_audio_bus', { bus_name: 'Second' });
+  const layoutNames = (answer: unknown): unknown[] =>
+    asArray(get(answer, 'buses')).map((bus) => [get(bus, 'index'), get(bus, 'name'), get(bus, 'send')]);
+  assert.deepEqual(
+    [get(second, 'bus', 'index'), get(second, 'bus', 'name'), get(second, 'bus', 'send')],
+    [1, 'Second', 'Master'],
+    `the new bus is where it went: ${JSON.stringify(second)}`,
+  );
+  assert.deepEqual(
+    layoutNames(operation('get_audio_buses', {})),
+    [
+      [0, 'Master', ''],
+      [1, 'Second', 'Master'],
+      [2, 'Fixture', 'Master'],
+    ],
+    'and the bus that was there keeps its name, one further along',
+  );
+  const twice = runRefusedOperation(godotPath, projectDir, 'create_audio_bus', { bus_name: 'Fixture' });
+  assert.equal(twice.answer, null, 'a name a bus already has is refused');
+  assert.match(twice.stderr, /A bus named Fixture already exists, at index 2/, twice.stderr);
+
+  // Set means the slot holds this effect afterwards: added at the end, replaced where one is.
+  const effects = (answer: unknown): unknown[] =>
+    asArray(get(answer, 'bus', 'effects')).map((effect) => get(effect, 'type'));
   const reverb = operation('set_audio_bus_effect', {
-    bus_index: asNumber(get(fixtureBus, 'bus', 'index')),
+    bus_index: 2,
     effect_index: 0,
     effect_type: 'AudioEffectReverb',
   });
-  assert.equal(get(reverb, 'bus', 'effects', 0, 'type'), 'AudioEffectReverb', JSON.stringify(reverb));
+  assert.deepEqual(effects(reverb), ['AudioEffectReverb'], `no padding: ${JSON.stringify(reverb)}`);
+  const chorus = operation('set_audio_bus_effect', { bus_index: 2, effect_index: 0, effect_type: 'Chorus' });
+  assert.deepEqual(
+    [effects(chorus), get(chorus, 'replaced'), get(chorus, 'effect_type')],
+    [['AudioEffectChorus'], 'AudioEffectReverb', 'AudioEffectChorus'],
+    `the effect in the slot is replaced, not pushed along: ${JSON.stringify(chorus)}`,
+  );
+  const beyond = runRefusedOperation(godotPath, projectDir, 'set_audio_bus_effect', {
+    bus_index: 2,
+    effect_index: 3,
+    effect_type: 'Reverb',
+  });
+  assert.equal(beyond.answer, null, 'a slot past the one after the last is refused');
+  assert.match(
+    beyond.stderr,
+    /Bus 2 has 1 effect, so effect_index can be 0 to 1, where 1 adds one after the last/,
+    beyond.stderr,
+  );
 
   // ClassDB, which is the one source of answers that does not touch the project at all.
   const classes = operation('query_classes', { filter: 'camera', category: 'node' });
@@ -1493,7 +1866,7 @@ function testRefusals(godotPath: string, projectDir: string): void {
   });
   assert.notEqual(missing.status, 0, 'a missing script should fail the run');
   assert.match(missing.stderr, /\[ERROR\].*does not exist/, 'the reason should be on stderr');
-  assert.doesNotMatch(missing.stdout, /^\{/m, 'a failed operation should print no payload');
+  assert.equal(missing.answer, null, 'a failed operation should write no answer');
 
   const unknown = runRefusedOperation(godotPath, projectDir, 'no_such_operation', {});
   assert.notEqual(unknown.status, 0, 'an unknown operation should fail the run');
@@ -1558,6 +1931,354 @@ function testAFamilyOfSettingsAnswersWithItsTypes(godotPath: string, projectDir:
   assert.equal(asNumber(get(none, 'count')), 0);
 }
 
+/**
+ * A reverse search finds every way the engine is told to load a file, and nothing that only shares
+ * its name.
+ *
+ * An autoload, the main scene and a plugin's script are named only in project.godot and plugin.cfg,
+ * and each was answered as used by nothing, which is the answer a file is deleted on. A relative
+ * preload and a scene named by its UID were missed, a node and a string sharing a class's name were
+ * counted as uses of it, and the forward walk passed over relative paths and handed a list cut short
+ * deep in the walk to a nearer reach of the same file.
+ */
+function testEveryUseIsFound(godotPath: string): void {
+  const dir = createProject(godotPath);
+  const operation = (name: string, params: unknown): unknown => runOperation(godotPath, dir, name, params);
+  const kinds = (path: string): unknown =>
+    get(operation('find_resource_usages', { resource_path: path }), 'summary', 'by_kind');
+  try {
+    mkdirSync(join(dir, 'auto'));
+    writeFileSync(join(dir, 'auto', 'autoload.gd'), 'extends Node\n');
+    writeFileSync(
+      join(dir, 'main.tscn'),
+      '[gd_scene format=3 uid="uid://c4c550daekhi1"]\n\n[node name="Main" type="Node"]\n',
+    );
+    writeFileSync(
+      join(dir, 'project.godot'),
+      // An input action sharing a class's name is a key written bare, which only the rule that a
+      // class is used by name in code alone keeps from counting.
+      `${readFileSync(join(dir, 'project.godot'), 'utf8')}\n[autoload]\n\nAuto="*res://auto/autoload.gd"\n\n[application]\n\nrun/main_scene="uid://c4c550daekhi1"\n\n[input]\n\nEnemy={\n"deadzone": 0.5,\n"events": []\n}\n`,
+    );
+    mkdirSync(join(dir, 'addons', 'probe'), { recursive: true });
+    writeFileSync(
+      join(dir, 'addons', 'probe', 'plugin.cfg'),
+      '[plugin]\n\nname="Probe"\nscript="plugin.gd"\n',
+    );
+    writeFileSync(join(dir, 'addons', 'probe', 'plugin.gd'), '@tool\nextends EditorPlugin\n');
+    assert.deepEqual(kinds('auto/autoload.gd'), { setting: 1 }, 'an autoload is used by project.godot');
+    assert.deepEqual(kinds('main.tscn'), { setting: 1 }, 'and the main scene, named by its UID');
+    assert.deepEqual(
+      kinds('addons/probe/plugin.gd'),
+      { plugin: 1 },
+      'and a plugin script, relative to plugin.cfg',
+    );
+
+    mkdirSync(join(dir, 'sub'));
+    writeFileSync(join(dir, 'sub', 'b.gd'), 'extends Node\n');
+    writeFileSync(join(dir, 'sub', 'a.gd'), 'extends Node\n\nconst B = preload("b.gd")\n');
+    assert.deepEqual(kinds('sub/b.gd'), { preload: 1 }, 'a relative preload names its sibling');
+    const forward = asArray(
+      get(operation('get_dependencies', { resource_path: 'sub/a.gd' }), 'dependencies', 'res://sub/a.gd'),
+    );
+    assert.deepEqual(
+      forward.map((dep) => get(dep, 'path')),
+      ['res://sub/b.gd'],
+      'and the forward walk follows it',
+    );
+
+    // A class used by name in code, and only there: a node and a string with the same word are not uses.
+    writeFileSync(join(dir, 'enemy.gd'), 'class_name Enemy\nextends Node2D\n');
+    writeFileSync(
+      join(dir, 'spawner.gd'),
+      'extends Node\n\nvar held: Enemy\n\n\nfunc say() -> void:\n\tprint("Enemy")  # an Enemy\n',
+    );
+    writeFileSync(join(dir, 'arena.tscn'), '[gd_scene format=3]\n\n[node name="Enemy" type="Node2D"]\n');
+    assert.deepEqual(
+      kinds('enemy.gd'),
+      { class_name: 1, comment: 1 },
+      'the declaration uses it; the string and node do not',
+    );
+
+    // Five deep and a shortcut to the middle: at depth three the middle is first reached two down,
+    // where its list stops short, and then again one down, where it does not.
+    for (const [name, next] of [
+      ['a', ['b', 'c']],
+      ['b', ['c']],
+      ['c', ['d']],
+      ['d', ['e']],
+      ['e', []],
+    ] as const) {
+      writeFileSync(
+        join(dir, 'sub', `chain_${name}.gd`),
+        `extends Node\n\n${next.map((one) => `const ${one.toUpperCase()} = preload("res://sub/chain_${one}.gd")\n`).join('')}`,
+      );
+    }
+    const walked = asArray(
+      get(
+        operation('get_dependencies', { resource_path: 'sub/chain_a.gd', depth: 3 }),
+        'dependencies',
+        'res://sub/chain_a.gd',
+      ),
+    );
+    const shortcut = walked.find((dep) => get(dep, 'path') === 'res://sub/chain_c.gd');
+    assert.deepEqual(
+      asArray(get(shortcut, 'dependencies')).map((dep) => [
+        get(dep, 'path'),
+        asArray(get(dep, 'dependencies') ?? []).map((one) => get(one, 'path')),
+      ]),
+      [['res://sub/chain_d.gd', ['res://sub/chain_e.gd']]],
+      `one down, the middle has its whole list: ${JSON.stringify(walked)}`,
+    );
+  } finally {
+    sweep(dir);
+  }
+}
+
+/**
+ * A setting is answered with the feature overrides that replace it, since the value under its own
+ * name is not the one a Windows build or the editor reads. Measured on 4.7.2: `get_setting` answers
+ * the plain value in a headless run, so the answer was right and the one a game showed was elsewhere.
+ */
+function testASettingSaysWhatReplacesIt(godotPath: string): void {
+  const dir = createProject(godotPath);
+  try {
+    writeFileSync(
+      join(dir, 'project.godot'),
+      `${readFileSync(join(dir, 'project.godot'), 'utf8')}\n[application]\n\nconfig/description="plain"\nconfig/description.windows="on windows"\nconfig/description.editor="in the editor"\n`,
+    );
+    const read = runOperation(godotPath, dir, 'get_project_setting', {
+      setting: 'application/config/description',
+    });
+    assert.deepEqual(
+      [get(read, 'value'), get(read, 'overrides')],
+      ['plain', { windows: 'on windows', editor: 'in the editor' }],
+      JSON.stringify(read),
+    );
+    const bare = runOperation(godotPath, dir, 'get_project_setting', { setting: 'application/config/name' });
+    assert.equal(get(bare, 'overrides'), undefined, 'and a setting with none carries none');
+  } finally {
+    sweep(dir);
+  }
+}
+
+/**
+ * Validation reads at most a hundred scripts, and says so with the count it read and the count there
+ * are. It counted the one past the limit before stopping and answered 101.
+ */
+function testValidationSaysHowMuchItRead(godotPath: string): void {
+  const dir = createProject(godotPath);
+  try {
+    mkdirSync(join(dir, 'many'));
+    for (let index = 0; index < 60; index++) {
+      writeFileSync(join(dir, 'many', `s${index}.gd`), 'extends Node\n');
+    }
+    const validated = runOperation(godotPath, dir, 'validate_project', {});
+    const total = asNumber(get(validated, 'scripts_total'));
+    assert.ok(total > 100, `the project should hold more than the limit: ${total}`);
+    assert.equal(get(validated, 'scripts_checked'), 100, JSON.stringify(validated));
+  } finally {
+    sweep(dir);
+  }
+}
+
+/**
+ * An import is judged stale when the importer would judge it so, before any of its files is looked at.
+ *
+ * Both states have every file current: an importer that now writes a newer format, which every scene
+ * meets after an engine upgrade, and a VRAM texture imported before the project asked for another
+ * compression format. Both read as up to date while the editor's next scan imported them. Each is
+ * checked against the engine's own verdict: the import pass after the reading has to rebuild it.
+ */
+function testTheImporterIsAskedFirst(godotPath: string): void {
+  const dir = createProject(godotPath);
+  const operation = (name: string, params: unknown): unknown => runOperation(godotPath, dir, name, params);
+  const statusOf = (resource: string): unknown[] => {
+    const one = get(operation('get_import_status', { resource_path: resource }), 'resources', 0);
+    return [get(one, 'status'), get(one, 'reason')];
+  };
+  const importAll = (): void => {
+    const run = spawnSync(godotPath, ['--headless', '--path', dir, '--import'], {
+      encoding: 'utf8',
+      timeout: 180_000,
+    });
+    assert.equal(run.status, 0, `the project should import: ${run.stdout}\n${run.stderr}`);
+  };
+  const imported = (name: string): number =>
+    Math.max(
+      ...readdirSync(join(dir, '.godot', 'imported'))
+        .filter((file) => file.startsWith(`${name}-`) && !file.endsWith('.md5'))
+        .map((file) => statSync(join(dir, '.godot', 'imported', file)).mtimeMs),
+    );
+  try {
+    writeFileSync(join(dir, 'thing.gltf'), JSON.stringify(triangleUsing('none.png')));
+    writeFileSync(join(dir, 'tex.png'), solidPng(40, 160, 40));
+    writeFileSync(
+      join(dir, 'tex.png.import'),
+      '[remap]\n\nimporter="texture"\n\n[params]\n\ncompress/mode=2\n',
+    );
+    importAll();
+    assert.deepEqual(statusOf('thing.gltf')[0], 'up_to_date', 'a fresh import is current');
+    assert.deepEqual(statusOf('tex.png')[0], 'up_to_date', 'a fresh import is current');
+
+    // The version this engine writes, read off the sidecar it just wrote, has to be the one judged
+    // against, or an engine that raises it leaves every older scene answered as current.
+    const sidecarPath = join(dir, 'thing.gltf.import');
+    const sidecar = readFileSync(sidecarPath, 'utf8');
+    const written = /^importer_version=(\d+)$/m.exec(sidecar)?.[1];
+    assert.ok(written !== undefined, `the scene importer writes its version: ${sidecar}`);
+    // Older, and with the hash the editor recorded for the sidecar moved to match it, so the version
+    // is the only thing that differs from a sidecar the editor wrote.
+    const cachePath = join(dir, '.godot', 'editor', 'filesystem_cache10');
+    const md5 = (text: string): string => createHash('md5').update(text).digest('hex');
+    const older = sidecar.replace(/^importer_version=\d+\n/m, '');
+    writeFileSync(sidecarPath, older);
+    writeFileSync(cachePath, readFileSync(cachePath, 'utf8').replace(md5(sidecar), md5(older)));
+    assert.deepEqual(statusOf('thing.gltf'), [
+      'needs_reimport',
+      `it was imported at version 0 of the scene importer, and this engine imports at version ${written}`,
+    ]);
+    const sceneBefore = imported('thing.gltf');
+    importAll();
+    assert.ok(
+      imported('thing.gltf') > sceneBefore,
+      'and the engine reimports it, which is the verdict held to',
+    );
+    assert.deepEqual(statusOf('thing.gltf')[0], 'up_to_date');
+
+    operation('set_project_setting', {
+      setting: 'rendering/textures/vram_compression/import_etc2_astc',
+      value: true,
+    });
+    assert.deepEqual(statusOf('tex.png'), [
+      'needs_reimport',
+      'the project now asks for etc2_astc textures, and this import did not write them',
+    ]);
+    const textureBefore = imported('tex.png');
+    importAll();
+    assert.ok(imported('tex.png') > textureBefore, 'and the engine reimports it, in the format asked for');
+    assert.deepEqual(statusOf('tex.png')[0], 'up_to_date');
+
+    // Asking for less is not a reason: an import holding a format the project no longer asks for
+    // stays, measured as the engine leaving it alone.
+    operation('set_project_setting', {
+      setting: 'rendering/textures/vram_compression/import_etc2_astc',
+      value: false,
+    });
+    assert.deepEqual(statusOf('tex.png')[0], 'up_to_date');
+  } finally {
+    sweep(dir);
+  }
+}
+
+/**
+ * The answer is what the operation wrote, whatever the project prints and however the engine ends.
+ *
+ * Through the server's own path, because the reading is the server's. The project's autoloads run
+ * after the operation has answered: one printing a dictionary in `_process` was the last JSON line
+ * out and was taken as the answer, and one quitting with a code afterwards turned a write that had
+ * happened into a failure a caller would retry. The third project is the operations script faulting
+ * part-way, which the engine survives by handing the caller a default value and exiting 0.
+ */
+async function testTheAnswerIsTheOperations(godotPath: string): Promise<void> {
+  const dir = mkdtempSync(join(tmpdir(), 'gdharness-answer-'));
+  const operations = mkdtempSync(join(tmpdir(), 'gdharness-faulty-operations-'));
+  try {
+    writeFileSync(
+      join(dir, 'project.godot'),
+      [
+        'config_version=5',
+        '',
+        '[application]',
+        'config/name="Answered"',
+        '',
+        '[autoload]',
+        'Loud="*res://loud.gd"',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(dir, 'loud.gd'),
+      [
+        'extends Node',
+        '',
+        '',
+        'func _ready() -> void:',
+        '\tprint({"setting_path": "not the operation", "value": "loud _ready"})',
+        '\tif FileAccess.file_exists("res://quit_after"):',
+        '\t\tget_tree().quit(3)',
+        '',
+        '',
+        'func _process(_delta: float) -> void:',
+        '\tprint({"setting_path": "not the operation", "value": "loud _process"})',
+        '',
+      ].join('\n'),
+    );
+    const engine = { godotPath, script: resolve('src/godot/operations/godot_operations.gd'), debug: false };
+
+    const read = await runThroughTheServersOwnPath(
+      engine,
+      'get_project_setting',
+      { setting: 'application/config/name' },
+      dir,
+    );
+    assert.ok(read.ok, `the read should answer: ${read.ok ? '' : read.message}`);
+    assert.deepEqual(
+      [get(read.payload, 'setting_path'), get(read.payload, 'value'), read.afterAnswer],
+      ['application/config/name', 'Answered', undefined],
+      `the answer is the operation's, not the autoload's: ${JSON.stringify(read.payload)}`,
+    );
+
+    writeFileSync(join(dir, 'quit_after'), '');
+    const written = await runThroughTheServersOwnPath(
+      engine,
+      'set_project_setting',
+      { setting: 'application/config/description', value: 'written before the quit' },
+      dir,
+    );
+    assert.ok(written.ok, `a write that happened is answered as one: ${written.ok ? '' : written.message}`);
+    assert.match(
+      written.afterAnswer ?? '',
+      /wrote this answer, and then the engine did not exit cleanly \(exit code 3\)/,
+      String(written.afterAnswer),
+    );
+    assert.match(
+      readFileSync(join(dir, 'project.godot'), 'utf8'),
+      /^config\/description="written before the quit"$/m,
+      'and the write it answered for is on disk',
+    );
+    rmSync(join(dir, 'quit_after'));
+
+    // One helper made to raise part-way through building the answer, in a copy of the scripts.
+    cpSync(resolve('src/godot/operations'), operations, { recursive: true });
+    const config = join(operations, 'project_config.gd');
+    const source = readFileSync(config, 'utf8');
+    const faulted = source.replace('"setting_path": setting_path,', '"setting_path": _faulty(),');
+    assert.notEqual(faulted, source, 'the fault should have gone in where the answer is built');
+    writeFileSync(
+      config,
+      `${faulted}\n\nfunc _faulty() -> String:\n\tvar none: Array = []\n\treturn none[1]\n`,
+    );
+    const partial = await runThroughTheServersOwnPath(
+      { ...engine, script: join(operations, 'godot_operations.gd') },
+      'get_project_setting',
+      { setting: 'application/config/name' },
+      dir,
+    );
+    assert.ok(
+      !partial.ok,
+      `an answer the script faulted while building is refused: ${JSON.stringify(partial)}`,
+    );
+    assert.match(
+      partial.message,
+      /^get_project_setting hit an error in the operations script, so its answer is left out: .*Out of bounds get index '1'.* \(_faulty \(.*project_config\.gd:\d+\)\)$/,
+      partial.message,
+    );
+  } finally {
+    sweep(dir);
+    sweep(operations);
+  }
+}
+
 function testTheOperationsSurviveEveryWarning(godotPath: string): void {
   const dir = mkdtempSync(join(tmpdir(), 'gdharness-strict-'));
   try {
@@ -1587,6 +2308,34 @@ function testTheOperationsSurviveEveryWarning(godotPath: string): void {
     sweep(dir);
   }
 }
+
+/** The cases after the fixtures, in the order the leg runs them, by the name `case` takes. */
+const CASES: Readonly<Record<string, (godotPath: string, projectDir: string) => void | Promise<void>>> = {
+  dependencyWalk: testDependencyWalk,
+  operations: testOperations,
+  gdignore: testAGdignoreStopsTheWalk,
+  importJudged: testAnImportIsJudgedByWhatItWasBuiltFrom,
+  importerFirst: (godotPath) => {
+    testTheImporterIsAskedFirst(godotPath);
+  },
+  validationCounts: (godotPath) => {
+    testValidationSaysHowMuchItRead(godotPath);
+  },
+  everyUse: (godotPath) => {
+    testEveryUseIsFound(godotPath);
+  },
+  overrides: (godotPath) => {
+    testASettingSaysWhatReplacesIt(godotPath);
+  },
+  runningLog: (godotPath) => testAnOperationLeavesARunningLogAlone(godotPath),
+  refusals: testRefusals,
+  installedLayout: testInstalledLayout,
+  settingsFamily: testAFamilyOfSettingsAnswersWithItsTypes,
+  everyWarning: (godotPath) => {
+    testTheOperationsSurviveEveryWarning(godotPath);
+  },
+  answer: (godotPath) => testTheAnswerIsTheOperations(godotPath),
+};
 
 async function main(): Promise<void> {
   const godotPath = resolveGodotPath();
@@ -1619,6 +2368,25 @@ async function main(): Promise<void> {
       sweep(projectDir);
     }
     console.log('typed gate passed');
+    return;
+  }
+  // Cases by name, in the order given, for the same reason as one fixture below. Several, because
+  // some read what an earlier one left in the project: operations reads the chain dependencyWalk writes.
+  const one = process.argv.indexOf('case');
+  if (one !== -1) {
+    const names = process.argv.slice(one + 1);
+    const unknown = names.filter((name) => CASES[name] === undefined);
+    if (names.length === 0 || unknown.length > 0) {
+      throw new Error(`case needs names from: ${Object.keys(CASES).join(', ')}`);
+    }
+    try {
+      for (const name of names) {
+        await CASES[name]?.(godotPath, projectDir);
+      }
+    } finally {
+      sweep(projectDir);
+    }
+    console.log(`cases ${names.join(', ')} passed`);
     return;
   }
   // One fixture script by name, for working on the thing it checks without the whole leg.
@@ -1688,15 +2456,9 @@ async function main(): Promise<void> {
       'the engine and the server should agree on the temporary directory',
     );
     runFixture(godotPath, projectDir, 'input_action');
-    testDependencyWalk(godotPath, projectDir);
-    testOperations(godotPath, projectDir);
-    testAGdignoreStopsTheWalk(godotPath, projectDir);
-    testAnImportIsJudgedByWhatItWasBuiltFrom(godotPath, projectDir);
-    await testAnOperationLeavesARunningLogAlone(godotPath);
-    testRefusals(godotPath, projectDir);
-    testInstalledLayout(godotPath, projectDir);
-    testAFamilyOfSettingsAnswersWithItsTypes(godotPath, projectDir);
-    testTheOperationsSurviveEveryWarning(godotPath);
+    for (const run of Object.values(CASES)) {
+      await run(godotPath, projectDir);
+    }
   } finally {
     sweep(projectDir);
   }

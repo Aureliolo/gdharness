@@ -1,7 +1,7 @@
 extends RefCounted
 
-# The server reads one JSON object off stdout and everything else as diagnostics, so the
-# prefixes are what let a human tell the two apart in a log without parsing it.
+# Everything printed is diagnostics; the answer goes to a file. The server reads `[ERROR]` lines as
+# the operation's own errors, and the prefixes let a human read the rest without parsing it.
 #
 # Every module preloads this as `Log`. `Logger` is a native class from Godot 4.5 on, and a
 # constant of that name is a parse error rather than a shadowing warning.

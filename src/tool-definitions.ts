@@ -357,11 +357,20 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       value: {
         blank: true,
         description:
-          'The value to write. Engine types may be tagged, {"_type": "Vector2", "x": 1, "y": 2}. "" writes an empty string.',
+          'The value to write. Engine types may be tagged, {"_type": "Vector2", "x": 1, "y": 2}, and infinity as {"_type": "float", "value": "inf"}, the form a read answers with. "" writes an empty string.',
       },
       name: { type: 'string', description: 'Autoload name.' },
       path: { type: 'string', description: 'Autoload script or scene inside the project.' },
-      enabled: { type: 'boolean', description: 'Autoloads: register enabled. Default true.' },
+      enabled: {
+        type: 'boolean',
+        description:
+          'Autoloads: Godot 4 loads every autoload in the list, so false is refused. Use global: false to keep the name out of the global scope, or remove_autoload to stop it loading.',
+      },
+      global: {
+        type: 'boolean',
+        description:
+          'Autoloads: make the name a global variable, the * in project.godot and the editor\'s "Global Variable" column. Default true. The autoload loads either way.',
+      },
       scenePath: SCENE_PATH,
       actionName: { type: 'string', description: 'Input action name, such as "jump".' },
       events: INPUT_EVENTS,
@@ -373,9 +382,17 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       pluginName: { type: 'string', description: 'Folder name under addons/.' },
       busName: { type: 'string', description: 'Audio bus name.' },
-      parentBusIndex: { type: 'number', description: 'Audio buses: the bus to send to. Default 0, Master.' },
+      parentBusIndex: {
+        type: 'number',
+        description:
+          'Audio buses: the bus to send to. Default 0, Master. The new bus goes right after it, so every later bus moves one along, and the answer lists them all.',
+      },
       busIndex: { type: 'number', description: 'Audio bus index.' },
-      effectIndex: { type: 'number', description: 'Slot on the bus for the effect.' },
+      effectIndex: {
+        type: 'number',
+        description:
+          'Slot on the bus for the effect: the effect there is replaced, and one past the last adds one. Any other slot is refused.',
+      },
       effectType: { type: 'string', description: 'Effect class, such as "AudioEffectReverb".' },
       volumeDb: { type: 'number', description: 'Bus volume in decibels.' },
     },
@@ -396,7 +413,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       disable_plugin: { summary: 'disable an addon', requires: ['pluginName'] },
       add_audio_bus: { summary: 'add an audio bus', requires: ['busName'] },
       set_audio_bus_effect: {
-        summary: 'add or configure an effect on a bus',
+        summary: 'put an effect in a slot on a bus',
         requires: ['busIndex', 'effectIndex', 'effectType'],
       },
       set_audio_bus_volume: { summary: 'set a bus volume', requires: ['busIndex', 'volumeDb'] },
@@ -437,7 +454,12 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'boolean',
         description: "forward: include the engine's own res://. resources. Default false.",
       },
-      fileTypes: { type: 'array', items: { type: 'string' }, description: 'reverse: extensions to look in.' },
+      fileTypes: {
+        type: 'array',
+        items: { type: 'string' },
+        description:
+          'reverse: extensions to look in, plus "godot" for project.godot, "cfg" for plugin.cfg and export_presets.cfg, and "import" for import sidecars. Default all of tscn, tres, gd, gdshader, godot, cfg and import, since an autoload, the main scene and a plugin script are named only in the settings files.',
+      },
     },
     requires: ['projectPath', 'resourcePath'],
   },
@@ -488,7 +510,11 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
           "reimport what status says is outdated or failed, one resource with resourcePath, or what is current as well with force. Through the open editor when one serves the project, so it reloads what it holds, waiting for it to finish; otherwise through the engine's own import pass. Answered from a second status read: reimported lists what is current now, notReimported what is not, with its status and reason, and via says which of the two did the work. stillImporting is an editor that had not finished within timeoutMs",
         requires: [],
       },
-      uid: { summary: 'the UID of one file', requires: ['resourcePath'] },
+      uid: {
+        summary:
+          "the UID of one file and where it was read: a script's or shader's .uid file, an imported file's .import, or a scene's or resource's own header",
+        requires: ['resourcePath'],
+      },
       refresh_uids: {
         summary:
           'import the project so every script and shader has its .uid sidecar, and name under uidsCreated the ones this made and under stillWithoutUid the ones the engine would not import: it writes no scene and no script, so a project whose sidecars are all present is left untouched',
@@ -714,13 +740,17 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'script_edit',
     description:
-      "Creates a GDScript file, or adds functions, variables and signals to one. Every declaration written carries a type. create loads what it wrote under the project's own warning settings and answers with parses; the engine's reasons for a refusal come back under engine_messages.",
+      "Creates a GDScript file, or adds functions, variables and signals to one. Every declaration written carries a type. Both load what they wrote under the project's own warning settings and answer with parses; the engine's reasons for a refusal come back under engine_messages. create answers with the extends and class_name the engine read, and a script declaring a class_name is put in the project's class list, with registered saying whether it is there. modify makes every addition or none, and answers with the line each one is on in the file written.",
     parameters: {
       projectPath: PROJECT_PATH,
       scriptPath: SCRIPT_PATH,
-      className: { type: 'string', description: 'create: a class_name for the script.' },
-      extends: { type: 'string', description: 'create: the base class. Default Node.' },
-      content: { type: 'string', description: 'create: the whole file, instead of a template.' },
+      className: { type: 'string', description: 'create: a class_name for the script. Not with content.' },
+      extends: { type: 'string', description: 'create: the base class. Default Node. Not with content.' },
+      content: {
+        type: 'string',
+        description:
+          'create: the whole file, written as given, instead of a template, className and extends.',
+      },
       template: {
         type: 'string',
         enum: ['singleton', 'state_machine', 'component', 'resource'],

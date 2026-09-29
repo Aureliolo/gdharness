@@ -10,6 +10,26 @@ extends RefCounted
 # every caller files the engine will never answer for.
 
 
+# Why [param path], a res:// or uid:// path a setting names, is not a file the engine can load, or
+# empty when it is. A uid:// path resolves through the project's uid cache, which the import writes,
+# so one that does not resolve is a file that has gone or a project not imported yet, and saying
+# only that the file does not exist sent a caller looking for a scene that was there.
+static func missing_reason(path: String) -> String:
+	if path.begins_with("uid://"):
+		var id: int = ResourceUID.text_to_id(path)
+		if id == ResourceUID.INVALID_ID or not ResourceUID.has_id(id):
+			return (
+				path
+				+ " does not resolve: no file in the project's uid cache has it, so the file has gone or the"
+				+ " project has not been imported yet (project_import refresh_uids imports it)"
+			)
+		var resolved: String = ResourceUID.get_id_path(id)
+		return (
+			"" if FileAccess.file_exists(resolved) else path + " names " + resolved + ", which does not exist"
+		)
+	return "" if FileAccess.file_exists(path) else path + " does not exist"
+
+
 # A directory the engine steps over, marker file and all.
 func is_stepped_over(path: String) -> bool:
 	return FileAccess.file_exists(path + ".gdignore")

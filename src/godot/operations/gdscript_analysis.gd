@@ -52,16 +52,30 @@ func get_gdscript_info(params: Dictionary) -> Dictionary:
 		# answer: a `var x: int = 5  # note` carried `5  # note` as its default, and correcting the
 		# end of a parameter list put the comment into the return type, where `rfind(")")` had been
 		# hiding it by stopping inside the comment instead.
-		var stripped: String = _without_comment(lines[i])
+		var raw: String = lines[i]
+		# Inside a string the raw line is counted, because a `#` in it is text and taking it for a
+		# comment would cut off the quotes that close the string.
+		if in_multiline_string:
+			if _triple_quotes(raw) % 2 == 1:
+				in_multiline_string = false
+			continue
+		var stripped: String = _without_comment(raw)
 
 		if stripped.is_empty():
 			continue
 
-		if '"""' in stripped or "'''" in stripped:
-			in_multiline_string = not in_multiline_string
-			continue
+		# An odd count opens a string that runs on; an even one is a string that closed on the line
+		# it opened on. Toggling on any count lost `const HELP := """Usage"""`, and everything after
+		# it up to the next triple quote, with the state inverted from there to the end of the file.
+		# The line that opens one is still read: it can be the declaration the string belongs to.
+		if _triple_quotes(stripped) % 2 == 1:
+			in_multiline_string = true
 
-		if in_multiline_string:
+		# Only a line at the left margin declares one of the script's own members. Indented, it is a
+		# function's local or an inner class's member, and each was answered as the script's own:
+		# every `var` in every body, and an inner class's `extends` taken for the script's base.
+		if raw.begins_with(" ") or raw.begins_with("\t"):
+			_collect_dependencies(stripped, dependencies)
 			continue
 
 		# Annotations may share the line with anything they annotate, so every branch below decides
@@ -116,14 +130,11 @@ func get_gdscript_info(params: Dictionary) -> Dictionary:
 		elif header.begins_with("class "):
 			inner_classes.append(header.substr(6).split(":")[0].split(" ")[0].strip_edges())
 
-		if "preload(" in stripped or "load(" in stripped:
-			for dep: String in _extract_dependencies(stripped):
-				if dep not in dependencies:
-					dependencies.append(dep)
+		_collect_dependencies(stripped, dependencies)
 
 	# After the loop, because it needs the base the loop reads, and a file that declared one after
 	# its first function would otherwise be judged against the default.
-	_mark_virtuals(functions, extends_name)
+	_mark_virtuals(functions, extends_name, full_script_path)
 
 	var answer: Dictionary = {
 		"path": script_path,
@@ -151,8 +162,8 @@ func get_gdscript_info(params: Dictionary) -> Dictionary:
 # with a private helper in it. The virtuals are the ones the native ancestor declares with
 # `METHOD_FLAG_VIRTUAL`, which is a question `ClassDB` answers exactly, and `class_has_method` does
 # not: it says false for `_ready` on `Node`, so the method list is what has to be walked.
-func _mark_virtuals(functions: Array[Dictionary], extends_name: String) -> void:
-	var native: String = _native_ancestor(extends_name)
+func _mark_virtuals(functions: Array[Dictionary], extends_name: String, from_path: String) -> void:
+	var native: String = _native_ancestor(extends_name, from_path)
 	var virtuals: Dictionary = {}
 	if not native.is_empty():
 		for m: Dictionary in ClassDB.class_get_method_list(native, false):
@@ -168,11 +179,12 @@ func _mark_virtuals(functions: Array[Dictionary], extends_name: String) -> void:
 # A base named by a script is followed; a base that is neither a script nor a class the engine knows
 # leaves nothing to ask, and then no function is called virtual rather than every underscore being
 # guessed at.
-func _native_ancestor(base: String) -> String:
+func _native_ancestor(base: String, from_path: String) -> String:
 	var seen: Array[String] = []
 	var current: String = base
+	var declared_in: String = from_path
 	while true:
-		var path: String = _script_named(current)
+		var path: String = _script_named(current, declared_in)
 		if path.is_empty():
 			break
 		if path in seen:
@@ -182,6 +194,7 @@ func _native_ancestor(base: String) -> String:
 		if above.is_empty():
 			return ""
 		current = str(above.get("extends", ""))
+		declared_in = path
 	return current if ClassDB.class_exists(current) else ""
 
 
@@ -196,8 +209,9 @@ func _native_ancestor(base: String) -> String:
 func _add_inherited(answer: Dictionary, seen: Array[String]) -> void:
 	var inherits_from: Array[String] = []
 	var base: String = str(answer.get("extends", ""))
+	var declared_in: String = str(answer.get("full_path", ""))
 	while true:
-		var base_path: String = _script_named(base)
+		var base_path: String = _script_named(base, declared_in)
 		if base_path.is_empty() or base_path in seen:
 			break
 		seen.append(base_path)
@@ -216,16 +230,28 @@ func _add_inherited(answer: Dictionary, seen: Array[String]) -> void:
 				carried["inherited_from"] = base_path
 				mine.append(carried)
 		base = str(above.get("extends", ""))
+		declared_in = base_path
 	answer["inherits_from"] = inherits_from
 
 
 # The file a base names, whether it named a path or a class, or empty for a native class.
-func _script_named(base: String) -> String:
+#
+# A quoted path is resolved the way the engine resolves it: `extends "base.gd"` is relative to the
+# script [param declared_in], and asking whether `base.gd` exists asked about nothing, so such a
+# script had no ancestor and none of its engine callbacks were virtual.
+func _script_named(base: String, declared_in: String) -> String:
 	if base.is_empty():
 		return ""
-	if base.begins_with('"') and base.ends_with('"'):
-		var quoted: String = base.substr(1, base.length() - 2)
-		return quoted if FileAccess.file_exists(quoted) else ""
+	var quoted: String = ""
+	if base.length() >= 2 and (base[0] == '"' or base[0] == "'") and base.ends_with(base[0]):
+		quoted = base.substr(1, base.length() - 2)
+	if not quoted.is_empty():
+		if quoted.begins_with("uid://"):
+			var id: int = ResourceUID.text_to_id(quoted)
+			quoted = ResourceUID.get_id_path(id) if ResourceUID.has_id(id) else ""
+		elif not quoted.begins_with("res://"):
+			quoted = declared_in.get_base_dir().path_join(quoted).simplify_path()
+		return quoted if not quoted.is_empty() and FileAccess.file_exists(quoted) else ""
 	for entry: Dictionary in ProjectSettings.get_global_class_list():
 		if str(entry.get("class", "")) == base:
 			var path: String = str(entry.get("path", ""))
@@ -560,6 +586,19 @@ func _parse_param(param_text: String) -> Dictionary:
 		name = name.substr(3).strip_edges()
 
 	return {"name": name, "type": type_hint, "default": default_value, "is_rest": is_rest}
+
+
+func _collect_dependencies(line: String, into: Array[String]) -> void:
+	if "load(" not in line:
+		return
+	for dep: String in _extract_dependencies(line):
+		if dep not in into:
+			into.append(dep)
+
+
+# How many triple quotes of either kind [param line] holds.
+static func _triple_quotes(line: String) -> int:
+	return line.count('"""') + line.count("'''")
 
 
 func _extract_dependencies(line: String) -> Array[String]:

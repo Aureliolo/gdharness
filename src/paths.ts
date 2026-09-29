@@ -116,6 +116,14 @@ export function resolveWithinProject(projectPath: string, candidatePath: string)
 
   const withoutScheme = trimmed.startsWith(RESOURCE_SCHEME) ? trimmed.slice(RESOURCE_SCHEME.length) : trimmed;
 
+  // A UID names a file in this project, and where it is on disk is known only to the engine that
+  // resolves it, so containment, which is a question about where, cannot be answered for one here.
+  if (withoutScheme.startsWith('uid://')) {
+    return {
+      ok: false,
+      reason: `Path '${trimmed}' is a UID, and a file is judged here by where it is on disk, which a UID does not say. Give the file's res:// path.`,
+    };
+  }
   const scheme = OTHER_SCHEME.exec(withoutScheme);
   if (scheme) {
     return {
