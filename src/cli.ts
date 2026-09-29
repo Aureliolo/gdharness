@@ -24,6 +24,7 @@ import {
   harnessNote,
   type Launch,
   launchFor,
+  mainCheckoutOf,
   recordedEnginePath,
   registered,
   servedProject,
@@ -79,7 +80,8 @@ function projectArgument(at: number): string {
 /**
  * [param projectPath] is a project already set up, whose own configuration names the engine it was
  * set up with. Asked after the usual search, so a machine with Godot where Godot lives is not
- * pinned to whatever it was set up with a year ago.
+ * pinned to whatever it was set up with a year ago. A git worktree with no such record falls back
+ * to the one its main checkout's configuration names.
  */
 async function engine(projectPath?: string): Promise<HeadlessEngine> {
   const located = await new GodotLocator().find();
@@ -91,11 +93,20 @@ async function engine(projectPath?: string): Promise<HeadlessEngine> {
   // other engine in silence under a variable somebody set on purpose.
   const recorded =
     located.named === null && projectPath !== undefined ? recordedEnginePath(projectPath) : null;
-  if (recorded === null) {
+  if (recorded !== null) {
+    return { godotPath: recorded, script: shippedOperationsScript(), debug: GODOT_DEBUG_MODE_DEFAULT };
+  }
+  const main = located.named === null && projectPath !== undefined ? mainCheckoutOf(projectPath) : null;
+  const theirs = main === null ? null : recordedEnginePath(main);
+  if (main === null || theirs === null) {
     const refusal = GodotLocator.refusal(located);
     throw new UsageError(`${refusal.message} ${refusal.advice.join('. ')}.`);
   }
-  return { godotPath: recorded, script: shippedOperationsScript(), debug: GODOT_DEBUG_MODE_DEFAULT };
+  // Said, because it is an engine this project's own files do not name.
+  console.error(
+    `engine: ${theirs}, which the harness config of ${main} names; this project is a git worktree of it`,
+  );
+  return { godotPath: theirs, script: shippedOperationsScript(), debug: GODOT_DEBUG_MODE_DEFAULT };
 }
 
 /** The outcome as a line for a person, and a throw when the engine refused. */

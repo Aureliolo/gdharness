@@ -13,9 +13,9 @@
  * documentation too: a guessed shape writes a file that silently does nothing.
  */
 
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join, relative, resolve } from 'node:path';
 import process from 'node:process';
 import type { AnnouncedServer } from './bridge-announce.js';
 import {
@@ -27,6 +27,7 @@ import {
   writeYaml,
 } from './config-formats.js';
 import { Refusal } from './errors.js';
+import { isSameDirectory } from './paths.js';
 import { currentRunner, type Runner, spawnFor } from './runner.js';
 
 /** What gdharness is called wherever it is registered. */
@@ -883,6 +884,47 @@ export function recordedEnginePath(projectPath: string): string | null {
     }
   }
   return null;
+}
+
+/**
+ * The same project in the main checkout, when [param projectPath] is in a linked git worktree, or
+ * null.
+ *
+ * A worktree is a second checkout of one repository, and its untracked files are its own: an
+ * engine vendored under the main checkout's root, and the config naming it, are not there. An
+ * upgrade in one refused for want of an engine while the main checkout's config named the pinned
+ * one. The worktree's `.git` is a file pointing at its entry under the main repository's `.git`,
+ * and that entry's `commondir` points at the main `.git` itself.
+ */
+export function mainCheckoutOf(projectPath: string): string | null {
+  let top = resolve(projectPath);
+  while (!existsSync(join(top, '.git'))) {
+    const up = dirname(top);
+    if (up === top) {
+      return null;
+    }
+    top = up;
+  }
+  const marker = join(top, '.git');
+  if (!statSync(marker).isFile()) {
+    return null;
+  }
+  const pointer = /^gitdir:\s*(.+)$/m.exec(readFileSync(marker, 'utf8'))?.[1]?.trim();
+  if (pointer === undefined) {
+    return null;
+  }
+  const entry = resolve(top, pointer);
+  const commonFile = join(entry, 'commondir');
+  if (!existsSync(commonFile)) {
+    return null;
+  }
+  const common = resolve(entry, readFileSync(commonFile, 'utf8').trim());
+  // A bare repository has no checkout to read a config from.
+  if (basename(common) !== '.git') {
+    return null;
+  }
+  const main = join(dirname(common), relative(top, resolve(projectPath)));
+  return isSameDirectory(main, projectPath) || !existsSync(join(main, 'project.godot')) ? null : main;
 }
 
 /**

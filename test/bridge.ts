@@ -14,6 +14,8 @@ import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { type RawData, WebSocket } from 'ws';
 import { RUNTIME_PROTOCOL } from '../src/runtime-client.js';
+import { SERVER_VERSION } from '../src/server-version.js';
+import { shippedRuntimeDigest } from '../src/setup.js';
 import { asArray, get, text } from './support/json.js';
 import {
   isRecord,
@@ -94,6 +96,8 @@ interface MockRuntimeOptions {
   protocol?: number;
   /** Accept connections and never answer, which is what a game paused at a breakpoint does. */
   silent?: boolean;
+  /** The runtime addon it says it loaded; this server's by default, and null to say nothing. */
+  addon?: { version: string; digest: string } | null;
 }
 
 interface MockRuntime {
@@ -235,6 +239,10 @@ function startMockRuntime(directory: string, options: MockRuntimeOptions): Promi
         return;
       }
       const announcement = join(directory, `runtime-${options.pid}.json`);
+      const addon =
+        options.addon === undefined
+          ? { version: SERVER_VERSION, digest: shippedRuntimeDigest() ?? '' }
+          : options.addon;
       writeFileSync(
         announcement,
         JSON.stringify({
@@ -243,6 +251,7 @@ function startMockRuntime(directory: string, options: MockRuntimeOptions): Promi
           port: address.port,
           address: '127.0.0.1',
           project: { name: options.name, path: options.projectPath },
+          ...(addon === null ? {} : { addon_version: addon.version, addon_digest: addon.digest }),
         }),
       );
       resolve({
@@ -524,9 +533,12 @@ async function main(): Promise<void> {
       );
       assert.equal(get(connected, 'game', 'runtimes', 0, 'pid'), process.pid, 'the game is named by pid');
       assert.equal(get(connected, 'game', 'runtimes', 0, 'port'), runtime.port);
+      assert.equal(get(connected, 'game', 'runtimes', 0, 'addonVersion'), SERVER_VERSION);
+      assert.equal(get(connected, 'game', 'runtimes', 0, 'addonIsStale'), false);
 
       const tree = await payload('runtime_inspect', { nodePath: '/root', depth: 2 });
       assert.equal(get(tree, 'type'), 'tree');
+      assert.equal(get(tree, 'addonIsStale'), undefined, "a game on this server's addon is not marked");
       assert.equal(get(tree, 'root', 'path'), '/root', 'runtime_inspect relays the addon tree');
       assert.equal(get(tree, 'id'), undefined, 'the request id is the relay business, not the answer');
 
@@ -694,6 +706,56 @@ async function main(): Promise<void> {
       );
     } finally {
       await older.close();
+    }
+
+    // A game on another runtime addon, as a second checkout of a project carries: named in the
+    // status, and on every answer from it, a refusal included, since a command the old code does
+    // not know is where it shows.
+    for (const [addon, said] of [
+      [
+        { version: '1.1.20', digest: 'an older digest' },
+        /running the 1\.1\.20 runtime addon, while this server ships/,
+      ],
+      [null, /running a runtime addon from before games reported theirs/],
+    ] as const) {
+      const behind = await startMockRuntime(runtimeDir, {
+        pid: process.pid,
+        projectPath,
+        name: 'behind',
+        addon,
+      });
+      try {
+        const listed = await payload('editor_status', {});
+        assert.equal(get(listed, 'game', 'runtimes', 0, 'addonIsStale'), true, JSON.stringify(listed));
+        assert.equal(get(listed, 'game', 'runtimes', 0, 'addonVersion'), addon?.version ?? null);
+        const staleNote = String(get(listed, 'game', 'runtimes', 0, 'staleNote'));
+        assert.match(staleNote, said, staleNote);
+        // The fixture project holds no addons, so it is sent to upgrade rather than to a restart.
+        assert.ok(staleNote.includes(`gdharness upgrade in ${projectPath}`), staleNote);
+        const answered = await payload('runtime_inspect', {});
+        assert.equal(get(answered, 'type'), 'tree', JSON.stringify(answered));
+        assert.equal(get(answered, 'addonIsStale'), true, JSON.stringify(answered));
+        assert.equal(get(answered, 'staleNote'), staleNote);
+        const unknown = textOf(await call('runtime_input', { op: 'key', keycode: 'A' })) ?? '';
+        assert.match(unknown, /Unknown command: inject_key/, unknown);
+        assert.ok(unknown.endsWith(staleNote), `a refusal carries the note too: ${unknown}`);
+      } finally {
+        await behind.close();
+      }
+    }
+    const unsaid = await startMockRuntime(runtimeDir, {
+      pid: process.pid,
+      projectPath,
+      name: 'unsaid',
+      addon: { version: '', digest: '' },
+    });
+    try {
+      const listed = await payload('editor_status', {});
+      assert.equal(get(listed, 'game', 'runtimes', 0, 'addonVersion'), null, JSON.stringify(listed));
+      assert.equal(get(listed, 'game', 'runtimes', 0, 'addonIsStale'), undefined, 'not guessed');
+      assert.equal(get(await payload('runtime_inspect', {}), 'addonIsStale'), undefined);
+    } finally {
+      await unsaid.close();
     }
 
     const closedPort = await reservePort();
