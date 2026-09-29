@@ -19006,6 +19006,17 @@ async function testGdUnitRunner(): Promise<void> {
           [],
           'and so does the user data directory each run was given',
         );
+
+        // Every suite ignored: nothing ran, whatever the exit code and whether a report was written.
+        const none = await call(
+          'project_test',
+          { projectPath: projectDir, ignore: ['sums_test', 'summary_lies_test', 'quiet_test'] },
+          ENGINE_CALL_TIMEOUT_MS * 3,
+        );
+        const noneAnswer: unknown = JSON.parse(none.slice(none.indexOf('{')));
+        assert.equal(get(noneAnswer, 'passed'), false, `a run where nothing ran did not pass: ${none}`);
+        assert.equal(get(noneAnswer, 'tests'), 0, none);
+
         // Nothing stopped early in the runs above, and the answer says so by leaving the field
         // out. Asserted here so the presence of it below means something.
         assert.equal(get(run, 'notRun'), undefined, JSON.stringify(run, null, 2));
