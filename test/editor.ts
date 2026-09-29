@@ -4696,26 +4696,44 @@ async function testABreakpointHoldsForEveryPlay({
   // list. Then it clicks off the line this server holds, which has to leave the held set.
   const gutterLine = BREAK_LINE - 1;
   const gutter = new GodotDAPClient(dapPort);
+  const watcher = new GodotDAPClient(dapPort);
+  const watched = (): boolean =>
+    watcher
+      .breakpointsInEditor()
+      .some((file) => file.lines.includes(gutterLine) && file.scriptPath.endsWith('main.gd'));
   try {
     await gutter.initialize();
+    await watcher.initialize();
     // The file as the adapter names it, taken from its own answer: a path it cannot map into its
     // project is set on nothing, and macOS reaches the temporary directory through /var where the
     // engine has it under /private/var.
     const godotsPath = text(get(again, 'breakpoints', 0, 'source', 'path'));
     await gutter.setBreakpoint(godotsPath, gutterLine);
-    const theirs = [{ scriptPath: 'res://main.gd', lines: [gutterLine] }];
-    let seen: unknown;
-    const patient = Date.now() + 5000;
-    do {
-      seen = get(await call('debug_breakpoint', { ...main, op: 'set', line: BREAK_LINE }), 'setInEditor');
-      if (JSON.stringify(seen) !== JSON.stringify(theirs)) await delay(100);
-    } while (JSON.stringify(seen) !== JSON.stringify(theirs) && Date.now() < patient);
-    assert.deepEqual(seen, theirs, "the gutter's line is listed as the editor's own");
+    // A set from here sends the file's whole list, so one sent before this server's session has
+    // heard of the gutter's line clears it, and every read of what it has heard is such a set. So
+    // the wait is on a third session, which the adapter tells at the same moment, with a margin
+    // for the two sockets to be read, before the one set from here.
+    const heard = Date.now() + 5000;
+    while (!watched() && Date.now() < heard) {
+      await delay(50);
+    }
     assert.ok(
-      gutter
-        .breakpointsInEditor()
-        .some((file) => file.lines.includes(gutterLine) && file.scriptPath.endsWith('main.gd')),
-      `and a set from here left it in place: ${JSON.stringify(gutter.breakpointsInEditor())}`,
+      watched(),
+      `the adapter tells every session of the gutter's line: ${JSON.stringify(watcher.breakpointsInEditor())}`,
+    );
+    await delay(1000);
+    const theirs = [{ scriptPath: 'res://main.gd', lines: [gutterLine] }];
+    const listed = await call('debug_breakpoint', { ...main, op: 'set', line: BREAK_LINE });
+    assert.deepEqual(
+      get(listed, 'setInEditor'),
+      theirs,
+      `the gutter's line is listed as the editor's own: ${text(listed)}`,
+    );
+    // Told to the watcher as a removal if the set from here had left it out.
+    await delay(1000);
+    assert.ok(
+      watched(),
+      `and a set from here left it in place: ${JSON.stringify(watcher.breakpointsInEditor())}`,
     );
 
     await gutter.removeBreakpoint(godotsPath, BREAK_LINE);
@@ -4731,6 +4749,7 @@ async function testABreakpointHoldsForEveryPlay({
     await gutter.removeBreakpoint(godotsPath, gutterLine);
   } finally {
     await gutter.abandon();
+    await watcher.abandon();
   }
   const back = await call('debug_breakpoint', { ...main, op: 'set', line: BREAK_LINE });
   assert.deepEqual(get(back, 'held'), one, `set again for the plays: ${text(back)}`);
