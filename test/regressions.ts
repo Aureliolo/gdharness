@@ -1177,6 +1177,94 @@ async function testFramingCeilingFailsLoudly(): Promise<void> {
 }
 
 /**
+ * A variables read says what it could not read, rather than answering it empty.
+ *
+ * The values of a scope come from the stopped game through the editor, and the adapter refuses
+ * their reference as "unknown" until they have arrived. A wait that ran out answered `[]`, which is
+ * what a scope with nothing in it says, and a frame id the stack no longer holds answered no scopes
+ * at all as a success. The stand-in holds back the values of one scope for good, answers a frame
+ * that is not in its stack, and in a second session never sends scopes.
+ */
+async function testAVariablesReadSaysWhatItCouldNotRead(): Promise<void> {
+  const adapter =
+    (scopes: readonly Record<string, unknown>[]): FramedPeerHandler =>
+    (message, socket) => {
+      const command = String(message['command']);
+      const answer = (success: boolean, body: Record<string, unknown>): void => {
+        socket.write(
+          frameJsonRpc({
+            seq: 1,
+            type: 'response',
+            request_seq: message['seq'],
+            command,
+            success,
+            ...(success ? { body } : { message: 'unknown' }),
+          }),
+        );
+      };
+      const reference = get(message['arguments'], 'variablesReference');
+      if (command === 'threads') {
+        answer(true, { threads: [{ id: 1, name: 'Main' }] });
+      } else if (command === 'stackTrace') {
+        answer(true, {
+          stackFrames: [
+            { id: 0, name: '_ready', line: 3 },
+            { id: 1, name: '_enter', line: 9 },
+          ],
+        });
+      } else if (command === 'scopes') {
+        answer(true, { scopes });
+      } else if (command === 'variables') {
+        answer(reference === 1, reference === 1 ? { variables: [{ name: 'health', value: '3' }] } : {});
+      } else {
+        answer(true, {});
+      }
+    };
+
+  const both = [
+    { name: 'Locals', variablesReference: 1 },
+    { name: 'Members', variablesReference: 2 },
+  ];
+  await withFramedPeer(adapter(both), async (port) => {
+    const client = new GodotDAPClient(port, '127.0.0.1', 1500);
+    try {
+      const read = await handleDAPTool(client, 'dap_get_variables', {});
+      const answer = JSON.parse(textOf({ jsonrpc: '2.0', result: read }) ?? '{}') as unknown;
+      assert.deepEqual(
+        get(answer, 'scopes'),
+        [
+          { name: 'Locals', variables: [{ name: 'health', value: '3' }] },
+          { name: 'Members', variables: null },
+        ],
+        `the values that came are answered, and the ones that did not are not given as none: ${JSON.stringify(answer)}`,
+      );
+      assert.deepEqual(get(answer, 'valuesMissing'), ['Members'], 'naming the scope that went unanswered');
+      assert.match(String(get(answer, 'note')), /unknown rather than empty/);
+
+      const gone = await handleDAPTool(client, 'dap_get_variables', { frameId: 7 });
+      const said = textOf({ jsonrpc: '2.0', result: gone }) ?? '';
+      assert.equal(gone.isError, true, `a frame the stack does not hold is refused: ${said}`);
+      assert.match(said, /has no frame 7; its frames are 0, 1\./, `naming the frames it does hold: ${said}`);
+      assert.doesNotMatch(said, /editor_run/, `without sending the caller to start a game: ${said}`);
+    } finally {
+      await client.abandon();
+    }
+  });
+
+  await withFramedPeer(adapter([]), async (port) => {
+    const client = new GodotDAPClient(port, '127.0.0.1', 1500);
+    try {
+      const read = await handleDAPTool(client, 'dap_get_variables', {});
+      const said = textOf({ jsonrpc: '2.0', result: read }) ?? '';
+      assert.equal(read.isError, true, `scopes that never came are not an empty frame: ${said}`);
+      assert.match(said, /The scopes of frame 0 did not arrive from the game within 1\.5s/, said);
+    } finally {
+      await client.abandon();
+    }
+  });
+}
+
+/**
  * Letting go of the debug adapter sends it nothing.
  *
  * Godot stops the game it is playing when this session sends the protocol's `disconnect`, and it
@@ -23345,6 +23433,7 @@ const TESTS: (() => void | Promise<void>)[] = [
 
   testProjectGodotMultilineValues,
   testLettingGoOfTheAdapterSendsItNothing,
+  testAVariablesReadSaysWhatItCouldNotRead,
   testAStopIsKnownToTheConnectionItWasSentTo,
   testAStopThatLandsWhileAttachAsksIsTheAnswer,
   testAContinueByAnotherClientIsKnownHere,

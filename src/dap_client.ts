@@ -27,6 +27,9 @@ const SCOPES_TIMEOUT_MS = 20_000;
  */
 const VARIABLES_POLL_TIMEOUT_MS = 2_000;
 
+/** A read of a held game refused for what it found, which starting a game would not change. */
+class ReadRefusal extends Refusal {}
+
 interface PendingRequest {
   resolve: (value: DAPBody | PromiseLike<DAPBody>) => void;
   reject: (reason?: unknown) => void;
@@ -132,9 +135,17 @@ export class GodotDAPClient {
   /** Told whenever the set this side holds changes without a call: see [setBreakpointsSink]. */
   private onBreakpointsChanged: ((held: HeldBreakpoint[]) => void) | null = null;
 
-  constructor(port = portFromEnv('GDHARNESS_DAP_PORT', DEFAULT_DAP_PORT), host = '127.0.0.1') {
+  /** How long a frame's scopes and values are waited for; see [SCOPES_TIMEOUT_MS]. */
+  readonly scopesPatienceMs: number;
+
+  constructor(
+    port = portFromEnv('GDHARNESS_DAP_PORT', DEFAULT_DAP_PORT),
+    host = '127.0.0.1',
+    scopesPatienceMs = SCOPES_TIMEOUT_MS,
+  ) {
     this.port = port;
     this.host = host;
+    this.scopesPatienceMs = scopesPatienceMs;
     this.pendingRequests = new Map();
   }
 
@@ -762,7 +773,10 @@ export class GodotDAPClient {
    * mean "not yet" rather than "no such thing", and neither is distinguishable from the other, so
    * both are waited out.
    */
-  private async variablesWhenReady(variablesReference: number, deadline: number): Promise<DAPArrayItem[]> {
+  private async variablesWhenReady(
+    variablesReference: number,
+    deadline: number,
+  ): Promise<DAPArrayItem[] | null> {
     while (Date.now() < deadline) {
       try {
         const answered = (
@@ -776,7 +790,7 @@ export class GodotDAPClient {
       }
       await delay(200);
     }
-    return [];
+    return null;
   }
 
   /**
@@ -791,15 +805,21 @@ export class GodotDAPClient {
    * on. So they are asked for until they arrive and then left alone, and it is the values that are
    * polled after that, never the scopes again.
    */
-  async getScopes(frameId?: number): Promise<{ name: string; variables: DAPArrayItem[] }[]> {
+  async getScopes(frameId?: number): Promise<{ name: string; variables: DAPArrayItem[] | null }[]> {
     await this.attach();
     const frames = await this.getStackTrace();
     const frame = frameId === undefined ? frames[0] : frames.find((each) => each['id'] === frameId);
+    // Refused rather than answered empty: no scopes is what a frame with nothing in it says, and a
+    // frame that is not there has not been read at all.
     if (frame === undefined) {
-      return [];
+      throw new ReadRefusal(
+        frames.length === 0
+          ? 'The adapter gave no stack, so there is no frame to read variables from'
+          : `The stack the adapter gives now has no frame ${String(frameId)}; its frames are ${frames.map((each) => String(each['id'])).join(', ')}. Read the stack again for the frames the game is at now`,
+      );
     }
 
-    const deadline = Date.now() + SCOPES_TIMEOUT_MS;
+    const deadline = Date.now() + this.scopesPatienceMs;
     let scopes: DAPArrayItem[] = [];
     while (scopes.length === 0 && Date.now() < deadline) {
       try {
@@ -813,8 +833,13 @@ export class GodotDAPClient {
       }
       await delay(200);
     }
+    if (scopes.length === 0) {
+      throw new ReadRefusal(
+        `The scopes of frame ${String(frame['id'])} did not arrive from the game within ${this.scopesPatienceMs / 1000}s. They come from the game through the editor, so a busy machine can take longer: ask again`,
+      );
+    }
 
-    const named: { name: string; variables: DAPArrayItem[] }[] = [];
+    const named: { name: string; variables: DAPArrayItem[] | null }[] = [];
     for (const scope of scopes) {
       const reference = scope['variablesReference'];
       named.push({
@@ -974,8 +999,17 @@ export async function handleDAPTool(
       case 'dap_get_variables': {
         const frameId = typeof safeArgs.frameId === 'number' ? safeArgs.frameId : undefined;
         const scopes = await client.getScopes(frameId);
+        const missing = scopes.filter((scope) => scope.variables === null).map((scope) => scope.name);
+        const answer =
+          missing.length === 0
+            ? { scopes }
+            : {
+                scopes,
+                valuesMissing: missing,
+                note: `The values of ${missing.join(', ')} did not arrive from the game within ${client.scopesPatienceMs / 1000}s, so they are unknown rather than empty. Ask again.`,
+              };
         return {
-          content: [{ type: 'text', text: JSON.stringify({ scopes }, null, 2) }],
+          content: [{ type: 'text', text: JSON.stringify(answer, null, 2) }],
         };
       }
 
@@ -990,14 +1024,18 @@ export async function handleDAPTool(
     // about the editor or the file and never about a game: "start one with editor_run" sent a
     // caller whose script the adapter could not find to start a game that would not have helped.
     const cure =
-      toolName === 'dap_set_breakpoint' || toolName === 'dap_remove_breakpoint'
-        ? 'Breakpoints need the editor open, not a running game: editor_status says whether one is connected, and the path is the script as the project spells it.'
-        : 'The debug tools answer for a game the editor is playing: start one with editor_run.';
+      error instanceof ReadRefusal
+        ? ''
+        : toolName === 'dap_set_breakpoint' || toolName === 'dap_remove_breakpoint'
+          ? 'Breakpoints need the editor open, not a running game: editor_status says whether one is connected, and the path is the script as the project spells it.'
+          : 'The debug tools answer for a game the editor is playing: start one with editor_run.';
     return {
       // Marked as the failure it is: without this a caller reads a sentence about what went
       // wrong as the answer to what it asked, which is the one thing a tool must never do.
       isError: true,
-      content: [{ type: 'text', text: `DAP tool '${toolName}' failed: ${message}. ${cure}` }],
+      content: [
+        { type: 'text', text: `DAP tool '${toolName}' failed: ${message}.${cure === '' ? '' : ` ${cure}`}` },
+      ],
     };
   }
 }

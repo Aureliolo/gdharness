@@ -1572,7 +1572,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       frameId: {
         type: 'number',
         ops: ['variables'],
-        description: 'variables: which frame, from a stack answer. Default the innermost.',
+        description:
+          'variables: which frame, from a stack answer. Default the innermost. A frame the stack no longer holds is refused, and a scope whose values did not arrive in time answers variables null and is named under valuesMissing.',
       },
     },
     requires: [],
