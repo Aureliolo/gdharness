@@ -2355,8 +2355,45 @@ async function testAProjectUpgradedUnderTheServerIsSaid(): Promise<void> {
     assert.match(said ?? '', /reconnect/i, 'and say what replaces it');
   } finally {
     await server.stop();
+  }
+
+  // The other direction: addons older than the server, as a checkout has when a teammate moved the
+  // pin in a committed config and not the addons. Reconnecting spawns this same server again and an
+  // editor restart loads the same old code, and those were the two remedies given.
+  writeFileSync(join(addon, '.gdharness-version'), '0.0.1\n');
+  const behind = new ServerProcess({ env: { GDHARNESS_PROJECT: project } });
+  try {
+    await behind.initialize('regression-test');
+    const said = textOf(await behind.request('tools/call', { name: 'editor_status', arguments: {} })) ?? '';
+    assert.match(said, /"projectIs": "0\.0\.1"/, said);
+    assert.match(said, /project_addons_behind_this_server/, `the older direction is its own notice: ${said}`);
+    assert.match(said, /gdharness upgrade in the project/, `naming the remedy that works: ${said}`);
+    assert.doesNotMatch(said, /project_upgraded_under_this_server/, said);
+  } finally {
+    await behind.stop();
     sweep(project);
   }
+}
+
+/**
+ * The editor's stale note names the remedy that works for the code a restart would load.
+ *
+ * An editor older than the server was always told to restart. When the project's own addons are as
+ * old as the editor's, a restart loads them again and its own answer says to restart again; what
+ * works is gdharness upgrade in the project first.
+ */
+function testAStaleNoteKnowsWhatARestartLoads(): void {
+  const onDiskOld = addonMismatch('1.1.0', '1.1.5', 'old-digest', 'new-digest', 'old-digest');
+  assert.match(
+    onDiskOld ?? '',
+    /gdharness upgrade in the project installs the 1\.1\.5 addons/,
+    String(onDiskOld),
+  );
+  const onDiskNew = addonMismatch('1.1.0', '1.1.5', 'old-digest', 'new-digest', 'new-digest');
+  assert.match(onDiskNew ?? '', /Restart it with editor_launch restart/, String(onDiskNew));
+  assert.doesNotMatch(onDiskNew ?? '', /gdharness upgrade/, String(onDiskNew));
+  const noProject = addonMismatch('1.1.0', '1.1.5', 'old-digest', 'new-digest');
+  assert.match(noProject ?? '', /Restart it with editor_launch restart/, String(noProject));
 }
 
 /**
@@ -8490,8 +8527,12 @@ function testStalenessIsTheEditorCodeNotTheVersion(): void {
  * digest that is not the shipped one is the positive: the same server calls that one stale.
  */
 async function testAnEditorOnTheShippedCodeIsNotCalledStale(): Promise<void> {
-  const statusFor = async (addonDigest: string): Promise<unknown> => {
+  const statusFor = async (addonDigest: string, onDisk?: string): Promise<unknown> => {
     const project = mkdtempSync(join(tmpdir(), 'gdharness-digest-editor-'));
+    if (onDisk !== undefined) {
+      mkdirSync(join(project, 'addons', 'gdharness_editor'), { recursive: true });
+      writeFileSync(join(project, 'addons', 'gdharness_editor', '.gdharness-digest'), `${onDisk}\n`);
+    }
     const port = await reservePort();
     let editor: WebSocket | null = null;
     const server = new ServerProcess({ env: { GDHARNESS_BRIDGE_PORT: String(port) } });
@@ -8562,6 +8603,25 @@ async function testAnEditorOnTheShippedCodeIsNotCalledStale(): Promise<void> {
   const behind = await statusFor('0'.repeat(64));
   assert.equal(get(behind, 'editor', 'addonIsStale'), true, `other code is stale: ${JSON.stringify(behind)}`);
   assert.match(text(get(behind, 'editor', 'staleNote')), /editor_launch restart/, JSON.stringify(behind));
+  // What a restart would load decides the remedy. With the project's addons as old as the editor's,
+  // a restart loads them again, and the note sent callers round that loop.
+  const oldOnDisk = await statusFor('0'.repeat(64), '0'.repeat(64));
+  assert.match(
+    text(get(oldOnDisk, 'editor', 'staleNote')),
+    /gdharness upgrade in the project/,
+    `old addons on disk are named as what a restart would load: ${JSON.stringify(oldOnDisk)}`,
+  );
+  const newOnDisk = await statusFor('0'.repeat(64), shipped);
+  assert.match(
+    text(get(newOnDisk, 'editor', 'staleNote')),
+    /editor_launch restart/,
+    JSON.stringify(newOnDisk),
+  );
+  assert.doesNotMatch(
+    text(get(newOnDisk, 'editor', 'staleNote')),
+    /gdharness upgrade/,
+    `addons on disk that match this server need only the restart: ${JSON.stringify(newOnDisk)}`,
+  );
   assert.equal(
     get(behind, 'editor', 'addonNote'),
     undefined,
@@ -23908,6 +23968,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASupersededServerStandsDown,
   testAPredecessorThatKeepsThePortIsNotWaitedOnForEver,
   testAProjectUpgradedUnderTheServerIsSaid,
+  testAStaleNoteKnowsWhatARestartLoads,
   testEveryDispatchedNameExistsOnBothSides,
   testEveryEngineParameterCanBeSent,
   testEveryToolParameterIsRead,

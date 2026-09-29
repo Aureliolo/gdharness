@@ -193,7 +193,12 @@ import {
   SERVER_VERSION,
   sameCodeNote,
 } from './server-version.js';
-import { installedAddonVersion, RUNTIME_AUTOLOAD, shippedEditorDigest } from './setup.js';
+import {
+  installedAddonVersion,
+  installedEditorDigest,
+  RUNTIME_AUTOLOAD,
+  shippedEditorDigest,
+} from './setup.js';
 import {
   asParams,
   readArray,
@@ -215,7 +220,7 @@ import {
   type ToolSpec,
   toolSpec,
 } from './tool-definitions.js';
-import { UpdateCheck } from './update-check.js';
+import { isNewer, UpdateCheck } from './update-check.js';
 
 /**
  * How many answers pass between one update notice and the next.
@@ -2200,6 +2205,25 @@ class GodotServer {
     // Before the one about npm, because this one is certain and about this project rather than
     // about the world, and because it is the state where the rest of the answer may be wrong.
     const moved = this.projectHasMovedOn();
+    // The other direction has another remedy. A server newer than the addons it finds is the one a
+    // checkout spawns when a pin in a committed config moved and the addons did not, and it was told
+    // to reconnect, which spawned the same version and brought the notice straight back.
+    if (moved !== null && !isNewer(moved, SERVER_VERSION)) {
+      this.noticedUpdate = true;
+      this.callsSinceNotice = 0;
+      return this.saying(answer, {
+        project_addons_behind_this_server: {
+          server_is: SERVER_VERSION,
+          project_is: moved,
+          what_to_do:
+            `The project's gdharness addons are ${moved}, older than this ${SERVER_VERSION} server, so an ` +
+            'editor restart loads the old code and reconnecting spawns this same server again. Tell the ' +
+            'user, and offer to run gdharness upgrade in the project, which replaces the addons with ' +
+            "this server's; ask first, since it changes files in their project. editor_launch restart " +
+            'then loads them.',
+        },
+      });
+    }
     if (moved !== null) {
       this.noticedUpdate = true;
       this.callsSinceNotice = 0;
@@ -2245,8 +2269,9 @@ class GodotServer {
         ...notice,
         what_to_do:
           'Tell the user a newer gdharness is out, with what changed, and offer to take it. ' +
-          'Only run the upgrade command if they say yes: it restarts their editor and the ' +
-          'MCP server has to be reconnected afterwards.',
+          'Only run the upgrade command if they say yes: it replaces the addons in their project, ' +
+          'and afterwards the MCP server has to be reconnected and the editor restarted with ' +
+          'editor_launch restart.',
       },
     });
   }
@@ -2272,6 +2297,18 @@ class GodotServer {
     }
     const installed = installedAddonVersion(this.ownProject);
     return installed === null || installed === SERVER_VERSION ? null : installed;
+  }
+
+  /**
+   * The code of the editor addon installed in the project the editor has open, which is what a
+   * restart of it loads, or undefined when no project is known.
+   */
+  private editorCodeOnDisk(): string | null | undefined {
+    const status = this.godotBridge.getStatus();
+    const project = (status.connected ? status.projectPath : undefined) ?? this.ownProject;
+    return project === null || project === undefined || project === ''
+      ? undefined
+      : installedEditorDigest(project);
   }
 
   /** What the project's own MCP config asks for, when it is not what is answering. */
@@ -4190,6 +4227,7 @@ class GodotServer {
         SERVER_VERSION,
         this.godotBridge.getStatus().addonDigest,
         shippedEditorDigest(),
+        this.editorCodeOnDisk(),
       ),
     );
   }
@@ -4660,7 +4698,13 @@ class GodotServer {
               note: `The gdharness server this one replaced, pid ${this.handingOverFrom}, still holds port ${this.godotBridge.configuredPort} and is standing down; this server takes the port when it lets go, and takes another after ${HANDOVER_MS / 1000} seconds if it does not.`,
             },
       staleNote: stale
-        ? addonMismatch(status.addonVersion, SERVER_VERSION, status.addonDigest, shippedEditorDigest())
+        ? addonMismatch(
+            status.addonVersion,
+            SERVER_VERSION,
+            status.addonDigest,
+            shippedEditorDigest(),
+            this.editorCodeOnDisk(),
+          )
         : undefined,
       addonNote: status.connected
         ? sameCodeNote(status.addonVersion, SERVER_VERSION, status.addonDigest, shippedEditorDigest())
@@ -4982,7 +5026,13 @@ class GodotServer {
       addonVersion: now.addonVersion,
       serverVersion: SERVER_VERSION,
       addonIsStale: editorIsStale(now.addonVersion, SERVER_VERSION, now.addonDigest, shippedEditorDigest()),
-      staleNote: addonMismatch(now.addonVersion, SERVER_VERSION, now.addonDigest, shippedEditorDigest()),
+      staleNote: addonMismatch(
+        now.addonVersion,
+        SERVER_VERSION,
+        now.addonDigest,
+        shippedEditorDigest(),
+        this.editorCodeOnDisk(),
+      ),
       ...this.whatTheEditorDropped(settingsBefore, after),
       tookMs: Date.now() - began,
     });
@@ -8437,6 +8487,7 @@ class GodotServer {
           SERVER_VERSION,
           this.godotBridge.getStatus().addonDigest,
           shippedEditorDigest(),
+          this.editorCodeOnDisk(),
         ),
       );
     } catch (error) {
