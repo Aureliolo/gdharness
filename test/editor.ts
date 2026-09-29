@@ -1859,6 +1859,15 @@ async function testASetIsReadBack({ call, refusal, project }: Editor): Promise<v
   );
   await call('scene_node', set('Pointer', { spawns: { a: { _type: 'Vector2', x: 1, y: 2 } } }));
   assert.match(nodeBody(fileText(project, 'checks.tscn'), 'Pointer'), /"a": Vector2\(1, 2\)/);
+  // Keys that are not text travel as entries, both ways, so a number key stays a number.
+  const numbered = { _type: 'Dictionary', entries: [[1, 'first']] };
+  await call('scene_node', set('Pointer', { spawns: numbered }));
+  assert.match(nodeBody(fileText(project, 'checks.tscn'), 'Pointer'), /spawns = \{\r?\n1: "first"/);
+  assert.deepEqual(
+    get(await call('scene_node', { ...scene, op: 'get', nodePath: 'Pointer' }), 'properties', 'spawns'),
+    numbered,
+    'and it is read back as it was written',
+  );
   assert.match(await refusal('scene_node', set('Pointer', { ids: [1.5, 2] })), /holds whole numbers/);
   await call('scene_node', set('Pointer', { ids: [1, 2] }));
   assert.match(nodeBody(fileText(project, 'checks.tscn'), 'Pointer'), /ids = Array\[int\]\(\[1, 2\]\)/);
