@@ -17,20 +17,32 @@ extends RefCounted
 ## sit inside another viewport. A SubViewport drawn some other way, onto a mesh for one, has no
 ## place on the screen to carry the point to, and the point stays in it.
 static func reach(viewport: Viewport, point: Vector2) -> Dictionary:
+	var out: Array[Dictionary] = steps_out(viewport, point)
+	return out.back()
+
+
+## Every viewport a pointer at [param point] in [param viewport] passes through on the way out to
+## the one it arrives at, innermost first, as {"viewport", "point", "through"}: the point in that
+## viewport's space, and the embedded [Window] or the [SubViewportContainer] in it that shows the
+## step before, null for the first. What [method reach] answers is the last of them.
+static func steps_out(viewport: Viewport, point: Vector2) -> Array[Dictionary]:
+	var out: Array[Dictionary] = [{"viewport": viewport, "point": point, "through": null}]
 	while true:
 		var window: Window = viewport as Window
 		if window != null and window.is_embedded() and window.get_parent() != null:
 			point += Vector2(window.position)
 			viewport = window.get_parent().get_viewport()
+			out.append({"viewport": viewport, "point": point, "through": window})
 			continue
 		var shown_by: SubViewportContainer = viewport.get_parent() as SubViewportContainer
 		if viewport is SubViewport and shown_by != null:
 			var scaled: Vector2 = point * float(shown_by.stretch_shrink) if shown_by.stretch else point
 			point = shown_by.get_global_transform_with_canvas() * scaled
 			viewport = shown_by.get_viewport()
+			out.append({"viewport": viewport, "point": point, "through": shown_by})
 			continue
 		break
-	return {"viewport": viewport, "point": point}
+	return out
 
 
 ## Where [param point], in [param viewport]'s own coordinates, is in the pixels of the window the
