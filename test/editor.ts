@@ -1630,6 +1630,15 @@ async function testAWriteKeepsWhatTheSceneComesFrom({ call, refusal, project }: 
     properties: { position: { x: 1, y: 2 } },
   });
   assert.equal(nodeBody(fileText(project, 'layers/host.tscn'), 'Part'), 'position = Vector2(1, 2)');
+
+  // An instance moved or copied is still an instance: the nodes its own scene makes stay that
+  // scene's, where giving them all to this root wrote them into this file as well.
+  await call('scene_node', { ...host, op: 'reparent', nodePath: 'Part', newParentPath: 'Panel' });
+  await call('scene_node', { ...host, op: 'duplicate', nodePath: 'Panel/Part', newName: 'Twin' });
+  const moved = fileText(project, 'layers/host.tscn');
+  assert.match(moved, /\[node name="Part" parent="Panel"[^\]]*instance=ExtResource/, `moved: ${moved}`);
+  assert.match(moved, /\[node name="Twin" parent="Panel"[^\]]*instance=ExtResource/, `copied: ${moved}`);
+  assert.doesNotMatch(moved, /name="Inner"/, `and neither carries the instance's own node: ${moved}`);
 }
 
 /**
@@ -1913,6 +1922,18 @@ async function testSignalsAreTheFilesOwn({ call, refusal, project }: Editor): Pr
     await refusal('scene_signal', { ...ends, op: 'disconnect', methodName: 'missing' }),
     /has no connection from Go\.pressed to Sink\.missing/,
   );
+  // A copy keeps the connections of what it copies.
+  await call('scene_node', { ...scene, op: 'duplicate', nodePath: 'Go', newName: 'Again' });
+  assert.match(
+    fileText(project, 'signals.tscn'),
+    /\[connection signal="pressed" from="Again" to="Sink" method="queue_free" flags=3\]/,
+  );
+  await call('scene_signal', {
+    ...ends,
+    sourceNodePath: 'Again',
+    op: 'disconnect',
+    methodName: 'queue_free',
+  });
   await call('scene_signal', { ...ends, op: 'disconnect', methodName: 'queue_free' });
   assert.doesNotMatch(fileText(project, 'signals.tscn'), /\[connection/, 'and a disconnect removes it');
 }

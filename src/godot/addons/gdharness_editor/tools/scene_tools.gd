@@ -93,6 +93,71 @@ func _kept(scene: SceneFile, saved: Node, node: Node, names: Array) -> String:
 ## Owns [param node] and the nodes under it to [param root], except those an instanced scene
 ## inside it owns: giving those to the root made the pack write the instance's own nodes into this
 ## scene as overrides.
+func _copy(source: Node, root: Node, copies: Dictionary) -> Node:
+	var copy: Node = null
+	if not source.scene_file_path.is_empty():
+		# An instanced scene made again from its file, so the copy is an instance too. Node.duplicate
+		# makes a plain node of the instance's class, and the pack saved it with every property of the
+		# instance's root frozen into this scene.
+		var packed: PackedScene = ResourceLoader.load(source.scene_file_path, "PackedScene") as PackedScene
+		if packed == null:
+			return null
+		copy = packed.instantiate(PackedScene.GEN_EDIT_STATE_INSTANCE)
+		for declared: Dictionary in source.get_property_list():
+			if not (Read.as_int(declared.get("usage", 0)) & PROPERTY_USAGE_STORAGE):
+				continue
+			var property: String = str(declared.get("name", ""))
+			var value: Variant = source.get(property)
+			if not PropertyValues.same(copy.get(property), value):
+				copy.set(property, value)
+		for group: StringName in source.get_groups():
+			if not copy.is_in_group(group):
+				copy.add_to_group(group, true)
+	else:
+		copy = source.duplicate(Node.DUPLICATE_GROUPS | Node.DUPLICATE_SCRIPTS)
+		for child: Node in copy.get_children():
+			copy.remove_child(child)
+			child.free()
+	copy.name = source.name
+	copies[source] = copy
+	# Only what this scene owns: an instance's own nodes come with the instance.
+	for child: Node in source.get_children():
+		if child.owner == root:
+			var copied: Node = _copy(child, root, copies)
+			if copied == null:
+				return null
+			copy.add_child(copied)
+	return copy
+
+
+## Gives each copy in [param copies] the persistent connections its source has, to the copy of the
+## target when the target was copied too. A connection an instance makes inside itself is skipped:
+## the instance made again from its file already has it.
+func _reconnect(copies: Dictionary, top: Node) -> void:
+	for key: Variant in copies:
+		var source: Node = key
+		var copy: Node = copies[key]
+		for info: Dictionary in source.get_signal_list():
+			var signal_name: String = str(info.get("name", ""))
+			for conn: Dictionary in source.get_signal_connection_list(signal_name):
+				var flags: int = Read.as_int(conn.get("flags", 0))
+				var callable: Callable = conn.get("callable", Callable())
+				var target: Object = callable.get_object()
+				if not flags & Object.CONNECT_PERSIST or target == null:
+					continue
+				var to: Object = copies.get(target, target)
+				if to == target and target is Node and (target == top or top.is_ancestor_of(target as Node)):
+					continue
+				var copied: Callable = Callable(to, callable.get_method())
+				if (
+					not copy.is_connected(signal_name, copied)
+					and copy.connect(signal_name, copied, flags) != OK
+				):
+					push_error(
+						"gdharness: could not copy the connection %s of %s" % [signal_name, source.name]
+					)
+
+
 func _own(node: Node, root: Node) -> void:
 	node.owner = root
 	for child: Node in node.get_children():
@@ -384,13 +449,15 @@ func duplicate_node(args: Dictionary) -> Dictionary:
 	if not unusable.is_empty():
 		return scene.refuse(unusable)
 
-	var duplicated_node: Node = source.duplicate()
+	var copies: Dictionary = {}
+	var duplicated_node: Node = _copy(source, root, copies)
 	if not duplicated_node:
 		return scene.refuse("Failed to duplicate node: " + node_path)
 
 	duplicated_node.name = new_name
 	target_parent.add_child(duplicated_node)
 	_own(duplicated_node, root)
+	_reconnect(copies, source)
 
 	var new_path: String = scene.path_of(duplicated_node)
 	var written: Dictionary = scene.write(
