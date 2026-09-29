@@ -21271,6 +21271,34 @@ async function testGdUnitRunner(): Promise<void> {
           [1, undefined, undefined],
           `a case failing twice is one failure and no hook: ${JSON.stringify(twice, null, 2)}`,
         );
+        // The same failing suite, run again and again. Reported downstream on 1.1.22 as a hook count
+        // that changed between runs of one suite, which would be an earlier run's report being read
+        // as well as #800's arithmetic; the answer has to be this run's alone, and the same each time.
+        writeFileSync(
+          join(projectDir, 'test', 'thrice_test.gd'),
+          'extends GdUnitTestSuite\n\n\nfunc test_three_assertions_fail() -> void:\n\tassert_bool(false).is_true()\n\tassert_bool(false).is_true()\n\tassert_bool(false).is_true()\n',
+        );
+        const runs: unknown[] = [];
+        for (let run = 0; run < 4; run += 1) {
+          const answer = JSON.parse(
+            await call(
+              'project_test',
+              { projectPath: projectDir, path: 'test/thrice_test.gd' },
+              ENGINE_CALL_TIMEOUT_MS * 3,
+            ),
+          ) as unknown;
+          runs.push([
+            get(answer, 'failures'),
+            get(answer, 'suites', 0, 'hookFailures'),
+            get(answer, 'hookFailures'),
+          ]);
+        }
+        rmSync(join(projectDir, 'test', 'thrice_test.gd'));
+        assert.deepEqual(
+          runs,
+          Array.from({ length: 4 }, () => [1, undefined, undefined]),
+          `one case failing three times is one failure and no hook, on every run: ${JSON.stringify(runs)}`,
+        );
         // Orphans left early in a run that prints a great deal after: counted off what was printed,
         // they were lost with everything before the newest two hundred lines.
         mkdirSync(join(projectDir, 'test', 'long'));
