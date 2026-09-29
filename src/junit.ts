@@ -280,7 +280,9 @@ export function parseJUnit(xml: string): TestReport {
 
 /** What gdUnit4 prints when it was pointed at something, and there was nothing there to run. */
 const NOTHING_RAN = /no test cases found/i;
-const NO_SUCH_PATH = /given directory or file does not exists:\s*(\S+)/i;
+// To the end of the line, since a directory can have a space in its name: `(\S+)` answered
+// `res://my` for `res://my tests`.
+const NO_SUCH_PATH = /given directory or file does not exists:\s*(.+?)\s*$/i;
 
 /**
  * Why a run wrote no report, as a verdict, or nothing when the printed output does not say.
@@ -467,17 +469,25 @@ export function withActualsPrinted<Case extends { readonly detail: string | null
     at: match[5] ?? '',
     ...readDiff(match[1] ?? ''),
   }));
+  // Each printed diff belongs to one failure, and both are in the order the run met them. The same
+  // assertion line failing twice merges alike when the values differ only where the marks were, so
+  // a diff offered to every failure it matched gave both the first one's value.
+  const used = new Set<number>();
   return failed.map((entry) => {
     if (entry.detail === null) {
       return entry;
     }
     let detail = entry.detail;
     let recovered = false;
-    for (const diff of diffs) {
+    for (const [index, diff] of diffs.entries()) {
+      if (used.has(index)) {
+        continue;
+      }
       const wrong = ` but was\n '${diff.merged.replaceAll('\r', '')}'${diff.suffix}\n\tat ${diff.at}`;
       if (detail.includes(wrong)) {
         detail = detail.replace(wrong, () => ` but was\n '${diff.actual}'${diff.suffix}\n\tat ${diff.at}`);
         recovered = true;
+        used.add(index);
       }
     }
     const quoted = QUOTED_EQUALITY.exec(detail);
@@ -533,7 +543,8 @@ export interface OrphanReport {
   readonly suites: readonly SuiteOrphans[];
 }
 
-const RUNNING_SUITE = /Run Test Suite:\s*(\S+)/;
+// Up to the script's own extension rather than the first space, for the same reason.
+const RUNNING_SUITE = /Run Test Suite:\s*(res:\/\/.+?\.(?:gd|cs))(?=\s|$)/;
 const ORPHANS = /(\d+)\s+orphans/;
 const OVERALL = 'Overall Summary';
 

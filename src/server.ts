@@ -1104,6 +1104,9 @@ const CACHE_WRITE_MS = 2_000;
  */
 const SCAN_WAIT_MS = 30_000;
 
+/** How long past its exit a run's output is waited for when something else still holds its pipes. */
+const STREAMS_GRACE_MS = 2_000;
+
 /** What a start waited for before the game was launched: an editor scan and its cache write. */
 interface ScanWait {
   readonly waitedMs: number;
@@ -3765,6 +3768,7 @@ class GodotServer {
     if (timedOut && run.process.pid !== undefined) {
       await untilGone([run.process.pid]);
     }
+    await run.settled;
 
     const reportsDir = join(project.value.path, '.godot', ...ours.split('/'));
     let report: TestReport | null = null;
@@ -3808,7 +3812,13 @@ class GodotServer {
       105: 'script errors',
     };
     const exitCode = run.exitCode;
-    const printed = run.log.select({ severity: 'info', sinceLastCall: false, limit: 200 }).entries;
+    // All of it, because the counts are read off it: the newest two hundred lines lost an early
+    // suite's orphans, and with them the warning, on any tier that printed a line per case.
+    const printed = run.log.select({
+      severity: 'info',
+      sinceLastCall: false,
+      limit: Number.POSITIVE_INFINITY,
+    }).entries;
     // Before the exit code, because gdUnit4 leaves it at zero for a run that found nothing to do,
     // and `passed` is the one word a skimming reader must never be handed for one of those.
     const said = printed.map((entry) => entry.text);
@@ -3851,7 +3861,9 @@ class GodotServer {
           ? `No tests ran: ${verdict}.${elsewhereIn(project.value.path, asked)}`
           : scriptErrors.length > 0
             ? scriptErrorsNote(scriptErrors)
-            : `The test run wrote no report (${verdict}${reportProblem ? `; ${reportProblem}` : ''}).`;
+            : reportProblem !== null
+              ? `The test run's report could not be read (${reportProblem}); the engine's own verdict was ${verdict}.`
+              : `The test run wrote no report (${verdict}).`;
       return {
         content: [
           { type: 'text', text: note },
@@ -3918,7 +3930,15 @@ class GodotServer {
     // along three times in one afternoon, and read its own suite as flaky.
     const notRun = report.suites.reduce((sum, suite) => sum + Math.max(0, suite.discovered - suite.tests), 0);
     return this.jsonTextResponse({
-      passed: !timedOut && exitCode === 0 && report.failures === 0 && report.errors === 0,
+      // A report with no cases in it is a run where nothing ran, which exits 0 and was answered
+      // passed beside a verdict saying no test cases were found.
+      passed:
+        !timedOut &&
+        exitCode === 0 &&
+        nothingRan === null &&
+        report.tests > 0 &&
+        report.failures === 0 &&
+        report.errors === 0,
       verdict,
       ...(timedOut ? { timedOut, hung, silentForMs } : {}),
       exitCode,
@@ -3942,7 +3962,9 @@ class GodotServer {
         verdict.startsWith('warnings') && warnings.length === 0
           ? 'gdUnit4 exits 101 for orphan nodes when nothing failed, and this run printed no count of them: orphan reporting may be off in the project settings.'
           : notRun > 0
-            ? `This run stopped at the first failure in each suite it failed in, so ${notRun} case${notRun === 1 ? '' : 's'} never ran and count as neither passed nor failed. Leave failFast out to run every case.`
+            ? readBoolean(args, 'failFast') === true
+              ? `This run stopped at the first failure in each suite it failed in, so ${notRun} case${notRun === 1 ? '' : 's'} never ran and count as neither passed nor failed. Leave failFast out to run every case.`
+              : `${notRun} case${notRun === 1 ? '' : 's'} counted in ${notRun === 1 ? 'its suite' : 'their suites'} never ran and count as neither passed nor failed. failFast was not set, so it was not that: the suites below with notRun are the ones to read.`
             : undefined,
       suites: unclean.map((suite) => ({
         name: suite.name,
@@ -5904,7 +5926,11 @@ class GodotServer {
    * asked, so a server that goes away mid-run takes the only reader with it; outliving it would
    * leave an engine nobody is reading and nobody will ever end.
    */
-  private spawnGame(godotPath: string, cmdArgs: string[], env?: NodeJS.ProcessEnv): SpawnedGame {
+  private spawnGame(
+    godotPath: string,
+    cmdArgs: string[],
+    env?: NodeJS.ProcessEnv,
+  ): SpawnedGame & { readonly settled: Promise<void> } {
     const child = spawn(godotPath, cmdArgs, { stdio: ['ignore', 'pipe', 'pipe'], ...(env ? { env } : {}) });
     // The same reasoning at the other end of the call: a caller who cancelled is no longer the
     // reader this run is held for, so it is ended with the call rather than at its own timeout.
@@ -5947,7 +5973,6 @@ class GodotServer {
     });
     child.on('exit', (code: number | null, signal: NodeJS.Signals | null) => {
       this.logDebug(`Godot process exited with code ${code ?? 'none'}, signal ${signal ?? 'none'}`);
-      log.finish();
       started.exitCode = code;
       started.exitSignal = code === null ? signal : null;
     });
@@ -5956,7 +5981,33 @@ class GodotServer {
       log.append('stderr', `${err.message}\n`);
       started.exitCode = -1;
     });
-    return started;
+    // The log is whole once both streams have closed, which Node does not promise by `exit`: the
+    // last lines can still be in the pipe, and they are the summary, the last case's failure, or
+    // the error a boot ended on. Two seconds past the exit at most, because a child the engine
+    // started and left running holds the pipe open for as long as it lives.
+    const settled = new Promise<void>((resolve) => {
+      let open = 2;
+      const done = (): void => {
+        log.finish();
+        resolve();
+      };
+      const closed = (): void => {
+        open -= 1;
+        if (open === 0) {
+          done();
+        }
+      };
+      child.stdout.once('close', closed);
+      child.stderr.once('close', closed);
+      child.once('exit', () => {
+        setTimeout(done, STREAMS_GRACE_MS).unref();
+      });
+      child.once('error', () => {
+        done();
+      });
+    });
+    // The same object the handlers above write the exit into, not a copy of it.
+    return Object.assign(started, { settled });
   }
 
   /**
@@ -6677,6 +6728,7 @@ class GodotServer {
         resolve(false);
       });
     });
+    await boot.settled;
 
     const errors = boot.log.count('error');
     const warnings = boot.log.count('warning');

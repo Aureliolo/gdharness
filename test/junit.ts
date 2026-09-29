@@ -128,6 +128,27 @@ function testARunThatFoundNothingIsNotAPass(): void {
     'nothing at res://test',
     'the path the runner named beats the one it was asked for',
   );
+  // A directory with a space in its name is named whole: the path was read up to the first space.
+  assert.equal(
+    whyNoReport(
+      ['Given directory or file does not exists: res://my tests', 'No test cases found, abort test run!'],
+      'res://my tests',
+    ),
+    'nothing at res://my tests',
+  );
+}
+
+function testASuiteWithASpaceInItsPathKeepsItsOrphans(): void {
+  const found = orphansPrinted([
+    'Run Test Suite: res://my tests/docket_test.gd',
+    'Statistics: 3 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 2 orphans |	WARNING',
+    'Overall Summary: 3 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 2 orphans |',
+  ]);
+  assert.deepEqual(
+    found.suites,
+    [{ path: 'res://my tests/docket_test.gd', orphans: 2 }],
+    JSON.stringify(found),
+  );
 }
 
 function testARunThatSaidNothingOfTheSortIsLeftAlone(): void {
@@ -339,6 +360,36 @@ function readsItsValue(ending: string): void {
       `'abcXd'\n\tat 'test_unprinted_apart' in res://test/words_test.gd:18\n${VALUE_NOT_RECOVERED_NOTE}`,
     ),
     `a detail the console kept no copy of, whose sides differ, says its value may be the merge: ${apart?.detail}`,
+  );
+}
+
+/**
+ * One assertion line failing twice, as a parameterized test does: one function name, one line, and a
+ * different value each time. Expected "abc", found "" and then "a", which merge alike, so a diff
+ * offered to every failure it matched gave both the first one's value.
+ */
+function testOneLineFailingTwiceKeepsEachValue(): void {
+  const e = String.fromCharCode(0x1b);
+  const at = `${e}[0m${e}[38;2;173;216;230m\tat 'test_each' in res://test/each_test.gd:7${e}[0m`;
+  const printed = [
+    ` but was`,
+    ` '${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[38;2;255;255;255mabc${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255m${e}[0m'${at}`,
+    ` but was`,
+    ` '${e}[38;2;30;144;255ma${e}[48;2;38;0;0m${e}[38;2;255;255;255mbc${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255m${e}[0m'${at}`,
+  ].join('\n');
+  const reported = {
+    detail: "Expecting:\n 'abc'\n but was\n 'abc'\n\tat 'test_each' in res://test/each_test.gd:7",
+  };
+  const [first, second] = withActualsPrinted([reported, reported], printed);
+  assert.match(
+    first?.detail ?? '',
+    / but was\n ''\n\tat 'test_each'/,
+    `the first found nothing: ${first?.detail}`,
+  );
+  assert.match(
+    second?.detail ?? '',
+    / but was\n 'a'\n\tat 'test_each'/,
+    `the second found "a": ${second?.detail}`,
   );
 }
 
@@ -559,6 +610,8 @@ function readsEveryShape(ending: string): void {
 
 testWhatGdUnitWrites();
 testAFailingStringReadsItsValue();
+testOneLineFailingTwiceKeepsEachValue();
+testASuiteWithASpaceInItsPathKeepsItsOrphans();
 testAStringAfterAnArrayReadsItsOwnValue();
 testEveryShapeOfAStringEqualityReadsItsValue();
 testEntitiesAndShapes();
