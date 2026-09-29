@@ -2122,10 +2122,18 @@ async function testACreateMakesWhatWasAsked({ call, refusal, project }: Editor):
   await call('resource_edit', tooled);
   const kept = fileText(project, 'tooled.tres');
   assert.match(
-    await refusal('resource_edit', { ...tooled, op: 'modify', properties: { hidden: 3 } }),
+    // With a property the file does keep, so the save the refusal undoes has changed something.
+    await refusal('resource_edit', {
+      ...tooled,
+      op: 'modify',
+      properties: { resource_name: 'renamed', hidden: 3 },
+    }),
     /res:\/\/tooled\.tres\.hidden would load from the file as 0: it is not a property the file keeps/,
   );
   assert.equal(fileText(project, 'tooled.tres'), kept, 'and the file is put back as it was');
+
+  // Imported by the editor's first scan, which a case run on its own can start before.
+  await call('editor_rescan', { projectPath: project });
   assert.match(
     await refusal('resource_edit', {
       projectPath: project,
