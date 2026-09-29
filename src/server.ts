@@ -2564,7 +2564,9 @@ class GodotServer {
           return await this.handleRuntimeCommand('click', {
             ...whichGame(args),
             path: readNonEmptyString(args, 'nodePath') ?? '',
-            button: readString(args, 'button') ?? 'left',
+            // As given, a number included: the addon names a button either way and refuses what is
+            // neither, and read as a string alone a right click given as 2 went as the left button.
+            button: args['button'] ?? 'left',
             double: readBoolean(args, 'doubleClick') ?? false,
             ...(readNonEmptyString(args, 'says') === undefined
               ? {}

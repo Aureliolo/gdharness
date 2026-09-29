@@ -175,6 +175,18 @@ static func is_a(object: Object, declared: String, declared_script: Script = nul
 	return false
 
 
+## What became of [param node] once an input it was given has run: still in the tree, taken out of
+## it, or freed. Untyped, because a freed reference handed to a typed parameter is itself the engine
+## error this is here to avoid.
+static func afterwards(node: Variant) -> String:
+	if not is_instance_valid(node):
+		return "freed"
+	if not node is Node:
+		return "removed"
+	var placed: Node = node
+	return "in_tree" if placed.is_inside_tree() else "removed"
+
+
 ## What [param object] is, by its script class where it has one, and by its script's file where
 ## that has no global name, since the engine class alone is what a refusal about the script has
 ## just said it matched.

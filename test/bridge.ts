@@ -583,6 +583,14 @@ async function main(): Promise<void> {
         { path: '/root/Menu/Play', button: 'left', double: false },
         'click carries the path, the button and whether it is a double click',
       );
+      // A button given by number, which the schema takes, reaches the game as that number: read as a
+      // string alone it was dropped and the click went as the left button.
+      const numbered = await payload('runtime_input', {
+        op: 'click',
+        nodePath: '/root/Menu/Play',
+        button: 2,
+      });
+      assert.equal(get(numbered, 'asked', 'button'), 2, JSON.stringify(numbered));
       const byWords = await payload('runtime_input', { op: 'click', says: 'New guild', index: 1 });
       assert.deepEqual(
         get(byWords, 'asked'),

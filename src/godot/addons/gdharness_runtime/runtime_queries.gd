@@ -361,6 +361,11 @@ static func _drawn(node: Node) -> bool:
 	var control: CanvasItem = node as CanvasItem
 	if control != null:
 		return control.visible
+	# A hidden layer hides everything drawn on it, a pause menu's for one, while each of those keeps
+	# its own visible flag, so read as shown it matched the words of a menu nobody could see.
+	var layer: CanvasLayer = node as CanvasLayer
+	if layer != null:
+		return layer.visible
 	var spatial: Node3D = node as Node3D
 	if spatial != null:
 		return spatial.visible

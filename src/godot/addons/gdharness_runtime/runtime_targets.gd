@@ -5,6 +5,7 @@ extends RefCounted
 const Queries = preload("runtime_queries.gd")
 const Read = preload("reading.gd")
 const Says = preload("runtime_says.gd")
+const Screen = preload("runtime_screen.gd")
 const Values = preload("runtime_values.gd")
 const Words = preload("runtime_words.gd")
 
@@ -68,8 +69,12 @@ static func control_saying(root: Node, root_path: String, wanted: String, which:
 	var areas: Array[Rect2] = _areas_of(drawn)
 	var covered: int = 0
 	var cover: Node = null
+	var outside: int = 0
 	var open: Array[int] = []
 	for index: int in matched.size():
+		if _off_screen(matched[index]):
+			outside += 1
+			continue
 		var over: Node = _cover_of(matched[index], drawn, areas)
 		if over == null:
 			open.append(index)
@@ -98,8 +103,8 @@ static func control_saying(root: Node, root_path: String, wanted: String, which:
 			"type": "error",
 			"message":
 			(
-				'no control on screen%s says "%s", so nothing was clicked%s%s'
-				% [under, wanted, _hidden_note(hidden), _covered_note(covered, cover)]
+				'no control on screen%s says "%s", so nothing was clicked%s%s%s'
+				% [under, wanted, _hidden_note(hidden), _outside_note(outside), _covered_note(covered, cover)]
 			)
 		}
 	var best: int = ranks.count(ranks[0])
@@ -137,10 +142,13 @@ static func control_saying(root: Node, root_path: String, wanted: String, which:
 	return {"path": str(targets[index].get_path()), "found": found}
 
 
-## How good a match [param target] is for a click: a button over what cannot be pressed, and then
-## the whole of its words over a part of them.
+## How good a match [param target] is for a click: an enabled button over anything else, and then
+## the whole of its words over a part of them. A disabled button ranks with what is not a button,
+## since a click on it presses nothing: counted as a button, one tied with an enabled button saying
+## the same words and the click was refused as not clear.
 static func _rank(target: Control, whole: bool) -> int:
-	return (2 if target is BaseButton else 0) + (1 if whole else 0)
+	var button: BaseButton = target as BaseButton
+	return (2 if button != null and not button.disabled else 0) + (1 if whole else 0)
 
 
 ## Whether one of [param wanted]'s alternatives is the whole of [param said], or the whole of one of
@@ -178,14 +186,17 @@ static func _described(count: int, rank: int, wanted: String, under: String) -> 
 	return "%d %ss on screen%s say %s" % [count, what, under, how]
 
 
-## Why the matches below [param rank] were passed over, said of one of them when [param one].
+## Why the matches below [param rank] were passed over, said of one of them when [param one]. As
+## what the code knows, which is whether a control is an enabled button: a card taking clicks in its
+## own `gui_input` is not one, and calling it something that cannot be pressed was a guess.
 static func _passed_over(rank: int, one: bool) -> String:
 	var says: String = "says" if one else "say"
+	var is_not: String = "is not an enabled button" if one else "are not enabled buttons"
 	match rank:
 		3:
-			return "cannot be pressed or %s it as part of more" % says
+			return "%s or %s it as part of more" % [is_not, says]
 		2:
-			return "cannot be pressed"
+			return is_not
 		_:
 			return "%s it as part of more" % says
 
@@ -195,6 +206,14 @@ static func _hidden_note(hidden: int) -> String:
 	if hidden == 0:
 		return ""
 	return "; %d hidden control%s" % [hidden, " says it" if hidden == 1 else "s say it"]
+
+
+## What to add to a refusal that found nothing on screen, when words matched controls a click cannot
+## reach: off the viewport, or clipped away by a container it does not scroll.
+static func _outside_note(outside: int) -> String:
+	if outside == 0:
+		return ""
+	return "; %d control%s it outside what the screen shows" % [outside, " says" if outside == 1 else "s say"]
 
 
 ## What to add to a refusal that found nothing on screen, when the controls saying it are covered.
@@ -271,25 +290,21 @@ static func _areas_of(drawn: Array[Node]) -> Array[Rect2]:
 ## page covered was picked over the ones in view, scrolled up under the page and pressed there.
 ##
 ## [param areas] holds the box around each of [param drawn], so everything whose box misses the
-## point is passed over before anything costlier is asked of it.
+## point is passed over before anything costlier is asked of it. A window's box is in the space of
+## the viewport it is embedded in, which is not the target's when the target is in another window,
+## so a window is judged by [method _window_over] instead.
 static func _cover_of(target: Control, drawn: Array[Node], areas: Array[Rect2]) -> Node:
 	var viewport: Viewport = target.get_viewport()
-	var point: Vector2 = target.get_global_transform_with_canvas() * (target.size * 0.5)
-	if _clipped_away(target, point):
-		point = _where_it_lands(target, point)
+	var point: Vector2 = _where_it_is_clicked(target)
 	var layer: int = _layer_of(target)
 	for at: int in drawn.size():
-		if not areas[at].has_point(point):
-			continue
 		var other: Node = drawn[at]
 		var window: Window = other as Window
 		if window != null:
-			if (
-				window.get_parent() != null
-				and window.get_parent().get_viewport() == viewport
-				and not window.is_ancestor_of(target)
-			):
+			if _window_over(target, point, window):
 				return window
+			continue
+		if not areas[at].has_point(point):
 			continue
 		var control: Control = other
 		if control == target or control.is_ancestor_of(target) or target.is_ancestor_of(control):
@@ -304,6 +319,42 @@ static func _cover_of(target: Control, drawn: Array[Node], areas: Array[Rect2]) 
 	return null
 
 
+## Where a click at [param target] lands in its viewport: its centre, or where scrolling will bring
+## the centre when a ScrollContainer holding it clips it away, as the click scrolls it first.
+static func _where_it_is_clicked(target: Control) -> Vector2:
+	var point: Vector2 = target.get_global_transform_with_canvas() * (target.size * 0.5)
+	if _clipped_away(target, point):
+		point = _where_it_lands(target, point)
+	return point
+
+
+## Whether the embedded [param window] is drawn over [param point], [param target]'s centre in its
+## own viewport, with that point carried out to the viewport the window is embedded in.
+##
+## Over it when the window holds the point there and is not the window the target is in, and, when
+## the target is in another window embedded in the same place, when it is stacked above that one:
+## the embedder's list of windows runs from the bottom up, measured on 4.7.2. Judged only in the
+## target's own viewport, a confirmation over a settings dialog did not cover the dialog's OK, and
+## a click by words tied it with the confirmation's own.
+static func _window_over(target: Control, point: Vector2, window: Window) -> bool:
+	if window.get_parent() == null or window.is_ancestor_of(target):
+		return false
+	var host: Viewport = window.get_parent().get_viewport()
+	for step: Dictionary in Screen.steps_out(target.get_viewport(), point):
+		if step["viewport"] != host:
+			continue
+		var there: Vector2 = step["point"]
+		if not Rect2(window.position, window.size).has_point(there):
+			return false
+		var through: Variant = step["through"]
+		if not through is Window:
+			return true
+		var own: Window = through
+		var stacked: Array[Window] = host.get_embedded_subwindows()
+		return stacked.find(window) > stacked.find(own)
+	return false
+
+
 ## Whether [param control] holds [param point], given in its viewport's coordinates.
 static func _holds(control: Control, point: Vector2) -> bool:
 	var placed: Transform2D = control.get_global_transform_with_canvas()
@@ -316,17 +367,18 @@ static func _holds(control: Control, point: Vector2) -> bool:
 
 
 ## Where [param target]'s centre, now at [param point], will be once the click has scrolled it into
-## view: moved as little as puts the whole of it inside each container clipping it, innermost first,
-## which is how a scroll container brings a control into view. A target larger than a container is
-## centred in it.
+## view: moved as little as puts the whole of it inside each ScrollContainer holding it, innermost
+## first, which is how one brings a control into view. A target larger than a container is centred
+## in it. Only a ScrollContainer, because that is all a click scrolls: another container clipping
+## what it holds, a collapsed section for one, leaves the target where it is.
 static func _where_it_lands(target: Control, point: Vector2) -> Vector2:
 	var drawn: Transform2D = target.get_global_transform_with_canvas()
 	var half: Vector2 = (drawn * Rect2(Vector2.ZERO, target.size)).size * 0.5
 	var landed: Vector2 = point
 	var walk: Node = target.get_parent()
 	while walk != null:
-		var holder: Control = walk as Control
-		if holder != null and holder.clip_contents:
+		var holder: ScrollContainer = walk as ScrollContainer
+		if holder != null:
 			var shown: Rect2 = holder.get_global_transform_with_canvas() * Rect2(Vector2.ZERO, holder.size)
 			var low: Vector2 = shown.position + half
 			var high: Vector2 = shown.end - half
@@ -336,6 +388,20 @@ static func _where_it_lands(target: Control, point: Vector2) -> Vector2:
 			)
 		walk = walk.get_parent()
 	return landed
+
+
+## Whether a click could not reach [param target] however it scrolled: its centre, where the click
+## would bring it, outside its viewport or the one showing that on the screen, or clipped away by a
+## container the click does not scroll. A drawer parked off the side of the screen, or anything
+## outside the 64 by 64 viewport of a game with no window, was listed among the controls on screen.
+static func _off_screen(target: Control) -> bool:
+	var point: Vector2 = _where_it_is_clicked(target)
+	if _clipped_away(target, point) or not target.get_viewport().get_visible_rect().has_point(point):
+		return true
+	var reached: Dictionary = Screen.reach(target.get_viewport(), point)
+	var viewport: Viewport = reached["viewport"]
+	var there: Vector2 = reached["point"]
+	return not viewport.get_visible_rect().has_point(there)
 
 
 ## Whether a container clipping what it holds cuts [param point] off from [param control].
