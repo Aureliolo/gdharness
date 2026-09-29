@@ -247,7 +247,7 @@ function parseAnnouncement(file: string, pid: number): Announced {
  * was listening was answered "may still be starting", and waiting changed nothing. A game on every
  * interface is on loopback as well.
  */
-export function dialAddress(address: string): string {
+function dialAddress(address: string): string {
   if (address === '*' || address === '0.0.0.0') {
     return '127.0.0.1';
   }
