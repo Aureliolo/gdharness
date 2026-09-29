@@ -19007,15 +19007,28 @@ async function testGdUnitRunner(): Promise<void> {
           'and so does the user data directory each run was given',
         );
 
-        // Every suite ignored: nothing ran, whatever the exit code and whether a report was written.
-        const none = await call(
-          'project_test',
-          { projectPath: projectDir, ignore: ['sums_test', 'summary_lies_test', 'quiet_test'] },
-          ENGINE_CALL_TIMEOUT_MS * 3,
-        );
-        const noneAnswer: unknown = JSON.parse(none.slice(none.indexOf('{')));
-        assert.equal(get(noneAnswer, 'passed'), false, `a run where nothing ran did not pass: ${none}`);
-        assert.equal(get(noneAnswer, 'tests'), 0, none);
+        // Nothing ran, two ways: every suite ignored, and a suite with no cases in it. Measured with the
+        // pinned gdUnit4 on 4.7.2, neither writes a report, so both reach the no-report answer; the
+        // one with a report of no cases is refused as passed by the same rule should a runner write it.
+        writeFileSync(join(projectDir, 'test', 'hollow_test.gd'), 'extends GdUnitTestSuite\n');
+        for (const [how, asked] of [
+          [
+            'every suite ignored',
+            { ignore: ['sums_test', 'summary_lies_test', 'quiet_test', 'hollow_test'] },
+          ],
+          ['a suite with no cases', { path: 'test/hollow_test.gd' }],
+        ] as const) {
+          const none = await call(
+            'project_test',
+            { projectPath: projectDir, ...asked },
+            ENGINE_CALL_TIMEOUT_MS * 3,
+          );
+          const noneAnswer: unknown = JSON.parse(none.slice(none.indexOf('{')));
+          assert.match(none, /^No tests ran: no test cases found at /, none);
+          assert.equal(get(noneAnswer, 'passed'), false, `${how} did not pass: ${none}`);
+          assert.equal(get(noneAnswer, 'tests'), 0, none);
+        }
+        rmSync(join(projectDir, 'test', 'hollow_test.gd'));
 
         // Nothing stopped early in the runs above, and the answer says so by leaving the field
         // out. Asserted here so the presence of it below means something.
