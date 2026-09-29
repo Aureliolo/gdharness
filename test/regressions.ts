@@ -14917,8 +14917,11 @@ async function testAPlayedGameIsToldFromItsWorkers(): Promise<void> {
               return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
             }
             if (tool === 'stop_playing') {
+              // Ended by the stop, as a real editor's game is. Left running, the stop waited it out
+              // and answered for a game still going, which a real editor's stop never leaves.
               const was = playing;
               playing = false;
+              held.game?.kill();
               return { ok: true, wasPlaying: was, playing: false };
             }
             if (tool === 'playing_status') {
@@ -15526,87 +15529,102 @@ async function testACancelledWaitStopsAskingTheEditor(): Promise<void> {
 }
 
 async function testALateAnnouncementIsTiedToThePlayedRun(): Promise<void> {
-  await withAPlayingEditor(
-    ({ adapter }) =>
-      (tool) => {
-        // The announcement is written from the body once the untied reading is taken, rather than
-        // on a timer from here: the rest of the start lies between the play and the end of its
-        // wait, and a loaded runner can take longer over it than any timer that has to lose to the
-        // wait allows.
-        if (tool === 'play_scene') {
-          return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
-        }
-        if (tool === 'playing_status') {
-          return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
-        }
-        return { ok: true };
-      },
-    async ({ server, project, runtimeDir, start }) => {
-      const started = await start(200);
-      assert.equal(get(started.answer, 'through'), 'editor', JSON.stringify(started.answer));
-      assert.equal(
-        get(started.answer, 'runtime', 'mayYetAnnounce'),
-        true,
-        `the wait should have run out before the announcement: ${JSON.stringify(started.answer)}`,
-      );
-      const cpu = async (): Promise<unknown> =>
-        parseTextContent(
-          await server.request('tools/call', { name: 'editor_output', arguments: { cpu: true } }, 60_000),
+  // A game of its own for the run to be tied to, started by the play and ended by the editor's stop
+  // as a real one's is. It was this process, which no stop can end, so every stop here waited out a
+  // game still going.
+  const played: { game: ChildProcess | null } = { game: null };
+  let gamePid = 0;
+  try {
+    await withAPlayingEditor(
+      ({ adapter }) =>
+        (tool) => {
+          // The announcement is written from the body once the untied reading is taken, rather than
+          // on a timer from here: the rest of the start lies between the play and the end of its
+          // wait, and a loaded runner can take longer over it than any timer that has to lose to the
+          // wait allows.
+          if (tool === 'play_scene') {
+            played.game = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+            gamePid = played.game.pid ?? 0;
+            return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
+          }
+          if (tool === 'playing_status') {
+            return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
+          }
+          if (tool === 'stop_playing') {
+            played.game?.kill();
+            return { ok: true, wasPlaying: played.game !== null, playing: false };
+          }
+          return { ok: true };
+        },
+      async ({ server, project, runtimeDir, start }) => {
+        const started = await start(200);
+        assert.equal(get(started.answer, 'through'), 'editor', JSON.stringify(started.answer));
+        assert.equal(
+          get(started.answer, 'runtime', 'mayYetAnnounce'),
+          true,
+          `the wait should have run out before the announcement: ${JSON.stringify(started.answer)}`,
         );
-      const untied = await cpu();
-      assert.equal(
-        get(untied, 'cpuSeconds'),
-        undefined,
-        `nothing has announced yet: ${JSON.stringify(untied)}`,
-      );
-      assert.match(
-        text(get(untied, 'note')),
-        /the game announced no runtime, so nothing here has its process id/,
-        `and the answer says why: ${JSON.stringify(untied)}`,
-      );
-      assert.equal(get(untied, 'pid'), null, `and names no process: ${JSON.stringify(untied)}`);
+        const cpu = async (): Promise<unknown> =>
+          parseTextContent(
+            await server.request('tools/call', { name: 'editor_output', arguments: { cpu: true } }, 60_000),
+          );
+        const untied = await cpu();
+        assert.equal(
+          get(untied, 'cpuSeconds'),
+          undefined,
+          `nothing has announced yet: ${JSON.stringify(untied)}`,
+        );
+        assert.match(
+          text(get(untied, 'note')),
+          /the game announced no runtime, so nothing here has its process id/,
+          `and the answer says why: ${JSON.stringify(untied)}`,
+        );
+        assert.equal(get(untied, 'pid'), null, `and names no process: ${JSON.stringify(untied)}`);
 
-      writeFileSync(
-        join(runtimeDir, `runtime-${process.pid}.json`),
-        JSON.stringify({
-          protocol: RUNTIME_PROTOCOL,
-          pid: process.pid,
-          port: 51_995,
-          address: '127.0.0.1',
-          project: { name: 'Played', path: project },
-        }),
-        'utf8',
-      );
-      const tied = await cpu();
-      assert.equal(
-        get(tied, 'pid'),
-        process.pid,
-        `once the game has announced, the run is named by that number: ${JSON.stringify(tied)}`,
-      );
-      // And asked by it. The reading is best effort by design, a PowerShell start on Windows that
-      // a loaded runner can hold past its budget, so what is held is that the question was put to
-      // that process: a number, or the note that the platform would not answer about it.
-      const cpuSeconds = get(tied, 'cpuSeconds');
-      assert.ok(
-        (typeof cpuSeconds === 'number' && cpuSeconds >= 0) ||
-          text(get(tied, 'note')).includes('this platform would not say what the run has used'),
-        `and asked by it: ${JSON.stringify(tied)}`,
-      );
+        writeFileSync(
+          join(runtimeDir, `runtime-${gamePid}.json`),
+          JSON.stringify({
+            protocol: RUNTIME_PROTOCOL,
+            pid: gamePid,
+            port: 51_995,
+            address: '127.0.0.1',
+            project: { name: 'Played', path: project },
+          }),
+          'utf8',
+        );
+        const tied = await cpu();
+        assert.equal(
+          get(tied, 'pid'),
+          gamePid,
+          `once the game has announced, the run is named by that number: ${JSON.stringify(tied)}`,
+        );
+        // And asked by it. The reading is best effort by design, a PowerShell start on Windows that
+        // a loaded runner can hold past its budget, so what is held is that the question was put to
+        // that process: a number, or the note that the platform would not answer about it.
+        const cpuSeconds = get(tied, 'cpuSeconds');
+        assert.ok(
+          (typeof cpuSeconds === 'number' && cpuSeconds >= 0) ||
+            text(get(tied, 'note')).includes('this platform would not say what the run has used'),
+          `and asked by it: ${JSON.stringify(tied)}`,
+        );
 
-      // The stop names the same number. A played run has no pid here, and the stop answered null
-      // under endedPid about a process the same server had been reading cpu for.
-      const stopped = parseTextContent(
-        await server.request('tools/call', { name: 'editor_run', arguments: { op: 'stop' } }, 60_000),
-      );
-      assert.equal(get(stopped, 'stopped'), true, JSON.stringify(stopped));
-      assert.equal(
-        get(stopped, 'endedPid'),
-        process.pid,
-        `the stop names the process the game announced: ${JSON.stringify(stopped)}`,
-      );
-      assert.equal(get(stopped, 'exitedBeforeStop'), false, JSON.stringify(stopped));
-    },
-  );
+        // The stop names the same number. A played run has no pid here, and the stop answered null
+        // under endedPid about a process the same server had been reading cpu for.
+        const stopped = parseTextContent(
+          await server.request('tools/call', { name: 'editor_run', arguments: { op: 'stop' } }, 60_000),
+        );
+        assert.equal(get(stopped, 'stopped'), true, JSON.stringify(stopped));
+        assert.equal(
+          get(stopped, 'endedPid'),
+          gamePid,
+          `the stop names the process the game announced: ${JSON.stringify(stopped)}`,
+        );
+        assert.equal(get(stopped, 'exitedBeforeStop'), false, JSON.stringify(stopped));
+      },
+    );
+  } finally {
+    played.game?.kill();
+  }
 }
 
 /**
@@ -18820,7 +18838,11 @@ async function testAStopCanEndWhatTheGameStarted(): Promise<void> {
             60_000,
           ),
         );
-        assert.equal(get(stopped, 'endedPid'), benchPid, JSON.stringify(stopped));
+        // The bench outlives the stop, which is this fixture's doing, so the stop says the game is
+        // still going and names it there rather than as ended.
+        assert.equal(get(stopped, 'stopped'), false, JSON.stringify(stopped));
+        assert.equal(get(stopped, 'stillGoing'), benchPid, JSON.stringify(stopped));
+        assert.equal(get(stopped, 'endedPid'), undefined, JSON.stringify(stopped));
         assert.deepEqual(
           get(stopped, 'endedChildren'),
           [worker],
