@@ -1313,7 +1313,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['click'],
         description:
-          'click: the words on the control to click, matched the way runtime_inspect find matches says (a plain word is contained in the text, a pattern with * or ? is a glob over it, and | separates alternatives), among the controls on screen, and pressed in the same frame it was found in, so a panel rebuilding between a find and a click cannot free it first. Words on a label inside a button press the button. A control with something drawn over its centre that would take the pointer, such as a screen shown over it, is not on screen. The matches are ranked the way a person picks what to press: a button before text that cannot be pressed, then a control whose whole text, or one whole line of it such as the title on a card, is the words before one saying them as part of more, and the best one is pressed; found.picked says why. Several matches at the best rank are refused with each one listed, and index picks one.',
+          'click: the words on the control to click, matched the way runtime_inspect find matches says (a plain word is contained in the text, a pattern with * or ? is a glob over it, and | separates alternatives), among the controls on screen, and pressed in the same frame it was found in, so a panel rebuilding between a find and a click cannot free it first. Words on a label inside a button press the button. A control with something drawn over its centre that would take the pointer, such as a screen shown over it or a dialog stacked above its own, is not on screen; nor is one on a hidden canvas layer, one outside the viewport, or one a container clips away that a click does not scroll. The refusal counts those apart. The matches are ranked the way a person picks what to press: an enabled button before anything else, a disabled one included, then a control whose whole text, or one whole line of it such as the title on a card, is the words before one saying them as part of more, and the best one is pressed; found.picked says why. Several matches at the best rank are refused with each one listed, and index picks one.',
       },
       action: {
         type: 'string',
@@ -1350,7 +1350,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'boolean',
         ops: ['text'],
         description:
-          'text: true writes over what the field already says, which is what filling one in means. Default false types at the caret, so a field reading 2.1 typed "0.3" at reads 2.10.3. The answer says what the field holds afterwards either way.',
+          'text: true writes over what the field already says, which is what filling one in means. Default false types at the caret, so a field reading 2.1 typed "0.3" at reads 2.10.3. The answer says what the field holds afterwards either way. A read-only field is refused.',
       },
       index: {
         type: 'number',
@@ -1398,12 +1398,12 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     operations: {
       click: {
         summary:
-          'press and release on a Control, a frame apart, and answer with what was under the pointer and what became of the control: in_tree, removed or freed. The control is named by nodePath, or by says with the words on it, found under nodePath when both are given, and the answer then says under found which match it was. A control out of sight inside a ScrollContainer is scrolled to first, and scrolled_into_view says whether the view moved. A 3D node is clicked where it is drawn, and landed then says the interface did not swallow the press',
+          'press and release on a Control, a frame apart, and answer with what was under the pointer and what became of the control: in_tree, removed or freed. The control is named by nodePath, or by says with the words on it, found under nodePath when both are given, and the answer then says under found which match it was. A control out of sight inside a ScrollContainer is scrolled to first, each container out from it a frame after the one inside, and scrolled_into_view says whether a scroll value changed. A disabled button, and a control that does not process (the game paused, say), are refused: the pointer reaches them and the press does nothing. A 3D node is clicked where it is drawn, and landed then says the interface did not swallow the press: no control under the pointer stopped it, a control letting the pointer pass included, and every viewport on the way out from the room had the pointer over what shows the room',
         requires: [],
       },
       choose: {
         summary:
-          "take an item out of a menu, by what it says or by where it is in the list. A menu's items are drawn rather than built, so there is nothing to click: the item takes the focus and Enter presses it, which is the engine's own path and needs no window. Answers with what was chosen, read before the press, what became of the control named (in_tree, removed or freed, since a game can rebuild its screen on the pick), and what the button in front of it shows now when it is still there",
+          "take an item out of a menu, by what it says or by where it is in the list. A menu's items are drawn rather than built, so there is nothing to click: the menu is opened, the item is looked for in it as it stands then, since a game can fill a menu as it opens, and the item takes the focus and ui_accept presses it, which is the engine's own path, needs no window, and does not depend on what ui_accept is bound to. A disabled or hidden button in front of the menu is refused, and so is a press the menu did not take, which is heard rather than assumed. Answers with what was chosen, read before the press, what became of the control named (in_tree, removed or freed, since a game can rebuild its screen on the pick), and what the button in front of it shows now when it is still there",
         requires: ['nodePath'],
       },
       action: { summary: 'press an action, or hold it', requires: ['action'] },
@@ -1414,7 +1414,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       text: {
         summary:
-          'type a string into the field being edited, a character at a time, and say what it landed in and what it holds afterwards, a secret field as its mask',
+          'type a string into the field being edited, a character at a time, and say what it landed in and what it holds afterwards, a secret field as its mask. The field is the focus of the dialog that has the focus when one does, which is where the keys go',
         requires: ['text'],
       },
       mouse_click: {

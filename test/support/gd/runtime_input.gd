@@ -10,6 +10,7 @@ extends SceneTree
 ## assumed.
 
 const InputCommands = preload("res://addons/gdharness_runtime/runtime_input.gd")
+const Typing = preload("res://addons/gdharness_runtime/runtime_typing.gd")
 const Checked = preload("checked.gd")
 const Read = preload("res://addons/gdharness_runtime/reading.gd")
 const Values = preload("res://addons/gdharness_runtime/runtime_values.gd")
@@ -53,7 +54,7 @@ class Counter:
 var failures: Array[String] = []
 
 var _field: LineEdit = null
-var _typing: InputCommands = null
+var _typing: Typing = null
 var _begun: bool = false
 
 
@@ -73,14 +74,14 @@ func _everything() -> void:
 	var host: Node = Node.new()
 	root.add_child(host)
 	var input: InputCommands = InputCommands.new(host, Values.new())
-	_typing = input
+	_typing = Typing.new(host)
 
 	await _check_keys(input)
 	await _check_mouse(input)
 	await _check_a_wheel_step(input)
 	await _check_a_whole_click(input)
 	await _check_actions(input)
-	_check_typing(input)
+	_check_typing(_typing)
 	await _type_with_keys(input)
 	_check_what_the_keys_typed()
 	await _check_a_dialog(input)
@@ -312,7 +313,7 @@ func _check_a_whole_click(input: InputCommands) -> void:
 ## other assertion here reads the event back, and an event can carry a keycode, a physical
 ## keycode and a label and still put no character anywhere: LineEdit inserts `unicode` and
 ## consults nothing else, so for a year every injected key pressed actions and typed nothing.
-func _check_typing(input: InputCommands) -> void:
+func _check_typing(input: Typing) -> void:
 	var field: LineEdit = LineEdit.new()
 	root.add_child(field)
 	field.grab_focus()
@@ -923,7 +924,10 @@ func _check_a_click_by_words_ranked(input: InputCommands) -> void:
 		)
 	elif (
 		why
-		!= 'the one button on screen saying "Onward" as part of more; the other one on screen cannot be pressed'
+		!= (
+			'the one button on screen saying "Onward" as part of more;'
+			+ " the other one on screen is not an enabled button"
+		)
 	):
 		_fail("and says why, of the one it passed over: %s" % why)
 	exactly.queue_free()

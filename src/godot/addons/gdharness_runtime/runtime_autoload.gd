@@ -16,6 +16,7 @@ const ErrorReport = preload("error_report.gd")
 const InputCommands = preload("runtime_input.gd")
 const Queries = preload("runtime_queries.gd")
 const Read = preload("reading.gd")
+const Typing = preload("runtime_typing.gd")
 const Values = preload("runtime_values.gd")
 const Waits = preload("runtime_waits.gd")
 
@@ -51,6 +52,7 @@ var values: Values = Values.new()
 var _queries: Queries = Queries.new(self, values)
 var _changes: Changes = Changes.new(self, values)
 var _input: InputCommands = InputCommands.new(self, values)
+var _typing: Typing = Typing.new(self)
 var _capture: Capture = Capture.new(self)
 var _waits: Waits = Waits.new(self, values)
 
@@ -91,11 +93,11 @@ func _init() -> void:
 		"capture_viewport": _capture.capture_viewport,
 		"inject_action": _input.inject_action,
 		"inject_key": _input.inject_key,
-		"inject_text": _input.inject_text,
+		"inject_text": _typing.inject_text,
 		"inject_mouse_click": _input.inject_mouse_click,
 		"inject_mouse_motion": _input.inject_mouse_motion,
 		"click": _input.click,
-		"choose": _input.choose,
+		"choose": _typing.choose,
 		"wait_frames": _waits.wait_frames,
 		"wait_signal": _waits.wait_signal,
 		"wait_until": _waits.wait_until,
