@@ -20,6 +20,7 @@ func _init() -> void:
 	_check_deserialize()
 	_check_every_type()
 	_check_non_finite()
+	_check_keys()
 
 	if failures.is_empty():
 		print(JSON.stringify({"ok": true}))
@@ -125,6 +126,28 @@ func _check_serialize() -> void:
 		_fail("passthrough int")
 	if values.serialize_value("plain") != "plain":
 		_fail("passthrough string")
+
+
+## Keys that are not text, through JSON and back. JSON keys are text, so an int key was answered as
+## its text and a dictionary written back from the answer had words where its numbers were.
+func _check_keys() -> void:
+	var keyed: Dictionary = {1: "one", Vector2(1, 2): Vector2(3, 4)}
+	var wire: String = JSON.stringify(values.serialize_value(keyed))
+	var back: Variant = values.deserialize_value(JSON.parse_string(wire))
+	if not back is Dictionary:
+		_fail("keyed dictionary came back as %s from %s" % [str(back), wire])
+		return
+	var held: Dictionary = back
+	if held.get(1) != "one" or held.get(Vector2(1, 2)) != Vector2(3, 4) or held.size() != 2:
+		_fail("keyed dictionary round trip: sent %s, wire %s, back %s" % [keyed, wire, held])
+
+	var texts: Variant = values.serialize_value({"a": 1, &"b": 2})
+	if _tag_of(texts) != "":
+		_fail("a dictionary keyed by text should stay plain: %s" % JSON.stringify(texts))
+
+	var malformed: Dictionary = {"_type": "Dictionary", "entries": [[1]]}
+	if values.deserialize_value(malformed) != malformed:
+		_fail("entries that are not pairs should come back as they arrived")
 
 
 func _check_deserialize() -> void:

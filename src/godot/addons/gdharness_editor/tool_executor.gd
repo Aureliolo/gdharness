@@ -11,6 +11,7 @@ const AnimationTools = preload("tools/animation_tools.gd")
 const PlayTools = preload("tools/play_tools.gd")
 const ClassTools = preload("tools/class_tools.gd")
 const SettingsTools = preload("tools/settings_tools.gd")
+const FilesystemTools = preload("tools/filesystem_tools.gd")
 
 var _editor_plugin: EditorPlugin = null
 
@@ -20,6 +21,7 @@ var _animation_tools: AnimationTools = null
 var _play_tools: PlayTools = null
 var _class_tools: ClassTools = null
 var _settings_tools: SettingsTools = null
+var _filesystem_tools: FilesystemTools = null
 
 var _tool_map: Dictionary = {}
 var _initialized: bool = false
@@ -33,6 +35,7 @@ func set_editor_plugin(plugin: EditorPlugin) -> void:
 	_animation_tools.set_editor_plugin(plugin)
 	_play_tools.set_editor_plugin(plugin)
 	_class_tools.set_editor_plugin(plugin)
+	_filesystem_tools.set_editor_plugin(plugin)
 
 
 func _init_tools() -> void:
@@ -64,6 +67,10 @@ func _init_tools() -> void:
 	_settings_tools.name = "SettingsTools"
 	add_child(_settings_tools)
 
+	_filesystem_tools = FilesystemTools.new()
+	_filesystem_tools.name = "FilesystemTools"
+	add_child(_filesystem_tools)
+
 	_tool_map = {
 		# Scene tools
 		"create_scene": [_scene_tools, "create_scene"],
@@ -78,9 +85,9 @@ func _init_tools() -> void:
 		"connect_signal": [_scene_tools, "connect_signal"],
 		"disconnect_signal": [_scene_tools, "disconnect_signal"],
 		"list_connections": [_scene_tools, "list_connections"],
-		"rescan_filesystem": [_scene_tools, "rescan_filesystem"],
-		"scan_status": [_scene_tools, "scan_status"],
-		"reimport_files": [_scene_tools, "reimport_files"],
+		"rescan_filesystem": [_filesystem_tools, "rescan_filesystem"],
+		"scan_status": [_filesystem_tools, "scan_status"],
+		"reimport_files": [_filesystem_tools, "reimport_files"],
 		"global_classes": [_class_tools, "global_classes"],
 		"reload_script": [_class_tools, "reload_script"],
 		# Settings, for a caller that asked the editor rather than the file on disk

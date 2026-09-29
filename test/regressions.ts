@@ -11574,7 +11574,7 @@ async function testASettingsWriteIsTakenUpByTheEditor(): Promise<void> {
     return;
   }
   const sent: { tool: string; args: Record<string, unknown> }[] = [];
-  const editor = { stale: false };
+  const editor = { stale: false, passOver: [] as string[] };
   await withAPlayingEditor(
     () => (tool, args) => {
       if (tool.startsWith('adopt_')) {
@@ -11582,6 +11582,16 @@ async function testASettingsWriteIsTakenUpByTheEditor(): Promise<void> {
         if (editor.stale) {
           return { ok: false, error: `Unknown tool: ${tool}` };
         }
+      }
+      // What the addon answers: each name it could place in a section, which is every name with one,
+      // less any the case has it pass over.
+      if (tool === 'adopt_project_settings') {
+        return {
+          ok: true,
+          adopted: asArray(args['settings'] ?? []).filter(
+            (name) => String(name).includes('/') && !editor.passOver.includes(String(name)),
+          ),
+        };
       }
       return { ok: true };
     },
@@ -11617,6 +11627,14 @@ async function testASettingsWriteIsTakenUpByTheEditor(): Promise<void> {
         ['autoload/Thing'],
         `a setting the write took out is one the editor has to drop: ${JSON.stringify(removed)}`,
       );
+      sent.splice(0);
+
+      // The answer is what the editor says it took, which is not always what it was sent.
+      editor.passOver = [named];
+      const partly = await call({ op: 'set', setting: named, value: 'passed over' });
+      assert.ok(!asArray(get(partly, 'editorAdopted') ?? []).includes(named), JSON.stringify(partly));
+      assert.deepEqual(asArray(get(partly, 'editorPassedOver') ?? []), [named], JSON.stringify(partly));
+      editor.passOver = [];
       sent.splice(0);
 
       const bus = await call({ op: 'add_audio_bus', busName: 'Voices' });
@@ -13160,7 +13178,19 @@ async function testAnEngineRunSaysHowItEnded(): Promise<void> {
     `two mebibytes of output is not a failure: ${howItEnded(talkative)}`,
   );
   assert.equal(talkative.log.all.length, lines + 1, 'and every line reached the log, the last included');
-  assert.equal(talkative.log.all.at(-1)?.text, 'last words', 'stderr is read as the engine writes it');
+  // By stream rather than by position: the two pipes are read apart, and on the Windows leg the
+  // stderr line landed before the end of stdout, so which comes last in the log is not defined.
+  const bySource = (source: string) => talkative.log.all.filter((entry) => entry.source === source);
+  assert.deepEqual(
+    bySource('stderr').map((entry) => [entry.severity, entry.text]),
+    [['error', 'last words']],
+    'stderr is read as the engine writes it',
+  );
+  assert.equal(
+    bySource('stdout').at(-1)?.text,
+    `line ${lines - 1} ${'x'.repeat(40)}`,
+    'and stdout to its end',
+  );
 
   const three = await node('process.exit(3)');
   assert.deepEqual(
@@ -20581,15 +20611,14 @@ function testTheCopiedHelperReadsTheSameEverywhere(): void {
   const copies = sharedCopies();
   assert.ok(copies.length >= 4, `only ${copies.length} copies were listed, so this proved little`);
 
+  // Line endings as the repository keeps them, LF: gdformat on Windows writes CRLF, and a copy the
+  // formatter touched while the original was checked out again read as drifted with nothing changed.
+  const committed = (path: string): string => readFileSync(path, 'utf8').replaceAll('\r\n', '\n');
   for (const { original, copy } of copies) {
-    const wanted = readFileSync(original, 'utf8');
+    const wanted = committed(original);
     assert.match(wanted, /^(?:static )?func /m, `${original} should hold the code this compares`);
     assert.ok(wanted.split('\n').length >= 30, `${original} is ${wanted.split('\n').length} lines`);
-    assert.equal(
-      readFileSync(copy, 'utf8'),
-      wanted,
-      `${copy} has drifted from ${original}: run bun run sync:gd`,
-    );
+    assert.equal(committed(copy), wanted, `${copy} has drifted from ${original}: run bun run sync:gd`);
     assert.ok(existsSync(`${copy}.uid`), `${copy} ships without the .uid that names it`);
   }
 }
