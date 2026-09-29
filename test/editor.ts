@@ -482,6 +482,10 @@ const SCENE_FILES: Record<string, string[]> = {
     '[node name="Ground" type="TileMapLayer" parent="."]',
     '',
   ],
+  // A variable that is not exported: set and read back like any property on a @tool script, and
+  // kept by no file, which only reading the saved form can tell.
+  'layers/tool_node.gd': ['@tool', 'extends Node', '', 'var hidden: int = 0', ''],
+  'layers/tool_resource.gd': ['@tool', 'extends Resource', '', 'var hidden: int = 0', ''],
   'moves/library.tres': [
     '[gd_resource type="AnimationLibrary" load_steps=2 format=3]',
     '',
@@ -1813,6 +1817,20 @@ async function testASetIsReadBack({ call, refusal, project }: Editor): Promise<v
   assert.match(await refusal('scene_node', set('Pointer', { ids: [1.5, 2] })), /holds whole numbers/);
   await call('scene_node', set('Pointer', { ids: [1, 2] }));
   assert.match(nodeBody(fileText(project, 'checks.tscn'), 'Pointer'), /ids = Array\[int\]\(\[1, 2\]\)/);
+
+  await call('scene_node', {
+    ...scene,
+    op: 'add',
+    nodeType: 'Node',
+    nodeName: 'Tooled',
+    properties: { script: 'res://layers/tool_node.gd' },
+  });
+  const before = fileText(project, 'checks.tscn');
+  assert.match(
+    await refusal('scene_node', set('Tooled', { hidden: 5 })),
+    /Nothing was written: Tooled\.hidden would load from the file as 0/,
+  );
+  assert.equal(fileText(project, 'checks.tscn'), before, 'and the file was left as it was');
 }
 
 /**
@@ -1981,6 +1999,12 @@ async function testTilesDrawWhatTheyName({ call, refusal, project }: Editor): Pr
     }),
     /no texture at res:\/\/tiles\/nothing\.png/,
   );
+  const outside = await refusal('resource_edit', {
+    ...tileset,
+    resourcePath: 'res://tiles/other.tres',
+    sources: [{ texture: '../../outside.png', tileSize: { x: 4, y: 4 } }],
+  });
+  assert.match(outside, /outside the project/, `a texture outside the project is refused: ${outside}`);
 
   const map = { projectPath: project, scenePath: 'res://tiles/map.tscn' };
   await call('scene_node', {
@@ -2053,6 +2077,15 @@ async function testACreateMakesWhatWasAsked({ call, refusal, project }: Editor):
   );
   await call('resource_edit', resource);
   assert.match(await refusal('resource_edit', resource), /res:\/\/once\.tres already exists/);
+
+  const tooled = { ...resource, resourcePath: 'res://tooled.tres', script: 'res://layers/tool_resource.gd' };
+  await call('resource_edit', tooled);
+  const kept = fileText(project, 'tooled.tres');
+  assert.match(
+    await refusal('resource_edit', { ...tooled, op: 'modify', properties: { hidden: 3 } }),
+    /res:\/\/tooled\.tres\.hidden would load from the file as 0: it is not a property the file keeps/,
+  );
+  assert.equal(fileText(project, 'tooled.tres'), kept, 'and the file is put back as it was');
   assert.match(
     await refusal('resource_edit', {
       projectPath: project,
