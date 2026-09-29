@@ -73,6 +73,11 @@ var _refused: String = ""
 func parse(value: Variant, expected_type: int = TYPE_NIL, elements: Array = []) -> Variant:
 	if value is Dictionary:
 		var fields: Dictionary = value
+		# A dictionary with keys that are not text arrives as its entries, and is read against the
+		# declared element types like any other.
+		if str(fields.get("_type", "")) == "Dictionary" and Serialisation.pairs(fields.get("entries")):
+			var built: Dictionary = _values.deserialize_value(fields)
+			return _parse_entries(built, elements)
 		var tagged: Array = _parse_tagged_dictionary(fields)
 		if tagged[0]:
 			return tagged[1]
