@@ -19,6 +19,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
@@ -1771,6 +1772,95 @@ function testAFamilyOfSettingsAnswersWithItsTypes(godotPath: string, projectDir:
 }
 
 /**
+ * An import is judged stale when the importer would judge it so, before any of its files is looked at.
+ *
+ * Both states have every file current: an importer that now writes a newer format, which every scene
+ * meets after an engine upgrade, and a VRAM texture imported before the project asked for another
+ * compression format. Both read as up to date while the editor's next scan imported them. Each is
+ * checked against the engine's own verdict: the import pass after the reading has to rebuild it.
+ */
+function testTheImporterIsAskedFirst(godotPath: string): void {
+  const dir = createProject(godotPath);
+  const operation = (name: string, params: unknown): unknown => runOperation(godotPath, dir, name, params);
+  const statusOf = (resource: string): unknown[] => {
+    const one = get(operation('get_import_status', { resource_path: resource }), 'resources', 0);
+    return [get(one, 'status'), get(one, 'reason')];
+  };
+  const importAll = (): void => {
+    const run = spawnSync(godotPath, ['--headless', '--path', dir, '--import'], {
+      encoding: 'utf8',
+      timeout: 180_000,
+    });
+    assert.equal(run.status, 0, `the project should import: ${run.stdout}\n${run.stderr}`);
+  };
+  const imported = (name: string): number =>
+    Math.max(
+      ...readdirSync(join(dir, '.godot', 'imported'))
+        .filter((file) => file.startsWith(`${name}-`) && !file.endsWith('.md5'))
+        .map((file) => statSync(join(dir, '.godot', 'imported', file)).mtimeMs),
+    );
+  try {
+    writeFileSync(join(dir, 'thing.gltf'), JSON.stringify(triangleUsing('none.png')));
+    writeFileSync(join(dir, 'tex.png'), solidPng(40, 160, 40));
+    writeFileSync(
+      join(dir, 'tex.png.import'),
+      '[remap]\n\nimporter="texture"\n\n[params]\n\ncompress/mode=2\n',
+    );
+    importAll();
+    assert.deepEqual(statusOf('thing.gltf')[0], 'up_to_date', 'a fresh import is current');
+    assert.deepEqual(statusOf('tex.png')[0], 'up_to_date', 'a fresh import is current');
+
+    // The version this engine writes, read off the sidecar it just wrote, has to be the one judged
+    // against, or an engine that raises it leaves every older scene answered as current.
+    const sidecarPath = join(dir, 'thing.gltf.import');
+    const sidecar = readFileSync(sidecarPath, 'utf8');
+    const written = /^importer_version=(\d+)$/m.exec(sidecar)?.[1];
+    assert.ok(written !== undefined, `the scene importer writes its version: ${sidecar}`);
+    // Older, and with the hash the editor recorded for the sidecar moved to match it, so the version
+    // is the only thing that differs from a sidecar the editor wrote.
+    const cachePath = join(dir, '.godot', 'editor', 'filesystem_cache10');
+    const md5 = (text: string): string => createHash('md5').update(text).digest('hex');
+    const older = sidecar.replace(/^importer_version=\d+\n/m, '');
+    writeFileSync(sidecarPath, older);
+    writeFileSync(cachePath, readFileSync(cachePath, 'utf8').replace(md5(sidecar), md5(older)));
+    assert.deepEqual(statusOf('thing.gltf'), [
+      'needs_reimport',
+      `it was imported at version 0 of the scene importer, and this engine imports at version ${written}`,
+    ]);
+    const sceneBefore = imported('thing.gltf');
+    importAll();
+    assert.ok(
+      imported('thing.gltf') > sceneBefore,
+      'and the engine reimports it, which is the verdict held to',
+    );
+    assert.deepEqual(statusOf('thing.gltf')[0], 'up_to_date');
+
+    operation('set_project_setting', {
+      setting: 'rendering/textures/vram_compression/import_etc2_astc',
+      value: true,
+    });
+    assert.deepEqual(statusOf('tex.png'), [
+      'needs_reimport',
+      'the project now asks for etc2_astc textures, and this import did not write them',
+    ]);
+    const textureBefore = imported('tex.png');
+    importAll();
+    assert.ok(imported('tex.png') > textureBefore, 'and the engine reimports it, in the format asked for');
+    assert.deepEqual(statusOf('tex.png')[0], 'up_to_date');
+
+    // Asking for less is not a reason: an import holding a format the project no longer asks for
+    // stays, measured as the engine leaving it alone.
+    operation('set_project_setting', {
+      setting: 'rendering/textures/vram_compression/import_etc2_astc',
+      value: false,
+    });
+    assert.deepEqual(statusOf('tex.png')[0], 'up_to_date');
+  } finally {
+    sweep(dir);
+  }
+}
+
+/**
  * The answer is what the operation wrote, whatever the project prints and however the engine ends.
  *
  * Through the server's own path, because the reading is the server's. The project's autoloads run
@@ -1915,6 +2005,9 @@ const CASES: Readonly<Record<string, (godotPath: string, projectDir: string) => 
   operations: testOperations,
   gdignore: testAGdignoreStopsTheWalk,
   importJudged: testAnImportIsJudgedByWhatItWasBuiltFrom,
+  importerFirst: (godotPath) => {
+    testTheImporterIsAskedFirst(godotPath);
+  },
   runningLog: (godotPath) => testAnOperationLeavesARunningLogAlone(godotPath),
   refusals: testRefusals,
   installedLayout: testInstalledLayout,

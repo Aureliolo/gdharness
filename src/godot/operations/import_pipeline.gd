@@ -37,6 +37,14 @@ const IMPORTABLE_EXTENSIONS: Array[String] = [
 	"obj",
 	"dae",
 ]
+## The format version each importer writes as `importer_version` where it is above 0, which the
+## editor reimports anything older than. Read off sidecars 4.7.2 writes: scene and animation_library
+## write 1, and the texture importers write none. A case imports one fresh and compares, so an engine
+## that raises one fails it rather than leaving this behind.
+const IMPORTER_VERSIONS: Dictionary[String, int] = {"scene": 1, "animation_library": 1}
+## The VRAM compression formats a project can ask for, each behind its
+## `rendering/textures/vram_compression/import_<format>` setting.
+const VRAM_FORMATS: Array[String] = ["s3tc_bptc", "etc2_astc"]
 const EDITOR_DIRECTORY: String = "res://.godot/editor"
 const EDITOR_CACHE_PREFIX: String = "filesystem_cache"
 
@@ -480,6 +488,27 @@ func _sidecar_staleness(resource_path: String, import_file_path: String, sidecar
 ## Whether the import itself is still the one its sidecar and source describe: an answer for a
 ## stale resource, empty for a current one.
 static func _import_staleness(resource_path: String, sidecar: ConfigFile) -> Dictionary:
+	# The importer is asked first, as the editor asks it: whether it still writes this format, and
+	# whether the settings the import was made under still hold. Both are true of an import whose
+	# files are all current, so they were answered as up to date while the editor's next scan
+	# imported them again: every scene after an engine upgrade raised the importer's version, and
+	# every VRAM texture once the project asked for another compression format.
+	var importer: String = str(sidecar.get_value("remap", "importer", ""))
+	var version: int = Read.as_int(sidecar.get_value("remap", "importer_version", 0))
+	var current: int = Read.as_int(IMPORTER_VERSIONS.get(importer, 0))
+	if current > version:
+		return _stale(
+			(
+				"it was imported at version %d of the %s importer, and this engine imports at version %d"
+				% [version, importer, current]
+			)
+		)
+	var lacking: Array[String] = _vram_formats_lacking(sidecar.get_value("remap", "metadata", {}))
+	if not lacking.is_empty():
+		return _stale(
+			"the project now asks for " + ", ".join(lacking) + " textures, and this import did not write them"
+		)
+
 	if not sidecar.has_section_key("remap", "uid"):
 		return _stale("its import file has no uid, which the import writes")
 
@@ -540,6 +569,28 @@ static func _import_staleness(resource_path: String, sidecar: ConfigFile) -> Dic
 	var built: Dictionary = _stale("it was imported without images it uses, which were not imported yet")
 	built["imported_without"] = without
 	return built
+
+
+## The VRAM formats the project asks textures to be imported in that an import recorded in
+## [param metadata] did not write, as the texture importers judge whether their settings still hold.
+## Measured on 4.7.2 for the texture and texture array importers: turning a format on reimports every
+## VRAM texture without it, and turning one off reimports nothing.
+static func _vram_formats_lacking(metadata: Variant) -> Array[String]:
+	var lacking: Array[String] = []
+	if not metadata is Dictionary:
+		return lacking
+	var meta: Dictionary = metadata
+	if not Read.as_bool(meta.get("vram_texture", false)):
+		return lacking
+	var written: Variant = meta.get("imported_formats", [])
+	var formats: Array = written if written is Array else []
+	for format: String in VRAM_FORMATS:
+		var asked: bool = Read.as_bool(
+			ProjectSettings.get_setting("rendering/textures/vram_compression/import_" + format, false)
+		)
+		if asked and format not in formats:
+			lacking.append(format)
+	return lacking
 
 
 ## The hashes [param resource_path]'s last import recorded, [code]source_md5[/code] of its source
