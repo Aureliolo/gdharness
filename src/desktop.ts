@@ -16,6 +16,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { writeFileSync } from 'node:fs';
 
 /** The desktop every process started this way shares. */
 export const HIDDEN_DESKTOP = 'gdharness';
@@ -62,6 +63,7 @@ public static class GdharnessDesktop {
   [DllImport("kernel32.dll")] static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
   [DllImport("kernel32.dll")] static extern bool GetExitCodeProcess(IntPtr handle, out uint code);
   [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+  [DllImport("kernel32.dll")] static extern bool TerminateProcess(IntPtr handle, uint code);
 
   delegate bool EachWindow(IntPtr window, IntPtr unused);
   [DllImport("user32.dll")] static extern bool EnumWindows(EachWindow each, IntPtr unused);
@@ -111,8 +113,10 @@ public static class GdharnessDesktop {
   // is held until then, since a desktop goes when the last handle to it does, and on this process's
   // own otherwise. With noActivate its first window is shown without being activated, which is
   // what a program's first ShowWindow does whatever it asks for when the start names a show state,
-  // and the foreground is held while it starts, since Godot also asks for it outright.
-  public static int Run(string desktop, string commandLine, string pidFile, bool noActivate) {
+  // and the foreground is held while it starts, since Godot also asks for it outright. The process
+  // is ended through the handle held here once stopFile appears, which is how a keeper ends a game
+  // it did not start itself: a handle names one process, where a pid can name the next one too.
+  public static int Run(string desktop, string commandLine, string pidFile, bool noActivate, string stopFile) {
     StartupInfo startup = new StartupInfo();
     startup.cb = Marshal.SizeOf(typeof(StartupInfo));
     if (desktop.Length > 0) {
@@ -147,7 +151,17 @@ public static class GdharnessDesktop {
         LockSetForegroundWindow(UnlockForeground);
       }
     }
-    WaitForSingleObject(started.process, Infinite);
+    if (stopFile.Length == 0) {
+      WaitForSingleObject(started.process, Infinite);
+    } else {
+      bool stopped = false;
+      while (WaitForSingleObject(started.process, 100) == TimedOut) {
+        if (!stopped && File.Exists(stopFile)) {
+          TerminateProcess(started.process, 1);
+          stopped = true;
+        }
+      }
+    }
     uint code;
     GetExitCodeProcess(started.process, out code);
     CloseHandle(started.thread);
@@ -185,33 +199,49 @@ export function windowsCommandLine(command: string, args: readonly string[]): st
   return [command, ...args].map(quoted).join(' ');
 }
 
+/** The files a helper is handed and writes, all in a directory of the caller's own. */
+export interface HelperFiles {
+  /** What to start and the helper's own source, read by the helper as it starts. */
+  readonly spec: string;
+  readonly pid: string;
+  readonly error: string;
+  /** Empty for a start nothing will be asked to end. */
+  readonly stop: string;
+}
+
 /**
  * The Windows PowerShell invocation that starts [param command] on [param how]'s desktop, or on the
- * one in use when it names none, shown without activation when it says so; writes its pid to
- * [param pidFile], waits for it and exits with its code. What stops it before the pid is written
- * goes to [param errorFile], since its own streams are the ones the process inherits.
+ * one in use when it names none, shown without activation when it says so; writes its pid to the
+ * pid file, waits for it and exits with its code, ending it first if the stop file appears. What
+ * stops it before the pid is written goes to the error file, since its own streams are the ones the
+ * process inherits.
+ *
+ * The spec goes in a file rather than on the command line. It carries the helper's C# source and the
+ * command line to start, and base64 of the JSON inside base64 of the script passed Windows' limit
+ * of 32767 characters on a command line: a keeper starting a long command on a desktop of its own
+ * failed with ENAMETOOLONG before anything started.
  */
 export function throughHelper(
   how: { readonly desktop?: string; readonly noActivate?: boolean },
   command: string,
   args: readonly string[],
-  pidFile: string,
-  errorFile: string,
+  files: HelperFiles,
 ): { command: string; args: string[] } {
   const spec = {
     desktop: how.desktop ?? '',
     noActivate: how.noActivate === true,
     commandLine: windowsCommandLine(command, args),
-    pidFile,
-    errorFile,
+    pidFile: files.pid,
+    stopFile: files.stop,
     source: SOURCE,
     digest: createHash('sha256').update(SOURCE).digest('hex').slice(0, 16),
   };
-  const encoded = Buffer.from(JSON.stringify(spec), 'utf8').toString('base64');
+  writeFileSync(files.spec, JSON.stringify(spec), 'utf8');
+  const literal = (path: string): string => `'${path.replaceAll("'", "''")}'`;
   const script = [
     "$ErrorActionPreference = 'Stop'",
-    `$spec = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}')) | ConvertFrom-Json`,
     'try {',
+    `  $spec = [IO.File]::ReadAllText(${literal(files.spec)}, [Text.Encoding]::UTF8) | ConvertFrom-Json`,
     "  $assembly = Join-Path ([IO.Path]::GetTempPath()) ('gdharness-desktop-' + $spec.digest + '.dll')",
     '  if (-not (Test-Path -LiteralPath $assembly)) {',
     '    $partial = "$assembly.$PID"',
@@ -219,9 +249,9 @@ export function throughHelper(
     '    try { Move-Item -LiteralPath $partial -Destination $assembly } catch { Remove-Item -LiteralPath $partial -ErrorAction SilentlyContinue }',
     '  }',
     '  Add-Type -LiteralPath $assembly',
-    '  $code = [GdharnessDesktop]::Run($spec.desktop, $spec.commandLine, $spec.pidFile, [bool]$spec.noActivate)',
+    '  $code = [GdharnessDesktop]::Run($spec.desktop, $spec.commandLine, $spec.pidFile, [bool]$spec.noActivate, $spec.stopFile)',
     '} catch {',
-    '  [IO.File]::WriteAllText($spec.errorFile, $_.Exception.Message)',
+    `  [IO.File]::WriteAllText(${literal(files.error)}, $_.Exception.Message)`,
     '  exit 1',
     '}',
     'exit $code',
