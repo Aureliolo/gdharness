@@ -83,6 +83,7 @@ import {
   mayYetConnect,
   theEditorHasComeBack,
 } from '../src/godot-bridge.js';
+import { mainCheckoutOf, recordedEnginePath } from '../src/harnesses.js';
 import { type ImportOutcome, librariesNotCopied, runImport } from '../src/headless.js';
 import { EDITOR_READS, HEADLESS_OPERATIONS } from '../src/headless-operations.js';
 import { RENDERED_AWAY_NOTE } from '../src/junit.js';
@@ -188,6 +189,7 @@ import {
   addonMismatch,
   editorIsStale,
   markIfStale,
+  runtimeMismatch,
   SERVER_VERSION,
   sameCodeNote,
 } from '../src/server-version.js';
@@ -196,10 +198,12 @@ import {
   autoloadIsOurs,
   installAddons,
   installedEditorDigest,
+  installedRuntimeDigest,
   RUNTIME_AUTOLOAD,
   removeAddons,
   SCRIPT_RUNS_SETTING,
   shippedEditorDigest,
+  shippedRuntimeDigest,
 } from '../src/setup.js';
 import { skillFiles } from '../src/skill.js';
 import { readNonNegativeNumber, readPositiveNumber } from '../src/tool-args.js';
@@ -6946,6 +6950,9 @@ async function testAGameNoNoteNamesIsStoppedByItsNumber(): Promise<void> {
       undefined,
       `a game this server started names no editor: ${JSON.stringify(announced)}`,
     );
+    // Copied without the markers an install writes, so the game can say only that it cannot say.
+    assert.equal(get(announced, 'addon_version'), '', JSON.stringify(announced));
+    assert.equal(get(announced, 'addon_digest'), '', JSON.stringify(announced));
     const serverPid = first.child.pid;
     assert.ok(serverPid !== undefined, 'the server should have a pid');
     await killTheTree(serverPid);
@@ -8166,6 +8173,242 @@ async function testARefusalDoesNotDenyTheRuntimeItCanSee(): Promise<void> {
     await server.stop();
     sweep(project);
     sweep(runtimeDir);
+  }
+}
+
+/**
+ * A game running a runtime addon other than this server's is named, with the fix its own project
+ * needs.
+ *
+ * Reported from ostinato: a git worktree of the project carried a runtime addon at 1.1.20 while the
+ * server was on 1.1.22, and nothing said so, because only the protocol was compared and it had not
+ * moved. Every branch of the note is rendered, since which remedy applies depends on what the
+ * game's project holds on disk and a wrong one sends the reader to a restart that loads the same
+ * code. Then the install: the runtime addon gets a digest of its own code, which the editor's
+ * digest does not cover, so an edit to the runtime changes one and leaves the other.
+ */
+function testAGameOnAnotherRuntimeAddonSaysSo(): void {
+  const shipped = shippedRuntimeDigest();
+  assert.ok(shipped !== undefined && shipped !== '', 'the shipped runtime addon has a digest');
+  const where = join(tmpdir(), 'a-worktree');
+  const note = (
+    addon: { version: string; digest: string } | undefined,
+    onDisk: string | null | undefined,
+  ): string | undefined => runtimeMismatch(4242, addon, SERVER_VERSION, shipped, onDisk, where);
+
+  assert.equal(note({ version: SERVER_VERSION, digest: shipped }, shipped), undefined, "this server's own");
+  assert.equal(
+    note({ version: '1.0.0', digest: shipped }, shipped),
+    undefined,
+    'an older version carrying the same code is not stale',
+  );
+  assert.equal(note({ version: '', digest: '' }, null), undefined, 'a game that could not read its markers');
+
+  const older = note({ version: '1.1.20', digest: 'an older digest' }, null) ?? '';
+  assert.match(
+    older,
+    /^The game \(pid 4242\) is running the 1\.1\.20 runtime addon, while this server ships /,
+    older,
+  );
+  assert.ok(
+    older.includes(`gdharness upgrade in ${where} installs the ${SERVER_VERSION} addons`),
+    `a project holding the old addon is told to upgrade, by its own path: ${older}`,
+  );
+  const restartable = note({ version: '1.1.20', digest: 'an older digest' }, shipped) ?? '';
+  assert.match(
+    restartable,
+    /The project holds this server's runtime addon, so the game picks it up when it next starts\./,
+  );
+  assert.doesNotMatch(
+    restartable,
+    /gdharness upgrade/,
+    `a current project is not sent to upgrade: ${restartable}`,
+  );
+
+  const before = note(undefined, 'an older digest') ?? '';
+  assert.match(
+    before,
+    /is running a runtime addon from before games reported theirs, while this server ships /,
+    before,
+  );
+  assert.match(before, /gdharness upgrade in /, before);
+
+  const rebuilt = note({ version: SERVER_VERSION, digest: 'another build' }, shipped) ?? '';
+  assert.match(
+    rebuilt,
+    new RegExp(`a different build of the ${SERVER_VERSION.replaceAll('.', '\\.')} runtime addon`),
+    rebuilt,
+  );
+
+  const unmarked = note({ version: '', digest: 'something' }, null) ?? '';
+  assert.match(unmarked, /a runtime addon with no version marker/, unmarked);
+
+  const newer = note({ version: '99.0.0', digest: 'a newer digest' }, 'a newer digest') ?? '';
+  assert.match(
+    newer,
+    /running the 99\.0\.0 runtime addon while this server ships .*This server is the older half: reconnect it in your harness so it spawns 99\.0\.0\./,
+    newer,
+  );
+  assert.doesNotMatch(
+    newer,
+    /upgrade|next starts/,
+    `a newer game is not sent anywhere but the reconnect: ${newer}`,
+  );
+
+  const from = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-runtime-digest-from-'));
+  const into = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-runtime-digest-into-'));
+  try {
+    installAddons(into);
+    assert.equal(installedRuntimeDigest(into), shipped, 'the install writes the shipped runtime digest');
+    assert.notEqual(
+      installedRuntimeDigest(into),
+      installedEditorDigest(into),
+      'the two addons have digests of their own',
+    );
+    cpSync(join('src', 'godot', 'addons'), from, { recursive: true });
+    const autoload = join(from, 'gdharness_runtime', 'runtime_autoload.gd');
+    writeFileSync(autoload, `${readFileSync(autoload, 'utf8')}\n# changed\n`);
+    installAddons(into, from);
+    const changed = installedRuntimeDigest(into);
+    assert.ok(changed !== null && changed !== shipped, `an edit to the runtime moves its digest: ${changed}`);
+    assert.equal(installedEditorDigest(into), shippedEditorDigest(), 'and leaves the editor digest alone');
+  } finally {
+    rmSync(from, { recursive: true, force: true });
+    rmSync(into, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A project in a git worktree finds the engine its main checkout's config names.
+ *
+ * Reported from ostinato: `upgrade` in a worktree refused for want of an engine, because the engine
+ * is vendored, untracked, under the main checkout, and so is the config naming it. The layout is
+ * built as git builds it, with the project a directory below the repository root on both sides,
+ * so the relative path is carried across. The main checkout itself, a bare repository and a main
+ * checkout without the project each answer null, and so does a worktree whose pointer is relative.
+ */
+function testAWorktreeFindsItsMainCheckoutsEngine(): void {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-worktree-'));
+  try {
+    const engine = join(root, 'main', '.tools', 'godot.exe');
+    mkdirSync(dirname(engine), { recursive: true });
+    writeFileSync(engine, '');
+    const entry = join(root, 'main', '.git', 'worktrees', 'next');
+    mkdirSync(entry, { recursive: true });
+    writeFileSync(join(entry, 'commondir'), '../..\n');
+    for (const checkout of ['main', 'next']) {
+      mkdirSync(join(root, checkout, 'game'), { recursive: true });
+      writeFileSync(join(root, checkout, 'game', 'project.godot'), 'config_version=5\n');
+    }
+    writeFileSync(
+      join(root, 'main', 'game', '.mcp.json'),
+      JSON.stringify({ mcpServers: { gdharness: { command: 'npx', env: { GODOT_PATH: engine } } } }),
+    );
+    const worktree = join(root, 'next', 'game');
+    writeFileSync(join(root, 'next', '.git'), `gitdir: ${entry.replaceAll('\\', '/')}\n`);
+
+    assert.equal(recordedEnginePath(worktree), null, 'the worktree names no engine of its own');
+    const main = mainCheckoutOf(worktree);
+    assert.ok(
+      main !== null && isSameDirectory(main, join(root, 'main', 'game')),
+      `the main checkout: ${main}`,
+    );
+    assert.equal(recordedEnginePath(main), engine, "and its config's engine is the one found");
+
+    writeFileSync(join(root, 'next', '.git'), 'gitdir: ../main/.git/worktrees/next\n');
+    const relativeMain = mainCheckoutOf(worktree);
+    assert.ok(
+      relativeMain !== null && isSameDirectory(relativeMain, join(root, 'main', 'game')),
+      `a relative pointer is read from the worktree: ${relativeMain}`,
+    );
+
+    assert.equal(mainCheckoutOf(join(root, 'main', 'game')), null, 'the main checkout is no worktree');
+    rmSync(join(root, 'main', 'game', 'project.godot'));
+    assert.equal(mainCheckoutOf(worktree), null, 'a main checkout without the project');
+    writeFileSync(join(root, 'main', 'game', 'project.godot'), 'config_version=5\n');
+    writeFileSync(join(entry, 'commondir'), '../../../bare.git\n');
+    assert.equal(mainCheckoutOf(worktree), null, 'a bare repository has no checkout');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A game says which runtime addon it loaded, as its markers said when it started.
+ *
+ * Read once at start: an upgrade rewrites the markers under a running game whose code stays what it
+ * loaded, so a later read would call old code current. The marker is rewritten mid-run here and
+ * the status has to go on naming what the game started with. The game is this project's own, so
+ * nothing about the rest of the answer depends on the addon being stale.
+ */
+async function testAGameSaysWhichRuntimeAddonItLoaded(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('runtime addon version regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-runtime-loaded-'));
+  const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-runtime-loaded-rt-'));
+  const server = new ServerProcess({
+    env: { GODOT_PATH: godotPath, GDHARNESS_PROJECT: project, GDHARNESS_RUNTIME_DIR: runtime },
+  });
+  let game = 0;
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Loaded"\n' +
+        'run/main_scene="res://main.tscn"\n\n[autoload]\n\n' +
+        'GdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n',
+    );
+    writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
+    installAddons(project);
+    await server.initialize('regression-test');
+    const started = await server.request(
+      'tools/call',
+      {
+        name: 'editor_run',
+        arguments: { projectPath: project, op: 'start', headless: true, runtimeWaitMs: 30_000 },
+      },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    assert.equal(
+      get(parseTextContent(started), 'runtime', 'listening'),
+      true,
+      `the game should have announced its runtime: ${textOf(started)}`,
+    );
+    game = asNumber(get(parseTextContent(started), 'runtime', 'pid'));
+    const announced: unknown = JSON.parse(readFileSync(join(runtime, `runtime-${game}.json`), 'utf8'));
+    assert.equal(get(announced, 'addon_version'), SERVER_VERSION, JSON.stringify(announced));
+    assert.equal(get(announced, 'addon_digest'), shippedRuntimeDigest(), JSON.stringify(announced));
+
+    writeFileSync(join(project, 'addons', 'gdharness_runtime', '.gdharness-version'), '0.0.1\n');
+    const status = parseTextContent(
+      await server.request('tools/call', { name: 'editor_status', arguments: {} }),
+    );
+    const entry = asArray(get(status, 'game', 'runtimes')).find((one) => get(one, 'pid') === game);
+    assert.equal(get(entry, 'addonVersion'), SERVER_VERSION, `named as it started: ${JSON.stringify(entry)}`);
+    assert.equal(get(entry, 'addonIsStale'), false, JSON.stringify(entry));
+    assert.equal(get(entry, 'staleNote'), undefined, JSON.stringify(entry));
+    const tree = parseTextContent(
+      await server.request('tools/call', { name: 'runtime_inspect', arguments: { depth: 1 } }),
+    );
+    assert.equal(get(tree, 'type'), 'tree', JSON.stringify(tree));
+    assert.equal(
+      get(tree, 'addonIsStale'),
+      undefined,
+      `a current game's answer is left alone: ${JSON.stringify(tree)}`,
+    );
+    await stopItsRun(server);
+  } finally {
+    if (game > 0 && isAlive(game)) {
+      process.kill(game);
+    }
+    await server.stop();
+    sweep(project);
+    sweep(runtime);
   }
 }
 
@@ -25377,6 +25620,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testATestServerWritesWhereNoRealRunIs,
   testRuntimeConnectedIsAboutThisProjectsGames,
   testAGameOnEveryInterfaceIsReached,
+  testAGameOnAnotherRuntimeAddonSaysSo,
+  testAGameSaysWhichRuntimeAddonItLoaded,
+  testAWorktreeFindsItsMainCheckoutsEngine,
   testAStartStopsWaitingForAGameThatIsOver,
   testAStartWaitsForTheGameToAnnounceItself,
   testAGameIsFoundThroughALinkToItsProject,

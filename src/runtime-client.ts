@@ -43,6 +43,16 @@ export interface RuntimeEndpoint {
   readonly editorPid?: number;
   /** When the announcement was written, which is what `judgeAnnouncedGame` holds the process to. */
   readonly announcedAt?: number;
+  /**
+   * The runtime addon the game loaded, as its markers said when it started: empty strings when it
+   * could not read them. Absent for a runtime addon from before games reported it.
+   */
+  readonly addon?: LoadedAddon;
+}
+
+interface LoadedAddon {
+  readonly version: string;
+  readonly digest: string;
 }
 
 /**
@@ -225,6 +235,7 @@ function parseAnnouncement(file: string, pid: number): Announced {
     return { kind: 'unspoken', unspoken: { pid, protocol: protocol ?? 0, project: named, ...when } };
   }
   const editorPid = readNumber(fields, 'editor_pid');
+  const addonVersion = readString(fields, 'addon_version');
   return {
     kind: 'runtime',
     endpoint: {
@@ -235,6 +246,9 @@ function parseAnnouncement(file: string, pid: number): Announced {
       file,
       ...(editorPid !== undefined && Number.isInteger(editorPid) && editorPid > 0 ? { editorPid } : {}),
       ...when,
+      ...(addonVersion === undefined
+        ? {}
+        : { addon: { version: addonVersion, digest: readString(fields, 'addon_digest') ?? '' } }),
     },
   };
 }

@@ -68,17 +68,29 @@ export const PORT_SETTING = 'gdharness/runtime/port';
 const VERSION_MARKER = '.gdharness-version';
 
 /**
- * Written beside the version marker in the editor addon: a digest of the code an editor loads.
+ * Written beside the version marker in the editor addon, a digest of the code an editor loads, and
+ * in the runtime addon, a digest of the code a game loads.
  *
- * The version changes on every release and the editor's code does not, so a version comparison
- * called an editor stale after every upgrade and sent it to a restart that changed nothing. The
- * digest is taken from the shipped copy at install time rather than from the project, because
- * the editor writes `.uid` and import files into its addons and those are not the code it loaded.
+ * The version changes on every release and the addons' code mostly does not, so a version
+ * comparison called an editor stale after every upgrade and sent it to a restart that changed
+ * nothing. The digest is taken from the shipped copy at install time rather than from the project,
+ * because the editor writes `.uid` and import files into the addons and those are not the code.
  */
 const DIGEST_MARKER = '.gdharness-digest';
 
+const RUNTIME_ADDON = 'gdharness_runtime';
+
 /** The digest of the editor plugins in `from`, which is what an open editor has loaded of ours. */
 function editorAddonDigest(from: string = shippedAddonsDirectory()): string {
+  return addonsDigest(EDITOR_PLUGINS, from);
+}
+
+/** The digest of the runtime addon in `from`, which is what a game has loaded of ours. */
+function runtimeAddonDigest(from: string = shippedAddonsDirectory()): string {
+  return addonsDigest([RUNTIME_ADDON], from);
+}
+
+function addonsDigest(names: readonly string[], from: string): string {
   const hash = createHash('sha256');
   const walk = (directory: string, relative: string): void => {
     for (const name of readdirSync(directory).sort()) {
@@ -96,13 +108,14 @@ function editorAddonDigest(from: string = shippedAddonsDirectory()): string {
       }
     }
   };
-  for (const name of EDITOR_PLUGINS) {
+  for (const name of names) {
     walk(join(from, name), name);
   }
   return hash.digest('hex');
 }
 
 let shippedDigest: string | null | undefined;
+let shippedRuntime: string | null | undefined;
 
 /**
  * The digest of the editor plugins this package ships, taken once, or undefined when they cannot
@@ -119,9 +132,30 @@ export function shippedEditorDigest(): string | undefined {
   return shippedDigest ?? undefined;
 }
 
+/** The same for the runtime addon. */
+export function shippedRuntimeDigest(): string | undefined {
+  if (shippedRuntime === undefined) {
+    try {
+      shippedRuntime = runtimeAddonDigest();
+    } catch {
+      shippedRuntime = null;
+    }
+  }
+  return shippedRuntime ?? undefined;
+}
+
 /** The digest the installed editor addon was written with, or null for a copy from before digests. */
 export function installedEditorDigest(projectPath: string): string | null {
-  const marker = join(projectPath, 'addons', ADDONS[0], DIGEST_MARKER);
+  return digestMarker(projectPath, ADDONS[0]);
+}
+
+/** The digest the installed runtime addon was written with, or null for a copy without one. */
+export function installedRuntimeDigest(projectPath: string): string | null {
+  return digestMarker(projectPath, RUNTIME_ADDON);
+}
+
+function digestMarker(projectPath: string, addon: string): string | null {
+  const marker = join(projectPath, 'addons', addon, DIGEST_MARKER);
   if (!existsSync(marker)) {
     return null;
   }
@@ -153,7 +187,7 @@ export function installAddons(
   const installed: InstalledAddon[] = [];
   for (const name of ADDONS) {
     const source = join(from, name);
-    if (!existsSync(join(source, name === 'gdharness_runtime' ? 'runtime_autoload.gd' : 'plugin.cfg'))) {
+    if (!existsSync(join(source, name === RUNTIME_ADDON ? 'runtime_autoload.gd' : 'plugin.cfg'))) {
       throw new Error(`The package holds no ${name} addon at ${source}.`);
     }
     const target = join(projectPath, 'addons', name);
@@ -165,6 +199,7 @@ export function installAddons(
     installed.push({ name, path: target, replaced });
   }
   writeFileSync(join(projectPath, 'addons', ADDONS[0], DIGEST_MARKER), `${editorAddonDigest(from)}\n`);
+  writeFileSync(join(projectPath, 'addons', RUNTIME_ADDON, DIGEST_MARKER), `${runtimeAddonDigest(from)}\n`);
   return installed;
 }
 
