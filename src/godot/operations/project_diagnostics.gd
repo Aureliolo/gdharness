@@ -106,7 +106,8 @@ func get_project_health(params: Dictionary) -> Dictionary:
 	if "scenes" in check_categories:
 		var details: Array[String] = []
 
-		var scene_files: Array[String] = _files.find_files("res://", ".tscn")
+		# Binary scenes too, which a project may save instead and which counted as none.
+		var scene_files: Array[String] = _files.find_files_with_extensions("res://", ["tscn", "scn"])
 		if scene_files.size() == 0:
 			details.append("No scene files found in project")
 			deductions += 5

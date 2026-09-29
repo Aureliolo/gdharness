@@ -235,6 +235,77 @@ func _check_a_name_written_as_a_word() -> void:
 ## A node hidden because something above it is hidden counts as hidden, since that is what the
 ## player sees, and the ones left out are counted rather than silently missing: "none" and "four,
 ## all hidden" used to be the same answer.
+## A hidden panel does not hide a label reached through a plain Node, nor a hidden Node3D a label
+## under it: measured on 4.7.2, both answer visible in tree, as the engine draws them. Walking every
+## ancestor called them hidden, so a text read left them out and a find counted them as hidden.
+func _check_a_label_past_a_plain_node() -> void:
+	var menu: Control = Control.new()
+	menu.name = "Menu"
+	menu.visible = false
+	root.add_child(menu)
+	var group: Node = Node.new()
+	group.name = "Popups"
+	menu.add_child(group)
+	var popped: Label = Label.new()
+	popped.name = "Popped"
+	popped.text = "a popup over the menu"
+	group.add_child(popped)
+	var tucked: Label = Label.new()
+	tucked.name = "Tucked"
+	tucked.text = "under the hidden menu itself"
+	menu.add_child(tucked)
+	var level: Node3D = Node3D.new()
+	level.name = "World"
+	level.visible = false
+	root.add_child(level)
+	var hud: Label = Label.new()
+	hud.name = "Hud"
+	hud.text = "a hud over the level"
+	level.add_child(hud)
+	await process_frame
+
+	for from: String in ["/root/Menu", "/root/World"]:
+		var read: Dictionary = await node._execute_command("read_text", {"root": from})
+		var lines: Array = read.get("lines", [])
+		var expected: Array = ["a popup over the menu"] if from == "/root/Menu" else ["a hud over the level"]
+		if lines != expected:
+			_fail("the words the engine draws past a hidden %s are read: %s" % [from, str(read)])
+	var found: Dictionary = await node._execute_command(
+		"find_nodes", {"class": "Label", "root": "/root/Menu", "include_hidden": false}
+	)
+	if _paths(found) != ["/root/Menu/Popups/Popped"] or found.get("hidden") != 1:
+		_fail("and found as shown, with the one under the menu counted hidden: %s" % str(found))
+
+	# Visible in tree yet undrawn, measured: via a Node under a hidden layer, and 3D in a hidden window.
+	var layer: CanvasLayer = CanvasLayer.new()
+	layer.name = "PauseLayer"
+	layer.visible = false
+	root.add_child(layer)
+	var holder: Node = Node.new()
+	layer.add_child(holder)
+	var said: Label = Label.new()
+	said.text = "paused"
+	holder.add_child(said)
+	var window: Window = Window.new()
+	window.name = "Shut"
+	window.visible = false
+	root.add_child(window)
+	window.add_child(Node3D.new())
+	await process_frame
+	var layered: Dictionary = await node._execute_command("read_text", {"root": "/root/PauseLayer"})
+	if layered.get("lines") != []:
+		_fail("a hidden layer hides what is drawn on it through a plain Node: %s" % str(layered))
+	var shut: Dictionary = await node._execute_command(
+		"find_nodes", {"class": "Node3D", "root": "/root/Shut", "include_hidden": false}
+	)
+	if shut.get("count") != 0 or shut.get("hidden") != 1:
+		_fail("a 3D node in a hidden window is hidden: %s" % str(shut))
+	menu.queue_free()
+	level.queue_free()
+	layer.queue_free()
+	window.queue_free()
+
+
 func _check_hidden_nodes_can_be_left_out() -> void:
 	var shelf: Control = Control.new()
 	shelf.name = "Shelf"
@@ -874,6 +945,7 @@ func _check() -> void:
 	if its_own.get("count") != 0:
 		_fail("what a node says is its own, not what is said under it: %s" % str(its_own))
 	await _check_hidden_nodes_can_be_left_out()
+	await _check_a_label_past_a_plain_node()
 	var limited: Dictionary = await node._execute_command("find_nodes", {"class": "Node", "limit": 2})
 	if limited.get("count") != 2 or limited.get("truncated") != true:
 		_fail("a limit truncates and says so: %s" % str(limited))

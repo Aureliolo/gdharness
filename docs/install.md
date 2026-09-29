@@ -169,6 +169,10 @@ and `GDHARNESS_SILENT=1` in the server's environment makes that the default. The
 engine flags for a game it plays, so a silent run is started by the server and the `debug_*` tools
 do not reach it; `silent: false` plays through the editor as before.
 
+`editor_launch restart` waits ninety seconds for the old editor to close and ninety more for the new
+one to connect. A project whose import takes longer than that sets
+`GDHARNESS_EDITOR_RESTART_TIMEOUT_MS` in the server's environment.
+
 ## Updating
 
 The server asks the npm registry every ten minutes, in the background, while it is being used, and

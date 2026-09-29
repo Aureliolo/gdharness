@@ -239,6 +239,21 @@ function parseAnnouncement(file: string, pid: number): Announced {
   };
 }
 
+/**
+ * Where to connect to a game announced at [param address], which is the address it bound.
+ *
+ * A project may bind every interface, as `*`, `0.0.0.0` or `::`, and none of those is somewhere to
+ * connect to: `*` is no host at all and Windows refuses `0.0.0.0`. Dialled as announced, a game that
+ * was listening was answered "may still be starting", and waiting changed nothing. A game on every
+ * interface is on loopback as well.
+ */
+function dialAddress(address: string): string {
+  if (address === '*' || address === '0.0.0.0') {
+    return '127.0.0.1';
+  }
+  return address === '::' ? '::1' : address;
+}
+
 /** What a sweep of the announcement directories found: games to talk to, and games too new. */
 export interface RuntimesAnnounced {
   readonly running: RuntimeEndpoint[];
@@ -933,7 +948,7 @@ export function runtimeRequest(
     let buffered = '';
     let welcomed = false;
 
-    const socket = createConnection({ port: endpoint.port, host: endpoint.address });
+    const socket = createConnection({ port: endpoint.port, host: dialAddress(endpoint.address) });
     let lateTimer: NodeJS.Timeout | null = null;
     const finish = (reply: RuntimeReply): void => {
       if (late) {

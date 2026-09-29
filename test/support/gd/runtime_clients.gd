@@ -41,6 +41,16 @@ func _init() -> void:
 	busy._cleanup()
 	busy.free()
 
+	# On the first frame, because a close request is about the tree and nothing is in one yet.
+	Checked.done(
+		process_frame.connect(_finish.bind(directory), CONNECT_ONE_SHOT) as Error,
+		"waiting for the first frame"
+	)
+
+
+func _finish(directory: String) -> void:
+	_check_a_declined_quit(directory)
+
 	# Not checked: the directory is gone either way by the time this runs.
 	var _removed: Error = DirAccess.remove_absolute(directory)
 
@@ -198,6 +208,31 @@ func _check_a_script_run_serves_nobody(directory: String) -> void:
 
 	quiet._cleanup()
 	quiet.free()
+
+
+## A close request the game declines leaves the runtime up; one it accepts takes it down.
+##
+## A game that asks before quitting turns auto_accept_quit off, and the runtime cleaned up on the
+## request itself, so a player answering No left the game running with no runtime and no
+## announcement.
+func _check_a_declined_quit(directory: String) -> void:
+	var announcement: String = directory.path_join("runtime-%d.json" % OS.get_process_id())
+	set_auto_accept_quit(false)
+	var kept: Runtime = Runtime.new()
+	root.add_child(kept)
+	if not kept.is_inside_tree():
+		_fail("the runtime should be in the tree the close request is about")
+	if not FileAccess.file_exists(announcement) or kept._port <= 0:
+		_fail("a runtime in the tree should serve and announce: port %d" % kept._port)
+	kept.propagate_notification(Node.NOTIFICATION_WM_CLOSE_REQUEST)
+	if not FileAccess.file_exists(announcement) or kept._server == null:
+		_fail("a close request the game declined took the runtime down")
+	set_auto_accept_quit(true)
+	kept.propagate_notification(Node.NOTIFICATION_WM_CLOSE_REQUEST)
+	if FileAccess.file_exists(announcement) or kept._server != null:
+		_fail("a close request the game takes should take the runtime down with it")
+	root.remove_child(kept)
+	kept.free()
 
 
 func _check(node: Runtime, directory: String) -> void:

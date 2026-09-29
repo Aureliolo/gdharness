@@ -3,18 +3,22 @@ extends RefCounted
 const Read = preload("reading.gd")
 const Log = preload("logger.gd")
 
-# The base class each category name stands for.
+# The base classes each category name stands for. Kept to the list the tool's schema offers, which
+# a case holds: the schema offered physics3d and ui, which this refused, and physics answered the 3D
+# bodies alone beside physics2d and physics3d.
 const CATEGORY_BASES: Dictionary = {
-	"node": "Node",
-	"node2d": "Node2D",
-	"node3d": "Node3D",
-	"control": "Control",
-	"resource": "Resource",
-	"physics": "PhysicsBody3D",
-	"physics2d": "PhysicsBody2D",
-	"audio": "AudioStream",
-	"visual": "VisualInstance3D",
-	"animation": "AnimationMixer",
+	"node": ["Node"],
+	"node2d": ["Node2D"],
+	"node3d": ["Node3D"],
+	"control": ["Control"],
+	"ui": ["Control"],
+	"resource": ["Resource"],
+	"physics": ["PhysicsBody2D", "PhysicsBody3D"],
+	"physics2d": ["PhysicsBody2D"],
+	"physics3d": ["PhysicsBody3D"],
+	"audio": ["AudioStream"],
+	"visual": ["VisualInstance3D"],
+	"animation": ["AnimationMixer"],
 }
 
 var _log: Log
@@ -22,6 +26,14 @@ var _log: Log
 
 func _init(p_log: Log) -> void:
 	_log = p_log
+
+
+static func _under_any(name: String, bases: Array) -> bool:
+	for base: Variant in bases:
+		var base_name: String = str(base)
+		if name == base_name or ClassDB.is_parent_class(name, base_name):
+			return true
+	return false
 
 
 # Query available classes from ClassDB with optional filtering
@@ -42,10 +54,10 @@ func query_classes(params: Dictionary) -> Dictionary:
 		)
 	)
 
-	var base_class: String = ""
+	var bases: Array = []
 	if not category.is_empty():
-		base_class = CATEGORY_BASES.get(category.to_lower(), "")
-		if base_class.is_empty():
+		bases = CATEGORY_BASES.get(category.to_lower(), [])
+		if bases.is_empty():
 			return _log.failure("Unknown category: " + category + ". Valid: " + str(CATEGORY_BASES.keys()))
 
 	var all_classes: PackedStringArray = ClassDB.get_class_list()
@@ -60,9 +72,8 @@ func query_classes(params: Dictionary) -> Dictionary:
 		if not filter.is_empty() and not class_name_str.to_lower().contains(filter.to_lower()):
 			continue
 
-		if not base_class.is_empty():
-			if not ClassDB.is_parent_class(class_name_str, base_class) and class_name_str != base_class:
-				continue
+		if not bases.is_empty() and not _under_any(class_name_str, bases):
+			continue
 
 		filtered_classes.append(class_name_str)
 

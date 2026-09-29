@@ -85,20 +85,29 @@ export function addonMismatch(
   serverVersion: string,
   addonDigest?: string,
   shippedDigest?: string,
+  onDisk?: string | null,
 ): string | undefined {
   if (!editorIsStale(addonVersion, serverVersion, addonDigest, shippedDigest)) {
     return undefined;
   }
   const reported = addonVersion ?? '';
+  // What a restart would load, which is the project's addons on disk, not this server's. A server
+  // newer than the addons it finds, as a checkout gets when a teammate moves the pin in a committed
+  // config and not the addons, was told to restart the editor, which loaded the same old code, and
+  // the restart's own answer said to restart again.
+  const restart =
+    onDisk !== undefined && onDisk !== shippedDigest
+      ? `The project's own addons are not this server's either, so a restart would load the same code again: gdharness upgrade in the project installs the ${serverVersion} addons, and editor_launch restart then picks them up.`
+      : 'Restart it with editor_launch restart to pick this one up.';
   if (reported === serverVersion) {
-    return `The editor is running a different build of the ${reported} addon from the one this server ships. Restart it with editor_launch restart to pick this one up.`;
+    return `The editor is running a different build of the ${reported} addon from the one this server ships. ${restart}`;
   }
   const editor = reported === '' ? UNVERSIONED : `the ${reported} addon`;
   const both = `The editor is running ${editor} while this server ships ${serverVersion}.`;
   if (reported !== '' && isNewer(reported, serverVersion)) {
     return `${both} This server is the older half: reconnect it in your harness so it spawns ${reported}.`;
   }
-  return `${both} Restart it with editor_launch restart to pick the new one up.`;
+  return `${both} ${restart}`;
 }
 
 /**
@@ -119,8 +128,9 @@ export function markIfStale(
   serverVersion: string,
   addonDigest?: string,
   shippedDigest?: string,
+  onDisk?: string | null,
 ): unknown {
-  const staleNote = addonMismatch(addonVersion, serverVersion, addonDigest, shippedDigest);
+  const staleNote = addonMismatch(addonVersion, serverVersion, addonDigest, shippedDigest, onDisk);
   if (staleNote === undefined || typeof answer !== 'object' || answer === null || Array.isArray(answer)) {
     return answer;
   }

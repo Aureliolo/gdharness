@@ -1,8 +1,9 @@
 extends SceneTree
 
-## The commands that take time: a click that presses and releases a frame apart, and the
-## waits for frames, a signal and a property. They need the main loop running, so the checks
-## start on the first frame rather than in _init, and the fixture quits when they are done.
+## The commands that take time: a click that presses and releases a frame apart, and the waits for
+## frames and a property; the wait for a signal is runtime_signal.gd. They need the main loop
+## running, so the checks start on the first frame rather than in _init, and the fixture quits
+## when they are done.
 
 const Checked = preload("checked.gd")
 const Read = preload("res://addons/gdharness_runtime/reading.gd")
@@ -61,7 +62,6 @@ func _run() -> void:
 	await _check_a_menu()
 	await _check_a_translated_menu()
 	await _check_frames()
-	await _check_signal()
 	await _check_until()
 
 	node._cleanup()
@@ -682,43 +682,6 @@ func _check_frames() -> void:
 		_fail("a wait of no frames should be refused: %s" % str(none))
 
 
-func _check_signal() -> void:
-	var timer: Timer = Timer.new()
-	timer.name = "Fuse"
-	timer.one_shot = true
-	timer.wait_time = 0.05
-	root.add_child(timer)
-	timer.start()
-	var fired: Dictionary = await node._execute_command(
-		"wait_signal", {"path": "/root/Fuse", "signal": "timeout"}
-	)
-	if fired.get("fired") != true:
-		_fail("a signal that fires should be reported as fired: %s" % str(fired))
-
-	var expired: Dictionary = await node._execute_command(
-		"wait_signal", {"path": "/root/Fuse", "signal": "timeout", "timeout_ms": 60}
-	)
-	if expired.get("fired") != false or Read.as_int(expired.get("elapsed_ms", 0)) < 60:
-		_fail(
-			"a signal that never fires should be reported as not fired after the timeout: %s" % str(expired)
-		)
-	if not timer.timeout.get_connections().is_empty():
-		_fail("the catcher should be disconnected once the wait gives up")
-
-	var with_args: Dictionary = await node._execute_command(
-		"wait_signal", {"path": "/root/Panel/Go", "signal": "toggled", "timeout_ms": 500}
-	)
-	if with_args.get("fired") != false:
-		_fail("toggled should not fire on its own: %s" % str(with_args))
-
-	var unknown: Dictionary = await node._execute_command(
-		"wait_signal", {"path": "/root/Fuse", "signal": "nonesuch"}
-	)
-	if unknown.get("type") != "error":
-		_fail("a signal the node does not have is refused: %s" % str(unknown))
-	timer.free()
-
-
 func _check_until() -> void:
 	var late: Callable = func() -> void:
 		await process_frame
@@ -743,8 +706,51 @@ func _check_until() -> void:
 	if no_value.get("type") != "error":
 		_fail("wait_until without a value is refused: %s" % str(no_value))
 
+	await _check_until_at_the_precision_kept()
 	await _check_until_a_reference_is_let_go()
 	await _check_until_something_says_it()
+
+
+## Compared at the precision kept: h_offset set to -1.1 holds -1.10000002384186, and an exact wait
+## ran out on it. A value the property would have to cut is refused: 3.5 on an int became 3 and met.
+func _check_until_at_the_precision_kept() -> void:
+	var lens: Camera3D = Camera3D.new()
+	lens.name = "Lens"
+	root.add_child(lens)
+	var shifted: Callable = func() -> void:
+		await process_frame
+		lens.h_offset = -1.1
+	shifted.call()
+	var met: Dictionary = await node._execute_command(
+		"wait_until", {"path": "/root/Lens", "property": "h_offset", "value": -1.1, "timeout_ms": 1000}
+	)
+	if met.get("met") != true:
+		_fail("a 32-bit float meets the value it was given: %s" % JSON.stringify(met))
+
+	var lines: Label = Label.new()
+	lines.name = "Lines"
+	lines.max_lines_visible = 3
+	root.add_child(lines)
+	var whole: Dictionary = await node._execute_command(
+		"wait_until",
+		{"path": "/root/Lines", "property": "max_lines_visible", "value": 3.0, "timeout_ms": 200}
+	)
+	if whole.get("met") != true:
+		_fail("a whole number arriving as a float meets an int: %s" % JSON.stringify(whole))
+	for cut: Variant in [3.5, "3.5"]:
+		var refused: Dictionary = await node._execute_command(
+			"wait_until",
+			{"path": "/root/Lines", "property": "max_lines_visible", "value": cut, "timeout_ms": 200}
+		)
+		if refused.get("type") != "error" or not str(refused.get("message", "")).contains("cut to fit"):
+			_fail("%s waited on an int is refused, not cut to 3: %s" % [str(cut), JSON.stringify(refused)])
+	var truth: Dictionary = await node._execute_command(
+		"wait_until", {"path": "/root/Lines", "property": "visible", "value": 0.2, "timeout_ms": 200}
+	)
+	if truth.get("type") != "error":
+		_fail("0.2 waited on a bool is refused, not read as true: %s" % JSON.stringify(truth))
+	lens.queue_free()
+	lines.queue_free()
 
 
 ## A reference waited on until it is let go of, every way a game lets go: the property set to null,

@@ -26,9 +26,11 @@ import {
   launchFor,
   recordedEnginePath,
   registered,
+  servedProject,
 } from './harnesses.js';
 import { type HeadlessEngine, type HeadlessOutcome, runOperation } from './headless.js';
 import { defectReport } from './issues.js';
+import { isSameDirectory } from './paths.js';
 import { Ask, interactive } from './prompt.js';
 import { GODOT_DEBUG_MODE_DEFAULT } from './server-version.js';
 import {
@@ -363,14 +365,18 @@ async function uninstall(): Promise<void> {
   const from = named.length > 0 ? named : HARNESSES;
 
   for (const harness of from) {
-    const removal = disconnect(harness, projectPath);
-    if (removal.action === 'absent') {
+    // Asked before anything is taken out: removing is not a probe, and a machine-wide entry removed
+    // and then reported as left alone was another project's server, or the whole file.
+    if (harness.scope === 'home' && named.length === 0) {
+      if (registered(harness, projectPath)) {
+        console.log(
+          `${harness.name}: left alone. Its config is machine-wide and may serve another project; pass --${harness.id} to remove it.`,
+        );
+      }
       continue;
     }
-    if (harness.scope === 'home' && named.length === 0) {
-      console.log(
-        `${harness.name}: left alone. Its config is machine-wide and may serve another project; pass --${harness.id} to remove it.`,
-      );
+    const removal = disconnect(harness, projectPath);
+    if (removal.action === 'absent') {
       continue;
     }
     if (removal.action === 'manual') {
@@ -403,9 +409,18 @@ async function uninstall(): Promise<void> {
     said(outcome, `disabling ${name}`);
     console.log(`${name}: ${outcome.ok ? String(outcome.payload['action']) : 'failed'}`);
   }
-  if (before.runtimeAutoload) {
+  // Our entry and not any loader: runtimeAutoload is true for a loader under a name of the
+  // project's, and asking the engine to remove GdharnessRuntime from such a project failed here on
+  // every run, after the harness entries had gone and before the addons did.
+  if (before.runtimeAutoloadPath !== null) {
     said(await setRuntime(godot, projectPath, false), 'removing the runtime autoload');
     console.log(`${RUNTIME_AUTOLOAD.name} autoload removed`);
+  }
+  const loader = before.runtimeLoaderAutoload;
+  if (loader !== null && loader.name !== RUNTIME_AUTOLOAD.name) {
+    console.log(
+      `${loader.name} names res://${loader.path}, which brings the runtime up its own way. That line is this project's, so it is left in place; the addon it brings up is gone now, so take the entry out unless that file does nothing without it.`,
+    );
   }
 
   const addons = removeAddons(projectPath);
@@ -413,7 +428,7 @@ async function uninstall(): Promise<void> {
     console.log(`removed ${path}`);
   }
 
-  const anything = addons.length > 0 || before.runtimeAutoload || enabled.length > 0;
+  const anything = addons.length > 0 || before.runtimeAutoloadPath !== null || enabled.length > 0;
   console.log(
     anything
       ? '\nReconnect your harness so it stops spawning a server that is no longer installed.'
@@ -438,8 +453,10 @@ async function upgrade(): Promise<void> {
   const projectPath = projectArgument(1);
   const version = getLocalVersion();
   const before = inspectProject(projectPath);
-  const installed = before.addons.find((addon) => addon.installed)?.version ?? null;
-  if (installed === null) {
+  // Present and unmarked is still installed: a copy made by hand, or a checkout that dropped
+  // dot-files, carries no version marker, and was told gdharness was not installed at all.
+  const present = before.addons.find((addon) => addon.installed);
+  if (present === undefined) {
     // The path only where it is not the directory you are in, so the command the message hands
     // back is one that can be copied rather than a line carrying its own path twice.
     const where = projectPath === process.cwd() ? '' : ` ${projectPath}`;
@@ -450,7 +467,11 @@ async function upgrade(): Promise<void> {
   // After the engine is found, not before. A refusal under a line saying which version this is
   // going to reads as a run that got partway and stopped, and this one changes nothing at all.
   const godot = await engine(projectPath);
-  console.log(installed === version ? `already ${version}; reinstalling` : `${installed} -> ${version}`);
+  console.log(
+    present.version === version
+      ? `already ${version}; reinstalling`
+      : `${present.version ?? 'an unmarked copy'} -> ${version}`,
+  );
 
   // Read before the copy replaces it. A copy from before digests has none, and then nothing says
   // the code is the same, so the restart is asked for as it always was.
@@ -473,7 +494,26 @@ async function upgrade(): Promise<void> {
   said(await runOperation(godot, 'refresh_class_cache', {}, projectPath), 'rebuilding the class list');
 
   const launch = launchFor(version, godot.godotPath, projectPath);
-  const already = HARNESSES.filter((harness) => registered(harness, projectPath));
+  const named = namedHarnesses();
+  // A machine-wide entry is rewritten only when it serves this project already or is named: one
+  // written for another project was pointed at this one, and every session of that project then
+  // spawned a server serving this one, with nothing in the output saying the project had changed.
+  const already = HARNESSES.filter((harness) => {
+    if (!registered(harness, projectPath)) {
+      return false;
+    }
+    if (harness.scope !== 'home' || named.includes(harness)) {
+      return true;
+    }
+    const serves = servedProject(harness, projectPath);
+    if (serves !== null && isSameDirectory(serves, projectPath)) {
+      return true;
+    }
+    console.log(
+      `${harness.name}: left alone. Its config is machine-wide and ${serves === null ? 'names no project' : `serves ${serves}`}; pass --${harness.id} to point it at this one.`,
+    );
+    return false;
+  });
   const moved: string[] = [];
   let written = 0;
   let byHand = 0;

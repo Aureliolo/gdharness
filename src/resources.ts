@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import { extname, resolve } from 'node:path';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import {
@@ -8,7 +8,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { emptyRecord } from './dictionary.js';
 import { Refusal } from './errors.js';
-import { resolveWithinProject } from './paths.js';
+import { isWithinRoot, resolveWithinProject } from './paths.js';
 
 const STATIC_RESOURCES = [
   {
@@ -55,7 +55,9 @@ type ParsedGodotUri =
 function ensureProjectPath(getProjectPath: () => string | null): string {
   const projectPath = getProjectPath();
   if (!projectPath) {
-    throw new Refusal('Project path is not set. Set a Godot project path first.');
+    throw new Refusal(
+      'This server knows no project to read from: start it with GDHARNESS_PROJECT, connect an editor, or make any tool call naming a projectPath that holds project.godot.',
+    );
   }
 
   return resolve(projectPath);
@@ -81,13 +83,34 @@ function uriPathToProjectPath(inputPath: string): string {
   return normalized.replace(/^\/+/, '');
 }
 
+/**
+ * The file [param resourcePath] names in the project, as the filesystem resolves it.
+ *
+ * Through links, because a read follows them: a link inside the project named `notes.gd` and
+ * pointing at a key in the user's home was read out whole, since the lexical check passes a link by
+ * its own name. The file has to exist to be read, so its real path can always be asked.
+ */
 function resolveProjectFile(projectPath: string, resourcePath: string): string {
   const contained = resolveWithinProject(projectPath, resourcePath);
   if (!contained.ok) {
     throw new Refusal(contained.reason);
   }
-
-  return contained.absolutePath;
+  let root: string;
+  try {
+    root = realpathSync.native(projectPath);
+  } catch {
+    throw new Refusal(`The project directory ${projectPath} is not there.`);
+  }
+  let real: string;
+  try {
+    real = realpathSync.native(contained.absolutePath);
+  } catch {
+    throw new Refusal(`No file at ${resourcePath} in the project.`);
+  }
+  if (!isWithinRoot(root, real)) {
+    throw new Refusal(`${resourcePath} leads outside the project through a link, so it is not read.`);
+  }
+  return real;
 }
 
 function parseGodotUri(uri: string): ParsedGodotUri {
