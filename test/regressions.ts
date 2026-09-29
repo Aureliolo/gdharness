@@ -87,6 +87,7 @@ import { mainCheckoutOf, recordedEnginePath } from '../src/harnesses.js';
 import { type ImportOutcome, librariesNotCopied, runImport } from '../src/headless.js';
 import { EDITOR_READS, HEADLESS_OPERATIONS } from '../src/headless-operations.js';
 import { RENDERED_AWAY_NOTE } from '../src/junit.js';
+import { askTheKeeperToStop, listenForAStop } from '../src/keeper-channel.js';
 import {
   editorArguments,
   environmentFor,
@@ -8275,6 +8276,220 @@ function testAGameOnAnotherRuntimeAddonSaysSo(): void {
   } finally {
     rmSync(from, { recursive: true, force: true });
     rmSync(into, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A keeper answers a stop with what it did, and a keeper that cannot be reached says why.
+ *
+ * The stop asks the keeper before it asks the operating system anything, so what comes back decides
+ * whether the proof that failed on a loaded Windows runner is needed at all. Each answer is taken
+ * from a listener that did that thing, and the two ways of not being reached are real: an address
+ * nothing listens on, and a peer that takes the question and says nothing. Outside Windows the
+ * socket sits in a directory only this user can enter, since the runs directory can be shared.
+ */
+async function testTheKeeperAnswersAStop(): Promise<void> {
+  for (const answer of ['signalled', 'gone'] as const) {
+    let asked = 0;
+    const listening = await listenForAStop(() => {
+      asked += 1;
+      return answer;
+    });
+    assert.ok(listening !== null, 'the keeper listens');
+    try {
+      assert.equal(await askTheKeeperToStop(listening.address, 5_000), answer);
+      assert.equal(asked, 1, 'and the keeper was asked once');
+      if (process.platform !== 'win32') {
+        const mode = statSync(dirname(listening.address)).mode & 0o777;
+        assert.equal(mode, 0o700, `the socket's directory is this user's alone: ${mode.toString(8)}`);
+      }
+    } finally {
+      listening.close();
+    }
+    const closed = await askTheKeeperToStop(listening.address, 5_000);
+    assert.ok(typeof closed !== 'string', `a keeper that has gone is not reached: ${JSON.stringify(closed)}`);
+  }
+  const silent = createServer((socket) => {
+    socket.on('error', () => {});
+  });
+  const address =
+    process.platform === 'win32'
+      ? `\\\\.\\pipe\\gdharness-silent-${randomUUID()}`
+      : join(mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-silent-')), 'silent.sock');
+  await new Promise<void>((ready) => {
+    silent.listen(address, ready);
+  });
+  try {
+    const said = await askTheKeeperToStop(address, 300);
+    assert.deepEqual(said, { unreached: 'it did not answer within 300 ms' });
+  } finally {
+    silent.close();
+    if (process.platform !== 'win32') {
+      rmSync(dirname(address), { recursive: true, force: true });
+    }
+  }
+}
+
+/**
+ * A stop ends a run through the keeper holding it, whichever server asks, and does without it when
+ * the keeper does not answer.
+ *
+ * A stop on the Windows engine leg refused its own game three times in a day: proving the pid was
+ * still the run took a PowerShell query and `tasklist`, and the windowed game rendering in software
+ * left the machine too loaded to start either in time. The keeper started the game and holds it, so
+ * it ends it with no proof needed. The first run is stopped by a replacement server, which knows the
+ * keeper only from the note. The second has its note pointed at a keeper that is not there, and the
+ * stop still ends it the old way. On Windows a third runs windowed on the server's own desktop,
+ * which is the start that goes through the helper and the one that failed.
+ */
+async function testAStopGoesThroughTheKeeper(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('stop through the keeper regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-through-keeper-'));
+  const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-through-keeper-rt-'));
+  const env = { GODOT_PATH: godotPath, GDHARNESS_PROJECT: project, GDHARNESS_RUNTIME_DIR: runtime };
+  const servers: ServerProcess[] = [];
+  const games: number[] = [];
+  const serve = async (): Promise<ServerProcess> => {
+    const server = new ServerProcess({ env });
+    servers.push(server);
+    await server.initialize('regression-test');
+    return server;
+  };
+  const start = async (server: ServerProcess, headless: boolean): Promise<number> => {
+    const started = await server.request(
+      'tools/call',
+      {
+        name: 'editor_run',
+        arguments: { projectPath: project, op: 'start', headless, runtimeWaitMs: WINDOWED_BOOT_MS },
+      },
+      WINDOWED_BOOT_MS + ENGINE_CALL_TIMEOUT_MS,
+    );
+    const answer = parseTextContent(started);
+    assert.equal(get(answer, 'runtime', 'listening'), true, `the game should announce: ${textOf(started)}`);
+    const game = asNumber(get(answer, 'runtime', 'pid'));
+    games.push(game);
+    return game;
+  };
+  const note = (): Record<string, unknown> =>
+    JSON.parse(readFileSync(runRecordPath(project, runtime), 'utf8')) as Record<string, unknown>;
+  const stop = async (server: ServerProcess, game: number, logged: string): Promise<void> => {
+    const answered = await server.request(
+      'tools/call',
+      { name: 'editor_run', arguments: { op: 'stop' } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    assert.equal(
+      get(parseTextContent(answered), 'stopped'),
+      true,
+      `the stop ends pid ${game}: ${textOf(answered)}`,
+    );
+    const output = textOf(await server.request('tools/call', { name: 'editor_output', arguments: {} })) ?? '';
+    assert.ok(output.includes(logged), `the run says how it was ended, ${logged}: ${output}`);
+    for (let waited = 0; waited < 10_000 && isAlive(game); waited += 250) {
+      await delay(250);
+    }
+    assert.equal(isAlive(game), false, `pid ${game} should be gone`);
+  };
+  const replace = async (server: ServerProcess): Promise<void> => {
+    const pid = server.child.pid;
+    assert.ok(pid !== undefined, 'the server should have a pid');
+    await killTheTree(pid);
+    await delay(1_000);
+  };
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Through the keeper"\n' +
+        'run/main_scene="res://main.tscn"\n\n[autoload]\n\n' +
+        'GdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n\n' +
+        '[rendering]\n\nrenderer/rendering_method="gl_compatibility"\n',
+    );
+    writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
+    cpSync(
+      join('src', 'godot', 'addons', 'gdharness_runtime'),
+      join(project, 'addons', 'gdharness_runtime'),
+      {
+        recursive: true,
+      },
+    );
+
+    const first = await serve();
+    const kept = await start(first, true);
+    assert.equal(typeof note()['keeper'], 'string', `the note names the keeper: ${JSON.stringify(note())}`);
+    await replace(first);
+    assert.ok(isAlive(kept), `the run outlives its server: pid ${kept}`);
+    const second = await serve();
+    await stop(second, kept, `gdharness ended pid ${kept} through the keeper holding it.`);
+
+    const unanswered = await start(second, true);
+    await replace(second);
+    const nobody =
+      process.platform === 'win32'
+        ? `\\\\.\\pipe\\gdharness-keeper-${randomUUID()}`
+        : join(runtime, 'nobody.sock');
+    writeFileSync(runRecordPath(project, runtime), JSON.stringify({ ...note(), keeper: nobody }), 'utf8');
+    const third = await serve();
+    await stop(
+      third,
+      unanswered,
+      `gdharness ended pid ${unanswered}, which the operating system described as`,
+    );
+
+    // A keeper answering that the game has gone while it runs: the stop waits on the process, so the
+    // answer cannot make a running game read as ended.
+    const misled = await start(third, true);
+    await replace(third);
+    const liar = await listenForAStop(() => 'gone');
+    assert.ok(liar !== null, 'the lying keeper listens');
+    try {
+      writeFileSync(
+        runRecordPath(project, runtime),
+        JSON.stringify({ ...note(), keeper: liar.address }),
+        'utf8',
+      );
+      const fourth = await serve();
+      const answered = parseTextContent(
+        await fourth.request(
+          'tools/call',
+          { name: 'editor_run', arguments: { op: 'stop' } },
+          ENGINE_CALL_TIMEOUT_MS,
+        ),
+      );
+      assert.equal(
+        get(answered, 'stopped'),
+        false,
+        `a game still running is not stopped: ${JSON.stringify(answered)}`,
+      );
+      assert.equal(get(answered, 'stillGoing'), misled, JSON.stringify(answered));
+      assert.ok(isAlive(misled), `pid ${misled} is still running`);
+      process.kill(misled);
+    } finally {
+      liar.close();
+    }
+
+    if (process.platform === 'win32') {
+      const fifth = await serve();
+      const windowed = await start(fifth, false);
+      await stop(fifth, windowed, `gdharness ended pid ${windowed} through the keeper holding it.`);
+    }
+  } finally {
+    for (const game of games) {
+      if (isAlive(game)) {
+        process.kill(game);
+      }
+    }
+    for (const server of servers) {
+      await server.stop().catch(() => undefined);
+    }
+    sweep(project);
+    sweep(runtime);
   }
 }
 
@@ -16995,10 +17210,12 @@ async function stopItsRun(server: ServerProcess): Promise<void> {
   const said = textOf(answered) ?? JSON.stringify(answered);
   let stopped: unknown;
   let stillGoing: unknown;
+  let notSignalled: unknown;
   try {
     const parsed = parseTextContent(answered);
     stopped = get(parsed, 'stopped');
     stillGoing = get(parsed, 'stillGoing');
+    notSignalled = get(parsed, 'notSignalled');
   } catch {
     stopped = undefined;
   }
@@ -17007,8 +17224,12 @@ async function stopItsRun(server: ServerProcess): Promise<void> {
   }
   // How long the game outlived the stop, and what the stop logged doing it, since the one time this
   // failed on a runner the answer was all there was and it did not say which of the two it was: a
-  // signal that never landed, or an engine slow to die.
+  // signal that never landed, or an engine slow to die. For a refusal, whether the process it
+  // refused was still there, which is what tells a game that had ended from one nothing could name.
   let outlived = 'no process was named';
+  if (typeof notSignalled === 'number') {
+    outlived = `pid ${notSignalled}, not signalled, was ${alive(notSignalled) ? 'still running' : 'gone'} when the stop answered`;
+  }
   if (typeof stillGoing === 'number') {
     const asked = Date.now();
     while (alive(stillGoing) && Date.now() - asked < 60_000) {
@@ -25623,6 +25844,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAGameOnAnotherRuntimeAddonSaysSo,
   testAGameSaysWhichRuntimeAddonItLoaded,
   testAWorktreeFindsItsMainCheckoutsEngine,
+  testTheKeeperAnswersAStop,
+  testAStopGoesThroughTheKeeper,
   testAStartStopsWaitingForAGameThatIsOver,
   testAStartWaitsForTheGameToAnnounceItself,
   testAGameIsFoundThroughALinkToItsProject,
