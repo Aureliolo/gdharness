@@ -32,6 +32,15 @@ export interface GodotProcess {
   projectPath: string | null;
   startedAt: number;
   /**
+   * When the pid was handed back, by which time the game had started, however long the launch took.
+   *
+   * What a process's own start is held against, since `startedAt` is when the start was asked for.
+   * A windowed run on Windows goes through a helper compiled on first use, and on a loaded runner the
+   * engine began more than the window after that: its own stop then refused it as a process started
+   * too late to be the run, and left it running. Absent from a note written before this was kept.
+   */
+  startedBy?: number;
+  /**
    * The engine a spawned run was started with, which with its project and start is what says its
    * pid still means it before anything is signalled: see `judgeRun`. Absent for a played run, and
    * for one picked up from a note too old to name it, which is then judged on its project alone.
