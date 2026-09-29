@@ -264,6 +264,14 @@ export function parseJUnit(xml: string): TestReport {
       .map((element) => caseOf(suite, element));
     const failures = cases.filter((entry) => entry.status === 'failed').length;
     const errors = cases.filter((entry) => entry.status === 'error').length;
+    // What the suite's own counts are counts of: one per failed assertion, and gdUnit4 goes on past
+    // a failed assertion, so a case failing two writes two. Measured on 4.7.2: a suite of one case
+    // failing twice wrote failures="2", a failed before() beside a passing case failures="1", and
+    // both together failures="3". Taken against failed cases, the second assertion was a hook.
+    const written = (kind: string): number =>
+      suite.children
+        .filter((child) => child.name === 'testcase')
+        .reduce((sum, element) => sum + element.children.filter((child) => child.name === kind).length, 0);
     return {
       name: suite.attributes['name'] ?? '',
       path: pathOf(suite),
@@ -274,8 +282,8 @@ export function parseJUnit(xml: string): TestReport {
       // Measured with gdUnit4 on 4.7.2: a `before()` whose assertion failed left both cases passing
       // and wrote `failures="1"` on the suite alone, so a count taken from the cases said nothing
       // failed beside an exit code saying something had.
-      hookFailures: Math.max(0, count(suite.attributes, 'failures') - failures),
-      hookErrors: Math.max(0, count(suite.attributes, 'errors') - errors),
+      hookFailures: Math.max(0, count(suite.attributes, 'failures') - written('failure')),
+      hookErrors: Math.max(0, count(suite.attributes, 'errors') - written('error')),
       skipped: cases.filter((entry) => entry.status === 'skipped').length,
       time: count(suite.attributes, 'time'),
       cases,

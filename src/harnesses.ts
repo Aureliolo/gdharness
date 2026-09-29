@@ -874,26 +874,50 @@ export function registered(harness: Harness, projectPath: string): boolean {
  */
 export function recordedEnginePath(projectPath: string): string | null {
   for (const harness of HARNESSES) {
-    if (harness.scope !== 'project' || harness.toml || harness.yaml || harness.snippet) {
+    if (harness.scope !== 'project') {
       continue;
     }
-    const path = configPath(harness, projectPath);
-    if (!existsSync(path)) {
-      continue;
-    }
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(readFileSync(path, 'utf8'));
-    } catch {
-      continue;
-    }
-    const entry = reach(reach(parsed, harness.container), SERVER_KEY);
-    const named = reach(reach(entry, harness.shape === 'opencode' ? 'environment' : 'env'), 'GODOT_PATH');
+    const named = reach(entryEnvironment(harness, projectPath), 'GODOT_PATH');
     if (typeof named === 'string' && named !== '' && existsSync(named)) {
       return named;
     }
   }
   return null;
+}
+
+/**
+ * The environment block of our entry in [param harness]'s config, or undefined when there is no
+ * entry or it cannot be read back: a TOML or YAML config is written and never re-read here.
+ */
+function entryEnvironment(harness: Harness, projectPath: string): unknown {
+  if (harness.toml || harness.yaml || harness.snippet) {
+    return undefined;
+  }
+  const path = configPath(harness, projectPath);
+  if (!existsSync(path)) {
+    return undefined;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, 'utf8'));
+  } catch {
+    return undefined;
+  }
+  const entry = reach(reach(parsed, harness.container), SERVER_KEY);
+  return reach(entry, harness.shape === 'opencode' ? 'environment' : 'env');
+}
+
+/**
+ * The project our entry in [param harness]'s config serves, or null when it names none or cannot
+ * be read back.
+ *
+ * Asked of a machine-wide config before it is rewritten for [param projectPath]: the entry there
+ * serves every project the harness opens, and one written for another project and rewritten for
+ * this one sends that project's sessions to a server serving this one.
+ */
+export function servedProject(harness: Harness, projectPath: string): string | null {
+  const named = reach(entryEnvironment(harness, projectPath), 'GDHARNESS_PROJECT');
+  return typeof named === 'string' && named !== '' ? named : null;
 }
 
 /** One key of a value that may be anything at all, which is what a config file is until read. */

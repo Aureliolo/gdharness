@@ -132,7 +132,7 @@ func set_property(params: Dictionary) -> Dictionary:
 	#
 	# Judged by what reads back alone, so a value of another kind than the one held, which cannot be
 	# compared with it, is still caught when the engine drops it.
-	var already: bool = _held_already(given, old_value)
+	var already: bool = held_already(given, old_value)
 	var unmoved: bool = Values.comparable(now, old_value) and now == old_value
 	if unmoved and not already:
 		var why: String = (
@@ -187,7 +187,7 @@ func set_property(params: Dictionary) -> Dictionary:
 ## property whose setter ignored a value differing from the held one below 32 bits: it is answered
 ## unchanged rather than refused. Vectors and colours hold 32-bit parts in the value itself, so they
 ## already compare at the property's precision.
-static func _held_already(given: Variant, held: Variant) -> bool:
+static func held_already(given: Variant, held: Variant) -> bool:
 	if not Values.comparable(given, held):
 		return false
 	if given == held:

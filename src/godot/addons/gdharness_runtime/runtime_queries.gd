@@ -14,7 +14,6 @@ const Words = preload("runtime_words.gd")
 ## The most nodes one find answers with, unless asked for fewer: enough for any real query and
 ## far short of the tree dump a query exists to avoid.
 const FIND_LIMIT: int = 100
-const FIND_LIMIT_CEILING: int = 1000
 
 ## What a find can be narrowed by, which is also what it refuses to answer without. Named once so
 ## the refusal lists the same set the walk reads.
@@ -23,6 +22,11 @@ const FILTERS: PackedStringArray = ["class", "script", "name", "group", "says"]
 ## The most lines one read answers with, unless asked for fewer. A screen is a few dozen; a
 ## thousand is a tree somebody pointed this at by mistake.
 const READ_LIMIT: int = 500
+
+## The most either can be asked for. A limit above it is refused rather than cut to it: the ceiling
+## was the default for a read, so the remedy its own answer gave, raising the limit, changed nothing
+## and said nothing, and a caller told to raise a number that stays put concludes the screen moved.
+const LIMIT_CEILING: int = 5000
 
 var _host: Node
 var _values: Values
@@ -88,7 +92,11 @@ func find_nodes(params: Dictionary) -> Dictionary:
 		wanted[filter] = str(params.get(filter, ""))
 	var wanted_property: String = str(params.get("property", ""))
 	var include_hidden: bool = Read.as_bool(params.get("include_hidden", true), true)
-	var limit: int = clampi(Read.as_int(params.get("limit", FIND_LIMIT), FIND_LIMIT), 1, FIND_LIMIT_CEILING)
+	var limit: int = Read.as_int(params.get("limit", FIND_LIMIT), FIND_LIMIT)
+	if limit < 1 or limit > LIMIT_CEILING:
+		return {
+			"type": "error", "message": "limit is from 1 to %d, and %d was asked for" % [LIMIT_CEILING, limit]
+		}
 
 	if not _anything_asked(wanted):
 		return {"type": "error", "message": "find_nodes needs at least one of " + ", ".join(FILTERS)}
@@ -116,6 +124,10 @@ func find_nodes(params: Dictionary) -> Dictionary:
 	for filter: String in wanted:
 		widened[filter] = widened_says if filter == "says" else wanted[filter]
 	var nearly_said: int = 0
+	# The near misses the same find would leave out as hidden, kept apart: the note says what a
+	# query would find, and counting these in it named a query that, asked, found none of them.
+	var nearly_hidden: int = 0
+	var nearly_said_hidden: int = 0
 	var hidden: int = 0
 	while not pending.is_empty():
 		var node: Node = pending.pop_front()
@@ -129,13 +141,19 @@ func find_nodes(params: Dictionary) -> Dictionary:
 			else:
 				found.append(_found(node, wanted_property))
 		elif rest and literal and str(node.name).containsn(wanted["name"]):
-			nearly += 1
+			if include_hidden or shown(node):
+				nearly += 1
+			else:
+				nearly_hidden += 1
 		elif (
 			not widened_says.is_empty()
 			and _named(node, wanted["name"])
 			and _matches_apart_from_name(node, widened)
 		):
-			nearly_said += 1
+			if include_hidden or shown(node):
+				nearly_said += 1
+			else:
+				nearly_said_hidden += 1
 		# Internal children included, which they were not. A ConfirmationDialog builds its Yes and
 		# its No as internal nodes, and a ScrollContainer its bars, so a find over a screen for
 		# every Button came back without the two buttons the player is being asked to press:
@@ -151,21 +169,39 @@ func find_nodes(params: Dictionary) -> Dictionary:
 	# Nothing found is the one answer that cannot be told apart from having asked the wrong
 	# question, and a name written without a wildcard is the way an agent writes "contains".
 	# Said only when it changes the answer, so a genuine nothing stays a plain nothing.
-	if found.is_empty() and nearly > 0:
-		var holding: String = "names contain" if nearly > 1 else "name contains"
-		notes.append(
-			(
-				'name is matched as a glob against the whole name; %d node %s "%s", which "*%s*" would find'
-				% [nearly, holding, wanted["name"], wanted["name"]]
-			)
-		)
-	if found.is_empty() and nearly_said > 0:
+	if found.is_empty() and nearly + nearly_hidden > 0:
+		var named_near: int = nearly if nearly > 0 else nearly_hidden
+		var holding: String = "names contain" if named_near > 1 else "name contains"
 		(
 			notes
 			. append(
 				(
-					'says with a wildcard is matched as a glob against a node\'s whole text; "%s" would find %d node%s'
-					% [widened_says, nearly_said, "" if nearly_said == 1 else "s"]
+					'name is matched as a glob against the whole name; %d %snode %s "%s", which "*%s*"%s would find'
+					% [
+						named_near,
+						"" if nearly > 0 else "hidden ",
+						holding,
+						wanted["name"],
+						wanted["name"],
+						"" if nearly > 0 else " with includeHidden true",
+					]
+				)
+			)
+		)
+	if found.is_empty() and nearly_said + nearly_said_hidden > 0:
+		var said_near: int = nearly_said if nearly_said > 0 else nearly_said_hidden
+		(
+			notes
+			. append(
+				(
+					'says with a wildcard is matched as a glob against a node\'s whole text; "%s"%s would find %d %snode%s'
+					% [
+						widened_says,
+						"" if nearly_said > 0 else " with includeHidden true",
+						said_near,
+						"" if nearly_said > 0 else "hidden ",
+						"" if said_near == 1 else "s",
+					]
 				)
 			)
 		)
@@ -184,17 +220,52 @@ func find_nodes(params: Dictionary) -> Dictionary:
 	return answer
 
 
-## Whether the player can see [param node], its ancestors counted.
+## Whether the player can see [param node], by the rule the engine draws by.
 ##
-## Not [method CanvasItem.is_visible_in_tree] on its own, because only the nodes that draw have it:
-## a plain Node sitting between a hidden panel and a label has no visibility to ask about, and the
-## label answers that it is visible while nothing of it is on screen. Walking up is what makes a
-## row hidden because the panel holding it is hidden, which is what somebody checking a screen is
-## asking about. A wait on words asks the same, so it reads this too.
+## A CanvasItem's visibility comes down through CanvasItem parents only, and one whose parent is not
+## a CanvasItem starts again from its canvas: measured on 4.7.2, a Label under a plain Node under a
+## hidden panel, and one under a hidden Node3D, both answer visible in tree, while one straight under
+## the panel does not. Walking every ancestor called those two hidden, so their words were left off
+## a screen that showed them and a wait on them ran out. What a CanvasItem's rule leaves out is its
+## canvas: a hidden layer hides everything drawn on it while each item keeps its own flag, and a
+## hidden window everything in it. A wait on words asks the same, so it reads this too.
 static func shown(node: Node) -> bool:
+	var item: CanvasItem = node as CanvasItem
+	if item != null:
+		return item.is_visible_in_tree() and _on_a_shown_canvas(item)
+	var spatial: Node3D = node as Node3D
+	if spatial != null:
+		return spatial.is_visible_in_tree() and _in_shown_windows(spatial)
+	var layer: CanvasLayer = node as CanvasLayer
+	if layer != null:
+		return layer.visible and _in_shown_windows(layer)
+	var window: Window = node as Window
+	if window != null:
+		return window.visible and _in_shown_windows(window.get_parent())
+	# A node that draws nothing is shown when what it sits in is.
+	var parent: Node = node.get_parent()
+	return parent == null or shown(parent)
+
+
+## Whether the canvas [param item] is drawn on is showing: its layer, and the windows around it.
+static func _on_a_shown_canvas(item: CanvasItem) -> bool:
+	var walk: Node = item.get_parent()
+	while walk != null:
+		var layer: CanvasLayer = walk as CanvasLayer
+		if layer != null:
+			return layer.visible and _in_shown_windows(layer)
+		if walk is Viewport:
+			return _in_shown_windows(walk)
+		walk = walk.get_parent()
+	return true
+
+
+## Whether every window [param node] sits in is showing, itself included when it is one.
+static func _in_shown_windows(node: Node) -> bool:
 	var walk: Node = node
 	while walk != null:
-		if not _drawn(walk):
+		var window: Window = walk as Window
+		if window != null and not window.visible:
 			return false
 		walk = walk.get_parent()
 	return true
@@ -304,7 +375,11 @@ static func _script_is(attached: Script, wanted: String) -> bool:
 func read_text(params: Dictionary) -> Dictionary:
 	var root_path: String = str(params.get("root", "/root"))
 	var include_hidden: bool = Read.as_bool(params.get("include_hidden", false))
-	var limit: int = clampi(Read.as_int(params.get("limit", READ_LIMIT), READ_LIMIT), 1, READ_LIMIT)
+	var limit: int = Read.as_int(params.get("limit", READ_LIMIT), READ_LIMIT)
+	if limit < 1 or limit > LIMIT_CEILING:
+		return {
+			"type": "error", "message": "limit is from 1 to %d, and %d was asked for" % [LIMIT_CEILING, limit]
+		}
 
 	var reached: Dictionary = Values.node_at(_host.get_tree().root, root_path)
 	if reached.has("message"):
@@ -338,39 +413,20 @@ func read_text(params: Dictionary) -> Dictionary:
 ## until it is opened, and reading a closed menu would put every item on the screen.
 ## Fills [param into] up to [param most] lines and answers with how many further lines the rest of
 ## the subtree says, which is what the caller is told rather than left to infer.
+##
+## Asked of each node rather than cut off at the first hidden one, since a hidden panel does not
+## hide a label reached through a plain Node: see [method shown].
 func _read_into(node: Node, include_hidden: bool, most: int, into: Array[String]) -> int:
-	if not include_hidden and not _drawn(node):
-		return 0
 	var left_out: int = 0
-	for said: String in Words.lines_said_by(node):
-		if into.size() < most:
-			into.append(said)
-		else:
-			left_out += 1
+	if include_hidden or shown(node):
+		for said: String in Words.lines_said_by(node):
+			if into.size() < most:
+				into.append(said)
+			else:
+				left_out += 1
 	for child: Node in node.get_children(true):
 		left_out += _read_into(child, include_hidden, most, into)
 	return left_out
-
-
-## Whether [param node] is on the screen at all, for the three kinds of thing that can be hidden.
-##
-## A Node3D among them because a hidden one draws nothing, Label3D included: reading a screen or
-## finding what is on it counted a hidden 3D subtree as showing, which is the one answer neither
-## question wants.
-static func _drawn(node: Node) -> bool:
-	var control: CanvasItem = node as CanvasItem
-	if control != null:
-		return control.visible
-	# A hidden layer hides everything drawn on it, a pause menu's for one, while each of those keeps
-	# its own visible flag, so read as shown it matched the words of a menu nobody could see.
-	var layer: CanvasLayer = node as CanvasLayer
-	if layer != null:
-		return layer.visible
-	var spatial: Node3D = node as Node3D
-	if spatial != null:
-		return spatial.visible
-	var window: Window = node as Window
-	return window == null or window.visible
 
 
 ## Where a node is on screen: a Control's rectangle, a Node2D's position, or the place a 3D node

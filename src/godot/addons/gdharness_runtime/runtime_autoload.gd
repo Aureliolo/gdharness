@@ -416,8 +416,14 @@ func _send_error(client: StreamPeerTCP, request_id: Variant, message: String) ->
 	_send_response(client, {"type": "error", "message": message, "id": request_id})
 
 
+## Down with the window only when the close is taken. A game that asks before quitting turns
+## auto_accept_quit off and decides for itself, and one whose player answered No went on running
+## with no runtime and no announcement, so every later call said no game was running. A quit it
+## does take ends the tree, which [method _exit_tree] cleans up after.
 func _notification(what: int) -> void:
-	if what == NOTIFICATION_WM_CLOSE_REQUEST:
+	if what != NOTIFICATION_WM_CLOSE_REQUEST:
+		return
+	if not is_inside_tree() or get_tree().auto_accept_quit:
 		_cleanup()
 
 

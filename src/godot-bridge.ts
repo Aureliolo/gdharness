@@ -69,6 +69,8 @@ interface GodotReadyMessage {
   syncs_breakpoints?: boolean;
   /** Whether a gdharness server started this editor, which decides who may start it again. */
   opened_by_a_server?: boolean;
+  /** Whether another editor started this one, and so none of the arguments it was given reached it. */
+  started_by_an_editor?: boolean;
 }
 
 type IncomingMessage = ToolResultMessage | PongMessage | GodotReadyMessage;
@@ -130,6 +132,13 @@ interface GodotConnectionInfo {
    */
   openedByAServer?: boolean | undefined;
   /**
+   * Whether another editor started this one: Godot's own restart, or the project manager opening a
+   * project. Such an editor has the environment and none of the arguments of the one before it, so
+   * it serves the ports its editor settings name, writes no console a server asked for, and is not
+   * the editor any server opened. Undefined for an addon too old to say.
+   */
+  startedByAnEditor?: boolean | undefined;
+  /**
    * Whether the editor keeps its breakpoints when a debug session opens.
    *
    * Godot clears every breakpoint in the script editor on a session's `initialize` unless
@@ -153,6 +162,7 @@ interface BridgeStatus {
   dapPort?: number | undefined;
   debugPort?: number | undefined;
   openedByAServer?: boolean | undefined;
+  startedByAnEditor?: boolean | undefined;
   syncsBreakpoints?: boolean | undefined;
   pendingRequests: number;
   queuedResources: number;
@@ -188,19 +198,6 @@ export function mayYetConnect(listeningSince: Date | undefined, now: number = Da
 }
 
 /**
- * The same question, counting an editor this server started that has not dialled in yet.
- *
- * The window above is measured from the bridge taking its port, which is the right reference for an
- * editor that was already running and has to notice, and no reference at all for one started
- * afterwards: a launch on a server that has been up longer than the window reads as final the
- * moment it returns. An editor imports the project before it loads any plugin, so on a large one
- * the gap between launching and dialling in is minutes. Measured downstream at nine, over which
- * this answered "an editor that is not there" about the editor the same server had just started.
- *
- * Either reason is enough and a live launched process outlasts the window by design, since what it
- * reports is a process somebody can watch rather than a guess about timing.
- */
-/**
  * Whether the editor a restart asked for has come back *and* said who it is.
  *
  * A connection is not an answer. The socket connects first and the addon's version, the editor's
@@ -218,9 +215,19 @@ export function theEditorHasComeBack(
   status: { connected: boolean; connectedAt?: Date | undefined; addonVersion?: string | undefined },
   startedAt: number,
 ): boolean {
-  return (
-    status.connected && (status.connectedAt?.getTime() ?? 0) > startedAt && status.addonVersion !== undefined
-  );
+  return hasSaidWhoItIs(status) && (status.connectedAt?.getTime() ?? 0) > startedAt;
+}
+
+/**
+ * Whether the connected editor has greeted, so what it reports about itself can be read.
+ *
+ * Until then its project, pid, version, ports and who opened it are all undefined, and each reads
+ * as a wrong answer rather than no answer: an undefined version as a stale addon, an undefined
+ * opener as an editor opened by hand. The gap is a frame on a busy editor and longer on one that
+ * is importing or sits unfocused.
+ */
+export function hasSaidWhoItIs(status: { connected: boolean; addonVersion?: string | undefined }): boolean {
+  return status.connected && status.addonVersion !== undefined;
 }
 
 /**
@@ -452,6 +459,7 @@ export class GodotBridge extends EventEmitter {
       dapPort: this.connectionInfo?.dapPort,
       debugPort: this.connectionInfo?.debugPort,
       openedByAServer: this.connectionInfo?.openedByAServer,
+      startedByAnEditor: this.connectionInfo?.startedByAnEditor,
       syncsBreakpoints: this.connectionInfo?.syncsBreakpoints,
       pendingRequests: this.pendingRequests.size,
       queuedResources: this.resourceQueues.size,
@@ -632,6 +640,8 @@ export class GodotBridge extends EventEmitter {
           this.connectionInfo.dapPort = servedPort(message.dap_port);
           this.connectionInfo.debugPort = servedPort(message.debug_port);
           this.connectionInfo.openedByAServer = message.opened_by_a_server === true;
+          this.connectionInfo.startedByAnEditor =
+            typeof message.started_by_an_editor === 'boolean' ? message.started_by_an_editor : undefined;
           // Left undefined rather than read as false for an addon that does not say, since the
           // two call for different advice: one is an editor to restart, the other a setting.
           this.connectionInfo.syncsBreakpoints =

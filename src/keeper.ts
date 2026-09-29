@@ -223,6 +223,7 @@ async function keep(): Promise<void> {
       transcript: run.transcript,
       startedAt: run.startedAt,
       projectPath: run.projectPath,
+      ...(run.servedBy === undefined ? {} : { servedBy: run.servedBy }),
       arguments: spec.args,
       command: spec.command,
     });

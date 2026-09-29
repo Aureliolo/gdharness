@@ -69,7 +69,6 @@ func wait_signal(params: Dictionary) -> Dictionary:
 		return {"type": "error", "message": "%s has no signal %s" % [node_path, signal_name]}
 
 	var catcher: SignalCatcher = SignalCatcher.new()
-	catcher.arity = _signal_arity(node, signal_name)
 	var callable: Callable = catcher._on_fired
 	var listening: Error = node.connect(signal_name, callable, CONNECT_ONE_SHOT)
 	if listening != OK:
@@ -153,6 +152,8 @@ func wait_until(params: Dictionary) -> Dictionary:
 	if holds_objects and Changes.names_no_object(wanted):
 		wanted = null
 	var refused: String = _not_comparable(current, wanted, node_path, property)
+	if refused.is_empty():
+		refused = _cut_to_fit(params["value"], typeof(current), node_path, property)
 	var never_held: bool = typeof(wanted) != TYPE_NIL and typeof(wanted) != TYPE_OBJECT
 	if refused.is_empty() and declared == TYPE_OBJECT and never_held:
 		refused = (
@@ -169,9 +170,12 @@ func wait_until(params: Dictionary) -> Dictionary:
 	var frames: int = 0
 	# The type is checked every time round, not only at the top: a property that holds an object a
 	# frame later is the same error arriving late.
+	# At the precision the property keeps, as set compares: a float arrives as 64 bits and most
+	# engine properties keep 32, so h_offset waited on as -1.1 read -1.10000002384186 every frame and
+	# the wait ran out on a value the game had reached.
 	while (
 		Values.comparable(current, wanted)
-		and current != wanted
+		and not Changes.held_already(wanted, current)
 		and Time.get_ticks_msec() - started < timeout_ms
 	):
 		await _host.get_tree().process_frame
@@ -187,11 +191,40 @@ func wait_until(params: Dictionary) -> Dictionary:
 		"type": "condition",
 		"path": node_path,
 		"property": property,
-		"met": Values.comparable(current, wanted) and current == wanted,
+		"met": Changes.held_already(wanted, current),
 		"value": _values.serialize(current),
 		"elapsed_ms": Time.get_ticks_msec() - started,
 		"frames": frames,
 	}
+
+
+## Why [param given] would have to be cut to be waited on a whole number or a truth, or "" when not.
+##
+## A number arrives from JSON as a float, so one is converted to what the property holds, and the
+## conversion truncates: 3.5 waited on an int became 3 and 0.2 on a bool became true, and a property
+## already holding that answered met at once, about a state nobody asked for.
+static func _cut_to_fit(given: Variant, type: int, node_path: String, property: String) -> String:
+	if type != TYPE_INT and type != TYPE_BOOL:
+		return ""
+	var number: Variant = given
+	if given is String:
+		var text: String = given
+		number = Read.json_or_null(text)
+	if typeof(number) != TYPE_FLOAT and typeof(number) != TYPE_INT:
+		return ""
+	var value: float = Read.as_float(number)
+	var whole: bool = value == floorf(value)
+	if type == TYPE_INT and whole:
+		return ""
+	if type == TYPE_BOOL and whole and (value == 0.0 or value == 1.0):
+		return ""
+	return (
+		(
+			"%s.%s holds %s and the value to wait for is %s, which it would have to be cut to fit:"
+			+ " waiting on it would answer about a state nobody asked for."
+		)
+		% [node_path, property, type_string(type), str(given)]
+	)
 
 
 ## Why [param wanted] cannot be waited for against [param current], or "" when it can.
@@ -342,26 +375,15 @@ func _anything_says(node_path: String, said: String, include_hidden: bool) -> bo
 	return false
 
 
-func _signal_arity(node: Node, signal_name: String) -> int:
-	for entry: Dictionary in node.get_signal_list():
-		if entry.get("name", "") == signal_name:
-			var declared: Array = entry.get("args", [])
-			return declared.size()
-	return 0
-
-
 ## Remembers that a signal fired and what it carried, for a wait that polls rather than
-## awaits the signal directly, so the wait can also give up. The handler accepts up to five
-## arguments, which covers every signal the engine declares, and records as many as the signal
-## has.
+## awaits the signal directly, so the wait can also give up. Takes any number of arguments: a
+## handler of five fixed ones covered the engine's signals, and a game's own signal with six was
+## never delivered to it, so the wait ran out and said the signal had not fired.
 class SignalCatcher:
 	extends RefCounted
 	var fired: bool = false
-	var arity: int = 0
 	var args: Array = []
 
-	func _on_fired(
-		a: Variant = null, b: Variant = null, c: Variant = null, d: Variant = null, e: Variant = null
-	) -> void:
+	func _on_fired(...carried: Array) -> void:
 		fired = true
-		args = [a, b, c, d, e].slice(0, mini(arity, 5))
+		args = carried

@@ -98,12 +98,21 @@ var _tried_announced: bool = false
 var _told_about_url: String = ""
 var _connecting_for: float = 0.0
 
+## Whether this editor was started by another editor, which is Godot's own restart and the project
+## manager opening a project: the new editor is the old one's child and has its environment, with
+## the variable this addon sets as it loads still naming the old one. Its arguments are gone, since
+## the engine consumes `--lsp-port`, `--dap-port` and `--log-file` and hands none of them back, so the
+## ports and the marker a server put in that environment describe the editor before this one.
+var _started_by_an_editor: bool = false
+
 
 func _ready() -> void:
 	_project_path = ProjectSettings.globalize_path("res://")
 	version_at_load = _loaded_version()
 	digest_at_load = _loaded_digest()
 	_keep_breakpoints_through_sessions()
+	var inherited: String = OS.get_environment(EDITOR_PID_VARIABLE)
+	_started_by_an_editor = not inherited.is_empty() and inherited != str(OS.get_process_id())
 	OS.set_environment(EDITOR_PID_VARIABLE, str(OS.get_process_id()))
 
 	_reconnect_timer = Timer.new()
@@ -306,7 +315,8 @@ func _handle_connect() -> void:
 			# Whether a server started this editor, which is the only kind that can be started again
 			# as itself: the engine hands back none of the arguments it was given, so the arguments
 			# have to come from whoever wrote them. See `restart_editor` in play_tools.gd.
-			"opened_by_a_server": _opened_by_a_server()
+			"opened_by_a_server": _opened_by_a_server() and not _started_by_an_editor,
+			"started_by_an_editor": _started_by_an_editor
 		}
 	)
 
@@ -338,7 +348,7 @@ static func _opened_by_a_server() -> bool:
 ## collided with the editor it was moved away from. Restarting is done by starting the editor again
 ## with the same arguments now, which is `editor_launch restart`, so there is nothing to persist.
 func _serves(variable: String, setting: String) -> int:
-	var asked: int = _asked_for(variable)
+	var asked: int = 0 if _started_by_an_editor else _asked_for(variable)
 	return asked if asked > 0 else _serving(setting)
 
 
