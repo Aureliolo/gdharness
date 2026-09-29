@@ -184,17 +184,52 @@ func find_nodes(params: Dictionary) -> Dictionary:
 	return answer
 
 
-## Whether the player can see [param node], its ancestors counted.
+## Whether the player can see [param node], by the rule the engine draws by.
 ##
-## Not [method CanvasItem.is_visible_in_tree] on its own, because only the nodes that draw have it:
-## a plain Node sitting between a hidden panel and a label has no visibility to ask about, and the
-## label answers that it is visible while nothing of it is on screen. Walking up is what makes a
-## row hidden because the panel holding it is hidden, which is what somebody checking a screen is
-## asking about. A wait on words asks the same, so it reads this too.
+## A CanvasItem's visibility comes down through CanvasItem parents only, and one whose parent is not
+## a CanvasItem starts again from its canvas: measured on 4.7.2, a Label under a plain Node under a
+## hidden panel, and one under a hidden Node3D, both answer visible in tree, while one straight under
+## the panel does not. Walking every ancestor called those two hidden, so their words were left off
+## a screen that showed them and a wait on them ran out. What a CanvasItem's rule leaves out is its
+## canvas: a hidden layer hides everything drawn on it while each item keeps its own flag, and a
+## hidden window everything in it. A wait on words asks the same, so it reads this too.
 static func shown(node: Node) -> bool:
+	var item: CanvasItem = node as CanvasItem
+	if item != null:
+		return item.is_visible_in_tree() and _on_a_shown_canvas(item)
+	var spatial: Node3D = node as Node3D
+	if spatial != null:
+		return spatial.is_visible_in_tree() and _in_shown_windows(spatial)
+	var layer: CanvasLayer = node as CanvasLayer
+	if layer != null:
+		return layer.visible and _in_shown_windows(layer)
+	var window: Window = node as Window
+	if window != null:
+		return window.visible and _in_shown_windows(window.get_parent())
+	# A node that draws nothing is shown when what it sits in is.
+	var parent: Node = node.get_parent()
+	return parent == null or shown(parent)
+
+
+## Whether the canvas [param item] is drawn on is showing: its layer, and the windows around it.
+static func _on_a_shown_canvas(item: CanvasItem) -> bool:
+	var walk: Node = item.get_parent()
+	while walk != null:
+		var layer: CanvasLayer = walk as CanvasLayer
+		if layer != null:
+			return layer.visible and _in_shown_windows(layer)
+		if walk is Viewport:
+			return _in_shown_windows(walk)
+		walk = walk.get_parent()
+	return true
+
+
+## Whether every window [param node] sits in is showing, itself included when it is one.
+static func _in_shown_windows(node: Node) -> bool:
 	var walk: Node = node
 	while walk != null:
-		if not _drawn(walk):
+		var window: Window = walk as Window
+		if window != null and not window.visible:
 			return false
 		walk = walk.get_parent()
 	return true
@@ -338,39 +373,20 @@ func read_text(params: Dictionary) -> Dictionary:
 ## until it is opened, and reading a closed menu would put every item on the screen.
 ## Fills [param into] up to [param most] lines and answers with how many further lines the rest of
 ## the subtree says, which is what the caller is told rather than left to infer.
+##
+## Asked of each node rather than cut off at the first hidden one, since a hidden panel does not
+## hide a label reached through a plain Node: see [method shown].
 func _read_into(node: Node, include_hidden: bool, most: int, into: Array[String]) -> int:
-	if not include_hidden and not _drawn(node):
-		return 0
 	var left_out: int = 0
-	for said: String in Words.lines_said_by(node):
-		if into.size() < most:
-			into.append(said)
-		else:
-			left_out += 1
+	if include_hidden or shown(node):
+		for said: String in Words.lines_said_by(node):
+			if into.size() < most:
+				into.append(said)
+			else:
+				left_out += 1
 	for child: Node in node.get_children(true):
 		left_out += _read_into(child, include_hidden, most, into)
 	return left_out
-
-
-## Whether [param node] is on the screen at all, for the three kinds of thing that can be hidden.
-##
-## A Node3D among them because a hidden one draws nothing, Label3D included: reading a screen or
-## finding what is on it counted a hidden 3D subtree as showing, which is the one answer neither
-## question wants.
-static func _drawn(node: Node) -> bool:
-	var control: CanvasItem = node as CanvasItem
-	if control != null:
-		return control.visible
-	# A hidden layer hides everything drawn on it, a pause menu's for one, while each of those keeps
-	# its own visible flag, so read as shown it matched the words of a menu nobody could see.
-	var layer: CanvasLayer = node as CanvasLayer
-	if layer != null:
-		return layer.visible
-	var spatial: Node3D = node as Node3D
-	if spatial != null:
-		return spatial.visible
-	var window: Window = node as Window
-	return window == null or window.visible
 
 
 ## Where a node is on screen: a Control's rectangle, a Node2D's position, or the place a 3D node
