@@ -2535,8 +2535,10 @@ async function testARestartLeftHalfDoneIsSaid(): Promise<void> {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-half-restart-'));
   const port = await reservePort();
   let editor: WebSocket | null = null;
+  // The engine is a stand-in that exits at once, so a launch guard that fails to refuse starts
+  // nothing that outlives the case.
   const server = new ServerProcess({
-    env: { GDHARNESS_PROJECT: project, GDHARNESS_BRIDGE_PORT: String(port) },
+    env: { GDHARNESS_PROJECT: project, GDHARNESS_BRIDGE_PORT: String(port), GODOT_PATH: process.execPath },
   });
   const uninformed = new ServerProcess({ env: { GDHARNESS_PROJECT: project } });
   try {
@@ -2569,6 +2571,91 @@ async function testARestartLeftHalfDoneIsSaid(): Promise<void> {
     assert.equal(get(interrupted, 'quitAt'), '2026-09-20T19:39:30.000Z', 'and when');
     assert.equal(get(interrupted, 'byServerPid'), 4242, 'and which server began it');
     assert.match(text(get(interrupted, 'note')), /editor_launch open/, 'and what finishes it');
+
+    const editorOf = async (): Promise<unknown> =>
+      get(
+        parseTextContent(await server.request('tools/call', { name: 'editor_status', arguments: {} })),
+        'editor',
+      );
+    const launch = async (projectPath: string): Promise<string> =>
+      textOf(
+        await server.request('tools/call', { name: 'editor_launch', arguments: { op: 'open', projectPath } }),
+      ) ?? '';
+    const begun = (byPid: number, quitAt: string): void => {
+      noteRestartBegun({
+        projectPath: project,
+        editorPid: 27040,
+        ports: { lsp: 6005, dap: 6006 },
+        quitAt,
+        byPid,
+      });
+    };
+
+    // A writer that answers is not enough: no restart lasts days, so a pid answering under a note
+    // that old is a process that reused the number, and the restart it names is over.
+    begun(process.pid, '2026-09-20T19:39:30.000Z');
+    const reused = await editorOf();
+    assert.equal(get(reused, 'restartInterrupted', 'byServerPid'), process.pid, JSON.stringify(reused));
+    assert.equal(get(reused, 'restartUnderway'), undefined, JSON.stringify(reused));
+    assert.equal(get(reused, 'mayYetConnect'), false, JSON.stringify(reused));
+
+    // Nor is a young note: the server that wrote this one has gone, so nothing will launch.
+    const ended = spawnSync(process.execPath, ['-e', ''], { encoding: 'utf8' }).pid;
+    assert.ok(ended > 0 && !alive(ended), 'the fixture needs a pid that has gone');
+    begun(ended, new Date().toISOString());
+    const orphaned = await editorOf();
+    assert.equal(get(orphaned, 'restartInterrupted', 'byServerPid'), ended, JSON.stringify(orphaned));
+    assert.equal(get(orphaned, 'restartUnderway'), undefined, JSON.stringify(orphaned));
+    assert.equal(get(orphaned, 'mayYetConnect'), false, JSON.stringify(orphaned));
+
+    // Young and its writer here, which is what a status asked in the gap of a restart reads: the
+    // editor is coming, from the restart, and another launch would be a second editor beside it.
+    begun(process.pid, new Date().toISOString());
+    const coming = await editorOf();
+    assert.equal(
+      get(coming, 'restartInterrupted'),
+      undefined,
+      `nothing was interrupted: ${JSON.stringify(coming)}`,
+    );
+    assert.equal(get(coming, 'mayYetConnect'), true, `an editor is coming: ${JSON.stringify(coming)}`);
+    assert.equal(get(coming, 'restartUnderway', 'byServerPid'), process.pid, JSON.stringify(coming));
+    assert.match(
+      text(get(coming, 'restartUnderway', 'note')),
+      /under way.*Wait for it/s,
+      JSON.stringify(coming),
+    );
+
+    // A launch that could never connect is refused before anything starts, each for its own reason.
+    // Each half of the addon check gets the shape only it refuses: enabled with nothing on disk,
+    // which is a project whose addons folder was cleaned, then on disk and not enabled.
+    const settings = readFileSync(join(project, 'project.godot'), 'utf8');
+    const enabled = `${settings}\n[editor_plugins]\nenabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n`;
+    writeFileSync(join(project, 'project.godot'), enabled);
+    assert.match(
+      await launch(project),
+      /gdharness editor addon is not installed/,
+      'enabled and not installed',
+    );
+    writeFileSync(join(project, 'project.godot'), settings);
+    mkdirSync(join(project, 'addons', 'gdharness_editor'), { recursive: true });
+    assert.match(await launch(project), /gdharness editor addon is not enabled/, 'installed and not enabled');
+    writeFileSync(join(project, 'project.godot'), enabled);
+    assert.match(
+      await launch(project),
+      /restart of this project's editor is under way/,
+      'a restart under way',
+    );
+    assert.ok(existsSync(restartNotePath(project)), 'and the refused launch leaves the restart note alone');
+    // Another project that has everything this one has, so its only fault is not being this one.
+    const other = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-other-project-'));
+    try {
+      mkdirSync(join(other, 'addons', 'gdharness_editor'), { recursive: true });
+      writeFileSync(join(other, 'project.godot'), readFileSync(join(project, 'project.godot'), 'utf8'));
+      const elsewhere = await launch(other);
+      assert.match(elsewhere, /This server serves .*would dial that project's own server/s, elsewhere);
+    } finally {
+      sweep(other);
+    }
 
     // The contrast, from a server just as young with no note to read: its `true` is the window,
     // and is the right answer there.
@@ -3401,7 +3488,8 @@ async function testAnArgumentMeantForAnotherOpIsRefused(): Promise<void> {
     const outside: [string, Record<string, unknown>, string][] = [
       ['runtime_inspect', { op: 'tree', depth: -1 }, 'depth of 0 or more, not -1'],
       ['runtime_inspect', { op: 'tree', depth: 1.5 }, 'depth as integer, not 1.5'],
-      ['runtime_inspect', { op: 'find', className: 'Label', limit: 0 }, 'limit of 1 or more, not 0'],
+      ['runtime_inspect', { op: 'find', className: 'Label', limit: 0 }, 'limit from 1 to 5000, not 0'],
+      ['runtime_inspect', { op: 'text', limit: 5001 }, 'limit from 1 to 5000, not 5001'],
       ['runtime_wait', { op: 'frames', frames: 601 }, 'frames from 1 to 600, not 601'],
       ['runtime_input', { op: 'action', action: 'jump', strength: 1.5 }, 'strength from 0 to 1, not 1.5'],
     ];
@@ -3411,6 +3499,7 @@ async function testAnArgumentMeantForAnotherOpIsRefused(): Promise<void> {
     }
     for (const [tool, args] of [
       ['runtime_inspect', { op: 'tree', depth: 0 }],
+      ['runtime_inspect', { op: 'text', limit: 5000 }],
       ['runtime_wait', { op: 'frames', frames: 600 }],
       ['runtime_input', { op: 'action', action: 'jump', strength: 0 }],
     ] as const) {
@@ -5453,9 +5542,13 @@ async function testALaunchedEditorsConsoleIsReadBeforeItConnects(): Promise<void
   const call = async (name: string, args: Record<string, unknown>): Promise<string> =>
     textOf(await server.request('tools/call', { name, arguments: args })) ?? '';
   try {
+    // The addon is there and enabled, because a launch on a project without it is refused: that
+    // editor would never connect, and there would be nothing for it to be connecting.
+    mkdirSync(join(project, 'addons', 'gdharness_editor'), { recursive: true });
     writeFileSync(
       join(project, 'project.godot'),
-      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Early"\n',
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Early"\n\n' +
+        '[editor_plugins]\nenabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n',
     );
     await server.initialize('regression-test');
 
@@ -8192,7 +8285,7 @@ function testTheCureIsWrittenWhole(): void {
   ];
   // What the tree holds today and not a comfortable minimum, so one place going quiet lowers this
   // in the same change and somebody confirms it was meant.
-  assert.equal(offered.length, 40, `the places offering a remedy should all be found, not ${offered.length}`);
+  assert.equal(offered.length, 42, `the places offering a remedy should all be found, not ${offered.length}`);
 
   // Across whitespace, because a rendered file wraps where the source did not and a sentence that
   // breaks at "the" is the same sentence. Change, edit and touch, because the claim is about what

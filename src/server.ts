@@ -194,6 +194,7 @@ import {
   sameCodeNote,
 } from './server-version.js';
 import {
+  inspectProject,
   installedAddonVersion,
   installedEditorDigest,
   RUNTIME_AUTOLOAD,
@@ -253,6 +254,18 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  * look at, usually a dialog, and saying so beats holding the caller's call open in silence.
  */
 const EDITOR_RESTART_TIMEOUT_MS = 90_000;
+
+/**
+ * Whether the restart a note records can still be in progress.
+ *
+ * A note lasts from the quit to the launch, which is the exit wait and the few seconds a launch
+ * takes, so a live writer is not enough: a note older than that whose writer's pid answers names a
+ * process that reused the number, and trusting it would refuse every launch on the project for as
+ * long as that process lived.
+ */
+function restartUnderway(note: RestartNote, now = Date.now()): boolean {
+  return alive(note.byPid) && now - Date.parse(note.quitAt) < EDITOR_RESTART_TIMEOUT_MS + 30_000;
+}
 
 /**
  * How long a game gets to answer a ping before it is taken for held. A running game answers in
@@ -4606,7 +4619,7 @@ class GodotServer {
    * Only while nothing is connected: an editor being there settles the debt whoever opened it, and
    * the note is taken down here so it is not reported again by the next server after this one.
    */
-  private restartLeftUnfinished(connected: boolean): RestartNote | null {
+  private restartLeftUnfinished(connected: boolean): { note: RestartNote; underway: boolean } | null {
     if (this.ownProject === null) {
       return null;
     }
@@ -4618,7 +4631,10 @@ class GodotServer {
       restartSettled(this.ownProject);
       return null;
     }
-    return owed;
+    // Under way rather than left unfinished while the server that began it is still here: this
+    // one, asked in the gap of its own restart, read its own note as another's and said nothing was
+    // coming, and a caller following that opened a second editor beside the one being launched.
+    return { note: owed, underway: restartUnderway(owed) };
   }
 
   private async getEditorStatusPayload() {
@@ -4650,16 +4666,25 @@ class GodotServer {
       mayYetConnect: status.connected
         ? undefined
         : unfinished !== null
-          ? false
+          ? unfinished.underway
           : anEditorIsStillComing(status.listeningSince, launchedIsUp),
       restartInterrupted:
-        unfinished === null
+        unfinished === null || unfinished.underway
           ? undefined
           : {
-              quitEditorPid: unfinished.editorPid,
-              quitAt: unfinished.quitAt,
-              byServerPid: unfinished.byPid,
+              quitEditorPid: unfinished.note.editorPid,
+              quitAt: unfinished.note.quitAt,
+              byServerPid: unfinished.note.byPid,
               note: "A restart begun by a previous gdharness server asked this project's editor to quit, and that server was ended before it could start the editor again, so nothing is coming. editor_launch open starts one, and clears this.",
+            },
+      restartUnderway:
+        unfinished === null || !unfinished.underway
+          ? undefined
+          : {
+              quitEditorPid: unfinished.note.editorPid,
+              quitAt: unfinished.note.quitAt,
+              byServerPid: unfinished.note.byPid,
+              note: `A restart of this project's editor is under way: gdharness server pid ${unfinished.note.byPid} asked it to quit at ${unfinished.note.quitAt} and is starting it again. Wait for it rather than opening another.`,
             },
       // Which of the two reasons the line above is true, when it is the launch. A caller told only
       // "yes" cannot tell a window that will close in seconds from an import that will take
@@ -5173,6 +5198,10 @@ class GodotServer {
         'Another project wants its own gdharness server, which is its own harness session',
       ]);
     }
+    const refused = this.anEditorThatCannotConnect(project.value.path);
+    if (refused !== null) {
+      return refused;
+    }
     const engine = await this.engine();
     if (!engine.ok) {
       return engine.response;
@@ -5211,6 +5240,48 @@ class GodotServer {
             ? undefined
             : 'Opening a project imports it and saves project.godot, and Godot drops any key sitting at its own default. editor_status names anything lost under settingsDropped once this editor has connected.',
     });
+  }
+
+  /**
+   * Why an editor opened on [param projectPath] could never reach this server, or null.
+   *
+   * Opened anyway, the launch answered launched and every status after it said the editor was on
+   * its way for as long as the window stayed open: one of another project dials that project's
+   * server or is turned away here, one without the editor addon enabled never dials at all, and a
+   * restart under way is opening one already. A launch also clears the project's editor log and
+   * restart note, which for another project are that project's server's.
+   */
+  private anEditorThatCannotConnect(projectPath: string): ToolResponse | null {
+    if (this.ownProject !== null && !isSameDirectory(this.ownProject, projectPath)) {
+      return this.createErrorResponse(
+        `This server serves ${this.ownProject}, and an editor of ${projectPath} would dial that project's own server rather than this one.`,
+        [
+          "Open it from that project's own gdharness session",
+          `editor_launch with projectPath ${this.ownProject} opens the editor this server serves`,
+        ],
+      );
+    }
+    const report = inspectProject(projectPath);
+    const installed = report.addons.some((addon) => addon.name === 'gdharness_editor' && addon.installed);
+    if (!installed || !report.pluginsEnabled.includes('gdharness_editor')) {
+      return this.createErrorResponse(
+        `The gdharness editor addon is not ${installed ? 'enabled' : 'installed'} in ${projectPath}, so an editor opened on it would never reach this server.`,
+        installed
+          ? [
+              'gdharness setup in the project enables it',
+              'Or enable it under Project Settings, Plugins, in an editor opened by hand',
+            ]
+          : ['gdharness setup in the project installs and enables it'],
+      );
+    }
+    const owed = restartOwed(projectPath);
+    if (owed !== null && restartUnderway(owed)) {
+      return this.createErrorResponse(
+        `A restart of this project's editor is under way: gdharness server pid ${owed.byPid} asked it to quit at ${owed.quitAt} and is starting it again, so opening another would put two editors on one project.`,
+        ['editor_status says when it has connected'],
+      );
+    }
+    return null;
   }
 
   /**
