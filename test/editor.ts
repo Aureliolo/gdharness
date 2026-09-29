@@ -1880,6 +1880,26 @@ async function testASetIsReadBack({ call, refusal, project }: Editor): Promise<v
     /Nothing was written: Tooled\.hidden would load from the file as 0/,
   );
   assert.equal(fileText(project, 'checks.tscn'), before, 'and the file was left as it was');
+
+  // A script that does not compile leaves the editor holding a placeholder with nothing declared,
+  // and the refusal named the property rather than the script.
+  await call('scene_node', {
+    ...scene,
+    op: 'add',
+    nodeType: 'Node',
+    nodeName: 'Broken',
+    properties: { script: 'res://broken.gd' },
+  });
+  assert.match(
+    await refusal('scene_node', set('Broken', { count: 1 })),
+    /Node has no property count\. Its script, res:\/\/broken\.gd, does not compile/,
+  );
+
+  // Three numbers are not a Vector2, where the first two were taken as one.
+  assert.match(
+    await refusal('scene_node', set('Picture', { position: [1, 2, 3] })),
+    /position is Vector2 and the value given is Array/,
+  );
 }
 
 /**
