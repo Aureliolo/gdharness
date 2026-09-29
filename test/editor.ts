@@ -1821,6 +1821,8 @@ async function testASetIsReadBack({ call, refusal, project }: Editor): Promise<v
     ),
     /takes a res:\/\/ or uid:\/\/ path, not user:\/\/outside\.png/,
   );
+  // An empty property reads back as an object that is null, which is the nothing asked for.
+  await call('scene_node', set('Picture', { texture: null }));
 
   // A script's exports, which in the editor sit behind a placeholder that takes whatever it is given.
   await call('scene_node', {

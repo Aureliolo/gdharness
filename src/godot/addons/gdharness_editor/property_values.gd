@@ -400,8 +400,12 @@ func declaration(target: Object, property: String) -> Dictionary:
 static func same(held: Variant, given: Variant) -> bool:
 	var held_type: int = typeof(held)
 	var given_type: int = typeof(given)
-	if held_type == TYPE_NIL or given_type == TYPE_NIL:
-		return held_type == given_type
+	# An empty object property reads back as an Object that is null, not as nil, and the two are
+	# the same nothing.
+	var held_none: bool = held_type == TYPE_NIL or (held_type == TYPE_OBJECT and held == null)
+	var given_none: bool = given_type == TYPE_NIL or (given_type == TYPE_OBJECT and given == null)
+	if held_none or given_none:
+		return held_none == given_none
 	if held_type == TYPE_OBJECT or given_type == TYPE_OBJECT:
 		return _same_object(held, given)
 	if Serialisation.NUMBERS.has(held_type) and Serialisation.NUMBERS.has(given_type):
