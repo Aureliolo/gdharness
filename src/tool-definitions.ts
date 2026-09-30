@@ -1382,7 +1382,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         ops: ['text', 'choose'],
         blank: true,
         description:
-          'text: what to type. A newline is Enter and a tab is Tab, a space is a space, and "" with replace empties the field. choose: the item to take, by what it says as drawn, which in a game with translations is the translation; the key it holds is matched after that.',
+          'text: what to type. A newline is Enter and a tab is Tab, a space is a space, and "" with replace empties the field. choose: the item to take, by what it says as drawn, which in a game with translations is the translation; the key it holds is matched after that. An item whose whole words are these comes first; otherwise the words match as says does anywhere, a plain word as part of the item, a glob, or alternatives split at |, enabled items ahead of disabled ones, and several matching equally are refused with each listed.',
       },
       replace: {
         type: 'boolean',

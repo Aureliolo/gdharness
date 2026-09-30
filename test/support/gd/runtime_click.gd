@@ -49,6 +49,7 @@ func _everything() -> void:
 	await _check_a_button_that_presses_nothing()
 	await _check_typing_where_the_keys_go()
 	await _check_choosing()
+	await _check_choosing_by_what_it_says()
 	await _check_scrolling_to_a_control()
 	await _check_a_control_in_a_subviewport()
 	await _check_the_world_behind_the_interface()
@@ -265,6 +266,54 @@ func _check_choosing() -> void:
 	if not _says(untaken, "did not take it"):
 		_fail("a press the menu did not take is not answered as chosen: %s" % JSON.stringify(untaken))
 	closing.queue_free()
+	await process_frame
+
+
+## An item is chosen by the rules every `says` matches words by, after its whole words.
+##
+## A menu holding "Leave the hall" refused "Leave*" as no such item, where a click, a find and a
+## wait all take the glob. Each rule is checked by what it chooses: a plain word as a contains, the
+## whole words ahead of an item that contains them, an enabled item ahead of a disabled one; and a
+## glob or alternatives matching two items equally are refused with both named.
+func _check_choosing_by_what_it_says() -> void:
+	var doors: MenuButton = MenuButton.new()
+	doors.name = "Doors"
+	root.add_child(doors)
+	var menu: PopupMenu = doors.get_popup()
+	for item: String in ["The guide", "Leave", "Leave the hall", "Leave quietly"]:
+		menu.add_item(item)
+	menu.set_item_disabled(3, true)
+	await process_frame
+	var fired: Array[int] = []
+	var heard: Callable = func(at: int) -> void: fired.append(at)
+	Checked.done(menu.index_pressed.connect(heard) as Error, "hearing the item pressed")
+	# Refused first, on a menu never opened before, and then chosen from.
+	var missing: Dictionary = await typing.choose({"path": "/root/Doors", "text": "Stay"})
+	if not _says(missing, "has no such item"):
+		_fail("words no item says are refused: %s" % JSON.stringify(missing))
+	for case: Array in [["hall", 2], ["Leave", 1], ["quietly|hall", 2], ["The*", 0]]:
+		fired.clear()
+		var chosen: Dictionary = await typing.choose({"path": "/root/Doors", "text": case[0]})
+		if chosen.get("index") != case[1] or fired != [case[1]]:
+			_fail("%s chooses item %d: %s %s" % [case[0], case[1], JSON.stringify(chosen), fired])
+	var ties: Dictionary[String, String] = {
+		"Leave*": "1: Leave, 2: Leave the hall",
+		"guide|hall": "0: The guide, 2: Leave the hall",
+	}
+	for tie: String in ties:
+		fired.clear()
+		var tied: Dictionary = await typing.choose({"path": "/root/Doors", "text": tie})
+		var named: String = str(tied.get("message", ""))
+		if not _says(tied, "items that say") or not fired.is_empty() or menu.visible:
+			_fail("%s matching two items chooses neither: %s %s" % [tie, JSON.stringify(tied), fired])
+		elif not named.contains(ties[tie]):
+			_fail("and names both: %s" % named)
+	# A refusal is followed by the call it asks for, on the same menu.
+	fired.clear()
+	var retried: Dictionary = await typing.choose({"path": "/root/Doors", "text": "Leave the hall"})
+	if retried.get("index") != 2 or fired != [2]:
+		_fail("a choice after a refusal is taken: %s %s" % [JSON.stringify(retried), fired])
+	doors.queue_free()
 	await process_frame
 
 
