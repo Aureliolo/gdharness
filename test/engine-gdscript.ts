@@ -918,7 +918,22 @@ function testOperations(godotPath: string, projectDir: string): void {
   writeFileSync(join(projectDir, 'kept_out', 'raw.png'), '');
   writeFileSync(join(projectDir, 'fresh.png'), '');
   writeFileSync(join(projectDir, 'model.blend'), '');
+  // A sidecar with no source beside it, once under the .gdignore and once where the engine looks.
+  // The whole-project listing is what a reimport reads its missingSource from, and asking about one
+  // path never walks: the first is not the engine's, and the second, listed, shows the walk ran.
+  const orphanSidecar = '[remap]\n\nimporter="texture"\n';
+  writeFileSync(join(projectDir, 'kept_out', 'packed.png.import'), orphanSidecar);
+  writeFileSync(join(projectDir, 'stray.png.import'), orphanSidecar);
   try {
+    const sourceless = asArray(get(operation('get_import_status', {}), 'resources'))
+      .filter((one) => get(one, 'status') === 'missing_source')
+      .map((one) => get(one, 'path'));
+    const said = JSON.stringify(sourceless);
+    assert.ok(sourceless.includes('res://stray.png'), `a sourceless sidecar is listed: ${said}`);
+    assert.ok(
+      !sourceless.some((path) => String(path).startsWith('res://kept_out/')),
+      `and one under a .gdignore is not: ${said}`,
+    );
     assert.deepEqual(statusOf('kept_out/raw.png'), [
       'not_imported',
       'a .gdignore in res://kept_out keeps the engine from importing anything under it',
@@ -932,6 +947,7 @@ function testOperations(godotPath: string, projectDir: string): void {
     rmSync(join(projectDir, 'kept_out'), { recursive: true, force: true });
     rmSync(join(projectDir, 'fresh.png'), { force: true });
     rmSync(join(projectDir, 'model.blend'), { force: true });
+    rmSync(join(projectDir, 'stray.png.import'), { force: true });
   }
   const sceneOptions = runRefusedOperation(godotPath, projectDir, 'get_import_options', {
     resource_path: 'fixture_scene.tscn',
