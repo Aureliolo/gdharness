@@ -8403,6 +8403,10 @@ async function testAStopGoesThroughTheKeeper(): Promise<void> {
   };
   const note = (): Record<string, unknown> =>
     JSON.parse(readFileSync(runRecordPath(project, runtime), 'utf8')) as Record<string, unknown>;
+  const status = async (server: ServerProcess): Promise<unknown> =>
+    parseTextContent(
+      await server.request('tools/call', { name: 'editor_status', arguments: {} }, ENGINE_CALL_TIMEOUT_MS),
+    );
   const stop = async (server: ServerProcess, game: number, logged: string): Promise<void> => {
     const answered = await server.request(
       'tools/call',
@@ -8451,11 +8455,21 @@ async function testAStopGoesThroughTheKeeper(): Promise<void> {
     );
 
     const first = await serve();
+    assert.equal(get(await status(first), 'game', 'run'), null, 'a status with no run names none');
     const kept = await start(first, true);
     assert.equal(typeof note()['keeper'], 'string', `the note names the keeper: ${JSON.stringify(note())}`);
     await replace(first);
     assert.ok(isAlive(kept), `the run outlives its server: pid ${kept}`);
     const second = await serve();
+    // The status names the run it calls active, and says this server did not start it.
+    const adopted = get(await status(second), 'game', 'run');
+    assert.equal(get(adopted, 'pid'), kept, `the status names the adopted run: ${JSON.stringify(adopted)}`);
+    assert.equal(get(adopted, 'adopted'), true, `and says it was adopted: ${JSON.stringify(adopted)}`);
+    assert.equal(
+      resolve(String(get(adopted, 'project'))).toLowerCase(),
+      resolve(project).toLowerCase(),
+      `and whose project it is: ${JSON.stringify(adopted)}`,
+    );
     await stop(second, kept, `gdharness ended pid ${kept} through the keeper holding it.`);
 
     const unanswered = await start(second, true);
@@ -8474,6 +8488,10 @@ async function testAStopGoesThroughTheKeeper(): Promise<void> {
 
     // A start that ends the run before it says how, as a stop does.
     const earlier = await start(third, true);
+    // A run this server started is named without the mark an adopted one carries.
+    const own = get(await status(third), 'game', 'run');
+    assert.equal(get(own, 'pid'), earlier, `the status names the run it started: ${JSON.stringify(own)}`);
+    assert.equal(get(own, 'adopted'), undefined, `and does not call it adopted: ${JSON.stringify(own)}`);
     const replacing = parseTextContent(
       await third.request(
         'tools/call',
