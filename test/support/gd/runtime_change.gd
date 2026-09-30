@@ -22,6 +22,9 @@ var shifting: Variant = 3
 var counted: int = 3
 var nodes: Array[Node] = [null]
 var by_id: Dictionary = {3: "three", 4.5: "four and a half", Vector2i(1, 2): "a pair"}
+var counts: Dictionary[int, int] = {68: 6}
+var weights: Dictionary[float, String] = {2.0: "two"}
+var tagged: Dictionary[StringName, int] = {&"gold": 3}
 var spare: RefCounted = RefCounted.new()
 
 
@@ -84,6 +87,7 @@ func _run() -> void:
 	await _check_a_slot_that_takes_anything()
 	await _check_an_element_declared_as_an_object()
 	await _check_a_map_keyed_by_numbers()
+	await _check_maps_typed_by_key()
 	node._cleanup()
 	# Not checked: both are gone either way by the time the fixture tears itself down.
 	var _took_directory: Error = DirAccess.remove_absolute(directory)
@@ -320,6 +324,31 @@ func _check_an_element_declared_as_an_object() -> void:
 	var recorded: Dictionary = await _write("nodes", [{"_type": "Node", "path": "/root/Plain"}])
 	if recorded.get("type") != "error" or not str(recorded.get("message", "")).contains("named by its path"):
 		_fail("a record for an object element is told how objects are named: %s" % JSON.stringify(recorded))
+
+
+## A map typed by its key, stepped into by that key written as text, logs nothing in the game.
+##
+## A typed map checks the type of every key it is asked about and reports an engine error for one of
+## another type, so trying the step as text before the number read the right entry and left the run
+## counting errors the game never had: eight for one read, and `clean` false at the stop. The runner
+## fails this fixture on any engine error, so each read below is held to logging nothing, beside its
+## answer. An absent key is refused the same way, and a write lands under the key's own type.
+func _check_maps_typed_by_key() -> void:
+	for case: Array in [["counts:68", 6], ["weights:2", "two"], ["tagged:gold", 3]]:
+		var read: Dictionary = await node._execute_command(
+			"get_property", {"path": "/root/Holder", "property": case[0]}
+		)
+		if read.get("value") != case[1]:
+			_fail("%s reads its entry: %s" % [case[0], JSON.stringify(read)])
+	var absent: Dictionary = await node._execute_command(
+		"get_property", {"path": "/root/Holder", "property": "counts:1"}
+	)
+	if absent.get("type") != "error" or not str(absent.get("message", "")).contains("no key 1"):
+		_fail("a key a typed map has not got is refused: %s" % JSON.stringify(absent))
+	var written: Dictionary = await _write("counts:68", 7)
+	var counts: Dictionary = holder.get("counts")
+	if written.get("type") != "property_set" or counts.get(68) != 7 or counts.size() != 1:
+		_fail("counts:68 is written under the number: %s, %s" % [JSON.stringify(written), str(counts)])
 
 
 ## A map keyed by numbers, stepped into by the number written as text, and written back under the

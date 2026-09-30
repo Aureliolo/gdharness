@@ -216,13 +216,21 @@ static func can_read(holder: Variant, named: String) -> bool:
 ## A step is text, and a map is keyed by whatever the game put in it: text, a StringName, or a
 ## number, which a map of units by id is. Keyed by 3, "3" is not a key of it, measured on 4.7.2, so a
 ## step that reads as a number is tried as one after the two spellings of text.
+##
+## A map typed by its key is asked only in that type. It checks every key it is asked about and
+## reports an engine error for one of another type, so a step into a map typed by an enum read the
+## right entry and left four errors in the game's log for each of the two walks, and the run was
+## counted as unclean for a read.
 static func _key_in(map: Dictionary, named: String) -> Array:
 	var spellings: Array = [named, StringName(named)]
 	if named.is_valid_int():
 		spellings.append(int(named))
 	if named.is_valid_float():
 		spellings.append(float(named))
+	var typed: int = map.get_typed_key_builtin() if map.is_typed_key() else TYPE_NIL
 	for key: Variant in spellings:
+		if typed != TYPE_NIL and typeof(key) != typed:
+			continue
 		if map.has(key):
 			return [key]
 	return []
