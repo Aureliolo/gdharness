@@ -1337,7 +1337,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'runtime_input',
     description:
-      'Input to the running game: a whole click on a Control or a 3D node named by path or on a control named by the words on it, an item chosen out of a menu, typing into whatever has the focus, or a raw action, key, mouse button or mouse motion. All of it works headless, where the window is 64 by 64 and the GUI only takes what is inside it.',
+      "Input to the running game: a whole click on a Control or a 3D node named by path or on a control named by the words on it, an item chosen out of a menu, typing into whatever has the focus, or a raw action, key, mouse button or mouse motion. All of it works headless, where the window is 64 by 64 and the GUI only takes what is inside it. On gdharness's own desktop, where a windowed run goes, Windows refuses to say where the pointer is: the pointer ops answer with pointer_note there, because get_mouse_position() on the root window, and the mouse positions derived from it, read a meaningless position, while what reads the event itself (the control under it, hover, tooltips, input handlers) gets the injected position.",
     parameters: {
       projectPath: RUNNING_PROJECT_PATH,
       pid: RUNNING_PID,
