@@ -629,6 +629,24 @@ jobs:
             done
           }
 
+          # Logging in writes nothing, so unlike `publish` it is retried on any failure rather than
+          # only on a connection that got nowhere. On 1.1.28 GitHub's token service answered the
+          # ninth login with a 503 and a connection timeout, which none of the patterns above name,
+          # and the job ended while npm was a minute from serving the version it was waiting for.
+          logged_in() {
+            local attempt=1 delay=5
+            until "${RUNNER_TEMP}/mcp-publisher" login github-oidc; do
+              if (( attempt >= 5 )); then
+                echo "Logging in to the registry failed on every attempt." >&2
+                return 1
+              fi
+              echo "Login attempt ${attempt} failed; retrying in ${delay}s." >&2
+              sleep "${delay}"
+              attempt=$(( attempt + 1 ))
+              delay=$(( delay * 2 ))
+            done
+          }
+
           if serves_this_version; then
             echo "The registry already serves ${name} ${VERSION}; there is nothing to publish."
           else
@@ -648,7 +666,7 @@ jobs:
             # refusals made on one login.
             published=""
             for attempt in $(seq 1 40); do
-              reached_the_registry "${RUNNER_TEMP}/mcp-publisher" login github-oidc
+              logged_in
               status=0
               output=$(reached_the_registry "${RUNNER_TEMP}/mcp-publisher" publish 2>&1) || status=$?
               printf '%s\n' "${output}"
