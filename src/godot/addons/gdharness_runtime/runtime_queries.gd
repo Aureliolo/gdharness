@@ -70,7 +70,8 @@ func get_tree(params: Dictionary) -> Dictionary:
 
 ## Nodes matching every filter given, as paths, so a caller can name what it wants without
 ## reading the whole tree to find it. `class` matches native classes and their subclasses, and
-## the global name of a script class; `name` is a case-insensitive glob; `script` is a path;
+## the global name of a script class; `name` is a case-insensitive glob, or several separated by `|`
+## the way `says` takes them, with `\|` for a bar in a name; `script` is a path;
 ## `says` is what the node has written on it.
 ##
 ## `property` names one to read off each of them, which is the difference between one question and
@@ -103,6 +104,12 @@ func find_nodes(params: Dictionary) -> Dictionary:
 	if not wanted["script"].is_empty() and not wanted["script"].begins_with("res://"):
 		wanted["script"] = "res://" + wanted["script"]
 
+	# Split once here rather than for each node the walk passes.
+	var names: Array[String] = Says.split_at_bars(wanted["name"])
+	if not wanted["name"].is_empty() and names.is_empty():
+		var bars_only: String = 'name "%s" is only bars, so it names no node; write the names between them'
+		return {"type": "error", "message": bars_only % wanted["name"]}
+
 	var reached: Dictionary = Values.node_at(_host.get_tree().root, root_path)
 	if reached.has("message"):
 		return reached
@@ -113,7 +120,10 @@ func find_nodes(params: Dictionary) -> Dictionary:
 	var truncated: bool = false
 	# Counted while the tree is already being walked, for the answer below: how many nodes this
 	# find would have matched if the name had been read the way it was probably meant.
-	var literal: bool = Says.is_plain(wanted["name"])
+	var plain_names: Array[String] = []
+	for named: String in names:
+		if Says.is_plain(named):
+			plain_names.append(named)
 	var nearly: int = 0
 	# The same for the words: a glob is matched against the whole text, and one written as a prefix
 	# by habit, "Taken together*", missed the label whose sentence those words are in the middle of.
@@ -132,7 +142,7 @@ func find_nodes(params: Dictionary) -> Dictionary:
 	while not pending.is_empty():
 		var node: Node = pending.pop_front()
 		var rest: bool = _matches_apart_from_name(node, wanted)
-		if rest and _named(node, wanted["name"]):
+		if rest and _named(node, names):
 			if not include_hidden and not shown(node):
 				hidden += 1
 			elif found.size() >= limit:
@@ -140,16 +150,12 @@ func find_nodes(params: Dictionary) -> Dictionary:
 				break
 			else:
 				found.append(_found(node, wanted_property))
-		elif rest and literal and str(node.name).containsn(wanted["name"]):
+		elif rest and _contains_any(str(node.name), plain_names):
 			if include_hidden or shown(node):
 				nearly += 1
 			else:
 				nearly_hidden += 1
-		elif (
-			not widened_says.is_empty()
-			and _named(node, wanted["name"])
-			and _matches_apart_from_name(node, widened)
-		):
+		elif not widened_says.is_empty() and _named(node, names) and _matches_apart_from_name(node, widened):
 			if include_hidden or shown(node):
 				nearly_said += 1
 			else:
@@ -172,17 +178,23 @@ func find_nodes(params: Dictionary) -> Dictionary:
 	if found.is_empty() and nearly + nearly_hidden > 0:
 		var named_near: int = nearly if nearly > 0 else nearly_hidden
 		var holding: String = "names contain" if named_near > 1 else "name contains"
+		var near_words: Array[String] = []
+		for named: String in plain_names:
+			near_words.append('"%s"' % named)
+		var opened: Array[String] = []
+		for named: String in names:
+			opened.append("*%s*" % named if Says.is_plain(named) else named)
 		(
 			notes
 			. append(
 				(
-					'name is matched as a glob against the whole name; %d %snode %s "%s", which "*%s*"%s would find'
+					'name is matched as a glob against the whole name; %d %snode %s %s, which "%s"%s would find'
 					% [
 						named_near,
 						"" if nearly > 0 else "hidden ",
 						holding,
-						wanted["name"],
-						wanted["name"],
+						" or ".join(PackedStringArray(near_words)),
+						Says.joined_at_bars(opened),
 						"" if nearly > 0 else " with includeHidden true",
 					]
 				)
@@ -308,10 +320,23 @@ static func _anything_asked(wanted: Dictionary[String, String]) -> bool:
 	return false
 
 
-## Whether [param node] carries the name a find asked for. Empty matches everything, which is what
-## makes leaving a filter out the same as not having one.
-static func _named(node: Node, pattern: String) -> bool:
-	return pattern.is_empty() or str(node.name).matchn(pattern)
+## Whether [param node] carries one of the names a find asked for. None matches everything, which is
+## what makes leaving a filter out the same as not having one.
+static func _named(node: Node, names: Array[String]) -> bool:
+	if names.is_empty():
+		return true
+	var called: String = str(node.name)
+	for pattern: String in names:
+		if called.matchn(pattern):
+			return true
+	return false
+
+
+static func _contains_any(called: String, words: Array[String]) -> bool:
+	for word: String in words:
+		if called.containsn(word):
+			return true
+	return false
 
 
 ## Every filter but the name, so a find that came back empty can say how many nodes the name was
