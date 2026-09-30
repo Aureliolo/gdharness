@@ -4,6 +4,7 @@ extends RefCounted
 ## where it is in the list.
 
 const Read = preload("reading.gd")
+const Says = preload("runtime_says.gd")
 const Words = preload("runtime_words.gd")
 
 
@@ -20,20 +21,28 @@ static func menu_of(node: Node) -> PopupMenu:
 	return null
 
 
-## Which item was asked for: `text`, matched exactly and then case-insensitively, or `index`.
-## Minus one when neither names one that is there.
+## The items asked for, best first: the one at `index`; else the one whose whole words are `text`,
+## exactly and then case-insensitively; else every item `text` matches by the rules `says` has, a
+## plain word as a contains, a glob, and alternatives split at `|`, the enabled ones when any are.
+## Empty when nothing matches, and more than one when several match equally well, which the caller
+## refuses rather than guesses between.
+##
+## By the same rules as `says` because a caller who has learnt them from a click, a find and a wait
+## writes the same pattern here: "Leave*" was refused against a menu holding "Leave the hall", and
+## the item had to be written out in full on a second call. The whole words still come first, so an
+## item named in full is chosen over another whose words contain it.
 ##
 ## `text` is matched against the words the item shows before the ones it holds. In a game with
 ## translations they differ, and the shown ones are what a caller has read off the screen: an item
 ## held as `ACT_ENGAGE` and shown as "Hire" refused "Hire" and listed the keys. The held words
 ## still count after them, for a caller that has the key from the source.
-static func wanted_item(menu: PopupMenu, params: Dictionary) -> int:
+static func wanted_items(menu: PopupMenu, params: Dictionary) -> Array[int]:
 	if params.has("index"):
 		var asked: int = Read.as_int(params.get("index", -1), -1)
-		return asked if asked >= 0 and asked < menu.get_item_count() else -1
+		return _items([asked] if asked >= 0 and asked < menu.get_item_count() else [])
 	var wanted: String = str(params.get("text", ""))
 	if wanted.is_empty():
-		return -1
+		return _items([])
 	# The items before the separators, because a heading can carry the same words as an item under
 	# it, and finding the heading first refused the choice the caller meant. A separator is still
 	# looked for after, so a heading asked for by name is refused as one rather than as missing.
@@ -50,11 +59,33 @@ static func wanted_item(menu: PopupMenu, params: Dictionary) -> int:
 	for words: Array[String] in [shown, held]:
 		for at: int in words.size():
 			if words[at] == wanted:
-				return order[at]
+				return _items([order[at]])
 		for at: int in words.size():
 			if words[at].nocasecmp_to(wanted) == 0:
-				return order[at]
-	return -1
+				return _items([order[at]])
+	# Separators are left out here: a heading is refused when named in full, and a pattern that
+	# matched one beside the item it heads would tie the two.
+	for words: Array[String] in [shown, held]:
+		var matched: Array[int] = []
+		var enabled: Array[int] = []
+		for at: int in words.size():
+			var index: int = order[at]
+			if menu.is_item_separator(index) or not Says.matches(words[at], wanted):
+				continue
+			matched.append(index)
+			if not menu.is_item_disabled(index):
+				enabled.append(index)
+		if not matched.is_empty():
+			return enabled if not enabled.is_empty() else matched
+	return _items([])
+
+
+## [param indices] as a list of item numbers: a literal list is untyped, and handed back where a
+## typed one is declared it is refused when the call is made, not when the script is read.
+static func _items(indices: Array) -> Array[int]:
+	var typed: Array[int] = []
+	typed.assign(indices)
+	return typed
 
 
 ## What the menu shows, for a refusal that names the choices rather than the miss: a titled

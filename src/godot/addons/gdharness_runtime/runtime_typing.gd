@@ -261,11 +261,24 @@ func choose(params: Dictionary) -> Dictionary:
 	var opened: bool = Menus.open_the_menu(node, menu)
 	await _host.get_tree().process_frame
 
-	var index: int = Menus.wanted_item(menu, params)
+	var found: Array[int] = Menus.wanted_items(menu, params)
+	if found.size() > 1:
+		await _shut(menu, opened)
+		var tied: Array[String] = []
+		for at: int in found:
+			tied.append("%d: %s" % [at, Words.item_says(menu, at)])
+		return {
+			"type": "error",
+			"message":
+			(
+				"%s has %d items that say %s, so nothing was chosen: %s. Name one by its whole text or by index"
+				% [node_path, found.size(), JSON.stringify(str(params.get("text", ""))), ", ".join(tied)]
+			)
+		}
+	var index: int = found[0] if found.size() == 1 else -1
 	var refused: String = _not_a_choice(node_path, menu, index)
 	if not refused.is_empty():
-		if opened and is_instance_valid(menu):
-			menu.hide()
+		await _shut(menu, opened)
 		return {"type": "error", "message": refused}
 
 	# Read before the press, because the press can take the menu away: a game that rebuilds its
@@ -298,8 +311,7 @@ func choose(params: Dictionary) -> Dictionary:
 		menu.index_pressed.disconnect(hear)
 
 	if not fired.has(index):
-		if opened and is_instance_valid(menu) and menu.visible:
-			menu.hide()
+		await _shut(menu, opened)
 		return {
 			"type": "error",
 			"message":
@@ -320,6 +332,16 @@ func choose(params: Dictionary) -> Dictionary:
 		answer["selected"] = chooser.get_selected()
 		answer["shows"] = Words.said_by(chooser)
 	return answer
+
+
+## Shuts a menu this call opened, and lets the frame pass in which the engine finishes shutting it.
+## A choice asked for in the frame a refusal shut the menu found it half shut, and the press it sent
+## went nowhere: measured on 4.7.2, a MenuButton refused and at once asked again answered that the
+## menu did not take the item.
+func _shut(menu: PopupMenu, opened: bool) -> void:
+	if opened and is_instance_valid(menu) and menu.visible:
+		menu.hide()
+		await _host.get_tree().process_frame
 
 
 ## Why item [param index] of [param menu] is not something to choose, or "" when it is.
