@@ -21,6 +21,13 @@ import { writeFileSync } from 'node:fs';
 /** The desktop every process started this way shares. */
 export const HIDDEN_DESKTOP = 'gdharness';
 
+/**
+ * Names the desktop to a process started on one, and to everything it starts: an editor there plays
+ * its games there too. Kept in step with `DESKTOP_VARIABLE` in the runtime autoload, which says what
+ * a desktop with no pointer does to a game's own reading of the mouse.
+ */
+export const DESKTOP_VARIABLE = 'GDHARNESS_DESKTOP';
+
 const SOURCE = `using System;
 using System.ComponentModel;
 using System.IO;
