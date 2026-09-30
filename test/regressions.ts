@@ -8494,6 +8494,124 @@ async function testAStopGoesThroughTheKeeper(): Promise<void> {
 }
 
 /**
+ * A pointer answer from a game on gdharness's own desktop says what does not follow the pointer.
+ *
+ * Reported from fantasy-guild-manager: the engine asks Windows where the pointer is for the root
+ * window, GetCursorPos refuses a process on a desktop that is not in use (measured: false, access
+ * denied, the point unwritten), the engine does not check, and get_mouse_position() read x 836852416
+ * after a motion to 1310. Measured here too, at -698365248 after a motion to 300, while the tooltip
+ * opened beside the injected pointer. Nothing can put a pointer there, so the answer says so.
+ * The name of the desktop reaches the game through the keeper, which is what is exercised: a
+ * windowed run on Windows is started there, and a headless run, started nowhere, answers the same
+ * motion without the note.
+ */
+async function testAPointerOnTheHiddenDesktopIsNoted(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('pointer note regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-pointer-note-'));
+  const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-pointer-note-rt-'));
+  const server = new ServerProcess({
+    env: { GODOT_PATH: godotPath, GDHARNESS_PROJECT: project, GDHARNESS_RUNTIME_DIR: runtime },
+  });
+  const games: number[] = [];
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Pointer"\n' +
+        'run/main_scene="res://main.tscn"\n\n[autoload]\n\n' +
+        'GdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n\n' +
+        '[rendering]\n\nrenderer/rendering_method="gl_compatibility"\n',
+    );
+    writeFileSync(
+      join(project, 'main.tscn'),
+      '[gd_scene load_steps=2 format=3]\n\n[sub_resource type="BoxMesh" id="box"]\n\n' +
+        '[node name="Main" type="Control"]\n\n' +
+        '[node name="Go" type="Button" parent="."]\noffset_right = 30.0\noffset_bottom = 20.0\ntext = "Go"\n\n' +
+        '[node name="Camera" type="Camera3D" parent="."]\ntransform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 4)\ncurrent = true\n\n' +
+        '[node name="Box" type="MeshInstance3D" parent="."]\nmesh = SubResource("box")\n',
+    );
+    cpSync(
+      join('src', 'godot', 'addons', 'gdharness_runtime'),
+      join(project, 'addons', 'gdharness_runtime'),
+      {
+        recursive: true,
+      },
+    );
+    await server.initialize('regression-test');
+    // Each pointer op, since each builds its own answer.
+    const pointed = async (): Promise<unknown[]> => {
+      const answers: unknown[] = [];
+      for (const args of [
+        { op: 'mouse_motion', x: 20, y: 10 },
+        { op: 'mouse_click', x: 20, y: 10 },
+        { op: 'click', nodePath: '/root/Main/Go' },
+        { op: 'click', nodePath: '/root/Main/Box' },
+      ]) {
+        const answer = parseTextContent(
+          await server.request('tools/call', { name: 'runtime_input', arguments: args }),
+        );
+        assert.ok(
+          ['input_injected', 'clicked'].includes(String(get(answer, 'type'))),
+          `${args.op}: ${JSON.stringify(answer)}`,
+        );
+        answers.push(answer);
+      }
+      return answers;
+    };
+    const moved = async (headless: boolean): Promise<unknown[]> => {
+      const started = parseTextContent(
+        await server.request(
+          'tools/call',
+          {
+            name: 'editor_run',
+            arguments: { projectPath: project, op: 'start', headless, runtimeWaitMs: WINDOWED_BOOT_MS },
+          },
+          WINDOWED_BOOT_MS + ENGINE_CALL_TIMEOUT_MS,
+        ),
+      );
+      assert.equal(get(started, 'runtime', 'listening'), true, JSON.stringify(started));
+      games.push(asNumber(get(started, 'runtime', 'pid')));
+      const answers = await pointed();
+      await stopItsRun(server);
+      return answers;
+    };
+    for (const answer of await moved(true)) {
+      assert.equal(
+        get(answer, 'pointer_note'),
+        undefined,
+        `a headless run is on no desktop: ${JSON.stringify(answer)}`,
+      );
+    }
+    if (process.platform !== 'win32') {
+      console.log('pointer note regression: the desktop half runs on Windows alone, where desktops are');
+      return;
+    }
+    for (const answer of await moved(false)) {
+      assert.match(
+        String(get(answer, 'pointer_note')),
+        /^This game is on gdharness's own desktop, where Windows refuses to say where the pointer is/,
+        `a windowed run on gdharness's desktop says so: ${JSON.stringify(answer)}`,
+      );
+    }
+  } finally {
+    for (const game of games) {
+      if (isAlive(game)) {
+        process.kill(game);
+      }
+    }
+    await server.stop();
+    sweep(project);
+    sweep(runtime);
+  }
+}
+
+/**
  * A project in a git worktree finds the engine its main checkout's config names.
  *
  * Reported from ostinato: `upgrade` in a worktree refused for want of an engine, because the engine
@@ -25844,6 +25962,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAGameOnAnotherRuntimeAddonSaysSo,
   testAGameSaysWhichRuntimeAddonItLoaded,
   testAWorktreeFindsItsMainCheckoutsEngine,
+  testAPointerOnTheHiddenDesktopIsNoted,
   testTheKeeperAnswersAStop,
   testAStopGoesThroughTheKeeper,
   testAStartStopsWaitingForAGameThatIsOver,

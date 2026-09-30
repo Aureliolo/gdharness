@@ -21,6 +21,10 @@ const TO_SMALL: int = 32
 ## reason a control is out of reach. Only worth telling somebody when it is what they have.
 const HEADLESS_VIEWPORT: Vector2 = Vector2(64, 64)
 
+## Set, to the desktop's name, for a process gdharness started on a desktop of its own and for
+## everything that process starts. Kept in step with `DESKTOP_VARIABLE` in src/desktop.ts.
+const DESKTOP_VARIABLE: String = "GDHARNESS_DESKTOP"
+
 var _host: Node
 var _values: Values
 
@@ -43,6 +47,28 @@ var _arrival_seconds: float = 1.0 / 60.0
 func _init(host: Node, values: Values) -> void:
 	_host = host
 	_values = values
+
+
+## [param answer], saying what a desktop of gdharness's own does to the game's own reading of the
+## pointer when the game is on one.
+##
+## For the root window the engine asks Windows where the pointer is, and GetCursorPos refuses a
+## process on a desktop that is not in use: measured on one of gdharness's own, it answered false
+## with access denied and left the point unwritten. The engine does not check, so a game driven
+## there read get_mouse_position() as x 836852416 after a motion to 1310, 314. Nothing here can
+## put a pointer on that desktop: Windows moves one only on the desktop in use, and making this one
+## that would take the screen. What reads the injected event is right, tooltips included, since the
+## engine places a tooltip from the motion that reached the control.
+static func _pointer_noted(answer: Dictionary) -> Dictionary:
+	if OS.get_environment(DESKTOP_VARIABLE) != "":
+		answer["pointer_note"] = (
+			"This game is on gdharness's own desktop, where Windows refuses to say where the"
+			+ " pointer is, so get_mouse_position() on the root window, and get_global_mouse_position()"
+			+ " and get_local_mouse_position() on what is drawn there, read a meaningless position"
+			+ " rather than where this put it. What reads the event itself gets this position: the"
+			+ " control under the pointer, its hover and tooltip, and the game's input handlers."
+		)
+	return answer
 
 
 ## The movement a pointer arriving at [param position] carries, which is the distance from where
@@ -238,15 +264,17 @@ func inject_mouse_click(params: Dictionary) -> Dictionary:
 		Input.parse_input_event(_button(position, button, false, false))
 		await _host.get_tree().process_frame
 
-	return {
-		"type": "input_injected",
-		"input_type": "mouse_click",
-		"position": [position.x, position.y],
-		"button": button,
-		"pressed": held and not whole,
-		"whole": whole,
-		"double": double
-	}
+	return _pointer_noted(
+		{
+			"type": "input_injected",
+			"input_type": "mouse_click",
+			"position": [position.x, position.y],
+			"button": button,
+			"pressed": held and not whole,
+			"whole": whole,
+			"double": double
+		}
+	)
 
 
 ## Moves the pointer to a position, with the movement the event carries taken from where the
@@ -275,12 +303,14 @@ func inject_mouse_motion(params: Dictionary) -> Dictionary:
 
 	Input.parse_input_event(_motion(position, relative))
 
-	return {
-		"type": "input_injected",
-		"input_type": "mouse_motion",
-		"position": [position.x, position.y],
-		"relative": [relative.x, relative.y]
-	}
+	return _pointer_noted(
+		{
+			"type": "input_injected",
+			"input_type": "mouse_motion",
+			"position": [position.x, position.y],
+			"relative": [relative.x, relative.y]
+		}
+	)
 
 
 ## Whether [param centre] is somewhere a click can reach it: inside the viewport, and inside every
@@ -466,7 +496,7 @@ func click(params: Dictionary) -> Dictionary:
 	}
 	if found != null:
 		answer["found"] = found
-	return answer
+	return _pointer_noted(answer)
 
 
 ## Why [param control] would take no click a player gave it, or "" when it would.
@@ -636,19 +666,21 @@ func _click_in_the_world(node_path: String, item: Node3D, params: Dictionary) ->
 	_press_button(arriving, _button(position, button, false, false))
 	await _host.get_tree().process_frame
 
-	return {
-		"type": "clicked",
-		"path": node_path,
-		"position": _values.serialize(position),
-		"button": button,
-		"double": double,
-		"hovered": hovered_path,
-		# The interface did not take it, so it reached the game's own input. As close to "it
-		# landed" as anything outside the game can get, and said in the same word the Control
-		# click says it in.
-		"landed": through["landed"],
-		"camera": found["camera"],
-	}
+	return _pointer_noted(
+		{
+			"type": "clicked",
+			"path": node_path,
+			"position": _values.serialize(position),
+			"button": button,
+			"double": double,
+			"hovered": hovered_path,
+			# The interface did not take it, so it reached the game's own input. As close to "it
+			# landed" as anything outside the game can get, and said in the same word the Control
+			# click says it in.
+			"landed": through["landed"],
+			"camera": found["camera"],
+		}
+	)
 
 
 ## Whether a pointer on its way out through [param out], the steps [method Screen.steps_out]
