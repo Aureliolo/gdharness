@@ -507,7 +507,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       reimport: {
         summary:
-          "reimport what status says is outdated or failed, one resource with resourcePath, or what is current as well with force. Through the open editor when one serves the project, so it reloads what it holds, waiting for it to finish; otherwise through the engine's own import pass. Answered from a second status read: reimported lists what is current now, notReimported what is not, with its status and reason, and via says which of the two did the work. stillImporting is an editor that had not finished within timeoutMs",
+          "reimport what status says is outdated or failed, one resource with resourcePath, or what is current as well with force. Through the open editor when one serves the project, so it reloads what it holds, waiting for it to finish; otherwise through the engine's own import pass. Answered from a second status read: reimported lists what is current now, notReimported what is not, with its status and reason, and via says which of the two did the work. A whole-project reimport also answers missingSource, the .import files whose source is not beside them, empty when there are none, whether or not anything needed reimporting; one resourcePath is not a walk of the project and leaves it out. stillImporting is an editor that had not finished within timeoutMs",
         requires: [],
       },
       uid: {

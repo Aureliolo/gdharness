@@ -3563,6 +3563,11 @@ class GodotServer {
     }
     const listed = importStatuses(before.payload);
     const missingSource = listed.filter((one) => one.status === 'missing_source').map((one) => one.path);
+    // Said on every whole-project answer, empty included, because that listing walked the project:
+    // left out when empty, and left off the answer when nothing needed reimporting, a clean project
+    // read the same as a check that never looked (reported from fantasy-guild-manager). One
+    // resourcePath asks about that file alone, so it says nothing about the rest.
+    const sourceless = resourcePath === undefined ? { missingSource } : {};
     if (resourcePath !== undefined && missingSource.length > 0) {
       return {
         ok: false,
@@ -3594,6 +3599,7 @@ class GodotServer {
         payload: {
           reimported: [],
           notReimported: [],
+          ...sourceless,
           note:
             resourcePath === undefined
               ? 'Nothing needed reimporting. Pass force to reimport what is current.'
@@ -3616,6 +3622,7 @@ class GodotServer {
             via: 'editor',
             stillImporting: true,
             asked: targets,
+            ...sourceless,
             note: `The editor had not finished after ${timeoutMs} ms. project_import status says what it has done so far; pass a longer timeoutMs to wait it out.`,
           },
         };
@@ -3659,7 +3666,7 @@ class GodotServer {
         via: viaEditor ? 'editor' : 'engine',
         reimported,
         notReimported,
-        ...(missingSource.length > 0 ? { missingSource } : {}),
+        ...sourceless,
         ...extra,
       },
     };
