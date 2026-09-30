@@ -13633,10 +13633,28 @@ async function testAReimportReimportsThroughTheEngine(): Promise<void> {
         `a failed import whose source was fixed should be reimported: ${JSON.stringify(fixed)}`,
       );
       assert.deepEqual(asArray(get(fixed, 'notReimported')), [], JSON.stringify(fixed));
+      // Said empty rather than left out, so a project with none reads as looked at.
+      assert.deepEqual(get(fixed, 'missingSource'), [], JSON.stringify(fixed));
 
       const nothing = await call({ op: 'reimport' });
       assert.deepEqual(asArray(get(nothing, 'reimported')), [], JSON.stringify(nothing));
       assert.match(String(get(nothing, 'note')), /Nothing needed reimporting/, JSON.stringify(nothing));
+      assert.deepEqual(get(nothing, 'missingSource'), [], JSON.stringify(nothing));
+
+      // A sidecar whose source is gone is named when nothing needs reimporting too, which was the
+      // one answer that left it off.
+      writeFileSync(join(project, 'gone.png.import'), '[remap]\n\nimporter="texture"\n');
+      try {
+        const orphaned = await call({ op: 'reimport' });
+        assert.match(String(get(orphaned, 'note')), /Nothing needed reimporting/, JSON.stringify(orphaned));
+        assert.deepEqual(
+          get(orphaned, 'missingSource'),
+          ['res://gone.png'],
+          `a sourceless sidecar is named on a reimport with nothing to do: ${JSON.stringify(orphaned)}`,
+        );
+      } finally {
+        rmSync(join(project, 'gone.png.import'), { force: true });
+      }
 
       // Current, with and then without the cache.
       const goodOutput = outputOf('good.png');
@@ -13659,6 +13677,11 @@ async function testAReimportReimportsThroughTheEngine(): Promise<void> {
           asArray(get(forced, 'reimported')),
           ['res://good.png'],
           `a current resource reimported with force (cache ${cached}): ${JSON.stringify(forced)}`,
+        );
+        assert.equal(
+          get(forced, 'missingSource'),
+          undefined,
+          `one resourcePath walks nothing else, so it says nothing of the rest: ${JSON.stringify(forced)}`,
         );
         assert.ok(
           statSync(goodOutput).mtimeMs > past.getTime() + 1000,
