@@ -319,11 +319,11 @@ static func _in_sight(control: Control, viewport: Viewport, centre: Vector2) -> 
 	return viewport.get_visible_rect().has_point(centre) and _clipped_by(control, centre) == null
 
 
-## The ScrollContainer between [param control] and the root that clips [param centre] away from it,
-## or null when none does.
+## The ScrollContainer between [param control] and its viewport that clips [param centre] away from
+## it, or null when none does. Not past the viewport: one holding a dialog is in another space.
 static func _clipped_by(control: Control, centre: Vector2) -> ScrollContainer:
 	var walking: Node = control.get_parent()
-	while walking != null:
+	while walking != null and not (walking is Viewport):
 		var holder: ScrollContainer = walking as ScrollContainer
 		# Carried into the same space the centre is in, which is the canvas rather than the
 		# container's own: the two are only the same while nothing above it is transformed.
@@ -342,11 +342,12 @@ static func _clipped_by(control: Control, centre: Vector2) -> ScrollContainer:
 ## next layout pass rather than inside the call, and the next one out works out where the control is
 ## from where it is drawn, so asked in the same frame it scrolled to where the control had been.
 ## Moved means a scroll value changed: a container asked to show what it already shows moves
-## nothing, and answering true for it said the view had moved when it had not.
+## nothing, and answering true for it said the view had moved when it had not. Only the containers in
+## the control's own viewport: one holding a dialog scrolls the page behind it, not the dialog.
 func _scroll_into_view(control: Control) -> bool:
 	var moved: bool = false
 	var walking: Variant = control.get_parent()
-	while walking != null:
+	while walking != null and not (walking is Viewport):
 		var step: Node = walking
 		var holder: ScrollContainer = step as ScrollContainer
 		if holder != null:
