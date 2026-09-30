@@ -54,16 +54,32 @@ static func alternatives(wanted: String) -> Array[String]:
 	if kept != null:
 		var split: Array[String] = kept
 		return split
-	var held: String = as_said(wanted).replace("\\|", ESCAPED_BAR)
-	var found: Array[String] = []
-	for part: String in held.split("|"):
-		var words: String = part.replace(ESCAPED_BAR, "|")
-		if not words.is_empty():
-			found.append(words)
+	var found: Array[String] = split_at_bars(as_said(wanted))
 	if _splits.size() >= SPLITS_KEPT:
 		_splits.clear()
 	_splits[wanted] = found
 	return found
+
+
+## [param written] split at every `|` not written as `\|`, empty alternatives dropped. Shared with a
+## find's name, which takes alternatives by the same rule so the two arguments beside each other do
+## not read a bar two ways: written in a name, `A|B` was one glob no node matched, and the empty
+## answer came with no note.
+static func split_at_bars(written: String) -> Array[String]:
+	var found: Array[String] = []
+	for part: String in written.replace("\\|", ESCAPED_BAR).split("|"):
+		var words: String = part.replace(ESCAPED_BAR, "|")
+		if not words.is_empty():
+			found.append(words)
+	return found
+
+
+## [param parts] joined back into one pattern that [method split_at_bars] reads as them.
+static func joined_at_bars(parts: Array[String]) -> String:
+	var escaped: Array[String] = []
+	for words: String in parts:
+		escaped.append(words.replace("|", "\\|"))
+	return "|".join(PackedStringArray(escaped))
 
 
 ## Whether [param pattern] is words written whole rather than as a glob, which is how a caller
