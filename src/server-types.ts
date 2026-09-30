@@ -43,6 +43,14 @@ export interface GodotProcess {
   /** Where the keeper holding a spawned run listens for a stop, as its note says. */
   keeper?: string;
   /**
+   * How this server ended the run, when it did: through the keeper holding it, by a signal to its
+   * pid, or by asking the editor playing it. Said in the stop's answer, because a caller checking a
+   * stop looks there and not in the run's log.
+   */
+  endedThrough?: 'keeper' | 'signal' | 'editor';
+  /** Why a stop signalled nothing, when its pid no longer answered as the run. */
+  notEndedBecause?: string;
+  /**
    * The engine a spawned run was started with, which with its project and start is what says its
    * pid still means it before anything is signalled: see `judgeRun`. Absent for a played run, and
    * for one picked up from a note too old to name it, which is then judged on its project alone.
