@@ -29,6 +29,7 @@ func _run() -> void:
 	await _check_reading_as_drawn()
 	await _check_a_long_screen()
 	await _check_a_near_miss_counts_what_would_be_found()
+	await _check_names_as_alternatives()
 	node._cleanup()
 	# Not checked: it is gone either way by the time the fixture tears itself down.
 	var _took_directory: Error = DirAccess.remove_absolute(directory)
@@ -111,6 +112,76 @@ func _check_a_near_miss_counts_what_would_be_found() -> void:
 	):
 		_fail("counted as findable where hidden nodes are found: %s" % str(shown_too))
 	shut.queue_free()
+
+
+## A name given as alternatives, the way `says` beside it takes them. Read as one glob, `Hero|Dragon`
+## matched no node, and the near-miss count looked for a name containing the bar, so the empty answer
+## came with no note at all.
+func _check_names_as_alternatives() -> void:
+	var cast: Node2D = Node2D.new()
+	cast.name = "Cast"
+	root.add_child(cast)
+	for called: String in ["Hero", "Heroine"]:
+		var person: Node2D = Node2D.new()
+		person.name = called
+		cast.add_child(person)
+	var docket: Label = Label.new()
+	docket.name = "Docket"
+	cast.add_child(docket)
+	# A bar is legal in a node name, so one written as `\|` stays a bar.
+	var barred: Node = Node.new()
+	barred.name = "Left|Right"
+	cast.add_child(barred)
+	if str(barred.name) != "Left|Right":
+		_fail("the engine kept the bar in the name, which the rest of this assumes: %s" % barred.name)
+	await process_frame
+
+	var either: Dictionary = await _find_in_cast("Hero|Dragon")
+	if _paths(either) != ["/root/Cast/Hero"] or either.has("note"):
+		_fail("a name of alternatives finds the node any one of them names: %s" % str(either))
+	var both: Dictionary = await _find_in_cast("heroine|HERO")
+	if _paths(both) != ["/root/Cast/Hero", "/root/Cast/Heroine"]:
+		_fail("each alternative is a whole name, case-insensitively: %s" % str(both))
+	var globbed: Dictionary = await _find_in_cast("Dragon|hero*")
+	if _paths(globbed) != ["/root/Cast/Hero", "/root/Cast/Heroine"]:
+		_fail("an alternative can be a glob: %s" % str(globbed))
+
+	var near: Dictionary = await _find_in_cast("ero|Dock")
+	var said: String = str(near.get("note", ""))
+	if (
+		near.get("count") != 0
+		or not said.contains('3 node names contain "ero" or "Dock"')
+		or not said.contains('"*ero*|*Dock*" would find')
+	):
+		_fail("a near miss is counted over every alternative and the glob offered keeps them: %s" % str(near))
+
+	var nothing: Dictionary = await _find_in_cast("|")
+	if nothing.get("type") != "error" or not str(nothing.get("message", "")).contains("names no node"):
+		_fail("a name of bars alone is refused rather than read as no filter: %s" % str(nothing))
+
+	var escaped: Dictionary = await _find_in_cast("Left\\|Right")
+	if _paths(escaped) != ["/root/Cast/Left|Right"]:
+		_fail("a bar written as \\| is part of the name: %s" % str(escaped))
+	var split: Dictionary = await _find_in_cast("Left|Right")
+	if split.get("count") != 0:
+		_fail("and one written bare separates two names neither of which is there: %s" % str(split))
+	# The glob offered is read back by the same split, so a bar inside a word stays escaped in it.
+	var inside: Dictionary = await _find_in_cast("eft\\|Ri")
+	if inside.get("count") != 0 or not str(inside.get("note", "")).contains('"*eft\\|Ri*" would find'):
+		_fail("a near miss on a word with a bar in it offers a glob that keeps the bar: %s" % str(inside))
+	cast.queue_free()
+
+
+func _find_in_cast(name_pattern: String) -> Dictionary:
+	return await node._execute_command("find_nodes", {"name": name_pattern, "root": "/root/Cast"})
+
+
+func _paths(reply: Dictionary) -> Array[String]:
+	var paths: Array[String] = []
+	var nodes: Array = reply.get("nodes", [])
+	for entry: Dictionary in nodes:
+		paths.append(str(entry.get("path", "")))
+	return paths
 
 
 ## A RichTextLabel reads as its words, not its markup. Its text is the BBCode when it reads BBCode,
