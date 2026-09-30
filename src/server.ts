@@ -4942,6 +4942,15 @@ class GodotServer {
     }
   }
 
+  /** The run a status answer is about, named the way editor_output names it. */
+  private runNamed(run: GodotProcess): { pid: number | null; project?: string; adopted?: true } {
+    return {
+      pid: run.pid ?? this.announcedPidOf(run) ?? run.announcedPid ?? null,
+      ...(run.throughEditor || run.projectPath === null ? {} : { project: run.projectPath }),
+      ...(run.pickedUp === true ? { adopted: true as const } : {}),
+    };
+  }
+
   /** editor_status: the three things an agent asks before doing anything else, in one answer. */
   private async handleEditorStatus(): Promise<ToolResponse> {
     const located = await this.locator.find();
@@ -5008,10 +5017,11 @@ class GodotServer {
       return {
         playing,
         active,
+        run: current === null ? null : this.runNamed(current),
         hold: current === null ? {} : await this.holdOf(current, active),
       };
     })();
-    const [games, { playing, active, hold }, scan, editorStatus] = await Promise.all([
+    const [games, { playing, active, run, hold }, scan, editorStatus] = await Promise.all([
       pinged,
       asked,
       this.editorScanState(),
@@ -5037,6 +5047,11 @@ class GodotServer {
         // The record too, or "is something running" answers no about a run this server did not
         // start, which after a reconnect is every run.
         processActive: active,
+        // Which run processActive is about. Without it the flag could not be tied to any entry in
+        // runtimes below, which on a machine running a bench fan-out lists dozens of games, and a run
+        // adopted after a reconnect read the same as one this server started (reported from
+        // ostinato, checking a kept run across a reconnect).
+        run,
         playingInEditor: playing,
         // The same three answers editor_output gives, for the same run: absent when there is no
         // run to ask about.
