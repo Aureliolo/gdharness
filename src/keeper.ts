@@ -17,7 +17,7 @@ import { closeSync, existsSync, mkdtempSync, openSync, readFileSync, rmSync, wri
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { throughHelper } from './desktop.js';
+import { DESKTOP_VARIABLE, throughHelper } from './desktop.js';
 import { type KeeperListening, listenForAStop } from './keeper-channel.js';
 import {
   KEEPER_SCRIPT,
@@ -95,8 +95,11 @@ async function startThroughHelper(
       error: errorFile,
       stop: stopFile,
     });
+    // The helper's environment is what it starts inherits, since the start names no other.
+    const envChanges =
+      spec.desktop === undefined ? spec.envChanges : { ...spec.envChanges, [DESKTOP_VARIABLE]: spec.desktop };
     const started = await startDirectly(
-      { ...spec, command: wrapper.command, args: wrapper.args },
+      { ...spec, command: wrapper.command, args: wrapper.args, envChanges },
       output,
       true,
       false,

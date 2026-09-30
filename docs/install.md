@@ -171,6 +171,12 @@ and `GDHARNESS_SILENT=1` in the server's environment makes that the default. The
 engine flags for a game it plays, so a silent run is started by the server and the `debug_*` tools
 do not reach it; `silent: false` plays through the editor as before.
 
+On that desktop Windows refuses to say where the pointer is, since it answers only for the desktop
+in use. Injected pointer input reaches the controls under it, their hover and tooltips, and the
+game's input handlers, but `get_mouse_position()` on the root window, and the positions derived
+from it, read a meaningless position: the engine asks Windows and does not check the refusal. The
+pointer answers from `runtime_input` say so under `pointer_note` for a game on that desktop.
+
 `editor_launch restart` waits ninety seconds for the old editor to close and ninety more for the new
 one to connect. A project whose import takes longer than that sets
 `GDHARNESS_EDITOR_RESTART_TIMEOUT_MS` in the server's environment.
