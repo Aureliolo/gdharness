@@ -6548,6 +6548,17 @@ function testAStopThatSignalsNothingSaysSo(): void {
     `the note says nothing was ended: ${refused.note}`,
   );
   assert.doesNotMatch(refused.note, /was ended\./, `and nowhere that it was: ${refused.note}`);
+  const why = 'that process started 14 seconds after the run had';
+  const said = stopVerdict({
+    wasRunning: true,
+    ending: 'refused',
+    endedPid: 4242,
+    throughEditor: false,
+    exitSignal: null,
+    clean: true,
+    notEndedBecause: why,
+  }).note;
+  assert.ok(said.includes(`(${why})`), `a refusal names the property the pid failed on: ${said}`);
 
   const gone = stopVerdict({
     wasRunning: true,
@@ -8389,6 +8400,12 @@ async function testAStopGoesThroughTheKeeper(): Promise<void> {
       get(parseTextContent(answered), 'stopped'),
       true,
       `the stop ends pid ${game}: ${textOf(answered)}`,
+    );
+    // Said in the answer too, which is where a caller checking the stop looks.
+    assert.equal(
+      get(parseTextContent(answered), 'endedThrough'),
+      logged.includes('through the keeper') ? 'keeper' : 'signal',
+      `the answer says how: ${textOf(answered)}`,
     );
     const output = textOf(await server.request('tools/call', { name: 'editor_output', arguments: {} })) ?? '';
     assert.ok(output.includes(logged), `the run says how it was ended, ${logged}: ${output}`);
@@ -14696,6 +14713,7 @@ async function testAStoppedRunIsStillTheOneAnswered(): Promise<void> {
       const stopped = await call('editor_run', { op: 'stop' });
       assert.equal(get(stopped, 'stopped'), true, JSON.stringify(stopped));
       assert.equal(get(stopped, 'endedPid'), null, JSON.stringify(stopped));
+      assert.equal(get(stopped, 'endedThrough'), 'editor', `the answer says how: ${JSON.stringify(stopped)}`);
       assert.match(
         text(get(stopped, 'note')),
         /Its game had not announced a runtime, so no process was named under endedPid/,

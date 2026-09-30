@@ -634,6 +634,8 @@ export function stopVerdict(stop: {
   readonly throughEditor: boolean;
   readonly exitSignal: string | null;
   readonly clean: boolean | undefined;
+  /** Which property of the run the pid no longer answered to, for a stop that was refused. */
+  readonly notEndedBecause?: string;
 }): StopVerdict {
   if (!stop.wasRunning) {
     return {
@@ -656,7 +658,7 @@ export function stopVerdict(stop: {
     return {
       stopped: false,
       notSignalled: stop.endedPid,
-      note: `Nothing was ended: pid ${stop.endedPid ?? 'unknown'} no longer answers as the process this run was started as (its engine, its project and when it started), so it was not signalled. If that process is still the game, end it yourself, for instance with runtime_invoke calling get_tree().quit() when the game has the runtime addon; if it is not, it belongs to something else.`,
+      note: `Nothing was ended: pid ${stop.endedPid ?? 'unknown'} no longer answers as the process this run was started as (${stop.notEndedBecause ?? 'its engine, its project and when it started'}), so it was not signalled. If that process is still the game, end it yourself, for instance with runtime_invoke calling get_tree().quit() when the game has the runtime addon; if it is not, it belongs to something else.`,
       withChildren: false,
     };
   }
@@ -6303,6 +6305,7 @@ class GodotServer {
         );
         return 'unreached';
       }
+      running.endedThrough = 'editor';
       // A game that announced no process is judged over by the editor saying so. Waiting on an empty
       // list of processes answered "gone" at once, whatever the editor was doing.
       if (announced === undefined) {
@@ -6341,6 +6344,7 @@ class GodotServer {
     if (why !== null) {
       clearTheRecord();
       running.endedHere = null;
+      running.notEndedBecause = why;
       running.log.record(
         'warning',
         `This run was not ended here: pid ${running.pid} no longer answers as the process the run was started as (${why}), so nothing was signalled. If that process is still the game, end it yourself; if it is not, it belongs to something else.`,
@@ -6381,6 +6385,9 @@ class GodotServer {
       running.exitCode = null;
       running.exitSignal = 'SIGTERM';
     }
+    if (landed) {
+      running.endedThrough = 'signal';
+    }
     clearTheRecord();
     // Written after the attempt rather than before it, so the line says what happened rather than
     // what was about to. A note that announces an act it has not performed is wrong for every run
@@ -6412,6 +6419,9 @@ class GodotServer {
     if (typeof asked !== 'string') {
       this.logDebug(`The keeper of pid ${pid} could not be asked to end it (${asked.unreached})`);
       return null;
+    }
+    if (asked === 'signalled') {
+      run.endedThrough = 'keeper';
     }
     const gone = await untilGone([pid]);
     if (gone) {
@@ -7844,10 +7854,15 @@ class GodotServer {
       throughEditor: stopped.throughEditor,
       exitSignal: stopped.exitSignal,
       clean: cleanVerdict(stopped),
+      ...(stopped.notEndedBecause === undefined ? {} : { notEndedBecause: stopped.notEndedBecause }),
     });
     return this.jsonTextResponse({
       stopped: verdict.stopped,
       through: stopped.throughEditor ? 'editor' : 'gdharness',
+      // How this stop ended it, for a stop that did: through the keeper holding the game, by a
+      // signal to its pid, or by asking the editor. A caller checking a stop reads the answer, and
+      // the run's log, where this was said before, is the one place nobody looked.
+      endedThrough: wasRunning ? stopped.endedThrough : undefined,
       // What was ended, named. One run is one process, and a game that started others is not one
       // of them: a bench fanning out to thirty-one workers with OS.create_process had the process
       // that prints ended and thirty left grinding, which went on writing their slice files until
@@ -7954,6 +7969,8 @@ class GodotServer {
       through: 'gdharness',
       endedPid: gone ? pid : undefined,
       stillGoing: gone ? undefined : pid,
+      // By number: no keeper holds a game no server here started.
+      ...(landed ? { endedThrough: 'signal' } : {}),
       ...childrenFields(ended),
       exitedBeforeStop: !landed,
       note: `${
