@@ -176,6 +176,7 @@ import {
   PLAY_STARTS_WITHIN_MS,
   PROJECT_FILE_ARGUMENTS,
   patienceForFrames,
+  previousRunHow,
   previousRunLeft,
   runIsUp,
   runtimeVerdict,
@@ -6560,6 +6561,18 @@ function testAStopThatSignalsNothingSaysSo(): void {
   }).note;
   assert.ok(said.includes(`(${why})`), `a refusal names the property the pid failed on: ${said}`);
 
+  // A start that ends the run before it says the same two things a stop does.
+  assert.deepEqual(previousRunHow({ pid: 7, ending: 'gone', through: 'keeper' }), {
+    endedPreviousRunThrough: 'keeper',
+  });
+  assert.deepEqual(previousRunHow({ pid: 7, ending: 'lingering', through: 'signal' }), {
+    endedPreviousRunThrough: 'signal',
+  });
+  assert.deepEqual(previousRunHow({ pid: 7, ending: 'refused', notEndedBecause: why }), {
+    previousRunLeftBecause: why,
+  });
+  assert.deepEqual(previousRunHow(null), {}, 'a start with no run before it says nothing of one');
+
   const gone = stopVerdict({
     wasRunning: true,
     ending: 'gone',
@@ -8458,6 +8471,28 @@ async function testAStopGoesThroughTheKeeper(): Promise<void> {
       unanswered,
       `gdharness ended pid ${unanswered}, which the operating system described as`,
     );
+
+    // A start that ends the run before it says how, as a stop does.
+    const earlier = await start(third, true);
+    const replacing = parseTextContent(
+      await third.request(
+        'tools/call',
+        {
+          name: 'editor_run',
+          arguments: { projectPath: project, op: 'start', headless: true, runtimeWaitMs: WINDOWED_BOOT_MS },
+        },
+        WINDOWED_BOOT_MS + ENGINE_CALL_TIMEOUT_MS,
+      ),
+    );
+    assert.equal(get(replacing, 'endedPreviousRun'), earlier, JSON.stringify(replacing));
+    assert.equal(
+      get(replacing, 'endedPreviousRunThrough'),
+      'keeper',
+      `the start says how it ended the run before it: ${JSON.stringify(replacing)}`,
+    );
+    const replacement = asNumber(get(replacing, 'runtime', 'pid'));
+    games.push(replacement);
+    await stop(third, replacement, `gdharness ended pid ${replacement} through the keeper holding it.`);
 
     // A keeper answering that the game has gone while it runs: the stop waits on the process, so the
     // answer cannot make a running game read as ended.

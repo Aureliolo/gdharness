@@ -698,6 +698,32 @@ export function stopVerdict(stop: {
 interface EndedRun {
   readonly pid: number | null;
   readonly ending: Ending;
+  /** How the start ended it, when it did: see `GodotProcess.endedThrough`. */
+  readonly through?: 'keeper' | 'signal' | 'editor';
+  /** Why nothing was signalled, for a run whose pid no longer answered as it. */
+  readonly notEndedBecause?: string;
+}
+
+/**
+ * How a start ended the run before it, and why it left one it did not end, as a stop says both. The
+ * answer is the only place this survives: the run's log, which also records it, is replaced by the
+ * new run's.
+ */
+export function previousRunHow(ended: EndedRun | null): {
+  endedPreviousRunThrough?: 'keeper' | 'signal' | 'editor';
+  previousRunLeftBecause?: string;
+} {
+  if (ended === null) {
+    return {};
+  }
+  return {
+    ...(ended.through === undefined || ended.ending === 'refused'
+      ? {}
+      : { endedPreviousRunThrough: ended.through }),
+    ...(ended.ending === 'refused' && ended.notEndedBecause !== undefined
+      ? { previousRunLeftBecause: ended.notEndedBecause }
+      : {}),
+  };
 }
 
 /**
@@ -5592,12 +5618,15 @@ class GodotServer {
     if (before !== null && (await this.runStillGoing(before))) {
       this.logDebug('Ending the running game before starting another');
       const endingFrom = Date.now();
+      const ending = await this.endActiveGame(
+        'editor_run start, which ends the run that was going before it starts another',
+        true,
+      );
       ended = {
         pid: before.pid ?? this.announcedPidOf(before) ?? null,
-        ending: await this.endActiveGame(
-          'editor_run start, which ends the run that was going before it starts another',
-          true,
-        ),
+        ending,
+        ...(before.endedThrough === undefined ? {} : { through: before.endedThrough }),
+        ...(before.notEndedBecause === undefined ? {} : { notEndedBecause: before.notEndedBecause }),
       };
       this.logDebug(`The running game was ${ended.ending} after ${Date.now() - endingFrom}ms`);
     }
@@ -5737,6 +5766,7 @@ class GodotServer {
       // here rather than looked for in the engine.
       endedPreviousRun: endedPreviousRun(ended),
       previousRunLeft: previousRunLeft(ended),
+      ...previousRunHow(ended),
       runtime: await this.runtimeUp(
         project.value.path,
         alreadyPlaying,
@@ -6022,6 +6052,7 @@ class GodotServer {
       debugPort: readNumber(playAnswer, 'debugPort'),
       endedPreviousRun: endedPreviousRun(ended),
       previousRunLeft: previousRunLeft(ended),
+      ...previousRunHow(ended),
       // What the game was told to stop on before it started, so a play that runs through a line
       // the caller asked for is checked against this rather than against memory. Absent when
       // nothing is held, and the refusals only when there were any.
