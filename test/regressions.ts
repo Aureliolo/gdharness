@@ -390,6 +390,136 @@ function testOneServerOneProjectRegression(): void {
   guest.close();
 }
 
+/**
+ * A process that greets without a server's mark is looked up before it is taken as the editor, and
+ * one whose command line makes it one job that quits is turned away (#834).
+ *
+ * A gate's `godot --headless --import` loaded the editor addon and was served as the editor, so a
+ * start for another project was refused while it ran, and the project's real editor, dialling in
+ * meanwhile, was the one turned away as a second connection. The reader is handed in, so each of
+ * its answers, and the wait for one, can be put to the bridge on purpose.
+ */
+async function testAOneShotEngineRunIsTurnedAwayAtTheBridge(): Promise<void> {
+  const mine = join(tmpdir(), 'gdharness-one-shot-bridge');
+  const hello = (socket: FakeSocket, pid: number, opened = false): void => {
+    socket.emit(
+      'message',
+      Buffer.from(
+        JSON.stringify({
+          type: 'godot_ready',
+          project_path: mine,
+          editor_pid: pid,
+          opened_by_a_server: opened,
+        }),
+      ),
+    );
+  };
+  const answers = new Map<number, string | null | undefined | Error>([
+    [101, '--import'],
+    [102, null],
+    [103, new Error('the listing was refused')],
+  ]);
+  const asked: number[] = [];
+  let release: ((option: string | null) => void) | null = null;
+  const bridge = createBridge(0, 1000, '127.0.0.1', mine);
+  bridge.identifyEditorsWith(async (pid) => {
+    asked.push(pid);
+    if (pid === 104) {
+      return await new Promise<string | null>((done) => {
+        release = done;
+      });
+    }
+    const answer = answers.get(pid);
+    if (answer instanceof Error) {
+      throw answer;
+    }
+    return answer;
+  });
+  const settled = (): Promise<void> => delay(20);
+  // Every socket the bridge takes holds a keepalive timer, and one left open by a failing assertion
+  // kept the whole run from ending, so each is closed however the case ends.
+  const opened: FakeSocket[] = [];
+  const socket = (name: string): FakeSocket => {
+    const made = new FakeSocket(name);
+    opened.push(made);
+    return made;
+  };
+  try {
+    await turnedAwayAtTheBridge(bridge, socket, hello, settled, asked, () => release);
+  } finally {
+    for (const made of opened) {
+      if (made.readyState !== 3) {
+        made.close();
+      }
+    }
+  }
+}
+
+async function turnedAwayAtTheBridge(
+  bridge: ReturnType<typeof createBridge>,
+  socket: (name: string) => FakeSocket,
+  hello: (socket: FakeSocket, pid: number, opened?: boolean) => void,
+  settled: () => Promise<void>,
+  asked: number[],
+  released: () => ((option: string | null) => void) | null,
+): Promise<void> {
+  // An import: turned away with its own code, and named.
+  const importing = socket('import');
+  connectFake(bridge, importing);
+  hello(importing, 101);
+  await settled();
+  assert.equal(
+    importing.closedWith?.code,
+    4002,
+    `an import is turned away: ${JSON.stringify(importing.closedWith)}`,
+  );
+  assert.match(importing.closedWith.reason, /pid 101 was started with --import/);
+  assert.equal(bridge.getStatus().connected, false, 'and is not the editor');
+  assert.equal(bridge.getStatus().turnedAway?.pid, 101, 'and status names it');
+  assert.equal(bridge.getStatus().turnedAway?.option, '--import');
+
+  // The same process dialling in again is told at once, without another look at the machine.
+  const again = socket('import again');
+  connectFake(bridge, again);
+  hello(again, 101);
+  assert.equal(again.closedWith?.code, 4002, 'a known one-shot run is turned away at once');
+  assert.deepEqual(asked, [101], 'without its command line being read again');
+
+  // While the answer is coming the process is not counted, and once it says editor, it is.
+  const waiting = socket('waiting');
+  connectFake(bridge, waiting);
+  hello(waiting, 104);
+  await settled();
+  assert.equal(bridge.getStatus().connected, false, 'not counted while it is being looked up');
+  assert.equal(bridge.getStatus().identifying, true, 'and status says it is being looked up');
+  const release = released();
+  assert.ok(release !== null, 'the reader was asked');
+  release(null);
+  await settled();
+  assert.equal(bridge.getStatus().connected, true, 'an editor is served once its command line says so');
+  assert.equal(bridge.getStatus().identifying, undefined);
+  assert.equal(waiting.closedWith, null, 'and is not closed on the way');
+  waiting.close();
+
+  // A plain editor, and one whose command line could not be read, are served as before.
+  for (const pid of [102, 103]) {
+    const editor = socket(`editor ${pid}`);
+    connectFake(bridge, editor);
+    hello(editor, pid);
+    await settled();
+    assert.equal(bridge.getStatus().connected, true, `pid ${pid} is served`);
+    editor.close();
+  }
+
+  // An editor a server opened is that server's, and is not looked up at all.
+  const marked = socket('opened');
+  connectFake(bridge, marked);
+  hello(marked, 105, true);
+  assert.equal(bridge.getStatus().connected, true, "a server's editor is served at once");
+  assert.equal(asked.includes(105), false, 'without being looked up');
+  marked.close();
+}
+
 function testSceneToolsVectorRegression(): void {
   const godotPath = resolveGodotPath();
   if (!godotPath) {
@@ -6703,6 +6833,23 @@ function testAGamesOwnArgumentsDoNotMakeItAnEditor(): void {
     'C:/Games/My Game',
     'the editor writes a space in the project path as %20, and the engine reads it back as a space',
   );
+
+  // Whether the run is one job that quits, which is what tells a gate's import from an editor.
+  assert.equal(readCommandLine(`godot --headless --path ${project} --import`).oneShot, '--import');
+  assert.equal(
+    readCommandLine(`godot -e --headless --path ${project} --quit-after 600`).oneShot,
+    '--quit-after',
+  );
+  assert.equal(
+    readCommandLine(`godot -e --headless --path ${project}`).oneShot,
+    null,
+    'an editor is not one',
+  );
+  assert.equal(
+    readCommandLine(`godot --path ${project} -- --import`).oneShot,
+    null,
+    "and an option among the game's own arguments is not the engine's",
+  );
 }
 
 /**
@@ -10832,12 +10979,16 @@ async function testWhatALaunchedEditorDroppedIsReadAsItArrives(): Promise<void> 
           socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result: {} }));
         }
       });
+      // The launched one says a server opened it, as the addon in an editor a server launched does:
+      // the greeting without it is one no current addon sends, and the bridge looks such a process
+      // up before taking it, which is a different case from the one read here.
       socket.send(
         JSON.stringify({
           type: 'godot_ready',
           project_path: project,
           addon_version: SERVER_VERSION,
           editor_pid: whose === 'launched' ? pid : pid + 1,
+          opened_by_a_server: whose === 'launched',
         }),
       );
       // Read off the server's own log rather than a status call, because the first status call is
@@ -17714,16 +17865,16 @@ function pngPixels(png: Buffer): PngPixels {
 }
 
 /**
- * A headless engine run nobody opened as an editor does not connect to the bridge.
+ * An engine run that does one job and quits is turned away by a real server, and an editor opened
+ * by hand is not.
  *
  * A gate's `godot --headless --path <main> --import` loaded the editor addon, which connected as
  * the editor, and for as long as the import ran a start for another project on the same server was
- * refused as "the editor on this bridge has <main> open" (#834). The addon cannot see the run's
- * options, so it tells the two apart by the mark a server puts on a hidden editor it opens. The
- * closest thing to the target is that same hidden editor without the mark, so it is the one judged:
- * timed against the marked one, which does connect, and kept up three times as long. An import can
- * finish before it would have connected, so it is checked as well rather than instead. Each
- * connection the bridge takes is logged, so one that came and went between two looks is still seen.
+ * refused as "the editor on this bridge has <main> open" (#834). The engine hands an editor plugin
+ * none of its options, so the server reads the process's command line. The closest thing to the
+ * target is an editor opened by hand, headless and unmarked as the one the editor leg runs, so it
+ * is the one that must be served; the same editor told `--quit-after` is the one that must not. An
+ * import can finish before it greets, so it is checked as well rather than instead.
  */
 async function testAOneShotEngineRunIsNotTheEditor(): Promise<void> {
   const godotPath = resolveGodotPath();
@@ -17756,15 +17907,26 @@ async function testAOneShotEngineRunIsNotTheEditor(): Promise<void> {
   });
   const env = { ...process.env, GDHARNESS_BRIDGE_PORT: String(port), GDHARNESS_RUNTIME_DIR: runtimeDir };
   const engines: ChildProcess[] = [];
-  const engine = (args: string[], opened = false): ChildProcess => {
-    const started = spawn(godotPath, args, {
-      env: opened ? { ...env, [OPENED_BY_A_SERVER]: '1' } : env,
-      stdio: 'ignore',
-    });
+  // What each engine printed, so a failure says what the engine said rather than only that it did
+  // not arrive.
+  const printed = new Map<number, string[]>();
+  const engine = (args: string[]): ChildProcess => {
+    const started = spawn(godotPath, args, { env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const lines: string[] = [];
+    printed.set(started.pid ?? 0, lines);
+    started.stdout.on('data', (chunk: Buffer) => lines.push(String(chunk)));
+    started.stderr.on('data', (chunk: Buffer) => lines.push(String(chunk)));
     engines.push(started);
     return started;
   };
-  const connections = (): number => server.stderr.split('Godot editor connected').length - 1;
+  const said = (child: ChildProcess): string => (printed.get(child.pid ?? 0) ?? []).join('').slice(-4000);
+  const editorStatus = async (): Promise<unknown> =>
+    get(
+      parseTextContent(await server.request('tools/call', { name: 'editor_status', arguments: {} })),
+      'editor',
+    );
+  const identified = (pid: number | undefined): boolean =>
+    server.stderr.includes(`Godot editor identified: pid ${pid}`);
   // Bounded, and the whole tree after the handle: a wait on an engine that ignored its kill held the
   // suite for twenty minutes with nothing said.
   const end = async (child: ChildProcess): Promise<void> => {
@@ -17785,27 +17947,40 @@ async function testAOneShotEngineRunIsNotTheEditor(): Promise<void> {
   try {
     await server.initialize('regression-test');
 
-    // The hidden editor a server opens, marked as one: it connects, and how long that takes sizes
-    // the window the unmarked one below is given to do the same.
-    const from = Date.now();
-    const editor = engine(['-e', '--headless', '--path', project], true);
-    for (let waited = 0; waited < 90_000 && connections() === 0; waited += 250) {
+    // An editor opened by hand, headless and unmarked: looked up, and served.
+    const editor = engine(['-e', '--headless', '--path', project]);
+    for (let waited = 0; waited < 90_000 && !identified(editor.pid); waited += 250) {
       await delay(250);
     }
-    const tookMs = Date.now() - from;
-    assert.equal(
-      connections(),
-      1,
-      `the marked editor should connect, or this proves nothing:\n${server.stderr}`,
+    assert.ok(
+      identified(editor.pid),
+      `an editor opened by hand should be served:\n${server.stderr}\nthe editor said:\n${said(editor)}`,
     );
+    const served = await editorStatus();
+    assert.equal(get(served, 'connected'), true, JSON.stringify(served));
+    assert.equal(get(served, 'editorPid'), editor.pid, JSON.stringify(served));
     await end(editor);
 
-    // The same editor without the mark, which is every headless job a command line starts.
-    const unmarked = engine(['-e', '--headless', '--path', project]);
-    await delay(Math.max(10_000, tookMs * 3));
-    assert.equal(unmarked.exitCode, null, 'the unmarked editor should still be running when it is judged');
-    assert.equal(connections(), 1, `a headless editor no server opened is not the editor:\n${server.stderr}`);
-    await end(unmarked);
+    // The same editor told to quit after more frames than it will draw: one job that quits.
+    const quitting = engine(['-e', '--headless', '--path', project, '--quit-after', '100000000']);
+    for (let waited = 0; waited < 90_000; waited += 250) {
+      const away = get(await editorStatus(), 'turnedAway');
+      if (away !== undefined && get(away, 'pid') === quitting.pid) {
+        break;
+      }
+      await delay(250);
+    }
+    const away = await editorStatus();
+    assert.equal(get(away, 'turnedAway', 'pid'), quitting.pid, `it is turned away: ${JSON.stringify(away)}`);
+    assert.equal(get(away, 'turnedAway', 'option'), '--quit-after', JSON.stringify(away));
+    assert.equal(get(away, 'connected'), false, 'and is not the editor');
+    assert.equal(identified(quitting.pid), false, `and was never served:\n${server.stderr}`);
+    // Told once, and it stops dialling in: the addon backs off from three seconds, so an addon that
+    // kept trying would have been turned away again inside this wait.
+    await delay(8_000);
+    const told = server.stderr.split(`Turning away an engine run: pid ${quitting.pid} `).length - 1;
+    assert.equal(told, 1, `a run turned away stops dialling in:\n${server.stderr}`);
+    await end(quitting);
 
     // The run reported: an import, and a start for another project while it runs.
     const importing = engine(['--headless', '--path', project, '--import']);
@@ -17824,13 +17999,13 @@ async function testAOneShotEngineRunIsNotTheEditor(): Promise<void> {
         },
         ENGINE_CALL_TIMEOUT_MS,
       );
-      const said = textOf(start) ?? '';
+      const answered = textOf(start) ?? '';
       assert.doesNotMatch(
-        said,
+        answered,
         /editor on this bridge/,
-        `a start for another project during an import: ${said}`,
+        `a start for another project during an import: ${answered}`,
       );
-      assert.equal(typeof get(parseTextContent(start), 'pid'), 'number', `and it starts: ${said}`);
+      assert.equal(typeof get(parseTextContent(start), 'pid'), 'number', `and it starts: ${answered}`);
       await server.request(
         'tools/call',
         { name: 'editor_run', arguments: { op: 'stop' } },
@@ -17843,7 +18018,7 @@ async function testAOneShotEngineRunIsNotTheEditor(): Promise<void> {
       await delay(250);
     }
     assert.equal(importing.exitCode, 0, 'the import should finish on its own');
-    assert.equal(connections(), 1, `an --import run is not the editor:\n${server.stderr}`);
+    assert.equal(identified(importing.pid), false, `an --import run is never served:\n${server.stderr}`);
   } finally {
     for (const started of engines) {
       await end(started);
@@ -19556,18 +19731,26 @@ function testACommandLineIsReadTheWayTheEngineReadsIt(): void {
     executable: 'Godot_v4.7.2-stable_win64.exe',
     projectPath: 'C:\\Users\\Me\\My Project',
     editor: false,
+    oneShot: null,
   });
   const posix = readCommandLine('/opt/godot/Godot --headless --path /home/me/My Project res://bench.tscn');
-  assert.deepEqual(posix, { executable: 'Godot', projectPath: '/home/me/My Project', editor: false });
+  assert.deepEqual(posix, {
+    executable: 'Godot',
+    projectPath: '/home/me/My Project',
+    editor: false,
+    oneShot: null,
+  });
   assert.deepEqual(readCommandLine('godot --path /p'), {
     executable: 'godot',
     projectPath: '/p',
     editor: false,
+    oneShot: null,
   });
   assert.deepEqual(readCommandLine('godot --path /p --headless'), {
     executable: 'godot',
     projectPath: '/p',
     editor: false,
+    oneShot: null,
   });
   assert.equal(readCommandLine('godot -e --path /p').editor, true);
   assert.equal(readCommandLine('godot --editor --path /p').editor, true);
@@ -19579,8 +19762,9 @@ function testACommandLineIsReadTheWayTheEngineReadsIt(): void {
     executable: 'node',
     projectPath: null,
     editor: false,
+    oneShot: null,
   });
-  assert.deepEqual(readCommandLine(''), { executable: '', projectPath: null, editor: false });
+  assert.deepEqual(readCommandLine(''), { executable: '', projectPath: null, editor: false, oneShot: null });
   assert.equal(
     readCommandLine('godot --path').projectPath,
     null,
@@ -24378,7 +24562,11 @@ async function testTheEditorAnswersOnlyForItsOwnProject(): Promise<void> {
     for (let waited = 0; waited < 10_000 && !knows; waited += 100) {
       await delay(100);
       const status = await server.request('tools/call', { name: 'editor_status', arguments: {} });
-      knows = text(get(parseTextContent(status), 'editor', 'projectPath')) === open;
+      // Connected as well as named: a process that greets without a server's mark is looked up
+      // before it is taken as the editor, and until then nothing is refused on its account.
+      knows =
+        text(get(parseTextContent(status), 'editor', 'projectPath')) === open &&
+        get(parseTextContent(status), 'editor', 'connected') === true;
     }
     assert.ok(knows, 'the fixture editor should have told the server its project, or this proves nothing');
 
@@ -26289,6 +26477,7 @@ function testEveryFixtureIsCalled(): void {
 }
 
 const TESTS: (() => void | Promise<void>)[] = [
+  testAOneShotEngineRunIsTurnedAwayAtTheBridge,
   testACaptureSaysWhatPartOfTheWindowItIs,
   testEveryFileArgumentIsContained,
   testDiagnosticsSayWhenTheEditorIsBehind,

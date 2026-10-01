@@ -13,22 +13,7 @@ var _tool_executor: ToolExecutor
 var _status_label: Label
 
 
-## Whether this process is somebody's editor rather than a job run from a command line: one drawn
-## on a display, or a hidden one a gdharness server opened and marked as its own.
-##
-## A gate's `godot --headless --path <project> --import` loaded this addon and connected as the
-## editor, and a start for another project on the same server was refused for as long as it ran.
-## What a run is for cannot be read from its options: an editor plugin is handed none of them, and
-## OS.get_cmdline_args() answered ["--editor"] under --import and under --quit-after alike, measured
-## on 4.7.2. Every such job runs headless, though, and the one headless editor that is somebody's
-## is the hidden one a server opens, which it marks in the editor's environment.
-static func is_an_editor(display: String, opened_by_a_server: bool) -> bool:
-	return display != "headless" or opened_by_a_server
-
-
 func _enter_tree() -> void:
-	if not is_an_editor(DisplayServer.get_name(), OS.has_environment(BridgeClient.OPENED_BY_A_SERVER)):
-		return
 	_client = BridgeClient.new()
 	_client.name = "GdharnessBridgeClient"
 	add_child(_client)

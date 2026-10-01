@@ -133,6 +133,7 @@ import {
   ancestorsIn,
   type CommandLineRead,
   descendantsIn,
+  oneShotOptionOf,
   type ProcessTree,
   processTree,
   readCommandLine,
@@ -1848,6 +1849,7 @@ class GodotServer {
   constructor() {
     this.ownProject = envValue('GDHARNESS_PROJECT') ?? null;
     this.godotBridge = getDefaultBridge(this.ownProject);
+    this.godotBridge.identifyEditorsWith(oneShotOptionOf);
     this.godotBridge.on('godot_connected', () => {
       this.settleTheLaunchReading();
     });
