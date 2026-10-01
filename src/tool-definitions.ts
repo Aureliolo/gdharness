@@ -1300,7 +1300,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'runtime_capture',
     description:
-      "A picture of the running game: the whole screen or one viewport, as an image. The whole screen includes the game's own dialogs and popups where they sit, also when a project opens them as windows of their own (subwindows not embedded). Needs the game running with a window. A capture asked for before the game's first frame is drawn waits for that frame, since the game announces itself before it and the viewport holds nothing it drew until then.",
+      "A picture of the running game: the whole screen, one region or node of it at full resolution, or one viewport, as an image. The whole screen includes the game's own dialogs and popups where they sit, also when a project opens them as windows of their own (subwindows not embedded). Needs the game running with a window. A capture asked for before the game's first frame is drawn waits for that frame, since the game announces itself before it and the viewport holds nothing it drew until then.",
     parameters: {
       projectPath: RUNNING_PROJECT_PATH,
       pid: RUNNING_PID,
@@ -1320,6 +1320,25 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         minimum: 1,
         description:
           "Scale the image to this height. Given alone, the width keeps the picture's proportions.",
+      },
+      region: {
+        type: 'object',
+        ops: ['screenshot'],
+        description:
+          "screenshot: capture only this rectangle of the window, at the game's own pixels: x, y, width and height in window pixels, or the window rectangle runtime_inspect rect answers, passed as it came. A region partly outside the window is cut to it and the answer says clipped; one wholly outside is refused. The answer names the region captured in window pixels, and drawnAt when the project draws at its own size and stretches that to the window, since the picture then has the game's pixels rather than the window's.",
+      },
+      nodePath: {
+        type: 'string',
+        ops: ['screenshot'],
+        description:
+          "screenshot: capture only where this node is drawn, as runtime_inspect rect answers it: a Control's rectangle, what a 3D node's geometry covers, or what a Sprite2D draws. A node with a position and no extent is refused; give region around it instead. Not with region.",
+      },
+      zoom: {
+        type: 'integer',
+        minimum: 1,
+        maximum: 16,
+        description:
+          'Enlarge the picture this many times, each pixel made a square of pixels rather than blended with its neighbours, so a thin line or a corner can be read. Not with width or height. Default 1.',
       },
       outputPath: {
         type: 'string',
