@@ -22,6 +22,26 @@ const SECOND_CONNECTION_CLOSE_CODE = 4000;
  */
 const OTHER_PROJECT_CLOSE_CODE = 4001;
 
+/**
+ * An engine run that loaded the editor addon to do one job and quit, such as a gate's
+ * `--headless --import`, told so rather than served. Its own code so the addon stops dialling in:
+ * the run is no editor however often it tries.
+ */
+const ONE_SHOT_CLOSE_CODE = 4002;
+
+/** What the bridge last turned away as a one-shot engine run, for editor_status to say. */
+export interface TurnedAway {
+  readonly pid: number;
+  readonly option: string;
+  readonly at: Date;
+}
+
+/**
+ * The option that makes a process one job that quits, null for none, undefined when it cannot be
+ * told. Given to the server's own bridge; a bridge without it takes every editor that greets.
+ */
+export type OneShotReader = (pid: number) => Promise<string | null | undefined>;
+
 /** The editor addon reads GDHARNESS_BRIDGE_PORT too, so the two agree by construction. */
 function resolveDefaultBridgePort(): number {
   return portFromEnv('GDHARNESS_BRIDGE_PORT', DEFAULT_PORT);
@@ -146,6 +166,11 @@ interface GodotConnectionInfo {
    * it here. Undefined for an addon too old to say, which is one that never turned it on.
    */
   syncsBreakpoints?: boolean | undefined;
+  /**
+   * True while the bridge reads the command line of a process that greeted without a server's
+   * mark, before it is taken as the editor. Until then it is not counted as connected.
+   */
+  identifying?: boolean;
 }
 
 interface BridgeStatus {
@@ -164,6 +189,10 @@ interface BridgeStatus {
   openedByAServer?: boolean | undefined;
   startedByAnEditor?: boolean | undefined;
   syncsBreakpoints?: boolean | undefined;
+  /** The last engine run turned away for being one job that quits rather than an editor. */
+  turnedAway?: TurnedAway | undefined;
+  /** A process has greeted and is being looked up before it is taken as the editor. */
+  identifying?: boolean | undefined;
   pendingRequests: number;
   queuedResources: number;
   /** When an editor already up could first have reached this bridge, absent until it listens. */
@@ -261,6 +290,10 @@ export class GodotBridge extends EventEmitter {
   private socket: WebSocket | null = null;
   private pingInterval: NodeJS.Timeout | null = null;
   private connectionInfo: GodotConnectionInfo | null = null;
+  private oneShotReader: OneShotReader | null = null;
+  /** Processes already found to be one-shot runs, so one that dials in again is told at once. */
+  private readonly oneShots = new Map<number, string>();
+  private turnedAway: TurnedAway | null = null;
   private pendingRequests = new Map<string, PendingRequest>();
   private resourceQueues = new Map<string, Promise<void>>();
 
@@ -289,6 +322,21 @@ export class GodotBridge extends EventEmitter {
     this.host = host;
     this.timeoutMs = timeoutMs;
     this.ownProject = ownProject;
+  }
+
+  /**
+   * Has every process that greets without a server's mark looked up before it is taken as the
+   * editor, and turned away when its command line makes it one job that quits.
+   *
+   * A gate's `godot --headless --path <project> --import` loads the editor addon, which connected
+   * as the editor: a start for another project on the same server was refused for as long as the
+   * import ran, and the project's real editor, dialling in meanwhile, was the one turned away as a
+   * second connection. The addon cannot tell, since the engine hands a plugin none of its options,
+   * so the bridge reads them from the process. An editor a server opened is marked as such and is
+   * not looked up.
+   */
+  public identifyEditorsWith(reader: OneShotReader): void {
+    this.oneShotReader = reader;
   }
 
   /**
@@ -441,26 +489,33 @@ export class GodotBridge extends EventEmitter {
   }
 
   public isConnected(): boolean {
-    return this.socket?.readyState === WebSocket.OPEN;
+    return this.socket?.readyState === WebSocket.OPEN && this.connectionInfo?.identifying !== true;
   }
 
   public getStatus(): BridgeStatus {
+    // A process still being looked up is not yet the editor, so nothing it said about itself is
+    // reported as the editor's: a project named before it is served read as an editor that had
+    // that project open, and anything waiting on the name went on to act on it.
+    const identifying = this.connectionInfo?.identifying === true;
+    const editor = identifying ? null : this.connectionInfo;
     return {
       host: this.host,
       port: this.port,
       connected: this.isConnected(),
-      projectPath: this.connectionInfo?.projectPath,
-      connectedAt: this.connectionInfo?.connectedAt,
-      lastPongAt: this.connectionInfo?.lastPongAt,
-      addonVersion: this.connectionInfo?.addonVersion,
-      addonDigest: this.connectionInfo?.addonDigest,
-      editorPid: this.connectionInfo?.editorPid,
-      lspPort: this.connectionInfo?.lspPort,
-      dapPort: this.connectionInfo?.dapPort,
-      debugPort: this.connectionInfo?.debugPort,
-      openedByAServer: this.connectionInfo?.openedByAServer,
-      startedByAnEditor: this.connectionInfo?.startedByAnEditor,
-      syncsBreakpoints: this.connectionInfo?.syncsBreakpoints,
+      projectPath: editor?.projectPath,
+      connectedAt: editor?.connectedAt,
+      lastPongAt: editor?.lastPongAt,
+      addonVersion: editor?.addonVersion,
+      addonDigest: editor?.addonDigest,
+      editorPid: editor?.editorPid,
+      lspPort: editor?.lspPort,
+      dapPort: editor?.dapPort,
+      debugPort: editor?.debugPort,
+      openedByAServer: editor?.openedByAServer,
+      startedByAnEditor: editor?.startedByAnEditor,
+      syncsBreakpoints: editor?.syncsBreakpoints,
+      turnedAway: this.turnedAway ?? undefined,
+      identifying: identifying ? true : undefined,
       pendingRequests: this.pendingRequests.size,
       queuedResources: this.resourceQueues.size,
       listeningSince: this.listeningSince ?? undefined,
@@ -647,6 +702,11 @@ export class GodotBridge extends EventEmitter {
           this.connectionInfo.syncsBreakpoints =
             typeof message.syncs_breakpoints === 'boolean' ? message.syncs_breakpoints : undefined;
           this.log('info', `Godot ready: ${message.project_path}`);
+          const pid = this.connectionInfo.editorPid;
+          if (!this.connectionInfo.openedByAServer && pid !== undefined && this.oneShotReader !== null) {
+            this.identify(pid);
+            return;
+          }
           this.emitBridgeEvent('godot_connected', { projectPath: message.project_path });
         }
         return;
@@ -774,6 +834,55 @@ export class GodotBridge extends EventEmitter {
     this.connectionInfo = null;
     this.stopKeepalive();
     stranger?.close(OTHER_PROJECT_CLOSE_CODE, said);
+  }
+
+  /**
+   * Takes the process that just greeted as the editor once its command line says it is one, and
+   * turns it away when the command line makes it one job that quits. Until the answer comes the
+   * connection is not counted, so nothing is refused or sent to it on the strength of it.
+   *
+   * A command line that cannot be read is taken as an editor's, which is what every connection was
+   * before this asked: the bridge errs towards serving a real editor rather than refusing one.
+   */
+  private identify(pid: number): void {
+    const known = this.oneShots.get(pid);
+    if (known !== undefined) {
+      this.turnAway(pid, known);
+      return;
+    }
+    const info = this.connectionInfo;
+    const socket = this.socket;
+    const reader = this.oneShotReader;
+    if (info === null || reader === null) {
+      return;
+    }
+    info.identifying = true;
+    void reader(pid)
+      .catch(() => undefined)
+      .then((option) => {
+        if (this.socket !== socket || this.connectionInfo !== info) {
+          return;
+        }
+        if (typeof option === 'string') {
+          this.oneShots.set(pid, option);
+          this.turnAway(pid, option);
+          return;
+        }
+        info.identifying = false;
+        this.log('info', `Godot editor identified: pid ${pid}`);
+        this.emitBridgeEvent('godot_connected', { projectPath: info.projectPath });
+      });
+  }
+
+  private turnAway(pid: number, option: string): void {
+    const said = `pid ${pid} was started with ${option}, which does one job and quits, so it is not an editor`;
+    this.log('info', `Turning away an engine run: ${said}`);
+    this.turnedAway = { pid, option, at: new Date() };
+    const run = this.socket;
+    this.socket = null;
+    this.connectionInfo = null;
+    this.stopKeepalive();
+    run?.close(ONE_SHOT_CLOSE_CODE, said);
   }
 
   private handleDisconnect(disconnectedSocket: WebSocket | null, reason: Error): void {

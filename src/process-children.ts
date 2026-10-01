@@ -280,7 +280,40 @@ export interface CommandLineRead {
   readonly projectPath: string | null;
   /** Whether the line asks for the editor, which a game is never given. */
   readonly editor: boolean;
+  /**
+   * The option that makes this run one job that quits, such as `--import`, or null when it has
+   * none. Such a run loads the editor and its plugins, plays nothing and is nobody's editor.
+   */
+  readonly oneShot: string | null;
 }
+
+/**
+ * The engine's options that make a run do one job and quit: import, export, write documentation,
+ * run a script, convert, dump or validate an API, or load and quit. An editor plugin is handed none
+ * of them (OS.get_cmdline_args() answered ["--editor"] under --import and under --quit-after alike,
+ * measured on 4.7.2), so whether a run that connects is an editor is read here from its command line.
+ */
+const ONE_SHOT_OPTIONS: readonly string[] = [
+  '--import',
+  '--quit',
+  '--quit-after',
+  '--export-release',
+  '--export-debug',
+  '--export-pack',
+  '--export-patch',
+  '--doctool',
+  '--gdscript-docs',
+  '--script',
+  '-s',
+  '--check-only',
+  '--build-solutions',
+  '--dump-gdextension-interface',
+  '--dump-extension-api',
+  '--dump-extension-api-with-docs',
+  '--validate-extension-api',
+  '--convert-3to4',
+  '--validate-conversion-3to4',
+];
 
 /**
  * [param command] read the way the engine reads its own: the executable first, then `--path` and
@@ -314,7 +347,22 @@ export function readCommandLine(command: string): CommandLineRead {
     executable,
     projectPath,
     editor: words.some((word) => word === '-e' || word === '--editor'),
+    oneShot: words.find((word) => ONE_SHOT_OPTIONS.includes(word)) ?? null,
   };
+}
+
+/**
+ * The option that makes process [param pid] one job that quits, null when its command line has
+ * none, or undefined when the platform would not say or no such process is listed. Read when an
+ * editor connects without a server's mark, to tell a gate's import from somebody's editor.
+ */
+export async function oneShotOptionOf(pid: number): Promise<string | null | undefined> {
+  const tree = await processTree();
+  const listed = tree?.get(pid);
+  if (listed === undefined || listed.command === '') {
+    return undefined;
+  }
+  return readCommandLine(listed.command).oneShot;
 }
 
 /** [param command] split into its words, with double quotes grouping and removed. */

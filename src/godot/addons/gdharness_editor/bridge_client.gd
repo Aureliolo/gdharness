@@ -25,6 +25,10 @@ const MAX_RECONNECT_DELAY: float = 30.0
 ## What a server closes with when the editor that said hello belongs to another project. Kept in
 ## step with `OTHER_PROJECT_CLOSE_CODE` in src/godot-bridge.ts.
 const ELSEWHERE_CLOSE_CODE: int = 4001
+## What a server closes with when this process is one job that quits, such as a gate's `--import`,
+## rather than an editor: dialling in again changes nothing for the rest of the run. Kept in step
+## with `ONE_SHOT_CLOSE_CODE` in src/godot-bridge.ts.
+const ONE_SHOT_CLOSE_CODE: int = 4002
 
 ## Where Godot keeps the three ports an editor serves. None of them is per editor: the settings
 ## file is one for every editor of this engine version on the machine, so two open at once want the
@@ -447,6 +451,8 @@ func _read_marker(path: String) -> String:
 func _handle_disconnect() -> void:
 	_is_connected = false
 	_said_elsewhere()
+	if socket.get_close_code() == ONE_SHOT_CLOSE_CODE:
+		_should_reconnect = false
 	disconnected.emit()
 
 	if _should_reconnect:
