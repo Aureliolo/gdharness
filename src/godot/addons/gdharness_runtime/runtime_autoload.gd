@@ -58,7 +58,7 @@ var _queries: Queries = Queries.new(self, values)
 var _changes: Changes = Changes.new(self, values)
 var _input: InputCommands = InputCommands.new(self, values)
 var _typing: Typing = Typing.new(self)
-var _capture: Capture = Capture.new(self)
+var _capture: Capture = Capture.new(self, values)
 var _waits: Waits = Waits.new(self, values)
 
 var _server: TCPServer

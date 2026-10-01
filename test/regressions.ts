@@ -166,6 +166,7 @@ import {
 import {
   aboveTheRunner,
   captureDestinationRefusal,
+  captureDetail,
   endedPreviousRun,
   endedToStartThis,
   endedWithoutACode,
@@ -17458,6 +17459,260 @@ async function stopItsRun(server: ServerProcess): Promise<void> {
   assert.fail(`the stop should end the game this case started: ${said}\n${outlived}\nlogged: ${logged}`);
 }
 
+/**
+ * A capture of part of the window says which part, in the window pixels it was asked in, and how it
+ * was enlarged, so a picture 60 pixels wide is not read as the whole screen. Each branch rendered,
+ * including the ones a whole-window capture never reaches.
+ */
+function testACaptureSaysWhatPartOfTheWindowItIs(): void {
+  assert.equal(captureDetail({ type: 'screenshot_file', width: 1152, height: 648 }), '');
+  const region = { x: 40, y: 30, width: 20, height: 10 };
+  assert.equal(captureDetail({ region }), ', of the window region at 40,30, 20x10 window pixels');
+  assert.equal(
+    captureDetail({ region, clipped: true, zoom: 3 }),
+    ', of the window region at 40,30, 20x10 window pixels, clipped to the window, enlarged 3 times',
+  );
+  assert.equal(
+    captureDetail({
+      region: { x: 40, y: 30.333333, width: 20, height: 10 },
+      drawnAt: { width: 576, height: 324 },
+    }),
+    ", of the window region at 40,30.33, 20x10 window pixels, at the game's own pixels: it draws at 576x324 and stretches that to its window",
+  );
+  assert.equal(
+    captureDetail({ region, note: '/root/Panel is hidden, so this is what is drawn where it would be' }),
+    ', of the window region at 40,30, 20x10 window pixels. /root/Panel is hidden, so this is what is drawn where it would be',
+  );
+  assert.equal(captureDetail({ zoom: 2 }), ', enlarged 2 times', 'a zoom of the whole screen says so too');
+}
+
+/**
+ * A capture of one node or one region is that part of the window at the game's own pixels, and zoom
+ * enlarges it with every pixel kept square.
+ *
+ * Width and height scale the whole picture, so a question about a 3-pixel ring in a 1600-pixel
+ * window was answered by capturing the window, saving it and cropping it with a script of the
+ * caller's own, three calls for every look (#831). The scene has a red 20x10 panel at 40,30 with a
+ * green 2x2 square in its corner on a blue window: the capture's size says what was cut, the corner
+ * says where, and the pixels either side of the green square's edge at zoom 3 say whether the
+ * enlargement blended them.
+ */
+async function testACaptureOfOneNodeIsThatNodeAtItsOwnPixels(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('region capture regression skipped (Godot not found)');
+    return;
+  }
+  const refused = windowedRunRefused();
+  if (refused !== null) {
+    console.log(`region capture regression skipped (${refused})`);
+    return;
+  }
+  const held: { game: ChildProcess | null } = { game: null };
+  const said: string[] = [];
+  await withAPlayingEditor(
+    ({ adapter, project, runtimeDir }) =>
+      (tool) => {
+        if (tool === 'play_scene') {
+          held.game = spawn(engine, ['--path', project, '--rendering-method', 'gl_compatibility'], {
+            stdio: ['ignore', 'pipe', 'pipe'],
+            env: {
+              ...process.env,
+              GDHARNESS_RUNTIME_DIR: runtimeDir,
+              GDHARNESS_EDITOR_PID: String(FAKE_EDITOR_PID),
+            },
+          });
+          held.game.stdout?.on('data', (chunk: Buffer) => {
+            said.push(String(chunk));
+          });
+          held.game.stderr?.on('data', (chunk: Buffer) => {
+            said.push(String(chunk));
+          });
+          return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
+        }
+        if (tool === 'playing_status') {
+          return {
+            ok: true,
+            playing: held.game?.exitCode === null,
+            scenePath: 'res://main.tscn',
+            debugPort: adapter,
+          };
+        }
+        if (tool === 'stop_playing') {
+          held.game?.kill();
+          return { ok: true };
+        }
+        return { ok: true };
+      },
+    async ({ server, project, start }) => {
+      writeFileSync(
+        join(project, 'main.tscn'),
+        '[gd_scene format=3]\n\n' +
+          '[node name="Main" type="ColorRect"]\nanchors_preset = 15\nanchor_right = 1.0\n' +
+          'anchor_bottom = 1.0\ncolor = Color(0, 0, 1, 1)\n\n' +
+          '[node name="Target" type="ColorRect" parent="."]\noffset_left = 40.0\noffset_top = 30.0\n' +
+          'offset_right = 60.0\noffset_bottom = 40.0\ncolor = Color(1, 0, 0, 1)\n\n' +
+          '[node name="Corner" type="ColorRect" parent="Target"]\noffset_right = 2.0\noffset_bottom = 2.0\n' +
+          'color = Color(0, 1, 0, 1)\n',
+      );
+      const capture = async (
+        args: Record<string, unknown>,
+      ): Promise<{ text: string; png: PngPixels | null }> => {
+        const answered = await server.request(
+          'tools/call',
+          { name: 'runtime_capture', arguments: { op: 'screenshot', ...args } },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+        const text = textOf(answered) ?? '';
+        const image = asArray(get(answered, 'result', 'content')).find(
+          (chunk) => get(chunk, 'type') === 'image',
+        );
+        return {
+          text,
+          png: image === undefined ? null : pngPixels(Buffer.from(String(get(image, 'data')), 'base64')),
+        };
+      };
+      const near = (actual: readonly number[], wanted: readonly number[]): boolean =>
+        wanted.every((channel, index) => Math.abs((actual[index] ?? -1) - channel) <= 3);
+      const [red, green, blue] = [
+        [255, 0, 0],
+        [0, 255, 0],
+        [0, 0, 255],
+      ] as const;
+      try {
+        const started = await start(WINDOWED_BOOT_MS);
+        assert.equal(
+          get(started.answer, 'runtime', 'listening'),
+          true,
+          `${JSON.stringify(started.answer)}\nthe engine said:\n${said.join('')}`,
+        );
+
+        const node = await capture({ nodePath: '/root/Main/Target' });
+        assert.ok(node.png !== null, `a node capture should answer an image: ${node.text}`);
+        assert.deepEqual([node.png.width, node.png.height], [20, 10], `the panel's own size: ${node.text}`);
+        assert.ok(
+          near(node.png.rgb(0, 0), green),
+          `its corner is the green square: ${node.png.rgb(0, 0).join(',')}`,
+        );
+        assert.ok(
+          near(node.png.rgb(10, 5), red),
+          `and the rest is the panel: ${node.png.rgb(10, 5).join(',')}`,
+        );
+        assert.match(node.text, /of the window region at 40,30, 20x10 window pixels/, node.text);
+
+        // The rectangle runtime_inspect rect answers, passed back as it came.
+        const rect = parseTextContent(
+          await server.request(
+            'tools/call',
+            { name: 'runtime_inspect', arguments: { op: 'rect', nodePath: '/root/Main/Target' } },
+            ENGINE_CALL_TIMEOUT_MS,
+          ),
+        );
+        const region = await capture({ region: get(rect, 'window') });
+        assert.ok(region.png !== null, `a region capture should answer an image: ${region.text}`);
+        assert.deepEqual([region.png.width, region.png.height], [20, 10], region.text);
+        assert.ok(near(region.png.rgb(0, 0), green), `the same corner: ${region.png.rgb(0, 0).join(',')}`);
+
+        const zoomed = await capture({ nodePath: '/root/Main/Target', zoom: 3 });
+        assert.ok(zoomed.png !== null, zoomed.text);
+        assert.deepEqual([zoomed.png.width, zoomed.png.height], [60, 30], zoomed.text);
+        assert.ok(
+          near(zoomed.png.rgb(5, 5), green),
+          `green up to the seam: ${zoomed.png.rgb(5, 5).join(',')}`,
+        );
+        assert.ok(near(zoomed.png.rgb(6, 6), red), `red from the seam: ${zoomed.png.rgb(6, 6).join(',')}`);
+        assert.match(zoomed.text, /enlarged 3 times/, zoomed.text);
+
+        const window = parseTextContent(
+          await server.request(
+            'tools/call',
+            { name: 'runtime_inspect', arguments: { op: 'rect', nodePath: '/root/Main' } },
+            ENGINE_CALL_TIMEOUT_MS,
+          ),
+        );
+        const across = Math.round(Number(get(window, 'window', 'size', 'x')));
+        const clipped = await capture({ region: { x: across - 5, y: 0, width: 20, height: 4 } });
+        assert.ok(clipped.png !== null, clipped.text);
+        assert.deepEqual([clipped.png.width, clipped.png.height], [5, 4], clipped.text);
+        assert.ok(
+          near(clipped.png.rgb(4, 3), blue),
+          `what is in the window: ${clipped.png.rgb(4, 3).join(',')}`,
+        );
+        assert.match(clipped.text, /clipped to the window/, clipped.text);
+
+        const outside = await capture({ region: { x: across + 10, y: 0, width: 20, height: 4 } });
+        assert.equal(outside.png, null, outside.text);
+        assert.match(outside.text, /is outside the window/, outside.text);
+      } finally {
+        await server.request(
+          'tools/call',
+          { name: 'editor_run', arguments: { op: 'stop' } },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+      }
+    },
+    { realAddon: true, engine, held },
+  );
+}
+
+interface PngPixels {
+  readonly width: number;
+  readonly height: number;
+  rgb(x: number, y: number): number[];
+}
+
+/**
+ * The pixels of an 8-bit RGB or RGBA PNG, which is what the engine saves. Every row filter is undone,
+ * so a reading does not depend on which filter the encoder chose for a row.
+ */
+function pngPixels(png: Buffer): PngPixels {
+  const width = png.readUInt32BE(16);
+  const height = png.readUInt32BE(20);
+  const colourType = png[25];
+  assert.ok(
+    png[24] === 8 && (colourType === 2 || colourType === 6),
+    `an 8-bit RGB or RGBA PNG, not ${png[24]}/${colourType}`,
+  );
+  const step = colourType === 6 ? 4 : 3;
+  const chunks: Buffer[] = [];
+  for (let at = 8; at < png.length; ) {
+    const length = png.readUInt32BE(at);
+    if (png.toString('ascii', at + 4, at + 8) === 'IDAT') {
+      chunks.push(png.subarray(at + 8, at + 8 + length));
+    }
+    at += 12 + length;
+  }
+  const raw = inflateSync(Buffer.concat(chunks));
+  const stride = width * step;
+  const pixels = Buffer.alloc(stride * height);
+  for (let row = 0; row < height; row += 1) {
+    const filter = raw[row * (stride + 1)];
+    for (let index = 0; index < stride; index += 1) {
+      const value = raw[row * (stride + 1) + 1 + index] ?? 0;
+      const left = index >= step ? (pixels[row * stride + index - step] ?? 0) : 0;
+      const up = row > 0 ? (pixels[(row - 1) * stride + index] ?? 0) : 0;
+      const corner = row > 0 && index >= step ? (pixels[(row - 1) * stride + index - step] ?? 0) : 0;
+      const guess = left + up - corner;
+      const nearest =
+        Math.abs(guess - left) <= Math.abs(guess - up) && Math.abs(guess - left) <= Math.abs(guess - corner)
+          ? left
+          : Math.abs(guess - up) <= Math.abs(guess - corner)
+            ? up
+            : corner;
+      const predicted = [0, left, up, Math.floor((left + up) / 2), nearest][filter ?? 0] ?? 0;
+      pixels[row * stride + index] = (value + predicted) & 0xff;
+    }
+  }
+  return {
+    width,
+    height,
+    rgb: (x, y) => [...pixels.subarray((y * width + x) * step, (y * width + x) * step + 3)],
+  };
+}
+
 /** The red, green and blue of a one-pixel PNG. */
 function onePixelOf(png: Buffer): Buffer {
   const chunks: Buffer[] = [];
@@ -25879,6 +26134,7 @@ function testEveryFixtureIsCalled(): void {
 }
 
 const TESTS: (() => void | Promise<void>)[] = [
+  testACaptureSaysWhatPartOfTheWindowItIs,
   testEveryFileArgumentIsContained,
   testDiagnosticsSayWhenTheEditorIsBehind,
   testAnUnknownArgumentSaysWhichServerSaysSo,
@@ -25969,6 +26225,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnInjectedMotionCarriesHowFarThePointerMoved,
   testAKeyDoesNotChooseFromAnOpenedMenu,
   testACaptureBeforeTheFirstFrameWaitsForIt,
+  testACaptureOfOneNodeIsThatNodeAtItsOwnPixels,
   testASubViewportCaptureIsDrawnNow,
   testAScreenshotHoldsTheGamesOwnWindows,
   testAWrittenLineBreakMatchesATwoLineLabel,
