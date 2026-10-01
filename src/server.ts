@@ -133,6 +133,7 @@ import {
   ancestorsIn,
   type CommandLineRead,
   descendantsIn,
+  oneShotOptionOf,
   type ProcessTree,
   processTree,
   readCommandLine,
@@ -1848,6 +1849,7 @@ class GodotServer {
   constructor() {
     this.ownProject = envValue('GDHARNESS_PROJECT') ?? null;
     this.godotBridge = getDefaultBridge(this.ownProject);
+    this.godotBridge.identifyEditorsWith(oneShotOptionOf);
     this.godotBridge.on('godot_connected', () => {
       this.settleTheLaunchReading();
     });
@@ -5580,6 +5582,16 @@ class GodotServer {
     return { lsp, dap };
   }
 
+  /**
+   * The editor connected to this bridge, by its process id when it gave one: a refusal naming
+   * only "the editor" sent a caller looking for an editor window when what held the bridge was a
+   * headless engine run with no window at all.
+   */
+  private editorOnTheBridge(): string {
+    const pid = this.godotBridge.getStatus().editorPid;
+    return pid === undefined ? 'the editor on this bridge' : `the editor on this bridge (pid ${pid})`;
+  }
+
   private async handleRunProject(args: OperationParams, op: string): Promise<ToolResponse> {
     const project = this.project(args);
     if (!project.ok) {
@@ -5592,7 +5604,7 @@ class GodotServer {
     const open = this.godotBridge.isConnected() ? this.godotBridge.getStatus().projectPath : undefined;
     if (op !== 'check' && open !== undefined && open !== '' && !isSameDirectory(open, project.value.path)) {
       return this.createErrorResponse(
-        `This start names ${project.value.path}, and the editor on this bridge has ${open} open.`,
+        `This start names ${project.value.path}, and ${this.editorOnTheBridge()} has ${open} open.`,
         [
           "editor_status names the project this server's editor is showing",
           'One server serves one editor: start a second server for the other project',
@@ -8849,7 +8861,7 @@ class GodotServer {
     const meant = readNonEmptyString(args, 'projectPath');
     if (open !== undefined && open !== '' && meant !== undefined && !isSameDirectory(open, meant)) {
       return this.createErrorResponse(
-        `This call names ${meant}, and the editor on this bridge has ${open} open.`,
+        `This call names ${meant}, and ${this.editorOnTheBridge()} has ${open} open.`,
         [
           "editor_status names the project this server's editor is showing",
           'One server serves one editor: start a second server for the other project',
