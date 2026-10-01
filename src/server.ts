@@ -337,6 +337,37 @@ export function captureDestinationRefusal(outputPath: string, projects: readonly
 }
 
 /**
+ * What part of the window a capture is and how it was enlarged, as the game said, for the answer's
+ * text: the region in window pixels, whether it was cut to the window, the size the project draws
+ * at when that is not the window's, and the zoom. Empty for a capture of the whole screen.
+ */
+export function captureDetail(payload: OperationParams): string {
+  const parts: string[] = [];
+  const region = payload['region'];
+  if (region !== null && typeof region === 'object') {
+    const named = region as Record<string, unknown>;
+    const at = (key: string): string => String(Math.round(Number(named[key]) * 100) / 100);
+    parts.push(
+      `of the window region at ${at('x')},${at('y')}, ${at('width')}x${at('height')} window pixels${
+        payload['clipped'] === true ? ', clipped to the window' : ''
+      }`,
+    );
+  }
+  const drawnAt = payload['drawnAt'];
+  if (drawnAt !== null && typeof drawnAt === 'object') {
+    const drawn = drawnAt as Record<string, unknown>;
+    parts.push(
+      `at the game's own pixels: it draws at ${String(drawn['width'])}x${String(drawn['height'])} and stretches that to its window`,
+    );
+  }
+  if (typeof payload['zoom'] === 'number') {
+    parts.push(`enlarged ${payload['zoom']} times`);
+  }
+  const note = typeof payload['note'] === 'string' ? `. ${payload['note']}` : '';
+  return parts.length === 0 ? note : `, ${parts.join(', ')}${note}`;
+}
+
+/**
  * How long a wait of this many frames is given before the game is called stuck, which is never
  * less than [param atLeast], the patience every other command gets.
  */
@@ -9177,7 +9208,7 @@ class GodotServer {
         content: [
           {
             type: 'text',
-            text: `Screenshot captured: ${dimensions}${chosenAmongSeveral ? ` from pid ${own}, the game this server holds` : ''}${saveTo === null ? '' : `. Saved to ${saveTo}`}${staleNote === undefined ? '' : `\n\n${staleNote}`}`,
+            text: `Screenshot captured: ${dimensions}${chosenAmongSeveral ? ` from pid ${own}, the game this server holds` : ''}${captureDetail(payload)}${saveTo === null ? '' : `. Saved to ${saveTo}`}${staleNote === undefined ? '' : `\n\n${staleNote}`}`,
           },
           { type: 'image', data: readFileSync(screenshotPath).toString('base64'), mimeType: 'image/png' },
         ],
