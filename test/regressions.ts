@@ -17713,6 +17713,147 @@ function pngPixels(png: Buffer): PngPixels {
   };
 }
 
+/**
+ * A headless engine run nobody opened as an editor does not connect to the bridge.
+ *
+ * A gate's `godot --headless --path <main> --import` loaded the editor addon, which connected as
+ * the editor, and for as long as the import ran a start for another project on the same server was
+ * refused as "the editor on this bridge has <main> open" (#834). The addon cannot see the run's
+ * options, so it tells the two apart by the mark a server puts on a hidden editor it opens. The
+ * closest thing to the target is that same hidden editor without the mark, so it is the one judged:
+ * timed against the marked one, which does connect, and kept up three times as long. An import can
+ * finish before it would have connected, so it is checked as well rather than instead. Each
+ * connection the bridge takes is logged, so one that came and went between two looks is still seen.
+ */
+async function testAOneShotEngineRunIsNotTheEditor(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('one-shot engine run regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-one-shot-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-one-shot-rt-'));
+  const port = await reservePort();
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\n\nconfig/name="One shot"\n\n' +
+      '[editor_plugins]\n\nenabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n',
+  );
+  cpSync(join('src', 'godot', 'addons', 'gdharness_editor'), join(project, 'addons', 'gdharness_editor'), {
+    recursive: true,
+  });
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(port),
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+      DEBUG: 'true',
+    },
+  });
+  const env = { ...process.env, GDHARNESS_BRIDGE_PORT: String(port), GDHARNESS_RUNTIME_DIR: runtimeDir };
+  const engines: ChildProcess[] = [];
+  const engine = (args: string[], opened = false): ChildProcess => {
+    const started = spawn(godotPath, args, {
+      env: opened ? { ...env, [OPENED_BY_A_SERVER]: '1' } : env,
+      stdio: 'ignore',
+    });
+    engines.push(started);
+    return started;
+  };
+  const connections = (): number => server.stderr.split('Godot editor connected').length - 1;
+  // Bounded, and the whole tree after the handle: a wait on an engine that ignored its kill held the
+  // suite for twenty minutes with nothing said.
+  const end = async (child: ChildProcess): Promise<void> => {
+    if (child.exitCode !== null || child.pid === undefined) {
+      return;
+    }
+    const exited = new Promise<void>((done) => {
+      child.once('exit', () => {
+        done();
+      });
+    });
+    child.kill();
+    const gone = await Promise.race([exited.then(() => true), delay(10_000).then(() => false)]);
+    if (!gone) {
+      await killTheTree(child.pid);
+    }
+  };
+  try {
+    await server.initialize('regression-test');
+
+    // The hidden editor a server opens, marked as one: it connects, and how long that takes sizes
+    // the window the unmarked one below is given to do the same.
+    const from = Date.now();
+    const editor = engine(['-e', '--headless', '--path', project], true);
+    for (let waited = 0; waited < 90_000 && connections() === 0; waited += 250) {
+      await delay(250);
+    }
+    const tookMs = Date.now() - from;
+    assert.equal(
+      connections(),
+      1,
+      `the marked editor should connect, or this proves nothing:\n${server.stderr}`,
+    );
+    await end(editor);
+
+    // The same editor without the mark, which is every headless job a command line starts.
+    const unmarked = engine(['-e', '--headless', '--path', project]);
+    await delay(Math.max(10_000, tookMs * 3));
+    assert.equal(unmarked.exitCode, null, 'the unmarked editor should still be running when it is judged');
+    assert.equal(connections(), 1, `a headless editor no server opened is not the editor:\n${server.stderr}`);
+    await end(unmarked);
+
+    // The run reported: an import, and a start for another project while it runs.
+    const importing = engine(['--headless', '--path', project, '--import']);
+    const elsewhere = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-one-shot-other-'));
+    try {
+      writeFileSync(
+        join(elsewhere, 'project.godot'),
+        'config_version=5\n\n[application]\n\nconfig/name="Other"\nrun/main_scene="res://main.tscn"\n',
+      );
+      writeFileSync(join(elsewhere, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
+      const start = await server.request(
+        'tools/call',
+        {
+          name: 'editor_run',
+          arguments: { projectPath: elsewhere, op: 'start', headless: true, runtimeWaitMs: 0 },
+        },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+      const said = textOf(start) ?? '';
+      assert.doesNotMatch(
+        said,
+        /editor on this bridge/,
+        `a start for another project during an import: ${said}`,
+      );
+      assert.equal(typeof get(parseTextContent(start), 'pid'), 'number', `and it starts: ${said}`);
+      await server.request(
+        'tools/call',
+        { name: 'editor_run', arguments: { op: 'stop' } },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+    } finally {
+      rmSync(elsewhere, { recursive: true, force: true });
+    }
+    for (let waited = 0; waited < 120_000 && importing.exitCode === null; waited += 250) {
+      await delay(250);
+    }
+    assert.equal(importing.exitCode, 0, 'the import should finish on its own');
+    assert.equal(connections(), 1, `an --import run is not the editor:\n${server.stderr}`);
+  } finally {
+    for (const started of engines) {
+      await end(started);
+    }
+    await server.stop().catch(() => undefined);
+    rmSync(project, { recursive: true, force: true });
+    rmSync(runtimeDir, { recursive: true, force: true });
+  }
+}
+
 /** The red, green and blue of a one-pixel PNG. */
 function onePixelOf(png: Buffer): Buffer {
   const chunks: Buffer[] = [];
@@ -24224,7 +24365,14 @@ async function testTheEditorAnswersOnlyForItsOwnProject(): Promise<void> {
         }),
       );
     });
-    socket.send(JSON.stringify({ type: 'godot_ready', project_path: open, addon_version: SERVER_VERSION }));
+    socket.send(
+      JSON.stringify({
+        type: 'godot_ready',
+        project_path: open,
+        addon_version: SERVER_VERSION,
+        editor_pid: FAKE_EDITOR_PID,
+      }),
+    );
 
     let knows = false;
     for (let waited = 0; waited < 10_000 && !knows; waited += 100) {
@@ -24239,7 +24387,11 @@ async function testTheEditorAnswersOnlyForItsOwnProject(): Promise<void> {
       arguments: { projectPath: elsewhere, scenePath: 'res://main.tscn' },
     });
     const refused = textOf(other) ?? JSON.stringify(other);
-    assert.match(refused, /the editor on this bridge has/, `the refusal names the open project: ${refused}`);
+    // By its process id too: a headless engine run that holds the bridge has no window to look for.
+    assert.ok(
+      refused.includes(`the editor on this bridge (pid ${FAKE_EDITOR_PID}) has`),
+      `the refusal names the open project and what holds it: ${refused}`,
+    );
     assert.match(refused, /gdharness-editor-has-not/, `and the one that was asked for: ${refused}`);
     assert.equal(
       asked.includes('list_scene_nodes'),
@@ -24259,7 +24411,10 @@ async function testTheEditorAnswersOnlyForItsOwnProject(): Promise<void> {
       arguments: { projectPath: elsewhere },
     });
     const startRefused = textOf(start) ?? JSON.stringify(start);
-    assert.match(startRefused, /the editor on this bridge has/, `a start is refused too: ${startRefused}`);
+    assert.ok(
+      startRefused.includes(`the editor on this bridge (pid ${FAKE_EDITOR_PID}) has`),
+      `a start is refused too: ${startRefused}`,
+    );
     assert.deepEqual(asked, [], `and the editor is not asked anything about its play: ${asked.join(', ')}`);
 
     // Beside it, the project the editor does have: the same call reaches the editor and comes back
@@ -26226,6 +26381,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAKeyDoesNotChooseFromAnOpenedMenu,
   testACaptureBeforeTheFirstFrameWaitsForIt,
   testACaptureOfOneNodeIsThatNodeAtItsOwnPixels,
+  testAOneShotEngineRunIsNotTheEditor,
   testASubViewportCaptureIsDrawnNow,
   testAScreenshotHoldsTheGamesOwnWindows,
   testAWrittenLineBreakMatchesATwoLineLabel,
