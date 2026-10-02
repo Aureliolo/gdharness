@@ -126,7 +126,13 @@ import {
   savesStayPut,
   userDataIn,
 } from './launch.js';
-import { DEFAULT_LSP_PORT, GodotLSPClient, handleLSPTool, normalizeLSPError } from './lsp_client.js';
+import {
+  DEFAULT_LSP_PORT,
+  GodotLSPClient,
+  handleLSPTool,
+  LSPTimeout,
+  normalizeLSPError,
+} from './lsp_client.js';
 import { launchOutsideTheTree } from './outside.js';
 import { isSameDirectory, isWithinRoot, realPathOr, resolveWithinProject } from './paths.js';
 import { freePort, portFromEnvOrNull } from './ports.js';
@@ -8859,7 +8865,10 @@ class GodotServer {
         }
         return await question(client);
       } catch (error) {
-        languageServer.problem = normalizeLSPError(error, client.port);
+        // A server that took the request in is there; the rename says what ran out instead.
+        if (!(error instanceof LSPTimeout)) {
+          languageServer.problem = normalizeLSPError(error, client.port);
+        }
         throw error;
       }
     };

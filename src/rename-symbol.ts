@@ -8,6 +8,7 @@
 import { existsSync, realpathSync } from 'node:fs';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { type DeclarationKind, isIdentifier, type Position } from './gdscript-source.js';
+import { LSPTimeout } from './lsp_client.js';
 import { ignoredTexts, type ProjectText, projectTexts } from './project-scan.js';
 import {
   ClassGraph,
@@ -193,6 +194,7 @@ export async function renameSymbol(request: RenameRequest, services: RenameServi
   let plan: Plan;
   let what: string;
   let resolvedBy: string;
+  let took: LanguageServerTook | null = null;
   let overrides: string[] = [];
   // The scripts whose own interface the rename changes, which every other script is checked against.
   let declaringFiles: string[] = [declaringPath];
@@ -317,7 +319,25 @@ export async function renameSymbol(request: RenameRequest, services: RenameServi
     overrides = family.map((one) => one.file).filter((file) => file !== fileOf(root));
     declaringFiles = family.map((one) => one.file);
 
-    const resolved = await resolveMember(projectPath, texts, scripts, family, symbol, services);
+    took = { references: { asked: 0, ms: 0 }, definitions: { asked: 0, ms: 0 } };
+    let resolved: Resolved[] | null;
+    try {
+      resolved = await resolveMember(projectPath, texts, scripts, family, symbol, services, took);
+    } catch (error) {
+      if (!(error instanceof LSPTimeout)) {
+        throw error;
+      }
+      // The server took the request in and is working on it, which is not the editor missing, and
+      // the advice for a missing editor would send a caller to open one that is open.
+      return {
+        ok: false,
+        reason: `The editor's language server took the ${error.method} request for ${symbol} and had not answered it after ${String(error.seconds)}s, so nothing was renamed.${error.method === 'textDocument/references' ? " Godot answers a references request by looking for the name's text in every script and resolving each match, so a name also written as a common local takes longest." : ''}`,
+        advice: [
+          'script_diagnostics on the declaring script says whether the language server is answering other requests',
+          'The request that ran out is still being answered by the editor, and another sent now waits behind it',
+        ],
+      };
+    }
     if (resolved === null) {
       const first = family[0];
       const script = first === undefined ? undefined : scripts.get(first.file);
@@ -381,6 +401,7 @@ export async function renameSymbol(request: RenameRequest, services: RenameServi
     rewrites,
     report: {
       renamed: { what, from: symbol, to: newName, declaredIn: declaringPath, resolvedBy },
+      ...(took === null ? {} : { languageServer: took }),
       ...(overrides.length > 0 ? { overridesRenamed: overrides } : {}),
       ...(moveTo === null ? {} : { moved: { from: declaringPath, to: moveTo } }),
       changed: changedReport(plan.edits, rewrites),
@@ -398,10 +419,11 @@ export async function renameSymbol(request: RenameRequest, services: RenameServi
  * overrides and answers that method's references, while a bare call inside the overriding class,
  * or one on a value typed as that class, resolves to the override and is in neither answer. So the
  * second pass asks where every other occurrence of the name in code is declared. One answer naming
- * a declaration being renamed makes it a use, and that occurrence's own references are then asked
- * for, which is the override's whole set in one request; one answer naming anything else settles
- * that symbol's references as not this member. More than one answer is the analyser offering every
- * declaration of the name for a value whose type it does not know, and that occurrence is left.
+ * a declaration being renamed makes it a use; one answer naming anything else makes it not this
+ * member. More than one answer is the analyser offering every declaration of the name for a value
+ * whose type it does not know, and that occurrence is left. Each occurrence is asked on its own
+ * rather than settled with its symbol's references: a references request is a walk of every script
+ * for the word, and a name that is also a common local cost one walk per local.
  *
  * Null when the first pass resolves nothing at all, not even the declaration it was asked about.
  */
@@ -412,6 +434,7 @@ async function resolveMember(
   family: readonly Resolved[],
   name: string,
   services: RenameServices,
+  took: LanguageServerTook,
 ): Promise<Resolved[] | null> {
   const absoluteOf = new Map(texts.map((file) => [file.path, file.absolute]));
   const key = (place: Resolved): string => `${place.file}:${place.offset}`;
@@ -426,12 +449,17 @@ async function resolveMember(
     if (script === undefined || absolute === undefined) {
       return [];
     }
-    const answered = await services[question](absolute, script.text, script.lines.positionOf(place.offset));
-    return answered.map(toResolved).filter((one): one is Resolved => one !== null);
+    const started = performance.now();
+    try {
+      const answered = await services[question](absolute, script.text, script.lines.positionOf(place.offset));
+      return answered.map(toResolved).filter((one): one is Resolved => one !== null);
+    } finally {
+      took[question].asked += 1;
+      took[question].ms += Math.round(performance.now() - started);
+    }
   };
 
   const ours = new Map<string, Resolved>();
-  const settled = new Set<string>();
   const root = family[0];
   if (root === undefined) {
     return [];
@@ -447,27 +475,26 @@ async function resolveMember(
   for (const script of scripts.values()) {
     for (const occurrence of script.occurrences(name)) {
       const place = { file: script.path, offset: occurrence.offset };
-      if (occurrence.kind !== 'code' || ours.has(key(place)) || settled.has(key(place))) {
+      if (occurrence.kind !== 'code' || ours.has(key(place))) {
         continue;
       }
       const declared = await ask('definitions', place);
       const only = declared.length === 1 ? declared[0] : undefined;
-      if (only === undefined) {
-        settled.add(key(place));
-        continue;
-      }
-      const isOurs = declarations.has(key(only));
-      const same = [place, ...(await ask('references', place))];
-      for (const one of same) {
-        if (isOurs) {
-          ours.set(key(one), one);
-        } else {
-          settled.add(key(one));
-        }
+      if (only !== undefined && declarations.has(key(only))) {
+        ours.set(key(place), place);
       }
     }
   }
   return [...ours.values()];
+}
+
+/**
+ * How many requests of each kind a member rename put to the language server and how long they
+ * took in all, answered so that a slow rename says which request was slow and by how much.
+ */
+interface LanguageServerTook {
+  references: { asked: number; ms: number };
+  definitions: { asked: number; ms: number };
 }
 
 /** Each changed file with its changed lines as they now read. */
@@ -527,8 +554,12 @@ function leftAloneReport(mentions: readonly Mention[]): Record<string, unknown> 
       full.push(mention);
     }
   }
+  // A string with a why names the thing by its name whole, or was resolved to it, and is the
+  // likeliest entry to break something silently, so it is put where a reader starts.
+  const loudFirst = (mention: Mention): number =>
+    mention.kind === 'string' && mention.why !== undefined ? 0 : 1;
   return {
-    leftAlone: full,
+    leftAlone: full.sort((a, b) => loudFirst(a) - loudFirst(b)),
     ...(prose.size > 0 ? { leftAloneInProse: [...prose.values()] } : {}),
   };
 }

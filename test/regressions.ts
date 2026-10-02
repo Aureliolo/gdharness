@@ -101,7 +101,7 @@ import {
   savesStayPut,
   userDataIn,
 } from '../src/launch.js';
-import { GodotLSPClient } from '../src/lsp_client.js';
+import { GodotLSPClient, LSPTimeout } from '../src/lsp_client.js';
 import { isSameDirectory, isWithinRoot, resolveWithinProject } from '../src/paths.js';
 import { freePort } from '../src/ports.js';
 import {
@@ -717,6 +717,43 @@ async function testDiagnosticsSurviveTheEditorRestarting(): Promise<void> {
       const afterwards = await client.getDiagnostics(script, 'extends Node\n');
       assert.equal(afterwards.length, 1, 'and so is the ask after the connection was replaced');
       await client.disconnect();
+    },
+  );
+}
+
+/**
+ * A references request is given a time of its own, longer than any other request's. Godot answers
+ * one by walking every script for the name's text and resolving each match, and a method named like
+ * a common local ran past the ten seconds every request was given. The stub never answers either
+ * request, so each runs to its own limit and says which limit it was.
+ */
+async function testAReferencesRequestIsGivenItsOwnTime(): Promise<void> {
+  await withFakeLanguageServer(
+    (uri) => uri,
+    async (port) => {
+      const script = join(tmpdir(), 'gdharness-lsp-references', 'houses.gd');
+      const client = new GodotLSPClient(port, '127.0.0.1', { requestMs: 200, referencesMs: 1500 });
+      const outcome = async (asked: Promise<unknown>): Promise<{ error: unknown; ms: number }> => {
+        const started = performance.now();
+        const error = await asked.then(
+          () => null,
+          (thrown: unknown) => thrown,
+        );
+        return { error, ms: performance.now() - started };
+      };
+      try {
+        const definitions = await outcome(client.getDefinitions(script, 'extends Node\n', 0, 0));
+        assert.ok(definitions.error instanceof LSPTimeout, String(definitions.error));
+        assert.equal(definitions.error.method, 'textDocument/definition');
+        assert.equal(definitions.error.seconds, 0.2);
+        const references = await outcome(client.getReferences(script, 'extends Node\n', 0, 0));
+        assert.ok(references.error instanceof LSPTimeout, String(references.error));
+        assert.equal(references.error.method, 'textDocument/references');
+        assert.equal(references.error.seconds, 1.5, 'the references request ran to its own limit');
+        assert.ok(references.ms >= 1400, `and was waited on that long: ${String(references.ms)}ms`);
+      } finally {
+        await client.disconnect();
+      }
     },
   );
 }
@@ -27085,6 +27122,12 @@ async function testAMemberRenameFollowsWhatTheLanguageServerResolves(): Promise<
       'the override and its own call, doc links through either class, and the connection to a node running the subclass',
     );
     assert.deepEqual(get(say.report, 'overridesRenamed'), ['res://loud.gd']);
+    // One walk of the project, at the declaration, and a definition at each other use in code: the
+    // override's bare call, the call on a value of unknown type, and the other class's method.
+    // Settling each with its own references cost a walk per symbol, one per common local.
+    assert.equal(get(say.report, 'languageServer', 'references', 'asked'), 1, JSON.stringify(say.report));
+    assert.equal(get(say.report, 'languageServer', 'definitions', 'asked'), 3);
+    assert.equal(typeof get(say.report, 'languageServer', 'references', 'ms'), 'number');
     // Reloaded in this order by an open editor, which checks each script against the copies it holds
     // of what it uses: the declaring class, then its override, which sorts before it by name and
     // would be checked against the old method, then the script that only calls it.
@@ -27234,6 +27277,110 @@ async function testADocLinkWrappedAcrossLinesIsRenamedWhole(): Promise<void> {
       ['4: ## Told.utter] link.'],
       'the member named on the line after its link opens',
     );
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A language server that took the references request and did not answer in time is said to have
+ * done that, with the limit, and is not answered as a missing editor: the advice for one sent a
+ * caller to open an editor that was open.
+ */
+async function testARenameThatOutrunsTheLanguageServerSaysWhichRequest(): Promise<void> {
+  const project = renameProject();
+  try {
+    const outcome = await renameSymbol(
+      {
+        projectPath: project,
+        scriptPath: join(project, 'told.gd'),
+        symbol: 'say',
+        newName: 'utter',
+        newScriptPath: null,
+      },
+      {
+        namesTaken: engineSaying(),
+        references: async () => Promise.reject(new LSPTimeout('textDocument/references', 180_000)),
+        definitions: async () => Promise.resolve([]),
+      },
+    );
+    assert.ok(!outcome.ok, 'nothing to rename from');
+    assert.match(
+      outcome.reason,
+      /^The editor's language server took the textDocument\/references request for say and had not answered it after 180s, so nothing was renamed\. Godot answers a references request by looking for the name's text in every script/,
+    );
+    assert.ok(
+      !(outcome.advice ?? []).some((one) => one.includes('editor_launch')),
+      `it is not sent to open an editor: ${JSON.stringify(outcome.advice)}`,
+    );
+    assert.equal(readFileSync(join(project, 'told.gd'), 'utf8'), RENAME_FIXTURE['told.gd']);
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A string that is the old name whole, a class's or a member's, names it the way find_children,
+ * call or a list of type names takes it, which nothing renames and no compile checks. It is listed
+ * first, with a why. A string holding the name among other words is plain.
+ */
+async function testAStringThatIsTheNameWholeIsListedFirst(): Promise<void> {
+  const caller = [
+    'extends Node',
+    '',
+    'const ACCEPTED: Array[String] = ["Told"]',
+    '',
+    '',
+    'func poke(node: Node) -> void:',
+    '\tif node.has_method(&"say"):',
+    '\t\tprint("Told you to say it")',
+    '',
+  ].join('\n');
+  const project = renameProjectWith({ 'caller.gd': caller });
+  try {
+    const left = async (
+      symbol: string,
+      newName: string,
+    ): Promise<{ line: number; kind: string; why: string }[]> => {
+      const outcome = await renameSymbol(
+        { projectPath: project, scriptPath: join(project, 'told.gd'), symbol, newName, newScriptPath: null },
+        { namesTaken: engineSaying(), ...fakeLanguageServer(project) },
+      );
+      assert.ok(outcome.ok, `${symbol} was refused: ${JSON.stringify(outcome)}`);
+      const entries = asArray(get(outcome.report, 'leftAlone')).map((one) => ({
+        file: text(get(one, 'file')),
+        line: asNumber(get(one, 'line')),
+        kind: text(get(one, 'kind')),
+        why: typeof get(one, 'why') === 'string' ? text(get(one, 'why')) : '',
+      }));
+      const firstPlain = entries.findIndex((one) => !(one.kind === 'string' && one.why !== ''));
+      assert.ok(
+        entries.slice(firstPlain).every((one) => !(one.kind === 'string' && one.why !== '')),
+        `strings with a why come before everything else: ${JSON.stringify(entries)}`,
+      );
+      return entries
+        .filter((one) => one.file === 'res://caller.gd')
+        .map(({ line, kind, why }) => ({ line, kind, why }));
+    };
+
+    const forClass = await left('Told', 'Wording');
+    assert.deepEqual(
+      forClass.map(({ line, kind }) => `${String(line)}:${kind}`),
+      ['3:string', '8:string'],
+    );
+    assert.match(forClass[0]?.why ?? '', /^the whole string is the class's name, as find_children's type/);
+    assert.equal(forClass[1]?.why, '', 'a string with other words in it is plain');
+
+    const forMember = await left('say', 'utter');
+    assert.deepEqual(
+      forMember.map(({ line, kind }) => `${String(line)}:${kind}`),
+      ['7:string', '8:string'],
+    );
+    assert.match(
+      forMember[0]?.why ?? '',
+      /^the whole string is the member's name, as call, connect, has_method/,
+    );
+    assert.equal(forMember[1]?.why, '');
   } finally {
     rmSync(project, { recursive: true, force: true });
   }
@@ -27417,6 +27564,8 @@ async function testARenameWithNoEditorLeavesTheCacheAndTheScriptsRight(): Promis
   }
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-rename-engine-'));
   const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-rename-engine-rt-'));
+  // A port nothing listens on, so the member rename cannot reach an editor of another project.
+  const lspPort = await reservePort();
   writeFileSync(
     join(project, 'project.godot'),
     'config_version=5\n\n[application]\n\nconfig/name="Rename"\n',
@@ -27439,8 +27588,7 @@ async function testARenameWithNoEditorLeavesTheCacheAndTheScriptsRight(): Promis
       GODOT_PATH: godotPath,
       GDHARNESS_PROJECT: project,
       GDHARNESS_BRIDGE_PORT: String(await reservePort()),
-      // A port nothing listens on, so the member rename cannot reach an editor of another project.
-      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(lspPort),
       GDHARNESS_RUNTIME_DIR: runtimeDir,
     },
   });
@@ -27539,6 +27687,39 @@ async function testARenameWithNoEditorLeavesTheCacheAndTheScriptsRight(): Promis
       /Renaming a member needs the editor's language server[\s\S]*Godot LSP is unavailable on port/,
       member,
     );
+    assert.match(readFileSync(join(project, 'loud.gd'), 'utf8'), /say\(2\)/, 'and nothing was written');
+
+    // A language server that takes the connection and never answers: one that is there and busy,
+    // which is not one that is missing, and is told apart from it.
+    // Accepts and says nothing, as an editor deep in a long request does. Its sockets are destroyed
+    // before it closes, since a close waits for every connection and the client keeps its own.
+    const held = new Set<Socket>();
+    const silent = createServer((socket) => {
+      held.add(socket);
+    });
+    await new Promise<void>((ready) => silent.listen(lspPort, '127.0.0.1', ready));
+    try {
+      const busy = await said({ symbol: 'say', newName: 'utter' });
+      assert.match(
+        busy,
+        /^The editor's language server took the initialize request for say and had not answered it after 10s, so nothing was renamed\./,
+        busy,
+      );
+      assert.doesNotMatch(
+        busy,
+        /editor_launch|needs the editor's language server/,
+        'it is not sent to open an editor',
+      );
+    } finally {
+      for (const socket of held) {
+        socket.destroy();
+      }
+      await new Promise<void>((closed) =>
+        silent.close(() => {
+          closed();
+        }),
+      );
+    }
     assert.match(readFileSync(join(project, 'loud.gd'), 'utf8'), /say\(2\)/, 'and nothing was written');
   } finally {
     await server.stop();
@@ -27696,6 +27877,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAUseUnderACommentEndingInAFullStopIsRenamed,
   testADocLinkWrappedAcrossLinesIsRenamedWhole,
   testAnIgnoredFolderIsListedAndLeftUnchanged,
+  testARenameThatOutrunsTheLanguageServerSaysWhichRequest,
+  testAStringThatIsTheNameWholeIsListedFirst,
   testAMovedScriptIsNamedByItsNewPathEverywhere,
   testARenameWritesEveryFileOrNone,
   testARenameWithNoEditorLeavesTheCacheAndTheScriptsRight,
@@ -27948,6 +28131,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheLongestWaitCanBeWaitedOut,
   testDiagnosticsSurviveUriReEncoding,
   testDiagnosticsSurviveTheEditorRestarting,
+  testAReferencesRequestIsGivenItsOwnTime,
   testDiagnosticsLeaveNoDocumentOpen,
   testDiagnosticsSurviveAnotherSpellingOfTheSamePath,
   testDiagnosticsTimeoutIsNotAnEmptyResult,
