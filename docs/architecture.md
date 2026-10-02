@@ -366,15 +366,33 @@ once the server is there, rather than waiting for somebody to restart it.
 
 ## Which tools use which
 
-| Tools                                                                 | Route                                                               | Needs running                                   |
-| --------------------------------------------------------------------- | ------------------------------------------------------------------- | ----------------------------------------------- |
-| `scene_*`, `resource_edit`, `editor_rescan`, `editor_launch restart`  | Editor bridge                                                       | The editor, addon enabled                       |
-| `script_diagnostics`, `script_info` except `structure`                | Language server                                                     | The editor                                      |
-| `debug_*`, and the console `editor_output` returns                    | Debug adapter                                                       | A game the editor is playing                    |
-| `runtime_*`                                                           | Runtime                                                             | A game with the runtime autoload                |
-| `project_*`, `editor_classes`, `script_info structure`, `script_edit` | Headless operations                                                 | Nothing                                         |
-| `editor_run`                                                          | Editor bridge when an editor is connected, otherwise a spawned game | Nothing, though the editor changes what it does |
-| `editor_status`                                                       | All of them, reporting what answers                                 | Nothing                                         |
+| Tools                                                                                    | Route                                                               | Needs running                                   |
+| ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------- | ----------------------------------------------- |
+| `scene_*`, `resource_edit`, `editor_rescan`, `editor_launch restart`                     | Editor bridge                                                       | The editor, addon enabled                       |
+| `script_diagnostics`, `script_info` except `structure`, `script_edit rename` of a member | Language server                                                     | The editor                                      |
+| `debug_*`, and the console `editor_output` returns                                       | Debug adapter                                                       | A game the editor is playing                    |
+| `runtime_*`                                                                              | Runtime                                                             | A game with the runtime autoload                |
+| `project_*`, `editor_classes`, `script_info structure`, `script_edit` otherwise          | Headless operations                                                 | Nothing                                         |
+| `editor_run`                                                                             | Editor bridge when an editor is connected, otherwise a spawned game | Nothing, though the editor changes what it does |
+| `editor_status`                                                                          | All of them, reporting what answers                                 | Nothing                                         |
+
+`script_edit rename` reads the project's files itself, through a GDScript tokenizer of its own in
+`src/gdscript-source.ts`, because the question it answers for every occurrence of a name is what
+the tokenizer makes of the place: code, a string, a comment, a `##` doc comment or a node path. A
+class is renamed from that alone: a global class is the only thing a bare identifier in code can
+name, unless the script declares something of its own by the name or the word follows a dot, and
+both of those are left for a person. A member needs the analyser, since which `say` is meant in
+`thing.say()` depends on the type of `thing`, so its uses come from the editor's language server:
+the references of the topmost declaration, then `textDocument/definition` at every other
+occurrence in code. The second pass is needed because Godot 4.7, asked at an override's
+declaration, answers for the method it overrides, and a call inside the overriding class or on a
+value typed as it is in neither answer. A definition answer with more than one place is the
+analyser listing every declaration of the name for a value it cannot type, and is left. Every
+change is written or none is, and afterwards an open editor is told to read each changed file
+again, its moved script's old path included, which is what makes it drop the old class: a scan
+alone picks up a class that has appeared and keeps one that has gone. With no editor the class
+cache is rebuilt, the UID table too when a script moved, and the changed scripts are compiled in
+a fresh engine.
 
 `project_import refresh_classes` is the one headless call that also asks the editor what classes
 it holds, when one is connected and open on the same project. Rewriting the cache does not reach

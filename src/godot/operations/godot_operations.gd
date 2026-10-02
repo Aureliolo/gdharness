@@ -26,6 +26,7 @@ const Log = preload("logger.gd")
 const Plugins = preload("plugins.gd")
 const ProjectConfig = preload("project_config.gd")
 const ProjectDiagnostics = preload("project_diagnostics.gd")
+const RenameChecks = preload("rename_checks.gd")
 const ResourceFiles = preload("resource_files.gd")
 
 var _log: Log
@@ -171,6 +172,10 @@ func _run(operation: String, params: Dictionary) -> Dictionary:
 			payload = GdscriptAuthoring.new(_log).modify_gdscript(params)
 		"get_script_info":
 			payload = GdscriptAnalysis.new(_log).get_gdscript_info(params)
+		"names_taken":
+			payload = RenameChecks.new(_log).names_taken(params)
+		"check_scripts":
+			payload = RenameChecks.new(_log).check_scripts(params)
 
 		# Plugins and input
 		"list_plugins":

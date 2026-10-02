@@ -63,6 +63,15 @@ func rescan_filesystem(args: Dictionary) -> Dictionary:
 	var uids: Dictionary = {"reread": [], "duplicated": []}
 	if not Read.as_bool(args.get("statusOnly", false)) and not busy:
 		uids = _reread_changed_uids(filesystem)
+		# Files the caller has just written, moved or deleted, read again one by one. The scan finds a
+		# script that appeared and leaves the global class of one that has gone in the editor's list,
+		# which it then writes back into the class cache at a path that is not there; reading the gone
+		# path again is what drops it.
+		var named: Variant = args.get("updateFiles", [])
+		if named is Array:
+			var paths: Array = named
+			for path: Variant in paths:
+				filesystem.update_file(str(path))
 		filesystem.scan()
 		# Whether the scan ran, read off the editor rather than assumed. `scan()` returns without
 		# a word while the thread of the scan before is still to be joined, which is a frame or
