@@ -8,7 +8,7 @@
 import { existsSync, realpathSync } from 'node:fs';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { type DeclarationKind, isIdentifier, type Position } from './gdscript-source.js';
-import { type ProjectText, projectTexts } from './project-scan.js';
+import { ignoredTexts, type ProjectText, projectTexts } from './project-scan.js';
 import {
   ClassGraph,
   type ClassId,
@@ -17,6 +17,7 @@ import {
   type EditKind,
   fileOf,
   type Mention,
+  mentionIgnored,
   type Plan,
   planClassRename,
   planMemberRename,
@@ -329,6 +330,7 @@ export async function renameSymbol(request: RenameRequest, services: RenameServi
       plan,
     );
   }
+  plan = mentionIgnored(plan, ignoredTexts(projectPath), symbol, moveTo === null ? null : declaringPath);
   const rewrites = rewritesOf(
     plan,
     texts,
