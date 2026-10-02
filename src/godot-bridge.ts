@@ -171,6 +171,8 @@ interface GodotConnectionInfo {
    * mark, before it is taken as the editor. Until then it is not counted as connected.
    */
   identifying?: boolean;
+  /** Set once the greeting has been read. */
+  greeted?: boolean;
 }
 
 interface BridgeStatus {
@@ -492,6 +494,22 @@ export class GodotBridge extends EventEmitter {
     return this.socket?.readyState === WebSocket.OPEN && this.connectionInfo?.identifying !== true;
   }
 
+  /**
+   * Whether a process has opened the socket and is not yet settled as the editor or turned away:
+   * it has not greeted, or its command line is still being read. Connected reads true before the
+   * greeting and false while the command line is read, so a caller acting on either reading in
+   * this window acted on a state that was about to change: a test editor read as connected had its
+   * first call refused as not connected a moment later, once its greeting started the lookup.
+   */
+  public isArriving(): boolean {
+    const info = this.connectionInfo;
+    return (
+      this.socket?.readyState === WebSocket.OPEN &&
+      info !== null &&
+      (info.greeted !== true || info.identifying === true)
+    );
+  }
+
   public getStatus(): BridgeStatus {
     // A process still being looked up is not yet the editor, so nothing it said about itself is
     // reported as the editor's: a project named before it is served read as an editor that had
@@ -702,6 +720,7 @@ export class GodotBridge extends EventEmitter {
           this.connectionInfo.syncsBreakpoints =
             typeof message.syncs_breakpoints === 'boolean' ? message.syncs_breakpoints : undefined;
           this.log('info', `Godot ready: ${message.project_path}`);
+          this.connectionInfo.greeted = true;
           const pid = this.connectionInfo.editorPid;
           if (!this.connectionInfo.openedByAServer && pid !== undefined && this.oneShotReader !== null) {
             this.identify(pid);
