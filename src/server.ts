@@ -3643,8 +3643,48 @@ class GodotServer {
 
     const viaEditor = this.editorHasOpen(projectPath);
     const extra: OperationParams = {};
+    const statusAsk: OperationParams =
+      resourcePath === undefined ? { includeUpToDate: true } : { resourcePath };
     if (viaEditor) {
-      const inEditor = await this.reimportInTheEditor(targets, timeoutMs);
+      // A scan first: the editor's reimport passes over a file its own file system has not taken in,
+      // without a word. Downstream, 143 images an installer had just written came back as 143 files
+      // not reimported, each needing the import it had just been asked for, and a rescan straight
+      // after imported every one. The scan imports what it finds, so only what is still behind
+      // afterwards is handed to the reimport, unless force asks for everything again.
+      const scan = await this.handleRescanFilesystem({ projectPath, timeoutMs });
+      if (scan.isError === true) {
+        return { ok: false, response: scan };
+      }
+      const scanned = asParams(JSON.parse(scan.content[0]?.text ?? '{}'));
+      if (scanned['stillWorking'] === true) {
+        return {
+          ok: true,
+          payload: {
+            via: 'editor',
+            stillImporting: true,
+            asked: targets,
+            ...sourceless,
+            note: `The editor's scan of the project had not finished after ${timeoutMs} ms, and the reimport waits for it. project_import status says what it has done so far; pass a longer timeoutMs to wait it out.`,
+          },
+        };
+      }
+      let remaining = targets;
+      if (!force) {
+        const between = await this.operation('get_import_status', statusAsk, projectPath);
+        if (!between.ok) {
+          return { ok: false, response: this.answer(between) };
+        }
+        const fresh = new Map(importStatuses(between.payload).map((one) => [one.path, one.status]));
+        const caughtUp = targets.filter((path) => fresh.get(path) === 'up_to_date');
+        remaining = targets.filter((path) => !caughtUp.includes(path));
+        if (caughtUp.length > 0) {
+          extra['importedByTheScan'] = caughtUp;
+        }
+      }
+      const inEditor =
+        remaining.length === 0
+          ? { ok: true as const, finished: true }
+          : await this.reimportInTheEditor(remaining, timeoutMs);
       if (!inEditor.ok) {
         return inEditor;
       }
@@ -3676,23 +3716,24 @@ class GodotServer {
       }
     }
 
-    const after = await this.operation(
-      'get_import_status',
-      resourcePath === undefined ? { includeUpToDate: true } : { resourcePath },
-      projectPath,
-    );
+    const after = await this.operation('get_import_status', statusAsk, projectPath);
     if (!after.ok) {
       return { ok: false, response: this.answer(after) };
     }
     const now = new Map(importStatuses(after.payload).map((one) => [one.path, one]));
     const reimported = targets.filter((path) => now.get(path)?.status === 'up_to_date');
-    const notReimported = targets
-      .filter((path) => now.get(path)?.status !== 'up_to_date')
-      .map((path) => ({
-        path,
-        status: now.get(path)?.status ?? 'unknown',
-        ...(now.get(path)?.reason === undefined ? {} : { reason: now.get(path)?.reason }),
-      }));
+    // One entry per status and reason, with the files sharing them, because a folder that failed
+    // for one reason was answered as that reason written out once per file: 143 identical rows.
+    const groups = new Map<string, { status: string; reason?: string; paths: string[] }>();
+    for (const path of targets.filter((one) => now.get(one)?.status !== 'up_to_date')) {
+      const status = now.get(path)?.status ?? 'unknown';
+      const reason = now.get(path)?.reason;
+      const key = `${status}\u0000${reason ?? ''}`;
+      const group = groups.get(key) ?? { status, ...(reason === undefined ? {} : { reason }), paths: [] };
+      group.paths.push(path);
+      groups.set(key, group);
+    }
+    const notReimported = [...groups.values()];
     return {
       ok: true,
       payload: {
