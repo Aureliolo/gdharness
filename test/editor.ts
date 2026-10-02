@@ -3197,6 +3197,111 @@ async function testAChangedUidIsReadByTheRescan({ call, project }: Editor): Prom
 }
 
 /**
+ * A rename against a real editor and its language server.
+ *
+ * The member half holds what Godot 4.7.2 was measured to answer: the references of a method's own
+ * declaration miss an override's own uses, a bare call inside the overriding class and a call on a
+ * value typed as it, and only a definition asked at each finds them. Another class's method of the
+ * same name and the name inside a string are left; a call on a value of unknown type cannot be
+ * written in this project, whose warnings refuse it, so the regressions hold that one. The class
+ * half moves the script as well, and holds
+ * that the editor lets go of the old name: a scan alone keeps a class whose script has gone, and
+ * every scan after it writes the class back into the cache at a path that is not there.
+ */
+async function testARenameFollowsTheEngine({ call, project }: Editor): Promise<void> {
+  const dir = join(project, 'renamed');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, 'speaker.gd'),
+    'class_name Speaker\nextends Node\n\n\nfunc speak(times: int) -> String:\n\treturn "x".repeat(times)\n\n\nfunc twice() -> void:\n\tspeak(2)\n\tcall("speak", 1)\n',
+  );
+  writeFileSync(
+    join(dir, 'shouter.gd'),
+    'class_name Shouter\nextends Speaker\n\n\nfunc speak(times: int) -> String:\n\treturn super.speak(times * 2)\n\n\nfunc shout() -> void:\n\tspeak(1)\n',
+  );
+  writeFileSync(
+    join(dir, 'listener.gd'),
+    'extends Node\n\nvar heard: Speaker = Speaker.new()\n\n\nclass Echo:\n\tfunc speak(times: int) -> int:\n\t\treturn times\n\n\nfunc listen(loud: Shouter) -> void:\n\theard.speak(1)\n\tloud.speak(2)\n\tprint(Echo.new().speak(3))\n',
+  );
+  await call('editor_rescan', { projectPath: project });
+
+  const member = await call('script_edit', {
+    op: 'rename',
+    projectPath: project,
+    scriptPath: 'res://renamed/speaker.gd',
+    symbol: 'speak',
+    newName: 'utter',
+  });
+  assert.equal(get(member, 'ok'), true, `the member rename settled: ${JSON.stringify(member)}`);
+  assert.deepEqual(get(member, 'overridesRenamed'), ['res://renamed/shouter.gd'], JSON.stringify(member));
+  const shouter = readFileSync(join(dir, 'shouter.gd'), 'utf8');
+  assert.match(
+    shouter,
+    /func utter\(times: int\)[\s\S]*super\.utter\(times \* 2\)[\s\S]*\tutter\(1\)/,
+    shouter,
+  );
+  const listener = readFileSync(join(dir, 'listener.gd'), 'utf8');
+  assert.match(
+    listener,
+    /heard\.utter\(1\)\n\tloud\.utter\(2\)\n\tprint\(Echo\.new\(\)\.speak\(3\)\)/,
+    listener,
+  );
+  assert.match(
+    listener,
+    /\tfunc speak\(times: int\) -> int:/,
+    'another class with a method of the same name keeps it',
+  );
+  assert.match(readFileSync(join(dir, 'speaker.gd'), 'utf8'), /\tutter\(2\)\n\tcall\("speak", 1\)/);
+  const left = asArray(get(member, 'leftAlone')).map(
+    (one) => `${asString(get(one, 'file'))} ${asString(get(one, 'kind'))}`,
+  );
+  assert.ok(
+    left.includes('res://renamed/listener.gd code') && left.includes('res://renamed/speaker.gd string'),
+    `the untyped call and the string are answered as left: ${JSON.stringify(left)}`,
+  );
+  assert.deepEqual(
+    asArray(get(member, 'editor', 'reloaded'))
+      .map((one) => asString(one))
+      .filter((path) => path.startsWith('res://renamed/')),
+    ['res://renamed/listener.gd', 'res://renamed/shouter.gd', 'res://renamed/speaker.gd'],
+    `every changed script was reloaded, the subclass after its base: ${JSON.stringify(member)}`,
+  );
+
+  const moved = await call('script_edit', {
+    op: 'rename',
+    projectPath: project,
+    scriptPath: 'res://renamed/speaker.gd',
+    symbol: 'Speaker',
+    newName: 'Orator',
+    newScriptPath: 'res://renamed/orator.gd',
+  });
+  assert.equal(get(moved, 'ok'), true, `the class rename settled: ${JSON.stringify(moved)}`);
+  assert.equal(get(moved, 'editor', 'stillHolds'), undefined, JSON.stringify(moved));
+  const after = await call('editor_rescan', { projectPath: project });
+  assert.equal(
+    get(after, 'cacheDropped'),
+    undefined,
+    `the editor let go of the old class, so a later scan writes nothing back: ${JSON.stringify(after)}`,
+  );
+  const cache = readFileSync(join(project, '.godot', 'global_script_class_cache.cfg'), 'utf8');
+  assert.match(cache, /"class": &"Orator",[\s\S]*?"path": "res:\/\/renamed\/orator\.gd"/);
+  assert.doesNotMatch(cache, /&"Speaker"/);
+  for (const script of ['shouter.gd', 'listener.gd', 'orator.gd']) {
+    const diagnostics = await call('script_diagnostics', {
+      projectPath: project,
+      scriptPath: `res://renamed/${script}`,
+    });
+    assert.equal(
+      get(diagnostics, 'clean'),
+      true,
+      `${script} reads clean afterwards: ${JSON.stringify(diagnostics)}`,
+    );
+  }
+  // The scripts stay: they compile, and deleting them would leave the editor holding two classes
+  // whose scripts are gone for every case after this one.
+}
+
+/**
  * A game the editor is playing survives the server being replaced under it.
  *
  * The case that used to stand for this, `testARunOutlivesItsServer` in the regression tier, starts
@@ -4947,6 +5052,7 @@ async function main(): Promise<void> {
     ['testAMethodAddedToAnAnalysedTypeIsPickedUp', testAMethodAddedToAnAnalysedTypeIsPickedUp],
     ['testAnEnumMemberAddedToAHeldTypeIsPickedUp', testAnEnumMemberAddedToAHeldTypeIsPickedUp],
     ['testAChangedUidIsReadByTheRescan', testAChangedUidIsReadByTheRescan],
+    ['testARenameFollowsTheEngine', testARenameFollowsTheEngine],
     ['testAPlayedRunsConsoleArrivesOnItsOwn', testAPlayedRunsConsoleArrivesOnItsOwn],
     ['testDebugging', testDebugging],
     ['testRuntime', testRuntime],
