@@ -76,6 +76,7 @@ import {
 } from '../src/editor-log.js';
 import { type EngineRun, howItEnded, runEngine } from '../src/engine-run.js';
 import { answersTo, forAnswer, GameLog, type LogEntry } from '../src/game-log.js';
+import { occurrencesOf, regionsOf, shapeOf as scriptShapeOf } from '../src/gdscript-source.js';
 import {
   anEditorIsStillComing,
   CONNECT_WINDOW_MS,
@@ -116,6 +117,8 @@ import {
 } from '../src/process-children.js';
 import { secondsFromClock } from '../src/process-time.js';
 import { projectStructure, type SearchOptions, searchProject } from '../src/project-scan.js';
+import { applyRewrites, type Rewrite } from '../src/rename.js';
+import { type RenameServices, renameSymbol } from '../src/rename-symbol.js';
 import { parseProjectGodot, settingKeys, settingsDroppedReport } from '../src/resources.js';
 import { noteRestartBegun, restartNotePath, restartOwed, restartSettled } from '../src/restart-note.js';
 import {
@@ -9673,7 +9676,7 @@ function testTheCureIsWrittenWhole(): void {
   ];
   // What the tree holds today and not a comfortable minimum, so one place going quiet lowers this
   // in the same change and somebody confirms it was meant.
-  assert.equal(offered.length, 43, `the places offering a remedy should all be found, not ${offered.length}`);
+  assert.equal(offered.length, 45, `the places offering a remedy should all be found, not ${offered.length}`);
 
   // Across whitespace, because a rendered file wraps where the source did not and a sentence that
   // breaks at "the" is the same sentence. Change, edit and touch, because the claim is about what
@@ -26540,6 +26543,818 @@ async function testAShortenedCacheIsRebuilt(): Promise<void> {
 }
 
 /**
+ * The tokenizer's view of a script, which decides for every occurrence of a name whether a rename
+ * may change it. Each region kind is held by an input where reading it as another kind would
+ * change the answer: a `#` inside a string, a `##` after code, a prefixed string, a node path, and
+ * a `%` that takes a remainder rather than naming a node.
+ */
+function testAScriptIsReadTheWayItsTokenizerReadsIt(): void {
+  const kindAt = (source: string, needle: string): string => {
+    const at = source.indexOf(needle);
+    assert.ok(at !== -1, `the fixture holds ${needle}`);
+    return regionsOf(source).find((region) => region.start <= at && at < region.end)?.kind ?? 'none';
+  };
+  const source = [
+    'var s := "Told # not a comment"  # Told in a comment',
+    '## Told in documentation',
+    'var t := 1  ## Told after code',
+    'var raw := r"\\"Told"',
+    'var name := &"TOLDNAME"',
+    'var path := ^"TOLDPATH"',
+    'var node := $Told/Child',
+    'var unique := %Unique',
+    'var quoted := $"QuotedNode"',
+    'var rest := a %LOUD',
+    '\treturn %Returned',
+    'var block := """',
+    'Told in a block',
+    '"""',
+    'var after := Told.new()',
+  ].join('\n');
+  assert.equal(kindAt(source, 'Told # not'), 'string', 'a # inside a string starts no comment');
+  assert.equal(kindAt(source, 'Told in a comment'), 'comment');
+  assert.equal(kindAt(source, 'Told in documentation'), 'doc', 'a ## alone on its line is documentation');
+  assert.equal(kindAt(source, 'Told after code'), 'comment', 'a ## after code is a comment');
+  assert.equal(kindAt(source, 'Told"'), 'string', 'an escaped quote does not end a raw string');
+  assert.equal(kindAt(source, 'TOLDNAME'), 'string');
+  assert.equal(kindAt(source, 'TOLDPATH'), 'string');
+  assert.equal(kindAt(source, 'Told/Child'), 'nodePath');
+  assert.equal(kindAt(source, 'Unique'), 'nodePath', 'a % in front of an operand names a node');
+  assert.equal(kindAt(source, 'QuotedNode'), 'nodePath');
+  assert.equal(kindAt(source, 'LOUD'), 'code', 'a % after an operand takes a remainder');
+  assert.equal(
+    kindAt(source, 'Returned'),
+    'nodePath',
+    'a % after a keyword taking an expression names a node',
+  );
+  assert.equal(kindAt(source, 'Told in a block'), 'string');
+  assert.equal(kindAt(source, 'Told.new'), 'code', 'the block string ends where its fence does');
+
+  const uses = occurrencesOf('var Told := 1\nx.Told\nx\n\t.Told\nclass_name Told\nTold.new()', 'Told');
+  assert.deepEqual(
+    uses.map((one) => [one.afterDot, one.declaredAs]),
+    [
+      [false, 'var'],
+      [true, null],
+      [true, null],
+      [false, 'class_name'],
+      [false, null],
+    ],
+    'a member after a dot, across a line break too, and a declaration are each told apart',
+  );
+
+  const shape = scriptShapeOf(
+    [
+      '@icon("res://i.svg") @abstract class_name Told extends "res://base.gd"',
+      '',
+      'enum Tone {',
+      '\tSOFT,',
+      '',
+      '\tHARD = 2,',
+      '}',
+      'enum { LOUD }',
+      '@export_range(0, 10) var level: int = 0',
+      'static func make() -> Told:',
+      '\treturn null',
+      '',
+      'class Inner extends Told:',
+      '\tfunc say() -> void:',
+      '\t\tpass',
+      '\tvar depth: int',
+      '',
+      'func again() -> void:',
+      '\tvar local := 1',
+    ].join('\n'),
+  );
+  assert.equal(shape.className?.name, 'Told', 'annotations sharing the line do not hide the class_name');
+  assert.equal(shape.body.extendsAs, '"res://base.gd"');
+  assert.deepEqual(
+    shape.body.declarations.map((one) => `${one.kind} ${one.name}`),
+    [
+      'enum Tone',
+      'enumValue SOFT',
+      'enumValue HARD',
+      'enumValue LOUD',
+      'var level',
+      'func make',
+      'class Inner',
+      'func again',
+    ],
+    'a blank line inside an enum keeps its values, and a local is not a member',
+  );
+  assert.deepEqual(
+    shape.body.inner.map((one) => [one.name, one.extendsAs, one.declarations.map((each) => each.name)]),
+    [['Inner', 'Told', ['say', 'depth']]],
+  );
+}
+
+/** A project for the rename fixtures: a class, a subclass overriding its method, and every place
+ * a name can occur without being a use. */
+const RENAME_FIXTURE: Readonly<Record<string, string>> = {
+  'project.godot':
+    'config_version=5\n\n[application]\n\nconfig/name="Rename"\n\n[autoload]\n\nSpeaker="*res://told.gd"\n',
+  'told.gd': [
+    'class_name Told',
+    'extends Node',
+    '## Told, because it is the whole of what was said. See [method say].',
+    '',
+    'signal spoken(text: String)',
+    '',
+    '@export var level: int = 0',
+    '',
+    '',
+    'func say(times: int) -> String:',
+    '\tspoken.emit("said")',
+    '\treturn "x".repeat(times)',
+    '',
+    '',
+    '# say it twice',
+    'func again() -> void:',
+    '\tsay(2)',
+    '\tcall("say", 1)',
+    '',
+  ].join('\n'),
+  'told.gd.uid': 'uid://btold\n',
+  'loud.gd': [
+    'class_name Loud',
+    'extends Told',
+    '## A [Told] that shouts: [method Told.say], [method Loud.say].',
+    '',
+    '# Told, because it is the whole of what Loud says.',
+    '',
+    '',
+    'func say(times: int) -> String:',
+    '\treturn super.say(times * 2)',
+    '',
+    '',
+    'func shout() -> void:',
+    '\tsay(1)',
+    '',
+  ].join('\n'),
+  'user.gd': [
+    'extends Node',
+    '',
+    'const TOLD_SCRIPT := preload("res://told.gd")',
+    'const SIBLING := preload("told.gd")',
+    '',
+    '## Read beside [member Holder.Told], which is a member and not the class.',
+    'var typed: Told = Told.new()',
+    'var found: Array[Node] = []',
+    '',
+    '',
+    'func _ready() -> void:',
+    '\ttyped.say(1)',
+    '\tfound = find_children("*", "Told")',
+    '\tprint($Told, %Told, typed.Told)',
+    '\tget_node("X").say(8)',
+    '',
+  ].join('\n'),
+  'shadow.gd': [
+    'extends Node',
+    '',
+    'var Told: int = 3',
+    '',
+    '',
+    'func count() -> int:',
+    '\treturn Told + 1',
+    '',
+  ].join('\n'),
+  'other.gd': [
+    'extends Node',
+    '',
+    '',
+    'class Other:',
+    '\tfunc say(times: int) -> String:',
+    '\t\treturn str(times)',
+    '',
+  ].join('\n'),
+  'main.tscn': [
+    '[gd_scene load_steps=4 format=3]',
+    '',
+    '[ext_resource type="Script" path="res://user.gd" id="1"]',
+    '[ext_resource type="Script" path="res://loud.gd" id="2"]',
+    '[ext_resource type="PackedScene" path="res://told.tscn" id="3"]',
+    '',
+    '[node name="Main" type="Node"]',
+    'script = ExtResource("1")',
+    '',
+    '[node name="Told" type="Node" parent="."]',
+    'script = ExtResource("2")',
+    'level = 4',
+    '',
+    '[node name="Instanced" parent="." instance=ExtResource("3")]',
+    'level = 5',
+    '',
+    '[node name="Plain" type="Node" parent="."]',
+    'level = 6',
+    '',
+    '[connection signal="spoken" from="Told" to="Told" method="say"]',
+    '[connection signal="spoken" from="Plain" to="Plain" method="say"]',
+    '',
+  ].join('\n'),
+  'told.tscn': [
+    '[gd_scene load_steps=2 format=3]',
+    '',
+    '[ext_resource type="Script" uid="uid://btold" id="1"]',
+    '',
+    '[node name="Root" type="Node"]',
+    'script = ExtResource("1")',
+    '',
+  ].join('\n'),
+  'data.tres': [
+    '[gd_resource type="Resource" script_class="Told" load_steps=2 format=3]',
+    '',
+    '[ext_resource type="Script" path="res://told.gd" id="1"]',
+    '',
+    '[resource]',
+    'script = ExtResource("1")',
+    'level = 7',
+    '',
+  ].join('\n'),
+  'notes.md': 'Told is renamed here; see res://told.gd.\n',
+};
+
+/** A copy of [RENAME_FIXTURE] in a directory of its own. */
+function renameProject(): string {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-rename-'));
+  for (const [file, text] of Object.entries(RENAME_FIXTURE)) {
+    writeFileSync(join(project, file), text);
+  }
+  return project;
+}
+
+/** The 1-based line of the first line of [param file] in the fixture holding [param needle]. */
+function fixtureLine(file: string, needle: string, nth = 0): number {
+  const lines = (RENAME_FIXTURE[file] ?? '').split('\n');
+  const found = lines
+    .map((line, index) => (line.includes(needle) ? index + 1 : 0))
+    .filter((line) => line > 0);
+  const line = found[nth];
+  assert.ok(line !== undefined, `${file} holds ${needle}`);
+  return line;
+}
+
+/** Engine answers for a rename fixture: nothing taken, unless [param taken] says otherwise. */
+function engineSaying(
+  taken: Record<string, { as?: string[]; declaredBy?: string }> = {},
+): RenameServices['namesTaken'] {
+  return async (names) =>
+    Promise.resolve(
+      Object.fromEntries(
+        names.map((name) => [
+          name,
+          { as: taken[name]?.as ?? [], declaredBy: taken[name]?.declaredBy ?? null },
+        ]),
+      ),
+    );
+}
+
+/** What a rename changed as `file:line`, and what it left alone as `file:line:kind`. */
+function renameReadings(report: Record<string, unknown>): { changed: string[]; left: string[] } {
+  const changed = asArray(get(report, 'changed')).flatMap((file) =>
+    asArray(get(file, 'lines')).map((line) => `${text(get(file, 'file'))}:${asNumber(get(line, 'line'))}`),
+  );
+  const left = asArray(get(report, 'leftAlone')).map(
+    (one) => `${text(get(one, 'file'))}:${asNumber(get(one, 'line'))}:${text(get(one, 'kind'))}`,
+  );
+  return { changed: changed.sort(), left: [...new Set(left)].sort() };
+}
+
+const NO_LANGUAGE_SERVER: Pick<RenameServices, 'references' | 'definitions'> = {
+  references: async () => Promise.reject(new Error('a class rename asked the language server')),
+  definitions: async () => Promise.reject(new Error('a class rename asked the language server')),
+};
+
+/**
+ * A class rename changes every use the engine makes of the name and nothing else, and names each
+ * place it left alone. Every way the word occurs without being a use is in the fixture: prose in a
+ * doc comment and a comment, a string, a node path, a member after a dot, a script declaring a
+ * variable of the same name, a node named like the class, and a file that is not code.
+ */
+async function testARenamedClassChangesItsUsesAndLeavesItsWords(): Promise<void> {
+  const project = renameProject();
+  try {
+    const outcome = await renameSymbol(
+      {
+        projectPath: project,
+        scriptPath: join(project, 'told.gd'),
+        symbol: 'Told',
+        newName: 'Wording',
+        newScriptPath: null,
+      },
+      { namesTaken: engineSaying(), ...NO_LANGUAGE_SERVER },
+    );
+    assert.ok(outcome.ok, `the rename was refused: ${JSON.stringify(outcome)}`);
+    const { changed, left } = renameReadings(outcome.report);
+    assert.deepEqual(
+      changed,
+      [
+        'res://data.tres:1',
+        'res://loud.gd:2',
+        'res://loud.gd:3',
+        `res://told.gd:1`,
+        `res://user.gd:${fixtureLine('user.gd', 'var typed')}`,
+      ].sort(),
+      'the declaration, extends, doc links, a typed use and the class a resource records',
+    );
+    assert.deepEqual(
+      left,
+      [
+        'res://loud.gd:5:comment',
+        `res://main.tscn:${fixtureLine('main.tscn', 'name="Told"')}:scene`,
+        `res://main.tscn:${fixtureLine('main.tscn', 'from="Told"')}:scene`,
+        'res://notes.md:1:text',
+        'res://shadow.gd:3:code',
+        `res://shadow.gd:${fixtureLine('shadow.gd', 'return Told')}:code`,
+        'res://told.gd:3:doc',
+        `res://user.gd:${fixtureLine('user.gd', 'find_children')}:string`,
+        `res://user.gd:${fixtureLine('user.gd', 'print(')}:nodePath`,
+        `res://user.gd:${fixtureLine('user.gd', 'print(')}:code`,
+        `res://user.gd:${fixtureLine('user.gd', 'Holder.Told')}:doc`,
+      ].sort(),
+      'every other occurrence is answered, each as what the tokenizer makes of its place',
+    );
+    const why = asArray(get(outcome.report, 'leftAlone'))
+      .filter((one) => text(get(one, 'file')) === 'res://shadow.gd')
+      .map((one) => text(get(one, 'why')));
+    assert.ok(
+      why.every((said) => said.includes('declares something of its own named Told')),
+      `the shadowing script's uses say why they were left: ${JSON.stringify(why)}`,
+    );
+
+    applyRewrites(outcome.rewrites);
+    const loud = readFileSync(join(project, 'loud.gd'), 'utf8');
+    assert.match(loud, /^extends Wording$/m);
+    assert.match(loud, /## A \[Wording\] that shouts: \[method Wording\.say\], \[method Loud\.say\]\./);
+    assert.match(loud, /# Told, because it is the whole of what Loud says\./, 'the comment keeps its word');
+    assert.match(readFileSync(join(project, 'data.tres'), 'utf8'), /script_class="Wording"/);
+    assert.equal(readFileSync(join(project, 'shadow.gd'), 'utf8'), RENAME_FIXTURE['shadow.gd']);
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A rename onto a name that is already something is refused, naming what it is, for every kind of
+ * taken: another class, an autoload, an identifier in code, and what the engine says. So is a
+ * member the engine declares, and a new member name already declared in the class's chain.
+ */
+async function testARenameRefusesANameAlreadyTaken(): Promise<void> {
+  const project = renameProject();
+  const ask = async (
+    symbol: string,
+    newName: string,
+    taken: Record<string, { as?: string[]; declaredBy?: string }> = {},
+    script = 'told.gd',
+  ): Promise<string> => {
+    const outcome = await renameSymbol(
+      { projectPath: project, scriptPath: join(project, script), symbol, newName, newScriptPath: null },
+      {
+        namesTaken: engineSaying(taken),
+        references: async () => Promise.resolve([]),
+        definitions: async () => Promise.resolve([]),
+      },
+    );
+    assert.ok(!outcome.ok, `${symbol} to ${newName} was not refused`);
+    return `${outcome.reason} ${(outcome.conflicts ?? []).join('; ')}`;
+  };
+  try {
+    assert.match(await ask('Told', 'Loud'), /Loud is already the class_name of res:\/\/loud\.gd/);
+    assert.match(await ask('Told', 'Speaker'), /Speaker is already an autoload in project\.godot/);
+    assert.match(
+      await ask('Told', 'TOLD_SCRIPT'),
+      /TOLD_SCRIPT is already an identifier at res:\/\/user\.gd:3/,
+    );
+    assert.match(await ask('Told', 'Node', { Node: { as: ['a native class'] } }), /Node is a native class/);
+    assert.match(await ask('Told', 'func'), /func is not a name GDScript accepts/);
+    assert.match(await ask('Told', 'Told'), /already called Told/);
+    assert.match(
+      await ask('say', '_ready', { _ready: { declaredBy: 'Node' } }),
+      /_ready is declared by the engine's Node, which this class inherits from/,
+    );
+    assert.match(
+      await ask('level', 'name', { level: { declaredBy: 'Node' } }),
+      /level is declared by the engine's Node/,
+    );
+    assert.match(await ask('level', 'shout'), /shout is already declared in res:\/\/loud\.gd/);
+    assert.match(
+      await ask('nothing', 'something'),
+      /declares no nothing at its top level\. What it declares there: Told, spoken, level, say, again/,
+    );
+    const escaping = await renameSymbol(
+      {
+        projectPath: project,
+        scriptPath: join(project, 'told.gd'),
+        symbol: 'Told',
+        newName: 'Wording',
+        newScriptPath: join(project, '..', 'escaped.gd'),
+      },
+      { namesTaken: engineSaying(), ...NO_LANGUAGE_SERVER },
+    );
+    assert.ok(
+      !escaping.ok && escaping.reason.includes('must be a .gd path inside the project'),
+      `a move out of the project is refused: ${JSON.stringify(escaping)}`,
+    );
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Language server answers for the rename fixture, shaped as Godot 4.7.2 gave them when measured:
+ * the references of the method's own declaration include the override's declaration and its call
+ * to super, and miss the override's own uses, which only an ask at one of them returns; a word in a
+ * comment or a string is resolved by name; and a call on a value of unknown type is answered with
+ * every declaration of the name.
+ */
+function fakeLanguageServer(project: string): Pick<RenameServices, 'references' | 'definitions'> {
+  const at = (
+    file: string,
+    needle: string,
+    within: string,
+  ): { file: string; line: number; character: number } => {
+    const line = fixtureLine(file, needle) - 1;
+    const text_ = (RENAME_FIXTURE[file] ?? '').split('\n')[line] ?? '';
+    return { file: join(project, file), line, character: text_.indexOf(needle) + needle.indexOf(within) };
+  };
+  const key = (place: { file: string; line: number; character: number }): string =>
+    `${place.file.replace(/\\/g, '/').toLowerCase()}:${place.line}:${place.character}`;
+  const toldSay = at('told.gd', 'func say', 'say');
+  const loudSay = at('loud.gd', 'func say', 'say');
+  const otherSay = at('other.gd', 'func say', 'say');
+  const methodSet = [
+    toldSay,
+    at('told.gd', '[method say]', 'say'),
+    at('told.gd', '# say it', 'say'),
+    at('told.gd', '\tsay(2)', 'say'),
+    at('told.gd', 'call("say"', 'say'),
+    loudSay,
+    at('loud.gd', 'super.say', 'say'),
+    at('user.gd', 'typed.say', 'say'),
+  ];
+  const overrideSet = [at('loud.gd', '\tsay(1)', 'say')];
+  const references = new Map<string, { file: string; line: number; character: number }[]>([
+    [key(toldSay), methodSet],
+    [key(at('loud.gd', '\tsay(1)', 'say')), overrideSet],
+    [key(otherSay), [otherSay]],
+    [key(at('told.gd', 'var level', 'level')), [at('told.gd', 'var level', 'level')]],
+    [
+      key(at('told.gd', 'signal spoken', 'spoken')),
+      [at('told.gd', 'signal spoken', 'spoken'), at('told.gd', 'spoken.emit', 'spoken')],
+    ],
+  ]);
+  const definitions = new Map<string, { file: string; line: number; character: number }[]>([
+    [key(at('loud.gd', '\tsay(1)', 'say')), [loudSay]],
+    [key(otherSay), [otherSay]],
+    [key(at('user.gd', 'get_node("X").say', 'say')), [toldSay, otherSay]],
+  ]);
+  return {
+    references: async (absolute, _text, position) =>
+      Promise.resolve(references.get(key({ file: absolute, ...position })) ?? []),
+    definitions: async (absolute, _text, position) =>
+      Promise.resolve(definitions.get(key({ file: absolute, ...position })) ?? []),
+  };
+}
+
+/**
+ * A member rename follows what the language server resolves, an override and its own uses
+ * included, and changes what scenes and resources record by the member's name on nodes whose
+ * script inherits it, and nowhere else.
+ */
+async function testAMemberRenameFollowsWhatTheLanguageServerResolves(): Promise<void> {
+  const project = renameProject();
+  const rename = async (
+    symbol: string,
+    newName: string,
+  ): Promise<{ changed: string[]; left: string[]; report: Record<string, unknown>; order: string[] }> => {
+    const outcome = await renameSymbol(
+      { projectPath: project, scriptPath: join(project, 'told.gd'), symbol, newName, newScriptPath: null },
+      { namesTaken: engineSaying(), ...fakeLanguageServer(project) },
+    );
+    assert.ok(outcome.ok, `${symbol} was refused: ${JSON.stringify(outcome)}`);
+    return { ...renameReadings(outcome.report), report: outcome.report, order: outcome.scriptsInOrder };
+  };
+  try {
+    const say = await rename('say', 'utter');
+    assert.deepEqual(
+      say.changed,
+      [
+        'res://loud.gd:3',
+        `res://loud.gd:${fixtureLine('loud.gd', 'func say')}`,
+        `res://loud.gd:${fixtureLine('loud.gd', 'super.say')}`,
+        `res://loud.gd:${fixtureLine('loud.gd', '\tsay(1)')}`,
+        'res://told.gd:3',
+        `res://told.gd:${fixtureLine('told.gd', 'func say')}`,
+        `res://told.gd:${fixtureLine('told.gd', '\tsay(2)')}`,
+        `res://user.gd:${fixtureLine('user.gd', 'typed.say')}`,
+        `res://main.tscn:${fixtureLine('main.tscn', 'from="Told"')}`,
+      ].sort(),
+      'the override and its own call, doc links through either class, and the connection to a node running the subclass',
+    );
+    assert.deepEqual(get(say.report, 'overridesRenamed'), ['res://loud.gd']);
+    // Reloaded in this order by an open editor, which checks each script against the copies it holds
+    // of what it uses: the declaring class, then its override, which sorts before it by name and
+    // would be checked against the old method, then the script that only calls it.
+    assert.deepEqual(say.order, ['res://told.gd', 'res://loud.gd', 'res://user.gd']);
+    const loudDoc = asArray(get(say.report, 'changed'))
+      .filter((file) => text(get(file, 'file')) === 'res://loud.gd')
+      .flatMap((file) => asArray(get(file, 'lines')))
+      .find((line) => asNumber(get(line, 'line')) === 3);
+    assert.equal(
+      text(get(loudDoc, 'text')),
+      '## A [Told] that shouts: [method Told.utter], [method Loud.utter].',
+      'a doc link through the class and one through the subclass are both renamed',
+    );
+    assert.deepEqual(
+      say.left,
+      [
+        `res://main.tscn:${fixtureLine('main.tscn', 'from="Plain"')}:scene`,
+        `res://other.gd:${fixtureLine('other.gd', 'func say')}:code`,
+        `res://told.gd:${fixtureLine('told.gd', '# say it')}:comment`,
+        `res://told.gd:${fixtureLine('told.gd', 'call("say"')}:string`,
+        `res://user.gd:${fixtureLine('user.gd', 'get_node')}:code`,
+      ].sort(),
+      'another class with the same method, a call on a value of unknown type, and what the server resolved by name in a comment or a string',
+    );
+
+    const level = await rename('level', 'depth');
+    assert.deepEqual(
+      level.changed,
+      [
+        'res://data.tres:7',
+        `res://main.tscn:${fixtureLine('main.tscn', 'level = 4')}`,
+        `res://main.tscn:${fixtureLine('main.tscn', 'level = 5')}`,
+        `res://told.gd:${fixtureLine('told.gd', 'var level')}`,
+      ].sort(),
+      'the value saved on a node running a subclass, on an instance of a scene whose root runs the class by UID, and on a resource',
+    );
+    assert.deepEqual(level.left, [`res://main.tscn:${fixtureLine('main.tscn', 'level = 6')}:scene`]);
+
+    const spoken = await rename('spoken', 'uttered');
+    assert.ok(
+      spoken.changed.includes(`res://main.tscn:${fixtureLine('main.tscn', 'from="Told"')}`) &&
+        !spoken.changed.includes(`res://main.tscn:${fixtureLine('main.tscn', 'from="Plain"')}`),
+      `a connection is renamed by its emitter: ${JSON.stringify(spoken)}`,
+    );
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A moved script is named by its new path everywhere a string names it, in the style it was
+ * written, and its own relative paths still name the files they did.
+ */
+async function testAMovedScriptIsNamedByItsNewPathEverywhere(): Promise<void> {
+  const project = renameProject();
+  // The project named through a link, so the path the caller gives and the one the file system
+  // resolves differ, as an 8.3 short name and its long one do on a Windows runner. The target does
+  // not exist yet, so it cannot be resolved itself, and read in the spelling given it was outside.
+  const linked = `${project}-linked`;
+  symlinkSync(project, linked, 'junction');
+  try {
+    writeFileSync(join(project, 'helper.gd'), 'extends Node\n');
+    writeFileSync(
+      join(project, 'told.gd'),
+      `${RENAME_FIXTURE['told.gd']}\nconst HELPER := preload("helper.gd")\n`,
+    );
+    const outcome = await renameSymbol(
+      {
+        projectPath: linked,
+        scriptPath: join(linked, 'told.gd'),
+        symbol: 'Told',
+        newName: 'Wording',
+        newScriptPath: join(linked, 'words', 'wording.gd'),
+      },
+      { namesTaken: engineSaying(), ...NO_LANGUAGE_SERVER },
+    );
+    assert.ok(outcome.ok, `the move was refused: ${JSON.stringify(outcome)}`);
+    applyRewrites(outcome.rewrites);
+    assert.ok(!existsSync(join(project, 'told.gd')) && !existsSync(join(project, 'told.gd.uid')));
+    assert.equal(readFileSync(join(project, 'words', 'wording.gd.uid'), 'utf8'), 'uid://btold\n');
+    const moved = readFileSync(join(project, 'words', 'wording.gd'), 'utf8');
+    assert.match(moved, /^class_name Wording$/m);
+    assert.match(
+      moved,
+      /preload\("\.\.\/helper\.gd"\)/,
+      'a relative path in the moved script still names its file',
+    );
+    const user = readFileSync(join(project, 'user.gd'), 'utf8');
+    assert.match(user, /preload\("res:\/\/words\/wording\.gd"\)/);
+    assert.match(user, /preload\("words\/wording\.gd"\)/, 'a relative path stays relative');
+    assert.match(
+      readFileSync(join(project, 'project.godot'), 'utf8'),
+      /Speaker="\*res:\/\/words\/wording\.gd"/,
+    );
+    assert.match(readFileSync(join(project, 'data.tres'), 'utf8'), /path="res:\/\/words\/wording\.gd"/);
+    assert.match(
+      readFileSync(join(project, 'notes.md'), 'utf8'),
+      /res:\/\/told\.gd/,
+      'prose keeps the old path',
+    );
+    assert.ok(
+      asArray(get(outcome.report, 'leftAlone')).some(
+        (one) =>
+          text(get(one, 'file')) === 'res://notes.md' &&
+          text(get(one, 'why')).includes('names res://told.gd'),
+      ),
+      'and says it did',
+    );
+  } finally {
+    // The link alone, which removing as a directory would follow into the project.
+    rmSync(linked, { force: true });
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A rename writes every file or none: one changed on disk since the plan was made stops it before
+ * anything is written, and a write failing part of the way puts back the files already written.
+ */
+async function testARenameWritesEveryFileOrNone(): Promise<void> {
+  const project = renameProject();
+  try {
+    const plan = async (): Promise<Rewrite[]> => {
+      const outcome = await renameSymbol(
+        {
+          projectPath: project,
+          scriptPath: join(project, 'told.gd'),
+          symbol: 'Told',
+          newName: 'Wording',
+          newScriptPath: null,
+        },
+        { namesTaken: engineSaying(), ...NO_LANGUAGE_SERVER },
+      );
+      assert.ok(outcome.ok);
+      return outcome.rewrites;
+    };
+    const first = await plan();
+    writeFileSync(join(project, 'user.gd'), `${RENAME_FIXTURE['user.gd']}# edited meanwhile\n`);
+    assert.throws(() => {
+      applyRewrites(first);
+    }, /res:\/\/user\.gd changed on disk while the rename was being worked out; nothing was written/);
+    assert.equal(
+      readFileSync(join(project, 'loud.gd'), 'utf8'),
+      RENAME_FIXTURE['loud.gd'],
+      'nothing was written',
+    );
+
+    const second = await plan();
+    // A directory where the last file is to be written, which fails the write after the others.
+    const last = second[second.length - 1];
+    assert.ok(last !== undefined);
+    const blocked = { ...last, writeTo: join(project, 'blocked', 'file.gd') };
+    writeFileSync(join(project, 'blocked'), 'a file where a directory has to be');
+    assert.throws(() => {
+      applyRewrites([...second.slice(0, -1), blocked]);
+    });
+    for (const rewrite of second.slice(0, -1)) {
+      assert.equal(readFileSync(rewrite.absolute, 'utf8'), rewrite.before, `${rewrite.path} was put back`);
+    }
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A rename with no editor, through the server and a real engine: the class renamed and its script
+ * moved with the UID it had, the class cache naming the new class at the new path and not the old
+ * one, every changed script compiling in a fresh engine, and the engine's own names refused. A
+ * member rename has no language server to ask and says so rather than guessing from the text.
+ */
+async function testARenameWithNoEditorLeavesTheCacheAndTheScriptsRight(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('rename without an editor regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-rename-engine-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-rename-engine-rt-'));
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\n\nconfig/name="Rename"\n',
+  );
+  writeFileSync(
+    join(project, 'told.gd'),
+    'class_name Told\nextends Node\n\nconst HELPER := preload("helper.gd")\n\n\nfunc _ready() -> void:\n\tpass\n\n\nfunc say(times: int) -> String:\n\treturn "x".repeat(times)\n',
+  );
+  writeFileSync(join(project, 'helper.gd'), 'extends RefCounted\n');
+  writeFileSync(
+    join(project, 'loud.gd'),
+    'class_name Loud\nextends Told\n\n\nfunc shout() -> String:\n\treturn say(2) + Told.new().say(1)\n',
+  );
+  writeFileSync(
+    join(project, 'user.gd'),
+    'extends Node\n\nconst SCRIPT := preload("res://told.gd")\n\nvar typed: Told = SCRIPT.new()\n',
+  );
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      // A port nothing listens on, so the member rename cannot reach an editor of another project.
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+    },
+  });
+  const rename = async (args: Record<string, unknown>): Promise<JsonRpcMessage> =>
+    await server.request(
+      'tools/call',
+      { name: 'script_edit', arguments: { op: 'rename', projectPath: project, ...args } },
+      240_000,
+    );
+  try {
+    const imported = await runImport(godotPath, project);
+    assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
+    const uid = readFileSync(join(project, 'told.gd.uid'), 'utf8');
+    await server.initialize('rename-engine');
+
+    const renamed = parseTextContent(
+      await rename({
+        scriptPath: 'res://told.gd',
+        symbol: 'Told',
+        newName: 'Wording',
+        newScriptPath: 'res://words/wording.gd',
+      }),
+    );
+    assert.equal(get(renamed, 'ok'), true, `the rename did not settle: ${JSON.stringify(renamed)}`);
+    assert.deepEqual(get(renamed, 'compiled', 'failed'), [], JSON.stringify(get(renamed, 'compiled')));
+    assert.equal(
+      asNumber(get(renamed, 'compiled', 'checked')),
+      3,
+      'the moved script, its subclass and its user',
+    );
+    assert.equal(get(renamed, 'uidTable'), 'rebuilt by an import pass');
+    assert.ok(!existsSync(join(project, 'told.gd')) && !existsSync(join(project, 'told.gd.uid')));
+    assert.equal(
+      readFileSync(join(project, 'words', 'wording.gd.uid'), 'utf8'),
+      uid,
+      'the UID moved with it',
+    );
+    const cache = readFileSync(join(project, '.godot', 'global_script_class_cache.cfg'), 'utf8');
+    assert.match(cache, /"class": &"Wording",[\s\S]*?"path": "res:\/\/words\/wording\.gd"/);
+    assert.doesNotMatch(cache, /&"Told"/, 'the old name is gone from the cache');
+    assert.match(readFileSync(join(project, 'loud.gd'), 'utf8'), /extends Wording\n[\s\S]*Wording\.new\(\)/);
+    assert.match(readFileSync(join(project, 'user.gd'), 'utf8'), /preload\("res:\/\/words\/wording\.gd"\)/);
+    assert.match(readFileSync(join(project, 'words', 'wording.gd'), 'utf8'), /preload\("\.\.\/helper\.gd"\)/);
+    // What a fresh engine resolves the UID to, which is what a scene naming the script by its UID
+    // loads: the engine's own table, not the sidecar.
+    writeFileSync(
+      join(project, 'probe.gd'),
+      `extends SceneTree\n\n\nfunc _init() -> void:\n\tprint("UID PATH ", ResourceUID.get_id_path(ResourceUID.text_to_id("${uid.trim()}")))\n\tquit()\n`,
+    );
+    const probed = spawnSync(godotPath, ['--headless', '--path', project, '--script', 'res://probe.gd'], {
+      encoding: 'utf8',
+      timeout: 120_000,
+    });
+    assert.match(probed.stdout, /UID PATH res:\/\/words\/wording\.gd/, `${probed.stdout}\n${probed.stderr}`);
+    rmSync(join(project, 'probe.gd'));
+
+    // A class renamed in place, beside a script naming it that does not compile for a reason of its
+    // own: the cache is rebuilt to the new name, and the script is reported rather than passed.
+    writeFileSync(
+      join(project, 'broken.gd'),
+      'extends Node\n\nvar held: Loud\n\n\nfunc f() -> void:\n\tnot_declared()\n',
+    );
+    const inPlace = parseTextContent(
+      await rename({ scriptPath: 'res://loud.gd', symbol: 'Loud', newName: 'Shouter' }),
+    );
+    assert.equal(get(inPlace, 'ok'), false, JSON.stringify(inPlace));
+    assert.deepEqual(
+      get(inPlace, 'compiled', 'failed'),
+      ['res://broken.gd'],
+      JSON.stringify(get(inPlace, 'compiled')),
+    );
+    const recached = readFileSync(join(project, '.godot', 'global_script_class_cache.cfg'), 'utf8');
+    assert.match(recached, /"class": &"Shouter",[\s\S]*?"path": "res:\/\/loud\.gd"/);
+    assert.doesNotMatch(recached, /&"Loud"/);
+    rmSync(join(project, 'broken.gd'));
+
+    const said = async (args: Record<string, unknown>): Promise<string> =>
+      textOf(await rename({ scriptPath: 'res://words/wording.gd', ...args })) ?? '';
+    const native = await said({ symbol: 'Wording', newName: 'Node' });
+    assert.match(native, /Node is a native class/, native);
+    // A virtual, which the engine's class_has_method does not count as a method of Node.
+    const virtual = await said({ symbol: '_ready', newName: 'begin' });
+    assert.match(virtual, /_ready is declared by the engine's Node/, virtual);
+    const member = await said({ symbol: 'say', newName: 'utter' });
+    assert.match(
+      member,
+      /Renaming a member needs the editor's language server[\s\S]*Godot LSP is unavailable on port/,
+      member,
+    );
+    assert.match(readFileSync(join(project, 'loud.gd'), 'utf8'), /say\(2\)/, 'and nothing was written');
+  } finally {
+    await server.stop();
+    sweep(project);
+    rmSync(runtimeDir, { recursive: true, force: true });
+  }
+}
+
+/**
  * A rescan asked for the moment an opening editor reaches the bridge finds nothing missing.
  *
  * Downstream, a rescan right after editor_launch open on a project of six hundred classes answered
@@ -26681,6 +27496,13 @@ function testEveryFixtureIsCalled(): void {
 
 const TESTS: (() => void | Promise<void>)[] = [
   testARescanAsTheEditorOpensFindsNothingMissing,
+  testAScriptIsReadTheWayItsTokenizerReadsIt,
+  testARenamedClassChangesItsUsesAndLeavesItsWords,
+  testARenameRefusesANameAlreadyTaken,
+  testAMemberRenameFollowsWhatTheLanguageServerResolves,
+  testAMovedScriptIsNamedByItsNewPathEverywhere,
+  testARenameWritesEveryFileOrNone,
+  testARenameWithNoEditorLeavesTheCacheAndTheScriptsRight,
   testAOneShotEngineRunIsTurnedAwayAtTheBridge,
   testACaptureSaysWhatPartOfTheWindowItIs,
   testEveryFileArgumentIsContained,
