@@ -74,9 +74,10 @@ Without it, `runtime_*` has nothing to talk to.
 ## Updating
 
 The server tells you when there is a newer release: a tool answer carries an `update_available`
-block naming the version, its notes and the command. Tell the reader, and run it only if they
-agree, because it replaces the addons in their project. Afterwards the MCP server is reconnected
-and the editor restarted with `editor_launch restart`.
+block naming the version, its notes and the command. Tell the reader, and run it only with their
+agreement, because it replaces the addons in their project: a yes when asked, or a standing
+instruction of theirs to upgrade on every release. Afterwards the MCP server is reconnected and the
+editor restarted with `editor_launch restart`.
 
 ```bash
 npx -y gdharness@<new> upgrade
