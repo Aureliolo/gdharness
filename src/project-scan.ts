@@ -170,6 +170,66 @@ function isBinary(bytes: Buffer): boolean {
   return bytes.subarray(0, 8000).includes(0);
 }
 
+/** A text file of the project, by its `res://` path and where it is on disk. */
+export interface ProjectText {
+  readonly path: string;
+  readonly absolute: string;
+  readonly text: string;
+}
+
+/**
+ * Formats that are never text, passed over without being read. Opening every texture and model in
+ * a project to look for a NUL made a walk of a large project read gigabytes to find its scripts.
+ */
+const BINARY_EXTENSIONS = new Set([
+  ...[...ASSET_EXTENSIONS].filter(
+    (extension) => !['svg', 'gltf', 'gdshader', 'shader', 'fnt'].includes(extension),
+  ),
+  'scn',
+  'res',
+  'zip',
+  'pck',
+  'exe',
+  'dll',
+  'so',
+  'dylib',
+]);
+
+/**
+ * Every text file of the project the engine would see, as the search walks them: dot directories,
+ * node_modules and directories holding a `.gdignore` are stepped over, and a file is text when its
+ * first eight thousand bytes hold no NUL.
+ */
+export function projectTexts(projectPath: string): ProjectText[] {
+  const found: ProjectText[] = [];
+  const visit = (directory: string, prefix: string): void => {
+    if (steppedOver(directory)) {
+      return;
+    }
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      if (skipped(entry.name)) {
+        continue;
+      }
+      const absolute = join(directory, entry.name);
+      const spelled = `${prefix}${entry.name}`;
+      if (entry.isDirectory()) {
+        visit(absolute, `${spelled}/`);
+        continue;
+      }
+      const extension = entry.name.includes('.') ? (entry.name.split('.').pop()?.toLowerCase() ?? '') : '';
+      if (!entry.isFile() || BINARY_EXTENSIONS.has(extension)) {
+        continue;
+      }
+      const bytes = readFileSync(absolute);
+      if (!isBinary(bytes)) {
+        found.push({ path: `res://${spelled}`, absolute, text: bytes.toString('utf8') });
+      }
+    }
+  };
+  visit(projectPath, '');
+  return found;
+}
+
 /** Where the query occurs in the project's text files, as res:// paths with line numbers. */
 export function searchProject(projectPath: string, options: SearchOptions): SearchResult {
   const extensions =

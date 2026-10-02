@@ -746,7 +746,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'script_edit',
     description:
-      "Creates a GDScript file, or adds functions, variables and signals to one. Every declaration written carries a type. Both load what they wrote under the project's own warning settings and answer with parses; the engine's reasons for a refusal come back under engine_messages. create answers with the extends and class_name the engine read, and a script declaring a class_name is put in the project's class list, with registered saying whether it is there. modify makes every addition or none, and answers with the line each one is on in the file written.",
+      "Creates a GDScript file, or adds functions, variables and signals to one. Every declaration written carries a type. Both load what they wrote under the project's own warning settings and answer with parses; the engine's reasons for a refusal come back under engine_messages. create answers with the extends and class_name the engine read, and a script declaring a class_name is put in the project's class list, with registered saying whether it is there. modify makes every addition or none, and answers with the line each one is on in the file written. rename renames a class or a member wherever the engine uses it and writes every file or none: changed lists each file with its changed lines as they now read, and leftAlone lists every other whole-word occurrence of the old name with what the tokenizer makes of it (code, string, comment, doc, nodePath, scene or text) and, where it is not plain, why: a find_children string, a word in a comment, a node named like the class, a call on a value whose type the analyser could not tell. Read leftAlone before calling the rename done; nothing in it was changed. Afterwards an open editor scans the changed files and reloads every changed script, which is also the compile check, and its answer comes back under editor; with no editor the class cache is rebuilt and the changed scripts are compiled in a fresh engine, under classCache and compiled.",
     parameters: {
       projectPath: PROJECT_PATH,
       scriptPath: SCRIPT_PATH,
@@ -763,11 +763,34 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         description: 'create: a starting shape.',
       },
       modifications: SCRIPT_MODIFICATIONS,
+      symbol: {
+        type: 'string',
+        ops: ['rename'],
+        description:
+          "rename: what to rename, declared by the script at scriptPath: its class_name, or a method, variable, constant, signal, enum, enum value or inner class at its top level. A class is renamed from the files and needs no editor: every bare use in code, the declaration, doc links such as [Told] and [method Told.say], and the script_class a .tres records. A script that declares something of its own by the old name, and a use after a dot, are left alone, since which of those mean the class cannot be told from the text. A member is renamed from what the editor's language server resolves to it, so it needs the editor open on this project; a method is renamed together with every override of it in the classes inheriting it, and from the topmost class declaring it when scriptPath's is itself an override. Doc links naming the member through any class inheriting it are renamed too, and so are a scene's or resource's saved value of a variable on a node or resource whose script inherits it, and a connection naming the signal on its emitter or the method on its receiver. A name the engine itself declares on the native base, such as _ready, is refused, as is a new name already taken: by a class, an autoload, an identifier in code, a native class or built-in type, or a member anywhere in the class's chain.",
+      },
+      newName: { type: 'string', ops: ['rename'], description: 'rename: the new name.' },
+      newScriptPath: {
+        type: 'string',
+        ops: ['rename'],
+        description:
+          'rename: also move the declaring script here, with its .uid beside it, rewriting every string that names it by path in the same style it was written (res:// or relative), and the relative paths in the moved script itself.',
+      },
+      preview: {
+        type: 'boolean',
+        ops: ['rename'],
+        description:
+          'rename: answer with what would change and what would be left alone, and write nothing. Default false.',
+      },
     },
     requires: ['projectPath', 'scriptPath'],
     operations: {
       create: { summary: 'a new script file', requires: [] },
       modify: { summary: 'add to an existing script', requires: ['modifications'] },
+      rename: {
+        summary: 'rename a class or a member wherever the engine uses it, across the project',
+        requires: ['symbol', 'newName'],
+      },
     },
   },
   {

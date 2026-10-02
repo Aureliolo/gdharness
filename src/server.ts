@@ -54,6 +54,7 @@ import {
   heldButGone,
   isToolScript,
   missingMemberIn,
+  type NamingScript,
   type NotReloaded,
   notReloadedNote,
   scriptsNaming,
@@ -125,7 +126,7 @@ import {
   savesStayPut,
   userDataIn,
 } from './launch.js';
-import { DEFAULT_LSP_PORT, GodotLSPClient, handleLSPTool } from './lsp_client.js';
+import { DEFAULT_LSP_PORT, GodotLSPClient, handleLSPTool, normalizeLSPError } from './lsp_client.js';
 import { launchOutsideTheTree } from './outside.js';
 import { isSameDirectory, isWithinRoot, realPathOr, resolveWithinProject } from './paths.js';
 import { freePort, portFromEnvOrNull } from './ports.js';
@@ -142,6 +143,8 @@ import {
 } from './process-children.js';
 import { cpuSecondsOf } from './process-time.js';
 import { projectStructure, scriptsWithoutUid, searchProject } from './project-scan.js';
+import { applyRewrites } from './rename.js';
+import { type NameTaken, type RenameOutcome, renameSymbol } from './rename-symbol.js';
 import { parseProjectGodot, settingKeys, settingsDroppedReport, setupResourceHandlers } from './resources.js';
 import { noteRestartBegun, type RestartNote, restartOwed, restartSettled } from './restart-note.js';
 import {
@@ -1589,6 +1592,7 @@ export const PROJECT_FILE_ARGUMENTS = [
   'scriptPath',
   'resourcePath',
   'newPath',
+  'newScriptPath',
   'path',
   'script',
 ];
@@ -2714,6 +2718,8 @@ class GodotServer {
             return await bridge('connect_animation_states');
         }
 
+      case 'script_edit':
+        return await this.handleRenameSymbol(args);
       case 'script_info':
         switch (op) {
           case 'symbols':
@@ -4539,13 +4545,18 @@ class GodotServer {
     toolName: string,
     args: unknown,
   ): Promise<{ content: { type: string; text: string }[] }> {
+    return handleLSPTool(await this.lsp(), toolName, args);
+  }
+
+  /** The client for the language server of the editor this server follows, on the port it serves. */
+  private async lsp(): Promise<GodotLSPClient> {
     const port = this.editorServes('lspPort', 'GDHARNESS_LSP_PORT', DEFAULT_LSP_PORT);
     if (this.lspClient !== null && this.lspClient.port !== port) {
       await this.lspClient.disconnect();
       this.lspClient = null;
     }
     this.lspClient ??= new GodotLSPClient(port);
-    return handleLSPTool(this.lspClient, toolName, args);
+    return this.lspClient;
   }
 
   private async handleDAP(toolName: string, args: unknown): Promise<ToolResponse> {
@@ -8561,9 +8572,16 @@ class GodotServer {
     projectPath: string,
     classes: readonly string[],
   ): Promise<{ reloaded: string[]; notReloaded: NotReloaded[] }> {
+    return await this.reloadInEditor(scriptsNaming(projectPath, classes));
+  }
+
+  /** Reloads each of [param scripts] in the editor from its file, as reloadScript reloads one. */
+  private async reloadInEditor(
+    scripts: readonly NamingScript[],
+  ): Promise<{ reloaded: string[]; notReloaded: NotReloaded[] }> {
     const reloaded: string[] = [];
     const notReloaded: NotReloaded[] = [];
-    for (const { script: scriptPath, tool } of scriptsNaming(projectPath, classes)) {
+    for (const { script: scriptPath, tool } of scripts) {
       // A @tool script is running in the editor, and reloading one from inside a call the editor is
       // serving can take the editor down: it did on Linux, reloading the addon's own tool executor.
       if (tool) {
@@ -8747,6 +8765,242 @@ class GodotServer {
     return this.godotBridge.isConnected()
       ? await this.alsoSayWhatTheEditorCannotSee(answered, args)
       : answered;
+  }
+
+  /**
+   * script_edit rename: a class or a member renamed wherever the engine uses it, every other
+   * occurrence of the word answered rather than changed, and the editor or the class cache brought
+   * up to the new name so nothing started next resolves the old one.
+   */
+  private async handleRenameSymbol(given: OperationParams): Promise<ToolResponse> {
+    const project = this.project(given);
+    if (!project.ok) {
+      return project.response;
+    }
+    const contained = this.containProjectFiles(given);
+    if (!contained.ok) {
+      return contained.response;
+    }
+    const args = contained.value;
+    const projectPath = project.value.path;
+    const scriptPath = resolveWithinProject(projectPath, readNonEmptyString(args, 'scriptPath') ?? '');
+    if (!scriptPath.ok) {
+      return this.createErrorResponse(scriptPath.reason);
+    }
+    if (!existsSync(scriptPath.absolutePath)) {
+      return this.createErrorResponse(`Script file does not exist: ${scriptPath.absolutePath}`);
+    }
+    const asked = readNonEmptyString(args, 'newScriptPath');
+    const moveTo = asked === undefined ? null : resolveWithinProject(projectPath, asked);
+    if (moveTo !== null && !moveTo.ok) {
+      return this.createErrorResponse(moveTo.reason);
+    }
+
+    // Held in an object rather than a variable, because it is set inside the calls below and read
+    // after them, which a narrowed `let` would type as never having been set.
+    const languageServer: { problem: string | null; initialized: boolean } = {
+      problem: null,
+      initialized: false,
+    };
+    const askTheLanguageServer = async <T>(question: (client: GodotLSPClient) => Promise<T>): Promise<T> => {
+      const client = await this.lsp();
+      try {
+        if (!languageServer.initialized) {
+          await client.initialize(projectPath);
+          languageServer.initialized = true;
+        }
+        return await question(client);
+      } catch (error) {
+        languageServer.problem = normalizeLSPError(error, client.port);
+        throw error;
+      }
+    };
+    const symbol = readNonEmptyString(args, 'symbol') ?? '';
+    const newName = readNonEmptyString(args, 'newName') ?? '';
+    const outcome = await renameSymbol(
+      {
+        projectPath,
+        scriptPath: scriptPath.absolutePath,
+        symbol,
+        newName,
+        newScriptPath: moveTo === null ? null : moveTo.absolutePath,
+      },
+      {
+        namesTaken: async (names, base) => {
+          const asked = await this.operation(
+            'names_taken',
+            { names: [...names], base: base ?? '' },
+            projectPath,
+          );
+          if (!asked.ok) {
+            throw new Error(
+              `the engine could not be asked whether ${names.join(' or ')} is taken: ${asked.message}`,
+            );
+          }
+          return asParams(asked.payload['taken']) as Record<string, NameTaken>;
+        },
+        references: async (absolute, text, at) =>
+          await askTheLanguageServer((client) => client.getReferences(absolute, text, at.line, at.character)),
+        definitions: async (absolute, text, at) =>
+          await askTheLanguageServer((client) =>
+            client.getDefinitions(absolute, text, at.line, at.character),
+          ),
+      },
+    ).catch((error: unknown): RenameOutcome => ({ ok: false, reason: errorMessage(error) }));
+
+    if (!outcome.ok) {
+      if (languageServer.problem !== null) {
+        return this.createErrorResponse(
+          `Renaming a member needs the editor's language server, because which uses of the name are this class's depends on the types only the engine's analyser knows. ${languageServer.problem}`,
+          [
+            'editor_launch opens the editor, whose language server this uses',
+            'A class_name is renamed from the files and needs no editor',
+          ],
+        );
+      }
+      const said = outcome.conflicts === undefined ? '' : ` ${outcome.conflicts.join('; ')}.`;
+      return this.createErrorResponse(`${outcome.reason}${said}`, outcome.advice ?? []);
+    }
+    if (readBoolean(args, 'preview') === true) {
+      return this.jsonTextResponse({ preview: true, ...outcome.report });
+    }
+
+    try {
+      applyRewrites(outcome.rewrites);
+    } catch (error) {
+      return this.createErrorResponse(`Nothing was renamed: ${errorMessage(error)}`);
+    }
+
+    const settled = this.godotBridge.isConnected()
+      ? await this.settleRenameInEditor(projectPath, outcome.scriptsInOrder, {
+          gone: outcome.moved === null ? [] : [outcome.moved.from],
+          oldClass: outcome.isClass ? symbol : null,
+          newClass: outcome.isClass ? newName : null,
+        })
+      : await this.settleRenameOnDisk(projectPath, outcome.scriptsInOrder, {
+          rebuildCache: outcome.isClass || outcome.moved !== null,
+          moved: outcome.moved !== null,
+        });
+    return this.jsonTextResponse({ ok: settled.ok, ...outcome.report, ...settled.report });
+  }
+
+  /**
+   * After a rename with the editor open: each changed file read again and a scan, so the editor
+   * holds the new names, then every changed script reloaded, since the editor keeps what it
+   * compiled from a file until that file is reloaded. A reload is also the compile check, under the
+   * project's own settings.
+   */
+  private async settleRenameInEditor(
+    projectPath: string,
+    changed: readonly string[],
+    names: { gone: readonly string[]; oldClass: string | null; newClass: string | null },
+  ): Promise<{ ok: boolean; report: Record<string, unknown> }> {
+    const { gone, oldClass, newClass } = names;
+    const scanned = asParams(
+      JSON.parse(
+        (
+          await this.handleRescanFilesystem({
+            projectPath,
+            timeoutMs: 60000,
+            updateFiles: [...gone, ...changed],
+          })
+        ).content[0]?.text ?? '{}',
+      ),
+    );
+    // The scan reloads the scripts naming a class it brought in, in the order it finds them, so one
+    // it reloaded before the script it inherits from failed and is tried again here in order.
+    const reloadedByTheScan = new Set((readArray(scanned, 'dependentsReloaded') ?? []).map(String));
+    const toReload: NamingScript[] = [];
+    for (const script of changed) {
+      if (!reloadedByTheScan.has(script)) {
+        const source = this.sourceOfClass(projectPath, script);
+        toReload.push({ script, tool: source !== null && isToolScript(source) });
+      }
+    }
+    const done = await this.reloadInEditor(toReload);
+    const notReloaded = done.notReloaded;
+    const reloaded = [...reloadedByTheScan, ...done.reloaded].sort();
+
+    // From the scan's own reading of the cache as well as from the editor's list: the list is read
+    // off the editor's file tree, which drops a moved script's class with the file, while the class
+    // registry behind it, which is what writes the cache and resolves names, can still hold it.
+    const checked = oldClass === null ? null : await this.classesTheEditorCannotSee({ projectPath });
+    const stillHeld =
+      oldClass !== null &&
+      (checked?.stillHeld?.includes(oldClass) === true ||
+        (readArray(scanned, 'cacheDropped') ?? []).map(String).includes(oldClass) ||
+        (readArray(scanned, 'cacheAtMissingPaths') ?? []).map(String).includes(oldClass));
+    const unseen = newClass !== null && checked?.unseen.some((one) => one.className === newClass) === true;
+    const notes: string[] = [];
+    if (stillHeld) {
+      notes.push(
+        `The editor still holds ${oldClass} after the scan, so it resolves the old name until it is restarted with editor_launch restart, and writes it back into the class cache on every scan until then.`,
+      );
+    }
+    if (unseen) {
+      notes.push(
+        `The editor does not hold ${newClass} after the scan, so every use of it reads as an unknown identifier there: editor_rescan on its own, or editor_launch restart.`,
+      );
+    }
+    if (scanned['stillWorking'] === true) {
+      notes.push(
+        'The editor was still scanning when the wait ran out, so it may not hold the new names yet.',
+      );
+    }
+    return {
+      ok: scanned['stillWorking'] !== true && notReloaded.length === 0 && !stillHeld && !unseen,
+      report: {
+        editor: {
+          reloaded,
+          ...(notReloaded.length > 0 ? { notReloaded } : {}),
+          ...(stillHeld ? { stillHolds: oldClass } : {}),
+          ...(typeof scanned['note'] === 'string' ? { scanNote: scanned['note'] } : {}),
+        },
+        ...(notes.length > 0 ? { note: notes.join(' ') } : {}),
+      },
+    };
+  }
+
+  /**
+   * After a rename with no editor: the class cache rebuilt when a class was renamed or moved, the
+   * engine's UID table rebuilt when a script moved, since it names the old path and a scene
+   * loading the script by its UID would look there; then every changed script compiled in a fresh
+   * engine.
+   */
+  private async settleRenameOnDisk(
+    projectPath: string,
+    changed: readonly string[],
+    asked: { rebuildCache: boolean; moved: boolean },
+  ): Promise<{ ok: boolean; report: Record<string, unknown> }> {
+    const report: Record<string, unknown> = {};
+    let ok = true;
+    if (asked.moved) {
+      const engine = await this.engine();
+      const imported = engine.ok ? await runImport(engine.value, projectPath) : null;
+      const problem =
+        imported === null
+          ? engine.ok
+            ? ''
+            : engine.response.content.map((block) => block.text).join(' ')
+          : imported.ok
+            ? null
+            : imported.message;
+      report['uidTable'] = problem === null ? 'rebuilt by an import pass' : `not rebuilt: ${problem}`;
+      ok &&= problem === null;
+    }
+    if (asked.rebuildCache) {
+      const rebuilt = await this.rebuildClassCache(projectPath);
+      report['classCache'] = rebuilt.ok ? rebuilt.payload : { rebuilt: false, problem: rebuilt.message };
+      ok &&= rebuilt.ok;
+    }
+    if (changed.length > 0) {
+      const compiled = await this.operation('check_scripts', { paths: [...changed] }, projectPath);
+      report['compiled'] = compiled.ok
+        ? { ...compiled.payload, ...engineExtras(compiled) }
+        : { problem: compiled.message };
+      ok &&= compiled.ok && (readArray(compiled.payload, 'failed') ?? []).length === 0;
+    }
+    return { ok, report };
   }
 
   private async alsoSayWhatTheEditorCannotSee(
