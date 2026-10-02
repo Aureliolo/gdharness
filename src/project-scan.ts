@@ -230,6 +230,39 @@ export function projectTexts(projectPath: string): ProjectText[] {
   return found;
 }
 
+/**
+ * The text files under the directories [projectTexts] steps over for holding a `.gdignore`: copies
+ * the engine never loads, such as a mod kit's sources, which still name the project's classes and
+ * are still broken by a rename. Dot directories and node_modules are stepped over here too.
+ */
+export function ignoredTexts(projectPath: string): ProjectText[] {
+  const found: ProjectText[] = [];
+  const visit = (directory: string, prefix: string, ignored: boolean): void => {
+    const under = ignored || steppedOver(directory);
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      if (skipped(entry.name)) {
+        continue;
+      }
+      const absolute = join(directory, entry.name);
+      const spelled = `${prefix}${entry.name}`;
+      if (entry.isDirectory()) {
+        visit(absolute, `${spelled}/`, under);
+        continue;
+      }
+      const extension = entry.name.includes('.') ? (entry.name.split('.').pop()?.toLowerCase() ?? '') : '';
+      if (!under || !entry.isFile() || BINARY_EXTENSIONS.has(extension) || entry.name === '.gdignore') {
+        continue;
+      }
+      const bytes = readFileSync(absolute);
+      if (!isBinary(bytes)) {
+        found.push({ path: `res://${spelled}`, absolute, text: bytes.toString('utf8') });
+      }
+    }
+  };
+  visit(projectPath, '', false);
+  return found;
+}
+
 /** Where the query occurs in the project's text files, as res:// paths with line numbers. */
 export function searchProject(projectPath: string, options: SearchOptions): SearchResult {
   const extensions =

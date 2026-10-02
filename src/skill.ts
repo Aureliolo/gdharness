@@ -155,14 +155,15 @@ formatting. \`script_diagnostics\` and \`script_info\` come from the editor's ow
 \`project_export\`, \`project_test\`, \`script_edit\`, \`script_info structure\` and
 \`editor_classes\` need nothing open: they run a short headless engine and are gone before the
 answer is printed. The exception is \`script_edit rename\` of a method, variable, signal or other
-member, which asks the editor's language server which uses are that class's.
+member, which asks the editor's language server which uses are that class's. \`project_settings
+get\` is on that list too, reading as it does like a look at a config file: it starts an engine so
+that a setting nobody wrote down still answers with the default the engine registers for it.
 
 To rename a class or a member across the project, use \`script_edit rename\` rather than a text
 replacement: it changes the uses the engine resolves, doc links and what scenes record, and lists
-every other occurrence of the word under \`leftAlone\`, a \`find_children\` string or a word in a
-comment, for you to read. Pass \`preview\` first on a large rename. \`project_settings get\` is on that list too, reading as it does like a look at
-a config file: it starts an engine so that a setting nobody wrote down still answers with the
-default the engine registers for it.
+every other occurrence of the word under \`leftAlone\`, a \`find_children\` string, a word in a
+comment or a file under a \`.gdignore\` directory, for you to read. Pass \`preview\` first on a
+large rename.
 
 Editing a file while a game is running does not change the running game. \`auto_reload\` is an
 editor plugin and reloads into the editor's own process; the game is a separate process holding
