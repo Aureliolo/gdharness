@@ -12,6 +12,7 @@
 
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { codeOf } from './gdscript-source.js';
 
 /**
  * What a `class_name` line looks like, including the annotations that may share it.
@@ -115,37 +116,6 @@ export function scriptsNaming(projectPath: string, classes: readonly string[]): 
     }
   });
   return naming.sort((a, b) => a.script.localeCompare(b.script));
-}
-
-/**
- * [param source] with its comments and string literals blanked out, line breaks kept: what is left
- * is the code, where a name is a use of the class rather than a word in prose or in text.
- */
-function codeOf(source: string): string {
-  let code = '';
-  let at = 0;
-  while (at < source.length) {
-    const here = source[at] ?? '';
-    if (here === '#') {
-      const end = source.indexOf('\n', at);
-      at = end === -1 ? source.length : end;
-      continue;
-    }
-    if (here === '"' || here === "'") {
-      const fence = source.startsWith(here.repeat(3), at) ? here.repeat(3) : here;
-      let end = at + fence.length;
-      while (end < source.length && !source.startsWith(fence, end)) {
-        end += source[end] === '\\' ? 2 : 1;
-      }
-      const literal = source.slice(at, Math.min(end + fence.length, source.length));
-      code += literal.replace(/[^\n]/g, ' ');
-      at = end + fence.length;
-      continue;
-    }
-    code += here;
-    at += 1;
-  }
-  return code;
 }
 
 /** The classes the cache lists, with the path each is recorded at, or null when there is none. */

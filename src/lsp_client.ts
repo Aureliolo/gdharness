@@ -652,6 +652,69 @@ export class GodotLSPClient {
     });
   }
 
+  /**
+   * Every place the language server resolves to the symbol at a position, declaration included,
+   * as file paths and zero-based positions.
+   *
+   * Godot finds these by looking for the symbol's name in every script of the project and keeping
+   * the places that resolve to the same symbol, so the answer carries the word wherever it occurs in
+   * a comment or a string too, resolved by name alone: a caller renaming from it has to tell those
+   * apart itself.
+   */
+  async getReferences(
+    filePath: string,
+    content: string,
+    line: number,
+    character: number,
+  ): Promise<{ file: string; line: number; character: number }[]> {
+    await this.ensureConnected();
+    await this.ensureInitializedForFile(filePath);
+
+    const result = await this.withDocument(filePath, async () => {
+      const uri = this.syncDocument(filePath, content);
+      try {
+        return await this.sendRequest('textDocument/references', {
+          textDocument: { uri },
+          position: { line, character },
+          context: { includeDeclaration: true },
+        });
+      } finally {
+        this.closeDocument(uri);
+      }
+    });
+
+    return locationsIn(result);
+  }
+
+  /**
+   * Where the language server says the symbol at a position is declared. More than one place is
+   * the analyser not knowing the type the name is looked up on and offering every declaration of
+   * that name it has, which is a guess rather than a resolution.
+   */
+  async getDefinitions(
+    filePath: string,
+    content: string,
+    line: number,
+    character: number,
+  ): Promise<{ file: string; line: number; character: number }[]> {
+    await this.ensureConnected();
+    await this.ensureInitializedForFile(filePath);
+
+    const result = await this.withDocument(filePath, async () => {
+      const uri = this.syncDocument(filePath, content);
+      try {
+        return await this.sendRequest('textDocument/definition', {
+          textDocument: { uri },
+          position: { line, character },
+        });
+      } finally {
+        this.closeDocument(uri);
+      }
+    });
+
+    return locationsIn(result);
+  }
+
   async getDocumentSymbols(filePath: string, content: string): Promise<unknown[]> {
     await this.ensureConnected();
     await this.ensureInitializedForFile(filePath);
@@ -675,6 +738,35 @@ export class GodotLSPClient {
   }
 }
 
+/** The file positions in a Location, a list of them, or a list of LocationLinks. */
+function locationsIn(result: unknown): { file: string; line: number; character: number }[] {
+  const entries = Array.isArray(result)
+    ? (result as unknown[])
+    : result === null || result === undefined
+      ? []
+      : [result];
+  const found: { file: string; line: number; character: number }[] = [];
+  for (const entry of entries) {
+    const location = entry as {
+      uri?: unknown;
+      range?: { start?: { line?: unknown; character?: unknown } };
+      targetUri?: unknown;
+      targetSelectionRange?: { start?: { line?: unknown; character?: unknown } };
+    };
+    const uri = location.uri ?? location.targetUri;
+    const start = location.range?.start ?? location.targetSelectionRange?.start;
+    if (typeof uri !== 'string' || typeof start?.line !== 'number' || typeof start.character !== 'number') {
+      continue;
+    }
+    try {
+      found.push({ file: fileURLToPath(uri), line: start.line, character: start.character });
+    } catch {
+      // A location that is not a file is nothing a rename can write.
+    }
+  }
+  return found;
+}
+
 function asToolResponse(payload: unknown): { content: { type: string; text: string }[] } {
   return {
     content: [
@@ -690,7 +782,7 @@ function asToolResponse(payload: unknown): { content: { type: string; text: stri
  * The port is the client's rather than the default's, because the two come apart: an editor that
  * was moved off 6005 is exactly the case where somebody needs to be told which port was tried.
  */
-function normalizeLSPError(error: unknown, port: number): string {
+export function normalizeLSPError(error: unknown, port: number): string {
   if (error instanceof Error) {
     if (
       error.message.includes('ECONNREFUSED') ||

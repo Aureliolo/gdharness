@@ -154,7 +154,13 @@ formatting. \`script_diagnostics\` and \`script_info\` come from the editor's ow
 \`project_info\`, \`project_dependencies\`, \`project_settings\`, \`project_import\`,
 \`project_export\`, \`project_test\`, \`script_edit\`, \`script_info structure\` and
 \`editor_classes\` need nothing open: they run a short headless engine and are gone before the
-answer is printed. \`project_settings get\` is on that list too, reading as it does like a look at
+answer is printed. The exception is \`script_edit rename\` of a method, variable, signal or other
+member, which asks the editor's language server which uses are that class's.
+
+To rename a class or a member across the project, use \`script_edit rename\` rather than a text
+replacement: it changes the uses the engine resolves, doc links and what scenes record, and lists
+every other occurrence of the word under \`leftAlone\`, a \`find_children\` string or a word in a
+comment, for you to read. Pass \`preview\` first on a large rename. \`project_settings get\` is on that list too, reading as it does like a look at
 a config file: it starts an engine so that a setting nobody wrote down still answers with the
 default the engine registers for it.
 
