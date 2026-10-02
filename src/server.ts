@@ -8929,7 +8929,22 @@ class GodotServer {
           rebuildCache: outcome.isClass || outcome.moved !== null,
           moved: outcome.moved !== null,
         });
-    return this.jsonTextResponse({ ok: settled.ok, ...outcome.report, ...settled.report });
+    // ok answers for the whole rename, the compile included, so a false one beside a list of
+    // changed files has to say that the files were still written, or it reads as nothing done.
+    const said = readString(settled.report, 'note');
+    const leftChanged = settled.ok
+      ? said
+      : [
+          'The rename was written: every file under changed now reads as shown there and is left that way. ok is false for what came after the write, said under editor or compiled.',
+          ...(said === undefined ? [] : [said]),
+        ].join(' ');
+    return this.jsonTextResponse({
+      ok: settled.ok,
+      written: true,
+      ...outcome.report,
+      ...settled.report,
+      ...(leftChanged === undefined ? {} : { note: leftChanged }),
+    });
   }
 
   /**
