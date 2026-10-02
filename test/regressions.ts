@@ -27101,6 +27101,149 @@ async function testAMemberRenameFollowsWhatTheLanguageServerResolves(): Promise<
   }
 }
 
+/** A copy of [RENAME_FIXTURE] with [param extra] files written beside it. */
+function renameProjectWith(extra: Readonly<Record<string, string>>): string {
+  const project = renameProject();
+  for (const [file, contents] of Object.entries(extra)) {
+    mkdirSync(dirname(join(project, file)), { recursive: true });
+    writeFileSync(join(project, file), contents);
+  }
+  return project;
+}
+
+/**
+ * A class used at the start of a statement is a use when the comment line above it ends in a full
+ * stop. What comes before the name is read with comments blanked, so the stop is not taken for the
+ * dot of a member access on the line below.
+ */
+async function testAUseUnderACommentEndingInAFullStopIsRenamed(): Promise<void> {
+  const maker = [
+    'extends Node',
+    '',
+    '',
+    'func make() -> void:',
+    '\t# Built here.',
+    '\tTold.new().say(1)',
+    '',
+  ].join('\n');
+  const project = renameProjectWith({ 'maker.gd': maker });
+  try {
+    const outcome = await renameSymbol(
+      {
+        projectPath: project,
+        scriptPath: join(project, 'told.gd'),
+        symbol: 'Told',
+        newName: 'Wording',
+        newScriptPath: null,
+      },
+      { namesTaken: engineSaying(), ...NO_LANGUAGE_SERVER },
+    );
+    assert.ok(outcome.ok, `the rename was refused: ${JSON.stringify(outcome)}`);
+    const { changed, left } = renameReadings(outcome.report);
+    assert.ok(
+      changed.includes('res://maker.gd:6'),
+      `the use under the comment is changed: ${JSON.stringify(changed)}`,
+    );
+    assert.ok(
+      !left.some((one) => one.startsWith('res://maker.gd:')),
+      `nothing in maker.gd is left alone: ${JSON.stringify(left)}`,
+    );
+    applyRewrites(outcome.rewrites);
+    assert.equal(
+      readFileSync(join(project, 'maker.gd'), 'utf8'),
+      maker.replace('\tTold.new()', '\tWording.new()'),
+    );
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A doc link wrapped across two `##` lines is one link, as Godot joins a documentation comment's
+ * lines before reading it, so its second half is renamed for a class and for a member alike.
+ */
+async function testADocLinkWrappedAcrossLinesIsRenamedWhole(): Promise<void> {
+  const wrapped = [
+    'extends Node',
+    '## Holds a [constant',
+    '## Told.LOUD] beside a [method',
+    '## Told.say] link.',
+    '',
+  ];
+  const project = renameProjectWith({ 'wrapped.gd': wrapped.join('\n') });
+  try {
+    const rename = async (symbol: string, newName: string): Promise<string[]> => {
+      const outcome = await renameSymbol(
+        { projectPath: project, scriptPath: join(project, 'told.gd'), symbol, newName, newScriptPath: null },
+        { namesTaken: engineSaying(), ...fakeLanguageServer(project) },
+      );
+      assert.ok(outcome.ok, `${symbol} was refused: ${JSON.stringify(outcome)}`);
+      return asArray(get(outcome.report, 'changed'))
+        .filter((file) => text(get(file, 'file')) === 'res://wrapped.gd')
+        .flatMap((file) => asArray(get(file, 'lines')))
+        .map((line) => `${asNumber(get(line, 'line'))}: ${text(get(line, 'text'))}`);
+    };
+    assert.deepEqual(
+      await rename('Told', 'Wording'),
+      ['3: ## Wording.LOUD] beside a [method', '4: ## Wording.say] link.'],
+      'the class named on the lines after two links open',
+    );
+    assert.deepEqual(
+      await rename('say', 'utter'),
+      ['4: ## Told.utter] link.'],
+      'the member named on the line after its link opens',
+    );
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A script under a directory holding a `.gdignore` is not loaded by the engine, so it is not
+ * changed, but its uses of the class and of the moved script's path are listed, not passed over.
+ */
+async function testAnIgnoredFolderIsListedAndLeftUnchanged(): Promise<void> {
+  const mod = ['extends "res://told.gd"', '', 'var made: Told = Told.new()', ''].join('\n');
+  const project = renameProjectWith({ 'sdk/.gdignore': '', 'sdk/mod.gd': mod });
+  try {
+    const outcome = await renameSymbol(
+      {
+        projectPath: project,
+        scriptPath: join(project, 'told.gd'),
+        symbol: 'Told',
+        newName: 'Wording',
+        newScriptPath: join(project, 'speech', 'wording.gd'),
+      },
+      { namesTaken: engineSaying(), ...NO_LANGUAGE_SERVER },
+    );
+    assert.ok(outcome.ok, `the rename was refused: ${JSON.stringify(outcome)}`);
+    const { changed, left } = renameReadings(outcome.report);
+    assert.ok(changed.includes('res://told.gd:1'), `the declaration is changed: ${JSON.stringify(changed)}`);
+    assert.ok(
+      !changed.some((one) => one.startsWith('res://sdk/')),
+      `nothing under sdk is changed: ${JSON.stringify(changed)}`,
+    );
+    assert.deepEqual(
+      left.filter((one) => one.startsWith('res://sdk/')),
+      ['res://sdk/mod.gd:1:ignored', 'res://sdk/mod.gd:3:ignored'],
+      'the path the script moved from and the use of the class, each once',
+    );
+    const why = asArray(get(outcome.report, 'leftAlone'))
+      .filter((one) => text(get(one, 'kind')) === 'ignored')
+      .map((one) => text(get(one, 'why')));
+    assert.equal(why.length, 2, `a line naming the class twice is listed once: ${JSON.stringify(why)}`);
+    assert.ok(
+      why.every((said) => said.includes('.gdignore')),
+      `each says why it was left: ${JSON.stringify(why)}`,
+    );
+    applyRewrites(outcome.rewrites);
+    assert.ok(existsSync(join(project, 'speech', 'wording.gd')), 'the script moved');
+    assert.equal(readFileSync(join(project, 'sdk', 'mod.gd'), 'utf8'), mod);
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
 /**
  * A moved script is named by its new path everywhere a string names it, in the style it was
  * written, and its own relative paths still name the files they did.
@@ -27500,6 +27643,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARenamedClassChangesItsUsesAndLeavesItsWords,
   testARenameRefusesANameAlreadyTaken,
   testAMemberRenameFollowsWhatTheLanguageServerResolves,
+  testAUseUnderACommentEndingInAFullStopIsRenamed,
+  testADocLinkWrappedAcrossLinesIsRenamedWhole,
+  testAnIgnoredFolderIsListedAndLeftUnchanged,
   testAMovedScriptIsNamedByItsNewPathEverywhere,
   testARenameWritesEveryFileOrNone,
   testARenameWithNoEditorLeavesTheCacheAndTheScriptsRight,

@@ -238,6 +238,10 @@ export function occurrencesOf(
 ): Occurrence[] {
   const found: Occurrence[] = [];
   let index = 0;
+  // What comes before a name is read off the code alone, comments and strings blanked: read off
+  // the text, a full stop ending a comment line makes a class used at the start of the next line
+  // read as a member after a dot.
+  let code: string | null = null;
   for (const match of source.matchAll(wholeWord(name))) {
     const offset = match.index;
     while (index < regions.length - 1 && (regions[index]?.end ?? 0) <= offset) {
@@ -247,16 +251,17 @@ export function occurrencesOf(
     let afterDot = false;
     let declaredAs: string | null = null;
     if (kind === 'code') {
+      code ??= codeOf(source, regions);
       let back = offset - 1;
-      while (back >= 0 && /[\s\\]/.test(source[back] ?? '')) {
+      while (back >= 0 && /[\s\\]/.test(code[back] ?? '')) {
         back -= 1;
       }
-      afterDot = source[back] === '.' && source[back - 1] !== '.';
+      afterDot = code[back] === '.' && code[back - 1] !== '.';
       let wordStart = back + 1;
-      while (wordStart > 0 && isIdentifierPart(source[wordStart - 1])) {
+      while (wordStart > 0 && isIdentifierPart(code[wordStart - 1])) {
         wordStart -= 1;
       }
-      const word = source.slice(wordStart, back + 1);
+      const word = code.slice(wordStart, back + 1);
       declaredAs = DECLARING.has(word) ? word : null;
     }
     found.push({ offset, kind, afterDot, declaredAs });
