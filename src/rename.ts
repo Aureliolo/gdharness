@@ -49,9 +49,10 @@ export interface Edit {
 
 /**
  * Where an occurrence was left alone. code, string, comment, doc and nodePath are the tokenizer's
- * view of a script; scene is a scene or resource file; text is any other file.
+ * view of a script; scene is a scene or resource file; text is any other file; ignored is any file
+ * under a directory holding a `.gdignore`.
  */
-type MentionKind = RegionKind | 'scene' | 'text';
+type MentionKind = RegionKind | 'scene' | 'text' | 'ignored';
 
 export interface Mention {
   readonly file: string;
@@ -271,32 +272,91 @@ interface DocLink {
   readonly index: number;
 }
 
-/** The doc link [param offset] is inside, on its own line of [param text], or null. */
-function docLinkAt(text: string, offset: number): DocLink | null {
-  const lineStart = text.lastIndexOf('\n', offset - 1) + 1;
-  const nextBreak = text.indexOf('\n', offset);
-  const lineEnd = nextBreak < 0 ? text.length : nextBreak;
-  const open = text.lastIndexOf('[', offset);
-  const close = text.indexOf(']', offset);
-  if (open < lineStart || close === -1 || close > lineEnd) {
+/**
+ * The documentation comment holding [param offset], its `##` lines joined by a space the way Godot
+ * reads one, with where in [param text] each joined character came from (-1 for a joining space).
+ * Null when the offset is not on a `##` line.
+ */
+function docBlockAt(text: string, offset: number): { joined: string; from: number[] } | null {
+  const lineStartOf = (at: number): number => text.lastIndexOf('\n', at - 1) + 1;
+  const contentOf = (lineStart: number): number | null => {
+    let at = lineStart;
+    while (text[at] === ' ' || text[at] === '\t') {
+      at += 1;
+    }
+    return text.startsWith('##', at) ? at + 2 : null;
+  };
+  let top = lineStartOf(offset);
+  if (contentOf(top) === null) {
     return null;
   }
-  const inside = text.slice(open + 1, close);
+  while (top > 0 && contentOf(lineStartOf(top - 1)) !== null) {
+    top = lineStartOf(top - 1);
+  }
+  let joined = '';
+  const from: number[] = [];
+  for (let line = top; ; ) {
+    const content = contentOf(line);
+    if (content === null) {
+      break;
+    }
+    const nextBreak = text.indexOf('\n', line);
+    let end = nextBreak < 0 ? text.length : nextBreak;
+    if (text[end - 1] === '\r') {
+      end -= 1;
+    }
+    if (joined.length > 0) {
+      joined += ' ';
+      from.push(-1);
+    }
+    for (let at = content; at < end; at += 1) {
+      joined += text[at];
+      from.push(at);
+    }
+    if (nextBreak < 0) {
+      break;
+    }
+    line = nextBreak + 1;
+  }
+  return { joined, from };
+}
+
+/**
+ * The doc link [param offset] is inside, or null. Read across the lines of its documentation
+ * comment, because a link wraps where the prose does: `[constant` ending one `##` line and
+ * `Folk.SKILL_MAX]` starting the next is one link, and read a line at a time only its first half
+ * was renamed, leaving a reference to nothing after a rename that answered ok.
+ */
+function docLinkAt(text: string, offset: number): DocLink | null {
+  const block = docBlockAt(text, offset);
+  const at = block?.from.indexOf(offset) ?? -1;
+  if (block === null || at < 0) {
+    return null;
+  }
+  const { joined } = block;
+  const open = joined.lastIndexOf('[', at);
+  const close = joined.indexOf(']', at);
+  if (open < 0 || close < 0) {
+    return null;
+  }
+  const inside = joined.slice(open + 1, close);
   if (inside.includes('[') || inside.includes(']')) {
     return null;
   }
-  const match = /^(?:([a-z_]+)\s+)?([\p{L}_][\p{L}\p{N}_]*(?:\.[\p{L}_][\p{L}\p{N}_]*)*)$/u.exec(inside);
+  const match = /^\s*(?:([a-z_]+)\s+)?([\p{L}_][\p{L}\p{N}_]*(?:\.[\p{L}_][\p{L}\p{N}_]*)*)\s*$/u.exec(
+    inside,
+  );
   if (match === null || (match[1] !== undefined && !DOC_LINK_KINDS.has(match[1]))) {
     return null;
   }
-  const parts = (match[2] ?? '').split('.');
-  const pathStart = open + 1 + inside.length - (match[2] ?? '').length;
-  let at = pathStart;
+  const path = match[2] ?? '';
+  const parts = path.split('.');
+  let partAt = open + 1 + inside.trimEnd().length - path.length;
   for (const [index, part] of parts.entries()) {
-    if (at === offset) {
+    if (partAt === at) {
       return { kind: match[1] ?? null, parts, index };
     }
-    at += part.length + 1;
+    partAt += part.length + 1;
   }
   return null;
 }
@@ -861,6 +921,47 @@ export function planMove(args: MoveArguments, plan: Plan): Plan {
   }
   return {
     edits: edits.sort((a, b) => a.file.localeCompare(b.file) || a.offset - b.offset),
+    mentions: mentions.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line),
+  };
+}
+
+/**
+ * The plan with every occurrence of [param name], and of [param movedFrom] when the script moves,
+ * in [param ignored] added as a mention. Those files are not changed: the engine does not load
+ * them, so nothing says which of their words are uses, but a copy kept there to be shipped or
+ * vendored back is broken by the rename all the same, and is answered rather than passed over.
+ */
+export function mentionIgnored(
+  plan: Plan,
+  ignored: readonly ProjectText[],
+  name: string,
+  movedFrom: string | null,
+): Plan {
+  const mentions = [...plan.mentions];
+  const why = 'under a directory holding a .gdignore, which the engine does not load, so it was not changed';
+  for (const file of ignored) {
+    const lines = new Lines(file.text);
+    const offsets = occurrencesOf(file.text, name, [{ kind: 'code', start: 0, end: file.text.length }]).map(
+      (one) => one.offset,
+    );
+    if (movedFrom !== null) {
+      let at = file.text.indexOf(movedFrom);
+      while (at >= 0) {
+        offsets.push(at);
+        at = file.text.indexOf(movedFrom, at + movedFrom.length);
+      }
+    }
+    const seen = new Set<number>();
+    for (const offset of offsets) {
+      const line = lines.positionOf(offset).line + 1;
+      if (!seen.has(line)) {
+        seen.add(line);
+        mentions.push({ file: file.path, line, kind: 'ignored', text: lines.lineAt(offset).trim(), why });
+      }
+    }
+  }
+  return {
+    edits: plan.edits,
     mentions: mentions.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line),
   };
 }
