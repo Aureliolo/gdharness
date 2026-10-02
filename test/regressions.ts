@@ -475,6 +475,7 @@ async function turnedAwayAtTheBridge(
   );
   assert.match(importing.closedWith.reason, /pid 101 was started with --import/);
   assert.equal(bridge.getStatus().connected, false, 'and is not the editor');
+  assert.equal(bridge.isArriving(), false, 'nor arriving, so nothing waits on it');
   assert.equal(bridge.getStatus().turnedAway?.pid, 101, 'and status names it');
   assert.equal(bridge.getStatus().turnedAway?.option, '--import');
 
@@ -485,19 +486,23 @@ async function turnedAwayAtTheBridge(
   assert.equal(again.closedWith?.code, 4002, 'a known one-shot run is turned away at once');
   assert.deepEqual(asked, [101], 'without its command line being read again');
 
-  // While the answer is coming the process is not counted, and once it says editor, it is.
+  // While the answer is coming the process is not counted, and once it says editor, it is. Before
+  // its greeting and while it is looked up it is arriving, which is what a call waits out.
   const waiting = socket('waiting');
   connectFake(bridge, waiting);
+  assert.equal(bridge.isArriving(), true, 'a socket that has not greeted is arriving');
   hello(waiting, 104);
   await settled();
   assert.equal(bridge.getStatus().connected, false, 'not counted while it is being looked up');
   assert.equal(bridge.getStatus().identifying, true, 'and status says it is being looked up');
+  assert.equal(bridge.isArriving(), true, 'and is still arriving');
   const release = released();
   assert.ok(release !== null, 'the reader was asked');
   release(null);
   await settled();
   assert.equal(bridge.getStatus().connected, true, 'an editor is served once its command line says so');
   assert.equal(bridge.getStatus().identifying, undefined);
+  assert.equal(bridge.isArriving(), false, 'and has arrived');
   assert.equal(waiting.closedWith, null, 'and is not closed on the way');
   waiting.close();
 
@@ -3187,6 +3192,91 @@ async function testAnEditorAServerOpenedIsStartedAgain(): Promise<void> {
  * ports; and the console was refused as not ours. The fake editor holds its greeting while each is
  * asked, then greets as an editor a server opened while the restart waits.
  */
+/**
+ * A call made while an editor is still arriving waits for it to settle and is then served.
+ *
+ * Connected reads true from the moment the socket opens, and false again once an editor nobody's
+ * server opened greets and its command line is read. On the macOS editor leg a test editor read as
+ * connected had its first call refused as not connected, because that call landed in the second
+ * window. Here a fake editor opens the socket, is read as connected, is asked for a scene while it
+ * has not greeted, and greets without a server's mark half a second later: the call reaches it only
+ * after the greeting and the lookup, and answers with what the editor said.
+ */
+async function testACallWaitsForAnArrivingEditor(): Promise<void> {
+  const port = await reservePort();
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-arriving-'));
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\n\nconfig/name="Arriving"\n',
+  );
+  writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
+  const server = new ServerProcess({
+    env: { GDHARNESS_BRIDGE_PORT: String(port), GODOT_PATH: join(tmpdir(), 'gdharness-no-such-engine') },
+  });
+  let editor: WebSocket | null = null;
+  try {
+    await server.initialize('regression-test');
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+    editor = socket;
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', () => {
+        resolve();
+      });
+      socket.once('error', reject);
+    });
+    // Held in an object, since the asking side sets it from inside a handler.
+    const times: { asked: number | null } = { asked: null };
+    socket.on('message', (data: Buffer) => {
+      const message = JSON.parse(data.toString('utf8')) as { type?: string; tool?: string; id?: string };
+      if (message.type === 'tool_invoke' && message.tool === 'list_scene_nodes') {
+        times.asked = Date.now();
+        socket.send(
+          JSON.stringify({ type: 'tool_result', id: message.id, success: true, result: { nodes: ['Main'] } }),
+        );
+      }
+    });
+    let connected = false;
+    for (let waited = 0; waited < 10_000 && !connected; waited += 100) {
+      const now = parseTextContent(
+        await server.request('tools/call', { name: 'editor_status', arguments: {} }),
+      );
+      connected = get(now, 'editor', 'connected') === true;
+      if (!connected) {
+        await delay(100);
+      }
+    }
+    assert.ok(connected, 'the socket counts as connected before its greeting, which is the reading acted on');
+    const asked = server.request(
+      'tools/call',
+      { name: 'scene_tree', arguments: { projectPath: project, scenePath: 'res://main.tscn' } },
+      30_000,
+    );
+    await delay(500);
+    const greetedAt = Date.now();
+    socket.send(
+      JSON.stringify({
+        type: 'godot_ready',
+        project_path: project,
+        addon_version: SERVER_VERSION,
+        // This process, whose command line names no one-shot option, so the lookup takes it as an
+        // editor; not a server's, so the lookup happens.
+        editor_pid: process.pid,
+      }),
+    );
+    const answered = textOf(await asked) ?? '';
+    assert.match(answered, /Main/, `the call is served once the editor has settled: ${answered}`);
+    assert.ok(
+      times.asked !== null && times.asked >= greetedAt,
+      `and reached the editor only after it greeted: asked at ${String(times.asked)}, greeted at ${greetedAt}`,
+    );
+    assert.match(server.stderr, /Godot editor identified: pid \d+/, 'after it had been looked up');
+  } finally {
+    editor?.terminate();
+    await server.stop();
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
 async function testAnEditorIsReadOnceItHasSaidWhoItIs(): Promise<void> {
   const port = await reservePort();
   const server = new ServerProcess({
@@ -26831,6 +26921,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheBridgeTakesThePortWhenItIsFreed,
   testAnEditorAServerOpenedIsStartedAgain,
   testAnEditorIsReadOnceItHasSaidWhoItIs,
+  testACallWaitsForAnArrivingEditor,
   testARestartWaitsForTheOldEditorToGo,
   testAServerEndsWithAnEditorStillOnTheBridge,
   testABadPortIsReported,
