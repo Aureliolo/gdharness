@@ -10406,6 +10406,15 @@ async function testUpdateNoticeRidesOnAnAnswer(): Promise<void> {
         'and the command that takes it, spelled for this runtime',
       );
       assert.doesNotMatch(first, /upgrade <project>/, 'without a placeholder path to fill in');
+      // Agreement first, in either form the user gives it: a project whose own instructions say to
+      // upgrade on every release was told to wait for a yes anyway, setting the notice against
+      // the user it was written for.
+      const block = asArray(get(carrying, 'result', 'content'))
+        .map((one) => String(get(one, 'text')))
+        .find((one) => one.includes('"update_available"'));
+      const told = get(JSON.parse(block ?? '{}'), 'update_available', 'what_to_do');
+      assert.match(String(told), /only with their agreement: a yes now, or a standing instruction of theirs/);
+      assert.match(String(told), /Without either, offer it and wait/);
 
       // A notice is a block of its own, so the answer it rides on has to still read as the
       // answer. Anything that takes the blocks as one document gets two JSON documents end to

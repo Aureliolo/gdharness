@@ -2399,10 +2399,11 @@ class GodotServer {
       update_available: {
         ...notice,
         what_to_do:
-          'Tell the user a newer gdharness is out, with what changed, and offer to take it. ' +
-          'Only run the upgrade command if they say yes: it replaces the addons in their project, ' +
-          'and afterwards the MCP server has to be reconnected and the editor restarted with ' +
-          'editor_launch restart.',
+          'Tell the user a newer gdharness is out, with what changed. Run the upgrade command ' +
+          'only with their agreement: a yes now, or a standing instruction of theirs, such as ' +
+          'their CLAUDE.md, to upgrade on every release. Without either, offer it and wait, since ' +
+          'it replaces the addons in their project. Afterwards the MCP server has to be ' +
+          'reconnected and the editor restarted with editor_launch restart.',
       },
     });
   }
