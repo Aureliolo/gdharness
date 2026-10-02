@@ -8299,16 +8299,13 @@ class GodotServer {
     // What the cache holds before the editor is asked to scan, because the editor writes that file
     // at the end of a scan from the list it is holding rather than from the file. An editor blind
     // to a class writes a cache without it, over the correct one, and the loss surfaces in the next
-    // engine to read it as an unknown identifier in a file nobody touched.
-    const before = projectPath === '' ? null : cachedClasses(projectPath);
-    const writtenBefore = projectPath === '' ? null : cacheWrittenAt(projectPath);
-    const blind = await this.classesTheEditorCannotSee(args);
-    const atRisk = before === null ? [] : blind.unseen.filter((one) => before.has(one.className));
-    // The other direction, and the more damaging one: a class the editor still holds for a script
-    // that is gone. The scan writes the editor's list, so this comes back into the cache at a path
-    // that is not there, and the next engine to read it fails on a correct script. Known before
-    // the scan, from the editor's own list, so the write can be waited for and then undone.
-    const ghosts = blind.stillHeld ?? [];
+    // engine to read it as an unknown identifier in a file nobody touched. Read once the editor's
+    // own scan is over, below, and not before: an editor still opening reads its files in as it
+    // scans, so a reading taken then named every class in the project as unseen, the scan as
+    // bringing all of them in, and every @tool script naming one as needing a restart.
+    let before: Map<string, string> | null = null;
+    let writtenBefore: number | null = null;
+    let blind: Awaited<ReturnType<typeof this.classesTheEditorCannotSee>> = { unseen: [] };
 
     // The editor's own scan or import waited out rather than scanned over. An editor that has noticed
     // new files is already importing them, and a scan asked for then starts a second reimport over
@@ -8336,6 +8333,9 @@ class GodotServer {
       if (wasBusy) {
         waitedForEditorMs += Date.now() - busySince;
       }
+      before = projectPath === '' ? null : cachedClasses(projectPath);
+      writtenBefore = projectPath === '' ? null : cacheWrittenAt(projectPath);
+      blind = await this.classesTheEditorCannotSee(args);
       first = await this.handleViaBridge('rescan_filesystem', args);
       if (first.isError) {
         return first;
@@ -8352,6 +8352,13 @@ class GodotServer {
       }
       await new Promise((settle) => setTimeout(settle, 100));
     }
+    const held = before;
+    const atRisk = held === null ? [] : blind.unseen.filter((one) => held.has(one.className));
+    // The other direction, and the more damaging one: a class the editor still holds for a script
+    // that is gone. The scan writes the editor's list, so this comes back into the cache at a path
+    // that is not there, and the next engine to read it fails on a correct script. Known before
+    // the scan, from the editor's own list, so the write can be waited for and then undone.
+    const ghosts = blind.stillHeld ?? [];
 
     // Idle for a while rather than idle once: what a scan finds is imported after it stops
     // reporting itself, and an editor that has just been told of files starts its own scan a moment

@@ -27355,6 +27355,119 @@ async function testARenameWithNoEditorLeavesTheCacheAndTheScriptsRight(): Promis
 }
 
 /**
+ * A rescan asked for the moment an opening editor reaches the bridge finds nothing missing.
+ *
+ * Downstream, a rescan right after editor_launch open on a project of six hundred classes answered
+ * ok false, named every class as brought in, reloaded nearly every script, and sent the caller to
+ * restart the editor for fifteen @tool scripts, while the editor's own log held no error. The
+ * reading of what the editor holds was taken before the rescan waited out the editor's first scan,
+ * and an editor still scanning has not read its files in yet. Reproduced here with fifteen hundred
+ * chained classes and the editor's file system cache deleted, which keeps that first scan going
+ * after the addon has connected; at three hundred classes with the cache in place the scan was
+ * over first and nothing showed.
+ */
+async function testARescanAsTheEditorOpensFindsNothingMissing(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('rescan as the editor opens regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-cold-rescan-'));
+  const home = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-cold-rescan-home-'));
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\n\nconfig/name="Cold"\n\n' +
+      '[editor_plugins]\n\nenabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n',
+  );
+  cpSync(join('src', 'godot', 'addons', 'gdharness_editor'), join(project, 'addons', 'gdharness_editor'), {
+    recursive: true,
+  });
+  mkdirSync(join(project, 'classes'));
+  const count = 1500;
+  for (let index = 0; index < count; index += 1) {
+    writeFileSync(
+      join(project, 'classes', `c${index}.gd`),
+      `class_name C${index}\nextends ${index === 0 ? 'RefCounted' : `C${index - 1}`}\n`,
+    );
+  }
+  // A @tool script naming one of them, which is what the restart advice was given for.
+  writeFileSync(join(project, 'tooled.gd'), '@tool\nextends Node\n\nvar held: C1 = null\n');
+  const own = { APPDATA: home, LOCALAPPDATA: home, XDG_CONFIG_HOME: home, XDG_DATA_HOME: home };
+  const bridgePort = await reservePort();
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(bridgePort),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_RUNTIME_DIR: join(home, 'runtime'),
+    },
+  });
+  let editor: ChildProcess | null = null;
+  const printed: string[] = [];
+  try {
+    const imported = await runImport(godotPath, project);
+    assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
+    rmSync(join(project, '.godot', 'editor'), { recursive: true, force: true });
+    await server.initialize('cold-rescan');
+    editor = spawn(godotPath, ['--editor', '--headless', '--path', project], {
+      env: { ...process.env, ...own, GDHARNESS_BRIDGE_PORT: String(bridgePort) },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    editor.stdout?.on('data', (chunk: Buffer) => printed.push(String(chunk)));
+    editor.stderr?.on('data', (chunk: Buffer) => printed.push(String(chunk)));
+    let answer: unknown = null;
+    const deadline = Date.now() + 120_000;
+    while (Date.now() < deadline) {
+      const asked = await server.request(
+        'tools/call',
+        { name: 'editor_rescan', arguments: { projectPath: project, timeoutMs: 120_000 } },
+        240_000,
+      );
+      const said = textOf(asked) ?? '';
+      if (!said.startsWith('Editor not connected')) {
+        answer = parseTextContent(asked);
+        break;
+      }
+      await delay(50);
+    }
+    assert.ok(answer !== null, `the editor never reached the bridge:\n${printed.join('').slice(-3000)}`);
+    // The positive the absences below stand beside: the rescan ran, and waited out a scan the editor
+    // was still making, which is the state the fault needs.
+    assert.ok(
+      asNumber(get(answer, 'waitedForEditorScanMs') ?? 0) > 0,
+      `the rescan should have arrived during the editor's first scan, or this proves nothing: ${JSON.stringify(answer)}`,
+    );
+    assert.equal(get(answer, 'ok'), true, JSON.stringify(answer));
+    assert.equal(
+      get(answer, 'broughtIn'),
+      undefined,
+      `nothing was missing to bring in: ${JSON.stringify(answer)}`,
+    );
+    assert.equal(get(answer, 'dependentsNotReloaded'), undefined, JSON.stringify(answer));
+  } finally {
+    if (editor?.exitCode === null && editor.pid !== undefined) {
+      const child = editor;
+      const exited = new Promise<void>((done) => {
+        child.once('exit', () => {
+          done();
+        });
+      });
+      child.kill();
+      if (!(await Promise.race([exited.then(() => true), delay(10_000).then(() => false)]))) {
+        await killTheTree(child.pid ?? 0);
+      }
+    }
+    await server.stop();
+    sweep(project);
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
+/**
  * Every fixture in this file is in the list below.
  *
  * The list is written by hand, so a fixture can be added and left out of it, and nothing says so:
@@ -27382,6 +27495,7 @@ function testEveryFixtureIsCalled(): void {
 }
 
 const TESTS: (() => void | Promise<void>)[] = [
+  testARescanAsTheEditorOpensFindsNothingMissing,
   testAScriptIsReadTheWayItsTokenizerReadsIt,
   testARenamedClassChangesItsUsesAndLeavesItsWords,
   testARenameRefusesANameAlreadyTaken,
