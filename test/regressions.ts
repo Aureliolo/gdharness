@@ -26814,9 +26814,16 @@ function renameReadings(report: Record<string, unknown>): { changed: string[]; l
   const changed = asArray(get(report, 'changed')).flatMap((file) =>
     asArray(get(file, 'lines')).map((line) => `${text(get(file, 'file'))}:${asNumber(get(line, 'line'))}`),
   );
-  const left = asArray(get(report, 'leftAlone')).map(
-    (one) => `${text(get(one, 'file'))}:${asNumber(get(one, 'line'))}:${text(get(one, 'kind'))}`,
-  );
+  const left = [
+    ...asArray(get(report, 'leftAlone')).map(
+      (one) => `${text(get(one, 'file'))}:${asNumber(get(one, 'line'))}:${text(get(one, 'kind'))}`,
+    ),
+    ...asArray(get(report, 'leftAloneInProse') ?? []).flatMap((group) =>
+      asArray(get(group, 'lines')).map(
+        (line) => `${text(get(group, 'file'))}:${asNumber(line)}:${text(get(group, 'kind'))}`,
+      ),
+    ),
+  ];
   return { changed: changed.sort(), left: [...new Set(left)].sort() };
 }
 
@@ -26873,6 +26880,20 @@ async function testARenamedClassChangesItsUsesAndLeavesItsWords(): Promise<void>
         `res://user.gd:${fixtureLine('user.gd', 'Holder.Told')}:doc`,
       ].sort(),
       'every other occurrence is answered, each as what the tokenizer makes of its place',
+    );
+    assert.deepEqual(
+      get(outcome.report, 'leftAloneInProse'),
+      [
+        { file: 'res://loud.gd', kind: 'comment', lines: [5] },
+        { file: 'res://notes.md', kind: 'text', lines: [1] },
+      ],
+      'a comment and a line of a text file are given by file and line, not quoted',
+    );
+    assert.ok(
+      !asArray(get(outcome.report, 'leftAlone')).some((one) =>
+        ['comment', 'text'].includes(text(get(one, 'kind'))),
+      ),
+      'and are not also quoted under leftAlone',
     );
     const why = asArray(get(outcome.report, 'leftAlone'))
       .filter((one) => text(get(one, 'file')) === 'res://shadow.gd')
@@ -26936,7 +26957,19 @@ async function testARenameRefusesANameAlreadyTaken(): Promise<void> {
       await ask('level', 'name', { level: { declaredBy: 'Node' } }),
       /level is declared by the engine's Node/,
     );
-    assert.match(await ask('level', 'shout'), /shout is already declared in res:\/\/loud\.gd/);
+    const declared = await ask('level', 'shout');
+    assert.match(declared, /shout is already declared in res:\/\/loud\.gd/);
+    assert.doesNotMatch(declared, /used in code/, 'a declaration is named once, as a declaration');
+    // A parameter of the class's own method and of its subclass's override would shadow the member;
+    // other.gd's class has a parameter of the same name and does not inherit it.
+    const shadowing = await ask('level', 'times');
+    assert.match(
+      shadowing,
+      new RegExp(
+        `times is already used in code where level is inherited, as a local, a parameter or another name the renamed variable would shadow or be shadowed by, at res://loud\\.gd:${fixtureLine('loud.gd', 'func say')}, res://loud\\.gd:${fixtureLine('loud.gd', 'super.say')}, res://told\\.gd:${fixtureLine('told.gd', 'func say')}, res://told\\.gd:${fixtureLine('told.gd', 'repeat(times)')}$`,
+      ),
+    );
+    assert.doesNotMatch(shadowing, /other\.gd/, 'a class not inheriting the member is not named');
     assert.match(
       await ask('nothing', 'something'),
       /declares no nothing at its top level\. What it declares there: Told, spoken, level, say, again/,
@@ -27075,6 +27108,14 @@ async function testAMemberRenameFollowsWhatTheLanguageServerResolves(): Promise<
         `res://user.gd:${fixtureLine('user.gd', 'get_node')}:code`,
       ].sort(),
       'another class with the same method, a call on a value of unknown type, and what the server resolved by name in a comment or a string',
+    );
+    const resolvedComment = asArray(get(say.report, 'leftAlone')).find(
+      (one) => text(get(one, 'kind')) === 'comment',
+    );
+    assert.match(
+      text(get(resolvedComment, 'why')),
+      /the language server resolved this to the method/,
+      'a comment the server resolved is quoted with its why rather than given as a line',
     );
 
     const level = await rename('level', 'depth');
@@ -27424,6 +27465,8 @@ async function testARenameWithNoEditorLeavesTheCacheAndTheScriptsRight(): Promis
       }),
     );
     assert.equal(get(renamed, 'ok'), true, `the rename did not settle: ${JSON.stringify(renamed)}`);
+    assert.equal(get(renamed, 'written'), true);
+    assert.equal(get(renamed, 'note'), undefined, 'a rename that settled has nothing to explain');
     assert.deepEqual(get(renamed, 'compiled', 'failed'), [], JSON.stringify(get(renamed, 'compiled')));
     assert.equal(
       asNumber(get(renamed, 'compiled', 'checked')),
@@ -27466,6 +27509,13 @@ async function testARenameWithNoEditorLeavesTheCacheAndTheScriptsRight(): Promis
       await rename({ scriptPath: 'res://loud.gd', symbol: 'Loud', newName: 'Shouter' }),
     );
     assert.equal(get(inPlace, 'ok'), false, JSON.stringify(inPlace));
+    assert.equal(get(inPlace, 'written'), true);
+    assert.match(
+      text(get(inPlace, 'note')),
+      /^The rename was written: every file under changed now reads as shown there and is left that way\. ok is false for what came after the write/,
+      'a false ok beside the changed files says they were still written',
+    );
+    assert.match(readFileSync(join(project, 'loud.gd'), 'utf8'), /^class_name Shouter$/m);
     assert.deepEqual(
       get(inPlace, 'compiled', 'failed'),
       ['res://broken.gd'],

@@ -268,6 +268,33 @@ export async function renameSymbol(request: RenameRequest, services: RenameServi
         );
       }
     }
+    // A bare use of the new name inside a class that inherits the member is a local, a parameter,
+    // or a global the member would hide; each either shadows the renamed member or is shadowed by
+    // it, and a project treating SHADOWED_VARIABLE as an error stops compiling.
+    const heirs = graph.descendants(root);
+    const inUse: { file: string; line: number }[] = [];
+    for (const script of scripts.values()) {
+      for (const occurrence of script.occurrences(newName)) {
+        const body = graph.bodyAt(script.path, occurrence.offset);
+        if (
+          occurrence.kind === 'code' &&
+          !occurrence.afterDot &&
+          heirs.has(body) &&
+          graph.declaration(body, newName)?.offset !== occurrence.offset
+        ) {
+          inUse.push({ file: script.path, line: script.lines.positionOf(occurrence.offset).line + 1 });
+        }
+      }
+    }
+    if (inUse.length > 0) {
+      const places = inUse
+        .sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line)
+        .slice(0, 10)
+        .map((place) => `${place.file}:${place.line}`);
+      conflicts.push(
+        `${newName} is already used in code where ${symbol} is inherited, as a local, a parameter or another name the renamed ${what} would shadow or be shadowed by, at ${places.join(', ')}${inUse.length > places.length ? ` and ${inUse.length - places.length} more` : ''}`,
+      );
+    }
     if (conflicts.length > 0) {
       return {
         ok: false,
@@ -357,7 +384,7 @@ export async function renameSymbol(request: RenameRequest, services: RenameServi
       ...(overrides.length > 0 ? { overridesRenamed: overrides } : {}),
       ...(moveTo === null ? {} : { moved: { from: declaringPath, to: moveTo } }),
       changed: changedReport(plan.edits, rewrites),
-      leftAlone: plan.mentions,
+      ...leftAloneReport(plan.mentions),
       summary: summaryOf(plan.edits, plan.mentions, rewrites),
     },
   };
@@ -476,6 +503,34 @@ function changedReport(edits: readonly Edit[], rewrites: readonly Rewrite[]): Re
         })),
     };
   });
+}
+
+/**
+ * What was left alone, with prose given by file and line rather than quoted: a comment or a line of
+ * a text file that only shares the word is there to be read if wanted, and quoting every one made
+ * the answer for a common word over a hundred kilobytes, mostly a progress log, past what a caller
+ * can read. A prose mention with a why, such as a comment the language server resolved to the
+ * member, is quoted in full with the rest.
+ */
+function leftAloneReport(mentions: readonly Mention[]): Record<string, unknown> {
+  const full: Mention[] = [];
+  const prose = new Map<string, { file: string; kind: string; lines: number[] }>();
+  for (const mention of mentions) {
+    if ((mention.kind === 'comment' || mention.kind === 'text') && mention.why === undefined) {
+      const key = `${mention.file}\n${mention.kind}`;
+      const group = prose.get(key) ?? { file: mention.file, kind: mention.kind, lines: [] };
+      if (!group.lines.includes(mention.line)) {
+        group.lines.push(mention.line);
+      }
+      prose.set(key, group);
+    } else {
+      full.push(mention);
+    }
+  }
+  return {
+    leftAlone: full,
+    ...(prose.size > 0 ? { leftAloneInProse: [...prose.values()] } : {}),
+  };
 }
 
 function summaryOf(
