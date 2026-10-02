@@ -2297,6 +2297,60 @@ async function testAReimportGoesThroughTheEditor({ call, project }: Editor): Pro
 }
 
 /**
+ * A reimport through the editor of files it has never seen, written the way an asset installer
+ * writes them: images and sidecars in a folder new to the editor, the sidecars without the uid an
+ * import writes. The editor's reimport passes over files its file system has not taken in, so
+ * downstream 143 images came back as not reimported, each needing the import just asked for, one
+ * row per file. Two of the images here are not images, so what is left over shares one reason.
+ */
+async function testAReimportTakesInFilesTheEditorHasNotSeen({ call, project }: Editor): Promise<void> {
+  const dir = join(project, 'installed_avatars');
+  mkdirSync(dir, { recursive: true });
+  const sidecar = (name: string): string =>
+    `[remap]\n\nimporter="texture"\ntype="CompressedTexture2D"\npath="res://.godot/imported/${name}-0.ctex"\n\n[deps]\n\nsource_file="res://installed_avatars/${name}"\n\n[params]\n\ncompress/mode=0\n`;
+  for (let index = 0; index < 3; index += 1) {
+    writeFileSync(join(dir, `avatar${index}.png`), solidPng(30 * index, 90, 160));
+    writeFileSync(join(dir, `avatar${index}.png.import`), sidecar(`avatar${index}.png`));
+  }
+  for (const name of ['broken0.png', 'broken1.png']) {
+    writeFileSync(join(dir, name), 'not an image');
+    writeFileSync(join(dir, `${name}.import`), sidecar(name));
+  }
+
+  const reimported = await call('project_import', { projectPath: project, op: 'reimport' });
+  assert.equal(get(reimported, 'via'), 'editor', text(reimported));
+  const images = [0, 1, 2].map((index) => `res://installed_avatars/avatar${index}.png`);
+  for (const image of images) {
+    assert.ok(
+      asArray(get(reimported, 'reimported')).includes(image),
+      `${image} is imported though the editor had not seen it: ${text(reimported)}`,
+    );
+  }
+  assert.deepEqual(
+    asArray(get(reimported, 'importedByTheScan'))
+      .map((path) => asString(path))
+      .filter((path) => images.includes(path)),
+    images,
+    `the scan imported them, and they are named for it: ${text(reimported)}`,
+  );
+  const broken = asArray(get(reimported, 'notReimported')).filter((group) =>
+    asArray(get(group, 'paths')).some((path) => asString(path).startsWith('res://installed_avatars/')),
+  );
+  assert.equal(broken.length, 1, `the two that failed for one reason are one entry: ${text(reimported)}`);
+  assert.deepEqual(
+    asArray(get(broken[0], 'paths'))
+      .map((path) => asString(path))
+      .sort(),
+    ['res://installed_avatars/broken0.png', 'res://installed_avatars/broken1.png'],
+    text(reimported),
+  );
+  assert.equal(get(broken[0], 'status'), 'failed', text(reimported));
+
+  rmSync(dir, { recursive: true, force: true });
+  await call('editor_rescan', { projectPath: project });
+}
+
+/**
  * A class declared on disk, listed in the cache, and invisible to the editor.
  *
  * This is the state every check gdharness had called clean, because all of them compared one
@@ -4986,6 +5040,7 @@ async function main(): Promise<void> {
     ['testACreateMakesWhatWasAsked', testACreateMakesWhatWasAsked],
     ['testEditorRescan', testEditorRescan],
     ['testAReimportGoesThroughTheEditor', testAReimportGoesThroughTheEditor],
+    ['testAReimportTakesInFilesTheEditorHasNotSeen', testAReimportTakesInFilesTheEditorHasNotSeen],
     ['testAClassTheEditorCannotSee', testAClassTheEditorCannotSee],
     ['testAScanWritesTheCacheFromTheEditor', testAScanWritesTheCacheFromTheEditor],
     ['testARescanKeepsWhatTheRebuildWrote', testARescanKeepsWhatTheRebuildWrote],
