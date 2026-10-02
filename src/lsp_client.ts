@@ -27,6 +27,35 @@ type JsonRecord = Record<string, unknown>;
 
 const DIAGNOSTICS_TIMEOUT_MS = 5000;
 
+/** What a request is given unless it says otherwise: one position answered from the open script. */
+const REQUEST_TIMEOUT_MS = 10_000;
+
+/**
+ * What a references request is given. Godot answers one by looking for the name's text in every
+ * script of the project and resolving each match, so its cost grows with how often the word is
+ * written, not with how often the symbol is used: a method named like the project's commonest local
+ * ran past ten seconds on a project where a rarer name in the same class answered in a few.
+ */
+const REFERENCES_TIMEOUT_MS = 180_000;
+
+/** How long a request is given, references apart from the rest. */
+export interface LSPTimeouts {
+  readonly requestMs: number;
+  readonly referencesMs: number;
+}
+
+/** A request the server took in but did not answer in the time it was given. */
+export class LSPTimeout extends Error {
+  readonly method: string;
+  readonly seconds: number;
+
+  constructor(method: string, timeoutMs: number) {
+    super(`LSP request timed out after ${String(timeoutMs / 1000)}s: ${method}`);
+    this.method = method;
+    this.seconds = timeoutMs / 1000;
+  }
+}
+
 /** A call refused for what it was asked, which no language server could answer either. */
 class ArgumentRefusal extends Refusal {}
 
@@ -95,9 +124,16 @@ export class GodotLSPClient {
   /** The last ask queued on each file, which the next one waits behind; see [withDocument]. */
   private documentTurns = new Map<string, Promise<void>>();
 
-  constructor(port = portFromEnv('GDHARNESS_LSP_PORT', DEFAULT_LSP_PORT), host = '127.0.0.1') {
+  private readonly timeouts: LSPTimeouts;
+
+  constructor(
+    port = portFromEnv('GDHARNESS_LSP_PORT', DEFAULT_LSP_PORT),
+    host = '127.0.0.1',
+    timeouts: LSPTimeouts = { requestMs: REQUEST_TIMEOUT_MS, referencesMs: REFERENCES_TIMEOUT_MS },
+  ) {
     this.port = port;
     this.host = host;
+    this.timeouts = timeouts;
     this.pendingRequests = new Map<number, PendingRequest>();
   }
 
@@ -215,7 +251,11 @@ export class GodotLSPClient {
     await this.initialize(rootPath);
   }
 
-  private async sendRequest(method: string, params?: unknown): Promise<unknown> {
+  private async sendRequest(
+    method: string,
+    params?: unknown,
+    timeoutMs = this.timeouts.requestMs,
+  ): Promise<unknown> {
     await this.ensureConnected();
 
     if (!this.socket) {
@@ -237,8 +277,8 @@ export class GodotLSPClient {
     return new Promise<unknown>((resolveRequest, rejectRequest) => {
       const timer = setTimeout(() => {
         this.pendingRequests.delete(id);
-        rejectRequest(new Error(`LSP request timed out after 10s: ${method}`));
-      }, 10000);
+        rejectRequest(new LSPTimeout(method, timeoutMs));
+      }, timeoutMs);
 
       this.pendingRequests.set(id, {
         resolve: resolveRequest,
@@ -673,11 +713,15 @@ export class GodotLSPClient {
     const result = await this.withDocument(filePath, async () => {
       const uri = this.syncDocument(filePath, content);
       try {
-        return await this.sendRequest('textDocument/references', {
-          textDocument: { uri },
-          position: { line, character },
-          context: { includeDeclaration: true },
-        });
+        return await this.sendRequest(
+          'textDocument/references',
+          {
+            textDocument: { uri },
+            position: { line, character },
+            context: { includeDeclaration: true },
+          },
+          this.timeouts.referencesMs,
+        );
       } finally {
         this.closeDocument(uri);
       }
