@@ -9,6 +9,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readdirSync,
   readFileSync,
   realpathSync,
@@ -21638,7 +21639,10 @@ async function testAForeignRunSurvivesAStart(): Promise<void> {
     /endedPreviousRun/,
     `a start of this server's own project ends no run of anybody else's: ${theirs.answer}`,
   );
-  assert.ok(theirs.keptPrinting, 'a bench recorded against another project should still be printing');
+  assert.ok(
+    theirs.keptPrinting,
+    `a bench recorded against another project should still be printing (exit code ${String(theirs.exitCode)}, stderr: ${theirs.said || 'nothing'})`,
+  );
   assert.equal(theirs.exitCode, null, 'and should not have been signalled');
 
   // The same instrument against a run this server does own, which is what makes the assertions
@@ -21660,7 +21664,7 @@ async function testAForeignRunSurvivesAStart(): Promise<void> {
  */
 async function benchThroughAStart(
   owner: 'mine' | 'theirs',
-): Promise<{ answer: string; keptPrinting: boolean; exitCode: number | null }> {
+): Promise<{ answer: string; keptPrinting: boolean; exitCode: number | null; said: string }> {
   const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-foreign-runtime-'));
   const mine = join(runtimeDir, 'mine');
   const ticks = join(runtimeDir, 'bench.log');
@@ -21687,6 +21691,7 @@ async function benchThroughAStart(
   // command line because that is what makes it the recorded run rather than a pid that matches:
   // a bench the identity check disowns would be spared for a reason this fixture is not about.
   const recorded = join(runtimeDir, owner);
+  const benchErrors = join(runtimeDir, 'bench.err');
   const bench = spawn(
     process.execPath,
     [
@@ -21694,11 +21699,14 @@ async function benchThroughAStart(
       // come up as an editor, and an editor is disowned by the identity check for a reason this
       // fixture is not about.
       '--eval',
+      // A write refused while the test reads the file, or while an antivirus scanner holds it, is
+      // skipped rather than thrown: thrown from a timer it ends the bench, which then reads exactly
+      // like a bench somebody killed.
       "const {appendFileSync}=require('node:fs');" +
-        `setInterval(() => appendFileSync(${JSON.stringify(ticks)}, 'tick\\n'), 25);`,
+        `setInterval(() => { try { appendFileSync(${JSON.stringify(ticks)}, 'tick\\n'); } catch {} }, 25);`,
       recorded,
     ],
-    { stdio: 'ignore' },
+    { stdio: ['ignore', 'ignore', openSync(benchErrors, 'w')] },
   );
   const benchPid = bench.pid;
   assert.ok(benchPid !== undefined, 'the fixture needs a live process to stand in for the bench');
@@ -21723,7 +21731,16 @@ async function benchThroughAStart(
       'utf8',
     );
 
-    const printed = (): number => (existsSync(ticks) ? readFileSync(ticks, 'utf8').length : 0);
+    // By size, and the last size when the file is held at the moment of asking.
+    let lastSize = 0;
+    const printed = (): number => {
+      try {
+        lastSize = statSync(ticks).size;
+      } catch {
+        // Not written yet, or held by the bench's own write.
+      }
+      return lastSize;
+    };
     // Waited for rather than assumed: a bench that had not yet written its first line would make
     // the comparison below read as dead whatever happened to it.
     for (let waited = 0; printed() === 0 && waited < 2000; waited += 25) await delay(25);
@@ -21737,9 +21754,18 @@ async function benchThroughAStart(
       { GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: mine, GODOT_PATH: process.execPath },
     );
 
+    // Waited on up to three seconds for one more line rather than read once after a quarter of one:
+    // a bench descheduled on a loaded runner prints again within that, and a killed one never does.
+    // A live bench answers on its next tick, so the wait costs a passing run nothing.
     const afterwards = printed();
-    await delay(250);
-    return { answer, keptPrinting: printed() > afterwards, exitCode: bench.exitCode };
+    for (let waited = 0; printed() <= afterwards && waited < 3000; waited += 25) await delay(25);
+    const keptPrinting = printed() > afterwards;
+    return {
+      answer,
+      keptPrinting,
+      exitCode: bench.exitCode,
+      said: existsSync(benchErrors) ? readFileSync(benchErrors, 'utf8') : '',
+    };
   } finally {
     bench.kill('SIGKILL');
     sweep(runtimeDir);
@@ -27748,6 +27774,11 @@ async function testARenameWithNoEditorLeavesTheCacheAndTheScriptsRight(): Promis
  * chained classes and the editor's file system cache deleted, which keeps that first scan going
  * after the addon has connected; at three hundred classes with the cache in place the scan was
  * over first and nothing showed.
+ *
+ * Whether the scan is still going when the rescan arrives is a race between the scan and the
+ * addon connecting, and a fast Windows runner finished fifteen hundred first. A project that
+ * loses the race has not reached the state this is about, so a bigger one is made and asked again;
+ * a broken rescan still fails on whichever attempt reaches it.
  */
 async function testARescanAsTheEditorOpensFindsNothingMissing(): Promise<void> {
   const godotPath = resolveGodotPath();
@@ -27758,6 +27789,35 @@ async function testARescanAsTheEditorOpensFindsNothingMissing(): Promise<void> {
     console.log('rescan as the editor opens regression skipped (Godot not found)');
     return;
   }
+  const sizes = [1500, 4000, 10_000];
+  const missed: string[] = [];
+  for (const count of sizes) {
+    const answer = await rescanAsTheEditorOpens(godotPath, count);
+    if (asNumber(get(answer, 'waitedForEditorScanMs') ?? 0) === 0) {
+      missed.push(`${String(count)} classes: ${JSON.stringify(answer)}`);
+      continue;
+    }
+    if (missed.length > 0) {
+      console.log(
+        `rescan as the editor opens: the scan outlasted the connection at ${String(count)} classes`,
+      );
+    }
+    assert.equal(get(answer, 'ok'), true, JSON.stringify(answer));
+    assert.equal(
+      get(answer, 'broughtIn'),
+      undefined,
+      `nothing was missing to bring in: ${JSON.stringify(answer)}`,
+    );
+    assert.equal(get(answer, 'dependentsNotReloaded'), undefined, JSON.stringify(answer));
+    return;
+  }
+  assert.fail(
+    `the rescan never arrived during the editor's first scan, so this proved nothing:\n${missed.join('\n')}`,
+  );
+}
+
+/** One editor opening on [param count] chained classes, and the rescan asked as it connects. */
+async function rescanAsTheEditorOpens(godotPath: string, count: number): Promise<unknown> {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-cold-rescan-'));
   const home = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-cold-rescan-home-'));
   writeFileSync(
@@ -27769,7 +27829,6 @@ async function testARescanAsTheEditorOpensFindsNothingMissing(): Promise<void> {
     recursive: true,
   });
   mkdirSync(join(project, 'classes'));
-  const count = 1500;
   for (let index = 0; index < count; index += 1) {
     writeFileSync(
       join(project, 'classes', `c${index}.gd`),
@@ -27818,19 +27877,7 @@ async function testARescanAsTheEditorOpensFindsNothingMissing(): Promise<void> {
       await delay(50);
     }
     assert.ok(answer !== null, `the editor never reached the bridge:\n${printed.join('').slice(-3000)}`);
-    // The positive the absences below stand beside: the rescan ran, and waited out a scan the editor
-    // was still making, which is the state the fault needs.
-    assert.ok(
-      asNumber(get(answer, 'waitedForEditorScanMs') ?? 0) > 0,
-      `the rescan should have arrived during the editor's first scan, or this proves nothing: ${JSON.stringify(answer)}`,
-    );
-    assert.equal(get(answer, 'ok'), true, JSON.stringify(answer));
-    assert.equal(
-      get(answer, 'broughtIn'),
-      undefined,
-      `nothing was missing to bring in: ${JSON.stringify(answer)}`,
-    );
-    assert.equal(get(answer, 'dependentsNotReloaded'), undefined, JSON.stringify(answer));
+    return answer;
   } finally {
     if (editor?.exitCode === null && editor.pid !== undefined) {
       const child = editor;
