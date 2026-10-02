@@ -451,6 +451,24 @@ class PlanBuilder {
 
 type WhyFor = (file: string, occurrence: Occurrence, kind: MentionKind) => string | undefined;
 
+/**
+ * Whether the string holding [param offset] is [param name] and nothing else: `"Stamp"`, or the
+ * StringName `&"Stamp"`. Code that writes a name whole is usually handing it to something that
+ * looks the name up at run time, which no compile checks.
+ */
+function isWholeString(text: string, offset: number, name: string): boolean {
+  const before = text[offset - 1];
+  return (before === '"' || before === "'") && text[offset + name.length] === before;
+}
+
+/** Why a string that is the class's whole name was left, for the class rename. */
+const WHOLE_CLASS_NAME =
+  "the whole string is the class's name, as find_children's type, a comparison with get_global_name() or a list of accepted type names takes it, and it was not changed: if it names this class, it no longer matches anything after the rename, and no compile says so";
+
+/** Why a string that is the member's whole name was left, for the member rename. */
+const WHOLE_MEMBER_NAME =
+  "the whole string is the member's name, as call, connect, has_method, get or set take it, and it was not changed: if it names this member, it no longer finds it after the rename, and no compile says so";
+
 /** Why a script names the old name as something of its own, if it does, for the mentions there. */
 function declaresItsOwn(script: Script, name: string, except: number | null): boolean {
   return script
@@ -513,6 +531,9 @@ export function planClassRename(args: ClassRenameArguments): Plan {
   }
   plan.mentionTheRest(texts, scripts, (file, occurrence, kind) => {
     const script = scripts.get(file);
+    if (kind === 'string' && script !== undefined && isWholeString(script.text, occurrence.offset, oldName)) {
+      return WHOLE_CLASS_NAME;
+    }
     if (kind !== 'code' || script === undefined) {
       return undefined;
     }
@@ -622,13 +643,22 @@ export function planMemberRename(args: MemberRenameArguments): Plan {
 
   planScenes(texts, heirs, kind, oldName, plan);
 
-  plan.mentionTheRest(texts, scripts, (_file, occurrence, mentionKind) =>
-    mentionKind === 'code'
-      ? occurrence.afterDot
-        ? 'not resolved to this member by the language server: another class with a member of the same name, or a value whose type the analyser could not tell'
-        : 'not resolved to this member by the language server'
-      : undefined,
-  );
+  plan.mentionTheRest(texts, scripts, (file, occurrence, mentionKind) => {
+    const script = scripts.get(file);
+    if (
+      mentionKind === 'string' &&
+      script !== undefined &&
+      isWholeString(script.text, occurrence.offset, oldName)
+    ) {
+      return WHOLE_MEMBER_NAME;
+    }
+    if (mentionKind !== 'code') {
+      return undefined;
+    }
+    return occurrence.afterDot
+      ? 'not resolved to this member by the language server: another class with a member of the same name, or a value whose type the analyser could not tell'
+      : 'not resolved to this member by the language server';
+  });
   return plan.build();
 }
 
