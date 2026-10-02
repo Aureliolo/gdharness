@@ -2591,6 +2591,12 @@ class GodotServer {
    * `op` is empty for a tool that has none.
    */
   private async dispatch(tool: string, op: string, args: OperationParams): Promise<ToolResponse> {
+    // Every call but the one that reports the state as it is waits out an editor still arriving,
+    // so nothing is decided on a reading that is about to change: connected before the greeting,
+    // then not while the command line is read. editor_status answers in the middle of it, saying so.
+    if (tool !== 'editor_status' && this.godotBridge.isArriving()) {
+      await this.waitForBridge(() => !this.godotBridge.isArriving(), Date.now() + GREETING_WAIT_MS);
+    }
     if (ENGINE_PASSES[tool]?.[op] !== undefined) {
       return op === 'reimport' ? await this.handleReimport(args) : await this.handleRefreshUids(args);
     }
@@ -5170,21 +5176,12 @@ class GodotServer {
     if (!hasSaidWhoItIs(before)) {
       // Who opened it decides which way it is restarted, and that arrives with the greeting: read
       // before it, an editor a server opened was taken for one opened by hand and asked to restart
-      // itself, which brings it back without its ports.
-      const settled = await this.waitForBridge(
-        () => hasSaidWhoItIs(this.godotBridge.getStatus()) || !this.godotBridge.isConnected(),
-        Date.now() + GREETING_WAIT_MS,
+      // itself, which brings it back without its ports. The call has already waited for the
+      // greeting on its way in, so one still silent is refused rather than restarted on a guess.
+      return this.createErrorResponse(
+        `The editor has connected and has not said who it is within ${GREETING_WAIT_MS / 1000}s, so whether this server or the editor itself restarts it cannot be told.`,
+        ['editor_status says when it has, under greeting while it has not', 'Then ask for the restart again'],
       );
-      if (!settled) {
-        return this.createErrorResponse(
-          `The editor has connected and has not said who it is within ${GREETING_WAIT_MS / 1000}s, so whether this server or the editor itself restarts it cannot be told.`,
-          [
-            'editor_status says when it has, under greeting while it has not',
-            'Then ask for the restart again',
-          ],
-        );
-      }
-      return this.handleRestartEditor(args);
     }
     const mine = before.openedByAServer === true && before.projectPath !== undefined;
     // An editor opened by hand restarts itself and comes back as it was, so hidden was accepted and
