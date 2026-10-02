@@ -674,6 +674,21 @@ jobs:
                 published=yes
                 break
               fi
+              # A gateway answering 502, 503 or 504 says nothing about the write behind it: on
+              # 1.1.33 nginx gave up on a publish after sixty seconds that the registry may still
+              # have been completing. Read the entry back before asking again, since publishing a
+              # version that landed is refused as a duplicate.
+              if grep -qE 'server returned status 50[234]' <<<"${output}"; then
+                for _ in $(seq 1 24); do
+                  if serves_this_version; then
+                    published=yes
+                    break 2
+                  fi
+                  sleep 5
+                done
+                echo "The registry's gateway failed and the entry is not served; asked ${attempt} times."
+                continue
+              fi
               if ! grep -qF "version '${VERSION}' was not found" <<<"${output}"; then
                 exit "${status}"
               fi
