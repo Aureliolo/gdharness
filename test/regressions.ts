@@ -27017,6 +27017,11 @@ async function testAMemberRenameFollowsWhatTheLanguageServerResolves(): Promise<
  */
 async function testAMovedScriptIsNamedByItsNewPathEverywhere(): Promise<void> {
   const project = renameProject();
+  // The project named through a link, so the path the caller gives and the one the file system
+  // resolves differ, as an 8.3 short name and its long one do on a Windows runner. The target does
+  // not exist yet, so it cannot be resolved itself, and read in the spelling given it was outside.
+  const linked = `${project}-linked`;
+  symlinkSync(project, linked, 'junction');
   try {
     writeFileSync(join(project, 'helper.gd'), 'extends Node\n');
     writeFileSync(
@@ -27025,11 +27030,11 @@ async function testAMovedScriptIsNamedByItsNewPathEverywhere(): Promise<void> {
     );
     const outcome = await renameSymbol(
       {
-        projectPath: project,
-        scriptPath: join(project, 'told.gd'),
+        projectPath: linked,
+        scriptPath: join(linked, 'told.gd'),
         symbol: 'Told',
         newName: 'Wording',
-        newScriptPath: join(project, 'words', 'wording.gd'),
+        newScriptPath: join(linked, 'words', 'wording.gd'),
       },
       { namesTaken: engineSaying(), ...NO_LANGUAGE_SERVER },
     );
@@ -27066,6 +27071,8 @@ async function testAMovedScriptIsNamedByItsNewPathEverywhere(): Promise<void> {
       'and says it did',
     );
   } finally {
+    // The link alone, which removing as a directory would follow into the project.
+    rmSync(linked, { force: true });
     rmSync(project, { recursive: true, force: true });
   }
 }

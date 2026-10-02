@@ -6,7 +6,7 @@
  */
 
 import { existsSync, realpathSync } from 'node:fs';
-import { relative } from 'node:path';
+import { basename, dirname, join, relative, resolve } from 'node:path';
 import { type DeclarationKind, isIdentifier, type Position } from './gdscript-source.js';
 import { type ProjectText, projectTexts } from './project-scan.js';
 import {
@@ -95,23 +95,35 @@ const WHAT: Record<DeclarationKind, string> = {
 
 /** [param absolute] as the `res://` path the walk spells it with, or null outside the project. */
 function resourcePathOf(projectPath: string, absolute: string): string | null {
-  let onDisk = absolute;
-  try {
-    onDisk = realpathSync.native(absolute);
-  } catch {
-    // A file not there yet, the move's target, is spelled as given.
-  }
-  let root = projectPath;
-  try {
-    root = realpathSync.native(projectPath);
-  } catch {
-    // The project was opened already, so this does not fail in practice.
-  }
-  const inside = relative(root, onDisk);
+  const inside = relative(onDiskSpelling(projectPath), onDiskSpelling(absolute));
   if (inside === '' || inside.startsWith('..') || /^[A-Za-z]:/.test(inside)) {
     return null;
   }
   return `res://${inside.replace(/\\/g, '/')}`;
+}
+
+/**
+ * [param path] as the file system spells it, for a path whose tail does not exist yet too: the
+ * nearest directory that exists is resolved and the rest appended. Resolving only paths that exist
+ * left a move's target in the spelling it was given, and on Windows that can be an 8.3 short name
+ * (`C:\Users\RUNNER~1\...`) against a project root resolved to its long one, so a target inside
+ * the project read as outside it.
+ */
+function onDiskSpelling(path: string): string {
+  const missing: string[] = [];
+  let at = resolve(path);
+  for (;;) {
+    try {
+      return join(realpathSync.native(at), ...missing.reverse());
+    } catch {
+      const parent = dirname(at);
+      if (parent === at) {
+        return resolve(path);
+      }
+      missing.push(basename(at));
+      at = parent;
+    }
+  }
 }
 
 /** Up to [param most] places [param name] is already an identifier in code, other than after a dot. */
