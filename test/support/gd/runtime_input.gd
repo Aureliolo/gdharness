@@ -869,6 +869,48 @@ func _check_a_click_by_words_ranked(input: InputCommands) -> void:
 	footer.queue_free()
 	await root.get_tree().process_frame
 
+	# Above the view, with a list scrolled to its end: what sits at the top edge now comes later in
+	# the list, so it is drawn over the place the button will be scrolled to, and moves away when it
+	# is. One button alone, one in a card that clips what it holds, and then a lid over the whole
+	# container, which the scroll does not move and which covers both.
+	var tray: ScrollContainer = ScrollContainer.new()
+	tray.size = Vector2(64, 32)
+	root.add_child(tray)
+	var cards: VBoxContainer = VBoxContainer.new()
+	tray.add_child(cards)
+	var up: Button = _small_button(cards, "Up", Vector2.ZERO)
+	var sleeve: PanelContainer = PanelContainer.new()
+	sleeve.clip_contents = true
+	cards.add_child(sleeve)
+	var sleeved: Button = _small_button(sleeve, "Sleeved", Vector2.ZERO)
+	var rest: Control = Control.new()
+	rest.custom_minimum_size = Vector2(40, 100)
+	cards.add_child(rest)
+	for case: Array in [[up, "Up"], [sleeved, "Sleeved"]]:
+		var wanted: Button = case[0]
+		await root.get_tree().process_frame
+		tray.scroll_vertical = 1000
+		await root.get_tree().process_frame
+		if wanted.get_global_rect().end.y > 0:
+			_fail("%s should start above the tray's view for this to mean anything" % case[1])
+		var raised: Dictionary = await input.click({"says": case[1]})
+		if _presses(wanted) != 1 or raised.get("scrolled_into_view") != true:
+			_fail("a button above the view is scrolled down to and pressed: %s" % JSON.stringify(raised))
+	tray.scroll_vertical = 1000
+	var lid: Panel = Panel.new()
+	lid.size = Vector2(64, 32)
+	root.add_child(lid)
+	await root.get_tree().process_frame
+	var lidded: Dictionary = await input.click({"says": "Up"})
+	if (
+		_presses(up) != 1
+		or not str(lidded.get("message", "")).contains("under %s, which is drawn over it" % lid.get_path())
+	):
+		_fail("and one above the view of a container a lid covers is covered: %s" % JSON.stringify(lidded))
+	tray.queue_free()
+	lid.queue_free()
+	await root.get_tree().process_frame
+
 	# A higher canvas layer is drawn over the game, and takes the pointer first, wherever it is in
 	# the tree.
 	var overlay: CanvasLayer = CanvasLayer.new()
