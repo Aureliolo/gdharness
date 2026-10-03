@@ -569,7 +569,18 @@ export interface MemberRenameArguments {
   readonly oldName: string;
   readonly newName: string;
   readonly resolved: readonly Resolved[];
+  /** Places in code the language server resolved to exactly one other declaration, `file:offset`. */
+  readonly elsewhere: ReadonlySet<string>;
+  /** The files holding a class that inherits the member, where a bare name can be it. */
+  readonly heirFiles: ReadonlySet<string>;
 }
+
+/** Why a bare name in a file with no class inheriting the member was left. */
+export const NOT_INHERITED =
+  "no class in this file inherits the member, so a bare name here is that class's own local, parameter or member, or a global";
+
+/** Why a name the language server resolved to one other declaration was left. */
+export const RESOLVED_ELSEWHERE = 'the language server resolved this to another declaration of the name';
 
 /**
  * The edits renaming a member: what the language server resolved to it in code, its declarations,
@@ -577,7 +588,8 @@ export interface MemberRenameArguments {
  * by its name on nodes whose script is one of those classes.
  */
 export function planMemberRename(args: MemberRenameArguments): Plan {
-  const { texts, scripts, graph, root, family, kind, oldName, newName, resolved } = args;
+  const { texts, scripts, graph, root, family, kind, oldName, newName, resolved, elsewhere, heirFiles } =
+    args;
   const plan = new PlanBuilder(oldName, newName);
   const heirs = graph.descendants(root);
   const docKind = DOC_KIND[kind];
@@ -655,9 +667,15 @@ export function planMemberRename(args: MemberRenameArguments): Plan {
     if (mentionKind !== 'code') {
       return undefined;
     }
+    if (!occurrence.afterDot && !heirFiles.has(file)) {
+      return NOT_INHERITED;
+    }
+    if (elsewhere.has(`${file}:${String(occurrence.offset)}`)) {
+      return RESOLVED_ELSEWHERE;
+    }
     return occurrence.afterDot
-      ? 'not resolved to this member by the language server: another class with a member of the same name, or a value whose type the analyser could not tell'
-      : 'not resolved to this member by the language server';
+      ? 'not resolved to this member by the language server: a value whose type the analyser could not tell, so it may be this member and is left for you'
+      : 'not resolved to this member by the language server, which gave no single declaration for it';
   });
   return plan.build();
 }
