@@ -627,7 +627,7 @@ export function planMemberRename(args: MemberRenameArguments): Plan {
         script.lines,
         one.offset,
         occurrence.kind,
-        `the language server resolved this to the ${kind === 'func' ? 'method' : 'member'}, and it is inside ${occurrence.kind === 'string' ? 'a string' : occurrence.kind === 'nodePath' ? 'a node path' : 'a comment'}, so it is left for you`,
+        `the language server resolved this word to the ${kind === 'func' ? 'method' : 'member'}, but it is inside ${occurrence.kind === 'string' ? 'a string' : occurrence.kind === 'nodePath' ? 'a node path' : 'a comment'}, which no rename changes: read it, and change the word by hand if it names the ${kind === 'func' ? 'method' : 'member'}`,
       );
     }
   }
