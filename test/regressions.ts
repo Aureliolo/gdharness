@@ -16116,8 +16116,9 @@ async function testAPlayedStartStopsWaitingForAGameThatIsOver(): Promise<void> {
  * and a runtime that announced inside that second was found only when the editor let go. The
  * question is asked beside the looks, and the last answer is what each look reads.
  *
- * The editor here answers `playing_status` after 900 ms and the game announces 300 ms after the
- * play; the start has to find it well before the editor's first answer arrives.
+ * The editor here answers `playing_status` after 700 ms and the game announces 300 ms after the
+ * play; the start has to find it well before the editor's first answer arrives. Run here, it is
+ * found 311 to 313 ms after the play.
  */
 async function testTheAnnounceWaitIsNotHeldByASlowEditor(): Promise<void> {
   const answersAfterMs = 700;
@@ -16153,9 +16154,20 @@ async function testTheAnnounceWaitIsNotHeldByASlowEditor(): Promise<void> {
         }
         return { ok: true };
       },
-    async ({ start }) => {
+    async ({ start, server }) => {
       const found = await start(10_000);
       const sincePlayMs = Date.now() - playedAt;
+      // Printed on every run, with the server's own account of the wait, so a slow one on a loaded
+      // runner can be read against the passing ones and against where the time went.
+      const account = server.stderr
+        .split('\n')
+        .filter((line) =>
+          /announce wait ended|playing_status did not|playing_status answered after|Tool (playing_status|play_scene)/.test(
+            line,
+          ),
+        )
+        .map((line) => line.trim());
+      console.log(`slow editor: found ${String(sincePlayMs)}ms after the play; ${account.join(' | ')}`);
       assert.equal(get(found.answer, 'through'), 'editor', JSON.stringify(found.answer));
       assert.ok(playedAt > 0, 'the editor should have been asked to play');
       assert.equal(
@@ -16166,7 +16178,7 @@ async function testTheAnnounceWaitIsNotHeldByASlowEditor(): Promise<void> {
       assert.equal(get(found.answer, 'runtime', 'pid'), process.pid, JSON.stringify(found.answer));
       assert.ok(
         sincePlayMs < answersAfterMs,
-        `and found before the editor's first answer arrived: ${sincePlayMs}ms after the play, against ${answersAfterMs}ms`,
+        `and found before the editor's first answer arrived: ${sincePlayMs}ms after the play, against ${answersAfterMs}ms; the server said: ${account.join(' | ')}`,
       );
     },
   );
