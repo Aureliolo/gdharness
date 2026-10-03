@@ -458,7 +458,17 @@ type WhyFor = (file: string, occurrence: Occurrence, kind: MentionKind) => strin
  */
 function isWholeString(text: string, offset: number, name: string): boolean {
   const before = text[offset - 1];
-  return (before === '"' || before === "'") && text[offset + name.length] === before;
+  if ((before !== '"' && before !== "'") || text[offset + name.length] !== before) {
+    return false;
+  }
+  // A colon after it makes it a dictionary key or a match pattern, `{"found": found}` or
+  // `"found":` under a match, which is the word as data rather than a name handed to call or get;
+  // flagged, three dictionary keys were sent to be checked as uses of a method.
+  let after = offset + name.length + 1;
+  while (text[after] === ' ' || text[after] === '\t') {
+    after += 1;
+  }
+  return text[after] !== ':';
 }
 
 /** Why a string that is the class's whole name was left, for the class rename. */
@@ -467,7 +477,7 @@ const WHOLE_CLASS_NAME =
 
 /** Why a string that is the member's whole name was left, for the member rename. */
 const WHOLE_MEMBER_NAME =
-  "the whole string is the member's name, as call, connect, has_method, get or set take it, and it was not changed: if it names this member, it no longer finds it after the rename, and no compile says so";
+  "the whole string is the member's name, as call, connect, has_method, get, set or a subscript on an object take it, and it was not changed: if it names this member, it no longer finds it after the rename, and no compile says so";
 
 /** Why a script names the old name as something of its own, if it does, for the mentions there. */
 function declaresItsOwn(script: Script, name: string, except: number | null): boolean {
