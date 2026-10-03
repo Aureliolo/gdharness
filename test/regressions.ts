@@ -227,7 +227,7 @@ import { namedType, renderToolsMarkdown } from '../src/tool-reference.js';
 import { CACHE_MS, cacheFile, isNewer, registryFor, UpdateCheck } from '../src/update-check.js';
 import { askWindows } from '../src/windows-ask.js';
 import { withHome } from './support/cli-home.js';
-import { asArray, asNumber, get, text } from './support/json.js';
+import { asArray, asNumber, asObject, get, text } from './support/json.js';
 import { isRecord, type JsonRpcMessage, parseTextContent, textOf } from './support/json-rpc.js';
 import { solidPng } from './support/png.js';
 import { reservePort, ServerProcess } from './support/server.js';
@@ -26895,8 +26895,10 @@ function renameReadings(report: Record<string, unknown>): { changed: string[]; l
         (line) => `${text(get(group, 'file'))}:${asNumber(line)}:${text(get(group, 'kind'))}`,
       ),
     ),
-    ...asArray(get(report, 'leftAloneOtherSymbols') ?? []).flatMap((group) =>
-      asArray(get(group, 'lines')).map((line) => `${text(get(group, 'file'))}:${asNumber(line)}:code`),
+    ...asArray(get(report, 'leftAloneOtherSymbols') ?? []).flatMap((reason) =>
+      asArray(get(reason, 'files')).flatMap((group) =>
+        asArray(get(group, 'lines')).map((line) => `${text(get(group, 'file'))}:${asNumber(line)}:code`),
+      ),
     ),
   ];
   return { changed: changed.sort(), left: [...new Set(left)].sort() };
@@ -26961,15 +26963,29 @@ async function testARenamedClassChangesItsUsesAndLeavesItsWords(): Promise<void>
       [
         { file: 'res://loud.gd', kind: 'comment', lines: [5] },
         { file: 'res://notes.md', kind: 'text', lines: [1] },
+        { file: 'res://told.gd', kind: 'doc', lines: [3] },
+        { file: 'res://user.gd', kind: 'doc', lines: [fixtureLine('user.gd', 'Holder.Told')] },
       ],
-      'a comment and a line of a text file are given by file and line, not quoted',
+      'a comment, a documentation line and a line of a text file are given by file and line, not quoted',
     );
     assert.ok(
-      !asArray(get(outcome.report, 'leftAlone')).some((one) =>
-        ['comment', 'text'].includes(text(get(one, 'kind'))),
+      !asArray(get(outcome.report, 'leftAlone')).some(
+        (one) =>
+          ['comment', 'doc', 'string', 'text'].includes(text(get(one, 'kind'))) &&
+          get(one, 'why') === undefined,
       ),
-      'and are not also quoted under leftAlone',
+      'and none of them is also quoted under leftAlone',
     );
+    // Each list counted on its own beside the total, so the total is not read against the quoted
+    // list a fraction its size as entries gone missing.
+    const counted = asObject(get(outcome.report, 'summary', 'leftAlone'));
+    assert.deepEqual(counted, {
+      total: 11,
+      quoted: asArray(get(outcome.report, 'leftAlone')).length,
+      inProse: 4,
+      otherSymbols: 0,
+    });
+    assert.equal(asNumber(get(counted, 'quoted')) + 4, 11, 'the lists add up to the total');
     const why = asArray(get(outcome.report, 'leftAlone'))
       .filter((one) => text(get(one, 'file')) === 'res://shadow.gd')
       .map((one) => text(get(one, 'why')));
@@ -27378,10 +27394,16 @@ async function testAMemberNamedLikeALocalIsNotAskedAboutWhereItCannotBe(): Promi
       `a bare name where nothing inherits the member is not asked about: ${JSON.stringify(asked)}`,
     );
     assert.ok(asked.includes('caller.gd:9'), `a call on a value is: ${JSON.stringify(asked)}`);
+    // Each reason said once, with the files it covers under it.
     assert.deepEqual(get(outcome.report, 'leftAloneOtherSymbols'), [
-      { file: 'res://caller.gd', why: NOT_INHERITED, lines: [7, 8] },
-      { file: 'res://caller.gd', why: RESOLVED_ELSEWHERE, lines: [9] },
-      { file: 'res://other.gd', why: NOT_INHERITED, lines: [fixtureLine('other.gd', 'func say')] },
+      {
+        why: NOT_INHERITED,
+        files: [
+          { file: 'res://caller.gd', lines: [7, 8] },
+          { file: 'res://other.gd', lines: [fixtureLine('other.gd', 'func say')] },
+        ],
+      },
+      { why: RESOLVED_ELSEWHERE, files: [{ file: 'res://caller.gd', lines: [9] }] },
     ]);
     const quotedCode = asArray(get(outcome.report, 'leftAlone'))
       .filter((one) => text(get(one, 'kind')) === 'code')
@@ -27455,7 +27477,7 @@ async function testAStringThatIsTheNameWholeIsListedFirst(): Promise<void> {
     const left = async (
       symbol: string,
       newName: string,
-    ): Promise<{ line: number; kind: string; why: string }[]> => {
+    ): Promise<{ line: number; kind: string; why: string; where: string }[]> => {
       const outcome = await renameSymbol(
         { projectPath: project, scriptPath: join(project, 'told.gd'), symbol, newName, newScriptPath: null },
         { namesTaken: engineSaying(), ...fakeLanguageServer(project) },
@@ -27472,9 +27494,22 @@ async function testAStringThatIsTheNameWholeIsListedFirst(): Promise<void> {
         entries.slice(firstPlain).every((one) => !(one.kind === 'string' && one.why !== '')),
         `strings with a why come before everything else: ${JSON.stringify(entries)}`,
       );
-      return entries
-        .filter((one) => one.file === 'res://caller.gd')
-        .map(({ line, kind, why }) => ({ line, kind, why }));
+      const prose = asArray(get(outcome.report, 'leftAloneInProse') ?? [])
+        .filter((group) => text(get(group, 'file')) === 'res://caller.gd')
+        .flatMap((group) =>
+          asArray(get(group, 'lines')).map((line) => ({
+            line: asNumber(line),
+            kind: text(get(group, 'kind')),
+            why: '',
+            where: 'leftAloneInProse',
+          })),
+        );
+      return [
+        ...entries
+          .filter((one) => one.file === 'res://caller.gd')
+          .map(({ line, kind, why }) => ({ line, kind, why, where: 'leftAlone' })),
+        ...prose,
+      ];
     };
 
     const forClass = await left('Told', 'Wording');
@@ -27483,7 +27518,12 @@ async function testAStringThatIsTheNameWholeIsListedFirst(): Promise<void> {
       ['3:string', '8:string'],
     );
     assert.match(forClass[0]?.why ?? '', /^the whole string is the class's name, as find_children's type/);
-    assert.equal(forClass[1]?.why, '', 'a string with other words in it is plain');
+    assert.equal(forClass[0]?.where, 'leftAlone', 'quoted, since nothing compiles it');
+    assert.equal(
+      forClass[1]?.where,
+      'leftAloneInProse',
+      'a string with other words in it is a line of prose',
+    );
 
     const forMember = await left('say', 'utter');
     assert.deepEqual(
@@ -27494,7 +27534,8 @@ async function testAStringThatIsTheNameWholeIsListedFirst(): Promise<void> {
       forMember[0]?.why ?? '',
       /^the whole string is the member's name, as call, connect, has_method/,
     );
-    assert.equal(forMember[1]?.why, '');
+    assert.equal(forMember[0]?.where, 'leftAlone');
+    assert.equal(forMember[1]?.where, 'leftAloneInProse');
   } finally {
     rmSync(project, { recursive: true, force: true });
   }

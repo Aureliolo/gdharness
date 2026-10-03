@@ -163,9 +163,9 @@ To rename a class or a member across the project, use \`script_edit rename\` rat
 replacement: it changes the uses the engine resolves, doc links and what scenes record, and lists
 every other occurrence of the word for you to read: a string that is the name whole, such as a
 \`find_children\` type, first under \`leftAlone\` since nothing compiles it, a file under a
-\`.gdignore\` directory there too, a word in a comment or a text file by line under
-\`leftAloneInProse\`, and a local or another class's member of the same name by line under
-\`leftAloneOtherSymbols\`. Pass \`preview\` first on a large rename. If the answer has \`ok: false\`
+\`.gdignore\` directory there too, a word in a comment, a doc line, a string or a text file by
+line under \`leftAloneInProse\`, and a local or another class's member of the same name by line
+under \`leftAloneOtherSymbols\`. Pass \`preview\` first on a large rename. If the answer has \`ok: false\`
 beside \`written: true\`, the files were changed and a script did not compile afterwards.
 
 Editing a file while a game is running does not change the running game. \`auto_reload\` is an
