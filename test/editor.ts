@@ -3265,8 +3265,8 @@ async function testARenameFollowsTheEngine({ call, project }: Editor): Promise<v
   assert.deepEqual(
     get(member, 'leftAloneOtherSymbols'),
     [
-      { file: 'res://renamed/listener.gd', why: NOT_INHERITED, lines: [7] },
-      { file: 'res://renamed/listener.gd', why: RESOLVED_ELSEWHERE, lines: [14] },
+      { why: NOT_INHERITED, files: [{ file: 'res://renamed/listener.gd', lines: [7] }] },
+      { why: RESOLVED_ELSEWHERE, files: [{ file: 'res://renamed/listener.gd', lines: [14] }] },
     ],
     `another class's method of the same name is answered as another symbol: ${JSON.stringify(member)}`,
   );
