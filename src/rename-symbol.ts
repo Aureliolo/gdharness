@@ -383,6 +383,7 @@ export async function renameSymbol(request: RenameRequest, services: RenameServi
     );
   }
   plan = mentionIgnored(plan, ignoredTexts(projectPath), symbol, moveTo === null ? null : declaringPath);
+  const left = leftAloneReport(plan.mentions);
   const rewrites = rewritesOf(
     plan,
     texts,
@@ -410,8 +411,8 @@ export async function renameSymbol(request: RenameRequest, services: RenameServi
       ...(overrides.length > 0 ? { overridesRenamed: overrides } : {}),
       ...(moveTo === null ? {} : { moved: { from: declaringPath, to: moveTo } }),
       changed: changedReport(plan.edits, rewrites),
-      ...leftAloneReport(plan.mentions),
-      summary: summaryOf(plan.edits, plan.mentions, rewrites),
+      ...left.lists,
+      summary: summaryOf(plan.edits, plan.mentions, rewrites, left.counts),
     },
   };
 }
@@ -570,31 +571,38 @@ function changedReport(edits: readonly Edit[], rewrites: readonly Rewrite[]): Re
  * uses, 309 kilobytes a caller had to dig the edits out of. What stays quoted is code that might
  * still be the member, a value whose type the analyser could not tell.
  */
-function leftAloneReport(mentions: readonly Mention[]): Record<string, unknown> {
+function leftAloneReport(mentions: readonly Mention[]): LeftAlone {
   const full: Mention[] = [];
   const prose = new Map<string, { file: string; kind: string; lines: number[] }>();
-  const others = new Map<string, { file: string; why: string; lines: number[] }>();
-  const add = (group: { lines: number[] }, line: number): void => {
-    if (!group.lines.includes(line)) {
-      group.lines.push(line);
+  // By reason first, so a reason is said once however many files it covers: said per file, the
+  // same sentence ran to 233 copies and was the bulk of an answer still too big to read inline.
+  const others = new Map<string, Map<string, number[]>>();
+  const counts = { quoted: 0, inProse: 0, otherSymbols: 0 };
+  const add = (lines: number[], line: number): void => {
+    if (!lines.includes(line)) {
+      lines.push(line);
     }
   };
   for (const mention of mentions) {
-    if ((mention.kind === 'comment' || mention.kind === 'text') && mention.why === undefined) {
+    if (PROSE_KINDS.has(mention.kind) && mention.why === undefined) {
       const key = `${mention.file}\n${mention.kind}`;
       const group = prose.get(key) ?? { file: mention.file, kind: mention.kind, lines: [] };
-      add(group, mention.line);
+      add(group.lines, mention.line);
       prose.set(key, group);
+      counts.inProse += 1;
     } else if (
       mention.kind === 'code' &&
       (mention.why === NOT_INHERITED || mention.why === RESOLVED_ELSEWHERE)
     ) {
-      const key = `${mention.file}\n${mention.why}`;
-      const group = others.get(key) ?? { file: mention.file, why: mention.why, lines: [] };
-      add(group, mention.line);
-      others.set(key, group);
+      const files = others.get(mention.why) ?? new Map<string, number[]>();
+      const lines = files.get(mention.file) ?? [];
+      add(lines, mention.line);
+      files.set(mention.file, lines);
+      others.set(mention.why, files);
+      counts.otherSymbols += 1;
     } else {
       full.push(mention);
+      counts.quoted += 1;
     }
   }
   // A string with a why names the thing by its name whole, or was resolved to it, and is the
@@ -602,16 +610,40 @@ function leftAloneReport(mentions: readonly Mention[]): Record<string, unknown> 
   const loudFirst = (mention: Mention): number =>
     mention.kind === 'string' && mention.why !== undefined ? 0 : 1;
   return {
-    leftAlone: full.sort((a, b) => loudFirst(a) - loudFirst(b)),
-    ...(prose.size > 0 ? { leftAloneInProse: [...prose.values()] } : {}),
-    ...(others.size > 0 ? { leftAloneOtherSymbols: [...others.values()] } : {}),
+    lists: {
+      leftAlone: full.sort((a, b) => loudFirst(a) - loudFirst(b)),
+      ...(prose.size > 0 ? { leftAloneInProse: [...prose.values()] } : {}),
+      ...(others.size > 0
+        ? {
+            leftAloneOtherSymbols: [...others.entries()].map(([why, files]) => ({
+              why,
+              files: [...files.entries()].map(([file, lines]) => ({ file, lines })),
+            })),
+          }
+        : {}),
+    },
+    counts,
   };
+}
+
+/**
+ * The word where it is only a word: a comment, a documentation line, a string or a text file that
+ * shares the name and has nothing more to say. Quoted, a common name's doc lines and strings were
+ * a hundred and fifty more entries a caller had to read past to reach the few that matter.
+ */
+const PROSE_KINDS: ReadonlySet<string> = new Set(['comment', 'doc', 'string', 'text']);
+
+/** The left-alone lists for the answer, and how many occurrences each holds. */
+interface LeftAlone {
+  readonly lists: Record<string, unknown>;
+  readonly counts: { readonly quoted: number; readonly inProse: number; readonly otherSymbols: number };
 }
 
 function summaryOf(
   edits: readonly Edit[],
   mentions: readonly Mention[],
   rewrites: readonly Rewrite[],
+  left: LeftAlone['counts'],
 ): Record<string, unknown> {
   const count = (values: readonly string[]): Record<string, number> => {
     const counted: Record<string, number> = {};
@@ -624,7 +656,9 @@ function summaryOf(
     filesChanged: rewrites.length,
     edits: edits.length,
     editsByKind: count(edits.map((edit) => edit.kind)),
-    leftAlone: mentions.length,
+    // Per list as well as in all: the total beside a quoted list a tenth its size read as entries
+    // dropped somewhere between the two.
+    leftAlone: { total: mentions.length, ...left },
     leftAloneByKind: count(mentions.map((mention) => mention.kind)),
   };
 }
