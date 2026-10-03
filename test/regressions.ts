@@ -31,6 +31,7 @@ import { serviceDidNotAnswer } from '../scripts/audit-production.js';
 import { pullRequestNumbers, shipsToUsers } from '../scripts/release-notes.js';
 import { sharedCopies } from '../scripts/sync-shared-gd.js';
 import { alive } from '../src/alive.js';
+import { answerJson } from '../src/answer-json.js';
 import {
   bootNotePath,
   halfAsLongAgain,
@@ -119,7 +120,12 @@ import {
 import { secondsFromClock } from '../src/process-time.js';
 import { projectStructure, type SearchOptions, searchProject } from '../src/project-scan.js';
 import { applyRewrites, NOT_INHERITED, RESOLVED_ELSEWHERE, type Rewrite } from '../src/rename.js';
-import { type RenameServices, renameSymbol } from '../src/rename-symbol.js';
+import {
+  LEFT_ALONE_ANSWER_LINES,
+  type RenameServices,
+  renameSymbol,
+  writeLeftAloneDetail,
+} from '../src/rename-symbol.js';
 import { parseProjectGodot, settingKeys, settingsDroppedReport } from '../src/resources.js';
 import { noteRestartBegun, restartNotePath, restartOwed, restartSettled } from '../src/restart-note.js';
 import {
@@ -27470,6 +27476,7 @@ async function testAStringThatIsTheNameWholeIsListedFirst(): Promise<void> {
     'func poke(node: Node) -> void:',
     '\tif node.has_method(&"say"):',
     '\t\tprint("Told you to say it")',
+    '\tvar table := {"Told": 1, "say": 2}',
     '',
   ].join('\n');
   const project = renameProjectWith({ 'caller.gd': caller });
@@ -27515,7 +27522,7 @@ async function testAStringThatIsTheNameWholeIsListedFirst(): Promise<void> {
     const forClass = await left('Told', 'Wording');
     assert.deepEqual(
       forClass.map(({ line, kind }) => `${String(line)}:${kind}`),
-      ['3:string', '8:string'],
+      ['3:string', '8:string', '9:string'],
     );
     assert.match(forClass[0]?.why ?? '', /^the whole string is the class's name, as find_children's type/);
     assert.equal(forClass[0]?.where, 'leftAlone', 'quoted, since nothing compiles it');
@@ -27524,12 +27531,15 @@ async function testAStringThatIsTheNameWholeIsListedFirst(): Promise<void> {
       'leftAloneInProse',
       'a string with other words in it is a line of prose',
     );
+    // The name whole as a dictionary key is the word as data, not a name handed to anything.
+    assert.equal(forClass[2]?.where, 'leftAloneInProse', 'a dictionary key is a line of prose');
 
     const forMember = await left('say', 'utter');
     assert.deepEqual(
       forMember.map(({ line, kind }) => `${String(line)}:${kind}`),
-      ['7:string', '8:string'],
+      ['7:string', '8:string', '9:string'],
     );
+    assert.equal(forMember[2]?.where, 'leftAloneInProse', 'for a member as well');
     assert.match(
       forMember[0]?.why ?? '',
       /^the whole string is the member's name, as call, connect, has_method/,
@@ -27539,6 +27549,89 @@ async function testAStringThatIsTheNameWholeIsListedFirst(): Promise<void> {
   } finally {
     rmSync(project, { recursive: true, force: true });
   }
+}
+
+/**
+ * A rename leaving more grouped lines than an answer can carry answers with the quoted entries and
+ * the counts, and hands every grouped line, with its text, to a file. A member named `found`
+ * left 1886 such lines and answered past what the caller's client shows inline.
+ */
+async function testALargeRenameAnswerPutsItsGroupedLinesInAFile(): Promise<void> {
+  const many = LEFT_ALONE_ANSWER_LINES + 1;
+  const notes = Array.from({ length: many }, (_, index) => `Told, line ${String(index)}.`).join('\n');
+  const project = renameProjectWith({ 'many.md': `${notes}\n` });
+  try {
+    const outcome = await renameSymbol(
+      {
+        projectPath: project,
+        scriptPath: join(project, 'told.gd'),
+        symbol: 'Told',
+        newName: 'Wording',
+        newScriptPath: null,
+      },
+      { namesTaken: engineSaying(), ...NO_LANGUAGE_SERVER },
+    );
+    assert.ok(outcome.ok, JSON.stringify(outcome));
+    assert.equal(
+      get(outcome.report, 'leftAloneInProse'),
+      undefined,
+      'the grouped lines are not in the answer',
+    );
+    assert.ok(
+      asArray(get(outcome.report, 'leftAlone')).some((one) => text(get(one, 'kind')) === 'string'),
+      'the quoted entries still are',
+    );
+    // The fixture's own four prose lines, each in a file of its own, and the new file's.
+    assert.deepEqual(get(outcome.report, 'leftAloneDetail', 'inProse'), {
+      files: 5,
+      occurrences: many + 4,
+    });
+    const detail = outcome.detail;
+    assert.ok(detail !== null, 'the lines are handed over to be written');
+    const manyGroup = detail.leftAloneInProse.find((group) => group.file === 'res://many.md');
+    assert.ok(manyGroup !== undefined, 'the new file is grouped');
+    assert.equal(manyGroup.lines.length, many, 'every line');
+    assert.deepEqual(manyGroup.lines[0], { line: 1, text: 'Told, line 0.' }, 'with its text');
+
+    // Twelve in one go, several to a millisecond, each a file of its own.
+    const written = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map(() =>
+      writeLeftAloneDetail(project, 'Told', detail),
+    );
+    assert.equal(new Set(written).size, 12, 'no two writes share a name');
+    const directory = join(project, '.godot', 'gdharness-renames');
+    assert.ok(
+      written.every((one) => one.startsWith(directory)),
+      JSON.stringify(written),
+    );
+    const kept = readdirSync(directory);
+    assert.equal(kept.length, 10, `the newest ten are kept: ${JSON.stringify(kept)}`);
+    assert.ok(existsSync(written[11] ?? ''), 'the one just written is among them');
+    assert.deepEqual(JSON.parse(readFileSync(written[11] ?? '', 'utf8')), detail, 'whole');
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
+ * An answer keeps a list of numbers on one line and everything else as it was, and reads back as
+ * the same value: one number to an indented line was over half of an 81,855-character answer.
+ */
+function testAnAnswerKeepsNumberListsOnOneLine(): void {
+  const value = {
+    lines: [1, 22, 333],
+    nested: [{ file: 'a.gd', lines: [4, 5] }],
+    flags: [true, false, null],
+    words: ['one', 'two'],
+    tricky: '[\n  1,\n  2\n]',
+    empty: [],
+  };
+  const written = answerJson(value);
+  assert.deepEqual(JSON.parse(written), value, 'the same value');
+  assert.match(written, /"lines": \[1, 22, 333\]/);
+  assert.match(written, /"lines": \[4, 5\]/);
+  assert.match(written, /"flags": \[true, false, null\]/);
+  assert.match(written, /"words": \[\n {4}"one",\n {4}"two"\n {2}\]/, 'a list of strings keeps its lines');
+  assert.match(written, /"file": "a\.gd"/);
 }
 
 /**
@@ -28054,6 +28147,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testADocLinkWrappedAcrossLinesIsRenamedWhole,
   testAnIgnoredFolderIsListedAndLeftUnchanged,
   testAMemberNamedLikeALocalIsNotAskedAboutWhereItCannotBe,
+  testALargeRenameAnswerPutsItsGroupedLinesInAFile,
+  testAnAnswerKeepsNumberListsOnOneLine,
   testARenameThatOutrunsTheLanguageServerSaysWhichRequest,
   testAStringThatIsTheNameWholeIsListedFirst,
   testAMovedScriptIsNamedByItsNewPathEverywhere,
