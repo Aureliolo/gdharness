@@ -118,7 +118,7 @@ import {
 } from '../src/process-children.js';
 import { secondsFromClock } from '../src/process-time.js';
 import { projectStructure, type SearchOptions, searchProject } from '../src/project-scan.js';
-import { applyRewrites, type Rewrite } from '../src/rename.js';
+import { applyRewrites, NOT_INHERITED, RESOLVED_ELSEWHERE, type Rewrite } from '../src/rename.js';
 import { type RenameServices, renameSymbol } from '../src/rename-symbol.js';
 import { parseProjectGodot, settingKeys, settingsDroppedReport } from '../src/resources.js';
 import { noteRestartBegun, restartNotePath, restartOwed, restartSettled } from '../src/restart-note.js';
@@ -26895,6 +26895,9 @@ function renameReadings(report: Record<string, unknown>): { changed: string[]; l
         (line) => `${text(get(group, 'file'))}:${asNumber(line)}:${text(get(group, 'kind'))}`,
       ),
     ),
+    ...asArray(get(report, 'leftAloneOtherSymbols') ?? []).flatMap((group) =>
+      asArray(get(group, 'lines')).map((line) => `${text(get(group, 'file'))}:${asNumber(line)}:code`),
+    ),
   ];
   return { changed: changed.sort(), left: [...new Set(left)].sort() };
 }
@@ -27157,11 +27160,12 @@ async function testAMemberRenameFollowsWhatTheLanguageServerResolves(): Promise<
       'the override and its own call, doc links through either class, and the connection to a node running the subclass',
     );
     assert.deepEqual(get(say.report, 'overridesRenamed'), ['res://loud.gd']);
-    // One walk of the project, at the declaration, and a definition at each other use in code: the
-    // override's bare call, the call on a value of unknown type, and the other class's method.
-    // Settling each with its own references cost a walk per symbol, one per common local.
+    // One walk of the project, at the declaration, and a definition at each other use in code that
+    // could be the member: the override's bare call and the call on a value of unknown type. The
+    // other class's method is bare in a file where nothing inherits the member, and is not asked
+    // about. Settling each with its own references cost a walk per symbol, one per common local.
     assert.equal(get(say.report, 'languageServer', 'references', 'asked'), 1, JSON.stringify(say.report));
-    assert.equal(get(say.report, 'languageServer', 'definitions', 'asked'), 3);
+    assert.equal(get(say.report, 'languageServer', 'definitions', 'asked'), 2);
     assert.equal(typeof get(say.report, 'languageServer', 'references', 'ms'), 'number');
     // Reloaded in this order by an open editor, which checks each script against the copies it holds
     // of what it uses: the declaring class, then its override, which sorts before it by name and
@@ -27311,6 +27315,81 @@ async function testADocLinkWrappedAcrossLinesIsRenamedWhole(): Promise<void> {
       await rename('say', 'utter'),
       ['4: ## Told.utter] link.'],
       'the member named on the line after its link opens',
+    );
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A member named like a common local is not asked about where it cannot be the member, and what is
+ * certainly another symbol is given by file and line rather than quoted. A bare name in a file where
+ * nothing inherits the member is that class's own; a call the language server resolves to one other
+ * declaration is that declaration's. A call on a value of unknown type may still be the member, and
+ * stays quoted. Downstream, a member named `found` was asked about 1176 times for three uses and
+ * answered in 309 kilobytes.
+ */
+async function testAMemberNamedLikeALocalIsNotAskedAboutWhereItCannotBe(): Promise<void> {
+  const caller = [
+    'extends Node',
+    '',
+    'var spare: Node = null',
+    '',
+    '',
+    'func poke() -> void:',
+    '\tvar say: int = 1',
+    '\tprint(say)',
+    '\tprint(spare.say(3))',
+    '',
+  ].join('\n');
+  const project = renameProjectWith({ 'caller.gd': caller });
+  try {
+    const fake = fakeLanguageServer(project);
+    const otherSay = fixtureLine('other.gd', 'func say') - 1;
+    const asked: string[] = [];
+    const outcome = await renameSymbol(
+      {
+        projectPath: project,
+        scriptPath: join(project, 'told.gd'),
+        symbol: 'say',
+        newName: 'utter',
+        newScriptPath: null,
+      },
+      {
+        namesTaken: engineSaying(),
+        references: fake.references,
+        definitions: async (absolute, source, position) => {
+          asked.push(`${basename(absolute)}:${String(position.line + 1)}`);
+          return basename(absolute) === 'caller.gd'
+            ? Promise.resolve([
+                {
+                  file: join(project, 'other.gd'),
+                  line: otherSay,
+                  character: (RENAME_FIXTURE['other.gd'] ?? '').split('\n')[otherSay]?.indexOf('say') ?? 0,
+                },
+              ])
+            : fake.definitions(absolute, source, position);
+        },
+      },
+    );
+    assert.ok(outcome.ok, JSON.stringify(outcome));
+    assert.ok(
+      !asked.some((one) => one === 'caller.gd:7' || one === 'caller.gd:8' || one.startsWith('other.gd:')),
+      `a bare name where nothing inherits the member is not asked about: ${JSON.stringify(asked)}`,
+    );
+    assert.ok(asked.includes('caller.gd:9'), `a call on a value is: ${JSON.stringify(asked)}`);
+    assert.deepEqual(get(outcome.report, 'leftAloneOtherSymbols'), [
+      { file: 'res://caller.gd', why: NOT_INHERITED, lines: [7, 8] },
+      { file: 'res://caller.gd', why: RESOLVED_ELSEWHERE, lines: [9] },
+      { file: 'res://other.gd', why: NOT_INHERITED, lines: [fixtureLine('other.gd', 'func say')] },
+    ]);
+    const quotedCode = asArray(get(outcome.report, 'leftAlone'))
+      .filter((one) => text(get(one, 'kind')) === 'code')
+      .map((one) => `${text(get(one, 'file'))}:${String(asNumber(get(one, 'line')))}`);
+    assert.deepEqual(
+      quotedCode,
+      [`res://user.gd:${String(fixtureLine('user.gd', 'get_node'))}`],
+      'only the call on a value of unknown type, which may be the member, is quoted',
     );
   } finally {
     rmSync(project, { recursive: true, force: true });
@@ -27933,6 +28012,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAUseUnderACommentEndingInAFullStopIsRenamed,
   testADocLinkWrappedAcrossLinesIsRenamedWhole,
   testAnIgnoredFolderIsListedAndLeftUnchanged,
+  testAMemberNamedLikeALocalIsNotAskedAboutWhereItCannotBe,
   testARenameThatOutrunsTheLanguageServerSaysWhichRequest,
   testAStringThatIsTheNameWholeIsListedFirst,
   testAMovedScriptIsNamedByItsNewPathEverywhere,
