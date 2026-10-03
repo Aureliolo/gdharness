@@ -36,6 +36,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { alive } from '../src/alive.js';
 import { readBreakpointNote } from '../src/breakpoint-note.js';
 import { GodotDAPClient } from '../src/dap_client.js';
+import { NOT_INHERITED, RESOLVED_ELSEWHERE } from '../src/rename.js';
 import { SERVER_VERSION } from '../src/server-version.js';
 import { RUNTIME_AUTOLOAD } from '../src/setup.js';
 import { endEnginesUnder } from './support/engines.js';
@@ -3256,8 +3257,18 @@ async function testARenameFollowsTheEngine({ call, project }: Editor): Promise<v
     (one) => `${asString(get(one, 'file'))} ${asString(get(one, 'kind'))}`,
   );
   assert.ok(
-    left.includes('res://renamed/listener.gd code') && left.includes('res://renamed/speaker.gd string'),
-    `the untyped call and the string are answered as left: ${JSON.stringify(left)}`,
+    left.includes('res://renamed/speaker.gd string'),
+    `the string is quoted as left: ${JSON.stringify(left)}`,
+  );
+  // The other class's method, given by line rather than quoted: its declaration is a bare name in a
+  // file where nothing inherits Speaker, and the call on it is one Godot resolves to that method.
+  assert.deepEqual(
+    get(member, 'leftAloneOtherSymbols'),
+    [
+      { file: 'res://renamed/listener.gd', why: NOT_INHERITED, lines: [7] },
+      { file: 'res://renamed/listener.gd', why: RESOLVED_ELSEWHERE, lines: [14] },
+    ],
+    `another class's method of the same name is answered as another symbol: ${JSON.stringify(member)}`,
   );
   assert.deepEqual(
     asArray(get(member, 'editor', 'reloaded'))

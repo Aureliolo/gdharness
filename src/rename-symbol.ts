@@ -19,10 +19,12 @@ import {
   fileOf,
   type Mention,
   mentionIgnored,
+  NOT_INHERITED,
   type Plan,
   planClassRename,
   planMemberRename,
   planMove,
+  RESOLVED_ELSEWHERE,
   type Resolved,
   type Rewrite,
   rewritesOf,
@@ -320,9 +322,10 @@ export async function renameSymbol(request: RenameRequest, services: RenameServi
     declaringFiles = family.map((one) => one.file);
 
     took = { references: { asked: 0, ms: 0 }, definitions: { asked: 0, ms: 0 } };
-    let resolved: Resolved[] | null;
+    const heirFiles = new Set([...graph.descendants(root)].map(fileOf));
+    let resolved: Resolution | null;
     try {
-      resolved = await resolveMember(projectPath, texts, scripts, family, symbol, services, took);
+      resolved = await resolveMember(projectPath, texts, scripts, family, symbol, services, took, heirFiles);
     } catch (error) {
       if (!(error instanceof LSPTimeout)) {
         throw error;
@@ -361,7 +364,9 @@ export async function renameSymbol(request: RenameRequest, services: RenameServi
       kind,
       oldName: symbol,
       newName,
-      resolved,
+      resolved: resolved.ours,
+      elsewhere: resolved.elsewhere,
+      heirFiles,
     });
   }
 
@@ -425,6 +430,11 @@ export async function renameSymbol(request: RenameRequest, services: RenameServi
  * rather than settled with its symbol's references: a references request is a walk of every script
  * for the word, and a name that is also a common local cost one walk per local.
  *
+ * A bare name in a file where no class inherits the member is not asked about at all: it resolves
+ * to that class's own local, parameter or member, or to a global, and never to a member it does
+ * not inherit. A member named like a common local was asked about 1176 times on a project, at a
+ * tenth of a second each, for three uses.
+ *
  * Null when the first pass resolves nothing at all, not even the declaration it was asked about.
  */
 async function resolveMember(
@@ -435,7 +445,8 @@ async function resolveMember(
   name: string,
   services: RenameServices,
   took: LanguageServerTook,
-): Promise<Resolved[] | null> {
+  heirFiles: ReadonlySet<string>,
+): Promise<Resolution | null> {
   const absoluteOf = new Map(texts.map((file) => [file.path, file.absolute]));
   const key = (place: Resolved): string => `${place.file}:${place.offset}`;
   const toResolved = (located: Located): Resolved | null => {
@@ -460,9 +471,10 @@ async function resolveMember(
   };
 
   const ours = new Map<string, Resolved>();
+  const elsewhere = new Set<string>();
   const root = family[0];
   if (root === undefined) {
-    return [];
+    return { ours: [], elsewhere };
   }
   const seeded = await ask('references', root);
   if (seeded.length === 0) {
@@ -478,14 +490,28 @@ async function resolveMember(
       if (occurrence.kind !== 'code' || ours.has(key(place))) {
         continue;
       }
+      if (!occurrence.afterDot && !heirFiles.has(script.path)) {
+        continue;
+      }
       const declared = await ask('definitions', place);
       const only = declared.length === 1 ? declared[0] : undefined;
       if (only !== undefined && declarations.has(key(only))) {
         ours.set(key(place), place);
+      } else if (only !== undefined) {
+        elsewhere.add(key(place));
       }
     }
   }
-  return [...ours.values()];
+  return { ours: [...ours.values()], elsewhere };
+}
+
+/**
+ * What the sweep found: the places that are the member, and the places in code the language server
+ * resolved to exactly one other declaration, as `file:offset`.
+ */
+interface Resolution {
+  readonly ours: Resolved[];
+  readonly elsewhere: ReadonlySet<string>;
 }
 
 /**
@@ -538,18 +564,35 @@ function changedReport(edits: readonly Edit[], rewrites: readonly Rewrite[]): Re
  * the answer for a common word over a hundred kilobytes, mostly a progress log, past what a caller
  * can read. A prose mention with a why, such as a comment the language server resolved to the
  * member, is quoted in full with the rest.
+ *
+ * Code that is certainly another symbol of the same name goes the same way, by file, reason and
+ * line: a member named like a common local was answered with 1106 quoted locals around its three
+ * uses, 309 kilobytes a caller had to dig the edits out of. What stays quoted is code that might
+ * still be the member, a value whose type the analyser could not tell.
  */
 function leftAloneReport(mentions: readonly Mention[]): Record<string, unknown> {
   const full: Mention[] = [];
   const prose = new Map<string, { file: string; kind: string; lines: number[] }>();
+  const others = new Map<string, { file: string; why: string; lines: number[] }>();
+  const add = (group: { lines: number[] }, line: number): void => {
+    if (!group.lines.includes(line)) {
+      group.lines.push(line);
+    }
+  };
   for (const mention of mentions) {
     if ((mention.kind === 'comment' || mention.kind === 'text') && mention.why === undefined) {
       const key = `${mention.file}\n${mention.kind}`;
       const group = prose.get(key) ?? { file: mention.file, kind: mention.kind, lines: [] };
-      if (!group.lines.includes(mention.line)) {
-        group.lines.push(mention.line);
-      }
+      add(group, mention.line);
       prose.set(key, group);
+    } else if (
+      mention.kind === 'code' &&
+      (mention.why === NOT_INHERITED || mention.why === RESOLVED_ELSEWHERE)
+    ) {
+      const key = `${mention.file}\n${mention.why}`;
+      const group = others.get(key) ?? { file: mention.file, why: mention.why, lines: [] };
+      add(group, mention.line);
+      others.set(key, group);
     } else {
       full.push(mention);
     }
@@ -561,6 +604,7 @@ function leftAloneReport(mentions: readonly Mention[]): Record<string, unknown> 
   return {
     leftAlone: full.sort((a, b) => loudFirst(a) - loudFirst(b)),
     ...(prose.size > 0 ? { leftAloneInProse: [...prose.values()] } : {}),
+    ...(others.size > 0 ? { leftAloneOtherSymbols: [...others.values()] } : {}),
   };
 }
 
