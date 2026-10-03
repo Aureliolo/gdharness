@@ -203,8 +203,16 @@ export class ServerProcess {
     return this.nextId;
   }
 
-  /** Sends a request and resolves with its response, or rejects when the server dies or stalls. */
-  async request(method: string, params: unknown = {}, timeoutMs = 10_000): Promise<JsonRpcMessage> {
+  /**
+   * Sends a request and resolves with its response, or rejects when the server dies or stalls.
+   *
+   * The default outlasts the server's own deadlines, ten seconds for a runtime or language server
+   * request, so a slow call is answered by the server, with the game's late reply or its own timeout
+   * saying which, rather than cut off here first: at an equal ten seconds this always gave up a
+   * moment before the server could answer, and a slow click on a loaded runner read only as "no
+   * response".
+   */
+  async request(method: string, params: unknown = {}, timeoutMs = 30_000): Promise<JsonRpcMessage> {
     const id = this.nextId;
     this.nextId += 1;
     if (this.exited) {
