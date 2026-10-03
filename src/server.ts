@@ -8925,7 +8925,7 @@ class GodotServer {
       const folded = asParams(outcome.report['leftAloneDetail']);
       outcome.report['leftAloneDetail'] = {
         file,
-        note: `Too many lines were left alone to list here, and none of them is a use: every comment, documentation line, string and text file line that only shares the word, and every other symbol of the same name, is in ${file} with its text.`,
+        note: `Too many lines were left alone to list here, and none of them is a use: every comment, documentation line, string and text file line that only shares the word, and every other symbol of the same name, is in ${file} with its text. The newest ten of these files are kept and older ones removed as new ones are written.`,
         ...folded,
       };
     }

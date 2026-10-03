@@ -27230,7 +27230,7 @@ async function testAMemberRenameFollowsWhatTheLanguageServerResolves(): Promise<
     );
     assert.match(
       text(get(resolvedComment, 'why')),
-      /the language server resolved this to the method/,
+      /the language server resolved this word to the method, but it is inside a comment, which no rename changes: read it, and change the word by hand if it names the method/,
       'a comment the server resolved is quoted with its why rather than given as a line',
     );
 
