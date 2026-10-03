@@ -193,6 +193,7 @@ import {
   runtimeVerdict,
   scanWaitAnswer,
   scriptErrorsNote,
+  settingsNamedBy,
   stopVerdict,
   timedOutVerdict,
   uidsLeftNote,
@@ -13769,6 +13770,30 @@ async function testOptionsWrittenAreSaidWhenTheirReimportFails(): Promise<void> 
   );
 }
 
+/**
+ * The setting each project_settings write names, handed to the editor whether or not the file
+ * changed: every op that writes a setting, and none for an op without the argument it needs.
+ */
+function testEachSettingsWriteNamesItsSetting(): void {
+  assert.deepEqual(settingsNamedBy('set', { setting: 'threading/worker_pool/low_priority_thread_ratio' }), [
+    'threading/worker_pool/low_priority_thread_ratio',
+  ]);
+  assert.deepEqual(settingsNamedBy('add_autoload', { name: 'Thing' }), ['autoload/Thing']);
+  assert.deepEqual(settingsNamedBy('remove_autoload', { name: 'Thing' }), ['autoload/Thing']);
+  assert.deepEqual(settingsNamedBy('set_main_scene', { scenePath: 'res://main.tscn' }), [
+    'application/run/main_scene',
+  ]);
+  assert.deepEqual(settingsNamedBy('add_input_action', { actionName: 'jump' }), ['input/jump']);
+  assert.deepEqual(settingsNamedBy('enable_plugin', { pluginName: 'x' }), ['editor_plugins/enabled']);
+  assert.deepEqual(settingsNamedBy('disable_plugin', { pluginName: 'x' }), ['editor_plugins/enabled']);
+  assert.deepEqual(settingsNamedBy('set', {}), [], 'no setting named, none handed over');
+  assert.deepEqual(
+    settingsNamedBy('add_audio_bus', { busName: 'Voices' }),
+    [],
+    'a bus is reloaded, not named',
+  );
+}
+
 async function testASettingsWriteIsTakenUpByTheEditor(): Promise<void> {
   const engine = resolveGodotPath();
   if (!engine) {
@@ -13818,10 +13843,25 @@ async function testASettingsWriteIsTakenUpByTheEditor(): Promise<void> {
       assert.ok(adopted.includes(named), JSON.stringify(set));
       assert.deepEqual(sent.splice(0), [{ tool: 'adopt_project_settings', args: { settings: adopted } }]);
 
-      // The same value again changes nothing in the file, so there is nothing for the editor to take.
+      // The file put back behind the editor, as a checkout does, and the value it already holds set
+      // again: the write changes nothing in the file, and the editor, still holding the later value,
+      // is told all the same, or its next save of the settings writes that value back.
+      const holdingFirst = readFileSync(join(project, 'project.godot'), 'utf8');
+      await call({ op: 'set', setting: named, value: 'second' });
+      sent.splice(0);
+      writeFileSync(join(project, 'project.godot'), holdingFirst);
       const same = await call({ op: 'set', setting: named, value: 'first' });
-      assert.equal(get(same, 'editorAdopted'), undefined, JSON.stringify(same));
-      assert.deepEqual(sent.splice(0), [], 'an unchanged file sends the editor nothing');
+      assert.equal(
+        readFileSync(join(project, 'project.godot'), 'utf8'),
+        holdingFirst,
+        'the file is unchanged',
+      );
+      assert.ok(asArray(get(same, 'editorAdopted') ?? []).includes(named), JSON.stringify(same));
+      assert.deepEqual(
+        sent.splice(0),
+        [{ tool: 'adopt_project_settings', args: { settings: [named] } }],
+        'the setting the write names is handed to the editor though the file did not change',
+      );
 
       writeFileSync(join(project, 'thing.gd'), 'extends Node\n');
       const added = await call({ op: 'add_autoload', name: 'Thing', path: 'res://thing.gd' });
@@ -28302,6 +28342,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStructureReadDescribesTheScriptItRead,
   testRefreshingUidsMakesTheSidecarAndWritesNoScene,
   testAReimportReimportsThroughTheEngine,
+  testEachSettingsWriteNamesItsSetting,
   testASettingsWriteIsTakenUpByTheEditor,
   testOptionsWrittenAreSaidWhenTheirReimportFails,
   testWhoIsHoldingAPortIsAskable,

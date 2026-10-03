@@ -1478,6 +1478,33 @@ function changedSettings(
 }
 
 /**
+ * The settings a project_settings write names, whatever the file held before it.
+ *
+ * Handed to the editor beside what the write changed, because the file is not the only copy: put
+ * back with a checkout after an earlier set, it already held the value written, nothing changed,
+ * the editor was not told, and it kept the earlier value to write back on its next save.
+ */
+export function settingsNamedBy(op: string, args: OperationParams): string[] {
+  const text = (key: string): string => readString(args, key) ?? '';
+  switch (op) {
+    case 'set':
+      return text('setting') === '' ? [] : [text('setting')];
+    case 'add_autoload':
+    case 'remove_autoload':
+      return text('name') === '' ? [] : [`autoload/${text('name')}`];
+    case 'set_main_scene':
+      return ['application/run/main_scene'];
+    case 'add_input_action':
+      return text('actionName') === '' ? [] : [`input/${text('actionName')}`];
+    case 'enable_plugin':
+    case 'disable_plugin':
+      return ['editor_plugins/enabled'];
+    default:
+      return [];
+  }
+}
+
+/**
  * The longest silence a test run cut off at its timeout may have had and still be called running,
  * whatever the timeout: half of it, and never more than this.
  */
@@ -3491,7 +3518,8 @@ class GodotServer {
     if (AUDIO_BUS_OPS.has(op)) {
       return this.jsonTextResponse({ ...answer, ...(await this.editorTakes('adopt_audio_bus_layout', {})) });
     }
-    const changed = changedSettings(before, this.settingKeysOf(projectPath));
+    const diffed = changedSettings(before, this.settingKeysOf(projectPath));
+    const changed = diffed === null ? null : [...new Set([...diffed, ...settingsNamedBy(op, args)])].sort();
     if (changed === null) {
       return this.jsonTextResponse({
         ...answer,
