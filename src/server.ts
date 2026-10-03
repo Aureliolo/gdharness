@@ -38,6 +38,7 @@ import {
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
 import { alive } from './alive.js';
+import { answerJson } from './answer-json.js';
 import { halfAsLongAgain, readBootNote, waitSizedTo, writeBootNote } from './boot-note.js';
 import { readBreakpointNote, writeBreakpointNote } from './breakpoint-note.js';
 import { announceBridge, announcementPath, readAnnouncement, withdrawBridge } from './bridge-announce.js';
@@ -150,7 +151,7 @@ import {
 import { cpuSecondsOf } from './process-time.js';
 import { projectStructure, scriptsWithoutUid, searchProject } from './project-scan.js';
 import { applyRewrites } from './rename.js';
-import { type NameTaken, type RenameOutcome, renameSymbol } from './rename-symbol.js';
+import { type NameTaken, type RenameOutcome, renameSymbol, writeLeftAloneDetail } from './rename-symbol.js';
 import { parseProjectGodot, settingKeys, settingsDroppedReport, setupResourceHandlers } from './resources.js';
 import { noteRestartBegun, type RestartNote, restartOwed, restartSettled } from './restart-note.js';
 import {
@@ -1360,7 +1361,7 @@ export function exportAnswer(
     ...(problems.omitted === 0 ? {} : { entriesOmitted: problems.omitted }),
   };
   if (verdict.exported) {
-    return { content: [{ type: 'text', text: JSON.stringify(verdict, null, 2) }] };
+    return { content: [{ type: 'text', text: answerJson(verdict) }] };
   }
   const stale =
     !written && after !== null
@@ -1376,7 +1377,7 @@ export function exportAnswer(
         type: 'text',
         text: `Export with preset '${asked.preset}' did not produce ${asked.outputPath}.${why}`,
       },
-      { type: 'text', text: JSON.stringify(verdict, null, 2) },
+      { type: 'text', text: answerJson(verdict) },
     ],
     isError: true,
   };
@@ -1897,7 +1898,7 @@ class GodotServer {
   }
 
   private jsonTextResponse(payload: unknown): ToolResponse {
-    return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }] };
+    return { content: [{ type: 'text', text: answerJson(payload) }] };
   }
 
   // -------------------------------------------------------------------------------------------
@@ -2412,7 +2413,7 @@ class GodotServer {
   private saying(answer: ToolResponse, block: Record<string, unknown>): ToolResponse {
     return {
       ...answer,
-      content: [...answer.content, { type: 'text', text: JSON.stringify(block, null, 2) }],
+      content: [...answer.content, { type: 'text', text: answerJson(block) }],
     };
   }
 
@@ -3859,7 +3860,7 @@ class GodotServer {
     if (!outcome.ok) {
       const response = this.createErrorResponse(outcome.message);
       if (Object.keys(extras).length > 0) {
-        response.content.push({ type: 'text', text: JSON.stringify(extras, null, 2) });
+        response.content.push({ type: 'text', text: answerJson(extras) });
       }
       return response;
     }
@@ -8918,6 +8919,15 @@ class GodotServer {
       }
       const said = outcome.conflicts === undefined ? '' : ` ${outcome.conflicts.join('; ')}.`;
       return this.createErrorResponse(`${outcome.reason}${said}`, outcome.advice ?? []);
+    }
+    if (outcome.detail !== null) {
+      const file = writeLeftAloneDetail(projectPath, symbol, outcome.detail);
+      const folded = asParams(outcome.report['leftAloneDetail']);
+      outcome.report['leftAloneDetail'] = {
+        file,
+        note: `Too many lines were left alone to list here, and none of them is a use: every comment, documentation line, string and text file line that only shares the word, and every other symbol of the same name, is in ${file} with its text.`,
+        ...folded,
+      };
     }
     if (readBoolean(args, 'preview') === true) {
       return this.jsonTextResponse({ preview: true, ...outcome.report });

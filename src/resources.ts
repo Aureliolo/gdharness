@@ -6,6 +6,7 @@ import {
   ListResourceTemplatesRequestSchema,
   ReadResourceRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
+import { answerJson } from './answer-json.js';
 import { emptyRecord } from './dictionary.js';
 import { Refusal } from './errors.js';
 import { isWithinRoot, resolveWithinProject } from './paths.js';
@@ -337,7 +338,7 @@ function readResourceText(
 
     return {
       mimeType: 'application/json',
-      text: JSON.stringify(parsedProject, null, 2),
+      text: answerJson(parsedProject),
     };
   }
 
