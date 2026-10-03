@@ -288,6 +288,10 @@ static func _areas_of(drawn: Array[Node]) -> Array[Rect2]:
 ## the click scrolls it into view first: what is drawn over its place now is not what it will land
 ## under. Judged not covered at all instead, a button below the fold of a roster that a full-screen
 ## page covered was picked over the ones in view, scrolled up under the page and pressed there.
+## Whatever else the scroll holds moves with it and is judged where it goes. Judged where it sat, the
+## card at the top of a tray scrolled down was drawn over a button above the view, because a later
+## card is drawn over an earlier one, and a button below the view was passed by the same card only
+## because the cards beside the bottom edge come before it.
 ##
 ## [param areas] holds the box around each of [param drawn], so everything whose box misses the
 ## point is passed over before anything costlier is asked of it. A window's box is in the space of
@@ -295,7 +299,8 @@ static func _areas_of(drawn: Array[Node]) -> Array[Rect2]:
 ## so a window is judged by [method _window_over] instead.
 static func _cover_of(target: Control, drawn: Array[Node], areas: Array[Rect2]) -> Node:
 	var viewport: Viewport = target.get_viewport()
-	var point: Vector2 = _where_it_is_clicked(target)
+	var moves: Dictionary[ScrollContainer, Vector2] = _scrolls_for(target)
+	var point: Vector2 = _centre_of(target) + _moved_by(target, moves)
 	var layer: int = _layer_of(target)
 	for at: int in drawn.size():
 		var other: Node = drawn[at]
@@ -304,9 +309,11 @@ static func _cover_of(target: Control, drawn: Array[Node], areas: Array[Rect2]) 
 			if _window_over(target, point, window):
 				return window
 			continue
-		if not areas[at].has_point(point):
-			continue
 		var control: Control = other
+		# The point where this control is now, which is where the scroll will carry it to the point.
+		var before: Vector2 = point - _moved_by(control, moves)
+		if not areas[at].has_point(before):
+			continue
 		if control == target or control.is_ancestor_of(target) or target.is_ancestor_of(control):
 			continue
 		if control.get_viewport() != viewport:
@@ -314,18 +321,34 @@ static func _cover_of(target: Control, drawn: Array[Node], areas: Array[Rect2]) 
 		var its_layer: int = _layer_of(control)
 		if its_layer < layer or (its_layer == layer and not control.is_greater_than(target)):
 			continue
-		if _holds(control, point) and not _clipped_away(control, point):
+		if _holds(control, before) and not _clipped_away(control, point, moves):
 			return control
 	return null
 
 
-## Where a click at [param target] lands in its viewport: its centre, or where scrolling will bring
-## the centre when a ScrollContainer holding it clips it away, as the click scrolls it first.
-static func _where_it_is_clicked(target: Control) -> Vector2:
-	var point: Vector2 = target.get_global_transform_with_canvas() * (target.size * 0.5)
-	if _clipped_away(target, point):
-		point = _where_it_lands(target, point)
-	return point
+## [param target]'s centre in its viewport, where it is now.
+static func _centre_of(target: Control) -> Vector2:
+	return target.get_global_transform_with_canvas() * (target.size * 0.5)
+
+
+## How far the click moves what each ScrollContainer holding [param target] holds, to bring it into
+## view: empty when no container clips it away, as nothing is scrolled then.
+static func _scrolls_for(target: Control) -> Dictionary[ScrollContainer, Vector2]:
+	var none: Dictionary[ScrollContainer, Vector2] = {}
+	var centre: Vector2 = _centre_of(target)
+	if not _clipped_away(target, centre, none):
+		return none
+	return _where_it_lands(target, centre)
+
+
+## How far the scrolls in [param moves] carry [param node]: the sum over the containers holding it,
+## and nothing for a container itself, which stays where it is while what it holds moves.
+static func _moved_by(node: Node, moves: Dictionary[ScrollContainer, Vector2]) -> Vector2:
+	var moved: Vector2 = Vector2.ZERO
+	for holder: ScrollContainer in moves:
+		if holder.is_ancestor_of(node):
+			moved += moves[holder]
+	return moved
 
 
 ## Whether the embedded [param window] is drawn over [param point], [param target]'s centre in its
@@ -366,14 +389,15 @@ static func _holds(control: Control, point: Vector2) -> bool:
 	return Rect2(Vector2.ZERO, control.size).has_point(placed.affine_inverse() * point)
 
 
-## Where [param target]'s centre, now at [param point], will be once the click has scrolled it into
-## view: moved as little as puts the whole of it inside each ScrollContainer holding it, innermost
-## first, which is how one brings a control into view. A target larger than a container is centred
-## in it. Only a ScrollContainer, because that is all a click scrolls: another container clipping
-## what it holds, a collapsed section for one, leaves the target where it is.
-static func _where_it_lands(target: Control, point: Vector2) -> Vector2:
+## How far each ScrollContainer holding [param target] moves what it holds once the click has
+## scrolled [param target], centred at [param point], into view: as little as puts the whole of it
+## inside each, innermost first, which is how one brings a control into view. A target larger than a
+## container is centred in it. Only a ScrollContainer, because that is all a click scrolls: another
+## container clipping what it holds, a collapsed section for one, leaves the target where it is.
+static func _where_it_lands(target: Control, point: Vector2) -> Dictionary[ScrollContainer, Vector2]:
 	var drawn: Transform2D = target.get_global_transform_with_canvas()
 	var half: Vector2 = (drawn * Rect2(Vector2.ZERO, target.size)).size * 0.5
+	var moves: Dictionary[ScrollContainer, Vector2] = {}
 	var landed: Vector2 = point
 	var walk: Node = target.get_parent()
 	while walk != null and not (walk is Viewport):
@@ -382,12 +406,15 @@ static func _where_it_lands(target: Control, point: Vector2) -> Vector2:
 			var shown: Rect2 = holder.get_global_transform_with_canvas() * Rect2(Vector2.ZERO, holder.size)
 			var low: Vector2 = shown.position + half
 			var high: Vector2 = shown.end - half
-			landed = Vector2(
+			var next: Vector2 = Vector2(
 				shown.get_center().x if low.x > high.x else clampf(landed.x, low.x, high.x),
 				shown.get_center().y if low.y > high.y else clampf(landed.y, low.y, high.y)
 			)
+			if next != landed:
+				moves[holder] = next - landed
+			landed = next
 		walk = walk.get_parent()
-	return landed
+	return moves
 
 
 ## Whether a click could not reach [param target] however it scrolled: its centre, where the click
@@ -395,8 +422,9 @@ static func _where_it_lands(target: Control, point: Vector2) -> Vector2:
 ## container the click does not scroll. A drawer parked off the side of the screen, or anything
 ## outside the 64 by 64 viewport of a game with no window, was listed among the controls on screen.
 static func _off_screen(target: Control) -> bool:
-	var point: Vector2 = _where_it_is_clicked(target)
-	if _clipped_away(target, point) or not target.get_viewport().get_visible_rect().has_point(point):
+	var moves: Dictionary[ScrollContainer, Vector2] = _scrolls_for(target)
+	var point: Vector2 = _centre_of(target) + _moved_by(target, moves)
+	if _clipped_away(target, point, moves) or not target.get_viewport().get_visible_rect().has_point(point):
 		return true
 	var reached: Dictionary = Screen.reach(target.get_viewport(), point)
 	var viewport: Viewport = reached["viewport"]
@@ -404,16 +432,19 @@ static func _off_screen(target: Control) -> bool:
 	return not viewport.get_visible_rect().has_point(there)
 
 
-## Whether a container clipping what it holds cuts [param point] off from [param control].
+## Whether a container clipping what it holds cuts [param point] off from [param control], once the
+## scrolls in [param moves] have carried each container wherever they carry it.
 ##
 ## Only up to the viewport [param control] is in. A dialog is a window, and the containers the game
 ## added it under are in another space: judged against a clipping one of those, every button of a
 ## confirmation was refused as off the screen while it sat in plain view.
-static func _clipped_away(control: Control, point: Vector2) -> bool:
+static func _clipped_away(
+	control: Control, point: Vector2, moves: Dictionary[ScrollContainer, Vector2]
+) -> bool:
 	var walk: Node = control.get_parent()
 	while walk != null and not (walk is Viewport):
 		var holder: Control = walk as Control
-		if holder != null and holder.clip_contents and not _holds(holder, point):
+		if holder != null and holder.clip_contents and not _holds(holder, point - _moved_by(holder, moves)):
 			return true
 		walk = walk.get_parent()
 	return false
