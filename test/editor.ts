@@ -2671,6 +2671,29 @@ async function testASettingReadFromTheEditor({ call, refusal, project }: Editor)
   assert.equal(await read(), through, 'the write reaches the file');
   assert.equal(await read('editor'), through, 'and the editor holds it too');
 
+  // The file put back by hand to the earlier value, as a checkout does, and that value set again:
+  // the write changes nothing in the file, and the editor, still holding the later one, has to be
+  // told anyway or it saves the later one back. Downstream, a reverted setting answered as a clean
+  // no-op while the editor went on holding the value the checkout removed.
+  const putBack = readFileSync(file, 'utf8').replace(
+    /^config\/description=.*$/m,
+    `config/description="${written}"`,
+  );
+  writeFileSync(file, putBack);
+  assert.equal(await read('editor'), through, 'the editor still holds the later value');
+  const again = await call('project_settings', {
+    projectPath: project,
+    op: 'set',
+    setting: named,
+    value: written,
+  });
+  assert.equal(readFileSync(file, 'utf8'), putBack, `the file already held it: ${text(again)}`);
+  assert.ok(
+    asArray(get(again, 'editorAdopted') ?? []).includes(named),
+    `the editor is told though the file did not change: ${text(again)}`,
+  );
+  assert.equal(await read('editor'), written, 'and holds the value the file holds');
+
   // An op that writes settings of its own, which the editor takes the same way.
   const action = await call('project_settings', {
     projectPath: project,
