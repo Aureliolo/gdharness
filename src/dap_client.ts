@@ -1,5 +1,6 @@
 import { createConnection, type Socket } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
+import { answerJson } from './answer-json.js';
 import { Refusal } from './errors.js';
 import { FrameReader, frame, OversizedStreamError } from './framing.js';
 import { portFromEnv } from './ports.js';
@@ -1027,7 +1028,7 @@ export async function handleDAPTool(
 
         const result = await client.setBreakpoint(safeArgs.scriptPath, safeArgs.line);
         return {
-          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+          content: [{ type: 'text', text: answerJson(result) }],
         };
       }
 
@@ -1038,7 +1039,7 @@ export async function handleDAPTool(
 
         const result = await client.removeBreakpoint(safeArgs.scriptPath, safeArgs.line);
         return {
-          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+          content: [{ type: 'text', text: answerJson(result) }],
         };
       }
 
@@ -1059,13 +1060,13 @@ export async function handleDAPTool(
               heldAgain,
               note: `The game had not stopped again ${client.stepPatienceMs / 1000}s after the step: the step is still running, it went on without stopping anywhere, or the game was not held when it was asked. debug_state stack answers once it stops.`,
             };
-        return { content: [{ type: 'text', text: JSON.stringify(answer, null, 2) }] };
+        return { content: [{ type: 'text', text: answerJson(answer) }] };
       }
 
       case 'dap_get_stack_trace': {
         const stack = await client.getStackTrace();
         return {
-          content: [{ type: 'text', text: JSON.stringify(stack, null, 2) }],
+          content: [{ type: 'text', text: answerJson(stack) }],
         };
       }
 
@@ -1082,7 +1083,7 @@ export async function handleDAPTool(
                 note: `The values of ${missing.join(', ')} did not arrive from the game within ${client.scopesPatienceMs / 1000}s, so they are unknown rather than empty. Ask again.`,
               };
         return {
-          content: [{ type: 'text', text: JSON.stringify(answer, null, 2) }],
+          content: [{ type: 'text', text: answerJson(answer) }],
         };
       }
 

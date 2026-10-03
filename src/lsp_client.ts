@@ -3,6 +3,7 @@ import { readFile, realpath } from 'node:fs/promises';
 import { createConnection, type Socket } from 'node:net';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { answerJson } from './answer-json.js';
 import { Refusal } from './errors.js';
 import { FrameReader, frame, OversizedStreamError } from './framing.js';
 import { isSameDirectory, isWithinRoot, resolveWithinProject } from './paths.js';
@@ -816,7 +817,7 @@ function asToolResponse(payload: unknown): { content: { type: string; text: stri
     content: [
       {
         type: 'text',
-        text: JSON.stringify(payload, null, 2),
+        text: answerJson(payload),
       },
     ],
   };

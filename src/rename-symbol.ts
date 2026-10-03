@@ -5,7 +5,7 @@
  * here can be reached without either.
  */
 
-import { existsSync, realpathSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { type DeclarationKind, isIdentifier, type Position } from './gdscript-source.js';
 import { LSPTimeout } from './lsp_client.js';
@@ -79,6 +79,11 @@ export type RenameOutcome =
        * before what it uses is checked against the old names and fails.
        */
       readonly scriptsInOrder: string[];
+      /**
+       * Every grouped left-alone line with its text, when there were too many to answer with: the
+       * caller writes it to a file and names the file under the report's leftAloneDetail.
+       */
+      readonly detail: LeftAloneDetail | null;
     }
   | {
       readonly ok: false;
@@ -405,6 +410,7 @@ export async function renameSymbol(request: RenameRequest, services: RenameServi
     moved: moveTo === null ? null : { from: declaringPath, to: moveTo },
     scriptsInOrder,
     rewrites,
+    detail: left.detail,
     report: {
       renamed: { what, from: symbol, to: newName, declaredIn: declaringPath, resolvedBy },
       ...(took === null ? {} : { languageServer: took }),
@@ -583,6 +589,10 @@ function leftAloneReport(mentions: readonly Mention[]): LeftAlone {
       lines.push(line);
     }
   };
+  const textOf = new Map<string, string>();
+  for (const mention of mentions) {
+    textOf.set(`${mention.file}:${String(mention.line)}`, mention.text);
+  }
   for (const mention of mentions) {
     if (PROSE_KINDS.has(mention.kind) && mention.why === undefined) {
       const key = `${mention.file}\n${mention.kind}`;
@@ -609,21 +619,98 @@ function leftAloneReport(mentions: readonly Mention[]): LeftAlone {
   // likeliest entry to break something silently, so it is put where a reader starts.
   const loudFirst = (mention: Mention): number =>
     mention.kind === 'string' && mention.why !== undefined ? 0 : 1;
+  const leftAlone = full.sort((a, b) => loudFirst(a) - loudFirst(b));
+  const inProse = [...prose.values()];
+  const otherSymbols = [...others.entries()].map(([why, files]) => ({
+    why,
+    files: [...files.entries()].map(([file, lines]) => ({ file, lines })),
+  }));
+  const grouped =
+    inProse.reduce((sum, group) => sum + group.lines.length, 0) +
+    otherSymbols.reduce((sum, reason) => sum + reason.files.reduce((n, one) => n + one.lines.length, 0), 0);
+  if (grouped <= LEFT_ALONE_ANSWER_LINES) {
+    return {
+      lists: {
+        leftAlone,
+        ...(inProse.length > 0 ? { leftAloneInProse: inProse } : {}),
+        ...(otherSymbols.length > 0 ? { leftAloneOtherSymbols: otherSymbols } : {}),
+      },
+      counts,
+      detail: null,
+    };
+  }
+  const withText = (file: string, lines: readonly number[]): { line: number; text: string }[] =>
+    lines.map((line) => ({ line, text: textOf.get(`${file}:${String(line)}`) ?? '' }));
   return {
     lists: {
-      leftAlone: full.sort((a, b) => loudFirst(a) - loudFirst(b)),
-      ...(prose.size > 0 ? { leftAloneInProse: [...prose.values()] } : {}),
-      ...(others.size > 0
-        ? {
-            leftAloneOtherSymbols: [...others.entries()].map(([why, files]) => ({
-              why,
-              files: [...files.entries()].map(([file, lines]) => ({ file, lines })),
-            })),
-          }
-        : {}),
+      leftAlone,
+      leftAloneDetail: {
+        inProse: { files: new Set(inProse.map((group) => group.file)).size, occurrences: counts.inProse },
+        otherSymbols: otherSymbols.map((reason) => ({
+          why: reason.why,
+          files: reason.files.length,
+          occurrences: reason.files.reduce((n, one) => n + one.lines.length, 0),
+        })),
+      },
     },
     counts,
+    detail: {
+      leftAloneInProse: inProse.map((group) => ({
+        file: group.file,
+        kind: group.kind,
+        lines: withText(group.file, group.lines),
+      })),
+      leftAloneOtherSymbols: otherSymbols.map((reason) => ({
+        why: reason.why,
+        files: reason.files.map((one) => ({ file: one.file, lines: withText(one.file, one.lines) })),
+      })),
+    },
   };
+}
+
+/**
+ * How many grouped left-alone lines an answer carries before they go to a file instead. A member
+ * named `found` left 1886 such lines, which kept an answer past what a caller's client shows
+ * inline even once each list was only file and line numbers; what a reader acts on, the quoted
+ * entries and the counts, stays in the answer either way.
+ */
+export const LEFT_ALONE_ANSWER_LINES = 300;
+
+/** Every grouped left-alone line with its text, for the file a large answer names. */
+export interface LeftAloneDetail {
+  readonly leftAloneInProse: { file: string; kind: string; lines: { line: number; text: string }[] }[];
+  readonly leftAloneOtherSymbols: {
+    why: string;
+    files: { file: string; lines: { line: number; text: string }[] }[];
+  }[];
+}
+
+/**
+ * Writes [param detail] under the project's `.godot` directory, which version control leaves out,
+ * and keeps the newest ten there, so a preview repeated while deciding does not pile files up.
+ * Answers the path written.
+ */
+let detailWrites = 0;
+
+export function writeLeftAloneDetail(projectPath: string, symbol: string, detail: LeftAloneDetail): string {
+  const directory = join(projectPath, '.godot', 'gdharness-renames');
+  mkdirSync(directory, { recursive: true });
+  // The time, then this process's count of writes, so the names sort oldest first even several to
+  // a millisecond, and the process so two servers writing in one millisecond do not share a name.
+  detailWrites += 1;
+  const path = join(
+    directory,
+    `${String(Date.now())}-${String(detailWrites).padStart(6, '0')}-${String(process.pid)}-${symbol}.json`,
+  );
+  writeFileSync(path, `${JSON.stringify(detail, null, 2)}\n`, 'utf8');
+  const kept = readdirSync(directory)
+    .filter((name) => name.endsWith('.json'))
+    .sort()
+    .reverse();
+  for (const old of kept.slice(10)) {
+    rmSync(join(directory, old), { force: true });
+  }
+  return path;
 }
 
 /**
@@ -636,6 +723,7 @@ const PROSE_KINDS: ReadonlySet<string> = new Set(['comment', 'doc', 'string', 't
 /** The left-alone lists for the answer, and how many occurrences each holds. */
 interface LeftAlone {
   readonly lists: Record<string, unknown>;
+  readonly detail: LeftAloneDetail | null;
   readonly counts: { readonly quoted: number; readonly inProse: number; readonly otherSymbols: number };
 }
 
