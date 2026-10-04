@@ -553,8 +553,10 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     parameters: {
       projectPath: PROJECT_PATH,
       path: {
-        type: 'string',
-        description: 'A test directory or one suite file inside the project. Default test.',
+        type: ['string', 'array'],
+        items: { type: 'string' },
+        description:
+          'A test directory or suite file inside the project, or a list of them, all run on one engine: a named set of suites boots once rather than once per suite. An entry given twice, or a suite inside a directory also listed, runs once. A run where any entry is not there is refused before the engine starts, naming each one. Default test.',
       },
       ignore: {
         type: 'array',
