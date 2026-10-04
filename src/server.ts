@@ -1741,6 +1741,51 @@ function elsewhereIn(projectPath: string, asked: string): string {
   return near.length === 0 ? '' : ` The project does have ${there}.`;
 }
 
+/**
+ * The suites and directories a test run was asked for, as `res://` paths in the order given, or why
+ * one of them cannot be run.
+ *
+ * One path or a list, so a named set of suites runs on one engine rather than one engine each, which
+ * spent nearly all of a set of small suites on booting. Each entry is held inside the project as any
+ * file argument is. An entry given twice, or a suite inside a directory also given, is dropped,
+ * because gdUnit4 runs a suite once for every path handed to it that reaches it.
+ */
+export function testPathsIn(
+  projectPath: string,
+  given: unknown,
+): { ok: true; value: string[] } | { ok: false; reason: string } {
+  const entries = given === undefined || given === null || given === '' ? ['test'] : given;
+  const listed: unknown[] = Array.isArray(entries) ? entries : [entries];
+  if (listed.length === 0) {
+    return {
+      ok: false,
+      reason: 'path is an empty list: name a suite file or a directory, or leave path out for test.',
+    };
+  }
+  const resolved: string[] = [];
+  for (const [index, entry] of listed.entries()) {
+    if (typeof entry !== 'string' || entry.trim() === '') {
+      return {
+        ok: false,
+        reason: `path${Array.isArray(entries) ? `[${index}]` : ''} is ${typeof entry === 'string' ? 'empty' : describeValue(entry)}, not a suite file or a directory in the project.`,
+      };
+    }
+    const location = resolveWithinProject(projectPath, entry);
+    if (!location.ok) {
+      return { ok: false, reason: location.reason };
+    }
+    resolved.push(location.relativePath.replace(/\/+$/, ''));
+  }
+  const unique = [...new Set(resolved)];
+  const within = (path: string, directory: string): boolean => path.startsWith(`${directory}/`);
+  return {
+    ok: true,
+    value: unique
+      .filter((path) => !unique.some((other) => other !== path && within(path, other)))
+      .map((path) => `res://${path}`),
+  };
+}
+
 /** Whether project.godot names a scene for the game to start in. */
 function hasMainScene(projectFile: string): boolean {
   const scene = parseProjectGodot(readFileSync(projectFile, 'utf8'))['application']?.['run/main_scene'];
@@ -4055,9 +4100,28 @@ class GodotServer {
     if (!project.ok) {
       return project.response;
     }
-    const contained = this.containProjectFiles({ ...args, path: readNonEmptyString(args, 'path') ?? 'test' });
-    if (!contained.ok) {
-      return contained.response;
+    const paths = testPathsIn(project.value.path, args['path']);
+    if (!paths.ok) {
+      return this.createErrorResponse(paths.reason, PATH_SOLUTIONS);
+    }
+    const asked = paths.value;
+    // Before an engine is started for them: one missing entry among several would otherwise be a
+    // run of the rest that gdUnit4 sums up as having found nothing.
+    const missing = asked.filter(
+      (path) => !existsSync(join(project.value.path, path.slice('res://'.length))),
+    );
+    if (missing.length > 0) {
+      const verdict = `nothing at ${missing.join(' and ')}`;
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `No tests ran: ${verdict}.${elsewhereIn(project.value.path, missing[0] ?? '')}`,
+          },
+          { type: 'text', text: answerJson({ passed: false, verdict, tests: 0 }) },
+        ],
+        isError: true,
+      };
     }
     const runner = 'addons/gdUnit4/bin/GdUnitCmdTool.gd';
     if (!existsSync(join(project.value.path, runner))) {
@@ -4086,7 +4150,6 @@ class GodotServer {
     const ours = `gdharness-reports/${randomUUID()}`;
     const reports = `res://.godot/${ours}`;
     const ignored = readStringArray(args, 'ignore') ?? [];
-    const asked = readString(contained.value, 'path') ?? 'res://test';
     const cmdArgs = [
       '--headless',
       '--path',
@@ -4095,8 +4158,7 @@ class GodotServer {
       `res://${runner}`,
       '--ignoreHeadlessMode',
       ...(readBoolean(args, 'failFast') === true ? [] : ['-c']),
-      '-a',
-      asked,
+      ...asked.flatMap((path) => ['-a', path]),
       ...ignored.flatMap((entry) => ['-i', entry]),
       '-rd',
       reports,
@@ -4195,7 +4257,7 @@ class GodotServer {
     // Before the exit code, because gdUnit4 leaves it at zero for a run that found nothing to do,
     // and `passed` is the one word a skimming reader must never be handed for one of those.
     const said = printed.map((entry) => entry.text);
-    const nothingRan = timedOut ? null : whyNoReport(said, asked);
+    const nothingRan = timedOut ? null : whyNoReport(said, asked.join(' and '));
     const cutShort = timedOut ? timedOutVerdict(timeoutMs, silentForMs) : null;
     const hung = cutShort?.hung ?? false;
     const scriptErrors = timedOut || exitCode !== 105 ? [] : scriptErrorsPrinted(said);
@@ -4231,7 +4293,7 @@ class GodotServer {
     if (report === null) {
       const note =
         nothingRan !== null
-          ? `No tests ran: ${verdict}.${elsewhereIn(project.value.path, asked)}`
+          ? `No tests ran: ${verdict}.`
           : scriptErrors.length > 0
             ? scriptErrorsNote(scriptErrors)
             : reportProblem !== null
