@@ -195,6 +195,7 @@ import {
   scriptErrorsNote,
   settingsNamedBy,
   stopVerdict,
+  testPathsIn,
   timedOutVerdict,
   uidsLeftNote,
 } from '../src/server.js';
@@ -22450,6 +22451,35 @@ async function testGdUnitRunner(): Promise<void> {
     'with no cause among them, the sentence says where to look rather than naming nothing',
   );
 
+  // The paths a run is given, which the engine half below runs: one or a list, each held inside
+  // the project, overlaps dropped, and anything that is not a path refused by where it sits.
+  const inProject = mkdtempSync(join(tmpdir(), 'gdharness-test-paths-'));
+  try {
+    assert.deepEqual(testPathsIn(inProject, undefined), { ok: true, value: ['res://test'] });
+    assert.deepEqual(testPathsIn(inProject, 'tests/'), { ok: true, value: ['res://tests'] });
+    assert.deepEqual(
+      testPathsIn(inProject, ['tests/a_test.gd', 'res://tests/b_test.gd', 'tests/a_test.gd', 'other']),
+      { ok: true, value: ['res://tests/a_test.gd', 'res://tests/b_test.gd', 'res://other'] },
+    );
+    assert.deepEqual(
+      testPathsIn(inProject, ['tests/deep/a_test.gd', 'tests_more/b_test.gd', 'tests']),
+      { ok: true, value: ['res://tests_more/b_test.gd', 'res://tests'] },
+      'a suite inside a listed directory goes, and a directory whose name only starts the same stays',
+    );
+    for (const [given, reason] of [
+      [[], /^path is an empty list/],
+      [['tests/a_test.gd', 5], /^path\[1\] is 5, not a suite file/],
+      [['tests/a_test.gd', ' '], /^path\[1\] is empty, not a suite file/],
+      [['tests/a_test.gd', '../elsewhere/b_test.gd'], /outside the project/],
+    ] as const) {
+      const refused = testPathsIn(inProject, given);
+      assert.ok(!refused.ok, `${JSON.stringify(given)} is refused`);
+      assert.match(refused.reason, reason);
+    }
+  } finally {
+    rmSync(inProject, { recursive: true, force: true });
+  }
+
   const godotPath = resolveGodotPath();
   const gdunit = process.env['GDUNIT4_PATH'];
   if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
@@ -22872,6 +22902,53 @@ async function testGdUnitRunner(): Promise<void> {
         assert.equal(get(empty, 'passed'), false, nowhere);
         assert.equal(get(empty, 'verdict'), 'nothing at res://tests', nowhere);
         assert.equal(get(empty, 'tests'), 0, nowhere);
+
+        // #875: a named set of suites in one run. Two of the three, as a list: both counted, each
+        // failure on its own suite, and the third not run.
+        const set: unknown = JSON.parse(
+          await call(
+            'project_test',
+            { projectPath: projectDir, path: ['test/quiet_test.gd', 'res://test/summary_lies_test.gd'] },
+            ENGINE_CALL_TIMEOUT_MS * 3,
+          ),
+        );
+        assert.deepEqual(
+          {
+            tests: get(set, 'tests'),
+            failures: get(set, 'failures'),
+            suitesPassed: get(set, 'suitesPassed'),
+            failedIn: [...new Set(asArray(get(set, 'failed')).map((entry) => get(entry, 'path')))],
+          },
+          { tests: 3, failures: 2, suitesPassed: 1, failedIn: ['res://test/summary_lies_test.gd'] },
+          JSON.stringify(set, null, 2),
+        );
+        // A suite named twice, and inside a directory also named, runs once: the whole directory's
+        // count, as the first run here had it.
+        const overlapping: unknown = JSON.parse(
+          await call(
+            'project_test',
+            { projectPath: projectDir, path: ['test/sums_test.gd', 'test', 'res://test/sums_test.gd'] },
+            ENGINE_CALL_TIMEOUT_MS * 3,
+          ),
+        );
+        assert.equal(get(overlapping, 'tests'), get(run, 'tests'), JSON.stringify(overlapping, null, 2));
+        // One entry not there among others that are: refused before anything runs, naming each.
+        const partly = await call(
+          'project_test',
+          { projectPath: projectDir, path: ['test/quiet_test.gd', 'test/gone_test.gd', 'gone'] },
+          ENGINE_CALL_TIMEOUT_MS * 3,
+        );
+        assert.match(
+          partly,
+          /^No tests ran: nothing at res:\/\/test\/gone_test\.gd and res:\/\/gone\./,
+          partly,
+        );
+        const partlyAnswer: unknown = JSON.parse(partly.slice(partly.indexOf('{')));
+        assert.deepEqual(
+          [get(partlyAnswer, 'passed'), get(partlyAnswer, 'tests'), get(partlyAnswer, 'classes')],
+          [false, 0, undefined],
+          `refused before the class list was rebuilt for a run: ${partly}`,
+        );
 
         // A failing string's value, which gdUnit4 prints as a character diff against the expected
         // one and writes into its report with the marks stripped, so both strings came back merged:
