@@ -5521,7 +5521,7 @@ function testAGameThatAnnouncedAndWentIsSaidSo(): void {
     const problem = 'problem' in choice ? choice.problem : '';
     assert.match(
       problem,
-      new RegExp(`announced itself and its process is gone: pid ${ended.pid}`),
+      new RegExp(`announced itself and its process is gone: pid ${ended.pid}(?!\\d)`),
       `the game that went is named: ${problem}`,
     );
     assert.match(problem, /quit or was ended rather than never starting/, `and told apart: ${problem}`);
@@ -5549,7 +5549,11 @@ function testAGameThatAnnouncedAndWentIsSaidSo(): void {
     }
     const repeated = chooseRuntime([], root, []);
     const thrice = 'problem' in repeated ? repeated.problem : '';
-    assert.match(thrice, new RegExp(`gone: pid ${third.pid}`), `the most recent is the one named: ${thrice}`);
+    assert.match(
+      thrice,
+      new RegExp(`gone: pid ${third.pid}(?!\\d)`),
+      `the most recent is the one named: ${thrice}`,
+    );
     assert.match(thrice, /2 earlier ones went the same way/, `and the others are counted: ${thrice}`);
 
     // The other project's game is not this project's answer. These directories are shared, and a
@@ -5747,7 +5751,7 @@ async function testAStaleAnnouncementWhoseNumberCameRoundIsSwept(): Promise<void
     const choice = chooseRuntime(swept.running, root, swept.unspoken);
     assert.match(
       'problem' in choice ? choice.problem : '',
-      new RegExp(`announced itself and its process is gone: pid ${pid}`),
+      new RegExp(`announced itself and its process is gone: pid ${pid}(?!\\d)`),
       `the game that went is reported as gone: ${JSON.stringify(choice)}`,
     );
 
@@ -18124,8 +18128,10 @@ async function testAOneShotEngineRunIsNotTheEditor(): Promise<void> {
       parseTextContent(await server.request('tools/call', { name: 'editor_status', arguments: {} })),
       'editor',
     );
+  // Ended where the number ends: pid 908 is the start of pid 9088, the editor served a step earlier,
+  // and an unanchored match read that line as the quitting run having been served.
   const identified = (pid: number | undefined): boolean =>
-    server.stderr.includes(`Godot editor identified: pid ${pid}`);
+    new RegExp(`Godot editor identified: pid ${pid}(?!\\d)`).test(server.stderr);
   // Bounded, and the whole tree after the handle: a wait on an engine that ignored its kill held the
   // suite for twenty minutes with nothing said.
   const end = async (child: ChildProcess): Promise<void> => {
@@ -20738,7 +20744,7 @@ async function testAStatusCallIsNotHeldByAHeldGame(): Promise<void> {
     );
     assert.match(
       textOf(nobody) ?? JSON.stringify(nobody),
-      new RegExp(`No running game has pid 999999999\\. Running: pid ${gamePid}`),
+      new RegExp(`No running game has pid 999999999\\. Running: pid ${gamePid}(?!\\d)`),
       `a pid that is nobody's is refused naming who is running: ${textOf(nobody)}`,
     );
 
