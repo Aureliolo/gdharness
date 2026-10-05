@@ -76,8 +76,20 @@ func reload_script(args: Dictionary) -> Dictionary:
 	if reader == null:
 		return {"ok": false, "error": "Could not read " + path + ": " + str(FileAccess.get_open_error())}
 	var previous: String = script.source_code
-	script.source_code = reader.get_as_text()
+	var text: String = reader.get_as_text()
 	reader.close()
+
+	# Godot keeps one parse of each script for other scripts to resolve its class through, and a
+	# reload drops that parse only when the text it compiles differs from the text that was parsed.
+	# A parse that failed because a class it names was not yet known has the file's own text, so it
+	# outlived every reload: the class answered with all its methods while each script naming it read
+	# "because of a parser error" until the editor restarted, for as long as anything held the parse,
+	# such as a file open in an editor's language server. Compiling once with a line more makes the
+	# texts differ, which drops that parse and those of the scripts that resolved through it; the
+	# file's own text is compiled below.
+	script.source_code = text + "\n"
+	var _dropped: Error = script.reload(true)
+	script.source_code = text
 
 	# A reload that fails is still answered as a call that ran, because the readings are what a
 	# caller needs then: a failure travels back as its message alone, and a project met one and

@@ -29,10 +29,12 @@ import {
   utimesSync,
   writeFileSync,
 } from 'node:fs';
+import { connect, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
+import { pathToFileURL } from 'node:url';
 import { alive } from '../src/alive.js';
 import { readBreakpointNote } from '../src/breakpoint-note.js';
 import { GodotDAPClient } from '../src/dap_client.js';
@@ -3127,6 +3129,156 @@ async function testAnEnumMemberAddedToAHeldTypeIsPickedUp({ call, project }: Edi
 }
 
 /**
+ * A class reloaded once its base exists is resolved by the scripts that use it.
+ *
+ * #879: a class was rewritten to extend a class written in the same change, and the editor parsed it
+ * before the new base was a known class. Godot keeps that parse for every other script to resolve
+ * the class through, and a reload drops it only when the text differs from what was parsed; the text
+ * had not changed, only the classes around it. So the reload answered with every method while each
+ * script naming the class still read "because of a parser error", until the editor restarted.
+ *
+ * The failed parse lasts only while something holds it. A language server client holding a file
+ * open does, since the server keeps that file's parse and the parses it depends on, and an editor
+ * open beside the project is such a client; the one gdharness itself uses closes each file once
+ * answered, and with nothing holding the failed parse the next request parsed the class afresh and
+ * every setup here read clean. So a second client opens a script naming the class while the base
+ * is missing and keeps it open, the base is then written and registered, and the stale reading is
+ * asserted before the reload, so the case shows it reached the state, and the clean one after it.
+ */
+async function testAClassReloadedOnceItsBaseExistsReachesItsUsers({
+  call,
+  project,
+  lspPort,
+}: Editor): Promise<void> {
+  const read = async (): Promise<unknown> => {
+    await delay(2500);
+    return await call('script_diagnostics', { projectPath: project, scriptPath: 'res://bench/gallery.gd' });
+  };
+  const messages = (answer: unknown): string[] =>
+    asArray(get(answer, 'diagnostics') ?? []).map((entry) => String(get(entry, 'message')));
+  const failedParse = 'Could not parse global class "Statue" from "res://bench/statue.gd".';
+
+  mkdirSync(join(project, 'bench'), { recursive: true });
+  writeFileSync(
+    join(project, 'bench', 'statue.gd'),
+    ['class_name Statue', 'extends Plinth', '', '', 'func height() -> int:', '\treturn 3', ''].join('\n'),
+  );
+  writeFileSync(
+    join(project, 'bench', 'gallery.gd'),
+    [
+      'class_name Gallery',
+      'extends Node',
+      '',
+      '',
+      'func tallest(statue: Statue) -> int:',
+      '\treturn statue.height()',
+      '',
+    ].join('\n'),
+  );
+  const hall = ['class_name Hall', 'extends Node', '', 'var centre: Statue = null', ''].join('\n');
+  writeFileSync(join(project, 'bench', 'hall.gd'), hall);
+  await call('project_import', { projectPath: project, op: 'refresh_classes' });
+  await call('editor_rescan', { projectPath: project });
+  const holder = await holdOpen(lspPort, project, join(project, 'bench', 'hall.gd'), hall);
+  try {
+    await caseBody();
+  } finally {
+    holder.destroy();
+  }
+
+  async function caseBody(): Promise<void> {
+    const missing = await read();
+    assert.ok(
+      messages(missing).includes(failedParse),
+      `with the base missing, the class does not parse: ${JSON.stringify(missing)}`,
+    );
+
+    writeFileSync(
+      join(project, 'bench', 'plinth.gd'),
+      ['class_name Plinth', 'extends Node', '', '', 'func base_height() -> int:', '\treturn 1', ''].join(
+        '\n',
+      ),
+    );
+    await call('project_import', { projectPath: project, op: 'refresh_classes' });
+    const rescanned = await call('editor_rescan', { projectPath: project });
+    assert.ok(
+      asArray(get(rescanned, 'dependentsReloaded') ?? []).includes('res://bench/statue.gd'),
+      `the rescan bringing the base in reloads the class that names it: ${JSON.stringify(rescanned)}`,
+    );
+    const registered = await read();
+    assert.deepEqual(
+      messages(registered),
+      [],
+      `and the script naming the class resolves it, with the failed parse held open: ${JSON.stringify(registered)}`,
+    );
+
+    const reloaded = await call('editor_rescan', {
+      projectPath: project,
+      reloadScript: 'res://bench/statue.gd',
+    });
+    assert.equal(get(reloaded, 'reloadProblem'), undefined, JSON.stringify(reloaded));
+    assert.ok(asArray(get(reloaded, 'reloadedMethods')).includes('height'), JSON.stringify(reloaded));
+    const resolved = await read();
+    assert.deepEqual(
+      messages(resolved),
+      [],
+      `once the class is reloaded, the script naming it resolves it: ${JSON.stringify(resolved)}`,
+    );
+  }
+  rmSync(join(project, 'bench'), { recursive: true, force: true });
+  await call('project_import', { projectPath: project, op: 'refresh_classes' });
+  await call('editor_rescan', { projectPath: project });
+}
+
+/**
+ * A language server client of the editor's own holding [file] open, as an editor beside the project
+ * does, until the socket it answers with is destroyed. Answered once the server has published the
+ * file's diagnostics, which is when it has parsed it.
+ */
+async function holdOpen(port: number, project: string, file: string, text: string): Promise<Socket> {
+  const socket = connect(port, '127.0.0.1');
+  let heard = '';
+  const published = new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(
+        new Error(`the language server published nothing for ${file} within 30 s: ${heard.slice(-500)}`),
+      );
+    }, 30_000);
+    socket.on('data', (chunk: Buffer) => {
+      heard += chunk.toString('utf8');
+      if (heard.includes('textDocument/publishDiagnostics')) {
+        clearTimeout(timer);
+        resolve();
+      }
+    });
+    socket.on('error', (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+  });
+  const send = (message: unknown): void => {
+    const body = JSON.stringify({ jsonrpc: '2.0', ...(message as object) });
+    socket.write(`Content-Length: ${Buffer.byteLength(body, 'utf8')}\r\n\r\n${body}`);
+  };
+  await new Promise<void>((resolve, reject) => {
+    socket.once('connect', resolve);
+    socket.once('error', reject);
+  });
+  send({
+    id: 1,
+    method: 'initialize',
+    params: { processId: null, rootUri: pathToFileURL(project).href, capabilities: {} },
+  });
+  send({ method: 'initialized', params: {} });
+  send({
+    method: 'textDocument/didOpen',
+    params: { textDocument: { uri: pathToFileURL(file).href, languageId: 'gdscript', version: 1, text } },
+  });
+  await published;
+  return socket;
+}
+
+/**
  * A script whose `.uid` alone changed is read again by the next rescan, so the editor's cache stops
  * naming the old UID and no engine reading it warns of a duplicate.
  *
@@ -5085,6 +5237,10 @@ async function main(): Promise<void> {
     ['testAClassWrittenUnderTheEditorNeedsARescan', testAClassWrittenUnderTheEditorNeedsARescan],
     ['testAMethodAddedToAnAnalysedTypeIsPickedUp', testAMethodAddedToAnAnalysedTypeIsPickedUp],
     ['testAnEnumMemberAddedToAHeldTypeIsPickedUp', testAnEnumMemberAddedToAHeldTypeIsPickedUp],
+    [
+      'testAClassReloadedOnceItsBaseExistsReachesItsUsers',
+      testAClassReloadedOnceItsBaseExistsReachesItsUsers,
+    ],
     ['testAChangedUidIsReadByTheRescan', testAChangedUidIsReadByTheRescan],
     ['testARenameFollowsTheEngine', testARenameFollowsTheEngine],
     ['testAPlayedRunsConsoleArrivesOnItsOwn', testAPlayedRunsConsoleArrivesOnItsOwn],
