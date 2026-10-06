@@ -139,12 +139,16 @@ static func _text_of(node: Node) -> String:
 	if not text is String:
 		return ""
 	var words: String = text
-	# What somebody typed is drawn as typed, never translated.
+	# What somebody typed is drawn as typed, never translated. An empty field draws its placeholder
+	# instead, which is what a player reads it by: a search field was found by nothing it showed.
 	if node is LineEdit:
 		var field: LineEdit = node
+		if words.is_empty():
+			return field.atr(field.placeholder_text).strip_edges()
 		return masked(field) if field.secret else words.strip_edges()
 	if node is TextEdit:
-		return words.strip_edges()
+		var area: TextEdit = node
+		return (area.atr(area.placeholder_text) if words.is_empty() else words).strip_edges()
 	words = node.atr(words)
 	if node is Label3D:
 		var sign_text: Label3D = node
