@@ -450,6 +450,60 @@ static func _clipped_away(
 	return false
 
 
+## Where [param label] draws the words [param wanted] matched in it, in the label's own space, when
+## they are part of its text: {"point"} on their middle, {"unplaced"} saying why there is none, or
+## {} when the words are the whole text, whose middle is the label's.
+##
+## A line of a dispatch names two people, each a link to their page, and a press on the label's
+## middle landed on the second name when the first was asked for, so the game opened the wrong page.
+## Godot answers which line a character is on, where that line is and how wide it is drawn, and
+## nothing narrower, so the place along the line is the font's measure of the text before the
+## words. A line in another font or holding an image measures off from what is drawn, which a wide
+## line with nothing between the words and its start hardly does.
+static func point_on_words(label: RichTextLabel, wanted: String) -> Dictionary:
+	var text: String = Words.said_by(label)
+	var start: int = -1
+	var length: int = 0
+	for words: String in Says.alternatives(wanted):
+		if not Says.is_plain(words):
+			continue
+		var at: int = text.findn(words)
+		if at >= 0 and (start < 0 or at < start):
+			start = at
+			length = words.length()
+	if start < 0:
+		return {"unplaced": "the words were matched as a pattern, which names no one place in the text"}
+	if text.strip_edges().length() == length:
+		return {}
+	var line: int = label.get_character_line(start)
+	var shown: Vector2i = label.get_line_range(line)
+	if line < 0 or shown.x > start:
+		return {"unplaced": "the label could not say which line the words are on"}
+	var on_line: int = mini(length, shown.y - start) if shown.y > start else length
+	var font: Font = label.get_theme_font("normal_font")
+	var font_size: int = label.get_theme_font_size("normal_font_size")
+	var before: float = _width(font, font_size, text.substr(shown.x, start - shown.x))
+	var across: float = _width(font, font_size, text.substr(start, on_line))
+	var frame: StyleBox = label.get_theme_stylebox("normal")
+	var left: float = frame.get_margin(SIDE_LEFT)
+	var room: float = label.size.x - left - frame.get_margin(SIDE_RIGHT)
+	var spare: float = maxf(room - label.get_line_width(line), 0.0)
+	var aligned: float = 0.0
+	if label.horizontal_alignment == HORIZONTAL_ALIGNMENT_CENTER:
+		aligned = spare * 0.5
+	elif label.horizontal_alignment == HORIZONTAL_ALIGNMENT_RIGHT:
+		aligned = spare
+	var scrolled: float = label.get_v_scroll_bar().value if label.scroll_active else 0.0
+	var x: float = clampf(left + aligned + before + across * 0.5, left, left + room)
+	var top: float = frame.get_margin(SIDE_TOP) + label.get_line_offset(line) - scrolled
+	return {"point": Vector2(x, top + label.get_line_height(line) * 0.5)}
+
+
+## How wide [param font] at [param font_size] draws [param words] on one line.
+static func _width(font: Font, font_size: int, words: String) -> float:
+	return font.get_string_size(words, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x
+
+
 ## The canvas layer [param control] is drawn on, 0 for the viewport's own canvas.
 static func _layer_of(control: Control) -> int:
 	var layer: CanvasLayer = control.get_canvas_layer_node()

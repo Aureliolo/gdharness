@@ -54,6 +54,7 @@ func _everything() -> void:
 	await _check_a_control_in_a_subviewport()
 	await _check_the_world_behind_the_interface()
 	await _check_words_nobody_can_click()
+	await _check_words_in_a_rich_label()
 	await _check_a_dialog_over_a_dialog()
 	await _check_a_dialog_under_a_clipping_container()
 
@@ -529,6 +530,47 @@ func _check_words_nobody_can_click() -> void:
 		_fail("and the one on screen is clicked without a tie: %s" % JSON.stringify(near))
 	for named: String in ["Far", "Fold", "Near"]:
 		root.get_node(named).queue_free()
+	await process_frame
+
+
+## Words that are part of a rich label's line are pressed where they are drawn, so a link among them
+## is the one pressed. #885: a line naming two people, each a link, was pressed in its middle, which
+## was on the second name, and the game opened the wrong page. Here the line's middle is on plain
+## words between the two links, so a press there reaches neither. A pattern names no one place, and
+## the answer says the press went to the middle.
+func _check_words_in_a_rich_label() -> void:
+	var line: RichTextLabel = RichTextLabel.new()
+	line.name = "Dispatch"
+	line.bbcode_enabled = true
+	line.autowrap_mode = TextServer.AUTOWRAP_OFF
+	line.add_theme_font_size_override("normal_font_size", 4)
+	line.position = Vector2(0, 20)
+	line.size = Vector2(64, 12)
+	line.text = "[url=first]Ab[/url] and a great deal more [url=second]Cd[/url]"
+	root.add_child(line)
+	await process_frame
+	await process_frame
+	if line.get_line_count() != 1 or line.get_content_width() > line.size.x:
+		_fail(
+			(
+				"the line should fit the label on one line for this to mean anything: %d lines, %d wide"
+				% [line.get_line_count(), line.get_content_width()]
+			)
+		)
+	for case: Array in [["Ab", "first"], ["cd", "second"]]:
+		var clicked: Dictionary = await input.click({"says": case[0]})
+		var found: Dictionary = clicked.get("found", {})
+		if clicked.get("link_pressed") != case[1] or found.get("pressedOn") != "the words":
+			_fail("words in a rich label are pressed where they are drawn: %s" % JSON.stringify(clicked))
+	var patterned: Dictionary = await input.click({"says": "Ab*Cd"})
+	var told: Dictionary = patterned.get("found", {})
+	if (
+		told.get("pressedOn") != "the middle of the label"
+		or not str(told.get("note", "")).contains("so the press went to its middle")
+		or patterned.has("link_pressed")
+	):
+		_fail("a pattern is pressed in the middle and says so: %s" % JSON.stringify(patterned))
+	line.queue_free()
 	await process_frame
 
 
