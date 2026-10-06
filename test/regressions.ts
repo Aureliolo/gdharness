@@ -8972,9 +8972,9 @@ async function testAPointerOnTheHiddenDesktopIsNoted(): Promise<void> {
       return answers;
     };
     for (const answer of await moved(true)) {
-      assert.equal(
-        get(answer, 'pointer_note'),
-        undefined,
+      assert.deepEqual(
+        [get(answer, 'pointer_note'), get(answer, 'pointer_on_hidden_desktop')],
+        [undefined, undefined],
         `a headless run is on no desktop: ${JSON.stringify(answer)}`,
       );
     }
@@ -8982,12 +8982,28 @@ async function testAPointerOnTheHiddenDesktopIsNoted(): Promise<void> {
       console.log('pointer note regression: the desktop half runs on Windows alone, where desktops are');
       return;
     }
-    for (const answer of await moved(false)) {
-      assert.match(
-        String(get(answer, 'pointer_note')),
-        /^This game is on gdharness's own desktop, where Windows refuses to say where the pointer is/,
-        `a windowed run on gdharness's desktop says so: ${JSON.stringify(answer)}`,
+    // Every answer marked, and the explanation on the first of the run alone (#893): four hundred
+    // characters on each of dozens of calls was most of what a session read back.
+    const windowed = await moved(false);
+    for (const [index, answer] of windowed.entries()) {
+      assert.equal(
+        get(answer, 'pointer_on_hidden_desktop'),
+        true,
+        `a windowed run on gdharness's desktop marks every pointer answer: ${JSON.stringify(answer)}`,
       );
+      if (index === 0) {
+        assert.match(
+          String(get(answer, 'pointer_note')),
+          /^This game is on gdharness's own desktop, where Windows refuses to say where the pointer is/,
+          `and explains it on the first: ${JSON.stringify(answer)}`,
+        );
+      } else {
+        assert.equal(
+          get(answer, 'pointer_note'),
+          undefined,
+          `and only on the first: ${JSON.stringify(answer)}`,
+        );
+      }
     }
   } finally {
     for (const game of games) {

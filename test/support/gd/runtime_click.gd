@@ -55,6 +55,9 @@ func _everything() -> void:
 	await _check_the_world_behind_the_interface()
 	await _check_words_nobody_can_click()
 	await _check_words_in_a_rich_label()
+	await _check_a_word_inside_a_sentence()
+	await _check_an_item_in_an_open_menu()
+	await _check_a_field_by_its_placeholder()
 	await _check_a_dialog_over_a_dialog()
 	await _check_a_dialog_under_a_clipping_container()
 
@@ -571,6 +574,94 @@ func _check_words_in_a_rich_label() -> void:
 	):
 		_fail("a pattern is pressed in the middle and says so: %s" % JSON.stringify(patterned))
 	line.queue_free()
+	await process_frame
+
+
+## A word inside a sentence is not pressed for a control saying exactly that word which is hidden.
+## #895: a tab reading "Out" sat in a collapsed drawer, and a click on it pressed a dispatch saying
+## somebody "fell out in the hall". Refused, naming both, and pressed when the caller asks for the
+## sentence by index; with nothing else saying the word, pressed and said to be part of more.
+func _check_a_word_inside_a_sentence() -> void:
+	var tab: Button = _button("Tab", Vector2(2, 2), root, "Out")
+	tab.visible = false
+	var line: Button = _button("Line", Vector2(2, 20), root, "they fell out")
+	line.size = Vector2(40, 10)
+	await process_frame
+	var refused: Dictionary = await input.click({"says": "Out"})
+	var said: String = str(refused.get("message", ""))
+	if (
+		not _says(refused, 'no control on screen says exactly "Out"')
+		or not said.contains("/root/Line")
+		or not said.contains("/root/Tab, hidden")
+		or not said.contains("pass index 0")
+		or _presses("Line") != 0
+	):
+		_fail(
+			"a word in a sentence is not pressed for a hidden control saying it: %s" % JSON.stringify(refused)
+		)
+	var asked: Dictionary = await input.click({"says": "Out", "index": 0})
+	var found: Dictionary = asked.get("found", {})
+	if _presses("Line") != 1 or found.get("partOf") != "they fell out":
+		_fail("and is pressed when asked for by index, said to be part of more: %s" % JSON.stringify(asked))
+	tab.queue_free()
+	await process_frame
+	var alone: Dictionary = await input.click({"says": "Out"})
+	var alone_found: Dictionary = alone.get("found", {})
+	if _presses("Line") != 2 or alone_found.get("partOf") != "they fell out":
+		_fail(
+			(
+				"with nothing else saying it, the sentence is pressed and said to be part of more: %s"
+				% JSON.stringify(alone)
+			)
+		)
+	line.queue_free()
+	await process_frame
+
+
+## An item of an open menu is drawn by the menu rather than held as a control, so a click by its
+## words finds no control; the refusal names the menu and the call that chooses the item. #894: a
+## wait was met on an item's words and the click after it was refused with no word of choose.
+func _check_an_item_in_an_open_menu() -> void:
+	var hall: MenuButton = MenuButton.new()
+	hall.name = "Hall"
+	root.add_child(hall)
+	var menu: PopupMenu = hall.get_popup()
+	for item: String in ["Stay", "Leave the hall"]:
+		menu.add_item(item)
+	await process_frame
+	hall.show_popup()
+	await process_frame
+	var refused: Dictionary = await input.click({"says": "Leave the hall"})
+	if not _says(refused, 'choose it with runtime_input choose, path /root/Hall and text "Leave the hall"'):
+		_fail("an open menu's item is refused naming the menu and choose: %s" % JSON.stringify(refused))
+	menu.hide()
+	await process_frame
+	var closed: Dictionary = await input.click({"says": "Leave the hall"})
+	if _says(closed, "runtime_input choose"):
+		_fail("and a closed menu is not named: %s" % JSON.stringify(closed))
+	hall.queue_free()
+	await process_frame
+
+
+## An empty field draws its placeholder, and is found by it. #899: a search field was found by
+## nothing it showed, and the click fell back to coordinates.
+func _check_a_field_by_its_placeholder() -> void:
+	var search: LineEdit = LineEdit.new()
+	search.name = "Search"
+	search.placeholder_text = "Search the reports"
+	search.position = Vector2(2, 2)
+	search.size = Vector2(60, 12)
+	root.add_child(search)
+	await process_frame
+	var clicked: Dictionary = await input.click({"says": "Search the reports"})
+	if clicked.get("path") != "/root/Search" or not search.has_focus():
+		_fail("an empty field is clicked by its placeholder: %s" % JSON.stringify(clicked))
+	search.text = "hall"
+	await process_frame
+	var filled: Dictionary = await input.click({"says": "Search the reports"})
+	if not _says(filled, "no control on screen"):
+		_fail("and not once it holds text, which is drawn instead: %s" % JSON.stringify(filled))
+	search.queue_free()
 	await process_frame
 
 
