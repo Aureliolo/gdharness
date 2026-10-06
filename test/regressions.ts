@@ -89,7 +89,7 @@ import {
 import { mainCheckoutOf, recordedEnginePath } from '../src/harnesses.js';
 import { type ImportOutcome, librariesNotCopied, runImport } from '../src/headless.js';
 import { EDITOR_READS, HEADLESS_OPERATIONS } from '../src/headless-operations.js';
-import { RENDERED_AWAY_NOTE } from '../src/junit.js';
+import { RENDERED_AWAY_NOTE, type ScriptError } from '../src/junit.js';
 import { askTheKeeperToStop, listenForAStop } from '../src/keeper-channel.js';
 import {
   editorArguments,
@@ -173,6 +173,7 @@ import {
   sweepAbandonedScratch,
   untilDiscarded,
 } from '../src/scratch.js';
+import { type CheckScript, originsOf, withoutListed } from '../src/script-origins.js';
 import {
   aboveTheRunner,
   captureDestinationRefusal,
@@ -22537,6 +22538,211 @@ async function testGdUnitRunner(): Promise<void> {
     'a script with an error of its own is not also listed as failing through a dependency',
   );
 
+  // #908: a parse error in a class_name script reaches the run as every script using the class
+  // failing to resolve it, and gdUnit4 never names the script declaring it. The engine's check of
+  // each declaring script is handed in, so the chain, a cycle and a check that found nothing are
+  // all walked without starting one.
+  const unresolved = (path: string, line: number, name: string): ScriptError => ({
+    path,
+    line,
+    message: `Parse Error: Could not resolve class "${name}", because of a parser error.`,
+  });
+  const declared = new Map([
+    ['Motif', 'res://core/motif.gd'],
+    ['Base', 'res://core/base.gd'],
+    ['Listed', 'res://core/listed.gd'],
+    ['Quiet', 'res://core/quiet.gd'],
+  ]);
+  const checked: string[] = [];
+  const engineSays =
+    (says: Record<string, ScriptError[]>, failure: string | null = null): CheckScript =>
+    (path) => {
+      checked.push(path);
+      return Promise.resolve({ errors: says[path] ?? [], failure });
+    };
+  const chain = await originsOf(
+    [
+      unresolved('res://core/armed.gd', 94, 'Motif'),
+      unresolved('res://core/hearing.gd', 298, 'Motif'),
+      dependedOn('res://test/armed_test.gd'),
+    ],
+    declared,
+    engineSays({
+      'res://core/motif.gd': [unresolved('res://core/motif.gd', 3, 'Base')],
+      'res://core/base.gd': [
+        { path: 'res://core/other.gd', line: 1, message: 'Parse Error: elsewhere.' },
+        {
+          path: 'res://core/base.gd',
+          line: 7,
+          message: 'Parse Error: Expected ":" after function declaration.',
+        },
+      ],
+    }),
+  );
+  assert.deepEqual(
+    chain,
+    {
+      origins: [
+        { ...unresolved('res://core/motif.gd', 3, 'Base'), declares: 'Motif' },
+        {
+          path: 'res://core/base.gd',
+          line: 7,
+          message: 'Parse Error: Expected ":" after function declaration.',
+          declares: 'Base',
+        },
+      ],
+      unconfirmed: [],
+    },
+    'followed to the script the declaring one could not resolve either, each checked once, and an error the check printed for another script left out',
+  );
+  assert.deepEqual(checked, ['res://core/motif.gd', 'res://core/base.gd']);
+  const chainNote = scriptErrorsNote(
+    [
+      unresolved('res://core/armed.gd', 94, 'Motif'),
+      unresolved('res://core/hearing.gd', 298, 'Motif'),
+      dependedOn('res://test/armed_test.gd'),
+    ],
+    chain,
+  );
+  assert.equal(
+    chainNote,
+    'No tests ran: gdUnit4 could not load 3 scripts while looking for suites, and it runs no suite at all when one fails to load. res://core/base.gd:7 Parse Error: Expected ":" after function declaration. gdUnit4 did not name this script, which declares Base; the engine\'s own check of it found the error. res://core/motif.gd:3 Parse Error: Could not resolve class "Base", because of a parser error. gdUnit4 did not name this script, which declares Motif; the engine\'s own check of it found the error. res://core/armed.gd:94, res://core/hearing.gd:298 could not resolve Motif because of it. One more failed only because a script it depends on did: res://test/armed_test.gd.',
+    'the script to open is named first with its line, and those that failed on its class after it',
+  );
+
+  checked.length = 0;
+  assert.deepEqual(
+    await originsOf(
+      [
+        unresolved('res://core/listed.gd', 4, 'Missing'),
+        unresolved('res://core/a.gd', 2, 'Listed'),
+        unresolved('res://core/b.gd', 2, 'Quiet'),
+        unresolved('res://core/c.gd', 2, 'Quiet'),
+      ],
+      declared,
+      engineSays({}),
+    ),
+    {
+      origins: [],
+      unconfirmed: [
+        { path: 'res://core/quiet.gd', declares: 'Quiet', why: "the engine's check of it found no error" },
+      ],
+    },
+    'a class no script declares is left unnamed, a declaring script gdUnit4 listed is not checked again, and a class two scripts failed on is checked once',
+  );
+  assert.deepEqual(checked, ['res://core/quiet.gd']);
+  assert.deepEqual(
+    (
+      await originsOf(
+        [unresolved('res://core/b.gd', 2, 'Quiet')],
+        declared,
+        engineSays({}, 'it ran past its minute'),
+      )
+    ).unconfirmed,
+    [
+      {
+        path: 'res://core/quiet.gd',
+        declares: 'Quiet',
+        why: "the engine's check of it did not finish (it ran past its minute)",
+      },
+    ],
+  );
+  assert.equal(
+    scriptErrorsNote([unresolved('res://core/b.gd', 2, 'Quiet')], {
+      origins: [],
+      unconfirmed: [
+        {
+          path: 'res://core/quiet.gd',
+          declares: 'Quiet',
+          why: "the engine's check of it did not finish (it ran past its minute)",
+        },
+      ],
+    }),
+    "No tests ran: gdUnit4 could not load one script while looking for suites, and it runs no suite at all when one fails to load. res://core/quiet.gd declares Quiet, which gdUnit4 did not name, and the engine's check of it did not finish (it ran past its minute). res://core/b.gd:2 could not resolve Quiet because of it.",
+    'a declaring script the check found nothing in is named as the place to look, without an error put to it',
+  );
+  checked.length = 0;
+  const looped = await originsOf(
+    [unresolved('res://core/a.gd', 2, 'Motif')],
+    declared,
+    engineSays({
+      'res://core/motif.gd': [unresolved('res://core/motif.gd', 3, 'Base')],
+      'res://core/base.gd': [unresolved('res://core/base.gd', 3, 'Motif')],
+    }),
+  );
+  assert.deepEqual(
+    looped.origins.map((origin) => origin.path),
+    ['res://core/motif.gd', 'res://core/base.gd'],
+    'two classes failing on each other end the walk',
+  );
+  assert.deepEqual(checked, ['res://core/motif.gd', 'res://core/base.gd']);
+  // Each check is an engine start, so a run that failed on many broken classes at once is not
+  // made to wait on one for each of them.
+  checked.length = 0;
+  const many = Array.from({ length: 9 }, (_, at) => `Broken${at}`);
+  await originsOf(
+    many.map((name, at) => unresolved(`res://core/user${at}.gd`, 2, name)),
+    new Map(many.map((name, at) => [name, `res://core/broken${at}.gd`])),
+    engineSays({}),
+  );
+  assert.equal(checked.length, 8);
+
+  // #900: the entries beside a run stopped at discovery hold what scriptErrors does not. Each
+  // listed error was printed twice more, once by the engine with a backtrace and once in gdUnit4's
+  // list, and each dependent added a load failure: nineteen of them ran an answer past 15 kB.
+  const logged = (
+    text: string,
+    detail: string[] = [],
+    severity: LogEntry['severity'] = 'error',
+  ): LogEntry => ({
+    index: 0,
+    severity,
+    source: severity === 'info' ? 'stdout' : 'stderr',
+    text,
+    detail,
+  });
+  const run = [
+    logged('Godot Engine v4.7.2.stable.official', [], 'info'),
+    logged('Parse Error: Could not resolve class "Motif", because of a parser error.', [
+      'at: GDScript::reload (res://core/hearing.gd:6)',
+    ]),
+    logged('Parse Error: Could not resolve class "Motif", because of a parser error.', [
+      'at: GDScript::reload (res://core/hearing.gd:7)',
+    ]),
+    logged('Compile Error: Failed to compile depended scripts.', [
+      'at: GDScript::reload (res://test/armed_test.gd:0)',
+    ]),
+    logged('Failed to load script "res://test/armed_test.gd" with error "Compilation failed".', [
+      'at: load (modules/gdscript/gdscript_resource_format.cpp:46)',
+    ]),
+    logged('Failed to load script "res://core/elsewhere.gd" with error "Compilation failed".'),
+    logged('Script errors were detected during test discovery!', [], 'info'),
+    logged('  Parse Error: Could not resolve class "Motif", because of a parser error.', [], 'info'),
+    logged('\tat res://core/hearing.gd:6', [], 'info'),
+    logged('  Compile Error: Failed to compile depended scripts.', [], 'info'),
+    logged('\tat res://test/armed_test.gd:0', [], 'info'),
+    logged('Abnormal exit with 105', [], 'info'),
+  ];
+  assert.deepEqual(
+    withoutListed(run, [
+      unresolved('res://core/motif.gd', 10, 'Base'),
+      unresolved('res://core/hearing.gd', 6, 'Motif'),
+      dependedOn('res://test/armed_test.gd'),
+    ]).map((entry) => entry.text),
+    [
+      'Godot Engine v4.7.2.stable.official',
+      'Parse Error: Could not resolve class "Motif", because of a parser error.',
+      'Failed to load script "res://core/elsewhere.gd" with error "Compilation failed".',
+      'Abnormal exit with 105',
+    ],
+    'what is listed goes, and an error at a line the list does not hold stays, as does a load failure of a script it does not name',
+  );
+  assert.equal(
+    withoutListed(run, [unresolved('res://core/hearing.gd', 6, 'Motif')])[1]?.detail[0],
+    'at: GDScript::reload (res://core/hearing.gd:7)',
+  );
+  assert.deepEqual(withoutListed(run, []), run, 'a run with no script errors keeps every entry');
+
   // The paths a run is given, which the engine half below runs: one or a list, each held inside
   // the project, overlaps dropped, and anything that is not a path refused by where it sits.
   const inProject = mkdtempSync(join(tmpdir(), 'gdharness-test-paths-'));
@@ -23329,14 +23535,21 @@ async function testGdUnitRunner(): Promise<void> {
           ),
           ['res://broken/deeper/missing_base_test.gd:1', 'res://broken/parse_test.gd:5'],
         );
-        const brokenFrames = asArray(get(brokenAnswer, 'entries')).flatMap((entry) =>
-          get(entry, 'detail') === undefined ? [] : asArray(get(entry, 'detail')).map(text),
+        // The entries beside them hold what the run printed apart from those errors, which the
+        // engine printed once with gdUnit4's frames under each and gdUnit4 listed again.
+        const brokenEntries = asArray(get(brokenAnswer, 'entries')).map((entry) => text(get(entry, 'text')));
+        assert.ok(
+          brokenEntries.some((line) => line.startsWith('Scanning for test suites in: res://broken')),
+          broken,
         );
-        assert.ok(brokenFrames.length > 0, broken);
-        assert.equal(
-          brokenFrames.filter((line) => line.includes('addons/gdUnit4/src')).length,
-          0,
-          'the frames gdUnit4 took to load the scripts are counted, not listed',
+        assert.deepEqual(
+          brokenEntries.filter((line) =>
+            /undefined_thing|NoSuchBaseClass|Failed to load script|Script errors were detected|^\s*at res:\/\//.test(
+              line,
+            ),
+          ),
+          [],
+          broken,
         );
         assert.equal(
           get(brokenAnswer, 'failedThroughDependency'),
@@ -23405,6 +23618,91 @@ async function testGdUnitRunner(): Promise<void> {
         );
         rmSync(join(projectDir, 'leaning'), { recursive: true, force: true });
         writeFileSync(join(projectDir, 'project.godot'), settingsBefore);
+
+        // #908: ostinato's shape, a colon missing from a static function in a class_name script.
+        // Every script using the class fails to resolve it and the engine prints nothing naming
+        // the script itself, so its path and line come from the engine's check of it. The engine
+        // places the error on the line after the missing colon, the first it could not parse.
+        mkdirSync(join(projectDir, 'motif'));
+        writeFileSync(
+          join(projectDir, 'motif', 'motif.gd'),
+          [
+            'class_name RegressionMotif',
+            'extends RefCounted',
+            '',
+            '',
+            'static func plain(beats: int) -> int:',
+            '\treturn beats',
+            '',
+            '',
+            'static func doubled(beats: int) -> int',
+            '\treturn beats * 2',
+            '',
+          ].join('\n'),
+        );
+        writeFileSync(
+          join(projectDir, 'motif', 'hearing.gd'),
+          [
+            'class_name RegressionHearing',
+            'extends RefCounted',
+            '',
+            '',
+            'func beats() -> int:',
+            '\treturn RegressionMotif.plain(2)',
+            '',
+          ].join('\n'),
+        );
+        writeFileSync(
+          join(projectDir, 'motif', 'hearing_test.gd'),
+          [
+            'extends GdUnitTestSuite',
+            '',
+            '',
+            'func test_beats() -> void:',
+            '\tassert_int(RegressionHearing.new().beats()).is_equal(2)',
+            '',
+          ].join('\n'),
+        );
+        const motif = await call(
+          'project_test',
+          { projectPath: projectDir, path: 'res://motif/hearing_test.gd' },
+          ENGINE_CALL_TIMEOUT_MS * 3,
+        );
+        const motifNote = motif.slice(0, motif.indexOf('{'));
+        const motifAnswer: unknown = JSON.parse(motif.slice(motif.indexOf('{')));
+        assert.deepEqual(
+          asArray(get(motifAnswer, 'scriptErrors'))[0],
+          {
+            path: 'res://motif/motif.gd',
+            line: 10,
+            message: 'Parse Error: Unexpected "Indent" in class body.',
+            declares: 'RegressionMotif',
+          },
+          motif,
+        );
+        assert.match(
+          motifNote,
+          /^No tests ran: gdUnit4 could not load 2 scripts [\s\S]*\. res:\/\/motif\/motif\.gd:10 Parse Error: Unexpected "Indent" in class body\. gdUnit4 did not name this script, which declares RegressionMotif; the engine's own check of it found the error\. res:\/\/motif\/hearing\.gd:6 could not resolve RegressionMotif because of it\. One more failed only because a script it depends on did: res:\/\/motif\/hearing_test\.gd\.$/,
+          motif,
+        );
+        assert.equal(get(motifAnswer, 'verdict'), 'script errors in 3 scripts, so no suite ran', motif);
+        // What the answer carries beside them: what the run printed, without the errors listed
+        // above it a second and third time.
+        const motifEntries = asArray(get(motifAnswer, 'entries')).map((entry) => text(get(entry, 'text')));
+        assert.ok(
+          motifEntries.some((line) => line.startsWith('Godot Engine v')),
+          motif,
+        );
+        assert.deepEqual(
+          motifEntries.filter((line) =>
+            /Failed to compile depended scripts|Could not resolve class|Failed to load script|Script errors were detected|^\s*at res:\/\//.test(
+              line,
+            ),
+          ),
+          [],
+          motif,
+        );
+        rmSync(join(projectDir, 'motif'), { recursive: true, force: true });
       },
       { GODOT_PATH: godotPath },
     );

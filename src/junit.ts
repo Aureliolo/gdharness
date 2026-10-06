@@ -372,12 +372,23 @@ const DISCOVERY_FAILED = 'Script errors were detected during test discovery!';
  * then each error as its message and an `at` line naming the script and line.
  */
 export function scriptErrorsPrinted(printed: readonly string[]): ScriptError[] {
+  return discoveryListing(printed)?.errors ?? [];
+}
+
+/**
+ * Where in [param printed] gdUnit4 listed the scripts it could not load, from its heading to the
+ * last line of the list, with the errors read off it; null when it listed none.
+ */
+export function discoveryListing(
+  printed: readonly string[],
+): { readonly errors: ScriptError[]; readonly from: number; readonly to: number } | null {
   const start = printed.findIndex((line) => line.includes(DISCOVERY_FAILED));
   if (start < 0) {
-    return [];
+    return null;
   }
   const found: ScriptError[] = [];
   let message: string | null = null;
+  let to = start + 1;
   for (const line of printed.slice(start + 1)) {
     const at = /^\s*at (res:\/\/.+):(\d+)\s*$/.exec(line);
     if (at !== null && message !== null) {
@@ -388,10 +399,14 @@ export function scriptErrorsPrinted(printed: readonly string[]): ScriptError[] {
     } else {
       break;
     }
+    to += 1;
   }
   // gdUnit4 lists them in the order the filesystem hands it the directory, which Linux and
   // Windows disagree about, so the same project named its broken scripts in two orders.
-  return found.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : (a.line ?? 0) - (b.line ?? 0)));
+  const errors = found.sort((a, b) =>
+    a.path < b.path ? -1 : a.path > b.path ? 1 : (a.line ?? 0) - (b.line ?? 0),
+  );
+  return { errors, from: start, to };
 }
 
 const ESCAPE = String.fromCharCode(0x1b);
