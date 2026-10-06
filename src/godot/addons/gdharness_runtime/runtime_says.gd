@@ -16,6 +16,9 @@ const SPLITS_KEPT: int = 8
 ## Each `says` split into alternatives, by what was written; see [method alternatives].
 static var _splits: Dictionary[String, Array] = {}
 
+## Every space separator Unicode has besides the plain space, built once; see [method spaced].
+static var _spaces: RegEx = null
+
 
 ## Whether [param node]'s own words are what [param wanted] asks for.
 static func says(node: Node, wanted: String) -> bool:
@@ -35,10 +38,31 @@ static func says(node: Node, wanted: String) -> bool:
 ## first, and read as one glob with the bars in it, it waited out its whole timeout for words no
 ## screen says.
 static func matches(said: String, wanted: String) -> bool:
+	var shown: String = spaced(said)
 	for words: String in alternatives(wanted):
-		if said.containsn(words) if is_plain(words) else said.matchn(words):
+		if shown.containsn(words) if is_plain(words) else shown.matchn(words):
 			return true
 	return false
+
+
+## [param text] with every Unicode space separator written as a plain space, which is what a caller
+## types for any of them. A game keeping a name on one line writes it with a non-breaking space, and
+## "Deskanem Bonituk" typed with a plain one found nothing while the screen showed exactly those
+## words. One character for one, so a place found in the result is the same place in [param text].
+static func spaced(text: String) -> String:
+	if _spaces == null:
+		var separators: String = (
+			String.chr(0x00A0)
+			+ String.chr(0x1680)
+			+ String.chr(0x2000)
+			+ "-"
+			+ String.chr(0x200A)
+			+ String.chr(0x202F)
+			+ String.chr(0x205F)
+			+ String.chr(0x3000)
+		)
+		_spaces = RegEx.create_from_string("[%s]" % separators)
+	return _spaces.sub(text, " ", true)
 
 
 ## The alternatives [param wanted] names, each as words on a screen: split at every `|` not written
@@ -110,4 +134,4 @@ static func widened(wanted: String) -> String:
 ## which reads as a control that is not on the screen. Nothing on a screen says a backslash and
 ## an n, so the two characters mean the break to everybody who writes them.
 static func as_said(wanted: String) -> String:
-	return wanted.replace("\\n", "\n")
+	return spaced(wanted.replace("\\n", "\n"))

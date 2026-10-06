@@ -9,6 +9,7 @@ extends SceneTree
 
 const Checked = preload("checked.gd")
 const InputCommands = preload("res://addons/gdharness_runtime/runtime_input.gd")
+const Says = preload("res://addons/gdharness_runtime/runtime_says.gd")
 const Typing = preload("res://addons/gdharness_runtime/runtime_typing.gd")
 const Values = preload("res://addons/gdharness_runtime/runtime_values.gd")
 
@@ -56,8 +57,10 @@ func _everything() -> void:
 	await _check_words_nobody_can_click()
 	await _check_words_in_a_rich_label()
 	await _check_a_word_inside_a_sentence()
+	await _check_a_word_said_inside_other_words()
 	await _check_an_item_in_an_open_menu()
 	await _check_a_field_by_its_placeholder()
+	await _check_words_held_together_by_a_space_that_does_not_break()
 	await _check_a_dialog_over_a_dialog()
 	await _check_a_dialog_under_a_clipping_container()
 
@@ -618,6 +621,98 @@ func _check_a_word_inside_a_sentence() -> void:
 	await process_frame
 
 
+## The screen #895 was reported from again on 1.1.46, built up from what was on it and taken away one
+## piece at a time. No control's text said "Out": the tab saying it was a picture named for a player
+## who cannot see it, once hidden in a drawer and once on the rail as "Open Out", beside cards saying
+## "Scout, 90" and a line saying what "is out there". The card was pressed, and spent the game's
+## silver.
+func _check_a_word_said_inside_other_words() -> void:
+	var drawer: Button = _button("DrawerOut", Vector2(2, 2), root)
+	drawer.accessibility_name = "Out"
+	drawer.visible = false
+	var rail: Button = _button("RailOut", Vector2(2, 2), root)
+	rail.accessibility_name = "Open Out"
+	var card: Button = _button("Look", Vector2(20, 2), root, "Scout, 90")
+	var there: Label = Label.new()
+	there.name = "There"
+	there.text = "what is out there"
+	there.add_theme_font_size_override("font_size", 4)
+	there.position = Vector2(2, 30)
+	root.add_child(there)
+	await process_frame
+
+	var refused: Dictionary = await input.click({"says": "Out"})
+	var said: String = str(refused.get("message", ""))
+	if (
+		not _says(refused, 'no control on screen says exactly "Out"')
+		or not said.contains("/root/RailOut")
+		or not said.contains("/root/DrawerOut, hidden")
+		or _presses("RailOut") + _presses("Look") != 0
+	):
+		_fail(
+			"a picture named for part of the words stands in for the hidden one: %s" % JSON.stringify(refused)
+		)
+	var asked: Dictionary = await input.click({"says": "Out", "index": 0})
+	if _presses("RailOut") != 1 or _presses("Look") != 0:
+		_fail("and is pressed by index, not the card: %s" % JSON.stringify(asked))
+
+	drawer.queue_free()
+	await process_frame
+	var named: Dictionary = await input.click({"says": "Out"})
+	var found: Dictionary = named.get("found", {})
+	if _presses("RailOut") != 2 or _presses("Look") != 0 or found.get("partOf") != "Open Out":
+		_fail("with nothing else saying it, the picture named for it is pressed: %s" % JSON.stringify(named))
+
+	rail.queue_free()
+	await process_frame
+	var through: Dictionary = await input.click({"says": "Out"})
+	if (
+		not _says(through, "lets the pointer through")
+		or not str(through.get("message", "")).contains("/root/There")
+	):
+		_fail(
+			"a line the pointer passes through is not clicked for a word in it: %s" % JSON.stringify(through)
+		)
+	if _presses("Look") != 0:
+		_fail("and the card saying Scout is not pressed in its place")
+
+	there.queue_free()
+	await process_frame
+	var buried: Dictionary = await input.click({"says": "Out"})
+	if not _says(buried, 'says "Out" as a word of its own') or not _says(buried, '"Scout, 90"'):
+		_fail("words found only inside a longer word are refused: %s" % JSON.stringify(buried))
+	var anyway: Dictionary = await input.click({"says": "Out", "index": 0})
+	if _presses("Look") != 1:
+		_fail("and pressed when asked for by index: %s" % JSON.stringify(anyway))
+	card.queue_free()
+
+	# Exact on screen in a control that takes clicks without being a button, beside a button saying
+	# more. A heading letting the pointer through is passed over for the button, which the input
+	# fixture holds with "Onward".
+	var heading: Label = Label.new()
+	heading.name = "Heading"
+	heading.text = "Out"
+	heading.mouse_filter = Control.MOUSE_FILTER_STOP
+	heading.position = Vector2(2, 30)
+	root.add_child(heading)
+	_put("Beyond", Vector2(2, 2), root, "Out there")
+	await process_frame
+	var beside: Dictionary = await input.click({"says": "Out"})
+	if not _says(beside, 'no button on screen says exactly "Out"') or _presses("Beyond") != 0:
+		_fail("an exact match on screen that is not a button is named: %s" % JSON.stringify(beside))
+	heading.queue_free()
+	root.get_node("Beyond").queue_free()
+
+	# A word starting a longer one is said, the way a plural says its singular.
+	_put("Hire", Vector2(2, 2), root, "Recruits")
+	await process_frame
+	var plural: Dictionary = await input.click({"says": "Recruit"})
+	if _presses("Hire") != 1:
+		_fail("words starting a longer word are pressed: %s" % JSON.stringify(plural))
+	root.get_node("Hire").queue_free()
+	await process_frame
+
+
 ## An item of an open menu is drawn by the menu rather than held as a control, so a click by its
 ## words finds no control; the refusal names the menu and the call that chooses the item. #894: a
 ## wait was met on an item's words and the click after it was refused with no word of choose.
@@ -662,6 +757,52 @@ func _check_a_field_by_its_placeholder() -> void:
 	if not _says(filled, "no control on screen"):
 		_fail("and not once it holds text, which is drawn instead: %s" % JSON.stringify(filled))
 	search.queue_free()
+	await process_frame
+
+
+## Any space a game draws between words is the space a caller types. #906: a name kept on one line
+## with a non-breaking space was not found by the name typed with a plain one, while the screen
+## showed exactly those words. Each separator, a link inside a line pressed where it is drawn, and a
+## button saying the words exactly, which ranks as the exact match it is.
+func _check_words_held_together_by_a_space_that_does_not_break() -> void:
+	for code: int in [0x00A0, 0x1680, 0x2000, 0x2007, 0x200A, 0x202F, 0x205F, 0x3000]:
+		if not Says.matches("Ab%sCd" % String.chr(code), "ab cd"):
+			_fail("a typed space matches U+%04X" % code)
+	if Says.matches("Ab%sCd" % String.chr(0x200B), "ab cd"):
+		_fail("and a zero-width space, which draws no space, is not one")
+
+	var line: RichTextLabel = RichTextLabel.new()
+	line.name = "Dossier"
+	line.bbcode_enabled = true
+	line.autowrap_mode = TextServer.AUTOWRAP_OFF
+	line.add_theme_font_size_override("normal_font_size", 4)
+	line.position = Vector2(0, 20)
+	line.size = Vector2(64, 12)
+	line.text = "[url=named]Ab%sCd[/url] and a great deal more" % String.chr(0x00A0)
+	root.add_child(line)
+	await process_frame
+	await process_frame
+	var named: Dictionary = await input.click({"says": "Ab Cd"})
+	var found: Dictionary = named.get("found", {})
+	if named.get("link_pressed") != "named" or found.get("pressedOn") != "the words":
+		_fail(
+			(
+				"a name held by a non-breaking space is found and pressed by its typed words: %s"
+				% JSON.stringify(named)
+			)
+		)
+	line.queue_free()
+
+	var held: Button = _button("Held", Vector2(2, 2), root, "Leave%snow" % String.chr(0x202F))
+	_put("Loose", Vector2(34, 2), root, "Leave now and then")
+	await process_frame
+	var exact: Dictionary = await input.click({"says": "leave now"})
+	if exact.get("path") != "/root/Held" or _presses("Held") != 1:
+		_fail(
+			"and words held together say them exactly, over a button saying more: %s" % JSON.stringify(exact)
+		)
+	held.queue_free()
+	root.get_node("Loose").queue_free()
 	await process_frame
 
 
