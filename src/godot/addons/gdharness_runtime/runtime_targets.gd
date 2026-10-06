@@ -42,12 +42,19 @@ static func control_saying(root: Node, root_path: String, wanted: String, which:
 	var said: Array[String] = []
 	var exact: Array[bool] = []
 	var hidden: int = 0
+	# Controls saying exactly the words that a click cannot reach, kept to say what a match on screen
+	# that only says them as part of more stands in for.
+	var exact_out_of_reach: Array[Node] = []
+	var out_of_reach_as: Array[String] = []
 	var pending: Array[Node] = [reached["node"]]
 	while not pending.is_empty():
 		var node: Node = pending.pop_front()
 		if node is Control and Says.says(node, wanted):
 			if not Queries.shown(node):
 				hidden += 1
+				if _says_exactly(Words.said_by(node), wanted):
+					exact_out_of_reach.append(node)
+					out_of_reach_as.append("hidden")
 			else:
 				var control: Control = node
 				var target: Control = _pressed_through(control)
@@ -74,12 +81,18 @@ static func control_saying(root: Node, root_path: String, wanted: String, which:
 	for index: int in matched.size():
 		if _off_screen(matched[index]):
 			outside += 1
+			if exact[index]:
+				exact_out_of_reach.append(matched[index])
+				out_of_reach_as.append("outside what the screen shows")
 			continue
 		var over: Node = _cover_of(matched[index], drawn, areas)
 		if over == null:
 			open.append(index)
 		else:
 			covered += 1
+			if exact[index]:
+				exact_out_of_reach.append(matched[index])
+				out_of_reach_as.append("under %s, which is drawn over it" % over.get_path())
 			if cover == null:
 				cover = over
 	# Stable, so matches of one rank keep the order they are drawn in.
@@ -92,10 +105,12 @@ static func control_saying(root: Node, root_path: String, wanted: String, which:
 	var targets: Array[Control] = []
 	var ranks: Array[int] = []
 	var lines: Array[String] = []
+	var wholes: Array[bool] = []
 	for index: int in open:
 		targets.append(matched[index])
 		ranks.append(_rank(matched[index], exact[index]))
 		lines.append(said[index])
+		wholes.append(exact[index])
 
 	var under: String = "" if root_path == "/root" else " under %s" % root_path
 	if targets.is_empty():
@@ -103,8 +118,15 @@ static func control_saying(root: Node, root_path: String, wanted: String, which:
 			"type": "error",
 			"message":
 			(
-				'no control on screen%s says "%s", so nothing was clicked%s%s%s'
-				% [under, wanted, _hidden_note(hidden), _outside_note(outside), _covered_note(covered, cover)]
+				'no control on screen%s says "%s", so nothing was clicked%s%s%s%s'
+				% [
+					under,
+					wanted,
+					_hidden_note(hidden),
+					_outside_note(outside),
+					_covered_note(covered, cover),
+					_open_menu_note(root, wanted),
+				]
 			)
 		}
 	var best: int = ranks.count(ranks[0])
@@ -129,7 +151,33 @@ static func control_saying(root: Node, root_path: String, wanted: String, which:
 				% [str(which), targets.size(), plural, under, wanted, _candidates(targets, lines)]
 			)
 		}
+	# A word inside a sentence on screen, while a control saying exactly that word is out of reach: the
+	# sentence is a stand-in, not the control meant. A tab reading "Out" sat in a collapsed drawer, and
+	# a click on it pressed a dispatch saying somebody "fell out in the hall". Pressed only when asked
+	# for by index, which is the caller saying the sentence is what they meant.
+	if which == null and not wholes[index] and not exact_out_of_reach.is_empty():
+		return {
+			"type": "error",
+			"message":
+			(
+				(
+					'no control on screen%s says exactly "%s", so nothing was clicked: %s %s says it as part of'
+					+ ' "%s", while %s; pass index %d to press that one anyway, or bring the other into view'
+				)
+				% [
+					under,
+					wanted,
+					"the one on screen," if targets.size() == 1 else "the best match on screen,",
+					targets[index].get_path(),
+					_shortened(lines[index]),
+					_out_of_reach_exactly(exact_out_of_reach, out_of_reach_as),
+					index,
+				]
+			)
+		}
 	var found: Dictionary = {"says": wanted, "index": index, "of": targets.size()}
+	if not wholes[index]:
+		found["partOf"] = _shortened(lines[index])
 	if which == null and targets.size() > 1:
 		var others: String = (
 			"the other one on screen %s" % _passed_over(ranks[0], true)
@@ -515,10 +563,48 @@ static func _layer_of(control: Control) -> int:
 static func _candidates(targets: Array[Control], said: Array[String]) -> String:
 	var named: Array[String] = []
 	for index: int in mini(targets.size(), LISTED_CANDIDATES):
-		var words: String = said[index].replace("\n", " ")
-		if words.length() > 60:
-			words = words.substr(0, 57) + "..."
-		named.append('%d %s ("%s")' % [index, targets[index].get_path(), words])
+		named.append('%d %s ("%s")' % [index, targets[index].get_path(), _shortened(said[index])])
 	if targets.size() > LISTED_CANDIDATES:
 		named.append("and %d more" % (targets.size() - LISTED_CANDIDATES))
 	return "; ".join(named)
+
+
+## What to add to a refusal that found nothing on screen, when an open menu has an item saying the
+## words: a menu draws its items rather than holding a control for each, so a click finds none, while
+## a wait for the words finds the item. A wait met on "Leave the hall" was followed by a click on it
+## refused as nothing on screen saying it, with no word of the call that chooses it.
+static func _open_menu_note(root: Node, wanted: String) -> String:
+	var pending: Array[Node] = [root]
+	while not pending.is_empty():
+		var node: Node = pending.pop_back()
+		var menu: PopupMenu = node as PopupMenu
+		if menu != null and menu.visible:
+			for item: int in menu.item_count:
+				var text: String = menu.get_item_text(item)
+				if Says.matches(text, wanted):
+					var owner: Node = menu.get_parent()
+					var named: Node = owner if owner is MenuButton or owner is OptionButton else menu
+					return (
+						(
+							'; the open menu %s has an item saying it, "%s", which a click cannot reach:'
+							+ ' choose it with runtime_input choose, path %s and text "%s"'
+						)
+						% [menu.get_path(), text, named.get_path(), text]
+					)
+		pending.append_array(node.get_children(true))
+	return ""
+
+
+## [param words] on one line and at most sixty characters, for naming a control by what it says.
+static func _shortened(words: String) -> String:
+	var flat: String = words.replace("\n", " ").strip_edges()
+	return flat if flat.length() <= 60 else flat.substr(0, 57) + "..."
+
+
+## The controls in [param nodes], each saying the words exactly and out of a click's reach for the
+## reason [param why] holds at the same place, as the end of a sentence.
+static func _out_of_reach_exactly(nodes: Array[Node], why: Array[String]) -> String:
+	var first: String = "%s, %s" % [nodes[0].get_path(), why[0]]
+	if nodes.size() == 1:
+		return "1 control says exactly that and cannot be clicked: %s" % first
+	return "%d controls say exactly that and cannot be clicked, such as %s" % [nodes.size(), first]
