@@ -83,19 +83,21 @@ const READS_ONLY: String = ", and a path, which a wait reads every frame, only c
 ## at a time rather than handed to that method, which answers null for a path that goes wrong
 ## halfway along and for one that ends on null.
 ##
-## A step written as a call, "get_viewport()", calls a method of that name that takes no arguments
-## and walks into what it returned. Some of what hangs off a node is only reachable by asking:
-## which control holds the focus is a question for the viewport a control is in, and the viewport
-## is a method's answer rather than a property. Spelled with the brackets so a reader sees a call
-## where one happens, and so a method can never shadow a property of the same name. A list or a map
-## answers the calls that read it, "board:size()" or "inbox:keys()", listed in [constant LIST_CALLS]
-## and [constant MAP_CALLS].
+## A step written as a call, "get_viewport()", calls a method of that name and walks into what it
+## returned. Some of what hangs off a node is only reachable by asking: which control holds the
+## focus is a question for the viewport a control is in, and the viewport is a method's answer
+## rather than a property. Spelled with the brackets so a reader sees a call where one happens, and
+## so a method can never shadow a property of the same name. A list or a map answers the calls that
+## read it, "board:size()" or "inbox:keys()", listed in [constant LIST_CALLS] and
+## [constant MAP_CALLS]. An engine method that reads takes literal arguments in the brackets,
+## "get_theme_stylebox(\"panel\"):content_margin_top", since what a control's theme gives it is only
+## reachable by naming what is asked for; see [method arguments_of].
 ##
 ## Answers with a `message` instead when a step along the way is not there or holds something that
 ## is not an object, naming the step rather than the whole path: "/root/Main:_game has no property
 ## clocks" is a typo found, and "no property _game:clocks:speed" is a puzzle.
 static func walk_to(node: Node, node_path: String, reaching: String) -> Dictionary:
-	var parts: PackedStringArray = reaching.split(":")
+	var parts: PackedStringArray = steps_of(reaching)
 	var holder: Variant = node
 	var called: String = node_path
 	for step: int in parts.size() - 1:
@@ -187,26 +189,33 @@ static func nothing_under(holder: Variant, named: String, called: String) -> Str
 ## first one. An index reads the way a property does, and a negative one counts from the end the
 ## way GDScript's own does, so reading the last of something does not mean asking how many first.
 static func can_read(holder: Variant, named: String) -> bool:
+	var method: String = method_of(named)
+	var given: Dictionary = arguments_of(named) if not method.is_empty() else {"args": []}
+	if given.has("message"):
+		return false
+	var args: Array = given["args"]
 	if holder is Array:
 		var items: Array = holder
-		var list_call: String = method_of(named)
-		if not list_call.is_empty():
-			return list_call in LIST_CALLS and not (items.is_empty() and list_call in NEEDS_AN_ELEMENT)
+		if not method.is_empty():
+			return (
+				args.is_empty()
+				and method in LIST_CALLS
+				and not (items.is_empty() and method in NEEDS_AN_ELEMENT)
+			)
 		return _index_in(named, items.size()) != -1
 	if packed(holder):
-		if not method_of(named).is_empty():
-			return method_of(named) in PACKED_CALLS
+		if not method.is_empty():
+			return args.is_empty() and method in PACKED_CALLS
 		return _index_in(named, len(holder)) != -1
 	if holder is Dictionary:
 		var map: Dictionary = holder
-		if not method_of(named).is_empty():
-			return method_of(named) in MAP_CALLS
+		if not method.is_empty():
+			return args.is_empty() and method in MAP_CALLS
 		return not _key_in(map, named).is_empty()
 	if holder is Object:
 		var object: Object = holder
-		var method: String = method_of(named)
 		if not method.is_empty():
-			return call_refused(object, method, "").is_empty()
+			return call_refused(object, method, "", args.size()).is_empty()
 		return _has_property(object, named)
 	return false
 
@@ -236,24 +245,103 @@ static func _key_in(map: Dictionary, named: String) -> Array:
 	return []
 
 
-## The method a step written as a call names, "get_viewport()" being get_viewport, or "" for a
-## step that is a name.
+## [param reaching] split into its steps at each colon, except one inside a call's brackets or a
+## quoted argument: `get_node("/root/Main"):name` is two steps, and split at every colon a quoted
+## argument holding one became a step that names nothing.
+static func steps_of(reaching: String) -> PackedStringArray:
+	var steps: PackedStringArray = []
+	var step: String = ""
+	var depth: int = 0
+	var quoted: bool = false
+	var escaped: bool = false
+	for character: String in reaching:
+		if quoted:
+			if escaped:
+				escaped = false
+			elif character == "\\":
+				escaped = true
+			elif character == '"':
+				quoted = false
+		elif character == '"':
+			quoted = true
+		elif character == "(":
+			depth += 1
+		elif character == ")":
+			depth = maxi(depth - 1, 0)
+		elif character == ":" and depth == 0:
+			var _kept: bool = steps.push_back(step)
+			step = ""
+			continue
+		step += character
+	var _last: bool = steps.push_back(step)
+	return steps
+
+
+## The method a step written as a call names, "get_viewport()" being get_viewport and
+## `get_theme_constant("separation")` get_theme_constant, or "" for a step that is a name.
 static func method_of(named: String) -> String:
-	return named.trim_suffix("()") if named.ends_with("()") else ""
+	if not named.ends_with(")"):
+		return ""
+	var opened: int = named.find("(")
+	if opened < 1:
+		return ""
+	var method: String = named.substr(0, opened)
+	return method if method.is_valid_ascii_identifier() else ""
 
 
-## How many arguments [param method] on [param object] has to be given, or -1 when there is no such
-## method. Read off the method list rather than [method Object.has_method], because a path can only
-## call a method with nothing, and a method with a required argument called with nothing raises
-## inside the game rather than answering.
-static func _arguments_required(object: Object, method: String) -> int:
+## The arguments a call step gives in its brackets, as {"args"}, or {"message"} saying why they are
+## not ones a path can give.
+##
+## Literals only: words in double quotes, numbers, true, false and null, read as JSON reads them, a
+## whole number as an int. A path names what is read, and an argument that was itself a path or an
+## object would make a read depend on other state in a way the step does not show.
+static func arguments_of(named: String) -> Dictionary:
+	var inside: String = named.substr(named.find("(") + 1, named.length() - named.find("(") - 2).strip_edges()
+	if inside.is_empty():
+		return {"args": []}
+	var reader: JSON = JSON.new()
+	var parsed: Variant = reader.data if reader.parse("[%s]" % inside) == OK else null
+	if not parsed is Array:
+		return {"message": _not_literals(named)}
+	var args: Array = []
+	for given: Variant in parsed:
+		if given is float:
+			var number: float = given
+			if number == floorf(number) and absf(number) < 9.0e15:
+				args.append(int(number))
+			else:
+				args.append(number)
+		elif given == null or given is String or given is bool:
+			args.append(given)
+		else:
+			return {"message": _not_literals(named)}
+	return {"args": args}
+
+
+static func _not_literals(named: String) -> String:
+	return (
+		"%s: a path gives a call literal arguments only, words in double quotes, numbers, true, false or null"
+		% named
+	)
+
+
+## How many arguments [param method] on [param object] takes, as {"least", "most", "any_more"}, or
+## an empty map when there is no such method. Read off the method list rather than
+## [method Object.has_method], because a method given too few or too many raises inside the game
+## rather than answering.
+static func _arity(object: Object, method: String) -> Dictionary:
 	for entry: Dictionary in object.get_method_list():
 		if str(entry.get("name", "")) != method:
 			continue
 		var params: Array = entry.get("args", [])
 		var defaults: Array = entry.get("default_args", [])
-		return params.size() - defaults.size()
-	return -1
+		var flags: int = entry.get("flags", 0)
+		return {
+			"least": params.size() - defaults.size(),
+			"most": params.size(),
+			"any_more": flags & METHOD_FLAG_VARARG != 0,
+		}
+	return {}
 
 
 ## Why a path may not call [param method] on [param object], said about [param called_as], or ""
@@ -265,16 +353,36 @@ static func _arguments_required(object: Object, method: String) -> int:
 ## doing something and answering nothing, and one left untyped is trusted. Without this a find
 ## with property "queue_free()" freed every node it matched, and a wait on "advance_day()" called
 ## it once a frame and then reported the state it had driven the game to.
-static func call_refused(object: Object, method: String, called_as: String) -> String:
-	var required: int = _arguments_required(object, method)
-	if required == -1:
+##
+## Given [param given] arguments, a call is the engine's and marked as reading, or it is refused. A
+## game's method taking arguments is trusted on nothing at all: one answering a value can as well
+## change what it was asked about, and runtime_invoke call is how one is called on purpose.
+static func call_refused(object: Object, method: String, called_as: String, given: int = 0) -> String:
+	var arity: Dictionary = _arity(object, method)
+	if arity.is_empty():
 		return "%s has no method %s" % [called_as, method]
-	if required > 0:
-		return (
-			"%s.%s takes %d argument%s, and a path can only call a method that takes none"
-			% [called_as, method, required, "" if required == 1 else "s"]
-		)
+	var least: int = arity["least"]
+	var most: int = arity["most"]
+	var any_more: bool = arity["any_more"]
 	var scripted: Dictionary = _script_method(object, method)
+	if not scripted.is_empty() and (given > 0 or least > 0):
+		var why: String = (
+			"since nothing marks one as only reading%s; runtime_invoke call takes them" % READS_ONLY
+		)
+		return (
+			"%s.%s is the game's own and a path gives a game's method no arguments, %s"
+			% [called_as, method, why]
+		)
+	if given < least or (given > most and not any_more):
+		var takes: String = "%d" % least
+		if any_more:
+			takes = "at least %d" % least
+		elif most != least:
+			takes = "%d to %d" % [least, most]
+		return (
+			'%s.%s takes %s argument%s and the path gives it %d, in the brackets as in %s("name")'
+			% [called_as, method, takes, "" if takes == "1" else "s", given, method]
+		)
 	if not scripted.is_empty():
 		var returned: Dictionary = scripted.get("return", {})
 		var usage: int = returned.get("usage", 0)
@@ -350,7 +458,8 @@ static func read_under(holder: Variant, named: String) -> Variant:
 	var object: Object = holder
 	var method: String = method_of(named)
 	if not method.is_empty():
-		return object.call(method)
+		var args: Array = arguments_of(named)["args"]
+		return object.callv(method, args)
 	return object.get(named)
 
 
@@ -374,20 +483,25 @@ static func _index_in(named: String, size: int) -> int:
 ## the whole path, because the step is the typo.
 static func nothing_there(holder: Variant, named: String, called_as: String) -> String:
 	var container_call: String = method_of(named)
+	var given: Dictionary = arguments_of(named) if not container_call.is_empty() else {"args": []}
+	if given.has("message"):
+		return "%s:%s" % [called_as, given["message"]]
+	var given_args: Array = given["args"]
+	var given_count: int = given_args.size()
 	if holder is Array:
 		var items: Array = holder
 		if container_call in NEEDS_AN_ELEMENT and items.is_empty():
 			return "%s is an empty list, so it has no %s" % [called_as, named]
 		if not container_call.is_empty():
-			return container_calls_refused(called_as, "a list", container_call)
+			return container_calls_refused(called_as, "a list", container_call, given_count)
 		return "%s is a list of %d, so there is no %s in it" % [called_as, items.size(), named]
 	if packed(holder):
 		if not container_call.is_empty():
-			return container_calls_refused(called_as, "a packed list", container_call)
+			return container_calls_refused(called_as, "a packed list", container_call, given_count)
 		return "%s is a packed list of %d, so there is no %s in it" % [called_as, len(holder), named]
 	if holder is Dictionary:
 		if not container_call.is_empty():
-			return container_calls_refused(called_as, "a map", container_call)
+			return container_calls_refused(called_as, "a map", container_call, given_count)
 		var map: Dictionary = holder
 		var keys: Array = map.keys()
 		# A key reading as the step and still not reached is one of a type a step cannot spell, and
@@ -410,7 +524,7 @@ static func nothing_there(holder: Variant, named: String, called_as: String) -> 
 	var object: Object = holder
 	var method: String = method_of(named)
 	if not method.is_empty():
-		return call_refused(object, method, called_as)
+		return call_refused(object, method, called_as, given_count)
 	# A method spelled as a property is the likeliest thing behind a name the object has no property
 	# for, and the caller is one pair of brackets away from what they meant.
 	if object.has_method(named):
@@ -422,13 +536,18 @@ static func nothing_there(holder: Variant, named: String, called_as: String) -> 
 
 
 ## Why [param method] is not a call a path makes on [param sort] ("a list", "a packed list" or "a
-## map"), naming the calls it does make.
-static func container_calls_refused(called_as: String, sort: String, method: String) -> String:
+## map"), naming the calls it does make, or that it makes this one with no arguments when
+## [param given] were.
+static func container_calls_refused(
+	called_as: String, sort: String, method: String, given: int = 0
+) -> String:
 	var calls: Array[String] = MAP_CALLS
 	if sort == "a list":
 		calls = LIST_CALLS
 	elif sort == "a packed list":
 		calls = PACKED_CALLS
+	if given > 0 and method in calls:
+		return "%s is %s, and a path calls %s() on one with no arguments" % [called_as, sort, method]
 	var spelled: Array[String] = []
 	for each: String in calls:
 		spelled.append(each + "()")

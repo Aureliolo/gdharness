@@ -771,7 +771,7 @@ func _check_calling_a_step_along_the_path(hero: Node2D, button: Button) -> void:
 		"get_property", {"path": "/root/Level/Hero", "property": "first():called"}
 	)
 	var refused: String = str(needing.get("message", ""))
-	if needing.get("type") != "error" or not refused.contains("takes 1 argument, and a path can only call"):
+	if needing.get("type") != "error" or not refused.contains("first is the game's own and a path"):
 		_fail("a method that needs an argument is refused as one: %s" % str(needing))
 
 	var defaulted: Dictionary = await node._execute_command(

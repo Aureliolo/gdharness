@@ -2971,6 +2971,7 @@ class GodotServer {
                 path: readNonEmptyString(args, 'nodePath') ?? '',
                 method: readString(args, 'method') ?? '',
                 args: readArray(args, 'args') ?? [],
+                ...(args['properties'] === undefined ? {} : { properties: args['properties'] }),
               },
               patience,
             );
