@@ -25,7 +25,14 @@ static func said_by(node: Node) -> String:
 		return _label_says(label)
 	if _draws_a_list(node):
 		return "\n".join(lines_said_by(node))
-	return _text_of(node)
+	var own: String = _text_of(node)
+	# A control showing a picture rather than words is named for a player who cannot see it, and that
+	# name is the one the words a caller asks by are meant for: the rail's "Out" tab is a square with
+	# an icon on it, and a click on "Out" found only the words around it.
+	if own.is_empty() and node is Control:
+		var control: Control = node
+		return control.atr(control.accessibility_name).strip_edges()
+	return own
 
 
 ## Every line [param node] draws for a player to read, one to an entry: a label's one line, or each

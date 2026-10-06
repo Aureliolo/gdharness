@@ -57,6 +57,7 @@ func _everything() -> void:
 	await _check_words_nobody_can_click()
 	await _check_words_in_a_rich_label()
 	await _check_a_word_inside_a_sentence()
+	await _check_a_word_said_inside_other_words()
 	await _check_an_item_in_an_open_menu()
 	await _check_a_field_by_its_placeholder()
 	await _check_words_held_together_by_a_space_that_does_not_break()
@@ -617,6 +618,98 @@ func _check_a_word_inside_a_sentence() -> void:
 			)
 		)
 	line.queue_free()
+	await process_frame
+
+
+## The screen #895 was reported from again on 1.1.46, built up from what was on it and taken away one
+## piece at a time. No control's text said "Out": the tab saying it was a picture named for a player
+## who cannot see it, once hidden in a drawer and once on the rail as "Open Out", beside cards saying
+## "Scout, 90" and a line saying what "is out there". The card was pressed, and spent the game's
+## silver.
+func _check_a_word_said_inside_other_words() -> void:
+	var drawer: Button = _button("DrawerOut", Vector2(2, 2), root)
+	drawer.accessibility_name = "Out"
+	drawer.visible = false
+	var rail: Button = _button("RailOut", Vector2(2, 2), root)
+	rail.accessibility_name = "Open Out"
+	var card: Button = _button("Look", Vector2(20, 2), root, "Scout, 90")
+	var there: Label = Label.new()
+	there.name = "There"
+	there.text = "what is out there"
+	there.add_theme_font_size_override("font_size", 4)
+	there.position = Vector2(2, 30)
+	root.add_child(there)
+	await process_frame
+
+	var refused: Dictionary = await input.click({"says": "Out"})
+	var said: String = str(refused.get("message", ""))
+	if (
+		not _says(refused, 'no control on screen says exactly "Out"')
+		or not said.contains("/root/RailOut")
+		or not said.contains("/root/DrawerOut, hidden")
+		or _presses("RailOut") + _presses("Look") != 0
+	):
+		_fail(
+			"a picture named for part of the words stands in for the hidden one: %s" % JSON.stringify(refused)
+		)
+	var asked: Dictionary = await input.click({"says": "Out", "index": 0})
+	if _presses("RailOut") != 1 or _presses("Look") != 0:
+		_fail("and is pressed by index, not the card: %s" % JSON.stringify(asked))
+
+	drawer.queue_free()
+	await process_frame
+	var named: Dictionary = await input.click({"says": "Out"})
+	var found: Dictionary = named.get("found", {})
+	if _presses("RailOut") != 2 or _presses("Look") != 0 or found.get("partOf") != "Open Out":
+		_fail("with nothing else saying it, the picture named for it is pressed: %s" % JSON.stringify(named))
+
+	rail.queue_free()
+	await process_frame
+	var through: Dictionary = await input.click({"says": "Out"})
+	if (
+		not _says(through, "lets the pointer through")
+		or not str(through.get("message", "")).contains("/root/There")
+	):
+		_fail(
+			"a line the pointer passes through is not clicked for a word in it: %s" % JSON.stringify(through)
+		)
+	if _presses("Look") != 0:
+		_fail("and the card saying Scout is not pressed in its place")
+
+	there.queue_free()
+	await process_frame
+	var buried: Dictionary = await input.click({"says": "Out"})
+	if not _says(buried, 'says "Out" as a word of its own') or not _says(buried, '"Scout, 90"'):
+		_fail("words found only inside a longer word are refused: %s" % JSON.stringify(buried))
+	var anyway: Dictionary = await input.click({"says": "Out", "index": 0})
+	if _presses("Look") != 1:
+		_fail("and pressed when asked for by index: %s" % JSON.stringify(anyway))
+	card.queue_free()
+
+	# Exact on screen in a control that takes clicks without being a button, beside a button saying
+	# more. A heading letting the pointer through is passed over for the button, which the input
+	# fixture holds with "Onward".
+	var heading: Label = Label.new()
+	heading.name = "Heading"
+	heading.text = "Out"
+	heading.mouse_filter = Control.MOUSE_FILTER_STOP
+	heading.position = Vector2(2, 30)
+	root.add_child(heading)
+	_put("Beyond", Vector2(2, 2), root, "Out there")
+	await process_frame
+	var beside: Dictionary = await input.click({"says": "Out"})
+	if not _says(beside, 'no button on screen says exactly "Out"') or _presses("Beyond") != 0:
+		_fail("an exact match on screen that is not a button is named: %s" % JSON.stringify(beside))
+	heading.queue_free()
+	root.get_node("Beyond").queue_free()
+
+	# A word starting a longer one is said, the way a plural says its singular.
+	_put("Hire", Vector2(2, 2), root, "Recruits")
+	await process_frame
+	var plural: Dictionary = await input.click({"says": "Recruit"})
+	if _presses("Hire") != 1:
+		_fail("words starting a longer word are pressed: %s" % JSON.stringify(plural))
+	root.get_node("Hire").queue_free()
 	await process_frame
 
 

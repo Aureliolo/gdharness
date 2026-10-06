@@ -41,6 +41,8 @@ static func control_saying(root: Node, root_path: String, wanted: String, which:
 	# The words of the control that matched, which a button pressed on a label's behalf has none of.
 	var said: Array[String] = []
 	var exact: Array[bool] = []
+	# Whether the words are only inside longer words there, "out" in "Scout".
+	var inside: Array[bool] = []
 	var hidden: int = 0
 	# Controls saying exactly the words that a click cannot reach, kept to say what a match on screen
 	# that only says them as part of more stands in for.
@@ -60,14 +62,17 @@ static func control_saying(root: Node, root_path: String, wanted: String, which:
 				var target: Control = _pressed_through(control)
 				var words: String = Words.said_by(node)
 				var whole: bool = _says_exactly(words, wanted)
+				var buried: bool = not whole and _inside_a_word(words, wanted)
 				var at: int = matched.find(target)
 				if at == -1:
 					matched.append(target)
 					said.append(words)
 					exact.append(whole)
-				elif whole and not exact[at]:
+					inside.append(buried)
+				elif (whole and not exact[at]) or (inside[at] and not buried):
 					said[at] = words
-					exact[at] = true
+					exact[at] = whole
+					inside[at] = buried
 		var children: Array[Node] = node.get_children(true)
 		for index: int in range(children.size() - 1, -1, -1):
 			pending.push_front(children[index])
@@ -95,9 +100,13 @@ static func control_saying(root: Node, root_path: String, wanted: String, which:
 				out_of_reach_as.append("under %s, which is drawn over it" % over.get_path())
 			if cover == null:
 				cover = over
-	# Stable, so matches of one rank keep the order they are drawn in.
+	# Stable, so matches of one rank keep the order they are drawn in. Words only inside longer words
+	# come after everything else: ranked as a button saying them as part of more, "Scout, 90" was
+	# pressed for "Out" over a control saying exactly "Out", and spent a game's silver.
 	open.sort_custom(
 		func(a: int, b: int) -> bool:
+			if inside[a] != inside[b]:
+				return inside[b]
 			var first: int = _rank(matched[a], exact[a])
 			var second: int = _rank(matched[b], exact[b])
 			return first > second or (first == second and a < b)
@@ -106,11 +115,13 @@ static func control_saying(root: Node, root_path: String, wanted: String, which:
 	var ranks: Array[int] = []
 	var lines: Array[String] = []
 	var wholes: Array[bool] = []
+	var insides: Array[bool] = []
 	for index: int in open:
 		targets.append(matched[index])
 		ranks.append(_rank(matched[index], exact[index]))
 		lines.append(said[index])
 		wholes.append(exact[index])
+		insides.append(inside[index])
 
 	var under: String = "" if root_path == "/root" else " under %s" % root_path
 	if targets.is_empty():
@@ -129,7 +140,10 @@ static func control_saying(root: Node, root_path: String, wanted: String, which:
 				]
 			)
 		}
-	var best: int = ranks.count(ranks[0])
+	var best: int = 0
+	for at: int in targets.size():
+		if ranks[at] == ranks[0] and insides[at] == insides[0]:
+			best += 1
 	if which == null and best > 1:
 		var order: String = "" if best == targets.size() else ", best matches first"
 		return {
@@ -151,28 +165,72 @@ static func control_saying(root: Node, root_path: String, wanted: String, which:
 				% [str(which), targets.size(), plural, under, wanted, _candidates(targets, lines)]
 			)
 		}
-	# A word inside a sentence on screen, while a control saying exactly that word is out of reach: the
-	# sentence is a stand-in, not the control meant. A tab reading "Out" sat in a collapsed drawer, and
-	# a click on it pressed a dispatch saying somebody "fell out in the hall". Pressed only when asked
-	# for by index, which is the caller saying the sentence is what they meant.
-	if which == null and not wholes[index] and not exact_out_of_reach.is_empty():
+	# A match saying the words as part of more, while another control says exactly them, is a stand-in
+	# for that one, not the control meant: a tab reading "Out" sat in a collapsed drawer and a dispatch
+	# saying somebody "fell out in the hall" was pressed, and with the tab's own words on screen in a
+	# control that is not a button, a card reading "Scout, 90" was. Pressed only when asked for by
+	# index, which is the caller saying the match is what they meant.
+	var exact_elsewhere: Array[Node] = exact_out_of_reach.duplicate()
+	var elsewhere_as: Array[String] = out_of_reach_as.duplicate()
+	# On screen only when it takes clicks itself: a heading saying exactly "Onward" beside a button
+	# saying "Onward now" is not what a click on "Onward" is for, and the button is pressed.
+	for other: int in targets.size():
+		var taking: bool = targets[other].get_mouse_filter_with_override() != Control.MOUSE_FILTER_IGNORE
+		if other != index and wholes[other] and taking:
+			exact_elsewhere.append(targets[other])
+			elsewhere_as.append("on screen, taking clicks but not an enabled button")
+	var best_one: String = "the one on screen," if targets.size() == 1 else "the best match on screen,"
+	if which == null and not wholes[index] and not exact_elsewhere.is_empty():
 		return {
 			"type": "error",
 			"message":
 			(
 				(
-					'no control on screen%s says exactly "%s", so nothing was clicked: %s %s says it as part of'
-					+ ' "%s", while %s; pass index %d to press that one anyway, or bring the other into view'
+					'no %s on screen%s says exactly "%s", so nothing was clicked: %s %s says it as part of'
+					+ ' "%s", while %s; pass index %d to press that one anyway'
 				)
 				% [
+					"button" if exact_elsewhere.size() > exact_out_of_reach.size() else "control",
 					under,
 					wanted,
-					"the one on screen," if targets.size() == 1 else "the best match on screen,",
+					best_one,
 					targets[index].get_path(),
 					_shortened(lines[index]),
-					_out_of_reach_exactly(exact_out_of_reach, out_of_reach_as),
+					_out_of_reach_exactly(exact_elsewhere, elsewhere_as),
 					index,
 				]
+			)
+		}
+	if which == null and insides[index]:
+		return {
+			"type": "error",
+			"message":
+			(
+				(
+					'no control on screen%s says "%s" as a word of its own, so nothing was clicked: %s %s has'
+					+ ' it only inside a longer word, "%s"; pass index %d to press that one anyway'
+				)
+				% [under, wanted, best_one, targets[index].get_path(), _shortened(lines[index]), index]
+			)
+		}
+	# Words in a sentence on a control that lets the pointer through: the press lands on whatever is
+	# under it, which is nothing the words name. A line saying what "is out there" was the best match
+	# left for "Out" once the cards saying "Scout" were passed over.
+	if (
+		which == null
+		and not wholes[index]
+		and targets[index].get_mouse_filter_with_override() == Control.MOUSE_FILTER_IGNORE
+	):
+		return {
+			"type": "error",
+			"message":
+			(
+				(
+					'no control on screen%s that takes a click says "%s", so nothing was clicked: %s %s says it'
+					+ ' as part of "%s" and lets the pointer through to what is under it; pass index %d to'
+					+ " click there anyway"
+				)
+				% [under, wanted, best_one, targets[index].get_path(), _shortened(lines[index]), index]
 			)
 		}
 	var found: Dictionary = {"says": wanted, "index": index, "of": targets.size()}
@@ -219,6 +277,32 @@ static func _says_exactly(written: String, wanted: String) -> bool:
 			if line.strip_edges().nocasecmp_to(looked_for) == 0:
 				return true
 	return false
+
+
+## Whether [param written] has the plain words [param wanted] asks for only inside longer words,
+## never starting where a word starts: "out" in "Scout". Words starting a longer one count as said,
+## "Recruit" in "Recruits", and so does anything matched by a pattern.
+static func _inside_a_word(written: String, wanted: String) -> bool:
+	var said: String = Says.spaced(written).to_lower()
+	var found: bool = false
+	for words: String in Says.alternatives(wanted):
+		var looked_for: String = words.to_lower()
+		if not Says.is_plain(words) or not _in_a_word(looked_for.unicode_at(0)):
+			return false
+		var at: int = said.find(looked_for)
+		while at >= 0:
+			found = true
+			if at == 0 or not _in_a_word(said.unicode_at(at - 1)):
+				return false
+			at = said.find(looked_for, at + 1)
+	return found
+
+
+## Whether the character [param code] is part of a word: a letter, a digit or an underscore. A letter
+## is told by having a case, which leaves scripts without one counted as breaks between words.
+static func _in_a_word(code: int) -> bool:
+	var character: String = String.chr(code)
+	return character.to_lower() != character.to_upper() or character.is_valid_int() or character == "_"
 
 
 ## [param count] matches of [param rank], as the start of a sentence.
