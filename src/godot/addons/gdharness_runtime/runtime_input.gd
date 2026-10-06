@@ -25,6 +25,9 @@ const HEADLESS_VIEWPORT: Vector2 = Vector2(64, 64)
 ## everything that process starts. Kept in step with `DESKTOP_VARIABLE` in src/desktop.ts.
 const DESKTOP_VARIABLE: String = "GDHARNESS_DESKTOP"
 
+## Whether this run has had the pointer note in full; the game process is the run.
+static var _pointer_explained: bool = false
+
 var _host: Node
 var _values: Values
 
@@ -60,13 +63,21 @@ func _init(host: Node, values: Values) -> void:
 ## that would take the screen. What reads the injected event is right, tooltips included, since the
 ## engine places a tooltip from the motion that reached the control.
 static func _pointer_noted(answer: Dictionary) -> Dictionary:
-	if OS.get_environment(DESKTOP_VARIABLE) != "":
+	if OS.get_environment(DESKTOP_VARIABLE) == "":
+		return answer
+	# The fact on every answer and the explanation on the first of the run: a session sends dozens of
+	# pointer calls to one game, and the same four hundred characters on each was most of what came
+	# back.
+	answer["pointer_on_hidden_desktop"] = true
+	if not _pointer_explained:
+		_pointer_explained = true
 		answer["pointer_note"] = (
 			"This game is on gdharness's own desktop, where Windows refuses to say where the"
 			+ " pointer is, so get_mouse_position() on the root window, and get_global_mouse_position()"
 			+ " and get_local_mouse_position() on what is drawn there, read a meaningless position"
 			+ " rather than where this put it. What reads the event itself gets this position: the"
-			+ " control under the pointer, its hover and tooltip, and the game's input handlers."
+			+ " control under the pointer, its hover and tooltip, and the game's input handlers. Said"
+			+ " once a run; pointer_on_hidden_desktop marks every answer it applies to."
 		)
 	return answer
 
