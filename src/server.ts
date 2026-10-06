@@ -1012,6 +1012,11 @@ interface AfterWaiting {
    */
   readonly withArgs: boolean;
   /**
+   * Whether this server is set up for one project, which decides what a runtime call naming no
+   * project meets while the game has not announced: a refusal, or another project's game.
+   */
+  readonly servesAProject: boolean;
+  /**
    * For a run the editor plays, whether the editor has yet said it is playing it. `running` is
    * true either way while the play is within its grace, and the note says which it is: a game
    * that is up and slow to announce, or one the editor has not started yet.
@@ -1067,10 +1072,24 @@ export function runtimeVerdict(
     listening: false,
     mayYetAnnounce: after.running,
     note: after.running
-      ? `nothing announced itself within ${after.budgetMs}ms${sized} and ${state}, so it may announce a moment from now: editor_status says whether it has, and editor_run start takes runtimeWaitMs to wait longer than this${after.withArgs ? ', which a run carrying its own arguments may well need, since whatever they ask the game to do before its first frame is inside this wait' : ''}`
+      ? `nothing announced itself within ${after.budgetMs}ms${sized} and ${state}, so it may announce a moment from now: editor_status says whether it has, and editor_run start takes runtimeWaitMs to wait longer than this${after.withArgs ? ', which a run carrying its own arguments may well need, since whatever they ask the game to do before its first frame is inside this wait' : ''}. ${untilItAnnounces(after.servesAProject)}`
       : `nothing announced itself within ${after.budgetMs}ms${sized} and the game is no longer running, so nothing is going to: editor_output has what it printed on the way down`,
     heldAt: null,
   };
+}
+
+/**
+ * What a runtime call meets while the game it means has not announced.
+ *
+ * A start under load answered that the game may yet announce, and the next call naming no project
+ * was refused for another project's game being the only one announced. Which of two things happens
+ * depends on the server: one set up for a project refuses every other project's game, and one set
+ * up for none talks to whichever game is the only one announced.
+ */
+function untilItAnnounces(servesAProject: boolean): string {
+  return servesAProject
+    ? "Until it does, a runtime_* call for it waits briefly and is then refused, and another project's game answers only a call whose projectPath names that project."
+    : "Until it does, a runtime_* call naming no projectPath reaches whichever game is the only one announced, another project's included, so pass projectPath to be sure the answer is this game's.";
 }
 
 /** Whether [param value] is the [param kind] a schema asked for. An unknown kind asks nothing. */
@@ -1514,6 +1533,31 @@ const STALLED_AFTER_MS = 30_000;
 const DEPENDED_FAILED = 'Failed to compile depended scripts';
 
 /**
+ * [param errors] as the answer holds them: every error of a script's own in full, and the scripts
+ * that failed only because one they depend on did as their paths alone.
+ *
+ * Each of those carries the same line, "Failed to compile depended scripts" at line 0, and a parse
+ * error in a core script took nineteen of them down with it: about ten kilobytes of one sentence
+ * nineteen times, under a first line that had already counted them.
+ */
+export function foldedScriptErrors(errors: readonly ScriptError[]): {
+  scriptErrors: ScriptError[];
+  failedThroughDependency: string[];
+} {
+  const scriptErrors = errors.filter((error) => !error.message.includes(DEPENDED_FAILED));
+  const own = new Set(scriptErrors.map((error) => error.path));
+  return {
+    scriptErrors,
+    failedThroughDependency: [...new Set(errors.map((error) => error.path))].filter((path) => !own.has(path)),
+  };
+}
+
+/** [param lists] without the ones that are empty, so an answer holds no field with nothing in it. */
+function nonEmpty<T extends Record<string, readonly unknown[]>>(lists: T): Partial<T> {
+  return Object.fromEntries(Object.entries(lists).filter(([, list]) => list.length > 0)) as Partial<T>;
+}
+
+/**
  * The sentence for a run gdUnit4 stopped at discovery, naming each script it could not load with
  * its first error; every error is under `scriptErrors` beside it. The suites that did load are
  * said not to have run, because a caller reading "script errors" took the rest of the tier as
@@ -1525,13 +1569,13 @@ const DEPENDED_FAILED = 'Failed to compile depended scripts';
  * worth opening third, between four copies of "Failed to compile depended scripts" at line 0.
  */
 export function scriptErrorsNote(errors: readonly ScriptError[]): string {
+  const { scriptErrors: own, failedThroughDependency: dependents } = foldedScriptErrors(errors);
   const causes = new Map<string, ScriptError>();
-  for (const error of errors) {
-    if (!error.message.includes(DEPENDED_FAILED) && !causes.has(error.path)) {
+  for (const error of own) {
+    if (!causes.has(error.path)) {
       causes.set(error.path, error);
     }
   }
-  const dependents = [...new Set(errors.map((error) => error.path))].filter((path) => !causes.has(path));
   const scripts = causes.size + dependents.length;
   const named = [...causes.values()]
     .map(
@@ -1545,7 +1589,7 @@ export function scriptErrorsNote(errors: readonly ScriptError[]): string {
       : causes.size === 0
         ? `${dependents.join(', ')} ${dependents.length === 1 ? 'depends' : 'depend'} on a script that did not compile, and gdUnit4 named none with an error of its own: script_diagnostics on one of them finds it.`
         : `${dependents.length === 1 ? 'One more' : `${dependents.length} more`} failed only because a script ${dependents.length === 1 ? 'it depends' : 'they depend'} on did: ${dependents.join(', ')}.`;
-  const more = errors.filter((error) => !error.message.includes(DEPENDED_FAILED)).length - causes.size;
+  const more = own.length - causes.size;
   const rest =
     more > 0
       ? `${more === 1 ? 'One more error' : `${more} more errors`} in ${causes.size === 1 ? 'that script' : 'those scripts'} ${more === 1 ? 'is' : 'are'} under scriptErrors.`
@@ -4104,13 +4148,16 @@ class GodotServer {
     if (!paths.ok) {
       return this.createErrorResponse(paths.reason, PATH_SOLUTIONS);
     }
-    const asked = paths.value;
-    // Before an engine is started for them: one missing entry among several would otherwise be a
-    // run of the rest that gdUnit4 sums up as having found nothing.
-    const missing = asked.filter(
+    // An entry not there is left out of the run rather than handed to gdUnit4, which runs the rest
+    // and then sums the whole run up as having found nothing. Left out, and not the reason to run
+    // nothing: a set of suites named from memory met one wrong name four times in a day, and each
+    // time the rest waited a round trip for it. Named in the answer, and never a pass, since a run
+    // of fewer suites than were asked for is not the run asked for.
+    const missing = paths.value.filter(
       (path) => !existsSync(join(project.value.path, path.slice('res://'.length))),
     );
-    if (missing.length > 0) {
+    const asked = paths.value.filter((path) => !missing.includes(path));
+    if (asked.length === 0) {
       const verdict = `nothing at ${missing.join(' and ')}`;
       return {
         content: [
@@ -4262,7 +4309,7 @@ class GodotServer {
     const hung = cutShort?.hung ?? false;
     const scriptErrors = timedOut || exitCode !== 105 ? [] : scriptErrorsPrinted(said);
     const brokenScripts = new Set(scriptErrors.map((error) => error.path)).size;
-    const verdict =
+    const ranAs =
       cutShort !== null
         ? cutShort.verdict
         : (nothingRan ??
@@ -4271,6 +4318,12 @@ class GodotServer {
             : undefined) ??
           (exitCode === null ? undefined : verdicts[exitCode]) ??
           (run.exitSignal === null ? `exit ${exitCode ?? 'unknown'}` : howItExited(run)));
+    const nothingAt = missing.join(' and ');
+    const verdict = missing.length === 0 ? ranAs : `${ranAs}; nothing at ${nothingAt}`;
+    const missingNote =
+      missing.length === 0
+        ? undefined
+        : `Nothing at ${nothingAt}, so ${missing.length === 1 ? 'it was' : 'they were'} left out and only ${asked.join(', ')} ran; a run of fewer paths than were asked for is not called a pass.${elsewhereIn(project.value.path, missing[0] ?? '')}`;
     // Said on every answer from a run whose saves could not be moved, whichever way it ended: a
     // tier that failed still wrote wherever it wrote, and the run that found nothing to do is the
     // one exception, since it never started a game.
@@ -4291,14 +4344,15 @@ class GodotServer {
           };
 
     if (report === null) {
-      const note =
+      const said =
         nothingRan !== null
-          ? `No tests ran: ${verdict}.`
+          ? `No tests ran: ${ranAs}.`
           : scriptErrors.length > 0
             ? scriptErrorsNote(scriptErrors)
             : reportProblem !== null
-              ? `The test run's report could not be read (${reportProblem}); the engine's own verdict was ${verdict}.`
-              : `The test run wrote no report (${verdict}).`;
+              ? `The test run's report could not be read (${reportProblem}); the engine's own verdict was ${ranAs}.`
+              : `The test run wrote no report (${ranAs}).`;
+      const note = missingNote === undefined ? said : `${said} ${missingNote}`;
       return {
         content: [
           { type: 'text', text: note },
@@ -4313,7 +4367,8 @@ class GodotServer {
                 exitSignal: run.exitSignal ?? undefined,
                 hung,
                 ...(timedOut ? { timedOut, silentForMs } : {}),
-                ...(scriptErrors.length > 0 ? { scriptErrors } : {}),
+                ...(missing.length > 0 ? { missing } : {}),
+                ...nonEmpty(foldedScriptErrors(scriptErrors)),
                 arguments: cmdArgs,
                 entries: forAnswer(printed.slice(0, 60).map(aboveTheRunner)),
                 ...printedLines,
@@ -4398,8 +4453,10 @@ class GodotServer {
         report.tests > 0 &&
         report.failures === 0 &&
         report.errors === 0 &&
-        hookFailures.length === 0,
+        hookFailures.length === 0 &&
+        missing.length === 0,
       verdict,
+      ...(missing.length > 0 ? { missing } : {}),
       ...(timedOut ? { timedOut, hung, silentForMs } : {}),
       exitCode,
       exitSignal: run.exitSignal ?? undefined,
@@ -4420,9 +4477,14 @@ class GodotServer {
       ...scanned,
       // The word on its own was the whole answer, and it named neither what was warned nor where.
       note:
-        verdict.startsWith('warnings') && warnings.length === 0
-          ? 'gdUnit4 exits 101 for orphan nodes when nothing failed, and this run printed no count of them: orphan reporting may be off in the project settings.'
-          : notRunNote(notRun, readBoolean(args, 'failFast') === true),
+        [
+          missingNote,
+          ranAs.startsWith('warnings') && warnings.length === 0
+            ? 'gdUnit4 exits 101 for orphan nodes when nothing failed, and this run printed no count of them: orphan reporting may be off in the project settings.'
+            : notRunNote(notRun, readBoolean(args, 'failFast') === true),
+        ]
+          .filter((part) => part !== undefined)
+          .join(' ') || undefined,
       suites: unclean.map((suite) => ({
         name: suite.name,
         path: suite.path,
@@ -6015,7 +6077,14 @@ class GodotServer {
   ): Promise<Record<string, unknown>> {
     const budgetMs = budget.ms;
     if (!existsSync(join(projectPath, RUNTIME_AUTOLOAD.path))) {
-      return runtimeVerdict(null, { addon: false, budgetMs, heldAt: null, running: false, withArgs });
+      return runtimeVerdict(null, {
+        addon: false,
+        budgetMs,
+        heldAt: null,
+        running: false,
+        withArgs,
+        servesAProject: this.ownProject !== null,
+      });
     }
     // The editor is asked about a run it is playing no more often than the wait loop asks it, so
     // a look every fifty milliseconds does not become a request every fifty milliseconds, and
@@ -6110,6 +6179,7 @@ class GodotServer {
       // asking the editor about a played one costs a round trip the answer would not use.
       running: endpoint !== null || (going !== null && (await this.runStillGoing(going))),
       withArgs,
+      servesAProject: this.ownProject !== null,
       ...(going?.throughEditor === true ? { playingSeen: going.seenPlaying === true } : {}),
     });
   }

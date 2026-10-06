@@ -181,6 +181,7 @@ import {
   endedToStartThis,
   endedWithoutACode,
   exportAnswer,
+  foldedScriptErrors,
   leftRunningNote,
   noCodeWillCome,
   notRunNote,
@@ -8111,7 +8112,7 @@ function testANotYetRuntimeIsNotTheSameAsNoRuntime(): void {
       project: { name: 'F', path: '/p' },
       file: 'runtime-4242.json',
     },
-    { addon: true, budgetMs: 5_000, heldAt: null, running: true, withArgs: false },
+    { addon: true, budgetMs: 5_000, heldAt: null, running: true, withArgs: false, servesAProject: true },
   );
   assert.deepEqual(listening, { listening: true, pid: 4242, port: 51_300 }, 'a runtime that answered');
 
@@ -8121,6 +8122,7 @@ function testANotYetRuntimeIsNotTheSameAsNoRuntime(): void {
     heldAt: null,
     running: true,
     withArgs: false,
+    servesAProject: true,
   });
   assert.equal(none['listening'], false);
   assert.equal(none['mayYetAnnounce'], false, 'a project with no addon is never going to announce');
@@ -8131,10 +8133,33 @@ function testANotYetRuntimeIsNotTheSameAsNoRuntime(): void {
     heldAt: null,
     running: true,
     withArgs: false,
+    servesAProject: true,
   });
   assert.equal(booting['listening'], false);
   assert.equal(booting['mayYetAnnounce'], true, 'a game still running may still announce');
   assert.match(String(booting['note']), /runtimeWaitMs/, 'and the answer names the way to wait longer');
+  // What a call meets before the announce, which a start under load sent straight into: a server
+  // for one project refuses, and a server for none reaches another project's game. Each says its
+  // own, and neither says the other's.
+  const unserved = runtimeVerdict(null, {
+    addon: true,
+    budgetMs: 5_000,
+    heldAt: null,
+    running: true,
+    withArgs: false,
+    servesAProject: false,
+  });
+  assert.match(
+    String(booting['note']),
+    /Until it does, a runtime_\* call for it waits briefly and is then refused/,
+    String(booting['note']),
+  );
+  assert.match(
+    String(unserved['note']),
+    /Until it does, a runtime_\* call naming no projectPath reaches whichever game is the only one announced, another project's included/,
+    String(unserved['note']),
+  );
+  assert.doesNotMatch(String(booting['note']), /reaches whichever game/, String(booting['note']));
 
   // The reason the wait ran out is often the caller's own arguments, and from where they sit that
   // is invisible: the same project answers straight away without them. Reported from a run given
@@ -8145,6 +8170,7 @@ function testANotYetRuntimeIsNotTheSameAsNoRuntime(): void {
     heldAt: null,
     running: true,
     withArgs: true,
+    servesAProject: true,
   });
   assert.match(
     String(carrying['note']),
@@ -8163,10 +8189,12 @@ function testANotYetRuntimeIsNotTheSameAsNoRuntime(): void {
     heldAt: null,
     running: false,
     withArgs: false,
+    servesAProject: true,
   });
   assert.equal(over['listening'], false);
   assert.equal(over['mayYetAnnounce'], false, 'a game that has ended is not going to announce');
   assert.match(String(over['note']), /editor_output/, 'and the answer says where its output went');
+  assert.doesNotMatch(String(over['note']), /Until it does/, 'and is told nothing about waiting for it');
 
   // Held at a breakpoint is the one case where waiting alone is not enough and the caller has
   // something to do, so it must not read as either of the two above.
@@ -8176,6 +8204,7 @@ function testANotYetRuntimeIsNotTheSameAsNoRuntime(): void {
     heldAt: { reason: 'breakpoint', description: 'Paused on breakpoint', text: 'res://main.gd:12' },
     running: true,
     withArgs: false,
+    servesAProject: true,
   });
   assert.equal(held['mayYetAnnounce'], true, 'a held game announces once it is let go');
   assert.match(String(held['note']), /debug_control continue/, 'and the answer says what lets it go');
@@ -16250,6 +16279,7 @@ function testTheWaitSizedToABootIsSaid(): void {
     heldAt: null,
     running: true,
     withArgs: false,
+    servesAProject: true,
   });
   assert.match(
     text(get(said, 'note')),
@@ -16266,6 +16296,7 @@ function testTheWaitSizedToABootIsSaid(): void {
     heldAt: null,
     running: true,
     withArgs: false,
+    servesAProject: true,
   });
   assert.match(
     text(get(capped, 'note')),
@@ -16282,6 +16313,7 @@ function testTheWaitSizedToABootIsSaid(): void {
     heldAt: null,
     running: false,
     withArgs: false,
+    servesAProject: true,
   });
   assert.match(
     text(get(exact, 'note')),
@@ -16296,6 +16328,7 @@ function testTheWaitSizedToABootIsSaid(): void {
     heldAt: null,
     running: true,
     withArgs: false,
+    servesAProject: true,
   });
   assert.match(text(get(unsized, 'note')), /within 5000ms and the game/, JSON.stringify(unsized));
 
@@ -22456,6 +22489,37 @@ async function testGdUnitRunner(): Promise<void> {
     /could not load one script .*\. res:\/\/core\/run\.gd depends on a script that did not compile, and gdUnit4 named none with an error of its own: script_diagnostics on one of them finds it\.$/,
     'with no cause among them, the sentence says where to look rather than naming nothing',
   );
+  // The answer beside that sentence: each error of a script's own in full, and the scripts that
+  // failed only through a dependency by path, once each. ostinato's tier answered nineteen copies
+  // of the depended line, about ten kilobytes, under a first line that had counted them.
+  const reward = {
+    path: 'res://core/reward.gd',
+    line: 90,
+    message:
+      'Parse Error: The parameter "last" is never used in the function "from()". (Warning treated as error.)',
+  };
+  assert.deepEqual(
+    foldedScriptErrors([
+      dependedOn('res://core/ladder.gd'),
+      reward,
+      dependedOn('res://core/run.gd'),
+      dependedOn('res://core/ladder.gd'),
+      { ...reward, line: 95 },
+    ]),
+    {
+      scriptErrors: [reward, { ...reward, line: 95 }],
+      failedThroughDependency: ['res://core/ladder.gd', 'res://core/run.gd'],
+    },
+  );
+  assert.deepEqual(
+    foldedScriptErrors([
+      dependedOn('res://core/run.gd'),
+      fault(3, 'Parse Error: one.'),
+      dependedOn('res://test/a_test.gd'),
+    ]),
+    { scriptErrors: [fault(3, 'Parse Error: one.')], failedThroughDependency: ['res://core/run.gd'] },
+    'a script with an error of its own is not also listed as failing through a dependency',
+  );
 
   // The paths a run is given, which the engine half below runs: one or a list, each held inside
   // the project, overlaps dropped, and anything that is not a path refused by where it sits.
@@ -22938,22 +23002,49 @@ async function testGdUnitRunner(): Promise<void> {
           ),
         );
         assert.equal(get(overlapping, 'tests'), get(run, 'tests'), JSON.stringify(overlapping, null, 2));
-        // One entry not there among others that are: refused before anything runs, naming each.
-        const partly = await call(
-          'project_test',
-          { projectPath: projectDir, path: ['test/quiet_test.gd', 'test/gone_test.gd', 'gone'] },
-          ENGINE_CALL_TIMEOUT_MS * 3,
+        // #898: entries not there among one that is. The one that is runs, the others are named,
+        // and a run of fewer paths than were asked for is not a pass even when all of it passed.
+        const partly: unknown = JSON.parse(
+          await call(
+            'project_test',
+            { projectPath: projectDir, path: ['test/quiet_test.gd', 'test/gone_test.gd', 'gone'] },
+            ENGINE_CALL_TIMEOUT_MS * 3,
+          ),
+        );
+        assert.deepEqual(
+          {
+            passed: get(partly, 'passed'),
+            verdict: get(partly, 'verdict'),
+            tests: get(partly, 'tests'),
+            suitesPassed: get(partly, 'suitesPassed'),
+            missing: get(partly, 'missing'),
+          },
+          {
+            passed: false,
+            verdict: 'passed; nothing at res://test/gone_test.gd and res://gone',
+            tests: 1,
+            suitesPassed: 1,
+            missing: ['res://test/gone_test.gd', 'res://gone'],
+          },
+          JSON.stringify(partly, null, 2),
         );
         assert.match(
-          partly,
-          /^No tests ran: nothing at res:\/\/test\/gone_test\.gd and res:\/\/gone\./,
-          partly,
+          text(get(partly, 'note')),
+          /^Nothing at res:\/\/test\/gone_test\.gd and res:\/\/gone, so they were left out and only res:\/\/test\/quiet_test\.gd ran/,
+          JSON.stringify(partly, null, 2),
         );
-        const partlyAnswer: unknown = JSON.parse(partly.slice(partly.indexOf('{')));
+        // Every entry not there: nothing to run, refused before anything runs, naming each.
+        const none = await call(
+          'project_test',
+          { projectPath: projectDir, path: ['test/gone_test.gd', 'gone'] },
+          ENGINE_CALL_TIMEOUT_MS * 3,
+        );
+        assert.match(none, /^No tests ran: nothing at res:\/\/test\/gone_test\.gd and res:\/\/gone\./, none);
+        const noneAnswer: unknown = JSON.parse(none.slice(none.indexOf('{')));
         assert.deepEqual(
-          [get(partlyAnswer, 'passed'), get(partlyAnswer, 'tests'), get(partlyAnswer, 'classes')],
+          [get(noneAnswer, 'passed'), get(noneAnswer, 'tests'), get(noneAnswer, 'classes')],
           [false, 0, undefined],
-          `refused before the class list was rebuilt for a run: ${partly}`,
+          `refused before the class list was rebuilt for a run: ${none}`,
         );
 
         // A failing string's value, which gdUnit4 prints as a character diff against the expected
@@ -23231,6 +23322,73 @@ async function testGdUnitRunner(): Promise<void> {
           0,
           'the frames gdUnit4 took to load the scripts are counted, not listed',
         );
+        assert.equal(
+          get(brokenAnswer, 'failedThroughDependency'),
+          undefined,
+          'and none failed only through another',
+        );
+
+        // #900: a script with an error of its own and a suite that fails only for depending on it.
+        // The engine says the same line for each such script, and the answer gives them by path.
+        // ostinato's shape: the script parses and fails to compile, on an unused parameter with
+        // that warning raised to an error. One that does not parse is a different line, "Could not
+        // resolve class", which the engine gives each suite as an error of its own.
+        const settingsBefore = readFileSync(join(projectDir, 'project.godot'), 'utf8');
+        writeFileSync(
+          join(projectDir, 'project.godot'),
+          `${settingsBefore}\n[debug]\n\ngdscript/warnings/unused_parameter=2\n`,
+        );
+        mkdirSync(join(projectDir, 'leaning'));
+        writeFileSync(
+          join(projectDir, 'leaning', 'core.gd'),
+          [
+            'class_name LeaningCore',
+            'extends RefCounted',
+            '',
+            '',
+            'func weight(last: int) -> int:',
+            '\treturn 1',
+            '',
+          ].join('\n'),
+        );
+        writeFileSync(
+          join(projectDir, 'leaning', 'leans_test.gd'),
+          [
+            'extends GdUnitTestSuite',
+            '',
+            '',
+            'func test_leans() -> void:',
+            '\tassert_object(LeaningCore.new()).is_not_null()',
+            '',
+          ].join('\n'),
+        );
+        const leaning = await call(
+          'project_test',
+          { projectPath: projectDir, path: 'res://leaning' },
+          ENGINE_CALL_TIMEOUT_MS * 3,
+        );
+        const leaningAnswer: unknown = JSON.parse(leaning.slice(leaning.indexOf('{')));
+        assert.deepEqual(
+          {
+            ownErrorsIn: [
+              ...new Set(
+                asArray(get(leaningAnswer, 'scriptErrors')).map((error) => text(get(error, 'path'))),
+              ),
+            ],
+            dependedLines: asArray(get(leaningAnswer, 'scriptErrors')).filter((error) =>
+              text(get(error, 'message')).includes('Failed to compile depended scripts'),
+            ).length,
+            failedThroughDependency: get(leaningAnswer, 'failedThroughDependency'),
+          },
+          {
+            ownErrorsIn: ['res://leaning/core.gd'],
+            dependedLines: 0,
+            failedThroughDependency: ['res://leaning/leans_test.gd'],
+          },
+          leaning,
+        );
+        rmSync(join(projectDir, 'leaning'), { recursive: true, force: true });
+        writeFileSync(join(projectDir, 'project.godot'), settingsBefore);
       },
       { GODOT_PATH: godotPath },
     );
