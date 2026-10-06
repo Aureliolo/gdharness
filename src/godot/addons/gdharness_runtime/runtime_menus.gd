@@ -61,7 +61,7 @@ static func wanted_items(menu: PopupMenu, params: Dictionary) -> Array[int]:
 			if words[at] == wanted:
 				return _items([order[at]])
 		for at: int in words.size():
-			if words[at].nocasecmp_to(wanted) == 0:
+			if Says.spaced(words[at]).nocasecmp_to(Says.spaced(wanted)) == 0:
 				return _items([order[at]])
 	# Separators are left out here: a heading is refused when named in full, and a pattern that
 	# matched one beside the item it heads would tie the two.
