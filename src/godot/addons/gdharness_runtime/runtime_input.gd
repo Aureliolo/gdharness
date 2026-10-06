@@ -408,9 +408,27 @@ func click(params: Dictionary) -> Dictionary:
 	if not unmoved.is_empty():
 		return {"type": "error", "message": unmoved}
 
+	# Words that are part of a rich label are pressed where they are drawn, since its middle can be on
+	# other words, a link among them. Said either way, so a press on the middle is never read as one
+	# on the words.
+	var aim: Vector2 = control.size * 0.5
+	var rich: RichTextLabel = control as RichTextLabel
+	if found != null and rich != null:
+		var placed: Dictionary = Targets.point_on_words(rich, wanted)
+		var found_here: Dictionary = found
+		if placed.has("point"):
+			aim = placed["point"]
+			found_here["pressedOn"] = "the words"
+		elif placed.has("unplaced"):
+			found_here["pressedOn"] = "the middle of the label"
+			found_here["note"] = (
+				"the words are part of a longer label and %s, so the press went to its middle"
+				% placed["unplaced"]
+			)
+
 	# In the control's own viewport first, which is the space its scrolling happens in.
 	var own: Viewport = control.get_viewport()
-	var local: Vector2 = control.get_global_transform_with_canvas() * (control.size * 0.5)
+	var local: Vector2 = control.get_global_transform_with_canvas() * aim
 
 	# A control out of sight inside a ScrollContainer is not out of reach, it is one scroll away,
 	# which is what a person does without thinking about it before they click. Refusing it
@@ -434,7 +452,7 @@ func click(params: Dictionary) -> Dictionary:
 					% [node_path, "freed" if left == "freed" else "taken out of the tree"]
 				)
 			}
-		local = control.get_global_transform_with_canvas() * (control.size * 0.5)
+		local = control.get_global_transform_with_canvas() * aim
 
 	var reached: Dictionary = Screen.reach(own, local)
 	var viewport: Viewport = reached["viewport"]
@@ -472,12 +490,19 @@ func click(params: Dictionary) -> Dictionary:
 		hovered_path = str(hovered.get_path())
 	var landed: bool = hovered == control or (hovered != null and control.is_ancestor_of(hovered))
 
+	# The link a rich label says was pressed, which is its own word for what the press reached.
+	var links: Array[String] = []
+	var heard: Callable = func(meta: Variant) -> void: links.append(str(meta))
+	if rich != null:
+		var _listening: int = rich.meta_clicked.connect(heard)
 	_press_button(viewport, _button(position, button, true, double))
 	await _host.get_tree().process_frame
 	_press_button(viewport, _button(position, button, false, false))
 	# The release is what a button acts on, and a queue_free it causes lands at the end of
 	# this frame; the frame passes so the answer describes the control as the click left it.
 	await _host.get_tree().process_frame
+	if rich != null and is_instance_valid(rich) and rich.meta_clicked.is_connected(heard):
+		rich.meta_clicked.disconnect(heard)
 
 	# What became of the control: still in the tree, taken out of it, or freed. A button that
 	# opened another screen is the second or the third, and the caller wants to hear that
@@ -497,6 +522,8 @@ func click(params: Dictionary) -> Dictionary:
 	}
 	if found != null:
 		answer["found"] = found
+	if not links.is_empty():
+		answer["link_pressed"] = links.back()
 	return _pointer_noted(answer)
 
 
