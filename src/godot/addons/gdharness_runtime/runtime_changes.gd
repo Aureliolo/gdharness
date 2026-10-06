@@ -233,13 +233,17 @@ func call_method(params: Dictionary) -> Dictionary:
 			var read_from: int = Time.get_ticks_usec()
 			var answered: Variant = Paths.read_under(reached["holder"], spelled)
 			var read_for: int = Time.get_ticks_usec() - read_from
-			return {
+			var listed: Dictionary = {
 				"type": "method_result",
 				"path": node_path,
 				"method": method,
 				"result": _values.serialize(answered),
 				"elapsed_usec": read_for,
 			}
+			var asked_of_it: Variant = params.get("properties")
+			if _reads_the_result(asked_of_it):
+				listed.merge(_read_off_result(answered, asked_of_it))
+			return listed
 		var why: String = (
 			"%s:%s takes no arguments" % [reached["called"], spelled]
 			if Paths.can_read(reached["holder"], spelled)
@@ -258,10 +262,11 @@ func call_method(params: Dictionary) -> Dictionary:
 	# The method a call ends on is the one being called whether or not it carries the brackets a
 	# step along the way would: "get_viewport():gui_get_focus_owner()" is the same call as without
 	# the last pair.
+	var not_called: String = _not_a_method_to_call(holder, named, str(reached["called"]))
+	if not not_called.is_empty():
+		return {"type": "error", "message": not_called}
 	if not Paths.method_of(named).is_empty():
 		named = Paths.method_of(named)
-	if not holder.has_method(named):
-		return {"type": "error", "message": "%s has no method %s" % [reached["called"], named]}
 
 	# Checked before the call rather than left to it. `callv` raises inside the game when an
 	# argument cannot be converted, and an error raised in a game somebody is playing holds it at a
@@ -360,7 +365,96 @@ func call_method(params: Dictionary) -> Dictionary:
 		answer["errors"] = caught.raised.slice(0, ERRORS_KEPT)
 		if caught.raised.size() > ERRORS_KEPT:
 			answer["errors_not_shown"] = caught.raised.size() - ERRORS_KEPT
+	var asked: Variant = params.get("properties")
+	if _reads_the_result(asked):
+		answer.merge(_read_off_result(result, asked))
 	return answer
+
+
+## Why [param named], the last step of a call's method, names no method of [param holder] to call, or
+## "" when it does. Brackets on it holding arguments are refused rather than read: the arguments are
+## taken from args alone, so a call is never made with half of them in one place and half in the
+## other, or with the bracketed ones quietly dropped.
+static func _not_a_method_to_call(holder: Object, named: String, called: String) -> String:
+	var method: String = named
+	if not Paths.method_of(named).is_empty():
+		var bracketed: Dictionary = Paths.arguments_of(named)
+		var in_brackets: Array = bracketed.get("args", [])
+		if bracketed.has("message") or not in_brackets.is_empty():
+			return (
+				"%s:%s: the method a call ends on takes its arguments under args, not in its brackets"
+				% [called, named]
+			)
+		method = Paths.method_of(named)
+	return "" if holder.has_method(method) else "%s has no method %s" % [called, method]
+
+
+## Whether a call's `properties` asks for its result to be read: true, or a list of names.
+static func _reads_the_result(asked: Variant) -> bool:
+	return asked is Array or (asked is bool and asked)
+
+
+## What [param asked] reads off the object a call answered with: every variable its script declares
+## when [param asked] is true, or the properties a list names, each a path walked from the object.
+##
+## In the same answer because an object handed back is otherwise only its class and an id, and
+## reading one field of it meant finding the same object again by a path into the game's private
+## state, which works only where the caller already knows a key. A name that is not there is listed
+## rather than refusing the answer, since the call has run by then and its result is what was asked.
+func _read_off_result(result: Variant, asked: Variant) -> Dictionary:
+	if result is Object and not is_instance_valid(result):
+		return {
+			"properties_note": "the call answered an object that has since been freed, so nothing was read"
+		}
+	if not result is Object:
+		return {
+			"properties_note":
+			"the call answered %s, which has no properties to read" % type_string(typeof(result))
+		}
+	var object: Object = result
+	var wanted: Array[String] = []
+	if asked is Array:
+		for name: Variant in asked:
+			wanted.append(str(name))
+	else:
+		wanted = _script_variables(object)
+	var read: Dictionary = {}
+	var missing: Array[String] = []
+	for path: String in wanted:
+		var walked: Dictionary = _walk_from(object, path)
+		if walked.has("message"):
+			missing.append(str(walked["message"]))
+		else:
+			read[path] = _values.serialize(walked["value"])
+	var answered: Dictionary = {"result_properties": read}
+	if not missing.is_empty():
+		answered["result_properties_missing"] = missing
+	return answered
+
+
+## The variables the script attached to [param object] declares, in the order it declares them.
+static func _script_variables(object: Object) -> Array[String]:
+	var names: Array[String] = []
+	for entry: Dictionary in object.get_property_list():
+		var usage: int = entry.get("usage", 0)
+		if usage & PROPERTY_USAGE_SCRIPT_VARIABLE != 0:
+			names.append(str(entry.get("name", "")))
+	return names
+
+
+## What [param path] reads walked from [param object], as {"value"}, or {"message"} naming the step
+## that is not there, by the same rules a path read from a node follows.
+static func _walk_from(object: Object, path: String) -> Dictionary:
+	var holder: Variant = object
+	var called: String = "the result"
+	for named: String in Paths.steps_of(path):
+		if not (holder is Object or holder is Array or holder is Dictionary or Paths.packed(holder)):
+			return {"message": "%s holds no object to read %s off" % [called, named]}
+		if not Paths.can_read(holder, named):
+			return {"message": Paths.nothing_there(holder, named, called)}
+		holder = Paths.read_under(holder, named)
+		called = "%s:%s" % [called, named]
+	return {"value": holder}
 
 
 ## Why [param given] arguments are the wrong number for [param method], or "" when they are not.
