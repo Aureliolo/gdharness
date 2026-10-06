@@ -9,6 +9,7 @@ extends SceneTree
 
 const Checked = preload("checked.gd")
 const InputCommands = preload("res://addons/gdharness_runtime/runtime_input.gd")
+const Says = preload("res://addons/gdharness_runtime/runtime_says.gd")
 const Typing = preload("res://addons/gdharness_runtime/runtime_typing.gd")
 const Values = preload("res://addons/gdharness_runtime/runtime_values.gd")
 
@@ -58,6 +59,7 @@ func _everything() -> void:
 	await _check_a_word_inside_a_sentence()
 	await _check_an_item_in_an_open_menu()
 	await _check_a_field_by_its_placeholder()
+	await _check_words_held_together_by_a_space_that_does_not_break()
 	await _check_a_dialog_over_a_dialog()
 	await _check_a_dialog_under_a_clipping_container()
 
@@ -662,6 +664,52 @@ func _check_a_field_by_its_placeholder() -> void:
 	if not _says(filled, "no control on screen"):
 		_fail("and not once it holds text, which is drawn instead: %s" % JSON.stringify(filled))
 	search.queue_free()
+	await process_frame
+
+
+## Any space a game draws between words is the space a caller types. #906: a name kept on one line
+## with a non-breaking space was not found by the name typed with a plain one, while the screen
+## showed exactly those words. Each separator, a link inside a line pressed where it is drawn, and a
+## button saying the words exactly, which ranks as the exact match it is.
+func _check_words_held_together_by_a_space_that_does_not_break() -> void:
+	for code: int in [0x00A0, 0x1680, 0x2000, 0x2007, 0x200A, 0x202F, 0x205F, 0x3000]:
+		if not Says.matches("Ab%sCd" % String.chr(code), "ab cd"):
+			_fail("a typed space matches U+%04X" % code)
+	if Says.matches("Ab%sCd" % String.chr(0x200B), "ab cd"):
+		_fail("and a zero-width space, which draws no space, is not one")
+
+	var line: RichTextLabel = RichTextLabel.new()
+	line.name = "Dossier"
+	line.bbcode_enabled = true
+	line.autowrap_mode = TextServer.AUTOWRAP_OFF
+	line.add_theme_font_size_override("normal_font_size", 4)
+	line.position = Vector2(0, 20)
+	line.size = Vector2(64, 12)
+	line.text = "[url=named]Ab%sCd[/url] and a great deal more" % String.chr(0x00A0)
+	root.add_child(line)
+	await process_frame
+	await process_frame
+	var named: Dictionary = await input.click({"says": "Ab Cd"})
+	var found: Dictionary = named.get("found", {})
+	if named.get("link_pressed") != "named" or found.get("pressedOn") != "the words":
+		_fail(
+			(
+				"a name held by a non-breaking space is found and pressed by its typed words: %s"
+				% JSON.stringify(named)
+			)
+		)
+	line.queue_free()
+
+	var held: Button = _button("Held", Vector2(2, 2), root, "Leave%snow" % String.chr(0x202F))
+	_put("Loose", Vector2(34, 2), root, "Leave now and then")
+	await process_frame
+	var exact: Dictionary = await input.click({"says": "leave now"})
+	if exact.get("path") != "/root/Held" or _presses("Held") != 1:
+		_fail(
+			"and words held together say them exactly, over a button saying more: %s" % JSON.stringify(exact)
+		)
+	held.queue_free()
+	root.get_node("Loose").queue_free()
 	await process_frame
 
 

@@ -205,7 +205,8 @@ static func _rank(target: Control, whole: bool) -> int:
 ## A line counts because a card is a title over a description: "WARD" over "wards 3" is the card
 ## named WARD, and read as its words run together it said WARD only as part of more, level with
 ## "WARDSPITE" over its own description, and a click on WARD was refused as not clear.
-static func _says_exactly(said: String, wanted: String) -> bool:
+static func _says_exactly(written: String, wanted: String) -> bool:
+	var said: String = Says.spaced(written)
 	for words: String in Says.alternatives(wanted):
 		if not Says.is_plain(words):
 			if said.matchn(words):
@@ -509,7 +510,7 @@ static func _clipped_away(
 ## words. A line in another font or holding an image measures off from what is drawn, which a wide
 ## line with nothing between the words and its start hardly does.
 static func point_on_words(label: RichTextLabel, wanted: String) -> Dictionary:
-	var text: String = Words.said_by(label)
+	var text: String = Says.spaced(Words.said_by(label))
 	var start: int = -1
 	var length: int = 0
 	for words: String in Says.alternatives(wanted):
