@@ -191,6 +191,14 @@ import {
   whichHalfIsBehind,
 } from './runtime-client.js';
 import { discard, scratchDirectory, sweepAbandonedScratch } from './scratch.js';
+import {
+  checkWithEngine,
+  originsOf,
+  type ScriptOrigin,
+  type UnconfirmedOrigin,
+  unresolvedClassIn,
+  withoutListed,
+} from './script-origins.js';
 import type {
   GodotProcess,
   MCPToolDefinition,
@@ -1567,8 +1575,21 @@ function nonEmpty<T extends Record<string, readonly unknown[]>>(lists: T): Parti
  * they depend on did are named after them as the consequence. One unused parameter, with warnings
  * treated as errors, took four scripts down with it, and listing all five by path put the only one
  * worth opening third, between four copies of "Failed to compile depended scripts" at line 0.
+ *
+ * Ahead of all of them come [param origins], the scripts declaring a class the others could not
+ * resolve, which gdUnit4 never names, and the scripts that failed on that class are grouped after
+ * each as its consequence.
  */
-export function scriptErrorsNote(errors: readonly ScriptError[]): string {
+export function scriptErrorsNote(
+  errors: readonly ScriptError[],
+  {
+    origins,
+    unconfirmed,
+  }: { origins: readonly ScriptOrigin[]; unconfirmed: readonly UnconfirmedOrigin[] } = {
+    origins: [],
+    unconfirmed: [],
+  },
+): string {
   const { scriptErrors: own, failedThroughDependency: dependents } = foldedScriptErrors(errors);
   const causes = new Map<string, ScriptError>();
   for (const error of own) {
@@ -1577,12 +1598,37 @@ export function scriptErrorsNote(errors: readonly ScriptError[]): string {
     }
   }
   const scripts = causes.size + dependents.length;
-  const named = [...causes.values()]
-    .map(
-      (error) =>
-        `${error.line === null ? error.path : `${error.path}:${error.line}`} ${error.message}${/[.!?]\)?$/.test(error.message) ? '' : '.'}`,
-    )
-    .join(' ');
+  const at = (error: ScriptError): string =>
+    error.line === null ? error.path : `${error.path}:${error.line}`;
+  const sentence = (text: string): string => `${text}${/[.!?]\)?$/.test(text) ? '' : '.'}`;
+  const traced = new Set<string>();
+  const failedOn = (declares: string): string => {
+    const through = [...causes.values()].filter((error) => unresolvedClassIn(error.message) === declares);
+    for (const error of through) {
+      traced.add(error.path);
+    }
+    return through.length === 0
+      ? ''
+      : ` ${through.map(at).join(', ')} could not resolve ${declares} because of it.`;
+  };
+  // A declaring script that itself could not resolve a class is a step on the way, and the one
+  // that failed on something else is the one to open, so it is named first.
+  const first = [...new Map(origins.map((origin) => [origin.path, origin])).values()].sort(
+    (a, b) => Number(unresolvedClassIn(a.message) !== null) - Number(unresolvedClassIn(b.message) !== null),
+  );
+  const named = [
+    ...first.map(
+      (origin) =>
+        `${at(origin)} ${sentence(origin.message)} gdUnit4 did not name this script, which declares ${origin.declares}; the engine's own check of it found the error.${failedOn(origin.declares)}`,
+    ),
+    ...unconfirmed.map(
+      (origin) =>
+        `${origin.path} declares ${origin.declares}, which gdUnit4 did not name, and ${origin.why}.${failedOn(origin.declares)}`,
+    ),
+    ...[...causes.values()]
+      .filter((error) => !traced.has(error.path))
+      .map((error) => `${at(error)} ${sentence(error.message)}`),
+  ].join(' ');
   const following =
     dependents.length === 0
       ? ''
@@ -4308,7 +4354,17 @@ class GodotServer {
     const nothingRan = timedOut ? null : whyNoReport(said, asked.join(' and '));
     const cutShort = timedOut ? timedOutVerdict(timeoutMs, silentForMs) : null;
     const hung = cutShort?.hung ?? false;
-    const scriptErrors = timedOut || exitCode !== 105 ? [] : scriptErrorsPrinted(said);
+    const printedErrors = timedOut || exitCode !== 105 ? [] : scriptErrorsPrinted(said);
+    // Only on a run that stopped on a class it could not resolve, so the engine is started again
+    // for nothing on any other answer.
+    const declaring = printedErrors.some((error) => unresolvedClassIn(error.message) !== null)
+      ? await originsOf(
+          printedErrors,
+          declaredClasses(project.value.path),
+          checkWithEngine(engine.value, project.value.path),
+        )
+      : { origins: [], unconfirmed: [] };
+    const scriptErrors: ScriptError[] = [...declaring.origins, ...printedErrors];
     const brokenScripts = new Set(scriptErrors.map((error) => error.path)).size;
     const ranAs =
       cutShort !== null
@@ -4349,7 +4405,7 @@ class GodotServer {
         nothingRan !== null
           ? `No tests ran: ${ranAs}.`
           : scriptErrors.length > 0
-            ? scriptErrorsNote(scriptErrors)
+            ? scriptErrorsNote(printedErrors, declaring)
             : reportProblem !== null
               ? `The test run's report could not be read (${reportProblem}); the engine's own verdict was ${ranAs}.`
               : `The test run wrote no report (${ranAs}).`;
@@ -4371,7 +4427,7 @@ class GodotServer {
                 ...(missing.length > 0 ? { missing } : {}),
                 ...nonEmpty(foldedScriptErrors(scriptErrors)),
                 arguments: cmdArgs,
-                entries: forAnswer(printed.slice(0, 60).map(aboveTheRunner)),
+                entries: forAnswer(withoutListed(printed, scriptErrors).slice(0, 60).map(aboveTheRunner)),
                 ...printedLines,
                 savesNote,
                 ...scanned,
