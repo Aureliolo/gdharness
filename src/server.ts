@@ -42,7 +42,7 @@ import { answerJson } from './answer-json.js';
 import { halfAsLongAgain, readBootNote, waitSizedTo, writeBootNote } from './boot-note.js';
 import { readBreakpointNote, writeBreakpointNote } from './breakpoint-note.js';
 import { announceBridge, announcementPath, readAnnouncement, withdrawBridge } from './bridge-announce.js';
-import { callSignal, withCallSignal } from './call-signal.js';
+import { type CallProgress, callProgress, callSignal, withCallSignal } from './call-signal.js';
 import {
   cachedAtMissingPaths,
   cachedClasses,
@@ -70,6 +70,7 @@ import {
 } from './class-cache.js';
 import { readClassNote, writeClassNote } from './class-note.js';
 import { configDisagrees } from './config-pin.js';
+import { type CutTestRun, cutTestRunNote, keepCutTestRun, takeCutTestRun } from './cut-test-run.js';
 import {
   DEFAULT_DAP_PORT,
   GodotDAPClient,
@@ -102,12 +103,15 @@ import { engineExtras, type HeadlessOutcome, runImport, runOperation } from './h
 import { EDITOR_READS, ENGINE_PASSES, HEADLESS_OPERATIONS } from './headless-operations.js';
 import { DefectsSeen, defectReport, feedbackNotice } from './issues.js';
 import {
+  finishesASuite,
   hookFailuresPrinted,
   orphansPrinted,
   parseJUnit,
   type ScriptError,
   scriptErrorsPrinted,
+  suitesPrinted,
   type TestReport,
+  testProgressMessage,
   whyNoReport,
   withActualsPrinted,
 } from './junit.js';
@@ -1537,6 +1541,9 @@ export function settingsNamedBy(op: string, args: OperationParams): string[] {
  */
 const STALLED_AFTER_MS = 30_000;
 
+/** The longest a test run goes without a progress notification while no suite finishes. */
+const TEST_HEARTBEAT_MS = 20_000;
+
 /** What the engine says of a script that failed only because one it depends on did. */
 const DEPENDED_FAILED = 'Failed to compile depended scripts';
 
@@ -1588,6 +1595,53 @@ export function foldedScriptErrors(errors: readonly ScriptError[]): {
 /** [param lists] without the ones that are empty, so an answer holds no field with nothing in it. */
 function nonEmpty<T extends Record<string, readonly unknown[]>>(lists: T): Partial<T> {
   return Object.fromEntries(Object.entries(lists).filter(([, list]) => list.length > 0)) as Partial<T>;
+}
+
+/**
+ * [param answer] carrying [param previous]: its sentence after the answer's own, and the record
+ * under `previousRunCut` in the JSON the answer ends with.
+ */
+export function withPreviousCut(answer: ToolResponse, previous: CutTestRun): ToolResponse {
+  const content = answer.content.map((part) => ({ ...part }));
+  const last = content.at(-1);
+  let json: Record<string, unknown> | null = null;
+  try {
+    const parsed: unknown = JSON.parse(last?.text ?? '');
+    json = typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) ? { ...parsed } : null;
+  } catch {
+    // An answer that does not end in JSON carries the sentence alone.
+  }
+  if (last !== undefined && json !== null) {
+    last.text = answerJson({ ...json, previousRunCut: previous });
+  }
+  const note = cutTestRunNote(previous);
+  const first = content[0];
+  // A passing run answers in JSON alone, and a sentence written onto the end of it is no longer JSON.
+  if (first === undefined || (first === last && json !== null) || typeof first.text !== 'string') {
+    content.unshift({ type: 'text', text: note });
+  } else {
+    first.text = `${first.text} ${note}`;
+  }
+  return { ...answer, content };
+}
+
+/**
+ * The sentence after "wrote no report" saying what a run had finished before it ended: so many
+ * suites, so many of them failing, and the one it was in. Empty for a run that never started one.
+ */
+export function finishedBeforeTheEnd(finished: number, failing: number, running: string | null): string {
+  if (finished === 0 && running === null) {
+    return '';
+  }
+  const got =
+    finished === 0
+      ? 'no suite had finished'
+      : `${finished === 1 ? 'one suite' : `${finished} suites`} finished${failing === 0 ? '' : finished === 1 ? ', with failures' : `, ${failing} of them with failures`}`;
+  const listed =
+    finished === 0
+      ? ''
+      : `; ${finished === 1 ? 'it is' : 'they are'} under suitesFinished${failing === 0 ? '' : ', with the failing cases under suitesFailing'}, so a run of the rest need not repeat ${finished === 1 ? 'it' : 'them'}`;
+  return ` Before it ended, ${got}${running === null ? '' : `${finished === 0 ? ' and' : ', and'} ${running} was running`}${listed}.`;
 }
 
 /**
@@ -2468,8 +2522,27 @@ class GodotServer {
       // Started here and not waited for: whatever it learns lands on a later call, and a
       // registry that never answers costs this one nothing.
       this.updates.refresh();
-      const answer = await withCallSignal(extra.signal, () =>
-        this.answered(spec.name, checked.op ?? '', args),
+      // Only to a client that sent a token, which is how it says it wants to hear: a long call
+      // that says nothing is cut off by a client's idle limit, a test tier past thirty minutes
+      // included, and every finished suite went with it.
+      const token = request.params._meta?.progressToken;
+      const progress: CallProgress | undefined =
+        token === undefined
+          ? undefined
+          : (done, message) => {
+              extra
+                .sendNotification({
+                  method: 'notifications/progress',
+                  params: { progressToken: token, progress: done, message },
+                })
+                .catch((error: unknown) => {
+                  this.logDebug(`Progress for ${spec.name} was not sent: ${errorMessage(error)}`);
+                });
+            };
+      const answer = await withCallSignal(
+        extra.signal,
+        () => this.answered(spec.name, checked.op ?? '', args),
+        progress,
       );
       return this.withFeedbackNotice(this.withUpdateNotice(answer));
     });
@@ -4214,12 +4287,63 @@ class GodotServer {
   }
 
   /**
+   * Progress for a test run, read off [param log] as it fills: a notification each time a suite
+   * finishes, and one at least every twenty seconds while none does, so a client with an idle
+   * limit sees a live call through a long suite. Claude Code ends a call that says nothing for
+   * thirty minutes, and the SDK's own default is a minute. The number sent is the seconds the run
+   * has taken, which only goes up as the protocol asks; the counts are in the message.
+   */
+  private reportTestProgress(log: GameLog): NodeJS.Timeout | undefined {
+    const progress = callProgress();
+    if (progress === undefined) {
+      return undefined;
+    }
+    const began = Date.now();
+    let read = 0;
+    let lastSent = began;
+    const ticker = setInterval(() => {
+      const entries = log.all;
+      const finishedOne = entries.slice(read).some((entry) => finishesASuite(entry.text));
+      read = entries.length;
+      const now = Date.now();
+      if (!finishedOne && now - lastSent < TEST_HEARTBEAT_MS) {
+        return;
+      }
+      lastSent = now;
+      // Whole seconds, from ticks at least a second apart, so each is more than the last.
+      progress(
+        Math.floor((now - began) / 1000),
+        testProgressMessage(
+          entries.map((entry) => entry.text),
+          now - began,
+        ),
+      );
+    }, 1000);
+    ticker.unref();
+    return ticker;
+  }
+
+  /**
    * project_test: gdUnit4's command line runner, driven the way its own runtest script does
    * and read through the JUnit report it writes rather than its console. The class list is
    * rebuilt first because the runner is itself a set of class_names the engine has to resolve,
    * and so is any suite written since the editor last scanned.
+   *
+   * With the answer goes what the run before it in this project had finished when its client cut
+   * it off, taken only by a call that is still being waited on: one that is not would take what
+   * it had itself just kept, and hand it to nobody.
    */
   private async handleRunTests(args: OperationParams): Promise<ToolResponse> {
+    const answer = await this.runTests(args);
+    const project = this.project(args);
+    if (!project.ok || callSignal()?.aborted === true) {
+      return answer;
+    }
+    const previous = takeCutTestRun(project.value.path);
+    return previous === null ? answer : withPreviousCut(answer, previous);
+  }
+
+  private async runTests(args: OperationParams): Promise<ToolResponse> {
     const project = this.project(args);
     if (!project.ok) {
       return project.response;
@@ -4309,6 +4433,7 @@ class GodotServer {
     run.process.stderr?.on('data', () => {
       lastSaid = Date.now();
     });
+    const reporting = this.reportTestProgress(run.log);
     let silentForMs = 0;
     const timedOut = await new Promise<boolean>((resolve) => {
       const timer = setTimeout(() => {
@@ -4325,6 +4450,7 @@ class GodotServer {
         resolve(false);
       });
     });
+    clearInterval(reporting);
     // A signal is not an exit: the engine still holds its log in the user data directory while it
     // goes, and the removal below would find it there.
     if (timedOut && run.process.pid !== undefined) {
@@ -4433,7 +4559,25 @@ class GodotServer {
             ...(echoed.omitted > 0 ? { printedOmitted: echoed.omitted } : {}),
           };
 
+    // What finished before a run without a report ended, which only the console holds: a run cut
+    // off by its timeout or by the client otherwise answers nothing of the suites it got through.
+    const sofar = report === null ? suitesPrinted(said) : null;
     if (report === null) {
+      const finished = sofar?.finished ?? [];
+      const running = sofar?.running ?? null;
+      const failing = finished.filter((suite) => suite.errors + suite.failures > 0);
+      const atTheEnd = {
+        ...nonEmpty({
+          suitesFinished: finished.map((suite) => suite.path),
+          suitesFailing: failing.map(({ path, errors, failures, failed }) => ({
+            path,
+            errors,
+            failures,
+            failed,
+          })),
+        }),
+        ...(running === null ? {} : { suiteRunning: running }),
+      };
       const said =
         nothingRan !== null
           ? `No tests ran: ${ranAs}.`
@@ -4441,8 +4585,13 @@ class GodotServer {
             ? scriptErrorsNote(printedErrors, declaring)
             : reportProblem !== null
               ? `The test run's report could not be read (${reportProblem}); the engine's own verdict was ${ranAs}.`
-              : `The test run wrote no report (${ranAs}).`;
+              : `The test run wrote no report (${ranAs}).${finishedBeforeTheEnd(finished.length, failing.length, running)}`;
       const note = missingNote === undefined ? said : `${said} ${missingNote}`;
+      // Kept in the project when nobody is left to read the answer, for the next run there to
+      // hand back: the client that cut this call off is the one that will ask again.
+      if (callSignal()?.aborted === true) {
+        keepCutTestRun(project.value.path, { cutAt: new Date().toISOString(), paths: asked, ...atTheEnd });
+      }
       return {
         content: [
           { type: 'text', text: note },
@@ -4459,6 +4608,7 @@ class GodotServer {
                 ...(timedOut ? { timedOut, silentForMs } : {}),
                 ...(missing.length > 0 ? { missing } : {}),
                 ...nonEmpty(foldedScriptErrors(scriptErrors)),
+                ...atTheEnd,
                 arguments: cmdArgs,
                 entries: forAnswer(withoutListed(printed, scriptErrors).slice(0, 60).map(aboveTheRunner)),
                 ...printedLines,
