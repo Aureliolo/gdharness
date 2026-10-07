@@ -781,6 +781,24 @@ func _check_words_held_together_by_a_space_that_does_not_break() -> void:
 			_fail("a typed space matches U+%04X" % code)
 	if Says.matches("Ab%sCd" % String.chr(0x200B), "ab cd"):
 		_fail("and a zero-width space, which draws no space, is not one")
+	# A space stands for any one character only while a text is sorted out cheaply; what matches is
+	# still decided on the words spaced.
+	var nbsp: String = String.chr(0x00A0)
+	for case: Array in [
+		["AbXCd", "ab cd", false],
+		["Ab Cd", "ab cd", true],
+		["Ab%sCd and more" % nbsp, "ab cd*", true],
+		["AbXCd and more", "ab cd*", false],
+		["first line\nsecond words", "second words", true],
+		["Two\nlines", "two\\nlines", true],
+		["We lost%sthe hall" % nbsp, "won|lost the", true],
+		["We lostXthe hall", "won|lost the", false],
+	]:
+		var said: String = case[0]
+		var wanted: String = case[1]
+		var expected: bool = case[2]
+		if Says.matches(said, wanted) != expected:
+			_fail("%s says %s: %s" % [JSON.stringify(said), JSON.stringify(wanted), not expected])
 
 	var line: RichTextLabel = RichTextLabel.new()
 	line.name = "Dossier"
