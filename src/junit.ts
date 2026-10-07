@@ -662,3 +662,79 @@ export function orphansPrinted(printed: readonly string[]): OrphanReport {
     suites,
   };
 }
+
+/** One suite the run finished, as its statistics line counted it, and the cases that did not pass. */
+export interface SuiteFinished {
+  readonly path: string;
+  readonly cases: number;
+  readonly errors: number;
+  readonly failures: number;
+  /** The names of its cases that failed or errored, as gdUnit4 printed them. */
+  readonly failed: readonly string[];
+}
+
+const SUITE_COUNTS = /(\d+)\s+test cases\s*\|\s*(\d+)\s+errors\s*\|\s*(\d+)\s+failures/;
+const CASE_FAILED = /^\s*res:\/\/.+?\.(?:gd|cs) > (.+?) (?:FAILED|ERROR)(?:\s|$)/;
+
+/** Whether [param line] is the statistics line gdUnit4 prints as a suite ends. */
+export function finishesASuite(line: string): boolean {
+  return SUITE_COUNTS.test(line) && !line.includes(OVERALL);
+}
+
+/**
+ * The suites a run has finished so far, and the one it is in, read off what it printed.
+ *
+ * The report is written once, at the end, so a run that is cut off has none, and what it finished
+ * exists only on the console: a tier of 110 suites ended by the client's idle limit after thirty
+ * minutes answered nothing of the suites that had run. Read as it goes as well, for the progress a
+ * long run reports.
+ */
+export function suitesPrinted(printed: readonly string[]): {
+  finished: SuiteFinished[];
+  running: string | null;
+} {
+  const finished: SuiteFinished[] = [];
+  let running: string | null = null;
+  let failed: string[] = [];
+  for (const line of printed) {
+    const started = RUNNING_SUITE.exec(line);
+    if (started?.[1] !== undefined) {
+      running = started[1];
+      failed = [];
+      continue;
+    }
+    if (running === null) {
+      continue;
+    }
+    const failing = CASE_FAILED.exec(line)?.[1];
+    if (failing !== undefined) {
+      failed.push(failing);
+      continue;
+    }
+    const counted = finishesASuite(line) ? SUITE_COUNTS.exec(line) : null;
+    if (counted !== null) {
+      finished.push({
+        path: running,
+        cases: Number(counted[1]),
+        errors: Number(counted[2]),
+        failures: Number(counted[3]),
+        failed,
+      });
+      running = null;
+    }
+  }
+  return { finished, running };
+}
+
+/** The progress message for a run [param elapsedMs] in, from what [param printed] says so far. */
+export function testProgressMessage(printed: readonly string[], elapsedMs: number): string {
+  const { finished, running } = suitesPrinted(printed);
+  const failing = finished.filter((suite) => suite.errors + suite.failures > 0).length;
+  const seconds = Math.floor(elapsedMs / 1000);
+  const took = seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  const done =
+    finished.length === 0
+      ? 'No suite has finished'
+      : `${finished.length === 1 ? 'One suite has' : `${finished.length} suites have`} finished${failing === 0 ? '' : `, ${failing} with failures`}`;
+  return `${done}${running === null ? '' : `; running ${running}`}; ${took} in.`;
+}

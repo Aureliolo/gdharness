@@ -64,6 +64,7 @@ import {
   withAddonClassesCounted,
 } from '../src/class-cache.js';
 import { classNotePath, readClassNote } from '../src/class-note.js';
+import { type CutTestRun, cutTestRunNote, keepCutTestRun, takeCutTestRun } from '../src/cut-test-run.js';
 import { GodotDAPClient, type HeldBreakpoint, handleDAPTool } from '../src/dap_client.js';
 import { HIDDEN_DESKTOP, windowsCommandLine } from '../src/desktop.js';
 import { dictionary, emptyRecord } from '../src/dictionary.js';
@@ -182,6 +183,7 @@ import {
   endedToStartThis,
   endedWithoutACode,
   exportAnswer,
+  finishedBeforeTheEnd,
   foldedScriptErrors,
   leftRunningNote,
   noCodeWillCome,
@@ -200,6 +202,7 @@ import {
   testPathsIn,
   timedOutVerdict,
   uidsLeftNote,
+  withPreviousCut,
 } from '../src/server.js';
 import type { GodotProcess, ToolResponse } from '../src/server-types.js';
 import {
@@ -23804,6 +23807,266 @@ async function testGdUnitRunner(): Promise<void> {
 }
 
 /**
+ * #915: a test run says how far it has got, and keeps what it finished when it is cut off.
+ *
+ * ostinato's tier of 110 suites ran past thirty minutes, Claude Code ended the call for sending
+ * nothing in that time, and every finished suite went with it. A client asking for progress is
+ * told as each suite finishes and at least every twenty seconds through a long one, a client that
+ * did not ask is told nothing, a run its own timeout ends answers with what it finished, and a run
+ * its client cancels leaves that in the project for the next run there to hand back once.
+ */
+async function testATestRunSaysHowFarItHasGot(): Promise<void> {
+  // The sentences, for each count, without an engine.
+  assert.equal(finishedBeforeTheEnd(0, 0, null), '');
+  assert.equal(
+    finishedBeforeTheEnd(0, 0, 'res://test/c_test.gd'),
+    ' Before it ended, no suite had finished and res://test/c_test.gd was running.',
+  );
+  assert.equal(
+    finishedBeforeTheEnd(1, 1, 'res://test/c_test.gd'),
+    ' Before it ended, one suite finished, with failures, and res://test/c_test.gd was running; it is under suitesFinished, with the failing cases under suitesFailing, so a run of the rest need not repeat it.',
+  );
+  assert.equal(
+    finishedBeforeTheEnd(3, 2, null),
+    ' Before it ended, 3 suites finished, 2 of them with failures; they are under suitesFinished, with the failing cases under suitesFailing, so a run of the rest need not repeat them.',
+  );
+  const cut: CutTestRun = {
+    cutAt: '2026-10-07T01:00:00.000Z',
+    paths: ['res://test'],
+    suitesFinished: ['res://test/a_test.gd', 'res://test/b_test.gd'],
+    suitesFailing: [{ path: 'res://test/b_test.gd', errors: 0, failures: 1, failed: ['test_fails'] }],
+    suiteRunning: 'res://test/c_test.gd',
+  };
+  assert.equal(
+    cutTestRunNote(cut),
+    'The test run before this one in this project, of res://test, was cut off by its client at 2026-10-07T01:00:00.000Z after 2 suites had finished, 1 of them with failures, while res://test/c_test.gd was running; what it finished is under previousRunCut.',
+  );
+  assert.equal(
+    cutTestRunNote({ cutAt: cut.cutAt, paths: ['res://a_test.gd', 'res://b_test.gd'] }),
+    'The test run before this one in this project, of res://a_test.gd, res://b_test.gd, was cut off by its client at 2026-10-07T01:00:00.000Z before any suite had finished; what it finished is under previousRunCut.',
+  );
+  const carried = withPreviousCut(
+    {
+      content: [
+        { type: 'text', text: 'All 3 tests passed.' },
+        { type: 'text', text: '{"passed": true}' },
+      ],
+    },
+    cut,
+  );
+  assert.equal(carried.content[0]?.text, `All 3 tests passed. ${cutTestRunNote(cut)}`);
+  assert.deepEqual(JSON.parse(carried.content[1]?.text ?? ''), { passed: true, previousRunCut: cut });
+  // A passing run answers in JSON alone, so the sentence goes ahead of it rather than onto it.
+  const alone = withPreviousCut({ content: [{ type: 'text', text: '{"passed": true}' }] }, cut);
+  assert.deepEqual(
+    alone.content.map((part) => part.text),
+    [cutTestRunNote(cut), answerJson({ passed: true, previousRunCut: cut })],
+  );
+  const kept = mkdtempSync(join(tmpdir(), 'gdharness-cut-run-'));
+  try {
+    assert.equal(takeCutTestRun(kept), null, 'nothing kept in a project no run was cut in');
+    keepCutTestRun(kept, cut);
+    assert.deepEqual(takeCutTestRun(kept), cut);
+    assert.equal(takeCutTestRun(kept), null, 'handed back once');
+    mkdirSync(join(kept, '.godot', 'gdharness-reports'), { recursive: true });
+    writeFileSync(join(kept, '.godot', 'gdharness-reports', 'cut-run.json'), '{"cutAt": 5, "paths": "x"}');
+    assert.equal(takeCutTestRun(kept), null, 'a record of the wrong shape is not handed back');
+    assert.equal(existsSync(join(kept, '.godot', 'gdharness-reports', 'cut-run.json')), false, 'and goes');
+  } finally {
+    rmSync(kept, { recursive: true, force: true });
+  }
+
+  const godotPath = resolveGodotPath();
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
+    }
+    console.log('test run progress regression skipped (Godot or gdUnit4 not found)');
+    return;
+  }
+  const projectDir = mkdtempSync(join(tmpdir(), 'gdharness-test-progress-'));
+  const server = new ServerProcess({ env: { GODOT_PATH: godotPath } });
+  const answerOf = (response: JsonRpcMessage): { note: string; json: unknown } => {
+    const result = response.result;
+    const content =
+      isRecord(result) && Array.isArray(result['content']) ? (result['content'] as { text?: string }[]) : [];
+    const json = content.findLast((part) => part.text?.startsWith('{') === true)?.text;
+    return {
+      note: content[0]?.text ?? '',
+      json:
+        json === undefined
+          ? assert.fail(`no JSON in ${JSON.stringify(content)}`)
+          : jsonOf(json, 'project_test'),
+    };
+  };
+  const progressFor = (token: string): { progress: number; message: string }[] =>
+    server.notifications
+      .filter((message) => message.method === 'notifications/progress')
+      .map((message) => (isRecord(message.params) ? message.params : {}))
+      .filter((params) => params['progressToken'] === token)
+      .map((params) => ({ progress: Number(params['progress']), message: text(params['message']) }));
+  try {
+    writeFileSync(
+      join(projectDir, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="TestProgress"\n',
+    );
+    cpSync(gdunit, join(projectDir, 'addons', 'gdUnit4'), { recursive: true });
+    mkdirSync(join(projectDir, 'test'));
+    const suite = (name: string, seconds: number, passes: boolean): void => {
+      writeFileSync(
+        join(projectDir, 'test', `${name}_test.gd`),
+        [
+          'extends GdUnitTestSuite',
+          '',
+          '',
+          `func test_${passes ? 'holds' : 'fails'}() -> void:`,
+          `\tawait get_tree().create_timer(${seconds}.0).timeout`,
+          `\tassert_int(1).is_equal(${passes ? 1 : 2})`,
+          '',
+        ].join('\n'),
+      );
+    };
+    suite('a', 2, true);
+    suite('b', 2, false);
+    suite('c', 120, true);
+    const a = 'res://test/a_test.gd';
+    const b = 'res://test/b_test.gd';
+    const c = 'res://test/c_test.gd';
+    await server.initialize('regression-test');
+
+    // Asked for: told as each suite finishes, with a number that only goes up.
+    const asked = await server.request(
+      'tools/call',
+      {
+        name: 'project_test',
+        arguments: { projectPath: projectDir, path: [a, b] },
+        _meta: { progressToken: 'two' },
+      },
+      ENGINE_CALL_TIMEOUT_MS * 3,
+    );
+    assert.equal(get(answerOf(asked).json, 'verdict'), 'failures', JSON.stringify(asked));
+    const told = progressFor('two');
+    assert.ok(told.length >= 1, JSON.stringify(server.notifications));
+    for (const [at, each] of told.entries()) {
+      assert.ok(
+        at === 0 || each.progress > (told[at - 1]?.progress ?? 0),
+        `progress only goes up: ${JSON.stringify(told)}`,
+      );
+    }
+    assert.ok(
+      told.some((each) => /^(One suite has|2 suites have) finished/.test(each.message)),
+      `a finished suite is counted: ${JSON.stringify(told)}`,
+    );
+    // Not asked for: told nothing, over the same run that was told something when it asked.
+    const before = server.notifications.length;
+    await server.request(
+      'tools/call',
+      { name: 'project_test', arguments: { projectPath: projectDir, path: [a, b] } },
+      ENGINE_CALL_TIMEOUT_MS * 3,
+    );
+    assert.equal(
+      server.notifications.slice(before).filter((message) => message.method === 'notifications/progress')
+        .length,
+      0,
+      'a call with no progress token is sent no progress',
+    );
+
+    // Its own timeout: the answer says what had finished and what was running.
+    const timed = answerOf(
+      await server.request(
+        'tools/call',
+        { name: 'project_test', arguments: { projectPath: projectDir, path: [a, c], timeoutMs: 25_000 } },
+        ENGINE_CALL_TIMEOUT_MS * 3,
+      ),
+    );
+    assert.deepEqual(
+      { finished: get(timed.json, 'suitesFinished'), running: get(timed.json, 'suiteRunning') },
+      { finished: [a], running: c },
+      timed.note,
+    );
+    assert.match(
+      timed.note,
+      /Before it ended, one suite finished, and res:\/\/test\/c_test\.gd was running; it is under suitesFinished/,
+    );
+
+    // Cut off by its client: told through the long suite, and what it finished kept for the next run.
+    const id = server.nextRequestId;
+    void server
+      .request(
+        'tools/call',
+        {
+          name: 'project_test',
+          arguments: { projectPath: projectDir, path: [a, b, c] },
+          _meta: { progressToken: 'cut' },
+        },
+        ENGINE_CALL_TIMEOUT_MS * 4,
+      )
+      .catch(() => {
+        // A cancelled call is not answered; the next call is where its leftovers come back.
+      });
+    const inTheLongOne = (each: { message: string }): boolean =>
+      each.message.startsWith('2 suites have finished, 1 with failures; running res://test/c_test.gd');
+    for (
+      let waited = 0;
+      waited < 90_000 && progressFor('cut').filter(inTheLongOne).length < 2;
+      waited += 500
+    ) {
+      await delay(500);
+    }
+    assert.ok(
+      progressFor('cut').filter(inTheLongOne).length >= 2,
+      `told again through a suite that takes long, with nothing finishing: ${JSON.stringify(progressFor('cut'))}`,
+    );
+    server.notify('notifications/cancelled', { requestId: id, reason: 'the caller stopped waiting' });
+    const keptAt = join(projectDir, '.godot', 'gdharness-reports', 'cut-run.json');
+    for (let waited = 0; waited < 20_000 && !existsSync(keptAt); waited += 250) {
+      await delay(250);
+    }
+    assert.ok(existsSync(keptAt), 'a cancelled run keeps what it finished in the project');
+    const next = answerOf(
+      await server.request(
+        'tools/call',
+        { name: 'project_test', arguments: { projectPath: projectDir, path: a } },
+        ENGINE_CALL_TIMEOUT_MS * 3,
+      ),
+    );
+    const previous = get(next.json, 'previousRunCut');
+    assert.deepEqual(
+      {
+        paths: get(previous, 'paths'),
+        finished: get(previous, 'suitesFinished'),
+        failing: get(previous, 'suitesFailing'),
+        running: get(previous, 'suiteRunning'),
+      },
+      {
+        paths: [a, b, c],
+        finished: [a, b],
+        failing: [{ path: b, errors: 0, failures: 1, failed: ['test_fails'] }],
+        running: c,
+      },
+      next.note,
+    );
+    assert.match(
+      next.note,
+      /The test run before this one in this project, of res:\/\/test\/a_test\.gd, res:\/\/test\/b_test\.gd, res:\/\/test\/c_test\.gd, was cut off by its client at \S+ after 2 suites had finished, 1 of them with failures, while res:\/\/test\/c_test\.gd was running; what it finished is under previousRunCut\.$/,
+    );
+    const after = answerOf(
+      await server.request(
+        'tools/call',
+        { name: 'project_test', arguments: { projectPath: projectDir, path: a } },
+        ENGINE_CALL_TIMEOUT_MS * 3,
+      ),
+    );
+    assert.equal(get(after.json, 'verdict'), 'passed', after.note);
+    assert.equal(get(after.json, 'previousRunCut'), undefined, 'handed back once');
+  } finally {
+    await server.stop();
+    sweep(projectDir);
+  }
+}
+
+/**
  * The CLI against a real engine: setup puts the addons in and turns the editor ones on,
  * runtime on and off registers and removes the autoload, and doctor says so, then says what
  * is wrong once something is.
@@ -29066,6 +29329,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARunOfAnotherProjectOutlivesItsServer,
   testTheResourcesReadOnlyTheProject,
   testGdUnitRunner,
+  testATestRunSaysHowFarItHasGot,
   testATestRunCutShortIsNamedForWhatItWasDoing,
   testAnUpgradeReadsTheEngineOutOfTheConfigItRewrites,
   testCommandLineSetup,

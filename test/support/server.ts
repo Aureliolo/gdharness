@@ -126,6 +126,8 @@ export class ServerProcess {
   readonly child: ChildProcess;
   stdout = '';
   stderr = '';
+  /** Every notification the server has sent, in order: a message with no id. */
+  readonly notifications: JsonRpcMessage[] = [];
   private nextId = 1;
   private readonly waiting = new Map<number | string, (message: JsonRpcMessage) => void>();
   private readonly abandoned = new Set<(reason: Error) => void>();
@@ -168,7 +170,10 @@ export class ServerProcess {
       const lines = this.buffered.split('\n');
       this.buffered = lines.pop() ?? '';
       for (const message of parseJsonLines(lines.join('\n'))) {
-        if (message.id === undefined || message.id === null) continue;
+        if (message.id === undefined || message.id === null) {
+          this.notifications.push(message);
+          continue;
+        }
         const resolve = this.waiting.get(message.id);
         if (resolve) {
           this.waiting.delete(message.id);
