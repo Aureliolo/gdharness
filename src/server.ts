@@ -1547,16 +1547,41 @@ const DEPENDED_FAILED = 'Failed to compile depended scripts';
  * Each of those carries the same line, "Failed to compile depended scripts" at line 0, and a parse
  * error in a core script took nineteen of them down with it: about ten kilobytes of one sentence
  * nineteen times, under a first line that had already counted them.
+ *
+ * The errors a script has only because a class it uses did not resolve are kept apart under
+ * `followFromUnresolved`: the engine reads the class as Variant, so every member used on it is
+ * "not present on the inferred type", and a variable typed with it fails to parse the class
+ * again. On ostinato's tier those were all seventeen "more errors" beside five scripts that could
+ * not resolve one class, and each goes with the fault or shows again once it is fixed.
  */
 export function foldedScriptErrors(errors: readonly ScriptError[]): {
   scriptErrors: ScriptError[];
   failedThroughDependency: string[];
+  followFromUnresolved: ScriptError[];
 } {
-  const scriptErrors = errors.filter((error) => !error.message.includes(DEPENDED_FAILED));
+  const unresolved = new Map<string, Set<string>>();
+  for (const error of errors) {
+    const name = unresolvedClassIn(error.message);
+    if (name !== null) {
+      unresolved.set(error.path, (unresolved.get(error.path) ?? new Set()).add(name));
+    }
+  }
+  const follows = (error: ScriptError): boolean => {
+    const names = unresolved.get(error.path);
+    if (names === undefined) {
+      return false;
+    }
+    const reparsed = /Could not parse global class "([A-Za-z_][A-Za-z0-9_]*)"/.exec(error.message)?.[1];
+    return (
+      error.message.includes('the inferred type "Variant"') || (reparsed !== undefined && names.has(reparsed))
+    );
+  };
+  const scriptErrors = errors.filter((error) => !error.message.includes(DEPENDED_FAILED) && !follows(error));
   const own = new Set(scriptErrors.map((error) => error.path));
   return {
     scriptErrors,
     failedThroughDependency: [...new Set(errors.map((error) => error.path))].filter((path) => !own.has(path)),
+    followFromUnresolved: errors.filter(follows),
   };
 }
 
@@ -1590,7 +1615,11 @@ export function scriptErrorsNote(
     unconfirmed: [],
   },
 ): string {
-  const { scriptErrors: own, failedThroughDependency: dependents } = foldedScriptErrors(errors);
+  const {
+    scriptErrors: own,
+    failedThroughDependency: dependents,
+    followFromUnresolved: consequences,
+  } = foldedScriptErrors(errors);
   const causes = new Map<string, ScriptError>();
   for (const error of own) {
     if (!causes.has(error.path)) {
@@ -1640,14 +1669,18 @@ export function scriptErrorsNote(
     more > 0
       ? `${more === 1 ? 'One more error' : `${more} more errors`} in ${causes.size === 1 ? 'that script' : 'those scripts'} ${more === 1 ? 'is' : 'are'} under scriptErrors.`
       : '';
-  return [
-    `No tests ran: gdUnit4 could not load ${scripts === 1 ? 'one script' : `${scripts} scripts`} while looking for suites, and it runs no suite at all when one fails to load.`,
-    named,
-    following,
-    rest,
-  ]
-    .filter((part) => part !== '')
-    .join(' ');
+  const after =
+    consequences.length > 0
+      ? `${consequences.length === 1 ? 'One more error comes' : `${consequences.length} more errors come`} only from a class that did not resolve, which the engine reads as Variant, and ${consequences.length === 1 ? 'is' : 'are'} under followFromUnresolved.`
+      : '';
+  // Counted with the declaring scripts gdUnit4 did not name, so the head and the verdict beside it,
+  // which counts every script with an error, give one number for one run.
+  const unnamed = first.length;
+  const opening =
+    unnamed === 0
+      ? `No tests ran: gdUnit4 could not load ${scripts === 1 ? 'one script' : `${scripts} scripts`} while looking for suites, and it runs no suite at all when one fails to load.`
+      : `No tests ran: ${scripts + unnamed} scripts did not compile, and gdUnit4 runs no suite at all when one fails to load. It could not load ${scripts === 1 ? 'one' : scripts} of them while looking for suites, and ${unnamed === 1 ? 'the one it did not name comes' : `the ${unnamed} it did not name come`} first.`;
+  return [opening, named, following, rest, after].filter((part) => part !== '').join(' ');
 }
 
 /**

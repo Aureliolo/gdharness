@@ -22526,6 +22526,7 @@ async function testGdUnitRunner(): Promise<void> {
     {
       scriptErrors: [reward, { ...reward, line: 95 }],
       failedThroughDependency: ['res://core/ladder.gd', 'res://core/run.gd'],
+      followFromUnresolved: [],
     },
   );
   assert.deepEqual(
@@ -22534,7 +22535,11 @@ async function testGdUnitRunner(): Promise<void> {
       fault(3, 'Parse Error: one.'),
       dependedOn('res://test/a_test.gd'),
     ]),
-    { scriptErrors: [fault(3, 'Parse Error: one.')], failedThroughDependency: ['res://core/run.gd'] },
+    {
+      scriptErrors: [fault(3, 'Parse Error: one.')],
+      failedThroughDependency: ['res://core/run.gd'],
+      followFromUnresolved: [],
+    },
     'a script with an error of its own is not also listed as failing through a dependency',
   );
 
@@ -22606,7 +22611,7 @@ async function testGdUnitRunner(): Promise<void> {
   );
   assert.equal(
     chainNote,
-    'No tests ran: gdUnit4 could not load 3 scripts while looking for suites, and it runs no suite at all when one fails to load. res://core/base.gd:7 Parse Error: Expected ":" after function declaration. gdUnit4 did not name this script, which declares Base; the engine\'s own check of it found the error. res://core/motif.gd:3 Parse Error: Could not resolve class "Base", because of a parser error. gdUnit4 did not name this script, which declares Motif; the engine\'s own check of it found the error. res://core/armed.gd:94, res://core/hearing.gd:298 could not resolve Motif because of it. One more failed only because a script it depends on did: res://test/armed_test.gd.',
+    'No tests ran: 5 scripts did not compile, and gdUnit4 runs no suite at all when one fails to load. It could not load 3 of them while looking for suites, and the 2 it did not name come first. res://core/base.gd:7 Parse Error: Expected ":" after function declaration. gdUnit4 did not name this script, which declares Base; the engine\'s own check of it found the error. res://core/motif.gd:3 Parse Error: Could not resolve class "Base", because of a parser error. gdUnit4 did not name this script, which declares Motif; the engine\'s own check of it found the error. res://core/armed.gd:94, res://core/hearing.gd:298 could not resolve Motif because of it. One more failed only because a script it depends on did: res://test/armed_test.gd.',
     'the script to open is named first with its line, and those that failed on its class after it',
   );
 
@@ -22660,6 +22665,59 @@ async function testGdUnitRunner(): Promise<void> {
     }),
     "No tests ran: gdUnit4 could not load one script while looking for suites, and it runs no suite at all when one fails to load. res://core/quiet.gd declares Quiet, which gdUnit4 did not name, and the engine's check of it did not finish (it ran past its minute). res://core/b.gd:2 could not resolve Quiet because of it.",
     'a declaring script the check found nothing in is named as the place to look, without an error put to it',
+  );
+
+  // #912: the errors a script has only because a class did not resolve. The engine reads the class
+  // as Variant, so each member used on it is not present on the inferred type, at that line and at
+  // any line using a variable typed with it, and that variable's type fails to parse the class.
+  const variant = (path: string, line: number, member: string): ScriptError => ({
+    path,
+    line,
+    message: `Parse Error: The method "${member}()" is not present on the inferred type "Variant" (but may be present on a subtype). (Warning treated as error.)`,
+  });
+  const reparsed = (path: string, line: number, name: string): ScriptError => ({
+    path,
+    line,
+    message: `Parse Error: Could not parse global class "${name}" from "res://core/${name.toLowerCase()}.gd".`,
+  });
+  const hearingErrors = [
+    unresolved('res://core/hearing.gd', 6, 'Motif'),
+    variant('res://core/hearing.gd', 6, 'held'),
+    reparsed('res://core/hearing.gd', 10, 'Motif'),
+    unresolved('res://core/hearing.gd', 10, 'Motif'),
+    variant('res://core/hearing.gd', 11, 'held'),
+    reparsed('res://core/hearing.gd', 12, 'Other'),
+    variant('res://core/sound.gd', 4, 'rang'),
+    dependedOn('res://test/hearing_test.gd'),
+  ];
+  assert.deepEqual(
+    foldedScriptErrors(hearingErrors),
+    {
+      scriptErrors: [
+        unresolved('res://core/hearing.gd', 6, 'Motif'),
+        unresolved('res://core/hearing.gd', 10, 'Motif'),
+        reparsed('res://core/hearing.gd', 12, 'Other'),
+        variant('res://core/sound.gd', 4, 'rang'),
+      ],
+      failedThroughDependency: ['res://test/hearing_test.gd'],
+      followFromUnresolved: [
+        variant('res://core/hearing.gd', 6, 'held'),
+        reparsed('res://core/hearing.gd', 10, 'Motif'),
+        variant('res://core/hearing.gd', 11, 'held'),
+      ],
+    },
+    'kept apart only in a script that could not resolve a class, and a class it resolved failing to parse is its own error',
+  );
+  assert.equal(
+    scriptErrorsNote(hearingErrors),
+    'No tests ran: gdUnit4 could not load 3 scripts while looking for suites, and it runs no suite at all when one fails to load. res://core/hearing.gd:6 Parse Error: Could not resolve class "Motif", because of a parser error. res://core/sound.gd:4 Parse Error: The method "rang()" is not present on the inferred type "Variant" (but may be present on a subtype). (Warning treated as error.) One more failed only because a script it depends on did: res://test/hearing_test.gd. 2 more errors in those scripts are under scriptErrors. 3 more errors come only from a class that did not resolve, which the engine reads as Variant, and are under followFromUnresolved.',
+  );
+  assert.match(
+    scriptErrorsNote([
+      unresolved('res://core/hearing.gd', 6, 'Motif'),
+      variant('res://core/hearing.gd', 6, 'held'),
+    ]),
+    /\. One more error comes only from a class that did not resolve, which the engine reads as Variant, and is under followFromUnresolved\.$/,
   );
   checked.length = 0;
   const looped = await originsOf(
@@ -23650,7 +23708,18 @@ async function testGdUnitRunner(): Promise<void> {
             'func beats() -> int:',
             '\treturn RegressionMotif.plain(2)',
             '',
+            '',
+            'func twice() -> int:',
+            '\tvar motif: RegressionMotif = RegressionMotif.new()',
+            '\treturn motif.held() * 2',
+            '',
           ].join('\n'),
+        );
+        // #912: with unsafe access raised to an error, as ostinato's project has it, the class read
+        // as Variant gives this script errors that come only from the fault.
+        writeFileSync(
+          join(projectDir, 'project.godot'),
+          `${settingsBefore}\n[debug]\n\ngdscript/warnings/unsafe_method_access=2\n`,
         );
         writeFileSync(
           join(projectDir, 'motif', 'hearing_test.gd'),
@@ -23682,10 +23751,32 @@ async function testGdUnitRunner(): Promise<void> {
         );
         assert.match(
           motifNote,
-          /^No tests ran: gdUnit4 could not load 2 scripts [\s\S]*\. res:\/\/motif\/motif\.gd:10 Parse Error: Unexpected "Indent" in class body\. gdUnit4 did not name this script, which declares RegressionMotif; the engine's own check of it found the error\. res:\/\/motif\/hearing\.gd:6 could not resolve RegressionMotif because of it\. One more failed only because a script it depends on did: res:\/\/motif\/hearing_test\.gd\.$/,
+          /^No tests ran: 3 scripts did not compile, and gdUnit4 runs no suite at all when one fails to load\. It could not load 2 of them while looking for suites, and the one it did not name comes first\. res:\/\/motif\/motif\.gd:10 Parse Error: Unexpected "Indent" in class body\. gdUnit4 did not name this script, which declares RegressionMotif; the engine's own check of it found the error\. res:\/\/motif\/hearing\.gd:6 could not resolve RegressionMotif because of it\. One more failed only because a script it depends on did: res:\/\/motif\/hearing_test\.gd\. [\s\S]* more errors come only from a class that did not resolve, which the engine reads as Variant, and are under followFromUnresolved\.$/,
           motif,
         );
+        // #911: one number for one run, in the head and in the verdict beside it.
         assert.equal(get(motifAnswer, 'verdict'), 'script errors in 3 scripts, so no suite ran', motif);
+        const followed = asArray(get(motifAnswer, 'followFromUnresolved'));
+        assert.ok(followed.length >= 2, motif);
+        for (const error of followed) {
+          assert.equal(get(error, 'path'), 'res://motif/hearing.gd', motif);
+          assert.match(
+            text(get(error, 'message')),
+            /inferred type "Variant"|Could not parse global class "RegressionMotif"/,
+            motif,
+          );
+        }
+        assert.ok(
+          followed.some((error) => Number(get(error, 'line')) === 11),
+          `a line using a variable typed with the class, not only the line that failed to resolve it: ${motif}`,
+        );
+        assert.deepEqual(
+          asArray(get(motifAnswer, 'scriptErrors'))
+            .map((error) => text(get(error, 'message')))
+            .filter((message) => /inferred type "Variant"|Could not parse global class/.test(message)),
+          [],
+          motif,
+        );
         // What the answer carries beside them: what the run printed, without the errors listed
         // above it a second and third time.
         const motifEntries = asArray(get(motifAnswer, 'entries')).map((entry) => text(get(entry, 'text')));
@@ -23703,6 +23794,7 @@ async function testGdUnitRunner(): Promise<void> {
           motif,
         );
         rmSync(join(projectDir, 'motif'), { recursive: true, force: true });
+        writeFileSync(join(projectDir, 'project.godot'), settingsBefore);
       },
       { GODOT_PATH: godotPath },
     );
