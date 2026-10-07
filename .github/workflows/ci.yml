@@ -77,7 +77,8 @@ jobs:
         run: |
           set -euo pipefail
           archive="${RUNNER_TEMP}/uv-x86_64-unknown-linux-gnu.tar.gz"
-          curl -fsSL --proto '=https' --tlsv1.2 --retry 6 --retry-all-errors -o "${archive}" \
+          curl -fsSL --proto '=https' --tlsv1.2 --retry 6 --retry-all-errors \
+            --connect-timeout 20 --speed-limit 1024 --speed-time 60 -o "${archive}" \
             "https://github.com/astral-sh/uv/releases/download/${UV_TAG}/uv-x86_64-unknown-linux-gnu.tar.gz"
           echo "${UV_SHA256}  ${archive}" | sha256sum --check --strict
           tar -xzf "${archive}" -C "${RUNNER_TEMP}"
@@ -128,7 +129,8 @@ jobs:
         run: |
           set -euo pipefail
           archive="${RUNNER_TEMP}/uv-x86_64-unknown-linux-gnu.tar.gz"
-          curl -fsSL --proto '=https' --tlsv1.2 --retry 6 --retry-all-errors -o "${archive}" \
+          curl -fsSL --proto '=https' --tlsv1.2 --retry 6 --retry-all-errors \
+            --connect-timeout 20 --speed-limit 1024 --speed-time 60 -o "${archive}" \
             "https://github.com/astral-sh/uv/releases/download/${UV_TAG}/uv-x86_64-unknown-linux-gnu.tar.gz"
           echo "${UV_SHA256}  ${archive}" | sha256sum --check --strict
           tar -xzf "${archive}" -C "${RUNNER_TEMP}"
