@@ -16,6 +16,9 @@ const SPLITS_KEPT: int = 8
 ## Each `says` split into alternatives, by what was written; see [method alternatives].
 static var _splits: Dictionary[String, Array] = {}
 
+## Each `says` as the globs [method matches] tries first, by what was written; see [method _loose].
+static var _globs: Dictionary[String, Array] = {}
+
 ## Every space separator Unicode has besides the plain space, built once; see [method spaced].
 static var _spaces: RegEx = null
 
@@ -37,19 +40,51 @@ static func says(node: Node, wanted: String) -> bool:
 ## wait for the end of a turn is a wait for whichever of "won", "lost" or the next turn's words comes
 ## first, and read as one glob with the bars in it, it waited out its whole timeout for words no
 ## screen says.
+##
+## A space in the words matches any space separator in [param said], which is how they were typed.
+## Each node's words are spaced only once a looser match says they may be the ones: this runs for
+## every node on every look a wait takes, and spacing them all made a look over 16,000 labels half
+## as slow again, which took a game under half its speed on a macOS runner.
 static func matches(said: String, wanted: String) -> bool:
-	var shown: String = spaced(said)
-	for words: String in alternatives(wanted):
-		if shown.containsn(words) if is_plain(words) else shown.matchn(words):
-			return true
+	for glob: String in _loose(wanted):
+		if said.matchn(glob):
+			var shown: String = spaced(said)
+			for words: String in alternatives(wanted):
+				if shown.containsn(words) if is_plain(words) else shown.matchn(words):
+					return true
+			return false
 	return false
+
+
+## Each alternative of [param wanted] as a glob, open at both ends for words written plain, with
+## every space as `?`. Words that match once spaced match this as written, since spacing changes
+## only the characters a `?` stands for, so a text that does not is answered without being spaced.
+## Kept by what was written, as [method alternatives] keeps its split.
+static func _loose(wanted: String) -> Array[String]:
+	var kept: Variant = _globs.get(wanted)
+	if kept != null:
+		var globs: Array[String] = kept
+		return globs
+	var found: Array[String] = []
+	for words: String in alternatives(wanted):
+		found.append((("*%s*" % words) if is_plain(words) else words).replace(" ", "?"))
+	if _globs.size() >= SPLITS_KEPT:
+		_globs.clear()
+	_globs[wanted] = found
+	return found
 
 
 ## [param text] with every Unicode space separator written as a plain space, which is what a caller
 ## types for any of them. A game keeping a name on one line writes it with a non-breaking space, and
 ## "Deskanem Bonituk" typed with a plain one found nothing while the screen showed exactly those
 ## words. One character for one, so a place found in the result is the same place in [param text].
+##
+## Text that is all ASCII holds none of them and is handed back as it is, which is most of a screen.
+## Its UTF-8 is one byte to a character only when every character is ASCII, and counting that costs
+## a quarter of the substitution.
 static func spaced(text: String) -> String:
+	if text.to_utf8_buffer().size() == text.length():
+		return text
 	if _spaces == null:
 		var separators: String = (
 			String.chr(0x00A0)
