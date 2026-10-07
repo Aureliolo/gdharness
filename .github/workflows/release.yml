@@ -359,11 +359,19 @@ jobs:
           # through 1.0.10, which makes five minutes look ample, and then 7m11s on 1.0.11, which
           # is the release this stopped on. Waiting longer costs runner minutes on something
           # already published and immutable; stopping early costs the answer.
+          #
+          # A deadline rather than a count of asks, and each ask bounded, because an ask is not: on
+          # 1.1.48 the MCP registry took up to three minutes to answer one read, and a count of
+          # them spanned nine times the window it was written for.
           url=""
-          for attempt in $(seq 1 120); do
-            if url="$(npm view --prefer-online "gdharness@${VERSION}" dist.tarball 2>/dev/null)" && [ -n "${url}" ]; then
+          attempt=0
+          served_by=$(( SECONDS + 20 * 60 ))
+          while (( SECONDS < served_by )); do
+            attempt=$(( attempt + 1 ))
+            if url="$(timeout 60 npm view --prefer-online "gdharness@${VERSION}" dist.tarball 2>/dev/null)" && [ -n "${url}" ]; then
               break
             fi
+            url=""
             echo "The registry does not serve ${VERSION} yet; asked ${attempt} times."
             sleep 10
           done
@@ -376,6 +384,7 @@ jobs:
           fi
 
           curl -fsSL --proto '=https' --tlsv1.2 --retry 6 --retry-all-errors \
+            --connect-timeout 20 --speed-limit 1024 --speed-time 60 \
             "${url}" -o published.tgz
           actual="$(sha256sum published.tgz | cut -d' ' -f1)"
 
@@ -448,8 +457,12 @@ jobs:
           set -euo pipefail
           # Twenty minutes, for the reason the job above waits that long: the delay being absorbed
           # is npm's, it has no stated bound, and an edge that has not caught up yet is not an
-          # install that is broken.
-          for attempt in $(seq 1 120); do
+          # install that is broken. A deadline rather than a count, for the reason the job above
+          # gives; an ask is left unbounded here, since macOS has no timeout command.
+          attempt=0
+          served_by=$(( SECONDS + 20 * 60 ))
+          while (( SECONDS < served_by )); do
+            attempt=$(( attempt + 1 ))
             if npx -y "gdharness@${VERSION}" --version > /dev/null 2>&1; then
               echo "The registry serves ${VERSION} to npx here; asked ${attempt} times."
               exit 0
@@ -517,8 +530,8 @@ jobs:
     if: github.repository == 'Aureliolo/gdharness'
     needs: [build, publish, npm]
     runs-on: ubuntu-24.04
-    # Room for the twenty-minute wait on npm and the five-minute read-back below, which only a
-    # slow npm or a registry that has gone quiet uses.
+    # Room for the twenty-minute wait on npm, two after a failed gateway and the five-minute
+    # read-back below, which only a slow npm or a registry that has gone quiet uses.
     timeout-minutes: 35
     permissions:
       contents: read # Reads server.json at the tag, which is the thing being published.
@@ -546,7 +559,8 @@ jobs:
         run: |
           set -euo pipefail
           archive="${RUNNER_TEMP}/mcp-publisher_linux_amd64.tar.gz"
-          curl -fsSL --proto '=https' --tlsv1.2 --retry 6 --retry-all-errors -o "${archive}" \
+          curl -fsSL --proto '=https' --tlsv1.2 --retry 6 --retry-all-errors \
+            --connect-timeout 20 --speed-limit 1024 --speed-time 60 -o "${archive}" \
             "https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_TAG}/mcp-publisher_linux_amd64.tar.gz"
           echo "${MCP_PUBLISHER_SHA256}  ${archive}" | sha256sum --check --strict
           tar -xzf "${archive}" -C "${RUNNER_TEMP}" mcp-publisher
@@ -585,9 +599,12 @@ jobs:
           # says what it is. The second is why the publish is not skipped merely because something
           # holds this version: a wrong entry sends this on to `publish`, which refuses it, which
           # is the loud failure that state deserves.
+          # Each read is bounded, because the waits below are measured in time and a read is not:
+          # on 1.1.48 the registry took up to three minutes to answer one 404, and twenty-four
+          # reads meant to span two minutes spanned eighteen.
           serves_this_version() {
             local body served
-            body="$(curl -fsSL --proto '=https' --tlsv1.2 "${url}")" || return 1
+            body="$(curl -fsSL --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 20 "${url}")" || return 1
             served="$(printf '%s' "${body}" | jq -er '
               [.server.version,
                .server.packages[0].identifier + "@" + .server.packages[0].version,
@@ -664,8 +681,15 @@ jobs:
             # Logged in again before every attempt: the registry's token lasts about five minutes,
             # and on 1.0.14 the eleventh attempt was refused with "token is expired" after ten npm
             # refusals made on one login.
+            #
+            # Each wait is a deadline rather than a count, so the three of them fit the job's
+            # thirty-five minutes however slowly the registry answers: twenty here, two after a
+            # gateway failure, five for the read-back.
             published=""
-            for attempt in $(seq 1 40); do
+            attempt=0
+            publish_by=$(( SECONDS + 20 * 60 ))
+            while (( SECONDS < publish_by )); do
+              attempt=$(( attempt + 1 ))
               logged_in
               status=0
               output=$(reached_the_registry "${RUNNER_TEMP}/mcp-publisher" publish 2>&1) || status=$?
@@ -679,7 +703,8 @@ jobs:
               # have been completing. Read the entry back before asking again, since publishing a
               # version that landed is refused as a duplicate.
               if grep -qE 'server returned status 50[234]' <<<"${output}"; then
-                for _ in $(seq 1 24); do
+                back_by=$(( SECONDS + 120 ))
+                while (( SECONDS < back_by )); do
                   if serves_this_version; then
                     published=yes
                     break 2
@@ -707,7 +732,10 @@ jobs:
             # second: what the window absorbs is this registry's own indexing, which it puts no
             # number on, and a wait on something already published costs only runner minutes.
             arrived=""
-            for attempt in $(seq 1 60); do
+            attempt=0
+            served_by=$(( SECONDS + 5 * 60 ))
+            while (( SECONDS < served_by )); do
+              attempt=$(( attempt + 1 ))
               if serves_this_version; then
                 arrived=yes
                 break
