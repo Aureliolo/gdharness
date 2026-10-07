@@ -13,6 +13,8 @@ import {
   parseJUnit,
   RENDERED_AWAY_NOTE,
   scriptErrorsPrinted,
+  suitesPrinted,
+  testProgressMessage,
   VALUE_NOT_RECOVERED_NOTE,
   whyNoReport,
   withActualsPrinted,
@@ -687,6 +689,71 @@ function readsEveryShape(ending: string): void {
   );
 }
 
+/**
+ * #915: the suites a run has finished, read off the console as gdUnit4 printed it on 4.7.2 with
+ * v6.2.1, for a run cut off before its report and for the progress a long one sends. The second
+ * suite fails and is followed by its report's lines, and the third is still running.
+ */
+function testFinishedSuitesAreReadOffTheConsole(): void {
+  const printed = [
+    'Scanning for test suites in: res://test',
+    'Run Test Suite: res://test/a_test.gd',
+    '  res://test/a_test.gd > test_one STARTED',
+    '  res://test/a_test.gd > test_one PASSED 10ms',
+    '  res://test/a_test.gd > test_two STARTED',
+    '  res://test/a_test.gd > test_two PASSED 1s 969ms',
+    'Statistics: 2 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 0 orphans | PASSED 2s 6ms',
+    'Run Test Suite: res://test/my suites/b_test.gd',
+    '  res://test/my suites/b_test.gd > test_fails STARTED',
+    '  res://test/my suites/b_test.gd > test_fails FAILED 1s 993ms',
+    '  Report:',
+    '  Expecting:',
+    ' 2',
+    ' but was',
+    " 1\tat 'test_fails' in res://test/my suites/b_test.gd:6",
+    '  res://test/my suites/b_test.gd > test_errs:1 (a, b) STARTED',
+    '  res://test/my suites/b_test.gd > test_errs:1 (a, b) ERROR 5ms',
+    'Statistics: 2 test cases | 1 errors | 1 failures | 0 flaky | 0 skipped | 0 orphans | PASSED 2s 21ms',
+    'Run Test Suite: res://test/c_test.gd',
+    '  res://test/c_test.gd > test_long STARTED',
+  ];
+  assert.deepEqual(suitesPrinted(printed), {
+    finished: [
+      { path: 'res://test/a_test.gd', cases: 2, errors: 0, failures: 0, failed: [] },
+      {
+        path: 'res://test/my suites/b_test.gd',
+        cases: 2,
+        errors: 1,
+        failures: 1,
+        failed: ['test_fails', 'test_errs:1 (a, b)'],
+      },
+    ],
+    running: 'res://test/c_test.gd',
+  });
+  const ended = [
+    ...printed,
+    '  res://test/c_test.gd > test_long PASSED 2m 0s',
+    'Statistics: 1 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 0 orphans | PASSED 2m 0s',
+    'Overall Summary: 5 test cases | 1 errors | 1 failures | 0 flaky | 0 skipped | 0 orphans |',
+  ];
+  assert.deepEqual(
+    suitesPrinted(ended).finished.map((suite) => suite.path),
+    ['res://test/a_test.gd', 'res://test/my suites/b_test.gd', 'res://test/c_test.gd'],
+    'the overall summary is not a suite',
+  );
+  assert.equal(suitesPrinted(ended).running, null);
+  assert.equal(
+    testProgressMessage(printed, 125_400),
+    '2 suites have finished, 1 with failures; running res://test/c_test.gd; 2m 5s in.',
+  );
+  assert.equal(
+    testProgressMessage(printed.slice(0, 4), 9_999),
+    'No suite has finished; running res://test/a_test.gd; 9s in.',
+  );
+  assert.equal(testProgressMessage(printed.slice(0, 7), 30_000), 'One suite has finished; 30s in.');
+  assert.equal(testProgressMessage([], 1_000), 'No suite has finished; 1s in.');
+}
+
 testWhatGdUnitWrites();
 testAFailingStringReadsItsValue();
 testOneLineFailingTwiceKeepsEachValue();
@@ -701,4 +768,5 @@ testARunThatFoundNothingIsNotAPass();
 testARunThatSaidNothingOfTheSortIsLeftAlone();
 testOrphansAreReadOffTheConsole();
 testScriptErrorsAreReadOffTheConsole();
+testFinishedSuitesAreReadOffTheConsole();
 console.log('junit reader tests passed');
