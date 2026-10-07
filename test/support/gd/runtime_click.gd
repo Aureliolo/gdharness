@@ -566,16 +566,27 @@ func _check_words_in_a_rich_label() -> void:
 	for case: Array in [["Ab", "first"], ["cd", "second"]]:
 		var clicked: Dictionary = await input.click({"says": case[0]})
 		var found: Dictionary = clicked.get("found", {})
-		if clicked.get("link_pressed") != case[1] or found.get("pressedOn") != "the words":
+		if (
+			clicked.get("link_pressed") != true
+			or clicked.get("link_meta") != case[1]
+			or found.get("pressedOn") != "the words"
+		):
 			_fail("words in a rich label are pressed where they are drawn: %s" % JSON.stringify(clicked))
 	var patterned: Dictionary = await input.click({"says": "Ab*Cd"})
 	var told: Dictionary = patterned.get("found", {})
 	if (
 		told.get("pressedOn") != "the middle of the label"
 		or not str(told.get("note", "")).contains("so the press went to its middle")
-		or patterned.has("link_pressed")
+		or patterned.get("link_pressed") != false
+		or patterned.has("link_meta")
 	):
 		_fail("a pattern is pressed in the middle and says so: %s" % JSON.stringify(patterned))
+	# #913: a link with an empty meta, which given as the meta alone read as no link pressed.
+	line.text = "[url=]Ab[/url] and a great deal more [url=second]Cd[/url]"
+	await process_frame
+	var bare: Dictionary = await input.click({"says": "Ab"})
+	if bare.get("link_pressed") != true or bare.get("link_meta") != "":
+		_fail("a link with an empty meta is said to be pressed: %s" % JSON.stringify(bare))
 	line.queue_free()
 	await process_frame
 
@@ -784,7 +795,11 @@ func _check_words_held_together_by_a_space_that_does_not_break() -> void:
 	await process_frame
 	var named: Dictionary = await input.click({"says": "Ab Cd"})
 	var found: Dictionary = named.get("found", {})
-	if named.get("link_pressed") != "named" or found.get("pressedOn") != "the words":
+	if (
+		named.get("link_pressed") != true
+		or named.get("link_meta") != "named"
+		or found.get("pressedOn") != "the words"
+	):
 		_fail(
 			(
 				"a name held by a non-breaking space is found and pressed by its typed words: %s"

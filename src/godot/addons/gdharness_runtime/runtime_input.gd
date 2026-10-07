@@ -502,9 +502,11 @@ func click(params: Dictionary) -> Dictionary:
 	var landed: bool = hovered == control or (hovered != null and control.is_ancestor_of(hovered))
 
 	# The link a rich label says was pressed, which is its own word for what the press reached.
-	var links: Array[String] = []
-	var heard: Callable = func(meta: Variant) -> void: links.append(str(meta))
-	if rich != null:
+	var links: Array = []
+	var heard: Callable = func(meta: Variant) -> void: links.append(meta)
+	# Read before the press, which may free the label.
+	var on_rich_text: bool = rich != null
+	if on_rich_text:
 		var _listening: int = rich.meta_clicked.connect(heard)
 	_press_button(viewport, _button(position, button, true, double))
 	await _host.get_tree().process_frame
@@ -533,8 +535,12 @@ func click(params: Dictionary) -> Dictionary:
 	}
 	if found != null:
 		answer["found"] = found
-	if not links.is_empty():
-		answer["link_pressed"] = links.back()
+	# Whether a link was pressed apart from what it carries: a bare [url] reports an empty meta,
+	# and given as the meta alone that press read exactly like one that reached no link.
+	if on_rich_text:
+		answer["link_pressed"] = not links.is_empty()
+		if not links.is_empty():
+			answer["link_meta"] = _values.serialize(links.back())
 	return _pointer_noted(answer)
 
 
