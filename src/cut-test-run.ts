@@ -11,7 +11,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import { dirname, join } from 'node:path';
 
 /** A suite that finished with cases that did not pass, and which ones. */
-export interface FailingSuite {
+interface FailingSuite {
   readonly path: string;
   readonly errors: number;
   readonly failures: number;
