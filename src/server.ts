@@ -834,6 +834,34 @@ interface ChildrenEnded {
  */
 const CONSOLE_WRAPPER = /_console(\.exe)?$/i;
 
+/**
+ * The editors of [param projectPath] in [param tree], read off their command lines: a Godot
+ * executable given `--path` on the project and the editor flag, without an option that makes it
+ * one job that quits, and not the console wrapper, which forwards to an editor listed beside it.
+ *
+ * Read from the process table because an editor that has not reached the bridge yet is known to
+ * nothing else. A restart interrupted by a reconnect launched one and its server was ended before
+ * it connected; the next server, seeing nothing connected and no restart owed, opened a second on
+ * the same project and the same language server port.
+ */
+export function editorsOfProjectIn(tree: ProcessTree, projectPath: string): number[] {
+  const found: number[] = [];
+  for (const [pid, listed] of tree) {
+    const read = readCommandLine(listed.command);
+    if (
+      read.editor &&
+      read.oneShot === null &&
+      read.projectPath !== null &&
+      /godot/i.test(read.executable) &&
+      !CONSOLE_WRAPPER.test(read.executable) &&
+      isSameDirectory(read.projectPath, projectPath)
+    ) {
+      found.push(pid);
+    }
+  }
+  return found.sort((a, b) => a - b);
+}
+
 /** [param executable] and, when it is the console wrapper, the engine it starts. */
 function engineNamesOf(executable: string): string[] {
   return CONSOLE_WRAPPER.test(executable)
@@ -5411,6 +5439,13 @@ class GodotServer {
       greeted &&
       editorIsStale(status.addonVersion, SERVER_VERSION, status.addonDigest, shippedEditorDigest());
     const unfinished = this.restartLeftUnfinished(status.connected);
+    // An editor of this project already running and not connected is coming whoever opened it,
+    // which is the one reading that does not depend on this server's age or memory: a reconnect
+    // in the middle of a restart left one starting, and the server after it said no pid.
+    const arriving =
+      status.connected || this.ownProject === null
+        ? []
+        : ((await this.editorsNotYetConnected(this.ownProject)) ?? []);
     return {
       ...status,
       serverVersion: SERVER_VERSION,
@@ -5432,11 +5467,14 @@ class GodotServer {
       // answering from its own age sent a caller into a wait that could not end.
       mayYetConnect: status.connected
         ? undefined
-        : unfinished !== null
-          ? unfinished.underway
-          : anEditorIsStillComing(status.listeningSince, launchedIsUp),
+        : arriving.length > 0
+          ? true
+          : unfinished !== null
+            ? unfinished.underway
+            : anEditorIsStillComing(status.listeningSince, launchedIsUp),
+      editorsNotYetConnected: arriving.length > 0 ? arriving : undefined,
       restartInterrupted:
-        unfinished === null || unfinished.underway
+        unfinished === null || unfinished.underway || arriving.length > 0
           ? undefined
           : {
               quitEditorPid: unfinished.note.editorPid,
@@ -6046,6 +6084,19 @@ class GodotServer {
     if (refused !== null) {
       return refused;
     }
+    const arriving = await this.editorsNotYetConnected(project.value.path);
+    if (arriving !== undefined && arriving.length > 0) {
+      const named = arriving
+        .map((one) => `pid ${one.pid}${one.startedAt === null ? '' : `, started ${one.startedAt}`}`)
+        .join('; ');
+      return this.createErrorResponse(
+        `An editor of this project is already running (${named}) and has not reached this server yet: an editor dials in once it is up, later while it imports, so opening another would put two editors on one project and one language server port.`,
+        [
+          'editor_status names it under editorsNotYetConnected and says when it has connected',
+          `If it never connects it is not reaching this server: end ${arriving.length === 1 ? 'that pid' : 'those pids'} and open again`,
+        ],
+      );
+    }
     const engine = await this.engine();
     if (!engine.ok) {
       return engine.response;
@@ -6083,6 +6134,26 @@ class GodotServer {
           : before.size === 0
             ? undefined
             : 'Opening a project imports it and saves project.godot, and Godot drops any key sitting at its own default. editor_status names anything lost under settingsDropped once this editor has connected.',
+    });
+  }
+
+  /**
+   * The editors of [param projectPath] running and not connected here, with when each started, or
+   * undefined when the platform would not list its processes. The connected editor is left out.
+   */
+  private async editorsNotYetConnected(
+    projectPath: string,
+  ): Promise<{ pid: number; startedAt: string | null }[] | undefined> {
+    const tree = await processTree();
+    if (tree === undefined) {
+      return undefined;
+    }
+    const connected = this.godotBridge.isConnected() ? this.godotBridge.getStatus().editorPid : undefined;
+    const pids = editorsOfProjectIn(tree, projectPath).filter((pid) => pid !== connected);
+    const started = await startTimesOf(pids);
+    return pids.map((pid) => {
+      const at = started.get(pid) ?? tree.get(pid)?.startedAt;
+      return { pid, startedAt: at === undefined ? null : new Date(at).toISOString() };
     });
   }
 
