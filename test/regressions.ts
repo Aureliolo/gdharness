@@ -506,6 +506,65 @@ async function testAOneShotEngineRunIsTurnedAwayAtTheBridge(): Promise<void> {
   }
 }
 
+/**
+ * A one-shot run of another project is turned away as a one-shot, quietly. A gate's `--import` of a
+ * fresh worktree has no announcement and dials the shared default port; closed as another
+ * project's editor, the addon warns and gates refuse a push on the warning, while closed as a
+ * one-shot it stops dialling and says nothing. An editor of another project is still told whose
+ * server this is, after its command line is read, and one that sends no pid is told at once.
+ */
+async function testAOneShotRunOfAnotherProjectIsTurnedAwayQuietly(): Promise<void> {
+  const mine = resolve('/gdharness-one-shot-mine');
+  const worktree = resolve('/gdharness-one-shot-worktree');
+  const bridge = createBridge(0, 1000, '127.0.0.1', mine);
+  bridge.identifyEditorsWith((pid) => Promise.resolve(pid === 201 ? '--import' : null));
+  const hello = (socket: FakeSocket, pid: number | undefined): void => {
+    socket.emit(
+      'message',
+      Buffer.from(JSON.stringify({ type: 'godot_ready', project_path: worktree, editor_pid: pid })),
+    );
+  };
+  const opened: FakeSocket[] = [];
+  const socket = (name: string): FakeSocket => {
+    const made = new FakeSocket(name);
+    opened.push(made);
+    connectFake(bridge, made);
+    return made;
+  };
+  try {
+    const importing = socket('import of a worktree');
+    hello(importing, 201);
+    await delay(20);
+    assert.equal(
+      importing.closedWith?.code,
+      4002,
+      `closed as a one-shot: ${JSON.stringify(importing.closedWith)}`,
+    );
+    assert.match(importing.closedWith.reason, /pid 201 was started with --import/);
+    assert.equal(bridge.getStatus().turnedAway?.pid, 201, 'and status names it');
+
+    const editor = socket('editor of another project');
+    hello(editor, 202);
+    await delay(20);
+    assert.equal(
+      editor.closedWith?.code,
+      4001,
+      `an editor of another project is told so: ${JSON.stringify(editor.closedWith)}`,
+    );
+    assert.match(editor.closedWith.reason, /^this server serves /);
+
+    const unsaid = socket('an addon that sends no pid');
+    hello(unsaid, undefined);
+    assert.equal(unsaid.closedWith?.code, 4001, 'and one with no pid to read is told at once');
+  } finally {
+    for (const made of opened) {
+      if (made.readyState !== 3) {
+        made.close();
+      }
+    }
+  }
+}
+
 async function turnedAwayAtTheBridge(
   bridge: ReturnType<typeof createBridge>,
   socket: (name: string) => FakeSocket,
@@ -30396,6 +30455,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEveryToolIsDrivenSomewhere,
   testStaleDisconnectRegression,
   testOneServerOneProjectRegression,
+  testAOneShotRunOfAnotherProjectIsTurnedAwayQuietly,
   testSceneToolsVectorRegression,
   testRunArgumentsLeaveTheLocalDebuggerOff,
   testSilenceFollowsTheAskThenTheEnvironment,
