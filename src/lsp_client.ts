@@ -2,6 +2,7 @@ import { existsSync, realpathSync } from 'node:fs';
 import { readFile, realpath } from 'node:fs/promises';
 import { createConnection, type Socket } from 'node:net';
 import { dirname, join, resolve } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { answerJson } from './answer-json.js';
 import { Refusal } from './errors.js';
@@ -52,11 +53,15 @@ function initializeTimeoutMs(): number {
   return Number.isInteger(override) && override > 0 ? override : 180_000;
 }
 
-/** How long a request is given, references and initialize apart from the rest. */
+/**
+ * How long a request is given, references and initialize apart from the rest, and how long a
+ * port the connected editor names is waited on to start listening.
+ */
 export interface LSPTimeouts {
   readonly requestMs: number;
   readonly referencesMs: number;
   readonly initializeMs: number;
+  readonly listenMs: number;
 }
 
 /** A request the server took in but did not answer in the time it was given. */
@@ -68,6 +73,23 @@ export class LSPTimeout extends Error {
     super(`LSP request timed out after ${String(timeoutMs / 1000)}s: ${method}`);
     this.method = method;
     this.seconds = timeoutMs / 1000;
+  }
+}
+
+/**
+ * How long a refused connection is tried again while the editor on the bridge says it serves the
+ * port. Measured downstream: the third call, a few seconds after the editor reached the bridge,
+ * was the first answered.
+ */
+const LANGUAGE_SERVER_START_MS = 30_000;
+const LANGUAGE_SERVER_RETRY_MS = 250;
+
+/** A port the connected editor names as its language server's, refusing past the wait for it. */
+class LanguageServerNotListening extends Error {
+  constructor(port: number, waitedMs: number) {
+    super(
+      `The editor on the bridge says its language server is on port ${port}, and nothing accepted a connection there in ${String(waitedMs / 1000)}s. An editor starts it a few seconds after it reaches the bridge, so straight after editor_launch this is the editor still starting, and calling again answers. One that goes on refusing could not take the port; editor_output shows what the editor printed.`,
+    );
   }
 }
 
@@ -147,6 +169,8 @@ export class GodotLSPClient {
   private documentTurns = new Map<string, Promise<void>>();
 
   private readonly timeouts: LSPTimeouts;
+  /** Whether the editor on the bridge says its language server is on this client's port. */
+  private readonly servedHere: () => boolean;
 
   constructor(
     port = portFromEnv('GDHARNESS_LSP_PORT', DEFAULT_LSP_PORT),
@@ -155,15 +179,43 @@ export class GodotLSPClient {
       requestMs: REQUEST_TIMEOUT_MS,
       referencesMs: REFERENCES_TIMEOUT_MS,
       initializeMs: initializeTimeoutMs(),
+      listenMs: LANGUAGE_SERVER_START_MS,
     },
+    servedHere: () => boolean = () => false,
   ) {
     this.port = port;
     this.host = host;
     this.timeouts = timeouts;
+    this.servedHere = servedHere;
     this.pendingRequests = new Map<number, PendingRequest>();
   }
 
+  /**
+   * Connects, waiting out a language server that has not started listening yet when the editor on
+   * the bridge says it serves this port. An editor reaches the bridge a few seconds before its
+   * language server listens, so the first call after a restart of the editor was refused twice, and
+   * told to enable a setting that was already on, before a third answered.
+   */
   async connect(): Promise<void> {
+    const until = Date.now() + this.timeouts.listenMs;
+    for (;;) {
+      try {
+        await this.connectOnce();
+        return;
+      } catch (error) {
+        const refused = error instanceof Error && error.message.includes('ECONNREFUSED');
+        if (!refused || !this.servedHere()) {
+          throw error;
+        }
+        if (Date.now() >= until) {
+          throw new LanguageServerNotListening(this.port, this.timeouts.listenMs);
+        }
+        await delay(LANGUAGE_SERVER_RETRY_MS);
+      }
+    }
+  }
+
+  private async connectOnce(): Promise<void> {
     if (this.connected && this.socket) {
       return;
     }
@@ -1135,6 +1187,7 @@ export async function handleLSPTool(
       ...(error instanceof ArgumentRefusal ? { refusedArguments: true } : {}),
       ...(error instanceof NoDiagnosticsPublished ? { aboutThisFile: true } : {}),
       ...(error instanceof LSPTimeout && error.method === 'initialize' ? { stillReading: true } : {}),
+      ...(error instanceof LanguageServerNotListening ? { stillReading: true } : {}),
     });
   }
 }

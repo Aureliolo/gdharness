@@ -808,6 +808,13 @@ async function main(): Promise<void> {
     assert.equal(page.status, 404, 'a plain request gets nothing');
     assert.equal(page.headers.get('access-control-allow-origin'), null, 'and no CORS header inviting one');
 
+    // A language server port that takes a connection and drops it. One that refused it would be
+    // waited on, since the editor names it, for as long as a language server takes to start.
+    const lspPort = await reservePort();
+    const dropping = createServer((socket: Socket) => {
+      socket.destroy();
+    });
+    await new Promise<void>((ready) => dropping.listen(lspPort, '127.0.0.1', ready));
     const godot = await connect(`ws://${BRIDGE_HOST}:${bridgePort}/godot`);
     try {
       // The three ports with it. Godot keeps one language server, one debug adapter and one
@@ -818,7 +825,7 @@ async function main(): Promise<void> {
         JSON.stringify({
           type: 'godot_ready',
           project_path: projectPath,
-          lsp_port: 6105,
+          lsp_port: lspPort,
           dap_port: 6106,
           debug_port: 0,
         }),
@@ -830,7 +837,7 @@ async function main(): Promise<void> {
         true,
         'editor_status reports connected after godot_ready',
       );
-      assert.equal(get(afterReady, 'editor', 'lspPort'), 6105, 'and where that editor serves the LSP');
+      assert.equal(get(afterReady, 'editor', 'lspPort'), lspPort, 'and where that editor serves the LSP');
       assert.equal(get(afterReady, 'editor', 'dapPort'), 6106, 'and its debug adapter');
       assert.equal(
         get(afterReady, 'editor', 'debugPort'),
@@ -842,7 +849,7 @@ async function main(): Promise<void> {
       // port it asked on, and that is the editor's rather than the default.
       assert.match(
         textOf(await call('script_diagnostics', { projectPath, scriptPath: 'res://player.gd' })) ?? '',
-        /6105/,
+        new RegExp(`port ${lspPort}\\b`),
         'script_diagnostics asks on the port the editor reported',
       );
 
@@ -914,6 +921,7 @@ async function main(): Promise<void> {
       assert.deepEqual(unexpected, [], 'a refused call emits no tool_invoke');
     } finally {
       godot.close();
+      dropping.close();
     }
 
     console.log('bridge integration tests passed');

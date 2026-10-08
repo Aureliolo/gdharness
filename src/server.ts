@@ -51,13 +51,16 @@ import {
   contradictedDiagnostics,
   declaredClasses,
   declaredSince,
+  externalMemberIn,
   failedReloadNote,
   heldButGone,
   isToolScript,
+  type MissingMember,
   missingMemberIn,
   type NamingScript,
   type NotReloaded,
   notReloadedNote,
+  reloadDifference,
   scriptsNaming,
   staleAnalysisNote,
   staleClassNames,
@@ -2054,6 +2057,9 @@ export function scriptsToDiagnose(
   }
   return { ok: true, value: unique };
 }
+
+/** A diagnostic naming only the member of another class it could not resolve. */
+const EXTERNAL_MEMBER = 'Could not resolve external class member "';
 
 function isDirectory(path: string): boolean {
   try {
@@ -5006,8 +5012,9 @@ class GodotServer {
       if (payload['refusedArguments'] === true) {
         return { refusal: this.createErrorResponse(reason), perScript: true };
       }
-      // A server that took the connection and is still reading the project is the right one on
-      // the right port, so the port remedies would send the caller after a fault that is not there.
+      // A server still reading the project, or one the connected editor names and has yet to
+      // start, is the right one on the right port, so the port and settings remedies would send
+      // the caller after a fault that is not there.
       if (payload['stillReading'] === true) {
         return { refusal: this.createErrorResponse(`Diagnostics unavailable: ${reason}`), perScript: false };
       }
@@ -5073,7 +5080,10 @@ class GodotServer {
     // answer and this tool is called in a loop over a directory. Nothing below can find anything
     // when no message is of a shape that can be checked at all.
     const worthChecking = messages.some(
-      (message) => missingMemberIn(message) !== null || unknownTypeIn(message) !== null,
+      (message) =>
+        missingMemberIn(message) !== null ||
+        unknownTypeIn(message) !== null ||
+        message.includes(EXTERNAL_MEMBER),
     );
     const project = worthChecking ? this.project(args) : null;
     if (project === null || !project.ok) {
@@ -5081,23 +5091,43 @@ class GodotServer {
     }
     const projectPath = project.value.path;
     const cached = cachedClasses(projectPath);
+    const sourceOf = (resourcePath: string): string | null => {
+      const contained = resolveWithinProject(projectPath, resourcePath);
+      if (!contained.ok || !existsSync(contained.absolutePath)) {
+        return null;
+      }
+      try {
+        return readFileSync(contained.absolutePath, 'utf8');
+      } catch {
+        // A script the cache names and the disk will not hand over contradicts nothing, and the
+        // diagnostics beside it are still worth answering with.
+        return null;
+      }
+    };
 
-    const contradicted =
+    // The diagnostics that name only a member, read against the line of the diagnosed script they
+    // are on to find the class it was looked up on.
+    const external = diagnostics.filter((entry) =>
+      String(asParams(entry)['message']).includes(EXTERNAL_MEMBER),
+    );
+    const diagnosed = external.length === 0 ? null : sourceOf(readString(args, 'scriptPath') ?? '');
+    const lines = diagnosed?.split('\n') ?? [];
+    const alsoDenied =
       cached === null
         ? []
-        : contradictedDiagnostics(messages, cached, (resourcePath) => {
-            const contained = resolveWithinProject(projectPath, resourcePath);
-            if (!contained.ok || !existsSync(contained.absolutePath)) {
-              return null;
-            }
-            try {
-              return readFileSync(contained.absolutePath, 'utf8');
-            } catch {
-              // A script the cache names and the disk will not hand over contradicts nothing, and
-              // the diagnostics beside it are still worth answering with.
-              return null;
-            }
-          });
+        : external
+            .map((entry) => {
+              const { message, line } = asParams(entry);
+              return externalMemberIn(
+                String(message),
+                typeof line === 'number' ? lines[line - 1] : undefined,
+                cached,
+              );
+            })
+            .filter((missing): missing is MissingMember => missing !== null);
+
+    const contradicted =
+      cached === null ? [] : contradictedDiagnostics(messages, cached, sourceOf, alsoDenied);
 
     // The walk of the project is the expensive half, so it happens only for a message that could
     // name a class at all rather than on every call that reached this far.
@@ -5219,7 +5249,10 @@ class GodotServer {
       await this.lspClient.disconnect();
       this.lspClient = null;
     }
-    this.lspClient ??= new GodotLSPClient(port);
+    this.lspClient ??= new GodotLSPClient(port, undefined, undefined, () => {
+      const status = this.godotBridge.getStatus();
+      return status.connected && status.lspPort === port;
+    });
     return this.lspClient;
   }
 
@@ -9259,16 +9292,18 @@ class GodotServer {
       // How much of that was the editor's own scan or import, finished before this one was asked
       // for, so an answer after a large write says the editor was already at work on it.
       waitedForEditorScanMs: waitedForEditorMs > 0 ? waitedForEditorMs : undefined,
-      // Both readings, because they answer different questions. What the copy held before says
-      // whether this editor had the fault at all, which is the thing a caller cannot otherwise
-      // find out; what it holds after says whether the call mended it.
       reloadedAs: reloaded.as,
-      heldBeforeReload: reloaded.heldBefore,
-      reloadedMethods: reloaded.methods,
-      // The same two readings for constants, with an enum's values as `Kind.SHORT`, because an enum
-      // member is held in the copy as a constant and never appears among its methods.
-      heldConstantsBeforeReload: reloaded.heldConstantsBefore,
-      reloadedConstants: reloaded.constants,
+      ...reloadDifference(reloaded),
+      // The whole lists on request. Answered always, a reload of a script holding six hundred
+      // constants came back as two lists of six hundred around the one member it added.
+      ...(args['listMembers'] === true
+        ? {
+            heldBeforeReload: reloaded.heldBefore,
+            reloadedMethods: reloaded.methods,
+            heldConstantsBeforeReload: reloaded.heldConstantsBefore,
+            reloadedConstants: reloaded.constants,
+          }
+        : {}),
       reloadProblem: reloaded.problem,
       unseenByEditor: unseen.length > 0 ? unseen : undefined,
       broughtIn: broughtIn.length > 0 ? broughtIn : undefined,
