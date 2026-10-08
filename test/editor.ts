@@ -3847,8 +3847,13 @@ async function testLanguageServer({ call, attempt, project }: Editor): Promise<v
     assert.ok(symbols.includes(declared), `symbols should name ${declared}: ${symbols.join(', ')}`);
   }
 
-  // Line 8 is `count += times`, and column 6 is the end of `count`.
-  const hover = await call('script_info', { ...sound, op: 'hover', line: 8, character: 6 });
+  // Counted from one, as the editor shows it: the parse error is in `func ring( -> int:`, line 4 of
+  // broken.gd. The protocol counts from zero, and an answer passing its number on said line 3.
+  const brokenLines = asArray(get(broken, 'diagnostics'), 'diagnostics').map((entry) => get(entry, 'line'));
+  assert.ok(brokenLines.includes(4), `the parse error is answered at line 4: ${JSON.stringify(broken)}`);
+
+  // Line 9 is `count += times`, and column 7 is just past `count`, behind the tab.
+  const hover = await call('script_info', { ...sound, op: 'hover', line: 9, character: 7 });
   assert.match(
     text(get(hover, 'hover', 'contents', 'value')),
     /var count: int/,
@@ -3856,7 +3861,7 @@ async function testLanguageServer({ call, attempt, project }: Editor): Promise<v
   );
 
   const completions = asArray(
-    get(await call('script_info', { ...sound, op: 'completion', line: 8, character: 6 }), 'completions'),
+    get(await call('script_info', { ...sound, op: 'completion', line: 9, character: 7 }), 'completions'),
     'completions',
   ).map((entry) => asString(get(entry, 'label'), 'label'));
   assert.ok(

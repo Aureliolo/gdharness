@@ -6,6 +6,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { answerJson } from './answer-json.js';
 import { Refusal } from './errors.js';
 import { FrameReader, frame, OversizedStreamError } from './framing.js';
+import { envValue } from './launch.js';
 import { isSameDirectory, isWithinRoot, resolveWithinProject } from './paths.js';
 import { portFromEnv } from './ports.js';
 
@@ -39,10 +40,23 @@ const REQUEST_TIMEOUT_MS = 10_000;
  */
 const REFERENCES_TIMEOUT_MS = 180_000;
 
-/** How long a request is given, references apart from the rest. */
+/**
+ * What an initialize is given. Godot reads every script in the project while answering the first
+ * one after its editor starts, and answers every later one at once: on 4.7.2, a project of 3000
+ * small generated scripts took 7.3 s the first time and 1 ms the second, and a project with larger
+ * scripts ran past the ten seconds every request was given, on the first call after editor_launch.
+ * A project whose language server reads for longer sets GDHARNESS_LSP_INITIALIZE_TIMEOUT_MS.
+ */
+function initializeTimeoutMs(): number {
+  const override = Number.parseInt(envValue('GDHARNESS_LSP_INITIALIZE_TIMEOUT_MS') ?? '', 10);
+  return Number.isInteger(override) && override > 0 ? override : 180_000;
+}
+
+/** How long a request is given, references and initialize apart from the rest. */
 export interface LSPTimeouts {
   readonly requestMs: number;
   readonly referencesMs: number;
+  readonly initializeMs: number;
 }
 
 /** A request the server took in but did not answer in the time it was given. */
@@ -137,7 +151,11 @@ export class GodotLSPClient {
   constructor(
     port = portFromEnv('GDHARNESS_LSP_PORT', DEFAULT_LSP_PORT),
     host = '127.0.0.1',
-    timeouts: LSPTimeouts = { requestMs: REQUEST_TIMEOUT_MS, referencesMs: REFERENCES_TIMEOUT_MS },
+    timeouts: LSPTimeouts = {
+      requestMs: REQUEST_TIMEOUT_MS,
+      referencesMs: REFERENCES_TIMEOUT_MS,
+      initializeMs: initializeTimeoutMs(),
+    },
   ) {
     this.port = port;
     this.host = host;
@@ -529,31 +547,35 @@ export class GodotLSPClient {
     const rootUri = pathToFileURL(resolvedRootPath).href;
 
     this.forgetServedWorkspace();
-    const result = await this.sendRequest('initialize', {
-      processId: process.pid,
-      rootPath: resolvedRootPath,
-      rootUri,
-      capabilities: {
-        textDocument: {
-          publishDiagnostics: {},
-          completion: {
-            completionItem: {
-              snippetSupport: true,
+    const result = await this.sendRequest(
+      'initialize',
+      {
+        processId: process.pid,
+        rootPath: resolvedRootPath,
+        rootUri,
+        capabilities: {
+          textDocument: {
+            publishDiagnostics: {},
+            completion: {
+              completionItem: {
+                snippetSupport: true,
+              },
             },
+            hover: {
+              contentFormat: ['markdown', 'plaintext'],
+            },
+            documentSymbol: {},
           },
-          hover: {
-            contentFormat: ['markdown', 'plaintext'],
-          },
-          documentSymbol: {},
         },
+        workspaceFolders: [
+          {
+            uri: rootUri,
+            name: resolvedRootPath,
+          },
+        ],
       },
-      workspaceFolders: [
-        {
-          uri: rootUri,
-          name: resolvedRootPath,
-        },
-      ],
-    });
+      this.timeouts.initializeMs,
+    );
 
     // Godot serves one project, its editor's, and answers an initialize naming any other root by
     // telling the client to change to its own, ahead of the answer. Whatever it said after that
@@ -843,10 +865,175 @@ export function normalizeLSPError(error: unknown, port: number): string {
     ) {
       return `Godot LSP is unavailable on port ${port}. Start the Godot editor and enable Language Server in Editor Settings, or set GDHARNESS_LSP_PORT to the port it serves.`;
     }
+    if (error instanceof LSPTimeout && error.method === 'initialize') {
+      return `The language server on port ${port} took the connection and did not answer initialize within ${String(error.seconds)}s. Godot reads every script in the project before it answers the first initialize after its editor starts, and goes on reading after this call stops waiting, so call again once the editor has settled.`;
+    }
     return error.message;
   }
 
   return String(error);
+}
+
+/*
+ * The language server's answers as the editor shows them rather than as the protocol carries them:
+ * lines and columns counted from one, and kinds and severities as words. The protocol counts lines
+ * from zero, so every diagnostic named the line above the one the editor, the file and the engine's
+ * own errors name, and a caller fixing the line it was given edited the line above the fault.
+ */
+
+const SEVERITIES = ['error', 'warning', 'information', 'hint'];
+
+const SYMBOL_KINDS = [
+  'file',
+  'module',
+  'namespace',
+  'package',
+  'class',
+  'method',
+  'property',
+  'field',
+  'constructor',
+  'enum',
+  'interface',
+  'function',
+  'variable',
+  'constant',
+  'string',
+  'number',
+  'boolean',
+  'array',
+  'object',
+  'key',
+  'null',
+  'enum member',
+  'struct',
+  'event',
+  'operator',
+  'type parameter',
+];
+
+const COMPLETION_KINDS = [
+  'text',
+  'method',
+  'function',
+  'constructor',
+  'field',
+  'variable',
+  'class',
+  'interface',
+  'module',
+  'property',
+  'unit',
+  'value',
+  'enum',
+  'keyword',
+  'snippet',
+  'color',
+  'file',
+  'reference',
+  'folder',
+  'enum member',
+  'constant',
+  'struct',
+  'event',
+  'operator',
+  'type parameter',
+];
+
+function asRecord(value: unknown): JsonRecord {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) ? (value as JsonRecord) : {};
+}
+
+/** The protocol's numbered kind as its name, or the value as it came when it is not one. */
+function named(value: unknown, names: readonly string[]): unknown {
+  return typeof value === 'number' && Number.isInteger(value) ? (names[value - 1] ?? value) : value;
+}
+
+/** A protocol position counted from one, or null when the server sent something else. */
+function shownPosition(position: unknown): { line: number; column: number } | null {
+  const { line, character } = asRecord(position);
+  return typeof line === 'number' && typeof character === 'number'
+    ? { line: line + 1, column: character + 1 }
+    : null;
+}
+
+/** Where a protocol range starts, and the position just past its end, counted from one. */
+function shownRange(range: unknown): Record<string, number> {
+  const start = shownPosition(asRecord(range)['start']);
+  const end = shownPosition(asRecord(range)['end']);
+  return {
+    ...(start === null ? {} : { line: start.line, column: start.column }),
+    ...(end === null ? {} : { endLine: end.line, endColumn: end.column }),
+  };
+}
+
+function shownDiagnostic(entry: unknown): JsonRecord {
+  const { range, severity, message, code } = asRecord(entry);
+  return {
+    ...shownRange(range),
+    severity: named(severity, SEVERITIES),
+    message,
+    // Godot sends 0 for every diagnostic, which tells a reader nothing the message does not.
+    ...(code === undefined || code === null || code === 0 || code === '' ? {} : { code }),
+  };
+}
+
+/**
+ * A symbol where its name is, which is the position hover and completion are asked at, and the
+ * last line of its declaration. Godot also sends an empty documentation and a native class for
+ * every symbol, which are left out when they say nothing.
+ */
+function shownSymbol(entry: unknown): JsonRecord {
+  const symbol = asRecord(entry);
+  const whole = asRecord(symbol['range'] ?? asRecord(symbol['location'])['range']);
+  const at = shownPosition(asRecord(symbol['selectionRange'] ?? whole)['start']);
+  const last = shownPosition(whole['end']);
+  const children = Array.isArray(symbol['children']) ? (symbol['children'] as unknown[]) : [];
+  const { documentation, native_class: nativeClass, deprecated, detail } = symbol;
+  return {
+    name: symbol['name'],
+    kind: named(symbol['kind'], SYMBOL_KINDS),
+    ...(typeof detail === 'string' && detail !== '' ? { detail } : {}),
+    ...(at === null ? {} : { line: at.line, column: at.column }),
+    ...(last === null ? {} : { lastLine: last.line }),
+    ...(typeof documentation === 'string' && documentation !== '' ? { documentation } : {}),
+    ...(typeof nativeClass === 'string' && nativeClass !== '' ? { nativeClass } : {}),
+    ...(deprecated === true ? { deprecated } : {}),
+    ...(children.length > 0 ? { children: children.map(shownSymbol) } : {}),
+  };
+}
+
+/** A completion without the copy of the request Godot hands back with every item. */
+function shownCompletion(entry: unknown): JsonRecord {
+  const { data: _request, kind, ...rest } = asRecord(entry);
+  return { ...rest, kind: named(kind, COMPLETION_KINDS) };
+}
+
+function shownHover(hover: unknown): unknown {
+  if (hover === null || typeof hover !== 'object') {
+    return hover;
+  }
+  const { range, ...rest } = asRecord(hover);
+  return { ...rest, ...shownRange(range) };
+}
+
+/** The position a completion or hover names, counted from one, as the protocol counts it. */
+function protocolPosition(args: JsonRecord): { line: number; character: number } {
+  const line = args['line'];
+  const character = args['character'];
+  if (
+    typeof line !== 'number' ||
+    typeof character !== 'number' ||
+    !Number.isInteger(line) ||
+    !Number.isInteger(character) ||
+    line < 1 ||
+    character < 1
+  ) {
+    throw new ArgumentRefusal(
+      `line and character are counted from 1, as the editor shows them; got line ${String(line)} and character ${String(character)}.`,
+    );
+  }
+  return { line: line - 1, character: character - 1 };
 }
 
 async function resolveLSPPaths(
@@ -918,36 +1105,24 @@ export async function handleLSPTool(
     switch (toolName) {
       case 'lsp_get_diagnostics': {
         const diagnostics = await client.getDiagnostics(scriptPath, content);
-        return asToolResponse({ diagnostics });
+        return asToolResponse({ diagnostics: diagnostics.map(shownDiagnostic) });
       }
 
       case 'lsp_get_completions': {
-        const line = Number(parsedArgs['line']);
-        const character = Number(parsedArgs['character']);
-
-        if (!Number.isFinite(line) || !Number.isFinite(character)) {
-          throw new ArgumentRefusal('Arguments line and character must be numbers.');
-        }
-
+        const { line, character } = protocolPosition(parsedArgs);
         const completions = await client.getCompletions(scriptPath, content, line, character);
-        return asToolResponse({ completions });
+        return asToolResponse({ completions: completions.map(shownCompletion) });
       }
 
       case 'lsp_get_hover': {
-        const line = Number(parsedArgs['line']);
-        const character = Number(parsedArgs['character']);
-
-        if (!Number.isFinite(line) || !Number.isFinite(character)) {
-          throw new ArgumentRefusal('Arguments line and character must be numbers.');
-        }
-
+        const { line, character } = protocolPosition(parsedArgs);
         const hover = await client.getHover(scriptPath, content, line, character);
-        return asToolResponse({ hover });
+        return asToolResponse({ hover: shownHover(hover) });
       }
 
       case 'lsp_get_symbols': {
         const symbols = await client.getDocumentSymbols(scriptPath, content);
-        return asToolResponse({ symbols });
+        return asToolResponse({ symbols: symbols.map(shownSymbol) });
       }
 
       default:
@@ -959,6 +1134,7 @@ export async function handleLSPTool(
       ...(error instanceof AnotherProjectsServer ? { serves: error.serves } : {}),
       ...(error instanceof ArgumentRefusal ? { refusedArguments: true } : {}),
       ...(error instanceof NoDiagnosticsPublished ? { aboutThisFile: true } : {}),
+      ...(error instanceof LSPTimeout && error.method === 'initialize' ? { stillReading: true } : {}),
     });
   }
 }
