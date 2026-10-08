@@ -7,6 +7,7 @@ import {
   chmodSync,
   cpSync,
   existsSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   openSync,
@@ -112,6 +113,7 @@ import {
   childrenOf,
   descendantsIn,
   listingFailure,
+  type ProcessTree,
   parseProcessTable,
   processTree,
   readCommandLine,
@@ -179,6 +181,7 @@ import {
   aboveTheRunner,
   captureDestinationRefusal,
   captureDetail,
+  editorsOfProjectIn,
   endedPreviousRun,
   endedToStartThis,
   endedWithoutACode,
@@ -2726,6 +2729,130 @@ async function testABridgeThatMovedSaysFromWhere(): Promise<void> {
         resolve();
       });
     });
+    sweep(project);
+  }
+}
+
+/**
+ * #931: an editor of this project that is running and has not reached this server is coming,
+ * whoever opened it. A reconnect in the middle of a restart ended the server after it had launched
+ * the new editor and before that editor connected; the next server said no pid, and an open beside
+ * it put a second editor on the project and on language server port 6005.
+ *
+ * The stand-in is the runtime under a name with "godot" in it, given a script that waits and the
+ * editor's own arguments, so the process table reads it as this project's editor. A restart note
+ * from a server that has gone sits beside it, which on its own says nothing is coming.
+ */
+async function testAnEditorStillArrivingIsNotOpenedBeside(): Promise<void> {
+  // Which processes read as this project's editors, without starting any.
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-arriving-editor-'));
+  const godot =
+    process.platform === 'win32' ? 'C:\\godot\\Godot_v4.7.2-stable_win64.exe' : '/opt/godot/godot';
+  const tree: ProcessTree = new Map([
+    [10, { parent: 1, command: `${godot} --path ${project} --editor --lsp-port 6005` }],
+    [11, { parent: 1, command: `${godot.replace(/(\.exe)?$/, '_console$1')} --path ${project} --editor` }],
+    [12, { parent: 1, command: `${godot} --path ${join(project, 'elsewhere')} --editor` }],
+    [13, { parent: 1, command: `${godot} --path ${project}` }],
+    [14, { parent: 1, command: `${godot} --headless --path ${project} --editor --import` }],
+    [15, { parent: 1, command: `node hold.js --path ${project} --editor` }],
+    [16, { parent: 1, command: `${godot} -e --path ${project}` }],
+  ]);
+  assert.deepEqual(
+    editorsOfProjectIn(tree, project),
+    [10, 16],
+    "this project's editors, not the console wrapper, another project's, a game, a one-shot run or another program",
+  );
+
+  const port = await reservePort();
+  const server = new ServerProcess({
+    env: { GDHARNESS_PROJECT: project, GDHARNESS_BRIDGE_PORT: String(port), GODOT_PATH: process.execPath },
+  });
+  let standIn: ChildProcess | null = null;
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      'config_version=5\n\n[application]\nconfig/name="Arriving"\n\n[editor_plugins]\nenabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n',
+    );
+    mkdirSync(join(project, 'addons', 'gdharness_editor'), { recursive: true });
+    // A server that has gone, so the note reads as a restart left unfinished rather than one under way.
+    const ended = spawnSync(process.execPath, ['-e', '0']).pid;
+    noteRestartBegun({
+      projectPath: project,
+      editorPid: 27040,
+      ports: { lsp: 6005, dap: 6006 },
+      quitAt: '2026-10-08T11:42:49.000Z',
+      byPid: ended,
+    });
+
+    const runtime = join(project, `godot-standin${process.platform === 'win32' ? '.exe' : ''}`);
+    try {
+      linkSync(process.execPath, runtime);
+    } catch {
+      cpSync(process.execPath, runtime);
+    }
+    writeFileSync(join(project, 'hold.js'), 'setTimeout(() => {}, 120000);\n');
+    standIn = spawn(runtime, [join(project, 'hold.js'), '--path', project, '--editor'], {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    const pid = standIn.pid;
+    assert.ok(pid !== undefined, 'the stand-in editor starts');
+
+    await server.initialize('regression-test');
+    const status = (): Promise<unknown> =>
+      server.request('tools/call', { name: 'editor_status', arguments: {} }).then(parseTextContent);
+    const arriving = get(await status(), 'editor');
+    assert.deepEqual(
+      {
+        mayYetConnect: get(arriving, 'mayYetConnect'),
+        pids: asArray(get(arriving, 'editorsNotYetConnected')).map((one) => get(one, 'pid')),
+        restartInterrupted: get(arriving, 'restartInterrupted'),
+      },
+      { mayYetConnect: true, pids: [pid], restartInterrupted: undefined },
+      `the editor still arriving is named, and a restart note saying none is coming is not repeated: ${JSON.stringify(arriving)}`,
+    );
+    assert.match(
+      text(get(asArray(get(arriving, 'editorsNotYetConnected'))[0], 'startedAt')),
+      /^\d{4}-\d\d-\d\dT/,
+      JSON.stringify(arriving),
+    );
+
+    const refused =
+      textOf(
+        await server.request('tools/call', {
+          name: 'editor_launch',
+          arguments: { projectPath: project, op: 'open', hidden: true },
+        }),
+      ) ?? '';
+    assert.match(
+      refused,
+      new RegExp(
+        `An editor of this project is already running \\(pid ${pid}, started [^)]+\\) and has not reached this server yet`,
+      ),
+      refused,
+    );
+
+    // Gone, nothing is arriving: the note's own answer stands again and an open goes ahead.
+    standIn.kill();
+    for (let waited = 0; waited < 10_000 && alive(pid); waited += 100) {
+      await delay(100);
+    }
+    const after = get(await status(), 'editor');
+    assert.equal(get(after, 'editorsNotYetConnected'), undefined, JSON.stringify(after));
+    assert.equal(get(after, 'restartInterrupted', 'quitEditorPid'), 27040, JSON.stringify(after));
+    const opened = parseTextContent(
+      await server.request('tools/call', {
+        name: 'editor_launch',
+        arguments: { projectPath: project, op: 'open', hidden: true },
+      }),
+    );
+    assert.equal(get(opened, 'launched'), true, JSON.stringify(opened));
+  } finally {
+    if (standIn?.pid !== undefined && alive(standIn.pid)) {
+      standIn.kill();
+    }
+    await server.stop();
     sweep(project);
   }
 }
@@ -29382,6 +29509,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEveryFixtureIsCalled,
   testBothEndsAgreeAboutTheAnnouncement,
   testARestartLeftHalfDoneIsSaid,
+  testAnEditorStillArrivingIsNotOpenedBeside,
   testABridgeThatMovedSaysFromWhere,
   testASupersededServerStandsDown,
   testAPredecessorThatKeepsThePortIsNotWaitedOnForEver,
