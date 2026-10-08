@@ -248,6 +248,7 @@ import { asArray, asNumber, asObject, get, text } from './support/json.js';
 import { isRecord, type JsonRpcMessage, parseTextContent, textOf } from './support/json-rpc.js';
 import { solidPng } from './support/png.js';
 import { reservePort, ServerProcess } from './support/server.js';
+import { REGRESSION_SECONDS, regressionPart, UNMEASURED_SECONDS } from './support/shards.js';
 import { endEnginesLeft, leftBehindBy, reportUnswept, sweep, sweepingFor } from './support/sweep.js';
 
 async function withOccupiedBridgePort<T>(run: () => Promise<T>): Promise<T> {
@@ -24777,21 +24778,10 @@ async function testATestRunSaysHowFarItHasGot(): Promise<void> {
       told.some((each) => /^(One suite has|2 suites have) finished/.test(each.message)),
       `a finished suite is counted: ${JSON.stringify(told)}`,
     );
-    // Not asked for: told nothing, over the same run that was told something when it asked.
+    // Its own timeout: the answer says what had finished and what was running. Asked with no
+    // progress token, over a run that finishes a suite and runs past a heartbeat, so it is told
+    // nothing where it would have been told twice.
     const before = server.notifications.length;
-    await server.request(
-      'tools/call',
-      { name: 'project_test', arguments: { projectPath: projectDir, path: [a, b] } },
-      ENGINE_CALL_TIMEOUT_MS * 3,
-    );
-    assert.equal(
-      server.notifications.slice(before).filter((message) => message.method === 'notifications/progress')
-        .length,
-      0,
-      'a call with no progress token is sent no progress',
-    );
-
-    // Its own timeout: the answer says what had finished and what was running.
     const timed = answerOf(
       await server.request(
         'tools/call',
@@ -24807,6 +24797,12 @@ async function testATestRunSaysHowFarItHasGot(): Promise<void> {
     assert.match(
       timed.note,
       /Before it ended, one suite finished, and res:\/\/test\/c_test\.gd was running; it is under suitesFinished/,
+    );
+    assert.equal(
+      server.notifications.slice(before).filter((message) => message.method === 'notifications/progress')
+        .length,
+      0,
+      'a call with no progress token is sent no progress',
     );
 
     // Cut off by its client: told through the long suite, and what it finished kept for the next run.
@@ -29939,7 +29935,38 @@ function testEveryFixtureIsCalled(): void {
   assert.deepEqual(unreachable, [], 'every fixture defined here should be in TESTS');
 }
 
+/**
+ * The regression parts CI runs on several machines cover every regression exactly once, and are
+ * balanced to within the heaviest single regression. Dealt out every nth, the Windows leg's halves
+ * ran 578 and about 370 seconds. A weight under a name no regression has any more would leave a
+ * renamed slow test counted as quick, so every weighted name is checked against the list.
+ */
+function testRegressionPartsCoverEveryTestOnceAndBalance(): void {
+  const names = TESTS.map((test) => test.name);
+  const stale = Object.keys(REGRESSION_SECONDS).filter((name) => !names.includes(name));
+  assert.deepEqual(stale, [], 'every weighted name is a regression in TESTS');
+  const heaviest = Math.max(...Object.values(REGRESSION_SECONDS));
+  const weight = (name: string): number => REGRESSION_SECONDS[name] ?? UNMEASURED_SECONDS;
+  for (const parts of [1, 2, 3, 4]) {
+    const split = Array.from({ length: parts }, (_unused, at) => regressionPart(names, at + 1, parts));
+    const covered = split.flat();
+    assert.equal(covered.length, names.length, `${parts} parts hold each regression once`);
+    assert.deepEqual([...covered].sort(), [...names].sort(), `${parts} parts hold every regression`);
+    const loads = split.map((part) => part.reduce((total, name) => total + weight(name), 0));
+    assert.ok(
+      Math.max(...loads) - Math.min(...loads) <= heaviest,
+      `${parts} parts within the heaviest regression of each other: ${loads.join(', ')}`,
+    );
+  }
+  // Two of 20 and two of 1 into two parts: the heavy pair is split, where every other one put
+  // both 20s together. Each part keeps the list's own order.
+  const weights = { a: 20, b: 1, c: 20, d: 1 };
+  assert.deepEqual(regressionPart(['a', 'b', 'c', 'd'], 1, 2, weights), ['a', 'b']);
+  assert.deepEqual(regressionPart(['a', 'b', 'c', 'd'], 2, 2, weights), ['c', 'd']);
+}
+
 const TESTS: (() => void | Promise<void>)[] = [
+  testRegressionPartsCoverEveryTestOnceAndBalance,
   testARescanAsTheEditorOpensFindsNothingMissing,
   testAScriptIsReadTheWayItsTokenizerReadsIt,
   testARenamedClassChangesItsUsesAndLeavesItsWords,
@@ -30263,8 +30290,7 @@ async function main(): Promise<void> {
   }
   // One part of the list, for CI to run the parts on several machines at once: run one after
   // another, the engine leg took fifteen minutes of a 23-minute run, nearly all of it waiting on
-  // Godot processes. Every nth from the kth, so the slow ones, which sit apart in the list, fall
-  // into different parts.
+  // Godot processes. Split by measured weight, so the parts finish together.
   const shard = process.env['GDHARNESS_REGRESSION_SHARD'];
   const part = shard === undefined ? null : /^(\d+)\/(\d+)$/.exec(shard);
   if (shard !== undefined && (part === null || Number(part[1]) < 1 || Number(part[1]) > Number(part[2]))) {
@@ -30272,8 +30298,17 @@ async function main(): Promise<void> {
     process.exitCode = 2;
     return;
   }
-  const chosen =
-    part === null ? named : named.filter((_test, at) => at % Number(part[2]) === Number(part[1]) - 1);
+  const inPart =
+    part === null
+      ? null
+      : new Set(
+          regressionPart(
+            named.map((test) => test.name),
+            Number(part[1]),
+            Number(part[2]),
+          ),
+        );
+  const chosen = inPart === null ? named : named.filter((test) => inPart.has(test.name));
   if (part !== null) {
     console.log(`part ${part[1]} of ${part[2]}: ${chosen.length} of ${named.length} regressions`);
   }

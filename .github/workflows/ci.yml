@@ -147,6 +147,48 @@ jobs:
       - name: Lint
         run: yamllint --strict .
 
+  # Whether the engine legs have anything to test. A release pull request changes the version in
+  # package.json and server.json and nothing else; its tree is main's with those two lines, and
+  # main's own run already took the engine legs over everything else. Running them again cost
+  # ten of the release's minutes and could only find a flake. Judged from the diff, not from the
+  # branch name, so a pull request that changes one more line takes the legs as any other does.
+  scope:
+    name: scope
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      engine: ${{ steps.scope.outputs.engine }}
+    steps:
+      # Two commits deep: a pull request is checked out as its merge into the base, whose first
+      # parent is the base, so the diff between them is what the pull request changes.
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Judge the diff
+        id: scope
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          engine=true
+          if [[ "${EVENT}" == pull_request ]]; then
+            changed="$(git diff --name-only HEAD^1 HEAD | sort | tr '\n' ' ')"
+            if [[ "${changed}" == "package.json server.json " ]]; then
+              # Every added or removed line, headers aside, has to be a version line.
+              others="$(git diff -U0 HEAD^1 HEAD -- package.json server.json \
+                | grep -E '^[+-]' | grep -vE '^(\+\+\+|---) ' \
+                | grep -vE '^[+-][[:space:]]*"version": "[0-9]+\.[0-9]+\.[0-9]+",?$' || true)"
+              if [[ -z "${others}" ]]; then
+                engine=false
+              fi
+            fi
+          fi
+          echo "Engine legs needed: ${engine}"
+          echo "engine=${engine}" >> "${GITHUB_OUTPUT}"
+
   # The GDScript that ships in the bundle, driven against a real engine on every platform we
   # claim to support. It is a separate job from build-and-test because it is the only one that
   # needs Godot, and running it on one platform would say nothing about the other two: the
@@ -154,37 +196,48 @@ jobs:
   # differ. The parts of each platform run at once, on machines of their own; see engine.yml.
   engine-linux-parts:
     name: engine linux
+    needs: scope
+    if: needs.scope.outputs.engine == 'true'
     permissions:
       contents: read
     uses: ./.github/workflows/engine.yml # zizmor: ignore[self-repository]
     with:
       # renovate: datasource=github-runners depName=ubuntu
       runner: ubuntu-24.04
+      regression-parts: '["1/3", "2/3", "3/3"]'
 
   engine-windows-parts:
     name: engine windows
+    needs: scope
+    if: needs.scope.outputs.engine == 'true'
     permissions:
       contents: read
     uses: ./.github/workflows/engine.yml # zizmor: ignore[self-repository]
     with:
       # renovate: datasource=github-runners depName=windows
       runner: windows-2025
+      regression-parts: '["1/3", "2/3", "3/3"]'
 
   engine-macos-parts:
     name: engine macos
+    needs: scope
+    if: needs.scope.outputs.engine == 'true'
     permissions:
       contents: read
     uses: ./.github/workflows/engine.yml # zizmor: ignore[self-repository]
     with:
       # renovate: datasource=github-runners depName=macos
       runner: macos-26
+      regression-parts: '["1/2", "2/2"]'
 
   # One check per platform, named by platform rather than by runner image, because the name is
   # what the branch ruleset requires, and an image bump must not rename a required check out from
   # under it. Each reports only its own platform's parts, so a Windows failure leaves Linux green.
+  # Parts skipped pass only when scope said there was nothing to test, so a scope that failed
+  # fails these too rather than passing them unrun.
   engine-linux:
     name: engine (linux)
-    needs: engine-linux-parts
+    needs: [scope, engine-linux-parts]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -192,11 +245,12 @@ jobs:
       - name: Every part passed
         env:
           RESULT: ${{ needs.engine-linux-parts.result }}
-        run: test "${RESULT}" = success
+          ENGINE: ${{ needs.scope.outputs.engine }}
+        run: test "${RESULT}" = success || { test "${ENGINE}" = false && test "${RESULT}" = skipped; }
 
   engine-windows:
     name: engine (windows)
-    needs: engine-windows-parts
+    needs: [scope, engine-windows-parts]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -204,11 +258,12 @@ jobs:
       - name: Every part passed
         env:
           RESULT: ${{ needs.engine-windows-parts.result }}
-        run: test "${RESULT}" = success
+          ENGINE: ${{ needs.scope.outputs.engine }}
+        run: test "${RESULT}" = success || { test "${ENGINE}" = false && test "${RESULT}" = skipped; }
 
   engine-macos:
     name: engine (macos)
-    needs: engine-macos-parts
+    needs: [scope, engine-macos-parts]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -216,7 +271,8 @@ jobs:
       - name: Every part passed
         env:
           RESULT: ${{ needs.engine-macos-parts.result }}
-        run: test "${RESULT}" = success
+          ENGINE: ${{ needs.scope.outputs.engine }}
+        run: test "${RESULT}" = success || { test "${ENGINE}" = false && test "${RESULT}" = skipped; }
 
   # Biome owns formatting and the fast syntactic rules; oxlint owns the ones that need the type
   # checker, which it runs through typescript-go rather than a second copy of the compiler.
@@ -266,14 +322,8 @@ jobs:
       - name: Install Bun
         uses: ./.github/actions/install-bun # zizmor: ignore[self-repository]
 
-      - name: Restore Bun package cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.bun/install/cache
-          key: ${{ runner.os }}-bun-${{ hashFiles('package.json', 'bun.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-bun-
-
+      # No package cache: restoring and saving one took twelve seconds against an install of one,
+      # and an entry any pull request can write is bytes whose provenance is a cache key.
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
