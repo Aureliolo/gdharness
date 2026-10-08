@@ -30359,9 +30359,10 @@ async function main(): Promise<void> {
     } finally {
       clearTimeout(deadline);
     }
-    // Said for the slow ones, so a leg creeping towards its limit shows which tests are growing.
+    // Said for the slow ones, so a leg creeping towards its limit shows which tests are growing,
+    // and so the weights the parts are split by (test/support/shards.ts) can be read off a run.
     const took = Date.now() - began;
-    if (took >= 20_000) {
+    if (took >= 5_000) {
       console.log(`${test.name} took ${(took / 1000).toFixed(1)}s`);
     }
     if (!passed || leftBehindBy(test.name)) {
