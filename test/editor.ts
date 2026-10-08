@@ -2939,8 +2939,17 @@ async function testAMethodAddedToAnAnalysedTypeIsPickedUp({ call, project }: Edi
   // the reload worked, and pairing it with a stale built copy from before is two readings from
   // different moments reported as one divergence.
   const analyserFirst = await read();
-  const reloaded = await call('editor_rescan', { projectPath: project, reloadScript: 'res://bell.gd' });
+  const reloaded = await call('editor_rescan', {
+    projectPath: project,
+    reloadScript: 'res://bell.gd',
+    listMembers: true,
+  });
   assert.equal(get(reloaded, 'reloadProblem'), undefined, JSON.stringify(reloaded));
+  assert.deepEqual(
+    get(reloaded, 'methodsAdded'),
+    ['silence'],
+    `what the reload added: ${JSON.stringify(reloaded)}`,
+  );
   const names = (field: string): string[] =>
     asArray(get(reloaded, field)).map((entry) => asString(entry, 'method'));
 
@@ -3018,7 +3027,11 @@ async function testAnEnumMemberAddedToAHeldTypeIsPickedUp({ call, project }: Edi
   assert.equal(get(analysed, 'clean'), true, `the dependent starts clean: ${JSON.stringify(analysed)}`);
   // Built and held, which is the state the report was in: the reload answers with the methods of
   // the copy the editor had, and Peal has one.
-  const held = await call('editor_rescan', { projectPath: project, reloadScript: 'res://peal.gd' });
+  const held = await call('editor_rescan', {
+    projectPath: project,
+    reloadScript: 'res://peal.gd',
+    listMembers: true,
+  });
   assert.ok(
     asArray(get(held, 'heldBeforeReload')).includes('chime'),
     `the editor should hold a built copy of Peal: ${JSON.stringify(held)}`,
@@ -3050,17 +3063,14 @@ async function testAnEnumMemberAddedToAHeldTypeIsPickedUp({ call, project }: Edi
   // The same divergence the method case holds, taken in the same window: the analyser resolved the
   // new member while the copy the editor built still has the enum it was built with. So a stale
   // built copy alone does not deny the member here, and ostinato's editor had something more.
+  // Asked without listMembers, as staleAnalysis sends a caller: what the reload added is the answer,
+  // which says both that the built copy lacked them and that the recompiled one has them.
   const regrown = await call('editor_rescan', { projectPath: project, reloadScript: 'res://peal.gd' });
-  const constants = (field: string): unknown[] => asArray(get(regrown, field));
-  assert.ok(
-    !constants('heldConstantsBeforeReload').includes('Kind.DOUBLE') &&
-      !constants('heldConstantsBeforeReload').includes('CHANGES'),
-    `the built copy should still be the one built before the change: ${JSON.stringify(regrown)}`,
-  );
-  assert.ok(
-    constants('reloadedConstants').includes('Kind.DOUBLE') &&
-      constants('reloadedConstants').includes('CHANGES'),
-    `and the reload should recompile it with the new member and constant: ${JSON.stringify(regrown)}`,
+  assert.deepEqual(
+    [get(regrown, 'constantsAdded'), get(regrown, 'constantsRemoved'), get(regrown, 'reloadedConstants')],
+    // In the copy's own order, which reads sorted: the list above has Kind.LONG before Kind.SHORT.
+    [['CHANGES', 'Kind.DOUBLE'], [], undefined],
+    `the reload should recompile it with the new member and constant, and say only those: ${JSON.stringify(regrown)}`,
   );
 
   writeFileSync(
@@ -3094,14 +3104,22 @@ async function testAnEnumMemberAddedToAHeldTypeIsPickedUp({ call, project }: Edi
   // copy unusable, and the addon compiles it again from the text it was built from, which is what
   // lets the answer say it is as it was.
   writeFileSync(join(project, 'tower.gd'), TOWER_GD.join('\n'));
-  const towerHeld = await call('editor_rescan', { projectPath: project, reloadScript: 'res://tower.gd' });
+  const towerHeld = await call('editor_rescan', {
+    projectPath: project,
+    reloadScript: 'res://tower.gd',
+    listMembers: true,
+  });
   assert.deepEqual(
     get(towerHeld, 'reloadedMethods'),
     ['counted', 'kind', 'rounds'],
     JSON.stringify(towerHeld),
   );
   writeFileSync(join(project, 'tower.gd'), `${TOWER_GD.join('\n')}\n\nfunc broken( -> int:\n\treturn 1\n`);
-  const refused = await call('editor_rescan', { projectPath: project, reloadScript: 'res://tower.gd' });
+  const refused = await call('editor_rescan', {
+    projectPath: project,
+    reloadScript: 'res://tower.gd',
+    listMembers: true,
+  });
   assert.match(
     String(get(refused, 'reloadProblem')),
     /^res:\/\/tower\.gd did not compile: Godot answered error 43, Parse error\. The copy the editor holds was compiled again from the text it was built from, which puts it back as it was/,
@@ -3120,7 +3138,11 @@ async function testAnEnumMemberAddedToAHeldTypeIsPickedUp({ call, project }: Edi
   assert.equal(get(refused, 'reloadedMethods'), undefined, 'and nothing claimed as reloaded');
 
   writeFileSync(join(project, 'tower.gd'), TOWER_GD.join('\n'));
-  const mended = await call('editor_rescan', { projectPath: project, reloadScript: 'res://tower.gd' });
+  const mended = await call('editor_rescan', {
+    projectPath: project,
+    reloadScript: 'res://tower.gd',
+    listMembers: true,
+  });
   assert.deepEqual(
     [get(mended, 'heldBeforeReload'), get(mended, 'reloadedMethods'), get(mended, 'reloadProblem')],
     [['counted', 'kind', 'rounds'], ['counted', 'kind', 'rounds'], undefined],
@@ -3215,6 +3237,7 @@ async function testAClassReloadedOnceItsBaseExistsReachesItsUsers({
     const reloaded = await call('editor_rescan', {
       projectPath: project,
       reloadScript: 'res://bench/statue.gd',
+      listMembers: true,
     });
     assert.equal(get(reloaded, 'reloadProblem'), undefined, JSON.stringify(reloaded));
     assert.ok(asArray(get(reloaded, 'reloadedMethods')).includes('height'), JSON.stringify(reloaded));
