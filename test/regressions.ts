@@ -236,7 +236,7 @@ import {
   theGamePicked,
   toolSpec,
 } from '../src/tool-definitions.js';
-import { namedType, renderToolsMarkdown } from '../src/tool-reference.js';
+import { argumentShape, namedType, renderToolsMarkdown } from '../src/tool-reference.js';
 import { CACHE_MS, cacheFile, isNewer, registryFor, UpdateCheck } from '../src/update-check.js';
 import { askWindows } from '../src/windows-ask.js';
 import { withHome } from './support/cli-home.js';
@@ -12443,6 +12443,19 @@ function testTheReferencePrintsEveryShapeOfType(): void {
   assert.equal(namedType(undefined), 'any', 'and an argument with no declared type takes any value');
   assert.equal(namedType({ oneOf: [] }), 'any', 'as does a shape this does not read');
   assert.equal(namedType(['string', 7]), 'any', 'a list that is not all names is not a union');
+  // What an array holds, which "array" alone hid: `path` takes a suite or a list of them.
+  assert.equal(argumentShape({ type: 'array', items: { type: 'string' } }), 'array of strings');
+  assert.equal(
+    argumentShape({ type: ['string', 'array'], items: { type: 'string' } }),
+    'string or array of strings',
+  );
+  assert.equal(
+    argumentShape({ type: 'array' }),
+    'array',
+    'an array of any values says no more than it knows',
+  );
+  assert.equal(argumentShape({ type: 'integer' }), 'integer');
+  assert.equal(argumentShape({}), 'any');
 
   const markdown = renderToolsMarkdown();
   for (const name of ['keycode', 'button']) {
@@ -25110,6 +25123,25 @@ async function testAnUnknownArgumentSaysWhichServerSaysSo(): Promise<void> {
     // `frames` is not because it belongs to a different tool entirely.
     assert.match(said, /prefix/, `the list is what the op takes: ${said}`);
     assert.doesNotMatch(said, /frames/, `and nothing from another tool: ${said}`);
+
+    // Each argument with what it takes. ostinato guessed `suites` for a list of suite files and was
+    // told `path`, not that path takes that list, and found the form only in its own transcript.
+    const guessed =
+      textOf(
+        await server.request('tools/call', {
+          name: 'project_test',
+          arguments: { projectPath: '/p', suites: ['tests/a_test.gd'] },
+        }),
+      ) ?? '';
+    assert.match(guessed, /project_test does not take suites\. It takes: /, guessed);
+    assert.match(guessed, /\bpath \(string or array of strings\)/, guessed);
+    assert.match(guessed, /\bfailFast \(boolean\)/, guessed);
+    // A tool with ops asked for nothing in particular names the ops op takes.
+    const unasked =
+      textOf(
+        await server.request('tools/call', { name: 'project_settings', arguments: { nosuchargument: 1 } }),
+      ) ?? '';
+    assert.match(unasked, /\bop \(get, set[^)]*\)/, unasked);
   } finally {
     await server.stop();
   }
