@@ -71,6 +71,46 @@ function freePort(): Promise<number> {
   });
 }
 
+/**
+ * Bridge ports reserved ahead for a server whose fixture names none, topped up after each is taken.
+ *
+ * Left to the default, two servers of this suite took 6505 while a real editor of another project
+ * was dialling its own server there: the editor reached the test servers, they turned it away, and
+ * the server that project started next found 6505 held and moved. Only the bridge: the language
+ * server and debug adapter variables are pins that override the port a connected editor reports,
+ * so setting them changes what a fixture tests rather than only where it reaches.
+ * Reserved ahead because a server's environment is fixed when it is spawned, which the constructor
+ * does, and a reservation is asynchronous.
+ */
+const sparePorts: number[] = [];
+const SPARE_PORTS = 24;
+
+async function topUpSparePorts(): Promise<void> {
+  while (sparePorts.length < SPARE_PORTS) {
+    sparePorts.push(await reservePort());
+  }
+}
+
+await topUpSparePorts();
+
+function sparePort(): number {
+  const port = sparePorts.shift();
+  if (port === undefined) {
+    throw new Error('no reserved port left for a test server; more were started at once than are kept');
+  }
+  void topUpSparePorts();
+  return port;
+}
+
+/**
+ * A reserved bridge port unless [param named] names one. The fixture's own value wins, and one that
+ * wants the default on purpose names the variable as an empty string, which the server reads as
+ * unset.
+ */
+function reservedPortsFor(named: Record<string, string> | undefined): Record<string, string> {
+  return named?.['GDHARNESS_BRIDGE_PORT'] === undefined ? { GDHARNESS_BRIDGE_PORT: String(sparePort()) } : {};
+}
+
 export interface ServerOptions {
   entry?: string;
   env?: Record<string, string>;
@@ -160,6 +200,7 @@ export class ServerProcess {
         // failing until its branch takes the version bump. That is the suite depending on the
         // network and on today's date, and it cost an afternoon's confusion once.
         GDHARNESS_NO_UPDATE_CHECK: '1',
+        ...reservedPortsFor(options.env),
         ...options.env,
       },
     });

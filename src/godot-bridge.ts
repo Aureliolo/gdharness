@@ -13,6 +13,34 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 const KEEPALIVE_INTERVAL_MS = 10_000;
 const SECOND_CONNECTION_CLOSE_CODE = 4000;
 
+/** The most a WebSocket close frame carries as its reason, in UTF-8 bytes. */
+const MOST_CLOSE_REASON_BYTES = 123;
+
+/**
+ * [param text] cut to fit a close frame, keeping its start or its end.
+ *
+ * The protocol carries at most 123 bytes of reason, and `ws` throws past that rather than trimming.
+ * It threw inside the message handler, where nothing catches it, so the process ended: a reason
+ * naming two project paths took down any server an editor of another project dialled, and an
+ * editor whose own server is gone dials the shared default port.
+ */
+export function closeReason(text: string, keep: 'start' | 'end'): string {
+  if (Buffer.byteLength(text) <= MOST_CLOSE_REASON_BYTES) {
+    return text;
+  }
+  // By code point, so a character outside the basic plane is never split in half.
+  const characters = Array.from(text);
+  const marker = '...';
+  while (Buffer.byteLength(characters.join('')) + marker.length > MOST_CLOSE_REASON_BYTES) {
+    if (keep === 'end') {
+      characters.shift();
+    } else {
+      characters.pop();
+    }
+  }
+  return keep === 'end' ? `${marker}${characters.join('')}` : `${characters.join('')}${marker}`;
+}
+
 /**
  * An editor belonging to another project, told so rather than served.
  *
@@ -177,7 +205,12 @@ interface GodotConnectionInfo {
 
 interface BridgeStatus {
   host: string;
-  port: number;
+  /**
+   * The port it listens on, or null while it listens on none: before it binds, while it waits for
+   * a predecessor to let go, and between a held port refusing it and a free one taking it. The
+   * configured port stood in for it there, and read as a bridge listening where it was not.
+   */
+  port: number | null;
   connected: boolean;
   projectPath?: string | undefined;
   connectedAt?: Date | undefined;
@@ -518,7 +551,7 @@ export class GodotBridge extends EventEmitter {
     const editor = identifying ? null : this.connectionInfo;
     return {
       host: this.host,
-      port: this.port,
+      port: this.boundPort,
       connected: this.isConnected(),
       projectPath: editor?.projectPath,
       connectedAt: editor?.connectedAt,
@@ -852,7 +885,13 @@ export class GodotBridge extends EventEmitter {
     this.socket = null;
     this.connectionInfo = null;
     this.stopKeepalive();
-    stranger?.close(OTHER_PROJECT_CLOSE_CODE, said);
+    // Both projects when they fit. When they do not, whose server this is, which the editor cannot
+    // see for itself, cut from the front so the project's folder survives a long path.
+    const fits = closeReason(said, 'start') === said;
+    stranger?.close(
+      OTHER_PROJECT_CLOSE_CODE,
+      fits ? said : closeReason(`this server serves ${this.ownProject ?? ''}`, 'end'),
+    );
   }
 
   /**
@@ -901,7 +940,7 @@ export class GodotBridge extends EventEmitter {
     this.socket = null;
     this.connectionInfo = null;
     this.stopKeepalive();
-    run?.close(ONE_SHOT_CLOSE_CODE, said);
+    run?.close(ONE_SHOT_CLOSE_CODE, closeReason(said, 'start'));
   }
 
   private handleDisconnect(disconnectedSocket: WebSocket | null, reason: Error): void {
