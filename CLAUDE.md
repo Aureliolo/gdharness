@@ -274,7 +274,7 @@ bump, merge the pull request it opens, and `release-tag.yml` tags whatever versi
 
 Merge nothing else while a release pull request is open. The ruleset on `main` requires branches to
 be up to date, so every other merge puts the release branch behind and costs it all thirteen checks
-again, three of them engine legs. On 2026-09-20 five pull requests went in while one release sat
+again. On 2026-09-20 five pull requests went in while one release sat
 open, and it took four rounds of updating and re-running to land. Cut the release last, let it
 through, then carry on. It is a convention rather than a setting, and it costs nothing: the work is
 already done by the time the release is cut.
