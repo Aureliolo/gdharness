@@ -731,7 +731,11 @@ export class GodotBridge extends EventEmitter {
       case 'godot_ready':
         if (this.connectionInfo) {
           if (this.belongsElsewhere(message.project_path)) {
-            this.sendElsewhere(message.project_path);
+            this.elsewhereUnlessOneShot(
+              message.project_path,
+              message.editor_pid,
+              message.opened_by_a_server === true,
+            );
             return;
           }
           this.connectionInfo.projectPath = message.project_path;
@@ -892,6 +896,48 @@ export class GodotBridge extends EventEmitter {
       OTHER_PROJECT_CLOSE_CODE,
       fits ? said : closeReason(`this server serves ${this.ownProject ?? ''}`, 'end'),
     );
+  }
+
+  /**
+   * Turns away a process of another project, as a one-shot run when its command line makes it one
+   * and as another project's editor otherwise.
+   *
+   * A gate's `--import` of a fresh worktree has no announcement and dials the shared default port,
+   * so it reaches whichever server holds that port. Told it was another project's editor, it prints
+   * a warning that gates refuse a push on, so the command line is read before either close: a
+   * one-shot run is closed quietly, and a real editor is still told whose server this is.
+   */
+  private elsewhereUnlessOneShot(
+    theirProject: string,
+    pid: number | undefined,
+    openedByAServer: boolean,
+  ): void {
+    const known = pid === undefined ? undefined : this.oneShots.get(pid);
+    if (pid !== undefined && known !== undefined) {
+      this.turnAway(pid, known);
+      return;
+    }
+    const info = this.connectionInfo;
+    const socket = this.socket;
+    const reader = this.oneShotReader;
+    if (pid === undefined || openedByAServer || info === null || reader === null) {
+      this.sendElsewhere(theirProject);
+      return;
+    }
+    info.identifying = true;
+    void reader(pid)
+      .catch(() => undefined)
+      .then((option) => {
+        if (this.socket !== socket || this.connectionInfo !== info) {
+          return;
+        }
+        if (typeof option === 'string') {
+          this.oneShots.set(pid, option);
+          this.turnAway(pid, option);
+          return;
+        }
+        this.sendElsewhere(theirProject);
+      });
   }
 
   /**
