@@ -84,7 +84,9 @@ import { occurrencesOf, regionsOf, shapeOf as scriptShapeOf } from '../src/gdscr
 import {
   anEditorIsStillComing,
   CONNECT_WINDOW_MS,
+  closeReason,
   createBridge,
+  GodotBridge,
   mayYetConnect,
   theEditorHasComeBack,
 } from '../src/godot-bridge.js';
@@ -251,32 +253,29 @@ import { reservePort, ServerProcess } from './support/server.js';
 import { REGRESSION_SECONDS, regressionPart, UNMEASURED_SECONDS } from './support/shards.js';
 import { endEnginesLeft, leftBehindBy, reportUnswept, sweep, sweepingFor } from './support/sweep.js';
 
-async function withOccupiedBridgePort<T>(run: () => Promise<T>): Promise<T> {
+/**
+ * Runs [param run] with a bridge port held by something else, handed to it to configure a server
+ * with. A reserved port rather than 6505: holding the default here held it against the real server
+ * of whichever project's editor was dialling it.
+ */
+async function withOccupiedBridgePort<T>(run: (port: number) => Promise<T>): Promise<T> {
+  const port = await reservePort();
   const blocker = createServer();
-  const blockerState = await new Promise<{ alreadyOccupied: boolean }>((resolve, reject) => {
-    blocker.once('error', (error: NodeJS.ErrnoException) => {
-      if (error.code === 'EADDRINUSE') {
-        resolve({ alreadyOccupied: true });
-        return;
-      }
-      reject(error);
-    });
-    blocker.listen(6505, '127.0.0.1', () => {
-      resolve({ alreadyOccupied: false });
+  await new Promise<void>((resolve, reject) => {
+    blocker.once('error', reject);
+    blocker.listen(port, '127.0.0.1', () => {
+      resolve();
     });
   });
-
   try {
-    return await run();
+    return await run(port);
   } finally {
-    if (!blockerState.alreadyOccupied) {
-      await new Promise<void>((resolve, reject) => {
-        blocker.close((err) => {
-          if (err) reject(err);
-          else resolve();
-        });
+    await new Promise<void>((resolve, reject) => {
+      blocker.close((err) => {
+        if (err) reject(err);
+        else resolve();
       });
-    }
+    });
   }
 }
 
@@ -302,6 +301,11 @@ class FakeSocket extends EventEmitter {
   }
 
   close(code = 1000, reason = ''): void {
+    // What ws does with a reason a close frame cannot carry. Without it this stand-in took any
+    // reason, and the one naming two project paths that ended real servers passed here (#941).
+    if (Buffer.byteLength(reason) > 123) {
+      throw new RangeError('The message must not be greater than 123 bytes');
+    }
     this.readyState = 3;
     this.closedWith = { code, reason };
     this.emit('close', code, Buffer.from(reason));
@@ -365,8 +369,11 @@ function testStaleDisconnectRegression(): void {
  * called the bridge healthy. The addon has always said which project it has open; nothing read it.
  */
 function testOneServerOneProjectRegression(): void {
-  const mine = join(tmpdir(), 'gdharness-one-server-mine');
-  const theirs = join(tmpdir(), 'gdharness-one-server-theirs');
+  // Short enough that a reason naming both fits a close frame. Under the temporary directory the
+  // pair came to 168 bytes, a reason no close frame carries, which the stand-in accepted until it
+  // was made to refuse what ws refuses (#941); the long pair is checked below.
+  const mine = resolve('/gdharness-one-server-mine');
+  const theirs = resolve('/gdharness-one-server-theirs');
 
   const bridge = createBridge(0, 1000, '127.0.0.1', mine);
   const stranger = new FakeSocket('stranger');
@@ -382,6 +389,27 @@ function testOneServerOneProjectRegression(): void {
     /this server serves .*and that editor has .* open/,
     'and a reason naming both projects, since neither side can see the other',
   );
+
+  // #941: paths long enough that naming both overruns a close frame. ws threw, uncaught, and the
+  // server ended; the refusal is still made, with a reason that fits and ends with this project.
+  const longMine = join(tmpdir(), `gdharness-one-server-${'mine'.repeat(30)}`);
+  const long = createBridge(0, 1000, '127.0.0.1', longMine);
+  const farAway = new FakeSocket('far away');
+  connectFake(long, farAway);
+  saysHello(farAway, join(tmpdir(), `gdharness-one-server-${'theirs'.repeat(20)}`));
+  assert.equal(farAway.closedWith?.code, 4001, 'a long pair of paths is still turned away');
+  const reason = farAway.closedWith.reason;
+  assert.ok(Buffer.byteLength(reason) <= 123, `in a reason a close frame carries: ${reason}`);
+  assert.match(
+    reason,
+    new RegExp(`^\\.\\.\\..*${'mine'.repeat(10)}$`),
+    'cut from the front, so the folder is kept',
+  );
+  assert.equal(closeReason('short enough', 'start'), 'short enough', 'and a short reason goes as it is');
+  // A character outside the basic plane is four bytes and two UTF-16 units, and is never split.
+  const astral = closeReason('\u{1F3B2}'.repeat(40), 'start');
+  assert.ok(Buffer.byteLength(astral) <= 123 && !astral.includes('�'), astral);
+  assert.equal(astral, `${'\u{1F3B2}'.repeat(30)}...`);
 
   // The same project as Godot spells it: forward slashes and a trailing one, against a config
   // holding a Windows path. A comparison that failed this would refuse the editor it exists for.
@@ -2847,8 +2875,8 @@ async function testAnEditorNotReachedYetIsNotAnEditorThatIsGone(): Promise<void>
 }
 
 async function testEditorStatusPortConflict(): Promise<void> {
-  await withOccupiedBridgePort(async () => {
-    const server = new ServerProcess();
+  await withOccupiedBridgePort(async (port) => {
+    const server = new ServerProcess({ env: { GDHARNESS_BRIDGE_PORT: String(port) } });
     try {
       await delay(500);
       assert.equal(
@@ -3548,6 +3576,117 @@ async function testASupersededServerStandsDown(): Promise<void> {
 }
 
 /**
+ * #941: a server that turns away another project's editor stays up, through a real socket. Both
+ * paths are long enough that the reason naming them overran a close frame, and ws threw from inside
+ * the message handler: two servers of this suite died that way when a real editor of another
+ * project dialled the default port they had taken.
+ */
+async function testATurnedAwayEditorLeavesTheServerUp(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), `gdharness-turned-away-${'mine'.repeat(20)}-`));
+  const port = await reservePort();
+  const server = new ServerProcess({
+    env: { GDHARNESS_PROJECT: project, GDHARNESS_BRIDGE_PORT: String(port) },
+  });
+  let socket: WebSocket | null = null;
+  try {
+    await server.initialize('regression-test');
+    const opened = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+    socket = opened;
+    await new Promise<void>((resolve, reject) => {
+      opened.once('open', () => {
+        resolve();
+      });
+      opened.once('error', reject);
+    });
+    const closed = new Promise<{ code: number; reason: string }>((resolve) => {
+      opened.once('close', (code: number, reason: Buffer) => {
+        resolve({ code, reason: String(reason) });
+      });
+    });
+    opened.send(
+      JSON.stringify({
+        type: 'godot_ready',
+        project_path: join(tmpdir(), `gdharness-turned-away-${'theirs'.repeat(15)}`),
+      }),
+    );
+    const { code, reason } = await closed;
+    assert.equal(code, 4001, `turned away as another project's editor: ${code} ${reason}`);
+    assert.ok(reason.endsWith(basename(project)), `naming this project's folder: ${reason}`);
+    const status = parseTextContent(
+      await server.request('tools/call', { name: 'editor_status', arguments: {} }),
+    );
+    assert.equal(
+      get(status, 'editor', 'port'),
+      port,
+      `and the server is still up: ${JSON.stringify(status)}`,
+    );
+  } finally {
+    socket?.close();
+    await server.stop();
+    sweep(project);
+  }
+}
+
+/**
+ * #941: a test server whose fixture names no bridge port is kept off the default. Two such servers
+ * took 6505 while a real editor of another project was dialling its own server there; the editor
+ * reached them instead, and the real server that came next found the port held.
+ */
+async function testATestServerTakesNoRealEditorsPort(): Promise<void> {
+  const server = new ServerProcess();
+  try {
+    await server.initialize('regression-test');
+    const status = parseTextContent(
+      await server.request('tools/call', { name: 'editor_status', arguments: {} }),
+    );
+    const bridge = asNumber(
+      get(status, 'editor', 'port'),
+      `the bridge is on a port: ${JSON.stringify(status)}`,
+    );
+    assert.notEqual(bridge, 6505, 'and not the default a real editor dials');
+  } finally {
+    await server.stop();
+  }
+}
+
+/**
+ * #940: a bridge on no port says so. Its status gave the configured port while it listened on none, and
+ * a status read in the moment between a held port refusing a handover and a free one taking it said
+ * no handover and the held port, which a macOS run of the case below caught once in 1.1.51's CI:
+ * "it moved off the held port" with port the held one and no listeningSince. Asked of the bridge
+ * itself, in each state it passes through, because a server's status lands in that moment only by
+ * chance.
+ */
+async function testABridgeOnNoPortSaysSo(): Promise<void> {
+  const port = await reservePort();
+  const holder = createServer();
+  await new Promise<void>((resolve) => {
+    holder.listen(port, '127.0.0.1', resolve);
+  });
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-no-port-'));
+  const bridge = new GodotBridge(port, '127.0.0.1', 1000, project);
+  try {
+    assert.equal(bridge.getStatus().port, null, 'before it binds');
+    await assert.rejects(bridge.start(false), (error: unknown) => get(error, 'code') === 'EADDRINUSE');
+    assert.equal(bridge.getStatus().port, null, 'when the held port refused it');
+    await bridge.start();
+    const moved = bridge.getStatus();
+    assert.ok(moved.port !== null && moved.port !== port, `then on a free one: ${JSON.stringify(moved)}`);
+    assert.equal(moved.portWanted, port, JSON.stringify(moved));
+    await bridge.stop();
+    assert.equal(bridge.getStatus().port, null, 'and once it has stopped');
+  } finally {
+    await bridge.stop();
+    await new Promise<void>((resolve) => {
+      holder.close(() => {
+        resolve();
+      });
+    });
+    sweep(project);
+  }
+}
+
+/**
  * A predecessor that does not let go of the configured port is not waited on for ever.
  *
  * A server from before servers watched for a successor never stands down, and neither does one
@@ -3595,7 +3734,7 @@ async function testAPredecessorThatKeepsThePortIsNotWaitedOnForEver(): Promise<v
       await delay(500);
       status = await editorOf();
     }
-    const took = asNumber(get(status, 'port'), 'it is listening somewhere');
+    const took = asNumber(get(status, 'port'), `it is listening somewhere: ${JSON.stringify(status)}`);
     assert.notEqual(took, port, `it moved off the held port: ${JSON.stringify(status)}`);
     assert.equal(get(status, 'portWanted'), port, JSON.stringify(status));
     assert.match(
@@ -30010,6 +30149,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testABridgeThatMovedSaysFromWhere,
   testASupersededServerStandsDown,
   testAPredecessorThatKeepsThePortIsNotWaitedOnForEver,
+  testABridgeOnNoPortSaysSo,
+  testATurnedAwayEditorLeavesTheServerUp,
+  testATestServerTakesNoRealEditorsPort,
   testAProjectUpgradedUnderTheServerIsSaid,
   testAStaleNoteKnowsWhatARestartLoads,
   testEveryDispatchedNameExistsOnBothSides,
