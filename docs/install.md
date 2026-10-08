@@ -181,6 +181,10 @@ pointer answers from `runtime_input` say so under `pointer_note` for a game on t
 one to connect. A project whose import takes longer than that sets
 `GDHARNESS_EDITOR_RESTART_TIMEOUT_MS` in the server's environment.
 
+The editor's language server reads every script in the project before it answers the first request
+after the editor starts, and the server waits three minutes for that. A project whose language
+server reads for longer sets `GDHARNESS_LSP_INITIALIZE_TIMEOUT_MS`.
+
 ## Updating
 
 The server asks the npm registry every ten minutes, in the background, while it is being used, and

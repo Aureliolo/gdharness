@@ -105,7 +105,7 @@ import {
   savesStayPut,
   userDataIn,
 } from '../src/launch.js';
-import { GodotLSPClient, LSPTimeout } from '../src/lsp_client.js';
+import { GodotLSPClient, handleLSPTool, LSPTimeout } from '../src/lsp_client.js';
 import { isSameDirectory, isWithinRoot, resolveWithinProject } from '../src/paths.js';
 import { freePort } from '../src/ports.js';
 import {
@@ -613,12 +613,84 @@ function portOf(server: Server): number {
   return address.port;
 }
 
+/**
+ * What Godot 4.7.2 answered a documentSymbol request with for a script declaring a signal on line
+ * 4, a variable on line 5 and an inner class with one method, cut to one of each, as captured.
+ */
+const GODOT_SYMBOLS = [
+  {
+    children: [
+      {
+        children: [],
+        deprecated: false,
+        detail: 'signal told(amount)',
+        documentation: '',
+        kind: 24,
+        name: 'told',
+        native_class: '',
+        range: { end: { character: 24, line: 3 }, start: { character: 0, line: 3 } },
+        selectionRange: { end: { character: 11, line: 3 }, start: { character: 7, line: 3 } },
+      },
+      {
+        deprecated: false,
+        detail: 'var count: int = 0',
+        documentation: '',
+        kind: 13,
+        name: 'count',
+        native_class: '',
+        range: { end: { character: 18, line: 4 }, start: { character: 0, line: 4 } },
+        selectionRange: { end: { character: 9, line: 4 }, start: { character: 4, line: 4 } },
+      },
+      {
+        children: [
+          {
+            deprecated: false,
+            detail: 'func deep() -> void',
+            documentation: '',
+            kind: 6,
+            name: 'deep',
+            native_class: '',
+            range: { end: { character: 7, line: 12 }, start: { character: 1, line: 11 } },
+            selectionRange: { end: { character: 10, line: 11 }, start: { character: 6, line: 11 } },
+          },
+        ],
+        deprecated: false,
+        detail: 'class Inner',
+        documentation: '',
+        kind: 5,
+        name: 'Inner',
+        native_class: '',
+        range: { end: { character: 7, line: 12 }, start: { character: 0, line: 10 } },
+        selectionRange: { end: { character: 11, line: 10 }, start: { character: 6, line: 10 } },
+      },
+    ],
+    deprecated: false,
+    detail: 'class Probe',
+    documentation: '',
+    kind: 5,
+    name: 'Probe',
+    native_class: '',
+    range: { end: { character: 0, line: 14 }, start: { character: 0, line: 0 } },
+    selectionRange: { end: { character: 16, line: 0 }, start: { character: 11, line: 0 } },
+  },
+];
+
+/** A diagnostic the stand-in publishes, positioned as the protocol counts: from zero. */
+interface FakeDiagnostic {
+  readonly message: string;
+  readonly line?: number;
+  readonly character?: number;
+  readonly endCharacter?: number;
+  readonly severity?: number;
+}
+
 async function withFakeLanguageServer<T>(
   publishUri: (uri: string) => string | null,
   handler: (port: number) => Promise<T>,
   seen?: JsonRpcMessage[],
-  said: readonly string[] = ['Could not find type "Missing" in the current scope.'],
+  said: readonly (string | FakeDiagnostic)[] = ['Could not find type "Missing" in the current scope.'],
   serves?: () => string,
+  initializeAfterMs = 0,
 ): Promise<T> {
   const sockets = new Set<Socket>();
 
@@ -662,7 +734,14 @@ async function withFakeLanguageServer<T>(
             });
             send({ jsonrpc: '2.0', method: 'gdscript_client/changeWorkspace', params: { path: own } });
           }
-          send({ jsonrpc: '2.0', id: message.id, result: { capabilities: {} } });
+          const answer = { jsonrpc: '2.0', id: message.id, result: { capabilities: {} } };
+          if (initializeAfterMs > 0) {
+            setTimeout(() => {
+              if (!socket.destroyed) send(answer);
+            }, initializeAfterMs);
+          } else {
+            send(answer);
+          }
         } else if (message.method === 'textDocument/didOpen') {
           const uri = publishUri(String(get(message.params, 'textDocument', 'uri')));
           if (uri !== null) {
@@ -671,15 +750,50 @@ async function withFakeLanguageServer<T>(
               method: 'textDocument/publishDiagnostics',
               params: {
                 uri,
-                diagnostics: said.map((message) => ({
-                  range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
-                  message,
-                  severity: 1,
-                  source: 'gdscript',
-                })),
+                diagnostics: said.map((entry) => {
+                  const one = typeof entry === 'string' ? { message: entry } : entry;
+                  const line = one.line ?? 0;
+                  return {
+                    code: 0,
+                    message: one.message,
+                    range: {
+                      start: { line, character: one.character ?? 0 },
+                      end: { line, character: one.endCharacter ?? 1 },
+                    },
+                    severity: one.severity ?? 1,
+                    source: 'gdscript',
+                  };
+                }),
               },
             });
           }
+        } else if (message.method === 'textDocument/documentSymbol') {
+          send({ jsonrpc: '2.0', id: message.id, result: GODOT_SYMBOLS });
+        } else if (message.method === 'textDocument/hover') {
+          const position = get(message.params, 'position');
+          send({
+            jsonrpc: '2.0',
+            id: message.id,
+            result: {
+              contents: { kind: 'markdown', value: '\tvar count: int = 0' },
+              range: { start: position, end: position },
+            },
+          });
+        } else if (message.method === 'textDocument/completion') {
+          const position = get(message.params, 'position');
+          const textDocument = get(message.params, 'textDocument');
+          send({
+            jsonrpc: '2.0',
+            id: message.id,
+            result: [
+              {
+                data: { context: { triggerCharacter: '', triggerKind: 1 }, position, textDocument },
+                insertText: 'count',
+                kind: 10,
+                label: 'count',
+              },
+            ],
+          });
         }
       }
     });
@@ -750,7 +864,11 @@ async function testAReferencesRequestIsGivenItsOwnTime(): Promise<void> {
     (uri) => uri,
     async (port) => {
       const script = join(tmpdir(), 'gdharness-lsp-references', 'houses.gd');
-      const client = new GodotLSPClient(port, '127.0.0.1', { requestMs: 200, referencesMs: 1500 });
+      const client = new GodotLSPClient(port, '127.0.0.1', {
+        requestMs: 200,
+        referencesMs: 1500,
+        initializeMs: 1500,
+      });
       const outcome = async (asked: Promise<unknown>): Promise<{ error: unknown; ms: number }> => {
         const started = performance.now();
         const error = await asked.then(
@@ -774,6 +892,299 @@ async function testAReferencesRequestIsGivenItsOwnTime(): Promise<void> {
       }
     },
   );
+}
+
+/**
+ * #937: initialize is given a time of its own. Godot reads every script in the project before it
+ * answers the first initialize after its editor starts: 7.3 s for 3000 small generated scripts on
+ * 4.7.2, against 1 ms for the next one, so a larger project's first call after editor_launch ran
+ * past the ten seconds every request was given, and the refusal sent the caller to the port.
+ *
+ * The stand-in answers initialize after 600 ms, three times what any other request is given here.
+ * One that still runs past its time is said to be the server reading, not a port to check.
+ */
+/**
+ * #936: a script_diagnostics call over a folder stops asking once it is cancelled. With no cap on
+ * how many scripts one call names, a folder can take minutes, and a caller that gave up left it
+ * asking the language server about every script still to go.
+ *
+ * The stand-in publishes nothing, so each script waits out the five seconds a publish is given, and
+ * the call is cancelled during the first. Twelve seconds later an uncancelled loop would have opened
+ * three; a stopped one opened only the one it was on.
+ */
+async function testACancelledFolderStopsAsking(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-diagnose-cancelled-'));
+  try {
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    mkdirSync(join(project, 'slow'));
+    for (let at = 0; at < 5; at += 1) {
+      writeFileSync(join(project, 'slow', `s${String(at)}.gd`), 'extends Node\n');
+    }
+    const seen: JsonRpcMessage[] = [];
+    const opened = (): number => seen.filter((message) => message.method === 'textDocument/didOpen').length;
+    await withFakeLanguageServer(
+      () => null,
+      async (lspPort) => {
+        const server = new ServerProcess({
+          env: {
+            GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+            GDHARNESS_LSP_PORT: String(lspPort),
+            GODOT_PATH: join(tmpdir(), 'gdharness-no-such-godot'),
+          },
+        });
+        try {
+          await server.initialize('regression-test');
+          const id = server.nextRequestId;
+          void server
+            .request(
+              'tools/call',
+              { name: 'script_diagnostics', arguments: { projectPath: project, scriptPath: 'slow' } },
+              60_000,
+            )
+            .catch(() => {
+              // A cancelled request is not answered.
+            });
+          assert.ok(
+            await cameTrue(() => opened() >= 1, 10_000),
+            'the call should ask about the first script',
+          );
+          server.notify('notifications/cancelled', { requestId: id, reason: 'the caller stopped waiting' });
+          await delay(12_000);
+          assert.equal(opened(), 1, `the call should stop asking once cancelled: ${String(opened())} opened`);
+        } finally {
+          await server.stop();
+        }
+      },
+      seen,
+    );
+  } finally {
+    sweep(project);
+  }
+}
+
+function lspPayload(answer: { content: { text: string }[] }): unknown {
+  return JSON.parse(answer.content[0]?.text ?? '{}') as unknown;
+}
+
+async function testTheFirstInitializeIsGivenItsOwnTime(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lsp-initialize-'));
+  try {
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    writeFileSync(join(project, 'player.gd'), 'extends Node\n');
+    const ask = { projectPath: project, scriptPath: 'player.gd' };
+    await withFakeLanguageServer(
+      (uri) => uri,
+      async (port) => {
+        const patient = new GodotLSPClient(port, '127.0.0.1', {
+          requestMs: 200,
+          referencesMs: 200,
+          initializeMs: 3000,
+        });
+        try {
+          const answered = lspPayload(await handleLSPTool(patient, 'lsp_get_diagnostics', ask));
+          assert.equal(get(answered, 'error'), undefined, JSON.stringify(answered));
+          assert.equal(asArray(get(answered, 'diagnostics')).length, 1, JSON.stringify(answered));
+        } finally {
+          await patient.disconnect();
+        }
+
+        const hurried = new GodotLSPClient(port, '127.0.0.1', {
+          requestMs: 3000,
+          referencesMs: 3000,
+          initializeMs: 200,
+        });
+        try {
+          const refused = lspPayload(await handleLSPTool(hurried, 'lsp_get_diagnostics', ask));
+          assert.equal(
+            get(refused, 'error'),
+            `The language server on port ${port} took the connection and did not answer initialize within 0.2s. Godot reads every script in the project before it answers the first initialize after its editor starts, and goes on reading after this call stops waiting, so call again once the editor has settled.`,
+            JSON.stringify(refused),
+          );
+          assert.equal(get(refused, 'stillReading'), true, JSON.stringify(refused));
+        } finally {
+          await hurried.disconnect();
+        }
+
+        // And as the caller reads it: the server answering on the right port is not sent to check
+        // the port. GDHARNESS_LSP_INITIALIZE_TIMEOUT_MS is how a project reading for longer moves it.
+        const server = new ServerProcess({
+          env: {
+            GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+            GDHARNESS_LSP_PORT: String(port),
+            GDHARNESS_LSP_INITIALIZE_TIMEOUT_MS: '200',
+            GODOT_PATH: join(tmpdir(), 'gdharness-no-such-godot'),
+          },
+        });
+        try {
+          await server.initialize('regression-test');
+          const said =
+            textOf(await server.request('tools/call', { name: 'script_diagnostics', arguments: ask })) ?? '';
+          assert.equal(
+            said,
+            `Diagnostics unavailable: The language server on port ${port} took the connection and did not answer initialize within 0.2s. Godot reads every script in the project before it answers the first initialize after its editor starts, and goes on reading after this call stops waiting, so call again once the editor has settled.`,
+          );
+        } finally {
+          await server.stop();
+        }
+      },
+      undefined,
+      undefined,
+      undefined,
+      600,
+    );
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * #935: the language server's answers count lines and columns from one, as the editor, the file
+ * and the engine's own errors do, and name kinds and severities in words. The protocol counts from
+ * zero, so `return no_such_name` on line 6 was answered at line 5, and a caller fixing the line it
+ * was given edited the line above. The stand-in sends what Godot 4.7.2 sent for the reproduction,
+ * and the positions a caller names are sent on counted from zero.
+ */
+async function testLanguageServerAnswersCountFromOne(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lsp-from-one-'));
+  try {
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    writeFileSync(join(project, 'probe.gd'), 'extends Node\n');
+    const undeclared = 'Identifier "no_such_name" not declared in the current scope.';
+    const unused = '(UNUSED_VARIABLE): The local variable "unused" is declared but never used in the block.';
+    const seen: JsonRpcMessage[] = [];
+    await withFakeLanguageServer(
+      (uri) => uri,
+      async (lspPort) => {
+        const server = new ServerProcess({
+          env: {
+            GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+            GDHARNESS_LSP_PORT: String(lspPort),
+            GODOT_PATH: join(tmpdir(), 'gdharness-no-such-godot'),
+          },
+        });
+        try {
+          await server.initialize('regression-test');
+          const call = async (name: string, args: Record<string, unknown>): Promise<JsonRpcMessage> =>
+            server.request('tools/call', {
+              name,
+              arguments: { projectPath: project, scriptPath: 'probe.gd', ...args },
+            });
+
+          const diagnosed = parseTextContent(await call('script_diagnostics', {}));
+          assert.deepEqual(
+            {
+              errors: get(diagnosed, 'errors'),
+              warnings: get(diagnosed, 'warnings'),
+              diagnostics: get(diagnosed, 'diagnostics'),
+            },
+            {
+              errors: 1,
+              warnings: 1,
+              diagnostics: [
+                { line: 6, column: 9, endLine: 6, endColumn: 21, severity: 'error', message: undeclared },
+                { line: 5, column: 2, endLine: 5, endColumn: 17, severity: 'warning', message: unused },
+              ],
+            },
+            JSON.stringify(diagnosed),
+          );
+
+          assert.deepEqual(get(parseTextContent(await call('script_info', { op: 'symbols' })), 'symbols'), [
+            {
+              name: 'Probe',
+              kind: 'class',
+              detail: 'class Probe',
+              line: 1,
+              column: 12,
+              lastLine: 15,
+              children: [
+                {
+                  name: 'told',
+                  kind: 'event',
+                  detail: 'signal told(amount)',
+                  line: 4,
+                  column: 8,
+                  lastLine: 4,
+                },
+                {
+                  name: 'count',
+                  kind: 'variable',
+                  detail: 'var count: int = 0',
+                  line: 5,
+                  column: 5,
+                  lastLine: 5,
+                },
+                {
+                  name: 'Inner',
+                  kind: 'class',
+                  detail: 'class Inner',
+                  line: 11,
+                  column: 7,
+                  lastLine: 13,
+                  children: [
+                    {
+                      name: 'deep',
+                      kind: 'method',
+                      detail: 'func deep() -> void',
+                      line: 12,
+                      column: 7,
+                      lastLine: 13,
+                    },
+                  ],
+                },
+              ],
+            },
+          ]);
+
+          // `count` on line 5 starts at column 5, the position symbols gave for it.
+          const hover = parseTextContent(await call('script_info', { op: 'hover', line: 5, character: 5 }));
+          assert.deepEqual(
+            get(hover, 'hover'),
+            {
+              contents: { kind: 'markdown', value: '\tvar count: int = 0' },
+              line: 5,
+              column: 5,
+              endLine: 5,
+              endColumn: 5,
+            },
+            JSON.stringify(hover),
+          );
+          const completed = parseTextContent(
+            await call('script_info', { op: 'completion', line: 5, character: 5 }),
+          );
+          assert.deepEqual(
+            get(completed, 'completions'),
+            [{ insertText: 'count', kind: 'property', label: 'count' }],
+            JSON.stringify(completed),
+          );
+          assert.deepEqual(
+            seen
+              .filter(
+                (message) =>
+                  message.method === 'textDocument/hover' || message.method === 'textDocument/completion',
+              )
+              .map((message) => get(message.params, 'position')),
+            [
+              { line: 4, character: 4 },
+              { line: 4, character: 4 },
+            ],
+            'and the position asked about is sent on as the protocol counts it',
+          );
+
+          const zero = textOf(await call('script_info', { op: 'hover', line: 0, character: 5 })) ?? '';
+          assert.match(zero, /^script_info takes line of 1 or more, not 0\./, zero);
+        } finally {
+          await server.stop();
+        }
+      },
+      seen,
+      [
+        { message: undeclared, line: 5, character: 8, endCharacter: 20, severity: 1 },
+        { message: unused, line: 4, character: 1, endCharacter: 16, severity: 2 },
+      ],
+    );
+  } finally {
+    sweep(project);
+  }
 }
 
 /**
@@ -10376,8 +10787,15 @@ async function testAnEditorOnTheShippedCodeIsNotCalledStale(): Promise<void> {
   // was read as something to fix and an editor was restarted for nothing.
   assert.equal(
     get(current, 'editor', 'addonNote'),
-    `The editor loaded the 0.0.1-behind addons, which are the same code this ${SERVER_VERSION} server ships, so nothing needs restarting; addonVersion changes at the next editor start.`,
+    `The editor loaded the 0.0.1-behind addons, which are the same code this ${SERVER_VERSION} server ships, so nothing needs restarting; addonVersion is the version the editor loaded when it started.`,
     JSON.stringify(current),
+  );
+  // #934: the other direction, an editor opened after the project's pin moved and before the
+  // harness reconnected. Its addonVersion is already the newer one and stays so across a restart,
+  // so the note names this server as the half that moves.
+  assert.equal(
+    sameCodeNote('99.0.0', SERVER_VERSION, shipped, shipped),
+    `The editor loaded the 99.0.0 addons, which are the same code this ${SERVER_VERSION} server ships, so nothing needs restarting. This server is the older of the two, which a reconnect in your harness settles once the project pins 99.0.0.`,
   );
 
   const behind = await statusFor('0'.repeat(64));
@@ -12117,14 +12535,62 @@ async function testDiagnosticsAnswerSeveralScripts(): Promise<void> {
     for (let at = 0; at < 301; at += 1) {
       writeFileSync(join(project, 'many', `s${String(at).padStart(3, '0')}.gd`), 'extends Node\n');
     }
+    // #936: no count is refused, since a flat folder has no narrower folders to name instead.
     const many = scriptsToDiagnose(project, 'many');
-    assert.ok(
-      !many.ok && many.reason.includes('names 301 scripts, and one call asks about at most 300'),
-      JSON.stringify(many),
+    assert.equal(many.ok && many.value?.length, 301, JSON.stringify(many).slice(0, 300));
+
+    // And a folder with nothing to report is answered by its paths, not by an entry each saying so.
+    await withFakeLanguageServer(
+      (uri) => uri,
+      async (lspPort) => {
+        const server = new ServerProcess({
+          env: {
+            GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+            GDHARNESS_LSP_PORT: String(lspPort),
+            GODOT_PATH: join(tmpdir(), 'gdharness-no-such-godot'),
+          },
+        });
+        try {
+          await server.initialize('regression-test');
+          const folder = parseTextContent(
+            await server.request(
+              'tools/call',
+              {
+                name: 'script_diagnostics',
+                arguments: { projectPath: project, scriptPath: ['many', 'ui/shop.gd'] },
+              },
+              120_000,
+            ),
+          );
+          const nothing = asArray(get(folder, 'nothingReported'));
+          assert.deepEqual(
+            {
+              clean: get(folder, 'clean'),
+              scriptsChecked: get(folder, 'scriptsChecked'),
+              errors: get(folder, 'errors'),
+              scripts: get(folder, 'scripts'),
+              nothingReported: nothing.length,
+              first: nothing[0],
+              last: nothing.at(-1),
+            },
+            {
+              clean: true,
+              scriptsChecked: 302,
+              errors: 0,
+              scripts: [],
+              nothingReported: 302,
+              first: 'many/s000.gd',
+              last: 'ui/shop.gd',
+            },
+            JSON.stringify(folder).slice(0, 600),
+          );
+        } finally {
+          await server.stop();
+        }
+      },
+      undefined,
+      [],
     );
-    rmSync(join(project, 'many', 's300.gd'));
-    const most = scriptsToDiagnose(project, 'many');
-    assert.equal(most.ok && most.value?.length, 300, 'three hundred is still one call');
     rmSync(join(project, 'many'), { recursive: true, force: true });
 
     await withFakeLanguageServer(
@@ -12159,6 +12625,7 @@ async function testDiagnosticsAnswerSeveralScripts(): Promise<void> {
               warnings: get(several, 'warnings'),
               scriptsNotRead: get(several, 'scriptsNotRead'),
               paths: asArray(get(several, 'scripts')).map((entry) => get(entry, 'scriptPath')),
+              nothingReported: get(several, 'nothingReported'),
             },
             {
               clean: false,
@@ -12167,6 +12634,7 @@ async function testDiagnosticsAnswerSeveralScripts(): Promise<void> {
               warnings: 0,
               scriptsNotRead: 2,
               paths: ['scripts/a.gd', 'scripts/quiet.gd', 'scripts/sub/b.gd', 'scripts/gone.gd'],
+              nothingReported: [],
             },
             said,
           );
@@ -29170,6 +29638,8 @@ async function testARenameWithNoEditorLeavesTheCacheAndTheScriptsRight(): Promis
       GDHARNESS_BRIDGE_PORT: String(await reservePort()),
       GDHARNESS_LSP_PORT: String(lspPort),
       GDHARNESS_RUNTIME_DIR: runtimeDir,
+      // The silent server below never answers initialize, which is waited on this long.
+      GDHARNESS_LSP_INITIALIZE_TIMEOUT_MS: '10000',
     },
   });
   const rename = async (args: Record<string, unknown>): Promise<JsonRpcMessage> =>
@@ -29740,6 +30210,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testDiagnosticsSurviveUriReEncoding,
   testDiagnosticsSurviveTheEditorRestarting,
   testAReferencesRequestIsGivenItsOwnTime,
+  testTheFirstInitializeIsGivenItsOwnTime,
+  testLanguageServerAnswersCountFromOne,
+  testACancelledFolderStopsAsking,
   testDiagnosticsLeaveNoDocumentOpen,
   testDiagnosticsSurviveAnotherSpellingOfTheSamePath,
   testDiagnosticsTimeoutIsNotAnEmptyResult,

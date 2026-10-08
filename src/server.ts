@@ -1992,9 +1992,6 @@ export function testPathsIn(
   };
 }
 
-/** The most scripts one script_diagnostics call asks the language server about. */
-const MOST_DIAGNOSED = 300;
-
 /**
  * The scripts a script_diagnostics call names, each as a path inside the project, or null for one
  * file named alone, which is answered in the single-script shape it always was.
@@ -2003,6 +2000,11 @@ const MOST_DIAGNOSED = 300;
  * each, so four were asked about and thirteen waited for the unit tier, which says less about a
  * parse error and says it minutes later. A folder is its `.gd` files at any depth, without the
  * directories the engine skips (a `.gdignore`, a hidden name) and without following a link out.
+ *
+ * No count is refused. A cap of three hundred told a flat test folder of 1192 scripts to name
+ * narrower folders, which it had none of, or to call again for the rest, which nothing could name.
+ * A script costs one round trip, a few tens of milliseconds, and the call reports progress, which
+ * is what keeps a client from giving up on it.
  */
 export function scriptsToDiagnose(
   projectPath: string,
@@ -2049,12 +2051,6 @@ export function scriptsToDiagnose(
   const unique = [...new Set(found)];
   if (unique.length === 0) {
     return { ok: false, reason: `No .gd script is under ${empty.join(' or ')}.` };
-  }
-  if (unique.length > MOST_DIAGNOSED) {
-    return {
-      ok: false,
-      reason: `scriptPath names ${unique.length} scripts, and one call asks about at most ${MOST_DIAGNOSED}, each a round trip through the language server: name narrower folders, or call again for the rest.`,
-    };
   }
   return { ok: true, value: unique };
 }
@@ -4902,10 +4898,14 @@ class GodotServer {
 
   /**
    * script_diagnostics: what the language server reports, and the verdict that follows, for one
-   * script or for several. Several are answered under `scripts`, each in the shape one script is
+   * script or for several. Of several, a script with nothing to report is named under
+   * `nothingReported` and every other is answered under `scripts`, in the shape one script is
    * answered in, with the counts summed beside them; a script the server would not read is named
    * there with why, and the rest are still asked about. The editor's language server being out of
    * reach is the same answer for every script, so it ends the call on the first.
+   *
+   * The scripts with something are what a folder is asked about for: answered in full, a clean
+   * folder of 164 scripts came back as 164 identical entries around nothing.
    */
   private async handleScriptDiagnostics(args: OperationParams): Promise<ToolResponse> {
     const project = this.project(args);
@@ -4918,11 +4918,17 @@ class GodotServer {
       return 'refusal' in one ? one.refusal : this.jsonTextResponse(this.markedIfStale(one.answer));
     }
     const progress = callProgress();
-    const answers: OperationParams[] = [];
+    const cancelled = callSignal();
+    const reported: OperationParams[] = [];
+    const nothingReported: string[] = [];
     let errors = 0;
     let warnings = 0;
     let unread = 0;
     for (const [at, scriptPath] of scripts.value.entries()) {
+      // Nobody is left to read the answer, and a folder can take minutes.
+      if (cancelled?.aborted === true) {
+        return this.createErrorResponse(`Cancelled after ${at} of ${scripts.value.length} scripts.`);
+      }
       progress?.(at + 1, `${at + 1} of ${scripts.value.length}: ${scriptPath}`);
       const one = await this.diagnosticsOf({ ...args, scriptPath });
       if ('refusal' in one) {
@@ -4930,21 +4936,27 @@ class GodotServer {
           return one.refusal;
         }
         unread += 1;
-        answers.push({ scriptPath, error: one.refusal.content[0]?.text ?? 'not read' });
+        reported.push({ scriptPath, error: one.refusal.content[0]?.text ?? 'not read' });
         continue;
       }
       errors += Number(one.answer['errors']);
       warnings += Number(one.answer['warnings']);
-      answers.push(one.answer);
+      // Every note an answer can carry is about a diagnostic, so none means nothing else either.
+      if (readArray(one.answer, 'diagnostics')?.length === 0) {
+        nothingReported.push(scriptPath);
+      } else {
+        reported.push(one.answer);
+      }
     }
     return this.jsonTextResponse(
       this.markedIfStale({
         clean: errors === 0 && unread === 0,
-        scriptsChecked: answers.length,
+        scriptsChecked: scripts.value.length,
         errors,
         warnings,
         ...(unread > 0 ? { scriptsNotRead: unread } : {}),
-        scripts: answers,
+        scripts: reported,
+        nothingReported,
       }),
     );
   }
@@ -4989,6 +5001,11 @@ class GodotServer {
       if (payload['refusedArguments'] === true) {
         return { refusal: this.createErrorResponse(reason), perScript: true };
       }
+      // A server that took the connection and is still reading the project is the right one on
+      // the right port, so the port remedies would send the caller after a fault that is not there.
+      if (payload['stillReading'] === true) {
+        return { refusal: this.createErrorResponse(`Diagnostics unavailable: ${reason}`), perScript: false };
+      }
       if (typeof payload['serves'] === 'string') {
         return {
           refusal: this.createErrorResponse(`Diagnostics unavailable: ${reason}`, [
@@ -5009,10 +5026,7 @@ class GodotServer {
     }
 
     const diagnostics = readArray(payload, 'diagnostics') ?? [];
-    const errors = diagnostics.filter((entry) => {
-      const severity = asParams(entry)['severity'];
-      return severity === 1 || severity === 'error' || severity === 'ERROR';
-    }).length;
+    const errors = diagnostics.filter((entry) => asParams(entry)['severity'] === 'error').length;
     return {
       answer: {
         scriptPath: readString(args, 'scriptPath'),
