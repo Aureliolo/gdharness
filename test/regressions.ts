@@ -29463,15 +29463,41 @@ async function main(): Promise<void> {
       }
     }
   };
+  // A regression that hangs fails by name rather than taking the leg's whole budget with it: on
+  // the 1.1.49 release commit one hung on the Windows engine leg until the job's 25 minutes ran
+  // out, and a job ended that way uploads no log, so nothing said which test it was. The longest
+  // ones take about four minutes on a CI runner; the variable shortens it to check the deadline.
+  const deadlineMs = Number(process.env['GDHARNESS_REGRESSION_DEADLINE_MS'] ?? 8 * 60_000);
+  const ranPast: string[] = [];
   for (const test of chosen) {
     sweepingFor(test.name);
     let passed = true;
+    const began = Date.now();
+    let deadline: NodeJS.Timeout | undefined;
+    const running = Promise.resolve().then(() => test());
+    // A test that settles after its deadline has nobody waiting on it any more.
+    running.catch(() => undefined);
     try {
-      await test();
+      await Promise.race([
+        running,
+        new Promise<never>((_resolve, reject) => {
+          deadline = setTimeout(() => {
+            ranPast.push(test.name);
+            reject(new Error(`${test.name} was still running ${deadlineMs / 1000}s after it started`));
+          }, deadlineMs);
+        }),
+      ]);
     } catch (error) {
       passed = false;
       failed.push(test.name);
       console.error(`\n${test.name} failed\n${error instanceof Error ? error.stack : String(error)}\n`);
+    } finally {
+      clearTimeout(deadline);
+    }
+    // Said for the slow ones, so a leg creeping towards its limit shows which tests are growing.
+    const took = Date.now() - began;
+    if (took >= 20_000) {
+      console.log(`${test.name} took ${(took / 1000).toFixed(1)}s`);
     }
     if (!passed || leftBehindBy(test.name)) {
       leftRunning(await endEnginesLeft(test.name));
@@ -29488,6 +29514,11 @@ async function main(): Promise<void> {
       console.error(`  ${name}`);
     }
     process.exitCode = 1;
+    // A test past its deadline is still running and holds whatever it opened, which would keep
+    // this process, and the job waiting on it, alive until the job's own limit.
+    if (ranPast.length > 0) {
+      process.exit(1);
+    }
     return;
   }
   console.log(`regression tests passed (${chosen.length})`);
