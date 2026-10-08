@@ -197,6 +197,7 @@ import {
   runtimeVerdict,
   scanWaitAnswer,
   scriptErrorsNote,
+  scriptsToDiagnose,
   settingsNamedBy,
   stopVerdict,
   testPathsIn,
@@ -11923,6 +11924,205 @@ function testAFailedReloadSaysWhatItKept(): void {
  * the class cache and declaring file are the project's own, so what is checked is the answer a
  * caller reads rather than the functions that build it.
  */
+/**
+ * #926: script_diagnostics answers several scripts in one call. A change across seventeen scripts
+ * was one call each, so four were asked about and thirteen waited for the unit tier.
+ *
+ * The stand-in language server publishes one error for every file except the quiet one, which it
+ * takes in and says nothing about, and one listed script is not there: the two are named with why,
+ * and the rest are still answered. A server nobody is listening for is the same answer for every
+ * script, so it refuses the call once.
+ */
+async function testDiagnosticsAnswerSeveralScripts(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-diagnose-several-'));
+  try {
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    const script = (path: string): void => {
+      mkdirSync(join(project, dirname(path)), { recursive: true });
+      writeFileSync(join(project, path), 'extends Node\n');
+    };
+    for (const path of [
+      'scripts/a.gd',
+      'scripts/quiet.gd',
+      'scripts/sub/b.gd',
+      'scripts/ignored/c.gd',
+      'scripts/.hidden/d.gd',
+      'ui/shop.gd',
+    ]) {
+      script(path);
+    }
+    writeFileSync(join(project, 'scripts', 'ignored', '.gdignore'), '');
+    writeFileSync(join(project, 'scripts', 'notes.txt'), 'not a script\n');
+    mkdirSync(join(project, 'empty'));
+
+    // Which scripts a call names, without a language server.
+    assert.deepEqual(
+      scriptsToDiagnose(project, 'scripts/a.gd'),
+      { ok: true, value: null },
+      'one file is one script',
+    );
+    assert.deepEqual(
+      scriptsToDiagnose(project, 'scripts/gone.gd'),
+      { ok: true, value: null },
+      'as is one not there',
+    );
+    assert.deepEqual(scriptsToDiagnose(project, 'res://scripts'), {
+      ok: true,
+      value: ['scripts/a.gd', 'scripts/quiet.gd', 'scripts/sub/b.gd'],
+    });
+    assert.deepEqual(scriptsToDiagnose(project, ['ui', 'scripts/sub', 'ui/shop.gd', 'scripts/gone.gd']), {
+      ok: true,
+      value: ['ui/shop.gd', 'scripts/sub/b.gd', 'scripts/gone.gd'],
+    });
+    for (const [given, reason] of [
+      [[], /^scriptPath is an empty list/],
+      [['ui', 5], /^scriptPath\[1\] is 5, not a script or a folder/],
+      [['../elsewhere'], /outside the project/],
+      [['empty'], /^No \.gd script is under empty\.$/],
+    ] as const) {
+      const refused = scriptsToDiagnose(project, given);
+      assert.ok(
+        !refused.ok && reason.test(refused.reason),
+        `${JSON.stringify(given)}: ${JSON.stringify(refused)}`,
+      );
+    }
+    mkdirSync(join(project, 'many'));
+    for (let at = 0; at < 301; at += 1) {
+      writeFileSync(join(project, 'many', `s${String(at).padStart(3, '0')}.gd`), 'extends Node\n');
+    }
+    const many = scriptsToDiagnose(project, 'many');
+    assert.ok(
+      !many.ok && many.reason.includes('names 301 scripts, and one call asks about at most 300'),
+      JSON.stringify(many),
+    );
+    rmSync(join(project, 'many', 's300.gd'));
+    const most = scriptsToDiagnose(project, 'many');
+    assert.equal(most.ok && most.value?.length, 300, 'three hundred is still one call');
+    rmSync(join(project, 'many'), { recursive: true, force: true });
+
+    await withFakeLanguageServer(
+      (uri) => (uri.includes('quiet') ? null : uri),
+      async (lspPort) => {
+        const server = new ServerProcess({
+          env: {
+            GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+            GDHARNESS_LSP_PORT: String(lspPort),
+            GODOT_PATH: join(tmpdir(), 'gdharness-no-such-godot'),
+          },
+        });
+        try {
+          await server.initialize('regression-test');
+          const several = parseTextContent(
+            await server.request(
+              'tools/call',
+              {
+                name: 'script_diagnostics',
+                arguments: { projectPath: project, scriptPath: ['scripts', 'scripts/gone.gd'] },
+                _meta: { progressToken: 'several' },
+              },
+              60_000,
+            ),
+          );
+          const said = JSON.stringify(several);
+          assert.deepEqual(
+            {
+              clean: get(several, 'clean'),
+              scriptsChecked: get(several, 'scriptsChecked'),
+              errors: get(several, 'errors'),
+              warnings: get(several, 'warnings'),
+              scriptsNotRead: get(several, 'scriptsNotRead'),
+              paths: asArray(get(several, 'scripts')).map((entry) => get(entry, 'scriptPath')),
+            },
+            {
+              clean: false,
+              scriptsChecked: 4,
+              errors: 2,
+              warnings: 0,
+              scriptsNotRead: 2,
+              paths: ['scripts/a.gd', 'scripts/quiet.gd', 'scripts/sub/b.gd', 'scripts/gone.gd'],
+            },
+            said,
+          );
+          const [first, quiet, , gone] = asArray(get(several, 'scripts'));
+          assert.deepEqual(
+            {
+              clean: get(first, 'clean'),
+              errors: get(first, 'errors'),
+              diagnostics: asArray(get(first, 'diagnostics')).length,
+            },
+            { clean: false, errors: 1, diagnostics: 1 },
+            `each script in the shape one is answered in: ${said}`,
+          );
+          assert.match(text(get(quiet, 'error')), /published no diagnostics/, said);
+          assert.match(text(get(gone, 'error')), /does not exist/, said);
+          // Marked as a whole, once, the way one script's answer is, and not again on each script.
+          assert.equal(get(several, 'addonIsStale'), true, said);
+          assert.ok(
+            asArray(get(several, 'scripts')).every((entry) => get(entry, 'addonIsStale') === undefined),
+            said,
+          );
+          assert.deepEqual(
+            server.notifications
+              .filter((message) => message.method === 'notifications/progress')
+              .map((message) => get(message.params, 'message')),
+            [
+              '1 of 4: scripts/a.gd',
+              '2 of 4: scripts/quiet.gd',
+              '3 of 4: scripts/sub/b.gd',
+              '4 of 4: scripts/gone.gd',
+            ],
+            'told as each script is asked about',
+          );
+
+          // One script is answered in the shape it always was.
+          const one = parseTextContent(
+            await server.request('tools/call', {
+              name: 'script_diagnostics',
+              arguments: { projectPath: project, scriptPath: 'ui/shop.gd' },
+            }),
+          );
+          assert.deepEqual(
+            { scriptPath: get(one, 'scriptPath'), errors: get(one, 'errors'), scripts: get(one, 'scripts') },
+            { scriptPath: 'ui/shop.gd', errors: 1, scripts: undefined },
+            JSON.stringify(one),
+          );
+        } finally {
+          await server.stop();
+        }
+      },
+    );
+
+    // Nobody listening: refused once, as the call for one script is.
+    const closed = new ServerProcess({
+      env: {
+        GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+        GDHARNESS_LSP_PORT: String(await reservePort()),
+        GODOT_PATH: join(tmpdir(), 'gdharness-no-such-godot'),
+      },
+    });
+    try {
+      await closed.initialize('regression-test');
+      const refused =
+        textOf(
+          await closed.request(
+            'tools/call',
+            {
+              name: 'script_diagnostics',
+              arguments: { projectPath: project, scriptPath: ['scripts', 'ui'] },
+            },
+            60_000,
+          ),
+        ) ?? '';
+      assert.match(refused, /^Diagnostics unavailable: Godot LSP is unavailable on port \d+/, refused);
+      assert.doesNotMatch(refused, /"scripts"/, refused);
+    } finally {
+      await closed.stop();
+    }
+  } finally {
+    sweep(project);
+  }
+}
+
 async function testDiagnosticsNameAStaleEnumMember(): Promise<void> {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-stale-enum-'));
   try {
@@ -29279,6 +29479,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStaleStaticFunctionIsNamed,
   testAFailedReloadSaysWhatItKept,
   testDiagnosticsNameAStaleEnumMember,
+  testDiagnosticsAnswerSeveralScripts,
   testAClassTheEditorHasNotLoadedIsToldApartFromOneTheCacheLacks,
   testAClassTheEditorHoldsAfterItsScriptIsGoneIsNamed,
   testWhatAStaleTypeDependsOnIsNamed,

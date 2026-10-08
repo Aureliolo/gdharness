@@ -60,6 +60,13 @@ export class LSPTimeout extends Error {
 /** A call refused for what it was asked, which no language server could answer either. */
 class ArgumentRefusal extends Refusal {}
 
+/**
+ * A server that took a file in and published nothing for it in the time given. About that file
+ * rather than the server, which answered the files before it: one not in its workspace is the
+ * case named in the message, so a call asking about several goes on to the next.
+ */
+class NoDiagnosticsPublished extends Error {}
+
 /** A language server that belongs to an editor of another project than the one asked about. */
 class AnotherProjectsServer extends Refusal {
   readonly serves: string;
@@ -608,7 +615,7 @@ export class GodotLSPClient {
           // really is clean, so resolving [] here makes a broken language server look
           // exactly like healthy code, and the caller has no way to tell the two apart.
           rejectDiagnostics(
-            new Error(
+            new NoDiagnosticsPublished(
               `Godot published no diagnostics for ${key} within ${DIAGNOSTICS_TIMEOUT_MS}ms. ` +
                 'The language server may not be running, or may not have this file in its workspace.',
             ),
@@ -951,6 +958,7 @@ export async function handleLSPTool(
       error: normalizeLSPError(error, client.port),
       ...(error instanceof AnotherProjectsServer ? { serves: error.serves } : {}),
       ...(error instanceof ArgumentRefusal ? { refusedArguments: true } : {}),
+      ...(error instanceof NoDiagnosticsPublished ? { aboutThisFile: true } : {}),
     });
   }
 }
