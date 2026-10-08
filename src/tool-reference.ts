@@ -20,6 +20,24 @@ export function namedType(declared: unknown): string {
 }
 
 /**
+ * What an argument takes, in prose: its type, with what an array holds. A list of suite files was
+ * accepted by `path` and read as "string or array" in the reference and as the bare name in a
+ * refusal, and a session that guessed `suites` found the form only in its own earlier transcript.
+ */
+export function argumentShape(schema: Readonly<Record<string, unknown>>): string {
+  const named = namedType(schema['type']);
+  const items = schema['items'];
+  const held =
+    typeof items === 'object' && items !== null && !Array.isArray(items)
+      ? namedType((items as Record<string, unknown>)['type'])
+      : 'any';
+  return named
+    .split(' or ')
+    .map((kind) => (kind === 'array' && held !== 'any' ? `array of ${held}s` : kind))
+    .join(' or ');
+}
+
+/**
  * Which calls a push gate can make, listed rather than described.
  *
  * The rest of this page says what each tool does and not what it needs to exist before it can do
@@ -106,7 +124,7 @@ export function renderToolsMarkdown(): string {
     if (parameters.length > 0) {
       lines.push('Arguments:', '');
       for (const [name, schema] of parameters) {
-        const type = namedType(schema['type']);
+        const type = argumentShape(schema);
         // The colon goes with the description rather than with the name. Ten arguments had none and
         // rendered as a line ending in a colon, in the page and in the skill an agent reads.
         const note = typeof schema['description'] === 'string' ? `: ${schema['description']}` : '';

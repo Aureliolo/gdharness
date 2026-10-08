@@ -251,6 +251,7 @@ import {
   type ToolSpec,
   toolSpec,
 } from './tool-definitions.js';
+import { argumentShape } from './tool-reference.js';
 import { isNewer, UpdateCheck } from './update-check.js';
 
 /**
@@ -2773,7 +2774,18 @@ class GodotServer {
       const asked = readString(args, 'op');
       const named = asked !== undefined && spec.operations?.[asked] !== undefined ? asked : null;
       const wanted = named === null ? [...known] : [...argumentsOf(spec, named), 'op'];
-      const takes = wanted.length === 0 ? 'It takes no arguments.' : `It takes: ${wanted.join(', ')}.`;
+      // Each with what it takes, because the name alone hides the second form: a session that
+      // guessed `suites` for a list of suite files was told `path` and not that path takes one.
+      const shaped = wanted.map((name) => {
+        const schema = spec.parameters[name];
+        if (schema !== undefined) {
+          return `${name} (${argumentShape(schema)})`;
+        }
+        return name === 'op' && named === null && spec.operations !== undefined
+          ? `op (${Object.keys(spec.operations).join(', ')})`
+          : name;
+      });
+      const takes = wanted.length === 0 ? 'It takes no arguments.' : `It takes: ${shaped.join(', ')}.`;
       // And the version, because "this tool has no such argument" and "the server you are talking
       // to does not have it yet" are the same sentence, and a server left running through an
       // upgrade says the second while sounding like the first. Without it the caller spends two
