@@ -68,7 +68,13 @@ export function sameCodeNote(
   ) {
     return undefined;
   }
-  return `The editor loaded the ${addonVersion} addons, which are the same code this ${serverVersion} server ships, so nothing needs restarting; addonVersion changes at the next editor start.`;
+  const same = `The editor loaded the ${addonVersion} addons, which are the same code this ${serverVersion} server ships, so nothing needs restarting`;
+  // Which version moves next depends on which half is behind. An editor opened after a project's
+  // pin moved and before the harness reconnected holds the newer addon, and keeps it across a
+  // restart: it is this server that is behind.
+  return isNewer(addonVersion, serverVersion)
+    ? `${same}. This server is the older of the two, which a reconnect in your harness settles once the project pins ${addonVersion}.`
+    : `${same}; addonVersion is the version the editor loaded when it started.`;
 }
 
 /**
