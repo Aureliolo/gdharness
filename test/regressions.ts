@@ -6499,17 +6499,28 @@ async function testALaunchWithoutActivationSaysSo(): Promise<void> {
           `writeFileSync(${JSON.stringify(answer)}, JSON.stringify(launched));`,
         ].join('\n'),
       );
-      spawnSync(process.execPath, [launcher], { timeout: 90_000, windowsHide: true });
+      const ran = spawnSync(process.execPath, [launcher], {
+        encoding: 'utf8',
+        timeout: 90_000,
+        windowsHide: true,
+      });
       const launched: unknown = existsSync(answer) ? JSON.parse(readFileSync(answer, 'utf8')) : null;
-      assert.equal(
-        get(launched, 'error'),
-        undefined,
-        `the launch should start the probe: ${JSON.stringify(launched)}`,
+      // The pid rather than the absence of an error: a launcher that wrote no answer has no error
+      // either, and on the 1.1.49 run of main the control probe wrote nothing in thirty seconds
+      // with nothing here to say whether it had been started at all.
+      const pid = get(launched, 'pid');
+      assert.ok(
+        typeof pid === 'number',
+        `the launch should start the probe: ${JSON.stringify(launched)}, launcher ${ran.status ?? ran.signal ?? ran.error?.message}: ${ran.stdout} ${ran.stderr}`,
       );
       for (let waited = 0; waited < 30_000 && !existsSync(written); waited += 200) {
         await delay(200);
       }
-      return existsSync(written) ? readFileSync(written, 'utf8') : '';
+      // Said for the case that has happened: started, and nothing written, with whether the probe
+      // was still going or had ended without writing.
+      return existsSync(written)
+        ? readFileSync(written, 'utf8')
+        : `nothing written in 30s by pid ${pid}, which ${alive(pid) ? 'is still running' : 'has ended'}`;
     };
 
     const control = await said('control', false);
