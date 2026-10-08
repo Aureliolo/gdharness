@@ -1964,6 +1964,103 @@ export function testPathsIn(
   };
 }
 
+/** The most scripts one script_diagnostics call asks the language server about. */
+const MOST_DIAGNOSED = 300;
+
+/**
+ * The scripts a script_diagnostics call names, each as a path inside the project, or null for one
+ * file named alone, which is answered in the single-script shape it always was.
+ *
+ * Several are named as a list, a folder, or both: a change across seventeen scripts was one call
+ * each, so four were asked about and thirteen waited for the unit tier, which says less about a
+ * parse error and says it minutes later. A folder is its `.gd` files at any depth, without the
+ * directories the engine skips (a `.gdignore`, a hidden name) and without following a link out.
+ */
+export function scriptsToDiagnose(
+  projectPath: string,
+  given: unknown,
+): { ok: true; value: string[] | null } | { ok: false; reason: string } {
+  const listed = Array.isArray(given);
+  if (!listed) {
+    const one = typeof given === 'string' ? resolveWithinProject(projectPath, given) : null;
+    if (one === null || !one.ok || !isDirectory(one.absolutePath)) {
+      return { ok: true, value: null };
+    }
+  }
+  const entries: unknown[] = listed ? given : [given];
+  if (entries.length === 0) {
+    return {
+      ok: false,
+      reason: 'scriptPath is an empty list: name a script, a folder, or a list of either.',
+    };
+  }
+  const found: string[] = [];
+  const empty: string[] = [];
+  for (const [index, entry] of entries.entries()) {
+    if (typeof entry !== 'string' || entry.trim() === '') {
+      return {
+        ok: false,
+        reason: `scriptPath${listed ? `[${index}]` : ''} is ${typeof entry === 'string' ? 'empty' : describeValue(entry)}, not a script or a folder in the project.`,
+      };
+    }
+    const location = resolveWithinProject(projectPath, entry);
+    if (!location.ok) {
+      return { ok: false, reason: location.reason };
+    }
+    const relative = location.relativePath.replace(/\/+$/, '');
+    if (!isDirectory(location.absolutePath)) {
+      found.push(relative);
+      continue;
+    }
+    const inside = scriptsUnder(location.absolutePath, relative);
+    if (inside.length === 0) {
+      empty.push(entry);
+    }
+    found.push(...inside);
+  }
+  const unique = [...new Set(found)];
+  if (unique.length === 0) {
+    return { ok: false, reason: `No .gd script is under ${empty.join(' or ')}.` };
+  }
+  if (unique.length > MOST_DIAGNOSED) {
+    return {
+      ok: false,
+      reason: `scriptPath names ${unique.length} scripts, and one call asks about at most ${MOST_DIAGNOSED}, each a round trip through the language server: name narrower folders, or call again for the rest.`,
+    };
+  }
+  return { ok: true, value: unique };
+}
+
+function isDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/** The `.gd` files under [param directory], as paths beginning [param prefix], in a stable order. */
+function scriptsUnder(directory: string, prefix: string): string[] {
+  if (existsSync(join(directory, '.gdignore'))) {
+    return [];
+  }
+  const found: string[] = [];
+  for (const entry of readdirSync(directory, { withFileTypes: true }).sort((a, b) =>
+    a.name < b.name ? -1 : 1,
+  )) {
+    if (entry.name.startsWith('.')) {
+      continue;
+    }
+    const path = prefix === '' ? entry.name : `${prefix}/${entry.name}`;
+    if (entry.isDirectory()) {
+      found.push(...scriptsUnder(join(directory, entry.name), path));
+    } else if (entry.isFile() && entry.name.endsWith('.gd')) {
+      found.push(path);
+    }
+  }
+  return found;
+}
+
 /** Whether project.godot names a scene for the game to start in. */
 function hasMainScene(projectFile: string): boolean {
   const scene = parseProjectGodot(readFileSync(projectFile, 'utf8'))['application']?.['run/main_scene'];
@@ -4775,27 +4872,112 @@ class GodotServer {
   // script
   // -------------------------------------------------------------------------------------------
 
-  /** script_diagnostics: what the language server reports, and the verdict that follows. */
+  /**
+   * script_diagnostics: what the language server reports, and the verdict that follows, for one
+   * script or for several. Several are answered under `scripts`, each in the shape one script is
+   * answered in, with the counts summed beside them; a script the server would not read is named
+   * there with why, and the rest are still asked about. The editor's language server being out of
+   * reach is the same answer for every script, so it ends the call on the first.
+   */
   private async handleScriptDiagnostics(args: OperationParams): Promise<ToolResponse> {
+    const project = this.project(args);
+    const scripts = project.ok ? scriptsToDiagnose(project.value.path, args['scriptPath']) : null;
+    if (scripts !== null && !scripts.ok) {
+      return this.createErrorResponse(scripts.reason);
+    }
+    if (scripts?.value == null) {
+      const one = await this.diagnosticsOf(args);
+      return 'refusal' in one ? one.refusal : this.jsonTextResponse(this.markedIfStale(one.answer));
+    }
+    const progress = callProgress();
+    const answers: OperationParams[] = [];
+    let errors = 0;
+    let warnings = 0;
+    let unread = 0;
+    for (const [at, scriptPath] of scripts.value.entries()) {
+      progress?.(at + 1, `${at + 1} of ${scripts.value.length}: ${scriptPath}`);
+      const one = await this.diagnosticsOf({ ...args, scriptPath });
+      if ('refusal' in one) {
+        if (!one.perScript) {
+          return one.refusal;
+        }
+        unread += 1;
+        answers.push({ scriptPath, error: one.refusal.content[0]?.text ?? 'not read' });
+        continue;
+      }
+      errors += Number(one.answer['errors']);
+      warnings += Number(one.answer['warnings']);
+      answers.push(one.answer);
+    }
+    return this.jsonTextResponse(
+      this.markedIfStale({
+        clean: errors === 0 && unread === 0,
+        scriptsChecked: answers.length,
+        errors,
+        warnings,
+        ...(unread > 0 ? { scriptsNotRead: unread } : {}),
+        scripts: answers,
+      }),
+    );
+  }
+
+  /**
+   * [param answer] marked stale the way a bridge answer is, because this one is worth marking
+   * most. Diagnostics come from the language server of an editor that may have been running since
+   * before the addon it holds was replaced, and nothing in the answer said so: a caller had to
+   * make a status call first to know whether to believe it, which nobody does before an answer
+   * looks wrong.
+   *
+   * That is the fault, rather than any claim that a behind editor answers wrongly. A project
+   * recorded diagnostics naming lines that were not in the file, gone after a restart, and on
+   * their own re-reading a class_name the editor's database had not caught up with explains it
+   * without staleness being involved at all. Marked rather than refused for the same reason: a
+   * suspicion is not a fault, and refusing would take a working tool away on one.
+   */
+  private markedIfStale(answer: OperationParams): unknown {
+    return markIfStale(
+      answer,
+      this.godotBridge.getStatus().addonVersion,
+      SERVER_VERSION,
+      this.godotBridge.getStatus().addonDigest,
+      shippedEditorDigest(),
+      this.editorCodeOnDisk(),
+    );
+  }
+
+  /**
+   * One script's diagnostics and verdict, unmarked, or the refusal. `perScript` says whether the
+   * refusal is about this script, such as a path that is not there, rather than about the
+   * language server, which would refuse every script the same way.
+   */
+  private async diagnosticsOf(
+    args: OperationParams,
+  ): Promise<{ answer: OperationParams } | { refusal: ToolResponse; perScript: boolean }> {
     const answer = await this.handleLSP('lsp_get_diagnostics', args);
     const payload = asParams(JSON.parse(answer.content[0]?.text ?? '{}'));
     if (payload['error'] !== undefined) {
       const reason =
         typeof payload['error'] === 'string' ? payload['error'] : JSON.stringify(payload['error']);
       if (payload['refusedArguments'] === true) {
-        return this.createErrorResponse(reason);
+        return { refusal: this.createErrorResponse(reason), perScript: true };
       }
       if (typeof payload['serves'] === 'string') {
-        return this.createErrorResponse(`Diagnostics unavailable: ${reason}`, [
-          'editor_status names the editor on the bridge and the port it says it serves',
-          "editor_launch opens this project's own editor, on a language server port of its own",
-          'GDHARNESS_LSP_PORT points this server at the right one',
-        ]);
+        return {
+          refusal: this.createErrorResponse(`Diagnostics unavailable: ${reason}`, [
+            'editor_status names the editor on the bridge and the port it says it serves',
+            "editor_launch opens this project's own editor, on a language server port of its own",
+            'GDHARNESS_LSP_PORT points this server at the right one',
+          ]),
+          perScript: false,
+        };
       }
-      return this.createErrorResponse(`Diagnostics unavailable: ${reason}`, [
-        `Ensure the Godot editor is running with its language server enabled, on port ${this.editorServes('lspPort', 'GDHARNESS_LSP_PORT', DEFAULT_LSP_PORT)}`,
-        'GDHARNESS_LSP_PORT points this server at another one',
-      ]);
+      return {
+        refusal: this.createErrorResponse(`Diagnostics unavailable: ${reason}`, [
+          `Ensure the Godot editor is running with its language server enabled, on port ${this.editorServes('lspPort', 'GDHARNESS_LSP_PORT', DEFAULT_LSP_PORT)}`,
+          'GDHARNESS_LSP_PORT points this server at another one',
+        ]),
+        perScript: payload['aboutThisFile'] === true,
+      };
     }
 
     const diagnostics = readArray(payload, 'diagnostics') ?? [];
@@ -4803,34 +4985,16 @@ class GodotServer {
       const severity = asParams(entry)['severity'];
       return severity === 1 || severity === 'error' || severity === 'ERROR';
     }).length;
-    // Marked stale the way a bridge answer is, because this one is worth marking most. These come
-    // from the language server of an editor that may have been running since before the addon it
-    // holds was replaced, and nothing in the answer said so: a caller had to make a status call
-    // first to know whether to believe it, which nobody does before an answer looks wrong.
-    //
-    // That is the fault, rather than any claim that a behind editor answers wrongly. A project
-    // recorded diagnostics naming lines that were not in the file, gone after a restart, and on
-    // their own re-reading a class_name the editor's database had not caught up with explains it
-    // without staleness being involved at all. Marked rather than refused for the same reason: a
-    // suspicion is not a fault, and refusing would take a working tool away on one.
-    const disagrees = this.whereTheFileDisagrees(diagnostics, args);
-    return this.jsonTextResponse(
-      markIfStale(
-        {
-          scriptPath: readString(args, 'scriptPath'),
-          clean: errors === 0,
-          errors,
-          warnings: diagnostics.length - errors,
-          diagnostics,
-          ...disagrees,
-        },
-        this.godotBridge.getStatus().addonVersion,
-        SERVER_VERSION,
-        this.godotBridge.getStatus().addonDigest,
-        shippedEditorDigest(),
-        this.editorCodeOnDisk(),
-      ),
-    );
+    return {
+      answer: {
+        scriptPath: readString(args, 'scriptPath'),
+        clean: errors === 0,
+        errors,
+        warnings: diagnostics.length - errors,
+        diagnostics,
+        ...this.whereTheFileDisagrees(diagnostics, args),
+      },
+    };
   }
 
   /**
