@@ -2297,8 +2297,15 @@ class GodotServer {
     // A bridge that cannot bind must not take the stdio server down with it: the tools that
     // need no editor still work, and editor_status says what happened.
     try {
-      await this.takeOverFromAPredecessor();
-      await this.godotBridge.start();
+      try {
+        await this.takeOverFromAPredecessor();
+        await this.godotBridge.start();
+      } finally {
+        // Cleared once the bridge is on a port, not when the wait ends: a held port refusing and a
+        // free one taking it is the last step of the handover, and a status read between the two
+        // said no handover and no port.
+        this.handingOverFrom = null;
+      }
       this.bridgeStartupError = null;
       const bridgeStatus = this.godotBridge.getStatus();
       console.error(`[SERVER] Godot Editor Bridge started on ${bridgeStatus.host}:${bridgeStatus.port}`);
@@ -2363,7 +2370,6 @@ class GodotServer {
         await delay(HANDOVER_POLL_MS);
       }
     }
-    this.handingOverFrom = null;
     this.notHandedOverBy = taken ? null : announced.pid;
   }
 
@@ -2420,10 +2426,9 @@ class GodotServer {
     if (this.ownProject === null) {
       return;
     }
-    const status = this.godotBridge.getStatus();
     this.announcedAt = announceBridge(this.ownProject, {
-      host: status.host,
-      port: status.port,
+      host: this.godotBridge.getStatus().host,
+      port: this.godotBridge.port,
       version: SERVER_VERSION,
     });
     this.watchForASuccessor();
@@ -5442,8 +5447,22 @@ class GodotServer {
   }
 
   private async getEditorStatusPayload() {
+    // The slow questions first, and every reading of this server's own state after them, so the
+    // answer is of one moment. The process table takes hundreds of milliseconds on Windows, and a
+    // bridge handover that finished while it was asked answered with the port from before and the
+    // handover marker from after: no handover, and the bridge on the held port it had just left.
+    const wasConnected = this.godotBridge.getStatus().connected;
+    const launchedWasUp = !wasConnected && (await this.launchedEditorIsUp());
+    // An editor of this project already running and not connected is coming whoever opened it,
+    // which is the one reading that does not depend on this server's age or memory: a reconnect
+    // in the middle of a restart left one starting, and the server after it said no pid.
+    const arrivingFound =
+      wasConnected || this.ownProject === null
+        ? []
+        : ((await this.editorsNotYetConnected(this.ownProject)) ?? []);
     const status = this.godotBridge.getStatus();
-    const launchedIsUp = !status.connected && (await this.launchedEditorIsUp());
+    const launchedIsUp = !status.connected && launchedWasUp;
+    const arriving = status.connected ? [] : arrivingFound;
     const isPortConflict = this.bridgeStartupError?.includes('EADDRINUSE') ?? false;
     // The addon an editor loaded at startup, against the one this server ships. An install
     // replaces the files under a running editor without changing what it is serving, and the
@@ -5453,13 +5472,6 @@ class GodotServer {
       greeted &&
       editorIsStale(status.addonVersion, SERVER_VERSION, status.addonDigest, shippedEditorDigest());
     const unfinished = this.restartLeftUnfinished(status.connected);
-    // An editor of this project already running and not connected is coming whoever opened it,
-    // which is the one reading that does not depend on this server's age or memory: a reconnect
-    // in the middle of a restart left one starting, and the server after it said no pid.
-    const arriving =
-      status.connected || this.ownProject === null
-        ? []
-        : ((await this.editorsNotYetConnected(this.ownProject)) ?? []);
     return {
       ...status,
       serverVersion: SERVER_VERSION,
@@ -5468,7 +5480,7 @@ class GodotServer {
         status.connected && !greeted
           ? 'The editor has connected and has not yet said who it is: its project, pid, addon version and ports arrive with its greeting a moment after the socket opens, later while it imports. Ask again for them.'
           : undefined,
-      bridgeAvailable: this.bridgeStartupError === null,
+      bridgeAvailable: this.bridgeStartupError === null && status.port !== null,
       // Whether a `connected: false` is final. The editor dials in rather than being dialled, and
       // it backs off between tries, so for the first half-minute of a bridge's life "nothing has
       // connected" and "there is no editor" are the same answer to two different questions. A
