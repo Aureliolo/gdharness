@@ -103,9 +103,11 @@ jobs:
       - name: Typecheck
         run: bun run typecheck
 
-      - name: Runtime regression tests
-        run: bun run test:ci
-
+      # No regression run here. The commit being built is on main, and main takes only pull
+      # requests that are up to date with it, so build-and-test ran the regressions on this tree
+      # before it merged; running them again took five of the release's minutes to say the same.
+      # What follows is what only a release build can check: the versions, the packed archive, the
+      # audit, and a source tree the build leaves clean.
       - name: Bridge integration test
         run: bun run test:integration
 
