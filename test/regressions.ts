@@ -29651,14 +29651,30 @@ const TESTS: (() => void | Promise<void>)[] = [
  */
 async function main(): Promise<void> {
   const wanted = process.argv.slice(2).map((argument) => argument.toLowerCase());
-  const chosen =
+  const named =
     wanted.length === 0
       ? TESTS
       : TESTS.filter((test) => wanted.some((word) => test.name.toLowerCase().includes(word)));
-  if (chosen.length === 0) {
+  if (named.length === 0) {
     console.error(`No regression is named ${process.argv.slice(2).join(' ')}.`);
     process.exitCode = 2;
     return;
+  }
+  // One part of the list, for CI to run the parts on several machines at once: run one after
+  // another, the engine leg took fifteen minutes of a 23-minute run, nearly all of it waiting on
+  // Godot processes. Every nth from the kth, so the slow ones, which sit apart in the list, fall
+  // into different parts.
+  const shard = process.env['GDHARNESS_REGRESSION_SHARD'];
+  const part = shard === undefined ? null : /^(\d+)\/(\d+)$/.exec(shard);
+  if (shard !== undefined && (part === null || Number(part[1]) < 1 || Number(part[1]) > Number(part[2]))) {
+    console.error(`GDHARNESS_REGRESSION_SHARD is ${shard}; it takes k/n, the kth part of n, such as 1/2.`);
+    process.exitCode = 2;
+    return;
+  }
+  const chosen =
+    part === null ? named : named.filter((_test, at) => at % Number(part[2]) === Number(part[1]) - 1);
+  if (part !== null) {
+    console.log(`part ${part[1]} of ${part[2]}: ${chosen.length} of ${named.length} regressions`);
   }
 
   const failed: string[] = [];

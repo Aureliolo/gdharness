@@ -151,83 +151,72 @@ jobs:
   # claim to support. It is a separate job from build-and-test because it is the only one that
   # needs Godot, and running it on one platform would say nothing about the other two: the
   # things it covers, project.godot writing and path handling, are exactly where the platforms
-  # differ.
-  engine:
-    # Named by platform rather than by runner image, because the name is what the branch ruleset
-    # requires, and an image bump must not rename a required check out from under it.
-    name: engine (${{ matrix.platform }})
-    strategy:
-      fail-fast: false
-      matrix:
-        # Renovate reads a runner out of `runs-on:` but not out of a matrix, so each of these
-        # carries its own line for it.
-        include:
-          - platform: linux
-            # renovate: datasource=github-runners depName=ubuntu
-            runner: ubuntu-24.04
-          - platform: windows
-            # renovate: datasource=github-runners depName=windows
-            runner: windows-2025
-          - platform: macos
-            # renovate: datasource=github-runners depName=macos
-            runner: macos-26
+  # differ. The parts of each platform run at once, on machines of their own; see engine.yml.
+  engine-linux-parts:
+    name: engine linux
+    permissions:
+      contents: read
+    uses: ./.github/workflows/engine.yml
+    with:
+      # renovate: datasource=github-runners depName=ubuntu
+      runner: ubuntu-24.04
 
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 25
+  engine-windows-parts:
+    name: engine windows
+    permissions:
+      contents: read
+    uses: ./.github/workflows/engine.yml
+    with:
+      # renovate: datasource=github-runners depName=windows
+      runner: windows-2025
 
+  engine-macos-parts:
+    name: engine macos
+    permissions:
+      contents: read
+    uses: ./.github/workflows/engine.yml
+    with:
+      # renovate: datasource=github-runners depName=macos
+      runner: macos-26
+
+  # One check per platform, named by platform rather than by runner image, because the name is
+  # what the branch ruleset requires, and an image bump must not rename a required check out from
+  # under it. Each reports only its own platform's parts, so a Windows failure leaves Linux green.
+  engine-linux:
+    name: engine (linux)
+    needs: engine-linux-parts
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Install Bun
-        uses: ./.github/actions/install-bun # zizmor: ignore[self-repository]
-
-      # Ours rather than a setup action's, because the engine is a 180 MB binary and this is the
-      # only way to know it is the one the repository pins. It exports GODOT_PATH.
-      - name: Install Godot
-        run: bun scripts/install-godot.ts
-
-      # The test runner project_test drives, pinned by commit and digest the same way. It
-      # exports GDUNIT4_PATH, and the regression that needs it fails rather than skips here.
-      - name: Install gdUnit4
-        run: bun scripts/install-gdunit4.ts
-
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-
-      - name: Engine fixtures
-        run: bun run test:engine
+      - name: Every part passed
         env:
-          # The suite skips when it cannot run Godot, which is right on a contributor's machine
-          # and wrong here: without this a broken install would read as a pass.
-          GDHARNESS_REQUIRE_GODOT: '1'
+          RESULT: ${{ needs.engine-linux-parts.result }}
+        run: test "${RESULT}" = success
 
-      # The regressions that drive the scene tools through the engine skip without one, so they
-      # are run again here, where a skip is a failure.
-      - name: Regressions that need the engine
-        if: '!cancelled()'
-        run: bun run build && bun run test:regressions
+  engine-windows:
+    name: engine (windows)
+    needs: engine-windows-parts
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Every part passed
         env:
-          GDHARNESS_REQUIRE_GODOT: '1'
+          RESULT: ${{ needs.engine-windows-parts.result }}
+        run: test "${RESULT}" = success
 
-      # The bridge test's ClassDB phase reaches the engine and skips without one, so it is run
-      # again here, where a skip is a failure.
-      - name: Bridge integration test with the engine
-        if: '!cancelled()'
-        run: bun run test:integration
+  engine-macos:
+    name: engine (macos)
+    needs: engine-macos-parts
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Every part passed
         env:
-          GDHARNESS_REQUIRE_GODOT: '1'
-
-      # The editor tools, against an editor this starts itself. Nothing else in CI opens one, so
-      # without this every scene_* tool, resource_edit and editor_rescan is covered by argument
-      # checks alone, which a tool answering plausible nonsense passes as well as a working one.
-      - name: Editor fixtures
-        if: '!cancelled()'
-        run: bun run build && bun run test:editor
-        env:
-          GDHARNESS_REQUIRE_GODOT: '1'
+          RESULT: ${{ needs.engine-macos-parts.result }}
+        run: test "${RESULT}" = success
 
   # Biome owns formatting and the fast syntactic rules; oxlint owns the ones that need the type
   # checker, which it runs through typescript-go rather than a second copy of the compiler.
