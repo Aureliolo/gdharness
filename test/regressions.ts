@@ -29465,8 +29465,9 @@ async function main(): Promise<void> {
   };
   // A regression that hangs fails by name rather than taking the leg's whole budget with it: on
   // the 1.1.49 release commit one hung on the Windows engine leg until the job's 25 minutes ran
-  // out, and a job ended that way uploads no log, so nothing said which test it was. The longest
-  // ones take about four minutes on a CI runner; the variable shortens it to check the deadline.
+  // out, and a job ended that way uploads no log, so nothing said which test it was. The slowest
+  // took 79s on the Windows leg that first printed the times, so eight minutes is room for a
+  // loaded runner rather than a limit anything meets; the variable shortens it to check the deadline.
   const deadlineMs = Number(process.env['GDHARNESS_REGRESSION_DEADLINE_MS'] ?? 8 * 60_000);
   const ranPast: string[] = [];
   for (const test of chosen) {
