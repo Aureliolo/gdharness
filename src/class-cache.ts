@@ -11,7 +11,7 @@
  */
 
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, posix } from 'node:path';
 import { codeOf } from './gdscript-source.js';
 
 /**
@@ -228,11 +228,62 @@ export function missingMemberIn(message: string): MissingMember | null {
 }
 
 /**
+ * The member an "external class member" diagnostic says is missing, and the class it was looked up
+ * on, read from [param line], the diagnosed script's line the diagnostic is on.
+ *
+ * Godot names only the member: `Could not resolve external class member "READ_BY_THE_RUN".` So the
+ * class is the identifier before `.READ_BY_THE_RUN` on that line, taken only when it is one of
+ * [param classes]. ostinato met 332 of these across 270 scripts, all stale, none of them checked,
+ * because no type could be read from the message alone. A member reached through anything else,
+ * such as a constant holding a preloaded script, is left unread rather than guessed.
+ */
+export function externalMemberIn(
+  message: string,
+  line: string | undefined,
+  classes: ReadonlyMap<string, string>,
+): MissingMember | null {
+  const member = /Could not resolve external class member "([A-Za-z_]\w*)"/.exec(message)?.[1];
+  if (member === undefined || line === undefined) {
+    return null;
+  }
+  for (const [, type] of line.matchAll(new RegExp(String.raw`\b([A-Za-z_]\w*)\s*\.\s*${member}\b`, 'g'))) {
+    if (type !== undefined && classes.has(type)) {
+      return { kind: 'member', member, type };
+    }
+  }
+  return null;
+}
+
+/**
+ * The script [param source] extends, as a resource path, or undefined for a native base or none.
+ * A class name is looked up in [param classes]; a quoted path is taken as written, and one without
+ * `res://` is read against [param from], the script's own path, as Godot reads it.
+ */
+function baseScriptOf(
+  source: string,
+  from: string,
+  classes: ReadonlyMap<string, string>,
+): string | undefined {
+  const found =
+    /^(?:@\w+(?:\([^)]*\))?\s+)*(?:class_name\s+\w+\s+)?extends\s+(?:"([^"]+)"|'([^']+)'|([A-Za-z_]\w*))/m.exec(
+      source,
+    );
+  const quoted = found?.[1] ?? found?.[2];
+  if (quoted !== undefined) {
+    return quoted.startsWith('res://')
+      ? quoted
+      : posix.join(posix.dirname(from), quoted).replace(/^res:\/(?!\/)/, 'res://');
+  }
+  const named = found?.[3];
+  return named === undefined ? undefined : classes.get(named);
+}
+
+/**
  * Whether [param source] declares [param missing] itself.
  *
- * Only its own declarations, never a base class. An inherited member that this file does not
- * declare says nothing either way: the diagnostic might be stale, or the caller might be right that
- * nothing in the chain has it. This exists to turn a diagnostic into a contradiction, and a
+ * Only its own declarations, never a base class: {@link contradictedDiagnostics} walks the bases.
+ * A member nothing in the chain declares says nothing either way: the diagnostic might be stale, or
+ * the caller might be right. This exists to turn a diagnostic into a contradiction, and a
  * contradiction needs the member found rather than not found, so the conservative answer is the
  * only useful one.
  */
@@ -398,29 +449,48 @@ export function contradictedDiagnostics(
   messages: readonly string[],
   classes: ReadonlyMap<string, string>,
   sourceOf: (resourcePath: string) => string | null,
+  alsoDenied: readonly MissingMember[] = [],
 ): Contradicted[] {
   const keyOf = (missing: MissingMember): string =>
     [missing.type, missing.enum ?? '', missing.member].join('.');
-  const denials = messages
-    .map((message) => missingMemberIn(message))
-    .filter((missing): missing is MissingMember => missing !== null);
+  const denials = [
+    ...messages
+      .map((message) => missingMemberIn(message))
+      .filter((missing): missing is MissingMember => missing !== null),
+    ...alsoDenied,
+  ];
   const calledOnTheClass = new Set(
     denials.filter((missing) => missing.kind === 'static method').map((missing) => keyOf(missing)),
   );
   const read = new Map<string, string | null>();
+  const sourceAt = (path: string): string | null => {
+    if (!read.has(path)) {
+      read.set(path, sourceOf(path));
+    }
+    return read.get(path) ?? null;
+  };
   const found = new Map<string, Contradicted>();
   for (const missing of denials) {
-    const declaredIn = classes.get(missing.type);
     const key = keyOf(missing);
-    if (declaredIn === undefined || (missing.kind === 'method' && calledOnTheClass.has(key))) {
+    if (found.has(key) || (missing.kind === 'method' && calledOnTheClass.has(key))) {
       continue;
     }
-    if (!read.has(declaredIn)) {
-      read.set(declaredIn, sourceOf(declaredIn));
-    }
-    const source = read.get(declaredIn) ?? null;
-    if (source !== null && declaresMember(source, missing)) {
-      found.set(key, { ...missing, declaredIn });
+    // Up the chain of project scripts, because a member is the type's whether its own file declares
+    // it or a base does: `Shop extends Tariff` has `piece_sells` from tariff.gd, and the 270 scripts
+    // denying such members were exactly as stale as the four whose member sat in the named file.
+    const seen = new Set<string>();
+    let at = classes.get(missing.type);
+    while (at !== undefined && !seen.has(at)) {
+      seen.add(at);
+      const source = sourceAt(at);
+      if (source === null) {
+        break;
+      }
+      if (declaresMember(source, missing)) {
+        found.set(key, { ...missing, declaredIn: at });
+        break;
+      }
+      at = baseScriptOf(source, at, classes);
     }
   }
   return [...found.values()];
@@ -491,8 +561,9 @@ export function staleAnalysisNote(
   );
   return [
     `The editor is reporting against an older copy of ${types.size === 1 ? 'a type' : 'some types'} ` +
-      'named under contradictedByTheFile. Each member listed is declared in the file the class cache ' +
-      'points at, so those diagnostics are wrong however the code is written.',
+      'named under contradictedByTheFile. Each member listed is declared in the script under its ' +
+      'declaredIn, the class itself or a project class it extends, so those diagnostics are wrong ' +
+      'however the code is written.',
     instanceRemedy(onInstances, dependsOn, onTheClass.length > 0),
     classRemedy(onTheClass),
   ]
@@ -542,7 +613,7 @@ function instanceRemedy(
         ? `editor_rescan with reloadScript set to ${declaring[0]} recompiles that copy`
         : `reloadScript takes one script, so a call each for ${declaring.join(' and ')} recompiles those copies`
     } from the file into the same ` +
-    'object and answers with the members it has afterwards under reloadedMethods. Read that and the ' +
+    'object and answers with what that added under methodsAdded and constantsAdded. Read that and the ' +
     'next diagnostics as two readings, because they are of two things: measured in one window on ' +
     'one editor, the analyser resolved a call to a newly added method while the built copy of that ' +
     'same script did not have it. So the reload is worth doing and is not what clears these; the ' +
@@ -640,6 +711,40 @@ export interface FailedReload {
 }
 
 /**
+ * What a reload changed in the copy the editor holds, from its member lists before and after, with
+ * how many it holds afterwards. A reload is asked whether it brought the copy up to the file, which
+ * is the difference; the count is there because a reload that compiled nothing and answered OK is
+ * the failure worth catching, and it shows as a copy holding no methods. Enum values come as
+ * `Kind.SHORT` among the constants, since a copy holds an enum member as a constant.
+ */
+export function reloadDifference(reloaded: {
+  readonly methods?: readonly string[];
+  readonly heldBefore?: readonly string[];
+  readonly constants?: readonly string[];
+  readonly heldConstantsBefore?: readonly string[];
+}): Record<string, unknown> {
+  const between = (
+    before: readonly string[] | undefined,
+    after: readonly string[] | undefined,
+  ): { added: string[]; removed: string[] } | null => {
+    if (before === undefined || after === undefined) {
+      return null;
+    }
+    const was = new Set(before);
+    const is = new Set(after);
+    return { added: after.filter((name) => !was.has(name)), removed: before.filter((name) => !is.has(name)) };
+  };
+  const methods = between(reloaded.heldBefore, reloaded.methods);
+  const constants = between(reloaded.heldConstantsBefore, reloaded.constants);
+  return {
+    ...(reloaded.methods === undefined ? {} : { methodsHeld: reloaded.methods.length }),
+    ...(methods === null ? {} : { methodsAdded: methods.added, methodsRemoved: methods.removed }),
+    ...(reloaded.constants === undefined ? {} : { constantsHeld: reloaded.constants.length }),
+    ...(constants === null ? {} : { constantsAdded: constants.added, constantsRemoved: constants.removed }),
+  };
+}
+
+/**
  * What to tell a caller whose reload did not compile.
  *
  * ostinato met one on a script whose held copy had, straight after, one method of the eleven it had
@@ -677,7 +782,7 @@ export function failedReloadNote(failed: FailedReload): string {
     copy = `${unusable} The editor compiled it again from the text it was built from, and that failed too${failed.restoredAs === '' ? '' : ` (${failed.restoredAs})`}, so it stays that way until the script compiles: reload it then, or restart the editor with editor_launch restart.`;
   } else if (unchanged) {
     copy =
-      'The copy the editor holds was compiled again from the text it was built from, which puts it back as it was, with the members under heldBeforeReload and heldConstantsBeforeReload.';
+      'The copy the editor holds was compiled again from the text it was built from, which puts it back as it was, with the members it held before, which listMembers lists.';
   } else {
     copy = `The copy the editor holds was compiled again from the text it was built from and changed even so${lost.length === 0 ? '' : `, and has lost ${lost.join(', ')}`}: anything diagnosed against it now is answered from what is left, and reloading it once it compiles rebuilds it.`;
   }

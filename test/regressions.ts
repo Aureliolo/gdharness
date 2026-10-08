@@ -51,6 +51,7 @@ import {
   contradictedDiagnostics,
   declaredClasses,
   declaresMember,
+  externalMemberIn,
   type FailedReload,
   failedReloadNote,
   heldButGone,
@@ -720,6 +721,7 @@ async function withFakeLanguageServer<T>(
   said: readonly (string | FakeDiagnostic)[] = ['Could not find type "Missing" in the current scope.'],
   serves?: () => string,
   initializeAfterMs = 0,
+  listenOn = 0,
 ): Promise<T> {
   const sockets = new Set<Socket>();
 
@@ -831,7 +833,7 @@ async function withFakeLanguageServer<T>(
     });
   });
 
-  await new Promise<void>((ready) => server.listen(0, '127.0.0.1', ready));
+  await new Promise<void>((ready) => server.listen(listenOn, '127.0.0.1', ready));
 
   try {
     return await handler(portOf(server));
@@ -897,6 +899,7 @@ async function testAReferencesRequestIsGivenItsOwnTime(): Promise<void> {
         requestMs: 200,
         referencesMs: 1500,
         initializeMs: 1500,
+        listenMs: 0,
       });
       const outcome = async (asked: Promise<unknown>): Promise<{ error: unknown; ms: number }> => {
         const started = performance.now();
@@ -995,6 +998,66 @@ function lspPayload(answer: { content: { text: string }[] }): unknown {
   return JSON.parse(answer.content[0]?.text ?? '{}') as unknown;
 }
 
+/**
+ * #946: a language server the connected editor names is waited for while it starts. An editor
+ * reaches the bridge a few seconds before its language server listens, and the first two calls
+ * after editor_launch restart were refused and told to enable a setting that was already on.
+ *
+ * Nobody names the port: refused at once, as before. The editor names it and it starts late: the
+ * call waits and is answered. The editor names it and it never starts: said to be starting, not
+ * misconfigured.
+ */
+async function testALanguageServerStillStartingIsWaitedFor(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lsp-starting-'));
+  try {
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    writeFileSync(join(project, 'player.gd'), 'extends Node\n');
+    const ask = { projectPath: project, scriptPath: 'player.gd' };
+    const port = await reservePort();
+    const timeouts = (listenMs: number) => ({
+      requestMs: 3000,
+      referencesMs: 3000,
+      initializeMs: 3000,
+      listenMs,
+    });
+
+    const unnamed = new GodotLSPClient(port, '127.0.0.1', timeouts(20_000), () => false);
+    const refused = lspPayload(await handleLSPTool(unnamed, 'lsp_get_diagnostics', ask));
+    assert.match(text(get(refused, 'error')), /^Godot LSP is unavailable on port/, JSON.stringify(refused));
+    await unnamed.disconnect();
+
+    const never = new GodotLSPClient(port, '127.0.0.1', timeouts(1000), () => true);
+    const starting = lspPayload(await handleLSPTool(never, 'lsp_get_diagnostics', ask));
+    assert.match(
+      text(get(starting, 'error')),
+      new RegExp(
+        `^The editor on the bridge says its language server is on port ${port}, and nothing accepted a connection there in 1s\\. An editor starts it a few seconds after it reaches the bridge`,
+      ),
+      JSON.stringify(starting),
+    );
+    assert.equal(get(starting, 'stillReading'), true, 'and is not sent to the settings or the port');
+    await never.disconnect();
+
+    const late = new GodotLSPClient(port, '127.0.0.1', timeouts(20_000), () => true);
+    const asked = handleLSPTool(late, 'lsp_get_diagnostics', ask);
+    await delay(1500);
+    const answered = await withFakeLanguageServer(
+      (uri) => uri,
+      async () => lspPayload(await asked),
+      undefined,
+      undefined,
+      undefined,
+      0,
+      port,
+    );
+    assert.equal(get(answered, 'error'), undefined, JSON.stringify(answered));
+    assert.equal(asArray(get(answered, 'diagnostics')).length, 1, JSON.stringify(answered));
+    await late.disconnect();
+  } finally {
+    sweep(project);
+  }
+}
+
 async function testTheFirstInitializeIsGivenItsOwnTime(): Promise<void> {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lsp-initialize-'));
   try {
@@ -1008,6 +1071,7 @@ async function testTheFirstInitializeIsGivenItsOwnTime(): Promise<void> {
           requestMs: 200,
           referencesMs: 200,
           initializeMs: 3000,
+          listenMs: 0,
         });
         try {
           const answered = lspPayload(await handleLSPTool(patient, 'lsp_get_diagnostics', ask));
@@ -1021,6 +1085,7 @@ async function testTheFirstInitializeIsGivenItsOwnTime(): Promise<void> {
           requestMs: 3000,
           referencesMs: 3000,
           initializeMs: 200,
+          listenMs: 0,
         });
         try {
           const refused = lspPayload(await handleLSPTool(hurried, 'lsp_get_diagnostics', ask));
@@ -10584,7 +10649,7 @@ function testTheStaleNoteNamesTheCallThatRebuildsTheCopy(): void {
   assert.match(alone, /Run editor_rescan first/, 'the remedy that has cleared this comes first');
   assert.match(alone, /reloadScript/, 'the note should name the argument that rebuilds the built copy');
   assert.match(alone, /res:\/\/bell\.gd/, 'and the script to point it at, which only the caller can know');
-  assert.match(alone, /reloadedMethods/, 'and the reading that says the rebuild happened');
+  assert.match(alone, /methodsAdded and constantsAdded/, 'and the reading that says the rebuild happened');
   assert.match(alone, /editor_launch restart/, 'with the restart kept as the one that always worked');
   assert.match(alone, /depend on no other global class/, 'and no lever invented where there is none');
   // The reload is offered without being credited with the clearing, and the note now says why
@@ -12568,7 +12633,7 @@ function testAFailedReloadSaysWhatItKept(): void {
   });
   assert.equal(
     alone,
-    'res://core/exchange.gd did not compile: Godot answered error 43. The copy the editor holds was compiled again from the text it was built from, which puts it back as it was, with the members under heldBeforeReload and heldConstantsBeforeReload. script_diagnostics on it gives the errors.',
+    'res://core/exchange.gd did not compile: Godot answered error 43. The copy the editor holds was compiled again from the text it was built from, which puts it back as it was, with the members it held before, which listMembers lists. script_diagnostics on it gives the errors.',
     'an intact copy, no class to name and no name for the error, each said as nothing more than it is',
   );
   // A member the copy gained is still a change, however unlikely: the claim is sameness.
@@ -12937,6 +13002,121 @@ async function testDiagnosticsNameAStaleEnumMember(): Promise<void> {
         'Cannot find member "ZZ_PROBE" in base "Charm.Kind".',
         'The argument 3 of the function "per()" requires the subtype "Charm.Kind" but the supertype "Variant" was provided.',
         'The method "toll()" is not present on the inferred type "Bell".',
+      ],
+    );
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * #945: a member the type inherits from a project base class is found in the base, and a diagnostic
+ * naming only the member is read against its line. ostinato's 270 stale scripts denied
+ * `READ_BY_THE_RUN`, declared in GearReads, which GearKinds extends, with `Could not resolve external
+ * class member` and no type; and `piece_sells`, declared in Tariff, which Shop extends. Four
+ * scripts, whose members sat in the named type's own file, were the only ones given a remedy, and
+ * following it cleared all 274.
+ *
+ * GearKinds reaches its base by a relative path and Shop by name, the two ways a script extends
+ * another. A member nothing in the chain declares is still passed on, and a chain that loops ends.
+ */
+async function testDiagnosticsFindAMemberInAProjectBase(): Promise<void> {
+  const classes = new Map([
+    ['A', 'res://a.gd'],
+    ['B', 'res://b.gd'],
+  ]);
+  const looping = (path: string): string =>
+    path === 'res://a.gd' ? 'class_name A\nextends B\n' : 'class_name B\nextends A\n';
+  assert.deepEqual(
+    contradictedDiagnostics(['Cannot find member "NOWHERE" in base "A".'], classes, looping),
+    [],
+    'a chain that loops ends, finding nothing',
+  );
+  assert.equal(
+    externalMemberIn(
+      'Could not resolve external class member "MAX".',
+      '\treturn Held.MAX',
+      new Map([['Kept', 'x']]),
+    ),
+    null,
+    'a member reached through something other than a class is left unread',
+  );
+
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-stale-base-'));
+  try {
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    mkdirSync(join(project, '.godot'), { recursive: true });
+    mkdirSync(join(project, 'core'), { recursive: true });
+    writeFileSync(
+      join(project, 'core', 'tariff.gd'),
+      'class_name Tariff\nextends RefCounted\n\n\nstatic func piece_sells() -> int:\n\treturn 1\n',
+    );
+    writeFileSync(join(project, 'core', 'shop.gd'), 'class_name Shop\nextends Tariff\n');
+    writeFileSync(
+      join(project, 'core', 'gear_reads.gd'),
+      'class_name GearReads\nextends RefCounted\n\nconst READ_BY_THE_RUN: int = 3\n',
+    );
+    writeFileSync(join(project, 'core', 'gear_kinds.gd'), 'class_name GearKinds\nextends "gear_reads.gd"\n');
+    writeFileSync(
+      join(project, 'probe.gd'),
+      'extends Node\n\n\nfunc sold() -> int:\n\treturn GearKinds.READ_BY_THE_RUN + Shop.piece_sells() + Shop.never_sold()\n',
+    );
+    writeFileSync(
+      join(project, '.godot', 'global_script_class_cache.cfg'),
+      [
+        'list=[{\n"class": &"Tariff",\n"path": "res://core/tariff.gd"\n}, ',
+        '{\n"class": &"Shop",\n"path": "res://core/shop.gd"\n}, ',
+        '{\n"class": &"GearReads",\n"path": "res://core/gear_reads.gd"\n}, ',
+        '{\n"class": &"GearKinds",\n"path": "res://core/gear_kinds.gd"\n}]\n',
+      ].join(''),
+    );
+    await withFakeLanguageServer(
+      (uri) => uri,
+      async (lspPort) => {
+        const server = new ServerProcess({
+          env: {
+            GDHARNESS_LSP_PORT: String(lspPort),
+            GODOT_PATH: join(tmpdir(), 'gdharness-no-such-godot'),
+          },
+        });
+        try {
+          await server.initialize('regression-test');
+          const answer = parseTextContent(
+            await server.request('tools/call', {
+              name: 'script_diagnostics',
+              arguments: { projectPath: project, scriptPath: 'res://probe.gd' },
+            }),
+          );
+          assert.deepEqual(
+            get(answer, 'contradictedByTheFile'),
+            [
+              {
+                kind: 'static method',
+                member: 'piece_sells',
+                type: 'Shop',
+                declaredIn: 'res://core/tariff.gd',
+              },
+              {
+                kind: 'member',
+                member: 'READ_BY_THE_RUN',
+                type: 'GearKinds',
+                declaredIn: 'res://core/gear_reads.gd',
+              },
+            ],
+            `each found in the base that declares it, and never_sold in none: ${JSON.stringify(answer)}`,
+          );
+          const said = String(get(answer, 'staleAnalysis'));
+          assert.match(said, /res:\/\/core\/tariff\.gd/, `the remedy reloads the declaring base: ${said}`);
+          assert.match(said, /res:\/\/core\/gear_reads\.gd/, said);
+        } finally {
+          await server.stop();
+        }
+      },
+      undefined,
+      [
+        { message: 'Could not resolve external class member "READ_BY_THE_RUN".', line: 4, character: 18 },
+        'Static function "piece_sells()" not found in base "Shop".',
+        'Static function "never_sold()" not found in base "Shop".',
       ],
     );
   } finally {
@@ -27703,7 +27883,15 @@ async function testARescanReloadsWhatNamesAClassItBroughtIn(): Promise<void> {
                       ? uncompiled
                       : scriptPath === 'res://Charters_Test.gd'
                         ? { ok: true, script: 'res://charters_test.gd', methods: ['run_once'] }
-                        : { ok: true, methods: [] },
+                        : scriptPath === 'res://grown.gd'
+                          ? {
+                              ok: true,
+                              heldBefore: ['run_once'],
+                              methods: ['run_once', 'sell'],
+                              heldConstantsBefore: ['Effect.SPENDS', 'MAX'],
+                              constants: ['Effect.SPENDS', 'Effect.RESALE_GROWS', 'MAX'],
+                            }
+                          : { ok: true, methods: [] },
                 },
           ),
         );
@@ -27792,12 +27980,12 @@ async function testARescanReloadsWhatNamesAClassItBroughtIn(): Promise<void> {
     const asked = parseTextContent(
       await server.request('tools/call', {
         name: 'editor_rescan',
-        arguments: { projectPath: project, reloadScript: 'res://refuses.gd' },
+        arguments: { projectPath: project, reloadScript: 'res://refuses.gd', listMembers: true },
       }),
     );
     assert.equal(
       get(asked, 'reloadProblem'),
-      "res://refuses.gd did not compile: Godot answered error 43, Parse error. The copy the editor holds was compiled again from the text it was built from, which puts it back as it was, with the members under heldBeforeReload and heldConstantsBeforeReload. script_diagnostics on it gives the errors. If they deny a member of CharteredRun that its file declares, the editor's copy of that class is behind: reload that class first with reloadScript and then this script, the order that cleared it in the one project that has met this.",
+      "res://refuses.gd did not compile: Godot answered error 43, Parse error. The copy the editor holds was compiled again from the text it was built from, which puts it back as it was, with the members it held before, which listMembers lists. script_diagnostics on it gives the errors. If they deny a member of CharteredRun that its file declares, the editor's copy of that class is behind: reload that class first with reloadScript and then this script, the order that cleared it in the one project that has met this.",
       JSON.stringify(asked),
     );
     assert.deepEqual(
@@ -27852,9 +28040,57 @@ async function testARescanReloadsWhatNamesAClassItBroughtIn(): Promise<void> {
       }),
     );
     assert.deepEqual(
-      [get(recased, 'reloadedAs'), get(recased, 'reloadedMethods')],
-      ['res://charters_test.gd', ['run_once']],
+      [get(recased, 'reloadedAs'), get(recased, 'methodsHeld')],
+      ['res://charters_test.gd', 1],
       `a path in another case says which spelling was reloaded: ${JSON.stringify(recased)}`,
+    );
+    // #947: a reload answers with what it changed, not with every member twice. gear.gd's reload
+    // answered two lists of about six hundred constants around the one enum member it added.
+    const grown = parseTextContent(
+      await server.request('tools/call', {
+        name: 'editor_rescan',
+        arguments: { projectPath: project, reloadScript: 'res://grown.gd' },
+      }),
+    );
+    assert.deepEqual(
+      Object.fromEntries(
+        [
+          'methodsHeld',
+          'methodsAdded',
+          'methodsRemoved',
+          'constantsHeld',
+          'constantsAdded',
+          'constantsRemoved',
+          'reloadedMethods',
+          'reloadedConstants',
+          'heldBeforeReload',
+          'heldConstantsBeforeReload',
+        ].map((field) => [field, get(grown, field)]),
+      ),
+      {
+        methodsHeld: 2,
+        methodsAdded: ['sell'],
+        methodsRemoved: [],
+        constantsHeld: 3,
+        constantsAdded: ['Effect.RESALE_GROWS'],
+        constantsRemoved: [],
+        reloadedMethods: undefined,
+        reloadedConstants: undefined,
+        heldBeforeReload: undefined,
+        heldConstantsBeforeReload: undefined,
+      },
+      JSON.stringify(grown),
+    );
+    const listed = parseTextContent(
+      await server.request('tools/call', {
+        name: 'editor_rescan',
+        arguments: { projectPath: project, reloadScript: 'res://grown.gd', listMembers: true },
+      }),
+    );
+    assert.deepEqual(
+      [get(listed, 'heldBeforeReload'), get(listed, 'reloadedConstants'), get(listed, 'constantsAdded')],
+      [['run_once'], ['Effect.SPENDS', 'Effect.RESALE_GROWS', 'MAX'], ['Effect.RESALE_GROWS']],
+      `and the whole lists when asked for, beside what changed: ${JSON.stringify(listed)}`,
     );
     // The declaring script asked for without res://. Its file names only its own class, which is not
     // one to reload first: spelled this way it passed for one, and the script was told to reload itself.
@@ -30246,6 +30482,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStaleStaticFunctionIsNamed,
   testAFailedReloadSaysWhatItKept,
   testDiagnosticsNameAStaleEnumMember,
+  testDiagnosticsFindAMemberInAProjectBase,
   testDiagnosticsAnswerSeveralScripts,
   testAClassTheEditorHasNotLoadedIsToldApartFromOneTheCacheLacks,
   testAClassTheEditorHoldsAfterItsScriptIsGoneIsNamed,
@@ -30380,6 +30617,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testDiagnosticsSurviveTheEditorRestarting,
   testAReferencesRequestIsGivenItsOwnTime,
   testTheFirstInitializeIsGivenItsOwnTime,
+  testALanguageServerStillStartingIsWaitedFor,
   testLanguageServerAnswersCountFromOne,
   testACancelledFolderStopsAsking,
   testDiagnosticsLeaveNoDocumentOpen,
