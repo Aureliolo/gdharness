@@ -54,7 +54,8 @@ turned off quietly. A rule that fires on good code is an argument about the rule
 argument goes next to the suppression along with what it would cost to adopt.
 
 **Every job CI runs is a required status check.** A job that can be red while something merges is
-not a gate, and we have been bitten by exactly that.
+not a gate, and we have been bitten by exactly that. The engine legs run in parts on separate
+machines, and each platform's `engine (...)` check passes only when every one of its parts did.
 
 **Nothing from outside the repository runs unverified.** Every file CI downloads is refused
 unless it matches a digest written in this repository: the Bun that runs every job

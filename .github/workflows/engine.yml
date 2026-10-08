@@ -1,0 +1,98 @@
+name: Engine
+
+# The GDScript that ships in the bundle, driven against a real engine, for one platform per call.
+# The work is split into parts that run at once, each on its own machine: the regressions in two
+# halves, the engine fixtures, and the editor fixtures with the bridge test. Run one after another
+# on one machine they took 23 minutes on Windows, nearly all of it waiting on Godot processes,
+# and every release waits on them three times over. Four parts keeps a platform's macOS jobs
+# under the five GitHub runs at once.
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: The runner image this platform's parts run on.
+        type: string
+        required: true
+
+permissions: {}
+
+jobs:
+  part:
+    name: ${{ matrix.part.name }}
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 20
+    permissions:
+      contents: read # Reads the source it tests.
+    strategy:
+      fail-fast: false
+      matrix:
+        part:
+          - name: regressions 1 of 2
+            shard: '1/2'
+          - name: regressions 2 of 2
+            shard: '2/2'
+          - name: engine fixtures
+            shard: ''
+          - name: editor fixtures
+            shard: ''
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Bun
+        uses: ./.github/actions/install-bun # zizmor: ignore[self-repository]
+
+      # Ours rather than a setup action's, because the engine is a 180 MB binary and this is the
+      # only way to know it is the one the repository pins. It exports GODOT_PATH.
+      - name: Install Godot
+        run: bun scripts/install-godot.ts
+
+      # The test runner project_test drives, pinned by commit and digest the same way. It
+      # exports GDUNIT4_PATH, and the regression that needs it fails rather than skips here.
+      - name: Install gdUnit4
+        run: bun scripts/install-gdunit4.ts
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # The suites start servers from the bundle; the engine fixtures run GDScript alone.
+      - name: Build
+        if: matrix.part.name != 'engine fixtures'
+        run: bun run build
+
+      - name: Engine fixtures
+        if: matrix.part.name == 'engine fixtures'
+        run: bun run test:engine
+        env:
+          # The suite skips when it cannot run Godot, which is right on a contributor's machine
+          # and wrong here: without this a broken install would read as a pass.
+          GDHARNESS_REQUIRE_GODOT: '1'
+
+      # The regressions that drive the scene tools through the engine skip without one, so they
+      # are run again here, where a skip is a failure.
+      - name: Regressions that need the engine
+        if: matrix.part.shard != ''
+        run: bun run test:regressions
+        env:
+          GDHARNESS_REQUIRE_GODOT: '1'
+          GDHARNESS_REGRESSION_SHARD: ${{ matrix.part.shard }}
+
+      # The bridge test's ClassDB phase reaches the engine and skips without one, so it is run
+      # again here, where a skip is a failure.
+      - name: Bridge integration test with the engine
+        if: matrix.part.name == 'editor fixtures'
+        run: bun run test:integration
+        env:
+          GDHARNESS_REQUIRE_GODOT: '1'
+
+      # The editor tools, against an editor this starts itself. Nothing else in CI opens one, so
+      # without this every scene_* tool, resource_edit and editor_rescan is covered by argument
+      # checks alone, which a tool answering plausible nonsense passes as well as a working one.
+      - name: Editor fixtures
+        if: matrix.part.name == 'editor fixtures' && !cancelled()
+        run: bun run test:editor
+        env:
+          GDHARNESS_REQUIRE_GODOT: '1'
