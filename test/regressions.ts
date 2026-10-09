@@ -31851,7 +31851,7 @@ function testRegressionPartsCoverEveryTestOnceAndBalance(): void {
   const carrying = Array.from({ length: 3 }, (_unused, at) =>
     regressionPart(names, at + 1, 3, REGRESSION_SECONDS, ENGINE_FIXTURES_SECONDS),
   );
-  assert.deepEqual([...carrying.flat()].sort(), [...names].sort(), 'still every regression once');
+  assert.deepEqual(carrying.flat().sort(), [...names].sort(), 'still every regression once');
   const carried = carrying.map(
     (part, at) =>
       part.reduce((total, name) => total + weight(name), 0) + (at === 0 ? ENGINE_FIXTURES_SECONDS : 0),
