@@ -416,6 +416,24 @@ export function patienceForFrames(frames: number, atLeast: number): number {
 }
 
 /**
+ * What would wait longer for a runtime call that ran out of time, for [param tool] [param op]
+ * after [param waitedMs]: its own timeoutMs where the op takes one, read off its schema. The
+ * pending answer told every call to pass timeoutMs, and runtime_wait frames, runtime_input and
+ * runtime_capture refuse it, so the advice cost a refused call on a game that had stopped answering.
+ */
+export function longerWaitNote(tool: string, op: string, waitedMs: number): string {
+  const spec = TOOL_SPECS.find((one) => one.name === tool);
+  if (spec !== undefined && argumentsOf(spec, op).includes('timeoutMs')) {
+    return 'timeoutMs waits longer next time.';
+  }
+  const how =
+    tool === 'runtime_wait' && op === 'frames'
+      ? `the wait is counted from the number of frames, at ${SLOWEST_FRAME_RATE} a second on top of GDHARNESS_RUNTIME_TIMEOUT_MS, and this game fell below that rate, so ask for fewer frames at a time`
+      : 'the wait is GDHARNESS_RUNTIME_TIMEOUT_MS, which is set in the environment the server is started with';
+  return `${tool} ${op} takes no timeoutMs: it was given ${waitedMs}ms, and ${how}.`;
+}
+
+/**
  * A file under the project as the project spells it, which is how a caller names it.
  *
  * Both sides resolved, since the adapter's spelling has every symlink followed and the project's
@@ -3538,7 +3556,7 @@ class GodotServer {
                 include_properties: readBoolean(args, 'includeProperties') ?? false,
                 properties: readArray(args, 'properties') ?? [],
               },
-              patience,
+              { tool: 'runtime_inspect', op, patience },
             );
           }
           case 'find':
@@ -3552,13 +3570,13 @@ class GodotServer {
                 include_hidden: readBoolean(args, 'includeHidden') ?? false,
                 limit: readPositiveNumber(args, 'limit') ?? 500,
               },
-              patience,
+              { tool: 'runtime_inspect', op, patience },
             );
           case 'rect':
             return await this.handleRuntimeCommand(
               'get_rect',
               { ...whichGame(args), path: readNonEmptyString(args, 'nodePath') ?? '' },
-              patience,
+              { tool: 'runtime_inspect', op, patience },
             );
           case 'property':
             return await this.handleRuntimeCommand(
@@ -3568,13 +3586,13 @@ class GodotServer {
                 path: readNonEmptyString(args, 'nodePath') ?? '',
                 property: readNonEmptyString(args, 'property') ?? '',
               },
-              patience,
+              { tool: 'runtime_inspect', op, patience },
             );
           default:
             return await this.handleRuntimeCommand(
               'get_metrics',
               { ...whichGame(args), metrics: readArray(args, 'metrics') ?? [] },
-              patience,
+              { tool: 'runtime_inspect', op, patience },
             );
         }
       }
@@ -3594,7 +3612,7 @@ class GodotServer {
                 property: readString(args, 'property') ?? '',
                 value: args['value'],
               },
-              patience,
+              { tool: 'runtime_invoke', op, patience },
             )
           : await this.handleRuntimeCommand(
               'call_method',
@@ -3605,13 +3623,14 @@ class GodotServer {
                 args: readArray(args, 'args') ?? [],
                 ...(args['properties'] === undefined ? {} : { properties: args['properties'] }),
               },
-              patience,
+              { tool: 'runtime_invoke', op, patience },
             );
       }
       case 'runtime_capture':
         return await this.handleRuntimeCommand(
           op === 'screenshot' ? 'capture_screenshot' : 'capture_viewport',
           args,
+          { tool: 'runtime_capture', op },
         );
       case 'runtime_input':
         if (op === 'click') {
@@ -3623,30 +3642,38 @@ class GodotServer {
               'runtime_input click needs nodePath, or says with the words on the control to click.',
             );
           }
-          return await this.handleRuntimeCommand('click', {
-            ...whichGame(args),
-            path: readNonEmptyString(args, 'nodePath') ?? '',
-            // As given, a number included: the addon names a button either way and refuses what is
-            // neither, and read as a string alone a right click given as 2 went as the left button.
-            button: args['button'] ?? 'left',
-            double: readBoolean(args, 'doubleClick') ?? false,
-            ...(readNonEmptyString(args, 'says') === undefined
-              ? {}
-              : { says: readNonEmptyString(args, 'says') }),
-            ...(args['index'] === undefined ? {} : { index: args['index'] }),
-          });
+          return await this.handleRuntimeCommand(
+            'click',
+            {
+              ...whichGame(args),
+              path: readNonEmptyString(args, 'nodePath') ?? '',
+              // As given, a number included: the addon names a button either way and refuses what is
+              // neither, and read as a string alone a right click given as 2 went as the left button.
+              button: args['button'] ?? 'left',
+              double: readBoolean(args, 'doubleClick') ?? false,
+              ...(readNonEmptyString(args, 'says') === undefined
+                ? {}
+                : { says: readNonEmptyString(args, 'says') }),
+              ...(args['index'] === undefined ? {} : { index: args['index'] }),
+            },
+            { tool: 'runtime_input', op },
+          );
         }
         if (op === 'choose') {
           // `index` is passed on only when it was given, because the addon reads whether it is
           // there as which of the two ways the caller named the item.
-          return await this.handleRuntimeCommand('choose', {
-            ...whichGame(args),
-            path: readNonEmptyString(args, 'nodePath') ?? '',
-            text: readString(args, 'text') ?? '',
-            ...(args['index'] === undefined ? {} : { index: args['index'] }),
-          });
+          return await this.handleRuntimeCommand(
+            'choose',
+            {
+              ...whichGame(args),
+              path: readNonEmptyString(args, 'nodePath') ?? '',
+              text: readString(args, 'text') ?? '',
+              ...(args['index'] === undefined ? {} : { index: args['index'] }),
+            },
+            { tool: 'runtime_input', op },
+          );
         }
-        return await this.handleRuntimeCommand(`inject_${op}`, args);
+        return await this.handleRuntimeCommand(`inject_${op}`, args, { tool: 'runtime_input', op });
       case 'runtime_wait':
         return await this.handleRuntimeWait(op, args);
 
@@ -10704,8 +10731,9 @@ class GodotServer {
   private async handleRuntimeCommand(
     command: string,
     args: unknown,
-    timeoutMs: number = this.runtimeTimeoutMs(),
+    asked: { tool: string; op: string; patience?: number },
   ): Promise<ToolResponse> {
+    const timeoutMs = asked.patience ?? this.runtimeTimeoutMs();
     const { op: _op, projectPath, pid, outputPath, ...params } = asParams(args);
     const waited =
       typeof pid === 'number'
@@ -10806,7 +10834,7 @@ class GodotServer {
           requestId: reply.requestId,
           command,
           waitedMs: timeoutMs,
-          note: reply.message,
+          note: `${reply.message} ${longerWaitNote(asked.tool, asked.op, timeoutMs)}`,
           ...answeredBy,
           ...stale,
         });
@@ -10934,7 +10962,7 @@ class GodotServer {
         // is what somebody reads off the screen.
         ...(includeHidden === undefined ? {} : { include_hidden: includeHidden }),
       },
-      patience,
+      { tool: 'runtime_inspect', op: 'find', patience },
     );
   }
 
@@ -10952,7 +10980,11 @@ class GodotServer {
       // than off `timeoutMs`, which this op does not take: how long a run of frames is worth
       // waiting for is the count, and a second knob on it is one nobody could set correctly.
       const waited = patienceForFrames(frames, this.runtimeTimeoutMs());
-      return await this.handleRuntimeCommand('wait_frames', { ...whichGame(args), frames }, waited);
+      return await this.handleRuntimeCommand(
+        'wait_frames',
+        { ...whichGame(args), frames },
+        { tool: 'runtime_wait', op, patience: waited },
+      );
     }
 
     const timeoutMs = readPositiveNumber(args, 'timeoutMs') ?? 5000;
@@ -10977,7 +11009,7 @@ class GodotServer {
             signal: readString(args, 'signal') ?? '',
             timeout_ms: timeoutMs,
           },
-          patience,
+          { tool: 'runtime_wait', op, patience },
         )
       : await this.handleRuntimeCommand(
           'wait_until',
@@ -10996,7 +11028,7 @@ class GodotServer {
               : { include_hidden: readBoolean(args, 'includeHidden') }),
             timeout_ms: timeoutMs,
           },
-          patience,
+          { tool: 'runtime_wait', op, patience },
         );
   }
 }
