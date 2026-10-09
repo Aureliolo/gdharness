@@ -43,12 +43,16 @@ const HEADLINE = /^(USER )?(SCRIPT ERROR|SHADER ERROR|ERROR|WARNING):\s?(.*)$/;
 const COLOUR_CODE = new RegExp(`${String.fromCharCode(0x1b)}\\[[0-9;]*m`, 'g');
 
 /** The severity a headline announces, or null for a line that announces nothing. */
-function announced(line: string): { severity: Severity; text: string } | null {
+function announced(line: string): { severity: Severity; text: string; byScript: boolean } | null {
   const match = HEADLINE.exec(line);
   if (!match) {
     return null;
   }
-  return { severity: match[2] === 'WARNING' ? 'warning' : 'error', text: match[3] ?? '' };
+  return {
+    severity: match[2] === 'WARNING' ? 'warning' : 'error',
+    text: match[3] ?? '',
+    byScript: match[2] === 'SCRIPT ERROR',
+  };
 }
 
 /**
@@ -88,15 +92,89 @@ const ADMITTED: Record<Severity, ReadonlySet<Severity>> = {
  * one that costs nothing. `entry.detail ?? []` reads either.
  */
 export function forAnswer(entries: readonly LogEntry[]): readonly ReportedEntry[] {
-  return entries.map((entry) =>
-    entry.detail.length === 0
-      ? { index: entry.index, severity: entry.severity, source: entry.source, text: entry.text }
-      : entry,
-  );
+  return entries.map(reported);
+}
+
+function reported(entry: LogEntry): ReportedEntry {
+  return entry.detail.length === 0
+    ? { index: entry.index, severity: entry.severity, source: entry.source, text: entry.text }
+    : { ...entry, detail: framesCollapsed(entry.detail) };
+}
+
+const FRAME = /^\[(\d+)\] (.+)$/;
+
+/**
+ * A backtrace with each run of identical frames written once, as `[first-last] frame`.
+ *
+ * A recursion without end prints one frame per call down to the engine's limit: a stack overflow's
+ * backtrace was a thousand lines of `[n] depth (res://overflow_test.gd:5)` differing only in n, in
+ * every answer that carried the entry.
+ */
+function framesCollapsed(detail: readonly string[]): readonly string[] {
+  const out: string[] = [];
+  let pending: FrameRun | undefined;
+  for (const line of detail) {
+    const match = FRAME.exec(line);
+    const number = match?.[1];
+    const frame = match?.[2];
+    if (frame !== undefined && pending?.frame === frame && Number(number) === Number(pending.last) + 1) {
+      pending.last = String(number);
+      continue;
+    }
+    if (pending !== undefined) {
+      out.push(writtenRun(pending));
+    }
+    pending =
+      number === undefined || frame === undefined ? undefined : { first: number, last: number, frame };
+    if (pending === undefined) {
+      out.push(line);
+    }
+  }
+  if (pending !== undefined) {
+    out.push(writtenRun(pending));
+  }
+  return out;
+}
+
+interface FrameRun {
+  readonly first: string;
+  last: string;
+  readonly frame: string;
+}
+
+function writtenRun(run: FrameRun): string {
+  return run.first === run.last ? `[${run.first}] ${run.frame}` : `[${run.first}-${run.last}] ${run.frame}`;
 }
 
 /** An entry on its way out: the same fields, with `detail` there only when it says something. */
 export type ReportedEntry = Omit<LogEntry, 'detail'> & { readonly detail?: readonly string[] };
+
+/** An entry standing for every identical one, with how many there were when more than one. */
+export type FoldedEntry = ReportedEntry & { readonly times?: number };
+
+/**
+ * The entries with identical ones folded into the first, which says how many times it was printed.
+ *
+ * A runaway error prints the same entry hundreds of times: a recursion without end left two
+ * hundred `Stack underflow` entries in one answer, identical but for the index, and the distinct
+ * line that explained them came last. Identical means the same severity, source, text and detail,
+ * so a line printed from two places stays two entries.
+ */
+export function foldedRepeats(entries: readonly LogEntry[]): readonly FoldedEntry[] {
+  const first = new Map<string, { entry: LogEntry; times: number }>();
+  for (const entry of entries) {
+    const key = JSON.stringify([entry.severity, entry.source, entry.text, entry.detail]);
+    const seen = first.get(key);
+    if (seen === undefined) {
+      first.set(key, { entry, times: 1 });
+    } else {
+      seen.times += 1;
+    }
+  }
+  return [...first.values()].map(({ entry, times }) =>
+    times === 1 ? reported(entry) : { ...reported(entry), times },
+  );
+}
 
 export class GameLog {
   private readonly entries: LogEntry[] = [];
@@ -106,7 +184,19 @@ export class GameLog {
     transcript: new StringDecoder('utf8'),
   };
   private readonly partial: Record<Stream, string> = { stdout: '', stderr: '', transcript: '' };
-  private lastHeadline: { index: number; detail: string[] } | null = null;
+  /**
+   * The headline each stream printed last, while nothing but its detail has followed it there.
+   *
+   * Per stream, because the engine writes a headline and its detail down one pipe and other lines
+   * arrive down the other in between. gdUnit4 indents its progress lines on stdout, and with one
+   * headline for both streams a `PASSED` line landing after a stderr error became that error's
+   * detail and was gone from what the run printed, which the suite counts are read off.
+   */
+  private readonly lastHeadline: Record<Stream, { detail: string[] } | null> = {
+    stdout: null,
+    stderr: null,
+    transcript: null,
+  };
   /**
    * How far a caller has been shown, one mark per severity floor.
    *
@@ -117,6 +207,14 @@ export class GameLog {
    * a parked bench is what a caller reaches for that answer to find.
    */
   private readonly seen: Record<Severity, number> = { error: 0, warning: 0, info: 0 };
+  /**
+   * The entries the engine headed `SCRIPT ERROR`, by index.
+   *
+   * Kept beside the entries rather than on them, because every answer carries entries and none of
+   * them needs the word: what does is a test run, where `push_error` and the engine's own checks
+   * print the same `ERROR` headline and only a script error says the code under test faulted.
+   */
+  private readonly byScript = new Set<number>();
 
   append(source: Stream, chunk: Buffer | string): void {
     const decoded = typeof chunk === 'string' ? chunk : this.decoders[source].write(chunk);
@@ -144,8 +242,9 @@ export class GameLog {
     if (line.trim() === '') {
       return;
     }
-    if (this.lastHeadline && /^\s/.test(line) && this.lastHeadline.index === this.entries.length - 1) {
-      this.lastHeadline.detail.push(line.trim());
+    const owner = this.lastHeadline[source];
+    if (owner !== null && /^\s/.test(line)) {
+      owner.detail.push(line.trim());
       return;
     }
     const headline = announced(line);
@@ -158,7 +257,15 @@ export class GameLog {
       detail,
     };
     this.entries.push(entry);
-    this.lastHeadline = headline ? { index: entry.index, detail } : null;
+    if (headline?.byScript === true) {
+      this.byScript.add(entry.index);
+    }
+    this.lastHeadline[source] = headline ? { detail } : null;
+  }
+
+  /** Whether the engine headed [param entry] `SCRIPT ERROR`, for an entry of this log or a copy. */
+  raisedByScript(entry: LogEntry): boolean {
+    return this.byScript.has(entry.index);
   }
 
   /**
@@ -177,8 +284,6 @@ export class GameLog {
       text,
       detail: [],
     });
-    // It owns no following lines, so an indented line after it belongs to whatever printed last.
-    this.lastHeadline = null;
   }
 
   get all(): readonly LogEntry[] {

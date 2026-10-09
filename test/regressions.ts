@@ -80,7 +80,7 @@ import {
   writeEditorLogNote,
 } from '../src/editor-log.js';
 import { type EngineRun, howItEnded, runEngine } from '../src/engine-run.js';
-import { answersTo, forAnswer, GameLog, type LogEntry } from '../src/game-log.js';
+import { answersTo, foldedRepeats, forAnswer, GameLog, type LogEntry } from '../src/game-log.js';
 import { occurrencesOf, regionsOf, shapeOf as scriptShapeOf } from '../src/gdscript-source.js';
 import {
   anEditorIsStillComing,
@@ -563,6 +563,106 @@ async function testAOneShotRunOfAnotherProjectIsTurnedAwayQuietly(): Promise<voi
       }
     }
   }
+}
+
+/**
+ * A test run's engine entries are folded and its script errors are known apart from other errors.
+ *
+ * A recursion without end printed one `Stack underflow` entry per frame it unwound, two hundred
+ * identical entries in one answer, before the `Stack overflow` that explained them. And the verdict
+ * rests on which headline an error carried: `push_error` and the engine's own checks both print
+ * `ERROR`, and only `SCRIPT ERROR` says the code under test faulted.
+ */
+function testEngineEntriesFoldAndScriptErrorsAreKnown(): void {
+  const log = new GameLog();
+  log.append(
+    'transcript',
+    [
+      'SCRIPT ERROR: Stack overflow. Check for infinite recursion in your script.',
+      '   at: depth (res://tests/overflow_test.gd:5)',
+      ...Array.from({ length: 4 }, () =>
+        [
+          'ERROR: Stack underflow! (Engine Bug)',
+          '   at: exit_function (modules/gdscript/gdscript.h:529)',
+        ].join('\n'),
+      ),
+      'ERROR: Stack underflow! (Engine Bug)',
+      '   at: exit_function (modules/gdscript/gdscript.h:530)',
+      'ERROR: an error the case means to print',
+      '   at: push_error (core/variant/variant_utility.cpp:1023)',
+      'USER ERROR: an error from an older engine',
+      'WARNING: a warning',
+      'SCRIPT ERROR: Stack overflow. Check for infinite recursion in your script.',
+      '   at: depth (res://tests/overflow_test.gd:5)',
+      '',
+    ].join('\n'),
+  );
+  log.finish();
+
+  const byScript = log.all.filter((entry) => log.raisedByScript(entry)).map((entry) => entry.index);
+  assert.deepEqual(byScript, [0, 9], 'the two SCRIPT ERROR entries and nothing else');
+
+  const folded = foldedRepeats(log.all);
+  assert.deepEqual(
+    folded.map((entry) => [entry.index, entry.text, entry.times]),
+    [
+      [0, 'Stack overflow. Check for infinite recursion in your script.', 2],
+      [1, 'Stack underflow! (Engine Bug)', 4],
+      [5, 'Stack underflow! (Engine Bug)', undefined],
+      [6, 'an error the case means to print', undefined],
+      [7, 'an error from an older engine', undefined],
+      [8, 'a warning', undefined],
+    ],
+    `one entry per distinct one, at its first index, counted when repeated: ${JSON.stringify(folded)}`,
+  );
+  assert.deepEqual(folded[1]?.detail, ['at: exit_function (modules/gdscript/gdscript.h:529)']);
+  assert.equal('detail' in (folded[5] ?? {}), false, 'an entry with no detail carries none');
+  assert.equal(log.count('error'), 9, 'the count is of every entry, folded or not');
+
+  // A backtrace of one frame per call down to the limit is written once per run of identical frames.
+  const deep = new GameLog();
+  deep.append(
+    'transcript',
+    [
+      'SCRIPT ERROR: Stack overflow. Check for infinite recursion in your script.',
+      '   at: depth (res://overflow_test.gd:4)',
+      '   GDScript backtrace (most recent call first):',
+      ...Array.from({ length: 1014 }, (_, frame) => `       [${frame}] depth (res://overflow_test.gd:5)`),
+      '       [1014] test_runs_away (res://overflow_test.gd:9)',
+      '       [1015] test_runs_away (res://overflow_test.gd:9)',
+      '       [1016] depth (res://overflow_test.gd:5)',
+      '',
+    ].join('\n'),
+  );
+  deep.finish();
+  assert.deepEqual(forAnswer(deep.all)[0]?.detail, [
+    'at: depth (res://overflow_test.gd:4)',
+    'GDScript backtrace (most recent call first):',
+    '[0-1013] depth (res://overflow_test.gd:5)',
+    '[1014-1015] test_runs_away (res://overflow_test.gd:9)',
+    '[1016] depth (res://overflow_test.gd:5)',
+  ]);
+
+  // The engine writes a headline and its detail down one pipe. gdUnit4 indents its progress lines on
+  // stdout, and one landing after an error on stderr is a line of its own, not that error's detail.
+  const piped = new GameLog();
+  piped.append('stderr', 'ERROR: Stack underflow! (Engine Bug)\n');
+  piped.append('stdout', '  res://tests/overflow_test.gd > test_runs_away PASSED 87ms\n');
+  piped.append('stderr', '   at: exit_function (modules/gdscript/gdscript.h:529)\n');
+  piped.finish();
+  assert.deepEqual(
+    piped.all.map((entry) => [entry.source, entry.severity, entry.text, entry.detail]),
+    [
+      [
+        'stderr',
+        'error',
+        'Stack underflow! (Engine Bug)',
+        ['at: exit_function (modules/gdscript/gdscript.h:529)'],
+      ],
+      ['stdout', 'info', '  res://tests/overflow_test.gd > test_runs_away PASSED 87ms', []],
+    ],
+    JSON.stringify(piped.all),
+  );
 }
 
 async function turnedAwayAtTheBridge(
@@ -23554,6 +23654,140 @@ async function testATestRunCutShortIsNamedForWhatItWasDoing(): Promise<void> {
 }
 
 /**
+ * A run whose cases all passed beside a stack overflow is not called passed.
+ *
+ * gdUnit4 fails a case on a script error through a logger written in GDScript, and a stack
+ * overflow is raised at the deepest call the engine allows, where that logger cannot be called. So
+ * a case whose assertion accepted what the overflowed call returned passed, gdUnit4 exited 0, and
+ * the answer said passed beside two thousand engine errors. Three runs: the overflow; a suite whose
+ * only errors are its own (an expected runtime error and a deliberate push_error), which must still
+ * pass; and the overflow again with the project's gdUnit4 setting for script errors turned off.
+ */
+async function testAStackOverflowIsNotAPass(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
+    }
+    console.log('stack overflow regression skipped (Godot or gdUnit4 not found)');
+    return;
+  }
+  const projectDir = mkdtempSync(join(tmpdir(), 'gdharness-overflow-'));
+  const settings =
+    '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="OverflowRun"\n';
+  try {
+    writeFileSync(join(projectDir, 'project.godot'), settings);
+    cpSync(gdunit, join(projectDir, 'addons', 'gdUnit4'), { recursive: true });
+    mkdirSync(join(projectDir, 'overflow'));
+    writeFileSync(
+      join(projectDir, 'overflow', 'overflow_test.gd'),
+      [
+        'extends GdUnitTestSuite',
+        '',
+        '',
+        'func depth(n: int) -> int:',
+        '\treturn depth(n + 1)',
+        '',
+        '',
+        'func test_runs_away() -> void:',
+        '\tvar got: Variant = depth(0)',
+        '\tassert_bool(got == null or got is int).is_true()',
+        '',
+      ].join('\n'),
+    );
+    mkdirSync(join(projectDir, 'asked'));
+    writeFileSync(
+      join(projectDir, 'asked', 'asked_test.gd'),
+      [
+        'extends GdUnitTestSuite',
+        '',
+        '',
+        'func test_expects_a_runtime_error() -> void:',
+        '\tawait assert_error(func() -> void:',
+        '\t\tvar items: Array = []',
+        '\t\tprint(items[3])',
+        '\t).is_runtime_error(any_string())',
+        '',
+        '',
+        'func test_pushes_an_error() -> void:',
+        '\tpush_error("an error this case means to print")',
+        '\tassert_bool(true).is_true()',
+        '',
+      ].join('\n'),
+    );
+    await withStdioServer(async (_call, request) => {
+      const run = async (path: string): Promise<unknown> => {
+        const response = await request(
+          'tools/call',
+          { name: 'project_test', arguments: { projectPath: projectDir, path } },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+        const blocks = asArray(get(response, 'result', 'content')).map((block) => String(get(block, 'text')));
+        return JSON.parse(blocks.find((text) => text.trimStart().startsWith('{')) ?? '{}') as unknown;
+      };
+
+      const overflow = await run('res://overflow');
+      const shown = JSON.stringify(overflow).slice(0, 4000);
+      assert.equal(get(overflow, 'tests'), 1, shown);
+      assert.equal(get(overflow, 'failures'), 0, `gdUnit4 failed nothing: ${shown}`);
+      assert.equal(get(overflow, 'exitCode'), 0, `and exited 0: ${shown}`);
+      assert.equal(get(overflow, 'passed'), false, `a stack overflow is not a pass: ${shown}`);
+      assert.match(
+        String(get(overflow, 'verdict')),
+        /^(one script error|\d+ script errors) that failed no case$/,
+        shown,
+      );
+      const uncaught = asArray(get(overflow, 'uncaughtScriptErrors'));
+      assert.ok(uncaught.length > 0, shown);
+      for (const entry of uncaught) {
+        assert.equal(
+          get(entry, 'text'),
+          'Stack overflow. Check for infinite recursion in your script.',
+          shown,
+        );
+      }
+      assert.match(String(get(overflow, 'note')), /no case failed on, the first "Stack overflow\./, shown);
+
+      // One entry per distinct message, each counted, and the count of errors is still of every one.
+      const entries = asArray(get(overflow, 'engineEntries'));
+      const underflows = entries.filter((entry) => get(entry, 'text') === 'Stack underflow! (Engine Bug)');
+      assert.equal(underflows.length, 1, `the underflows fold into one entry: ${shown}`);
+      assert.ok(Number(get(underflows[0], 'times')) > 100, `counted: ${shown}`);
+      assert.ok(entries.length < 10, `a handful of distinct entries rather than hundreds: ${shown}`);
+      assert.equal(get(overflow, 'engineEntriesOmitted'), undefined, shown);
+      const printedErrors = entries
+        .filter((entry) => get(entry, 'severity') === 'error')
+        .reduce((sum: number, entry) => sum + Number(get(entry, 'times') ?? 1), 0);
+      assert.equal(get(overflow, 'engineErrors'), printedErrors, `every error is counted once: ${shown}`);
+
+      const asked = await run('res://asked');
+      const askedShown = JSON.stringify(asked).slice(0, 4000);
+      assert.equal(get(asked, 'tests'), 2, askedShown);
+      assert.equal(get(asked, 'passed'), true, `errors a test asked for are not uncaught: ${askedShown}`);
+      assert.equal(get(asked, 'verdict'), 'passed', askedShown);
+      assert.equal(get(asked, 'uncaughtScriptErrors'), undefined, askedShown);
+      assert.ok(Number(get(asked, 'engineErrors')) >= 2, `the engine printed both of them: ${askedShown}`);
+
+      writeFileSync(
+        join(projectDir, 'project.godot'),
+        `${settings}\n[gdunit4]\n\nreport/godot/script_error=false\n`,
+      );
+      const allowed = await run('res://overflow');
+      const allowedShown = JSON.stringify(allowed).slice(0, 4000);
+      assert.equal(
+        get(allowed, 'passed'),
+        true,
+        `a project that lets script errors pass is obeyed: ${allowedShown}`,
+      );
+      assert.equal(get(allowed, 'uncaughtScriptErrors'), undefined, allowedShown);
+    });
+  } finally {
+    sweep(projectDir);
+  }
+}
+
+/**
  * The user data directories a test run of the project named [param project] made since [param since]
  * and left in the system temporary directory, once the server has had time to try them again.
  *
@@ -30456,6 +30690,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testStaleDisconnectRegression,
   testOneServerOneProjectRegression,
   testAOneShotRunOfAnotherProjectIsTurnedAwayQuietly,
+  testEngineEntriesFoldAndScriptErrorsAreKnown,
   testSceneToolsVectorRegression,
   testRunArgumentsLeaveTheLocalDebuggerOff,
   testSilenceFollowsTheAskThenTheEnvironment,
@@ -30639,6 +30874,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testGdUnitRunner,
   testATestRunSaysHowFarItHasGot,
   testATestRunCutShortIsNamedForWhatItWasDoing,
+  testAStackOverflowIsNotAPass,
   testAnUpgradeReadsTheEngineOutOfTheConfigItRewrites,
   testCommandLineSetup,
   testUninstallLeavesAddonsItDidNotMake,

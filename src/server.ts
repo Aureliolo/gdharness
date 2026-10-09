@@ -93,7 +93,7 @@ import {
 } from './editor-log.js';
 import { type EngineRun, howItEnded, runEngine } from './engine-run.js';
 import { errorMessage, Refusal } from './errors.js';
-import { answersTo, forAnswer, GameLog, type LogEntry } from './game-log.js';
+import { answersTo, foldedRepeats, forAnswer, GameLog, type LogEntry } from './game-log.js';
 import {
   anEditorIsStillComing,
   type GodotBridge,
@@ -1920,6 +1920,55 @@ export function aboveTheRunner(entry: LogEntry): LogEntry {
       `[and ${cut === 1 ? 'one frame' : `${cut} frames`} inside ${RUNNER_DIRECTORY}]`,
     ],
   };
+}
+
+/** How many distinct engine entries a test run's answer carries, the newest kept. */
+const MOST_ENGINE_ENTRIES = 200;
+
+/**
+ * The gdUnit4 script a test's own expected runtime error is raised under.
+ *
+ * `assert_error(callable).is_runtime_error(...)` calls the callable from this file and consumes the
+ * error it raises, so the case passes, while the engine still prints it as a `SCRIPT ERROR` with
+ * this file in the backtrace. Such an error is one the test asked for.
+ */
+const ERROR_ASSERT = 'GdUnitGodotErrorAssertImpl.gd';
+
+/**
+ * Whether the project leaves gdUnit4 failing a case on a script error, which it does unless its
+ * `report/godot/script_error` setting is turned off.
+ */
+function gdUnitFailsOnScriptErrors(projectPath: string): boolean {
+  try {
+    return (
+      settingKeys(readFileSync(join(projectPath, 'project.godot'), 'utf8')).get(
+        'gdunit4/report/godot/script_error',
+      ) !== false
+    );
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * What to say about script errors printed in a run whose every case passed, or nothing.
+ *
+ * gdUnit4 catches script errors with a logger written in GDScript, and a stack overflow is raised
+ * at the deepest call the engine allows, where that logger cannot be called. The case then passes
+ * on whatever the faulted call returned, beside thousands of engine errors, and the run exits 0.
+ */
+function uncaughtNote(uncaught: readonly LogEntry[]): string | undefined {
+  const first = uncaught[0];
+  if (first === undefined) {
+    return undefined;
+  }
+  const count = uncaught.length === 1 ? 'one script error' : `${uncaught.length} script errors`;
+  return (
+    `Every case passed, but the run printed ${count} that no case failed on, the first "${first.text}"; ` +
+    'they are under uncaughtScriptErrors. gdUnit4 fails a case on the script errors its logger sees, and ' +
+    'it did not see these, so the cases passed on whatever the faulted calls returned. A stack overflow is ' +
+    'one it cannot see: it is raised deeper than the logger can be called.'
+  );
 }
 
 /**
@@ -4629,9 +4678,12 @@ class GodotServer {
       }
     }
 
-    const engineEntries = run.log
-      .select({ severity: 'warning', sinceLastCall: false, limit: 200 })
-      .entries.map(aboveTheRunner);
+    const engineEntries = foldedRepeats(
+      run.log
+        .select({ severity: 'warning', sinceLastCall: false, limit: Number.POSITIVE_INFINITY })
+        .entries.map(aboveTheRunner),
+    );
+    const engineEntriesShown = engineEntries.slice(-MOST_ENGINE_ENTRIES);
     const verdicts: Readonly<Record<number, string>> = {
       0: 'passed',
       100: 'failures',
@@ -4644,6 +4696,13 @@ class GodotServer {
       105: 'script errors',
     };
     const exitCode = run.exitCode;
+    const uncaught =
+      report !== null && exitCode === 0 && !timedOut && gdUnitFailsOnScriptErrors(project.value.path)
+        ? run.log.all.filter(
+            (entry) =>
+              run.log.raisedByScript(entry) && !entry.detail.some((line) => line.includes(ERROR_ASSERT)),
+          )
+        : [];
     // All of it, because the counts are read off it: the newest two hundred lines lost an early
     // suite's orphans, and with them the warning, on any tier that printed a line per case.
     const printed = run.log.select({
@@ -4675,6 +4734,9 @@ class GodotServer {
         : (nothingRan ??
           (brokenScripts > 0
             ? `script errors in ${brokenScripts === 1 ? 'one script' : `${brokenScripts} scripts`}, so no suite ran`
+            : undefined) ??
+          (uncaught.length > 0
+            ? `${uncaught.length === 1 ? 'one script error' : `${uncaught.length} script errors`} that failed no case`
             : undefined) ??
           (exitCode === null ? undefined : verdicts[exitCode]) ??
           (run.exitSignal === null ? `exit ${exitCode ?? 'unknown'}` : howItExited(run)));
@@ -4838,6 +4900,7 @@ class GodotServer {
         report.failures === 0 &&
         report.errors === 0 &&
         hookFailures.length === 0 &&
+        uncaught.length === 0 &&
         missing.length === 0,
       verdict,
       ...(missing.length > 0 ? { missing } : {}),
@@ -4851,6 +4914,7 @@ class GodotServer {
       time: report.time,
       failed,
       hookFailures: hookFailures.length > 0 ? hookFailures : undefined,
+      uncaughtScriptErrors: uncaught.length > 0 ? foldedRepeats(uncaught.map(aboveTheRunner)) : undefined,
       // Alongside `failed` rather than folded into it: a suite that left nodes behind failed
       // nothing, and an agent reading `failed` for what to fix must not find a passing test in it.
       warnings: warnings.length > 0 ? warnings : undefined,
@@ -4863,6 +4927,7 @@ class GodotServer {
       note:
         [
           missingNote,
+          uncaughtNote(uncaught),
           ranAs.startsWith('warnings') && warnings.length === 0
             ? 'gdUnit4 exits 101 for orphan nodes when nothing failed, and this run printed no count of them: orphan reporting may be off in the project settings.'
             : notRunNote(notRun, readBoolean(args, 'failFast') === true),
@@ -4887,7 +4952,11 @@ class GodotServer {
       suitesPassed: report.suites.length - unclean.length,
       engineErrors: run.log.count('error'),
       engineWarnings: run.log.count('warning'),
-      engineEntries,
+      engineEntries: engineEntriesShown,
+      engineEntriesOmitted:
+        engineEntries.length > engineEntriesShown.length
+          ? engineEntries.length - engineEntriesShown.length
+          : undefined,
       classes: withAddonClassesCounted(classes.payload, cachedClasses(project.value.path) ?? new Map()),
     });
   }
