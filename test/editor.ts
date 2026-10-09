@@ -241,6 +241,11 @@ const MAIN_GD = [
   '\tvar nobody: Node = get_node_or_null("NoSuchNode")',
   '\tstash = nobody.get_index()',
   '',
+  '',
+  // The game quitting by itself, which a stop from the editor is not: the editor kills its game.
+  'func leave() -> void:',
+  '\tget_tree().quit()',
+  '',
 ];
 
 /**
@@ -4698,6 +4703,31 @@ async function testAPlayedGameIsProfiled({ call, attempt, play, project }: Edito
     assert.ok(
       asNumber(get(first, 'frames'), 'frames') > 0,
       `frames reached the editor: ${JSON.stringify(first)}`,
+    );
+
+    // The game quitting by itself sends the totals and waits for the editor to say it has read
+    // them: answered, it is gone within a few frames; unanswered, it waits out the runtime's three
+    // seconds before it exits.
+    const asked = Date.now();
+    await attempt('runtime_invoke', {
+      projectPath: project,
+      op: 'call',
+      nodePath: '/root/Main',
+      method: 'leave',
+    });
+    let gone = -1;
+    while (Date.now() - asked < 10_000) {
+      if (get(await call('editor_status', {}), 'game', 'playingInEditor', 'playing') === false) {
+        gone = Date.now() - asked;
+        break;
+      }
+      await delay(50);
+    }
+    const whole = await call('editor_run', { op: 'profile', limit: 100 });
+    assert.equal(get(whole, 'complete'), true, `the totals arrived: ${JSON.stringify(whole)}`);
+    assert.ok(
+      gone >= 0 && gone < 2000,
+      `the game left ${gone}ms after it was asked to, so the editor answered its word that the totals were sent`,
     );
 
     await attempt('editor_run', { op: 'stop' });
