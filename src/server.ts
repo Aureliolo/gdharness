@@ -145,6 +145,7 @@ import {
 } from './lsp_client.js';
 import { launchOutsideTheTree } from './outside.js';
 import { isSameDirectory, isWithinRoot, realPathOr, resolveWithinProject } from './paths.js';
+import { acceptsConnections, notListeningNote } from './port-probe.js';
 import { freePort, portFromEnvOrNull } from './ports.js';
 import {
   ancestorsIn,
@@ -306,6 +307,12 @@ function editorRestartTimeoutMs(): number {
   return waitFromEnv('GDHARNESS_EDITOR_RESTART_TIMEOUT_MS', 90_000);
 }
 
+/**
+ * How long a restarted editor is given to start its language server and debug adapter once it has
+ * greeted. The two came up within a few seconds of each other downstream, in either order.
+ */
+const EDITOR_SERVERS_START_MS = 20_000;
+
 /** [param variable] as a positive number of milliseconds, or [param fallback] when it is not one. */
 function waitFromEnv(variable: string, fallback: number): number {
   const override = Number.parseInt(envValue(variable) ?? '', 10);
@@ -435,7 +442,7 @@ export function longerWaitNote(tool: string, op: string, waitedMs: number): stri
   }
   const how =
     tool === 'runtime_wait' && op === 'frames'
-      ? `the wait is counted from the number of frames, at ${SLOWEST_FRAME_RATE} a second on top of GDHARNESS_RUNTIME_TIMEOUT_MS, and this game fell below that rate, so ask for fewer frames at a time`
+      ? `the wait is counted from the number of frames, at ${SLOWEST_FRAME_RATE} a second on top of GDHARNESS_RUNTIME_TIMEOUT_MS: a game drawing frames more slowly than that is waited on in fewer frames at a time, and a game inside one long frame, such as a long _ready, answers no call however few frames are asked for`
       : 'the wait is GDHARNESS_RUNTIME_TIMEOUT_MS, which is set in the environment the server is started with';
   return `${tool} ${op} takes no timeoutMs: it was given ${waitedMs}ms, and ${how}.`;
 }
@@ -6211,15 +6218,17 @@ class GodotServer {
         hold: current === null ? {} : await this.holdOf(current, active),
       };
     })();
-    const [games, { playing, active, run, hold }, scan, editorStatus] = await Promise.all([
+    const [games, { playing, active, run, hold }, scan, editorStatus, servers] = await Promise.all([
       pinged,
       asked,
       this.editorScanState(),
       this.getEditorStatusPayload(),
+      this.editorServersListening(),
     ]);
     return this.jsonTextResponse({
       editor: {
         ...editorStatus,
+        ...servers,
         // Asked of the editor rather than remembered from when it greeted this server: the
         // debugger takes a port again before every play, so the one in the greeting is a number
         // it has already moved off.
@@ -6267,6 +6276,47 @@ class GodotServer {
         })),
       },
     });
+  }
+
+  /**
+   * Whether the connected editor's language server and debug adapter accept connections on the
+   * ports it names, with what to do when one does not. Empty before the editor has named them.
+   */
+  private async editorServersListening(): Promise<{
+    lspListening?: boolean;
+    dapListening?: boolean;
+    serversNote?: string | undefined;
+  }> {
+    const status = this.godotBridge.getStatus();
+    const { lspPort, dapPort } = status;
+    if (!status.connected || lspPort === undefined || dapPort === undefined) {
+      return {};
+    }
+    const [lsp, dap] = await Promise.all([acceptsConnections(lspPort), acceptsConnections(dapPort)]);
+    const greetedAgoMs = status.connectedAt === undefined ? null : Date.now() - status.connectedAt.getTime();
+    return {
+      ...(lsp === null ? {} : { lspListening: lsp }),
+      ...(dap === null ? {} : { dapListening: dap }),
+      serversNote: notListeningNote(
+        { lsp: { port: lspPort, listening: lsp }, dap: { port: dapPort, listening: dap } },
+        greetedAgoMs,
+      ),
+    };
+  }
+
+  /**
+   * The same, for an editor that has just come back from a restart: asked again until both listen
+   * or the editor is past starting them, since its language server comes up seconds after it greets.
+   */
+  private async editorServersOnceStarted(): Promise<Awaited<ReturnType<typeof this.editorServersListening>>> {
+    const deadline = Date.now() + EDITOR_SERVERS_START_MS;
+    for (;;) {
+      const answer = await this.editorServersListening();
+      if (answer.serversNote === undefined || Date.now() >= deadline) {
+        return answer;
+      }
+      await delay(500);
+    }
   }
 
   /**
@@ -6365,6 +6415,7 @@ class GodotServer {
       );
     }
 
+    const servers = await this.editorServersOnceStarted();
     const now = this.godotBridge.getStatus();
     const after = this.settingKeysOf(before.projectPath);
     // With the value each one had, because naming the key alone leaves the caller to go and find
@@ -6386,6 +6437,7 @@ class GodotServer {
         this.editorCodeOnDisk(),
       ),
       ...this.whatTheEditorDropped(settingsBefore, after),
+      ...servers,
       tookMs: Date.now() - began,
     });
   }
@@ -7232,6 +7284,7 @@ class GodotServer {
         `The editor is connected but its debug adapter is not: ${errorMessage(error)}`,
         [
           `This asked on port ${this.dap().port}, which is where the connected editor says it serves`,
+          "Godot binds its debug adapter once, as the editor starts, and reports a failure only in the editor's own log panel: editor_launch restart binds it again",
           'GDHARNESS_DAP_PORT points this server at another one',
         ],
       );
