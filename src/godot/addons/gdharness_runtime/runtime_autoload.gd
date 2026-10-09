@@ -27,6 +27,10 @@ const BIND_ADDRESS_SETTING: String = "gdharness/runtime/bind_address"
 ## expects. A fixed port is for a client that cannot read the announcement.
 const PORT_SETTING: String = "gdharness/runtime/port"
 
+## How long a profiled game waits as it leaves for its profile to be sent: the debugger's thread
+## sends every 6.9 ms, so this is many of its turns.
+const PROFILE_SEND_MS: int = 100
+
 ## How the engine is told to run a script instead of the game: `godot -s thing.gd`.
 const SCRIPT_FLAGS: PackedStringArray = ["-s", "--script"]
 
@@ -126,11 +130,24 @@ func _ready() -> void:
 
 
 func _exit_tree() -> void:
+	_send_the_profile()
 	if _errors != null:
 		OS.remove_logger(_errors)
 		_errors.close()
 		_errors = null
 	_cleanup()
+
+
+## A profiled run's totals, sent as the game leaves the tree.
+##
+## The engine sends its script profiler's totals only when the profiler is switched off, and at
+## exit it is torn down without being switched off, so a scene that did its work in _ready and
+## quit took its whole profile with it, last frame included. The wait is for the debugger's own
+## thread, which sends what is queued every few milliseconds and stops without emptying the queue.
+func _send_the_profile() -> void:
+	if EngineDebugger.is_active() and EngineDebugger.is_profiling("servers"):
+		EngineDebugger.profiler_enable("servers", false)
+		OS.delay_msec(PROFILE_SEND_MS)
 
 
 ## The engine's error reports, written to a file for the server, for a game the editor plays, and
