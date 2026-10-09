@@ -331,6 +331,7 @@ func _wait_until_said(node_path: String, said: String, timeout_ms: int, include_
 	var looks: int = 0
 	var looked_usec: int = 0
 	var next_look: int = 0
+	var looked_at_frame: int = 0
 	var found: bool = false
 	while true:
 		if Time.get_ticks_usec() >= next_look:
@@ -340,13 +341,19 @@ func _wait_until_said(node_path: String, said: String, timeout_ms: int, include_
 			var took: int = Time.get_ticks_usec() - looking
 			looked_usec += took
 			next_look = Time.get_ticks_usec() + took * LOOKS_APART
+			looked_at_frame = frames
 		if found or Time.get_ticks_msec() - started >= timeout_ms:
 			break
 		await _host.get_tree().process_frame
 		frames += 1
 	# One more look at the end, so words that arrived between two paced looks are not answered as
-	# never having come.
+	# never having come. Taken once a whole frame has run since the last look, which is two frame
+	# starts: a first look that outlasted the timeout otherwise left none, so the wait answered with
+	# the game not having run at all, and a command sent during that look not yet read.
 	if not found:
+		while frames - looked_at_frame < 2:
+			await _host.get_tree().process_frame
+			frames += 1
 		var last: int = Time.get_ticks_usec()
 		found = _anything_says(node_path, said, include_hidden)
 		looks += 1
