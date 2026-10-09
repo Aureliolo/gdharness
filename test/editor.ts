@@ -4582,6 +4582,59 @@ async function testAPlayIsItsOwn({ call, attempt, refusal, play, project }: Edit
   }
 }
 
+/**
+ * A game the editor plays is profiled through the editor's own debugger session.
+ *
+ * The editor's handlers take the profiler's messages before any addon is asked, so the addon reads
+ * them off a signal of an editor node Godot does not expose: this is the case that says whether
+ * that still reaches them. Twice: a play started with profile: true, which is armed before the play
+ * and counts every call; and a play started without it, where asking switches the profiler on there
+ * and then, says so, and counts only what came after.
+ */
+async function testAPlayedGameIsProfiled({ call, attempt, play, project }: Editor): Promise<void> {
+  await attempt('editor_run', { op: 'stop' });
+  const twice = async (times: number): Promise<void> => {
+    for (let round = 0; round < times; round += 1) {
+      await call('runtime_invoke', { projectPath: project, op: 'call', nodePath: '/root/Main', method: '_twice', args: [round] });
+    }
+  };
+  const callsOfTwice = async (): Promise<number> => {
+    // Frames reach the editor at its own frame rate, so a call made a moment ago can be a frame away.
+    for (let attemptAt = 0; attemptAt < 40; attemptAt += 1) {
+      const profile = await call('editor_run', { op: 'profile', limit: 100 });
+      const row = asArray(get(profile, 'functions')).find((one) => get(one, 'function') === '_twice');
+      if (row !== undefined) {
+        return asNumber(get(row, 'calls'), 'calls');
+      }
+      await delay(250);
+    }
+    return 0;
+  };
+  try {
+    await play({ profile: true });
+    await twice(25);
+    await delay(500);
+    const first = await call('editor_run', { op: 'profile', limit: 100 });
+    assert.equal(get(first, 'through'), 'editor', JSON.stringify(first));
+    assert.equal(get(first, 'connected'), true, JSON.stringify(first));
+    assert.ok(asNumber(get(first, 'frames'), 'frames') > 0, `frames reached the editor: ${JSON.stringify(first)}`);
+    // The fixture's _ready calls _twice once itself, so the count shows the profile began before it.
+    assert.equal(await callsOfTwice(), 26, "every call of a play profiled from its start, _ready's own included");
+
+    await attempt('editor_run', { op: 'stop' });
+    await play();
+    await twice(5);
+    const switched = await call('editor_run', { op: 'profile' });
+    assert.equal(get(switched, 'started'), true, `asking switches the profiler on: ${JSON.stringify(switched)}`);
+    assert.match(String(get(switched, 'note')), /switched on now/, JSON.stringify(switched));
+    await delay(500);
+    await twice(10);
+    assert.equal(await callsOfTwice(), 10, 'only the calls after the profiler went on');
+  } finally {
+    await attempt('editor_run', { op: 'stop' });
+  }
+}
+
 async function testAnEditDoesNotReachTheRunningGame({ call, attempt, play, project }: Editor): Promise<void> {
   await attempt('editor_run', { op: 'stop' });
   const game = { projectPath: project };
@@ -5276,6 +5329,7 @@ async function main(): Promise<void> {
     ['testRuntime', testRuntime],
     ['testAPlayIsItsOwn', testAPlayIsItsOwn],
     ['testAnEditDoesNotReachTheRunningGame', testAnEditDoesNotReachTheRunningGame],
+    ['testAPlayedGameIsProfiled', testAPlayedGameIsProfiled],
     ['testTheDebuggerGetsAPortOfItsOwn', testTheDebuggerGetsAPortOfItsOwn],
     ['testTheGameIsHandedItsOwnArguments', testTheGameIsHandedItsOwnArguments],
     ['testAnErrorTheGameBrokeOnIsReported', testAnErrorTheGameBrokeOnIsReported],

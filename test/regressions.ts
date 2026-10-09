@@ -81,6 +81,15 @@ import {
 } from '../src/editor-log.js';
 import { type EngineRun, howItEnded, runEngine } from '../src/engine-run.js';
 import { answersTo, foldedRepeats, forAnswer, GameLog, type LogEntry } from '../src/game-log.js';
+import { DebuggerStream, decodeVariant, framedCommand } from '../src/godot-variant.js';
+import {
+  ProfileAggregate,
+  type ProfileTotals,
+  profiledFunctions,
+  profilerOn,
+  signatureParts,
+  withEngineArguments,
+} from '../src/script-profile.js';
 import { occurrencesOf, regionsOf, shapeOf as scriptShapeOf } from '../src/gdscript-source.js';
 import {
   anEditorIsStillComing,
@@ -199,6 +208,7 @@ import {
   patienceForFrames,
   previousRunHow,
   previousRunLeft,
+  profileAnswer,
   runIsUp,
   runtimeVerdict,
   scanWaitAnswer,
@@ -768,6 +778,172 @@ function testEngineEntriesFoldAndScriptErrorsAreKnown(): void {
     `an export's answer folds them too: ${JSON.stringify(exported)}`,
   );
   assert.equal(get(exported, 'warnings'), 303, 'and counts every one');
+}
+
+/**
+ * The profiler's reading of the engine's wire format, its sums and its answer, without an engine.
+ *
+ * The bytes are built here as `core/io/marshalls.cpp` writes them at 4.7.2, in the shapes the engine
+ * actually uses, which are not the ones this server writes: names as StringName (21) rather than
+ * String, floats as 32-bit where that loses nothing, an int past 32 bits with its flag, and a packed
+ * string array whose lengths count a trailing NUL. The answer is rendered in every state it has, so
+ * a sentence only one state reaches is read before somebody is handed it.
+ */
+function testTheProfilerReadsWhatTheEngineSends(): void {
+  const bytes: number[] = [];
+  const u32 = (value: number): void => {
+    bytes.push(value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff);
+  };
+  const text = (value: string, nul = false): void => {
+    const encoded = [...new TextEncoder().encode(value), ...(nul ? [0] : [])];
+    u32(encoded.length);
+    bytes.push(...encoded, ...new Array<number>((4 - (encoded.length % 4)) % 4).fill(0));
+  };
+  u32(28);
+  u32(6);
+  u32(21);
+  text('res://a.gd::3::f');
+  u32(2 | (1 << 16));
+  const wide = new DataView(new ArrayBuffer(8));
+  wide.setBigInt64(0, 2n ** 40n, true);
+  bytes.push(...new Uint8Array(wide.buffer));
+  u32(3);
+  const narrow = new DataView(new ArrayBuffer(4));
+  narrow.setFloat32(0, 0.5, true);
+  bytes.push(...new Uint8Array(narrow.buffer));
+  u32(34);
+  u32(2);
+  text('x', true);
+  text('yz', true);
+  u32(27);
+  u32(1);
+  u32(2);
+  u32(1);
+  u32(1);
+  u32(1);
+  u32(5);
+  narrow.setFloat32(0, 1, true);
+  bytes.push(...new Uint8Array(narrow.buffer));
+  narrow.setFloat32(0, 2, true);
+  bytes.push(...new Uint8Array(narrow.buffer));
+  assert.deepEqual(decodeVariant(Uint8Array.from(bytes)), [
+    'res://a.gd::3::f',
+    2 ** 40,
+    0.5,
+    ['x', 'yz'],
+    { kind: 'dictionary', entries: [[1, true]] },
+    { kind: 'Vector2', values: [1, 2] },
+  ]);
+
+  // The command decodes back to what the game checks: a String name, thread 1, then the data.
+  const command = profilerOn();
+  assert.equal(new DataView(command.buffer).getUint32(0, true), command.length - 4, 'its length, little-endian');
+  assert.deepEqual(decodeVariant(command.subarray(4)), ['profiler:servers', 1, [true, [16384, false]]]);
+
+  // Messages however the reads cut them, and one this reader cannot take skipped on its own.
+  const unknownType = Uint8Array.of(12, 0, 0, 0, 28, 0, 0, 0, 1, 0, 0, 0, 99, 0, 0, 0, 0, 0, 0, 0);
+  const joined = Uint8Array.from([
+    ...framedCommand('first', [1]),
+    ...unknownType.subarray(0, 16),
+    ...framedCommand('second', ['two']),
+  ]);
+  new DataView(joined.buffer).setUint32(framedCommand('first', [1]).length, 12, true);
+  const stream = new DebuggerStream();
+  const read = [...joined].flatMap((byte) => stream.push(Uint8Array.of(byte)));
+  assert.deepEqual(
+    read.map((one) => ('message' in one ? [one.message, one.data] : 'unreadable')),
+    [['first', [1]], 'unreadable', ['second', ['two']]],
+    JSON.stringify(read),
+  );
+
+  // Frames summed per function past the servers' section, and the engine's totals replacing them.
+  const aggregate = new ProfileAggregate(1000);
+  const take = (message: string, data: unknown[]): void => {
+    aggregate.take({ message, data: data as never }, 2000);
+  };
+  take('servers:function_signature', ['res://w.gd::6::Work.square', 0]);
+  take('servers:function_signature', ['res://w.gd::10::Work.busy', 1]);
+  const frame = (calls: number): unknown[] => [
+    7, 0.016, 0.01, 0, 0.016, 0.004, 1, 'physics_2d', 4, 'step', 0.001, 'flush', 0.0, 10,
+    0, calls, 0.002, 0.002, 0, 1, 1, 0.001, 0.003, 0,
+  ];
+  take('servers:profile_frame', frame(100));
+  take('servers:profile_frame', frame(50));
+  take('servers:profile_frame', [1, 2, 3]);
+  const summed = aggregate.snapshot();
+  assert.deepEqual(
+    [summed.frames, summed.complete, summed.unreadable, summed.functions['res://w.gd::6::Work.square']?.calls],
+    [2, false, 1, 150],
+    JSON.stringify(summed),
+  );
+  take('servers:profile_total', [9, 0, 0, 0, 0, 0, 0, 5, 0, 200, 0.5, 0.5, 0]);
+  const whole = aggregate.snapshot();
+  assert.deepEqual(
+    [whole.complete, Object.keys(whole.functions), whole.functions['res://w.gd::6::Work.square']?.calls],
+    [true, ['res://w.gd::6::Work.square'], 200],
+    'the total is what the frames add up to, so it replaces them',
+  );
+
+  assert.deepEqual(signatureParts('res://w.gd::10::Work.busy'), { script: 'res://w.gd', line: 10, function: 'Work.busy' });
+  assert.deepEqual(signatureParts('res://s.tscn::GDScript_ab::7::f(lambda)'), {
+    script: 'res://s.tscn::GDScript_ab',
+    line: 7,
+    function: 'f(lambda)',
+  });
+
+  const totals = (functions: ProfileTotals['functions']): ProfileTotals => ({
+    startedAt: 0,
+    lastFrameAt: 10,
+    frames: 3,
+    complete: true,
+    unreadable: 0,
+    functions,
+  });
+  const table = profiledFunctions(
+    totals({
+      'res://a.gd::1::slow': { calls: 1, selfSeconds: 0.5, totalSeconds: 0.9 },
+      'res://a.gd::2::fast': { calls: 9, selfSeconds: 0.1, totalSeconds: 0.1 },
+      'res://a.gd::3::inside': { calls: 0, selfSeconds: 99, totalSeconds: 99 },
+      'res://a.gd::4::mid': { calls: 2, selfSeconds: 0.3, totalSeconds: 0.4 },
+    }),
+    2,
+  );
+  assert.deepEqual(
+    [table.functions.map((one) => one.function), table.omitted, table.counted, table.scriptMs],
+    [['slow', 'mid'], 1, 3, 900],
+    'by self time; the function the profiler started inside is not counted, nor its time',
+  );
+
+  assert.deepEqual(withEngineArguments(['--path', 'p', '--', '--level=2'], ['--remote-debug', 'x']), [
+    '--path',
+    'p',
+    '--remote-debug',
+    'x',
+    '--',
+    '--level=2',
+  ]);
+  assert.deepEqual(withEngineArguments(['--path', 'p'], ['--x']), ['--path', 'p', '--x']);
+
+  const answer = (reading: Partial<Parameters<typeof profileAnswer>[0]>): Record<string, unknown> =>
+    profileAnswer(
+      { through: 'gdharness', running: false, totals: null, coveredMs: 0, runtimeAddon: true, ...reading },
+      30,
+    );
+  const say = (reading: Partial<Parameters<typeof profileAnswer>[0]>): string => String(answer(reading)['note']);
+  assert.match(say({ running: true }), /^The game has not connected to the profiler yet/);
+  assert.match(say({}), /^The game never connected to the profiler, so nothing was measured/);
+  assert.equal(answer({ totals: totals({}) })['note'], undefined, 'the engine’s own totals need nothing said');
+  const partial = { ...totals({}), complete: false };
+  assert.match(say({ running: true, totals: partial }), /^The run is still going, so these are the 3 frames summed so far, written at most half a second behind\.$/);
+  assert.match(say({ running: true, totals: partial, through: 'editor' }), /summed so far\.$/);
+  assert.match(say({ totals: { ...partial, frames: 1 } }), /^These are the one frame that arrived, summed/);
+  assert.doesNotMatch(say({ totals: partial }), /runtime addon/, 'a project with the addon is not told to install it');
+  assert.match(
+    say({ totals: { ...partial, frames: 0 }, runtimeAddon: false, through: 'editor' }),
+    /ended before a frame of the profile reached the editor.*This project has no gdharness runtime addon/,
+  );
+  assert.match(say({ totals: { ...totals({}), unreadable: 1 } }), /^1 message from the game could not be read/);
+  assert.match(say({ totals: { ...totals({}), unreadable: 2 } }), /^2 messages from the game could not be read/);
 }
 
 async function turnedAwayAtTheBridge(
@@ -31004,6 +31180,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testOneServerOneProjectRegression,
   testAOneShotRunOfAnotherProjectIsTurnedAwayQuietly,
   testEngineEntriesFoldAndScriptErrorsAreKnown,
+  testTheProfilerReadsWhatTheEngineSends,
   testSceneToolsVectorRegression,
   testRunArgumentsLeaveTheLocalDebuggerOff,
   testSilenceFollowsTheAskThenTheEnvironment,

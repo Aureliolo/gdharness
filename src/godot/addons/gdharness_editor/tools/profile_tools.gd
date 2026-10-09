@@ -136,11 +136,16 @@ func _switch_on(session_id: int) -> void:
 	session.toggle_profiler("servers", true, [FRAME_FUNCTIONS, false])
 
 
+## A play that was asked to be profiled is switched on as it starts. Any other play drops what is
+## held: the editor plays the next game in the same session, and a profile kept past it was read as
+## the new game's.
 func _on_session_started(session_id: int) -> void:
-	if _armed:
-		_armed = false
-		if _hook() > 0:
-			_switch_on(session_id)
+	if not _armed:
+		_reset()
+		return
+	_armed = false
+	if _hook() > 0:
+		_switch_on(session_id)
 
 
 ## Connects to every debugger tab not connected yet, in tab order, which is session order.
