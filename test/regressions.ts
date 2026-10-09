@@ -6108,7 +6108,7 @@ function testEveryGdscriptIsUnderTheGatesAndEveryGateHasSome(): void {
 /**
  * The bumps the release button offers are the bumps both documents describe.
  *
- * `CLAUDE.md` tells the owner how to choose a bump and says `.github/CONTRIBUTING.md` states the
+ * `AGENTS.md` tells the owner how to choose a bump and says `.github/CONTRIBUTING.md` states the
  * same thing publicly, so keep the two in step. That instruction was stated and held by nothing,
  * which is its own shape: a project can write a rule into its working agreement, act on it, and
  * still have no case that fails when the two drift.
@@ -6141,7 +6141,7 @@ function testTheReleaseButtonOffersWhatBothDocumentsDescribe(): void {
   // well, so a whole-file search passes on a Versions section that has lost it, which is a check
   // reading the right document and the wrong part of it.
   const sections: [string, string][] = [
-    ['CLAUDE.md', '## Releasing'],
+    ['AGENTS.md', '## Releasing'],
     [join('.github', 'CONTRIBUTING.md'), '## Versions'],
   ];
   for (const [file, heading] of sections) {
@@ -6414,7 +6414,7 @@ function testChangelogReach(): void {
   const repositoryOnly: string[][] = [
     ['test/regressions.ts'],
     ['test/support/server.ts'],
-    ['CLAUDE.md'],
+    ['AGENTS.md'],
     ['.github/workflows/ci.yml'],
     ['.github/CONTRIBUTING.md'],
     ['docs/architecture.md'],
