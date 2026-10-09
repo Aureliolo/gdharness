@@ -116,6 +116,7 @@ import {
 } from '../src/launch.js';
 import { GodotLSPClient, handleLSPTool, LSPTimeout } from '../src/lsp_client.js';
 import { isSameDirectory, isWithinRoot, resolveWithinProject } from '../src/paths.js';
+import { acceptsConnections, notListeningNote } from '../src/port-probe.js';
 import { freePort } from '../src/ports.js';
 import {
   ancestorsIn,
@@ -5422,7 +5423,10 @@ function testTheLongerWaitIsOneTheCallTakes(): void {
   ]) {
     assert.ok(rendered.includes(named), `${named} was rendered: ${rendered.join(', ')}`);
   }
-  assert.match(longerWaitNote('runtime_wait', 'frames', 25_000), /so ask for fewer frames at a time\.$/);
+  assert.match(
+    longerWaitNote('runtime_wait', 'frames', 25_000),
+    /waited on in fewer frames at a time, and a game inside one long frame, such as a long _ready, answers no call however few frames are asked for\.$/,
+  );
   assert.match(
     longerWaitNote('runtime_capture', 'screenshot', 10_000),
     /the wait is GDHARNESS_RUNTIME_TIMEOUT_MS, which is set in the environment the server is started with\.$/,
@@ -12995,6 +12999,7 @@ async function testARestartSaysWhatTheEditorDropped(): Promise<void> {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-restarting-'));
   let editor: WebSocket | null = null;
   let second: WebSocket | null = null;
+  const servers: Server[] = [];
   try {
     const settings = join(project, 'project.godot');
     writeFileSync(
@@ -13003,7 +13008,7 @@ async function testARestartSaysWhatTheEditorDropped(): Promise<void> {
     );
 
     await server.initialize('regression-test');
-    const greet = async (socket: WebSocket): Promise<void> => {
+    const greet = async (socket: WebSocket, saying: Record<string, unknown> = {}): Promise<void> => {
       await new Promise<void>((resolve, reject) => {
         socket.once('open', () => {
           resolve();
@@ -13025,6 +13030,7 @@ async function testARestartSaysWhatTheEditorDropped(): Promise<void> {
           project_path: project,
           addon_version: SERVER_VERSION,
           editor_pid: process.pid,
+          ...saying,
         }),
       );
     };
@@ -13050,12 +13056,32 @@ async function testARestartSaysWhatTheEditorDropped(): Promise<void> {
     writeFileSync(settings, 'config_version=5\n\n[debug]\n\ngdscript/warnings/unsafe_call_argument=2\n');
     editor.close();
     await delay(1100);
+    // The editor that comes back names its two servers, and its debug adapter starts listening a
+    // second after it greets, as a restarted editor's servers come up after its greeting.
+    const [lspPort, dapPort] = [await reservePort(), await reservePort()];
+    const listen = async (on: number): Promise<Server> => {
+      const made = createServer((socket) => {
+        socket.destroy();
+      });
+      await new Promise<void>((resolve) => {
+        made.listen(on, '127.0.0.1', resolve);
+      });
+      return made;
+    };
+    servers.push(await listen(lspPort));
     second = new WebSocket(`ws://127.0.0.1:${port}/godot`);
-    await greet(second);
+    await greet(second, { lsp_port: lspPort, dap_port: dapPort });
+    await delay(1000);
+    servers.push(await listen(dapPort));
 
     const answer = parseTextContent(await restarting);
     const said = JSON.stringify(answer);
     assert.equal(get(answer, 'restarted'), true, said);
+    assert.deepEqual(
+      [get(answer, 'lspListening'), get(answer, 'dapListening'), get(answer, 'serversNote')],
+      [true, true, undefined],
+      `the restart waited for the adapter to start listening, and says both are: ${said}`,
+    );
     const gone = asArray(get(answer, 'settingsDropped') ?? []);
     assert.equal(gone.length, 1, `the key the save took out is named: ${said}`);
     assert.equal(get(gone[0], 'setting'), 'debug/gdscript/warnings/return_value_discarded', said);
@@ -13076,6 +13102,9 @@ async function testARestartSaysWhatTheEditorDropped(): Promise<void> {
     editor?.terminate();
     second?.terminate();
     await server.stop();
+    for (const one of servers) {
+      one.close();
+    }
     sweep(project);
   }
 }
@@ -16657,6 +16686,124 @@ async function testAnEditorOnAnotherVersionIsStillAskedWhatItIsPlaying(): Promis
  *
  * Three greetings on one server, each from a fresh socket the way a restarted editor greets.
  */
+/**
+ * Whether the editor's language server and debug adapter are listening is asked of their ports, not
+ * read off the editor's greeting.
+ *
+ * Reported in #987: a restarted editor came back with its language server up and nothing on its
+ * debug adapter port. Godot reports a failed bind only in the editor's own log panel, so the played
+ * start was refused with ECONNREFUSED while editor_status went on naming the port. Here a fake editor
+ * names two ports, one with a listener behind it and one with none, and then the second gets one.
+ */
+async function testAnEditorsServersAreAskedOfTheirPorts(): Promise<void> {
+  // The note's branches, rendered: one down, both down, an editor still starting, and a port that
+  // neither accepted nor refused, which is not reported as down.
+  const up = { port: 6005, listening: true };
+  assert.equal(notListeningNote({ lsp: up, dap: { port: 6006, listening: true } }, 60_000), undefined);
+  assert.equal(notListeningNote({ lsp: up, dap: { port: 6006, listening: null } }, 60_000), undefined);
+  assert.equal(
+    notListeningNote({ lsp: up, dap: { port: 6006, listening: false } }, 60_000),
+    "The editor names its debug adapter on port 6006, and nothing accepts connections there. Godot binds each once, as the editor starts, and reports a failure only in the editor's own log panel; played runs and the debug tools need the debug adapter. editor_launch restart binds it again.",
+  );
+  assert.match(
+    String(
+      notListeningNote(
+        { lsp: { port: 6005, listening: false }, dap: { port: 6006, listening: false } },
+        60_000,
+      ),
+    ),
+    /^The editor names its language server on port 6005 and its debug adapter on port 6006, .*; diagnostics, symbols and renames need the language server, and played runs and the debug tools need the debug adapter\. editor_launch restart binds them again\.$/,
+  );
+  assert.match(
+    String(notListeningNote({ lsp: { port: 6005, listening: false }, dap: up }, 3_000)),
+    /binds it again\. The editor greeted 3s ago, so it may still be starting: ask again in a few seconds\.$/,
+  );
+
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-served-'));
+  const port = await reservePort();
+  const [lspPort, dapPort] = [await reservePort(), await reservePort()];
+  const listener = async (on: number): Promise<Server> => {
+    const made = createServer((socket) => {
+      socket.destroy();
+    });
+    await new Promise<void>((resolve) => {
+      made.listen(on, '127.0.0.1', resolve);
+    });
+    return made;
+  };
+  const listeners: Server[] = [await listener(lspPort)];
+  const server = new ServerProcess({ env: { GDHARNESS_BRIDGE_PORT: String(port) } });
+  let socket: WebSocket | null = null;
+  try {
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    await server.initialize('regression-test');
+    const status = async (): Promise<unknown> =>
+      get(
+        parseTextContent(await server.request('tools/call', { name: 'editor_status', arguments: {} })),
+        'editor',
+      );
+    const opened = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+    socket = opened;
+    await new Promise<void>((resolve, reject) => {
+      opened.once('open', () => {
+        resolve();
+      });
+      opened.once('error', reject);
+    });
+    opened.on('message', (raw: Buffer) => {
+      const message: unknown = JSON.parse(String(raw));
+      if (isRecord(message) && message['type'] === 'tool_invoke') {
+        opened.send(
+          JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result: { ok: true } }),
+        );
+      }
+    });
+    opened.send(
+      JSON.stringify({
+        type: 'godot_ready',
+        project_path: project,
+        addon_version: SERVER_VERSION,
+        lsp_port: lspPort,
+        dap_port: dapPort,
+      }),
+    );
+    let seen: unknown = null;
+    for (let waited = 0; waited < 10_000 && get(seen, 'projectPath') !== project; waited += 100) {
+      await delay(100);
+      seen = await status();
+    }
+    const said = JSON.stringify(seen);
+    assert.deepEqual(
+      [get(seen, 'lspPort'), get(seen, 'lspListening'), get(seen, 'dapPort'), get(seen, 'dapListening')],
+      [lspPort, true, dapPort, false],
+      `the language server answers and the debug adapter does not: ${said}`,
+    );
+    assert.match(
+      text(get(seen, 'serversNote')),
+      new RegExp(
+        `^The editor names its debug adapter on port ${dapPort}, and nothing accepts connections there\\..*editor_launch restart binds it again\\. The editor greeted \\d+s ago, so it may still be starting`,
+      ),
+      said,
+    );
+
+    listeners.push(await listener(dapPort));
+    const both = await status();
+    assert.deepEqual(
+      [get(both, 'lspListening'), get(both, 'dapListening'), get(both, 'serversNote')],
+      [true, true, undefined],
+      `and once the adapter is listening, nothing is said: ${JSON.stringify(both)}`,
+    );
+    assert.equal(await acceptsConnections(dapPort), true, 'the probe reaches a listener');
+  } finally {
+    socket?.close();
+    await server.stop();
+    for (const one of listeners) {
+      one.close();
+    }
+    sweep(project);
+  }
+}
+
 async function testAnEditorThatClearsBreakpointsIsSaidSo(): Promise<void> {
   const project = mkdtempSync(join(tmpdir(), 'gdharness-sync-'));
   const port = await reservePort();
@@ -21441,7 +21588,7 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
       assert.equal(get(framesWait, 'pending'), true, JSON.stringify(framesWait));
       assert.match(
         text(get(framesWait, 'note')),
-        /runtime_wait frames takes no timeoutMs: it was given \d+ms, and the wait is counted from the number of frames, at 20 a second on top of GDHARNESS_RUNTIME_TIMEOUT_MS, and this game fell below that rate, so ask for fewer frames at a time\.$/,
+        /runtime_wait frames takes no timeoutMs: it was given \d+ms, and the wait is counted from the number of frames, at 20 a second on top of GDHARNESS_RUNTIME_TIMEOUT_MS: a game drawing frames more slowly than that is waited on in fewer frames at a time, and a game inside one long frame, such as a long _ready, answers no call however few frames are asked for\.$/,
         `a frames wait is told what sizes its wait: ${JSON.stringify(framesWait)}`,
       );
       assert.equal(get(moved, 'pending'), true, JSON.stringify(moved));
@@ -32440,6 +32587,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testABreakpointRefusalNamesTheEditor,
   testABreakpointSetHereKeepsTheEditorsOwn,
   testAnEditorThatClearsBreakpointsIsSaidSo,
+  testAnEditorsServersAreAskedOfTheirPorts,
   testProjectGodotResistsPrototypeKeys,
 
   testAnAnswerFromAStaleAddonSaysSo,
