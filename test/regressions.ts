@@ -17843,6 +17843,19 @@ async function testAWordsWaitLeavesTheGameItsSpeed(): Promise<void> {
         true,
         `words that came between looks are found: ${JSON.stringify(late)}`,
       );
+      // A wait whose first look outlasts its time still lets the game run a whole frame before the
+      // last look. On a loaded runner a look over the whole hall outlasted the 300ms above, the last
+      // look followed in the same frame, and the day turned during the first one went unread.
+      const outlasted = await call('runtime_wait', {
+        op: 'until',
+        nodePath: '/root/Main',
+        says: 'words nobody says',
+        timeoutMs: 1,
+      });
+      assert.ok(
+        get(outlasted, 'met') === false && asNumber(get(outlasted, 'frames')) >= 2,
+        `a whole frame passes before the last look: ${JSON.stringify(outlasted)}`,
+      );
 
       // And words that are there are found.
       const turned = await call('runtime_wait', {
