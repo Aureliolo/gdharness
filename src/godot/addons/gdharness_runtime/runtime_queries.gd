@@ -28,8 +28,14 @@ const READ_LIMIT: int = 500
 ## and said nothing, and a caller told to raise a number that stays put concludes the screen moved.
 const LIMIT_CEILING: int = 5000
 
+## How many frames the frame time is the mean of: two seconds at sixty frames a second.
+const FRAMES_TIMED: int = 120
+
 var _host: Node
 var _values: Values
+## How long each of the last frames took, oldest first, in microseconds, as the game timed them.
+var _frame_usec: PackedInt64Array = PackedInt64Array()
+var _last_frame_usec: int = 0
 
 
 ## The host is the autoload, which is how the tree is reached: it is not in one when the
@@ -649,12 +655,60 @@ func get_property(params: Dictionary) -> Dictionary:
 	}
 
 
+## Called by the autoload once a frame, whatever else it does that frame, with the time it was called.
+##
+## The engine's own monitors do not follow the frame: TIME_PROCESS and the frame rate are set once a
+## second, the first to the slowest process step of that second, so a game whose frames took 16.7ms
+## read 45ms for a second at a time, and a change to the game showed only on the next second's
+## worst frame. The time between two of these calls is the frame as it passed, physics and the wait
+## for the display included.
+func note_frame(now_usec: int) -> void:
+	if _last_frame_usec > 0:
+		var _grew: bool = _frame_usec.push_back(now_usec - _last_frame_usec)
+		if _frame_usec.size() > FRAMES_TIMED:
+			_frame_usec.remove_at(0)
+	_last_frame_usec = now_usec
+
+
+## Whether the frame waits for the display, which sets its floor: a game with vsync on cannot
+## finish a frame sooner than the display refreshes, however little it does.
+static func _vsync() -> String:
+	if DisplayServer.get_name() == "headless":
+		return "none, headless"
+	match DisplayServer.window_get_vsync_mode():
+		DisplayServer.VSYNC_DISABLED:
+			return "disabled"
+		DisplayServer.VSYNC_ADAPTIVE:
+			return "adaptive"
+		DisplayServer.VSYNC_MAILBOX:
+			return "mailbox"
+		_:
+			return "enabled"
+
+
 func get_metrics(params: Dictionary) -> Dictionary:
 	var metrics: Array = params.get("metrics", [])
+	var timed: int = _frame_usec.size()
+	var total_usec: int = 0
+	var slowest_usec: int = 0
+	for one: int in _frame_usec:
+		total_usec += one
+		slowest_usec = maxi(slowest_usec, one)
+	# Null rather than zero before a frame has been timed: no frame took no time.
+	var frame_time: Variant = null
+	var frame_time_max: Variant = null
+	if timed > 0:
+		frame_time = float(total_usec) / timed / 1000000.0
+		frame_time_max = slowest_usec / 1000000.0
 	var all: Dictionary = {
 		"fps": Engine.get_frames_per_second(),
-		"frame_time": Performance.get_monitor(Performance.TIME_PROCESS),
+		"frame_time": frame_time,
+		"frame_time_max": frame_time_max,
+		"frames_timed": timed,
+		"process_time_max": Performance.get_monitor(Performance.TIME_PROCESS),
 		"physics_time": Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS),
+		"vsync": _vsync(),
+		"max_fps": Engine.max_fps,
 		"memory_static": Performance.get_monitor(Performance.MEMORY_STATIC),
 		"memory_static_max": Performance.get_monitor(Performance.MEMORY_STATIC_MAX),
 		"object_count": Performance.get_monitor(Performance.OBJECT_COUNT),
