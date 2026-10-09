@@ -15,6 +15,7 @@ import { readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { createServer, type Server, type Socket } from 'node:net';
 import { type CallSite, callSitesOf, enclosingFunction } from './gdscript-source.js';
 import { type DebuggerMessage, DebuggerStream, framedCommand, type GodotValue } from './godot-variant.js';
+import { parseProjectGodot } from './resources.js';
 
 /** One function's totals, keyed by the signature the engine compiled into it. */
 interface FunctionTotals {
@@ -39,6 +40,14 @@ export interface ProfileTotals {
   readonly functions: Readonly<Record<string, FunctionTotals>>;
   /** Messages that could not be read, which leave a gap the answer has to admit to. */
   readonly unreadable: number;
+  /**
+   * The most functions the profiler was asked to send in one frame, how many frames carried that
+   * many, and whether the engine's totals did: each leaves out the functions with the least time in
+   * it. Absent from a file written by a keeper older than the cap.
+   */
+  readonly frameFunctions?: number;
+  readonly cappedFrames?: number;
+  readonly totalCapped?: boolean;
 }
 
 /**
@@ -66,16 +75,38 @@ export function readProfileFile(path: string): ProfileFile | null {
   }
 }
 
+/** Where a project sizes its game's outgoing debugger queue, and the engine's default for it. */
+const QUEUE_SETTING = 'limits/debugger/max_queued_messages';
+const QUEUE_DEFAULT = 2048;
+
+/** Room left in the queue beside a frame's names: the frame itself, and whatever else is sent then. */
+const QUEUE_HEADROOM = 512;
+
 /**
- * How many functions each frame may carry. The engine sends only the top so many by total time
- * and clamps nothing on the game's side; this is its own buffer's default size
- * (`debug/settings/profiler/max_functions`), so a frame is never cut short of what was called.
+ * How many functions each frame may carry, for a game whose debugger queue holds [param queued]
+ * messages. The engine names a function once, as it first appears, in a message of its own sent
+ * with the frame, and queues every one of them at once; past the queue's size it drops them and
+ * never names those functions again, so 3000 functions called in one frame came back with 956 of
+ * them as bare numbers, and the frame or the totals queued after the names can go the same way. It
+ * sends a frame's functions by total time, so the cap leaves out the ones that took least, which a
+ * later frame can still name.
  */
-const FRAME_FUNCTIONS = 16384;
+export function frameFunctionsFor(queued: number): number {
+  return Math.max(64, queued - QUEUE_HEADROOM);
+}
+
+/** The debugger queue size [param projectGodot] sets for its game, or the engine's default. */
+export function queuedMessagesOf(projectGodot: string | null): number {
+  const set = projectGodot === null ? undefined : parseProjectGodot(projectGodot)['network']?.[QUEUE_SETTING];
+  return typeof set === 'number' && Number.isInteger(set) && set > 0 ? set : QUEUE_DEFAULT;
+}
+
+/** What a function is called when its name never arrived: `#` and the number the engine gave it. */
+export const UNNAMED_PREFIX = '#';
 
 /** The command that switches the profiler on, as the editor sends it: `[true, [count, native]]`. */
-export function profilerOn(): Uint8Array {
-  return framedCommand('profiler:servers', [true, [FRAME_FUNCTIONS, false]]);
+export function profilerOn(frameFunctions: number): Uint8Array {
+  return framedCommand('profiler:servers', [true, [frameFunctions, false]]);
 }
 
 /**
@@ -95,10 +126,14 @@ export class ProfileAggregate {
   private frames = 0;
   private lastFrameAt: number | null = null;
   private unreadable = 0;
+  private cappedFrames = 0;
+  private totalCapped = false;
   private readonly startedAt: number;
+  private readonly frameFunctions: number;
 
-  constructor(startedAt: number) {
+  constructor(startedAt: number, frameFunctions: number) {
     this.startedAt = startedAt;
+    this.frameFunctions = frameFunctions;
   }
 
   /** Takes one message from the game; anything that is not the profiler's is left alone. */
@@ -113,47 +148,54 @@ export class ProfileAggregate {
         this.names.set(id, name);
       }
     } else if (received.message === 'servers:profile_frame') {
-      if (this.addFrame(received.data, this.totals)) {
+      const carried = this.addFrame(received.data, this.totals);
+      if (carried === null) {
+        this.unreadable += 1;
+      } else {
         this.frames += 1;
         this.lastFrameAt = now;
-      } else {
-        this.unreadable += 1;
+        this.cappedFrames += carried >= this.frameFunctions ? 1 : 0;
       }
     } else if (received.message === 'servers:profile_total') {
       // The engine's own count since the profiler started, so it replaces the frames' sum rather
       // than adding to it: it is what the frames add up to, with nothing lost between them.
       const whole = new Map<string, { calls: number; selfSeconds: number; totalSeconds: number }>();
-      if (this.addFrame(received.data, whole)) {
+      const carried = this.addFrame(received.data, whole);
+      if (carried === null) {
+        this.unreadable += 1;
+      } else {
         this.totals = whole;
         this.complete = true;
         this.lastFrameAt = now;
-      } else {
-        this.unreadable += 1;
+        this.totalCapped = carried >= this.frameFunctions;
       }
     }
   }
 
-  /** Adds one frame's functions into [param into], reading past the servers' section to reach them. */
+  /**
+   * Adds one frame's functions into [param into], reading past the servers' section to reach them,
+   * and answers how many it carried, or null for a frame that could not be read.
+   */
   private addFrame(
     data: readonly GodotValue[],
     into: Map<string, { calls: number; selfSeconds: number; totalSeconds: number }>,
-  ): boolean {
+  ): number | null {
     let at = 6;
     const servers = data[at];
     if (typeof servers !== 'number') {
-      return false;
+      return null;
     }
     at += 1;
     for (let server = 0; server < servers; server += 1) {
       const fields = data[at + 1];
       if (typeof fields !== 'number') {
-        return false;
+        return null;
       }
       at += 2 + fields;
     }
     const values = data[at];
     if (typeof values !== 'number' || values % 5 !== 0) {
-      return false;
+      return null;
     }
     at += 1;
     for (let index = 0; index < values; index += 5) {
@@ -164,16 +206,16 @@ export class ProfileAggregate {
         typeof self !== 'number' ||
         typeof total !== 'number'
       ) {
-        return false;
+        return null;
       }
-      const name = this.names.get(id) ?? `#${id}`;
+      const name = this.names.get(id) ?? `${UNNAMED_PREFIX}${id}`;
       const sum = into.get(name) ?? { calls: 0, selfSeconds: 0, totalSeconds: 0 };
       sum.calls += calls;
       sum.selfSeconds += self;
       sum.totalSeconds += total;
       into.set(name, sum);
     }
-    return true;
+    return values / 5;
   }
 
   snapshot(): ProfileTotals {
@@ -184,6 +226,9 @@ export class ProfileAggregate {
       complete: this.complete,
       functions: Object.fromEntries(this.totals),
       unreadable: this.unreadable,
+      frameFunctions: this.frameFunctions,
+      cappedFrames: this.cappedFrames,
+      totalCapped: this.totalCapped,
     };
   }
 }
@@ -352,14 +397,25 @@ export class ProfileListener {
   private readonly server: Server;
   readonly port: number;
   private readonly changed: (totals: ProfileTotals) => void;
+  private readonly frameFunctions: number;
 
-  private constructor(server: Server, port: number, changed: (totals: ProfileTotals) => void) {
+  private constructor(
+    server: Server,
+    port: number,
+    changed: (totals: ProfileTotals) => void,
+    frameFunctions: number,
+  ) {
     this.server = server;
     this.port = port;
     this.changed = changed;
+    this.frameFunctions = frameFunctions;
   }
 
-  static async open(changed: (totals: ProfileTotals) => void): Promise<ProfileListener> {
+  /** A listener asking for at most [param frameFunctions] functions a frame; see `frameFunctionsFor`. */
+  static async open(
+    changed: (totals: ProfileTotals) => void,
+    frameFunctions: number,
+  ): Promise<ProfileListener> {
     const server = createServer();
     await new Promise<void>((resolve, reject) => {
       server.once('error', reject);
@@ -372,7 +428,7 @@ export class ProfileListener {
       server.close();
       throw new Error('the profiler listener has no port');
     }
-    const listener = new ProfileListener(server, address.port, changed);
+    const listener = new ProfileListener(server, address.port, changed, frameFunctions);
     server.on('connection', (socket) => {
       listener.accept(socket);
     });
@@ -393,10 +449,10 @@ export class ProfileListener {
     // Only the one game ever dials it, and it dials once.
     this.server.close();
     const started = Date.now();
-    const aggregate = new ProfileAggregate(started);
+    const aggregate = new ProfileAggregate(started, this.frameFunctions);
     this.aggregate = aggregate;
     const stream = new DebuggerStream();
-    socket.write(profilerOn());
+    socket.write(profilerOn(this.frameFunctions));
     this.changed(aggregate.snapshot());
     socket.on('data', (chunk: Buffer) => {
       let messages: DebuggerMessage[];

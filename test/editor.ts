@@ -39,6 +39,7 @@ import { alive } from '../src/alive.js';
 import { readBreakpointNote } from '../src/breakpoint-note.js';
 import { GodotDAPClient } from '../src/dap_client.js';
 import { NOT_INHERITED, RESOLVED_ELSEWHERE } from '../src/rename.js';
+import { frameFunctionsFor, queuedMessagesOf } from '../src/script-profile.js';
 import { SERVER_VERSION } from '../src/server-version.js';
 import { RUNTIME_AUTOLOAD } from '../src/setup.js';
 import { endEnginesUnder } from './support/engines.js';
@@ -406,6 +407,10 @@ const HOOKS_GD = [
   '\t\t\tvar stopped: Variant = tools.call("stop_playing", {}) if tools != null else null',
   '\t\t\tEditorInterface.play_main_scene()',
   '\t\t\treturn {"playing": EditorInterface.is_playing_scene(), "stopped": stopped != null}',
+  // What the addon holds of the profile, read past the server: which cap it switched the profiler on with.
+  '\t\t"profile_held":',
+  '\t\t\tvar profiler: Node = EditorInterface.get_base_control().get_tree().root.find_child("ProfileTools", true, false)',
+  '\t\t\treturn profiler.call("profile_read", {}) if profiler != null else {}',
   '\t\t"open":',
   '\t\t\tEditorInterface.open_scene_from_path(path)',
   '\t\t"edit":',
@@ -595,6 +600,12 @@ function createProject(): string {
       '',
       '[editor_plugins]',
       'enabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg", "res://addons/fixture_hooks/plugin.cfg")',
+      '',
+      // Not the engine's default, so the profiler's cap read from it differs from the one the addon
+      // falls back on and a profile switched on without the server's number shows it.
+      '[network]',
+      '',
+      'limits/debugger/max_queued_messages=3072',
       '',
       // The runtime addon, registered the way an install registers it. A game the editor plays
       // then serves the runtime tools, which is the only way to drive them against a real one:
@@ -4656,6 +4667,14 @@ async function testAPlayedGameIsProfiled({ call, attempt, play, project }: Edito
       `the start says the profiler is on, and whose: ${JSON.stringify(started)}`,
     );
     assert.equal(get(started, 'profile', 'on'), true, JSON.stringify(started));
+    // The cap the server worked out from the project's debugger queue, which the fixture sets away
+    // from the engine's default, rather than the addon's own fallback or the engine's buffer size.
+    const held = await hook(project, { op: 'profile_held' });
+    assert.deepEqual(
+      [get(held, 'profiled'), get(held, 'frameFunctions')],
+      [true, frameFunctionsFor(queuedMessagesOf(readFileSync(join(project, 'project.godot'), 'utf8')))],
+      `the profiler went on with the cap the server asked for: ${JSON.stringify(held)}`,
+    );
     await twice(25);
     // The fixture's _ready calls _twice once itself, so the count shows the profile began before it.
     assert.equal(
@@ -4685,6 +4704,11 @@ async function testAPlayedGameIsProfiled({ call, attempt, play, project }: Edito
       String(get(switched, 'note')),
       /switched on now.*its first frame has arrived/,
       JSON.stringify(switched),
+    );
+    assert.equal(
+      get(await hook(project, { op: 'profile_held' }), 'frameFunctions'),
+      frameFunctionsFor(queuedMessagesOf(readFileSync(join(project, 'project.godot'), 'utf8'))),
+      'and with the cap the server asked for, as the armed start had',
     );
     await twice(10);
     assert.equal(await callsOfTwice(10), 10, 'only the calls after the profiler went on');
