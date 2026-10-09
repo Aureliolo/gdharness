@@ -17340,9 +17340,20 @@ async function testAWordsWaitLeavesTheGameItsSpeed(): Promise<void> {
       assert.equal(get(unwatched.answer, 'met'), false, JSON.stringify(unwatched.answer));
       const watched = await rateOver('/root/Main', { says: 'words nobody says' });
       assert.equal(get(watched.answer, 'met'), false, JSON.stringify(watched.answer));
+      // How long the looks took, so a game that lost its speed says whether the looks took it or the
+      // frames between them ran slow. One macOS run fell to 41.9 frames a second against 84, with
+      // four looks: they could not have cost more than about 400ms of its 2076, so most of the loss
+      // was between them, which nothing in the answer could show.
+      const looking = asNumber(get(watched.answer, 'looking_ms'), JSON.stringify(watched.answer));
+      const elapsed = asNumber(get(watched.answer, 'elapsed_ms'), JSON.stringify(watched.answer));
+      assert.ok(
+        looking > 0 && looking <= elapsed,
+        `the looks took part of the wait: ${JSON.stringify(watched.answer)}`,
+      );
+      const between = (asNumber(get(watched.answer, 'frames')) / (elapsed - looking)) * 1000;
       assert.ok(
         watched.rate >= unwatched.rate / 2,
-        `the game runs at ${watched.rate * 1000} frames a second while words are waited for, against ${unwatched.rate * 1000} while a property is: ${JSON.stringify(watched.answer)}`,
+        `the game runs at ${watched.rate * 1000} frames a second while words are waited for, against ${unwatched.rate * 1000} while a property is; the looks took ${looking}ms of the ${elapsed}, and the frames between them ran at ${between} a second: ${JSON.stringify(watched.answer)}`,
       );
 
       // Words that arrive after the last paced look and before the time runs out are still found:
