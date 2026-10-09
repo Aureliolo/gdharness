@@ -1298,7 +1298,11 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
           'what one property reads on a node, or through the objects it holds, refusing a name nothing along the way has',
         requires: ['nodePath', 'property'],
       },
-      metrics: { summary: 'frame time, memory, draw calls and the rest', requires: [] },
+      metrics: {
+        summary:
+          "frame time, memory, draw calls and the rest. frame_time is the mean wall time of a frame over the last frames_timed frames (up to 120, timed by the game itself, physics and the wait for the display included), frame_time_max the slowest of them, both in seconds and null before a frame has passed; vsync says whether a frame waits for the display, and max_fps is the game's frame-rate cap, 0 for none. fps, process_time_max and physics_time are the engine's monitors, which it sets once a second: the frames counted in the last second, and the slowest process and physics step in it, so they trail a change by up to a second and the last two are a worst case rather than the frame. The memory, object and render counts are read as asked",
+        requires: [],
+      },
     },
     defaultOperation: 'tree',
   },
