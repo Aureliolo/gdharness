@@ -2131,6 +2131,10 @@ export function profileAnswer(reading: ProfileReading, limit: number): Record<st
   const addonNote = reading.runtimeAddon
     ? ''
     : ' This project has no gdharness runtime addon, which switches the profiler off as the game quits so the engine sends its totals: setup installs it.';
+  // Said only of a run that has ended, whose totals will not come now.
+  const totalsWithheld = reading.runtimeAddon
+    ? ' The runtime addon switches the profiler off as the game leaves the tree, and did not here: either it was not running in this game, which a project can arrange for some scenes, or the game ended without leaving the tree, as a crash or a kill does.'
+    : addonNote;
   if (totals.complete) {
     // Nothing to add: these are the engine's own totals since the profiler went on.
   } else if (reading.running && totals.frames === 0) {
@@ -2143,11 +2147,16 @@ export function profileAnswer(reading: ProfileReading, limit: number): Record<st
     );
   } else if (totals.frames === 0) {
     notes.push(
-      `The game connected and ended before a frame of the profile reached ${reading.through === 'editor' ? 'the editor' : 'this server'}: the engine sends its totals only when the profiler is switched off, and stops sending as it exits without emptying what it has queued.${addonNote}`,
+      `The game connected and ended before a frame of the profile reached ${reading.through === 'editor' ? 'the editor' : 'this server'}: the engine sends its totals only when the profiler is switched off, and stops sending as it exits without emptying what it has queued.${totalsWithheld}`,
     );
   } else {
     notes.push(
-      `These are the ${totals.frames === 1 ? 'one frame' : `${totals.frames} frames`} that arrived, summed, without the engine's own totals, so what the game did after the last of them is not in it: the engine sends its totals only when the profiler is switched off, and stops sending as it exits without emptying what it has queued.${addonNote}`,
+      `These are the ${totals.frames === 1 ? 'one frame' : `${totals.frames} frames`} that arrived, summed, without the engine's own totals, which it sends only when the profiler is switched off.${totalsWithheld} Not in them is any script time after the last frame sent: a frame still queued as the game exited, since the engine stops sending without emptying its queue, and what scripts did as it quit, such as in _exit_tree. That can be nothing: a scene that does its work in _ready and quits has all of it in its first frame.`,
+    );
+  }
+  if (table.superCallers > 0) {
+    notes.push(
+      `${table.superCallers === 1 ? 'One function calls' : `${table.superCallers} functions call`} through super, marked selfIncludesSuper: the engine takes every other call out of the caller's self time, and not a super call, so ${table.superCallers === 1 ? 'its' : 'their'} selfMs holds the overridden function's time, which that function's own row counts again. Self time therefore cannot be added along an override chain, and scriptMs counts the time under a super call once more for each level above it.`,
     );
   }
   notes.push(...cappedNotes(totals));
