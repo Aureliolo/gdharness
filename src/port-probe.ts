@@ -3,8 +3,8 @@
  * than taken from what the editor says it serves.
  *
  * The editor reports the ports it was told to use, and Godot binds each once, as the editor starts,
- * reporting a failure only to the editor's own log panel (`DebugAdapterServer::start` in
- * `editor/debugger/debug_adapter/debug_adapter_server.cpp`), never to stdout. A restarted editor
+ * reporting a failure only to the editor's own log panel (`DebugAdapterServer::start` in the
+ * engine's editor sources), never to stdout. A restarted editor
  * came back with its language server up and nothing on its debug adapter port, and every answer
  * still named the port.
  */
