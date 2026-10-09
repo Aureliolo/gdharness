@@ -272,7 +272,12 @@ import { asArray, asNumber, asObject, get, text } from './support/json.js';
 import { isRecord, type JsonRpcMessage, parseTextContent, textOf } from './support/json-rpc.js';
 import { solidPng } from './support/png.js';
 import { reservePort, ServerProcess } from './support/server.js';
-import { REGRESSION_SECONDS, regressionPart, UNMEASURED_SECONDS } from './support/shards.js';
+import {
+  ENGINE_FIXTURES_SECONDS,
+  REGRESSION_SECONDS,
+  regressionPart,
+  UNMEASURED_SECONDS,
+} from './support/shards.js';
 import { endEnginesLeft, leftBehindBy, reportUnswept, sweep, sweepingFor } from './support/sweep.js';
 
 /**
@@ -17848,6 +17853,19 @@ async function testAWordsWaitLeavesTheGameItsSpeed(): Promise<void> {
         true,
         `words that came between looks are found: ${JSON.stringify(late)}`,
       );
+      // A wait whose first look outlasts its time still lets the game run a whole frame before the
+      // last look. On a loaded runner a look over the whole hall outlasted the 300ms above, the last
+      // look followed in the same frame, and the day turned during the first one went unread.
+      const outlasted = await call('runtime_wait', {
+        op: 'until',
+        nodePath: '/root/Main',
+        says: 'words nobody says',
+        timeoutMs: 1,
+      });
+      assert.ok(
+        get(outlasted, 'met') === false && asNumber(get(outlasted, 'frames')) >= 2,
+        `a whole frame passes before the last look: ${JSON.stringify(outlasted)}`,
+      );
 
       // And words that are there are found.
       const turned = await call('runtime_wait', {
@@ -24741,6 +24759,31 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
     );
     scene('once', 'work.gd');
     scene('frames', 'frames.gd');
+    // A scene that sends the runtime away and goes on, as a project keeping it out of a scene can.
+    writeFileSync(
+      join(project, 'harness', 'shed.gd'),
+      [
+        'extends Node',
+        '',
+        'var frames := 0',
+        '',
+        '',
+        'func each_frame() -> void:',
+        '\tframes += 1',
+        '',
+        '',
+        'func _ready() -> void:',
+        '\tget_node("/root/GdharnessRuntime").queue_free()',
+        '',
+        '',
+        'func _process(_delta: float) -> void:',
+        '\teach_frame()',
+        '\tif frames == 30:',
+        '\t\tget_tree().quit()',
+        '',
+      ].join('\n'),
+    );
+    scene('shed', 'shed.gd');
     // More functions in one frame than the game's debugger queue holds names for.
     const many = 2500;
     writeFileSync(
@@ -24968,6 +25011,16 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
       );
       const perFrame = asArray(get(summed, 'functions')).find((one) => get(one, 'function') === 'each_frame');
       assert.ok(Number(get(perFrame, 'calls')) >= 25, `called once a frame: ${summedShown}`);
+
+      // The runtime leaving mid-run is not the game quitting: the profiler stays on and the frames
+      // after it are counted, rather than the engine's totals arriving then and nothing after them.
+      writeFileSync(join(project, 'project.godot'), settings(true));
+      // Every row asked for: each_frame's self time is tiny, and on Linux the runtime's own start-up
+      // functions outranked it in a table of ten.
+      const shed = await profiledRun('shed', true, { limit: 100 });
+      const shedShown = JSON.stringify(shed);
+      const shedEach = asArray(get(shed, 'functions')).find((one) => get(one, 'function') === 'each_frame');
+      assert.ok(Number(get(shedEach, 'calls')) >= 25, `the frames after the runtime went: ${shedShown}`);
     } finally {
       await server.stop();
     }
@@ -32091,6 +32144,23 @@ function testRegressionPartsCoverEveryTestOnceAndBalance(): void {
   const weights = { a: 20, b: 1, c: 20, d: 1 };
   assert.deepEqual(regressionPart(['a', 'b', 'c', 'd'], 1, 2, weights), ['a', 'b']);
   assert.deepEqual(regressionPart(['a', 'b', 'c', 'd'], 2, 2, weights), ['c', 'd']);
+  // A first part that carries other work is dealt that much less: with 20 on it already, one of the
+  // heavy pair goes to it and both light ones to the other part.
+  assert.deepEqual(regressionPart(['a', 'b', 'c', 'd'], 1, 2, weights, 20), ['c']);
+  assert.deepEqual(regressionPart(['a', 'b', 'c', 'd'], 2, 2, weights, 20), ['a', 'b', 'd']);
+  // And over the real list with the engine fixtures on the first of three, which is how macOS runs.
+  const carrying = Array.from({ length: 3 }, (_unused, at) =>
+    regressionPart(names, at + 1, 3, REGRESSION_SECONDS, ENGINE_FIXTURES_SECONDS),
+  );
+  assert.deepEqual(carrying.flat().sort(), [...names].sort(), 'still every regression once');
+  const carried = carrying.map(
+    (part, at) =>
+      part.reduce((total, name) => total + weight(name), 0) + (at === 0 ? ENGINE_FIXTURES_SECONDS : 0),
+  );
+  assert.ok(
+    Math.max(...carried) - Math.min(...carried) <= heaviest,
+    `and the parts within the heaviest regression of each other, the fixtures counted: ${carried.join(', ')}`,
+  );
 }
 
 const TESTS: (() => void | Promise<void>)[] = [
@@ -32447,6 +32517,9 @@ async function main(): Promise<void> {
             named.map((test) => test.name),
             Number(part[1]),
             Number(part[2]),
+            REGRESSION_SECONDS,
+            // Set by the workflow for a platform whose first part also runs the engine fixtures.
+            process.env['GDHARNESS_ENGINE_FIXTURES_IN_FIRST_PART'] === '1' ? ENGINE_FIXTURES_SECONDS : 0,
           ),
         );
   const chosen = inPart === null ? named : named.filter((test) => inPart.has(test.name));
