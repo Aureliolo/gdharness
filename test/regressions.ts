@@ -24749,6 +24749,31 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
     );
     scene('once', 'work.gd');
     scene('frames', 'frames.gd');
+    // A scene that sends the runtime away and goes on, as a project keeping it out of a scene can.
+    writeFileSync(
+      join(project, 'harness', 'shed.gd'),
+      [
+        'extends Node',
+        '',
+        'var frames := 0',
+        '',
+        '',
+        'func each_frame() -> void:',
+        '\tframes += 1',
+        '',
+        '',
+        'func _ready() -> void:',
+        '\tget_node("/root/GdharnessRuntime").queue_free()',
+        '',
+        '',
+        'func _process(_delta: float) -> void:',
+        '\teach_frame()',
+        '\tif frames == 30:',
+        '\t\tget_tree().quit()',
+        '',
+      ].join('\n'),
+    );
+    scene('shed', 'shed.gd');
     // More functions in one frame than the game's debugger queue holds names for.
     const many = 2500;
     writeFileSync(
@@ -24976,6 +25001,16 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
       );
       const perFrame = asArray(get(summed, 'functions')).find((one) => get(one, 'function') === 'each_frame');
       assert.ok(Number(get(perFrame, 'calls')) >= 25, `called once a frame: ${summedShown}`);
+
+      // The runtime leaving mid-run is not the game quitting: the profiler stays on and the frames
+      // after it are counted, rather than the engine's totals arriving then and nothing after them.
+      writeFileSync(join(project, 'project.godot'), settings(true));
+      // Every row asked for: each_frame's self time is tiny, and on Linux the runtime's own start-up
+      // functions outranked it in a table of ten.
+      const shed = await profiledRun('shed', true, { limit: 100 });
+      const shedShown = JSON.stringify(shed);
+      const shedEach = asArray(get(shed, 'functions')).find((one) => get(one, 'function') === 'each_frame');
+      assert.ok(Number(get(shedEach, 'calls')) >= 25, `the frames after the runtime went: ${shedShown}`);
     } finally {
       await server.stop();
     }
