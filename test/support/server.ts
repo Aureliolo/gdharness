@@ -299,9 +299,16 @@ export class ServerProcess {
   async stop(): Promise<void> {
     try {
       if (this.exited) return;
+      const gone = new Promise<void>((done) => {
+        this.child.once('exit', () => {
+          done();
+        });
+      });
       this.child.stdin?.end();
       this.child.kill('SIGTERM');
-      await delay(250);
+      // Over as soon as it exits, and killed if it has not within the quarter second: about ninety
+      // fixtures start a server, and the whole wait on every stop was time spent on nothing.
+      await Promise.race([gone, delay(250)]);
       // `exited` is a getter over the child, so it can have turned true during the wait.
       if (this.child.exitCode === null && this.child.signalCode === null) this.child.kill('SIGKILL');
     } finally {

@@ -4934,6 +4934,9 @@ async function testAnEditorIsReadOnceItHasSaidWhoItIs(): Promise<void> {
     env: {
       GDHARNESS_BRIDGE_PORT: String(silentPort),
       GODOT_PATH: join(tmpdir(), 'gdharness-no-such-engine'),
+      // Short, since the silent editor's restart waits all of it out. Only here: the first server's
+      // wait also covers the greeting and the command-line lookup after it.
+      GDHARNESS_GREETING_WAIT_MS: '2000',
     },
   });
   let silent: WebSocket | null = null;
@@ -4969,7 +4972,7 @@ async function testAnEditorIsReadOnceItHasSaidWhoItIs(): Promise<void> {
           .request('tools/call', { name: 'editor_launch', arguments: { op: 'restart' } }, 30_000)
           .catch(() => null),
       ) ?? 'no answer: it waited for a comeback';
-    assert.match(refused, /has not said who it is within 10s/, refused);
+    assert.match(refused, /has not said who it is within 2s/, refused);
     assert.deepEqual(
       asked.filter((tool) => tool === 'restart_editor' || tool === 'quit_editor'),
       [],
@@ -10307,8 +10310,8 @@ async function testAStopGoesThroughTheKeeper(): Promise<void> {
   const env = { GODOT_PATH: godotPath, GDHARNESS_PROJECT: project, GDHARNESS_RUNTIME_DIR: runtime };
   const servers: ServerProcess[] = [];
   const games: number[] = [];
-  const serve = async (): Promise<ServerProcess> => {
-    const server = new ServerProcess({ env });
+  const serve = async (extra: Record<string, string> = {}): Promise<ServerProcess> => {
+    const server = new ServerProcess({ env: { ...env, ...extra } });
     servers.push(server);
     await server.initialize('regression-test');
     return server;
@@ -10362,7 +10365,11 @@ async function testAStopGoesThroughTheKeeper(): Promise<void> {
     const pid = server.child.pid;
     assert.ok(pid !== undefined, 'the server should have a pid');
     await killTheTree(pid);
-    await delay(1_000);
+    // Until it has gone, so whatever it was writing is written before the note is rewritten here.
+    for (let waited = 0; waited < 10_000 && isAlive(pid); waited += 50) {
+      await delay(50);
+    }
+    assert.equal(isAlive(pid), false, `the replaced server, pid ${pid}, has gone`);
   };
   try {
     writeFileSync(
@@ -10451,7 +10458,8 @@ async function testAStopGoesThroughTheKeeper(): Promise<void> {
         JSON.stringify({ ...note(), keeper: liar.address }),
         'utf8',
       );
-      const fourth = await serve();
+      // A short stop wait: the game is meant to outlive it, so all of it is waited out.
+      const fourth = await serve({ GDHARNESS_STOP_WAIT_MS: '2000' });
       const answered = parseTextContent(
         await fourth.request(
           'tools/call',
@@ -17094,7 +17102,7 @@ async function testAStopTheEditorDidNotTakeIsNotAStop(): Promise<void> {
         return { ok: true };
       },
     async ({ server, start }) => {
-      // Past the stop's own ten-second wait, which the lingering stop sits out.
+      // Past the stop's own wait, which the lingering stop sits out.
       const call = async (name: string, args: Record<string, unknown>): Promise<unknown> => {
         const response = await server.request('tools/call', { name, arguments: args }, 30_000);
         return parseTextContent(response) ?? textOf(response);
@@ -17120,10 +17128,12 @@ async function testAStopTheEditorDidNotTakeIsNotAStop(): Promise<void> {
       assert.equal(get(lingering, 'stopped'), false, JSON.stringify(lingering));
       assert.match(
         text(get(lingering, 'note')),
-        /was still playing it 10 seconds later, so it has not stopped/,
+        /was still playing it 2 seconds later, so it has not stopped/,
         JSON.stringify(lingering),
       );
     },
+    // A short stop wait, which the lingering stop sits out whole, and which its note states.
+    { env: { GDHARNESS_STOP_WAIT_MS: '2000' } },
   );
 }
 
@@ -22522,6 +22532,8 @@ async function testAStopCanEndWhatTheGameStarted(): Promise<void> {
           'and a stop that did not end the process leaves its announcement',
         );
       },
+      // A short stop wait: the bench is meant to outlive the stop, so all of it is waited out.
+      { env: { GDHARNESS_STOP_WAIT_MS: '2000' } },
     );
   } finally {
     for (const pid of [worker, other]) {
@@ -25768,6 +25780,8 @@ async function testGdUnitRunner(): Promise<void> {
           ),
         ) as unknown;
         rmSync(join(projectDir, 'test', 'long'), { recursive: true, force: true });
+        // Three hundred lines printed and printed not asked for: none of them comes back.
+        assert.equal(get(long, 'printed'), undefined, 'a run says nothing of what it printed unless asked');
         assert.deepEqual(
           asArray(get(long, 'warnings') ?? []).map((warning) => get(warning, 'path')),
           ['res://test/long/a_leaves_test.gd'],
@@ -25947,32 +25961,6 @@ async function testGdUnitRunner(): Promise<void> {
             '',
           ].join('\n'),
         );
-        const worded: unknown = JSON.parse(
-          await call(
-            'project_test',
-            { projectPath: projectDir, path: 'res://strings' },
-            ENGINE_CALL_TIMEOUT_MS * 3,
-          ),
-        );
-        const detailOf = (name: string): string =>
-          text(
-            get(
-              asArray(get(worded, 'failed')).find((entry) => get(entry, 'name') === name),
-              'detail',
-            ),
-          );
-        const found: [string, string][] = [
-          ['test_nothing_said', ''],
-          ['test_one_swapped', 'abXd'],
-          ['test_a_second_line', 'one\ntwo'],
-          ['test_a_break_only_it_had', 'a\nb'],
-        ];
-        for (const [name, value] of found) {
-          assert.ok(
-            detailOf(name).includes(` but was\n '${value}'\n\tat '${name}'`),
-            `${name} says the value was ${JSON.stringify(value)}: ${JSON.stringify(detailOf(name))}`,
-          );
-        }
 
         // The same after an array equality, whose report ends in a table rather than a quote. The
         // two sentences share an "s", so their merge reads as a word that neither of them has.
@@ -26003,32 +25991,6 @@ async function testGdUnitRunner(): Promise<void> {
             '',
           ].join('\n'),
         );
-        const mixed: unknown = JSON.parse(
-          await call(
-            'project_test',
-            { projectPath: projectDir, path: 'res://mixed' },
-            ENGINE_CALL_TIMEOUT_MS * 3,
-          ),
-        );
-        const mixedDetailOf = (name: string): string =>
-          text(
-            get(
-              asArray(get(mixed, 'failed')).find((entry) => get(entry, 'name') === name),
-              'detail',
-            ),
-          );
-        for (const name of ['test_the_sentence_alone', 'test_the_sentence_after_others']) {
-          assert.ok(
-            mixedDetailOf(name).endsWith(
-              ` but was\n 'for every spell you have spoken'\n\tat '${name}' in res://mixed/mixed_test.gd:${name === 'test_the_sentence_alone' ? 12 : 20}`,
-            ),
-            `${name} says the value it found: ${JSON.stringify(mixedDetailOf(name))}`,
-          );
-        }
-        assert.match(
-          mixedDetailOf('test_a_array_failure_first'),
-          /but was\n '\[0, 55, 110\]'\n\nDifferences found:/,
-        );
 
         // The other ways a string equality prints: ignoring case, which writes a word after the
         // value; BBCode in the value, which gdUnit4 masks on both sides; BBCode only in the
@@ -26058,40 +26020,69 @@ async function testGdUnitRunner(): Promise<void> {
             '',
           ].join('\n'),
         );
-        const shapes: unknown = JSON.parse(
+        // The three in one run, each case read by its own name, which no two of them share. Each diff
+        // is matched to its failure in the order the run met them, and the one pair whose merged text
+        // is the same is in one file, which a run of several suites does not reorder.
+        const worded: unknown = JSON.parse(
           await call(
             'project_test',
-            { projectPath: projectDir, path: 'res://shapes' },
+            { projectPath: projectDir, path: ['res://strings', 'res://mixed', 'res://shapes'] },
             ENGINE_CALL_TIMEOUT_MS * 3,
           ),
         );
-        const shapeOf = (name: string): string =>
+        const detailOf = (name: string): string =>
           text(
             get(
-              asArray(get(shapes, 'failed')).find((entry) => get(entry, 'name') === name),
+              asArray(get(worded, 'failed')).find((entry) => get(entry, 'name') === name),
               'detail',
             ),
           );
+        const found: [string, string][] = [
+          ['test_nothing_said', ''],
+          ['test_one_swapped', 'abXd'],
+          ['test_a_second_line', 'one\ntwo'],
+          ['test_a_break_only_it_had', 'a\nb'],
+        ];
+        for (const [name, value] of found) {
+          assert.ok(
+            detailOf(name).includes(` but was\n '${value}'\n\tat '${name}'`),
+            `${name} says the value was ${JSON.stringify(value)}: ${JSON.stringify(detailOf(name))}`,
+          );
+        }
+        for (const name of ['test_the_sentence_alone', 'test_the_sentence_after_others']) {
+          assert.ok(
+            detailOf(name).endsWith(
+              ` but was\n 'for every spell you have spoken'\n\tat '${name}' in res://mixed/mixed_test.gd:${name === 'test_the_sentence_alone' ? 12 : 20}`,
+            ),
+            `${name} says the value it found: ${JSON.stringify(detailOf(name))}`,
+          );
+        }
+        assert.match(
+          detailOf('test_a_array_failure_first'),
+          /but was\n '\[0, 55, 110\]'\n\nDifferences found:/,
+        );
         assert.ok(
-          shapeOf('test_ignoring_case').includes(
+          detailOf('test_ignoring_case').includes(
             " but was\n 'for every spell' (ignoring case)\n\tat 'test_ignoring_case'",
           ),
-          JSON.stringify(shapeOf('test_ignoring_case')),
+          JSON.stringify(detailOf('test_ignoring_case')),
         );
         assert.ok(
-          shapeOf('test_bbcode').startsWith(
+          detailOf('test_bbcode').startsWith(
             "Expecting:\n 'a [b]bold[/b] y'\n but was\n 'a [b]bold[/b] x'\n\tat 'test_bbcode'",
           ),
-          JSON.stringify(shapeOf('test_bbcode')),
+          JSON.stringify(detailOf('test_bbcode')),
         );
         assert.ok(
-          shapeOf('test_bbcode_expected_only').endsWith(`\n${RENDERED_AWAY_NOTE}`),
-          JSON.stringify(shapeOf('test_bbcode_expected_only')),
+          detailOf('test_bbcode_expected_only').endsWith(`\n${RENDERED_AWAY_NOTE}`),
+          JSON.stringify(detailOf('test_bbcode_expected_only')),
         );
         assert.ok(
-          shapeOf('test_dictionary').includes(`but was\n '{\n\t"[lb]": 1\n  }'\n\tat 'test_dictionary'`),
-          JSON.stringify(shapeOf('test_dictionary')),
+          detailOf('test_dictionary').includes(`but was\n '{\n\t"[lb]": 1\n  }'\n\tat 'test_dictionary'`),
+          JSON.stringify(detailOf('test_dictionary')),
         );
+        // Every failure of the three suites is in the one answer, so none was cut from a longer list.
+        assert.equal(asArray(get(worded, 'failed')).length, 12, JSON.stringify(get(worded, 'failed')));
 
         // A passing suite whose numbers come back through printed, which a probe measuring
         // something used to have to fail an assertion for.
@@ -26122,14 +26113,6 @@ async function testGdUnitRunner(): Promise<void> {
           ['PROBE rounds=42'],
           'a passing run answers with the lines holding the marker, case aside, and no others',
         );
-        const unasked: unknown = JSON.parse(
-          await call(
-            'project_test',
-            { projectPath: projectDir, path: 'res://probe' },
-            ENGINE_CALL_TIMEOUT_MS * 3,
-          ),
-        );
-        assert.equal(get(unasked, 'printed'), undefined, 'and says nothing of what it printed unless asked');
 
         // A directory where two suites do not load and one does. gdUnit4 stops at discovery and
         // runs none of them, the good one included, which "script errors" alone did not say.
@@ -26509,13 +26492,15 @@ async function testATestRunSaysHowFarItHasGot(): Promise<void> {
           '',
           '',
           `func test_${passes ? 'holds' : 'fails'}() -> void:`,
-          `\tawait get_tree().create_timer(${seconds}.0).timeout`,
+          `\tawait get_tree().create_timer(${seconds.toFixed(1)}).timeout`,
           `\tassert_int(1).is_equal(${passes ? 1 : 2})`,
           '',
         ].join('\n'),
       );
     };
-    suite('a', 2, true);
+    // b's two seconds are what give the progress ticker, once a second, a finished suite to report
+    // before the run ends; a's guard nothing, so it is over at once.
+    suite('a', 0.1, true);
     suite('b', 2, false);
     suite('c', 120, true);
     const a = 'res://test/a_test.gd';
@@ -29012,7 +28997,16 @@ async function testAStartWaitsOutTheEditorsScan(): Promise<void> {
     return;
   }
   const port = await reservePort();
-  const server = new ServerProcess({ env: { GDHARNESS_BRIDGE_PORT: String(port), GODOT_PATH: godotPath } });
+  // Twice the longest scan a finite case below runs, about three seconds when every scan question is
+  // answered late, so the endless case is the only one that waits it out.
+  const scanWait = 6_000;
+  const server = new ServerProcess({
+    env: {
+      GDHARNESS_BRIDGE_PORT: String(port),
+      GODOT_PATH: godotPath,
+      GDHARNESS_SCAN_WAIT_MS: String(scanWait),
+    },
+  });
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-scan-start-'));
   const cache = join(project, '.godot', 'global_script_class_cache.cfg');
   const EMPTY = 'list=Array[Dictionary]([])\n';
@@ -29326,7 +29320,7 @@ async function testAStartWaitsOutTheEditorsScan(): Promise<void> {
     }
 
     // A scan that does not end: started anyway, and said. A headless operation waits beside the
-    // game, in the same thirty seconds, because its note names another engine and another log.
+    // game, in the same wait, because its note names another engine and another log.
     cacheBeforeTheScan();
     scanning = () => true;
     const [endless, operation] = await Promise.all([
@@ -29341,18 +29335,18 @@ async function testAStartWaitsOutTheEditorsScan(): Promise<void> {
       ),
     ]);
     assert.ok(
-      asNumber(get(endless.answer, 'waitedForEditorScanMs')) >= 30_000,
+      asNumber(get(endless.answer, 'waitedForEditorScanMs')) >= scanWait,
       `a scan that does not end is waited for as long as the budget: ${endless.said}`,
     );
     assert.match(
       text(get(endless.answer, 'scanNote')),
-      /still scanning the project after 30 seconds, so this game started during the scan/,
+      /still scanning the project after 6 seconds, so this game started during the scan/,
       `and the start says it went ahead during it: ${endless.said}`,
     );
     assert.match(endless.said, /cache read: before it/, `the game still booted: ${endless.said}`);
     assert.match(
       text(get(parseTextContent(operation), 'scanNote')),
-      /still scanning the project after 30 seconds, so the engine answering this started during the scan.*If engine_messages shows/,
+      /still scanning the project after 6 seconds, so the engine answering this started during the scan.*If engine_messages shows/,
       `an operation says it went ahead too, and where its own complaints are: ${textOf(operation)}`,
     );
   } finally {
@@ -31598,8 +31592,9 @@ async function testARenameWithNoEditorLeavesTheCacheAndTheScriptsRight(): Promis
       GDHARNESS_BRIDGE_PORT: String(await reservePort()),
       GDHARNESS_LSP_PORT: String(lspPort),
       GDHARNESS_RUNTIME_DIR: runtimeDir,
-      // The silent server below never answers initialize, which is waited on this long.
-      GDHARNESS_LSP_INITIALIZE_TIMEOUT_MS: '10000',
+      // The silent server below never answers initialize, which is waited on this long; nothing
+      // else in the case reaches a language server that answers.
+      GDHARNESS_LSP_INITIALIZE_TIMEOUT_MS: '2000',
     },
   });
   const rename = async (args: Record<string, unknown>): Promise<JsonRpcMessage> =>
@@ -31712,7 +31707,7 @@ async function testARenameWithNoEditorLeavesTheCacheAndTheScriptsRight(): Promis
       const busy = await said({ symbol: 'say', newName: 'utter' });
       assert.match(
         busy,
-        /^The editor's language server took the initialize request for say and had not answered it after 10s, so nothing was renamed\./,
+        /^The editor's language server took the initialize request for say and had not answered it after 2s, so nothing was renamed\./,
         busy,
       );
       assert.doesNotMatch(

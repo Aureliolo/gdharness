@@ -303,16 +303,23 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  * A project whose import runs past it sets GDHARNESS_EDITOR_RESTART_TIMEOUT_MS.
  */
 function editorRestartTimeoutMs(): number {
-  const override = Number.parseInt(envValue('GDHARNESS_EDITOR_RESTART_TIMEOUT_MS') ?? '', 10);
-  return Number.isInteger(override) && override > 0 ? override : 90_000;
+  return waitFromEnv('GDHARNESS_EDITOR_RESTART_TIMEOUT_MS', 90_000);
+}
+
+/** [param variable] as a positive number of milliseconds, or [param fallback] when it is not one. */
+function waitFromEnv(variable: string, fallback: number): number {
+  const override = Number.parseInt(envValue(variable) ?? '', 10);
+  return Number.isInteger(override) && override > 0 ? override : fallback;
 }
 
 /**
  * How long a restart waits for a connected editor's greeting. It follows the socket by a frame, so
  * seconds cover an editor that is busy; one still silent after that is stuck, and the caller is
- * told rather than held.
+ * told rather than held. GDHARNESS_GREETING_WAIT_MS sets another.
  */
-const GREETING_WAIT_MS = 10_000;
+function greetingWaitMs(): number {
+  return waitFromEnv('GDHARNESS_GREETING_WAIT_MS', 10_000);
+}
 
 /**
  * Whether the restart a note records can still be in progress.
@@ -637,8 +644,11 @@ export function noCodeWillCome(run: Pick<GodotProcess, 'exitCode' | 'exitSignal'
  *
  * Ten seconds covers a windowed engine closing its renderer on a loaded machine; the kill is
  * immediate on Windows and a SIGTERM elsewhere, which Godot answers by quitting.
+ * GDHARNESS_STOP_WAIT_MS sets another.
  */
-const STOP_WAIT_MS = 10_000;
+function stopWaitMs(): number {
+  return waitFromEnv('GDHARNESS_STOP_WAIT_MS', 10_000);
+}
 
 /**
  * How long a keeper is given to answer a stop. It is already running and does no more than end what
@@ -662,7 +672,7 @@ const EXIT_REPORTED_WITHIN_MS = 2_000;
  * announced one, since under the Windows console build the run's process is a wrapper that goes
  * before the engine does.
  */
-async function untilGone(pids: readonly number[], withinMs = STOP_WAIT_MS): Promise<boolean> {
+async function untilGone(pids: readonly number[], withinMs = stopWaitMs()): Promise<boolean> {
   const gone = (): boolean => pids.every((pid) => !alive(pid));
   const deadline = Date.now() + withinMs;
   while (!gone() && Date.now() < deadline) {
@@ -785,7 +795,7 @@ export function stopVerdict(stop: {
     return {
       stopped: false,
       stillGoing: stop.endedPid,
-      note: `${told} ${STOP_WAIT_MS / 1000} seconds later, so it has not stopped. editor_status says when it has gone, and editor_run stop asks again.`,
+      note: `${told} ${stopWaitMs() / 1000} seconds later, so it has not stopped. editor_status says when it has gone, and editor_run stop asks again.`,
       withChildren: true,
     };
   }
@@ -1069,7 +1079,7 @@ export function endedToStartThis(ended: EndedRun | null): string {
     return ` ${which} was not ended here: the editor could not be asked to stop it. The editor stops a play before starting the next, so it is not running beside this one if this start reached the editor.`;
   }
   if (ended.ending === 'lingering') {
-    return ` ${which} was told to end to start this one and was still running ${STOP_WAIT_MS / 1000} seconds later, so it is running beside this one: editor_status says when it has gone.`;
+    return ` ${which} was told to end to start this one and was still running ${stopWaitMs() / 1000} seconds later, so it is running beside this one: editor_status says when it has gone.`;
   }
   return ` ${which} was ended to start this one; its output is no longer what editor_output answers about.`;
 }
@@ -1394,8 +1404,11 @@ const CACHE_WRITE_MS = 2_000;
  * The rescan tool's own default, since it is the same wait. A scan of a few hundred scripts takes
  * a second or two; what runs longer is an import of large assets, and a caller who asked for a game
  * is better served by one started with a note than by a refusal to start.
+ * GDHARNESS_SCAN_WAIT_MS sets another.
  */
-const SCAN_WAIT_MS = 30_000;
+function scanWaitMs(): number {
+  return waitFromEnv('GDHARNESS_SCAN_WAIT_MS', 30_000);
+}
 
 /** How long past its exit a run's output is waited for when something else still holds its pipes. */
 const STREAMS_GRACE_MS = 2_000;
@@ -1518,7 +1531,7 @@ export function scanWaitAnswer(
   if (scanned.waitedMs === 0) {
     return {};
   }
-  const still = `The editor was still scanning the project after ${SCAN_WAIT_MS / 1000} seconds, so`;
+  const still = `The editor was still scanning the project after ${scanWaitMs() / 1000} seconds, so`;
   return {
     waitedForEditorScanMs: scanned.waitedMs,
     scanNote: !scanned.stillScanning
@@ -3366,7 +3379,7 @@ class GodotServer {
     // so nothing is decided on a reading that is about to change: connected before the greeting,
     // then not while the command line is read. editor_status answers in the middle of it, saying so.
     if (tool !== 'editor_status' && this.godotBridge.isArriving()) {
-      await this.waitForBridge(() => !this.godotBridge.isArriving(), Date.now() + GREETING_WAIT_MS);
+      await this.waitForBridge(() => !this.godotBridge.isArriving(), Date.now() + greetingWaitMs());
     }
     if (ENGINE_PASSES[tool]?.[op] !== undefined) {
       return op === 'reimport' ? await this.handleReimport(args) : await this.handleRefreshUids(args);
@@ -4013,7 +4026,7 @@ class GodotServer {
       const answered = Date.now();
       if (status['scanning'] === true || status['importing'] === true || status['pending'] === true) {
         sawAScan = true;
-        if (Date.now() - started >= SCAN_WAIT_MS) {
+        if (Date.now() - started >= scanWaitMs()) {
           return { waitedMs: Date.now() - started, stillScanning: true };
         }
         await new Promise((settle) => setTimeout(settle, 100));
@@ -6286,7 +6299,7 @@ class GodotServer {
       // itself, which brings it back without its ports. The call has already waited for the
       // greeting on its way in, so one still silent is refused rather than restarted on a guess.
       return this.createErrorResponse(
-        `The editor has connected and has not said who it is within ${GREETING_WAIT_MS / 1000}s, so whether this server or the editor itself restarts it cannot be told.`,
+        `The editor has connected and has not said who it is within ${greetingWaitMs() / 1000}s, so whether this server or the editor itself restarts it cannot be told.`,
         ['editor_status says when it has, under greeting while it has not', 'Then ask for the restart again'],
       );
     }
@@ -7515,7 +7528,7 @@ class GodotServer {
    * Whether the editor reports its play over within the stop's wait. An answer that does not come
    * is waited past rather than taken as either.
    */
-  private async untilTheEditorStopsPlaying(withinMs = STOP_WAIT_MS): Promise<boolean> {
+  private async untilTheEditorStopsPlaying(withinMs = stopWaitMs()): Promise<boolean> {
     const deadline = Date.now() + withinMs;
     for (;;) {
       if ((await this.editorPlayingState())?.playing === false) {
@@ -7667,7 +7680,7 @@ class GodotServer {
       declined !== null
         ? `gdharness could not signal pid ${running.pid}: the operating system refused it (${declined}). It had described that process as ${described}.`
         : !gone
-          ? `gdharness signalled pid ${running.pid}, which the operating system described as ${described}, and it was still running ${STOP_WAIT_MS / 1000} seconds later.`
+          ? `gdharness signalled pid ${running.pid}, which the operating system described as ${described}, and it was still running ${stopWaitMs() / 1000} seconds later.`
           : landed
             ? `gdharness ended pid ${running.pid}, which the operating system described as ${described}.`
             : `gdharness signalled pid ${running.pid} and it was already gone; the operating system had described it as ${described}.`,
@@ -7704,7 +7717,7 @@ class GodotServer {
     run.log.record(
       gone ? 'info' : 'warning',
       !gone
-        ? `gdharness had the keeper holding pid ${pid} end it, and it was still running ${STOP_WAIT_MS / 1000} seconds later.`
+        ? `gdharness had the keeper holding pid ${pid} end it, and it was still running ${stopWaitMs() / 1000} seconds later.`
         : asked === 'signalled'
           ? `gdharness ended pid ${pid} through the keeper holding it.`
           : `gdharness asked the keeper holding pid ${pid} to end it, and it had already gone.`,
@@ -9443,7 +9456,7 @@ class GodotServer {
       exitedBeforeStop: !landed,
       note: `${
         !gone
-          ? `pid ${pid} was told to end and was still running ${STOP_WAIT_MS / 1000} seconds later, so it has not stopped: a game of this project that no server here was holding,`
+          ? `pid ${pid} was told to end and was still running ${stopWaitMs() / 1000} seconds later, so it has not stopped: a game of this project that no server here was holding,`
           : landed
             ? `pid ${pid} was ended: a game of this project that no server here was holding,`
             : `pid ${pid} had already gone when it was signalled: a game of this project that no server here was holding,`
