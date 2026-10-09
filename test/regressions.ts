@@ -1029,6 +1029,16 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     undefined,
     'the engine’s own totals need nothing said',
   );
+  // Totals with the game still going: something switched the profiler off early, and what can have
+  // depends on who is the game's debugger.
+  assert.match(
+    say({ running: true, totals: totals({}) }),
+    /^The engine's totals arrived while the game is still running, which it sends only when the profiler is switched off, so the game itself, through EngineDebugger, switched it off before the game ended\. They cover the run up to then and nothing after\.$/,
+  );
+  assert.match(
+    say({ running: true, totals: totals({}), through: 'editor' }),
+    /so the editor's Profiler tab or the game itself, through EngineDebugger, switched it off/,
+  );
   const partial = { ...totals({}), complete: false };
   assert.match(
     say({ running: true, totals: partial }),
@@ -1040,7 +1050,7 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
   // apart from data lost because it can be nothing at all.
   assert.match(
     say({ totals: partial }),
-    /^These are the 3 frames that arrived, summed, without the engine's own totals, which it sends only when the profiler is switched off\. The runtime addon switches the profiler off as the game leaves the tree, and did not here: either it was not running in this game, which a project can arrange for some scenes, or the game ended without leaving the tree, as a crash or a kill does\. Not in them is any script time after the last frame sent: a frame still queued as the game exited, .* and what scripts did as it quit, such as in _exit_tree\. That can be nothing: a scene that does its work in _ready and quits has all of it in its first frame\.$/,
+    /^These are the 3 frames that arrived, summed, without the engine's own totals, which it sends only when the profiler is switched off\. The runtime addon switches the profiler off as the game quits, and did not here: either it was no longer running in this game by then, which a project can arrange for some scenes, or the game ended without taking its tree down, as a crash or a kill does\. Not in them is any script time after the last frame sent: a frame still queued as the game exited, .* and what scripts did as it quit, such as in _exit_tree\. That can be nothing: a scene that does its work in _ready and quits has all of it in its first frame\.$/,
   );
   assert.doesNotMatch(
     say({ totals: partial }),
@@ -1053,7 +1063,7 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
   );
   assert.match(
     say({ totals: { ...partial, frames: 0 } }),
-    /ended before a frame of the profile reached this server: .* The runtime addon switches the profiler off as the game leaves the tree, and did not here/,
+    /ended before a frame of the profile reached this server: .* The runtime addon switches the profiler off as the game quits, and did not here/,
   );
   assert.match(
     say({ totals: { ...partial, frames: 0 }, runtimeAddon: false, through: 'editor' }),

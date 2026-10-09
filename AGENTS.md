@@ -4,8 +4,6 @@
 
 | Command                                                          | What it does                                                                                                                                                    |
 | ---------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Command                                                          | What it does                                                                                                                                                    |
-| ---                                                              | ---                                                                                                                                                             |
 | `bun run build`                                                  | Bundles into `build/` without typechecking. `ci`, `test:metadata`, `test:packaging` and `test:node-runtime` run it first; `test:ci` and the regressions do not. |
 | `bun run typecheck`                                              | `tsc --noEmit`.                                                                                                                                                 |
 | `bun run ci`                                                     | Build, typecheck, `format:check`, `lint` and `test:ci`, in that order.                                                                                          |
