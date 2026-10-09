@@ -2,18 +2,18 @@
 
 ## Commands
 
-| Command                                               | What it does                                                 |
-| ----------------------------------------------------- | ------------------------------------------------------------ |
-| `bun run build`                                       | Bundles into `build/` without typechecking. Suites run this. |
-| `bun run typecheck`                                   | `tsc --noEmit`.                                              |
-| `bun run lint`                                        | Biome, types, dead code and markdownlint.                    |
-| `bun run format:check`                                | Biome and Prettier.                                          |
-| `bun run lint:gd`, `bun run format:gd:check`          | gdlint and gdformat on `src/godot` and `test/support/gd`.    |
-| `bun run test:typed`                                  | Shipped scripts and fixtures, warnings as errors; Godot.     |
-| `bun test/regressions.ts [name ...]`                  | Every regression; names select tests, loosely matched.       |
-| `bun run test:ci`                                     | The eleven fast files, regressions included.                 |
-| `test:integration`, `test:metadata`, `test:packaging` | The other four files the `build-and-test` job runs.          |
-| `bun run test:engine`, `bun run test:editor`          | The engine and editor legs; need a real Godot.               |
+| Command                                               | What it does                                                                                  |
+| ----------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| `bun run build`                                       | Bundles into `build/` without typechecking. Only `test:metadata` and `test:packaging` run it. |
+| `bun run typecheck`                                   | `tsc --noEmit`.                                                                               |
+| `bun run lint`                                        | Biome, types, dead code and markdownlint.                                                     |
+| `bun run format:check`                                | Biome and Prettier.                                                                           |
+| `bun run lint:gd`, `bun run format:gd:check`          | gdlint and gdformat on `src/godot` and `test/support/gd`.                                     |
+| `bun run test:typed`                                  | Shipped scripts and fixtures, warnings as errors; Godot.                                      |
+| `bun test/regressions.ts [name ...]`                  | Every regression; names select tests, loosely matched.                                        |
+| `bun run test:ci`                                     | The eleven fast files, regressions included.                                                  |
+| `test:integration`, `test:metadata`, `test:packaging` | The other four files the `build-and-test` job runs.                                           |
+| `bun run test:engine`, `bun run test:editor`          | The engine and editor legs; need a real Godot.                                                |
 
 Build before running a suite, because the suites start servers from the bundle. Engine-backed cases
 need `GODOT_PATH`, and the gdUnit fixture needs `GDUNIT4_PATH`; without them those cases skip and say
@@ -224,11 +224,13 @@ the build, release and installer scripts. `docs/architecture.md` describes how t
 - Do not edit or build while a suite runs. Each fixture starts a server from the bundle, so a build
   mid-run hands later fixtures a half-written file, and their failures look like faults in the tools
   they called. Rerun any suite that failed beside a build.
-- Run what CI runs before calling a change done: `test:ci`, `test:integration`, `test:metadata` and
-  `test:packaging`, fifteen files in all. They call the same code in different ways: a sentence
-  change passed the regressions and failed `test/bridge.ts` on the push.
-- Redirect a run's output to a file and read the file. `| tail` loses the message, and a failure that
-  never repeats leaves nothing else behind.
+- The repository is public, so CI runs the suites: push, and read every one CI runs before calling a
+  change done, `test:ci`, `test:integration`, `test:metadata` and `test:packaging`, fifteen files in
+  all, and the engine and editor legs. They call the same code in different ways: a sentence change
+  passed the regressions and failed `test/bridge.ts` on the push. Locally, run the regressions and
+  editor cases the change touches.
+- Redirect a run's output to a file under `$TEMP` or the scratchpad, and read the file. `| tail`
+  loses the message, and a failure that never repeats leaves nothing else behind.
 
 ## Releasing
 
@@ -237,25 +239,20 @@ carrying the fixes rather than leaving them sitting on `main` unreleased. A fix 
 is not delivered.
 
 A report must not stand between an irreversible act and the work that depends on it. The release
-takes three acts that cannot be taken back, and the step comparing what npm serves against the
-signed archive sat inside the npm job, after the publish. On 1.0.11 npm took 7m11s to serve the
-version against a five-minute window, the job went red, and the two jobs behind it were skipped for
-needing that job rather than that step: the MCP registry entry and the install checks on three
-platforms. The listing every marketplace reads stayed a release behind, and the registry entry for
-that version can never be made, because publishing there happens once. Widening the window makes it
-rarer and leaves the shape alone. Ask of every such step whether what comes next depends on the act
-or on the report of it, and move the report out.
+takes three acts that cannot be taken back, and the MCP registry entry for a version can be made
+only once. Ask of every step after one of them whether what comes next depends on the act or on
+the report of it, and give the report its own job, the way `served` in `release.yml` checks what
+npm serves without holding back the registry entry or the install checks. Widening a timeout makes
+such a failure rarer and leaves the shape alone.
 
-Then ask the same question of each act on its own: can this run be run again? All three refused to
-act on something already done, so a release run that failed anywhere after the first publish could
-not be re-run at all, and the tag workflow, dispatched by hand on a tag that already existed, said
-"nothing to do" and exited without starting the release, which is exactly the state somebody
-presses that button in.
+Then ask the same question of each act on its own: can this run be run again? An act that refuses
+something already done makes a run that failed after the first publish impossible to re-run, and a
+hand-dispatched tag workflow that stops on an existing tag does nothing in exactly the state
+somebody presses that button in. Take what is already done as done and carry on.
 
-**Every release is a patch.** From 1.0.0 the next version is 1.0.1, then 1.0.2, and so on: a fix,
-an addition nothing has to adapt to, a new argument, a new field in an answer, a new tool, a new op,
-all of them patches. The owner set this on 2026-09-21 as a standing rule, and it replaces the
-patch-or-minor judgement that held before 1.0.
+**Every release is a patch**, raising only the last number: a fix, an addition nothing has to
+adapt to, a new argument, a new field in an answer, a new tool, a new op, all of them patches. This
+is the owner's standing rule.
 
 A wrong answer corrected is a patch even when the output changes shape. Never leave an answer wrong
 to protect a caller who parsed it, and never let "that would be breaking" become a reason to ship a
@@ -274,20 +271,16 @@ bump, merge the pull request it opens, and `release-tag.yml` tags whatever versi
 
 Merge nothing else while a release pull request is open. The ruleset on `main` requires branches to
 be up to date, so every other merge puts the release branch behind and costs it all thirteen checks
-again. On 2026-09-20 five pull requests went in while one release sat
-open, and it took four rounds of updating and re-running to land. Cut the release last, let it
-through, then carry on. It is a convention rather than a setting, and it costs nothing: the work is
-already done by the time the release is cut.
+again. Cut the release last, let it through, then carry on. It is a convention rather than a
+setting, and it costs nothing: the work is already done by the time the release is cut.
 
 Read that requirement from the rulesets rather than from branch protection. `gh api
 repos/.../branches/main/protection` answers 404 here, which reads as "nothing is enforced" and is
 wrong: the rules live in `gh api repos/.../rulesets`, and `strict` on the required checks is the
 line that makes this matter.
 
-Read a commit's subject back after writing it. Twelve of the nineteen commits between v0.13.36 and
-v0.13.37 have the subject `@`, because the message was written as a PowerShell here-string,
-`-m @'...'@`, through a POSIX shell, where `@'` is a literal `@` and a quote. Every one of those
-commits succeeded, and the fault was found downstream by somebody reading `git log` to see what an
-upgrade brought. The repository squashes with the pull request's title and body now, so a branch
-subject cannot reach `main` again, but the branch commits are what a reviewer reads:
-`-m "Subject" -m "Body"`, or a heredoc, and then `git log -1 --format=%s`.
+Read a commit's subject back after writing it, with `git log -1 --format=%s`. A PowerShell
+here-string, `-m @'...'@`, passed through a POSIX shell commits with the subject `@` (there `@'` is
+a literal `@` and a quote), and the commit still succeeds. Write `-m "Subject" -m "Body"`, or a
+heredoc. Pull requests squash with their title and body, so a branch subject never reaches `main`,
+but the branch commits are what a reviewer reads.
