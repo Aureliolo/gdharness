@@ -363,29 +363,37 @@ jobs:
           # A deadline rather than a count of asks, and each ask bounded, because an ask is not: on
           # 1.1.48 the MCP registry took up to three minutes to answer one read, and a count of
           # them spanned nine times the window it was written for.
+          #
+          # The tarball is waited for inside the same window, because npm serves it apart from the
+          # listing that names it: on 1.1.60 the listing named the version twelve minutes after the
+          # publish and its tarball still answered 404 a minute later, past curl's own retries.
           url=""
+          fetched=false
           attempt=0
           served_by=$(( SECONDS + 20 * 60 ))
           while (( SECONDS < served_by )); do
             attempt=$(( attempt + 1 ))
-            if url="$(timeout 60 npm view --prefer-online "gdharness@${VERSION}" dist.tarball 2>/dev/null)" && [ -n "${url}" ]; then
-              break
+            if [ -z "${url}" ]; then
+              url="$(timeout 60 npm view --prefer-online "gdharness@${VERSION}" dist.tarball 2>/dev/null)" || url=""
             fi
-            url=""
-            echo "The registry does not serve ${VERSION} yet; asked ${attempt} times."
+            if [ -z "${url}" ]; then
+              echo "The registry does not list ${VERSION} yet; asked ${attempt} times."
+            elif curl -fsSL --proto '=https' --tlsv1.2 --connect-timeout 20 --max-time 120 \
+              --speed-limit 1024 --speed-time 60 "${url}" -o published.tgz; then
+              fetched=true
+              break
+            else
+              echo "The registry lists ${VERSION} and does not serve its tarball yet; asked ${attempt} times."
+            fi
             sleep 10
           done
 
-          if [ -z "${url}" ]; then
+          if [ "${fetched}" != true ]; then
             echo "gdharness@${VERSION} is published; the registry had not served it twenty" >&2
             echo "minutes later, so these bytes are unconfirmed rather than wrong. Re-run this" >&2
             echo "job once npm serves the version." >&2
             exit 1
           fi
-
-          curl -fsSL --proto '=https' --tlsv1.2 --retry 6 --retry-all-errors \
-            --connect-timeout 20 --speed-limit 1024 --speed-time 60 \
-            "${url}" -o published.tgz
           actual="$(sha256sum published.tgz | cut -d' ' -f1)"
 
           if [[ "${expected}" != "${actual}" ]]; then
