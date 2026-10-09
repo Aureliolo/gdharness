@@ -308,6 +308,10 @@ jobs:
         if: '!cancelled()'
         run: bun run lint:dead
 
+      - name: markdownlint
+        if: '!cancelled()'
+        run: bun run lint:prose
+
   build-and-test:
     name: build-and-test
     runs-on: ubuntu-24.04
