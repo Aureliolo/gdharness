@@ -1064,7 +1064,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'integer',
         minimum: 1,
         description:
-          'The most entries to answer with, newest kept. Default 200, and omitted says how many matching entries that left out. A run long enough to pass it needs this raised, not just filtered: filtering narrows what counts as matching, and the newest of those is still all one answer carries.',
+          'The most entries to answer with, newest kept. Identical entries come back as one, at the first of them, with times saying how many were printed, so the limit counts distinct entries. Default 200, and omitted says how many distinct matching entries that left out. A run long enough to pass it needs this raised, not just filtered: filtering narrows what counts as matching, and the newest of those is still all one answer carries.',
       },
       before: {
         ops: ['editor'],

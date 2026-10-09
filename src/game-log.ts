@@ -336,6 +336,21 @@ export class GameLog {
     const omitted = Math.max(0, matching.length - options.limit);
     return { entries: matching.slice(omitted), omitted };
   }
+
+  /**
+   * What `select` answers, as an answer carries it: identical entries folded into one before the
+   * limit, so the limit counts distinct entries and `omitted` the distinct ones left out. A per-frame
+   * error fills two hundred entries of an answer with one line otherwise, and pushes everything
+   * printed before it out of the window.
+   */
+  selectFolded(options: Parameters<GameLog['select']>[0]): {
+    entries: readonly FoldedEntry[];
+    omitted: number;
+  } {
+    const folded = foldedRepeats(this.select({ ...options, limit: Number.POSITIVE_INFINITY }).entries);
+    const omitted = Math.max(0, folded.length - options.limit);
+    return { entries: folded.slice(omitted), omitted };
+  }
 }
 
 /**

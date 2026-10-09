@@ -93,7 +93,7 @@ import {
 } from './editor-log.js';
 import { type EngineRun, howItEnded, runEngine } from './engine-run.js';
 import { errorMessage, Refusal } from './errors.js';
-import { answersTo, foldedRepeats, forAnswer, GameLog, type LogEntry } from './game-log.js';
+import { answersTo, type FoldedEntry, foldedRepeats, GameLog, type LogEntry } from './game-log.js';
 import {
   anEditorIsStillComing,
   type GodotBridge,
@@ -1411,7 +1411,6 @@ export function exportAnswer(
 ): ToolResponse {
   const { log } = ending;
   const written = after !== null && after !== before;
-  const problems = log.select({ severity: 'warning', sinceLastCall: false, limit: 200 });
   const verdict = {
     exported: ending.exitCode === 0 && ending.failure === null && log.count('error') === 0 && written,
     ...asked,
@@ -1420,8 +1419,7 @@ export function exportAnswer(
     failure: ending.failure ?? undefined,
     errors: log.count('error'),
     warnings: log.count('warning'),
-    entries: forAnswer(problems.entries),
-    ...(problems.omitted === 0 ? {} : { entriesOmitted: problems.omitted }),
+    ...foldedEntriesAnswer(log),
   };
   if (verdict.exported) {
     return { content: [{ type: 'text', text: answerJson(verdict) }] };
@@ -1924,6 +1922,25 @@ export function aboveTheRunner(entry: LogEntry): LogEntry {
 
 /** How many distinct engine entries a test run's answer carries, the newest kept. */
 const MOST_ENGINE_ENTRIES = 200;
+
+/**
+ * A run's errors and warnings as an answer carries them: folded, the newest two hundred distinct
+ * ones, and how many distinct ones were left out when any were.
+ */
+function foldedEntriesAnswer(log: GameLog): {
+  entries: readonly FoldedEntry[];
+  entriesOmitted?: number;
+} {
+  const problems = log.selectFolded({
+    severity: 'warning',
+    sinceLastCall: false,
+    limit: MOST_ENGINE_ENTRIES,
+  });
+  return {
+    entries: problems.entries,
+    ...(problems.omitted === 0 ? {} : { entriesOmitted: problems.omitted }),
+  };
+}
 
 /**
  * The gdUnit4 script a test's own expected runtime error is raised under.
@@ -4816,7 +4833,7 @@ class GodotServer {
                 ...nonEmpty(foldedScriptErrors(scriptErrors)),
                 ...atTheEnd,
                 arguments: cmdArgs,
-                entries: forAnswer(withoutListed(printed, scriptErrors).slice(0, 60).map(aboveTheRunner)),
+                entries: foldedRepeats(withoutListed(printed, scriptErrors).map(aboveTheRunner)).slice(0, 60),
                 ...printedLines,
                 savesNote,
                 ...scanned,
@@ -8288,7 +8305,7 @@ class GodotServer {
       warnings,
       ...scanWaitAnswer(scanned),
       savesNote: asked.savesIn !== undefined && savesStayPut() ? SAVES_NOT_MOVED_NOTE : undefined,
-      entries: forAnswer(boot.log.select({ severity: 'warning', sinceLastCall: false, limit: 200 }).entries),
+      ...foldedEntriesAnswer(boot.log),
     });
   }
 
@@ -8452,7 +8469,7 @@ class GodotServer {
     const asked = readString(args, 'severity');
     const severity = asked === 'error' || asked === 'warning' ? asked : 'info';
     const contains = readNonEmptyString(args, 'contains');
-    const selected = console.log.select({
+    const selected = console.log.selectFolded({
       severity,
       sinceLastCall: false,
       contains,
@@ -8496,7 +8513,7 @@ class GodotServer {
       },
       repeated: shown,
       moreShapes: grouped.length > shown.length ? grouped.length - shown.length : undefined,
-      entries: forAnswer(selected.entries),
+      entries: selected.entries,
       omitted: selected.omitted === 0 ? undefined : selected.omitted,
     });
   }
@@ -8521,7 +8538,7 @@ class GodotServer {
       run.endedUnwatched = noCodeWillCome(run);
     }
     const severity = readString(args, 'severity');
-    const selected = run.log.select({
+    const selected = run.log.selectFolded({
       severity: severity === 'error' || severity === 'warning' ? severity : 'info',
       sinceLastCall: readBoolean(args, 'sinceLastCall') ?? false,
       contains: readNonEmptyString(args, 'contains'),
@@ -8693,7 +8710,7 @@ class GodotServer {
       cpuSeconds,
       note: notes.length > 0 ? notes.join(' ') : undefined,
       omitted: selected.omitted,
-      entries: forAnswer(selected.entries),
+      entries: selected.entries,
     });
   }
 
@@ -8819,9 +8836,7 @@ class GodotServer {
       note: verdict.withChildren
         ? `${verdict.note} ${aboutTheChildren(ended, stopped.throughEditor)}`
         : verdict.note,
-      entries: forAnswer(
-        stopped.log.select({ severity: 'warning', sinceLastCall: false, limit: 200 }).entries,
-      ),
+      ...foldedEntriesAnswer(stopped.log),
     });
   }
 

@@ -663,6 +663,52 @@ function testEngineEntriesFoldAndScriptErrorsAreKnown(): void {
     ],
     JSON.stringify(piped.all),
   );
+
+  // Every answer listing a run's entries folds them before its limit, so the limit and the count of
+  // what it left out are of distinct entries: a per-frame warning does not push the rest out. Warnings
+  // rather than errors, so the export below is judged exported and answers with its entries.
+  const busy = new GameLog();
+  busy.append(
+    'transcript',
+    [
+      'WARNING: the first thing printed',
+      'WARNING: the second thing printed',
+      ...Array.from({ length: 300 }, () => 'WARNING: a per-frame warning'),
+      'WARNING: the last thing printed',
+      '',
+    ].join('\n'),
+  );
+  busy.finish();
+  const newest = busy.selectFolded({ severity: 'warning', sinceLastCall: false, limit: 3 });
+  assert.deepEqual(
+    newest.entries.map((entry) => [entry.text, entry.times]),
+    [
+      ['the second thing printed', undefined],
+      ['a per-frame warning', 300],
+      ['the last thing printed', undefined],
+    ],
+    JSON.stringify(newest),
+  );
+  assert.equal(newest.omitted, 1, 'one distinct entry left out, not three hundred');
+  const exported = parseTextContent({
+    result: exportAnswer(
+      { log: busy, exitCode: 0, exitSignal: null, failure: null },
+      { preset: 'Linux', outputPath: 'builds/game.x86_64', debug: false },
+      null,
+      5,
+    ),
+  });
+  assert.deepEqual(
+    asArray(get(exported, 'entries')).map((entry) => [get(entry, 'text'), get(entry, 'times')]),
+    [
+      ['the first thing printed', undefined],
+      ['the second thing printed', undefined],
+      ['a per-frame warning', 300],
+      ['the last thing printed', undefined],
+    ],
+    `an export's answer folds them too: ${JSON.stringify(exported)}`,
+  );
+  assert.equal(get(exported, 'warnings'), 303, 'and counts every one');
 }
 
 async function turnedAwayAtTheBridge(
@@ -7179,6 +7225,18 @@ async function testALaunchedEditorsConsoleIsReadBeforeItConnects(): Promise<void
       ['Parse Error: Could not parse global class …'],
       'and a read at a severity leaves out the shapes below it',
     );
+    const errorsRead = await call('editor_output', { op: 'editor', severity: 'error' });
+    assert.deepEqual(
+      asArray(get(jsonOf(errorsRead, 'editor_output op editor'), 'entries')).map((entry) => [
+        text(get(entry, 'text')),
+        get(entry, 'times'),
+      ]),
+      [
+        ['Parse Error: Could not parse global class "Run"', 2],
+        ['Parse Error: Could not parse global class "Ledger"', undefined],
+      ],
+      `identical console lines come back once, counted: ${errorsRead}`,
+    );
   } finally {
     await server.stop();
     sweep(project);
@@ -11823,7 +11881,7 @@ async function testAFinishedRunCanStillBeRead(): Promise<void> {
     );
     writeFileSync(
       join(projectDir, 'main.gd'),
-      'extends Node\n\n\nfunc _ready() -> void:\n\tprint("the answer is 42")\n\tget_tree().quit()\n',
+      'extends Node\n\n\nfunc _ready() -> void:\n\tprint("the answer is 42")\n\tfor _i in 5:\n\t\tprint("once per frame")\n\tget_tree().quit()\n',
     );
     writeFileSync(
       join(projectDir, 'main.tscn'),
@@ -11867,6 +11925,14 @@ async function testAFinishedRunCanStillBeRead(): Promise<void> {
         assert.ok(
           printed.some((line) => line.includes('the answer is 42')),
           `what it printed before quitting survives:\n${JSON.stringify(output, null, 2)}`,
+        );
+        // A line printed again and again comes back once, counted, as a per-frame print would.
+        assert.deepEqual(
+          asArray(get(output, 'entries'))
+            .filter((entry) => text(get(entry, 'text')) === 'once per frame')
+            .map((entry) => get(entry, 'times')),
+          [5],
+          `repeated lines fold:\n${JSON.stringify(output, null, 2)}`,
         );
 
         // And a readable log is not a debug session. The refusal names which of the two states it
@@ -26886,8 +26952,9 @@ const TOOL_OP_MENTIONS = 18;
 function testEveryToolNamedInProseIsATool(): void {
   const names = new Set(TOOL_SPECS.map((spec) => spec.name));
   const families = [...new Set(TOOL_SPECS.map((spec) => spec.name.split('_')[0]))];
-  // Words this project owns that are shaped like a tool and are not one: the fields the bridge
-  // sends the addon, the autoload the runtime installs, and a section of project.godot. Named one
+  // Words this project owns or reads that are shaped like a tool and are not one: the fields the
+  // bridge sends the addon, the autoload the runtime installs, a section of project.godot, and the
+  // gdUnit4 setting a test run obeys on script errors. Named one
   // by one rather than matched by a pattern, so a new word of this shape has to be looked at once
   // and called a tool or called vocabulary.
   const notTools = new Set([
@@ -26907,6 +26974,7 @@ function testEveryToolNamedInProseIsATool(): void {
     'debug_port',
     'debug_adapter',
     'editor_plugins',
+    'script_error',
   ]);
   // The addon's own modules, taken from the files rather than written down, because a module added
   // tomorrow is named in a string the day it lands and a list would not know about it.
