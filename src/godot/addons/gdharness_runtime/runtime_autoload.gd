@@ -27,9 +27,21 @@ const BIND_ADDRESS_SETTING: String = "gdharness/runtime/bind_address"
 ## expects. A fixed port is for a client that cannot read the announcement.
 const PORT_SETTING: String = "gdharness/runtime/port"
 
-## How long a profiled game waits as it leaves for its profile to be sent: the debugger's thread
-## sends every 6.9 ms, so this is many of its turns.
-const PROFILE_SEND_MS: int = 100
+## The debugger messages that confirm a profile's totals arrived: the game sends the first after
+## them, and the debugger answers with the second once it has read that far. Kept in step with
+## `PROFILE_SENT` and `PROFILE_RECEIVED` in src/script-profile.ts and the editor addon's
+## profile_tools.gd.
+const PROFILE_CAPTURE: String = "gdharness"
+const PROFILE_SENT: String = "gdharness:profile_sent"
+const PROFILE_RECEIVED: String = "gdharness:profile_received"
+
+## The longest a quitting game waits for that answer. A debugger that never gives one, such as an
+## editor without the gdharness addon, holds every profiled exit this long.
+const PROFILE_CONFIRM_MS: int = 3000
+
+## How many calls of `EngineDebugger.line_poll` read the debugger's messages once: it reads them
+## on every 2048th call and only counts the others.
+const POLLS_PER_READ: int = 2048
 
 ## How the engine is told to run a script instead of the game: `godot -s thing.gd`.
 const SCRIPT_FLAGS: PackedStringArray = ["-s", "--script"]
@@ -90,6 +102,7 @@ var _commands: Dictionary = {}
 ## Empty when the markers cannot be read, as in a copy made by hand.
 var _loaded_version: String = _read_marker(VERSION_MARKER)
 var _loaded_digest: String = _read_marker(DIGEST_MARKER)
+var _profile_received: bool = false
 
 
 func _init() -> void:
@@ -144,17 +157,47 @@ func _exit_tree() -> void:
 ##
 ## The engine sends its script profiler's totals only when the profiler is switched off, and at
 ## exit it is torn down without being switched off, so a scene that did its work in _ready and
-## quit took its whole profile with it, last frame included. The wait is for the debugger's own
-## thread, which sends what is queued every few milliseconds and stops without emptying the queue.
+## quit took its whole profile with it, last frame included.
+##
+## The totals go out on the debugger's own thread, which stops without emptying its queue, so the
+## game waits until the debugger says it has read them. A fixed wait of 100 ms lost the totals of
+## games quitting under load, whose debugger thread did not get its turn in time.
 ##
 ## On the root leaving rather than this node: the root leaves only as the game quits, and after
 ## every other node's _exit_tree, so what those do is counted. A project that sent this node away
 ## mid-run had the profiler switched off then, and its run answered as complete with none of the
 ## frames after it.
 func _send_the_profile() -> void:
-	if EngineDebugger.is_active() and EngineDebugger.is_profiling("servers"):
-		EngineDebugger.profiler_enable("servers", false)
-		OS.delay_msec(PROFILE_SEND_MS)
+	if not (EngineDebugger.is_active() and EngineDebugger.is_profiling("servers")):
+		return
+	_profile_received = false
+	if not EngineDebugger.has_capture(PROFILE_CAPTURE):
+		EngineDebugger.register_message_capture(PROFILE_CAPTURE, _on_debugger_message)
+	EngineDebugger.profiler_enable("servers", false)
+	EngineDebugger.send_message(PROFILE_SENT, [])
+	var deadline: int = Time.get_ticks_msec() + PROFILE_CONFIRM_MS
+	while not _profile_received and Time.get_ticks_msec() < deadline:
+		for _poll: int in POLLS_PER_READ:
+			EngineDebugger.line_poll()
+		OS.delay_msec(5)
+	EngineDebugger.unregister_message_capture(PROFILE_CAPTURE)
+	if not _profile_received:
+		print(
+			(
+				(
+					"[gdharness] the debugger did not confirm the profiler's totals within %d ms, so the"
+					+ " profile may be the frames that arrived without them"
+				)
+				% PROFILE_CONFIRM_MS
+			)
+		)
+
+
+func _on_debugger_message(message: String, _data: Array) -> bool:
+	if PROFILE_CAPTURE + ":" + message == PROFILE_RECEIVED:
+		_profile_received = true
+		return true
+	return false
 
 
 ## The engine's error reports, written to a file for the server, for a game the editor plays, and
