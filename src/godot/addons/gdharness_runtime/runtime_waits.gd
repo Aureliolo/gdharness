@@ -322,12 +322,14 @@ static func _declared_type(holder: Variant, named: String) -> int:
 ## looking takes about a tenth of the time. Every frame on a hall of 3,500 nodes held the game at a
 ## sixth of its frame rate, and its clock, which advances by the frame's delta, lost three quarters
 ## of its time, so a wait for a date timed out on a clock that turned a day every thirty seconds.
-## The answer says how many frames the wait spanned and how many looks it took, which is how a
-## caller sees what it cost.
+## The answer says how many frames the wait spanned, how many looks it took and how long they took
+## between them, which is how a caller sees what it cost and whether the game lost its speed to the
+## looks or to something else.
 func _wait_until_said(node_path: String, said: String, timeout_ms: int, include_hidden: bool) -> Dictionary:
 	var started: int = Time.get_ticks_msec()
 	var frames: int = 0
 	var looks: int = 0
+	var looked_usec: int = 0
 	var next_look: int = 0
 	var found: bool = false
 	while true:
@@ -335,7 +337,9 @@ func _wait_until_said(node_path: String, said: String, timeout_ms: int, include_
 			var looking: int = Time.get_ticks_usec()
 			found = _anything_says(node_path, said, include_hidden)
 			looks += 1
-			next_look = Time.get_ticks_usec() + (Time.get_ticks_usec() - looking) * LOOKS_APART
+			var took: int = Time.get_ticks_usec() - looking
+			looked_usec += took
+			next_look = Time.get_ticks_usec() + took * LOOKS_APART
 		if found or Time.get_ticks_msec() - started >= timeout_ms:
 			break
 		await _host.get_tree().process_frame
@@ -343,8 +347,10 @@ func _wait_until_said(node_path: String, said: String, timeout_ms: int, include_
 	# One more look at the end, so words that arrived between two paced looks are not answered as
 	# never having come.
 	if not found:
+		var last: int = Time.get_ticks_usec()
 		found = _anything_says(node_path, said, include_hidden)
 		looks += 1
+		looked_usec += Time.get_ticks_usec() - last
 
 	return {
 		"type": "condition",
@@ -355,6 +361,7 @@ func _wait_until_said(node_path: String, said: String, timeout_ms: int, include_
 		"elapsed_ms": Time.get_ticks_msec() - started,
 		"frames": frames,
 		"looks": looks,
+		"looking_ms": looked_usec / 1000.0,
 	}
 
 
