@@ -27424,6 +27424,141 @@ function testEveryArgumentTheSkillNamesIsOneTheOpTakes(): void {
   assert.ok(seen >= ARGUMENT_MENTIONS, `only ${seen} phrases were read; the pattern is not matching`);
 }
 
+/** How many files the prose gate below reads today, as a floor under its walk. */
+const PROSE_FILES_READ = 215;
+
+/**
+ * The two dashes, by code point, so this file holds neither character: an editor or a tool that
+ * turns an escape into the character it names would otherwise put one here for the gate to find.
+ */
+const EM_DASH = String.fromCodePoint(0x2014);
+const EN_DASH = String.fromCodePoint(0x2013);
+
+/**
+ * Phrases an agent writes by habit and no sentence here needs: chatbot openers and closers, and
+ * marketing words that claim instead of saying. Exact and lower case, matched case aside.
+ */
+const HABIT_PHRASES = [
+  'i hope this helps',
+  'let me know if you have any questions',
+  "let's dive in",
+  "here's what you need to know",
+  "it's not just",
+  'at its core',
+  'the real question is',
+  'what really matters',
+  'game-changer',
+  'game changer',
+  'cutting-edge',
+  'next-generation',
+  'seamless',
+  'delve',
+] as const;
+
+/**
+ * What [param text] holds that the project's prose may not, by rule.
+ *
+ * An em dash anywhere, and an en dash standing between spaces as one. In [param prose], also a
+ * spaced double hyphen standing in for a dash, outside backticks, where a command line's own `--`
+ * lives, and the habit phrases.
+ */
+function proseFaults(text: string, prose: boolean): string[] {
+  const faults: string[] = [];
+  for (const [index, line] of text.split('\n').entries()) {
+    const at = `line ${index + 1}`;
+    if (line.includes(EM_DASH)) {
+      faults.push(`${at}: an em dash`);
+    }
+    if (line.includes(` ${EN_DASH} `)) {
+      faults.push(`${at}: an en dash used as a dash`);
+    }
+    if (!prose) {
+      continue;
+    }
+    const outsideCode = line.replace(/`[^`]*`/g, '');
+    if (outsideCode.includes(' -- ')) {
+      faults.push(`${at}: a double hyphen used as a dash`);
+    }
+    const lower = outsideCode.toLowerCase();
+    for (const phrase of HABIT_PHRASES) {
+      if (new RegExp(`\\b${phrase.replaceAll('-', '\\-')}`).test(lower)) {
+        faults.push(`${at}: "${phrase}"`);
+      }
+    }
+  }
+  return faults;
+}
+
+/**
+ * The project's prose holds no dash stand-ins and none of the habit phrases.
+ *
+ * No em dashes was a rule written in CONTRIBUTING.md and nowhere else, so nothing stopped a tool
+ * description, a refusal or a comment carrying one to every agent that reads it. Every tracked text
+ * file is read for the dashes, tests and workflows included; the double hyphen and the phrases only
+ * in what ships, the sources and the documents and the skill and tool reference as rendered, since a
+ * test has to be free to quote a phrase and a command line's separator is a double hyphen.
+ */
+function testShippedProseHasNoDashStandInsOrHabitPhrases(): void {
+  // The check itself, on what it must flag and what it must leave alone.
+  assert.deepEqual(proseFaults(`one ${EM_DASH} two`, false), ['line 1: an em dash']);
+  assert.deepEqual(proseFaults(`one ${EN_DASH} two, pages 3${EN_DASH}4`, false), [
+    'line 1: an en dash used as a dash',
+  ]);
+  assert.deepEqual(proseFaults('wait -- then go\nI hope this helps!', true), [
+    'line 1: a double hyphen used as a dash',
+    'line 2: "i hope this helps"',
+  ]);
+  assert.deepEqual(proseFaults('godot `--path p -- -e` and `HEAD -- package.json`', true), []);
+  assert.deepEqual(proseFaults('wait -- then go', false), [], 'a test line may hold a command line');
+
+  const read: { where: string; text: string; prose: boolean }[] = [];
+  const kinds = /\.(ts|gd|md|yml|yaml|json|jsonc|cfg|tscn|sh|ps1|mjs)$/;
+  const walk = (directory: string, prose: boolean): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name !== 'node_modules') {
+          walk(path, prose);
+        }
+      } else if (kinds.test(entry.name)) {
+        // The workflows are shell, where a double hyphen is a command's separator.
+        read.push({
+          where: path,
+          text: readFileSync(path, 'utf8'),
+          prose: prose && !/\.ya?ml$/.test(entry.name),
+        });
+      }
+    }
+  };
+  walk('src', true);
+  walk('docs', true);
+  walk('.github', true);
+  walk('test', false);
+  walk('scripts', false);
+  for (const entry of readdirSync('.', { withFileTypes: true })) {
+    if (entry.isFile() && kinds.test(entry.name) && !entry.name.endsWith('lock.json')) {
+      read.push({
+        where: entry.name,
+        text: readFileSync(entry.name, 'utf8'),
+        prose: entry.name.endsWith('.md'),
+      });
+    }
+  }
+  read.push({ where: 'the tool reference', text: renderToolsMarkdown(), prose: true });
+  for (const [name, text] of skillFiles('0.0.0')) {
+    read.push({ where: `the skill: ${name}`, text, prose: true });
+  }
+
+  const faults = read.flatMap(({ where, text, prose }) =>
+    proseFaults(text, prose).map((fault) => `${where} ${fault}`),
+  );
+  assert.deepEqual(faults, [], 'the prose holds no dash stand-ins and none of the habit phrases');
+  assert.ok(
+    read.length >= PROSE_FILES_READ,
+    `only ${read.length} files were read; the walk is not reaching them`,
+  );
+}
+
 /**
  * How many tool names the tree mentions today, as a floor under the reading below.
  *
@@ -31237,6 +31372,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheCopiedHelperReadsTheSameEverywhere,
   testEveryReservedPortIsItsOwn,
   testEveryToolNamedInProseIsATool,
+  testShippedProseHasNoDashStandInsOrHabitPhrases,
   testEveryArgumentTheSkillNamesIsOneTheOpTakes,
   testACaptureIsSavedOnlyWhereItMayBe,
   testTheEditorIsOfferedWhereItCanAnswer,

@@ -163,7 +163,7 @@ async function registerRuntime(godot: HeadlessEngine, projectPath: string): Prom
   }
 }
 
-/** setup's own flags, so anything else beginning with -- is read as naming a harness. */
+/** setup's own flags, so anything else beginning with `--` is read as naming a harness. */
 const SETUP_FLAGS = new Set(['--runtime', '--no-runtime', '--no-connect', '--no-skill', '--json', '--yes']);
 
 /**

@@ -162,5 +162,7 @@ publishing with nothing linking to it.
 
 ## Style
 
-- British English in prose. No em-dashes.
+- British English in prose. No em-dashes, and no en dash or double hyphen standing in for one; no
+  chatbot openers or closers and no marketing words in what ships. A regression reads every file for
+  these, so the list it holds (`HABIT_PHRASES` in `test/regressions.ts`) is the one to add to.
 - Comments explain why, never what.
