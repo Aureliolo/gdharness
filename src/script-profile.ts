@@ -13,7 +13,7 @@
 
 import { readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { createServer, type Server, type Socket } from 'node:net';
-import { type CallSite, callSitesOf, enclosingFunction } from './gdscript-source.js';
+import { bodyCallsSuper, type CallSite, callSitesOf, codeOf, enclosingFunction } from './gdscript-source.js';
 import { type DebuggerMessage, DebuggerStream, framedCommand, type GodotValue } from './godot-variant.js';
 import { parseProjectGodot } from './resources.js';
 
@@ -244,6 +244,13 @@ export interface ProfiledFunction {
   readonly calls: number;
   readonly selfMs: number;
   readonly totalMs: number;
+  /**
+   * True for a function that calls through `super`, whose selfMs then holds what that call took.
+   * The engine takes every other call a script function makes out of its self time, but its opcode
+   * for a super call (`OPCODE_CALL_SELF_BASE` in `gdscript_vm.cpp` at 4.7.2) is not timed, so the
+   * overridden function's time is in its own row and again in this one.
+   */
+  readonly selfIncludesSuper?: true;
 }
 
 /** A script's source by its `res://` path, or null when it cannot be read. */
@@ -276,8 +283,14 @@ export function profiledFunctions(
   totals: ProfileTotals,
   limit: number,
   sourceOf: SourceOf = () => null,
-): { functions: readonly ProfiledFunction[]; omitted: number; scriptMs: number; counted: number } {
-  const rows = rowsOf(totals);
+): {
+  functions: readonly ProfiledFunction[];
+  omitted: number;
+  scriptMs: number;
+  counted: number;
+  superCallers: number;
+} {
+  const rows = rowsOf(totals, sourceOf);
   const scriptMs = ms(
     Object.values(totals.functions).reduce((sum, one) => sum + (one.calls > 0 ? one.selfSeconds : 0), 0),
   );
@@ -286,15 +299,25 @@ export function profiledFunctions(
     omitted: Math.max(0, rows.length - limit),
     scriptMs,
     counted: rows.length,
+    superCallers: rows.filter((row) => row.selfIncludesSuper === true).length,
   };
 }
 
-/** Every function [param totals] counts a call of, by self time. */
-function rowsOf(totals: ProfileTotals): ProfiledFunction[] {
+/** Every function [param totals] counts a call of, by self time, each marked if it calls super. */
+function rowsOf(totals: ProfileTotals, sourceOf: SourceOf): ProfiledFunction[] {
+  const codes = new Map<string, string | null>();
+  const codeOfScript = (script: string): string | null => {
+    if (!codes.has(script)) {
+      const source = sourceOf(script);
+      codes.set(script, source === null ? null : codeOf(source));
+    }
+    return codes.get(script) ?? null;
+  };
   return Object.entries(totals.functions)
     .filter(([, sum]) => sum.calls > 0)
     .map(([signature, sum]): ProfiledFunction => {
       const parts = signatureParts(signature);
+      const code = codeOfScript(parts.script);
       return {
         script: parts.script,
         function: parts.function,
@@ -302,6 +325,9 @@ function rowsOf(totals: ProfileTotals): ProfiledFunction[] {
         calls: sum.calls,
         selfMs: ms(sum.selfSeconds),
         totalMs: ms(sum.totalSeconds),
+        ...(code !== null && bodyCallsSuper(code, parts.line, parts.function.endsWith('(lambda)'))
+          ? { selfIncludesSuper: true as const }
+          : {}),
       };
     })
     .sort((a, b) => b.selfMs - a.selfMs || b.totalMs - a.totalMs || a.function.localeCompare(b.function));
@@ -333,6 +359,8 @@ export interface ProfiledCallSite extends CallSite {
   readonly withinCalls?: number;
   readonly withinSelfMs?: number;
   readonly withinTotalMs?: number;
+  /** As `selfIncludesSuper` on the function's own row. */
+  readonly withinSelfIncludesSuper?: true;
 }
 
 /** How many places a callers answer lists before saying how many more there were. */
@@ -352,13 +380,15 @@ export function callersOf(
   name: string,
   scripts: Iterable<readonly [script: string, source: string]>,
 ): { target: readonly ProfiledFunction[]; sites: readonly ProfiledCallSite[]; omitted: number } {
-  const rows = rowsOf(totals);
+  const listed = [...scripts];
+  const sources = new Map(listed);
+  const rows = rowsOf(totals, (script) => sources.get(script) ?? null);
   const bare = bareName(name);
   const target = rows.filter((row) =>
     name.includes('.') ? row.function === name : bareName(row.function) === bare,
   );
   const sites: ProfiledCallSite[] = [];
-  for (const [script, source] of scripts) {
+  for (const [script, source] of listed) {
     for (const site of callSitesOf(source, bare)) {
       const within =
         site.within === null
@@ -369,7 +399,12 @@ export function callersOf(
         ...site,
         ...(within === undefined
           ? {}
-          : { withinCalls: within.calls, withinSelfMs: within.selfMs, withinTotalMs: within.totalMs }),
+          : {
+              withinCalls: within.calls,
+              withinSelfMs: within.selfMs,
+              withinTotalMs: within.totalMs,
+              ...(within.selfIncludesSuper === true ? { withinSelfIncludesSuper: true as const } : {}),
+            }),
       });
     }
   }

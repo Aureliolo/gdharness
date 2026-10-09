@@ -501,6 +501,81 @@ export function enclosingFunction(source: string, line: number, code = codeOf(so
   return null;
 }
 
+const SUPER_CALL = /(?<![\p{L}\p{N}_.])super\s*[.(]/u;
+const LAMBDA_HEADER = new RegExp(`(?<![\\p{L}\\p{N}_])func(?:\\s+${NAME})?\\s*\\(`, 'u');
+
+/**
+ * Where the body of the function header starting at [param from] in [param text] begins: past the
+ * parameters' closing bracket, a return type and the colon. -1 when the header does not end there.
+ */
+function afterHeader(text: string, from: number): number {
+  let depth = 0;
+  for (let at = text.indexOf('(', from); at !== -1 && at < text.length; at += 1) {
+    if (text[at] === '(') {
+      depth += 1;
+    } else if (text[at] === ')') {
+      depth -= 1;
+      if (depth === 0) {
+        const colon = text.indexOf(':', at);
+        return colon === -1 ? -1 : colon + 1;
+      }
+    }
+  }
+  return -1;
+}
+
+/**
+ * Whether the function whose body's first statement is on one-based [param line] of [param code]
+ * calls through `super` in its own body, not in a lambda written in it. [param code] is a script as
+ * `codeOf` gives it, so `super` in a comment or a string is not read; [param lambda] says which of a
+ * named function and a lambda starting on the same line is meant, since both are recorded there.
+ */
+export function bodyCallsSuper(code: string, line: number, lambda: boolean): boolean {
+  const lines = code.split('\n');
+  const first = lines[line - 1];
+  if (first === undefined) {
+    return false;
+  }
+  // A body written on its header's line, which is then the line recorded for it.
+  const header = lambda ? LAMBDA_HEADER.exec(first) : FUNC_LINE.exec(first);
+  if (header !== null) {
+    const body = afterHeader(first, header.index);
+    if (body !== -1 && first.slice(body).trim() !== '') {
+      return SUPER_CALL.test(first.slice(body));
+    }
+  }
+  const indent = indentOf(first);
+  let lambdaIndent: number | null = null;
+  for (let index = line - 1; index < lines.length; index += 1) {
+    const text = lines[index] ?? '';
+    if (text.trim() === '') {
+      continue;
+    }
+    const at = indentOf(text);
+    if (at < indent) {
+      break;
+    }
+    if (lambdaIndent !== null) {
+      if (at > lambdaIndent) {
+        continue;
+      }
+      lambdaIndent = null;
+    }
+    // A lambda's code is its own row: what comes before its header is this function's.
+    const inner = LAMBDA_HEADER.exec(text);
+    if (SUPER_CALL.test(inner === null ? text : text.slice(0, inner.index))) {
+      return true;
+    }
+    if (inner !== null) {
+      const body = afterHeader(text, inner.index);
+      if (body !== -1 && text.slice(body).trim() === '') {
+        lambdaIndent = at;
+      }
+    }
+  }
+  return false;
+}
+
 /** A place in a script that names a function, outside its declaration. */
 export interface CallSite {
   /** One-based. */

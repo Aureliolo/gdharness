@@ -1036,10 +1036,24 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
   );
   assert.match(say({ running: true, totals: partial, through: 'editor' }), /summed so far\.$/);
   assert.match(say({ totals: { ...partial, frames: 1 } }), /^These are the one frame that arrived, summed/);
+  // An ended run without totals: why they did not come, and what that leaves out, which is told
+  // apart from data lost because it can be nothing at all.
+  assert.match(
+    say({ totals: partial }),
+    /^These are the 3 frames that arrived, summed, without the engine's own totals, which it sends only when the profiler is switched off\. The runtime addon switches the profiler off as the game leaves the tree, and did not here: either it was not running in this game, which a project can arrange for some scenes, or the game ended without leaving the tree, as a crash or a kill does\. Not in them is any script time after the last frame sent: a frame still queued as the game exited, .* and what scripts did as it quit, such as in _exit_tree\. That can be nothing: a scene that does its work in _ready and quits has all of it in its first frame\.$/,
+  );
   assert.doesNotMatch(
     say({ totals: partial }),
-    /runtime addon/,
+    /setup installs it|no gdharness runtime addon/,
     'a project with the addon is not told to install it',
+  );
+  assert.match(
+    say({ totals: partial, runtimeAddon: false }),
+    /switched off\. This project has no gdharness runtime addon, .*: setup installs it\. Not in them is any script time/,
+  );
+  assert.match(
+    say({ totals: { ...partial, frames: 0 } }),
+    /ended before a frame of the profile reached this server: .* The runtime addon switches the profiler off as the game leaves the tree, and did not here/,
   );
   assert.match(
     say({ totals: { ...partial, frames: 0 }, runtimeAddon: false, through: 'editor' }),
@@ -1250,6 +1264,107 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
   assert.match(withCallers('_ranked_by', scripts), /^Found by name in the project's scripts/);
   assert.match(withCallers('_ranked_by', []), /^No script in the project names _ranked_by in code/);
   assert.match(withCallers('_strength', scripts), /The profile counts no call of _strength/);
+
+  // A super call is in its caller's self time as well as in the overridden function's row, so the
+  // rows calling super are marked: each way of writing one, and the places that only look like one.
+  const duel = [
+    'class_name Run',
+    'extends Pouched',
+    '',
+    '',
+    'func _begin_duel(a: int) -> int:',
+    '\tvar got := super(a)',
+    '\treturn got',
+    '',
+    '',
+    'func _begin_other() -> void:',
+    '\tsuper._begin_duel(1)',
+    '',
+    '',
+    'func one_line() -> int: return super.one_line() + 1',
+    '',
+    '',
+    'func only_said() -> void:',
+    '\tprint("super(a) in a string")  # super(a) in a comment',
+    '',
+    '',
+    'func in_a_lambda() -> void:',
+    '\tvar later := func(): return super.in_a_lambda()',
+    '\tlater.call()',
+    '',
+    '',
+    'func in_a_long_lambda() -> void:',
+    '\tvar later := func():',
+    '\t\tsuper.in_a_long_lambda()',
+    '\tlater.call()',
+    '',
+    '',
+    'func _supervise() -> void:',
+    '\tsupervisor.super_x(my_super(1))',
+    '',
+  ].join('\n');
+  const duelRows = (lines: readonly (readonly [number, string])[]): ProfileTotals =>
+    totals(
+      Object.fromEntries(
+        lines.map(([line, name], at) => [
+          `res://duel.gd::${line}::Run.${name}`,
+          { calls: 1, selfSeconds: 0.1 * (lines.length - at), totalSeconds: 1 },
+        ]),
+      ),
+    );
+  const duels = duelRows([
+    [6, '_begin_duel'],
+    [11, '_begin_other'],
+    [14, 'one_line'],
+    [18, 'only_said'],
+    [22, 'in_a_lambda'],
+    [22, '<anonymous lambda>(lambda)'],
+    [27, 'in_a_long_lambda'],
+    [28, '<anonymous lambda>(lambda)'],
+    [33, '_supervise'],
+  ]);
+  const duelSource = (script: string): string | null => (script === 'res://duel.gd' ? duel : null);
+  assert.deepEqual(
+    profiledFunctions(duels, 20, duelSource).functions.map((one) => [
+      one.line,
+      one.function,
+      one.selfIncludesSuper,
+    ]),
+    [
+      [6, 'Run._begin_duel', true],
+      [11, 'Run._begin_other', true],
+      [14, 'Run.one_line', true],
+      [18, 'Run.only_said', undefined],
+      [22, 'Run.in_a_lambda', undefined],
+      [22, 'Run.<anonymous lambda>(lambda)', true],
+      [27, 'Run.in_a_long_lambda', undefined],
+      [28, 'Run.<anonymous lambda>(lambda)', true],
+      [33, 'Run._supervise', undefined],
+    ],
+    'super( and super.name( in the body, on its header line or in a lambda; not in a comment, a string, a lambda written in the function, or a longer name holding super',
+  );
+  assert.match(
+    String(answer({ totals: duels, sourceOf: duelSource })['note']),
+    /^5 functions call through super, marked selfIncludesSuper: the engine takes every other call out of the caller's self time, and not a super call, so their selfMs holds the overridden function's time, which that function's own row counts again\. Self time therefore cannot be added along an override chain, and scriptMs counts the time under a super call once more for each level above it\.$/,
+  );
+  assert.match(
+    String(answer({ totals: duelRows([[6, '_begin_duel']]), sourceOf: duelSource })['note']),
+    /^One function calls through super, marked selfIncludesSuper: .* so its selfMs holds/,
+  );
+  assert.equal(
+    answer({ totals: duels })['note'],
+    undefined,
+    'nothing is said of a source that cannot be read',
+  );
+  assert.deepEqual(
+    callersOf(duels, '_begin_duel', [['res://duel.gd', duel]]).sites.map((one) => [
+      one.line,
+      one.within,
+      one.withinSelfIncludesSuper,
+    ]),
+    [[11, '_begin_other', true]],
+    'and a place in such a function says so beside its numbers',
+  );
 
   // A script path comes from the game, so it is read only inside the project: a path climbing out of
   // it reads nothing, though the file it names is there, and nor does one built into a scene.
@@ -24565,7 +24680,7 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
       join(project, 'harness', 'work.gd'),
       [
         'class_name Work',
-        'extends Node',
+        'extends "res://harness/ladder.gd"',
         '',
         '',
         'static func square(n: int) -> int:',
@@ -24580,7 +24695,7 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
         '',
         '',
         'func _ready() -> void:',
-        '\tprint(busy(200000))',
+        '\tprint(busy(200000), duel(100000))',
         '\t# ranked(this comment is not a call)',
         '\tprint(ranked([3, 1, 2]), "ranked(nor this string)")',
         '\tget_tree().quit()',
@@ -24591,6 +24706,25 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
         '\tvalues.sort_custom(by_size)',
         '\tvalues.sort_custom(func(a: int, b: int) -> bool: return a < b)',
         '\treturn values',
+        '',
+        '',
+        'func duel(rounds: int) -> int:',
+        '\treturn super(rounds) + 1',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(project, 'harness', 'ladder.gd'),
+      [
+        'class_name Ladder',
+        'extends Node',
+        '',
+        '',
+        'func duel(rounds: int) -> int:',
+        '\tvar sum := 0',
+        '\tfor i in rounds:',
+        '\t\tsum += i % 7',
+        '\treturn sum',
         '',
       ].join('\n'),
     );
@@ -24688,7 +24822,11 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
       assert.equal(get(whole, 'through'), 'gdharness', wholeShown);
       assert.equal(get(whole, 'connected'), true, wholeShown);
       assert.equal(get(whole, 'complete'), true, `the runtime addon sent the engine's totals: ${wholeShown}`);
-      assert.equal(get(whole, 'note'), undefined, wholeShown);
+      assert.match(
+        String(get(whole, 'note')),
+        /^One function calls through super, marked selfIncludesSuper/,
+        wholeShown,
+      );
       const rows = asArray(get(whole, 'functions'));
       const row = (name: string): unknown => rows.find((one) => get(one, 'function') === name);
       assert.deepEqual(
@@ -24730,6 +24868,17 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
         get(row('Work.busy'), 'within'),
         undefined,
         `a named function needs no placing: ${wholeShown}`,
+      );
+      // The override calling super is marked, as its self time holds the base's; the base is not.
+      assert.deepEqual(
+        [
+          get(row('Work.duel'), 'line'),
+          get(row('Work.duel'), 'selfIncludesSuper'),
+          get(row('Ladder.duel'), 'calls'),
+          get(row('Ladder.duel'), 'selfIncludesSuper'),
+        ],
+        [31, true, 1, undefined],
+        `Work.duel calls super, Ladder.duel does not: ${wholeShown}`,
       );
 
       // Its two callers, from the source, each with its own numbers from the same profile; the
@@ -24805,6 +24954,16 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
         lostShown,
       );
       assert.match(String(get(lost, 'note')), /no gdharness runtime addon/, lostShown);
+      if (Number(get(lost, 'frames')) === 1) {
+        // What the note says of such a scene: its one frame holds all of the work done in _ready.
+        const lostRows = asArray(get(lost, 'functions'));
+        const lostRow = (name: string): unknown => lostRows.find((one) => get(one, 'function') === name);
+        assert.deepEqual(
+          [get(lostRow('Work.busy'), 'calls'), get(lostRow('Work.square'), 'calls')],
+          [1, 200000],
+          lostShown,
+        );
+      }
 
       const summed = await profiledRun('frames', true);
       const summedShown = JSON.stringify(summed);
