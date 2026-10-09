@@ -272,7 +272,12 @@ import { asArray, asNumber, asObject, get, text } from './support/json.js';
 import { isRecord, type JsonRpcMessage, parseTextContent, textOf } from './support/json-rpc.js';
 import { solidPng } from './support/png.js';
 import { reservePort, ServerProcess } from './support/server.js';
-import { REGRESSION_SECONDS, regressionPart, UNMEASURED_SECONDS } from './support/shards.js';
+import {
+  ENGINE_FIXTURES_SECONDS,
+  REGRESSION_SECONDS,
+  regressionPart,
+  UNMEASURED_SECONDS,
+} from './support/shards.js';
 import { endEnginesLeft, leftBehindBy, reportUnswept, sweep, sweepingFor } from './support/sweep.js';
 
 /**
@@ -31922,6 +31927,23 @@ function testRegressionPartsCoverEveryTestOnceAndBalance(): void {
   const weights = { a: 20, b: 1, c: 20, d: 1 };
   assert.deepEqual(regressionPart(['a', 'b', 'c', 'd'], 1, 2, weights), ['a', 'b']);
   assert.deepEqual(regressionPart(['a', 'b', 'c', 'd'], 2, 2, weights), ['c', 'd']);
+  // A first part that carries other work is dealt that much less: with 20 on it already, one of the
+  // heavy pair goes to it and both light ones to the other part.
+  assert.deepEqual(regressionPart(['a', 'b', 'c', 'd'], 1, 2, weights, 20), ['c']);
+  assert.deepEqual(regressionPart(['a', 'b', 'c', 'd'], 2, 2, weights, 20), ['a', 'b', 'd']);
+  // And over the real list with the engine fixtures on the first of three, which is how macOS runs.
+  const carrying = Array.from({ length: 3 }, (_unused, at) =>
+    regressionPart(names, at + 1, 3, REGRESSION_SECONDS, ENGINE_FIXTURES_SECONDS),
+  );
+  assert.deepEqual(carrying.flat().sort(), [...names].sort(), 'still every regression once');
+  const carried = carrying.map(
+    (part, at) =>
+      part.reduce((total, name) => total + weight(name), 0) + (at === 0 ? ENGINE_FIXTURES_SECONDS : 0),
+  );
+  assert.ok(
+    Math.max(...carried) - Math.min(...carried) <= heaviest,
+    `and the parts within the heaviest regression of each other, the fixtures counted: ${carried.join(', ')}`,
+  );
 }
 
 const TESTS: (() => void | Promise<void>)[] = [
@@ -32278,6 +32300,9 @@ async function main(): Promise<void> {
             named.map((test) => test.name),
             Number(part[1]),
             Number(part[2]),
+            REGRESSION_SECONDS,
+            // Set by the workflow for a platform whose first part also runs the engine fixtures.
+            process.env['GDHARNESS_ENGINE_FIXTURES_IN_FIRST_PART'] === '1' ? ENGINE_FIXTURES_SECONDS : 0,
           ),
         );
   const chosen = inPart === null ? named : named.filter((test) => inPart.has(test.name));
