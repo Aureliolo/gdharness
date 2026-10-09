@@ -9324,12 +9324,12 @@ function testANotYetRuntimeIsNotTheSameAsNoRuntime(): void {
   const unstarted = { ...played, seenPlaying: false };
   assert.equal(runIsUp(unstarted, false), true, 'a play the editor has not started yet is on its way');
   assert.equal(
-    runIsUp(unstarted, false, played.startedAt + PLAY_STARTS_WITHIN_MS),
+    runIsUp(unstarted, false, null, played.startedAt + PLAY_STARTS_WITHIN_MS),
     false,
     'and an editor that has not started it within the grace is believed',
   );
   assert.equal(
-    runIsUp(unstarted, false, played.startedAt + PLAY_STARTS_WITHIN_MS - 1),
+    runIsUp(unstarted, false, null, played.startedAt + PLAY_STARTS_WITHIN_MS - 1),
     true,
     'up to the last moment of it',
   );
@@ -9367,6 +9367,37 @@ function testANotYetRuntimeIsNotTheSameAsNoRuntime(): void {
     'a run this server spawned is asked of the operating system, whatever the editor is playing',
   );
   assert.equal(runIsUp(null, true), false, 'and no run at all is not a run that is up');
+
+  // Which play the editor is in, for a game that never announced and so has no process to ask. A
+  // stop and a new play in one moment leave the editor saying "playing" throughout, and only the
+  // play's number says the run being asked about is not the one it means.
+  const third = { ...played, play: { play: 3, editorPid: 4242 } };
+  assert.equal(runIsUp(third, true, { play: 3, editorPid: 4242 }), true, 'its own play is still going');
+  assert.equal(
+    runIsUp(third, true, { play: 4, editorPid: 4242 }),
+    false,
+    'a play the editor has begun since means this one is over, though the editor says playing',
+  );
+  assert.equal(
+    runIsUp(third, true, { play: 3, editorPid: 4343 }),
+    false,
+    'and so does the same count from another editor, which a restart starts again from nothing',
+  );
+  assert.equal(
+    runIsUp({ ...third, seenPlaying: false }, false, { play: 4, editorPid: 4242 }),
+    false,
+    'with no grace for a play still on its way, since a later play is never this one arriving',
+  );
+  assert.equal(
+    runIsUp(third, true, null),
+    true,
+    'and an editor that does not number its plays leaves its word on playing as the answer',
+  );
+  assert.equal(
+    runIsUp(played, true, { play: 4, editorPid: 4242 }),
+    true,
+    'as does a run that cannot say which play it is',
+  );
 
   const listening = runtimeVerdict(
     {
