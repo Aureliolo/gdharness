@@ -25005,7 +25005,9 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
       // The runtime leaving mid-run is not the game quitting: the profiler stays on and the frames
       // after it are counted, rather than the engine's totals arriving then and nothing after them.
       writeFileSync(join(project, 'project.godot'), settings(true));
-      const shed = await profiledRun('shed', true);
+      // Every row asked for: each_frame's self time is tiny, and on Linux the runtime's own start-up
+      // functions outranked it in a table of ten.
+      const shed = await profiledRun('shed', true, { limit: 100 });
       const shedShown = JSON.stringify(shed);
       const shedEach = asArray(get(shed, 'functions')).find((one) => get(one, 'function') === 'each_frame');
       assert.ok(Number(get(shedEach, 'calls')) >= 25, `the frames after the runtime went: ${shedShown}`);
