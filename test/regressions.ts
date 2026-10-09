@@ -188,10 +188,12 @@ import {
 import { type CheckScript, originsOf, withoutListed } from '../src/script-origins.js';
 import {
   callersOf,
+  frameFunctionsFor,
   ProfileAggregate,
   type ProfileTotals,
   profiledFunctions,
   profilerOn,
+  queuedMessagesOf,
   signatureParts,
   withEngineArguments,
 } from '../src/script-profile.js';
@@ -844,13 +846,30 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
   ]);
 
   // The command decodes back to what the game checks: a String name, thread 1, then the data.
-  const command = profilerOn();
+  const command = profilerOn(1536);
   assert.equal(
     new DataView(command.buffer).getUint32(0, true),
     command.length - 4,
     'its length, little-endian',
   );
-  assert.deepEqual(decodeVariant(command.subarray(4)), ['profiler:servers', 1, [true, [16384, false]]]);
+  assert.deepEqual(decodeVariant(command.subarray(4)), ['profiler:servers', 1, [true, [1536, false]]]);
+
+  // The most functions a frame may carry, kept below the game's debugger queue, which drops the
+  // messages naming functions past its size: the engine's default queue, and a project's own.
+  assert.deepEqual(
+    [
+      queuedMessagesOf(null),
+      queuedMessagesOf('config_version=5\n\n[network]\n\nlimits/debugger/max_queued_messages=4096\n'),
+      queuedMessagesOf('config_version=5\n\n[network]\n\nlimits/debugger/max_queued_messages=0\n'),
+      queuedMessagesOf('config_version=5\n\n[application]\n\nlimits/debugger/max_queued_messages=4096\n'),
+    ],
+    [2048, 4096, 2048, 2048],
+    "the project's queue when it sets one in [network], the engine's default otherwise",
+  );
+  assert.deepEqual(
+    [frameFunctionsFor(2048), frameFunctionsFor(4096), frameFunctionsFor(100)],
+    [1536, 3584, 64],
+  );
 
   // Messages however the reads cut them, and one this reader cannot take skipped on its own.
   const unknownType = Uint8Array.of(12, 0, 0, 0, 28, 0, 0, 0, 1, 0, 0, 0, 99, 0, 0, 0, 0, 0, 0, 0);
@@ -869,7 +888,7 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
   );
 
   // Frames summed per function past the servers' section, and the engine's totals replacing them.
-  const aggregate = new ProfileAggregate(1000);
+  const aggregate = new ProfileAggregate(1000, 3);
   const take = (message: string, data: unknown[]): void => {
     aggregate.take({ message, data: data as never }, 2000);
   };
@@ -922,6 +941,29 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     [true, ['res://w.gd::6::Work.square'], 200],
     'the total is what the frames add up to, so it replaces them',
   );
+  assert.deepEqual(
+    [summed.cappedFrames, whole.totalCapped],
+    [0, false],
+    'two functions a frame is under three',
+  );
+
+  // A frame carrying as many as were asked for is counted, since the engine left out the rest; and a
+  // function whose naming message never came is kept under its number.
+  const tight = new ProfileAggregate(1000, 2);
+  const into = (message: string, data: unknown[]): void => {
+    tight.take({ message, data: data as never }, 2000);
+  };
+  into('servers:function_signature', ['res://w.gd::6::Work.square', 0]);
+  into('servers:profile_frame', frame(1));
+  into('servers:profile_frame', [...frame(1).slice(0, 13), 5, 0, 1, 0.002, 0.002, 0]);
+  const tightFrames = tight.snapshot();
+  assert.deepEqual(
+    [tightFrames.cappedFrames, tightFrames.frameFunctions, Object.keys(tightFrames.functions).sort()],
+    [1, 2, ['#1', 'res://w.gd::6::Work.square']],
+    'one of the two frames at the cap, and the function never named kept as #1',
+  );
+  into('servers:profile_total', [9, 0, 0, 0, 0, 0, 0, 10, 0, 2, 0.5, 0.5, 0, 1, 1, 0.1, 0.1, 0]);
+  assert.equal(tight.snapshot().totalCapped, true, 'and totals at the cap are said to be');
 
   assert.deepEqual(signatureParts('res://w.gd::10::Work.busy'), {
     script: 'res://w.gd',
@@ -1012,6 +1054,41 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     /^The profiler is on and the game has not finished its first frame yet: .*the engine's own totals arrive when the game quits\.$/,
   );
   assert.match(say({ running: true, totals: { ...partial, frames: 1 } }), /one frame summed so far/);
+
+  // What the cap leaves out, said for each way it can: some frames, every frame, the totals; and
+  // nothing for a profile that never reached it or one read off a keeper older than the cap.
+  const atCap = { ...partial, frameFunctions: 1536, cappedFrames: 1, totalCapped: false };
+  assert.match(
+    say({ running: true, totals: atCap }),
+    /1 of the 3 frames carried the most functions the profiler asks for in one, 1536, so the functions with the least time in it are not counted there: 1536 is kept below the game's debugger queue \(network\/limits\/debugger\/max_queued_messages\)/,
+  );
+  assert.match(
+    say({ running: true, totals: { ...atCap, cappedFrames: 3 } }),
+    /All 3 frames carried .* in them/,
+  );
+  assert.match(say({ running: true, totals: { ...atCap, frames: 1 } }), /The one frame carried .* in it/);
+  assert.match(
+    say({ totals: { ...totals({}), frameFunctions: 1536, cappedFrames: 0, totalCapped: true } }),
+    /^The engine's totals carried the most functions the profiler asks for, 1536, so the functions with the least time are not in them/,
+  );
+  assert.equal(
+    answer({ totals: { ...totals({}), frameFunctions: 1536, cappedFrames: 4, totalCapped: false } })['note'],
+    undefined,
+    'totals under the cap make the capped frames before them moot',
+  );
+  assert.doesNotMatch(say({ running: true, totals: { ...atCap, cappedFrames: 0 } }), /carried the most/);
+  assert.doesNotMatch(say({ running: true, totals: { ...partial, cappedFrames: 2 } }), /carried the most/);
+  assert.match(
+    say({
+      totals: totals({
+        '#2155': { calls: 880, selfSeconds: 0.2, totalSeconds: 0.3 },
+        '#2386': { calls: 60, selfSeconds: 0.01, totalSeconds: 0.01 },
+        '#99': { calls: 0, selfSeconds: 9, totalSeconds: 9 },
+        'res://a.gd::1::f': { calls: 1, selfSeconds: 0.1, totalSeconds: 0.1 },
+      }),
+    }),
+    /^2 functions arrived without their names, shown as # and the number the engine gave them: .*They are script functions of the game/,
+  );
 
   assert.equal(profileOnStart(false, 'gdharness', true), undefined, 'a start that did not ask says nothing');
   assert.match(
@@ -24346,6 +24423,33 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
     );
     scene('once', 'work.gd');
     scene('frames', 'frames.gd');
+    // More functions in one frame than the game's debugger queue holds names for.
+    const many = 2500;
+    writeFileSync(
+      join(project, 'harness', 'burst.gd'),
+      [
+        'extends Node',
+        '',
+        ...Array.from({ length: many }, (_, i) => `func f${i}() -> int:\n\treturn ${i}\n`),
+        'func _ready() -> void:',
+        '\tvar sum := 0',
+        ...Array.from({ length: many }, (_, i) => `\tsum += f${i}()`),
+        '\tprint(sum)',
+        '',
+        '',
+        // A few frames more, so the totals at the exit name nothing new and arrive whatever the
+        // first frame lost: what they carry is then what the first frame's names left behind.
+        'var frames := 0',
+        '',
+        '',
+        'func _process(_delta: float) -> void:',
+        '\tframes += 1',
+        '\tif frames == 5:',
+        '\t\tget_tree().quit()',
+        '',
+      ].join('\n'),
+    );
+    scene('burst', 'burst.gd');
     const server = new ServerProcess({
       env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
     });
@@ -24462,6 +24566,28 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
         String(get(whole, 'callers', 'note')),
         /^Found by name in the project's scripts/,
         wholeShown,
+      );
+
+      // Every function counted is named, and the answer says the totals stopped at the most a frame
+      // may carry: without the cap 2500 functions came back with hundreds of them as bare numbers.
+      const burst = await profiledRun('burst', true, { limit: 5000 });
+      const burstShown = JSON.stringify(burst).slice(0, 2000);
+      const burstRows = asArray(get(burst, 'functions'));
+      assert.deepEqual(
+        burstRows
+          .filter((one) => String(get(one, 'function')).startsWith('#'))
+          .map((one) => get(one, 'function')),
+        [],
+        `no function is left as a bare number: ${burstShown}`,
+      );
+      assert.ok(
+        burstRows.length > 1000 && burstRows.length <= frameFunctionsFor(queuedMessagesOf(null)),
+        `the totals carry as many functions as were asked for: ${burstRows.length}, ${burstShown}`,
+      );
+      assert.match(
+        String(get(burst, 'note')),
+        /^The engine's totals carried the most functions the profiler asks for, 1536/,
+        burstShown,
       );
 
       const unprofiled = await profiledRun('once', false);
