@@ -30,8 +30,10 @@ import {
 import { recordRunEnded, writeRunRecord } from './run-record.js';
 import { discard, scratchDirectory } from './scratch.js';
 import {
+  frameFunctionsFor,
   ProfileListener,
   type ProfileTotals,
+  queuedMessagesOf,
   withEngineArguments,
   writeProfileFile,
 } from './script-profile.js';
@@ -148,7 +150,10 @@ const PROFILE_WRITE_MS = 500;
  * so a server reading the file mid-run is at most that far behind and one reading it after the
  * exit has the lot.
  */
-async function profiledBy(path: string): Promise<{ listener: ProfileListener; finish: () => void }> {
+async function profiledBy(
+  path: string,
+  projectPath: string,
+): Promise<{ listener: ProfileListener; finish: () => void }> {
   let latest: ProfileTotals | null = null;
   let timer: NodeJS.Timeout | null = null;
   const write = (): void => {
@@ -157,15 +162,24 @@ async function profiledBy(path: string): Promise<{ listener: ProfileListener; fi
       writeProfileFile(path, { ...latest, connected: true });
     }
   };
-  const listener = await ProfileListener.open((totals) => {
-    const first = latest === null;
-    latest = totals;
-    if (first) {
-      write();
-    } else {
-      timer ??= setTimeout(write, PROFILE_WRITE_MS);
-    }
-  });
+  let projectGodot: string | null = null;
+  try {
+    projectGodot = readFileSync(join(projectPath, 'project.godot'), 'utf8');
+  } catch {
+    // The engine's default queue is what such a game runs with too.
+  }
+  const listener = await ProfileListener.open(
+    (totals) => {
+      const first = latest === null;
+      latest = totals;
+      if (first) {
+        write();
+      } else {
+        timer ??= setTimeout(write, PROFILE_WRITE_MS);
+      }
+    },
+    frameFunctionsFor(queuedMessagesOf(projectGodot)),
+  );
   writeProfileFile(path, { connected: false, listeningSince: Date.now() });
   return {
     listener,
@@ -267,7 +281,7 @@ async function keep(): Promise<void> {
   }
   // The game's debugger for a profiled run, opened before the game so it is listening when the game
   // dials it: the engine dials once, as it starts, and runs with no debugger if nobody answers.
-  const profiled = run?.profile === undefined ? null : await profiledBy(run.profile);
+  const profiled = run?.profile === undefined ? null : await profiledBy(run.profile, run.projectPath);
   const toStart =
     profiled === null
       ? spec

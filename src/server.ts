@@ -211,10 +211,13 @@ import {
 } from './script-origins.js';
 import {
   callersOf,
+  frameFunctionsFor,
   type ProfileTotals,
   profiledFunctions,
+  queuedMessagesOf,
   readProfileFile,
   type SourceOf,
+  UNNAMED_PREFIX,
 } from './script-profile.js';
 import type {
   GodotProcess,
@@ -2004,6 +2007,34 @@ export interface ProfileReading {
   readonly callersOf?: { readonly name: string; readonly scripts: () => Iterable<readonly [string, string]> };
 }
 
+/** The most functions a frame of [param projectPath]'s game may carry; see `frameFunctionsFor`. */
+function profileFrameFunctions(projectPath: string | null): number {
+  let projectGodot: string | null = null;
+  if (projectPath !== null) {
+    try {
+      projectGodot = readFileSync(join(projectPath, 'project.godot'), 'utf8');
+    } catch {
+      // The engine's default queue is what such a game runs with too.
+    }
+  }
+  return frameFunctionsFor(queuedMessagesOf(projectGodot));
+}
+
+/** The cap an editor addon's profile reports, absent from an addon older than it. */
+function playedCap(
+  held: OperationParams,
+): Pick<ProfileTotals, 'frameFunctions' | 'cappedFrames' | 'totalCapped'> {
+  const frameFunctions = readPositiveNumber(held, 'frameFunctions');
+  if (frameFunctions === undefined) {
+    return {};
+  }
+  return {
+    frameFunctions,
+    cappedFrames: readNonNegativeNumber(held, 'cappedFrames') ?? 0,
+    totalCapped: readBoolean(held, 'totalCapped') === true,
+  };
+}
+
 /** What a profile answer reads from the run's project rather than from the profile. */
 type ProjectForProfile = Pick<ProfileReading, 'runtimeAddon' | 'sourceOf' | 'callersOf'>;
 
@@ -2088,6 +2119,7 @@ export function profileAnswer(reading: ProfileReading, limit: number): Record<st
       `These are the ${totals.frames === 1 ? 'one frame' : `${totals.frames} frames`} that arrived, summed, without the engine's own totals, so what the game did after the last of them is not in it: the engine sends its totals only when the profiler is switched off, and stops sending as it exits without emptying what it has queued.${addonNote}`,
     );
   }
+  notes.push(...cappedNotes(totals));
   if (totals.unreadable > 0) {
     notes.push(
       `${totals.unreadable} message${totals.unreadable === 1 ? '' : 's'} from the game could not be read, so the totals have that many gaps.`,
@@ -2107,6 +2139,35 @@ export function profileAnswer(reading: ProfileReading, limit: number): Record<st
     callers: reading.callersOf === undefined ? undefined : callersAnswer(totals, reading.callersOf),
     note: notes.length > 0 ? notes.join(' ') : undefined,
   };
+}
+
+/**
+ * What a profile leaves out because of how the engine sends it: the functions past the most a frame
+ * may carry, and the ones whose name never arrived.
+ */
+function cappedNotes(totals: ProfileTotals): string[] {
+  const notes: string[] = [];
+  const most = totals.frameFunctions;
+  const why = `${most} is kept below the game's debugger queue (network/limits/debugger/max_queued_messages), which drops the message naming a function when one frame names more than it holds, and a function whose name is dropped is never named afterwards.`;
+  if (most !== undefined && totals.complete && totals.totalCapped === true) {
+    notes.push(
+      `The engine's totals carried the most functions the profiler asks for, ${most}, so the functions with the least time are not in them: ${why}`,
+    );
+  } else if (most !== undefined && !totals.complete && (totals.cappedFrames ?? 0) > 0) {
+    const capped = totals.cappedFrames ?? 0;
+    notes.push(
+      `${capped === totals.frames ? (capped === 1 ? 'The one frame' : `All ${capped} frames`) : `${capped} of the ${totals.frames} frames`} carried the most functions the profiler asks for in one, ${most}, so the functions with the least time in ${capped === 1 ? 'it' : 'them'} are not counted there: ${why}`,
+    );
+  }
+  const unnamed = Object.entries(totals.functions).filter(
+    ([name, sum]) => name.startsWith(UNNAMED_PREFIX) && sum.calls > 0,
+  ).length;
+  if (unnamed > 0) {
+    notes.push(
+      `${unnamed === 1 ? 'One function' : `${unnamed} functions`} arrived without ${unnamed === 1 ? 'its name' : 'their names'}, shown as ${UNNAMED_PREFIX} and the number the engine gave ${unnamed === 1 ? 'it' : 'them'}: the engine names a function once, as it first appears, and the game's debugger queue was full when that message was sent. They are script functions of the game; which ones cannot be recovered from this profile.`,
+    );
+  }
+  return notes;
 }
 
 function callersAnswer(totals: ProfileTotals, asked: NonNullable<ProfileReading['callersOf']>) {
@@ -7141,7 +7202,10 @@ class GodotServer {
     // Armed before the play rather than switched on after it, so the profiler goes on as the game's
     // debugger session starts, which is before any of its scripts have run.
     if (profiled) {
-      const armed = await this.handleViaBridge('profile_start', { arm: true });
+      const armed = await this.handleViaBridge('profile_start', {
+        arm: true,
+        frameFunctions: profileFrameFunctions(projectPath),
+      });
       if (armed.isError === true) {
         return this.profilerRefusal(armed);
       }
@@ -8610,7 +8674,7 @@ class GodotServer {
               : { callersOf: { name: callersName, scripts: () => projectScripts(projectPath) } }),
           };
     if (run.throughEditor) {
-      return await this.profileOfThePlayedGame(going, fromProject, limit);
+      return await this.profileOfThePlayedGame(going, projectPath, fromProject, limit);
     }
     const record = run.projectPath === null ? null : readRunRecord(run.projectPath);
     const path = record !== null && record.pid === run.pid ? record.profile : undefined;
@@ -8643,6 +8707,7 @@ class GodotServer {
 
   private async profileOfThePlayedGame(
     going: boolean,
+    projectPath: string | null,
     fromProject: ProjectForProfile,
     limit: number,
   ): Promise<ToolResponse> {
@@ -8657,7 +8722,9 @@ class GodotServer {
           'editor_run start with profile: true plays it again with the profiler on from its start',
         ]);
       }
-      const started = await this.handleViaBridge('profile_start', {});
+      const started = await this.handleViaBridge('profile_start', {
+        frameFunctions: profileFrameFunctions(projectPath),
+      });
       if (started.isError === true) {
         return this.profilerRefusal(started);
       }
@@ -8690,6 +8757,7 @@ class GodotServer {
             frames: readNonNegativeNumber(held, 'frames') ?? 0,
             complete: readBoolean(held, 'complete') === true,
             unreadable: 0,
+            ...playedCap(held),
             functions: Object.fromEntries(
               Object.entries(functions).map(([signature, sum]) => {
                 const [calls, self, total] = Array.isArray(sum) ? (sum as unknown[]) : [];
