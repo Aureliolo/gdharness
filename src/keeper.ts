@@ -29,6 +29,7 @@ import {
 } from './outside.js';
 import { recordRunEnded, writeRunRecord } from './run-record.js';
 import { discard, scratchDirectory } from './scratch.js';
+import { ProfileListener, type ProfileTotals, withEngineArguments, writeProfileFile } from './script-profile.js';
 
 /**
  * The target started detached, so it is in no job object and no process group of this process;
@@ -133,6 +134,47 @@ async function startThroughHelper(
   }
 }
 
+/** How often a profiled run's file is written at most while frames arrive. */
+const PROFILE_WRITE_MS = 500;
+
+/**
+ * The game's debugger for a profiled run, writing what it sums to [param path]: when the game
+ * connects, at most every `PROFILE_WRITE_MS` while frames arrive, and once more as the game exits,
+ * so a server reading the file mid-run is at most that far behind and one reading it after the
+ * exit has the lot.
+ */
+async function profiledBy(path: string): Promise<{ listener: ProfileListener; finish: () => void }> {
+  let latest: ProfileTotals | null = null;
+  let timer: NodeJS.Timeout | null = null;
+  const write = (): void => {
+    timer = null;
+    if (latest !== null) {
+      writeProfileFile(path, { ...latest, connected: true });
+    }
+  };
+  const listener = await ProfileListener.open((totals) => {
+    const first = latest === null;
+    latest = totals;
+    if (first) {
+      write();
+    } else {
+      timer ??= setTimeout(write, PROFILE_WRITE_MS);
+    }
+  });
+  writeProfileFile(path, { connected: false, listeningSince: Date.now() });
+  return {
+    listener,
+    finish: () => {
+      if (timer !== null) {
+        clearTimeout(timer);
+      }
+      latest = listener.totals() ?? latest;
+      write();
+      listener.close();
+    },
+  };
+}
+
 /** How long a start through the helper is given to name the process it started. */
 const DESKTOP_START_MS = 60_000;
 
@@ -218,6 +260,10 @@ async function keep(): Promise<void> {
     process.stdout.write('error a keeper was started without a run or a helper to keep\n');
     process.exit(1);
   }
+  // The game's debugger for a profiled run, opened before the game so it is listening when the game
+  // dials it: the engine dials once, as it starts, and runs with no debugger if nobody answers.
+  const profiled = run?.profile === undefined ? null : await profiledBy(run.profile);
+  const toStart = profiled === null ? spec : { ...spec, args: withEngineArguments(spec.args, profiled.listener.engineArguments) };
   const transcript = run === undefined ? 'ignore' : openSync(run.transcript, 'a');
   // Private to this keeper, for the file a helper watches for its stop.
   const own =
@@ -225,7 +271,7 @@ async function keep(): Promise<void> {
   const stopFile = own === null ? '' : join(own, 'stop');
   let started: Awaited<ReturnType<typeof startDetached>>;
   try {
-    started = await startDetached(spec, transcript, run === undefined, stopFile);
+    started = await startDetached(toStart, transcript, run === undefined, stopFile);
   } finally {
     // The game holds its own copy from here on.
     if (transcript !== 'ignore') {
@@ -233,6 +279,7 @@ async function keep(): Promise<void> {
     }
   }
   if ('error' in started) {
+    profiled?.listener.close();
     process.stdout.write(`error ${started.error}\n`);
     process.exit(1);
   }
@@ -247,7 +294,8 @@ async function keep(): Promise<void> {
           startedBy: Date.now(),
           projectPath: run.projectPath,
           ...(run.servedBy === undefined ? {} : { servedBy: run.servedBy }),
-          arguments: spec.args,
+          ...(run.profile === undefined ? {} : { profile: run.profile }),
+          arguments: toStart.args,
           command: spec.command,
         };
   if (record !== null) {
@@ -261,6 +309,7 @@ async function keep(): Promise<void> {
     if (run !== undefined) {
       recordRunEnded(run.projectPath, pid, { exitCode: code, exitSignal: code === null ? signal : null });
     }
+    profiled?.finish();
     listening?.close();
     if (own !== null) {
       rmSync(own, { recursive: true, force: true });

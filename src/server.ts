@@ -160,6 +160,7 @@ import { projectStructure, scriptsWithoutUid, searchProject } from './project-sc
 import { applyRewrites } from './rename.js';
 import { type NameTaken, type RenameOutcome, renameSymbol, writeLeftAloneDetail } from './rename-symbol.js';
 import { parseProjectGodot, settingKeys, settingsDroppedReport, setupResourceHandlers } from './resources.js';
+import { type ProfileTotals, profiledFunctions, readProfileFile } from './script-profile.js';
 import { noteRestartBegun, type RestartNote, restartOwed, restartSettled } from './restart-note.js';
 import {
   clearRunRecord,
@@ -169,6 +170,7 @@ import {
   listeningPid,
   noteIsAbout,
   openTranscript,
+  profilePath,
   type RunRecord,
   readEditorRunNote,
   readRunRecord,
@@ -1920,6 +1922,81 @@ export function aboveTheRunner(entry: LogEntry): LogEntry {
   };
 }
 
+/** How many functions a profile answers with unless asked for another number. */
+const PROFILE_FUNCTIONS = 30;
+
+/** What a profile is read from, for the answer to say what it covers. */
+export interface ProfileReading {
+  /** Who was the game's debugger: the process that keeps a run this server started, or the editor. */
+  readonly through: 'gdharness' | 'editor';
+  readonly running: boolean;
+  /** Null while the game has not connected to the profiler, or never did. */
+  readonly totals: ProfileTotals | null;
+  readonly coveredMs: number;
+  /** Whether the project has the runtime addon, which sends the totals as a game quits. */
+  readonly runtimeAddon: boolean;
+}
+
+/**
+ * The answer to `editor_run profile`, from what the profile holds and what the run is doing.
+ *
+ * Every way of holding less than the whole run is said, because a short table reads as a run that
+ * spent its time in those functions: one the game never connected to, one still going, one that
+ * quit before its totals were sent.
+ */
+export function profileAnswer(reading: ProfileReading, limit: number): Record<string, unknown> {
+  const { totals } = reading;
+  if (totals === null) {
+    return {
+      through: reading.through,
+      running: reading.running,
+      connected: false,
+      functions: [],
+      note: reading.running
+        ? 'The game has not connected to the profiler yet: it dials its debugger once, as it starts, before any script runs. Ask again in a moment.'
+        : 'The game never connected to the profiler, so nothing was measured. A game dials its debugger once, as it starts, and an engine built without debugging (a release export template) refuses to: profiling needs the editor binary or a debug template.',
+    };
+  }
+  const table = profiledFunctions(totals, limit);
+  const notes: string[] = [];
+  const addonNote = reading.runtimeAddon
+    ? ''
+    : ' This project has no gdharness runtime addon, which switches the profiler off as the game quits so the engine sends its totals: setup installs it.';
+  if (totals.complete) {
+    // Nothing to add: these are the engine's own totals since the profiler went on.
+  } else if (reading.running) {
+    notes.push(
+      `The run is still going, so these are the ${totals.frames === 1 ? 'one frame' : `${totals.frames} frames`} summed so far${reading.through === 'gdharness' ? ', written at most half a second behind' : ''}.`,
+    );
+  } else if (totals.frames === 0) {
+    notes.push(
+      `The game connected and ended before a frame of the profile reached ${reading.through === 'editor' ? 'the editor' : 'this server'}: the engine sends its totals only when the profiler is switched off, and stops sending as it exits without emptying what it has queued.${addonNote}`,
+    );
+  } else {
+    notes.push(
+      `These are the ${totals.frames === 1 ? 'one frame' : `${totals.frames} frames`} that arrived, summed, without the engine's own totals, so what the game did after the last of them is not in it: the engine sends its totals only when the profiler is switched off, and stops sending as it exits without emptying what it has queued.${addonNote}`,
+    );
+  }
+  if (totals.unreadable > 0) {
+    notes.push(
+      `${totals.unreadable} message${totals.unreadable === 1 ? '' : 's'} from the game could not be read, so the totals have that many gaps.`,
+    );
+  }
+  return {
+    through: reading.through,
+    running: reading.running,
+    connected: true,
+    complete: totals.complete,
+    frames: totals.frames,
+    coveredMs: reading.coveredMs,
+    scriptMs: table.scriptMs,
+    functionsCounted: table.counted,
+    omitted: table.omitted > 0 ? table.omitted : undefined,
+    functions: table.functions,
+    note: notes.length > 0 ? notes.join(' ') : undefined,
+  };
+}
+
 /** How many distinct engine entries a test run's answer carries, the newest kept. */
 const MOST_ENGINE_ENTRIES = 200;
 
@@ -3242,6 +3319,9 @@ class GodotServer {
         }
         if (op === 'wait') {
           return await this.handleWaitForRun(args);
+        }
+        if (op === 'profile') {
+          return await this.handleRunProfile(args);
         }
         return await this.handleRunProject(args, op);
       case 'editor_output':
@@ -6586,6 +6666,7 @@ class GodotServer {
     // `--audio-driver Dummy`, and the editor takes none for a game it plays. Only a windowed one:
     // a headless run is silent already, the editor's included.
     const silent = resolveSilent(args['silent'], process.env) && !headless;
+    const profiled = readBoolean(args, 'profile') === true;
     if (
       this.godotBridge.isConnected() &&
       editorWouldPlay &&
@@ -6601,6 +6682,7 @@ class GodotServer {
         alreadyPlaying,
         runtimeWaitMs,
         ended,
+        profiled,
       );
     }
 
@@ -6622,6 +6704,7 @@ class GodotServer {
       // A window on a desktop of its own, where it renders and neither shows nor takes the keyboard,
       // unless the caller asked to see it. A headless run has no window to put anywhere.
       headless || args['visible'] === true ? undefined : HIDDEN_DESKTOP,
+      profiled,
     );
     if ('error' in started) {
       return this.createErrorResponse(`The game could not be started: ${started.error}`, [
@@ -6884,6 +6967,7 @@ class GodotServer {
     alreadyPlaying: ReadonlySet<number>,
     runtimeWaitMs: AnnounceBudget,
     ended: EndedRun | null,
+    profiled: boolean,
   ): Promise<ToolResponse> {
     const log = new GameLog();
     // Each step before the play says how long it took, since a start that sat nine seconds between
@@ -6924,6 +7008,14 @@ class GodotServer {
     const breakpoints = await this.dapHoldingBreakpointsOf(projectPath).reapplyBreakpoints();
     this.logDebug(`Breakpoints were sent again after ${Date.now() - sendingFrom}ms`);
 
+    // Armed before the play rather than switched on after it, so the profiler goes on as the game's
+    // debugger session starts, which is before any of its scripts have run.
+    if (profiled) {
+      const armed = await this.handleViaBridge('profile_start', { arm: true });
+      if (armed.isError === true) {
+        return this.profilerRefusal(armed);
+      }
+    }
     const answer = await this.handleViaBridge(
       'play_scene',
       scene === null ? {} : { scenePath: `res://${scene}` },
@@ -7510,6 +7602,7 @@ class GodotServer {
     projectPath: string,
     env?: NodeJS.ProcessEnv,
     desktop?: string,
+    profiled = false,
   ): Promise<GodotProcess | { error: string }> {
     const startedAt = Date.now();
     const transcript = openTranscript(startedAt);
@@ -7523,7 +7616,13 @@ class GodotServer {
       command: godotPath,
       args: cmdArgs,
       ...(env === undefined ? {} : { env }),
-      run: { transcript: transcript.path, startedAt, projectPath, ...this.servedBy() },
+      run: {
+        transcript: transcript.path,
+        startedAt,
+        projectPath,
+        ...this.servedBy(),
+        ...(profiled ? { profile: profilePath(startedAt) } : {}),
+      },
       ...(desktop === undefined ? {} : { desktop }),
     });
     if ('error' in launched) {
@@ -8331,6 +8430,127 @@ class GodotServer {
    * A wait that runs out is not a failure. The answer says `running` either way, and the note says
    * which of the two happened so that "still going" is never read as "ended and printed nothing".
    */
+  /**
+   * editor_run profile: where the run spends its time by GDScript function.
+   *
+   * A run this server started with profile: true has the keeper that holds it as its debugger, and
+   * the keeper writes what it sums to a file the run's record names, so any server reads it. A run
+   * the editor plays is profiled through the editor's own session, by the addon, which switches the
+   * profiler on here when nothing has.
+   */
+  private async handleRunProfile(args: OperationParams): Promise<ToolResponse> {
+    await this.pickUpWhatTheEditorIsPlaying();
+    const run = await this.currentRun();
+    if (!run) {
+      return this.createErrorResponse(this.nothingOfOursIsRunning());
+    }
+    const limit = readPositiveNumber(args, 'limit') ?? PROFILE_FUNCTIONS;
+    const going = await this.runStillGoing(run);
+    // Registered rather than on disk: the addon's files can be there with nothing bringing it up.
+    const registered = run.projectPath === null ? null : inspectProject(run.projectPath);
+    const runtimeAddon =
+      registered !== null && (registered.runtimeAutoloadPath !== null || registered.runtimeLoaderAutoload !== null);
+    if (run.throughEditor) {
+      return await this.profileOfThePlayedGame(going, runtimeAddon, limit);
+    }
+    const record = run.projectPath === null ? null : readRunRecord(run.projectPath);
+    const path = record !== null && record.pid === run.pid ? record.profile : undefined;
+    if (path === undefined) {
+      return this.createErrorResponse(
+        'This run was started without profile: true, and a game this server starts can be profiled only from its start: its debugger is whatever it dials as it starts, once.',
+        ['editor_run start with profile: true starts the run again with the profiler on'],
+      );
+    }
+    const file = readProfileFile(path);
+    if (file === null) {
+      return this.createErrorResponse(`The run's profile at ${path} could not be read.`, [
+        'editor_run start with profile: true starts the run again with the profiler on',
+      ]);
+    }
+    const totals = file.connected ? file : null;
+    return this.jsonTextResponse(
+      profileAnswer(
+        {
+          through: 'gdharness',
+          running: going,
+          totals,
+          coveredMs: totals?.lastFrameAt == null ? 0 : totals.lastFrameAt - totals.startedAt,
+          runtimeAddon,
+        },
+        limit,
+      ),
+    );
+  }
+
+  private async profileOfThePlayedGame(going: boolean, runtimeAddon: boolean, limit: number): Promise<ToolResponse> {
+    const read = await this.handleViaBridge('profile_read', {});
+    if (read.isError === true) {
+      return this.profilerRefusal(read);
+    }
+    const held = asParams(JSON.parse(read.content[0]?.text ?? '{}'));
+    if (readBoolean(held, 'profiled') !== true && readBoolean(held, 'armed') !== true) {
+      if (!going) {
+        return this.createErrorResponse('The game the editor played was not profiled, and it is over.', [
+          'editor_run start with profile: true plays it again with the profiler on from its start',
+        ]);
+      }
+      const started = await this.handleViaBridge('profile_start', {});
+      if (started.isError === true) {
+        return this.profilerRefusal(started);
+      }
+      return this.jsonTextResponse({
+        through: 'editor',
+        running: true,
+        started: true,
+        functions: [],
+        note: 'The profiler was switched on now, for the game the editor is playing, so it covers what the game does from here on. Ask again for the functions; editor_run start with profile: true covers a game from its start.',
+      });
+    }
+    const functions = asParams(held['functions']);
+    const totals: ProfileTotals | null =
+      readBoolean(held, 'profiled') === true
+        ? {
+            startedAt: 0,
+            lastFrameAt: null,
+            frames: readNonNegativeNumber(held, 'frames') ?? 0,
+            complete: readBoolean(held, 'complete') === true,
+            unreadable: 0,
+            functions: Object.fromEntries(
+              Object.entries(functions).map(([signature, sum]) => {
+                const [calls, self, total] = Array.isArray(sum) ? (sum as unknown[]) : [];
+                return [
+                  signature,
+                  { calls: Number(calls ?? 0), selfSeconds: Number(self ?? 0), totalSeconds: Number(total ?? 0) },
+                ];
+              }),
+            ),
+          }
+        : null;
+    return this.jsonTextResponse(
+      profileAnswer(
+        {
+          through: 'editor',
+          running: going,
+          totals,
+          coveredMs: readNonNegativeNumber(held, 'coveredMs') ?? 0,
+          runtimeAddon,
+        },
+        limit,
+      ),
+    );
+  }
+
+  /** The editor addon's refusal to profile, with what to do when the addon predates the profiler. */
+  private profilerRefusal(refused: ToolResponse): ToolResponse {
+    const said = refused.content[0]?.text ?? '';
+    return /Unknown tool: profile_/.test(said)
+      ? this.createErrorResponse(
+          "The editor's gdharness addon is older than the profiler, so it cannot profile the game it plays.",
+          ['editor_launch restart loads the addon this server installed', 'editor_status says which addon the editor holds'],
+        )
+      : refused;
+  }
+
   private async handleWaitForRun(args: OperationParams): Promise<ToolResponse> {
     await this.pickUpWhatTheEditorIsPlaying();
     const run = await this.currentRun();

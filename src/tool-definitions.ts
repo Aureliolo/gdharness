@@ -995,6 +995,18 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         description:
           'check: how long to give the boot before it is called hung. Default 60000. wait: how long to wait for the run to end before answering anyway. Default 600000.',
       },
+      profile: {
+        type: 'boolean',
+        ops: ['start'],
+        description:
+          "start: profile the run's GDScript with the engine's own script profiler from its start, for editor_run profile to answer which functions took the time. A run this server starts dials the process that keeps it as its debugger, on loopback, with breakpoints and error breaks skipped so it never stops to wait; a game the editor plays is profiled through the editor's debugger session. Needs an engine built with debugging, which the editor binary is and a release export template is not. Default false.",
+      },
+      limit: {
+        type: 'integer',
+        minimum: 1,
+        ops: ['profile'],
+        description: 'profile: how many functions to answer with, those with the most self time. Default 30.',
+      },
       andChildren: {
         type: 'boolean',
         ops: ['stop'],
@@ -1025,6 +1037,11 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         requires: ['projectPath'],
       },
       wait: { summary: 'wait for the run to end, then answer as editor_output does', requires: [] },
+      profile: {
+        summary:
+          "where the run spends its time by GDScript function, while it runs or after it ended: per function its script, the function (Class.name when the script declares a class_name), the line its body's first statement is on, calls, and self and total milliseconds, sorted by self time, with functionsCounted, scriptMs (the self time of them all) and coveredMs. complete is true when the engine's own totals arrived, which it sends only when the profiler is switched off: the runtime addon does that as a game quits, so a scene that does its work in _ready and quits is covered whole; otherwise the answer is the frames summed so far and the note says what that misses. Self time counts a call into the engine's own methods as the caller's, and a function the profiler started inside is left out, since its time would be counted from the engine's start. A run started with profile: true is profiled from its start. A game the editor plays that was not is profiled from the moment this is asked, and the answer says so; a run this server started without it is refused, since its debugger is fixed as it starts",
+        requires: [],
+      },
     },
     defaultOperation: 'start',
   },

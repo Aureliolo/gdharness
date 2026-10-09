@@ -23788,6 +23788,169 @@ async function testATestRunCutShortIsNamedForWhatItWasDoing(): Promise<void> {
  * only errors are its own (an expected runtime error and a deliberate push_error), which must still
  * pass; and the overflow again with the project's gdUnit4 setting for script errors turned off.
  */
+/**
+ * A run started with profile: true answers which GDScript functions took its time.
+ *
+ * The keeper is the game's debugger and sums the engine's own script profiler. Four runs, because
+ * each holds a different amount of the truth: a scene that does its work in _ready and quits, with
+ * the runtime addon, which switches the profiler off as the game leaves so the engine sends its
+ * totals, and must come back complete with exact call counts; the same scene with no runtime addon,
+ * whose one frame the engine drops at exit, which must say so rather than answer an empty table as
+ * a run that ran nothing; a scene that runs thirty frames with no addon, which is the frames summed
+ * and must say so; and a run started without profile, which is refused.
+ */
+async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('profiled run regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-profiled-'));
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-profiled-rt-'));
+  const settings = (addon: boolean): string =>
+    '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Profiled"\n' +
+    (addon ? '\n[autoload]\n\nGdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n' : '');
+  const scene = (name: string, script: string): void => {
+    writeFileSync(
+      join(project, 'harness', `${name}.tscn`),
+      `[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://harness/${script}" id="1"]\n\n[node name="Run" type="Node"]\nscript = ExtResource("1")\n`,
+    );
+  };
+  try {
+    cpSync(join('src', 'godot', 'addons', 'gdharness_runtime'), join(project, 'addons', 'gdharness_runtime'), {
+      recursive: true,
+    });
+    writeFileSync(join(project, 'project.godot'), settings(true));
+    mkdirSync(join(project, 'harness'));
+    writeFileSync(
+      join(project, 'harness', 'work.gd'),
+      [
+        'class_name Work',
+        'extends Node',
+        '',
+        '',
+        'static func square(n: int) -> int:',
+        '\treturn n * n',
+        '',
+        '',
+        'func busy(rounds: int) -> int:',
+        '\tvar sum := 0',
+        '\tfor i in rounds:',
+        '\t\tsum += Work.square(i)',
+        '\treturn sum',
+        '',
+        '',
+        'func _ready() -> void:',
+        '\tprint(busy(200000))',
+        '\tget_tree().quit()',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(project, 'harness', 'frames.gd'),
+      [
+        'extends Node',
+        '',
+        'var frames := 0',
+        '',
+        '',
+        'func each_frame() -> void:',
+        '\tframes += 1',
+        '',
+        '',
+        'func _process(_delta: float) -> void:',
+        '\teach_frame()',
+        '\tif frames == 30:',
+        '\t\tget_tree().quit()',
+        '',
+      ].join('\n'),
+    );
+    scene('once', 'work.gd');
+    scene('frames', 'frames.gd');
+    const server = new ServerProcess({
+      env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+    });
+    try {
+      await server.initialize('regression-test');
+      const call = async (args: Record<string, unknown>): Promise<string> =>
+        textOf(await server.request('tools/call', { name: 'editor_run', arguments: args }, ENGINE_CALL_TIMEOUT_MS)) ??
+        '';
+      const profiledRun = async (sceneName: string, profile: boolean): Promise<unknown> => {
+        const started = await call({
+          op: 'start',
+          projectPath: project,
+          scene: `harness/${sceneName}.tscn`,
+          headless: true,
+          profile,
+          runtimeWaitMs: 0,
+        });
+        assert.match(started, /"started": true/, started);
+        const waited = await call({ op: 'wait', timeoutMs: 60_000 });
+        assert.match(waited, /"running": false/, `the run ended: ${waited}`);
+        const answered = await call({ op: 'profile', limit: 10 });
+        return answered.trimStart().startsWith('{') ? (JSON.parse(answered) as unknown) : answered;
+      };
+
+      const whole = await profiledRun('once', true);
+      const wholeShown = JSON.stringify(whole);
+      assert.equal(get(whole, 'through'), 'gdharness', wholeShown);
+      assert.equal(get(whole, 'connected'), true, wholeShown);
+      assert.equal(get(whole, 'complete'), true, `the runtime addon sent the engine's totals: ${wholeShown}`);
+      assert.equal(get(whole, 'note'), undefined, wholeShown);
+      const rows = asArray(get(whole, 'functions'));
+      const row = (name: string): unknown => rows.find((one) => get(one, 'function') === name);
+      assert.deepEqual(
+        [get(row('Work.square'), 'script'), get(row('Work.square'), 'line'), get(row('Work.square'), 'calls')],
+        ['res://harness/work.gd', 6, 200000],
+        `square, at the line its body starts, called once per round: ${wholeShown}`,
+      );
+      assert.deepEqual(
+        [get(row('Work.busy'), 'line'), get(row('Work.busy'), 'calls')],
+        [10, 1],
+        `busy, called once from _ready: ${wholeShown}`,
+      );
+      const selves = rows.map((one) => Number(get(one, 'selfMs')));
+      assert.deepEqual(selves, [...selves].sort((a, b) => b - a), `sorted by self time: ${wholeShown}`);
+      assert.ok(Number(get(whole, 'scriptMs')) > 0, wholeShown);
+
+      const unprofiled = await profiledRun('once', false);
+      assert.match(String(unprofiled), /started without profile: true/, String(unprofiled));
+
+      // Whether the engine's one frame survives the exit is a race in the engine, measured going both
+      // ways on one machine, so either answer is right here as long as it admits what it lacks.
+      writeFileSync(join(project, 'project.godot'), settings(false));
+      const lost = await profiledRun('once', true);
+      const lostShown = JSON.stringify(lost);
+      assert.equal(get(lost, 'connected'), true, lostShown);
+      assert.equal(get(lost, 'complete'), false, lostShown);
+      assert.match(
+        String(get(lost, 'note')),
+        Number(get(lost, 'frames')) === 0
+          ? /ended before a frame of the profile reached this server/
+          : /^These are the one frame that arrived, summed, without the engine's own totals/,
+        lostShown,
+      );
+      assert.match(String(get(lost, 'note')), /no gdharness runtime addon/, lostShown);
+
+      const summed = await profiledRun('frames', true);
+      const summedShown = JSON.stringify(summed);
+      assert.equal(get(summed, 'complete'), false, summedShown);
+      assert.ok(Number(get(summed, 'frames')) >= 25, `the frames that reached it: ${summedShown}`);
+      assert.match(String(get(summed, 'note')), /frames that arrived, summed, without the engine's own totals/, summedShown);
+      const perFrame = asArray(get(summed, 'functions')).find((one) => get(one, 'function') === 'each_frame');
+      assert.ok(Number(get(perFrame, 'calls')) >= 25, `called once a frame: ${summedShown}`);
+    } finally {
+      await server.stop();
+    }
+  } finally {
+    sweep(project);
+    sweep(runtimeDir);
+  }
+}
+
 async function testAStackOverflowIsNotAPass(): Promise<void> {
   const godotPath = resolveGodotPath();
   const gdunit = process.env['GDUNIT4_PATH'];
@@ -31025,6 +31188,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testATestRunSaysHowFarItHasGot,
   testATestRunCutShortIsNamedForWhatItWasDoing,
   testAStackOverflowIsNotAPass,
+  testAProfiledRunNamesWhereItsTimeWent,
   testAnUpgradeReadsTheEngineOutOfTheConfigItRewrites,
   testCommandLineSetup,
   testUninstallLeavesAddonsItDidNotMake,
