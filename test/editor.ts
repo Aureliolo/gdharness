@@ -4649,7 +4649,13 @@ async function testAPlayedGameIsProfiled({ call, attempt, play, project }: Edito
     }
   };
   try {
-    await play({ profile: true });
+    const started = await play({ profile: true });
+    assert.match(
+      String(get(started, 'profile', 'totals')),
+      /^On from the game's start, through the editor's debugger session\./,
+      `the start says the profiler is on, and whose: ${JSON.stringify(started)}`,
+    );
+    assert.equal(get(started, 'profile', 'on'), true, JSON.stringify(started));
     await twice(25);
     // The fixture's _ready calls _twice once itself, so the count shows the profile began before it.
     assert.equal(
