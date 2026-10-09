@@ -4906,6 +4906,10 @@ class GodotServer {
     // fault than the last: a project fixing what was named and running again met the next case
     // along three times in one afternoon, and read its own suite as flaky.
     const notRun = report.suites.reduce((sum, suite) => sum + Math.max(0, suite.discovered - suite.tests), 0);
+    // Folded the way engineEntries is, from a subset of the same entries, so each folded entry here
+    // has the first index its counterpart there has.
+    const uncaughtFolded = foldedRepeats(uncaught.map(aboveTheRunner));
+    const listedAsUncaught = new Set(uncaughtFolded.map((entry) => entry.index));
     return this.jsonTextResponse({
       // A report with no cases in it is a run where nothing ran, which exits 0 and was answered
       // passed beside a verdict saying no test cases were found.
@@ -4931,7 +4935,7 @@ class GodotServer {
       time: report.time,
       failed,
       hookFailures: hookFailures.length > 0 ? hookFailures : undefined,
-      uncaughtScriptErrors: uncaught.length > 0 ? foldedRepeats(uncaught.map(aboveTheRunner)) : undefined,
+      uncaughtScriptErrors: uncaughtFolded.length > 0 ? uncaughtFolded : undefined,
       // Alongside `failed` rather than folded into it: a suite that left nodes behind failed
       // nothing, and an agent reading `failed` for what to fix must not find a passing test in it.
       warnings: warnings.length > 0 ? warnings : undefined,
@@ -4969,7 +4973,13 @@ class GodotServer {
       suitesPassed: report.suites.length - unclean.length,
       engineErrors: run.log.count('error'),
       engineWarnings: run.log.count('warning'),
-      engineEntries: engineEntriesShown,
+      // An entry already under uncaughtScriptErrors is named here without its detail again: a stack
+      // overflow's backtrace is most of an answer, and it was carried twice.
+      engineEntries: engineEntriesShown.map((entry) =>
+        listedAsUncaught.has(entry.index)
+          ? { ...entry, detail: undefined, detailUnder: 'uncaughtScriptErrors' }
+          : entry,
+      ),
       engineEntriesOmitted:
         engineEntries.length > engineEntriesShown.length
           ? engineEntries.length - engineEntriesShown.length
