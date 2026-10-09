@@ -461,6 +461,74 @@ export function shapeOf(source: string): ScriptShape {
   return { className, body };
 }
 
+const FUNC_LINE = new RegExp(`^[ \\t]*${ANNOTATIONS}(?:static\\s+)?func\\s+(${NAME})\\s*\\(`, 'u');
+
+function indentOf(text: string): number {
+  return /^[ \t]*/.exec(text)?.[0].length ?? 0;
+}
+
+/**
+ * The named function holding one-based [param line] of [param source], or null for a line at a
+ * class's own level.
+ *
+ * Found by walking up to each line indented less than the last, so a lambda's own `func(` line and
+ * the blocks around it are passed through on the way to the declaration holding them all. Read off
+ * the code, so a line of a multi-line string that begins `func` is not taken for a declaration.
+ */
+export function enclosingFunction(source: string, line: number, code = codeOf(source)): string | null {
+  const lines = code.split('\n');
+  const at = lines[line - 1];
+  if (at === undefined) {
+    return null;
+  }
+  // A function written on one line holds what is on that line.
+  const own = FUNC_LINE.exec(at);
+  if (own?.[1] !== undefined) {
+    return own[1];
+  }
+  let indent = indentOf(at);
+  for (let index = line - 2; index >= 0 && indent > 0; index -= 1) {
+    const text = lines[index] ?? '';
+    if (text.trim() === '' || indentOf(text) >= indent) {
+      continue;
+    }
+    indent = indentOf(text);
+    const declared = FUNC_LINE.exec(text);
+    if (declared?.[1] !== undefined) {
+      return declared[1];
+    }
+  }
+  return null;
+}
+
+/** A place in a script that names a function, outside its declaration. */
+export interface CallSite {
+  /** One-based. */
+  readonly line: number;
+  /** The named function the place is in, or null at a class's own level. */
+  readonly within: string | null;
+  /** True when it is called there; false when it is named without a call, as a Callable passed on. */
+  readonly called: boolean;
+}
+
+/**
+ * Where [param source] names [param name] in code, other than declaring it: as a call, a member
+ * call on anything, or a Callable handed to something that calls it later. Comments and strings are
+ * not code, so a function named in prose or by a string is not found.
+ */
+export function callSitesOf(source: string, name: string): CallSite[] {
+  const regions = regionsOf(source);
+  const code = codeOf(source, regions);
+  const lines = new Lines(source);
+  return occurrencesOf(source, name, regions)
+    .filter((one) => one.kind === 'code' && one.declaredAs === null)
+    .map((one) => {
+      const line = lines.positionOf(one.offset).line + 1;
+      const after = code.slice(one.offset + name.length).trimStart();
+      return { line, within: enclosingFunction(source, line, code), called: after.startsWith('(') };
+    });
+}
+
 /** The values of an enum whose braces open at [param from], as declarations of their own. */
 function collectEnumValues(text: string, from: number, into: Declaration[]): void {
   const close = text.indexOf('}');

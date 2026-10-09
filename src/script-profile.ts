@@ -13,6 +13,7 @@
 
 import { readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { createServer, type Server, type Socket } from 'node:net';
+import { type CallSite, callSitesOf, enclosingFunction } from './gdscript-source.js';
 import { type DebuggerMessage, DebuggerStream, framedCommand, type GodotValue } from './godot-variant.js';
 
 /** One function's totals, keyed by the signature the engine compiled into it. */
@@ -193,10 +194,15 @@ export interface ProfiledFunction {
   readonly function: string;
   /** The line of the function body's first statement, which is what the engine records. */
   readonly line: number;
+  /** For a lambda, the named function it is written in, read off the script's source. */
+  readonly within?: string;
   readonly calls: number;
   readonly selfMs: number;
   readonly totalMs: number;
 }
+
+/** A script's source by its `res://` path, or null when it cannot be read. */
+export type SourceOf = (script: string) => string | null;
 
 /**
  * [param signature] split as the GDScript compiler built it: `path::line::Class.function`, with a
@@ -224,8 +230,23 @@ const ms = (seconds: number): number => Math.round(seconds * 1_000_000) / 1000;
 export function profiledFunctions(
   totals: ProfileTotals,
   limit: number,
+  sourceOf: SourceOf = () => null,
 ): { functions: readonly ProfiledFunction[]; omitted: number; scriptMs: number; counted: number } {
-  const rows = Object.entries(totals.functions)
+  const rows = rowsOf(totals);
+  const scriptMs = ms(
+    Object.values(totals.functions).reduce((sum, one) => sum + (one.calls > 0 ? one.selfSeconds : 0), 0),
+  );
+  return {
+    functions: rows.slice(0, limit).map((row) => placedLambda(row, sourceOf)),
+    omitted: Math.max(0, rows.length - limit),
+    scriptMs,
+    counted: rows.length,
+  };
+}
+
+/** Every function [param totals] counts a call of, by self time. */
+function rowsOf(totals: ProfileTotals): ProfiledFunction[] {
+  return Object.entries(totals.functions)
     .filter(([, sum]) => sum.calls > 0)
     .map(([signature, sum]): ProfiledFunction => {
       const parts = signatureParts(signature);
@@ -239,15 +260,81 @@ export function profiledFunctions(
       };
     })
     .sort((a, b) => b.selfMs - a.selfMs || b.totalMs - a.totalMs || a.function.localeCompare(b.function));
-  const scriptMs = ms(
-    Object.values(totals.functions).reduce((sum, one) => sum + (one.calls > 0 ? one.selfSeconds : 0), 0),
+}
+
+/** A function's own name, without the class the compiler puts in front of it. */
+function bareName(fn: string): string {
+  return fn.slice(fn.lastIndexOf('.') + 1);
+}
+
+/**
+ * [param row] with the function it is written in, when it is a lambda. The compiler names a lambda
+ * `Class.name(lambda)`, and every anonymous one `Class.<anonymous lambda>(lambda)`, so ten of them
+ * in one class read alike, and the line alone sends a reader to the file.
+ */
+function placedLambda(row: ProfiledFunction, sourceOf: SourceOf): ProfiledFunction {
+  if (!row.function.endsWith('(lambda)')) {
+    return row;
+  }
+  const source = sourceOf(row.script);
+  const within = source === null ? null : enclosingFunction(source, row.line);
+  return within === null ? row : { ...row, within };
+}
+
+/** A place that names the function asked about, with the profile's row for the function it is in. */
+export interface ProfiledCallSite extends CallSite {
+  readonly script: string;
+  /** The profile's numbers for `within`, absent when it made no counted call. */
+  readonly withinCalls?: number;
+  readonly withinSelfMs?: number;
+  readonly withinTotalMs?: number;
+}
+
+/** How many places a callers answer lists before saying how many more there were. */
+const CALL_SITES = 40;
+
+/**
+ * Where the project's scripts name [param name], each with the profile's numbers for the function
+ * it is written in, those that took the most time first. [param name] is a function's own name, or
+ * `Class.name` to pick out the rows of one class.
+ *
+ * Found by name in the source, because the engine's profiler counts calls and time per function and
+ * records nothing about who made them. A place is a caller only if the name there is this function:
+ * a method of the same name on another class is found as well, which the answer says.
+ */
+export function callersOf(
+  totals: ProfileTotals,
+  name: string,
+  scripts: Iterable<readonly [script: string, source: string]>,
+): { target: readonly ProfiledFunction[]; sites: readonly ProfiledCallSite[]; omitted: number } {
+  const rows = rowsOf(totals);
+  const bare = bareName(name);
+  const target = rows.filter((row) =>
+    name.includes('.') ? row.function === name : bareName(row.function) === bare,
   );
-  return {
-    functions: rows.slice(0, limit),
-    omitted: Math.max(0, rows.length - limit),
-    scriptMs,
-    counted: rows.length,
-  };
+  const sites: ProfiledCallSite[] = [];
+  for (const [script, source] of scripts) {
+    for (const site of callSitesOf(source, bare)) {
+      const within =
+        site.within === null
+          ? undefined
+          : rows.find((row) => row.script === script && bareName(row.function) === site.within);
+      sites.push({
+        script,
+        ...site,
+        ...(within === undefined
+          ? {}
+          : { withinCalls: within.calls, withinSelfMs: within.selfMs, withinTotalMs: within.totalMs }),
+      });
+    }
+  }
+  sites.sort(
+    (a, b) =>
+      (b.withinTotalMs ?? -1) - (a.withinTotalMs ?? -1) ||
+      a.script.localeCompare(b.script) ||
+      a.line - b.line,
+  );
+  return { target, sites: sites.slice(0, CALL_SITES), omitted: Math.max(0, sites.length - CALL_SITES) };
 }
 
 /**
