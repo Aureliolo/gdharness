@@ -4604,34 +4604,36 @@ async function testAPlayedGameIsProfiled({ call, attempt, play, project }: Edito
       });
     }
   };
-  const callsOfTwice = async (): Promise<number> => {
-    // Frames reach the editor at its own frame rate, so a call made a moment ago can be a frame away.
-    for (let attemptAt = 0; attemptAt < 40; attemptAt += 1) {
+  // Until the count reaches what is expected or ten seconds pass: frames reach the editor at its own
+  // frame rate, so the frame holding the last call can still be on its way. Returning on the first
+  // reading that had the function at all counted 9 of 10 on a macOS editor.
+  const callsOfTwice = async (expected: number): Promise<number> => {
+    const deadline = Date.now() + 10_000;
+    for (;;) {
       const profile = await call('editor_run', { op: 'profile', limit: 100 });
       const row = asArray(get(profile, 'functions')).find((one) => get(one, 'function') === '_twice');
-      if (row !== undefined) {
-        return asNumber(get(row, 'calls'), 'calls');
+      const calls = row === undefined ? 0 : asNumber(get(row, 'calls'), 'calls');
+      if (calls >= expected || Date.now() >= deadline) {
+        return calls;
       }
       await delay(250);
     }
-    return 0;
   };
   try {
     await play({ profile: true });
     await twice(25);
-    await delay(500);
+    // The fixture's _ready calls _twice once itself, so the count shows the profile began before it.
+    assert.equal(
+      await callsOfTwice(26),
+      26,
+      "every call of a play profiled from its start, _ready's own included",
+    );
     const first = await call('editor_run', { op: 'profile', limit: 100 });
     assert.equal(get(first, 'through'), 'editor', JSON.stringify(first));
     assert.equal(get(first, 'connected'), true, JSON.stringify(first));
     assert.ok(
       asNumber(get(first, 'frames'), 'frames') > 0,
       `frames reached the editor: ${JSON.stringify(first)}`,
-    );
-    // The fixture's _ready calls _twice once itself, so the count shows the profile began before it.
-    assert.equal(
-      await callsOfTwice(),
-      26,
-      "every call of a play profiled from its start, _ready's own included",
     );
 
     await attempt('editor_run', { op: 'stop' });
@@ -4643,10 +4645,14 @@ async function testAPlayedGameIsProfiled({ call, attempt, play, project }: Edito
       true,
       `asking switches the profiler on: ${JSON.stringify(switched)}`,
     );
-    assert.match(String(get(switched, 'note')), /switched on now/, JSON.stringify(switched));
-    await delay(500);
+    // Said once the game's first frame of the profile has arrived, so the calls after it are counted.
+    assert.match(
+      String(get(switched, 'note')),
+      /switched on now.*its first frame has arrived/,
+      JSON.stringify(switched),
+    );
     await twice(10);
-    assert.equal(await callsOfTwice(), 10, 'only the calls after the profiler went on');
+    assert.equal(await callsOfTwice(10), 10, 'only the calls after the profiler went on');
   } finally {
     await attempt('editor_run', { op: 'stop' });
   }
