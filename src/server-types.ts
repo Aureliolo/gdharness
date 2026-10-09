@@ -1,5 +1,6 @@
 import type { ChildProcess } from 'node:child_process';
 import type { GameLog } from './game-log.js';
+import type { EditorPlay } from './run-record.js';
 
 /** The game editor_run started, and everything it has said. */
 export interface GodotProcess {
@@ -133,6 +134,11 @@ export interface GodotProcess {
    * just been restarted and played only once its scan was over.
    */
   seenPlaying?: boolean;
+  /**
+   * For a run the editor plays, which play it is, as the editor numbers them: what tells a played run
+   * that has ended from a new play the editor has begun since, which its saying "playing" does not.
+   */
+  play?: EditorPlay;
   /**
    * The process doing the run's work when that is neither `pid` nor an announced one: the engine
    * under the Windows console wrapper, for a project whose game announces nothing. Found through

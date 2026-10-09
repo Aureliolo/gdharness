@@ -399,6 +399,13 @@ const HOOKS_GD = [
   '\t\t"play":',
   '\t\t\tEditorInterface.play_main_scene()',
   '\t\t\treturn {"playing": EditorInterface.is_playing_scene()}',
+  // The addon stopping the play and somebody else starting one in the same frame, which no frame of
+  // the addon looks between: a stop through the server and a play the moment after it.
+  '\t\t"stop_then_play":',
+  '\t\t\tvar tools: Node = EditorInterface.get_base_control().get_tree().root.find_child("PlayTools", true, false)',
+  '\t\t\tvar stopped: Variant = tools.call("stop_playing", {}) if tools != null else null',
+  '\t\t\tEditorInterface.play_main_scene()',
+  '\t\t\treturn {"playing": EditorInterface.is_playing_scene(), "stopped": stopped != null}',
   '\t\t"open":',
   '\t\t\tEditorInterface.open_scene_from_path(path)',
   '\t\t"edit":',
@@ -4556,6 +4563,28 @@ async function testAPlayIsItsOwn({ call, attempt, refusal, play, project }: Edit
       get(picked, 'transcript'),
       transcript,
       `the play picked up is not given the earlier play's transcript: ${JSON.stringify(picked)}`,
+    );
+  } finally {
+    await attempt('editor_run', { op: 'stop' });
+  }
+
+  // The same, with no frame between the addon's stop and the other play: the editor's play count
+  // looks once a frame, and a stop through the server followed at once by somebody else's play was
+  // counted as the play still going, so it was handed the earlier play's transcript.
+  await play();
+  const before = get(await call('editor_output', {}), 'transcript');
+  const swapped = await hook(project, { op: 'stop_then_play' });
+  assert.deepEqual(
+    [get(swapped, 'stopped'), get(swapped, 'playing')],
+    [true, true],
+    `the hook should have stopped through the addon and played: ${JSON.stringify(swapped)}`,
+  );
+  try {
+    const next = await call('editor_output', {});
+    assert.notEqual(
+      get(next, 'transcript'),
+      before,
+      `a play begun in the frame the addon stopped the last one is its own: ${JSON.stringify(next)}`,
     );
   } finally {
     await attempt('editor_run', { op: 'stop' });

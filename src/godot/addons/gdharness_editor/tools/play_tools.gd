@@ -127,7 +127,10 @@ func stop_playing(_args: Dictionary) -> Dictionary:
 	var was_playing: bool = EditorInterface.is_playing_scene()
 	if was_playing:
 		EditorInterface.stop_playing_scene()
-	return {"ok": true, "wasPlaying": was_playing, "playing": EditorInterface.is_playing_scene()}
+	# Known over now rather than at the next frame's look: a play somebody else starts before that
+	# look would otherwise be read as this one still going, and given its number and its console.
+	_was_playing = EditorInterface.is_playing_scene()
+	return {"ok": true, "wasPlaying": was_playing, "playing": _was_playing}
 
 
 ## Restarts the editor, which is how a replaced addon is picked up.
