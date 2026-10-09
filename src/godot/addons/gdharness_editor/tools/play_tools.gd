@@ -34,6 +34,14 @@ func set_editor_plugin(plugin: EditorPlugin) -> void:
 
 
 func _process(_delta: float) -> void:
+	_count_a_play_begun()
+
+
+## Counts a play the editor has begun since the last look, whoever began it. Looked at every frame
+## and before the count is read: read alone, a play begun in this frame went uncounted until this
+## node's turn came round, and a server asking before then was told the earlier play's number with
+## "playing", which it took for the earlier play still going.
+func _count_a_play_begun() -> void:
 	var playing: bool = EditorInterface.is_playing_scene()
 	if playing and not _was_playing:
 		if _awaited:
@@ -231,6 +239,7 @@ static func _leave() -> void:
 
 
 func playing_status(_args: Dictionary) -> Dictionary:
+	_count_a_play_begun()
 	var playing: bool = EditorInterface.is_playing_scene()
 	# The debugger's port with it, read now rather than remembered: it is taken again before every
 	# play, so the one from when this editor greeted the server is a number it has moved off.

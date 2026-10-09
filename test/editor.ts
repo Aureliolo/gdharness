@@ -405,8 +405,11 @@ const HOOKS_GD = [
   '\t\t"stop_then_play":',
   '\t\t\tvar tools: Node = EditorInterface.get_base_control().get_tree().root.find_child("PlayTools", true, false)',
   '\t\t\tvar stopped: Variant = tools.call("stop_playing", {}) if tools != null else null',
+  '\t\t\tvar before: Dictionary = tools.call("playing_status", {}) if tools != null else {}',
   '\t\t\tEditorInterface.play_main_scene()',
-  '\t\t\treturn {"playing": EditorInterface.is_playing_scene(), "stopped": stopped != null}',
+  // Asked in the same frame as the play, before the addon has had a frame to look.
+  '\t\t\tvar after: Dictionary = tools.call("playing_status", {}) if tools != null else {}',
+  '\t\t\treturn {"playing": EditorInterface.is_playing_scene(), "stopped": stopped != null, "playBefore": before.get("play"), "playAfter": after.get("play")}',
   // What the addon holds of the profile, read past the server: which cap it switched the profiler on with.
   '\t\t"profile_held":',
   '\t\t\tvar profiler: Node = EditorInterface.get_base_control().get_tree().root.find_child("ProfileTools", true, false)',
@@ -4589,6 +4592,13 @@ async function testAPlayIsItsOwn({ call, attempt, refusal, play, project }: Edit
     [get(swapped, 'stopped'), get(swapped, 'playing')],
     [true, true],
     `the hook should have stopped through the addon and played: ${JSON.stringify(swapped)}`,
+  );
+  // The editor numbers that play at once, rather than at the addon's next frame: asked before then,
+  // it answered the stopped play's number with "playing", and the server kept the stopped play.
+  assert.equal(
+    get(swapped, 'playAfter'),
+    Number(get(swapped, 'playBefore')) + 1,
+    `the play begun in the same frame is numbered when asked: ${JSON.stringify(swapped)}`,
   );
   try {
     const next = await call('editor_output', {});
