@@ -17,6 +17,11 @@ const Read = preload("../reading.gd")
 ## the server keeps this below the queue the project sets; this is that for the engine's default.
 const FRAME_FUNCTIONS: int = 1536
 const DEBUGGER_CLASS: String = "ScriptEditorDebugger"
+## What a quitting game sends after its profile's totals, and the answer it waits for. Kept in step
+## with the runtime addon's runtime_autoload.gd.
+const PROFILE_CAPTURE: String = "gdharness"
+const PROFILE_SENT: String = "gdharness:profile_sent"
+const PROFILE_RECEIVED: String = "gdharness:profile_received"
 
 
 ## The editor's debugger sessions, numbered as the editor numbers its debugger tabs.
@@ -31,6 +36,17 @@ class Sessions:
 		var joined: int = session.started.connect(func() -> void: session_started.emit(session_id))
 		if joined != OK:
 			push_error("gdharness could not watch debugger session %d start: %d" % [session_id, joined])
+
+	func _has_capture(capture: String) -> bool:
+		return capture == PROFILE_CAPTURE
+
+	## Answers a quitting game that its profile's totals arrived, which it waits for before it exits.
+	## The editor reads a session's messages in order, so the totals sent before this have been read.
+	func _capture(message: String, _data: Array, session_id: int) -> bool:
+		if message != PROFILE_SENT:
+			return false
+		get_session(session_id).send_message(PROFILE_RECEIVED, [])
+		return true
 
 
 var _editor_plugin: EditorPlugin = null
