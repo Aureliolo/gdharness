@@ -103,47 +103,103 @@ function reported(entry: LogEntry): ReportedEntry {
 
 const FRAME = /^\[(\d+)\] (.+)$/;
 
+/** The longest cycle of frames looked for: a recursion through more functions than this is rare. */
+const LONGEST_CYCLE = 64;
+
 /**
- * A backtrace with each run of identical frames written once, as `[first-last] frame`.
+ * A backtrace with each run of repeated frames written once.
  *
- * A recursion without end prints one frame per call down to the engine's limit: a stack overflow's
- * backtrace was a thousand lines of `[n] depth (res://overflow_test.gd:5)` differing only in n, in
- * every answer that carried the entry.
+ * A recursion without end prints one frame per call down to the engine's limit. One function
+ * calling itself repeats one frame, written `[first-last] frame`: a thousand lines of
+ * `[n] depth (res://overflow_test.gd:5)` differing only in n. Functions calling each other repeat a
+ * cycle of several, written as a line saying which frames it covers and how many times, then the
+ * cycle once: an eight-function recursion carried a thousand frames whole in every answer with the
+ * entry, and two such entries put an answer past what a client takes inline.
  */
 function framesCollapsed(detail: readonly string[]): readonly string[] {
   const out: string[] = [];
-  let pending: FrameRun | undefined;
-  for (const line of detail) {
-    const match = FRAME.exec(line);
-    const number = match?.[1];
-    const frame = match?.[2];
-    if (frame !== undefined && pending?.frame === frame && Number(number) === Number(pending.last) + 1) {
-      pending.last = String(number);
+  let at = 0;
+  while (at < detail.length) {
+    const frames = consecutiveFrames(detail, at);
+    if (frames.length === 0) {
+      out.push(detail[at] ?? '');
+      at += 1;
       continue;
     }
-    if (pending !== undefined) {
-      out.push(writtenRun(pending));
+    let index = 0;
+    while (index < frames.length) {
+      const cycle = repeatedCycle(frames, index);
+      const first = frames[index];
+      if (cycle === null || first === undefined) {
+        out.push(`[${first?.number ?? ''}] ${first?.frame ?? ''}`);
+        index += 1;
+        continue;
+      }
+      const last = frames[index + cycle.period * cycle.times - 1];
+      const span = `[${first.number}-${last?.number ?? first.number}]`;
+      if (cycle.period === 1) {
+        out.push(`${span} ${first.frame}`);
+      } else {
+        out.push(`${span} these ${cycle.period} frames, ${cycle.times} times over:`);
+        for (const frame of frames.slice(index, index + cycle.period)) {
+          out.push(`  ${frame.frame}`);
+        }
+      }
+      index += cycle.period * cycle.times;
     }
-    pending =
-      number === undefined || frame === undefined ? undefined : { first: number, last: number, frame };
-    if (pending === undefined) {
-      out.push(line);
-    }
-  }
-  if (pending !== undefined) {
-    out.push(writtenRun(pending));
+    at += frames.length;
   }
   return out;
 }
 
-interface FrameRun {
-  readonly first: string;
-  last: string;
+interface Frame {
+  readonly number: number;
   readonly frame: string;
 }
 
-function writtenRun(run: FrameRun): string {
-  return run.first === run.last ? `[${run.first}] ${run.frame}` : `[${run.first}-${run.last}] ${run.frame}`;
+/** The backtrace frames from [param at] on whose numbers follow one another. */
+function consecutiveFrames(detail: readonly string[], at: number): Frame[] {
+  const frames: Frame[] = [];
+  for (const line of detail.slice(at)) {
+    const match = FRAME.exec(line);
+    const number = Number(match?.[1]);
+    const frame = match?.[2];
+    const before = frames.at(-1);
+    if (
+      frame === undefined ||
+      !Number.isInteger(number) ||
+      (before !== undefined && number !== before.number + 1)
+    ) {
+      break;
+    }
+    frames.push({ number, frame });
+  }
+  return frames;
+}
+
+/**
+ * The cycle starting at [param from] that repeats at least twice in a row and covers the most
+ * frames, the shorter on a tie, with how many whole times; or null when none repeats.
+ *
+ * The most frames rather than the shortest cycle, because a cycle can hold a frame twice in a row:
+ * `X X Y` over and over has `X X` at its start, and taking that would cut the cycle into pieces.
+ */
+function repeatedCycle(frames: readonly Frame[], from: number): { period: number; times: number } | null {
+  let best: { period: number; times: number } | null = null;
+  for (let period = 1; period <= LONGEST_CYCLE && from + 2 * period <= frames.length; period += 1) {
+    let length = period;
+    while (
+      from + length < frames.length &&
+      frames[from + length]?.frame === frames[from + length - period]?.frame
+    ) {
+      length += 1;
+    }
+    const times = Math.floor(length / period);
+    if (times >= 2 && (best === null || period * times > best.period * best.times)) {
+      best = { period, times };
+    }
+  }
+  return best;
 }
 
 /** An entry on its way out: the same fields, with `detail` there only when it says something. */

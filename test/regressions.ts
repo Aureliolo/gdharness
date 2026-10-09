@@ -643,6 +643,65 @@ function testEngineEntriesFoldAndScriptErrorsAreKnown(): void {
     '[1016] depth (res://overflow_test.gd:5)',
   ]);
 
+  // Functions calling one another repeat a cycle of frames: the shape of ostinato's overflow, an
+  // eight-function cycle after the frames it started from, ending part-way round, then its caller.
+  const cycle = [
+    'count_at',
+    '_fired',
+    'strength_of',
+    'gear',
+    'strength',
+    '_worn_strength',
+    'loadout',
+    'coin_held',
+  ];
+  const mutual = new GameLog();
+  mutual.append(
+    'transcript',
+    [
+      'SCRIPT ERROR: Stack overflow. Check for infinite recursion in your script.',
+      '   GDScript backtrace (most recent call first):',
+      '       [0] deepest (res://core/a.gd:1)',
+      ...Array.from(
+        { length: 8 * 125 + 3 },
+        (_, at) => `       [${at + 1}] ${cycle[at % 8] ?? ''} (res://core/x.gd:${at % 8})`,
+      ),
+      '       [1004] test_lends (res://tests/heriot_test.gd:30)',
+      '',
+    ].join('\n'),
+  );
+  mutual.finish();
+  assert.deepEqual(forAnswer(mutual.all)[0]?.detail, [
+    'GDScript backtrace (most recent call first):',
+    '[0] deepest (res://core/a.gd:1)',
+    '[1-1000] these 8 frames, 125 times over:',
+    ...cycle.map((name, at) => `  ${name} (res://core/x.gd:${at})`),
+    '[1001] count_at (res://core/x.gd:0)',
+    '[1002] _fired (res://core/x.gd:1)',
+    '[1003] strength_of (res://core/x.gd:2)',
+    '[1004] test_lends (res://tests/heriot_test.gd:30)',
+  ]);
+  // A cycle holding one frame twice in a row is the cycle, not that frame twice and the rest apart.
+  const doubled = new GameLog();
+  doubled.append(
+    'transcript',
+    [
+      'SCRIPT ERROR: Stack overflow. Check for infinite recursion in your script.',
+      ...Array.from(
+        { length: 30 },
+        (_, at) => `   [${at}] ${['x (a:1)', 'x (a:1)', 'y (a:2)'][at % 3] ?? ''}`,
+      ),
+      '',
+    ].join('\n'),
+  );
+  doubled.finish();
+  assert.deepEqual(forAnswer(doubled.all)[0]?.detail, [
+    '[0-29] these 3 frames, 10 times over:',
+    '  x (a:1)',
+    '  x (a:1)',
+    '  y (a:2)',
+  ]);
+
   // The engine writes a headline and its detail down one pipe. gdUnit4 indents its progress lines on
   // stdout, and one landing after an error on stderr is a line of its own, not that error's detail.
   const piped = new GameLog();
@@ -23752,12 +23811,16 @@ async function testAStackOverflowIsNotAPass(): Promise<void> {
         'extends GdUnitTestSuite',
         '',
         '',
-        'func depth(n: int) -> int:',
-        '\treturn depth(n + 1)',
+        'func ping(n: int) -> int:',
+        '\treturn pong(n + 1)',
+        '',
+        '',
+        'func pong(n: int) -> int:',
+        '\treturn ping(n + 1)',
         '',
         '',
         'func test_runs_away() -> void:',
-        '\tvar got: Variant = depth(0)',
+        '\tvar got: Variant = ping(0)',
         '\tassert_bool(got == null or got is int).is_true()',
         '',
       ].join('\n'),
@@ -23826,6 +23889,25 @@ async function testAStackOverflowIsNotAPass(): Promise<void> {
         .filter((entry) => get(entry, 'severity') === 'error')
         .reduce((sum: number, entry) => sum + Number(get(entry, 'times') ?? 1), 0);
       assert.equal(get(overflow, 'engineErrors'), printedErrors, `every error is counted once: ${shown}`);
+
+      // Two functions calling each other give a backtrace of one two-frame cycle a thousand frames
+      // deep, and the answer once carried it whole, twice: once here and once under engineEntries.
+      const cycled = uncaught.find((entry) =>
+        asArray(get(entry, 'detail')).some((line) => /these 2 frames, \d+ times over:$/.test(String(line))),
+      );
+      assert.ok(cycled !== undefined, `the cycle is written once with how many times: ${shown}`);
+      for (const entry of uncaught) {
+        const twin = entries.find((one) => get(one, 'index') === get(entry, 'index'));
+        assert.deepEqual(
+          [get(twin, 'detailUnder'), get(twin, 'detail')],
+          ['uncaughtScriptErrors', undefined],
+          `an uncaught error is named under engineEntries without its detail again: ${shown}`,
+        );
+      }
+      assert.ok(
+        JSON.stringify(overflow).length < 20_000,
+        `small enough to be read inline: ${JSON.stringify(overflow).length}`,
+      );
 
       const asked = await run('res://asked');
       const askedShown = JSON.stringify(asked).slice(0, 4000);
