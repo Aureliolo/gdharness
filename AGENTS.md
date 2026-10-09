@@ -2,23 +2,33 @@
 
 ## Commands
 
-| Command                                               | What it does                                                                                  |
-| ----------------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| `bun run build`                                       | Bundles into `build/` without typechecking. Only `test:metadata` and `test:packaging` run it. |
-| `bun run typecheck`                                   | `tsc --noEmit`.                                                                               |
-| `bun run lint`                                        | Biome, types, dead code and markdownlint.                                                     |
-| `bun run format:check`                                | Biome and Prettier.                                                                           |
-| `bun run lint:gd`, `bun run format:gd:check`          | gdlint and gdformat on `src/godot` and `test/support/gd`.                                     |
-| `bun run test:typed`                                  | Shipped scripts and fixtures, warnings as errors; Godot.                                      |
-| `bun test/regressions.ts [name ...]`                  | Every regression; names select tests, loosely matched.                                        |
-| `bun run test:ci`                                     | The eleven fast files, regressions included.                                                  |
-| `test:integration`, `test:metadata`, `test:packaging` | The other four files the `build-and-test` job runs.                                           |
-| `bun run test:engine`, `bun run test:editor`          | The engine and editor legs; need a real Godot.                                                |
+| Command                                                          | What it does                                                                                                                                                    |
+| ---------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Command                                                          | What it does                                                                                                                                                    |
+| ---                                                              | ---                                                                                                                                                             |
+| `bun run build`                                                  | Bundles into `build/` without typechecking. `ci`, `test:metadata`, `test:packaging` and `test:node-runtime` run it first; `test:ci` and the regressions do not. |
+| `bun run typecheck`                                              | `tsc --noEmit`.                                                                                                                                                 |
+| `bun run ci`                                                     | Build, typecheck, `format:check`, `lint` and `test:ci`, in that order.                                                                                          |
+| `bun run lint`                                                   | Biome, types, dead code and markdownlint.                                                                                                                       |
+| `bun run format:check`                                           | Biome and Prettier.                                                                                                                                             |
+| `uv run bun run lint:gd`, `uv run bun run format:gd:check`       | The pinned gdlint and gdformat from `.venv`, on `src/godot` and `test/support/gd`.                                                                              |
+| `uv run yamllint --strict .`                                     | The `yaml` job.                                                                                                                                                 |
+| `bun run format`, `bun run lint:fix`, `uv run bun run format:gd` | Write the fixes.                                                                                                                                                |
+| `bun run test:typed`                                             | Shipped scripts and fixtures, warnings as errors; Godot.                                                                                                        |
+| `bun test/regressions.ts [name ...]`                             | Every regression; names select tests, loosely matched.                                                                                                          |
+| `bun run test:ci`                                                | The eleven fast files, regressions included.                                                                                                                    |
+| `test:integration`, `test:metadata`, `test:packaging`            | The other four files the `build-and-test` job runs. `test:packaging` refuses on Windows.                                                                        |
+| `bun run test:engine`, `bun run test:editor`                     | The engine and editor legs; need a real Godot.                                                                                                                  |
+
+Set up with `bun install` and `uv sync --locked`; the second puts the pinned gdtoolkit and yamllint
+in `.venv`, which `uv run` uses in preference to any copy on `PATH`.
 
 Build before running a suite, because the suites start servers from the bundle. Engine-backed cases
 need `GODOT_PATH`, and the gdUnit fixture needs `GDUNIT4_PATH`; without them those cases skip and say
-so. `bun scripts/install-godot.ts` and `bun scripts/install-gdunit4.ts` fetch the pinned versions into
-the temp directory and print where they landed.
+so, and `GDHARNESS_REQUIRE_GODOT=1` turns those skips into failures, as the engine legs set it.
+Windowed regressions skip unless `GDHARNESS_ALLOW_WINDOWS` is set. `bun scripts/install-godot.ts`
+and `bun scripts/install-gdunit4.ts` fetch the pinned versions into the temp directory and print
+where they landed.
 
 Run `test:typed` after any GDScript change. gdlint and gdformat pass a script the engine refuses with
 warnings as errors, and the regressions load the addons under the default warnings, so a local run
@@ -26,9 +36,19 @@ with the engine passed a runtime addon that failed to compile on the Linux engin
 in `test/support/gd` compile under those settings too: one tried in a scratch project with default
 warnings passed there and failed on the leg for discarding what `ItemList.add_item` returns.
 
-`src/` is the TypeScript MCP server (entry points `server-entry.ts` and `cli.ts`), `src/godot/addons/`
-holds the editor and runtime addons in GDScript, `test/` has one file per suite, and `scripts/` holds
-the build, release and installer scripts. `docs/architecture.md` describes how the parts fit together.
+`reading.gd` and `serialisation.gd` are edited in `src/godot/operations/` only; `bun run sync:gd`
+writes the copies inside the addons, and a regression fails on a copy that has drifted. Commit the
+`.gd.uid` Godot writes beside every new addon script, and add a new operations module to the list
+in `test/packaging-consistency.ts`. `test:packaging` checks both and runs only on Linux and macOS,
+so from Windows the push is the first run that sees them.
+
+`src/` is the TypeScript MCP server (entry points `server-entry.ts` and `cli.ts`). Every tool is
+one entry in `src/tool-definitions.ts`: the server dispatches from it, and the site and the skill
+render their tool reference from it. `src/godot/addons/` holds the editor, runtime and auto-reload
+addons and `src/godot/operations/` the headless engine operations, both GDScript. `test/` holds the
+suites, with shared helpers in `test/support/`, and `scripts/` the build, release and installer
+scripts. `docs/architecture.md` describes how the parts fit together, and the repository map in
+`.github/CONTRIBUTING.md` names the main modules.
 
 ## Tests
 
@@ -267,17 +287,17 @@ options here, however ready anything looks; a rename or a removal is not made.
 
 Cut releases through the button rather than by hand: run the "Prepare release" workflow with the
 bump, merge the pull request it opens, and `release-tag.yml` tags whatever version lands on
-`main`.
+`main`. `.github/release-process.md` covers how a release is cut, signed and verified.
 
 Merge nothing else while a release pull request is open. The ruleset on `main` requires branches to
 be up to date, so every other merge puts the release branch behind and costs it all thirteen checks
 again. Cut the release last, let it through, then carry on. It is a convention rather than a
 setting, and it costs nothing: the work is already done by the time the release is cut.
 
-Read that requirement from the rulesets rather than from branch protection. `gh api
-repos/.../branches/main/protection` answers 404 here, which reads as "nothing is enforced" and is
-wrong: the rules live in `gh api repos/.../rulesets`, and `strict` on the required checks is the
-line that makes this matter.
+Read that requirement from the rulesets rather than from branch protection.
+`gh api repos/Aureliolo/gdharness/branches/main/protection` answers 404, which reads as "nothing is
+enforced" and is wrong: the rules live in `gh api repos/Aureliolo/gdharness/rulesets`, and `strict`
+on the required checks is the line that makes this matter.
 
 Read a commit's subject back after writing it, with `git log -1 --format=%s`. A PowerShell
 here-string, `-m @'...'@`, passed through a POSIX shell commits with the subject `@` (there `@'` is
