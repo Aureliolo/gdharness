@@ -12,9 +12,10 @@ extends Node
 
 const Read = preload("../reading.gd")
 
-## The engine sends only the top so many functions a frame and clamps nothing on the game's side.
-## Its own buffer's default, so no frame is cut short of what was called.
-const FRAME_FUNCTIONS: int = 16384
+## The most functions a frame may carry when the server does not say. The engine names a function
+## once, as it first appears, and the game's debugger queue drops those messages past its size, so
+## the server keeps this below the queue the project sets; this is that for the engine's default.
+const FRAME_FUNCTIONS: int = 1536
 const DEBUGGER_CLASS: String = "ScriptEditorDebugger"
 
 
@@ -44,6 +45,10 @@ var _started_msec: int = 0
 var _last_frame_msec: int = -1
 var _frames: int = 0
 var _complete: bool = false
+var _frame_functions: int = FRAME_FUNCTIONS
+## Frames that carried as many functions as were asked for, and whether the totals did.
+var _capped_frames: int = 0
+var _total_capped: bool = false
 var _names: Dictionary[int, String] = {}
 ## Per signature: calls, self seconds, total seconds.
 var _totals: Dictionary[String, PackedFloat64Array] = {}
@@ -81,6 +86,8 @@ func profile_start(args: Dictionary) -> Dictionary:
 			),
 		}
 	_reset()
+	var asked: int = Read.as_int(args.get("frameFunctions", FRAME_FUNCTIONS))
+	_frame_functions = asked if asked > 0 else FRAME_FUNCTIONS
 	if Read.as_bool(args.get("arm", false)):
 		_armed = true
 		return {"ok": true, "started": false, "armed": true, "session": -1}
@@ -104,6 +111,9 @@ func profile_read(_args: Dictionary) -> Dictionary:
 		"playing": EditorInterface.is_playing_scene(),
 		"frames": _frames,
 		"complete": _complete,
+		"frameFunctions": _frame_functions,
+		"cappedFrames": _capped_frames,
+		"totalCapped": _total_capped,
 		"coveredMs": _last_frame_msec - _started_msec if _last_frame_msec >= 0 else 0,
 		"functions": functions,
 	}
@@ -114,6 +124,8 @@ func _reset() -> void:
 	_session = -1
 	_frames = 0
 	_complete = false
+	_capped_frames = 0
+	_total_capped = false
 	_last_frame_msec = -1
 	_names.clear()
 	_totals.clear()
@@ -133,7 +145,7 @@ func _switch_on(session_id: int) -> void:
 	_session = session_id
 	_started_msec = Time.get_ticks_msec()
 	var session: EditorDebuggerSession = _sessions.get_session(session_id)
-	session.toggle_profiler("servers", true, [FRAME_FUNCTIONS, false])
+	session.toggle_profiler("servers", true, [_frame_functions, false])
 
 
 ## A play that was asked to be profiled is switched on as it starts. Any other play drops what is
@@ -170,37 +182,42 @@ func _on_debug_data(message: String, data: Array, session_id: int) -> void:
 	if message == "servers:function_signature" and data.size() >= 2:
 		_names[Read.as_int(data[1])] = str(data[0])
 	elif message == "servers:profile_frame":
-		if _add(data, _totals):
+		var carried: int = _add(data, _totals)
+		if carried >= 0:
 			_frames += 1
+			_capped_frames += 1 if carried >= _frame_functions else 0
 			_last_frame_msec = Time.get_ticks_msec()
 	elif message == "servers:profile_total":
 		# The engine's own count since the profiler started, so it replaces the frames' sum.
 		var whole: Dictionary[String, PackedFloat64Array] = {}
-		if _add(data, whole):
+		var carried: int = _add(data, whole)
+		if carried >= 0:
 			_totals = whole
 			_complete = true
+			_total_capped = carried >= _frame_functions
 			_last_frame_msec = Time.get_ticks_msec()
 
 
 ## Adds one frame's functions into [param into], reading past the servers' section to reach them:
 ## six frame times, the server count, each server's name and field count and fields, then five
-## numbers per function.
-func _add(data: Array, into: Dictionary[String, PackedFloat64Array]) -> bool:
+## numbers per function. Answers how many functions it carried, or -1 for a frame it cannot read.
+func _add(data: Array, into: Dictionary[String, PackedFloat64Array]) -> int:
 	var at: int = 6
 	if data.size() <= at:
-		return false
+		return -1
 	var servers: int = Read.as_int(data[at])
 	at += 1
 	for _server: int in servers:
 		if data.size() <= at + 1:
-			return false
+			return -1
 		at += 2 + Read.as_int(data[at + 1])
 	if data.size() <= at:
-		return false
+		return -1
 	var values: int = Read.as_int(data[at])
 	at += 1
 	if values % 5 != 0 or data.size() < at + values:
-		return false
+		return -1
+	var carried: int = 0
 	for index: int in range(at, at + values, 5):
 		var id: int = Read.as_int(data[index])
 		var signature: String = _names[id] if _names.has(id) else "#%d" % id
@@ -211,4 +228,5 @@ func _add(data: Array, into: Dictionary[String, PackedFloat64Array]) -> bool:
 		sum[1] += Read.as_float(data[index + 2])
 		sum[2] += Read.as_float(data[index + 3])
 		into[signature] = sum
-	return true
+		carried += 1
+	return carried
