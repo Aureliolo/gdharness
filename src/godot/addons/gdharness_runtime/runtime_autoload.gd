@@ -125,12 +125,14 @@ func _ready() -> void:
 	# even be un-paused over the socket. A debug server has to stay responsive while the game
 	# is frozen, to inspect, capture, inject or resume it.
 	process_mode = Node.PROCESS_MODE_ALWAYS
+	var watched: int = get_tree().root.tree_exiting.connect(_send_the_profile)
+	if watched != OK:
+		push_error("gdharness could not watch for the game quitting: %d" % watched)
 	_report_errors()
 	_start_server()
 
 
 func _exit_tree() -> void:
-	_send_the_profile()
 	if _errors != null:
 		OS.remove_logger(_errors)
 		_errors.close()
@@ -138,12 +140,17 @@ func _exit_tree() -> void:
 	_cleanup()
 
 
-## A profiled run's totals, sent as the game leaves the tree.
+## A profiled run's totals, sent as the game quits.
 ##
 ## The engine sends its script profiler's totals only when the profiler is switched off, and at
 ## exit it is torn down without being switched off, so a scene that did its work in _ready and
 ## quit took its whole profile with it, last frame included. The wait is for the debugger's own
 ## thread, which sends what is queued every few milliseconds and stops without emptying the queue.
+##
+## On the root leaving rather than this node: the root leaves only as the game quits, and after
+## every other node's _exit_tree, so what those do is counted. A project that sent this node away
+## mid-run had the profiler switched off then, and its run answered as complete with none of the
+## frames after it.
 func _send_the_profile() -> void:
 	if EngineDebugger.is_active() and EngineDebugger.is_profiling("servers"):
 		EngineDebugger.profiler_enable("servers", false)
