@@ -1016,7 +1016,7 @@ export function runtimeRequest(
         ok: false,
         reason: 'busy',
         requestId: id,
-        message: `${still} Nothing was cancelled: a call that takes longer than the wait goes on and does everything it was asked, so read the state back rather than repeating it. runtime_invoke op result with requestId ${id} answers with its reply once it comes, and timeoutMs waits longer next time. A game held at a breakpoint instead is one debug_state stack answers about.`,
+        message: `${still} Nothing was cancelled: a call that takes longer than the wait goes on and does everything it was asked, so read the state back rather than repeating it. runtime_invoke op result with requestId ${id} answers with its reply once it comes. A game held at a breakpoint instead is one debug_state stack answers about.`,
       });
     }, timeoutMs);
 

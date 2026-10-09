@@ -209,6 +209,7 @@ import {
   finishedBeforeTheEnd,
   foldedScriptErrors,
   leftRunningNote,
+  longerWaitNote,
   noCodeWillCome,
   notRunNote,
   PLAY_STARTS_WITHIN_MS,
@@ -5250,6 +5251,48 @@ function testTheLongestWaitCanBeWaitedOut(): void {
   assert.ok(
     patienceForFrames(600, flat) > patienceForFrames(60, flat),
     'and a longer wait is given longer than a shorter one',
+  );
+}
+
+/**
+ * A runtime call that ran out of time is told what would wait longer for it, and only an argument
+ * its own op takes. The note offered timeoutMs to every call, and runtime_wait frames refused it on a
+ * game that had stopped answering. Rendered for every op of every runtime tool, against its schema.
+ */
+function testTheLongerWaitIsOneTheCallTakes(): void {
+  const rendered: string[] = [];
+  for (const spec of TOOL_SPECS.filter((one) => one.name.startsWith('runtime_'))) {
+    for (const op of Object.keys(spec.operations ?? {})) {
+      const note = longerWaitNote(spec.name, op, 10_050);
+      const takes = argumentsOf(spec, op).includes('timeoutMs');
+      rendered.push(`${spec.name} ${op}`);
+      assert.equal(
+        note === 'timeoutMs waits longer next time.',
+        takes,
+        `${spec.name} ${op} ${takes ? 'takes' : 'does not take'} timeoutMs, and its note says: ${note}`,
+      );
+      if (!takes) {
+        assert.match(
+          note,
+          new RegExp(`^${spec.name} ${op} takes no timeoutMs: it was given 10050ms, and `),
+          note,
+        );
+      }
+    }
+  }
+  // The ops this was written for, so a loop that found no runtime tool does not pass for one.
+  for (const named of [
+    'runtime_wait frames',
+    'runtime_wait until',
+    'runtime_input click',
+    'runtime_inspect tree',
+  ]) {
+    assert.ok(rendered.includes(named), `${named} was rendered: ${rendered.join(', ')}`);
+  }
+  assert.match(longerWaitNote('runtime_wait', 'frames', 25_000), /so ask for fewer frames at a time\.$/);
+  assert.match(
+    longerWaitNote('runtime_capture', 'screenshot', 10_000),
+    /the wait is GDHARNESS_RUNTIME_TIMEOUT_MS, which is set in the environment the server is started with\.$/,
   );
 }
 
@@ -21190,6 +21233,11 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
       );
       const requestId = asNumber(get(pending, 'requestId'), 'with an id to collect it by');
       assert.match(text(get(pending, 'note')), /Nothing was cancelled/, JSON.stringify(pending));
+      assert.match(
+        text(get(pending, 'note')),
+        /timeoutMs waits longer next time\.$/,
+        `runtime_invoke call takes timeoutMs, so its note offers it: ${JSON.stringify(pending)}`,
+      );
       const early = await invokeWaiting({ op: 'result', requestId });
       assert.equal(get(early, 'pending'), true, `asked early, it is still running: ${JSON.stringify(early)}`);
       let collected: unknown = early;
@@ -21217,6 +21265,47 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
         /No request 999999 is waiting to be collected here/,
         'an id this server never gave is refused',
       );
+
+      // What waits longer, for calls that take no timeoutMs: the note offered it to every call and
+      // runtime_wait frames refused it. The game is held past the standing wait so that a frames wait
+      // and an input both run out; each is told what sets its own wait instead.
+      const holding = await invokeWaiting({
+        op: 'call',
+        nodePath: '/root/Main',
+        method: 'slow',
+        args: [12_000],
+        timeoutMs: 500,
+      });
+      const holdingId = asNumber(get(holding, 'requestId'), JSON.stringify(holding));
+      const asking = async (name: string, args: Record<string, unknown>): Promise<unknown> =>
+        parseTextContent(
+          await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS),
+        );
+      const [framesWait, moved] = await Promise.all([
+        asking('runtime_wait', { op: 'frames', frames: 1 }),
+        asking('runtime_input', { op: 'mouse_motion', x: 1, y: 1 }),
+      ]);
+      assert.equal(get(framesWait, 'pending'), true, JSON.stringify(framesWait));
+      assert.match(
+        text(get(framesWait, 'note')),
+        /runtime_wait frames takes no timeoutMs: it was given \d+ms, and the wait is counted from the number of frames, at 20 a second on top of GDHARNESS_RUNTIME_TIMEOUT_MS, and this game fell below that rate, so ask for fewer frames at a time\.$/,
+        `a frames wait is told what sizes its wait: ${JSON.stringify(framesWait)}`,
+      );
+      assert.equal(get(moved, 'pending'), true, JSON.stringify(moved));
+      assert.match(
+        text(get(moved, 'note')),
+        /runtime_input mouse_motion takes no timeoutMs: it was given \d+ms, and the wait is GDHARNESS_RUNTIME_TIMEOUT_MS/,
+        `and an input is told its wait is the server's: ${JSON.stringify(moved)}`,
+      );
+      for (const one of [framesWait, moved]) {
+        assert.doesNotMatch(text(get(one, 'note')), /timeoutMs waits longer/, JSON.stringify(one));
+      }
+      let released: unknown = holding;
+      for (let waited = 0; get(released, 'pending') === true && waited < 30_000; waited += 500) {
+        await delay(500);
+        released = await invokeWaiting({ op: 'result', requestId: holdingId });
+      }
+      assert.equal(get(released, 'result'), 'done after 12000', JSON.stringify(released));
 
       // A list's size is a call on the list, and a wait for a board to fill is written against it.
       // The step was read as an index, so the answer was "a list of 5, so there is no size() in it".
@@ -32120,6 +32209,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEditorPortMovesOnlyWhenItIsHeld,
   testAServerOnlyAnswersAboutItsOwnGame,
   testTheLongestWaitCanBeWaitedOut,
+  testTheLongerWaitIsOneTheCallTakes,
   testDiagnosticsSurviveUriReEncoding,
   testDiagnosticsSurviveTheEditorRestarting,
   testAReferencesRequestIsGivenItsOwnTime,
