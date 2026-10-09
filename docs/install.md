@@ -144,6 +144,13 @@ index, which is what a clone gets, and names any that are not. Commit the addon,
 autoload at a script of your own that brings the addon up when it is there and does nothing when it
 is not. Outside a repository, or with no git on the machine, it says nothing rather than guessing.
 
+Such a script usually adds the addon with `add_child.call_deferred`, because the root is still
+adding its own children while autoloads get `_ready`. A deferred add runs only once the main
+scene's `_ready` has returned, so the runtime announces after it: a scene that does its work in
+`_ready` cannot be reached with `runtime_*` calls until that work is over, and `editor_status` lists
+no runtime meanwhile. A profile still covers that time, since the profiler is on from the engine's
+start. The addon's own autoload entry, which `setup` writes, comes up before the main scene.
+
 An entry naming a script of your own is left where you put it. `setup`, `upgrade` and
 `runtime on` rewrite that line only when it names the addon's own script, and each of them says
 which of the two it did. An upgrade once repointed a wrapper and mentioned five other replacements

@@ -63,7 +63,7 @@ export function declaredClasses(projectPath: string): Map<string, string> {
  * Every script under the project the engine would import, handed to [param each] as its `res://`
  * path and its source. A directory holding a `.gdignore` is stepped over, as the engine steps over it.
  */
-function eachScript(projectPath: string, each: (script: string, source: string) => void): void {
+export function eachScript(projectPath: string, each: (script: string, source: string) => void): void {
   const visit = (directory: string, prefix: string): void => {
     if (existsSync(join(directory, '.gdignore'))) {
       return;
