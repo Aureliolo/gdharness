@@ -536,6 +536,21 @@ function playOf(answer: OperationParams): EditorPlay | null {
 }
 
 /**
+ * Whether [playing], the play an editor says it is in, is a different play from [run]'s, which is
+ * then over: an editor plays one game at a time. False when either side cannot say which play it
+ * is. A stop and a new play inside one moment leave the editor saying "playing" throughout, and
+ * that word alone kept the ended run as the current one and gave the new play its console.
+ */
+function playedSince(run: GodotProcess, playing: EditorPlay | null): boolean {
+  return (
+    run.throughEditor &&
+    run.play !== undefined &&
+    playing !== null &&
+    (playing.play !== run.play.play || playing.editorPid !== run.play.editorPid)
+  );
+}
+
+/**
  * Whether a run is still up, taking the editor's word for the runs it is playing.
  *
  * A run this server spawned has a process to ask the operating system about. A run the editor
@@ -543,16 +558,26 @@ function playOf(answer: OperationParams): EditorPlay | null {
  * and reading that as "still going" turns a game that died during boot into one that may yet
  * announce, which is the answer this was written to stop giving. The editor knows, and is already
  * asked this by `editor_status`. [param editorSays] is null when it will not say, and then the
- * record is what is left. [param now] is when the question is asked, for the play that has not
+ * record is what is left. [param editorPlay] is which play the editor says it is in, null when it
+ * does not number them. [param now] is when the question is asked, for the play that has not
  * started yet.
  */
-export function runIsUp(run: GodotProcess | null, editorSays: boolean | null, now = Date.now()): boolean {
+export function runIsUp(
+  run: GodotProcess | null,
+  editorSays: boolean | null,
+  editorPlay: EditorPlay | null = null,
+  now = Date.now(),
+): boolean {
   if (run?.throughEditor !== true) {
     return stillRunning(run);
   }
   // Stopped here: the editor's "not playing" inside the grace below would otherwise read as a play
   // still on its way, about a run this server has just had the editor stop.
   if (typeof run.endedHere === 'string') {
+    return false;
+  }
+  // Ahead of the grace too, and of the editor's "playing", which a play begun since also answers.
+  if (playedSince(run, editorPlay)) {
     return false;
   }
   // A process that is gone settles it before the editor is taken at its word. Godot went on
@@ -7035,6 +7060,7 @@ class GodotServer {
     const transcript = openTranscript(startedAt);
     closeSync(transcript.fd);
     const playAnswer = asParams(JSON.parse(answer.content[0]?.text ?? '{}'));
+    const which = playOf(playAnswer);
     const played: GodotProcess = {
       pid: null,
       log,
@@ -7048,10 +7074,10 @@ class GodotServer {
       brokeOn: null,
       announcedBefore: alreadyPlaying,
       seenPlaying: readBoolean(playAnswer, 'playing') === true,
+      ...(which === null ? {} : { play: which }),
     };
     this.activeProcess = played;
     this.watchThePlayedConsole();
-    const which = playOf(playAnswer);
     writeEditorRunNote({
       projectPath,
       transcript: transcript.path,
@@ -7712,17 +7738,29 @@ class GodotServer {
     }
     const going = this.activeProcess;
     // A run this server ended gives way to a play the editor has started since, which is the current
-    // run: the editor was told to stop, so its "playing" is a new play. Only a run ended here. The
-    // editor goes on reporting a game whose process was ended from outside, so for a played run
-    // that ended on its own "playing" can be the same play, still being reported; and a spawned run
-    // that finished on its own is output somebody is waiting to read, which a scene played in the
-    // editor meanwhile is not.
-    const givesWay = going !== null && !stillRunning(going) && typeof going.endedHere === 'string';
+    // run: the editor was told to stop, so its "playing" is a new play. So does a played run the
+    // editor numbers a later play than, whoever ended it. Otherwise a run that ended somewhere else
+    // stays: the editor goes on reporting a game whose process was ended from outside, so for a
+    // played run with no number "playing" can be the same play, still being reported; and a spawned
+    // run that finished on its own is output somebody is waiting to read, which a scene played in
+    // the editor meanwhile is not.
+    const asked =
+      going?.throughEditor === true && going.play !== undefined ? await this.editorPlayingState() : null;
+    const superseded = going !== null && asked !== null && playedSince(going, asked.play);
+    if (superseded && stillRunning(going)) {
+      going.endedUnwatched = true;
+    }
+    const givesWay =
+      going !== null && (superseded || (!stillRunning(going) && typeof going.endedHere === 'string'));
     if (going !== null && !givesWay) {
       // An editor-played run whose adapter has gone, with the editor still playing it. Reconnected
       // here rather than left silent: the gap is already recorded and cannot be filled, and the
       // alternative to trying is a run that prints for another hour into nothing.
-      if (going.throughEditor && going.consoleLost === true && (await this.editorPlayingState())?.playing) {
+      if (
+        going.throughEditor &&
+        going.consoleLost === true &&
+        (asked ?? (await this.editorPlayingState()))?.playing
+      ) {
         try {
           await this.dap().connect();
           // The flag stays set. It says the log has a hole in it, which reconnecting does not
@@ -7736,7 +7774,7 @@ class GodotServer {
       }
       return;
     }
-    const playing = await this.editorPlayingState();
+    const playing = asked ?? (await this.editorPlayingState());
     if (playing?.playing !== true) {
       return;
     }
@@ -7775,6 +7813,7 @@ class GodotServer {
       throughEditor: true,
       brokeOn: null,
       pickedUpPlaying: true,
+      ...(playing.play === null ? {} : { play: playing.play }),
     };
     // No `announcedBefore`: a picked-up run saw nothing announced, so `announcedPidOf` ties it to
     // the one game announced for this project, and the run is asked of the operating system the
@@ -8661,11 +8700,13 @@ class GodotServer {
     if (announced !== undefined && editorSays === undefined) {
       return stillRunning(run);
     }
-    const said = editorSays === undefined ? ((await this.editorPlayingState())?.playing ?? null) : editorSays;
-    if (said === true) {
+    const state = editorSays === undefined ? await this.editorPlayingState() : undefined;
+    const said = state === undefined ? (editorSays ?? null) : (state?.playing ?? null);
+    const play = state?.play ?? null;
+    if (said === true && !playedSince(run, play)) {
       run.seenPlaying = true;
     }
-    return runIsUp(run, said);
+    return runIsUp(run, said, play);
   }
 
   /**
