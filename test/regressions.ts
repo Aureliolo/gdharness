@@ -81,7 +81,12 @@ import {
 } from '../src/editor-log.js';
 import { type EngineRun, howItEnded, runEngine } from '../src/engine-run.js';
 import { answersTo, foldedRepeats, forAnswer, GameLog, type LogEntry } from '../src/game-log.js';
-import { occurrencesOf, regionsOf, shapeOf as scriptShapeOf } from '../src/gdscript-source.js';
+import {
+  enclosingFunction,
+  occurrencesOf,
+  regionsOf,
+  shapeOf as scriptShapeOf,
+} from '../src/gdscript-source.js';
 import {
   anEditorIsStillComing,
   CONNECT_WINDOW_MS,
@@ -182,6 +187,7 @@ import {
 } from '../src/scratch.js';
 import { type CheckScript, originsOf, withoutListed } from '../src/script-origins.js';
 import {
+  callersOf,
   ProfileAggregate,
   type ProfileTotals,
   profiledFunctions,
@@ -209,6 +215,8 @@ import {
   previousRunHow,
   previousRunLeft,
   profileAnswer,
+  profileOnStart,
+  projectSourceOf,
   runIsUp,
   runtimeVerdict,
   scanWaitAnswer,
@@ -997,6 +1005,190 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     say({ totals: { ...totals({}), unreadable: 2 } }),
     /^2 messages from the game could not be read/,
   );
+  // A run still inside the frame its work is in, which has sent nothing and is not a profiler that
+  // failed; and a run past it, whose frames are summed so far.
+  assert.match(
+    say({ running: true, totals: { ...partial, frames: 0 } }),
+    /^The profiler is on and the game has not finished its first frame yet: .*the engine's own totals arrive when the game quits\.$/,
+  );
+  assert.match(say({ running: true, totals: { ...partial, frames: 1 } }), /one frame summed so far/);
+
+  assert.equal(profileOnStart(false, 'gdharness', true), undefined, 'a start that did not ask says nothing');
+  assert.match(
+    String(profileOnStart(true, 'editor', true)?.totals),
+    /^On from the game's start, through the editor's debugger session\. .*replace the sum when the game quits\.$/,
+  );
+  assert.match(
+    String(profileOnStart(true, 'gdharness', false)?.totals),
+    /through the process that keeps the run\. .*which takes the runtime addon: without it the frames that arrived before the exit are what is kept\.$/,
+  );
+
+  // Where a lambda is written and who names a function, off source shaped like a real project's: a
+  // lambda whose body is on lines of its own, a string holding a line that begins with func, a
+  // function written on one line, an inner class, and lambdas at a class's own level.
+  const crewing = [
+    'class_name Crewing',
+    'extends Node',
+    '',
+    'var by_strength := func(a, b): return a < b',
+    'var named := "_ranked_by"',
+    '',
+    '',
+    'func _ranked_by(people: Array, key: Callable) -> Array:',
+    '\tpeople.sort_custom(func(a, b): return key.call(a) > key.call(b))',
+    '\treturn people',
+    '',
+    '',
+    'func _brings_together(people: Array) -> Array:',
+    '\tvar ranked := _ranked_by(people, _strength)',
+    '\tfor one in ranked:',
+    '\t\tvar note := """',
+    'func fake():',
+    '"""',
+    '\t\tvar pick := func pick_one(x):',
+    '',
+    '\t\t\treturn _ranked_by([x], _strength)',
+    '\t\tpick.call(one)',
+    '\treturn ranked',
+    '',
+    '',
+    'static func _crews_among(c: Crewing) -> Array: return c._ranked_by([], c._strength)',
+    '',
+    '',
+    'func _strength(_one: Variant) -> int:',
+    '\tvar later := _ranked_by  # _ranked_by( in a comment',
+    '\treturn 0 if later else 1',
+    '',
+    '',
+    'class Inner:',
+    '\tfunc sort(xs: Array) -> void:',
+    '\t\txs.sort_custom(func(a, b): return a < b)',
+    '',
+    '\tvar inner_lambda := func(): pass',
+    '',
+  ].join('\n');
+  assert.deepEqual(
+    [9, 14, 21, 26, 36, 4, 38, 99].map((line) => enclosingFunction(crewing, line)),
+    ['_ranked_by', '_brings_together', '_brings_together', '_crews_among', 'sort', null, null, null],
+    'each line in the named function written around it, and none for a line at a class level',
+  );
+  const other = [
+    'class_name Other',
+    '',
+    'func _ranked_by(x: Array) -> Array:',
+    '\treturn x',
+    '',
+    '',
+    'func send_out(c: Crewing) -> void:',
+    '\tc._ranked_by([], c._strength)',
+    '',
+    '',
+    'func _brings_together() -> void:',
+    '\t_ranked_by([])',
+    '',
+  ].join('\n');
+  const crew = totals({
+    'res://crewing.gd::9::Crewing._ranked_by': { calls: 716, selfSeconds: 0.9, totalSeconds: 1.8 },
+    'res://crewing.gd::9::Crewing.<anonymous lambda>(lambda)': {
+      calls: 16000,
+      selfSeconds: 0.4,
+      totalSeconds: 0.4,
+    },
+    'res://crewing.gd::14::Crewing._brings_together': { calls: 581, selfSeconds: 0.1, totalSeconds: 1.5 },
+    'res://crewing.gd::26::Crewing._crews_among': { calls: 10, selfSeconds: 0.05, totalSeconds: 2 },
+    'res://crewing.gd::21::Crewing.pick_one(lambda)': { calls: 581, selfSeconds: 0.02, totalSeconds: 0.5 },
+    'res://other.gd::4::Other._ranked_by': { calls: 5, selfSeconds: 0.01, totalSeconds: 0.01 },
+  });
+  const sourceOf = (script: string): string | null => (script === 'res://crewing.gd' ? crewing : null);
+  assert.deepEqual(
+    profiledFunctions(crew, 10, sourceOf).functions.map((one) => [one.function, one.within]),
+    [
+      ['Crewing._ranked_by', undefined],
+      ['Crewing.<anonymous lambda>(lambda)', '_ranked_by'],
+      ['Crewing._brings_together', undefined],
+      ['Crewing._crews_among', undefined],
+      ['Crewing.pick_one(lambda)', '_brings_together'],
+      ['Other._ranked_by', undefined],
+    ],
+    'the lambda placed in the function it is written in, and nothing added to a named function',
+  );
+  assert.equal(
+    profiledFunctions(crew, 10).functions[1]?.within,
+    undefined,
+    'and a lambda whose script cannot be read is left as the engine named it',
+  );
+  const scripts = [
+    ['res://crewing.gd', crewing],
+    ['res://other.gd', other],
+  ] as const;
+  const found = callersOf(crew, '_ranked_by', scripts);
+  assert.deepEqual(
+    found.sites.map((one) => [
+      one.script,
+      one.line,
+      one.within,
+      one.called,
+      one.withinCalls,
+      one.withinTotalMs,
+    ]),
+    [
+      ['res://crewing.gd', 26, '_crews_among', true, 10, 2000],
+      ['res://crewing.gd', 14, '_brings_together', true, 581, 1500],
+      ['res://crewing.gd', 21, '_brings_together', true, 581, 1500],
+      ['res://crewing.gd', 30, '_strength', false, undefined, undefined],
+      ['res://other.gd', 8, 'send_out', true, undefined, undefined],
+      ['res://other.gd', 12, '_brings_together', true, undefined, undefined],
+    ],
+    'every place in code naming it, by the time of the function each is in; not its declarations, the string or the comment',
+  );
+  assert.deepEqual(
+    [found.target.map((one) => one.function), found.omitted],
+    [['Crewing._ranked_by', 'Other._ranked_by'], 0],
+    "the rows of every function by that name, since a bare name does not say which class's",
+  );
+  assert.deepEqual(
+    callersOf(crew, 'Crewing._ranked_by', scripts).target.map((one) => one.function),
+    ['Crewing._ranked_by'],
+    "and Class.name picks out the one class's",
+  );
+  const crowded = [
+    'func many() -> void:',
+    ...Array.from({ length: 41 }, () => '\t_ranked_by([], _strength)'),
+  ].join('\n');
+  const capped = callersOf(crew, '_ranked_by', [['res://many.gd', crowded]]);
+  assert.deepEqual(
+    [capped.sites.length, capped.omitted, capped.sites.at(-1)?.line],
+    [40, 1, 41],
+    'forty places and the count of the rest',
+  );
+
+  const withCallers = (name: string, from: readonly (readonly [string, string])[]): string =>
+    String(get(answer({ totals: crew, callersOf: { name, scripts: () => from } }), 'callers', 'note'));
+  assert.match(withCallers('_ranked_by', scripts), /^Found by name in the project's scripts/);
+  assert.match(withCallers('_ranked_by', []), /^No script in the project names _ranked_by in code/);
+  assert.match(withCallers('_strength', scripts), /The profile counts no call of _strength/);
+
+  // A script path comes from the game, so it is read only inside the project: a path climbing out of
+  // it reads nothing, though the file it names is there, and nor does one built into a scene.
+  const holder = mkdtempSync(join(tmpdir(), 'gdharness-sources-'));
+  try {
+    const inside = join(holder, 'project');
+    mkdirSync(inside);
+    writeFileSync(join(inside, 'crewing.gd'), crewing);
+    writeFileSync(join(holder, 'outside.gd'), 'func outside() -> void:\n\tpass\n');
+    const read = projectSourceOf(inside);
+    assert.deepEqual(
+      [
+        read('res://crewing.gd') === crewing,
+        read('res://../outside.gd'),
+        read('res://crewing.tscn::GDScript_x'),
+      ],
+      [true, null, null],
+      'the project script read, the one outside it and the built-in one not',
+    );
+  } finally {
+    sweep(holder);
+  }
 }
 
 async function turnedAwayAtTheBridge(
@@ -24115,12 +24307,21 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
         '\tvar sum := 0',
         '\tfor i in rounds:',
         '\t\tsum += Work.square(i)',
-        '\treturn sum',
+        '\treturn sum + ranked(range(50)).front()',
         '',
         '',
         'func _ready() -> void:',
         '\tprint(busy(200000))',
+        '\t# ranked(this comment is not a call)',
+        '\tprint(ranked([3, 1, 2]), "ranked(nor this string)")',
         '\tget_tree().quit()',
+        '',
+        '',
+        'func ranked(values: Array) -> Array:',
+        '\tvar by_size := func larger(a: int, b: int) -> bool: return a > b',
+        '\tvalues.sort_custom(by_size)',
+        '\tvalues.sort_custom(func(a: int, b: int) -> bool: return a < b)',
+        '\treturn values',
         '',
       ].join('\n'),
     );
@@ -24154,8 +24355,13 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
         textOf(
           await server.request('tools/call', { name: 'editor_run', arguments: args }, ENGINE_CALL_TIMEOUT_MS),
         ) ?? '';
-      const profiledRun = async (sceneName: string, profile: boolean): Promise<unknown> => {
-        const started = await call({
+      let started: unknown = null;
+      const profiledRun = async (
+        sceneName: string,
+        profile: boolean,
+        asked: Record<string, unknown> = {},
+      ): Promise<unknown> => {
+        const answer = await call({
           op: 'start',
           projectPath: project,
           scene: `harness/${sceneName}.tscn`,
@@ -24163,15 +24369,26 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
           profile,
           runtimeWaitMs: 0,
         });
-        assert.match(started, /"started": true/, started);
+        assert.match(answer, /"started": true/, answer);
+        started = JSON.parse(answer) as unknown;
         const waited = await call({ op: 'wait', timeoutMs: 60_000 });
         assert.match(waited, /"running": false/, `the run ended: ${waited}`);
-        const answered = await call({ op: 'profile', limit: 10 });
+        const answered = await call({ op: 'profile', limit: 10, ...asked });
         return answered.trimStart().startsWith('{') ? (JSON.parse(answered) as unknown) : answered;
       };
 
-      const whole = await profiledRun('once', true);
+      const whole = await profiledRun('once', true, { callersOf: 'ranked', limit: 100 });
       const wholeShown = JSON.stringify(whole);
+      assert.equal(
+        get(started, 'profile', 'on'),
+        true,
+        `the start says the profiler is on: ${JSON.stringify(started)}`,
+      );
+      assert.match(
+        String(get(started, 'profile', 'totals')),
+        /the process that keeps the run.*replace the sum when the game quits\.$/,
+        JSON.stringify(started),
+      );
       assert.equal(get(whole, 'through'), 'gdharness', wholeShown);
       assert.equal(get(whole, 'connected'), true, wholeShown);
       assert.equal(get(whole, 'complete'), true, `the runtime addon sent the engine's totals: ${wholeShown}`);
@@ -24200,8 +24417,60 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
       );
       assert.ok(Number(get(whole, 'scriptMs')) > 0, wholeShown);
 
+      // The lambda as the engine names it, which is anonymous, placed in the function written around it.
+      // Both kinds: a lambda given a name of its own, and an anonymous one.
+      const lambdas = rows
+        .filter((one) => String(get(one, 'function')).includes('lambda'))
+        .map((one) => [get(one, 'line'), get(one, 'within'), Number(get(one, 'calls')) > 50]);
+      assert.deepEqual(
+        lambdas.sort((a, b) => Number(a[0]) - Number(b[0])),
+        [
+          [24, 'ranked', true],
+          [26, 'ranked', true],
+        ],
+        `the two comparison lambdas, both in ranked: ${wholeShown}`,
+      );
+      assert.equal(
+        get(row('Work.busy'), 'within'),
+        undefined,
+        `a named function needs no placing: ${wholeShown}`,
+      );
+
+      // Its two callers, from the source, each with its own numbers from the same profile; the
+      // comment and the string naming it are not code.
+      const sites = asArray(get(whole, 'callers', 'sites')).map((one) => [
+        get(one, 'script'),
+        get(one, 'line'),
+        get(one, 'within'),
+        get(one, 'called'),
+        get(one, 'withinCalls'),
+      ]);
+      assert.deepEqual(
+        sites.sort((a, b) => Number(a[1]) - Number(b[1])),
+        [
+          ['res://harness/work.gd', 13, 'busy', true, 1],
+          ['res://harness/work.gd', 19, '_ready', true, 1],
+        ],
+        `ranked is called from busy and from _ready: ${wholeShown}`,
+      );
+      assert.deepEqual(
+        asArray(get(whole, 'callers', 'rows')).map((one) => [get(one, 'function'), get(one, 'calls')]),
+        [['Work.ranked', 2]],
+        `beside the function's own row: ${wholeShown}`,
+      );
+      assert.match(
+        String(get(whole, 'callers', 'note')),
+        /^Found by name in the project's scripts/,
+        wholeShown,
+      );
+
       const unprofiled = await profiledRun('once', false);
       assert.match(String(unprofiled), /started without profile: true/, String(unprofiled));
+      assert.equal(
+        get(started, 'profile'),
+        undefined,
+        `nor does its start say otherwise: ${JSON.stringify(started)}`,
+      );
 
       // Whether the engine's one frame survives the exit is a race in the engine, measured going both
       // ways on one machine, so either answer is right here as long as it admits what it lacks.

@@ -51,6 +51,7 @@ import {
   contradictedDiagnostics,
   declaredClasses,
   declaredSince,
+  eachScript,
   externalMemberIn,
   failedReloadNote,
   heldButGone,
@@ -94,6 +95,7 @@ import {
 import { type EngineRun, howItEnded, runEngine } from './engine-run.js';
 import { errorMessage, Refusal } from './errors.js';
 import { answersTo, type FoldedEntry, foldedRepeats, GameLog, type LogEntry } from './game-log.js';
+import { isIdentifier } from './gdscript-source.js';
 import {
   anEditorIsStillComing,
   type GodotBridge,
@@ -207,7 +209,13 @@ import {
   unresolvedClassIn,
   withoutListed,
 } from './script-origins.js';
-import { type ProfileTotals, profiledFunctions, readProfileFile } from './script-profile.js';
+import {
+  callersOf,
+  type ProfileTotals,
+  profiledFunctions,
+  readProfileFile,
+  type SourceOf,
+} from './script-profile.js';
 import type {
   GodotProcess,
   MCPToolDefinition,
@@ -1950,6 +1958,33 @@ export function aboveTheRunner(entry: LogEntry): LogEntry {
 /** How many functions a profile answers with unless asked for another number. */
 const PROFILE_FUNCTIONS = 30;
 
+/** Registered rather than on disk: the addon's files can be there with nothing bringing it up. */
+function runtimeAddonRegistered(projectPath: string): boolean {
+  const registered = inspectProject(projectPath);
+  return registered.runtimeAutoloadPath !== null || registered.runtimeLoaderAutoload !== null;
+}
+
+/**
+ * What a start asked for `profile` says about it, or undefined for one that was not. Said on the
+ * start because nothing else is until `editor_run profile` answers, and a caller could not tell an
+ * armed profiler from an argument that had gone unread.
+ */
+export function profileOnStart(profiled: boolean, through: 'gdharness' | 'editor', runtimeAddon: boolean) {
+  if (!profiled) {
+    return undefined;
+  }
+  const debuggerOf =
+    through === 'editor' ? "the editor's debugger session" : 'the process that keeps the run';
+  return {
+    on: true,
+    totals:
+      `On from the game's start, through ${debuggerOf}. editor_run profile answers at any time: each frame is added as it ends, so a scene still inside a long _ready shows nothing until that returns, and the engine's own totals replace the sum when the game quits` +
+      (runtimeAddon
+        ? '.'
+        : ', which takes the runtime addon: without it the frames that arrived before the exit are what is kept.'),
+  };
+}
+
 /** How long a profiler switched on for a played game is given to send its first frame. */
 const PROFILER_ON_MS = 3000;
 
@@ -1963,6 +1998,50 @@ export interface ProfileReading {
   readonly coveredMs: number;
   /** Whether the project has the runtime addon, which sends the totals as a game quits. */
   readonly runtimeAddon: boolean;
+  /** The project's scripts by `res://` path, for placing a lambda in the function it is written in. */
+  readonly sourceOf?: SourceOf;
+  /** The function whose callers were asked for, and the project's scripts to find them in. */
+  readonly callersOf?: { readonly name: string; readonly scripts: () => Iterable<readonly [string, string]> };
+}
+
+/** What a profile answer reads from the run's project rather than from the profile. */
+type ProjectForProfile = Pick<ProfileReading, 'runtimeAddon' | 'sourceOf' | 'callersOf'>;
+
+/** What a callers answer says about where its places come from. */
+const CALLERS_FOUND_BY_NAME =
+  "Found by name in the project's scripts, since the engine's profiler counts calls and time per function and records nothing about who made them: a method of the same name on another class is listed too. Each place carries the profile's numbers for the function it is written in.";
+
+/**
+ * [param projectPath]'s scripts read off disk by `res://` path, null for one that is not a file
+ * inside it: missing, built into a scene (the path names the scene, then the script after `::`), or
+ * resolving outside the project, since the path is what the game sent.
+ */
+export function projectSourceOf(projectPath: string): SourceOf {
+  const read = new Map<string, string | null>();
+  return (script) => {
+    if (!read.has(script)) {
+      const inside = resolveWithinProject(projectPath, script);
+      let source: string | null = null;
+      if (inside.ok) {
+        try {
+          source = readFileSync(inside.absolutePath, 'utf8');
+        } catch {
+          // Missing or unreadable: the row keeps the name the engine gave it.
+        }
+      }
+      read.set(script, source);
+    }
+    return read.get(script) ?? null;
+  };
+}
+
+/** [param projectPath]'s scripts, as `callersOf` reads them. */
+function projectScripts(projectPath: string): [string, string][] {
+  const scripts: [string, string][] = [];
+  eachScript(projectPath, (script, source) => {
+    scripts.push([script, source]);
+  });
+  return scripts;
 }
 
 /**
@@ -1985,13 +2064,17 @@ export function profileAnswer(reading: ProfileReading, limit: number): Record<st
         : 'The game never connected to the profiler, so nothing was measured. A game dials its debugger once, as it starts, and an engine built without debugging (a release export template) refuses to: profiling needs the editor binary or a debug template.',
     };
   }
-  const table = profiledFunctions(totals, limit);
+  const table = profiledFunctions(totals, limit, reading.sourceOf);
   const notes: string[] = [];
   const addonNote = reading.runtimeAddon
     ? ''
     : ' This project has no gdharness runtime addon, which switches the profiler off as the game quits so the engine sends its totals: setup installs it.';
   if (totals.complete) {
     // Nothing to add: these are the engine's own totals since the profiler went on.
+  } else if (reading.running && totals.frames === 0) {
+    notes.push(
+      `The profiler is on and the game has not finished its first frame yet: a frame is sent as it ends, so a scene doing its work in _ready shows nothing until that returns, and the engine's own totals arrive when the game quits.${addonNote}`,
+    );
   } else if (reading.running) {
     notes.push(
       `The run is still going, so these are the ${totals.frames === 1 ? 'one frame' : `${totals.frames} frames`} summed so far${reading.through === 'gdharness' ? ', written at most half a second behind' : ''}.`,
@@ -2021,7 +2104,25 @@ export function profileAnswer(reading: ProfileReading, limit: number): Record<st
     functionsCounted: table.counted,
     omitted: table.omitted > 0 ? table.omitted : undefined,
     functions: table.functions,
+    callers: reading.callersOf === undefined ? undefined : callersAnswer(totals, reading.callersOf),
     note: notes.length > 0 ? notes.join(' ') : undefined,
+  };
+}
+
+function callersAnswer(totals: ProfileTotals, asked: NonNullable<ProfileReading['callersOf']>) {
+  const found = callersOf(totals, asked.name, asked.scripts());
+  return {
+    of: asked.name,
+    // The function's own rows beside its callers, so the calls the places share out are in view.
+    rows: found.target,
+    sites: found.sites,
+    omitted: found.omitted > 0 ? found.omitted : undefined,
+    note:
+      found.sites.length === 0
+        ? `No script in the project names ${asked.name} in code, outside its declaration: a call made through a string, such as call("name"), is not found by name.`
+        : found.target.length === 0
+          ? `${CALLERS_FOUND_BY_NAME} The profile counts no call of ${asked.name}, so these places are where it would be called from.`
+          : CALLERS_FOUND_BY_NAME,
   };
 }
 
@@ -6784,6 +6885,7 @@ class GodotServer {
       // name: a tail on a path that does not exist reports nothing, which is exactly what a run
       // that has not printed yet looks like.
       transcript: started.transcript,
+      profile: profileOnStart(profiled, 'gdharness', runtimeAddonRegistered(project.value.path)),
       refreshedClasses: refreshed.value,
       ...scanWaitAnswer(scanned),
       // Said on the start that asked for it rather than left to the player's save list: on macOS
@@ -7090,6 +7192,7 @@ class GodotServer {
       started: true,
       through: 'editor',
       scene: scene === null ? 'the main scene' : `res://${scene}`,
+      profile: profileOnStart(profiled, 'editor', runtimeAddonRegistered(projectPath)),
       refreshedClasses,
       ...scanWaitAnswer(scanned),
       // Which port the editor's debugger took, since it is the one port Godot has no command
@@ -8487,14 +8590,27 @@ class GodotServer {
       return this.createErrorResponse(this.nothingOfOursIsRunning());
     }
     const limit = readPositiveNumber(args, 'limit') ?? PROFILE_FUNCTIONS;
+    const callersName = readString(args, 'callersOf');
+    if (callersName !== undefined && !callersName.split('.').every(isIdentifier)) {
+      return this.createErrorResponse(
+        `callersOf takes a function's name, or Class.name for the functions of one class, and ${JSON.stringify(callersName)} is neither.`,
+        ['editor_run profile names each function as it answers; pass one of those'],
+      );
+    }
     const going = await this.runStillGoing(run);
-    // Registered rather than on disk: the addon's files can be there with nothing bringing it up.
-    const registered = run.projectPath === null ? null : inspectProject(run.projectPath);
-    const runtimeAddon =
-      registered !== null &&
-      (registered.runtimeAutoloadPath !== null || registered.runtimeLoaderAutoload !== null);
+    const projectPath = run.projectPath;
+    const fromProject: ProjectForProfile =
+      projectPath === null
+        ? { runtimeAddon: false }
+        : {
+            runtimeAddon: runtimeAddonRegistered(projectPath),
+            sourceOf: projectSourceOf(projectPath),
+            ...(callersName === undefined
+              ? {}
+              : { callersOf: { name: callersName, scripts: () => projectScripts(projectPath) } }),
+          };
     if (run.throughEditor) {
-      return await this.profileOfThePlayedGame(going, runtimeAddon, limit);
+      return await this.profileOfThePlayedGame(going, fromProject, limit);
     }
     const record = run.projectPath === null ? null : readRunRecord(run.projectPath);
     const path = record !== null && record.pid === run.pid ? record.profile : undefined;
@@ -8518,7 +8634,7 @@ class GodotServer {
           running: going,
           totals,
           coveredMs: totals?.lastFrameAt == null ? 0 : totals.lastFrameAt - totals.startedAt,
-          runtimeAddon,
+          ...fromProject,
         },
         limit,
       ),
@@ -8527,7 +8643,7 @@ class GodotServer {
 
   private async profileOfThePlayedGame(
     going: boolean,
-    runtimeAddon: boolean,
+    fromProject: ProjectForProfile,
     limit: number,
   ): Promise<ToolResponse> {
     const read = await this.handleViaBridge('profile_read', {});
@@ -8596,7 +8712,7 @@ class GodotServer {
           running: going,
           totals,
           coveredMs: readNonNegativeNumber(held, 'coveredMs') ?? 0,
-          runtimeAddon,
+          ...fromProject,
         },
         limit,
       ),
