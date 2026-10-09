@@ -192,6 +192,12 @@ The editor's language server reads every script in the project before it answers
 after the editor starts, and the server waits three minutes for that. A project whose language
 server reads for longer sets `GDHARNESS_LSP_INITIALIZE_TIMEOUT_MS`.
 
+Three shorter waits can be set the same way, in milliseconds: `GDHARNESS_SCAN_WAIT_MS`, how long a
+start waits for the editor to finish scanning before it starts anyway and says so (30 seconds);
+`GDHARNESS_STOP_WAIT_MS`, how long a stop waits for what it ended to be gone before answering that it
+is still running (10 seconds); and `GDHARNESS_GREETING_WAIT_MS`, how long a restart waits for a newly
+connected editor to say who it is (10 seconds).
+
 ## Updating
 
 The server asks the npm registry every ten minutes, in the background, while it is being used, and
