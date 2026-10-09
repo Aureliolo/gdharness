@@ -28,6 +28,11 @@ export interface OutsideSpec {
     readonly projectPath: string;
     /** The project the server that started the run serves, where it names one. */
     readonly servedBy?: string;
+    /**
+     * Where the keeper writes the run's script profile, when the run is profiled: the keeper is the
+     * game's debugger then, since it outlives the server that started the run.
+     */
+    readonly profile?: string;
   };
   /** A Windows desktop to start it on, where its windows neither show nor take the focus. */
   readonly desktop?: string;

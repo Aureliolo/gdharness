@@ -12,6 +12,7 @@ const PlayTools = preload("tools/play_tools.gd")
 const ClassTools = preload("tools/class_tools.gd")
 const SettingsTools = preload("tools/settings_tools.gd")
 const FilesystemTools = preload("tools/filesystem_tools.gd")
+const ProfileTools = preload("tools/profile_tools.gd")
 
 var _editor_plugin: EditorPlugin = null
 
@@ -22,6 +23,7 @@ var _play_tools: PlayTools = null
 var _class_tools: ClassTools = null
 var _settings_tools: SettingsTools = null
 var _filesystem_tools: FilesystemTools = null
+var _profile_tools: ProfileTools = null
 
 var _tool_map: Dictionary = {}
 var _initialized: bool = false
@@ -36,6 +38,7 @@ func set_editor_plugin(plugin: EditorPlugin) -> void:
 	_play_tools.set_editor_plugin(plugin)
 	_class_tools.set_editor_plugin(plugin)
 	_filesystem_tools.set_editor_plugin(plugin)
+	_profile_tools.set_editor_plugin(plugin)
 
 
 func _init_tools() -> void:
@@ -70,6 +73,10 @@ func _init_tools() -> void:
 	_filesystem_tools = FilesystemTools.new()
 	_filesystem_tools.name = "FilesystemTools"
 	add_child(_filesystem_tools)
+
+	_profile_tools = ProfileTools.new()
+	_profile_tools.name = "ProfileTools"
+	add_child(_profile_tools)
 
 	_tool_map = {
 		# Scene tools
@@ -108,6 +115,9 @@ func _init_tools() -> void:
 		"quit_editor": [_play_tools, "quit_editor"],
 		"stop_playing": [_play_tools, "stop_playing"],
 		"playing_status": [_play_tools, "playing_status"],
+		# The script profiler on a game the editor plays
+		"profile_start": [_profile_tools, "profile_start"],
+		"profile_read": [_profile_tools, "profile_read"],
 		"create_animation": [_animation_tools, "create_animation"],
 		"add_animation_track": [_animation_tools, "add_animation_track"],
 		"add_animation_state": [_animation_tools, "add_animation_state"],

@@ -77,6 +77,11 @@ export interface RunRecord {
    * written before keepers listened, and for a keeper that could not.
    */
   readonly keeper?: string;
+  /**
+   * The file the keeper sums the run's script profile into, for a run started with one. The keeper
+   * is the game's debugger and outlives the server, so any later server reads the profile from here.
+   */
+  readonly profile?: string;
   readonly arguments: readonly string[];
   /**
    * The engine this run was started with, so the pid can be shown to still mean this run.
@@ -162,6 +167,11 @@ export function openTranscript(startedAt: number): { path: string; fd: number } 
   mkdirSync(runsDirectory(), { recursive: true });
   const path = join(runsDirectory(), `run-${startedAt}.log`);
   return { path, fd: openSync(path, 'a') };
+}
+
+/** Where a profiled run's script profile is kept: beside its transcript, and swept with it. */
+export function profilePath(startedAt: number): string {
+  return join(runsDirectory(), `run-${startedAt}.profile.json`);
 }
 
 export function writeRunRecord(record: RunRecord): void {
@@ -362,6 +372,9 @@ function recordAt(path: string): RunRecord | null {
       ? { servedBy: fields['servedBy'] }
       : {}),
     ...(typeof fields['keeper'] === 'string' && fields['keeper'] !== '' ? { keeper: fields['keeper'] } : {}),
+    ...(typeof fields['profile'] === 'string' && fields['profile'] !== ''
+      ? { profile: fields['profile'] }
+      : {}),
     arguments: Array.isArray(args) ? args.filter((value): value is string => typeof value === 'string') : [],
     ...(typeof fields['command'] === 'string' ? { command: fields['command'] } : {}),
     ...(typeof fields['exitCode'] === 'number' ? { exitCode: fields['exitCode'] } : {}),
@@ -799,7 +812,12 @@ function ageMs(path: string, now: number): number {
  */
 export function sweepTranscripts(keepMs = 24 * 60 * 60 * 1000, now = Date.now()): void {
   const directory = runsDirectory();
-  const kept = new Set(everyRunRecord().map((record) => record.transcript));
+  const kept = new Set(
+    everyRunRecord().flatMap((record) => [
+      record.transcript,
+      ...(record.profile === undefined ? [] : [record.profile]),
+    ]),
+  );
   let entries: string[];
   try {
     entries = readdirSync(directory);
@@ -807,7 +825,7 @@ export function sweepTranscripts(keepMs = 24 * 60 * 60 * 1000, now = Date.now())
     return;
   }
   for (const entry of entries) {
-    if (!entry.startsWith('run-') || !entry.endsWith('.log')) {
+    if (!entry.startsWith('run-') || !(entry.endsWith('.log') || entry.endsWith('.profile.json'))) {
       continue;
     }
     const path = join(directory, entry);
