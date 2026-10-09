@@ -17686,6 +17686,79 @@ async function testAWordsWaitLeavesTheGameItsSpeed(): Promise<void> {
 }
 
 /**
+ * frame_time is the frame as it passed, not the engine's once-a-second worst process step.
+ *
+ * It was Performance.TIME_PROCESS, which the engine sets once a second to the slowest process step of
+ * that second: downstream a game whose frames took 16.8ms read 0.0478, and one taking 46ms read
+ * 0.0546. Here one frame in twenty is held 30ms, so the slowest step is near 30ms while the mean frame
+ * is a small part of it, and the mean is checked against the rate a frames wait measured over the same
+ * stretch of the game.
+ */
+async function testTheFrameTimeIsTheFrame(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('frame time regression skipped (Godot not found)');
+    return;
+  }
+  await withAPlayingEditor(
+    ({ adapter }) =>
+      (tool) =>
+        tool === 'playing_status'
+          ? { ok: true, playing: false, scenePath: '', debugPort: adapter }
+          : { ok: true },
+    async ({ server, project }) => {
+      writeFileSync(
+        join(project, 'main.gd'),
+        'extends Node\n\nvar frames: int = 0\n\n\nfunc _process(_delta: float) -> void:\n' +
+          '\tframes += 1\n\tif frames % 20 == 0:\n\t\tOS.delay_msec(30)\n',
+      );
+      writeFileSync(
+        join(project, 'main.tscn'),
+        '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+          '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+      );
+      const call = async (name: string, args: Record<string, unknown>): Promise<unknown> =>
+        parseTextContent(
+          await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS),
+        );
+      const started = await call('editor_run', {
+        projectPath: project,
+        op: 'start',
+        headless: true,
+        args: ['--stay'],
+        runtimeWaitMs: 30_000,
+      });
+      assert.equal(get(started, 'runtime', 'listening'), true, JSON.stringify(started));
+      // Long enough for the window to fill and for the engine's monitor to have been set once.
+      const waited = await call('runtime_wait', { op: 'frames', frames: 160 });
+      const measured =
+        asNumber(get(waited, 'elapsed_ms'), JSON.stringify(waited)) /
+        asNumber(get(waited, 'frames'), JSON.stringify(waited)) /
+        1000;
+      const metrics = await call('runtime_inspect', { op: 'metrics' });
+      const read = (name: string): number => asNumber(get(metrics, 'data', name), JSON.stringify(metrics));
+      const shown = `${JSON.stringify(metrics)}, a frames wait measured ${measured}s a frame`;
+      assert.equal(read('frames_timed'), 120, `the window is full: ${shown}`);
+      assert.ok(
+        read('frame_time') > measured / 2 && read('frame_time') < measured * 2,
+        `frame_time is the frame the wait measured: ${shown}`,
+      );
+      assert.ok(read('frame_time_max') >= 0.025, `frame_time_max is the held frame: ${shown}`);
+      assert.ok(
+        read('process_time_max') >= 0.025 && read('frame_time') < read('process_time_max') / 2,
+        `process_time_max is the engine's slowest step, which the mean frame is well under: ${shown}`,
+      );
+      assert.equal(get(metrics, 'data', 'vsync'), 'none, headless', shown);
+      await call('editor_run', { op: 'stop' });
+    },
+    { realAddon: true, engine },
+  );
+}
+
+/**
  * A play through a debug adapter another process holds is refused, every time it is asked.
  *
  * The owner of the adapter's port is asked once per connection, and a pass is what is remembered.
@@ -31873,6 +31946,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnExportIsJudgedByTheFileItWrote,
   testNotRunIsPutDownToFailFastOnlyWhenSet,
   testAWordsWaitLeavesTheGameItsSpeed,
+  testTheFrameTimeIsTheFrame,
   testTheAnnounceWaitIsNotHeldByASlowEditor,
   testTheWaitSizedToABootIsSaid,
   testTheWaitIsSizedToTheLastBoot,
