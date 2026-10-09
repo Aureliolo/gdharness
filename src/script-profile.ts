@@ -101,6 +101,14 @@ export function queuedMessagesOf(projectGodot: string | null): number {
   return typeof set === 'number' && Number.isInteger(set) && set > 0 ? set : QUEUE_DEFAULT;
 }
 
+/**
+ * What a quitting game sends after its profile's totals, and the answer it waits for before it
+ * exits: its debugger thread stops without emptying its queue, so without the answer the totals
+ * could go down with the process. Kept in step with the runtime addon's `runtime_autoload.gd`.
+ */
+const PROFILE_SENT = 'gdharness:profile_sent';
+const PROFILE_RECEIVED = 'gdharness:profile_received';
+
 /** What a function is called when its name never arrived: `#` and the number the engine gave it. */
 export const UNNAMED_PREFIX = '#';
 
@@ -501,6 +509,10 @@ export class ProfileListener {
       for (const received of messages) {
         if ('message' in received && received.message === 'debug_enter') {
           socket.write(framedCommand('continue', []));
+        }
+        // Read in order, so the totals sent before this are summed by now.
+        if ('message' in received && received.message === PROFILE_SENT) {
+          socket.write(framedCommand(PROFILE_RECEIVED, []));
         }
         aggregate.take(received, Date.now());
         frames ||=

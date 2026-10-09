@@ -2133,7 +2133,7 @@ export function profileAnswer(reading: ProfileReading, limit: number): Record<st
     : ' This project has no gdharness runtime addon, which switches the profiler off as the game quits so the engine sends its totals: setup installs it.';
   // Said only of a run that has ended, whose totals will not come now.
   const totalsWithheld = reading.runtimeAddon
-    ? ' The runtime addon switches the profiler off as the game quits, and did not here: either it was no longer running in this game by then, which a project can arrange for some scenes, or the game ended without taking its tree down, as a crash or a kill does.'
+    ? ' The runtime addon switches the profiler off as the game quits, and did not here: either it was no longer running in this game by then, which a project can arrange for some scenes; or the game ended without taking its tree down, as a crash or a kill does; or the totals did not reach the debugger before the game exited, which the game then says in its output.'
     : addonNote;
   if (totals.complete && reading.running) {
     notes.push(

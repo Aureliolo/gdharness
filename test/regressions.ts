@@ -1050,7 +1050,7 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
   // apart from data lost because it can be nothing at all.
   assert.match(
     say({ totals: partial }),
-    /^These are the 3 frames that arrived, summed, without the engine's own totals, which it sends only when the profiler is switched off\. The runtime addon switches the profiler off as the game quits, and did not here: either it was no longer running in this game by then, which a project can arrange for some scenes, or the game ended without taking its tree down, as a crash or a kill does\. Not in them is any script time after the last frame sent: a frame still queued as the game exited, .* and what scripts did as it quit, such as in _exit_tree\. That can be nothing: a scene that does its work in _ready and quits has all of it in its first frame\.$/,
+    /^These are the 3 frames that arrived, summed, without the engine's own totals, which it sends only when the profiler is switched off\. The runtime addon switches the profiler off as the game quits, and did not here: either it was no longer running in this game by then, which a project can arrange for some scenes; or the game ended without taking its tree down, as a crash or a kill does; or the totals did not reach the debugger before the game exited, which the game then says in its output\. Not in them is any script time after the last frame sent: a frame still queued as the game exited, .* and what scripts did as it quit, such as in _exit_tree\. That can be nothing: a scene that does its work in _ready and quits has all of it in its first frame\.$/,
   );
   assert.doesNotMatch(
     say({ totals: partial }),
@@ -24885,6 +24885,18 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
         `sorted by self time: ${wholeShown}`,
       );
       assert.ok(Number(get(whole, 'scriptMs')) > 0, wholeShown);
+      // The keeper answered the game's word that the totals were sent, so it did not wait out its
+      // deadline and say it could not confirm them.
+      const printed =
+        textOf(
+          await server.request(
+            'tools/call',
+            { name: 'editor_output', arguments: {} },
+            ENGINE_CALL_TIMEOUT_MS,
+          ),
+        ) ?? '';
+      assert.match(printed, /\[gdharness\] runtime listening/, printed);
+      assert.doesNotMatch(printed, /did not confirm the profiler's totals/, printed);
 
       // The lambda as the engine names it, which is anonymous, placed in the function written around it.
       // Both kinds: a lambda given a name of its own, and an anonymous one.
