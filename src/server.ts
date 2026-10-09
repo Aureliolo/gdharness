@@ -1925,6 +1925,9 @@ export function aboveTheRunner(entry: LogEntry): LogEntry {
 /** How many functions a profile answers with unless asked for another number. */
 const PROFILE_FUNCTIONS = 30;
 
+/** How long a profiler switched on for a played game is given to send its first frame. */
+const PROFILER_ON_MS = 3000;
+
 /** What a profile is read from, for the answer to say what it covers. */
 export interface ProfileReading {
   /** Who was the game's debugger: the process that keeps a run this server started, or the editor. */
@@ -8503,12 +8506,24 @@ class GodotServer {
       if (started.isError === true) {
         return this.profilerRefusal(started);
       }
+      if (readBoolean(asParams(JSON.parse(started.content[0]?.text ?? '{}')), 'started') !== true) {
+        return this.createErrorResponse(
+          'The editor says it is playing and has no debugger session for the game, so there is nothing to switch the profiler on in yet.',
+          ['Ask again in a moment, once the game is up'],
+        );
+      }
+      // Answered once the game's first frame of the profile has arrived rather than once the switch
+      // was sent: the editor sends it at its own frame rate and the game applies it at its next
+      // poll, so "from here on" said at once let the first calls after it go uncounted.
+      const on = await this.firstProfiledFrame();
       return this.jsonTextResponse({
         through: 'editor',
         running: true,
         started: true,
         functions: [],
-        note: 'The profiler was switched on now, for the game the editor is playing, so it covers what the game does from here on. Ask again for the functions; editor_run start with profile: true covers a game from its start.',
+        note: on
+          ? 'The profiler was switched on now, for the game the editor is playing, and its first frame has arrived, so it covers what the game does from here on. Ask again for the functions; editor_run start with profile: true covers a game from its start.'
+          : `The profiler was switched on for the game the editor is playing, and no frame of it had arrived ${PROFILER_ON_MS}ms later: what the game does before the first one is not counted. Ask again for the functions; editor_run start with profile: true covers a game from its start.`,
       });
     }
     const functions = asParams(held['functions']);
@@ -8547,6 +8562,22 @@ class GodotServer {
         limit,
       ),
     );
+  }
+
+  /** Whether a frame of the profile reached the editor within `PROFILER_ON_MS` of being asked. */
+  private async firstProfiledFrame(): Promise<boolean> {
+    const deadline = Date.now() + PROFILER_ON_MS;
+    while (Date.now() < deadline) {
+      const read = await this.handleViaBridge('profile_read', {});
+      if (read.isError !== true) {
+        const held = asParams(JSON.parse(read.content[0]?.text ?? '{}'));
+        if ((readNonNegativeNumber(held, 'frames') ?? 0) > 0) {
+          return true;
+        }
+      }
+      await delay(100);
+    }
+    return false;
   }
 
   /** The editor addon's refusal to profile, with what to do when the addon predates the profiler. */
