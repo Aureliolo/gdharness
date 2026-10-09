@@ -172,6 +172,7 @@ func _report_errors() -> void:
 func _process(_delta: float) -> void:
 	if not _enabled or _server == null:
 		return
+	_queries.note_frame(Time.get_ticks_usec())
 
 	if _server.is_connection_available():
 		var client: StreamPeerTCP = _server.take_connection()
