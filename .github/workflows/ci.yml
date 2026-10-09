@@ -229,6 +229,7 @@ jobs:
       # renovate: datasource=github-runners depName=macos
       runner: macos-26
       regression-parts: '["1/3", "2/3", "3/3"]'
+      engine-fixtures-in-first-part: true
 
   # One check per platform, named by platform rather than by runner image, because the name is
   # what the branch ruleset requires, and an image bump must not rename a required check out from
